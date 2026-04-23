@@ -42,9 +42,7 @@ struct MobileSlackShellView: View {
         )
     }
 
-    private var joinedWaddles: [WaddleSummary] {
-        model.publicWaddles.filter { model.isJoined($0.id) }
-    }
+    private var joinedWaddles: [WaddleSummary] { model.publicWaddles }
 
     private var serverLabel: String {
         if let url = AppConfig.normalizedServerURL(from: model.serverURLText) {
@@ -371,7 +369,7 @@ private struct MobileWorkspaceBrowserTab: View {
                     ForEach(waddles) { waddle in
                         MobileWorkspaceCard(
                             waddle: waddle,
-                            isJoined: model.isJoined(waddle.id),
+                            isJoined: true,
                             isCurrent: model.selectedWaddleID == waddle.id,
                             primaryActionTitle: "Open chat",
                             onPrimaryAction: {
@@ -442,7 +440,7 @@ private struct MobileYouTab: View {
                     }
 
                     HStack(spacing: 10) {
-                        Label("\(model.joinedWaddleIDs.count)", systemImage: "person.3.fill")
+                        Label("\(model.publicWaddles.count)", systemImage: "person.3.fill")
                             .mobileStatPill()
                         Label("\(model.channels.count)", systemImage: "number")
                             .mobileStatPill()

@@ -100,15 +100,8 @@ pub struct WaddlePresence {
 }
 
 #[derive(uniffi::Record, Clone)]
-pub struct WaddleDiscoveredWaddle {
-    pub id: String,
-    pub name: String,
-    pub is_public: bool,
-}
-
-#[derive(uniffi::Record, Clone)]
-pub struct WaddleDiscoveredChannel {
-    pub id: String,
+pub struct WaddleRoom {
+    pub jid: String,
     pub name: String,
     pub channel_type: String,
     pub position: i32,
@@ -492,66 +485,48 @@ impl WaddleClient {
         }
     }
 
-    pub async fn fetch_canonical_waddle(&self) -> Option<WaddleDiscoveredWaddle> {
+    pub async fn list_rooms(&self) -> Vec<WaddleRoom> {
         let guard = self.handle.lock().await;
-        match guard.as_ref() {
-            None => {
-                drop(guard);
-                self.listener.on_error("Not connected".to_string());
-                None
-            }
-            Some(h) => {
-                let spaces_domain = format!("spaces.{}", jid_domain(&self.config.jid));
-                match h.discover_items(&spaces_domain, None).await {
-                    Ok(items) => items.into_iter().next().map(|item| WaddleDiscoveredWaddle {
-                        id: item.node.unwrap_or_else(|| item.jid.clone()),
-                        name: item.name.unwrap_or_default(),
-                        is_public: true,
-                    }),
-                    Err(e) => {
-                        drop(guard);
-                        self.listener
-                            .on_error(format!("fetch_canonical_waddle failed: {e}"));
-                        None
-                    }
-                }
-            }
-        }
-    }
+        let Some(h) = guard.as_ref() else {
+            drop(guard);
+            self.listener.on_error("Not connected".to_string());
+            return vec![];
+        };
 
-    pub async fn discover_channels(&self, waddle_id: String) -> Vec<WaddleDiscoveredChannel> {
-        let guard = self.handle.lock().await;
-        match guard.as_ref() {
-            None => {
+        let spaces_domain = format!("spaces.{}", jid_domain(&self.config.jid));
+
+        // Step 1: discover the canonical space node (internal — not returned to caller).
+        let space_items = match h.discover_items(&spaces_domain, None).await {
+            Ok(items) => items,
+            Err(e) => {
                 drop(guard);
-                self.listener.on_error("Not connected".to_string());
-                vec![]
+                self.listener.on_error(format!("list_rooms: space discovery failed: {e}"));
+                return vec![];
             }
-            Some(h) => {
-                let spaces_domain = format!("spaces.{}", jid_domain(&self.config.jid));
-                match h.discover_items(&spaces_domain, Some(&waddle_id)).await {
-                    Ok(items) => items
-                        .into_iter()
-                        .map(|item| {
-                            // item.jid = "{waddleUUID}_{channelUUID}@muc.{domain}"
-                            let local = item.jid.split('@').next().unwrap_or(item.jid.as_str());
-                            let channel_id =
-                                local.splitn(2, '_').nth(1).unwrap_or(local).to_string();
-                            WaddleDiscoveredChannel {
-                                id: channel_id,
-                                name: item.name.unwrap_or_default(),
-                                channel_type: "text".to_string(),
-                                position: 0,
-                            }
-                        })
-                        .collect(),
-                    Err(e) => {
-                        drop(guard);
-                        self.listener
-                            .on_error(format!("discover_channels failed: {e}"));
-                        vec![]
-                    }
-                }
+        };
+
+        let Some(space) = space_items.into_iter().next() else {
+            return vec![];
+        };
+
+        let space_node = space.node.unwrap_or_else(|| space.jid.clone());
+
+        // Step 2: discover rooms within the space. Room JIDs are returned as-is
+        // so callers can use them directly for all XMPP operations.
+        match h.discover_items(&spaces_domain, Some(&space_node)).await {
+            Ok(items) => items
+                .into_iter()
+                .map(|item| WaddleRoom {
+                    jid: item.jid.clone(),
+                    name: item.name.unwrap_or_default(),
+                    channel_type: "text".to_string(),
+                    position: 0,
+                })
+                .collect(),
+            Err(e) => {
+                drop(guard);
+                self.listener.on_error(format!("list_rooms: room discovery failed: {e}"));
+                vec![]
             }
         }
     }

@@ -232,19 +232,6 @@ struct XMPPDiscoItem: Sendable, Equatable {
     let node: String?
 }
 
-struct XMPPDiscoveredWaddle: Sendable, Equatable, Identifiable {
-    let id: String
-    let name: String
-    let isPublic: Bool
-}
-
-struct XMPPDiscoveredChannel: Sendable, Equatable, Identifiable {
-    let id: String
-    let name: String
-    let channelType: String
-    let position: Int
-}
-
 struct XMPPRSMPageInfo: Sendable, Equatable {
     let first: String?
     let last: String?

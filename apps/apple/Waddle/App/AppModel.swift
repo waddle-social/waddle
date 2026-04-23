@@ -25,15 +25,12 @@ private func dlog(_ msg: String) {
 
 private enum ChatSendError: LocalizedError {
     case noSession
-    case noWaddle
     case noRoom
 
     var errorDescription: String? {
         switch self {
         case .noSession:
             return "Sign in again to reconnect live chat."
-        case .noWaddle:
-            return "Choose a waddle before sending a message."
         case .noRoom:
             return "Choose a channel before sending a message."
         }
@@ -87,7 +84,6 @@ final class AppModel: ObservableObject {
 
     private var serverURL: URL
     private var client: WaddleAPIClient
-    private var accessibleWaddles: [WaddleSummary] = []
     private var devicePollTask: Task<Void, Never>?
     private var reconnectTask: Task<Void, Never>?
     private var uploadServiceJID: String?
@@ -317,7 +313,7 @@ final class AppModel: ObservableObject {
                 isPublic: isPublic
             )
             joinedWaddleIDs.insert(created.id)
-            await refreshAccessibleWaddles()
+            await loadSpace()
             await selectWaddle(created.id)
         } catch {
             errorMessage = error.localizedDescription
@@ -649,7 +645,7 @@ final class AppModel: ObservableObject {
         guard let session, let waddleID = selectedWaddleID else { return }
         do {
             try await client.updateWaddle(sessionID: session.sessionID, waddleID: waddleID, name: name, description: description)
-            await refreshAccessibleWaddles()
+            await loadSpace()
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -663,7 +659,7 @@ final class AppModel: ObservableObject {
             channels = []
             selectedChannelID = nil
             members = []
-            await refreshAccessibleWaddles()
+            await loadSpace()
             updateChatSurfaceState()
         } catch {
             errorMessage = error.localizedDescription
@@ -781,10 +777,6 @@ final class AppModel: ObservableObject {
         if let channelID = result?.channelID {
             await selectChannel(channelID)
         }
-    }
-
-    func isJoined(_ waddleID: String) -> Bool {
-        joinedWaddleIDs.contains(waddleID)
     }
 
     private var currentRoomJID: String? {
@@ -954,8 +946,8 @@ final class AppModel: ObservableObject {
             updateConnectionBanner(for: .ready)
             await rustClient?.sendPresence()
             dlog(" presence sent")
-            await refreshAccessibleWaddles()
-            dlog(" accessible waddles: \(self.accessibleWaddles.count), public: \(self.publicWaddles.count)")
+            await loadSpace()
+            dlog(" space loaded: waddles=\(self.publicWaddles.count)")
             // Fire structure/channel loading in a separate Task so this event-loop iteration
             // completes and can process incoming events (e.g. the MUC self-presence that
             // resolves the join) while the structure load is in flight. Without this, the
@@ -1006,30 +998,41 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func refreshAccessibleWaddles() async {
+    /// Discovers rooms via XMPP (no explicit waddle ID in the protocol) and
+    /// derives space context implicitly from the returned room JIDs.
+    private func loadSpace() async {
         guard let rustClient else { return }
 
         isLoadingWaddles = true
         defer { isLoadingWaddles = false }
 
-        if let discovered = await rustClient.fetchCanonicalWaddle() {
-            let summary = WaddleSummary(
-                id: discovered.id,
-                name: discovered.name,
+        let rooms = await rustClient.listRooms()
+
+        // Derive the space context from room JIDs. The space identifier is
+        // embedded in each room JID as `{spaceId}_{channelId}@muc.domain` —
+        // we parse it locally and never expose it as a standalone API value.
+        if let firstJid = rooms.first?.jid,
+           let (spaceID, _) = parseManagedRoomBareJID(firstJid) {
+            let spaceName = serverURL.host ?? "Waddle"
+            let synthetic = WaddleSummary(
+                id: spaceID,
+                name: spaceName,
                 description: nil,
                 ownerUserID: nil,
                 iconURL: nil,
-                isPublic: discovered.isPublic,
+                isPublic: false,
                 role: nil,
                 createdAt: nil,
                 updatedAt: nil
             )
-            accessibleWaddles = [summary]
-            joinedWaddleIDs.insert(discovered.id)
+            publicWaddles = [synthetic]
+            joinedWaddleIDs.insert(spaceID)
+            if selectedWaddleID == nil {
+                selectedWaddleID = spaceID
+            }
         } else {
-            accessibleWaddles = []
+            publicWaddles = []
         }
-        mergeVisibleWaddles()
     }
 
     private func loadStructure(for waddleID: String) async {
@@ -1040,47 +1043,37 @@ final class AppModel: ObservableObject {
             updateChatSurfaceState()
             return
         }
-        guard joinedWaddleIDs.contains(waddleID) else {
-            dlog(" loadStructure: skipping discovery for unjoined waddle \(waddleID)")
-            channels = []
-            members = []
-            selectedChannelID = nil
-            syncChatRooms()
-            syncChatMembers()
-            syncChatMessages()
-            updateChatSurfaceState()
-            return
-        }
 
         isLoadingStructure = true
         updateChatSurfaceState()
 
         do {
-            async let discoveredChannels = rustClient.discoverChannels(waddleID: waddleID)
+            // Fetch rooms via XMPP discovery (no waddle ID in the protocol).
+            async let xmppRooms = rustClient.listRooms()
             async let loadedMembers = client.listMembers(sessionID: session.sessionID, waddleID: waddleID)
 
-            let (xmppChannels, loadedMembersValue) = try await (discoveredChannels, loadedMembers)
-            dlog(" discovered \(xmppChannels.count) channels, \(loadedMembersValue.count) members")
+            let (rooms, loadedMembersValue) = try await (xmppRooms, loadedMembers)
+            dlog(" listed \(rooms.count) rooms, \(loadedMembersValue.count) members")
             guard selectedWaddleID == waddleID else { return }
 
-            channels = xmppChannels
-                .map {
-                    ChannelSummary(
-                        id: $0.id,
-                        name: $0.name,
+            channels = rooms
+                .map { room in
+                    // Parse channel ID from the full room JID for internal use.
+                    let channelID = parseManagedRoomBareJID(room.jid)?.channelID ?? room.jid
+                    return ChannelSummary(
+                        id: channelID,
+                        roomJid: room.jid,
+                        name: room.name,
                         description: nil,
-                        channelType: $0.channelType,
-                        position: $0.position
+                        channelType: room.channelType,
+                        position: Int(room.position)
                     )
                 }
                 .sorted {
                     ($0.position ?? 0, $0.name.lowercased()) < ($1.position ?? 0, $1.name.lowercased())
                 }
             members = loadedMembersValue.sorted { $0.username.lowercased() < $1.username.lowercased() }
-
-            if members.contains(where: { $0.userID == session.userID }) {
-                joinedWaddleIDs.insert(waddleID)
-            }
+            joinedWaddleIDs.insert(waddleID)
 
             if let selectedChannelID,
                channels.contains(where: { $0.id == selectedChannelID }) {
@@ -1109,13 +1102,16 @@ final class AppModel: ObservableObject {
 
     private func joinSelectedChannel() async throws {
         guard let session,
-              let selectedWaddleID,
               let selectedChannelID,
               let rustClient else {
             throw ChatSendError.noRoom
         }
 
-        let roomJID = roomBareJID(accountJID: session.jid, waddleID: selectedWaddleID, channelID: selectedChannelID)
+        guard let roomJID = channels.first(where: { $0.id == selectedChannelID })?.roomJid,
+              !roomJID.isEmpty else {
+            throw ChatSendError.noRoom
+        }
+
         dlog("joinSelectedChannel: roomJID=\(roomJID) nick=\(session.username) alreadyJoined=\(joinedRoomJIDs.contains(roomJID))")
         if joinedRoomJIDs.contains(roomJID) {
             if roomJID == currentRoomJID {
@@ -1147,9 +1143,6 @@ final class AppModel: ObservableObject {
         guard let session else {
             throw ChatSendError.noSession
         }
-        guard let selectedWaddleID else {
-            throw ChatSendError.noWaddle
-        }
 
         let channelID = room?.id ?? selectedChannelID
         guard let channelID else {
@@ -1160,7 +1153,9 @@ final class AppModel: ObservableObject {
             throw ChatSendError.noSession
         }
 
-        let roomJID = roomBareJID(accountJID: session.jid, waddleID: selectedWaddleID, channelID: channelID)
+        guard let roomJID = channels.first(where: { $0.id == channelID })?.roomJid, !roomJID.isEmpty else {
+            throw ChatSendError.noRoom
+        }
         let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
         let bodyForWire = !trimmedText.isEmpty ? trimmedText : (sharedFiles.first?.url ?? "")
         guard !bodyForWire.isEmpty || !sharedFiles.isEmpty else {
@@ -1509,10 +1504,8 @@ final class AppModel: ObservableObject {
     }
 
     private func roomJID(for channelID: String) -> String? {
-        guard let session, let selectedWaddleID else {
-            return nil
-        }
-        return roomBareJID(accountJID: session.jid, waddleID: selectedWaddleID, channelID: channelID)
+        let jid = channels.first(where: { $0.id == channelID })?.roomJid
+        return jid.flatMap { $0.isEmpty ? nil : $0 }
     }
 
     private func timelineMessages(
@@ -1855,20 +1848,10 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func mergeVisibleWaddles() {
-        publicWaddles = accessibleWaddles.sorted { $0.name.lowercased() < $1.name.lowercased() }
-        if selectedWaddleID == nil {
-            selectedWaddleID = publicWaddles.first(where: { joinedWaddleIDs.contains($0.id) })?.id
-                ?? publicWaddles.first?.id
-        }
-    }
-
     private func syncChatRooms() {
         let rooms = channels.map { channel in
-            let roomJID = session.flatMap {
-                roomBareJID(accountJID: $0.jid, waddleID: selectedWaddleID ?? "", channelID: channel.id)
-            }
-            let lastMessage = roomJID.flatMap { messagesByRoomJID[$0]?.last }
+            let jid = channel.roomJid.isEmpty ? nil : channel.roomJid
+            let lastMessage = jid.flatMap { messagesByRoomJID[$0]?.last }
             return ChatRoomSelection(
                 id: channel.id,
                 title: channel.name,
@@ -1908,8 +1891,8 @@ final class AppModel: ObservableObject {
             return
         }
 
-        guard selectedWaddleID != nil else {
-            chatStore.setSurfaceState(.empty(title: "Select a waddle", message: "Choose a waddle to browse its live channels."))
+        guard selectedWaddleID != nil || !channels.isEmpty else {
+            chatStore.setSurfaceState(.empty(title: "Connecting to space", message: "Loading channels…"))
             return
         }
 
@@ -1998,7 +1981,6 @@ final class AppModel: ObservableObject {
         rustClient = nil
 
         session = nil
-        accessibleWaddles = []
         publicWaddles = []
         selectedWaddleID = nil
         channels = []

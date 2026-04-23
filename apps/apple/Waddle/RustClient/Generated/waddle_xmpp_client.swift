@@ -543,11 +543,7 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
     
     func disconnect() async 
     
-    func discoverChannels(waddleId: String) async  -> [WaddleDiscoveredChannel]
-    
     func discoverUploadService() async  -> String?
-    
-    func fetchCanonicalWaddle() async  -> WaddleDiscoveredWaddle?
     
     func fetchDmHistory(peerJid: String, maxMessages: UInt32, beforeId: String?) async  -> WaddleMamPage
     
@@ -556,6 +552,8 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
     func joinRoom(roomJid: String, nick: String) async 
     
     func leaveRoom(roomJid: String, nick: String) async 
+    
+    func listRooms() async  -> [WaddleRoom]
     
     /**
      * Request the XEP-0084 avatar for a user. Returns `None` when the target
@@ -671,24 +669,6 @@ open func disconnect()async   {
         )
 }
     
-open func discoverChannels(waddleId: String)async  -> [WaddleDiscoveredChannel]  {
-    return
-        try!  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_discover_channels(
-                    self.uniffiClonePointer(),
-                    FfiConverterString.lower(waddleId)
-                )
-            },
-            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
-            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
-            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
-            liftFunc: FfiConverterSequenceTypeWaddleDiscoveredChannel.lift,
-            errorHandler: nil
-            
-        )
-}
-    
 open func discoverUploadService()async  -> String?  {
     return
         try!  await uniffiRustCallAsync(
@@ -702,24 +682,6 @@ open func discoverUploadService()async  -> String?  {
             completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
             freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
             liftFunc: FfiConverterOptionString.lift,
-            errorHandler: nil
-            
-        )
-}
-    
-open func fetchCanonicalWaddle()async  -> WaddleDiscoveredWaddle?  {
-    return
-        try!  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_canonical_waddle(
-                    self.uniffiClonePointer()
-                    
-                )
-            },
-            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
-            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
-            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
-            liftFunc: FfiConverterOptionTypeWaddleDiscoveredWaddle.lift,
             errorHandler: nil
             
         )
@@ -792,6 +754,24 @@ open func leaveRoom(roomJid: String, nick: String)async   {
             completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_void,
             freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_void,
             liftFunc: { $0 },
+            errorHandler: nil
+            
+        )
+}
+    
+open func listRooms()async  -> [WaddleRoom]  {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_list_rooms(
+                    self.uniffiClonePointer()
+                    
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeWaddleRoom.lift,
             errorHandler: nil
             
         )
@@ -1338,170 +1318,6 @@ public func FfiConverterTypeWaddleConfig_lift(_ buf: RustBuffer) throws -> Waddl
 #endif
 public func FfiConverterTypeWaddleConfig_lower(_ value: WaddleConfig) -> RustBuffer {
     return FfiConverterTypeWaddleConfig.lower(value)
-}
-
-
-public struct WaddleDiscoveredChannel {
-    public var id: String
-    public var name: String
-    public var channelType: String
-    public var position: Int32
-
-    // Default memberwise initializers are never public by default, so we
-    // declare one manually.
-    public init(id: String, name: String, channelType: String, position: Int32) {
-        self.id = id
-        self.name = name
-        self.channelType = channelType
-        self.position = position
-    }
-}
-
-#if compiler(>=6)
-extension WaddleDiscoveredChannel: Sendable {}
-#endif
-
-
-extension WaddleDiscoveredChannel: Equatable, Hashable {
-    public static func ==(lhs: WaddleDiscoveredChannel, rhs: WaddleDiscoveredChannel) -> Bool {
-        if lhs.id != rhs.id {
-            return false
-        }
-        if lhs.name != rhs.name {
-            return false
-        }
-        if lhs.channelType != rhs.channelType {
-            return false
-        }
-        if lhs.position != rhs.position {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(id)
-        hasher.combine(name)
-        hasher.combine(channelType)
-        hasher.combine(position)
-    }
-}
-
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeWaddleDiscoveredChannel: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleDiscoveredChannel {
-        return
-            try WaddleDiscoveredChannel(
-                id: FfiConverterString.read(from: &buf), 
-                name: FfiConverterString.read(from: &buf), 
-                channelType: FfiConverterString.read(from: &buf), 
-                position: FfiConverterInt32.read(from: &buf)
-        )
-    }
-
-    public static func write(_ value: WaddleDiscoveredChannel, into buf: inout [UInt8]) {
-        FfiConverterString.write(value.id, into: &buf)
-        FfiConverterString.write(value.name, into: &buf)
-        FfiConverterString.write(value.channelType, into: &buf)
-        FfiConverterInt32.write(value.position, into: &buf)
-    }
-}
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeWaddleDiscoveredChannel_lift(_ buf: RustBuffer) throws -> WaddleDiscoveredChannel {
-    return try FfiConverterTypeWaddleDiscoveredChannel.lift(buf)
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeWaddleDiscoveredChannel_lower(_ value: WaddleDiscoveredChannel) -> RustBuffer {
-    return FfiConverterTypeWaddleDiscoveredChannel.lower(value)
-}
-
-
-public struct WaddleDiscoveredWaddle {
-    public var id: String
-    public var name: String
-    public var isPublic: Bool
-
-    // Default memberwise initializers are never public by default, so we
-    // declare one manually.
-    public init(id: String, name: String, isPublic: Bool) {
-        self.id = id
-        self.name = name
-        self.isPublic = isPublic
-    }
-}
-
-#if compiler(>=6)
-extension WaddleDiscoveredWaddle: Sendable {}
-#endif
-
-
-extension WaddleDiscoveredWaddle: Equatable, Hashable {
-    public static func ==(lhs: WaddleDiscoveredWaddle, rhs: WaddleDiscoveredWaddle) -> Bool {
-        if lhs.id != rhs.id {
-            return false
-        }
-        if lhs.name != rhs.name {
-            return false
-        }
-        if lhs.isPublic != rhs.isPublic {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(id)
-        hasher.combine(name)
-        hasher.combine(isPublic)
-    }
-}
-
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeWaddleDiscoveredWaddle: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleDiscoveredWaddle {
-        return
-            try WaddleDiscoveredWaddle(
-                id: FfiConverterString.read(from: &buf), 
-                name: FfiConverterString.read(from: &buf), 
-                isPublic: FfiConverterBool.read(from: &buf)
-        )
-    }
-
-    public static func write(_ value: WaddleDiscoveredWaddle, into buf: inout [UInt8]) {
-        FfiConverterString.write(value.id, into: &buf)
-        FfiConverterString.write(value.name, into: &buf)
-        FfiConverterBool.write(value.isPublic, into: &buf)
-    }
-}
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeWaddleDiscoveredWaddle_lift(_ buf: RustBuffer) throws -> WaddleDiscoveredWaddle {
-    return try FfiConverterTypeWaddleDiscoveredWaddle.lift(buf)
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeWaddleDiscoveredWaddle_lower(_ value: WaddleDiscoveredWaddle) -> RustBuffer {
-    return FfiConverterTypeWaddleDiscoveredWaddle.lower(value)
 }
 
 
@@ -2087,6 +1903,92 @@ public func FfiConverterTypeWaddleReplyTarget_lift(_ buf: RustBuffer) throws -> 
 #endif
 public func FfiConverterTypeWaddleReplyTarget_lower(_ value: WaddleReplyTarget) -> RustBuffer {
     return FfiConverterTypeWaddleReplyTarget.lower(value)
+}
+
+
+public struct WaddleRoom {
+    public var jid: String
+    public var name: String
+    public var channelType: String
+    public var position: Int32
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(jid: String, name: String, channelType: String, position: Int32) {
+        self.jid = jid
+        self.name = name
+        self.channelType = channelType
+        self.position = position
+    }
+}
+
+#if compiler(>=6)
+extension WaddleRoom: Sendable {}
+#endif
+
+
+extension WaddleRoom: Equatable, Hashable {
+    public static func ==(lhs: WaddleRoom, rhs: WaddleRoom) -> Bool {
+        if lhs.jid != rhs.jid {
+            return false
+        }
+        if lhs.name != rhs.name {
+            return false
+        }
+        if lhs.channelType != rhs.channelType {
+            return false
+        }
+        if lhs.position != rhs.position {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(jid)
+        hasher.combine(name)
+        hasher.combine(channelType)
+        hasher.combine(position)
+    }
+}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleRoom: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleRoom {
+        return
+            try WaddleRoom(
+                jid: FfiConverterString.read(from: &buf), 
+                name: FfiConverterString.read(from: &buf), 
+                channelType: FfiConverterString.read(from: &buf), 
+                position: FfiConverterInt32.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleRoom, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.jid, into: &buf)
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterString.write(value.channelType, into: &buf)
+        FfiConverterInt32.write(value.position, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleRoom_lift(_ buf: RustBuffer) throws -> WaddleRoom {
+    return try FfiConverterTypeWaddleRoom.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleRoom_lower(_ value: WaddleRoom) -> RustBuffer {
+    return FfiConverterTypeWaddleRoom.lower(value)
 }
 
 
@@ -2859,30 +2761,6 @@ fileprivate struct FfiConverterOptionTypeWaddleAvatar: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-fileprivate struct FfiConverterOptionTypeWaddleDiscoveredWaddle: FfiConverterRustBuffer {
-    typealias SwiftType = WaddleDiscoveredWaddle?
-
-    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
-        guard let value = value else {
-            writeInt(&buf, Int8(0))
-            return
-        }
-        writeInt(&buf, Int8(1))
-        FfiConverterTypeWaddleDiscoveredWaddle.write(value, into: &buf)
-    }
-
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
-        switch try readInt(&buf) as Int8 {
-        case 0: return nil
-        case 1: return try FfiConverterTypeWaddleDiscoveredWaddle.read(from: &buf)
-        default: throw UniffiInternalError.unexpectedOptionalTag
-        }
-    }
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
 fileprivate struct FfiConverterOptionTypeWaddleFallbackRange: FfiConverterRustBuffer {
     typealias SwiftType = WaddleFallbackRange?
 
@@ -3053,23 +2931,23 @@ fileprivate struct FfiConverterSequenceTypeWaddleArchivedMessage: FfiConverterRu
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-fileprivate struct FfiConverterSequenceTypeWaddleDiscoveredChannel: FfiConverterRustBuffer {
-    typealias SwiftType = [WaddleDiscoveredChannel]
+fileprivate struct FfiConverterSequenceTypeWaddleRoom: FfiConverterRustBuffer {
+    typealias SwiftType = [WaddleRoom]
 
-    public static func write(_ value: [WaddleDiscoveredChannel], into buf: inout [UInt8]) {
+    public static func write(_ value: [WaddleRoom], into buf: inout [UInt8]) {
         let len = Int32(value.count)
         writeInt(&buf, len)
         for item in value {
-            FfiConverterTypeWaddleDiscoveredChannel.write(item, into: &buf)
+            FfiConverterTypeWaddleRoom.write(item, into: &buf)
         }
     }
 
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [WaddleDiscoveredChannel] {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [WaddleRoom] {
         let len: Int32 = try readInt(&buf)
-        var seq = [WaddleDiscoveredChannel]()
+        var seq = [WaddleRoom]()
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
-            seq.append(try FfiConverterTypeWaddleDiscoveredChannel.read(from: &buf))
+            seq.append(try FfiConverterTypeWaddleRoom.read(from: &buf))
         }
         return seq
     }
@@ -3192,13 +3070,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_disconnect() != 16481) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_discover_channels() != 828) {
-        return InitializationResult.apiChecksumMismatch
-    }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_discover_upload_service() != 12511) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_canonical_waddle() != 42002) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_dm_history() != 13918) {
@@ -3211,6 +3083,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_leave_room() != 31045) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_list_rooms() != 17535) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_request_avatar() != 32787) {

@@ -266,13 +266,11 @@ private struct WaddleListView: View {
                             }
                         }
                         Spacer()
-                        if model.isJoined(waddle.id) {
-                            Text("Joined")
-                                .font(.caption.weight(.semibold))
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 5)
-                                .background(.green.opacity(0.16), in: Capsule())
-                        }
+                        Text("Joined")
+                            .font(.caption.weight(.semibold))
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(.green.opacity(0.16), in: Capsule())
                     }
                     .tag(waddle.id)
                 }

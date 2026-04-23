@@ -110,16 +110,10 @@ dictionary WaddlePresence {
     string? status;
 };
 
-// ── Discovered items ─────────────────────────────────────────────────────────
+// ── Room list (single implicit space) ────────────────────────────────────────
 
-dictionary WaddleDiscoveredWaddle {
-    string id;
-    string name;
-    boolean is_public;
-};
-
-dictionary WaddleDiscoveredChannel {
-    string id;
+dictionary WaddleRoom {
+    string jid;
     string name;
     string channel_type;
     i32 position;
@@ -173,10 +167,7 @@ interface WaddleClient {
     void leave_room(string room_jid, string nick);
 
     [Async]
-    WaddleDiscoveredWaddle? fetch_canonical_waddle();
-
-    [Async]
-    sequence<WaddleDiscoveredChannel> discover_channels(string waddle_id);
+    sequence<WaddleRoom> list_rooms();
 
     [Async]
     void send_presence(string? status, string? show);

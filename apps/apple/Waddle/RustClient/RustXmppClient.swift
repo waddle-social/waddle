@@ -127,21 +127,10 @@ final class RustXmppClient: ObservableObject {
 
     func retractMessage(roomJID: String, messageID: String) async {}
 
-    // MARK: - Discovery
+    // MARK: - Room list (implicit single space)
 
-    func fetchCanonicalWaddle() async -> XMPPDiscoveredWaddle? {
-        let item = await waddleClient.fetchCanonicalWaddle()
-        return item.map { XMPPDiscoveredWaddle(id: $0.id, name: $0.name, isPublic: $0.isPublic) }
-    }
-
-    func discoverChannels(waddleID: String) async -> [XMPPDiscoveredChannel] {
-        print("[RustXmppClient] discoverChannels: calling Rust FFI for waddleID=\(waddleID)")
-        let items = await waddleClient.discoverChannels(waddleId: waddleID)
-        print("[RustXmppClient] discoverChannels: got \(items.count) items from Rust FFI")
-        for item in items {
-            print("[RustXmppClient]   channel: id=\(item.id) name=\(item.name)")
-        }
-        return items.map { XMPPDiscoveredChannel(id: $0.id, name: $0.name, channelType: $0.channelType, position: Int($0.position)) }
+    func listRooms() async -> [WaddleRoom] {
+        return await waddleClient.listRooms()
     }
 
     // MARK: - Chat state / markers stubs

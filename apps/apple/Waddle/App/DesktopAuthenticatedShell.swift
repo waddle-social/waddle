@@ -55,16 +55,7 @@ private struct DesktopWorkspaceRail: View {
         model.publicWaddles.sorted { lhs, rhs in
             let lhsSelected = lhs.id == model.selectedWaddleID
             let rhsSelected = rhs.id == model.selectedWaddleID
-            if lhsSelected != rhsSelected {
-                return lhsSelected
-            }
-
-            let lhsJoined = model.isJoined(lhs.id)
-            let rhsJoined = model.isJoined(rhs.id)
-            if lhsJoined != rhsJoined {
-                return lhsJoined && !rhsJoined
-            }
-
+            if lhsSelected != rhsSelected { return lhsSelected }
             return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
         }
     }
@@ -103,7 +94,7 @@ private struct DesktopWorkspaceRail: View {
                             DesktopWorkspaceAvatarButton(
                                 waddle: waddle,
                                 isSelected: model.selectedWaddleID == waddle.id,
-                                isJoined: model.isJoined(waddle.id)
+                                isJoined: true
                             ) {
                                 Task { await model.selectWaddle(waddle.id) }
                             }

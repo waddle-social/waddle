@@ -104,6 +104,9 @@ struct ChannelSummary: Decodable, Identifiable, Hashable {
     let description: String?
     let channelType: String?
     let position: Int?
+    /// Full XMPP room JID (e.g. `{spaceUUID}_{channelUUID}@muc.domain`).
+    /// Set from XMPP discovery; not decoded from JSON.
+    var roomJid: String
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -111,6 +114,25 @@ struct ChannelSummary: Decodable, Identifiable, Hashable {
         case description
         case channelType = "channel_type"
         case position
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        description = try c.decodeIfPresent(String.self, forKey: .description)
+        channelType = try c.decodeIfPresent(String.self, forKey: .channelType)
+        position = try c.decodeIfPresent(Int.self, forKey: .position)
+        roomJid = ""
+    }
+
+    init(id: String, roomJid: String = "", name: String, description: String? = nil, channelType: String? = nil, position: Int? = nil) {
+        self.id = id
+        self.roomJid = roomJid
+        self.name = name
+        self.description = description
+        self.channelType = channelType
+        self.position = position
     }
 }
 
