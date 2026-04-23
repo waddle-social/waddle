@@ -214,7 +214,7 @@ impl XmppStateMachine {
         match frame {
             InboundFrame::Open => Vec::new(),
             InboundFrame::Close => {
-                self.phase = ConnectionPhase::Closing;
+                self.phase = ConnectionPhase::closing(self.phase.bound_jid().cloned());
                 Vec::new()
             }
             InboundFrame::Auth { mechanism, .. } => vec![OutboundEvent::Log {
@@ -240,7 +240,7 @@ impl XmppStateMachine {
             ConnectionPhase::Unauthenticated
             | ConnectionPhase::ScramPending { .. }
             | ConnectionPhase::Authenticated { .. }
-            | ConnectionPhase::Closing => {
+            | ConnectionPhase::Closing { .. } => {
                 return vec![OutboundEvent::Log {
                     level: Level::WARN,
                     message: format!(
@@ -418,7 +418,7 @@ mod tests {
         assert!(sm
             .handle(InboundEvent::FrameReceived(InboundFrame::Close))
             .is_empty());
-        assert!(matches!(sm.phase(), ConnectionPhase::Closing));
+        assert!(matches!(sm.phase(), ConnectionPhase::Closing { .. }));
     }
 
     #[test]

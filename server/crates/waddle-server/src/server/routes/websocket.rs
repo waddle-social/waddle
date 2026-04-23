@@ -292,7 +292,7 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
                             break;
                         }
 
-                        if matches!(conn.phase, ConnectionPhase::Closing) {
+                        if matches!(conn.phase, ConnectionPhase::Closing { .. }) {
                             break;
                         }
                     }
@@ -442,12 +442,12 @@ async fn cleanup_connection_shutdown(
         return;
     }
 
-    let Some(jid) = conn.phase.bound_jid().cloned() else {
+    let Some(jid) = conn.phase.cleanup_jid().cloned() else {
         return;
     };
 
     let should_detach_for_resume =
-        conn.sm_state.is_resumable() && !matches!(conn.phase, ConnectionPhase::Closing);
+        conn.sm_state.is_resumable() && !matches!(conn.phase, ConnectionPhase::Closing { .. });
 
     if should_detach_for_resume {
         let carbons_enabled = conn.carbons_enabled;
@@ -1064,7 +1064,7 @@ async fn handle_xmpp_frame(
 
         InboundFrame::Close => {
             info!("XMPP stream close requested");
-            *phase = ConnectionPhase::Closing;
+            *phase = ConnectionPhase::closing(phase.bound_jid().cloned());
             vec![r#"<close xmlns="urn:ietf:params:xml:ns:xmpp-framing"/>"#.to_string()]
         }
 
@@ -1082,8 +1082,7 @@ async fn handle_xmpp_frame(
                     handle_sasl_scram_client_first(&data, domain, state, phase).await
                 }
                 "OAUTHBEARER" => {
-                    handle_sasl_oauthbearer(&data, state, authenticated_session, phase)
-                        .await
+                    handle_sasl_oauthbearer(&data, state, authenticated_session, phase).await
                 }
                 other => {
                     warn!(mechanism = %other, "Unsupported SASL mechanism");
@@ -1100,13 +1099,7 @@ async fn handle_xmpp_frame(
             let scram = phase
                 .take_scram_pending()
                 .expect("SASL response must have pending SCRAM state");
-            handle_sasl_scram_response(
-                &data,
-                domain,
-                scram,
-                authenticated_session,
-                phase,
-            )
+            handle_sasl_scram_response(&data, domain, scram, authenticated_session, phase)
         }
 
         InboundFrame::Stanza(stanza) => {
@@ -4412,7 +4405,7 @@ mod tests {
             responses,
             vec![r#"<close xmlns="urn:ietf:params:xml:ns:xmpp-framing"/>"#.to_string()]
         );
-        assert!(matches!(conn.phase, ConnectionPhase::Closing));
+        assert!(matches!(conn.phase, ConnectionPhase::Closing { .. }));
     }
 
     #[tokio::test]
@@ -4434,7 +4427,7 @@ mod tests {
             responses,
             vec![r#"<close xmlns="urn:ietf:params:xml:ns:xmpp-framing"/>"#.to_string()]
         );
-        assert!(matches!(conn.phase, ConnectionPhase::Closing));
+        assert!(matches!(conn.phase, ConnectionPhase::Closing { .. }));
 
         let _ = handle_xmpp_frame(
             r#"<close xmlns="urn:ietf:params:xml:ns:xmpp-framing"/>"#,
@@ -4443,7 +4436,7 @@ mod tests {
             &mut conn,
         )
         .await;
-        assert!(matches!(conn.phase, ConnectionPhase::Closing));
+        assert!(matches!(conn.phase, ConnectionPhase::Closing { .. }));
     }
 
     #[tokio::test]

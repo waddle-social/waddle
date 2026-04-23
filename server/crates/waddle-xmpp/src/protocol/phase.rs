@@ -68,7 +68,9 @@ pub enum ConnectionPhase {
     },
 
     /// The client has sent `<close/>` and the transport is draining.
-    Closing,
+    /// Carries the bound JID (if any) so cleanup can unregister the connection
+    /// even after the phase has transitioned out of `Ready`.
+    Closing { full_jid: Option<FullJid> },
 }
 
 impl ConnectionPhase {
@@ -115,9 +117,28 @@ impl ConnectionPhase {
         matches!(self, Self::Ready { resumed: true, .. })
     }
 
+    /// Create a `Closing` phase, preserving the bound JID if one was active.
+    pub fn closing(full_jid: Option<FullJid>) -> Self {
+        Self::Closing { full_jid }
+    }
+
     pub fn bound_jid(&self) -> Option<&FullJid> {
         match self {
             Self::Ready { full_jid, .. } => Some(full_jid),
+            _ => None,
+        }
+    }
+
+    /// Returns the JID for post-close cleanup.
+    ///
+    /// Returns `Some` when the phase is `Ready` or `Closing` with a bound JID.
+    /// Returns `None` when closing before binding completes.
+    pub fn cleanup_jid(&self) -> Option<&FullJid> {
+        match self {
+            Self::Ready { full_jid, .. }
+            | Self::Closing {
+                full_jid: Some(full_jid),
+            } => Some(full_jid),
             _ => None,
         }
     }
@@ -150,7 +171,7 @@ impl ConnectionPhase {
     }
 
     pub fn is_closing(&self) -> bool {
-        matches!(self, Self::Closing)
+        matches!(self, Self::Closing { .. })
     }
 
     pub fn scram_pending_username(&self) -> Option<&str> {
@@ -261,13 +282,27 @@ mod tests {
 
     #[test]
     fn closing_phase_rejects_all_legal_transitions() {
-        let phase = ConnectionPhase::Closing;
+        let phase = ConnectionPhase::closing(None);
         assert!(phase.is_closing());
         assert!(!phase.allows_sasl_auth());
         assert!(!phase.allows_sasl_response());
         assert!(!phase.allows_resource_binding());
         assert!(!phase.allows_stream_management_enable());
         assert!(!phase.allows_stream_management_resume());
+    }
+
+    #[test]
+    fn cleanup_jid_survives_closing_transition() {
+        let jid: FullJid = "alice@example.com/web".parse().expect("valid jid");
+        let ready = ConnectionPhase::ready(jid.clone(), false);
+        let closing = ConnectionPhase::closing(Some(jid.clone()));
+        let closing_nobound = ConnectionPhase::closing(None);
+
+        assert_eq!(ready.cleanup_jid(), Some(&jid));
+        assert_eq!(closing.cleanup_jid(), Some(&jid));
+        assert_eq!(closing_nobound.cleanup_jid(), None);
+        // bound_jid stays None in Closing so stanza routing still rejects
+        assert_eq!(closing.bound_jid(), None);
     }
 
     #[test]
