@@ -20,7 +20,14 @@
 		{
 			"binding": "DB",
 			"database_name": "waddle-social",
-			"database_id": "fd7af7f7-d271-4d90-a7df-7fe1fa6a3e42"
+			"database_id": "fd7af7f7-d271-4d90-a7df-7fe1fa6a3e42",
+			"migrations_dir": "drizzle"
+		}
+	],
+	"send_email": [
+		{
+			"name": "EMAIL",
+			"allowed_sender_addresses": ["humans@waddle.social"]
 		}
 	],
 	"kv_namespaces": [
@@ -29,6 +36,16 @@
 			"id": "a6cde7c2af9141ca804120e4b3f8bbe2"
 		}
 	],
+	"secrets_store_secrets": [
+		{
+			"binding": "TURNSTILE_SECRET_KEY",
+			"store_id": "421985d6f384493c938c0554fea33c77",
+			"secret_name": "TURNSTILE_SECRET_KEY"
+		}
+	],
+	"vars": {
+		"TURNSTILE_SITE_KEY": "0x4AAAAAADByIlSeuS43sI-m"
+	},
 	"observability": {
 		"enabled": true
 	}

@@ -6,6 +6,7 @@
     "./worker-configuration.d.ts"
   ],
   "exclude": [
-    "dist"
+    "dist",
+    "**/*.test.ts"
   ]
 }

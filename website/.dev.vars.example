@@ -1,0 +1,4 @@
+# Local development only. Do not commit real keys.
+TURNSTILE_SITE_KEY=
+# Create the local TURNSTILE_SECRET_KEY binding with:
+# bunx wrangler secrets-store secret create 421985d6f384493c938c0554fea33c77 --name TURNSTILE_SECRET_KEY --scopes workers

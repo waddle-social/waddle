@@ -765,7 +765,10 @@ watch(
          emoji rails at once. -->
     <div
       v-if="!isEditing"
-      class="absolute -top-3 right-3 z-10 flex items-center gap-0.5 opacity-0 group-hover:opacity-100 focus-within:opacity-100 pointer-events-none group-hover:pointer-events-auto focus-within:pointer-events-auto transition-opacity duration-150 bg-card/95 backdrop-blur border border-border rounded-lg shadow-lg p-1 [@media(pointer:coarse)]:hidden"
+      :class="[
+        'absolute -top-3 right-3 flex items-center gap-0.5 opacity-0 group-hover:opacity-100 focus-within:opacity-100 pointer-events-none group-hover:pointer-events-auto focus-within:pointer-events-auto transition-opacity duration-150 bg-card/95 backdrop-blur border border-border rounded-lg shadow-lg p-1 [@media(pointer:coarse)]:hidden',
+        pickerOpen ? 'z-[60]' : 'z-10',
+      ]"
     >
       <button
         v-for="e in quickEmojis"

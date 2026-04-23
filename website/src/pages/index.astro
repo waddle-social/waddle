@@ -1,276 +1,381 @@
 ---
-import { Font } from "astro:assets";
-import "../styles/global.css";
+import WebsiteLayout from "../layouts/WebsiteLayout.astro";
+import {
+	WAITLIST_INVALID_MESSAGE,
+	WAITLIST_PENDING_MESSAGE,
+	WAITLIST_QUERY_KEY,
+	WAITLIST_RETRY_MESSAGE,
+	WAITLIST_SUCCESS_MESSAGE,
+	WAITLIST_TURNSTILE_ACTION,
+	WAITLIST_UNAVAILABLE_MESSAGE,
+	WAITLIST_VERIFICATION_MESSAGE,
+} from "../lib/waitlist/constants";
+import { getWaitlistTurnstileSiteKey } from "../lib/waitlist/runtime";
 
-const site = Astro.site ?? new URL("https://waddle.social");
-const title = "waddle.social";
-const description = "Open-source, XMPP-native social chat for the fediverse.";
-const canonicalUrl = new URL(Astro.url.pathname, site);
-const ogImageUrl = new URL("/og-image.png", site);
-const ogImageAlt =
-	"The waddle.social wordmark above three penguins sitting on an icy speech bubble.";
+const waitlistState = Astro.url.searchParams.get(WAITLIST_QUERY_KEY);
+const turnstileSiteKey = getWaitlistTurnstileSiteKey();
+const turnstileConfigured = turnstileSiteKey.length > 0;
+const initialStatus =
+	waitlistState === "submitted"
+		? { tone: "success", message: WAITLIST_SUCCESS_MESSAGE }
+		: waitlistState === "invalid"
+			? { tone: "error", message: WAITLIST_INVALID_MESSAGE }
+			: waitlistState === "verify"
+				? { tone: "error", message: WAITLIST_VERIFICATION_MESSAGE }
+				: waitlistState === "offline"
+					? { tone: "error", message: WAITLIST_UNAVAILABLE_MESSAGE }
+					: waitlistState === "retry"
+						? { tone: "error", message: WAITLIST_RETRY_MESSAGE }
+						: null;
+const waitlistStartsOpen = initialStatus !== null;
+const idleMessage = turnstileConfigured
+	? "Confirm first, launch notes later."
+	: WAITLIST_UNAVAILABLE_MESSAGE;
 ---
 
-<html lang="en">
-	<head>
-		<meta charset="utf-8" />
-		<link rel="icon" type="image/svg+xml" href="/waddle-logo.svg" />
-		<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png" />
-		<link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png" />
-		<link rel="shortcut icon" href="/favicon.ico" />
-		<link rel="canonical" href={canonicalUrl} />
-		<meta
-			name="viewport"
-			content="width=device-width, initial-scale=1, viewport-fit=cover"
-		/>
-		<link rel="manifest" href="/manifest.webmanifest" />
-		<meta name="apple-mobile-web-app-capable" content="yes" />
-		<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-		<meta name="apple-mobile-web-app-title" content="Waddle" />
-		<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
-		<meta name="mobile-web-app-capable" content="yes" />
-		<meta name="color-scheme" content="light dark" />
-		<meta name="generator" content={Astro.generator} />
-		<meta name="description" content={description} />
-		<meta name="theme-color" media="(prefers-color-scheme: light)" content="#f4f5f7" />
-		<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0c0d12" />
-		<meta property="og:type" content="website" />
-		<meta property="og:site_name" content={title} />
-		<meta property="og:title" content={title} />
-		<meta property="og:description" content={description} />
-		<meta property="og:url" content={canonicalUrl} />
-		<meta property="og:image" content={ogImageUrl} />
-		<meta property="og:image:width" content="1200" />
-		<meta property="og:image:height" content="630" />
-		<meta property="og:image:alt" content={ogImageAlt} />
-		<meta name="twitter:card" content="summary_large_image" />
-		<meta name="twitter:title" content={title} />
-		<meta name="twitter:description" content={description} />
-		<meta name="twitter:image" content={ogImageUrl} />
-		<meta name="twitter:image:alt" content={ogImageAlt} />
-		<title>{title}</title>
-		<Font cssVariable="--font-inter" preload />
-		<Font cssVariable="--font-fredoka" preload />
-		<script is:inline>
-			const saved = localStorage.getItem("waddle-theme");
-			const theme =
-				saved ??
-				(window.matchMedia("(prefers-color-scheme: dark)").matches
-					? "dark"
-					: "light");
-			document.documentElement.dataset.theme = theme;
-		</script>
-	</head>
-	<body>
-		<main class="stage">
-			<div class="sky" aria-hidden="true">
+<WebsiteLayout>
+	<div class="brand">
+		<h1 class="wordmark">
+			<span class="wordmark-name">waddle</span><span class="wordmark-dot" aria-hidden="true"
+				>.</span
+			><span class="wordmark-tld">social</span>
+		</h1>
+		<div class="brand-stack">
+			<div class="logo-wrap">
 				<button
 					type="button"
-					class="celestial-slot celestial-slot--sun"
-					data-theme-toggle
-					aria-label="Switch to dark theme"
+					class="logo-button"
+					data-toggle-waitlist
+					aria-expanded={waitlistStartsOpen ? "true" : "false"}
+					aria-controls="waitlist-panel"
+					aria-label={waitlistStartsOpen ? "Close waitlist" : "Open waitlist"}
 				>
-					<svg class="celestial celestial--sun" viewBox="0 0 100 100" aria-hidden="true">
-						<circle cx="50" cy="50" r="18" fill="#ffd26e" />
-						<g stroke="#ffd26e" stroke-width="3" stroke-linecap="round">
-							<line x1="50" y1="8" x2="50" y2="22" />
-							<line x1="50" y1="78" x2="50" y2="92" />
-							<line x1="8" y1="50" x2="22" y2="50" />
-							<line x1="78" y1="50" x2="92" y2="50" />
-							<line x1="20" y1="20" x2="30" y2="30" />
-							<line x1="70" y1="70" x2="80" y2="80" />
-							<line x1="80" y1="20" x2="70" y2="30" />
-							<line x1="30" y1="70" x2="20" y2="80" />
-						</g>
-					</svg>
+					<img
+						src="/logo.png"
+						alt="Waddle"
+						class="logo"
+						width="1024"
+						height="1024"
+						decoding="async"
+						fetchpriority="high"
+					/>
 				</button>
-				<button
-					type="button"
-					class="celestial-slot celestial-slot--moon"
-					data-theme-toggle
-					aria-label="Switch to light theme"
-				>
-					<svg class="celestial celestial--moon" viewBox="0 0 100 100" aria-hidden="true">
-						<path
-							d="M60 8 A42 42 0 1 0 92 56 A32 32 0 0 1 60 8 Z"
-							fill="#e8eef7"
-						/>
-						<circle cx="62" cy="38" r="3" fill="#c9d3e4" opacity="0.7" />
-						<circle cx="74" cy="58" r="4" fill="#c9d3e4" opacity="0.6" />
-						<circle cx="52" cy="62" r="2.5" fill="#c9d3e4" opacity="0.5" />
-					</svg>
-				</button>
-				<div class="stars" aria-hidden="true">
-					<span style="--x: 8%;  --y: 18%; --s: 2px; --d: 0s;"></span>
-					<span style="--x: 22%; --y: 32%; --s: 3px; --d: 0.8s;"></span>
-					<span style="--x: 14%; --y: 62%; --s: 2px; --d: 1.6s;"></span>
-					<span style="--x: 30%; --y: 78%; --s: 2.5px; --d: 2.4s;"></span>
-					<span style="--x: 72%; --y: 24%; --s: 2px; --d: 0.4s;"></span>
-					<span style="--x: 84%; --y: 58%; --s: 3px; --d: 1.2s;"></span>
-					<span style="--x: 90%; --y: 78%; --s: 2px; --d: 2s;"></span>
-					<span style="--x: 62%; --y: 82%; --s: 2.5px; --d: 2.8s;"></span>
-				</div>
-				<div class="snow" aria-hidden="true">
-					<span style="--x: 12%; --y: 22%; --d: 0s;  --r: -18deg;">❄</span>
-					<span style="--x: 28%; --y: 70%; --d: 1.4s; --r: 12deg;">❄</span>
-					<span style="--x: 18%; --y: 48%; --d: 2.8s; --r: -6deg;">❄</span>
-					<span style="--x: 78%; --y: 36%; --d: 0.7s; --r: 20deg;">❄</span>
-					<span style="--x: 86%; --y: 68%; --d: 2.1s; --r: -14deg;">❄</span>
-					<span style="--x: 62%; --y: 82%; --d: 3.5s; --r: 8deg;">❄</span>
-				</div>
 			</div>
 
-			<div class="brand">
-				<h1 class="wordmark">
-					<span class="wordmark-name">waddle</span><span
-						class="wordmark-dot"
-						aria-hidden="true">.</span
-					><span class="wordmark-tld">social</span>
-				</h1>
-				<div class="brand-stack">
-					<div class="logo-wrap">
-						<button
-							type="button"
-							class="logo-button"
-							data-toggle-waitlist
-							aria-expanded="false"
-							aria-controls="waitlist-panel"
-							aria-label="Open waitlist"
-						>
-							<img
-								src="/logo.png"
-								alt="Waddle"
-								class="logo"
-								width="1024"
-								height="1024"
-								decoding="async"
-								fetchpriority="high"
-							/>
-						</button>
-					</div>
+			<div
+				class:list={["waitlist", waitlistStartsOpen && "is-open"]}
+				id="waitlist-panel"
+				data-waitlist-panel
+				aria-hidden={waitlistStartsOpen ? "false" : "true"}
+			>
+				<div class="waitlist-copy">
+					<p class="waitlist-kicker">private beta, public signal</p>
+					<p class="waitlist-teaser">
+						Leave an address and we’ll send one confirmation note first. No public
+						roster, no surprise blasts, and no “already on the list” tells.
+					</p>
+				</div>
 
-					<div
-						class="waitlist"
-						id="waitlist-panel"
-						data-waitlist-panel
-						aria-hidden="true"
+				<div class="waitlist-control">
+					<form
+						id="waitlist-form"
+						class="waitlist-form"
+						method="post"
+						action="/api/waitlist"
+						autocomplete="on"
+						aria-disabled={turnstileConfigured ? "false" : "true"}
+						data-waitlist-form
+						data-turnstile-action={WAITLIST_TURNSTILE_ACTION}
+						data-turnstile-configured={turnstileConfigured ? "true" : "false"}
+						data-turnstile-site-key={turnstileSiteKey}
 					>
-						<p class="waitlist-teaser">
-							Open-source, XMPP-native social chat. The waitlist is paused while
-							we get the beta ready; this spot will open for early access and
-							launch notes soon.
-						</p>
-
-						<div class="waitlist-control">
-							<form
-								id="waitlist-form"
-								class="waitlist-form"
-								autocomplete="off"
-								aria-disabled="true"
+						<div class="waitlist-form-main">
+							<label class="sr-only" for="email">Email address</label>
+							<input
+								id="email"
+								name="email"
+								type="email"
+								autocomplete="email"
+								inputmode="email"
+								placeholder="you@signal.example"
+								required
+							/>
+							<button
+								type="submit"
+								class="waitlist-send"
+								aria-label="Join waitlist"
+								disabled={!turnstileConfigured}
 							>
-								<label class="sr-only" for="email">Email address</label>
-								<input
-									id="email"
-									name="email"
-									type="email"
-									disabled
-									autocomplete="off"
-									inputmode="email"
-									placeholder="waitlist opens soon"
-								/>
-								<button
-									type="button"
-									class="waitlist-send"
-									disabled
-									aria-label="Waitlist coming soon"
-								>
-									<img src="/waddle-mark.svg" alt="" width="32" height="32" />
-								</button>
-							</form>
+								<img src="/waddle-mark.svg" alt="" width="32" height="32" />
+							</button>
 						</div>
-					</div>
+						<input type="hidden" name="cf-turnstile-response" value="" data-turnstile-response />
+						{
+							turnstileConfigured && (
+								<div class="waitlist-turnstile-row">
+									<div class="waitlist-turnstile" data-waitlist-turnstile></div>
+								</div>
+							)
+						}
+					</form>
+
+					<p
+						class="waitlist-status"
+						data-waitlist-status
+						data-state={initialStatus?.tone ?? "idle"}
+						data-idle-message={idleMessage}
+						data-pending-message={WAITLIST_PENDING_MESSAGE}
+						data-success-message={WAITLIST_SUCCESS_MESSAGE}
+						data-error-message={WAITLIST_RETRY_MESSAGE}
+						data-unavailable-message={WAITLIST_UNAVAILABLE_MESSAGE}
+						data-verification-message={WAITLIST_VERIFICATION_MESSAGE}
+						aria-live="polite"
+					>
+						{initialStatus?.message ?? idleMessage}
+					</p>
+
+					<p class="waitlist-meta">
+						One pending request per inbox. Confirmation required before activation.
+						Every note carries its own unsubscribe link.
+					</p>
 				</div>
 			</div>
-			<footer class="site-footer">
-				<span class="site-footer-made">
-					Made with love in
-					<span class="site-footer-flags" aria-label="Germany, Scotland, and Norway">
-						<a
-							href="https://github.com/icepuma"
-							rel="noreferrer"
-							target="_blank"
-							aria-label="Germany: icepuma on GitHub"
-						>
-							<span aria-hidden="true">🇩🇪</span>
-						</a>
-						<a
-							href="https://github.com/rawkode"
-							rel="noreferrer"
-							target="_blank"
-							aria-label="Scotland: rawkode on GitHub"
-						>
-							<span aria-hidden="true"
-								>&#x1F3F4;&#xE0067;&#xE0062;&#xE0073;&#xE0063;&#xE0074;&#xE007F;</span
-							>
-						</a>
-						<a
-							href="https://github.com/randax"
-							rel="noreferrer"
-							target="_blank"
-							aria-label="Norway: randax on GitHub"
-						>
-							<span aria-hidden="true">🇳🇴</span>
-						</a>
-					</span>
-				</span>
-				<span class="site-footer-sep" aria-hidden="true"></span>
-				<a href="https://github.com/waddle-social" rel="noreferrer" target="_blank">
-					GitHub
-				</a>
-				<span class="site-footer-sep" aria-hidden="true"></span>
-				<a
-					href="https://bsky.app/profile/waddle.social"
-					rel="noreferrer"
-					target="_blank"
-				>
-					Bluesky
-				</a>
-			</footer>
-		</main>
+		</div>
+	</div>
 
-		<script>
-			const root = document.documentElement;
+	<script is:inline>
+		window.waddleTurnstileOnLoad = () => {
+			window.dispatchEvent(new Event("waddle:turnstile-ready"));
+		};
+	</script>
+	<script
+		is:inline
+		src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit&onload=waddleTurnstileOnLoad"
+		defer
+	></script>
 
-			// theme toggle — sun/moon
-			document
-				.querySelectorAll<HTMLElement>("[data-theme-toggle]")
-				.forEach((el) => {
-					el.addEventListener("click", () => {
-						const next = root.dataset.theme === "dark" ? "light" : "dark";
-						root.dataset.theme = next;
-						localStorage.setItem("waddle-theme", next);
-					});
-				});
+	<script>
+		const logoButton = document.querySelector<HTMLButtonElement>("[data-toggle-waitlist]");
+		const panel = document.querySelector<HTMLElement>("[data-waitlist-panel]");
+		const form = document.querySelector<HTMLFormElement>("[data-waitlist-form]");
+		const emailInput = form?.querySelector<HTMLInputElement>('input[name="email"]');
+		const submitButton = form?.querySelector<HTMLButtonElement>('button[type="submit"]');
+		const turnstileContainer = form?.querySelector<HTMLElement>("[data-waitlist-turnstile]");
+		const turnstileResponseInput = form?.querySelector<HTMLInputElement>(
+			'input[name="cf-turnstile-response"]',
+		);
+		const status = document.querySelector<HTMLElement>("[data-waitlist-status]");
+		const turnstileConfigured = form?.dataset.turnstileConfigured === "true";
+		const turnstileSiteKey = form?.dataset.turnstileSiteKey?.trim() ?? "";
+		const turnstileAction = form?.dataset.turnstileAction ?? "";
+		const unavailableMessage =
+			status?.dataset.unavailableMessage ??
+			"Waitlist verification is offline right now. Try again in a minute.";
+		const verificationMessage =
+			status?.dataset.verificationMessage ??
+			"Complete the quick human check, then try again.";
+		let widgetId: string | null = null;
+		let turnstileRenderPromise: Promise<void> | null = null;
 
-			// waitlist panel — logo toggles teaser + paused form
-			const logoButton = document.querySelector<HTMLButtonElement>(
-				"[data-toggle-waitlist]",
-			);
-			const panel = document.querySelector<HTMLElement>("[data-waitlist-panel]");
-
-			if (logoButton && panel) {
-				logoButton.addEventListener("click", () => {
-					const open = logoButton.getAttribute("aria-expanded") === "true";
-					const next = !open;
-					logoButton.setAttribute("aria-expanded", String(next));
-					logoButton.setAttribute(
-						"aria-label",
-						next ? "Close waitlist" : "Open waitlist",
-					);
-					panel.setAttribute("aria-hidden", String(!next));
-					panel.classList.toggle("is-open", next);
-				});
+		const setPanelOpen = (next: boolean) => {
+			if (!logoButton || !panel) {
+				return;
 			}
-		</script>
-	</body>
-</html>
+
+			logoButton.setAttribute("aria-expanded", String(next));
+			logoButton.setAttribute("aria-label", next ? "Close waitlist" : "Open waitlist");
+			panel.setAttribute("aria-hidden", String(!next));
+			panel.classList.toggle("is-open", next);
+		};
+
+		const setStatus = (tone: "idle" | "pending" | "success" | "error", message: string) => {
+			if (!status) {
+				return;
+			}
+
+			status.dataset.state = tone;
+			status.textContent = message;
+		};
+
+		const setBusy = (busy: boolean) => {
+			if (!form || !emailInput || !submitButton) {
+				return;
+			}
+
+			form.setAttribute("aria-disabled", String(busy));
+			form.dataset.busy = String(busy);
+			emailInput.disabled = busy;
+			submitButton.disabled = busy;
+		};
+
+		const waitForTurnstile = async () => {
+			if (window.turnstile) {
+				await new Promise<void>((resolve) => {
+					window.turnstile?.ready(() => resolve());
+				});
+				return true;
+			}
+
+			return await new Promise<boolean>((resolve) => {
+				const timeoutId = window.setTimeout(() => resolve(false), 4000);
+
+				window.addEventListener(
+					"waddle:turnstile-ready",
+					() => {
+						window.clearTimeout(timeoutId);
+						window.turnstile?.ready(() => resolve(true));
+					},
+					{ once: true },
+				);
+			});
+		};
+
+		const resetTurnstile = () => {
+			if (turnstileResponseInput) {
+				turnstileResponseInput.value = "";
+			}
+
+			if (widgetId && window.turnstile) {
+				window.turnstile.reset(widgetId);
+			}
+		};
+
+		const renderTurnstile = async () => {
+			if (!turnstileConfigured || !turnstileContainer || !turnstileResponseInput || !status) {
+				return;
+			}
+
+			if (turnstileRenderPromise) {
+				return turnstileRenderPromise;
+			}
+
+			turnstileRenderPromise = (async () => {
+				const ready = await waitForTurnstile();
+				if (!ready || !window.turnstile) {
+					setStatus("error", unavailableMessage);
+					return;
+				}
+
+				if (widgetId) {
+					window.turnstile.remove(widgetId);
+					widgetId = null;
+				}
+
+				turnstileResponseInput.value = "";
+				widgetId = window.turnstile.render(turnstileContainer, {
+					sitekey: turnstileSiteKey,
+					action: turnstileAction,
+					size: "flexible",
+					theme: document.documentElement.dataset.theme === "light" ? "light" : "dark",
+					callback: (token) => {
+						turnstileResponseInput.value = token;
+						if (status.dataset.state === "error") {
+							setStatus("idle", status.dataset.idleMessage ?? "Confirm first, launch notes later.");
+						}
+					},
+					"error-callback": () => {
+						turnstileResponseInput.value = "";
+						setStatus("error", unavailableMessage);
+					},
+					"expired-callback": () => {
+						turnstileResponseInput.value = "";
+						setStatus("error", verificationMessage);
+						resetTurnstile();
+					},
+				});
+			})().finally(() => {
+				turnstileRenderPromise = null;
+			});
+
+			return turnstileRenderPromise;
+		};
+
+		setPanelOpen(panel?.classList.contains("is-open") ?? false);
+		if (turnstileConfigured) {
+			void renderTurnstile();
+		}
+
+		logoButton?.addEventListener("click", () => {
+			setPanelOpen(!(panel?.classList.contains("is-open") ?? false));
+		});
+
+		window.addEventListener("waddle:theme-change", () => {
+			if (!turnstileConfigured) {
+				return;
+			}
+
+			void renderTurnstile();
+		});
+
+		form?.addEventListener("submit", async (event) => {
+			event.preventDefault();
+
+			if (!form || !emailInput || !submitButton || !status) {
+				return;
+			}
+
+			if (!form.reportValidity()) {
+				return;
+			}
+
+			if (!turnstileConfigured) {
+				setPanelOpen(true);
+				setStatus("error", unavailableMessage);
+				return;
+			}
+
+			if (!turnstileResponseInput?.value) {
+				setPanelOpen(true);
+				setStatus("error", verificationMessage);
+				return;
+			}
+
+			setPanelOpen(true);
+			setBusy(true);
+			setStatus("pending", status.dataset.pendingMessage ?? "Packing your confirmation note…");
+
+			try {
+				const response = await fetch(form.action, {
+					method: "POST",
+					headers: {
+						Accept: "application/json",
+					},
+					body: new FormData(form),
+				});
+
+				const payload = (await response.json()) as {
+					ok?: boolean;
+					message?: string;
+				};
+
+				if (response.ok && payload.ok) {
+					form.reset();
+					resetTurnstile();
+					setStatus(
+						"success",
+						payload.message ??
+							status.dataset.successMessage ??
+							"If that address can receive Waddle waitlist mail, you’ll get a link shortly.",
+					);
+					return;
+				}
+
+				resetTurnstile();
+				setStatus(
+					"error",
+					payload.message ??
+						status.dataset.errorMessage ??
+						"Mail hiccup on our side. Try again in a minute.",
+				);
+			} catch {
+				resetTurnstile();
+				setStatus(
+					"error",
+					status.dataset.errorMessage ?? "Mail hiccup on our side. Try again in a minute.",
+				);
+			} finally {
+				setBusy(false);
+			}
+		});
+	</script>
+</WebsiteLayout>
