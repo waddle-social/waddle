@@ -167,6 +167,7 @@ const idleMessage = turnstileConfigured
 			"Complete the quick human check, then try again.";
 		let widgetId: string | null = null;
 		let turnstileRenderPromise: Promise<void> | null = null;
+		let turnstileNeedsReset = false;
 
 		const setPanelOpen = (next: boolean) => {
 			if (!logoButton || !panel) {
@@ -226,6 +227,16 @@ const idleMessage = turnstileConfigured
 			if (widgetId && window.turnstile) {
 				window.turnstile.reset(widgetId);
 			}
+
+			turnstileNeedsReset = false;
+		};
+
+		const markTurnstileDirty = () => {
+			if (turnstileResponseInput) {
+				turnstileResponseInput.value = "";
+			}
+
+			turnstileNeedsReset = widgetId !== null;
 		};
 
 		const renderTurnstile = async () => {
@@ -257,6 +268,7 @@ const idleMessage = turnstileConfigured
 					theme: document.documentElement.dataset.theme === "light" ? "light" : "dark",
 					callback: (token) => {
 						turnstileResponseInput.value = token;
+						turnstileNeedsReset = false;
 						if (status.dataset.state === "error") {
 							setStatus("idle", status.dataset.idleMessage ?? "Confirm first, launch notes later.");
 						}
@@ -278,21 +290,50 @@ const idleMessage = turnstileConfigured
 			return turnstileRenderPromise;
 		};
 
-		setPanelOpen(panel?.classList.contains("is-open") ?? false);
-		if (turnstileConfigured) {
-			void renderTurnstile();
-		}
-
-		logoButton?.addEventListener("click", () => {
-			setPanelOpen(!(panel?.classList.contains("is-open") ?? false));
-		});
-
-		window.addEventListener("waddle:theme-change", () => {
+		const ensureTurnstileReady = async () => {
 			if (!turnstileConfigured) {
 				return;
 			}
 
+			const panelIsOpen = panel?.classList.contains("is-open") ?? false;
+			if (!panelIsOpen) {
+				return;
+			}
+
+			if (!widgetId) {
+				await renderTurnstile();
+				return;
+			}
+
+			if (turnstileNeedsReset) {
+				resetTurnstile();
+			}
+		};
+
+		setPanelOpen(panel?.classList.contains("is-open") ?? false);
+
+		logoButton?.addEventListener("click", () => {
+			const next = !(panel?.classList.contains("is-open") ?? false);
+			setPanelOpen(next);
+			if (next) {
+				void ensureTurnstileReady();
+			}
+		});
+
+		window.addEventListener("waddle:theme-change", () => {
+			if (!turnstileConfigured || !widgetId) {
+				return;
+			}
+
 			void renderTurnstile();
+		});
+
+		form?.addEventListener("focusin", () => {
+			void ensureTurnstileReady();
+		});
+
+		form?.addEventListener("pointerdown", () => {
+			void ensureTurnstileReady();
 		});
 
 		form?.addEventListener("submit", async (event) => {
@@ -314,6 +355,7 @@ const idleMessage = turnstileConfigured
 
 			if (!turnstileResponseInput?.value) {
 				setPanelOpen(true);
+				await ensureTurnstileReady();
 				setStatus("error", verificationMessage);
 				return;
 			}
@@ -349,7 +391,7 @@ const idleMessage = turnstileConfigured
 					return;
 				}
 
-				resetTurnstile();
+				markTurnstileDirty();
 				setStatus(
 					"error",
 					payload.message ??
@@ -357,7 +399,7 @@ const idleMessage = turnstileConfigured
 						"Mail hiccup on our side. Try again in a minute.",
 				);
 			} catch {
-				resetTurnstile();
+				markTurnstileDirty();
 				setStatus(
 					"error",
 					status.dataset.errorMessage ?? "Mail hiccup on our side. Try again in a minute.",

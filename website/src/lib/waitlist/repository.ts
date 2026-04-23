@@ -30,20 +30,21 @@ export type WaitlistStore = {
 	consumeToken(tokenId: string, consumedAt: Date): Promise<void>;
 };
 
-function isDuplicateEmailError(error: unknown): boolean {
-	const message = error instanceof Error ? error.message : String(error);
-	return (
-		message.includes("UNIQUE constraint failed") &&
-		message.includes("waitlist_entries.email")
-	);
-}
-
 export function createDrizzleWaitlistStore(db: WaitlistDatabase): WaitlistStore {
 	return {
 		async reserveEntry(input) {
 			const entryId = crypto.randomUUID();
 			const confirmTokenId = crypto.randomUUID();
 			const unsubscribeTokenId = crypto.randomUUID();
+			const existing = await db
+				.select({ id: waitlistEntries.id })
+				.from(waitlistEntries)
+				.where(eq(waitlistEntries.email, input.email))
+				.limit(1);
+
+			if (existing[0]) {
+				return { kind: "duplicate" };
+			}
 
 			try {
 				await db.insert(waitlistEntries).values({
@@ -70,11 +71,6 @@ export function createDrizzleWaitlistStore(db: WaitlistDatabase): WaitlistStore 
 				return { kind: "created", entryId };
 			} catch (error) {
 				await db.delete(waitlistEntries).where(eq(waitlistEntries.id, entryId)).catch(() => {});
-
-				if (isDuplicateEmailError(error)) {
-					return { kind: "duplicate" };
-				}
-
 				throw error;
 			}
 		},
