@@ -1,5 +1,7 @@
 # Xcode build output
 .derivedData/
+.derived/
+.build/
 
 # Xcode user state
 *.xcuserstate
