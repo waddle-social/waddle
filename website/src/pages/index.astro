@@ -318,6 +318,7 @@ const idleMessage = turnstileConfigured
 				return;
 			}
 
+			const requestBody = new FormData(form);
 			setPanelOpen(true);
 			setBusy(true);
 			setStatus("pending", status.dataset.pendingMessage ?? "Packing your confirmation note…");
@@ -328,7 +329,7 @@ const idleMessage = turnstileConfigured
 					headers: {
 						Accept: "application/json",
 					},
-					body: new FormData(form),
+					body: requestBody,
 				});
 
 				const payload = (await response.json()) as {

@@ -110,7 +110,7 @@ schema.#Project & {
 		migrateProduction: schema.#Task & {
 			command: "bun"
 			args: ["run", "db:migrate:remote"]
-			dependsOn: [tasks.dbGenerate]
+			dependsOn: [tasks.build, tasks.dbGenerate]
 			inputs: [
 				"wrangler.jsonc",
 				"drizzle/**",
@@ -133,10 +133,11 @@ schema.#Project & {
 		deployProduction: schema.#Task & {
 			command: "bun"
 			args: ["run", "deploy"]
-			dependsOn: [tasks.build]
+			dependsOn: [tasks.migrateProduction]
 			inputs: [
 				"wrangler.jsonc",
 				"dist/**",
+				"drizzle/**",
 			]
 			outputs: [
 				".wrangler/**",

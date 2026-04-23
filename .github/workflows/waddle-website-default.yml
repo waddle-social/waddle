@@ -13,11 +13,14 @@ on:
     - website/../package.json
     - website/astro.config.ts
     - website/dist/**
+    - website/drizzle.config.ts
+    - website/drizzle/**
     - website/env.cue
     - website/package.json
     - website/public/**
     - website/schema/**
     - website/src/**
+    - website/src/db/schema.ts
     - website/tsconfig.json
     - website/worker-configuration.d.ts
     - website/wrangler.jsonc
