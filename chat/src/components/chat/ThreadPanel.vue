@@ -7,7 +7,7 @@ import type { TimelineMessage, MarkupSpan, MessageReference } from "@/lib/chat-u
 import type { OccupantHat, OccupantPresence, RoomHats, RoomPresence } from "@/lib/xmpp-client";
 import type { ThreadEntry, ThreadIndex } from "@/composables/useThreads";
 import { useScrollDirection } from "@/composables/useScrollDirection";
-import { orderTimelineForScrollDirection, getPinnedScrollTop } from "@/lib/scroll-direction";
+import { isTopPinnedScrollDirection, orderTimelineForScrollDirection, getPinnedScrollTop } from "@/lib/scroll-direction";
 
 const props = defineProps<{
   threadStack: string[];
@@ -71,6 +71,10 @@ const orderedChildren = computed(() => {
   const children = activeEntry.value?.directChildren ?? [];
   return orderTimelineForScrollDirection(children, scrollDirectionMode.value);
 });
+
+const isTopPinned = computed(() =>
+  isTopPinnedScrollDirection(scrollDirectionMode.value),
+);
 
 const scrollContainerRef = ref<HTMLElement | null>(null);
 const draft = ref("");
@@ -211,6 +215,27 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
       </button>
     </div>
 
+    <!-- Composer: top-pinned mode (social mode) -->
+    <div v-if="!hideComposer && isTopPinned" class="border-b border-border flex-shrink-0">
+      <MessageComposer
+        :ref="setComposerRef"
+        v-model:draft="draft"
+        :channel-name="`thread in ${channelName}`"
+        :is-sending="isSending"
+        :disabled="false"
+        :tenor-api-key="tenorApiKey"
+        :member-names="memberNames"
+        :slow-mode-cooldown="slowModeCooldown"
+        :upload-progress="uploadProgress"
+        :replying-to="replyingTo"
+        :is-top-pinned="true"
+        @send="onSend"
+        @cancel-reply="cancelReplyInThread"
+        @typing="emit('typing')"
+        @select-gif="(url: string) => emit('selectGif', url)"
+      />
+    </div>
+
     <!-- Messages scroll area -->
     <div ref="scrollContainerRef" class="flex-1 min-h-0 overflow-auto px-3 py-3">
       <template v-if="activeEntry">
@@ -294,8 +319,8 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
       </div>
     </div>
 
-    <!-- Composer: hidden in parent context pane -->
-    <div v-if="!hideComposer" class="border-t border-border flex-shrink-0">
+    <!-- Composer: bottom-pinned mode (chat mode) - hidden in parent context pane -->
+    <div v-if="!hideComposer && !isTopPinned" class="border-t border-border flex-shrink-0">
       <MessageComposer
         :ref="setComposerRef"
         v-model:draft="draft"
@@ -307,6 +332,7 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
         :slow-mode-cooldown="slowModeCooldown"
         :upload-progress="uploadProgress"
         :replying-to="replyingTo"
+        :is-top-pinned="false"
         @send="onSend"
         @cancel-reply="cancelReplyInThread"
         @typing="emit('typing')"
