@@ -7,12 +7,11 @@ set -euo pipefail
 echo "=== Xcode Cloud Pre-Build Setup ==="
 
 # Get repository root
-# Xcode Cloud runs this script from the workspace, script is at apps/apple/ci_scripts/ci_post_clone.sh
-# Going from apps/apple/ci_scripts up to repository root: ../../../
+# Xcode Cloud runs this script from the workspace root
+# The script is at ci_scripts/ci_post_clone.sh in the repository root
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 echo "📍 Script location: $SCRIPT_DIR"
-echo "📍 Working directory: $(pwd)"
 echo "📍 Repository root: $REPO_ROOT"
 
 # Verify we're in the right place
