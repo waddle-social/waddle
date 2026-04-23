@@ -64,7 +64,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: WaddleXmppClientFFI-swift-bindings
-          path: apps/apple/Waddle/RustClient/Generated/
+          path: apps/apple/Waddle/RustClient/
 
       - name: Install xcodegen
         run: brew install xcodegen
@@ -100,7 +100,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: WaddleXmppClientFFI-swift-bindings
-          path: apps/apple/Waddle/RustClient/Generated/
+          path: apps/apple/Waddle/RustClient/
 
       - name: Install xcodegen
         run: brew install xcodegen
