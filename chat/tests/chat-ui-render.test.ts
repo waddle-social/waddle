@@ -1,5 +1,14 @@
 import { describe, expect, test } from "bun:test";
-import { isImageFile, renderStyledBody, type MarkupSpan, type MessageReference } from "../src/lib/chat-ui";
+import {
+  inferredFileDisposition,
+  isAudioFile,
+  isImageFile,
+  isPdfFile,
+  isVideoFile,
+  renderStyledBody,
+  type MarkupSpan,
+  type MessageReference,
+} from "../src/lib/chat-ui";
 
 describe("renderStyledBody", () => {
   test("renders plain text literally instead of parsing Markdown", () => {
@@ -72,5 +81,16 @@ describe("renderStyledBody", () => {
     expect(isImageFile(undefined, "https://cdn.example.com/cat.PNG?token=1")).toBe(true);
     expect(isImageFile(undefined, "https://media2.giphy.com/media/abc123/200w")).toBe(true);
     expect(isImageFile("application/octet-stream", "https://cdn.example.com/archive.bin")).toBe(false);
+  });
+
+  test("identifies video, audio, and PDF attachments and infers disposition", () => {
+    expect(isVideoFile("video/mp4")).toBe(true);
+    expect(isVideoFile(undefined, "clip.webm")).toBe(true);
+    expect(isAudioFile("audio/mpeg")).toBe(true);
+    expect(isAudioFile(undefined, "https://cdn.example.com/theme.ogg")).toBe(true);
+    expect(isPdfFile("application/pdf")).toBe(true);
+    expect(isPdfFile(undefined, "notes.pdf")).toBe(true);
+    expect(inferredFileDisposition("text/plain", "notes.txt")).toBe("attachment");
+    expect(inferredFileDisposition("video/mp4", "clip.mp4")).toBe("inline");
   });
 });

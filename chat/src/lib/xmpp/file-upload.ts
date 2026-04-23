@@ -2,7 +2,7 @@
 import type { Agent } from "stanza";
 import { reportError } from "@/lib/telemetry";
 
-export const MAX_IMAGE_UPLOAD_BYTES = 10 * 1024 * 1024; // 10 MB
+export const MAX_FILE_UPLOAD_BYTES = 10 * 1024 * 1024; // 10 MB
 
 interface UploadResult {
   getUrl: string;
@@ -100,7 +100,7 @@ export async function uploadFile(
   uploadDomain: string,
   onProgress?: (progress: UploadProgress) => void,
 ): Promise<UploadResult> {
-  const filename = file instanceof File ? file.name : `image-${Date.now()}.png`;
+  const filename = file instanceof File ? file.name : `attachment-${Date.now()}.bin`;
   const contentType = file.type || "application/octet-stream";
   const size = file.size;
 
@@ -132,28 +132,28 @@ export async function uploadFile(
   };
 }
 
-/** Extract every image from a paste or drop event. */
-export function extractImagesFromEvent(event: ClipboardEvent | DragEvent): File[] {
+/** Extract files from a paste or drop event. Paste stays image-only. */
+export function extractFilesFromEvent(event: ClipboardEvent | DragEvent): File[] {
   const out: File[] = [];
   if (event instanceof ClipboardEvent) {
     const items = event.clipboardData?.items;
     if (!items) return out;
     for (let i = 0; i < items.length; i++) {
-      if (items[i].type.startsWith("image/")) {
-        const f = items[i].getAsFile();
-        if (f) out.push(f);
-      }
+      const f = items[i].getAsFile();
+      if (f && f.type.startsWith("image/")) out.push(f);
     }
   } else if (event instanceof DragEvent) {
     const files = event.dataTransfer?.files;
     if (!files) return out;
     for (let i = 0; i < files.length; i++) {
-      if (files[i].type.startsWith("image/")) {
-        out.push(files[i]);
-      }
+      out.push(files[i]);
     }
   }
   return out;
+}
+
+export function extractImagesFromClipboardEvent(event: ClipboardEvent): File[] {
+  return extractFilesFromEvent(event).filter((file) => file.type.startsWith("image/"));
 }
 
 function parseSlotResponse(response: any): SlotInfo {

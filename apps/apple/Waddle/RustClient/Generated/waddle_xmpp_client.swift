@@ -438,6 +438,22 @@ fileprivate struct FfiConverterInt32: FfiConverterPrimitive {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterUInt64: FfiConverterPrimitive {
+    typealias FfiType = UInt64
+    typealias SwiftType = UInt64
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UInt64 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterBool : FfiConverter {
     typealias FfiType = Int8
     typealias SwiftType = Bool
@@ -529,6 +545,8 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
     
     func discoverChannels(waddleId: String) async  -> [WaddleDiscoveredChannel]
     
+    func discoverUploadService() async  -> String?
+    
     func discoverWaddles() async  -> [WaddleDiscoveredWaddle]
     
     func fetchDmHistory(peerJid: String, maxMessages: UInt32, beforeId: String?) async  -> WaddleMamPage
@@ -546,6 +564,8 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
      * "fall back to initials".
      */
     func requestAvatar(jid: String) async  -> WaddleAvatar?
+    
+    func requestUploadSlot(serviceJid: String, filename: String, size: UInt64, contentType: String) async  -> WaddleUploadSlot?
     
     func sendChatMessage(peerJid: String, body: String, options: WaddleSendOptions?) async 
     
@@ -669,6 +689,24 @@ open func discoverChannels(waddleId: String)async  -> [WaddleDiscoveredChannel] 
         )
 }
     
+open func discoverUploadService()async  -> String?  {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_discover_upload_service(
+                    self.uniffiClonePointer()
+                    
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterOptionString.lift,
+            errorHandler: nil
+            
+        )
+}
+    
 open func discoverWaddles()async  -> [WaddleDiscoveredWaddle]  {
     return
         try!  await uniffiRustCallAsync(
@@ -778,6 +816,24 @@ open func requestAvatar(jid: String)async  -> WaddleAvatar?  {
             completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
             freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
             liftFunc: FfiConverterOptionTypeWaddleAvatar.lift,
+            errorHandler: nil
+            
+        )
+}
+    
+open func requestUploadSlot(serviceJid: String, filename: String, size: UInt64, contentType: String)async  -> WaddleUploadSlot?  {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_request_upload_slot(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(serviceJid),FfiConverterString.lower(filename),FfiConverterUInt64.lower(size),FfiConverterString.lower(contentType)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterOptionTypeWaddleUploadSlot.lift,
             errorHandler: nil
             
         )
@@ -910,10 +966,11 @@ public struct WaddleArchivedMessage {
     public var replyToSender: String?
     public var replyFallbackStart: UInt32?
     public var replyFallbackEnd: UInt32?
+    public var sharedFiles: [WaddleSharedFile]
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(mamId: String, queryId: String?, stanzaId: String?, timestamp: String?, from: String?, to: String?, messageType: String, body: String?, reactionTargetId: String?, reactionEmojis: [String], thread: String?, parentThreadId: String?, replyToId: String?, replyToSender: String?, replyFallbackStart: UInt32?, replyFallbackEnd: UInt32?) {
+    public init(mamId: String, queryId: String?, stanzaId: String?, timestamp: String?, from: String?, to: String?, messageType: String, body: String?, reactionTargetId: String?, reactionEmojis: [String], thread: String?, parentThreadId: String?, replyToId: String?, replyToSender: String?, replyFallbackStart: UInt32?, replyFallbackEnd: UInt32?, sharedFiles: [WaddleSharedFile]) {
         self.mamId = mamId
         self.queryId = queryId
         self.stanzaId = stanzaId
@@ -930,6 +987,7 @@ public struct WaddleArchivedMessage {
         self.replyToSender = replyToSender
         self.replyFallbackStart = replyFallbackStart
         self.replyFallbackEnd = replyFallbackEnd
+        self.sharedFiles = sharedFiles
     }
 }
 
@@ -988,6 +1046,9 @@ extension WaddleArchivedMessage: Equatable, Hashable {
         if lhs.replyFallbackEnd != rhs.replyFallbackEnd {
             return false
         }
+        if lhs.sharedFiles != rhs.sharedFiles {
+            return false
+        }
         return true
     }
 
@@ -1008,6 +1069,7 @@ extension WaddleArchivedMessage: Equatable, Hashable {
         hasher.combine(replyToSender)
         hasher.combine(replyFallbackStart)
         hasher.combine(replyFallbackEnd)
+        hasher.combine(sharedFiles)
     }
 }
 
@@ -1035,7 +1097,8 @@ public struct FfiConverterTypeWaddleArchivedMessage: FfiConverterRustBuffer {
                 replyToId: FfiConverterOptionString.read(from: &buf), 
                 replyToSender: FfiConverterOptionString.read(from: &buf), 
                 replyFallbackStart: FfiConverterOptionUInt32.read(from: &buf), 
-                replyFallbackEnd: FfiConverterOptionUInt32.read(from: &buf)
+                replyFallbackEnd: FfiConverterOptionUInt32.read(from: &buf), 
+                sharedFiles: FfiConverterSequenceTypeWaddleSharedFile.read(from: &buf)
         )
     }
 
@@ -1056,6 +1119,7 @@ public struct FfiConverterTypeWaddleArchivedMessage: FfiConverterRustBuffer {
         FfiConverterOptionString.write(value.replyToSender, into: &buf)
         FfiConverterOptionUInt32.write(value.replyFallbackStart, into: &buf)
         FfiConverterOptionUInt32.write(value.replyFallbackEnd, into: &buf)
+        FfiConverterSequenceTypeWaddleSharedFile.write(value.sharedFiles, into: &buf)
     }
 }
 
@@ -1633,6 +1697,10 @@ public struct WaddleMessage {
      * XEP-0428 fallback range end (char offset, exclusive).
      */
     public var replyFallbackEnd: UInt32?
+    /**
+     * XEP-0446 / XEP-0447 shared files attached to the message.
+     */
+    public var sharedFiles: [WaddleSharedFile]
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -1648,7 +1716,10 @@ public struct WaddleMessage {
          */replyFallbackStart: UInt32?, 
         /**
          * XEP-0428 fallback range end (char offset, exclusive).
-         */replyFallbackEnd: UInt32?) {
+         */replyFallbackEnd: UInt32?, 
+        /**
+         * XEP-0446 / XEP-0447 shared files attached to the message.
+         */sharedFiles: [WaddleSharedFile]) {
         self.id = id
         self.from = from
         self.to = to
@@ -1668,6 +1739,7 @@ public struct WaddleMessage {
         self.replyToSender = replyToSender
         self.replyFallbackStart = replyFallbackStart
         self.replyFallbackEnd = replyFallbackEnd
+        self.sharedFiles = sharedFiles
     }
 }
 
@@ -1735,6 +1807,9 @@ extension WaddleMessage: Equatable, Hashable {
         if lhs.replyFallbackEnd != rhs.replyFallbackEnd {
             return false
         }
+        if lhs.sharedFiles != rhs.sharedFiles {
+            return false
+        }
         return true
     }
 
@@ -1758,6 +1833,7 @@ extension WaddleMessage: Equatable, Hashable {
         hasher.combine(replyToSender)
         hasher.combine(replyFallbackStart)
         hasher.combine(replyFallbackEnd)
+        hasher.combine(sharedFiles)
     }
 }
 
@@ -1788,7 +1864,8 @@ public struct FfiConverterTypeWaddleMessage: FfiConverterRustBuffer {
                 replyToId: FfiConverterOptionString.read(from: &buf), 
                 replyToSender: FfiConverterOptionString.read(from: &buf), 
                 replyFallbackStart: FfiConverterOptionUInt32.read(from: &buf), 
-                replyFallbackEnd: FfiConverterOptionUInt32.read(from: &buf)
+                replyFallbackEnd: FfiConverterOptionUInt32.read(from: &buf), 
+                sharedFiles: FfiConverterSequenceTypeWaddleSharedFile.read(from: &buf)
         )
     }
 
@@ -1812,6 +1889,7 @@ public struct FfiConverterTypeWaddleMessage: FfiConverterRustBuffer {
         FfiConverterOptionString.write(value.replyToSender, into: &buf)
         FfiConverterOptionUInt32.write(value.replyFallbackStart, into: &buf)
         FfiConverterOptionUInt32.write(value.replyFallbackEnd, into: &buf)
+        FfiConverterSequenceTypeWaddleSharedFile.write(value.sharedFiles, into: &buf)
     }
 }
 
@@ -2019,13 +2097,15 @@ public struct WaddleSendOptions {
     public var reply: WaddleReplyTarget?
     public var fallback: WaddleFallbackRange?
     public var thread: WaddleThreadTarget?
+    public var sharedFiles: [WaddleSharedFile]
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(reply: WaddleReplyTarget?, fallback: WaddleFallbackRange?, thread: WaddleThreadTarget?) {
+    public init(reply: WaddleReplyTarget?, fallback: WaddleFallbackRange?, thread: WaddleThreadTarget?, sharedFiles: [WaddleSharedFile]) {
         self.reply = reply
         self.fallback = fallback
         self.thread = thread
+        self.sharedFiles = sharedFiles
     }
 }
 
@@ -2045,6 +2125,9 @@ extension WaddleSendOptions: Equatable, Hashable {
         if lhs.thread != rhs.thread {
             return false
         }
+        if lhs.sharedFiles != rhs.sharedFiles {
+            return false
+        }
         return true
     }
 
@@ -2052,6 +2135,7 @@ extension WaddleSendOptions: Equatable, Hashable {
         hasher.combine(reply)
         hasher.combine(fallback)
         hasher.combine(thread)
+        hasher.combine(sharedFiles)
     }
 }
 
@@ -2066,7 +2150,8 @@ public struct FfiConverterTypeWaddleSendOptions: FfiConverterRustBuffer {
             try WaddleSendOptions(
                 reply: FfiConverterOptionTypeWaddleReplyTarget.read(from: &buf), 
                 fallback: FfiConverterOptionTypeWaddleFallbackRange.read(from: &buf), 
-                thread: FfiConverterOptionTypeWaddleThreadTarget.read(from: &buf)
+                thread: FfiConverterOptionTypeWaddleThreadTarget.read(from: &buf), 
+                sharedFiles: FfiConverterSequenceTypeWaddleSharedFile.read(from: &buf)
         )
     }
 
@@ -2074,6 +2159,7 @@ public struct FfiConverterTypeWaddleSendOptions: FfiConverterRustBuffer {
         FfiConverterOptionTypeWaddleReplyTarget.write(value.reply, into: &buf)
         FfiConverterOptionTypeWaddleFallbackRange.write(value.fallback, into: &buf)
         FfiConverterOptionTypeWaddleThreadTarget.write(value.thread, into: &buf)
+        FfiConverterSequenceTypeWaddleSharedFile.write(value.sharedFiles, into: &buf)
     }
 }
 
@@ -2090,6 +2176,119 @@ public func FfiConverterTypeWaddleSendOptions_lift(_ buf: RustBuffer) throws -> 
 #endif
 public func FfiConverterTypeWaddleSendOptions_lower(_ value: WaddleSendOptions) -> RustBuffer {
     return FfiConverterTypeWaddleSendOptions.lower(value)
+}
+
+
+/**
+ * XEP-0446 / XEP-0447 shared-file metadata exposed to Swift.
+ */
+public struct WaddleSharedFile {
+    public var url: String
+    public var name: String?
+    public var mediaType: String?
+    public var size: UInt64?
+    public var width: UInt32?
+    public var height: UInt32?
+    public var disposition: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(url: String, name: String?, mediaType: String?, size: UInt64?, width: UInt32?, height: UInt32?, disposition: String) {
+        self.url = url
+        self.name = name
+        self.mediaType = mediaType
+        self.size = size
+        self.width = width
+        self.height = height
+        self.disposition = disposition
+    }
+}
+
+#if compiler(>=6)
+extension WaddleSharedFile: Sendable {}
+#endif
+
+
+extension WaddleSharedFile: Equatable, Hashable {
+    public static func ==(lhs: WaddleSharedFile, rhs: WaddleSharedFile) -> Bool {
+        if lhs.url != rhs.url {
+            return false
+        }
+        if lhs.name != rhs.name {
+            return false
+        }
+        if lhs.mediaType != rhs.mediaType {
+            return false
+        }
+        if lhs.size != rhs.size {
+            return false
+        }
+        if lhs.width != rhs.width {
+            return false
+        }
+        if lhs.height != rhs.height {
+            return false
+        }
+        if lhs.disposition != rhs.disposition {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(url)
+        hasher.combine(name)
+        hasher.combine(mediaType)
+        hasher.combine(size)
+        hasher.combine(width)
+        hasher.combine(height)
+        hasher.combine(disposition)
+    }
+}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleSharedFile: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleSharedFile {
+        return
+            try WaddleSharedFile(
+                url: FfiConverterString.read(from: &buf), 
+                name: FfiConverterOptionString.read(from: &buf), 
+                mediaType: FfiConverterOptionString.read(from: &buf), 
+                size: FfiConverterOptionUInt64.read(from: &buf), 
+                width: FfiConverterOptionUInt32.read(from: &buf), 
+                height: FfiConverterOptionUInt32.read(from: &buf), 
+                disposition: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleSharedFile, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.url, into: &buf)
+        FfiConverterOptionString.write(value.name, into: &buf)
+        FfiConverterOptionString.write(value.mediaType, into: &buf)
+        FfiConverterOptionUInt64.write(value.size, into: &buf)
+        FfiConverterOptionUInt32.write(value.width, into: &buf)
+        FfiConverterOptionUInt32.write(value.height, into: &buf)
+        FfiConverterString.write(value.disposition, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleSharedFile_lift(_ buf: RustBuffer) throws -> WaddleSharedFile {
+    return try FfiConverterTypeWaddleSharedFile.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleSharedFile_lower(_ value: WaddleSharedFile) -> RustBuffer {
+    return FfiConverterTypeWaddleSharedFile.lower(value)
 }
 
 
@@ -2163,6 +2362,160 @@ public func FfiConverterTypeWaddleThreadTarget_lift(_ buf: RustBuffer) throws ->
 #endif
 public func FfiConverterTypeWaddleThreadTarget_lower(_ value: WaddleThreadTarget) -> RustBuffer {
     return FfiConverterTypeWaddleThreadTarget.lower(value)
+}
+
+
+/**
+ * Header the client must include when uploading to a XEP-0363 slot.
+ */
+public struct WaddleUploadHeader {
+    public var name: String
+    public var value: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(name: String, value: String) {
+        self.name = name
+        self.value = value
+    }
+}
+
+#if compiler(>=6)
+extension WaddleUploadHeader: Sendable {}
+#endif
+
+
+extension WaddleUploadHeader: Equatable, Hashable {
+    public static func ==(lhs: WaddleUploadHeader, rhs: WaddleUploadHeader) -> Bool {
+        if lhs.name != rhs.name {
+            return false
+        }
+        if lhs.value != rhs.value {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(name)
+        hasher.combine(value)
+    }
+}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleUploadHeader: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleUploadHeader {
+        return
+            try WaddleUploadHeader(
+                name: FfiConverterString.read(from: &buf), 
+                value: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleUploadHeader, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterString.write(value.value, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleUploadHeader_lift(_ buf: RustBuffer) throws -> WaddleUploadHeader {
+    return try FfiConverterTypeWaddleUploadHeader.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleUploadHeader_lower(_ value: WaddleUploadHeader) -> RustBuffer {
+    return FfiConverterTypeWaddleUploadHeader.lower(value)
+}
+
+
+/**
+ * XEP-0363 upload slot with PUT/GET URLs and required PUT headers.
+ */
+public struct WaddleUploadSlot {
+    public var putUrl: String
+    public var getUrl: String
+    public var putHeaders: [WaddleUploadHeader]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(putUrl: String, getUrl: String, putHeaders: [WaddleUploadHeader]) {
+        self.putUrl = putUrl
+        self.getUrl = getUrl
+        self.putHeaders = putHeaders
+    }
+}
+
+#if compiler(>=6)
+extension WaddleUploadSlot: Sendable {}
+#endif
+
+
+extension WaddleUploadSlot: Equatable, Hashable {
+    public static func ==(lhs: WaddleUploadSlot, rhs: WaddleUploadSlot) -> Bool {
+        if lhs.putUrl != rhs.putUrl {
+            return false
+        }
+        if lhs.getUrl != rhs.getUrl {
+            return false
+        }
+        if lhs.putHeaders != rhs.putHeaders {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(putUrl)
+        hasher.combine(getUrl)
+        hasher.combine(putHeaders)
+    }
+}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleUploadSlot: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleUploadSlot {
+        return
+            try WaddleUploadSlot(
+                putUrl: FfiConverterString.read(from: &buf), 
+                getUrl: FfiConverterString.read(from: &buf), 
+                putHeaders: FfiConverterSequenceTypeWaddleUploadHeader.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleUploadSlot, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.putUrl, into: &buf)
+        FfiConverterString.write(value.getUrl, into: &buf)
+        FfiConverterSequenceTypeWaddleUploadHeader.write(value.putHeaders, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleUploadSlot_lift(_ buf: RustBuffer) throws -> WaddleUploadSlot {
+    return try FfiConverterTypeWaddleUploadSlot.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleUploadSlot_lower(_ value: WaddleUploadSlot) -> RustBuffer {
+    return FfiConverterTypeWaddleUploadSlot.lower(value)
 }
 
 
@@ -2434,6 +2787,30 @@ fileprivate struct FfiConverterOptionUInt32: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionUInt64: FfiConverterRustBuffer {
+    typealias SwiftType = UInt64?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterUInt64.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterUInt64.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
     typealias SwiftType = String?
 
@@ -2578,6 +2955,30 @@ fileprivate struct FfiConverterOptionTypeWaddleThreadTarget: FfiConverterRustBuf
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeWaddleUploadSlot: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleUploadSlot?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeWaddleUploadSlot.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeWaddleUploadSlot.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceString: FfiConverterRustBuffer {
     typealias SwiftType = [String]
 
@@ -2674,6 +3075,56 @@ fileprivate struct FfiConverterSequenceTypeWaddleDiscoveredWaddle: FfiConverterR
         return seq
     }
 }
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeWaddleSharedFile: FfiConverterRustBuffer {
+    typealias SwiftType = [WaddleSharedFile]
+
+    public static func write(_ value: [WaddleSharedFile], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeWaddleSharedFile.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [WaddleSharedFile] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [WaddleSharedFile]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeWaddleSharedFile.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeWaddleUploadHeader: FfiConverterRustBuffer {
+    typealias SwiftType = [WaddleUploadHeader]
+
+    public static func write(_ value: [WaddleUploadHeader], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeWaddleUploadHeader.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [WaddleUploadHeader] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [WaddleUploadHeader]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeWaddleUploadHeader.read(from: &buf))
+        }
+        return seq
+    }
+}
 private let UNIFFI_RUST_FUTURE_POLL_READY: Int8 = 0
 private let UNIFFI_RUST_FUTURE_POLL_MAYBE_READY: Int8 = 1
 
@@ -2745,6 +3196,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_discover_channels() != 828) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_discover_upload_service() != 12511) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_discover_waddles() != 5994) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -2761,6 +3215,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_request_avatar() != 32787) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_request_upload_slot() != 18654) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_chat_message() != 43390) {

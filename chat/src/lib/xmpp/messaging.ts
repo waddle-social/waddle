@@ -13,6 +13,7 @@ export interface OutboundFileAttachment {
   name: string;
   mediaType: string;
   size: number;
+  disposition: "inline" | "attachment";
   width?: number;
   height?: number;
   encrypted?: WaddleEncryptedFile;
@@ -30,7 +31,7 @@ export interface ReplyTarget {
 /** Build one XEP-0447 <file-sharing> payload for a single attachment. */
 export function fileSharingElement(file: OutboundFileAttachment): Record<string, unknown> {
   return {
-    disposition: "inline",
+    disposition: file.disposition,
     name: file.name,
     mediaType: file.mediaType,
     size: String(file.size),

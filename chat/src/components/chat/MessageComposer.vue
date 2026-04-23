@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, watch, onBeforeUnmount } from "vue";
-import { Send, Image, X } from "lucide-vue-next";
+import { Send, Image, Paperclip, FileText, Music4, X } from "lucide-vue-next";
 import type { JSONContent } from "@tiptap/core";
 import GifPicker from "@/components/chat/GifPicker.vue";
 import ChatEditor from "@/components/chat/ChatEditor.vue";
@@ -8,14 +8,26 @@ import EditorBubbleToolbar from "@/components/chat/EditorBubbleToolbar.vue";
 import { searchEmoji } from "@/lib/emoji";
 import { getComposerAutocompleteAction, getComposerEscapeAction } from "@/lib/reply-ux";
 import { tiptapToRichMessage } from "@/lib/rich-message";
-import { extractImagesFromEvent } from "@/lib/xmpp/file-upload";
-import type { MarkupSpan, MessageReference } from "@/lib/chat-ui";
+import { extractImagesFromClipboardEvent } from "@/lib/xmpp/file-upload";
+import {
+  isAudioFile,
+  isImageFile,
+  isPdfFile,
+  isVideoFile,
+  type MarkupSpan,
+  type MessageReference,
+} from "@/lib/chat-ui";
+
+type AttachmentPreviewKind = "image" | "video" | "audio" | "pdf" | "file";
 
 interface PendingAttachment {
   id: string;
   file: File | Blob;
   previewUrl: string;
   name: string;
+  mediaType: string;
+  size: number;
+  previewKind: AttachmentPreviewKind;
 }
 
 const draft = defineModel<string>("draft", { required: true });
@@ -57,6 +69,10 @@ const editorRef = ref<InstanceType<typeof ChatEditor> | null>(null);
 const setEditorRef = (instance: InstanceType<typeof ChatEditor> | null) => {
   editorRef.value = instance;
 };
+const fileInputRef = ref<HTMLInputElement | null>(null);
+const setFileInputRef = (el: HTMLInputElement | null) => {
+  fileInputRef.value = el;
+};
 
 const tiptapEditor = computed(() => {
   const e = editorRef.value as any;
@@ -65,14 +81,39 @@ const tiptapEditor = computed(() => {
 
 const pendingAttachments = ref<PendingAttachment[]>([]);
 
+function attachmentName(file: File | Blob): string {
+  return file instanceof File && file.name
+    ? file.name
+    : `attachment-${Date.now()}.bin`;
+}
+
+function attachmentPreviewKind(mediaType?: string, name?: string): AttachmentPreviewKind {
+  const candidate = name ?? "";
+  if (isImageFile(mediaType, candidate)) return "image";
+  if (isVideoFile(mediaType, candidate)) return "video";
+  if (isAudioFile(mediaType, candidate)) return "audio";
+  if (isPdfFile(mediaType, candidate)) return "pdf";
+  return "file";
+}
+
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 function addAttachments(files: Array<File | Blob>) {
   const next = pendingAttachments.value.slice();
   for (const file of files) {
-    const name = file instanceof File ? file.name : `image-${Date.now()}.png`;
+    const name = attachmentName(file);
+    const mediaType = file.type || "application/octet-stream";
     next.push({
       id: crypto.randomUUID(),
       file,
       name,
+      mediaType,
+      size: file.size,
+      previewKind: attachmentPreviewKind(mediaType, name),
       previewUrl: URL.createObjectURL(file),
     });
   }
@@ -293,6 +334,17 @@ function focus() {
 
 defineExpose({ addAttachments, focus });
 
+function openFilePicker() {
+  fileInputRef.value?.click();
+}
+
+function onFileInputChange(e: Event) {
+  const input = e.target as HTMLInputElement | null;
+  if (!input?.files?.length) return;
+  addAttachments(Array.from(input.files));
+  input.value = "";
+}
+
 function onEditorCancel() {
   const action = getComposerEscapeAction({
     showMentions: showMentions.value,
@@ -346,7 +398,7 @@ function onGifSelected(url: string) {
 }
 
 function onEditorPaste(e: ClipboardEvent) {
-  const files = extractImagesFromEvent(e);
+  const files = extractImagesFromClipboardEvent(e);
   if (files.length > 0) {
     e.preventDefault();
     addAttachments(files);
@@ -416,10 +468,60 @@ watch(
         class="relative group/att rounded-xl border border-border bg-muted overflow-hidden"
       >
         <img
+          v-if="att.previewKind === 'image'"
           :src="att.previewUrl"
           :alt="att.name"
           class="h-20 w-20 object-cover"
         />
+        <div v-else-if="att.previewKind === 'video'" class="w-44">
+          <video
+            :src="att.previewUrl"
+            class="h-24 w-full bg-black object-cover"
+            controls
+            muted
+            playsinline
+            preload="metadata"
+          />
+          <div class="px-2 py-1.5 text-[11px]">
+            <div class="truncate font-medium text-foreground">{{ att.name }}</div>
+            <div class="text-muted-foreground">{{ formatFileSize(att.size) }}</div>
+          </div>
+        </div>
+        <div v-else-if="att.previewKind === 'audio'" class="w-72 p-3">
+          <div class="mb-2 flex items-center gap-2 text-[12px] font-medium">
+            <Music4 class="h-4 w-4 text-primary" />
+            <span class="truncate">{{ att.name }}</span>
+          </div>
+          <audio :src="att.previewUrl" controls class="h-9 w-full" />
+          <div class="mt-1 text-[11px] text-muted-foreground">
+            {{ att.mediaType }} · {{ formatFileSize(att.size) }}
+          </div>
+        </div>
+        <div v-else-if="att.previewKind === 'pdf'" class="w-44">
+          <object
+            :data="att.previewUrl"
+            type="application/pdf"
+            class="h-24 w-full bg-background"
+          >
+            <div class="flex h-24 w-full flex-col items-center justify-center gap-2 text-[12px] text-muted-foreground">
+              <FileText class="h-5 w-5 text-primary" />
+              <span>PDF preview</span>
+            </div>
+          </object>
+          <div class="px-2 py-1.5 text-[11px]">
+            <div class="truncate font-medium text-foreground">{{ att.name }}</div>
+            <div class="text-muted-foreground">{{ formatFileSize(att.size) }}</div>
+          </div>
+        </div>
+        <div v-else class="flex w-72 items-center gap-3 p-3">
+          <FileText class="h-5 w-5 flex-shrink-0 text-primary" />
+          <div class="min-w-0 flex-1">
+            <div class="truncate text-[12px] font-medium text-foreground">{{ att.name }}</div>
+            <div class="truncate text-[11px] text-muted-foreground">
+              {{ att.mediaType }} · {{ formatFileSize(att.size) }}
+            </div>
+          </div>
+        </div>
         <button
           type="button"
           class="absolute top-1 right-1 h-5 w-5 flex items-center justify-center rounded-full bg-background/90 text-muted-foreground hover:text-destructive border border-border shadow-sm opacity-0 group-hover/att:opacity-100 focus:opacity-100 transition-opacity"
@@ -496,6 +598,23 @@ watch(
     </div>
 
     <div class="flex min-w-0 flex-nowrap items-end gap-2.5">
+      <input
+        :ref="setFileInputRef"
+        type="file"
+        multiple
+        class="hidden"
+        @change="onFileInputChange"
+      />
+      <button
+        type="button"
+        class="h-10 w-10 shrink-0 flex items-center justify-center rounded-lg transition-all duration-200 text-muted-foreground hover:bg-muted hover:text-primary"
+        title="Attach files"
+        aria-label="Attach files"
+        :disabled="disabled"
+        @click="openFilePicker"
+      >
+        <Paperclip class="w-4 h-4" aria-hidden="true" />
+      </button>
       <button
         type="button"
         class="h-10 w-10 shrink-0 flex items-center justify-center rounded-lg transition-all duration-200"

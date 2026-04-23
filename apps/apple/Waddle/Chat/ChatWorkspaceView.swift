@@ -92,10 +92,22 @@ struct WaddleChatWorkspaceView: View {
                     replies: store.threadPanelChildren,
                     composerText: $store.threadComposerText,
                     isSending: store.isSendingThreadMessage,
+                    isUploadingFile: model.isUploadingFile,
                     canGoBack: store.canPopThreadPanel,
                     threadChildCount: { id in store.threadChildCount(forRootID: id) },
                     onOpenNestedThread: { msg in store.pushThreadPanel(forRootID: msg.id) },
                     onBack: { store.popThreadPanel() },
+                    onFileSelected: { data, name, type in
+                        guard let rootID = store.activeThreadParentID else { return }
+                        Task {
+                            await model.uploadAndSendFile(
+                                data: data,
+                                fileName: name,
+                                mediaType: type,
+                                threadRootID: rootID
+                            )
+                        }
+                    },
                     onSend: { Task { await store.sendThreadComposerMessage() } },
                     onClose: { store.closeThreadPanel() },
                     avatarDataBySenderID: { model.avatarData(forSenderID: $0) },
@@ -775,6 +787,19 @@ struct WaddleChatWorkspaceView: View {
                 peerUsername: convo.peerUsername,
                 messages: store.dmMessages,
                 composerText: $store.dmComposerText,
+                isUploadingFile: model.isUploadingFile,
+                onFileSelected: { data, name, type in
+                    Task {
+                        await model.uploadAndSendDmFile(
+                            data: data,
+                            fileName: name,
+                            mediaType: type,
+                            peerJID: convo.peerJID
+                        )
+                    }
+                },
+                avatarDataBySenderID: { model.avatarData(forSenderID: $0) },
+                onRequestAvatar: { model.requestAvatarIfNeeded(forSenderID: $0) },
                 onSend: {
                     Task { await model.sendDm(body: store.dmComposerText); store.dmComposerText = "" }
                 },
@@ -985,7 +1010,14 @@ struct WaddleChatWorkspaceView: View {
             replyingToMessage: store.replyingToMessage,
             onCancelReply: { store.setReplyingTo(nil) },
             onFileSelected: { data, name, type in
-                Task { await model.uploadAndSendFile(data: data, fileName: name, mediaType: type) }
+                Task {
+                    await model.uploadAndSendFile(
+                        data: data,
+                        fileName: name,
+                        mediaType: type,
+                        replyTo: store.replyingToMessage
+                    )
+                }
             },
             onGifSelected: { url in
                 store.composerText = url
@@ -1012,7 +1044,14 @@ struct WaddleChatWorkspaceView: View {
             replyingToMessage: store.replyingToMessage,
             onCancelReply: { store.setReplyingTo(nil) },
             onFileSelected: { data, name, type in
-                Task { await model.uploadAndSendFile(data: data, fileName: name, mediaType: type) }
+                Task {
+                    await model.uploadAndSendFile(
+                        data: data,
+                        fileName: name,
+                        mediaType: type,
+                        replyTo: store.replyingToMessage
+                    )
+                }
             },
             onGifSelected: { url in
                 store.composerText = url

@@ -16,8 +16,14 @@ import {
   type RoomPresence,
 } from "@/lib/xmpp-client";
 import { $xmppStatus } from "@/stores/xmpp-status";
-import type { DeliveryStatus, MarkupSpan, MessageReference, TimelineMessage } from "@/lib/chat-ui";
-import { MAX_IMAGE_UPLOAD_BYTES } from "@/lib/xmpp/file-upload";
+import {
+  inferredFileDisposition,
+  type DeliveryStatus,
+  type MarkupSpan,
+  type MessageReference,
+  type TimelineMessage,
+} from "@/lib/chat-ui";
+import { MAX_FILE_UPLOAD_BYTES } from "@/lib/xmpp/file-upload";
 import type { OutboundFileAttachment } from "@/lib/xmpp";
 import {
   findMessageById,
@@ -164,7 +170,7 @@ function queuedRoomMessageToTimeline(
       size: file.size,
       ...(file.width ? { width: file.width } : {}),
       ...(file.height ? { height: file.height } : {}),
-      disposition: "inline" as const,
+      disposition: inferredFileDisposition(file.mediaType, file.name ?? file.url),
       ...(file.encrypted ? { encrypted: file.encrypted } : {}),
     }));
   }
@@ -894,7 +900,7 @@ export function useMessaging(
 
     if (hasFiles) {
       for (const f of files!) {
-        if (f.size > MAX_IMAGE_UPLOAD_BYTES) {
+        if (f.size > MAX_FILE_UPLOAD_BYTES) {
           actionError.value = `File too large (${(f.size / 1024 / 1024).toFixed(1)} MB). Maximum upload size is 10 MB.`;
           return;
         }
@@ -907,7 +913,7 @@ export function useMessaging(
     try {
       let attachments: OutboundFileAttachment[] | undefined;
       if (hasFiles) {
-        const filenames = files!.map((f) => (f instanceof File ? f.name : `image-${Date.now()}.png`));
+        const filenames = files!.map((f) => (f instanceof File ? f.name : `attachment-${Date.now()}.bin`));
         uploadProgress.value = { uploading: true, progress: 0, filename: filenames[0] };
         attachments = await client.uploadAttachments(files!, (overall, idx) => {
           uploadProgress.value = {
@@ -991,7 +997,7 @@ export function useMessaging(
             size: a.size,
             ...(a.width ? { width: a.width } : {}),
             ...(a.height ? { height: a.height } : {}),
-            disposition: "inline" as const,
+            disposition: inferredFileDisposition(a.mediaType, a.name ?? a.url),
             ...(a.encrypted ? { encrypted: a.encrypted } : {}),
           }));
         }

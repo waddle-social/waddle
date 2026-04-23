@@ -1,11 +1,44 @@
 import SwiftUI
-import PhotosUI
+import AVKit
+import PDFKit
 import UniformTypeIdentifiers
 #if os(macOS)
 import AppKit
 #elseif os(iOS)
 import UIKit
 #endif
+
+private func importedChatAttachment(from url: URL) -> (data: Data, fileName: String, mediaType: String)? {
+    let accessed = url.startAccessingSecurityScopedResource()
+    defer {
+        if accessed {
+            url.stopAccessingSecurityScopedResource()
+        }
+    }
+
+    guard let data = try? Data(contentsOf: url) else {
+        return nil
+    }
+
+    let values = try? url.resourceValues(forKeys: [.nameKey, .contentTypeKey])
+    let fileName = values?.name ?? (url.lastPathComponent.isEmpty ? "attachment" : url.lastPathComponent)
+    let mediaType = values?.contentType?.preferredMIMEType
+        ?? UTType(filenameExtension: url.pathExtension)?.preferredMIMEType
+        ?? "application/octet-stream"
+    return (data, fileName, mediaType)
+}
+
+private func handleImportedChatAttachments(
+    _ result: Result<[URL], Error>,
+    onFileSelected: ((_ data: Data, _ fileName: String, _ mediaType: String) -> Void)?
+) {
+    guard let onFileSelected else { return }
+    guard case .success(let urls) = result else { return }
+    for url in urls {
+        guard let attachment = importedChatAttachment(from: url) else { continue }
+        onFileSelected(attachment.data, attachment.fileName, attachment.mediaType)
+    }
+}
 
 struct ChatConversationHeaderView: View {
     let room: ChatRoomSelection?
@@ -515,6 +548,9 @@ struct ChatMessageRowView: View {
                     }
 
                     inlineImagesView(for: message, maxWidth: 300)
+                    inlineVideosView(for: message, maxWidth: 300)
+                    inlineAudioFilesView(for: message, maxWidth: 300)
+                    inlinePdfFilesView(for: message, maxWidth: 300)
                     bodyImageURLsView(for: message, maxWidth: 300)
                     downloadableFilesView(for: message)
                 }
@@ -825,6 +861,68 @@ struct ChatMessageRowView: View {
         }
     }
 
+    @ViewBuilder
+    private func inlineVideosView(for message: ChatTimelineMessage, maxWidth: CGFloat) -> some View {
+        let files = message.inlineVideos
+        if !files.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(files, id: \.url) { file in
+                    if let url = URL(string: file.url) {
+                        ChatMediaPlayerAttachmentView(
+                            url: url,
+                            fileName: file.name ?? "Video",
+                            mediaType: file.mediaType,
+                            size: file.size,
+                            height: 220
+                        )
+                        .frame(maxWidth: maxWidth)
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func inlineAudioFilesView(for message: ChatTimelineMessage, maxWidth: CGFloat) -> some View {
+        let files = message.inlineAudioFiles
+        if !files.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(files, id: \.url) { file in
+                    if let url = URL(string: file.url) {
+                        ChatMediaPlayerAttachmentView(
+                            url: url,
+                            fileName: file.name ?? "Audio",
+                            mediaType: file.mediaType,
+                            size: file.size,
+                            height: 84
+                        )
+                        .frame(maxWidth: maxWidth)
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func inlinePdfFilesView(for message: ChatTimelineMessage, maxWidth: CGFloat) -> some View {
+        let files = message.inlinePdfFiles
+        if !files.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(files, id: \.url) { file in
+                    if let url = URL(string: file.url) {
+                        ChatPdfAttachmentView(
+                            url: url,
+                            fileName: file.name ?? "PDF",
+                            mediaType: file.mediaType,
+                            size: file.size
+                        )
+                        .frame(maxWidth: maxWidth, minHeight: 220, maxHeight: 220)
+                    }
+                }
+            }
+        }
+    }
+
     /// Render each URL in the message body that resolves to an image/GIF as
     /// an inline preview. Complements the XEP-0385 `sharedFiles` path for
     /// the common case where a sender just pasted a Tenor/Giphy/CDN link
@@ -891,6 +989,139 @@ struct ChatMessageRowView: View {
     }
 }
 
+private struct ChatMediaPlayerAttachmentView: View {
+    let url: URL
+    let fileName: String
+    let mediaType: String?
+    let size: Int?
+    let height: CGFloat
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            VideoPlayer(player: AVPlayer(url: url))
+                .frame(maxWidth: .infinity, minHeight: height, maxHeight: height)
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .strokeBorder(WaddleTheme.divider, lineWidth: 0.5)
+                )
+            attachmentMeta
+        }
+    }
+
+    private var attachmentMeta: some View {
+        HStack(spacing: 8) {
+            Image(systemName: mediaType?.hasPrefix("audio/") == true ? "waveform" : "film")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(WaddleTheme.textSecondary)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(fileName)
+                    .font(.caption.weight(.semibold))
+                    .lineLimit(1)
+                HStack(spacing: 4) {
+                    Text(mediaType ?? "media")
+                        .font(.caption2)
+                    if let size {
+                        Text("·")
+                        Text(formatFileSize(size))
+                            .font(.caption2)
+                    }
+                }
+                .foregroundStyle(WaddleTheme.textSecondary)
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 10)
+    }
+}
+
+private struct ChatPdfAttachmentView: View {
+    let url: URL
+    let fileName: String
+    let mediaType: String?
+    let size: Int?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ChatPdfPreview(url: url)
+                .frame(maxWidth: .infinity, minHeight: 220, maxHeight: 220)
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .strokeBorder(WaddleTheme.divider, lineWidth: 0.5)
+                )
+            HStack(spacing: 8) {
+                Image(systemName: "doc.richtext")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(WaddleTheme.textSecondary)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(fileName)
+                        .font(.caption.weight(.semibold))
+                        .lineLimit(1)
+                    HStack(spacing: 4) {
+                        Text(mediaType ?? "application/pdf")
+                            .font(.caption2)
+                        if let size {
+                            Text("·")
+                            Text(formatFileSize(size))
+                                .font(.caption2)
+                        }
+                    }
+                    .foregroundStyle(WaddleTheme.textSecondary)
+                }
+                Spacer()
+            }
+            .padding(.horizontal, 10)
+        }
+    }
+}
+
+#if os(iOS)
+private struct ChatPdfPreview: UIViewRepresentable {
+    let url: URL
+
+    func makeUIView(context: Context) -> PDFView {
+        let view = PDFView()
+        view.autoScales = true
+        view.displayMode = .singlePageContinuous
+        view.displayDirection = .vertical
+        view.document = PDFDocument(url: url)
+        return view
+    }
+
+    func updateUIView(_ uiView: PDFView, context: Context) {
+        if uiView.document == nil {
+            uiView.document = PDFDocument(url: url)
+        }
+    }
+}
+#elseif os(macOS)
+private struct ChatPdfPreview: NSViewRepresentable {
+    let url: URL
+
+    func makeNSView(context: Context) -> PDFView {
+        let view = PDFView()
+        view.autoScales = true
+        view.displayMode = .singlePageContinuous
+        view.displayDirection = .vertical
+        view.document = PDFDocument(url: url)
+        return view
+    }
+
+    func updateNSView(_ nsView: PDFView, context: Context) {
+        if nsView.document == nil {
+            nsView.document = PDFDocument(url: url)
+        }
+    }
+}
+#endif
+
+private func formatFileSize(_ bytes: Int) -> String {
+    if bytes < 1024 { return "\(bytes) B" }
+    if bytes < 1024 * 1024 { return "\(bytes / 1024) KB" }
+    return String(format: "%.1f MB", Double(bytes) / (1024 * 1024))
+}
+
 struct ChatComposerView: View {
     @Binding var text: String
     var placeholder: String = "Write a message"
@@ -909,7 +1140,7 @@ struct ChatComposerView: View {
     var onSend: () -> Void
     @State private var showEmojiPicker = false
     @State private var showGifPicker = false
-    @State private var selectedPhoto: PhotosPickerItem?
+    @State private var showFileImporter = false
 
     private var hasSendableText: Bool {
         !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -971,6 +1202,13 @@ struct ChatComposerView: View {
         }
         .onChange(of: text) { _, newValue in
             updateMentionQuery(newValue)
+        }
+        .fileImporter(
+            isPresented: $showFileImporter,
+            allowedContentTypes: [.item],
+            allowsMultipleSelection: true
+        ) { result in
+            handleImportedChatAttachments(result, onFileSelected: onFileSelected)
         }
     }
 
@@ -1114,20 +1352,12 @@ struct ChatComposerView: View {
                 ProgressView()
                     .frame(width: 20, height: 20)
             } else {
-                PhotosPicker(selection: $selectedPhoto, matching: .any(of: [.images, .videos])) {
+                Button {
+                    showFileImporter = true
+                } label: {
                     composerAccessoryLabel(systemName: "paperclip")
                 }
                 .buttonStyle(.plain)
-                .onChange(of: selectedPhoto) { _, newValue in
-                    guard let newValue else { return }
-                    Task {
-                        guard let data = try? await newValue.loadTransferable(type: Data.self) else { return }
-                        let mediaType = newValue.supportedContentTypes.first?.preferredMIMEType ?? "application/octet-stream"
-                        let fileName = "upload.\(newValue.supportedContentTypes.first?.preferredFilenameExtension ?? "bin")"
-                        onFileSelected?(data, fileName, mediaType)
-                        selectedPhoto = nil
-                    }
-                }
             }
         }
     }
@@ -1645,8 +1875,17 @@ struct ChatDmConversationView: View {
     let messages: [ChatTimelineMessage]
     @Binding var composerText: String
     var isSending: Bool = false
+    var isUploadingFile: Bool = false
+    var onFileSelected: ((_ data: Data, _ fileName: String, _ mediaType: String) -> Void)? = nil
+    var avatarDataBySenderID: (String) -> Data? = { _ in nil }
+    var onRequestAvatar: ((String) -> Void)? = nil
     var onSend: () -> Void
     var onBack: () -> Void
+    @State private var showFileImporter = false
+
+    private var canSend: Bool {
+        !composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1666,38 +1905,42 @@ struct ChatDmConversationView: View {
             Divider()
 
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 8) {
-                    ForEach(messages) { message in
-                        HStack(alignment: .top, spacing: 8) {
-                            if message.isOutgoing { Spacer(minLength: 40) }
-
-                            VStack(alignment: message.isOutgoing ? .trailing : .leading, spacing: 4) {
-                                Text(message.styledBody)
-                                    .font(.subheadline)
-                                    .textSelection(.enabled)
-
-                                Text(message.sentAt, style: .time)
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                            }
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 8)
-                            .background(
-                                message.isOutgoing ? Color.accentColor.opacity(0.12) : Color.secondary.opacity(0.08),
-                                in: RoundedRectangle(cornerRadius: 14, style: .continuous)
-                            )
-
-                            if !message.isOutgoing { Spacer(minLength: 40) }
-                        }
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    ForEach(Array(messages.enumerated()), id: \.element.id) { index, message in
+                        let previous = index > 0 ? messages[index - 1] : nil
+                        let next = index + 1 < messages.count ? messages[index + 1] : nil
+                        ChatMessageRowView(
+                            message: message,
+                            previousMessage: previous,
+                            nextMessage: next,
+                            usesCompactConversationStyle: true,
+                            avatarData: avatarDataBySenderID(message.senderID),
+                            onRequestAvatar: onRequestAvatar
+                        )
                     }
                 }
-                .padding(12)
+                .padding(.vertical, 8)
             }
+            .background(WaddleTheme.chatBackground)
 
             Divider()
                 .overlay(WaddleTheme.divider)
 
             HStack(spacing: 10) {
+                if isUploadingFile {
+                    ProgressView()
+                        .frame(width: 20, height: 20)
+                } else {
+                    Button {
+                        showFileImporter = true
+                    } label: {
+                        Image(systemName: "paperclip")
+                            .font(.body.weight(.medium))
+                            .foregroundStyle(WaddleTheme.textSecondary)
+                    }
+                    .buttonStyle(.plain)
+                }
+
                 TextField("Message \(peerUsername)", text: $composerText, axis: .vertical)
                     .lineLimit(1...4)
                     .font(.body)
@@ -1708,14 +1951,14 @@ struct ChatDmConversationView: View {
                 Button(action: onSend) {
                     Image(systemName: "paperplane.fill")
                         .font(.system(size: 14, weight: .bold))
-                        .foregroundStyle(composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? WaddleTheme.textMuted : .white)
+                        .foregroundStyle(canSend ? .white : WaddleTheme.textMuted)
                         .frame(width: 34, height: 34)
                         .background(
                             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                .fill(composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? WaddleTheme.surfaceRaised : WaddleTheme.accent)
+                                .fill(canSend ? WaddleTheme.accent : WaddleTheme.surfaceRaised)
                         )
                 }
-                .disabled(composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isSending)
+                .disabled(!canSend || isSending)
                 .buttonStyle(.plain)
                 .padding(.trailing, 10)
             }
@@ -1728,6 +1971,13 @@ struct ChatDmConversationView: View {
                     .strokeBorder(WaddleTheme.divider, lineWidth: 1)
             }
             .padding(12)
+        }
+        .fileImporter(
+            isPresented: $showFileImporter,
+            allowedContentTypes: [.item],
+            allowsMultipleSelection: true
+        ) { result in
+            handleImportedChatAttachments(result, onFileSelected: onFileSelected)
         }
     }
 }
@@ -2138,16 +2388,19 @@ struct ChatThreadPanelView: View {
     let replies: [ChatTimelineMessage]
     @Binding var composerText: String
     var isSending: Bool = false
+    var isUploadingFile: Bool = false
     var canGoBack: Bool = false
     var threadChildCount: (String) -> Int = { _ in 0 }
     var onOpenNestedThread: ((ChatTimelineMessage) -> Void)? = nil
     var onBack: (() -> Void)? = nil
+    var onFileSelected: ((_ data: Data, _ fileName: String, _ mediaType: String) -> Void)? = nil
     var onSend: () -> Void
     var onClose: () -> Void
     /// Forwarded through to each `ChatMessageRowView` so thread replies
     /// render XEP-0084 PEP avatars just like the main timeline.
     var avatarDataBySenderID: (String) -> Data? = { _ in nil }
     var onRequestAvatar: ((String) -> Void)? = nil
+    @State private var showFileImporter = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -2205,6 +2458,13 @@ struct ChatThreadPanelView: View {
 
             threadComposer
         }
+        .fileImporter(
+            isPresented: $showFileImporter,
+            allowedContentTypes: [.item],
+            allowsMultipleSelection: true
+        ) { result in
+            handleImportedChatAttachments(result, onFileSelected: onFileSelected)
+        }
     }
 
     private var header: some View {
@@ -2258,6 +2518,20 @@ struct ChatThreadPanelView: View {
 
     private var threadComposer: some View {
         HStack(alignment: .bottom, spacing: 10) {
+            if isUploadingFile {
+                ProgressView()
+                    .frame(width: 20, height: 20)
+            } else {
+                Button {
+                    showFileImporter = true
+                } label: {
+                    Image(systemName: "paperclip")
+                        .font(.body.weight(.semibold))
+                        .foregroundStyle(WaddleTheme.textSecondary)
+                }
+                .buttonStyle(.plain)
+            }
+
             TextField("Reply to thread…", text: $composerText, axis: .vertical)
                 .lineLimit(1...5)
                 .textFieldStyle(.plain)

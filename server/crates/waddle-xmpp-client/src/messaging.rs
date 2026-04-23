@@ -25,6 +25,9 @@ const NS_RETRACT: &str = "urn:xmpp:message-retract:0";
 const NS_REPLACE: &str = "urn:xmpp:message-correct:0";
 const NS_HATS: &str = "urn:xmpp:hats:0";
 const NS_SIMS: &str = "urn:xmpp:sims:1";
+const NS_SFS: &str = "urn:xmpp:sfs:0";
+const NS_FILE_METADATA: &str = "urn:xmpp:file:metadata:0";
+const NS_URL_DATA: &str = "http://jabber.org/protocol/url-data";
 const NS_CLIENT: &str = "jabber:client";
 const NS_MUC: &str = "http://jabber.org/protocol/muc";
 const NS_STICKERS: &str = "urn:xmpp:stickers:0";
@@ -50,7 +53,44 @@ pub enum MarkupSpanType {
     Link,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SharedFileDisposition {
+    Inline,
+    #[default]
+    Attachment,
+}
+
+impl SharedFileDisposition {
+    pub fn from_text_or_infer(value: Option<&str>, media_type: Option<&str>) -> Self {
+        match value {
+            Some("inline") => Self::Inline,
+            Some("attachment") => Self::Attachment,
+            _ => Self::infer_from_media_type(media_type),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Inline => "inline",
+            Self::Attachment => "attachment",
+        }
+    }
+
+    fn infer_from_media_type(media_type: Option<&str>) -> Self {
+        if media_type.is_some_and(|m| {
+            m.starts_with("image/")
+                || m.starts_with("video/")
+                || m.starts_with("audio/")
+                || m == "application/pdf"
+        }) {
+            Self::Inline
+        } else {
+            Self::Attachment
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SharedFile {
     pub url: String,
     pub name: Option<String>,
@@ -58,7 +98,7 @@ pub struct SharedFile {
     pub size: Option<u64>,
     pub width: Option<u32>,
     pub height: Option<u32>,
-    pub disposition: String,
+    pub disposition: SharedFileDisposition,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -130,6 +170,8 @@ pub struct SendMessageOptions {
     pub fallback: Option<xep_reply::FallbackRange>,
     /// XEP-0201 thread reference (with optional parent for nested threads).
     pub thread: Option<xep_thread::ThreadRef>,
+    /// XEP-0446 / XEP-0447 shared files attached to the message.
+    pub shared_files: Vec<SharedFile>,
 }
 
 // ─── Parse entry point ────────────────────────────────────────────────────
@@ -258,6 +300,15 @@ fn parse_message(el: &Element) -> InboundMessage {
         }
     }
 
+    for file_sharing_el in el
+        .children()
+        .filter(|c| c.name() == "file-sharing" && c.ns() == NS_SFS)
+    {
+        if let Some(file) = parse_file_sharing_element(file_sharing_el) {
+            shared_files.push(file);
+        }
+    }
+
     // XEP-0447 / XEP-0363: also check <sims> children for file sharing
     for sims_el in el.children().filter(|c| c.ns() == NS_SIMS) {
         for source_el in sims_el.children() {
@@ -277,7 +328,7 @@ fn parse_message(el: &Element) -> InboundMessage {
                             .and_then(|e| e.text().parse().ok()),
                         width: None,
                         height: None,
-                        disposition: "attachment".to_string(),
+                        disposition: SharedFileDisposition::Attachment,
                     });
                 }
             }
@@ -371,7 +422,7 @@ fn parse_shared_file(reference_el: &Element) -> Option<SharedFile> {
     let mut size: Option<u64> = None;
     let mut width: Option<u32> = None;
     let mut height: Option<u32> = None;
-    let mut disposition = "attachment".to_string();
+    let mut disposition: Option<String> = None;
 
     for child in reference_el.children() {
         match child.name() {
@@ -393,7 +444,7 @@ fn parse_shared_file(reference_el: &Element) -> Option<SharedFile> {
                     height = thumb.attr("height").and_then(|v| v.parse().ok());
                 }
                 if let Some(disp) = child.get_child("disposition", child.ns().as_str()) {
-                    disposition = disp.text();
+                    disposition = Some(disp.text());
                 }
             }
             // Simple <url> child fallback
@@ -404,6 +455,55 @@ fn parse_shared_file(reference_el: &Element) -> Option<SharedFile> {
         }
     }
 
+    let disposition =
+        SharedFileDisposition::from_text_or_infer(disposition.as_deref(), media_type.as_deref());
+    url.map(|u| SharedFile {
+        url: u,
+        name,
+        media_type,
+        size,
+        width,
+        height,
+        disposition,
+    })
+}
+
+fn parse_file_sharing_element(file_sharing_el: &Element) -> Option<SharedFile> {
+    let mut url: Option<String> = None;
+    let mut name: Option<String> = None;
+    let mut media_type: Option<String> = None;
+    let mut size: Option<u64> = None;
+    let mut width: Option<u32> = None;
+    let mut height: Option<u32> = None;
+    let disposition_attr = file_sharing_el.attr("disposition");
+
+    if let Some(file_el) = file_sharing_el.get_child("file", NS_FILE_METADATA) {
+        name = file_el
+            .get_child("name", NS_FILE_METADATA)
+            .map(|e| e.text());
+        media_type = file_el
+            .get_child("media-type", NS_FILE_METADATA)
+            .map(|e| e.text());
+        size = file_el
+            .get_child("size", NS_FILE_METADATA)
+            .and_then(|e| e.text().parse().ok());
+        width = file_el
+            .get_child("width", NS_FILE_METADATA)
+            .and_then(|e| e.text().parse().ok());
+        height = file_el
+            .get_child("height", NS_FILE_METADATA)
+            .and_then(|e| e.text().parse().ok());
+    }
+
+    if let Some(sources_el) = file_sharing_el.get_child("sources", NS_SFS) {
+        url = sources_el
+            .get_child("url-data", NS_URL_DATA)
+            .and_then(|e| e.attr("target"))
+            .map(String::from);
+    }
+
+    let disposition =
+        SharedFileDisposition::from_text_or_infer(disposition_attr, media_type.as_deref());
     url.map(|u| SharedFile {
         url: u,
         name,
@@ -619,7 +719,63 @@ fn build_outbound_message(
     if let Some(thread) = options.thread.as_ref() {
         builder = builder.append(xep_thread::build_thread_element(thread));
     }
+    for file in &options.shared_files {
+        builder = builder.append(build_file_sharing_element(file));
+    }
     builder.build()
+}
+
+fn build_file_sharing_element(file: &SharedFile) -> Element {
+    let mut file_sharing = Element::builder("file-sharing", NS_SFS)
+        .attr("disposition", file.disposition.as_str())
+        .build();
+
+    let mut metadata = Element::builder("file", NS_FILE_METADATA).build();
+    if let Some(media_type) = file.media_type.as_deref() {
+        metadata.append_child(
+            Element::builder("media-type", NS_FILE_METADATA)
+                .append(media_type)
+                .build(),
+        );
+    }
+    if let Some(name) = file.name.as_deref() {
+        metadata.append_child(
+            Element::builder("name", NS_FILE_METADATA)
+                .append(name)
+                .build(),
+        );
+    }
+    if let Some(size) = file.size {
+        metadata.append_child(
+            Element::builder("size", NS_FILE_METADATA)
+                .append(size.to_string())
+                .build(),
+        );
+    }
+    if let Some(width) = file.width {
+        metadata.append_child(
+            Element::builder("width", NS_FILE_METADATA)
+                .append(width.to_string())
+                .build(),
+        );
+    }
+    if let Some(height) = file.height {
+        metadata.append_child(
+            Element::builder("height", NS_FILE_METADATA)
+                .append(height.to_string())
+                .build(),
+        );
+    }
+    file_sharing.append_child(metadata);
+
+    let mut sources = Element::builder("sources", NS_SFS).build();
+    sources.append_child(
+        Element::builder("url-data", NS_URL_DATA)
+            .attr("target", file.url.as_str())
+            .build(),
+    );
+    file_sharing.append_child(sources);
+    file_sharing
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────
@@ -774,6 +930,43 @@ mod tests {
     }
 
     #[test]
+    fn parse_message_with_direct_file_sharing() {
+        let e = el(
+            "<message xmlns='jabber:client' type='chat'>\
+               <body>https://files.example.com/report.pdf</body>\
+               <file-sharing xmlns='urn:xmpp:sfs:0' disposition='inline'>\
+                 <file xmlns='urn:xmpp:file:metadata:0'>\
+                   <media-type>application/pdf</media-type>\
+                   <name>report.pdf</name>\
+                   <size>4096</size>\
+                 </file>\
+                 <sources>\
+                   <url-data xmlns='http://jabber.org/protocol/url-data' target='https://files.example.com/report.pdf'/>\
+                 </sources>\
+               </file-sharing>\
+             </message>",
+        );
+        let MessagingEvent::Message(msg) = parse(&e).unwrap() else {
+            panic!("expected Message");
+        };
+        assert_eq!(msg.shared_files.len(), 1);
+        assert_eq!(
+            msg.shared_files[0].url,
+            "https://files.example.com/report.pdf"
+        );
+        assert_eq!(msg.shared_files[0].name.as_deref(), Some("report.pdf"));
+        assert_eq!(
+            msg.shared_files[0].media_type.as_deref(),
+            Some("application/pdf")
+        );
+        assert_eq!(msg.shared_files[0].size, Some(4096));
+        assert_eq!(
+            msg.shared_files[0].disposition,
+            SharedFileDisposition::Inline
+        );
+    }
+
+    #[test]
     fn parse_presence_available() {
         let e = el("<presence xmlns='jabber:client' from='alice@example.com'>\
              <show>away</show>\
@@ -813,6 +1006,42 @@ mod tests {
         assert_eq!(p.hats[0].uri, "urn:example:hats:admin");
         assert_eq!(p.hats[0].title, "Administrator");
         assert_eq!(p.hats[1].title, "Moderator");
+    }
+
+    #[test]
+    fn build_outbound_message_with_shared_files() {
+        let options = SendMessageOptions {
+            shared_files: vec![SharedFile {
+                url: "https://files.example.com/song.ogg".to_string(),
+                name: Some("song.ogg".to_string()),
+                media_type: Some("audio/ogg".to_string()),
+                size: Some(1234),
+                width: None,
+                height: None,
+                disposition: SharedFileDisposition::Inline,
+            }],
+            ..Default::default()
+        };
+        let stanza = build_outbound_message("alice@example.com", "chat", "listen", &options);
+        let file_sharing = stanza
+            .get_child("file-sharing", NS_SFS)
+            .expect("file-sharing child");
+        assert_eq!(file_sharing.attr("disposition"), Some("inline"));
+        let file = file_sharing
+            .get_child("file", NS_FILE_METADATA)
+            .expect("metadata child");
+        assert_eq!(
+            file.get_child("media-type", NS_FILE_METADATA)
+                .map(|e| e.text()),
+            Some("audio/ogg".to_string())
+        );
+        assert_eq!(
+            file_sharing
+                .get_child("sources", NS_SFS)
+                .and_then(|sources| sources.get_child("url-data", NS_URL_DATA))
+                .and_then(|url_data| url_data.attr("target")),
+            Some("https://files.example.com/song.ogg")
+        );
     }
 
     #[test]

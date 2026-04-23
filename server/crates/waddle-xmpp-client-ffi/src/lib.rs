@@ -57,6 +57,8 @@ pub struct WaddleMessage {
     pub reply_fallback_start: Option<u32>,
     /// XEP-0428 fallback range end (char offset, exclusive).
     pub reply_fallback_end: Option<u32>,
+    /// XEP-0446 / XEP-0447 shared files attached to the message.
+    pub shared_files: Vec<WaddleSharedFile>,
 }
 
 #[derive(uniffi::Record, Clone)]
@@ -77,6 +79,7 @@ pub struct WaddleArchivedMessage {
     pub reply_to_sender: Option<String>,
     pub reply_fallback_start: Option<u32>,
     pub reply_fallback_end: Option<u32>,
+    pub shared_files: Vec<WaddleSharedFile>,
 }
 
 #[derive(uniffi::Record, Clone)]
@@ -127,6 +130,33 @@ pub struct WaddleAvatar {
     pub data: Vec<u8>,
 }
 
+/// XEP-0446 / XEP-0447 shared-file metadata exposed to Swift.
+#[derive(uniffi::Record, Clone)]
+pub struct WaddleSharedFile {
+    pub url: String,
+    pub name: Option<String>,
+    pub media_type: Option<String>,
+    pub size: Option<u64>,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub disposition: String,
+}
+
+/// Header the client must include when uploading to a XEP-0363 slot.
+#[derive(uniffi::Record, Clone)]
+pub struct WaddleUploadHeader {
+    pub name: String,
+    pub value: String,
+}
+
+/// XEP-0363 upload slot with PUT/GET URLs and required PUT headers.
+#[derive(uniffi::Record, Clone)]
+pub struct WaddleUploadSlot {
+    pub put_url: String,
+    pub get_url: String,
+    pub put_headers: Vec<WaddleUploadHeader>,
+}
+
 /// XEP-0461 reply target attached to an outbound message.
 #[derive(uniffi::Record, Clone)]
 pub struct WaddleReplyTarget {
@@ -158,6 +188,7 @@ pub struct WaddleSendOptions {
     pub reply: Option<WaddleReplyTarget>,
     pub fallback: Option<WaddleFallbackRange>,
     pub thread: Option<WaddleThreadTarget>,
+    pub shared_files: Vec<WaddleSharedFile>,
 }
 
 // ── Callback interface ───────────────────────────────────────────────────────
@@ -582,6 +613,58 @@ impl WaddleClient {
             },
         }
     }
+
+    pub async fn discover_upload_service(&self) -> Option<String> {
+        let guard = self.handle.lock().await;
+        match guard.as_ref() {
+            None => {
+                drop(guard);
+                self.listener.on_error("Not connected".to_string());
+                None
+            }
+            Some(h) => match h
+                .discover_upload_service(jid_domain(&self.config.jid))
+                .await
+            {
+                Ok(service_jid) => service_jid,
+                Err(e) => {
+                    drop(guard);
+                    self.listener
+                        .on_error(format!("discover_upload_service failed: {e}"));
+                    None
+                }
+            },
+        }
+    }
+
+    pub async fn request_upload_slot(
+        &self,
+        service_jid: String,
+        filename: String,
+        size: u64,
+        content_type: String,
+    ) -> Option<WaddleUploadSlot> {
+        let guard = self.handle.lock().await;
+        match guard.as_ref() {
+            None => {
+                drop(guard);
+                self.listener.on_error("Not connected".to_string());
+                None
+            }
+            Some(h) => match h
+                .request_upload_slot(&service_jid, &filename, size, &content_type)
+                .await
+            {
+                Ok(slot) => Some(upload_slot_to_ffi(slot)),
+                Err(e) => {
+                    drop(guard);
+                    self.listener
+                        .on_error(format!("request_upload_slot failed: {e}"));
+                    None
+                }
+            },
+        }
+    }
 }
 
 // ── Event dispatch ───────────────────────────────────────────────────────────
@@ -626,6 +709,30 @@ fn mam_page_to_ffi(page: waddle_xmpp_client::mam::MamPage) -> WaddleMamPage {
     }
 }
 
+fn shared_file_to_ffi(file: waddle_xmpp_client::messaging::SharedFile) -> WaddleSharedFile {
+    WaddleSharedFile {
+        url: file.url,
+        name: file.name,
+        media_type: file.media_type,
+        size: file.size,
+        width: file.width,
+        height: file.height,
+        disposition: file.disposition.as_str().to_string(),
+    }
+}
+
+fn upload_slot_to_ffi(slot: waddle_xmpp_client::discovery::UploadSlot) -> WaddleUploadSlot {
+    WaddleUploadSlot {
+        put_url: slot.put_url,
+        get_url: slot.get_url,
+        put_headers: slot
+            .put_headers
+            .into_iter()
+            .map(|(name, value)| WaddleUploadHeader { name, value })
+            .collect(),
+    }
+}
+
 /// Convert a parsed inbound message into the UniFFI record, flattening the
 /// XEP-0428 char range into two optional `u32` fields (UniFFI has no tuple
 /// support).
@@ -655,6 +762,11 @@ fn inbound_to_ffi(msg: InboundMessage) -> WaddleMessage {
         reply_to_sender: msg.reply_to_sender,
         reply_fallback_start: fb_start,
         reply_fallback_end: fb_end,
+        shared_files: msg
+            .shared_files
+            .into_iter()
+            .map(shared_file_to_ffi)
+            .collect(),
     }
 }
 
@@ -691,6 +803,16 @@ fn archived_to_ffi(archived: waddle_xmpp_client::ArchivedMessage) -> WaddleArchi
         reply_to_sender: parsed.as_ref().and_then(|m| m.reply_to_sender.clone()),
         reply_fallback_start: fb_start,
         reply_fallback_end: fb_end,
+        shared_files: parsed
+            .as_ref()
+            .map(|m| {
+                m.shared_files
+                    .clone()
+                    .into_iter()
+                    .map(shared_file_to_ffi)
+                    .collect()
+            })
+            .unwrap_or_default(),
     }
 }
 
@@ -732,9 +854,30 @@ fn send_options_from_ffi(opts: WaddleSendOptions) -> Result<SendMessageOptions, 
         parent: t.parent,
     });
 
+    let shared_files = opts
+        .shared_files
+        .into_iter()
+        .map(|file| {
+            let disposition = messaging::SharedFileDisposition::from_text_or_infer(
+                Some(file.disposition.as_str()),
+                file.media_type.as_deref(),
+            );
+            messaging::SharedFile {
+                url: file.url,
+                name: file.name,
+                media_type: file.media_type,
+                size: file.size,
+                width: file.width,
+                height: file.height,
+                disposition,
+            }
+        })
+        .collect();
+
     Ok(SendMessageOptions {
         reply,
         fallback,
         thread,
+        shared_files,
     })
 }

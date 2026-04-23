@@ -387,46 +387,53 @@ final class AppModel: ObservableObject {
         guard let rustClient, let session else { return }
         let archive = await rustClient.fetchDmHistory(peerJID: bareJID, max: 50)
         let messages = archive.messages.compactMap { archiveMsg -> ChatTimelineMessage? in
-                let event = archiveMsg.message
-                let text = (event.body ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !text.isEmpty else { return nil }
-                let senderBare = barePeerJID(event.from ?? "")
-                let senderName = XMPPJID(string: event.from ?? "")?.localpart ?? senderBare
-                let isOutgoing = senderBare == barePeerJID(session.jid)
-                let messageID = event.id ?? event.stanzaID ?? archiveMsg.mamID ?? UUID().uuidString
-                return ChatTimelineMessage(
-                    id: messageID,
-                    roomID: bareJID,
-                    senderID: senderBare,
-                    senderDisplayName: isOutgoing ? session.username : peerUsername,
-                    body: text,
-                    sentAt: archiveMsg.delayedDeliveryTimestamp ?? event.timestamp ?? Date(),
-                    editedAt: nil,
-                    deliveryState: .delivered,
-                    isOutgoing: isOutgoing,
-                    isAction: false,
-                    senderInitials: initials(from: isOutgoing ? session.username : peerUsername),
-                    reactions: nil,
-                    isRetracted: false
-                )
-            }
-            dmMessagesByPeer[bareJID] = messages.sorted { $0.sentAt < $1.sentAt }
-            if chatStore.activeDmPeerJID == bareJID {
-                chatStore.dmMessages = dmMessagesByPeer[bareJID] ?? []
-            }
+            let event = archiveMsg.message
+            let text = (event.body ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty || !event.sharedFiles.isEmpty else { return nil }
+            let senderBare = barePeerJID(event.from ?? "")
+            let senderName = XMPPJID(string: event.from ?? "")?.localpart ?? senderBare
+            let isOutgoing = senderBare == barePeerJID(session.jid)
+            let messageID = event.id ?? event.stanzaID ?? archiveMsg.mamID ?? UUID().uuidString
+            return ChatTimelineMessage(
+                id: messageID,
+                roomID: bareJID,
+                senderID: senderBare,
+                senderDisplayName: isOutgoing ? session.username : peerUsername,
+                body: text,
+                sentAt: archiveMsg.delayedDeliveryTimestamp ?? event.timestamp ?? Date(),
+                editedAt: nil,
+                deliveryState: .delivered,
+                isOutgoing: isOutgoing,
+                isAction: false,
+                senderInitials: initials(from: isOutgoing ? session.username : peerUsername),
+                reactions: nil,
+                isRetracted: false,
+                sharedFiles: event.sharedFiles.isEmpty ? nil : event.sharedFiles
+            )
+        }
+        dmMessagesByPeer[bareJID] = messages.sorted { $0.sentAt < $1.sentAt }
+        if chatStore.activeDmPeerJID == bareJID {
+            chatStore.dmMessages = dmMessagesByPeer[bareJID] ?? []
+        }
     }
 
-    func sendDm(body: String) async {
-        guard let peerJID = chatStore.activeDmPeerJID, let rustClient, let session else { return }
+    func sendDm(body: String, sharedFiles: [WaddleSharedFile] = [], peerJID: String? = nil) async {
+        guard let targetPeerJID = peerJID ?? chatStore.activeDmPeerJID,
+              let rustClient,
+              let session else {
+            return
+        }
+
         let text = body.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
+        let wireBody = !text.isEmpty ? text : (sharedFiles.first?.url ?? "")
+        guard !wireBody.isEmpty || !sharedFiles.isEmpty else { return }
 
         let optimistic = ChatTimelineMessage(
             id: UUID().uuidString,
-            roomID: peerJID,
+            roomID: targetPeerJID,
             senderID: barePeerJID(session.jid),
             senderDisplayName: session.username,
-            body: text,
+            body: wireBody,
             sentAt: Date(),
             editedAt: nil,
             deliveryState: .sending,
@@ -434,15 +441,30 @@ final class AppModel: ObservableObject {
             isAction: false,
             senderInitials: initials(from: session.username),
             reactions: nil,
-            isRetracted: false
+            isRetracted: false,
+            sharedFiles: sharedFiles.isEmpty ? nil : sharedFiles.map(timelineSharedFile(from:))
         )
-        var messages = dmMessagesByPeer[peerJID] ?? []
+        var messages = dmMessagesByPeer[targetPeerJID] ?? []
         messages.append(optimistic)
-        dmMessagesByPeer[peerJID] = messages
-        chatStore.dmMessages = messages
+        dmMessagesByPeer[targetPeerJID] = messages
+        if chatStore.activeDmPeerJID == targetPeerJID {
+            chatStore.dmMessages = messages
+        }
 
-        await rustClient.sendDirectMessage(peerJID: peerJID, body: text)
-        updateDmConversation(peerJID: peerJID, body: text, date: Date())
+        let options = sharedFiles.isEmpty
+            ? nil
+            : WaddleSendOptions(
+                reply: nil,
+                fallback: nil,
+                thread: nil,
+                sharedFiles: sharedFiles
+            )
+        await rustClient.sendDirectMessage(peerJID: targetPeerJID, body: wireBody, options: options)
+        updateDmConversation(
+            peerJID: targetPeerJID,
+            body: dmConversationPreview(body: text, sharedFiles: sharedFiles.map(timelineSharedFile(from:))),
+            date: Date()
+        )
     }
 
     func closeDm() {
@@ -455,7 +477,7 @@ final class AppModel: ObservableObject {
         guard let session else { return }
         guard event.type == "chat" || event.type == "normal" || event.type == nil else { return }
         let text = (event.body ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
+        guard !text.isEmpty || !event.sharedFiles.isEmpty else { return }
 
         let fromBare = barePeerJID(event.from ?? "")
         let toBare = barePeerJID(event.to ?? "")
@@ -487,7 +509,7 @@ final class AppModel: ObservableObject {
 
         if isSelf {
             var msgs = dmMessagesByPeer[peerJID] ?? []
-            msgs.removeAll { $0.isOutgoing && $0.deliveryState == .sending && $0.body == text }
+            msgs.removeAll { $0.isOutgoing && $0.deliveryState == .sending && $0.body == message.body }
             msgs.append(message)
             dmMessagesByPeer[peerJID] = msgs
         } else {
@@ -497,7 +519,11 @@ final class AppModel: ObservableObject {
         }
 
         ensureDmConversation(peerJID: peerJID, peerUsername: peerUsername)
-        updateDmConversation(peerJID: peerJID, body: text, date: event.timestamp ?? Date())
+        updateDmConversation(
+            peerJID: peerJID,
+            body: dmConversationPreview(body: text, sharedFiles: event.sharedFiles),
+            date: event.timestamp ?? Date()
+        )
 
         if !isSelf, chatStore.activeDmPeerJID != peerJID {
             incrementDmUnread(peerJID: peerJID)
@@ -734,60 +760,45 @@ final class AppModel: ObservableObject {
 
     @Published var isCreatingChannel = false
     @Published var isUploadingFile = false
+    private let maxUploadFileBytes = 10 * 1024 * 1024
 
-    func uploadAndSendFile(data: Data, fileName: String, mediaType: String) async {
-        guard let roomJID = currentRoomJID, let rustClient else {
+    func uploadAndSendFile(
+        data: Data,
+        fileName: String,
+        mediaType: String,
+        replyTo: ChatTimelineMessage? = nil,
+        threadRootID: String? = nil
+    ) async {
+        guard currentRoomJID != nil else {
             errorMessage = "Select a channel before uploading."
             return
         }
 
-        isUploadingFile = true
-        defer { isUploadingFile = false }
-
-        if uploadServiceJID == nil {
-            uploadServiceJID = await rustClient.discoverUploadService()
-        }
-        guard let serviceJID = uploadServiceJID else {
-            errorMessage = "File upload is not available on this server."
-            return
-        }
-
-        guard let slot = await rustClient.requestUploadSlot(
-            serviceJID: serviceJID,
-            filename: fileName,
-            size: data.count,
-            contentType: mediaType
-        ) else {
-            errorMessage = "Failed to request an upload slot."
+        guard let sharedFile = await uploadSharedFile(data: data, fileName: fileName, mediaType: mediaType) else {
             return
         }
 
         do {
-            var request = URLRequest(url: URL(string: slot.putURL)!)
-            request.httpMethod = "PUT"
-            request.setValue(mediaType, forHTTPHeaderField: "Content-Type")
-            for (name, value) in slot.putHeaders {
-                request.setValue(value, forHTTPHeaderField: name)
-            }
-
-            let (_, response) = try await URLSession.shared.upload(for: request, from: data)
-            guard let httpResponse = response as? HTTPURLResponse,
-                  (200..<300).contains(httpResponse.statusCode) else {
-                errorMessage = "File upload failed."
-                return
+            try await sendMessage(
+                "",
+                room: chatStore.selectedRoom,
+                replyTo: replyTo,
+                threadRootID: threadRootID,
+                sharedFiles: [sharedFile]
+            )
+            if replyTo != nil {
+                chatStore.setReplyingTo(nil)
             }
         } catch {
             errorMessage = error.localizedDescription
+        }
+    }
+
+    func uploadAndSendDmFile(data: Data, fileName: String, mediaType: String, peerJID: String) async {
+        guard let sharedFile = await uploadSharedFile(data: data, fileName: fileName, mediaType: mediaType) else {
             return
         }
-
-        await rustClient.sendGroupchatFileMessage(
-            roomJID: roomJID,
-            fileURL: slot.getURL,
-            fileName: fileName,
-            mediaType: mediaType,
-            size: data.count
-        )
+        await sendDm(body: "", sharedFiles: [sharedFile], peerJID: peerJID)
     }
 
     func retractMessage(_ message: ChatTimelineMessage) async {
@@ -1174,7 +1185,8 @@ final class AppModel: ObservableObject {
         _ text: String,
         room: ChatRoomSelection?,
         replyTo: ChatTimelineMessage? = nil,
-        threadRootID: String? = nil
+        threadRootID: String? = nil,
+        sharedFiles: [WaddleSharedFile] = []
     ) async throws {
         guard let session else {
             throw ChatSendError.noSession
@@ -1193,11 +1205,16 @@ final class AppModel: ObservableObject {
         }
 
         let roomJID = roomBareJID(accountJID: session.jid, waddleID: selectedWaddleID, channelID: channelID)
+        let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let bodyForWire = !trimmedText.isEmpty ? trimmedText : (sharedFiles.first?.url ?? "")
+        guard !bodyForWire.isEmpty || !sharedFiles.isEmpty else {
+            return
+        }
 
         // Build the wire body. For replies we prepend a XEP-0428 fallback
         // quote (so non-supporting clients see the context) and compute the
         // Unicode-scalar range that supporting clients will strip.
-        let (wireBody, fallbackRange) = composeWireBody(userText: text, replyTo: replyTo)
+        let (wireBody, fallbackRange) = composeWireBody(userText: bodyForWire, replyTo: replyTo)
 
         let optimisticID = UUID().uuidString
         let optimistic = ChatTimelineMessage(
@@ -1218,6 +1235,7 @@ final class AppModel: ObservableObject {
             replyToSenderName: replyTo?.senderDisplayName,
             replyToBody: replyTo?.displayBody,
             replyFallbackRange: fallbackRange,
+            sharedFiles: sharedFiles.isEmpty ? nil : sharedFiles.map(timelineSharedFile(from:)),
             threadID: threadRootID
         )
 
@@ -1229,7 +1247,7 @@ final class AppModel: ObservableObject {
             syncChatMessages()
         }
 
-        let (_, markupSpans) = parseMarkdownToMarkupSpans(text)
+        let (_, markupSpans) = parseMarkdownToMarkupSpans(trimmedText)
 
         // Compose structured send-options once so reply, thread, and fallback
         // metadata all travel together down the FFI in a single typed payload.
@@ -1252,9 +1270,14 @@ final class AppModel: ObservableObject {
             WaddleThreadTarget(id: rootID, parent: nil)
         }
 
-        let hasOptions = replyTarget != nil || fallbackOpt != nil || threadTarget != nil
+        let hasOptions = replyTarget != nil || fallbackOpt != nil || threadTarget != nil || !sharedFiles.isEmpty
         let options: WaddleSendOptions? = hasOptions
-            ? WaddleSendOptions(reply: replyTarget, fallback: fallbackOpt, thread: threadTarget)
+            ? WaddleSendOptions(
+                reply: replyTarget,
+                fallback: fallbackOpt,
+                thread: threadTarget,
+                sharedFiles: sharedFiles
+            )
             : nil
 
         if options == nil, !markupSpans.isEmpty {
@@ -1646,7 +1669,7 @@ final class AppModel: ObservableObject {
         session: WaddleSession
     ) -> ChatTimelineMessage? {
         let text = (event.body ?? event.subject ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else {
+        guard !text.isEmpty || !event.sharedFiles.isEmpty else {
             return nil
         }
 
@@ -1709,6 +1732,108 @@ final class AppModel: ObservableObject {
         case (nil, nil):
             return nil
         }
+    }
+
+    private func uploadSharedFile(data: Data, fileName: String, mediaType: String) async -> WaddleSharedFile? {
+        guard data.count <= maxUploadFileBytes else {
+            let sizeMb = Double(data.count) / 1024.0 / 1024.0
+            errorMessage = "File too large (\(String(format: "%.1f", sizeMb)) MB). Maximum upload size is 10 MB."
+            return nil
+        }
+
+        guard let rustClient else {
+            errorMessage = ChatSendError.noSession.errorDescription ?? "Sign in again to reconnect live chat."
+            return nil
+        }
+
+        isUploadingFile = true
+        defer { isUploadingFile = false }
+
+        if uploadServiceJID == nil {
+            uploadServiceJID = await rustClient.discoverUploadService()
+        }
+        guard let serviceJID = uploadServiceJID else {
+            errorMessage = "File upload is not available on this server."
+            return nil
+        }
+
+        guard let slot = await rustClient.requestUploadSlot(
+            serviceJID: serviceJID,
+            filename: fileName,
+            size: data.count,
+            contentType: mediaType
+        ) else {
+            errorMessage = "Failed to request an upload slot."
+            return nil
+        }
+
+        guard let putURL = URL(string: slot.putURL) else {
+            errorMessage = "Upload slot returned an invalid URL."
+            return nil
+        }
+
+        do {
+            var request = URLRequest(url: putURL)
+            request.httpMethod = "PUT"
+            request.setValue(mediaType, forHTTPHeaderField: "Content-Type")
+            for (name, value) in slot.putHeaders {
+                request.setValue(value, forHTTPHeaderField: name)
+            }
+
+            let (_, response) = try await URLSession.shared.upload(for: request, from: data)
+            guard let httpResponse = response as? HTTPURLResponse,
+                  (200..<300).contains(httpResponse.statusCode) else {
+                errorMessage = "File upload failed."
+                return nil
+            }
+        } catch {
+            errorMessage = error.localizedDescription
+            return nil
+        }
+
+        return WaddleSharedFile(
+            url: slot.getURL,
+            name: fileName,
+            mediaType: mediaType,
+            size: UInt64(data.count),
+            width: nil,
+            height: nil,
+            disposition: sharedFileDisposition(for: mediaType)
+        )
+    }
+
+    private func sharedFileDisposition(for mediaType: String) -> String {
+        if mediaType.hasPrefix("image/")
+            || mediaType.hasPrefix("video/")
+            || mediaType.hasPrefix("audio/")
+            || mediaType == "application/pdf" {
+            return "inline"
+        }
+        return "attachment"
+    }
+
+    private func timelineSharedFile(from file: WaddleSharedFile) -> XMPPSharedFile {
+        XMPPSharedFile(
+            url: file.url,
+            name: file.name,
+            mediaType: file.mediaType,
+            size: file.size.flatMap(Int.init),
+            width: file.width.flatMap(Int.init),
+            height: file.height.flatMap(Int.init),
+            disposition: file.disposition,
+            encryptedSource: nil
+        )
+    }
+
+    private func dmConversationPreview(body: String, sharedFiles: [XMPPSharedFile]) -> String {
+        let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty, !sharedFiles.contains(where: { $0.url == trimmed }) {
+            return trimmed
+        }
+        if let first = sharedFiles.first {
+            return first.name ?? "Sent an attachment"
+        }
+        return trimmed
     }
 
     private func handleIncomingPresence(_ event: XMPPPresenceEvent) {

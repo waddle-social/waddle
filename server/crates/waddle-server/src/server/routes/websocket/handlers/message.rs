@@ -14,19 +14,19 @@ use waddle_xmpp::{
     mam::{add_stanza_id as add_mam_stanza_id, ArchivedMessage, MamStorage, STANZA_ID_NS},
     muc::room_actor::BuildGroupchatBroadcast,
     registry::{BroadcastOutcome, SendResult},
+    xep::xep0430::build_inbox_push,
     xep::{
         has_file_sharing, is_moderation_request_message, is_moderation_result_message,
         is_reaction_message, is_retraction_message, is_sticker_message, should_skip_storage,
         NS_REPLY,
     },
-    xep::xep0430::build_inbox_push,
     Stanza,
 };
 use xmpp_parsers::message::MessageType as XmppMessageType;
 
+use super::super::{get_room_actor, stanza_to_xml, WebSocketState};
 use crate::auth::Session;
 use waddle_xmpp::protocol::ConnectionPhase;
-use super::super::{WebSocketState, get_room_actor, stanza_to_xml};
 
 fn archived_stanza_xml(message: &xmpp_parsers::message::Message) -> String {
     stanza_to_xml(&Stanza::Message(message.clone()))
@@ -470,11 +470,7 @@ async fn send_received_carbons_to_websocket_resources(
 }
 
 /// Push an inbox update headline to all connected sessions of a user.
-async fn push_inbox_update(
-    state: &WebSocketState,
-    user: &BareJid,
-    entry: &InboxEntry,
-) {
+async fn push_inbox_update(state: &WebSocketState, user: &BareJid, entry: &InboxEntry) {
     let resources = state
         .deps
         .protocol

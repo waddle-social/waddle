@@ -69,7 +69,8 @@ final class RustXmppClient: ObservableObject {
         let options = WaddleSendOptions(
             reply: nil,
             fallback: nil,
-            thread: WaddleThreadTarget(id: threadID, parent: nil)
+            thread: WaddleThreadTarget(id: threadID, parent: nil),
+            sharedFiles: []
         )
         await waddleClient.sendGroupchatMessage(roomJid: roomJID, body: body, options: options)
     }
@@ -176,14 +177,49 @@ final class RustXmppClient: ObservableObject {
 
     func enablePushNotifications(pushServiceJID: String, node: String, token: String) async {}
 
-    func discoverUploadService() async -> String? { nil }
+    func discoverUploadService() async -> String? {
+        await waddleClient.discoverUploadService()
+    }
     func requestUploadSlot(
         serviceJID: String, filename: String, size: Int, contentType: String
-    ) async -> (putURL: String, getURL: String, putHeaders: [(String, String)])? { nil }
+    ) async -> (putURL: String, getURL: String, putHeaders: [(String, String)])? {
+        guard size >= 0 else { return nil }
+        guard let slot = await waddleClient.requestUploadSlot(
+            serviceJid: serviceJID,
+            filename: filename,
+            size: UInt64(size),
+            contentType: contentType
+        ) else {
+            return nil
+        }
+        return (
+            putURL: slot.putUrl,
+            getURL: slot.getUrl,
+            putHeaders: slot.putHeaders.map { ($0.name, $0.value) }
+        )
+    }
 
     func sendGroupchatFileMessage(
         roomJID: String, fileURL: String, fileName: String, mediaType: String, size: Int
-    ) async {}
+    ) async {
+        guard size >= 0 else { return }
+        let sharedFile = WaddleSharedFile(
+            url: fileURL,
+            name: fileName,
+            mediaType: mediaType,
+            size: UInt64(size),
+            width: nil,
+            height: nil,
+            disposition: inferredDisposition(for: mediaType)
+        )
+        let options = WaddleSendOptions(
+            reply: nil,
+            fallback: nil,
+            thread: nil,
+            sharedFiles: [sharedFile]
+        )
+        await waddleClient.sendGroupchatMessage(roomJid: roomJID, body: fileURL, options: options)
+    }
 }
 
 // MARK: - Errors
@@ -258,7 +294,7 @@ private final class _EventListener: WaddleEventListener {
             markupSpans: [],
             chatState: nil,
             displayedMarkerID: nil,
-            sharedFiles: [],
+            sharedFiles: message.sharedFiles.map(makeSharedFile),
             broadcastMention: nil,
             mentionURIs: [],
             forumPostKind: nil,
@@ -306,6 +342,29 @@ private func parseRFC3339(_ string: String) -> Date? {
     return formatter.date(from: string)
 }
 
+private func makeSharedFile(_ file: WaddleSharedFile) -> XMPPSharedFile {
+    XMPPSharedFile(
+        url: file.url,
+        name: file.name,
+        mediaType: file.mediaType,
+        size: file.size.flatMap(Int.init),
+        width: file.width.flatMap(Int.init),
+        height: file.height.flatMap(Int.init),
+        disposition: file.disposition,
+        encryptedSource: nil
+    )
+}
+
+private func inferredDisposition(for mediaType: String) -> String {
+    if mediaType.hasPrefix("image/")
+        || mediaType.hasPrefix("video/")
+        || mediaType.hasPrefix("audio/")
+        || mediaType == "application/pdf" {
+        return "inline"
+    }
+    return "attachment"
+}
+
 private extension WaddleMamPage {
     func toXMPPArchivePage() -> XMPPArchivePage {
         let converted = messages.map { archived -> XMPPArchiveMessage in
@@ -330,7 +389,7 @@ private extension WaddleMamPage {
                 markupSpans: [],
                 chatState: nil,
                 displayedMarkerID: nil,
-                sharedFiles: [],
+                sharedFiles: archived.sharedFiles.map(makeSharedFile),
                 broadcastMention: nil,
                 mentionURIs: [],
                 forumPostKind: nil,
