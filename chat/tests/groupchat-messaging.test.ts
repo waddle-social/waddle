@@ -112,7 +112,7 @@ describe("groupchat messaging", () => {
     const fileUrl = "https://xmpp.waddle.social/upload/abc/photo.jpg";
 
     const messageId = sendGroupMessage(xmpp, "general@muc.waddle.social", "", {
-      files: [{ url: fileUrl, name: "photo.jpg", mediaType: "image/jpeg", size: 12345 }],
+      files: [{ url: fileUrl, name: "photo.jpg", mediaType: "image/jpeg", size: 12345, disposition: "inline" }],
     });
 
     expect(typeof messageId).toBe("string");
@@ -142,7 +142,7 @@ describe("groupchat messaging", () => {
     const fileUrl = "https://xmpp.waddle.social/upload/abc/photo.jpg";
 
     const messageId = sendGroupMessage(xmpp, "general@muc.waddle.social", "check this out", {
-      files: [{ url: fileUrl, name: "photo.jpg", mediaType: "image/jpeg", size: 12345 }],
+      files: [{ url: fileUrl, name: "photo.jpg", mediaType: "image/jpeg", size: 12345, disposition: "inline" }],
     });
 
     expect(typeof messageId).toBe("string");
@@ -163,8 +163,8 @@ describe("groupchat messaging", () => {
 
     const messageId = sendGroupMessage(xmpp, "general@muc.waddle.social", "gallery", {
       files: [
-        { url: urls[0], name: "1.jpg", mediaType: "image/jpeg", size: 1 },
-        { url: urls[1], name: "2.jpg", mediaType: "image/jpeg", size: 2 },
+        { url: urls[0], name: "1.jpg", mediaType: "image/jpeg", size: 1, disposition: "inline" },
+        { url: urls[1], name: "2.jpg", mediaType: "image/jpeg", size: 2, disposition: "inline" },
       ],
     });
 
@@ -190,7 +190,7 @@ describe("groupchat messaging", () => {
     } as const;
 
     sendGroupMessage(xmpp, "general@muc.waddle.social", "", {
-      files: [{ url: fileUrl, name: "photo.jpg", mediaType: "image/jpeg", size: 12345, encrypted }],
+      files: [{ url: fileUrl, name: "photo.jpg", mediaType: "image/jpeg", size: 12345, disposition: "inline", encrypted }],
     });
 
     const call = (xmpp.sendMessage as ReturnType<typeof mock>).mock.calls[0][0] as Record<string, unknown>;
@@ -207,6 +207,29 @@ describe("groupchat messaging", () => {
     const xmpp = makeAgent();
     expect(sendGroupMessage(xmpp, "general@muc.waddle.social", "")).toBeNull();
     expect(xmpp.sendMessage).toHaveBeenCalledTimes(0);
+  });
+
+  test("marks non-previewable room attachments as disposition=attachment", () => {
+    const xmpp = makeAgent();
+    const fileUrl = "https://xmpp.waddle.social/upload/abc/notes.txt";
+
+    sendGroupMessage(xmpp, "general@muc.waddle.social", "", {
+      files: [{
+        url: fileUrl,
+        name: "notes.txt",
+        mediaType: "text/plain",
+        size: 128,
+        disposition: "attachment",
+      }],
+    });
+
+    const call = (xmpp.sendMessage as ReturnType<typeof mock>).mock.calls[0][0] as Record<string, unknown>;
+    expect(call.fileSharing).toEqual([
+      expect.objectContaining({
+        url: fileUrl,
+        disposition: "attachment",
+      }),
+    ]);
   });
 
   test("sends XEP-0508 thread-create metadata for forum topics", () => {

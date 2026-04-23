@@ -22,6 +22,7 @@ import { registerWaddleExtensions } from "./extensions";
 // the span IS propagated (via traceparent on fetch/XHR) and will
 // correctly parent backend spans.
 import { withSpan } from "@/lib/telemetry";
+import { inferredFileDisposition } from "@/lib/chat-ui";
 import { dispatchGroupchat, ext } from "./message-parsing";
 import { dispatchChat } from "./dm-parsing";
 import * as messaging from "./messaging";
@@ -951,6 +952,7 @@ export class BrowserXmppClient {
         name: prepared.originalName,
         mediaType: prepared.originalMediaType,
         size: prepared.originalSize,
+        disposition: inferredFileDisposition(prepared.originalMediaType, prepared.originalName),
         encrypted: {
           ...prepared.encrypted,
           sources: [result.getUrl],

@@ -27,6 +27,7 @@ dictionary WaddleMessage {
     string? reply_to_sender;
     u32? reply_fallback_start;
     u32? reply_fallback_end;
+    sequence<WaddleSharedFile> shared_files;
 };
 
 // ── Archived MAM message ─────────────────────────────────────────────────────
@@ -45,6 +46,28 @@ dictionary WaddleArchivedMessage {
     string? reply_to_sender;
     u32? reply_fallback_start;
     u32? reply_fallback_end;
+    sequence<WaddleSharedFile> shared_files;
+};
+
+dictionary WaddleSharedFile {
+    string url;
+    string? name;
+    string? media_type;
+    u64? size;
+    u32? width;
+    u32? height;
+    string disposition;
+};
+
+dictionary WaddleUploadHeader {
+    string name;
+    string value;
+};
+
+dictionary WaddleUploadSlot {
+    string put_url;
+    string get_url;
+    sequence<WaddleUploadHeader> put_headers;
 };
 
 // ── Outbound send options (XEP-0461 / 0428 / 0201) ──────────────────────────
@@ -67,6 +90,7 @@ dictionary WaddleSendOptions {
     WaddleReplyTarget? reply;
     WaddleFallbackRange? fallback;
     WaddleThreadTarget? thread;
+    sequence<WaddleSharedFile> shared_files;
 };
 
 // ── MAM page result ──────────────────────────────────────────────────────────
@@ -159,4 +183,10 @@ interface WaddleClient {
 
     [Async]
     WaddleAvatar? request_avatar(string jid);
+
+    [Async]
+    string? discover_upload_service();
+
+    [Async]
+    WaddleUploadSlot? request_upload_slot(string service_jid, string filename, u64 size, string content_type);
 };

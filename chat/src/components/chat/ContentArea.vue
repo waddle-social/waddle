@@ -9,7 +9,7 @@ import {
   getNewMessagesDividerPlacement,
   orderTimelineForScrollDirection,
 } from "@/lib/scroll-direction";
-import { extractImagesFromEvent } from "@/lib/xmpp/file-upload";
+import { extractFilesFromEvent } from "@/lib/xmpp/file-upload";
 import type { ChannelSummary, WaddleSummary } from "@/lib/waddle-api";
 import type { TimelineMessage, MarkupSpan, MessageReference } from "@/lib/chat-ui";
 import type { BrowserXmppClient, XmppStatusSnapshot, RoomHats, RoomPresence } from "@/lib/xmpp-client";
@@ -389,7 +389,7 @@ function onDragLeave() {
 function onDrop(e: DragEvent) {
   e.preventDefault();
   isDragging.value = false;
-  const files = extractImagesFromEvent(e);
+  const files = extractFilesFromEvent(e);
   if (files.length > 0) composerRef.value?.addAttachments(files);
 }
 
@@ -449,7 +449,7 @@ function showDividerAfter(messageId: string): boolean {
       class="absolute inset-0 z-50 bg-primary/10 border-2 border-dashed border-primary rounded-xl flex flex-col items-center justify-center pointer-events-none animate-fade-in"
     >
       <Upload class="w-8 h-8 text-primary mb-2" />
-      <span class="text-primary font-display font-bold text-lg">Drop image to upload</span>
+      <span class="text-primary font-display font-bold text-lg">Drop files to upload</span>
     </div>
 
     <!-- Header — sleek, floating feel -->

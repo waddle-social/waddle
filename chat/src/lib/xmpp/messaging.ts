@@ -1,6 +1,6 @@
 /** Outbound message operations — all send* functions as standalone. */
 import type { Agent } from "stanza";
-import type { MarkupSpan, MessageReference } from "@/lib/chat-ui";
+import { inferredFileDisposition, type MarkupSpan, type MessageReference } from "@/lib/chat-ui";
 import type { WaddleFallback } from "./extensions/fallback";
 import type { WaddleThreadCreate, WaddleThreadReply } from "./extensions/forums";
 import type { WaddleEncryptedFile } from "./extensions/encrypted-file";
@@ -13,6 +13,7 @@ export interface OutboundFileAttachment {
   name: string;
   mediaType: string;
   size: number;
+  disposition: "inline" | "attachment";
   width?: number;
   height?: number;
   encrypted?: WaddleEncryptedFile;
@@ -30,7 +31,7 @@ export interface ReplyTarget {
 /** Build one XEP-0447 <file-sharing> payload for a single attachment. */
 export function fileSharingElement(file: OutboundFileAttachment): Record<string, unknown> {
   return {
-    disposition: "inline",
+    disposition: file.disposition ?? inferredFileDisposition(file.mediaType, file.url),
     name: file.name,
     mediaType: file.mediaType,
     size: String(file.size),

@@ -1,14 +1,35 @@
 <script setup lang="ts">
 import { useStore } from "@nanostores/vue";
 import { ref, computed, nextTick, onBeforeUnmount, watch } from "vue";
-import { MoreHorizontal, Pencil, Reply, SmilePlus, Trash2, FileDown, CornerDownRight, MessageSquare, Lock } from "lucide-vue-next";
+import {
+  MoreHorizontal,
+  Pencil,
+  Reply,
+  SmilePlus,
+  Trash2,
+  FileDown,
+  CornerDownRight,
+  MessageSquare,
+  Lock,
+} from "lucide-vue-next";
 import type { JSONContent } from "@tiptap/core";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
 import ChatEditor from "@/components/chat/ChatEditor.vue";
 import EditorBubbleToolbar from "@/components/chat/EditorBubbleToolbar.vue";
 import EmojiPicker from "@/components/chat/EmojiPicker.vue";
 import ImageLightbox from "@/components/ui/ImageLightbox.vue";
-import { renderStyledBody, isImageUrl, isImageFile, type TimelineMessage, type MarkupSpan, type MessageReference, type TimelineSharedFile } from "@/lib/chat-ui";
+import {
+  renderStyledBody,
+  isAudioFile,
+  isImageUrl,
+  isImageFile,
+  isPdfFile,
+  isVideoFile,
+  type TimelineMessage,
+  type MarkupSpan,
+  type MessageReference,
+  type TimelineSharedFile,
+} from "@/lib/chat-ui";
 import { richMessageToTiptap, tiptapToRichMessage } from "@/lib/rich-message";
 import { applyShikiToCodeBlocks } from "@/lib/shiki";
 import { decryptEncryptedAttachment, encryptedAttachmentKey, hasEncryptedAttachmentMetadata } from "@/lib/xmpp/encrypted-attachments";
@@ -68,8 +89,31 @@ const isGif = computed(() => sharedFiles.value.length === 0 && isImageUrl(props.
 const imageAttachments = computed(() =>
   sharedFiles.value.filter((f) => isImageFile(f.mediaType, f.url)),
 );
-const nonImageAttachments = computed(() =>
-  sharedFiles.value.filter((f) => !isImageFile(f.mediaType, f.url)),
+const videoAttachments = computed(() =>
+  sharedFiles.value.filter((f) => !isImageFile(f.mediaType, f.url) && isVideoFile(f.mediaType, f.url)),
+);
+const audioAttachments = computed(() =>
+  sharedFiles.value.filter((f) =>
+    !isImageFile(f.mediaType, f.url)
+    && !isVideoFile(f.mediaType, f.url)
+    && isAudioFile(f.mediaType, f.url),
+  ),
+);
+const pdfAttachments = computed(() =>
+  sharedFiles.value.filter((f) =>
+    !isImageFile(f.mediaType, f.url)
+    && !isVideoFile(f.mediaType, f.url)
+    && !isAudioFile(f.mediaType, f.url)
+    && isPdfFile(f.mediaType, f.url),
+  ),
+);
+const downloadableAttachments = computed(() =>
+  sharedFiles.value.filter((f) =>
+    !isImageFile(f.mediaType, f.url)
+    && !isVideoFile(f.mediaType, f.url)
+    && !isAudioFile(f.mediaType, f.url)
+    && !isPdfFile(f.mediaType, f.url),
+  ),
 );
 /** Display the user's text body when present; hide body when it's just the fallback URL for a single image. */
 const displayBody = computed(() => {
@@ -155,8 +199,15 @@ async function ensureAttachmentReady(file: TimelineSharedFile, persist = false):
   }
 }
 
+const previewableAttachments = computed(() => [
+  ...imageAttachments.value,
+  ...videoAttachments.value,
+  ...audioAttachments.value,
+  ...pdfAttachments.value,
+]);
+
 watch(
-  imageAttachments,
+  previewableAttachments,
   (attachments) => {
     if (typeof window === "undefined") return;
     const activeKeys = new Set(attachments.map((attachment) => attachmentKey(attachment)));
@@ -725,9 +776,120 @@ watch(
         </div>
       </div>
 
-      <!-- Non-image attachments -->
-      <div v-if="nonImageAttachments.length > 0" class="mt-2 flex flex-col gap-1.5">
-        <template v-for="file in nonImageAttachments" :key="attachmentKey(file)">
+      <!-- Inline video attachments -->
+      <div v-if="videoAttachments.length > 0" class="mt-2 flex flex-col gap-2">
+        <div
+          v-for="file in videoAttachments"
+          :key="attachmentKey(file)"
+          class="max-w-md rounded-xl border border-border bg-muted/30 p-2"
+        >
+          <video
+            v-if="resolvedAttachmentUrl(file)"
+            :src="resolvedAttachmentUrl(file) || ''"
+            class="max-h-72 w-full rounded-lg border border-border bg-black"
+            controls
+            playsinline
+            preload="metadata"
+          />
+          <div
+            v-else
+            class="flex h-40 w-full flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-border px-4 text-center text-[12px] text-muted-foreground"
+          >
+            <Lock class="h-4 w-4 text-primary/70" />
+            <span>{{ attachmentError(file) ?? (isDecryptingAttachment(file) ? "Decrypting video…" : "Preparing video…") }}</span>
+            <button
+              v-if="attachmentError(file)"
+              type="button"
+              class="rounded-lg border border-border bg-background px-2.5 py-1 text-[11px] text-foreground hover:bg-muted transition-colors"
+              @click="downloadAttachment(file)"
+            >
+              Download
+            </button>
+          </div>
+          <div class="mt-2 text-[11px] text-muted-foreground">
+            {{ file.name ?? "Video" }} · {{ file.mediaType ?? "video" }}
+            <span v-if="file.size"> · {{ formatFileSize(file.size) }}</span>
+            <span v-if="file.encrypted"> · Encrypted</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Inline audio attachments -->
+      <div v-if="audioAttachments.length > 0" class="mt-2 flex flex-col gap-2">
+        <div
+          v-for="file in audioAttachments"
+          :key="attachmentKey(file)"
+          class="max-w-md rounded-xl border border-border bg-muted/30 p-3"
+        >
+          <audio
+            v-if="resolvedAttachmentUrl(file)"
+            :src="resolvedAttachmentUrl(file) || ''"
+            class="w-full"
+            controls
+            preload="metadata"
+          />
+          <div
+            v-else
+            class="flex min-h-20 w-full flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-border px-4 text-center text-[12px] text-muted-foreground"
+          >
+            <Lock class="h-4 w-4 text-primary/70" />
+            <span>{{ attachmentError(file) ?? (isDecryptingAttachment(file) ? "Decrypting audio…" : "Preparing audio…") }}</span>
+            <button
+              v-if="attachmentError(file)"
+              type="button"
+              class="rounded-lg border border-border bg-background px-2.5 py-1 text-[11px] text-foreground hover:bg-muted transition-colors"
+              @click="downloadAttachment(file)"
+            >
+              Download
+            </button>
+          </div>
+          <div class="mt-2 text-[11px] text-muted-foreground">
+            {{ file.name ?? "Audio" }} · {{ file.mediaType ?? "audio" }}
+            <span v-if="file.size"> · {{ formatFileSize(file.size) }}</span>
+            <span v-if="file.encrypted"> · Encrypted</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Inline PDF attachments -->
+      <div v-if="pdfAttachments.length > 0" class="mt-2 flex flex-col gap-2">
+        <div
+          v-for="file in pdfAttachments"
+          :key="attachmentKey(file)"
+          class="max-w-md rounded-xl border border-border bg-muted/30 p-2"
+        >
+          <iframe
+            v-if="resolvedAttachmentUrl(file)"
+            :src="resolvedAttachmentUrl(file) || ''"
+            :title="file.name ?? 'PDF document'"
+            class="h-72 w-full rounded-lg border border-border bg-background"
+          />
+          <div
+            v-else
+            class="flex h-40 w-full flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-border px-4 text-center text-[12px] text-muted-foreground"
+          >
+            <Lock class="h-4 w-4 text-primary/70" />
+            <span>{{ attachmentError(file) ?? (isDecryptingAttachment(file) ? "Decrypting PDF…" : "Preparing PDF…") }}</span>
+            <button
+              v-if="attachmentError(file)"
+              type="button"
+              class="rounded-lg border border-border bg-background px-2.5 py-1 text-[11px] text-foreground hover:bg-muted transition-colors"
+              @click="downloadAttachment(file)"
+            >
+              Download
+            </button>
+          </div>
+          <div class="mt-2 text-[11px] text-muted-foreground">
+            {{ file.name ?? "PDF" }} · {{ file.mediaType ?? "application/pdf" }}
+            <span v-if="file.size"> · {{ formatFileSize(file.size) }}</span>
+            <span v-if="file.encrypted"> · Encrypted</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Downloadable attachments -->
+      <div v-if="downloadableAttachments.length > 0" class="mt-2 flex flex-col gap-1.5">
+        <template v-for="file in downloadableAttachments" :key="attachmentKey(file)">
           <button
             v-if="file.encrypted"
             type="button"

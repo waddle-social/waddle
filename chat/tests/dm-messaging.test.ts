@@ -16,7 +16,7 @@ describe("dm messaging", () => {
     const fileUrl = "https://xmpp.waddle.social/upload/abc/photo.jpg";
 
     const messageId = sendDirectMessage(xmpp, "bob@waddle.social", "", {
-      files: [{ url: fileUrl, name: "photo.jpg", mediaType: "image/jpeg", size: 12345 }],
+      files: [{ url: fileUrl, name: "photo.jpg", mediaType: "image/jpeg", size: 12345, disposition: "inline" }],
     });
 
     expect(typeof messageId).toBe("string");
@@ -46,7 +46,7 @@ describe("dm messaging", () => {
     const fileUrl = "https://xmpp.waddle.social/upload/abc/photo.jpg";
 
     const messageId = sendDirectMessage(xmpp, "bob@waddle.social", "check this out", {
-      files: [{ url: fileUrl, name: "photo.jpg", mediaType: "image/jpeg", size: 12345 }],
+      files: [{ url: fileUrl, name: "photo.jpg", mediaType: "image/jpeg", size: 12345, disposition: "inline" }],
     });
 
     expect(typeof messageId).toBe("string");
@@ -67,8 +67,8 @@ describe("dm messaging", () => {
 
     const messageId = sendDirectMessage(xmpp, "bob@waddle.social", "gallery", {
       files: [
-        { url: urls[0], name: "1.jpg", mediaType: "image/jpeg", size: 1 },
-        { url: urls[1], name: "2.jpg", mediaType: "image/jpeg", size: 2 },
+        { url: urls[0], name: "1.jpg", mediaType: "image/jpeg", size: 1, disposition: "inline" },
+        { url: urls[1], name: "2.jpg", mediaType: "image/jpeg", size: 2, disposition: "inline" },
       ],
     });
 
@@ -94,7 +94,7 @@ describe("dm messaging", () => {
     } as const;
 
     sendDirectMessage(xmpp, "bob@waddle.social", "", {
-      files: [{ url: fileUrl, name: "photo.jpg", mediaType: "image/jpeg", size: 12345, encrypted }],
+      files: [{ url: fileUrl, name: "photo.jpg", mediaType: "image/jpeg", size: 12345, disposition: "inline", encrypted }],
     });
 
     const call = (xmpp.sendMessage as ReturnType<typeof mock>).mock.calls[0][0] as Record<string, unknown>;
@@ -111,5 +111,28 @@ describe("dm messaging", () => {
     const xmpp = makeAgent();
     expect(sendDirectMessage(xmpp, "bob@waddle.social", "")).toBeNull();
     expect(xmpp.sendMessage).toHaveBeenCalledTimes(0);
+  });
+
+  test("marks non-previewable DM attachments as disposition=attachment", () => {
+    const xmpp = makeAgent();
+    const fileUrl = "https://xmpp.waddle.social/upload/abc/notes.txt";
+
+    sendDirectMessage(xmpp, "bob@waddle.social", "", {
+      files: [{
+        url: fileUrl,
+        name: "notes.txt",
+        mediaType: "text/plain",
+        size: 128,
+        disposition: "attachment",
+      }],
+    });
+
+    const call = (xmpp.sendMessage as ReturnType<typeof mock>).mock.calls[0][0] as Record<string, unknown>;
+    expect(call.fileSharing).toEqual([
+      expect.objectContaining({
+        url: fileUrl,
+        disposition: "attachment",
+      }),
+    ]);
   });
 });

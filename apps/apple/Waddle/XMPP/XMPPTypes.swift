@@ -112,6 +112,18 @@ struct XMPPSharedFile: Sendable, Equatable, Hashable, Identifiable {
         disposition == "inline" && (mediaType?.hasPrefix("image/") == true)
     }
 
+    var isInlineVideo: Bool {
+        disposition == "inline" && (mediaType?.hasPrefix("video/") == true)
+    }
+
+    var isInlineAudio: Bool {
+        disposition == "inline" && (mediaType?.hasPrefix("audio/") == true)
+    }
+
+    var isInlinePdf: Bool {
+        disposition == "inline" && mediaType == "application/pdf"
+    }
+
     var isEncrypted: Bool {
         encryptedSource != nil
     }

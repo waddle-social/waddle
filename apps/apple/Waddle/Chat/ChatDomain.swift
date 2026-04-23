@@ -107,8 +107,20 @@ struct ChatTimelineMessage: Identifiable, Hashable {
         sharedFiles?.filter(\.isInlineImage) ?? []
     }
 
+    var inlineVideos: [XMPPSharedFile] {
+        sharedFiles?.filter(\.isInlineVideo) ?? []
+    }
+
+    var inlineAudioFiles: [XMPPSharedFile] {
+        sharedFiles?.filter(\.isInlineAudio) ?? []
+    }
+
+    var inlinePdfFiles: [XMPPSharedFile] {
+        sharedFiles?.filter(\.isInlinePdf) ?? []
+    }
+
     var downloadableFiles: [XMPPSharedFile] {
-        sharedFiles?.filter { !$0.isInlineImage } ?? []
+        sharedFiles?.filter { !$0.isInlineImage && !$0.isInlineVideo && !$0.isInlineAudio && !$0.isInlinePdf } ?? []
     }
 
     var displayBody: String {
