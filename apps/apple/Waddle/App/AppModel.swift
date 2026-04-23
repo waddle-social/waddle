@@ -104,6 +104,7 @@ final class AppModel: ObservableObject {
     private var roomJoinTimeoutTasks: [String: Task<Void, Never>] = [:]
     private var roomHistoryBeforeCursorByRoomJID: [String: String] = [:]
     private let roomHistoryPageSize = 50
+    private var pushTokenObserver: NSObjectProtocol?
 
     init() {
         let persistedServerURL = AppConfig.persistedServerURL
@@ -121,8 +122,22 @@ final class AppModel: ObservableObject {
             }
             return await self.loadRoomHistory(for: room, before: before)
         }
+        pushTokenObserver = NotificationCenter.default.addObserver(
+            forName: .waddleDidRegisterForRemoteNotifications,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let self, let token = notification.object as? Data else { return }
+            Task { await self.registerPushToken(token) }
+        }
         updateChatSurfaceState()
         Task { await bootstrap() }
+    }
+
+    deinit {
+        if let pushTokenObserver {
+            NotificationCenter.default.removeObserver(pushTokenObserver)
+        }
     }
 
     var selectedWaddle: WaddleSummary? {
@@ -991,6 +1006,7 @@ final class AppModel: ObservableObject {
             reconnectTask = nil
             updateConnectionBanner(for: .ready)
             await rustClient?.sendPresence()
+            requestPushNotificationPermission()
             dlog(" presence sent")
             await refreshAccessibleWaddles()
             dlog(" accessible waddles: \(self.accessibleWaddles.count), public: \(self.publicWaddles.count)")

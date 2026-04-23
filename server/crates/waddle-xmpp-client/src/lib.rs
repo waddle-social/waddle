@@ -11,6 +11,7 @@ pub mod event;
 pub mod mam;
 pub mod messaging;
 pub mod pep;
+pub mod push;
 pub mod request;
 pub mod runtime;
 pub mod state;
@@ -36,6 +37,7 @@ pub use event::{ClientEvent, ConnectionEvent, LifecycleEvent, StreamManagementEv
 pub use mam::{ArchivedMessage, MamExt, MamPage, RsmPageInfo};
 pub use messaging::{InboundMessage, InboundPresence, MessagingEvent, MessagingExt};
 pub use pep::{PepExt, PepItem, UserActivity, UserMood, UserTune};
+pub use push::PushExt;
 pub use request::{
     ClientRequest, PendingRequest, RequestCorrelation, RequestId, RequestKind, RequestTracker,
     StanzaId,

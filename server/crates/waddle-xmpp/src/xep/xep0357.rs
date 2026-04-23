@@ -11,9 +11,8 @@
 //! <iq type='set' id='push1'>
 //!   <enable xmlns='urn:xmpp:push:0' jid='push-service.example.com' node='web-push'>
 //!     <x xmlns='jabber:x:data' type='submit'>
-//!       <field var='endpoint'><value>https://push.example.com/...</value></field>
-//!       <field var='p256dh'><value>BASE64KEY</value></field>
-//!       <field var='auth'><value>BASE64AUTH</value></field>
+//!       <field var='device-token'><value>HEX_APNS_TOKEN</value></field>
+//!       <field var='platform'><value>apple</value></field>
 //!     </x>
 //!   </enable>
 //! </iq>
@@ -98,7 +97,7 @@ pub fn parse_push_enable(iq: &Iq) -> Option<PushEnable> {
         .map(|s| s.to_owned());
 
     let mut options = parse_data_form_options(elem);
-    for attr_key in ["endpoint", "p256dh", "auth"] {
+    for attr_key in ["device-token", "platform"] {
         if let Some(value) = elem.attr(attr_key).filter(|s| !s.is_empty()) {
             if !options.iter().any(|(k, _)| k == attr_key) {
                 options.push((attr_key.to_owned(), value.to_owned()));
@@ -182,35 +181,26 @@ mod tests {
         let mut enable_elem = enable.build();
 
         if with_form {
-            let endpoint_value = Element::builder("value", NS_DATA_FORMS)
-                .append("https://push.example.com/abc")
+            let device_token_value = Element::builder("value", NS_DATA_FORMS)
+                .append("HEX_APNS_TOKEN")
                 .build();
-            let endpoint_field = Element::builder("field", NS_DATA_FORMS)
-                .attr("var", "endpoint")
-                .append(endpoint_value)
-                .build();
-
-            let p256dh_value = Element::builder("value", NS_DATA_FORMS)
-                .append("BASE64KEY")
-                .build();
-            let p256dh_field = Element::builder("field", NS_DATA_FORMS)
-                .attr("var", "p256dh")
-                .append(p256dh_value)
+            let device_token_field = Element::builder("field", NS_DATA_FORMS)
+                .attr("var", "device-token")
+                .append(device_token_value)
                 .build();
 
-            let auth_value = Element::builder("value", NS_DATA_FORMS)
-                .append("BASE64AUTH")
+            let platform_value = Element::builder("value", NS_DATA_FORMS)
+                .append("apple")
                 .build();
-            let auth_field = Element::builder("field", NS_DATA_FORMS)
-                .attr("var", "auth")
-                .append(auth_value)
+            let platform_field = Element::builder("field", NS_DATA_FORMS)
+                .attr("var", "platform")
+                .append(platform_value)
                 .build();
 
             let form = Element::builder("x", NS_DATA_FORMS)
                 .attr("type", "submit")
-                .append(endpoint_field)
-                .append(p256dh_field)
-                .append(auth_field)
+                .append(device_token_field)
+                .append(platform_field)
                 .build();
 
             enable_elem.append_child(form);
@@ -332,20 +322,16 @@ mod tests {
 
         assert_eq!(enable.jid, "push-service.example.com");
         assert_eq!(enable.node.as_deref(), Some("web-push"));
-        assert_eq!(enable.options.len(), 3);
+        assert_eq!(enable.options.len(), 2);
 
         assert!(enable
             .options
             .iter()
-            .any(|(k, v)| k == "endpoint" && v == "https://push.example.com/abc"));
+            .any(|(k, v)| k == "device-token" && v == "HEX_APNS_TOKEN"));
         assert!(enable
             .options
             .iter()
-            .any(|(k, v)| k == "p256dh" && v == "BASE64KEY"));
-        assert!(enable
-            .options
-            .iter()
-            .any(|(k, v)| k == "auth" && v == "BASE64AUTH"));
+            .any(|(k, v)| k == "platform" && v == "apple"));
     }
 
     #[test]
@@ -363,9 +349,8 @@ mod tests {
         let elem = Element::builder("enable", NS_PUSH)
             .attr("jid", "push-service.example.com")
             .attr("node", "web-push")
-            .attr("endpoint", "https://push.example.com/abc")
-            .attr("p256dh", "BASE64KEY")
-            .attr("auth", "BASE64AUTH")
+            .attr("device-token", "HEX_APNS_TOKEN")
+            .attr("platform", "apple")
             .build();
         let iq = Iq {
             from: Some("alice@example.com".parse().expect("valid jid")),
@@ -377,19 +362,15 @@ mod tests {
 
         assert_eq!(enable.jid, "push-service.example.com");
         assert_eq!(enable.node.as_deref(), Some("web-push"));
-        assert_eq!(enable.options.len(), 3);
+        assert_eq!(enable.options.len(), 2);
         assert!(enable
             .options
             .iter()
-            .any(|(k, v)| k == "endpoint" && v == "https://push.example.com/abc"));
+            .any(|(k, v)| k == "device-token" && v == "HEX_APNS_TOKEN"));
         assert!(enable
             .options
             .iter()
-            .any(|(k, v)| k == "p256dh" && v == "BASE64KEY"));
-        assert!(enable
-            .options
-            .iter()
-            .any(|(k, v)| k == "auth" && v == "BASE64AUTH"));
+            .any(|(k, v)| k == "platform" && v == "apple"));
     }
 
     #[test]
@@ -526,7 +507,7 @@ mod tests {
     fn test_parse_data_form_with_empty_value() {
         let empty_value = Element::builder("value", NS_DATA_FORMS).build();
         let field = Element::builder("field", NS_DATA_FORMS)
-            .attr("var", "endpoint")
+            .attr("var", "device-token")
             .append(empty_value)
             .build();
         let form = Element::builder("x", NS_DATA_FORMS)

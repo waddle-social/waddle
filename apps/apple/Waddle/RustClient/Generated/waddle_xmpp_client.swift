@@ -525,11 +525,15 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
     
     func connect() async 
     
+    func disablePushNotifications(pushServiceJid: String, node: String) async 
+    
     func disconnect() async 
     
     func discoverChannels(waddleId: String) async  -> [WaddleDiscoveredChannel]
     
     func discoverWaddles() async  -> [WaddleDiscoveredWaddle]
+    
+    func enablePushNotifications(pushServiceJid: String, node: String, deviceToken: String) async 
     
     func fetchDmHistory(peerJid: String, maxMessages: UInt32, beforeId: String?) async  -> WaddleMamPage
     
@@ -633,6 +637,24 @@ open func connect()async   {
         )
 }
     
+open func disablePushNotifications(pushServiceJid: String, node: String)async   {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_disable_push_notifications(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(pushServiceJid),FfiConverterString.lower(node)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_void,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_void,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: nil
+            
+        )
+}
+    
 open func disconnect()async   {
     return
         try!  await uniffiRustCallAsync(
@@ -682,6 +704,24 @@ open func discoverWaddles()async  -> [WaddleDiscoveredWaddle]  {
             completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
             freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
             liftFunc: FfiConverterSequenceTypeWaddleDiscoveredWaddle.lift,
+            errorHandler: nil
+            
+        )
+}
+    
+open func enablePushNotifications(pushServiceJid: String, node: String, deviceToken: String)async   {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_enable_push_notifications(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(pushServiceJid),FfiConverterString.lower(node),FfiConverterString.lower(deviceToken)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_void,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_void,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_void,
+            liftFunc: { $0 },
             errorHandler: nil
             
         )
@@ -2739,6 +2779,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_connect() != 32392) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_disable_push_notifications() != 59143) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_disconnect() != 16481) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -2746,6 +2789,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_discover_waddles() != 5994) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_enable_push_notifications() != 36949) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_dm_history() != 13918) {

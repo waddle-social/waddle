@@ -8214,40 +8214,42 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         };
 
         let bare_jid = sender_jid.to_bare().to_string();
-        let endpoint = enable
+        let device_token = enable
             .options
             .iter()
-            .find(|(k, _)| k == "endpoint")
+            .find(|(k, _)| k == "device-token")
             .map(|(_, v)| v.clone());
-        let p256dh = enable
+        let platform = enable
             .options
             .iter()
-            .find(|(k, _)| k == "p256dh")
-            .map(|(_, v)| v.clone());
-        let auth_key = enable
-            .options
-            .iter()
-            .find(|(k, _)| k == "auth")
+            .find(|(k, _)| k == "platform")
             .map(|(_, v)| v.clone());
 
-        if endpoint.is_none() || p256dh.is_none() || auth_key.is_none() {
+        if device_token.is_none() || platform.is_none() {
             return Err(XmppError::bad_request(Some(
-                "Push enable requires endpoint, p256dh, and auth options".into(),
+                "Push enable requires device-token and platform options".into(),
             )));
         }
 
-        // SSRF protection: only allow https endpoints and reject local/private targets.
-        if let Some(ref ep) = endpoint {
-            validate_push_endpoint(ep)?;
+        if !platform
+            .as_deref()
+            .is_some_and(|value| value.eq_ignore_ascii_case("apple"))
+        {
+            return Err(XmppError::bad_request(Some(
+                "Push enable platform must be apple".into(),
+            )));
         }
 
         let sub = crate::push::PushSubscription {
             user_jid: bare_jid.clone(),
             service_jid: enable.jid.clone(),
             node: enable.node.clone(),
-            endpoint,
-            p256dh,
-            auth_key,
+            device_token,
+            platform,
+            sandbox: false,
+            endpoint: None,
+            p256dh: None,
+            auth_key: None,
         };
 
         if let Err(e) = self.push_store.register(sub).await {

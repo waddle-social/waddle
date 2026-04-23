@@ -159,4 +159,10 @@ interface WaddleClient {
 
     [Async]
     WaddleAvatar? request_avatar(string jid);
+
+    [Async]
+    void enable_push_notifications(string push_service_jid, string node, string device_token);
+
+    [Async]
+    void disable_push_notifications(string push_service_jid, string node);
 };

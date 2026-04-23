@@ -174,7 +174,17 @@ final class RustXmppClient: ObservableObject {
     func publishTune(artist: String?, title: String?, source: String?, uri: String?) async {}
     func clearTune() async {}
 
-    func enablePushNotifications(pushServiceJID: String, node: String, token: String) async {}
+    func enablePushNotifications(pushServiceJID: String, node: String, token: String) async {
+        await waddleClient.enablePushNotifications(
+            pushServiceJid: pushServiceJID,
+            node: node,
+            deviceToken: token
+        )
+    }
+
+    func disablePushNotifications(pushServiceJID: String, node: String) async {
+        await waddleClient.disablePushNotifications(pushServiceJid: pushServiceJID, node: node)
+    }
 
     func discoverUploadService() async -> String? { nil }
     func requestUploadSlot(

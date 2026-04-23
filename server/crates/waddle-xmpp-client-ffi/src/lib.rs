@@ -582,6 +582,49 @@ impl WaddleClient {
             },
         }
     }
+
+    pub async fn enable_push_notifications(
+        &self,
+        push_service_jid: String,
+        node: String,
+        device_token: String,
+    ) {
+        let guard = self.handle.lock().await;
+        match guard.as_ref() {
+            None => {
+                drop(guard);
+                self.listener.on_error("Not connected".to_string());
+            }
+            Some(h) => {
+                let result = h
+                    .enable_push_notifications(&push_service_jid, &node, &device_token)
+                    .await;
+                drop(guard);
+                if let Err(e) = result {
+                    self.listener
+                        .on_error(format!("enable_push_notifications failed: {e}"));
+                }
+            }
+        }
+    }
+
+    pub async fn disable_push_notifications(&self, push_service_jid: String, node: String) {
+        let guard = self.handle.lock().await;
+        match guard.as_ref() {
+            None => {
+                drop(guard);
+                self.listener.on_error("Not connected".to_string());
+            }
+            Some(h) => {
+                let result = h.disable_push_notifications(&push_service_jid, &node).await;
+                drop(guard);
+                if let Err(e) = result {
+                    self.listener
+                        .on_error(format!("disable_push_notifications failed: {e}"));
+                }
+            }
+        }
+    }
 }
 
 // ── Event dispatch ───────────────────────────────────────────────────────────

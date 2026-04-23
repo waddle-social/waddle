@@ -293,7 +293,7 @@ fn build_inbox_iq(bare_jid: &str, query_id: &str, max: u32) -> Element {
         .build()
 }
 
-fn build_enable_push_iq(push_service_jid: &str, node: &str, token: &str) -> Element {
+fn build_enable_push_iq(push_service_jid: &str, node: &str, device_token: &str) -> Element {
     let id = format!("push-enable-{}", next_id());
     let form = Element::builder("x", DATA_FORMS_NS)
         .attr("type", "submit")
@@ -309,10 +309,20 @@ fn build_enable_push_iq(push_service_jid: &str, node: &str, token: &str) -> Elem
         )
         .append(
             Element::builder("field", DATA_FORMS_NS)
-                .attr("var", "secret")
+                .attr("var", "device-token")
                 .append(
                     Element::builder("value", DATA_FORMS_NS)
-                        .append(token)
+                        .append(device_token)
+                        .build(),
+                )
+                .build(),
+        )
+        .append(
+            Element::builder("field", DATA_FORMS_NS)
+                .attr("var", "platform")
+                .append(
+                    Element::builder("value", DATA_FORMS_NS)
+                        .append("apple")
                         .build(),
                 )
                 .build(),
@@ -491,7 +501,7 @@ pub trait DiscoveryExt {
         &self,
         push_service_jid: &str,
         node: &str,
-        token: &str,
+        device_token: &str,
     ) -> ClientResult<()>;
 
     /// Disable push notifications for a previously-registered push node.
@@ -614,9 +624,9 @@ impl DiscoveryExt for ClientHandle {
         &self,
         push_service_jid: &str,
         node: &str,
-        token: &str,
+        device_token: &str,
     ) -> ClientResult<()> {
-        let iq = build_enable_push_iq(push_service_jid, node, token);
+        let iq = build_enable_push_iq(push_service_jid, node, device_token);
         self.send_iq(iq).await.map(|_| ())
     }
 
@@ -854,5 +864,35 @@ mod tests {
             .build();
 
         assert!(parse_inbox_result(&message).is_none());
+    }
+
+    #[test]
+    fn build_enable_push_iq_uses_apple_apns_fields() {
+        let iq = build_enable_push_iq("push.example.com", "node-1", "HEX_APNS_TOKEN");
+        let enable = iq
+            .get_child("enable", PUSH_NS)
+            .expect("enable payload should be present");
+        let form = enable
+            .get_child("x", DATA_FORMS_NS)
+            .expect("x:data form should be present");
+        let mut device_token = None;
+        let mut platform = None;
+
+        for field in form.children().filter(|child| child.name() == "field") {
+            let Some(var) = field.attr("var") else {
+                continue;
+            };
+            let value = field
+                .get_child("value", DATA_FORMS_NS)
+                .map(|element| element.text());
+            match var {
+                "device-token" => device_token = value,
+                "platform" => platform = value,
+                _ => {}
+            }
+        }
+
+        assert_eq!(device_token.as_deref(), Some("HEX_APNS_TOKEN"));
+        assert_eq!(platform.as_deref(), Some("apple"));
     }
 }

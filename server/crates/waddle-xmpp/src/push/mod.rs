@@ -41,6 +41,12 @@ pub struct PushSubscription {
     pub service_jid: String,
     /// The PubSub node on the push service.
     pub node: Option<String>,
+    /// The APNS device token registered by the Apple client.
+    pub device_token: Option<String>,
+    /// Client platform marker (for now expected to be `apple`).
+    pub platform: Option<String>,
+    /// Whether this subscription should use APNS sandbox delivery.
+    pub sandbox: bool,
     /// The Web Push endpoint URL (from data form options).
     pub endpoint: Option<String>,
     /// The client's P-256 ECDH public key (base64, from data form options).
@@ -75,6 +81,9 @@ mod tests {
             user_jid: "alice@example.com".into(),
             service_jid: "push.example.com".into(),
             node: Some("web-push".into()),
+            device_token: Some("deadbeef".into()),
+            platform: Some("apple".into()),
+            sandbox: false,
             endpoint: Some("https://push.example.com/abc".into()),
             p256dh: Some("key".into()),
             auth_key: Some("auth".into()),
