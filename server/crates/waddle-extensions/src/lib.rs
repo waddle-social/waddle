@@ -2,6 +2,7 @@ pub mod actor;
 pub mod config;
 pub mod manager;
 pub mod oci;
+pub mod runtime;
 pub mod types;
 
 pub use config::{ExtensionConfig, ExtensionModuleConfig};

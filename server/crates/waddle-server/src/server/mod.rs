@@ -875,15 +875,19 @@ async fn create_router(
     let room_registry = kameo::spawn(RoomRegistryActor::new(muc_domain));
 
     let extension_manager = Arc::new(
-        ExtensionManager::from_config(server_config.extensions.clone()).unwrap_or_else(|error| {
-            warn!(error = %error, "Failed to initialize extension manager; continuing fail-open");
-            ExtensionManager::from_config(ExtensionConfig {
-                enabled: false,
-                cache_dir: String::new(),
-                modules: Vec::new(),
-            })
-            .expect("BUG: failed to create disabled ExtensionManager")
-        }),
+        match ExtensionManager::from_config(server_config.extensions.clone()).await {
+            Ok(mgr) => mgr,
+            Err(error) => {
+                warn!(error = %error, "Failed to initialize extension manager; continuing fail-open");
+                ExtensionManager::from_config(ExtensionConfig {
+                    enabled: false,
+                    cache_dir: String::new(),
+                    modules: Vec::new(),
+                })
+                .await
+                .expect("BUG: failed to create disabled ExtensionManager")
+            }
+        },
     );
 
     let websocket_command_registry = Arc::new(waddle_xmpp::commands::CommandRegistry::new());

@@ -41,7 +41,6 @@ interface lifecycle {
 }
 
 world waddle-extension {
-    import wasi:http/outgoing-handler@0.2.0;
     import wasi:logging/logging@0.1.0-draft;
     import wasi:clocks/monotonic-clock@0.2.0;
 

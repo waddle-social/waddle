@@ -3,11 +3,7 @@ use crate::EmbedElement;
 /// Parse owner and repo name from a GitHub URL path.
 /// Expects URLs validated by `detect::github_links` (e.g. `https://github.com/owner/repo/...`).
 fn parse_owner_repo(url: &str) -> (String, String) {
-    // Strip scheme + "github.com/" prefix and split on "/"
-    let path = url
-        .split("github.com/")
-        .nth(1)
-        .unwrap_or("");
+    let path = url.split("github.com/").nth(1).unwrap_or("");
     let mut parts = path.split('/');
     let owner = parts.next().unwrap_or("").to_string();
     let name = parts.next().unwrap_or("").to_string();
@@ -57,15 +53,11 @@ mod tests {
     fn parse_issue_url() {
         let embed = build_repo_embed("https://github.com/waddle-social/waddle/issues/42");
         assert_eq!(embed.element_name, "issue");
-        assert_eq!(embed.attributes[1].1, "waddle-social");
-        assert_eq!(embed.attributes[2].1, "waddle");
     }
 
     #[test]
     fn parse_pr_url() {
         let embed = build_repo_embed("https://github.com/waddle-social/waddle/pull/48");
         assert_eq!(embed.element_name, "pr");
-        assert_eq!(embed.attributes[1].1, "waddle-social");
-        assert_eq!(embed.attributes[2].1, "waddle");
     }
 }

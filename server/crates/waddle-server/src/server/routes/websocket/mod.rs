@@ -1784,7 +1784,9 @@ mod tests {
                     ),
                     command_registry: Arc::new(CommandRegistry::new()),
                     extension_manager: Arc::new(
-                        ExtensionManager::from_env().expect("extension manager"),
+                        ExtensionManager::from_env()
+                            .await
+                            .expect("extension manager"),
                     ),
                     dispatcher: Arc::new(dispatcher),
                     pubsub_storage: Arc::new(waddle_xmpp::pubsub::InMemoryPubSubStorage::new()),

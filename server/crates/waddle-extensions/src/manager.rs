@@ -1,23 +1,39 @@
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
 use futures::future::join_all;
 use regex::Regex;
+use serde_json::Value;
 use std::collections::HashSet;
+use thiserror::Error;
 use tokio::time::timeout;
 use tracing::{debug, warn};
 use xmpp_parsers::message::Message;
 
 use crate::actor::WasmExtensionActor;
-use crate::config::ExtensionConfig;
+use crate::config::{ExtensionConfig, ExtensionModuleConfig};
 use crate::oci::OciExtensionPuller;
-use crate::types::{
-    message_has_embed_for_namespaces, DetectedLink, ExtensionInfo, FeatureAdvertisement,
-};
+use crate::runtime::{LoadedExtension, WasmRuntime};
+use crate::types::{message_has_embed_for_namespaces, DetectedLink};
 
 const MAX_DETECTED_LINKS: usize = 3;
 const EXTENSION_ENRICH_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[derive(Debug, Error)]
+enum EffectiveModuleConfigError {
+    #[error("extension {extension} config_secret_files requires config to be a JSON object")]
+    NonObjectBaseConfig { extension: String },
+    #[error("failed to read config_secret_files[{key}] from {path} for extension {extension}")]
+    ReadSecretFile {
+        extension: String,
+        key: String,
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+}
 
 #[derive(Debug)]
 pub struct ExtensionManager {
@@ -26,7 +42,11 @@ pub struct ExtensionManager {
 }
 
 impl ExtensionManager {
-    pub fn from_config(config: ExtensionConfig) -> Result<Self> {
+    /// Build an `ExtensionManager` from the given configuration.
+    ///
+    /// Failures to load an individual extension are logged (fail-open) and do not
+    /// prevent the remaining extensions from loading.
+    pub async fn from_config(config: ExtensionConfig) -> Result<Self> {
         if !config.enabled {
             return Ok(Self {
                 actors: Vec::new(),
@@ -34,31 +54,79 @@ impl ExtensionManager {
             });
         }
 
+        let runtime = WasmRuntime::new()?;
         let puller = OciExtensionPuller::new(&config.cache_dir);
         let mut actors = Vec::new();
         let mut feature_namespaces = Vec::new();
 
         for module in &config.modules {
-            if let Err(error) = puller.pull_module(module) {
-                warn!(module = %module.name, error = %error, "failed to pull extension module; continuing fail-open");
+            // Advertise the configured namespace unconditionally, even if the
+            // WASM component fails to load. This keeps disco#info deterministic
+            // across deployments and lets clients send payloads in the
+            // advertised namespace regardless of runtime load status.
+            if !module.namespace.is_empty() && !feature_namespaces.contains(&module.namespace) {
+                feature_namespaces.push(module.namespace.clone());
             }
 
-            let namespace = if module.namespace.is_empty() {
-                format!("urn:waddle:extension:{}", module.name)
-            } else {
-                module.namespace.clone()
-            };
-            let info = ExtensionInfo {
-                name: module.name.clone(),
-                namespace: namespace.clone(),
-                version: module.tag.clone(),
-                features: vec![FeatureAdvertisement {
-                    namespace: namespace.clone(),
-                }],
+            let config_json = match effective_module_config_json(module) {
+                Ok(config_json) => config_json,
+                Err(error) => {
+                    warn!(
+                        extension = %module.name,
+                        %error,
+                        "failed to prepare extension config; skipping enrichment actor"
+                    );
+                    continue;
+                }
             };
 
-            feature_namespaces.push(namespace);
-            actors.push(Arc::new(WasmExtensionActor::new(info)));
+            let wasm_path = match puller.resolve_wasm_path(module) {
+                Ok(path) => path,
+                Err(error) => {
+                    warn!(
+                        extension = %module.name,
+                        %error,
+                        "failed to resolve extension WASM path; skipping enrichment actor"
+                    );
+                    continue;
+                }
+            };
+
+            let loaded = match LoadedExtension::load(&runtime, &wasm_path) {
+                Ok(loaded) => loaded,
+                Err(error) => {
+                    warn!(
+                        extension = %module.name,
+                        %error,
+                        "failed to compile extension component; skipping enrichment actor"
+                    );
+                    continue;
+                }
+            };
+
+            let actor = match WasmExtensionActor::initialize(loaded, &config_json).await {
+                Ok(actor) => actor,
+                Err(error) => {
+                    warn!(
+                        extension = %module.name,
+                        %error,
+                        "extension init() failed; skipping enrichment actor"
+                    );
+                    continue;
+                }
+            };
+
+            let info = actor.info();
+            if !info.namespace.is_empty() && !feature_namespaces.contains(&info.namespace) {
+                feature_namespaces.push(info.namespace.clone());
+            }
+            for feature in &info.features {
+                if !feature_namespaces.contains(&feature.namespace) {
+                    feature_namespaces.push(feature.namespace.clone());
+                }
+            }
+
+            actors.push(Arc::new(actor));
         }
 
         Ok(Self {
@@ -67,8 +135,9 @@ impl ExtensionManager {
         })
     }
 
-    pub fn from_env() -> Result<Self> {
-        Self::from_config(ExtensionConfig::from_env().map_err(anyhow::Error::msg)?)
+    pub async fn from_env() -> Result<Self> {
+        let config = ExtensionConfig::from_env().map_err(anyhow::Error::msg)?;
+        Self::from_config(config).await
     }
 
     pub fn feature_namespaces(&self) -> &[String] {
@@ -101,24 +170,25 @@ impl ExtensionManager {
             return 0;
         }
 
-        let enrich_futures = self
-            .actors
-            .iter()
-            .map(|actor| {
-                let actor_name = actor.info().name;
-                let actor = Arc::clone(actor);
-                let body = body.clone();
-                let links = links.clone();
-                async move {
-                    match timeout(EXTENSION_ENRICH_TIMEOUT, actor.enrich_message(body, links)).await {
-                        Ok(embeds) => embeds,
-                        Err(_) => {
-                            warn!(extension = %actor_name, timeout_secs = EXTENSION_ENRICH_TIMEOUT.as_secs(), "extension enrichment timed out; continuing fail-open");
-                            Vec::new()
-                        }
+        let enrich_futures = self.actors.iter().map(|actor| {
+            let actor_name = actor.info().name;
+            let actor = Arc::clone(actor);
+            let body = body.clone();
+            let links = links.clone();
+            async move {
+                match timeout(EXTENSION_ENRICH_TIMEOUT, actor.enrich_message(body, links)).await {
+                    Ok(embeds) => embeds,
+                    Err(_) => {
+                        warn!(
+                            extension = %actor_name,
+                            timeout_secs = EXTENSION_ENRICH_TIMEOUT.as_secs(),
+                            "extension enrichment timed out; continuing fail-open"
+                        );
+                        Vec::new()
                     }
                 }
-            });
+            }
+        });
         let results = join_all(enrich_futures).await;
 
         let mut count = 0usize;
@@ -134,6 +204,48 @@ impl ExtensionManager {
 
         count
     }
+}
+
+fn effective_module_config_json(
+    module: &ExtensionModuleConfig,
+) -> Result<String, EffectiveModuleConfigError> {
+    effective_module_config_with_reader(module, |path| std::fs::read_to_string(path))
+        .map(|value| value.to_string())
+}
+
+fn effective_module_config_with_reader<F>(
+    module: &ExtensionModuleConfig,
+    mut read_to_string: F,
+) -> Result<Value, EffectiveModuleConfigError>
+where
+    F: FnMut(&Path) -> std::io::Result<String>,
+{
+    if module.config_secret_files.is_empty() {
+        return Ok(module.config.clone());
+    }
+
+    let mut config = match module.config.clone() {
+        Value::Object(config) => config,
+        _ => {
+            return Err(EffectiveModuleConfigError::NonObjectBaseConfig {
+                extension: module.name.clone(),
+            });
+        }
+    };
+
+    for (key, path) in &module.config_secret_files {
+        let contents = read_to_string(Path::new(path)).map_err(|source| {
+            EffectiveModuleConfigError::ReadSecretFile {
+                extension: module.name.clone(),
+                key: key.clone(),
+                path: path.clone(),
+                source,
+            }
+        })?;
+        config.insert(key.clone(), Value::String(contents));
+    }
+
+    Ok(Value::Object(config))
 }
 
 fn detect_links(body: &str) -> Vec<DetectedLink> {
@@ -188,7 +300,19 @@ fn detect_links(body: &str) -> Vec<DetectedLink> {
 
 #[cfg(test)]
 mod tests {
-    use super::{detect_links, MAX_DETECTED_LINKS};
+    use std::collections::BTreeMap;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use serde_json::json;
+    use xmpp_parsers::message::{Body, Message};
+
+    use super::{
+        detect_links, effective_module_config_json, effective_module_config_with_reader,
+        EffectiveModuleConfigError, ExtensionManager, MAX_DETECTED_LINKS,
+    };
+    use crate::config::{ExtensionConfig, ExtensionModuleConfig};
 
     #[test]
     fn detects_urls() {
@@ -213,5 +337,167 @@ mod tests {
         let links = detect_links(body);
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].url, "https://github.com/waddle-social/waddle");
+    }
+
+    #[test]
+    fn merges_secret_file_values_into_effective_config() {
+        let mut config_secret_files = BTreeMap::new();
+        config_secret_files.insert(
+            "github_token".to_string(),
+            "/secrets/github-token".to_string(),
+        );
+        config_secret_files.insert(
+            "webhook_secret".to_string(),
+            "/secrets/webhook-secret".to_string(),
+        );
+
+        let module = ExtensionModuleConfig {
+            name: "github-enricher".to_string(),
+            registry: "ghcr.io/waddle-social/waddle/extensions/github-enricher".to_string(),
+            tag: "latest".to_string(),
+            namespace: "urn:waddle:github:0".to_string(),
+            config: json!({
+                "github_token": "from-config",
+                "log_level": "debug"
+            }),
+            config_secret_files,
+            local_path: None,
+        };
+
+        let merged = effective_module_config_with_reader(&module, |path| match path.to_str() {
+            Some("/secrets/github-token") => Ok("from-secret-file".to_string()),
+            Some("/secrets/webhook-secret") => Ok("webhook-value".to_string()),
+            other => panic!("unexpected path: {other:?}"),
+        })
+        .expect("config should merge");
+
+        assert_eq!(
+            merged,
+            json!({
+                "github_token": "from-secret-file",
+                "log_level": "debug",
+                "webhook_secret": "webhook-value"
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_non_object_config_when_secret_files_are_enabled() {
+        let mut config_secret_files = BTreeMap::new();
+        config_secret_files.insert(
+            "github_token".to_string(),
+            "/secrets/github-token".to_string(),
+        );
+
+        let module = ExtensionModuleConfig {
+            name: "github-enricher".to_string(),
+            registry: "ghcr.io/waddle-social/waddle/extensions/github-enricher".to_string(),
+            tag: "latest".to_string(),
+            namespace: "urn:waddle:github:0".to_string(),
+            config: json!(["not", "an", "object"]),
+            config_secret_files,
+            local_path: None,
+        };
+
+        let error = effective_module_config_with_reader(&module, |_| Ok(String::new()))
+            .expect_err("non-object config should fail");
+        assert!(matches!(
+            error,
+            EffectiveModuleConfigError::NonObjectBaseConfig { extension }
+            if extension == "github-enricher"
+        ));
+    }
+
+    #[test]
+    fn reads_secret_files_from_disk_when_building_effective_config() {
+        let artifact_dir = TestArtifacts::new();
+        let secret_path = artifact_dir.write("github-token", "file-secret\n");
+
+        let mut config_secret_files = BTreeMap::new();
+        config_secret_files.insert(
+            "github_token".to_string(),
+            secret_path.to_string_lossy().into_owned(),
+        );
+
+        let module = ExtensionModuleConfig {
+            name: "github-enricher".to_string(),
+            registry: "ghcr.io/waddle-social/waddle/extensions/github-enricher".to_string(),
+            tag: "latest".to_string(),
+            namespace: "urn:waddle:github:0".to_string(),
+            config: json!({}),
+            config_secret_files,
+            local_path: None,
+        };
+
+        let config_json =
+            effective_module_config_json(&module).expect("secret file should be read from disk");
+        assert_eq!(config_json, r#"{"github_token":"file-secret\n"}"#);
+    }
+
+    #[tokio::test]
+    async fn from_config_skips_actor_when_secret_file_cannot_be_read() {
+        let mut config_secret_files = BTreeMap::new();
+        config_secret_files.insert(
+            "github_token".to_string(),
+            "/path/that/does/not/exist".to_string(),
+        );
+
+        let config = ExtensionConfig {
+            enabled: true,
+            cache_dir: "/var/lib/waddle/extensions".to_string(),
+            modules: vec![ExtensionModuleConfig {
+                name: "github-enricher".to_string(),
+                registry: "ghcr.io/waddle-social/waddle/extensions/github-enricher".to_string(),
+                tag: "latest".to_string(),
+                namespace: "urn:waddle:github:0".to_string(),
+                config: json!({}),
+                config_secret_files,
+                local_path: Some("missing-but-never-read.wasm".to_string()),
+            }],
+        };
+
+        let manager = ExtensionManager::from_config(config)
+            .await
+            .expect("manager should stay fail-open");
+        assert_eq!(manager.feature_namespaces(), ["urn:waddle:github:0"]);
+
+        let mut msg = Message::new(None);
+        msg.bodies.insert(
+            String::new(),
+            Body("https://github.com/waddle-social/waddle".to_string()),
+        );
+        assert_eq!(manager.enrich_message(&mut msg).await, 0);
+        assert!(msg.payloads.is_empty());
+    }
+
+    struct TestArtifacts {
+        root: PathBuf,
+    }
+
+    impl TestArtifacts {
+        fn new() -> Self {
+            let nonce = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock should move forward")
+                .as_nanos();
+            let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("target")
+                .join("test-artifacts")
+                .join(format!("manager-{nonce}-{}", std::process::id()));
+            fs::create_dir_all(&root).expect("artifact directory should be created");
+            Self { root }
+        }
+
+        fn write(&self, name: &str, contents: &str) -> PathBuf {
+            let path = self.root.join(name);
+            fs::write(&path, contents).expect("artifact file should be written");
+            path
+        }
+    }
+
+    impl Drop for TestArtifacts {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
     }
 }

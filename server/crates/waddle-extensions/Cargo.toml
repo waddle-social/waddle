@@ -9,6 +9,7 @@ description = "Waddle Wasm extension runtime and OCI loader"
 
 [dependencies]
 anyhow = { workspace = true }
+async-trait = "0.1"
 futures = { workspace = true }
 minidom = { workspace = true }
 regex = { workspace = true }
@@ -17,6 +18,9 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
+wasmtime = { workspace = true }
+wasmtime-wasi = { workspace = true }
+wasmtime-wasi-http = { workspace = true }
 xmpp-parsers = { workspace = true }
 
 [dev-dependencies]

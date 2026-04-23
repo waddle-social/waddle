@@ -744,8 +744,11 @@ async fn run_test_server<S: AppState>(
         std::sync::Arc::new(waddle_xmpp::push::InMemoryPushStore::new());
     let push_sender: std::sync::Arc<dyn waddle_xmpp::push::WebPushSender + Send + Sync> =
         std::sync::Arc::new(waddle_xmpp::push::HttpWebPushSender::new());
-    let extension_manager =
-        Arc::new(waddle_extensions::ExtensionManager::from_env().expect("extension manager"));
+    let extension_manager = Arc::new(
+        waddle_extensions::ExtensionManager::from_env()
+            .await
+            .expect("extension manager"),
+    );
     // Create a shared command registry for ad-hoc commands
     let command_registry = std::sync::Arc::new(waddle_xmpp::commands::CommandRegistry::new());
 
