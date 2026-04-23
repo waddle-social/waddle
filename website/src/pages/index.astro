@@ -10,10 +10,10 @@ import {
 	WAITLIST_UNAVAILABLE_MESSAGE,
 	WAITLIST_VERIFICATION_MESSAGE,
 } from "../lib/waitlist/constants";
-import { getWaitlistTurnstileConfig } from "../lib/waitlist/runtime";
+import { getWaitlistTurnstileSiteKey } from "../lib/waitlist/runtime";
 
 const waitlistState = Astro.url.searchParams.get(WAITLIST_QUERY_KEY);
-const { siteKey: turnstileSiteKey } = getWaitlistTurnstileConfig();
+const turnstileSiteKey = getWaitlistTurnstileSiteKey();
 const turnstileConfigured = turnstileSiteKey.length > 0;
 const initialStatus =
 	waitlistState === "submitted"

@@ -26,7 +26,7 @@ export type WebsiteWorkerEnv = {
 	DB: D1Database;
 	EMAIL: SendEmailBinding;
 	TURNSTILE_SITE_KEY?: string;
-	TURNSTILE_SECRET_KEY?: string;
+	TURNSTILE_SECRET_KEY?: SecretsStoreSecret;
 };
 
 export function getWorkerEnv(): WebsiteWorkerEnv {

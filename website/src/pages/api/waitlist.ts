@@ -10,7 +10,10 @@ import {
 	WAITLIST_VERIFICATION_MESSAGE,
 } from "../../lib/waitlist/constants";
 import { isValidEmail, normalizeEmail } from "../../lib/waitlist/crypto";
-import { getWaitlistRuntime, getWaitlistTurnstileConfig } from "../../lib/waitlist/runtime";
+import {
+	getWaitlistRuntime,
+	getWaitlistTurnstileSecretKey,
+} from "../../lib/waitlist/runtime";
 import { submitWaitlist } from "../../lib/waitlist/service";
 import { verifyTurnstileToken } from "../../lib/waitlist/turnstile";
 
@@ -47,7 +50,7 @@ export const POST: APIRoute = async ({ request }) => {
 		);
 	}
 
-	const { secretKey: turnstileSecretKey } = getWaitlistTurnstileConfig();
+	const turnstileSecretKey = await getWaitlistTurnstileSecretKey();
 	if (!turnstileSecretKey) {
 		if (!wantsJson(request)) {
 			return redirectHome(request, "offline");

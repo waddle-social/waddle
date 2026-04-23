@@ -3,13 +3,17 @@ import { getWorkerEnv } from "../cloudflare/env";
 import { createWaitlistMailer } from "./mailer";
 import { createDrizzleWaitlistStore } from "./repository";
 
-export function getWaitlistTurnstileConfig() {
+export function getWaitlistTurnstileSiteKey() {
 	const workerEnv = getWorkerEnv();
 
-	return {
-		siteKey: workerEnv.TURNSTILE_SITE_KEY?.trim() ?? "",
-		secretKey: workerEnv.TURNSTILE_SECRET_KEY?.trim() ?? "",
-	};
+	return workerEnv.TURNSTILE_SITE_KEY?.trim() ?? "";
+}
+
+export async function getWaitlistTurnstileSecretKey() {
+	const workerEnv = getWorkerEnv();
+	const secret = await workerEnv.TURNSTILE_SECRET_KEY?.get();
+
+	return secret?.trim() ?? "";
 }
 
 export function getWaitlistRuntime() {
