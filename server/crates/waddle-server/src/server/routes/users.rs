@@ -4,6 +4,8 @@
 //! - GET /v1/users/search
 
 use super::waddles::WaddleState;
+use crate::db::actor::{DbQuery, RowValues};
+use crate::db::{row_value, ValueExt};
 use axum::{
     extract::{Query, State},
     http::StatusCode,
@@ -108,7 +110,7 @@ pub async fn search_users_handler(
 
     let limit = params.limit.clamp(1, 20) as i64;
     let users = match search_users(
-        state.app_state.db_pool.global(),
+        state.app_state.db_pool.global_actor().clone(),
         query,
         limit,
         &std::env::var("WADDLE_XMPP_DOMAIN").unwrap_or_else(|_| "localhost".to_string()),
@@ -135,7 +137,7 @@ pub async fn search_users_handler(
 }
 
 async fn search_users(
-    db: &crate::db::Database,
+    actor: kameo::actor::ActorRef<crate::db::actor::DbActor>,
     query: &str,
     limit: i64,
     xmpp_domain: &str,
@@ -167,43 +169,37 @@ async fn search_users(
         LIMIT ?2
     "#;
 
-    let conn = db.guard().await.map_err(|e| e.to_string())?;
-
-    let mut users = Vec::new();
-    let mut rows = conn
-        .query(sql, libsql::params![query, limit])
+    let rows = actor
+        .ask(DbQuery {
+            sql: sql.to_string(),
+            params: vec![query.into(), limit.into()],
+        })
         .await
         .map_err(|e| format!("Failed to query users: {}", e))?;
 
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|e| format!("Failed to read user row: {}", e))?
-    {
-        users.push(parse_user_row(&row, xmpp_domain)?);
-    }
-
-    Ok(users)
+    rows.into_iter()
+        .map(|row| parse_user_row(&row, xmpp_domain))
+        .collect()
 }
 
-fn parse_user_row(row: &libsql::Row, xmpp_domain: &str) -> Result<SearchUserResponse, String> {
-    let id: String = row
-        .get(0)
+fn parse_user_row(row: &RowValues, xmpp_domain: &str) -> Result<SearchUserResponse, String> {
+    let id = row_value(row, 0)
+        .and_then(ValueExt::as_string)
         .map_err(|e| format!("Failed to get user id: {}", e))?;
-    let username: String = row
-        .get(1)
+    let username = row_value(row, 1)
+        .and_then(ValueExt::as_string)
         .map_err(|e| format!("Failed to get username: {}", e))?;
-    let display_name: Option<String> = row
-        .get(2)
+    let display_name = row_value(row, 2)
+        .and_then(ValueExt::as_optional_string)
         .map_err(|e| format!("Failed to get display_name: {}", e))?;
-    let avatar_url: Option<String> = row
-        .get(3)
+    let avatar_url = row_value(row, 3)
+        .and_then(ValueExt::as_optional_string)
         .map_err(|e| format!("Failed to get avatar_url: {}", e))?;
-    let xmpp_localpart: String = row
-        .get(4)
+    let xmpp_localpart = row_value(row, 4)
+        .and_then(ValueExt::as_string)
         .map_err(|e| format!("Failed to get xmpp_localpart: {}", e))?;
-    let raw_claims_json: Option<String> = row
-        .get(5)
+    let raw_claims_json = row_value(row, 5)
+        .and_then(ValueExt::as_optional_string)
         .map_err(|e| format!("Failed to get raw_claims_json: {}", e))?;
     let avatar_url = if avatar_url.is_some() {
         avatar_url

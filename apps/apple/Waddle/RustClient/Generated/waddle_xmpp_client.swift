@@ -547,7 +547,7 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
     
     func discoverUploadService() async  -> String?
     
-    func discoverWaddles() async  -> [WaddleDiscoveredWaddle]
+    func fetchCanonicalWaddle() async  -> WaddleDiscoveredWaddle?
     
     func fetchDmHistory(peerJid: String, maxMessages: UInt32, beforeId: String?) async  -> WaddleMamPage
     
@@ -707,11 +707,11 @@ open func discoverUploadService()async  -> String?  {
         )
 }
     
-open func discoverWaddles()async  -> [WaddleDiscoveredWaddle]  {
+open func fetchCanonicalWaddle()async  -> WaddleDiscoveredWaddle?  {
     return
         try!  await uniffiRustCallAsync(
             rustFutureFunc: {
-                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_discover_waddles(
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_canonical_waddle(
                     self.uniffiClonePointer()
                     
                 )
@@ -719,7 +719,7 @@ open func discoverWaddles()async  -> [WaddleDiscoveredWaddle]  {
             pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
             completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
             freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
-            liftFunc: FfiConverterSequenceTypeWaddleDiscoveredWaddle.lift,
+            liftFunc: FfiConverterOptionTypeWaddleDiscoveredWaddle.lift,
             errorHandler: nil
             
         )
@@ -2859,6 +2859,30 @@ fileprivate struct FfiConverterOptionTypeWaddleAvatar: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeWaddleDiscoveredWaddle: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleDiscoveredWaddle?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeWaddleDiscoveredWaddle.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeWaddleDiscoveredWaddle.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeWaddleFallbackRange: FfiConverterRustBuffer {
     typealias SwiftType = WaddleFallbackRange?
 
@@ -3054,31 +3078,6 @@ fileprivate struct FfiConverterSequenceTypeWaddleDiscoveredChannel: FfiConverter
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-fileprivate struct FfiConverterSequenceTypeWaddleDiscoveredWaddle: FfiConverterRustBuffer {
-    typealias SwiftType = [WaddleDiscoveredWaddle]
-
-    public static func write(_ value: [WaddleDiscoveredWaddle], into buf: inout [UInt8]) {
-        let len = Int32(value.count)
-        writeInt(&buf, len)
-        for item in value {
-            FfiConverterTypeWaddleDiscoveredWaddle.write(item, into: &buf)
-        }
-    }
-
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [WaddleDiscoveredWaddle] {
-        let len: Int32 = try readInt(&buf)
-        var seq = [WaddleDiscoveredWaddle]()
-        seq.reserveCapacity(Int(len))
-        for _ in 0 ..< len {
-            seq.append(try FfiConverterTypeWaddleDiscoveredWaddle.read(from: &buf))
-        }
-        return seq
-    }
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
 fileprivate struct FfiConverterSequenceTypeWaddleSharedFile: FfiConverterRustBuffer {
     typealias SwiftType = [WaddleSharedFile]
 
@@ -3199,7 +3198,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_discover_upload_service() != 12511) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_discover_waddles() != 5994) {
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_canonical_waddle() != 42002) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_dm_history() != 13918) {

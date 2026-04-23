@@ -726,12 +726,11 @@ async fn run_test_server<S: AppState>(
     let connection_registry = std::sync::Arc::new(waddle_xmpp::registry::ConnectionRegistry::new());
     let user_registry = kameo::spawn(waddle_xmpp::registry::UserRegistryActor::new());
     // Create an in-memory MAM storage for the test (shared)
-    let db = libsql::Builder::new_local(":memory:")
-        .build()
-        .await
-        .unwrap();
-    let conn = db.connect().unwrap();
-    let mam_storage = std::sync::Arc::new(waddle_xmpp::mam::LibSqlMamStorage::new(conn));
+    let mam_storage = std::sync::Arc::new(
+        waddle_xmpp::mam::SqlxMamStorage::open_in_memory()
+            .await
+            .unwrap(),
+    );
     // Create a shared ISR token store
     let isr_token_store = waddle_xmpp::isr::create_shared_store();
     // Create a shared SM session registry for stream resumption

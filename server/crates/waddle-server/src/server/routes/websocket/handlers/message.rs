@@ -11,7 +11,7 @@ use waddle_xmpp::{
         },
         InboxEntry,
     },
-    mam::{add_stanza_id as add_mam_stanza_id, ArchivedMessage, MamStorage, STANZA_ID_NS},
+    mam::{add_stanza_id as add_mam_stanza_id, ArchivedMessage, STANZA_ID_NS},
     muc::room_actor::BuildGroupchatBroadcast,
     registry::{BroadcastOutcome, SendResult},
     xep::xep0430::build_inbox_push,

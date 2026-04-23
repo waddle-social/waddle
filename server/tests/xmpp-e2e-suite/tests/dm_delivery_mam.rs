@@ -5,6 +5,7 @@
 
 use anyhow::{anyhow, Context, Result};
 use kameo::actor::ActorRef;
+use sqlx::sqlite::SqlitePoolOptions;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -97,12 +98,11 @@ async fn run_test_server<S: AppState>(
     let room_registry = kameo::spawn(RoomRegistryActor::new(muc_domain));
     let connection_registry = Arc::new(ConnectionRegistry::new());
     let user_registry = kameo::spawn(UserRegistryActor::new());
-    let db = libsql::Builder::new_local(mam_db_path.to_string_lossy().as_ref())
-        .build()
-        .await
-        .expect("mam db");
-    let conn = db.connect().expect("mam conn");
-    let mam_storage = Arc::new(waddle_xmpp::mam::LibSqlMamStorage::new(conn));
+    let mam_storage = Arc::new(
+        waddle_xmpp::mam::SqlxMamStorage::open(&format!("sqlite://{}", mam_db_path.display()))
+            .await
+            .expect("mam storage"),
+    );
     let isr_token_store = waddle_xmpp::isr::create_shared_store();
     let sm_session_registry: Arc<dyn waddle_xmpp::stream_management::SmSessionRegistry> =
         Arc::new(InMemorySmSessionRegistry::new());
@@ -175,7 +175,7 @@ async fn handle_test_connection<S: AppState>(
     rooms: ActorRef<RoomRegistryActor>,
     conns: Arc<ConnectionRegistry>,
     users: ActorRef<UserRegistryActor>,
-    mam: Arc<waddle_xmpp::mam::LibSqlMamStorage>,
+    mam: Arc<waddle_xmpp::mam::SqlxMamStorage>,
     isr: waddle_xmpp::isr::SharedIsrTokenStore,
     sm_reg: Arc<dyn waddle_xmpp::stream_management::SmSessionRegistry>,
     registration_enabled: bool,
@@ -297,21 +297,16 @@ async fn establish_bound_session(
 }
 
 async fn count_rows_by_body(db_path: &Path, body: &str) -> Result<u64> {
-    let db = libsql::Builder::new_local(db_path.to_string_lossy().as_ref())
-        .build()
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect(&format!("sqlite://{}", db_path.display()))
         .await
-        .context("open mam db")?;
-    let conn = db.connect().context("connect mam db")?;
-    let mut rows = conn
-        .query("SELECT COUNT(*) FROM mam_messages WHERE body = ?1", [body])
+        .context("connect mam db")?;
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mam_messages WHERE body = ?")
+        .bind(body)
+        .fetch_one(&pool)
         .await
         .context("query mam rows")?;
-    let row = rows
-        .next()
-        .await
-        .context("read row stream")?
-        .ok_or_else(|| anyhow!("count query returned no rows"))?;
-    let count: i64 = row.get(0).context("decode count")?;
     Ok(count as u64)
 }
 

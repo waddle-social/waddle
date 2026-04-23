@@ -76,7 +76,7 @@ waddle-xmpp-core = { path = "../waddle-xmpp-core" }
 rcgen = "0.13"
 
 # Database
-libsql = { workspace = true }
+sqlx = { workspace = true }
 
 [dev-dependencies]
 tokio-test = "0.4"

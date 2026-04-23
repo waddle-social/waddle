@@ -1,10 +1,10 @@
 //! Database-backed roster storage for RFC 6121 compliance.
 //!
 //! This module implements the `RosterStorage` trait from `waddle-xmpp` using
-//! libSQL/Turso for persistent storage.
+//! the internal SQLx-backed database adapter for persistent storage.
 
+use crate::db::IntoParams;
 use jid::BareJid;
-use libsql::params::IntoParams;
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{debug, instrument};
@@ -35,7 +35,7 @@ impl DatabaseRosterStorage {
     ) -> Result<Vec<RosterItemRow>, RosterStorageError> {
         let mut rows = self.query_with_persistent(
             "SELECT contact_jid, name, subscription, ask, groups FROM roster_items WHERE user_jid = ?",
-            libsql::params![user_jid.to_string()],
+            crate::db_params![user_jid.to_string()],
         ).await?;
 
         let mut items = Vec::new();
@@ -80,7 +80,7 @@ impl DatabaseRosterStorage {
     ) -> Result<Option<RosterItemRow>, RosterStorageError> {
         let mut rows = self.query_with_persistent(
             "SELECT contact_jid, name, subscription, ask, groups FROM roster_items WHERE user_jid = ? AND contact_jid = ?",
-            libsql::params![user_jid.to_string(), contact_jid.to_string()],
+            crate::db_params![user_jid.to_string(), contact_jid.to_string()],
         ).await?;
 
         match rows
@@ -154,7 +154,7 @@ impl DatabaseRosterStorage {
                 updated_at = datetime('now')
             "#,
             || {
-                libsql::params![
+                crate::db_params![
                     user_jid_s.clone(),
                     contact_jid_s.clone(),
                     name.clone(),
@@ -187,7 +187,7 @@ impl DatabaseRosterStorage {
         let result = self
             .execute_with_retry(
                 "DELETE FROM roster_items WHERE user_jid = ? AND contact_jid = ?",
-                || libsql::params![user_jid_s.clone(), contact_jid_s.clone()],
+                || crate::db_params![user_jid_s.clone(), contact_jid_s.clone()],
             )
             .await?;
 
@@ -209,7 +209,7 @@ impl DatabaseRosterStorage {
         let mut rows = self
             .query_with_persistent(
                 "SELECT version FROM roster_versions WHERE user_jid = ?",
-                libsql::params![user_jid.to_string()],
+                crate::db_params![user_jid.to_string()],
             )
             .await?;
 
@@ -238,7 +238,7 @@ impl DatabaseRosterStorage {
         let mut rows = self
             .query_with_persistent(
                 "SELECT 1 FROM roster_items WHERE user_jid = ? AND contact_jid = ?",
-                libsql::params![user_jid.to_string(), contact_jid.to_string()],
+                crate::db_params![user_jid.to_string(), contact_jid.to_string()],
             )
             .await?;
 
@@ -278,7 +278,7 @@ impl DatabaseRosterStorage {
                 updated_at = datetime('now')
             "#,
             || {
-                libsql::params![
+                crate::db_params![
                     user_jid_s.clone(),
                     contact_jid_s.clone(),
                     subscription_s.clone(),
@@ -309,7 +309,7 @@ impl DatabaseRosterStorage {
     ) -> Result<Vec<String>, RosterStorageError> {
         let mut rows = self.query_with_persistent(
             "SELECT contact_jid FROM roster_items WHERE user_jid = ? AND subscription IN ('from', 'both')",
-            libsql::params![user_jid.to_string()],
+            crate::db_params![user_jid.to_string()],
         ).await?;
 
         let mut jids = Vec::new();
@@ -338,7 +338,7 @@ impl DatabaseRosterStorage {
     ) -> Result<Vec<String>, RosterStorageError> {
         let mut rows = self.query_with_persistent(
             "SELECT contact_jid FROM roster_items WHERE user_jid = ? AND subscription IN ('to', 'both')",
-            libsql::params![user_jid.to_string()],
+            crate::db_params![user_jid.to_string()],
         ).await?;
 
         let mut jids = Vec::new();
@@ -362,7 +362,7 @@ impl DatabaseRosterStorage {
         &self,
         sql: &str,
         params: impl IntoParams,
-    ) -> Result<libsql::Rows, RosterStorageError> {
+    ) -> Result<crate::db::Rows, RosterStorageError> {
         let conn = self
             .db
             .guard()
@@ -431,7 +431,7 @@ impl DatabaseRosterStorage {
                 version = excluded.version,
                 updated_at = datetime('now')
             "#,
-            || libsql::params![user_jid_s.clone(), new_version_s.clone()],
+            || crate::db_params![user_jid_s.clone(), new_version_s.clone()],
         )
         .await?;
 

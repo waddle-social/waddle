@@ -11,17 +11,17 @@
 //! - Plaintext passwords are never stored
 //! - Each user has a unique random salt
 
-use std::sync::Arc;
-
 use argon2::{
     password_hash::{rand_core::OsRng, PasswordHasher, SaltString},
     Argon2,
 };
 use base64::prelude::*;
+use kameo::actor::ActorRef;
 use tracing::debug;
 use waddle_xmpp::ScramCredentials;
 
-use crate::db::Database;
+use crate::db::actor::{DbActor, DbExecute, DbQuery, DbQueryOne};
+use crate::db::{row_value, ValueExt};
 
 use super::AuthError;
 
@@ -45,26 +45,14 @@ pub struct RegisterRequest {
 /// Native user store for XEP-0077 registration and SCRAM authentication.
 #[derive(Clone)]
 pub struct NativeUserStore {
-    /// Database connection
-    db: Arc<Database>,
+    /// Database actor
+    actor: ActorRef<DbActor>,
 }
 
 impl NativeUserStore {
     /// Create a new native user store.
-    pub fn new(db: Arc<Database>) -> Self {
-        Self { db }
-    }
-
-    /// Get a database connection.
-    ///
-    /// For in-memory databases, this returns a guard to the persistent connection
-    /// to ensure data consistency (libSQL creates isolated databases for each `:memory:` connection).
-    /// For file-based databases, we create new connections.
-    async fn get_connection(&self) -> Result<crate::db::ConnectionGuard<'_>, AuthError> {
-        self.db
-            .guard()
-            .await
-            .map_err(|e| AuthError::DatabaseError(e.to_string()))
+    pub fn new(actor: ActorRef<DbActor>) -> Self {
+        Self { actor }
     }
 
     /// Register a new native user.
@@ -102,29 +90,44 @@ impl NativeUserStore {
         );
 
         // Insert into database
-        let conn = self.get_connection().await?;
-
         let email_str = request.email.as_deref();
-        conn.execute(
-                r#"
-                INSERT INTO native_users (username, domain, password_hash, salt, iterations, stored_key, server_key, email)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                "#,
-                (
-                    request.username.as_str(),
-                    request.domain.as_str(),
-                    password_hash.as_str(),
-                    scram_salt_b64.as_str(),
-                    DEFAULT_SCRAM_ITERATIONS as i64,
-                    stored_key.as_slice(),
-                    server_key.as_slice(),
-                    email_str,
-                ),
-            )
+        let rows = self
+            .actor
+            .ask(DbQuery {
+                sql: r#"
+                    INSERT INTO native_users (username, domain, password_hash, salt, iterations, stored_key, server_key, email)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    RETURNING id
+                "#
+                .to_string(),
+                params: vec![
+                    request.username.as_str().into(),
+                    request.domain.as_str().into(),
+                    password_hash.into(),
+                    scram_salt_b64.into(),
+                    i64::from(DEFAULT_SCRAM_ITERATIONS).into(),
+                    stored_key.into(),
+                    server_key.into(),
+                    email_str.map_or(crate::db::Value::Null, crate::db::Value::from),
+                ],
+            })
             .await
             .map_err(db_err)?;
 
-        let user_id = conn.last_insert_rowid();
+        let user_id: i64 = rows
+            .into_iter()
+            .next()
+            .ok_or_else(|| AuthError::DatabaseError("insert did not return id".to_string()))?
+            .first()
+            .cloned()
+            .ok_or_else(|| AuthError::DatabaseError("insert did not return id".to_string()))
+            .and_then(|value| match value {
+                crate::db::Value::Integer(v) => Ok(v),
+                other => Err(AuthError::DatabaseError(format!(
+                    "insert returned unexpected id type: {:?}",
+                    other
+                ))),
+            })?;
 
         debug!(
             username = %request.username,
@@ -138,17 +141,16 @@ impl NativeUserStore {
 
     /// Check if a username exists in the given domain.
     pub async fn user_exists(&self, username: &str, domain: &str) -> Result<bool, AuthError> {
-        let conn = self.get_connection().await?;
-
-        let mut rows = conn
-            .query(
-                "SELECT 1 FROM native_users WHERE username = ? AND domain = ?",
-                (username, domain),
-            )
+        let row = self
+            .actor
+            .ask(DbQueryOne {
+                sql: "SELECT 1 FROM native_users WHERE username = ? AND domain = ?".to_string(),
+                params: vec![username.into(), domain.into()],
+            })
             .await
             .map_err(db_err)?;
 
-        Ok(rows.next().await.map_err(db_err)?.is_some())
+        Ok(row.is_some())
     }
 
     /// Get SCRAM credentials for a user.
@@ -157,28 +159,57 @@ impl NativeUserStore {
         username: &str,
         domain: &str,
     ) -> Result<Option<ScramCredentials>, AuthError> {
-        let conn = self.get_connection().await?;
-
-        let mut rows = conn
-            .query(
-                r#"
-                SELECT salt, iterations, stored_key, server_key
-                FROM native_users
-                WHERE username = ? AND domain = ?
-                "#,
-                (username, domain),
-            )
+        let row = self
+            .actor
+            .ask(DbQueryOne {
+                sql: r#"
+                    SELECT salt, iterations, stored_key, server_key
+                    FROM native_users
+                    WHERE username = ? AND domain = ?
+                "#
+                .to_string(),
+                params: vec![username.into(), domain.into()],
+            })
             .await
             .map_err(db_err)?;
 
-        match rows.next().await.map_err(db_err)? {
+        match row {
             Some(row) => {
-                let iterations: i64 = row.get(1).map_err(db_err)?;
+                let iterations = match row_value(&row, 1).map_err(db_err)? {
+                    crate::db::Value::Integer(value) => *value as i64,
+                    other => {
+                        return Err(AuthError::DatabaseError(format!(
+                            "invalid iterations value: {:?}",
+                            other
+                        )))
+                    }
+                };
+                let salt_b64 = row_value(&row, 0)
+                    .and_then(ValueExt::as_string)
+                    .map_err(db_err)?;
+                let stored_key = match row_value(&row, 2).map_err(db_err)? {
+                    crate::db::Value::Blob(value) => value.clone(),
+                    other => {
+                        return Err(AuthError::DatabaseError(format!(
+                            "invalid stored_key value: {:?}",
+                            other
+                        )))
+                    }
+                };
+                let server_key = match row_value(&row, 3).map_err(db_err)? {
+                    crate::db::Value::Blob(value) => value.clone(),
+                    other => {
+                        return Err(AuthError::DatabaseError(format!(
+                            "invalid server_key value: {:?}",
+                            other
+                        )))
+                    }
+                };
                 Ok(Some(ScramCredentials {
-                    salt_b64: row.get(0).map_err(db_err)?,
+                    salt_b64,
                     iterations: iterations as u32,
-                    stored_key: row.get(2).map_err(db_err)?,
-                    server_key: row.get(3).map_err(db_err)?,
+                    stored_key,
+                    server_key,
                 }))
             }
             None => Ok(None),
@@ -195,19 +226,21 @@ impl NativeUserStore {
     ) -> Result<bool, AuthError> {
         use argon2::password_hash::PasswordVerifier;
 
-        let conn = self.get_connection().await?;
-
-        let mut rows = conn
-            .query(
-                "SELECT password_hash FROM native_users WHERE username = ? AND domain = ?",
-                (username, domain),
-            )
+        let row = self
+            .actor
+            .ask(DbQueryOne {
+                sql: "SELECT password_hash FROM native_users WHERE username = ? AND domain = ?"
+                    .to_string(),
+                params: vec![username.into(), domain.into()],
+            })
             .await
             .map_err(db_err)?;
 
-        match rows.next().await.map_err(db_err)? {
+        match row {
             Some(row) => {
-                let hash_str: String = row.get(0).map_err(db_err)?;
+                let hash_str = row_value(&row, 0)
+                    .and_then(ValueExt::as_string)
+                    .map_err(db_err)?;
                 let parsed_hash = argon2::password_hash::PasswordHash::new(&hash_str)
                     .map_err(|e| AuthError::CryptoError(format!("Invalid password hash: {}", e)))?;
                 Ok(Argon2::default()
@@ -245,23 +278,24 @@ impl NativeUserStore {
             DEFAULT_SCRAM_ITERATIONS,
         );
 
-        let conn = self.get_connection().await?;
-
-        let affected = conn.execute(
-                r#"
-                UPDATE native_users
-                SET password_hash = ?, salt = ?, stored_key = ?, server_key = ?, updated_at = datetime('now')
-                WHERE username = ? AND domain = ?
-                "#,
-                (
-                    password_hash.as_str(),
-                    scram_salt_b64.as_str(),
-                    stored_key.as_slice(),
-                    server_key.as_slice(),
-                    username,
-                    domain,
-                ),
-            )
+        let affected = self
+            .actor
+            .ask(DbExecute {
+                sql: r#"
+                    UPDATE native_users
+                    SET password_hash = ?, salt = ?, stored_key = ?, server_key = ?, updated_at = datetime('now')
+                    WHERE username = ? AND domain = ?
+                "#
+                .to_string(),
+                params: vec![
+                    password_hash.into(),
+                    scram_salt_b64.into(),
+                    stored_key.into(),
+                    server_key.into(),
+                    username.into(),
+                    domain.into(),
+                ],
+            })
             .await
             .map_err(|e| AuthError::DatabaseError(format!("Failed to update password: {}", e)))?;
 
@@ -275,13 +309,12 @@ impl NativeUserStore {
 
     /// Delete a native user.
     pub async fn delete_user(&self, username: &str, domain: &str) -> Result<bool, AuthError> {
-        let conn = self.get_connection().await?;
-
-        let affected = conn
-            .execute(
-                "DELETE FROM native_users WHERE username = ? AND domain = ?",
-                (username, domain),
-            )
+        let affected = self
+            .actor
+            .ask(DbExecute {
+                sql: "DELETE FROM native_users WHERE username = ? AND domain = ?".to_string(),
+                params: vec![username.into(), domain.into()],
+            })
             .await
             .map_err(|e| AuthError::DatabaseError(format!("Failed to delete user: {}", e)))?;
 
@@ -299,7 +332,7 @@ fn generate_scram_salt() -> Vec<u8> {
     rand::random::<[u8; 16]>().to_vec()
 }
 
-/// Helper to convert libsql errors to AuthError.
+/// Helper to convert database errors to AuthError.
 fn db_err<E: std::fmt::Display>(e: E) -> AuthError {
     AuthError::DatabaseError(e.to_string())
 }
@@ -347,7 +380,8 @@ fn validate_username(username: &str) -> Result<(), AuthError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::MigrationRunner;
+    use crate::db::{Database, MigrationRunner};
+    use std::sync::Arc;
 
     fn test_password() -> String {
         format!("{:x}{:x}", rand::random::<u64>(), rand::random::<u64>())
@@ -369,7 +403,8 @@ mod tests {
     #[tokio::test]
     async fn test_register_user() {
         let db = create_test_db().await;
-        let store = NativeUserStore::new(db);
+        let actor = kameo::spawn(crate::db::actor::DbActor::new((*db).clone()));
+        let store = NativeUserStore::new(actor);
         let password = test_password();
 
         let request = RegisterRequest {
@@ -393,7 +428,8 @@ mod tests {
     #[tokio::test]
     async fn test_duplicate_user() {
         let db = create_test_db().await;
-        let store = NativeUserStore::new(db);
+        let actor = kameo::spawn(crate::db::actor::DbActor::new((*db).clone()));
+        let store = NativeUserStore::new(actor);
         let password = test_password();
 
         let request = RegisterRequest {
@@ -416,7 +452,8 @@ mod tests {
     #[tokio::test]
     async fn test_get_scram_credentials() {
         let db = create_test_db().await;
-        let store = NativeUserStore::new(db);
+        let actor = kameo::spawn(crate::db::actor::DbActor::new((*db).clone()));
+        let store = NativeUserStore::new(actor);
         let password = test_password();
 
         let request = RegisterRequest {
@@ -446,7 +483,8 @@ mod tests {
     #[tokio::test]
     async fn test_verify_password() {
         let db = create_test_db().await;
-        let store = NativeUserStore::new(db);
+        let actor = kameo::spawn(crate::db::actor::DbActor::new((*db).clone()));
+        let store = NativeUserStore::new(actor);
         let correct_password = test_password();
         let wrong_password = test_password();
         let missing_password = test_password();
@@ -485,7 +523,8 @@ mod tests {
     #[tokio::test]
     async fn test_update_password() {
         let db = create_test_db().await;
-        let store = NativeUserStore::new(db);
+        let actor = kameo::spawn(crate::db::actor::DbActor::new((*db).clone()));
+        let store = NativeUserStore::new(actor);
         let old_password = test_password();
         let new_password = test_password();
 
@@ -522,7 +561,8 @@ mod tests {
     #[tokio::test]
     async fn test_delete_user() {
         let db = create_test_db().await;
-        let store = NativeUserStore::new(db);
+        let actor = kameo::spawn(crate::db::actor::DbActor::new((*db).clone()));
+        let store = NativeUserStore::new(actor);
         let password = test_password();
 
         let request = RegisterRequest {

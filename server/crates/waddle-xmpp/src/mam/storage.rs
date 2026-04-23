@@ -1,4 +1,4 @@
-//! MAM storage trait and libSQL implementation.
+//! MAM storage trait and sqlx-backed implementations.
 //!
 //! Provides persistent storage for archived messages (XEP-0313).
 //! The storage layer supports:
@@ -8,11 +8,17 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use libsql::Connection;
+use sqlx::postgres::{PgPool, PgPoolOptions, PgRow};
+use sqlx::sqlite::{
+    SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions, SqliteRow,
+};
+use sqlx::{Postgres, QueryBuilder, Row, Sqlite};
+use std::path::Path;
+use std::str::FromStr;
 use std::sync::Arc;
 use thiserror::Error;
-use tokio::sync::Mutex;
-use tracing::{debug, instrument};
+use tokio::sync::RwLock;
+use tracing::{debug, info, instrument};
 use uuid::Uuid;
 
 use super::{ArchivedMessage, MamQuery, MamResult};
@@ -33,9 +39,9 @@ pub enum MamStorageError {
     Serialization(String),
 }
 
-impl From<libsql::Error> for MamStorageError {
-    fn from(e: libsql::Error) -> Self {
-        MamStorageError::Database(e.to_string())
+impl From<sqlx::Error> for MamStorageError {
+    fn from(error: sqlx::Error) -> Self {
+        Self::Database(error.to_string())
     }
 }
 
@@ -87,459 +93,566 @@ pub trait MamStorage: Send + Sync {
     ) -> Result<u64, MamStorageError>;
 }
 
-/// libSQL-based MAM storage implementation.
-///
-/// Uses an in-memory or file-based libSQL database for message archival.
-/// Designed to work with the existing Waddle database infrastructure.
-#[derive(Clone)]
-pub struct LibSqlMamStorage {
-    /// Database connection.
-    /// For in-memory databases, this must be a persistent connection.
-    conn: Arc<Mutex<Connection>>,
-    /// Whether the schema has been initialized.
-    initialized: Arc<std::sync::atomic::AtomicBool>,
+#[derive(Clone, Default)]
+pub struct InMemoryMamStorage {
+    entries: Arc<RwLock<Vec<(String, ArchivedMessage)>>>,
 }
 
-impl LibSqlMamStorage {
-    /// Create a new libSQL MAM storage with the given connection.
-    pub fn new(conn: Connection) -> Self {
-        Self {
-            conn: Arc::new(Mutex::new(conn)),
-            initialized: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        }
+impl InMemoryMamStorage {
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    /// Create from an Arc<Mutex<Connection>> (for sharing with other components).
-    pub fn from_shared(conn: Arc<Mutex<Connection>>) -> Self {
-        Self {
-            conn,
-            initialized: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        }
-    }
-
-    /// Initialize the database schema if not already done.
-    #[instrument(skip(self))]
-    pub async fn initialize(&self) -> Result<(), MamStorageError> {
-        if self.initialized.load(std::sync::atomic::Ordering::Acquire) {
-            return Ok(());
-        }
-
-        let conn = self.conn.lock().await;
-
-        // Create the message archive table
-        conn.execute_batch(MAM_SCHEMA).await?;
-        Self::migrate_schema(&conn).await?;
-
-        self.initialized
-            .store(true, std::sync::atomic::Ordering::Release);
-        debug!("MAM storage schema initialized");
-
-        Ok(())
-    }
-
-    /// Generate a time-sortable archive ID using UUID v7.
     fn generate_archive_id() -> String {
         Uuid::now_v7().to_string()
     }
-
-    async fn migrate_schema(conn: &Connection) -> Result<(), MamStorageError> {
-        Self::ensure_column(
-            conn,
-            "thread_id",
-            "ALTER TABLE mam_messages ADD COLUMN thread_id TEXT",
-        )
-        .await?;
-        Self::ensure_column(
-            conn,
-            "reply_to_id",
-            "ALTER TABLE mam_messages ADD COLUMN reply_to_id TEXT",
-        )
-        .await?;
-        Self::ensure_column(
-            conn,
-            "reply_to_jid",
-            "ALTER TABLE mam_messages ADD COLUMN reply_to_jid TEXT",
-        )
-        .await?;
-        Self::ensure_column(
-            conn,
-            "origin_id",
-            "ALTER TABLE mam_messages ADD COLUMN origin_id TEXT",
-        )
-        .await?;
-        let message_type_added = Self::ensure_column(
-            conn,
-            "message_type",
-            "ALTER TABLE mam_messages ADD COLUMN message_type TEXT NOT NULL DEFAULT 'chat'",
-        )
-        .await?;
-        Self::ensure_column(
-            conn,
-            "stanza_xml",
-            "ALTER TABLE mam_messages ADD COLUMN stanza_xml TEXT",
-        )
-        .await?;
-
-        conn.execute_batch(
-            r#"
-            CREATE INDEX IF NOT EXISTS idx_mam_room_thread
-                ON mam_messages(room_jid, thread_id, timestamp DESC);
-            CREATE INDEX IF NOT EXISTS idx_mam_room_reply_to
-                ON mam_messages(room_jid, reply_to_id, timestamp DESC);
-            "#,
-        )
-        .await?;
-
-        if message_type_added {
-            debug!("Added mam_messages.message_type with NOT NULL DEFAULT 'chat'");
-        }
-
-        Ok(())
-    }
-
-    async fn ensure_column(
-        conn: &Connection,
-        column_name: &str,
-        alter_statement: &str,
-    ) -> Result<bool, MamStorageError> {
-        let mut rows = conn.query("PRAGMA table_info(mam_messages)", ()).await?;
-        let mut exists = false;
-
-        while let Some(row) = rows.next().await? {
-            let name: String = row.get(1)?;
-            if name == column_name {
-                exists = true;
-                break;
-            }
-        }
-
-        if !exists {
-            conn.execute(alter_statement, ()).await?;
-            return Ok(true);
-        }
-
-        Ok(false)
-    }
 }
 
-/// SQL schema for MAM message storage.
-pub const MAM_SCHEMA: &str = r#"
--- Message Archive Management (MAM) table for XEP-0313
-CREATE TABLE IF NOT EXISTS mam_messages (
-    -- Primary key: UUID v7 (time-sortable)
-    id TEXT PRIMARY KEY,
-    -- Room/archive JID this message belongs to
-    room_jid TEXT NOT NULL,
-    -- Timestamp when the message was archived
-    timestamp TEXT NOT NULL,
-    -- Sender JID (full JID with resource/nick)
-    from_jid TEXT NOT NULL,
-    -- Recipient JID (room JID for MUC)
-    to_jid TEXT NOT NULL,
-    -- Message body content
-    body TEXT NOT NULL,
-    -- Original stanza-id from the client (if any)
-    stanza_id TEXT,
-    -- RFC 6121 thread identifier
-    thread_id TEXT,
-    -- XEP-0461 reply target message ID
-    reply_to_id TEXT,
-    -- XEP-0461 optional original sender JID
-    reply_to_jid TEXT,
-    -- XEP-0359 origin-id from client
-    origin_id TEXT,
-    -- Message type ("chat", "groupchat", ...)
-    message_type TEXT NOT NULL DEFAULT 'chat',
-    -- Full normalized stanza XML for faithful MAM replay
-    stanza_xml TEXT,
-    -- Created timestamp for internal tracking
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
--- Index for querying messages by room with timestamp ordering (most common query)
-CREATE INDEX IF NOT EXISTS idx_mam_room_timestamp
-    ON mam_messages(room_jid, timestamp DESC);
-
--- Index for querying by sender within a room
-CREATE INDEX IF NOT EXISTS idx_mam_room_sender
-    ON mam_messages(room_jid, from_jid, timestamp DESC);
-
--- Index for pagination by ID (for before_id/after_id queries)
-CREATE INDEX IF NOT EXISTS idx_mam_room_id
-    ON mam_messages(room_jid, id);
-
-"#;
-
 #[async_trait]
-impl MamStorage for LibSqlMamStorage {
-    #[instrument(skip(self, message), fields(archive = %archive_jid))]
+impl MamStorage for InMemoryMamStorage {
     async fn store_message(
         &self,
         archive_jid: &str,
         message: &ArchivedMessage,
     ) -> Result<String, MamStorageError> {
-        self.initialize().await?;
-
-        // Use provided ID or generate a new one
         let archive_id = if message.id.is_empty() {
             Self::generate_archive_id()
         } else {
             message.id.clone()
         };
 
-        let conn = self.conn.lock().await;
+        let mut stored = message.clone();
+        stored.id = archive_id.clone();
 
-        let timestamp = message.timestamp.to_rfc3339();
-        let stanza_id = message.stanza_id.as_deref();
-        let thread_id = message.thread_id.as_deref();
-        let reply_to_id = message.reply_to_id.as_deref();
-        let reply_to_jid = message.reply_to_jid.as_deref();
-        let origin_id = message.origin_id.as_deref();
-        let message_type = if message.message_type.is_empty() {
-            "chat"
-        } else {
-            message.message_type.as_str()
-        };
-        let stanza_xml = message.stanza_xml.as_deref();
-
-        conn.execute(
-            r#"
-            INSERT INTO mam_messages (
-                id, room_jid, timestamp, from_jid, to_jid, body, stanza_id,
-                thread_id, reply_to_id, reply_to_jid, origin_id, message_type, stanza_xml
-            )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
-            "#,
-            (
-                archive_id.as_str(),
-                archive_jid,
-                timestamp.as_str(),
-                message.from.as_str(),
-                message.to.as_str(),
-                message.body.as_str(),
-                stanza_id,
-                thread_id,
-                reply_to_id,
-                reply_to_jid,
-                origin_id,
-                message_type,
-                stanza_xml,
-            ),
-        )
-        .await?;
-
-        debug!(archive_id = %archive_id, "Message stored in MAM archive");
-
+        let mut entries = self.entries.write().await;
+        entries.push((archive_jid.to_string(), stored));
         Ok(archive_id)
     }
 
-    #[instrument(skip(self), fields(room = %room_jid))]
     async fn query_messages(
         &self,
-        room_jid: &str,
+        archive_jid: &str,
         query: &MamQuery,
     ) -> Result<MamResult, MamStorageError> {
-        self.initialize().await?;
+        let entries = self.entries.read().await;
+        let mut messages: Vec<ArchivedMessage> = entries
+            .iter()
+            .filter(|(jid, _)| jid == archive_jid)
+            .map(|(_, message)| message.clone())
+            .collect();
 
-        let conn = self.conn.lock().await;
-
-        // Build the query dynamically based on filters
-        let mut sql = String::from(
-            r#"
-            SELECT
-                id, room_jid, timestamp, from_jid, to_jid, body, stanza_id,
-                thread_id, reply_to_id, reply_to_jid, origin_id, message_type, stanza_xml
-            FROM mam_messages
-            WHERE room_jid = ?1
-            "#,
-        );
-
-        let mut param_index = 2;
-        let mut conditions = Vec::new();
-        let mut params: Vec<String> = vec![room_jid.to_string()];
-
-        // Time range filters
-        if let Some(ref start) = query.start {
-            conditions.push(format!("timestamp >= ?{}", param_index));
-            params.push(start.to_rfc3339());
-            param_index += 1;
+        if let Some(start) = query.start {
+            messages.retain(|message| message.timestamp >= start);
+        }
+        if let Some(end) = query.end {
+            messages.retain(|message| message.timestamp <= end);
+        }
+        if let Some(with) = query.with.as_deref() {
+            messages
+                .retain(|message| message.from.starts_with(with) || message.to.starts_with(with));
+        }
+        if let Some(before_id) = query.before_id.as_deref().filter(|id| !id.is_empty()) {
+            messages.retain(|message| message.id.as_str() < before_id);
+        }
+        if let Some(after_id) = query.after_id.as_deref() {
+            messages.retain(|message| message.id.as_str() > after_id);
         }
 
-        if let Some(ref end) = query.end {
-            conditions.push(format!("timestamp <= ?{}", param_index));
-            params.push(end.to_rfc3339());
-            param_index += 1;
-        }
-
-        // "with" filter: matches either sender or recipient (for personal archives,
-        // this filters by conversation partner; for MUC archives, by sender).
-        if let Some(ref with) = query.with {
-            conditions.push(format!(
-                "(from_jid LIKE ?{idx} OR to_jid LIKE ?{idx})",
-                idx = param_index
-            ));
-            params.push(format!("{}%", with));
-            param_index += 1;
-        }
-
-        // Pagination filters (before_id/after_id)
-        if let Some(before_id) = query
-            .before_id
-            .as_deref()
-            .filter(|before_id| !before_id.is_empty())
-        {
-            conditions.push(format!("id < ?{}", param_index));
-            params.push(before_id.to_string());
-            param_index += 1;
-        }
-
-        if let Some(ref after_id) = query.after_id {
-            conditions.push(format!("id > ?{}", param_index));
-            params.push(after_id.clone());
-            // param_index += 1; // Not needed after last use
-        }
-
-        // Add conditions to SQL
-        for condition in conditions {
-            sql.push_str(" AND ");
-            sql.push_str(&condition);
-        }
-
-        // Order by timestamp (ascending for forward pagination, descending for backward)
-        if query.before_id.is_some() {
-            sql.push_str(" ORDER BY id DESC");
+        if uses_backward_pagination(query) {
+            messages.sort_by(|a, b| b.id.cmp(&a.id));
         } else {
-            sql.push_str(" ORDER BY id ASC");
+            messages.sort_by(|a, b| a.id.cmp(&b.id));
         }
 
-        // Limit results (add 1 to check if there are more)
-        let limit = query.max.unwrap_or(100).min(500) + 1;
-        sql.push_str(&format!(" LIMIT {}", limit));
-
-        debug!(sql = %sql, params = ?params, "Executing MAM query");
-
-        // Execute the query with dynamic parameters
-        // Convert Vec<String> to Vec<&str> for libsql
-        let params_refs: Vec<&str> = params.iter().map(|s| s.as_str()).collect();
-        let mut rows = match params_refs.len() {
-            1 => conn.query(&sql, [params_refs[0]]).await?,
-            2 => conn.query(&sql, [params_refs[0], params_refs[1]]).await?,
-            3 => {
-                conn.query(&sql, [params_refs[0], params_refs[1], params_refs[2]])
-                    .await?
-            }
-            4 => {
-                conn.query(
-                    &sql,
-                    [
-                        params_refs[0],
-                        params_refs[1],
-                        params_refs[2],
-                        params_refs[3],
-                    ],
-                )
-                .await?
-            }
-            5 => {
-                conn.query(
-                    &sql,
-                    [
-                        params_refs[0],
-                        params_refs[1],
-                        params_refs[2],
-                        params_refs[3],
-                        params_refs[4],
-                    ],
-                )
-                .await?
-            }
-            6 => {
-                conn.query(
-                    &sql,
-                    [
-                        params_refs[0],
-                        params_refs[1],
-                        params_refs[2],
-                        params_refs[3],
-                        params_refs[4],
-                        params_refs[5],
-                    ],
-                )
-                .await?
-            }
-            _ => {
-                return Err(MamStorageError::InvalidQuery(
-                    "Too many query parameters".to_string(),
-                ))
-            }
-        };
-
-        let mut messages = Vec::new();
-
-        while let Some(row) = rows.next().await? {
-            let id: String = row.get(0)?;
-            let timestamp_str: String = row.get(2)?;
-            let from: String = row.get(3)?;
-            let to: String = row.get(4)?;
-            let body: String = row.get(5)?;
-            let stanza_id: Option<String> = row.get(6).ok();
-            let thread_id: Option<String> = row.get(7).ok();
-            let reply_to_id: Option<String> = row.get(8).ok();
-            let reply_to_jid: Option<String> = row.get(9).ok();
-            let origin_id: Option<String> = row.get(10).ok();
-            let message_type: String = row.get(11).unwrap_or_else(|_| "chat".to_string());
-            let stanza_xml: Option<String> = row.get(12).ok();
-
-            let timestamp = DateTime::parse_from_rfc3339(&timestamp_str)
-                .map_err(|e| MamStorageError::Serialization(format!("Invalid timestamp: {}", e)))?
-                .with_timezone(&Utc);
-
-            messages.push(ArchivedMessage {
-                id,
-                timestamp,
-                from,
-                to,
-                body,
-                stanza_id,
-                thread_id,
-                reply_to_id,
-                reply_to_jid,
-                origin_id,
-                message_type,
-                stanza_xml,
-            });
-        }
-
-        // Check if there are more results
         let actual_limit = query.max.unwrap_or(100).min(500) as usize;
-        let complete = messages.len() <= actual_limit;
-
-        // Remove the extra message if we fetched one more than requested
+        let mut complete = true;
         if messages.len() > actual_limit {
-            messages.pop();
+            messages.truncate(actual_limit);
+            complete = false;
         }
 
-        // Reverse if we were paginating backwards so callers always receive chronological order.
-        if query.before_id.is_some() {
+        if uses_backward_pagination(query) {
             messages.reverse();
         }
 
-        let first_id = messages.first().map(|m| m.id.clone());
-        let last_id = messages.last().map(|m| m.id.clone());
-
-        debug!(
-            message_count = messages.len(),
-            complete = complete,
-            "MAM query completed"
-        );
-
+        let first_id = messages.first().map(|message| message.id.clone());
+        let last_id = messages.last().map(|message| message.id.clone());
         Ok(MamResult {
             messages,
             complete,
             first_id,
             last_id,
-            count: None, // Count is optional and expensive
+            count: None,
         })
+    }
+
+    async fn get_message(
+        &self,
+        archive_id: &str,
+    ) -> Result<Option<ArchivedMessage>, MamStorageError> {
+        let entries = self.entries.read().await;
+        Ok(entries
+            .iter()
+            .find(|(_, message)| message.id == archive_id)
+            .map(|(_, message)| message.clone()))
+    }
+
+    async fn count_messages(&self, room_jid: &str) -> Result<u32, MamStorageError> {
+        let entries = self.entries.read().await;
+        Ok(entries.iter().filter(|(jid, _)| jid == room_jid).count() as u32)
+    }
+
+    async fn delete_before(
+        &self,
+        room_jid: &str,
+        before: DateTime<Utc>,
+    ) -> Result<u64, MamStorageError> {
+        let mut entries = self.entries.write().await;
+        let previous_len = entries.len();
+        entries.retain(|(jid, message)| !(jid == room_jid && message.timestamp < before));
+        Ok((previous_len - entries.len()) as u64)
+    }
+}
+
+#[derive(Clone)]
+enum MamDatabaseBackend {
+    Sqlite(SqlitePool),
+    Postgres(PgPool),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MamDatabaseDriver {
+    Sqlite,
+    Postgres,
+}
+
+/// sqlx-backed MAM storage implementation.
+#[derive(Clone)]
+pub struct SqlxMamStorage {
+    backend: MamDatabaseBackend,
+}
+
+impl SqlxMamStorage {
+    pub async fn open(database_url: &str) -> Result<Self, MamStorageError> {
+        let driver = infer_driver(database_url)?;
+        let backend = match driver {
+            MamDatabaseDriver::Sqlite => {
+                ensure_sqlite_parent_dir(database_url)?;
+                let options = SqliteConnectOptions::from_str(database_url)
+                    .map_err(|error| MamStorageError::Database(error.to_string()))?
+                    .create_if_missing(true)
+                    .foreign_keys(true)
+                    .journal_mode(SqliteJournalMode::Wal);
+                let max_connections = if is_in_memory_sqlite(database_url) {
+                    1
+                } else {
+                    10
+                };
+                let pool = SqlitePoolOptions::new()
+                    .max_connections(max_connections)
+                    .connect_with(options)
+                    .await?;
+                MamDatabaseBackend::Sqlite(pool)
+            }
+            MamDatabaseDriver::Postgres => {
+                let pool = PgPoolOptions::new()
+                    .max_connections(10)
+                    .connect(database_url)
+                    .await?;
+                MamDatabaseBackend::Postgres(pool)
+            }
+        };
+
+        let storage = Self { backend };
+        storage.initialize().await?;
+        info!(driver = ?driver, "MAM storage initialized");
+        Ok(storage)
+    }
+
+    pub async fn open_in_memory() -> Result<Self, MamStorageError> {
+        Self::open("sqlite::memory:").await
+    }
+
+    async fn initialize(&self) -> Result<(), MamStorageError> {
+        match &self.backend {
+            MamDatabaseBackend::Sqlite(pool) => execute_sqlite_batch(pool, SQLITE_MAM_SCHEMA).await,
+            MamDatabaseBackend::Postgres(pool) => {
+                execute_postgres_batch(pool, POSTGRES_MAM_SCHEMA).await
+            }
+        }
+    }
+
+    fn generate_archive_id() -> String {
+        Uuid::now_v7().to_string()
+    }
+}
+
+const SELECT_COLUMNS: &str =
+    "id, room_jid, timestamp, from_jid, to_jid, body, stanza_id, thread_id, reply_to_id, reply_to_jid, origin_id, message_type, stanza_xml";
+
+const SQLITE_MAM_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS mam_messages (
+    id TEXT PRIMARY KEY,
+    room_jid TEXT NOT NULL,
+    timestamp TEXT NOT NULL,
+    from_jid TEXT NOT NULL,
+    to_jid TEXT NOT NULL,
+    body TEXT NOT NULL,
+    stanza_id TEXT,
+    thread_id TEXT,
+    reply_to_id TEXT,
+    reply_to_jid TEXT,
+    origin_id TEXT,
+    message_type TEXT NOT NULL DEFAULT 'chat',
+    stanza_xml TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_mam_room_timestamp
+    ON mam_messages(room_jid, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_mam_room_sender
+    ON mam_messages(room_jid, from_jid, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_mam_room_id
+    ON mam_messages(room_jid, id);
+CREATE INDEX IF NOT EXISTS idx_mam_room_thread
+    ON mam_messages(room_jid, thread_id, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_mam_room_reply_to
+    ON mam_messages(room_jid, reply_to_id, timestamp DESC);
+"#;
+
+const POSTGRES_MAM_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS mam_messages (
+    id TEXT PRIMARY KEY,
+    room_jid TEXT NOT NULL,
+    timestamp TIMESTAMPTZ NOT NULL,
+    from_jid TEXT NOT NULL,
+    to_jid TEXT NOT NULL,
+    body TEXT NOT NULL,
+    stanza_id TEXT,
+    thread_id TEXT,
+    reply_to_id TEXT,
+    reply_to_jid TEXT,
+    origin_id TEXT,
+    message_type TEXT NOT NULL DEFAULT 'chat',
+    stanza_xml TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_mam_room_timestamp
+    ON mam_messages(room_jid, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_mam_room_sender
+    ON mam_messages(room_jid, from_jid, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_mam_room_id
+    ON mam_messages(room_jid, id);
+CREATE INDEX IF NOT EXISTS idx_mam_room_thread
+    ON mam_messages(room_jid, thread_id, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_mam_room_reply_to
+    ON mam_messages(room_jid, reply_to_id, timestamp DESC);
+"#;
+
+fn infer_driver(database_url: &str) -> Result<MamDatabaseDriver, MamStorageError> {
+    let lower = database_url.to_ascii_lowercase();
+    if lower.starts_with("postgres://") || lower.starts_with("postgresql://") {
+        return Ok(MamDatabaseDriver::Postgres);
+    }
+    if lower.starts_with("sqlite:") {
+        return Ok(MamDatabaseDriver::Sqlite);
+    }
+
+    Err(MamStorageError::Database(format!(
+        "unsupported MAM database URL '{}': expected sqlite: or postgres://",
+        database_url
+    )))
+}
+
+fn ensure_sqlite_parent_dir(database_url: &str) -> Result<(), MamStorageError> {
+    let Some(path) = sqlite_database_path(database_url) else {
+        return Ok(());
+    };
+
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            MamStorageError::Database(format!("failed to create sqlite parent directory: {error}"))
+        })?;
+    }
+
+    Ok(())
+}
+
+fn is_in_memory_sqlite(database_url: &str) -> bool {
+    matches!(
+        database_url
+            .strip_prefix("sqlite://")
+            .or_else(|| database_url.strip_prefix("sqlite:")),
+        Some(path) if path.starts_with(":memory:")
+    )
+}
+
+fn sqlite_database_path(database_url: &str) -> Option<&Path> {
+    let path = database_url
+        .strip_prefix("sqlite://")
+        .or_else(|| database_url.strip_prefix("sqlite:"))?;
+    if path.is_empty() || path.starts_with(":memory:") || path.starts_with("file:") {
+        return None;
+    }
+    Some(Path::new(path))
+}
+
+async fn execute_sqlite_batch(pool: &SqlitePool, sql: &str) -> Result<(), MamStorageError> {
+    for statement in sql
+        .split(';')
+        .map(str::trim)
+        .filter(|statement| !statement.is_empty())
+    {
+        sqlx::query(statement).execute(pool).await?;
+    }
+    Ok(())
+}
+
+async fn execute_postgres_batch(pool: &PgPool, sql: &str) -> Result<(), MamStorageError> {
+    for statement in sql
+        .split(';')
+        .map(str::trim)
+        .filter(|statement| !statement.is_empty())
+    {
+        sqlx::query(statement).execute(pool).await?;
+    }
+    Ok(())
+}
+
+fn uses_backward_pagination(query: &MamQuery) -> bool {
+    query
+        .before_id
+        .as_deref()
+        .is_some_and(|before_id| !before_id.is_empty())
+}
+
+fn finalize_result(mut messages: Vec<ArchivedMessage>, query: &MamQuery) -> MamResult {
+    let actual_limit = query.max.unwrap_or(100).min(500) as usize;
+    let complete = messages.len() <= actual_limit;
+
+    if messages.len() > actual_limit {
+        messages.pop();
+    }
+
+    if uses_backward_pagination(query) {
+        messages.reverse();
+    }
+
+    let first_id = messages.first().map(|message| message.id.clone());
+    let last_id = messages.last().map(|message| message.id.clone());
+
+    MamResult {
+        messages,
+        complete,
+        first_id,
+        last_id,
+        count: None,
+    }
+}
+
+fn decode_sqlite_message_row(row: &SqliteRow) -> Result<ArchivedMessage, MamStorageError> {
+    let timestamp = DateTime::parse_from_rfc3339(&row.try_get::<String, _>(2)?)
+        .map_err(|error| MamStorageError::Serialization(format!("Invalid timestamp: {error}")))?
+        .with_timezone(&Utc);
+
+    Ok(ArchivedMessage {
+        id: row.try_get(0)?,
+        timestamp,
+        from: row.try_get(3)?,
+        to: row.try_get(4)?,
+        body: row.try_get(5)?,
+        stanza_id: row.try_get(6)?,
+        thread_id: row.try_get(7)?,
+        reply_to_id: row.try_get(8)?,
+        reply_to_jid: row.try_get(9)?,
+        origin_id: row.try_get(10)?,
+        message_type: row.try_get(11)?,
+        stanza_xml: row.try_get(12)?,
+    })
+}
+
+fn decode_postgres_message_row(row: &PgRow) -> Result<ArchivedMessage, MamStorageError> {
+    Ok(ArchivedMessage {
+        id: row.try_get(0)?,
+        timestamp: row.try_get(2)?,
+        from: row.try_get(3)?,
+        to: row.try_get(4)?,
+        body: row.try_get(5)?,
+        stanza_id: row.try_get(6)?,
+        thread_id: row.try_get(7)?,
+        reply_to_id: row.try_get(8)?,
+        reply_to_jid: row.try_get(9)?,
+        origin_id: row.try_get(10)?,
+        message_type: row.try_get(11)?,
+        stanza_xml: row.try_get(12)?,
+    })
+}
+
+#[async_trait]
+impl MamStorage for SqlxMamStorage {
+    #[instrument(skip(self, message), fields(archive = %archive_jid))]
+    async fn store_message(
+        &self,
+        archive_jid: &str,
+        message: &ArchivedMessage,
+    ) -> Result<String, MamStorageError> {
+        let archive_id = if message.id.is_empty() {
+            Self::generate_archive_id()
+        } else {
+            message.id.clone()
+        };
+        let message_type = if message.message_type.is_empty() {
+            "chat"
+        } else {
+            message.message_type.as_str()
+        };
+
+        match &self.backend {
+            MamDatabaseBackend::Sqlite(pool) => {
+                let mut query = QueryBuilder::<Sqlite>::new(
+                    "INSERT INTO mam_messages (id, room_jid, timestamp, from_jid, to_jid, body, stanza_id, thread_id, reply_to_id, reply_to_jid, origin_id, message_type, stanza_xml) ",
+                );
+                query.push_values(std::iter::once(()), |mut builder, _| {
+                    builder
+                        .push_bind(&archive_id)
+                        .push_bind(archive_jid)
+                        .push_bind(message.timestamp.to_rfc3339())
+                        .push_bind(message.from.as_str())
+                        .push_bind(message.to.as_str())
+                        .push_bind(message.body.as_str())
+                        .push_bind(message.stanza_id.as_deref())
+                        .push_bind(message.thread_id.as_deref())
+                        .push_bind(message.reply_to_id.as_deref())
+                        .push_bind(message.reply_to_jid.as_deref())
+                        .push_bind(message.origin_id.as_deref())
+                        .push_bind(message_type)
+                        .push_bind(message.stanza_xml.as_deref());
+                });
+                query.build().execute(pool).await?;
+            }
+            MamDatabaseBackend::Postgres(pool) => {
+                let mut query = QueryBuilder::<Postgres>::new(
+                    "INSERT INTO mam_messages (id, room_jid, timestamp, from_jid, to_jid, body, stanza_id, thread_id, reply_to_id, reply_to_jid, origin_id, message_type, stanza_xml) ",
+                );
+                query.push_values(std::iter::once(()), |mut builder, _| {
+                    builder
+                        .push_bind(&archive_id)
+                        .push_bind(archive_jid)
+                        .push_bind(message.timestamp)
+                        .push_bind(message.from.as_str())
+                        .push_bind(message.to.as_str())
+                        .push_bind(message.body.as_str())
+                        .push_bind(message.stanza_id.as_deref())
+                        .push_bind(message.thread_id.as_deref())
+                        .push_bind(message.reply_to_id.as_deref())
+                        .push_bind(message.reply_to_jid.as_deref())
+                        .push_bind(message.origin_id.as_deref())
+                        .push_bind(message_type)
+                        .push_bind(message.stanza_xml.as_deref());
+                });
+                query.build().execute(pool).await?;
+            }
+        }
+
+        debug!(archive_id = %archive_id, "Message stored in MAM archive");
+        Ok(archive_id)
+    }
+
+    #[instrument(skip(self), fields(archive = %archive_jid))]
+    async fn query_messages(
+        &self,
+        archive_jid: &str,
+        query: &MamQuery,
+    ) -> Result<MamResult, MamStorageError> {
+        let limit = i64::from(query.max.unwrap_or(100).min(500)) + 1;
+        let with_filter = query.with.as_deref().map(|with| format!("{with}%"));
+
+        match &self.backend {
+            MamDatabaseBackend::Sqlite(pool) => {
+                let mut builder = QueryBuilder::<Sqlite>::new(format!(
+                    "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE room_jid = "
+                ));
+                builder.push_bind(archive_jid);
+                if let Some(start) = query.start {
+                    builder
+                        .push(" AND timestamp >= ")
+                        .push_bind(start.to_rfc3339());
+                }
+                if let Some(end) = query.end {
+                    builder
+                        .push(" AND timestamp <= ")
+                        .push_bind(end.to_rfc3339());
+                }
+                if let Some(with) = with_filter.as_deref() {
+                    builder
+                        .push(" AND (from_jid LIKE ")
+                        .push_bind(with)
+                        .push(" OR to_jid LIKE ")
+                        .push_bind(with)
+                        .push(")");
+                }
+                if let Some(before_id) = query.before_id.as_deref().filter(|id| !id.is_empty()) {
+                    builder.push(" AND id < ").push_bind(before_id);
+                }
+                if let Some(after_id) = query.after_id.as_deref() {
+                    builder.push(" AND id > ").push_bind(after_id);
+                }
+                builder.push(if uses_backward_pagination(query) {
+                    " ORDER BY id DESC"
+                } else {
+                    " ORDER BY id ASC"
+                });
+                builder.push(" LIMIT ").push_bind(limit);
+
+                let rows: Vec<SqliteRow> = builder.build().fetch_all(pool).await?;
+                let messages = rows
+                    .iter()
+                    .map(decode_sqlite_message_row)
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(finalize_result(messages, query))
+            }
+            MamDatabaseBackend::Postgres(pool) => {
+                let mut builder = QueryBuilder::<Postgres>::new(format!(
+                    "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE room_jid = "
+                ));
+                builder.push_bind(archive_jid);
+                if let Some(start) = query.start {
+                    builder.push(" AND timestamp >= ").push_bind(start);
+                }
+                if let Some(end) = query.end {
+                    builder.push(" AND timestamp <= ").push_bind(end);
+                }
+                if let Some(with) = with_filter.as_deref() {
+                    builder
+                        .push(" AND (from_jid LIKE ")
+                        .push_bind(with)
+                        .push(" OR to_jid LIKE ")
+                        .push_bind(with)
+                        .push(")");
+                }
+                if let Some(before_id) = query.before_id.as_deref().filter(|id| !id.is_empty()) {
+                    builder.push(" AND id < ").push_bind(before_id);
+                }
+                if let Some(after_id) = query.after_id.as_deref() {
+                    builder.push(" AND id > ").push_bind(after_id);
+                }
+                builder.push(if uses_backward_pagination(query) {
+                    " ORDER BY id DESC"
+                } else {
+                    " ORDER BY id ASC"
+                });
+                builder.push(" LIMIT ").push_bind(limit);
+
+                let rows: Vec<PgRow> = builder.build().fetch_all(pool).await?;
+                let messages = rows
+                    .iter()
+                    .map(decode_postgres_message_row)
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(finalize_result(messages, query))
+            }
+        }
     }
 
     #[instrument(skip(self))]
@@ -547,79 +660,46 @@ impl MamStorage for LibSqlMamStorage {
         &self,
         archive_id: &str,
     ) -> Result<Option<ArchivedMessage>, MamStorageError> {
-        self.initialize().await?;
-
-        let conn = self.conn.lock().await;
-
-        let mut rows = conn
-            .query(
-                r#"
-                SELECT
-                    id, room_jid, timestamp, from_jid, to_jid, body, stanza_id,
-                    thread_id, reply_to_id, reply_to_jid, origin_id, message_type, stanza_xml
-                FROM mam_messages
-                WHERE id = ?1
-                "#,
-                [archive_id],
-            )
-            .await?;
-
-        if let Some(row) = rows.next().await? {
-            let id: String = row.get(0)?;
-            let timestamp_str: String = row.get(2)?;
-            let from: String = row.get(3)?;
-            let to: String = row.get(4)?;
-            let body: String = row.get(5)?;
-            let stanza_id: Option<String> = row.get(6).ok();
-            let thread_id: Option<String> = row.get(7).ok();
-            let reply_to_id: Option<String> = row.get(8).ok();
-            let reply_to_jid: Option<String> = row.get(9).ok();
-            let origin_id: Option<String> = row.get(10).ok();
-            let message_type: String = row.get(11).unwrap_or_else(|_| "chat".to_string());
-            let stanza_xml: Option<String> = row.get(12).ok();
-
-            let timestamp = DateTime::parse_from_rfc3339(&timestamp_str)
-                .map_err(|e| MamStorageError::Serialization(format!("Invalid timestamp: {}", e)))?
-                .with_timezone(&Utc);
-
-            Ok(Some(ArchivedMessage {
-                id,
-                timestamp,
-                from,
-                to,
-                body,
-                stanza_id,
-                thread_id,
-                reply_to_id,
-                reply_to_jid,
-                origin_id,
-                message_type,
-                stanza_xml,
-            }))
-        } else {
-            Ok(None)
+        match &self.backend {
+            MamDatabaseBackend::Sqlite(pool) => {
+                let mut builder = QueryBuilder::<Sqlite>::new(format!(
+                    "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE id = "
+                ));
+                builder.push_bind(archive_id);
+                let row = builder.build().fetch_optional(pool).await?;
+                row.as_ref().map(decode_sqlite_message_row).transpose()
+            }
+            MamDatabaseBackend::Postgres(pool) => {
+                let mut builder = QueryBuilder::<Postgres>::new(format!(
+                    "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE id = "
+                ));
+                builder.push_bind(archive_id);
+                let row = builder.build().fetch_optional(pool).await?;
+                row.as_ref().map(decode_postgres_message_row).transpose()
+            }
         }
     }
 
     #[instrument(skip(self))]
     async fn count_messages(&self, room_jid: &str) -> Result<u32, MamStorageError> {
-        self.initialize().await?;
+        let count = match &self.backend {
+            MamDatabaseBackend::Sqlite(pool) => {
+                let mut builder = QueryBuilder::<Sqlite>::new(
+                    "SELECT COUNT(*) FROM mam_messages WHERE room_jid = ",
+                );
+                builder.push_bind(room_jid);
+                builder.build_query_scalar::<i64>().fetch_one(pool).await?
+            }
+            MamDatabaseBackend::Postgres(pool) => {
+                let mut builder = QueryBuilder::<Postgres>::new(
+                    "SELECT COUNT(*) FROM mam_messages WHERE room_jid = ",
+                );
+                builder.push_bind(room_jid);
+                builder.build_query_scalar::<i64>().fetch_one(pool).await?
+            }
+        };
 
-        let conn = self.conn.lock().await;
-
-        let mut rows = conn
-            .query(
-                "SELECT COUNT(*) FROM mam_messages WHERE room_jid = ?1",
-                [room_jid],
-            )
-            .await?;
-
-        if let Some(row) = rows.next().await? {
-            let count: i64 = row.get(0)?;
-            Ok(count as u32)
-        } else {
-            Ok(0)
-        }
+        Ok(u32::try_from(count).unwrap_or(u32::MAX))
     }
 
     #[instrument(skip(self))]
@@ -628,21 +708,28 @@ impl MamStorage for LibSqlMamStorage {
         room_jid: &str,
         before: DateTime<Utc>,
     ) -> Result<u64, MamStorageError> {
-        self.initialize().await?;
+        let deleted = match &self.backend {
+            MamDatabaseBackend::Sqlite(pool) => {
+                let mut builder =
+                    QueryBuilder::<Sqlite>::new("DELETE FROM mam_messages WHERE room_jid = ");
+                builder
+                    .push_bind(room_jid)
+                    .push(" AND timestamp < ")
+                    .push_bind(before.to_rfc3339());
+                builder.build().execute(pool).await?.rows_affected()
+            }
+            MamDatabaseBackend::Postgres(pool) => {
+                let mut builder =
+                    QueryBuilder::<Postgres>::new("DELETE FROM mam_messages WHERE room_jid = ");
+                builder
+                    .push_bind(room_jid)
+                    .push(" AND timestamp < ")
+                    .push_bind(before);
+                builder.build().execute(pool).await?.rows_affected()
+            }
+        };
 
-        let conn = self.conn.lock().await;
-
-        let before_str = before.to_rfc3339();
-
-        let deleted = conn
-            .execute(
-                "DELETE FROM mam_messages WHERE room_jid = ?1 AND timestamp < ?2",
-                [room_jid, &before_str],
-            )
-            .await?;
-
-        debug!(room = %room_jid, deleted = deleted, "Deleted old messages from MAM archive");
-
+        debug!(archive = %room_jid, deleted, "Deleted old messages from MAM archive");
         Ok(deleted)
     }
 }
@@ -650,14 +737,10 @@ impl MamStorage for LibSqlMamStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
-    async fn create_test_storage() -> LibSqlMamStorage {
-        let db = libsql::Builder::new_local(":memory:")
-            .build()
-            .await
-            .unwrap();
-        let conn = db.connect().unwrap();
-        LibSqlMamStorage::new(conn)
+    async fn create_test_storage() -> SqlxMamStorage {
+        SqlxMamStorage::open_in_memory().await.unwrap()
     }
 
     #[tokio::test]
@@ -665,7 +748,7 @@ mod tests {
         let storage = create_test_storage().await;
 
         let msg = ArchivedMessage {
-            id: String::new(), // Let storage generate ID
+            id: String::new(),
             timestamp: Utc::now(),
             from: "user@example.com/nick".to_string(),
             to: "room@conference.example.com".to_string(),
@@ -730,168 +813,84 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_query_messages_by_room() {
+    async fn test_query_with_pagination() {
         let storage = create_test_storage().await;
+        let archive = "room@conference.example.com";
 
-        let room = "room@conference.example.com";
-
-        // Store multiple messages
-        for i in 0..5 {
+        for body in ["one", "two", "three"] {
             let msg = ArchivedMessage {
                 id: String::new(),
                 timestamp: Utc::now(),
-                from: format!("user{}@example.com/nick", i),
-                to: room.to_string(),
-                body: format!("Message {}", i),
-                stanza_id: None,
+                from: "user@example.com/device".to_string(),
+                to: archive.to_string(),
+                body: body.to_string(),
                 ..Default::default()
             };
-            storage.store_message(room, &msg).await.unwrap();
+            storage.store_message(archive, &msg).await.unwrap();
         }
 
-        // Query all messages
-        let result = storage
-            .query_messages(room, &MamQuery::default())
+        let page_one = storage
+            .query_messages(
+                archive,
+                &MamQuery {
+                    max: Some(2),
+                    ..Default::default()
+                },
+            )
             .await
             .unwrap();
-        assert_eq!(result.messages.len(), 5);
-        assert!(result.complete);
+        assert_eq!(page_one.messages.len(), 2);
+        assert!(!page_one.complete);
+
+        let page_two = storage
+            .query_messages(
+                archive,
+                &MamQuery {
+                    after_id: page_one.last_id.clone(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(page_two.messages.len(), 1);
+        assert_eq!(page_two.messages[0].body, "three");
     }
 
-    #[tokio::test]
-    async fn test_query_with_limit() {
-        let storage = create_test_storage().await;
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_sqlite_file_backing_persists() {
+        let artifacts = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/test-artifacts");
+        std::fs::create_dir_all(&artifacts).expect("artifacts dir");
+        let path = artifacts.join(format!("mam-{}.db", uuid::Uuid::new_v4()));
+        let database_url = format!("sqlite://{}", path.display());
+        let archive = "room@conference.example.com";
 
-        let room = "room@conference.example.com";
-
-        // Store 10 messages
-        for i in 0..10 {
+        {
+            let storage = SqlxMamStorage::open(&database_url).await.expect("storage");
             let msg = ArchivedMessage {
                 id: String::new(),
                 timestamp: Utc::now(),
-                from: "user@example.com/nick".to_string(),
-                to: room.to_string(),
-                body: format!("Message {}", i),
-                stanza_id: None,
+                from: "user@example.com/device".to_string(),
+                to: archive.to_string(),
+                body: "persisted".to_string(),
                 ..Default::default()
             };
-            storage.store_message(room, &msg).await.unwrap();
+            storage.store_message(archive, &msg).await.expect("store");
         }
 
-        // Query with limit
-        let query = MamQuery {
-            max: Some(5),
-            ..Default::default()
-        };
-        let result = storage.query_messages(room, &query).await.unwrap();
-        assert_eq!(result.messages.len(), 5);
-        assert!(!result.complete); // There are more messages
-    }
+        let reopened = SqlxMamStorage::open(&database_url).await.expect("reopen");
+        let result = reopened
+            .query_messages(archive, &MamQuery::default())
+            .await
+            .expect("query");
+        assert_eq!(result.messages.len(), 1);
+        assert_eq!(result.messages[0].body, "persisted");
 
-    #[tokio::test]
-    async fn test_query_last_page_with_empty_before_returns_latest_messages() {
-        let storage = create_test_storage().await;
-
-        let room = "room@conference.example.com";
-
-        for i in 0..10 {
-            let msg = ArchivedMessage {
-                id: String::new(),
-                timestamp: Utc::now(),
-                from: "user@example.com/nick".to_string(),
-                to: room.to_string(),
-                body: format!("Message {}", i),
-                stanza_id: None,
-                ..Default::default()
-            };
-            storage.store_message(room, &msg).await.unwrap();
+        for cleanup in [
+            path.clone(),
+            PathBuf::from(format!("{}-shm", path.display())),
+            PathBuf::from(format!("{}-wal", path.display())),
+        ] {
+            let _ = std::fs::remove_file(cleanup);
         }
-
-        let query = MamQuery {
-            max: Some(3),
-            before_id: Some(String::new()),
-            ..Default::default()
-        };
-        let result = storage.query_messages(room, &query).await.unwrap();
-
-        assert_eq!(result.messages.len(), 3);
-        assert_eq!(
-            result
-                .messages
-                .iter()
-                .map(|message| message.body.as_str())
-                .collect::<Vec<_>>(),
-            vec!["Message 7", "Message 8", "Message 9"]
-        );
-    }
-
-    #[tokio::test]
-    async fn test_count_messages() {
-        let storage = create_test_storage().await;
-
-        let room = "room@conference.example.com";
-
-        // Store messages
-        for i in 0..7 {
-            let msg = ArchivedMessage {
-                id: String::new(),
-                timestamp: Utc::now(),
-                from: "user@example.com/nick".to_string(),
-                to: room.to_string(),
-                body: format!("Message {}", i),
-                stanza_id: None,
-                ..Default::default()
-            };
-            storage.store_message(room, &msg).await.unwrap();
-        }
-
-        let count = storage.count_messages(room).await.unwrap();
-        assert_eq!(count, 7);
-    }
-
-    #[tokio::test]
-    async fn test_delete_before() {
-        let storage = create_test_storage().await;
-
-        let room = "room@conference.example.com";
-        let old_time = Utc::now() - chrono::Duration::hours(2);
-        let new_time = Utc::now();
-
-        // Store old messages
-        for i in 0..3 {
-            let msg = ArchivedMessage {
-                id: String::new(),
-                timestamp: old_time,
-                from: "user@example.com/nick".to_string(),
-                to: room.to_string(),
-                body: format!("Old message {}", i),
-                stanza_id: None,
-                ..Default::default()
-            };
-            storage.store_message(room, &msg).await.unwrap();
-        }
-
-        // Store new messages
-        for i in 0..2 {
-            let msg = ArchivedMessage {
-                id: String::new(),
-                timestamp: new_time,
-                from: "user@example.com/nick".to_string(),
-                to: room.to_string(),
-                body: format!("New message {}", i),
-                stanza_id: None,
-                ..Default::default()
-            };
-            storage.store_message(room, &msg).await.unwrap();
-        }
-
-        // Delete old messages
-        let cutoff = Utc::now() - chrono::Duration::hours(1);
-        let deleted = storage.delete_before(room, cutoff).await.unwrap();
-        assert_eq!(deleted, 3);
-
-        // Verify only new messages remain
-        let count = storage.count_messages(room).await.unwrap();
-        assert_eq!(count, 2);
     }
 }

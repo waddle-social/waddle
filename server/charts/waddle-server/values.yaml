@@ -76,9 +76,14 @@ persistence:
   size: 10Gi
   storageClassName: ""
   mountPath: /var/lib/waddle
-  dbFileName: waddle.db
-  mamDbFileName: mam.db
   uploadSubPath: uploads
+
+database:
+  driver: postgres
+  # Non-sensitive DSN overrides (prefer secret.databaseUrl for credentials).
+  url: ""
+  xmppMamUrl: ""
+  xmppInboxUrl: ""
 
 xmpp:
   enabled: true
@@ -137,6 +142,10 @@ secret:
   # Example:
   # [{"id":"github","display_name":"GitHub","kind":"oauth2","issuer":"https://github.com","client_id":"...","client_secret":"...","scopes":["read:user","user:email"],"authorization_endpoint":"https://github.com/login/oauth/authorize","token_endpoint":"https://github.com/login/oauth/access_token","userinfo_endpoint":"https://api.github.com/user","subject_claim":"id","username_claim":"login","email_claim":"email"}]
   authProvidersJson: ""
+  # sqlx DSNs (recommended location for sensitive URLs).
+  databaseUrl: ""
+  xmppMamDatabaseUrl: ""
+  xmppInboxDatabaseUrl: ""
   githubToken: ""
 
 probes:

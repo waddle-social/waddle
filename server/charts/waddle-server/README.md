@@ -48,9 +48,19 @@ If `xmpp.tls.secretName` is not set, the chart will not inject `WADDLE_XMPP_TLS_
 
 By default this chart creates a PVC and stores:
 
-- `WADDLE_DB_PATH`: `<mountPath>/<dbFileName>`
-- `WADDLE_XMPP_MAM_DB`: `<mountPath>/<mamDbFileName>`
 - `WADDLE_UPLOAD_DIR`: `<mountPath>/<uploadSubPath>`
+
+Primary database wiring is DSN/driver based for sqlx:
+
+- `WADDLE_DB_DRIVER` (default: `postgres`)
+- `WADDLE_DATABASE_URL` (primary DB DSN)
+- `WADDLE_XMPP_MAM_DATABASE_URL` (optional MAM DSN override)
+- `WADDLE_XMPP_INBOX_DATABASE_URL` (optional inbox DSN override)
+
+Set DSNs with either:
+
+- non-sensitive `database.*` values (ConfigMap), or
+- `secret.databaseUrl` / `secret.xmppMamDatabaseUrl` / `secret.xmppInboxDatabaseUrl` (recommended for credentials)
 
 Scaling note:
 - The default `accessModes: [ReadWriteOnce]` is typically not compatible with `replicaCount > 1`.
@@ -72,6 +82,9 @@ The chart supports an app secret containing:
 
 - `WADDLE_SESSION_KEY` (required by server features relying on encrypted session data)
 - `WADDLE_AUTH_PROVIDERS_JSON` (optional; required to enable `/api/auth/*` broker flows)
+- `WADDLE_DATABASE_URL` (optional; preferred location for DB DSN with credentials)
+- `WADDLE_XMPP_MAM_DATABASE_URL` (optional MAM DSN override)
+- `WADDLE_XMPP_INBOX_DATABASE_URL` (optional inbox DSN override)
 - `GITHUB_TOKEN` (optional, for GitHub link enrichment)
 
 Provider JSON may also be set in `config.authProvidersJson`, but `secret.authProvidersJson`

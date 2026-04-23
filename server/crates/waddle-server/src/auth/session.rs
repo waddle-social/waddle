@@ -65,6 +65,10 @@ impl SessionManager {
         }
     }
 
+    pub fn actor_ref(&self) -> ActorRef<DbActor> {
+        self.actor.clone()
+    }
+
     fn token_hash(&self, token: &str) -> String {
         match &self.hash_key {
             Some(key) => {
@@ -96,11 +100,11 @@ impl SessionManager {
             .ask(DbExecute {
                 sql,
                 params: vec![
-                    libsql::Value::from(session.user_id.as_str()),
-                    libsql::Value::from(session.username.as_str()),
-                    libsql::Value::from(session.xmpp_localpart.as_str()),
-                    libsql::Value::from(session.created_at.to_rfc3339()),
-                    libsql::Value::from(session.created_at.to_rfc3339()),
+                    crate::db::Value::from(session.user_id.as_str()),
+                    crate::db::Value::from(session.username.as_str()),
+                    crate::db::Value::from(session.xmpp_localpart.as_str()),
+                    crate::db::Value::from(session.created_at.to_rfc3339()),
+                    crate::db::Value::from(session.created_at.to_rfc3339()),
                 ],
             })
             .await
@@ -125,15 +129,15 @@ impl SessionManager {
             .ask(DbExecute {
                 sql,
                 params: vec![
-                    libsql::Value::from(session.id.as_str()),
-                    libsql::Value::from(session.user_id.as_str()),
-                    libsql::Value::from(token_hash),
+                    crate::db::Value::from(session.id.as_str()),
+                    crate::db::Value::from(session.user_id.as_str()),
+                    crate::db::Value::from(token_hash),
                     match expires_at {
-                        Some(v) => libsql::Value::from(v),
-                        None => libsql::Value::Null,
+                        Some(v) => crate::db::Value::from(v),
+                        None => crate::db::Value::Null,
                     },
-                    libsql::Value::from(session.created_at.to_rfc3339()),
-                    libsql::Value::from(session.last_used_at.to_rfc3339()),
+                    crate::db::Value::from(session.created_at.to_rfc3339()),
+                    crate::db::Value::from(session.last_used_at.to_rfc3339()),
                 ],
             })
             .await
@@ -158,7 +162,7 @@ impl SessionManager {
         )))
     }
 
-    fn values_to_session(&self, row: &[libsql::Value]) -> Result<Session, AuthError> {
+    fn values_to_session(&self, row: &[crate::db::Value]) -> Result<Session, AuthError> {
         let id = row_value(row, 0)
             .and_then(ValueExt::as_string)
             .map_err(|e| AuthError::DatabaseError(format!("Failed to get session id: {}", e)))?;
@@ -229,7 +233,7 @@ impl SessionManager {
             .actor
             .ask(DbQueryOne {
                 sql,
-                params: vec![libsql::Value::from(session_id)],
+                params: vec![crate::db::Value::from(session_id)],
             })
             .await
             .map_err(Self::ask_err)?;
@@ -247,7 +251,10 @@ impl SessionManager {
         self.actor
             .ask(DbExecute {
                 sql: "UPDATE sessions SET last_used_at = ? WHERE id = ?".to_string(),
-                params: vec![libsql::Value::from(now), libsql::Value::from(session_id)],
+                params: vec![
+                    crate::db::Value::from(now),
+                    crate::db::Value::from(session_id),
+                ],
             })
             .await
             .map_err(Self::ask_err)?;
@@ -259,7 +266,7 @@ impl SessionManager {
         self.actor
             .ask(DbExecute {
                 sql: "DELETE FROM sessions WHERE id = ?".to_string(),
-                params: vec![libsql::Value::from(session_id)],
+                params: vec![crate::db::Value::from(session_id)],
             })
             .await
             .map_err(Self::ask_err)?;
@@ -290,7 +297,7 @@ impl SessionManager {
             .ask(DbExecute {
                 sql: "DELETE FROM sessions WHERE expires_at IS NOT NULL AND expires_at < ?"
                     .to_string(),
-                params: vec![libsql::Value::from(now)],
+                params: vec![crate::db::Value::from(now)],
             })
             .await
             .map_err(Self::ask_err)?;

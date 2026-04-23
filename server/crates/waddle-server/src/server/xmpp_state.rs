@@ -13,7 +13,7 @@ use crate::auth::{
     jid_to_localpart, localpart_to_jid, NativeUserStore, RegisterRequest, SessionManager,
 };
 use crate::db::actor::{DbActor, DbExecute, DbQuery, DbQueryOne, GetDatabase};
-use crate::db::{row_value, Database, DatabaseError, DatabasePool, MigrationRunner, ValueExt};
+use crate::db::{row_value, Database, DatabaseError, DatabasePool, ValueExt};
 use crate::permissions::{
     Object, ObjectType, PermissionService, Relation, Subject, SubjectType, Tuple,
 };
@@ -41,14 +41,7 @@ impl WaddleDbService {
         &self,
         waddle_id: &str,
     ) -> Result<ActorRef<DbActor>, XmppError> {
-        let actor = self.actor_for_waddle(waddle_id).await?;
-        let runner = MigrationRunner::waddle();
-        if let Ok(db) = actor.ask(GetDatabase).await {
-            if let Err(e) = runner.run(&db).await {
-                warn!(waddle_id = %waddle_id, error = %e, "Failed to run waddle DB migrations");
-            }
-        }
-        Ok(actor)
+        self.actor_for_waddle(waddle_id).await
     }
 }
 
@@ -94,8 +87,8 @@ impl XmppAppState {
         encryption_key: Option<&[u8]>,
     ) -> Self {
         let session_manager = SessionManager::new(db_actor.clone(), encryption_key);
-        let permission_service = PermissionService::new(Arc::clone(&db));
-        let native_user_store = NativeUserStore::new(Arc::clone(&db));
+        let permission_service = PermissionService::new(db_actor.clone());
+        let native_user_store = NativeUserStore::new(db_actor.clone());
         let vcard_store = VCardStore::new(Arc::clone(&db));
 
         Self {
@@ -550,7 +543,7 @@ impl waddle_xmpp::AppState for XmppAppState {
             .global_db_actor
             .ask(DbQueryOne {
                 sql: "SELECT avatar_url FROM users WHERE xmpp_localpart = ? LIMIT 1".to_string(),
-                params: vec![libsql::Value::from(localpart.clone())],
+                params: vec![crate::db::Value::from(localpart.clone())],
             })
             .await
             .map_err(|e| {
@@ -629,12 +622,12 @@ impl waddle_xmpp::AppState for XmppAppState {
             .ask(DbExecute {
                 sql: "INSERT INTO upload_slots (id, requester_jid, filename, size_bytes, content_type, status, expires_at) VALUES (?, ?, ?, ?, ?, 'pending', ?)".to_string(),
                 params: vec![
-                    libsql::Value::from(slot_id.clone()),
-                    libsql::Value::from(requester_jid.to_string()),
-                    libsql::Value::from(safe_filename.clone()),
-                    libsql::Value::from(size as i64),
-                    libsql::Value::from(effective_type.clone()),
-                    libsql::Value::from(expires_at.to_rfc3339()),
+                    crate::db::Value::from(slot_id.clone()),
+                    crate::db::Value::from(requester_jid.to_string()),
+                    crate::db::Value::from(safe_filename.clone()),
+                    crate::db::Value::from(size as i64),
+                    crate::db::Value::from(effective_type.clone()),
+                    crate::db::Value::from(expires_at.to_rfc3339()),
                 ],
             })
             .await
@@ -1011,8 +1004,8 @@ impl waddle_xmpp::AppState for XmppAppState {
                 sql: "SELECT xml_content FROM private_xml_storage WHERE jid = ? AND namespace = ?"
                     .to_string(),
                 params: vec![
-                    libsql::Value::from(jid.to_string()),
-                    libsql::Value::from(namespace.to_string()),
+                    crate::db::Value::from(jid.to_string()),
+                    crate::db::Value::from(namespace.to_string()),
                 ],
             })
             .await
@@ -1043,9 +1036,9 @@ impl waddle_xmpp::AppState for XmppAppState {
             .ask(DbExecute {
                 sql: "INSERT OR REPLACE INTO private_xml_storage (jid, namespace, xml_content, updated_at) VALUES (?, ?, ?, datetime('now'))".to_string(),
                 params: vec![
-                    libsql::Value::from(jid.to_string()),
-                    libsql::Value::from(namespace.to_string()),
-                    libsql::Value::from(xml_content.to_string()),
+                    crate::db::Value::from(jid.to_string()),
+                    crate::db::Value::from(namespace.to_string()),
+                    crate::db::Value::from(xml_content.to_string()),
                 ],
             })
             .await
@@ -1155,9 +1148,9 @@ impl waddle_xmpp::AppState for XmppAppState {
                     "#
                     .to_string(),
                     params: vec![
-                        libsql::Value::from(user_id.to_string()),
-                        libsql::Value::from(PAGE_SIZE as i64),
-                        libsql::Value::from(offset as i64),
+                        crate::db::Value::from(user_id.to_string()),
+                        crate::db::Value::from(PAGE_SIZE as i64),
+                        crate::db::Value::from(offset as i64),
                     ],
                 })
                 .await
@@ -1222,8 +1215,8 @@ impl waddle_xmpp::AppState for XmppAppState {
                     "#
                     .to_string(),
                     params: vec![
-                        libsql::Value::from(PAGE_SIZE as i64),
-                        libsql::Value::from(offset as i64),
+                        crate::db::Value::from(PAGE_SIZE as i64),
+                        crate::db::Value::from(offset as i64),
                     ],
                 })
                 .await
@@ -1302,7 +1295,7 @@ impl waddle_xmpp::AppState for XmppAppState {
                     WHERE id = ?
                 "#
                 .to_string(),
-                params: vec![libsql::Value::from(channel_id.to_string())],
+                params: vec![crate::db::Value::from(channel_id.to_string())],
             })
             .await
         {
@@ -1365,7 +1358,7 @@ impl waddle_xmpp::AppState for XmppAppState {
                     WHERE w.id = ?
                 "#
                 .to_string(),
-                params: vec![libsql::Value::from(waddle_id.to_string())],
+                params: vec![crate::db::Value::from(waddle_id.to_string())],
             })
             .await
             .map_err(|e| {
@@ -1443,9 +1436,9 @@ impl waddle_xmpp::AppState for XmppAppState {
                     "#
                     .to_string(),
                     params: vec![
-                        libsql::Value::from(user_id.to_string()),
-                        libsql::Value::from(PAGE_SIZE as i64),
-                        libsql::Value::from(offset as i64),
+                        crate::db::Value::from(user_id.to_string()),
+                        crate::db::Value::from(PAGE_SIZE as i64),
+                        crate::db::Value::from(offset as i64),
                     ],
                 })
                 .await
@@ -1530,8 +1523,8 @@ impl waddle_xmpp::AppState for XmppAppState {
                 "#
                 .to_string(),
                 params: vec![
-                    libsql::Value::from(limit as i64),
-                    libsql::Value::from(offset as i64),
+                    crate::db::Value::from(limit as i64),
+                    crate::db::Value::from(offset as i64),
                 ],
             })
             .await
@@ -1589,9 +1582,9 @@ impl waddle_xmpp::AppState for XmppAppState {
 // Roster Conversion Helpers
 // =========================================================================
 
-fn value_as_bool(value: &libsql::Value) -> Result<bool, DatabaseError> {
+fn value_as_bool(value: &crate::db::Value) -> Result<bool, DatabaseError> {
     match value {
-        libsql::Value::Integer(v) => Ok(*v != 0),
+        crate::db::Value::Integer(v) => Ok(*v != 0),
         other => Err(DatabaseError::QueryFailed(format!(
             "expected integer boolean, got {:?}",
             other
@@ -1695,18 +1688,18 @@ impl waddle_xmpp::commands::CreateChannelDeps for XmppAppState {
                 "#
                 .to_string(),
                 params: vec![
-                    libsql::Value::from(channel_id.as_str()),
-                    libsql::Value::from(metadata.name.as_str()),
+                    crate::db::Value::from(channel_id.as_str()),
+                    crate::db::Value::from(metadata.name.as_str()),
                     metadata
                         .description
                         .as_deref()
-                        .map(libsql::Value::from)
-                        .unwrap_or(libsql::Value::Null),
-                    libsql::Value::from(metadata.channel_type.as_str()),
-                    libsql::Value::from(metadata.position as i64),
-                    libsql::Value::from(0_i64),
-                    libsql::Value::from(now.as_str()),
-                    libsql::Value::from(now.as_str()),
+                        .map(crate::db::Value::from)
+                        .unwrap_or(crate::db::Value::Null),
+                    crate::db::Value::from(metadata.channel_type.as_str()),
+                    crate::db::Value::from(metadata.position as i64),
+                    crate::db::Value::from(0_i64),
+                    crate::db::Value::from(now.as_str()),
+                    crate::db::Value::from(now.as_str()),
                 ],
             })
             .await
@@ -1731,7 +1724,7 @@ impl waddle_xmpp::commands::CreateChannelDeps for XmppAppState {
             let _ = waddle_db_actor
                 .ask(DbExecute {
                     sql: "DELETE FROM channels WHERE id = ?".to_string(),
-                    params: vec![libsql::Value::from(channel_id.as_str())],
+                    params: vec![crate::db::Value::from(channel_id.as_str())],
                 })
                 .await;
             return Err(

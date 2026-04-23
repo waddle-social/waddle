@@ -281,10 +281,6 @@ private struct WaddleListView: View {
             }
         }
         .navigationTitle("Waddles")
-        .searchable(text: $model.searchQuery, placement: .sidebar, prompt: "Search public waddles")
-        .onChange(of: model.searchQuery) { _, _ in
-            model.schedulePublicWaddleSearch()
-        }
         .onChange(of: model.selectedWaddleID) { _, nextID in
             guard nextID != nil else { return }
             Task { await model.selectWaddle(nextID) }
@@ -293,11 +289,6 @@ private struct WaddleListView: View {
             ToolbarItemGroup {
                 if model.isLoadingWaddles {
                     ProgressView()
-                }
-                Button {
-                    Task { await model.refreshPublicWaddles() }
-                } label: {
-                    Image(systemName: "arrow.clockwise")
                 }
                 Button {
                     showCreateSheet = true
@@ -317,11 +308,6 @@ private struct WaddleListView: View {
                 Button("Sign out") {
                     Task { await model.signOut() }
                 }
-            }
-        }
-        .task {
-            if model.publicWaddles.isEmpty {
-                await model.refreshPublicWaddles()
             }
         }
 #if os(iOS)

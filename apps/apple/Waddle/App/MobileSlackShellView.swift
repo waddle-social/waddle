@@ -3,8 +3,6 @@ import SwiftUI
 
 private enum MobileWorkspaceFilter: String, CaseIterable, Identifiable {
     case joined
-    case discover
-    case all
 
     var id: String { rawValue }
 
@@ -12,10 +10,6 @@ private enum MobileWorkspaceFilter: String, CaseIterable, Identifiable {
         switch self {
         case .joined:
             return "Joined"
-        case .discover:
-            return "Discover"
-        case .all:
-            return "All"
         }
     }
 }
@@ -52,10 +46,6 @@ struct MobileSlackShellView: View {
         model.publicWaddles.filter { model.isJoined($0.id) }
     }
 
-    private var discoveredWaddles: [WaddleSummary] {
-        model.publicWaddles.filter { !model.isJoined($0.id) }
-    }
-
     private var serverLabel: String {
         if let url = AppConfig.normalizedServerURL(from: model.serverURLText) {
             return url.host ?? url.absoluteString
@@ -74,13 +64,11 @@ struct MobileSlackShellView: View {
                     selectedChannelID: model.selectedChannelID,
                     channels: model.channels,
                     joinedWaddles: joinedWaddles,
-                    discoveredWaddles: discoveredWaddles,
                     isLoadingStructure: model.isLoadingStructure,
                     onCreate: { showCreateSheet = true },
                     onBrowse: { updateSelectedTab(.browse) },
                     onOpenCurrentChat: { updateSelectedTab(.chat) },
-                    onOpenWaddle: openWaddle(_:),
-                    onJoinWaddle: joinWaddle(_:)
+                    onOpenWaddle: openWaddle(_:)
                 )
             }
             .tabItem {
@@ -94,10 +82,8 @@ struct MobileSlackShellView: View {
                     serverLabel: serverLabel,
                     filter: workspaceFilter,
                     joinedWaddles: joinedWaddles,
-                    discoveredWaddles: discoveredWaddles,
                     onCreate: { showCreateSheet = true },
-                    onOpenWaddle: openWaddle(_:),
-                    onJoinWaddle: joinWaddle(_:)
+                    onOpenWaddle: openWaddle(_:)
                 )
             }
             .tabItem {
@@ -146,15 +132,6 @@ struct MobileSlackShellView: View {
             }
         }
     }
-
-    private func joinWaddle(_ waddle: WaddleSummary) {
-        Task {
-            await model.join(waddle)
-            await MainActor.run {
-                updateSelectedTab(.chat)
-            }
-        }
-    }
 }
 
 private struct MobileHomeTab: View {
@@ -164,13 +141,11 @@ private struct MobileHomeTab: View {
     let selectedChannelID: String?
     let channels: [ChannelSummary]
     let joinedWaddles: [WaddleSummary]
-    let discoveredWaddles: [WaddleSummary]
     let isLoadingStructure: Bool
     let onCreate: () -> Void
     let onBrowse: () -> Void
     let onOpenCurrentChat: () -> Void
     let onOpenWaddle: (WaddleSummary) -> Void
-    let onJoinWaddle: (WaddleSummary) -> Void
 
     private var switcherWaddles: [WaddleSummary] {
         joinedWaddles.filter { $0.id != selectedWaddle?.id }
@@ -202,28 +177,6 @@ private struct MobileHomeTab: View {
                         .padding(.horizontal, 20)
                         .padding(.bottom, 2)
                     }
-                }
-
-                if !discoveredWaddles.isEmpty {
-                    sectionHeader("Suggested spaces")
-
-                    VStack(spacing: 12) {
-                        ForEach(discoveredWaddles.prefix(3)) { waddle in
-                            MobileWorkspaceCard(
-                                waddle: waddle,
-                                isJoined: false,
-                                isCurrent: false,
-                                primaryActionTitle: "Explore",
-                                onPrimaryAction: {
-                                    onOpenWaddle(waddle)
-                                },
-                                onSecondaryAction: {
-                                    onJoinWaddle(waddle)
-                                }
-                            )
-                        }
-                    }
-                    .padding(.horizontal, 20)
                 }
             }
             .padding(.top, 16)
@@ -356,10 +309,8 @@ private struct MobileWorkspaceBrowserTab: View {
     let serverLabel: String
     @Binding var filter: MobileWorkspaceFilter
     let joinedWaddles: [WaddleSummary]
-    let discoveredWaddles: [WaddleSummary]
     let onCreate: () -> Void
     let onOpenWaddle: (WaddleSummary) -> Void
-    let onJoinWaddle: (WaddleSummary) -> Void
 
     var body: some View {
         ScrollView {
@@ -370,39 +321,11 @@ private struct MobileWorkspaceBrowserTab: View {
                 )
                 .padding(.horizontal, 20)
 
-                Picker("Filter", selection: $filter) {
-                    ForEach(MobileWorkspaceFilter.allCases) { filter in
-                        Text(filter.title).tag(filter)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .padding(.horizontal, 20)
-
-                switch filter {
-                case .joined:
-                    workspaceSection(
-                        title: "Joined spaces",
-                        caption: "Keep the main places you talk in one reachable list.",
-                        waddles: joinedWaddles
-                    )
-                case .discover:
-                    workspaceSection(
-                        title: "Discover public spaces",
-                        caption: "Explore more channels without crowding your home tab.",
-                        waddles: discoveredWaddles
-                    )
-                case .all:
-                    workspaceSection(
-                        title: "Joined spaces",
-                        caption: "Your active team spaces.",
-                        waddles: joinedWaddles
-                    )
-                    workspaceSection(
-                        title: "Discover public spaces",
-                        caption: "Public rooms ready to explore.",
-                        waddles: discoveredWaddles
-                    )
-                }
+                workspaceSection(
+                    title: "Joined spaces",
+                    caption: "Keep the main places you talk in one reachable list.",
+                    waddles: joinedWaddles
+                )
             }
             .padding(.top, 16)
             .padding(.bottom, 28)
@@ -410,13 +333,6 @@ private struct MobileWorkspaceBrowserTab: View {
         .background(MobileShellBackground())
         .navigationTitle("Browse")
         .navigationBarTitleDisplayMode(.large)
-        .searchable(text: $model.searchQuery, prompt: "Search workspaces")
-        .onChange(of: model.searchQuery) { _, _ in
-            model.schedulePublicWaddleSearch()
-        }
-        .refreshable {
-            await model.refreshPublicWaddles()
-        }
         .toolbar {
             ToolbarItemGroup(placement: .topBarTrailing) {
                 if model.isLoadingWaddles {
@@ -424,21 +340,10 @@ private struct MobileWorkspaceBrowserTab: View {
                 }
 
                 Button {
-                    Task { await model.refreshPublicWaddles() }
-                } label: {
-                    Image(systemName: "arrow.clockwise")
-                }
-
-                Button {
                     onCreate()
                 } label: {
                     Image(systemName: "plus")
                 }
-            }
-        }
-        .task {
-            if model.publicWaddles.isEmpty {
-                await model.refreshPublicWaddles()
             }
         }
     }
@@ -458,7 +363,7 @@ private struct MobileWorkspaceBrowserTab: View {
             if waddles.isEmpty {
                 MobileEmptyCard(
                     title: "Nothing here yet",
-                    message: "Try a different search or refresh to load more spaces."
+                    message: "Your joined spaces will appear here once connected."
                 )
                 .padding(.horizontal, 20)
             } else {
@@ -468,13 +373,11 @@ private struct MobileWorkspaceBrowserTab: View {
                             waddle: waddle,
                             isJoined: model.isJoined(waddle.id),
                             isCurrent: model.selectedWaddleID == waddle.id,
-                            primaryActionTitle: model.isJoined(waddle.id) ? "Open chat" : "Explore",
+                            primaryActionTitle: "Open chat",
                             onPrimaryAction: {
                                 onOpenWaddle(waddle)
                             },
-                            onSecondaryAction: model.isJoined(waddle.id) ? nil : {
-                                onJoinWaddle(waddle)
-                            }
+                            onSecondaryAction: nil
                         )
                     }
                 }

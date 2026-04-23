@@ -6,18 +6,18 @@
 //! - Userset expansion
 //! - LRU caching for performance
 
-use std::collections::HashSet;
-use std::sync::Arc;
-
+use kameo::actor::ActorRef;
 use lru::LruCache;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{debug, instrument};
 
 use super::schema::{ComputedPermission, PermissionSchema};
 use super::tuple::{Object, ObjectType, Subject, SubjectType, TupleStore};
 use super::PermissionError;
-use crate::db::Database;
+use crate::db::actor::DbActor;
 
 /// Maximum depth for permission check traversal (prevents infinite loops)
 const MAX_CHECK_DEPTH: usize = 10;
@@ -79,9 +79,9 @@ pub struct PermissionChecker {
 
 impl PermissionChecker {
     /// Create a new permission checker
-    pub fn new(db: Arc<Database>, schema: PermissionSchema) -> Self {
+    pub fn new(actor: ActorRef<DbActor>, schema: PermissionSchema) -> Self {
         Self {
-            tuple_store: TupleStore::new(db),
+            tuple_store: TupleStore::new(actor),
             schema,
             cache: Arc::new(Mutex::new(LruCache::new(
                 std::num::NonZeroUsize::new(DEFAULT_CACHE_SIZE).unwrap(),
@@ -91,9 +91,13 @@ impl PermissionChecker {
 
     /// Create a new permission checker with custom cache size
     #[allow(dead_code)]
-    pub fn with_cache_size(db: Arc<Database>, schema: PermissionSchema, cache_size: usize) -> Self {
+    pub fn with_cache_size(
+        actor: ActorRef<DbActor>,
+        schema: PermissionSchema,
+        cache_size: usize,
+    ) -> Self {
         Self {
-            tuple_store: TupleStore::new(db),
+            tuple_store: TupleStore::new(actor),
             schema,
             cache: Arc::new(Mutex::new(LruCache::new(
                 std::num::NonZeroUsize::new(cache_size.max(1)).unwrap(),
@@ -377,24 +381,25 @@ impl PermissionChecker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::MigrationRunner;
+    use crate::db::actor::DbActor;
+    use crate::db::{Database, MigrationRunner};
     use crate::permissions::tuple::{Relation, Tuple};
 
-    async fn setup_test_db() -> (Arc<Database>, TupleStore) {
+    async fn setup_test_db() -> (kameo::actor::ActorRef<DbActor>, TupleStore) {
         let db = Database::in_memory("test-check").await.unwrap();
-        let db = Arc::new(db);
 
         let runner = MigrationRunner::global();
         runner.run(&db).await.unwrap();
 
-        let store = TupleStore::new(Arc::clone(&db));
-        (db, store)
+        let actor = kameo::spawn(DbActor::new(db));
+        let store = TupleStore::new(actor.clone());
+        (actor, store)
     }
 
     #[tokio::test]
     async fn test_direct_permission_check() {
-        let (db, store) = setup_test_db().await;
-        let checker = PermissionChecker::new(Arc::clone(&db), PermissionSchema::default());
+        let (actor, store) = setup_test_db().await;
+        let checker = PermissionChecker::new(actor.clone(), PermissionSchema::default());
 
         // Create tuple: alice is owner of waddle:test
         let tuple = Tuple::new(
@@ -425,8 +430,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_computed_permission_union() {
-        let (db, store) = setup_test_db().await;
-        let checker = PermissionChecker::new(Arc::clone(&db), PermissionSchema::default());
+        let (actor, store) = setup_test_db().await;
+        let checker = PermissionChecker::new(actor.clone(), PermissionSchema::default());
 
         // Create tuple: alice is admin of waddle:test (not owner)
         let tuple = Tuple::new(
@@ -448,8 +453,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_arrow_permission() {
-        let (db, store) = setup_test_db().await;
-        let checker = PermissionChecker::new(Arc::clone(&db), PermissionSchema::default());
+        let (actor, store) = setup_test_db().await;
+        let checker = PermissionChecker::new(actor.clone(), PermissionSchema::default());
 
         // Setup:
         // 1. alice is admin of waddle:test
@@ -487,8 +492,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_inherited_permission_via_membership() {
-        let (db, store) = setup_test_db().await;
-        let checker = PermissionChecker::new(Arc::clone(&db), PermissionSchema::default());
+        let (actor, store) = setup_test_db().await;
+        let checker = PermissionChecker::new(actor.clone(), PermissionSchema::default());
 
         // Setup:
         // 1. alice is a member of waddle:test
@@ -527,7 +532,7 @@ mod tests {
     #[tokio::test]
     async fn test_userset_permission() {
         let (db, store) = setup_test_db().await;
-        let checker = PermissionChecker::new(Arc::clone(&db), PermissionSchema::default());
+        let checker = PermissionChecker::new(db.clone(), PermissionSchema::default());
 
         // Setup:
         // 1. alice is a member of waddle:test
@@ -566,7 +571,7 @@ mod tests {
     #[tokio::test]
     async fn test_cache() {
         let (db, store) = setup_test_db().await;
-        let checker = PermissionChecker::new(Arc::clone(&db), PermissionSchema::default());
+        let checker = PermissionChecker::new(db.clone(), PermissionSchema::default());
 
         // Create tuple
         store
@@ -596,7 +601,7 @@ mod tests {
     #[tokio::test]
     async fn test_owner_has_delete() {
         let (db, store) = setup_test_db().await;
-        let checker = PermissionChecker::new(Arc::clone(&db), PermissionSchema::default());
+        let checker = PermissionChecker::new(db.clone(), PermissionSchema::default());
 
         // Create owner tuple
         store

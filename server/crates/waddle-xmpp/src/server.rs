@@ -4,7 +4,6 @@
 //! federation. Client-to-server traffic is served by the HTTP/WebSocket stack.
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use rustls::ServerConfig as RustlsServerConfig;
@@ -34,8 +33,8 @@ pub struct XmppServerConfig {
     pub tls_server_config: Option<Arc<RustlsServerConfig>>,
     /// Server domain (e.g., "waddle.social")
     pub domain: String,
-    /// MAM database path (None for in-memory, Some(path) for file-based)
-    pub mam_db_path: Option<PathBuf>,
+    /// MAM database URL (defaults to the main runtime DSN when configured by the embedding app)
+    pub mam_database_url: Option<String>,
     /// Whether native JID authentication is enabled (default: true)
     /// When enabled, users can authenticate with SCRAM-SHA-256 using native credentials.
     pub native_auth_enabled: bool,
@@ -60,7 +59,7 @@ impl Default for XmppServerConfig {
             tls_key_path: "certs/server.key".to_string(),
             tls_server_config: None,
             domain: "localhost".to_string(),
-            mam_db_path: None, // In-memory by default
+            mam_database_url: None,
             native_auth_enabled: true,
             registration_enabled: false, // Disabled by default for security
             single_tenant: false,

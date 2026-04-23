@@ -9,7 +9,8 @@
 //! - Protocol: XEP-0050 (Ad-Hoc Commands)
 
 use crate::auth::{AuthError, SessionManager};
-use crate::db::Database;
+use crate::db::actor::{DbActor, DbExecute, DbQuery, DbQueryOne, RowValues};
+use crate::db::{row_value, ValueExt};
 use crate::permissions::{
     Object, ObjectType, PermissionError, PermissionService, Relation, Subject, SubjectType, Tuple,
 };
@@ -26,6 +27,8 @@ use std::sync::Arc;
 use tracing::{error, info, instrument, warn};
 
 #[cfg(test)]
+use crate::db::Database;
+#[cfg(test)]
 use uuid::Uuid;
 
 /// Extended application state for channel routes
@@ -41,8 +44,7 @@ pub struct ChannelState {
 impl ChannelState {
     /// Create new channel state
     pub fn new(app_state: Arc<AppState>, encryption_key: Option<&[u8]>) -> Self {
-        let db = Arc::new(app_state.db_pool.global().clone());
-        let permission_service = PermissionService::new(Arc::clone(&db));
+        let permission_service = PermissionService::new(app_state.db_pool.global_actor().clone());
         let session_manager =
             SessionManager::new(app_state.db_pool.global_actor().clone(), encryption_key);
         Self {
@@ -235,8 +237,8 @@ pub async fn update_channel_handler(
     }
 
     // Get the waddle database
-    let waddle_db = match state.app_state.db_pool.get_waddle_db(waddle_id).await {
-        Ok(db) => db,
+    let waddle_actor = match state.app_state.db_pool.get_waddle_actor(waddle_id).await {
+        Ok(actor) => actor,
         Err(err) => {
             error!("Failed to get waddle database: {}", err);
             return channel_error_to_response(ChannelError::Database(format!(
@@ -248,7 +250,7 @@ pub async fn update_channel_handler(
     };
 
     // Check if channel exists
-    if let Ok(None) = get_channel_from_db(&waddle_db, waddle_id, &channel_id).await {
+    if let Ok(None) = get_channel_from_db(waddle_actor.clone(), waddle_id, &channel_id).await {
         return channel_error_to_response(ChannelError::NotFound(format!(
             "Channel '{}' not found",
             channel_id
@@ -259,7 +261,7 @@ pub async fn update_channel_handler(
     // Update channel in database
     let now = chrono::Utc::now().to_rfc3339();
     if let Err(err) = update_channel_in_db(
-        &waddle_db,
+        waddle_actor.clone(),
         &channel_id,
         request.name.as_deref(),
         request.description.as_deref(),
@@ -273,7 +275,7 @@ pub async fn update_channel_handler(
     }
 
     // Get updated channel
-    let updated_channel = match get_channel_from_db(&waddle_db, waddle_id, &channel_id).await {
+    let updated_channel = match get_channel_from_db(waddle_actor, waddle_id, &channel_id).await {
         Ok(Some(channel)) => channel,
         Ok(None) => {
             return channel_error_to_response(ChannelError::NotFound(format!(
@@ -320,8 +322,8 @@ pub async fn delete_channel_handler(
     let waddle_id = &params.waddle_id;
 
     // Get the waddle database first to check if channel exists
-    let waddle_db = match state.app_state.db_pool.get_waddle_db(waddle_id).await {
-        Ok(db) => db,
+    let waddle_actor = match state.app_state.db_pool.get_waddle_actor(waddle_id).await {
+        Ok(actor) => actor,
         Err(err) => {
             error!("Failed to get waddle database: {}", err);
             return channel_error_to_response(ChannelError::Database(format!(
@@ -333,7 +335,7 @@ pub async fn delete_channel_handler(
     };
 
     // Check if channel exists
-    let channel = match get_channel_from_db(&waddle_db, waddle_id, &channel_id).await {
+    let channel = match get_channel_from_db(waddle_actor.clone(), waddle_id, &channel_id).await {
         Ok(Some(channel)) => channel,
         Ok(None) => {
             return channel_error_to_response(ChannelError::NotFound(format!(
@@ -391,7 +393,7 @@ pub async fn delete_channel_handler(
     }
 
     // Delete channel from database
-    if let Err(err) = delete_channel_from_db(&waddle_db, &channel_id).await {
+    if let Err(err) = delete_channel_from_db(waddle_actor, &channel_id).await {
         error!("Failed to delete channel: {}", err);
         return channel_error_to_response(ChannelError::Database(err)).into_response();
     }
@@ -406,7 +408,7 @@ pub async fn delete_channel_handler(
 /// Insert a new channel into the per-waddle database
 #[allow(clippy::too_many_arguments)]
 async fn insert_channel(
-    db: &Database,
+    actor: kameo::actor::ActorRef<DbActor>,
     id: &str,
     name: &str,
     description: Option<&str>,
@@ -420,29 +422,29 @@ async fn insert_channel(
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     "#;
 
-    let conn = db.guard().await.map_err(|e| e.to_string())?;
-    conn.execute(
-        query,
-        libsql::params![
-            id,
-            name,
-            description,
-            channel_type,
-            position,
-            is_default as i32,
-            now,
-            now
-        ],
-    )
-    .await
-    .map_err(|e| format!("Failed to insert channel: {}", e))?;
+    actor
+        .ask(DbExecute {
+            sql: query.to_string(),
+            params: vec![
+                id.into(),
+                name.into(),
+                description.map_or(crate::db::Value::Null, crate::db::Value::from),
+                channel_type.into(),
+                (position as i64).into(),
+                (is_default as i64).into(),
+                now.into(),
+                now.into(),
+            ],
+        })
+        .await
+        .map_err(|e| format!("Failed to insert channel: {}", e))?;
 
     Ok(())
 }
 
 /// Get a channel from the per-waddle database
 pub(crate) async fn get_channel_from_db(
-    db: &Database,
+    actor: kameo::actor::ActorRef<DbActor>,
     waddle_id: &str,
     channel_id: &str,
 ) -> Result<Option<ChannelResponse>, String> {
@@ -452,37 +454,54 @@ pub(crate) async fn get_channel_from_db(
         WHERE id = ?
     "#;
 
-    let conn = db.guard().await.map_err(|e| e.to_string())?;
-    let mut rows = conn
-        .query(query, libsql::params![channel_id])
+    let row = actor
+        .ask(DbQueryOne {
+            sql: query.to_string(),
+            params: vec![channel_id.into()],
+        })
         .await
         .map_err(|e| format!("Failed to query channel: {}", e))?;
 
-    let row = rows
-        .next()
-        .await
-        .map_err(|e| format!("Failed to read channel row: {}", e))?;
-
     match row {
         Some(row) => {
-            let id: String = row.get(0).map_err(|e| format!("Failed to get id: {}", e))?;
-            let name: String = row
-                .get(1)
+            let id = row_value(&row, 0)
+                .and_then(ValueExt::as_string)
+                .map_err(|e| format!("Failed to get id: {}", e))?;
+            let name = row_value(&row, 1)
+                .and_then(ValueExt::as_string)
                 .map_err(|e| format!("Failed to get name: {}", e))?;
-            let description: Option<String> = row.get(2).ok();
-            let channel_type: String = row
-                .get(3)
+            let description = row_value(&row, 2)
+                .and_then(ValueExt::as_optional_string)
+                .map_err(|e| format!("Failed to get description: {}", e))?;
+            let channel_type = row_value(&row, 3)
+                .and_then(ValueExt::as_string)
                 .map_err(|e| format!("Failed to get channel_type: {}", e))?;
-            let position: i32 = row
-                .get(4)
-                .map_err(|e| format!("Failed to get position: {}", e))?;
-            let is_default: i32 = row
-                .get(5)
-                .map_err(|e| format!("Failed to get is_default: {}", e))?;
-            let created_at: String = row
-                .get(6)
+            let position =
+                match row_value(&row, 4).map_err(|e| format!("Failed to get position: {}", e))? {
+                    crate::db::Value::Integer(value) => *value as i32,
+                    other => {
+                        return Err(format!(
+                            "Failed to get position: unexpected value {:?}",
+                            other
+                        ))
+                    }
+                };
+            let is_default =
+                match row_value(&row, 5).map_err(|e| format!("Failed to get is_default: {}", e))? {
+                    crate::db::Value::Integer(value) => *value != 0,
+                    other => {
+                        return Err(format!(
+                            "Failed to get is_default: unexpected value {:?}",
+                            other
+                        ))
+                    }
+                };
+            let created_at = row_value(&row, 6)
+                .and_then(ValueExt::as_string)
                 .map_err(|e| format!("Failed to get created_at: {}", e))?;
-            let updated_at: Option<String> = row.get(7).ok();
+            let updated_at = row_value(&row, 7)
+                .and_then(ValueExt::as_optional_string)
+                .map_err(|e| format!("Failed to get updated_at: {}", e))?;
 
             Ok(Some(ChannelResponse {
                 id,
@@ -491,7 +510,7 @@ pub(crate) async fn get_channel_from_db(
                 description,
                 channel_type,
                 position,
-                is_default: is_default != 0,
+                is_default,
                 created_at,
                 updated_at,
             }))
@@ -502,7 +521,7 @@ pub(crate) async fn get_channel_from_db(
 
 /// List channels from the per-waddle database
 pub(crate) async fn list_channels_from_db(
-    db: &Database,
+    actor: kameo::actor::ActorRef<DbActor>,
     waddle_id: &str,
     limit: usize,
     offset: usize,
@@ -516,17 +535,15 @@ pub(crate) async fn list_channels_from_db(
 
     let mut channels = Vec::new();
 
-    let conn = db.guard().await.map_err(|e| e.to_string())?;
-    let mut rows = conn
-        .query(query, libsql::params![limit as i64, offset as i64])
+    let rows = actor
+        .ask(DbQuery {
+            sql: query.to_string(),
+            params: vec![(limit as i64).into(), (offset as i64).into()],
+        })
         .await
         .map_err(|e| format!("Failed to query channels: {}", e))?;
 
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|e| format!("Failed to read channel row: {}", e))?
-    {
+    for row in rows {
         let channel = parse_channel_row(&row, waddle_id)?;
         channels.push(channel);
     }
@@ -535,25 +552,44 @@ pub(crate) async fn list_channels_from_db(
 }
 
 /// Parse a channel row from the database
-fn parse_channel_row(row: &libsql::Row, waddle_id: &str) -> Result<ChannelResponse, String> {
-    let id: String = row.get(0).map_err(|e| format!("Failed to get id: {}", e))?;
-    let name: String = row
-        .get(1)
+fn parse_channel_row(row: &RowValues, waddle_id: &str) -> Result<ChannelResponse, String> {
+    let id = row_value(row, 0)
+        .and_then(ValueExt::as_string)
+        .map_err(|e| format!("Failed to get id: {}", e))?;
+    let name = row_value(row, 1)
+        .and_then(ValueExt::as_string)
         .map_err(|e| format!("Failed to get name: {}", e))?;
-    let description: Option<String> = row.get(2).ok();
-    let channel_type: String = row
-        .get(3)
+    let description = row_value(row, 2)
+        .and_then(ValueExt::as_optional_string)
+        .map_err(|e| format!("Failed to get description: {}", e))?;
+    let channel_type = row_value(row, 3)
+        .and_then(ValueExt::as_string)
         .map_err(|e| format!("Failed to get channel_type: {}", e))?;
-    let position: i32 = row
-        .get(4)
-        .map_err(|e| format!("Failed to get position: {}", e))?;
-    let is_default: i32 = row
-        .get(5)
-        .map_err(|e| format!("Failed to get is_default: {}", e))?;
-    let created_at: String = row
-        .get(6)
+    let position = match row_value(row, 4).map_err(|e| format!("Failed to get position: {}", e))? {
+        crate::db::Value::Integer(value) => *value as i32,
+        other => {
+            return Err(format!(
+                "Failed to get position: unexpected value {:?}",
+                other
+            ))
+        }
+    };
+    let is_default =
+        match row_value(row, 5).map_err(|e| format!("Failed to get is_default: {}", e))? {
+            crate::db::Value::Integer(value) => *value != 0,
+            other => {
+                return Err(format!(
+                    "Failed to get is_default: unexpected value {:?}",
+                    other
+                ))
+            }
+        };
+    let created_at = row_value(row, 6)
+        .and_then(ValueExt::as_string)
         .map_err(|e| format!("Failed to get created_at: {}", e))?;
-    let updated_at: Option<String> = row.get(7).ok();
+    let updated_at = row_value(row, 7)
+        .and_then(ValueExt::as_optional_string)
+        .map_err(|e| format!("Failed to get updated_at: {}", e))?;
 
     Ok(ChannelResponse {
         id,
@@ -562,7 +598,7 @@ fn parse_channel_row(row: &libsql::Row, waddle_id: &str) -> Result<ChannelRespon
         description,
         channel_type,
         position,
-        is_default: is_default != 0,
+        is_default,
         created_at,
         updated_at,
     })
@@ -570,7 +606,7 @@ fn parse_channel_row(row: &libsql::Row, waddle_id: &str) -> Result<ChannelRespon
 
 /// Update a channel in the per-waddle database
 async fn update_channel_in_db(
-    db: &Database,
+    actor: kameo::actor::ActorRef<DbActor>,
     channel_id: &str,
     name: Option<&str>,
     description: Option<&str>,
@@ -579,7 +615,7 @@ async fn update_channel_in_db(
 ) -> Result<(), String> {
     // Build dynamic update query based on provided fields
     let mut updates = vec!["updated_at = ?".to_string()];
-    let mut params: Vec<libsql::Value> = vec![now.into()];
+    let mut params: Vec<crate::db::Value> = vec![now.into()];
 
     if let Some(name) = name {
         updates.push("name = ?".to_string());
@@ -598,8 +634,8 @@ async fn update_channel_in_db(
 
     let query = format!("UPDATE channels SET {} WHERE id = ?", updates.join(", "));
 
-    let conn = db.guard().await.map_err(|e| e.to_string())?;
-    conn.execute(&query, params)
+    actor
+        .ask(DbExecute { sql: query, params })
         .await
         .map_err(|e| format!("Failed to update channel: {}", e))?;
 
@@ -607,12 +643,18 @@ async fn update_channel_in_db(
 }
 
 /// Delete a channel from the per-waddle database
-async fn delete_channel_from_db(db: &Database, channel_id: &str) -> Result<(), String> {
+async fn delete_channel_from_db(
+    actor: kameo::actor::ActorRef<DbActor>,
+    channel_id: &str,
+) -> Result<(), String> {
     // Messages will be cascade deleted due to foreign key constraint
     let query = "DELETE FROM channels WHERE id = ?";
 
-    let conn = db.guard().await.map_err(|e| e.to_string())?;
-    conn.execute(query, libsql::params![channel_id])
+    actor
+        .ask(DbExecute {
+            sql: query.to_string(),
+            params: vec![channel_id.into()],
+        })
         .await
         .map_err(|e| format!("Failed to delete channel: {}", e))?;
 
@@ -715,17 +757,27 @@ mod tests {
         (waddle_id, waddle_db)
     }
 
-    async fn create_test_channel(
-        state: &ChannelState,
-        waddle_db: &Database,
-        waddle_id: &str,
-        name: &str,
-    ) -> String {
-        let channel_id = Uuid::new_v4().to_string();
-        let now = chrono::Utc::now().to_rfc3339();
-        insert_channel(waddle_db, &channel_id, name, None, "text", 0, false, &now)
+    async fn create_test_channel(state: &ChannelState, waddle_id: &str, name: &str) -> String {
+        let waddle_actor = state
+            .app_state
+            .db_pool
+            .get_waddle_actor(waddle_id)
             .await
             .unwrap();
+        let channel_id = Uuid::new_v4().to_string();
+        let now = chrono::Utc::now().to_rfc3339();
+        insert_channel(
+            waddle_actor,
+            &channel_id,
+            name,
+            None,
+            "text",
+            0,
+            false,
+            &now,
+        )
+        .await
+        .unwrap();
 
         let parent_tuple = Tuple::new(
             Object::new(ObjectType::Channel, &channel_id),
@@ -749,11 +801,10 @@ mod tests {
     async fn test_update_channel() {
         let channel_state = create_test_channel_state().await;
         let session = create_test_session(&channel_state).await;
-        let (waddle_id, waddle_db) = setup_waddle_with_permissions(&channel_state, &session).await;
+        let (waddle_id, _waddle_db) = setup_waddle_with_permissions(&channel_state, &session).await;
         let app = router(channel_state.clone());
 
-        let channel_id =
-            create_test_channel(&channel_state, &waddle_db, &waddle_id, "test-channel").await;
+        let channel_id = create_test_channel(&channel_state, &waddle_id, "test-channel").await;
 
         // Update the channel
         let response = app
@@ -786,11 +837,10 @@ mod tests {
     async fn test_delete_channel() {
         let channel_state = create_test_channel_state().await;
         let session = create_test_session(&channel_state).await;
-        let (waddle_id, waddle_db) = setup_waddle_with_permissions(&channel_state, &session).await;
+        let (waddle_id, _waddle_db) = setup_waddle_with_permissions(&channel_state, &session).await;
         let app = router(channel_state.clone());
 
-        let channel_id =
-            create_test_channel(&channel_state, &waddle_db, &waddle_id, "test-channel").await;
+        let channel_id = create_test_channel(&channel_state, &waddle_id, "test-channel").await;
 
         // Delete the channel
         let response = app
@@ -816,7 +866,7 @@ mod tests {
         let channel_state = create_test_channel_state().await;
         let owner_session = create_test_session(&channel_state).await;
         let other_session = create_test_session(&channel_state).await;
-        let (waddle_id, waddle_db) =
+        let (waddle_id, _waddle_db) =
             setup_waddle_with_permissions(&channel_state, &owner_session).await;
 
         // Give other_session member permission only (not admin, so can't delete)
@@ -833,8 +883,7 @@ mod tests {
 
         let app = router(channel_state.clone());
 
-        let channel_id =
-            create_test_channel(&channel_state, &waddle_db, &waddle_id, "owner-channel").await;
+        let channel_id = create_test_channel(&channel_state, &waddle_id, "owner-channel").await;
 
         // Try to delete as other user (non-admin)
         let response = app

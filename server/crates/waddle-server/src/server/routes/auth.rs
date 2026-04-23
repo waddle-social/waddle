@@ -15,6 +15,8 @@ use crate::auth::{
     AuthProviderTokenEndpointAuthMethod, ProviderRegistry, Session, SessionManager,
 };
 use crate::config::ServerConfig;
+use crate::db::actor::{DbExecute, DbQueryOne};
+use crate::db::{row_value, ValueExt};
 use crate::server::AppState;
 use axum::{
     extract::{Query, State},
@@ -36,7 +38,6 @@ use uuid::Uuid;
 
 /// Shared auth state.
 pub struct AuthState {
-    pub db: Arc<crate::db::Database>,
     pub session_manager: SessionManager,
     pub identity_service: IdentityService,
     pub providers: ProviderRegistry,
@@ -56,15 +57,13 @@ impl AuthState {
         server_config: &ServerConfig,
         encryption_key: Option<&[u8]>,
     ) -> Self {
-        let db = Arc::new(app_state.db_pool.global().clone());
         let session_manager =
             SessionManager::new(app_state.db_pool.global_actor().clone(), encryption_key);
-        let identity_service = IdentityService::new(Arc::clone(&db));
+        let identity_service = IdentityService::new(app_state.db_pool.global_actor().clone());
         let providers = ProviderRegistry::new(server_config.auth.providers.clone())
             .unwrap_or_else(|e| panic!("invalid provider config at startup: {}", e));
 
         Self {
-            db,
             session_manager,
             identity_service,
             providers,
@@ -494,46 +493,43 @@ fn auth_error_to_response(err: AuthError) -> (StatusCode, Json<ErrorResponse>) {
 }
 
 async fn load_avatar_url(
-    db: &crate::db::Database,
+    actor: &kameo::actor::ActorRef<crate::db::actor::DbActor>,
     user_id: &str,
 ) -> Result<Option<String>, AuthError> {
-    let conn = db
-        .guard()
-        .await
-        .map_err(|e| AuthError::DatabaseError(e.to_string()))?;
-    let mut rows = conn
-        .query(
-            "SELECT u.avatar_url,
-                    (
-                        SELECT ai.raw_claims_json
-                        FROM auth_identities ai
-                        WHERE ai.user_id = u.id
-                        ORDER BY ai.last_login_at DESC
-                        LIMIT 1
-                    )
-             FROM users u
-             WHERE u.id = ? LIMIT 1",
-            libsql::params![user_id],
-        )
+    let row = actor
+        .ask(DbQueryOne {
+            sql: "SELECT u.avatar_url,
+                         (
+                             SELECT ai.raw_claims_json
+                             FROM auth_identities ai
+                             WHERE ai.user_id = u.id
+                             ORDER BY ai.last_login_at DESC
+                             LIMIT 1
+                         )
+                  FROM users u
+                  WHERE u.id = ? LIMIT 1"
+                .to_string(),
+            params: vec![user_id.into()],
+        })
         .await
         .map_err(|e| AuthError::DatabaseError(format!("Failed to query avatar_url: {}", e)))?;
-    let row = rows
-        .next()
-        .await
-        .map_err(|e| AuthError::DatabaseError(format!("Failed to read avatar_url row: {}", e)))?;
 
     match row {
         Some(row) => {
-            let avatar_url: Option<String> = row.get(0).map_err(|e| {
-                AuthError::DatabaseError(format!("Failed to get avatar_url: {}", e))
-            })?;
+            let avatar_url = row_value(&row, 0)
+                .and_then(ValueExt::as_optional_string)
+                .map_err(|e| {
+                    AuthError::DatabaseError(format!("Failed to get avatar_url: {}", e))
+                })?;
             if avatar_url.is_some() {
                 return Ok(avatar_url);
             }
 
-            let raw_claims_json: Option<String> = row.get(1).map_err(|e| {
-                AuthError::DatabaseError(format!("Failed to get raw_claims_json: {}", e))
-            })?;
+            let raw_claims_json = row_value(&row, 1)
+                .and_then(ValueExt::as_optional_string)
+                .map_err(|e| {
+                    AuthError::DatabaseError(format!("Failed to get raw_claims_json: {}", e))
+                })?;
             let Some(raw_claims_json) = raw_claims_json else {
                 return Ok(None);
             };
@@ -544,14 +540,20 @@ async fn load_avatar_url(
                 })?;
             let avatar_url = oidc::avatar_url_from_claims(&claims);
             if let Some(ref avatar_url) = avatar_url {
-                conn.execute(
-                    "UPDATE users SET avatar_url = ?, updated_at = ? WHERE id = ?",
-                    libsql::params![avatar_url.clone(), Utc::now().to_rfc3339(), user_id],
-                )
-                .await
-                .map_err(|e| {
-                    AuthError::DatabaseError(format!("Failed to backfill avatar_url: {}", e))
-                })?;
+                actor
+                    .ask(DbExecute {
+                        sql: "UPDATE users SET avatar_url = ?, updated_at = ? WHERE id = ?"
+                            .to_string(),
+                        params: vec![
+                            avatar_url.clone().into(),
+                            Utc::now().to_rfc3339().into(),
+                            user_id.into(),
+                        ],
+                    })
+                    .await
+                    .map_err(|e| {
+                        AuthError::DatabaseError(format!("Failed to backfill avatar_url: {}", e))
+                    })?;
             }
             Ok(avatar_url)
         }
@@ -909,10 +911,11 @@ pub async fn session_handler(
             let expires_at = session.expires_at.map(|v| v.to_rfc3339());
             let jid = localpart_to_jid(&session.xmpp_localpart, &state.xmpp_domain)
                 .unwrap_or_else(|_| format!("{}@{}", session.xmpp_localpart, state.xmpp_domain));
-            let avatar_url = match load_avatar_url(&state.db, &session.user_id).await {
-                Ok(avatar_url) => avatar_url,
-                Err(err) => return auth_error_to_response(err).into_response(),
-            };
+            let avatar_url =
+                match load_avatar_url(&state.session_manager.actor_ref(), &session.user_id).await {
+                    Ok(avatar_url) => avatar_url,
+                    Err(err) => return auth_error_to_response(err).into_response(),
+                };
             (
                 StatusCode::OK,
                 Json(SessionResponse {
@@ -964,6 +967,7 @@ pub async fn logout_handler(
 mod tests {
     use super::*;
     use crate::config::ServerConfig;
+    use crate::db::actor::{DbActor, DbExecute};
     use crate::db::{DatabaseConfig, DatabasePool, MigrationRunner, PoolConfig};
     use crate::server::AppState;
     use axum::body::Body;
@@ -971,7 +975,9 @@ mod tests {
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
-    async fn create_test_auth_state(server_config: &ServerConfig) -> Arc<AuthState> {
+    async fn create_test_auth_state(
+        server_config: &ServerConfig,
+    ) -> (Arc<AuthState>, kameo::actor::ActorRef<DbActor>) {
         let config = DatabaseConfig::default();
         let pool_config = PoolConfig::default();
         let db_pool = DatabasePool::new(config, pool_config).await.unwrap();
@@ -979,33 +985,33 @@ mod tests {
             .run(db_pool.global())
             .await
             .unwrap();
+        let actor = db_pool.global_actor().clone();
 
         let app_state = Arc::new(AppState::new(Arc::new(db_pool)));
-        Arc::new(AuthState::new(app_state, server_config, None))
+        (
+            Arc::new(AuthState::new(app_state, server_config, None)),
+            actor,
+        )
     }
 
     #[tokio::test]
     async fn session_response_includes_jid_and_websocket_url() {
         let server_config = ServerConfig::test_homeserver();
-        let auth_state = create_test_auth_state(&server_config).await;
+        let (auth_state, actor) = create_test_auth_state(&server_config).await;
         let session = Session::new("user-1", "alice", "alice");
         auth_state
             .session_manager
             .create_session(&session)
             .await
             .unwrap();
-        auth_state
-            .db
-            .guard()
-            .await
-            .unwrap()
-            .execute(
-                "UPDATE users SET avatar_url = ? WHERE id = ?",
-                libsql::params![
-                    "https://avatars.example.com/alice.png",
-                    session.user_id.clone()
+        actor
+            .ask(DbExecute {
+                sql: "UPDATE users SET avatar_url = ? WHERE id = ?".to_string(),
+                params: vec![
+                    "https://avatars.example.com/alice.png".into(),
+                    session.user_id.clone().into(),
                 ],
-            )
+            })
             .await
             .unwrap();
 
@@ -1041,34 +1047,31 @@ mod tests {
     #[tokio::test]
     async fn session_response_falls_back_to_raw_claim_profile_avatar() {
         let server_config = ServerConfig::test_homeserver();
-        let auth_state = create_test_auth_state(&server_config).await;
+        let (auth_state, actor) = create_test_auth_state(&server_config).await;
         let session = Session::new("user-1", "alice", "alice");
         auth_state
             .session_manager
             .create_session(&session)
             .await
             .unwrap();
-        auth_state
-            .db
-            .guard()
-            .await
-            .unwrap()
-            .execute(
-                "INSERT INTO auth_identities (id, user_id, provider_id, issuer, subject, email, email_verified, raw_claims_json, created_at, last_login_at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                libsql::params![
-                    "identity-1",
-                    session.user_id.clone(),
-                    "colony",
-                    "https://colony.waddle.social",
-                    "subject-1",
-                    Option::<String>::None,
-                    Option::<i64>::None,
-                    r#"{"profile":"https://cdn.example.com/avatar.png"}"#,
-                    "2026-04-15T00:00:00Z",
-                    "2026-04-15T00:00:00Z"
+        actor
+            .ask(DbExecute {
+                sql: "INSERT INTO auth_identities (id, user_id, provider_id, issuer, subject, email, email_verified, raw_claims_json, created_at, last_login_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                    .to_string(),
+                params: vec![
+                    "identity-1".into(),
+                    session.user_id.clone().into(),
+                    "colony".into(),
+                    "https://colony.waddle.social".into(),
+                    "subject-1".into(),
+                    crate::db::Value::Null,
+                    crate::db::Value::Null,
+                    r#"{"profile":"https://cdn.example.com/avatar.png"}"#.into(),
+                    "2026-04-15T00:00:00Z".into(),
+                    "2026-04-15T00:00:00Z".into(),
                 ],
-            )
+            })
             .await
             .unwrap();
 
@@ -1097,13 +1100,13 @@ mod tests {
     async fn secure_cookie_header_tracks_base_url_scheme() {
         let mut secure_config = ServerConfig::test_homeserver();
         secure_config.base_url = "https://server.waddle.social".to_string();
-        let secure_state = create_test_auth_state(&secure_config).await;
+        let (secure_state, _) = create_test_auth_state(&secure_config).await;
         assert!(secure_state
             .session_cookie_header(Some("token"), 60)
             .contains("Secure"));
 
         let insecure_config = ServerConfig::test_homeserver();
-        let insecure_state = create_test_auth_state(&insecure_config).await;
+        let (insecure_state, _) = create_test_auth_state(&insecure_config).await;
         assert!(!insecure_state
             .session_cookie_header(Some("token"), 60)
             .contains("Secure"));

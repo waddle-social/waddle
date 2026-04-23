@@ -173,7 +173,7 @@ interface WaddleClient {
     void leave_room(string room_jid, string nick);
 
     [Async]
-    sequence<WaddleDiscoveredWaddle> discover_waddles();
+    WaddleDiscoveredWaddle? fetch_canonical_waddle();
 
     [Async]
     sequence<WaddleDiscoveredChannel> discover_channels(string waddle_id);

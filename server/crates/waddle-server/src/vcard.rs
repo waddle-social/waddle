@@ -37,10 +37,9 @@ impl VCardStore {
 
     /// Get a database connection.
     ///
-    /// For in-memory databases, this returns a guard to the persistent connection
-    /// to ensure data consistency (libSQL creates isolated databases for each `:memory:` connection).
-    /// For file-based databases, we create new connections.
-    async fn get_connection(&self) -> Result<crate::db::ConnectionGuard<'_>, VCardError> {
+    /// For in-memory databases, this returns a guard from the shared pool so the
+    /// store reads and writes through the same logical database handle.
+    async fn get_connection(&self) -> Result<crate::db::ConnectionGuard, VCardError> {
         self.db
             .guard()
             .await
@@ -131,7 +130,7 @@ impl VCardStore {
     }
 }
 
-/// Helper to convert libsql errors to VCardError.
+/// Helper to convert database errors to VCardError.
 fn db_err<E: std::fmt::Display>(e: E) -> VCardError {
     VCardError::DatabaseError(e.to_string())
 }

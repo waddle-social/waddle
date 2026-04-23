@@ -72,6 +72,7 @@ impl From<crate::db::DatabaseError> for MessageError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::actor::DbActor;
     use crate::db::{Database, MigrationRunner};
     use std::sync::Arc;
 
@@ -80,7 +81,7 @@ mod tests {
         let conn = db.guard().await.unwrap();
         conn.execute(
             "INSERT INTO channels (id, name, channel_type, position, is_default) VALUES (?, ?, 'text', 0, 0)",
-            libsql::params![channel_id, format!("Test Channel {}", channel_id)],
+            crate::db_params![channel_id, format!("Test Channel {}", channel_id)],
         )
         .await
         .expect("Failed to create test channel");
@@ -98,7 +99,8 @@ mod tests {
         // Create the test channel first (required by foreign key constraint)
         create_test_channel(&db, "channel-123").await;
 
-        let repo = MessageRepository::new(Arc::clone(&db));
+        let actor = kameo::spawn(DbActor::new((*db).clone()));
+        let repo = MessageRepository::new(actor);
 
         // Create a message
         let create = MessageCreate::new(
@@ -134,7 +136,8 @@ mod tests {
         // Create the test channel first (required by foreign key constraint)
         create_test_channel(&db, "channel-test").await;
 
-        let repo = MessageRepository::new(Arc::clone(&db));
+        let actor = kameo::spawn(DbActor::new((*db).clone()));
+        let repo = MessageRepository::new(actor);
 
         // Create multiple messages
         for i in 0..10 {
@@ -172,7 +175,8 @@ mod tests {
         // Create the test channel first (required by foreign key constraint)
         create_test_channel(&db, "channel-123").await;
 
-        let repo = MessageRepository::new(Arc::clone(&db));
+        let actor = kameo::spawn(DbActor::new((*db).clone()));
+        let repo = MessageRepository::new(actor);
 
         // Create a message
         let create = MessageCreate::new(
@@ -204,7 +208,8 @@ mod tests {
         // Create the test channel first (required by foreign key constraint)
         create_test_channel(&db, "channel-123").await;
 
-        let repo = MessageRepository::new(Arc::clone(&db));
+        let actor = kameo::spawn(DbActor::new((*db).clone()));
+        let repo = MessageRepository::new(actor);
 
         // Create a message
         let create = MessageCreate::new(
@@ -234,7 +239,8 @@ mod tests {
         // Create the test channel first (required by foreign key constraint)
         create_test_channel(&db, "channel-123").await;
 
-        let repo = MessageRepository::new(Arc::clone(&db));
+        let actor = kameo::spawn(DbActor::new((*db).clone()));
+        let repo = MessageRepository::new(actor);
 
         // Create a parent message
         let parent_create = MessageCreate::new(

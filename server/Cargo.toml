@@ -36,8 +36,7 @@ crossterm = "0.28"
 tui-textarea = "0.7"
 
 # Database
-libsql = "0.9"
-sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite"] }
+sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite", "postgres", "macros", "chrono", "uuid"] }
 
 # Actor Framework
 kameo = "0.15"

@@ -11,7 +11,7 @@ use waddle_xmpp::{
         Feature, Identity,
     },
     inbox::runtime::filter_query,
-    mam::{build_fin_iq, build_result_messages, is_mam_query, parse_mam_query, MamStorage},
+    mam::{build_fin_iq, build_result_messages, is_mam_query, parse_mam_query},
     muc::room_actor::GetSnapshot,
     protocol::{
         frame::{parse_frame, InboundFrame},
@@ -42,6 +42,7 @@ use super::super::{
 };
 use super::presence::get_managed_channel_for_room;
 use crate::auth::Session;
+use crate::db::actor::DbExecute;
 use crate::server::routes::channels::list_channels_from_db;
 use crate::server::routes::waddles::{
     get_waddle_by_id, list_all_waddles_from_db, list_user_waddles,
@@ -306,27 +307,31 @@ pub async fn handle_iq_with_conn_state(
         // Disco info on spaces service
         if to.as_deref() == Some(spaces_domain.as_str()) {
             if let Some(node) = query.node.as_deref() {
-                let waddle =
-                    match get_waddle_by_id(state.deps.app_state.db_pool.global(), node).await {
-                        Ok(Some(waddle)) => waddle,
-                        Ok(None) => {
-                            return vec![build_iq_error_xml(&id, "cancel", "item-not-found")];
-                        }
-                        Err(err) => {
-                            warn!(
-                                node = %node,
-                                error = %err,
-                                "Failed to load space node for disco#info"
-                            );
-                            return vec![build_iq_error_xml(&id, "wait", "internal-server-error")];
-                        }
-                    };
+                let waddle = match get_waddle_by_id(
+                    state.deps.app_state.db_pool.global_actor().clone(),
+                    node,
+                )
+                .await
+                {
+                    Ok(Some(waddle)) => waddle,
+                    Ok(None) => {
+                        return vec![build_iq_error_xml(&id, "cancel", "item-not-found")];
+                    }
+                    Err(err) => {
+                        warn!(
+                            node = %node,
+                            error = %err,
+                            "Failed to load space node for disco#info"
+                        );
+                        return vec![build_iq_error_xml(&id, "wait", "internal-server-error")];
+                    }
+                };
 
                 let is_member = if single_tenant {
                     true
                 } else if let Some(session) = authenticated_session {
                     match list_user_waddles(
-                        state.deps.app_state.db_pool.global(),
+                        state.deps.app_state.db_pool.global_actor().clone(),
                         &session.user_id,
                         200,
                         0,
@@ -461,13 +466,15 @@ pub async fn handle_iq_with_conn_state(
         }
 
         if to.as_deref() == Some(spaces_domain.as_str()) {
-            let global_db = state.deps.app_state.db_pool.global();
+            let global_db_actor = state.deps.app_state.db_pool.global_actor().clone();
             let items: Vec<DiscoItem> = match query.node.as_deref() {
                 Some(node) => {
                     let can_list_channels = if single_tenant {
                         true
                     } else if let Some(session) = authenticated_session {
-                        match list_user_waddles(global_db, &session.user_id, 200, 0).await {
+                        match list_user_waddles(global_db_actor.clone(), &session.user_id, 200, 0)
+                            .await
+                        {
                             Ok(waddles) => waddles.iter().any(|w| w.id == node),
                             Err(err) => {
                                 warn!(
@@ -486,9 +493,9 @@ pub async fn handle_iq_with_conn_state(
                     if !can_list_channels {
                         vec![]
                     } else {
-                        match state.deps.app_state.db_pool.get_waddle_db(node).await {
-                            Ok(waddle_db) => {
-                                match list_channels_from_db(&waddle_db, node, 200, 0).await {
+                        match state.deps.app_state.db_pool.get_waddle_actor(node).await {
+                            Ok(waddle_actor) => {
+                                match list_channels_from_db(waddle_actor, node, 200, 0).await {
                                     Ok(channels) => {
                                         channels
                                             .into_iter()
@@ -531,7 +538,7 @@ pub async fn handle_iq_with_conn_state(
                 }
                 None => {
                     let waddles = if single_tenant {
-                        match list_all_waddles_from_db(global_db, 1, 0).await {
+                        match list_all_waddles_from_db(global_db_actor.clone(), 1, 0).await {
                             Ok(rows) => rows,
                             Err(err) => {
                                 warn!(error = %err, "Failed to list canonical single-tenant space");
@@ -544,8 +551,13 @@ pub async fn handle_iq_with_conn_state(
                         let mut all = Vec::new();
 
                         loop {
-                            match list_user_waddles(global_db, &session.user_id, PAGE_SIZE, offset)
-                                .await
+                            match list_user_waddles(
+                                global_db_actor.clone(),
+                                &session.user_id,
+                                PAGE_SIZE,
+                                offset,
+                            )
+                            .await
                             {
                                 Ok(page) => {
                                     let count = page.len();
@@ -871,30 +883,23 @@ pub async fn handle_iq_with_conn_state(
             let put_url = format!("{}/api/upload/{}", base_url, slot_id);
             let get_url = format!("{}/api/files/{}/{}", base_url, slot_id, safe_filename);
 
-            let db = state.deps.app_state.db_pool.global();
-            let conn = match db.guard().await {
-                Ok(c) => c,
-                Err(e) => {
-                    warn!(error = %e, "Failed to connect to database for upload slot");
-                    return vec![build_upload_error(
-                        &id,
-                        &UploadError::InternalError(format!("Database error: {}", e)),
-                    )];
-                }
-            };
-
-            if let Err(e) = conn
-                .execute(
-                    "INSERT INTO upload_slots (id, requester_jid, filename, size_bytes, content_type, status, expires_at) VALUES (?, ?, ?, ?, ?, 'pending', ?)",
-                    libsql::params![
-                        slot_id.clone(),
-                        sender_jid.to_bare().to_string(),
-                        safe_filename.clone(),
-                        request.size as i64,
-                        content_type.clone(),
-                        expires_at,
+            if let Err(e) = state
+                .deps
+                .app_state
+                .db_pool
+                .global_actor()
+                .clone()
+                .ask(DbExecute {
+                    sql: "INSERT INTO upload_slots (id, requester_jid, filename, size_bytes, content_type, status, expires_at) VALUES (?, ?, ?, ?, ?, 'pending', ?)".to_string(),
+                    params: vec![
+                        slot_id.clone().into(),
+                        sender_jid.to_bare().to_string().into(),
+                        safe_filename.clone().into(),
+                        (request.size as i64).into(),
+                        content_type.clone().into(),
+                        expires_at.into(),
                     ],
-                )
+                })
                 .await
             {
                 warn!(error = %e, "Failed to create upload slot in database");

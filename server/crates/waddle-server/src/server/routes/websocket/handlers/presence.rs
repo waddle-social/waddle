@@ -443,14 +443,14 @@ pub async fn get_managed_channel_for_room(
     room_jid: &BareJid,
 ) -> Option<crate::server::routes::channels::ChannelResponse> {
     let (waddle_id, channel_id) = waddle_xmpp::parse_managed_room_jid(room_jid)?;
-    let waddle_db = state
+    let waddle_actor = state
         .deps
         .app_state
         .db_pool
-        .get_waddle_db(&waddle_id)
+        .get_waddle_actor(&waddle_id)
         .await
         .ok()?;
-    get_channel_from_db(&waddle_db, &waddle_id, &channel_id)
+    get_channel_from_db(waddle_actor, &waddle_id, &channel_id)
         .await
         .ok()
         .flatten()

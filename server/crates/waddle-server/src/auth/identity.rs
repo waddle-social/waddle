@@ -1,9 +1,13 @@
 use crate::auth::{username_to_localpart, AuthError, AuthProviderConfig};
-use crate::db::Database;
+use kameo::actor::ActorRef;
+
+use crate::db::actor::{DbActor, DbExecute, DbQueryOne};
+use crate::db::{row_value, ValueExt};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+#[cfg(test)]
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -37,12 +41,12 @@ pub struct LinkedIdentity {
 }
 
 pub struct IdentityService {
-    db: Arc<Database>,
+    actor: ActorRef<DbActor>,
 }
 
 impl IdentityService {
-    pub fn new(db: Arc<Database>) -> Self {
-        Self { db }
+    pub fn new(actor: ActorRef<DbActor>) -> Self {
+        Self { actor }
     }
 
     pub async fn resolve_or_create_user(
@@ -117,34 +121,47 @@ impl IdentityService {
             LIMIT 1
         "#;
 
-        let conn = self
-            .db
-            .guard()
-            .await
-            .map_err(|e| AuthError::DatabaseError(e.to_string()))?;
-        let mut rows = conn
-            .query(query, libsql::params![issuer, subject])
+        let row = self
+            .actor
+            .ask(DbQueryOne {
+                sql: query.to_string(),
+                params: vec![issuer.into(), subject.into()],
+            })
             .await
             .map_err(|e| AuthError::DatabaseError(format!("Failed to query identity: {}", e)))?;
-        let row = rows
-            .next()
-            .await
-            .map_err(|e| AuthError::DatabaseError(format!("Failed to read identity row: {}", e)))?;
 
         match row {
             Some(row) => Ok(Some(UserRecord {
-                id: row.get(0).map_err(|e| {
-                    AuthError::DatabaseError(format!("Failed to get user id: {}", e))
-                })?,
-                username: row.get(1).map_err(|e| {
-                    AuthError::DatabaseError(format!("Failed to get username: {}", e))
-                })?,
-                xmpp_localpart: row.get(2).map_err(|e| {
-                    AuthError::DatabaseError(format!("Failed to get xmpp_localpart: {}", e))
-                })?,
-                display_name: row.get::<Option<String>>(3).ok().flatten(),
-                avatar_url: row.get::<Option<String>>(4).ok().flatten(),
-                primary_email: row.get::<Option<String>>(5).ok().flatten(),
+                id: row_value(&row, 0)
+                    .and_then(ValueExt::as_string)
+                    .map_err(|e| {
+                        AuthError::DatabaseError(format!("Failed to get user id: {}", e))
+                    })?,
+                username: row_value(&row, 1)
+                    .and_then(ValueExt::as_string)
+                    .map_err(|e| {
+                        AuthError::DatabaseError(format!("Failed to get username: {}", e))
+                    })?,
+                xmpp_localpart: row_value(&row, 2)
+                    .and_then(ValueExt::as_string)
+                    .map_err(|e| {
+                        AuthError::DatabaseError(format!("Failed to get xmpp_localpart: {}", e))
+                    })?,
+                display_name: row_value(&row, 3)
+                    .and_then(ValueExt::as_optional_string)
+                    .map_err(|e| {
+                        AuthError::DatabaseError(format!("Failed to get display_name: {}", e))
+                    })?,
+                avatar_url: row_value(&row, 4)
+                    .and_then(ValueExt::as_optional_string)
+                    .map_err(|e| {
+                        AuthError::DatabaseError(format!("Failed to get avatar_url: {}", e))
+                    })?,
+                primary_email: row_value(&row, 5)
+                    .and_then(ValueExt::as_optional_string)
+                    .map_err(|e| {
+                        AuthError::DatabaseError(format!("Failed to get primary_email: {}", e))
+                    })?,
             })),
             None => Ok(None),
         }
@@ -216,25 +233,30 @@ impl IdentityService {
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             "#;
 
-            let conn = self
-                .db
-                .guard()
-                .await
-                .map_err(|e| AuthError::DatabaseError(e.to_string()))?;
-            let result = conn
-                .execute(
-                    insert,
-                    libsql::params![
-                        user_id.clone(),
-                        username.clone(),
-                        xmpp_localpart.clone(),
-                        claims.name.clone(),
-                        claims.avatar_url.clone(),
-                        claims.email.clone(),
-                        now.clone(),
-                        now.clone()
+            let result = self
+                .actor
+                .ask(DbExecute {
+                    sql: insert.to_string(),
+                    params: vec![
+                        user_id.clone().into(),
+                        username.clone().into(),
+                        xmpp_localpart.clone().into(),
+                        claims
+                            .name
+                            .clone()
+                            .map_or(crate::db::Value::Null, crate::db::Value::from),
+                        claims
+                            .avatar_url
+                            .clone()
+                            .map_or(crate::db::Value::Null, crate::db::Value::from),
+                        claims
+                            .email
+                            .clone()
+                            .map_or(crate::db::Value::Null, crate::db::Value::from),
+                        now.clone().into(),
+                        now.clone().into(),
                     ],
-                )
+                })
                 .await;
 
             match result {
@@ -284,28 +306,25 @@ impl IdentityService {
             let xmpp_localpart = username_to_localpart(&username);
             let now = Utc::now().to_rfc3339();
 
-            let conn = self
-                .db
-                .guard()
-                .await
-                .map_err(|e| AuthError::DatabaseError(e.to_string()))?;
-            let result = conn
-                .execute(
-                    r#"
-                    UPDATE users
-                    SET username = ?, xmpp_localpart = ?, display_name = ?, avatar_url = ?, primary_email = ?, updated_at = ?
-                    WHERE id = ?
-                    "#,
-                    libsql::params![
-                        username.clone(),
-                        xmpp_localpart.clone(),
-                        claims.name.clone(),
-                        claims.avatar_url.clone(),
-                        claims.email.clone(),
-                        now.as_str(),
-                        existing.id.as_str()
+            let result = self
+                .actor
+                .ask(DbExecute {
+                    sql: r#"
+                        UPDATE users
+                        SET username = ?, xmpp_localpart = ?, display_name = ?, avatar_url = ?, primary_email = ?, updated_at = ?
+                        WHERE id = ?
+                    "#
+                    .to_string(),
+                    params: vec![
+                        username.clone().into(),
+                        xmpp_localpart.clone().into(),
+                        claims.name.clone().map_or(crate::db::Value::Null, crate::db::Value::from),
+                        claims.avatar_url.clone().map_or(crate::db::Value::Null, crate::db::Value::from),
+                        claims.email.clone().map_or(crate::db::Value::Null, crate::db::Value::from),
+                        now.clone().into(),
+                        existing.id.clone().into(),
                     ],
-                )
+                })
                 .await;
 
             match result {
@@ -349,33 +368,36 @@ impl IdentityService {
         let raw = serde_json::to_string(&claims.raw_claims)
             .map_err(|e| AuthError::DatabaseError(format!("Failed to serialize claims: {}", e)))?;
 
-        let conn = self
-            .db
-            .guard()
+        self.actor
+            .ask(DbExecute {
+                sql: r#"
+                    INSERT INTO auth_identities (
+                        id, user_id, provider_id, issuer, subject, email, email_verified,
+                        raw_claims_json, created_at, last_login_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                "#
+                .to_string(),
+                params: vec![
+                    identity_id.into(),
+                    user_id.into(),
+                    provider.id.clone().into(),
+                    issuer.into(),
+                    claims.subject.clone().into(),
+                    claims
+                        .email
+                        .clone()
+                        .map_or(crate::db::Value::Null, crate::db::Value::from),
+                    claims
+                        .email_verified
+                        .map(|v| crate::db::Value::from(i64::from(v)))
+                        .unwrap_or(crate::db::Value::Null),
+                    raw.into(),
+                    now.clone().into(),
+                    now.into(),
+                ],
+            })
             .await
-            .map_err(|e| AuthError::DatabaseError(e.to_string()))?;
-        conn.execute(
-            r#"
-                INSERT INTO auth_identities (
-                    id, user_id, provider_id, issuer, subject, email, email_verified,
-                    raw_claims_json, created_at, last_login_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                "#,
-            libsql::params![
-                identity_id.as_str(),
-                user_id,
-                provider.id.as_str(),
-                issuer,
-                claims.subject.as_str(),
-                claims.email.clone(),
-                claims.email_verified.map(|v| if v { 1 } else { 0 }),
-                raw.as_str(),
-                now.as_str(),
-                now.as_str()
-            ],
-        )
-        .await
-        .map_err(|e| AuthError::DatabaseError(format!("Failed to insert identity: {}", e)))?;
+            .map_err(|e| AuthError::DatabaseError(format!("Failed to insert identity: {}", e)))?;
 
         Ok(())
     }
@@ -391,29 +413,29 @@ impl IdentityService {
         let raw = serde_json::to_string(&claims.raw_claims)
             .map_err(|e| AuthError::DatabaseError(format!("Failed to serialize claims: {}", e)))?;
 
-        let conn = self
-            .db
-            .guard()
+        self.actor
+            .ask(DbExecute {
+                sql: "UPDATE auth_identities
+                      SET last_login_at = ?, provider_id = ?, email = ?, email_verified = ?, raw_claims_json = ?
+                      WHERE issuer = ? AND subject = ?"
+                    .to_string(),
+                params: vec![
+                    now.into(),
+                    provider.id.clone().into(),
+                    claims.email.clone().map_or(crate::db::Value::Null, crate::db::Value::from),
+                    claims
+                        .email_verified
+                        .map(|v| crate::db::Value::from(i64::from(v)))
+                        .unwrap_or(crate::db::Value::Null),
+                    raw.into(),
+                    issuer.into(),
+                    subject.into(),
+                ],
+            })
             .await
-            .map_err(|e| AuthError::DatabaseError(e.to_string()))?;
-        conn.execute(
-            "UPDATE auth_identities
-             SET last_login_at = ?, provider_id = ?, email = ?, email_verified = ?, raw_claims_json = ?
-             WHERE issuer = ? AND subject = ?",
-            libsql::params![
-                now.as_str(),
-                provider.id.as_str(),
-                claims.email.clone(),
-                claims.email_verified.map(|v| if v { 1 } else { 0 }),
-                raw.as_str(),
-                issuer,
-                subject
-            ],
-        )
-        .await
-        .map_err(|e| {
-            AuthError::DatabaseError(format!("Failed to update identity login timestamp: {}", e))
-        })?;
+            .map_err(|e| {
+                AuthError::DatabaseError(format!("Failed to update identity login timestamp: {}", e))
+            })?;
 
         Ok(())
     }
@@ -551,7 +573,8 @@ mod tests {
     #[tokio::test]
     async fn existing_identity_updates_username_and_claims_on_login() {
         let db = create_test_db().await;
-        let service = IdentityService::new(Arc::clone(&db));
+        let actor = kameo::spawn(crate::db::actor::DbActor::new((*db).clone()));
+        let service = IdentityService::new(actor);
         let provider = provider_with_username_claim(Some("preferred_username"));
 
         {
@@ -563,7 +586,7 @@ mod tests {
                 INSERT INTO users (id, username, xmpp_localpart, display_name, avatar_url, primary_email, created_at, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 "#,
-                libsql::params![
+                crate::db_params![
                     "user-1",
                     "example.person",
                     "example.person",
@@ -584,7 +607,7 @@ mod tests {
                     raw_claims_json, created_at, last_login_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 "#,
-                libsql::params![
+                crate::db_params![
                     "identity-1",
                     "user-1",
                     "provider",
@@ -621,7 +644,7 @@ mod tests {
         let mut rows = conn
             .query(
                 "SELECT username, xmpp_localpart, primary_email FROM users WHERE id = ?",
-                libsql::params!["user-1"],
+                crate::db_params!["user-1"],
             )
             .await
             .expect("query user");
@@ -636,7 +659,7 @@ mod tests {
         let mut rows = conn
             .query(
                 "SELECT email, raw_claims_json FROM auth_identities WHERE issuer = ? AND subject = ?",
-                libsql::params!["https://issuer.example", "sub-1234"],
+                crate::db_params!["https://issuer.example", "sub-1234"],
             )
             .await
             .expect("query identity");
@@ -650,7 +673,8 @@ mod tests {
     #[tokio::test]
     async fn existing_identity_uses_suffix_when_username_conflicts() {
         let db = create_test_db().await;
-        let service = IdentityService::new(Arc::clone(&db));
+        let actor = kameo::spawn(crate::db::actor::DbActor::new((*db).clone()));
+        let service = IdentityService::new(actor);
         let provider = provider_with_username_claim(Some("preferred_username"));
 
         {
@@ -662,7 +686,7 @@ mod tests {
                 INSERT INTO users (id, username, xmpp_localpart, created_at, updated_at)
                 VALUES (?, ?, ?, ?, ?)
                 "#,
-                libsql::params![
+                crate::db_params![
                     "user-conflict",
                     "rawkode",
                     "rawkode",
@@ -678,7 +702,7 @@ mod tests {
                 INSERT INTO users (id, username, xmpp_localpart, created_at, updated_at)
                 VALUES (?, ?, ?, ?, ?)
                 "#,
-                libsql::params![
+                crate::db_params![
                     "user-1",
                     "example.person",
                     "example.person",
@@ -695,7 +719,7 @@ mod tests {
                     id, user_id, provider_id, issuer, subject, raw_claims_json, created_at, last_login_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 "#,
-                libsql::params![
+                crate::db_params![
                     "identity-1",
                     "user-1",
                     "provider",

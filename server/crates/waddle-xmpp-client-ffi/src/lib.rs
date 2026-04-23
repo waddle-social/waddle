@@ -492,30 +492,27 @@ impl WaddleClient {
         }
     }
 
-    pub async fn discover_waddles(&self) -> Vec<WaddleDiscoveredWaddle> {
+    pub async fn fetch_canonical_waddle(&self) -> Option<WaddleDiscoveredWaddle> {
         let guard = self.handle.lock().await;
         match guard.as_ref() {
             None => {
                 drop(guard);
                 self.listener.on_error("Not connected".to_string());
-                vec![]
+                None
             }
             Some(h) => {
                 let spaces_domain = format!("spaces.{}", jid_domain(&self.config.jid));
                 match h.discover_items(&spaces_domain, None).await {
-                    Ok(items) => items
-                        .into_iter()
-                        .map(|item| WaddleDiscoveredWaddle {
-                            id: item.node.unwrap_or_else(|| item.jid.clone()),
-                            name: item.name.unwrap_or_default(),
-                            is_public: true,
-                        })
-                        .collect(),
+                    Ok(items) => items.into_iter().next().map(|item| WaddleDiscoveredWaddle {
+                        id: item.node.unwrap_or_else(|| item.jid.clone()),
+                        name: item.name.unwrap_or_default(),
+                        is_public: true,
+                    }),
                     Err(e) => {
                         drop(guard);
                         self.listener
-                            .on_error(format!("discover_waddles failed: {e}"));
-                        vec![]
+                            .on_error(format!("fetch_canonical_waddle failed: {e}"));
+                        None
                     }
                 }
             }

@@ -19,7 +19,7 @@ futures = { workspace = true }
 hmac = { workspace = true }
 jid = { workspace = true }
 kameo = { workspace = true }
-libsql = { workspace = true }
+sqlx = { workspace = true }
 pbkdf2 = { version = "0.12", features = ["hmac"] }
 rand = { workspace = true }
 rcgen = "0.13"

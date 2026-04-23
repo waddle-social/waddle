@@ -46,21 +46,21 @@ async fn main() -> Result<()> {
         .map_err(|e| anyhow::anyhow!("Failed to load server configuration: {}", e))?;
     server_config.log_config();
 
-    // Initialize database
-    let db_config = if let Ok(db_path) = std::env::var("WADDLE_DB_PATH") {
-        info!("Using file-based database at: {}", db_path);
-        db::DatabaseConfig::development(&db_path)
-    } else {
-        info!("Using in-memory database (development mode)");
-        db::DatabaseConfig::default()
-    };
+    // Initialize database (driver + DSN contract)
+    let db_runtime = config::DatabaseRuntimeConfig::from_env()
+        .map_err(|e| anyhow::anyhow!("Failed to load database runtime config: {}", e))?;
+    info!(
+        driver = ?db_runtime.driver,
+        "Using configured database runtime"
+    );
+    let db_config = db::DatabaseConfig::new(db_runtime.driver, db_runtime.database_url);
 
     let pool_config = db::PoolConfig::default();
     let db_pool = db::DatabasePool::new(db_config, pool_config)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to initialize database: {}", e))?;
 
-    let migration_runner = db::MigrationRunner::global();
+    let migration_runner = db::MigrationRunner::single();
     migration_runner
         .run(db_pool.global())
         .await

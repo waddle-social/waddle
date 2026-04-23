@@ -8,22 +8,23 @@
 
 use super::types::{Message, MessageCreate, MessageFlags, MessageUpdate};
 use super::MessageError;
-use crate::db::Database;
+use crate::db::actor::{DbActor, DbExecute, DbQuery, DbQueryOne};
+use crate::db::{row_value, ValueExt};
 use chrono::{DateTime, Utc};
-use std::sync::Arc;
+use kameo::actor::ActorRef;
 use tracing::{debug, instrument};
 use uuid::Uuid;
 
 /// Repository for message CRUD operations
 #[allow(dead_code)]
 pub struct MessageRepository {
-    db: Arc<Database>,
+    actor: ActorRef<DbActor>,
 }
 
 impl MessageRepository {
     /// Create a new message repository
-    pub fn new(db: Arc<Database>) -> Self {
-        Self { db }
+    pub fn new(actor: ActorRef<DbActor>) -> Self {
+        Self { actor }
     }
 
     /// Create a new message
@@ -41,30 +42,35 @@ impl MessageRepository {
         let expires_at_str = create.expires_at.map(|dt| dt.to_rfc3339());
         let created_at_str = created_at.to_rfc3339();
 
-        let conn = self.db.guard().await.map_err(|e| {
-            MessageError::DatabaseError(format!("Failed to connect to database: {}", e))
-        })?;
-        conn.execute(
-            r#"
-                INSERT INTO messages (
-                    id, channel_id, author_user_id, content, reply_to_id, thread_id,
-                    flags, edited_at, created_at, expires_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
-                "#,
-            libsql::params![
-                id.clone(),
-                create.channel_id.clone(),
-                create.author_user_id.clone(),
-                content.clone(),
-                create.reply_to_id.clone(),
-                create.thread_id.clone(),
-                flags_bits,
-                created_at_str,
-                expires_at_str
-            ],
-        )
-        .await
-        .map_err(|e| MessageError::DatabaseError(format!("Failed to insert message: {}", e)))?;
+        self.actor
+            .ask(DbExecute {
+                sql: r#"
+                    INSERT INTO messages (
+                        id, channel_id, author_user_id, content, reply_to_id, thread_id,
+                        flags, edited_at, created_at, expires_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+                "#
+                .to_string(),
+                params: vec![
+                    id.clone().into(),
+                    create.channel_id.clone().into(),
+                    create.author_user_id.clone().into(),
+                    content.clone().into(),
+                    create
+                        .reply_to_id
+                        .clone()
+                        .map_or(crate::db::Value::Null, crate::db::Value::from),
+                    create
+                        .thread_id
+                        .clone()
+                        .map_or(crate::db::Value::Null, crate::db::Value::from),
+                    flags_bits.into(),
+                    created_at_str.into(),
+                    expires_at_str.map_or(crate::db::Value::Null, crate::db::Value::from),
+                ],
+            })
+            .await
+            .map_err(|e| MessageError::DatabaseError(format!("Failed to insert message: {}", e)))?;
 
         debug!("Created message: {}", id);
 
@@ -92,21 +98,18 @@ impl MessageRepository {
             WHERE id = ?
         "#;
 
-        let conn = self.db.guard().await.map_err(|e| {
-            MessageError::DatabaseError(format!("Failed to connect to database: {}", e))
-        })?;
-        let mut rows = conn
-            .query(query, libsql::params![id])
+        let row = self
+            .actor
+            .ask(DbQueryOne {
+                sql: query.to_string(),
+                params: vec![id.into()],
+            })
             .await
             .map_err(|e| MessageError::DatabaseError(format!("Failed to query message: {}", e)))?;
 
-        let row = rows.next().await.map_err(|e| {
-            MessageError::DatabaseError(format!("Failed to read message row: {}", e))
-        })?;
-
         match row {
             Some(row) => {
-                let message = self.row_to_message(&row)?;
+                let message = self.values_to_message(&row)?;
                 Ok(Some(message))
             }
             None => Ok(None),
@@ -136,39 +139,33 @@ impl MessageRepository {
     ) -> Result<(Vec<Message>, Option<String>), MessageError> {
         let limit_plus_one = (limit + 1) as i64;
 
-        let (query, params): (&str, Vec<libsql::Value>) = match before_cursor {
+        let (query, params): (&str, Vec<crate::db::Value>) = match before_cursor {
             Some(cursor) => {
                 // Get the created_at of the cursor message for proper pagination
                 let cursor_query = "SELECT created_at FROM messages WHERE id = ?";
-                let cursor_created_at = {
-                    let conn = self.db.guard().await.map_err(|e| {
-                        MessageError::DatabaseError(format!("Failed to connect to database: {}", e))
-                    })?;
-                    let mut rows = conn
-                        .query(cursor_query, libsql::params![cursor])
-                        .await
-                        .map_err(|e| {
-                            MessageError::DatabaseError(format!("Failed to query cursor: {}", e))
-                        })?;
-
-                    match rows.next().await.map_err(|e| {
-                        MessageError::DatabaseError(format!("Failed to read cursor row: {}", e))
+                let cursor_created_at = match self
+                    .actor
+                    .ask(DbQueryOne {
+                        sql: cursor_query.to_string(),
+                        params: vec![cursor.into()],
+                    })
+                    .await
+                    .map_err(|e| {
+                        MessageError::DatabaseError(format!("Failed to query cursor: {}", e))
                     })? {
-                        Some(row) => {
-                            let created_at: String = row.get(0).map_err(|e| {
-                                MessageError::DatabaseError(format!(
-                                    "Failed to get cursor created_at: {}",
-                                    e
-                                ))
-                            })?;
-                            created_at
-                        }
-                        None => {
-                            return Err(MessageError::InvalidId(format!(
-                                "Cursor message not found: {}",
-                                cursor
-                            )))
-                        }
+                    Some(row) => row_value(&row, 0)
+                        .and_then(ValueExt::as_string)
+                        .map_err(|e| {
+                            MessageError::DatabaseError(format!(
+                                "Failed to get cursor created_at: {}",
+                                e
+                            ))
+                        })?,
+                    None => {
+                        return Err(MessageError::InvalidId(format!(
+                            "Cursor message not found: {}",
+                            cursor
+                        )))
                     }
                 };
 
@@ -203,18 +200,17 @@ impl MessageRepository {
 
         let mut messages = Vec::new();
 
-        let conn = self.db.guard().await.map_err(|e| {
-            MessageError::DatabaseError(format!("Failed to connect to database: {}", e))
-        })?;
-        let mut rows = conn
-            .query(query, params)
+        let rows = self
+            .actor
+            .ask(DbQuery {
+                sql: query.to_string(),
+                params,
+            })
             .await
             .map_err(|e| MessageError::DatabaseError(format!("Failed to query messages: {}", e)))?;
 
-        while let Some(row) = rows.next().await.map_err(|e| {
-            MessageError::DatabaseError(format!("Failed to read message row: {}", e))
-        })? {
-            messages.push(self.row_to_message(&row)?);
+        for row in rows {
+            messages.push(self.values_to_message(&row)?);
         }
 
         // Check if there are more messages
@@ -247,7 +243,7 @@ impl MessageRepository {
 
         // Build update query dynamically
         let mut set_clauses = Vec::new();
-        let mut params: Vec<libsql::Value> = Vec::new();
+        let mut params: Vec<crate::db::Value> = Vec::new();
 
         if let Some(ref content) = update.content {
             set_clauses.push("content = ?");
@@ -275,14 +271,10 @@ impl MessageRepository {
             set_clauses.join(", ")
         );
 
-        {
-            let conn = self.db.guard().await.map_err(|e| {
-                MessageError::DatabaseError(format!("Failed to connect to database: {}", e))
-            })?;
-            conn.execute(&query, params).await.map_err(|e| {
-                MessageError::DatabaseError(format!("Failed to update message: {}", e))
-            })?;
-        }
+        self.actor
+            .ask(DbExecute { sql: query, params })
+            .await
+            .map_err(|e| MessageError::DatabaseError(format!("Failed to update message: {}", e)))?;
 
         debug!("Updated message: {}", id);
 
@@ -295,11 +287,12 @@ impl MessageRepository {
     /// Delete a message
     #[instrument(skip(self))]
     pub async fn delete(&self, id: &str) -> Result<(), MessageError> {
-        let conn = self.db.guard().await.map_err(|e| {
-            MessageError::DatabaseError(format!("Failed to connect to database: {}", e))
-        })?;
-        let rows_affected = conn
-            .execute("DELETE FROM messages WHERE id = ?", libsql::params![id])
+        let rows_affected = self
+            .actor
+            .ask(DbExecute {
+                sql: "DELETE FROM messages WHERE id = ?".to_string(),
+                params: vec![id.into()],
+            })
             .await
             .map_err(|e| MessageError::DatabaseError(format!("Failed to delete message: {}", e)))?;
 
@@ -312,29 +305,46 @@ impl MessageRepository {
     }
 
     /// Convert a database row to a Message
-    fn row_to_message(&self, row: &libsql::Row) -> Result<Message, MessageError> {
-        let id: String = row
-            .get(0)
+    fn values_to_message(&self, row: &[crate::db::Value]) -> Result<Message, MessageError> {
+        let id = row_value(row, 0)
+            .and_then(ValueExt::as_string)
             .map_err(|e| MessageError::DatabaseError(format!("Failed to get message id: {}", e)))?;
 
-        let channel_id: String = row
-            .get(1)
+        let channel_id = row_value(row, 1)
+            .and_then(ValueExt::as_string)
             .map_err(|e| MessageError::DatabaseError(format!("Failed to get channel_id: {}", e)))?;
 
-        let author_user_id: String = row.get(2).map_err(|e| {
-            MessageError::DatabaseError(format!("Failed to get author_user_id: {}", e))
-        })?;
+        let author_user_id = row_value(row, 2)
+            .and_then(ValueExt::as_string)
+            .map_err(|e| {
+                MessageError::DatabaseError(format!("Failed to get author_user_id: {}", e))
+            })?;
 
-        let content: Option<String> = row.get(3).ok();
+        let content = row_value(row, 3)
+            .and_then(ValueExt::as_optional_string)
+            .ok()
+            .flatten();
 
-        let reply_to_id: Option<String> = row.get(4).ok();
+        let reply_to_id = row_value(row, 4)
+            .and_then(ValueExt::as_optional_string)
+            .ok()
+            .flatten();
 
-        let thread_id: Option<String> = row.get(5).ok();
+        let thread_id = row_value(row, 5)
+            .and_then(ValueExt::as_optional_string)
+            .ok()
+            .flatten();
 
-        let flags_bits: i64 = row.get(6).unwrap_or(0);
+        let flags_bits = match row_value(row, 6) {
+            Ok(crate::db::Value::Integer(v)) => *v,
+            _ => 0,
+        };
         let flags = MessageFlags::from(flags_bits);
 
-        let edited_at_str: Option<String> = row.get(7).ok();
+        let edited_at_str = row_value(row, 7)
+            .and_then(ValueExt::as_optional_string)
+            .ok()
+            .flatten();
         let edited_at = edited_at_str
             .map(|s| DateTime::parse_from_rfc3339(&s).map(|dt| dt.with_timezone(&Utc)))
             .transpose()
@@ -342,8 +352,8 @@ impl MessageRepository {
                 MessageError::DatabaseError(format!("Failed to parse edited_at: {}", e))
             })?;
 
-        let created_at_str: String = row
-            .get(8)
+        let created_at_str = row_value(row, 8)
+            .and_then(ValueExt::as_string)
             .map_err(|e| MessageError::DatabaseError(format!("Failed to get created_at: {}", e)))?;
         let created_at = DateTime::parse_from_rfc3339(&created_at_str)
             .map(|dt| dt.with_timezone(&Utc))
@@ -351,7 +361,10 @@ impl MessageRepository {
                 MessageError::DatabaseError(format!("Failed to parse created_at: {}", e))
             })?;
 
-        let expires_at_str: Option<String> = row.get(9).ok();
+        let expires_at_str = row_value(row, 9)
+            .and_then(ValueExt::as_optional_string)
+            .ok()
+            .flatten();
         let expires_at = expires_at_str
             .map(|s| DateTime::parse_from_rfc3339(&s).map(|dt| dt.with_timezone(&Utc)))
             .transpose()

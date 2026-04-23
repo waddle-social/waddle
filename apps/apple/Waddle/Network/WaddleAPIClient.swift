@@ -34,11 +34,6 @@ private struct PollStatusResponse: Decodable {
     let status: String
 }
 
-private struct PublicWaddlesResponse: Decodable {
-    let waddles: [WaddleSummary]
-    let total: Int
-}
-
 private struct MembersResponse: Decodable {
     let members: [MemberSummary]
 }
@@ -126,28 +121,6 @@ final class WaddleAPIClient {
         }
 
         _ = try await send(path: "/api/auth/logout", method: "POST", body: body)
-    }
-
-    func listPublicWaddles(sessionID: String, query: String?) async throws -> [WaddleSummary] {
-        var items = [
-            URLQueryItem(name: "session_id", value: sessionID),
-            URLQueryItem(name: "limit", value: "100"),
-        ]
-        let trimmed = query?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if !trimmed.isEmpty {
-            items.append(URLQueryItem(name: "query", value: trimmed))
-        }
-
-        let (data, _) = try await send(path: "/v1/waddles/public", queryItems: items)
-        return try decoder.decode(PublicWaddlesResponse.self, from: data).waddles
-    }
-
-    func joinWaddle(sessionID: String, waddleID: String) async throws {
-        _ = try await send(
-            path: "/v1/waddles/\(waddleID)/join",
-            method: "POST",
-            queryItems: [URLQueryItem(name: "session_id", value: sessionID)]
-        )
     }
 
     func createWaddle(sessionID: String, name: String, description: String?, isPublic: Bool) async throws -> WaddleSummary {

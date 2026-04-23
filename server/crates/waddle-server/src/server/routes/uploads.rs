@@ -7,7 +7,10 @@
 //! Upload slots are created via the XMPP upload request flow (XEP-0363).
 //! This module handles the HTTP portion of the upload/download process.
 
+use crate::db::actor::{DbActor, DbExecute, DbQueryOne};
+#[cfg(test)]
 use crate::db::Database;
+use crate::db::{row_value, ValueExt};
 use crate::server::AppState;
 use axum::{
     body::Bytes,
@@ -37,8 +40,13 @@ impl UploadState {
     }
 
     /// Get the global database reference
+    #[cfg(test)]
     fn global_db(&self) -> &Database {
         self.app_state.db_pool.global()
+    }
+
+    fn global_actor(&self) -> kameo::actor::ActorRef<DbActor> {
+        self.app_state.db_pool.global_actor().clone()
     }
 }
 
@@ -177,41 +185,50 @@ struct UploadSlotInfo {
 }
 
 /// Fetch upload slot from database
-async fn get_upload_slot(db: &Database, slot_id: &str) -> Result<Option<UploadSlotInfo>, String> {
+async fn get_upload_slot(
+    actor: kameo::actor::ActorRef<DbActor>,
+    slot_id: &str,
+) -> Result<Option<UploadSlotInfo>, String> {
     let query = r#"
         SELECT id, filename, size_bytes, content_type, status, storage_key, expires_at
         FROM upload_slots
         WHERE id = ?
     "#;
 
-    let conn = db.guard().await.map_err(|e| e.to_string())?;
-    let mut rows = conn
-        .query(query, libsql::params![slot_id])
+    let row = actor
+        .ask(DbQueryOne {
+            sql: query.to_string(),
+            params: vec![slot_id.into()],
+        })
         .await
         .map_err(|e| format!("Failed to query upload slot: {}", e))?;
 
-    let row = rows
-        .next()
-        .await
-        .map_err(|e| format!("Failed to read slot row: {}", e))?;
-
     match row {
         Some(row) => {
-            let filename: String = row
-                .get(1)
+            let filename = row_value(&row, 1)
+                .and_then(ValueExt::as_string)
                 .map_err(|e| format!("Failed to get filename: {}", e))?;
-            let size_bytes: i64 = row
-                .get(2)
-                .map_err(|e| format!("Failed to get size_bytes: {}", e))?;
-            let content_type: String = row
-                .get(3)
+            let size_bytes =
+                match row_value(&row, 2).map_err(|e| format!("Failed to get size_bytes: {}", e))? {
+                    crate::db::Value::Integer(value) => *value,
+                    other => {
+                        return Err(format!(
+                            "Failed to get size_bytes: unexpected value {:?}",
+                            other
+                        ))
+                    }
+                };
+            let content_type = row_value(&row, 3)
+                .and_then(ValueExt::as_string)
                 .map_err(|e| format!("Failed to get content_type: {}", e))?;
-            let status: String = row
-                .get(4)
+            let status = row_value(&row, 4)
+                .and_then(ValueExt::as_string)
                 .map_err(|e| format!("Failed to get status: {}", e))?;
-            let storage_key: Option<String> = row.get(5).ok();
-            let expires_at: String = row
-                .get(6)
+            let storage_key = row_value(&row, 5)
+                .and_then(ValueExt::as_optional_string)
+                .map_err(|e| format!("Failed to get storage_key: {}", e))?;
+            let expires_at = row_value(&row, 6)
+                .and_then(ValueExt::as_string)
                 .map_err(|e| format!("Failed to get expires_at: {}", e))?;
 
             Ok(Some(UploadSlotInfo {
@@ -228,7 +245,11 @@ async fn get_upload_slot(db: &Database, slot_id: &str) -> Result<Option<UploadSl
 }
 
 /// Update slot status to 'uploaded' and set storage_key
-async fn mark_slot_uploaded(db: &Database, slot_id: &str, storage_key: &str) -> Result<(), String> {
+async fn mark_slot_uploaded(
+    actor: kameo::actor::ActorRef<DbActor>,
+    slot_id: &str,
+    storage_key: &str,
+) -> Result<(), String> {
     let now = chrono::Utc::now().to_rfc3339();
     let query = r#"
         UPDATE upload_slots
@@ -236,8 +257,11 @@ async fn mark_slot_uploaded(db: &Database, slot_id: &str, storage_key: &str) -> 
         WHERE id = ?
     "#;
 
-    let conn = db.guard().await.map_err(|e| e.to_string())?;
-    conn.execute(query, libsql::params![storage_key, now, slot_id])
+    actor
+        .ask(DbExecute {
+            sql: query.to_string(),
+            params: vec![storage_key.into(), now.into(), slot_id.into()],
+        })
         .await
         .map_err(|e| format!("Failed to update slot status: {}", e))?;
 
@@ -275,7 +299,7 @@ pub async fn upload_handler(
     info!("Processing upload for slot: {}", slot_id);
 
     // Get upload slot from database
-    let slot = match get_upload_slot(state.global_db(), &slot_id).await {
+    let slot = match get_upload_slot(state.global_actor(), &slot_id).await {
         Ok(Some(slot)) => slot,
         Ok(None) => {
             warn!("Upload slot not found: {}", slot_id);
@@ -392,7 +416,7 @@ pub async fn upload_handler(
     }
 
     // Update slot status in database
-    if let Err(err) = mark_slot_uploaded(state.global_db(), &slot_id, &storage_key).await {
+    if let Err(err) = mark_slot_uploaded(state.global_actor(), &slot_id, &storage_key).await {
         error!("Failed to update slot status: {}", err);
         warn!("File uploaded but database status update failed");
     }
@@ -422,7 +446,7 @@ pub async fn download_handler(
     );
 
     // Get upload slot from database
-    let slot = match get_upload_slot(state.global_db(), &slot_id).await {
+    let slot = match get_upload_slot(state.global_actor(), &slot_id).await {
         Ok(Some(slot)) => slot,
         Ok(None) => {
             warn!("Download slot not found: {}", slot_id);
@@ -584,7 +608,7 @@ mod tests {
         let conn = db.guard().await.unwrap();
         conn.execute(
             query,
-            libsql::params![slot_id, filename, size, content_type, expires_at],
+            crate::db_params![slot_id, filename, size, content_type, expires_at],
         )
         .await
         .unwrap();
@@ -601,7 +625,7 @@ mod tests {
         "#;
 
         let conn = db.guard().await.unwrap();
-        conn.execute(query, libsql::params![slot_id, expires_at])
+        conn.execute(query, crate::db_params![slot_id, expires_at])
             .await
             .unwrap();
     }
@@ -646,7 +670,7 @@ mod tests {
         assert_eq!(saved_content, file_content);
 
         // Verify slot status was updated
-        let slot = get_upload_slot(state.global_db(), &slot_id)
+        let slot = get_upload_slot(state.global_actor(), &slot_id)
             .await
             .unwrap()
             .unwrap();
@@ -823,7 +847,7 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::CREATED);
 
-        let slot = get_upload_slot(state.global_db(), &slot_id)
+        let slot = get_upload_slot(state.global_actor(), &slot_id)
             .await
             .unwrap()
             .unwrap();

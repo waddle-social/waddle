@@ -35,11 +35,9 @@ use tracing::{info, info_span, warn, Level, Span};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 use waddle_extensions::{ExtensionConfig, ExtensionManager};
 use waddle_xmpp::inbox::storage::InboxStorage;
+use waddle_xmpp::mam::{MamStorage, SqlxMamStorage};
 use waddle_xmpp::XmppServerConfig;
-use waddle_xmpp::{
-    mam::LibSqlMamStorage, muc::room_registry_actor::RoomRegistryActor,
-    registry::ConnectionRegistry,
-};
+use waddle_xmpp::{muc::room_registry_actor::RoomRegistryActor, registry::ConnectionRegistry};
 
 mod routes;
 pub mod xmpp_state;
@@ -118,10 +116,10 @@ pub struct XmppConfig {
     pub tls_cert_path: String,
     /// TLS key path (default: "certs/server.key")
     pub tls_key_path: String,
-    /// MAM database path (None for in-memory)
-    pub mam_db_path: Option<PathBuf>,
-    /// Inbox database path (None for in-memory)
-    pub inbox_db_path: Option<PathBuf>,
+    /// MAM database URL (prefers dedicated XMPP DSN, otherwise the main runtime DSN)
+    pub mam_database_url: Option<String>,
+    /// Inbox database URL (prefers dedicated XMPP DSN, otherwise the main runtime DSN)
+    pub inbox_database_url: Option<String>,
     /// Whether native JID authentication is enabled (default: true)
     /// When enabled, users can authenticate with SCRAM-SHA-256 using native credentials.
     pub native_auth_enabled: bool,
@@ -151,8 +149,8 @@ impl Default for XmppConfig {
             s2s_enabled: false, // Disabled by default
             tls_cert_path: "certs/server.crt".to_string(),
             tls_key_path: "certs/server.key".to_string(),
-            mam_db_path: None,
-            inbox_db_path: None,
+            mam_database_url: None,
+            inbox_database_url: None,
             native_auth_enabled: true,
             registration_enabled: false, // Disabled by default for security
             single_tenant: false,
@@ -184,25 +182,8 @@ impl XmppConfig {
         let tls_key_path =
             std::env::var("WADDLE_XMPP_TLS_KEY").unwrap_or_else(|_| "certs/server.key".to_string());
 
-        let mam_db_path = Some(
-            std::env::var("WADDLE_XMPP_MAM_DB")
-                .map(PathBuf::from)
-                .unwrap_or_else(|_| {
-                    // Default: store MAM DB alongside the main DB, or ./mam.db
-                    std::env::var("WADDLE_DB_PATH")
-                        .map(|db| PathBuf::from(db).with_file_name("mam.db"))
-                        .unwrap_or_else(|_| PathBuf::from("mam.db"))
-                }),
-        );
-        let inbox_db_path = Some(
-            std::env::var("WADDLE_XMPP_INBOX_DB")
-                .map(PathBuf::from)
-                .unwrap_or_else(|_| {
-                    std::env::var("WADDLE_DB_PATH")
-                        .map(|db| PathBuf::from(db).join("inbox.db"))
-                        .unwrap_or_else(|_| PathBuf::from("inbox.db"))
-                }),
-        );
+        let mam_database_url = resolve_xmpp_database_url("WADDLE_XMPP_MAM_DATABASE_URL");
+        let inbox_database_url = resolve_xmpp_database_url("WADDLE_XMPP_INBOX_DATABASE_URL");
 
         let native_auth_enabled = std::env::var("WADDLE_NATIVE_AUTH_ENABLED")
             .map(|v| v.to_lowercase() != "false" && v != "0")
@@ -255,8 +236,8 @@ impl XmppConfig {
             s2s_enabled,
             tls_cert_path,
             tls_key_path,
-            mam_db_path,
-            inbox_db_path,
+            mam_database_url,
+            inbox_database_url,
             native_auth_enabled,
             registration_enabled,
             single_tenant,
@@ -287,13 +268,26 @@ impl XmppConfig {
             tls_key_path: self.tls_key_path.clone(),
             tls_server_config,
             domain: self.domain.clone(),
-            mam_db_path: self.mam_db_path.clone(),
+            mam_database_url: self.mam_database_url.clone(),
             native_auth_enabled: self.native_auth_enabled,
             registration_enabled: self.registration_enabled,
             single_tenant: self.single_tenant,
             extensions: self.extensions.clone(),
         }
     }
+}
+
+fn resolve_xmpp_database_url(env_key: &str) -> Option<String> {
+    std::env::var(env_key)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            std::env::var("WADDLE_DATABASE_URL")
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        })
 }
 
 fn start_acme_runtime(
@@ -443,7 +437,7 @@ pub async fn start_with_config(
     // Wrap db_pool in Arc for shared ownership between HTTP and XMPP states
     let db_pool = Arc::new(db_pool);
     ensure_fixed_test_account(&db_pool, &xmpp_config).await?;
-    let inbox_storage = build_inbox_storage(xmpp_config.inbox_db_path.clone())
+    let inbox_storage = build_inbox_storage(xmpp_config.inbox_database_url.clone())
         .await
         .map_err(|error| anyhow::anyhow!("Failed to initialize inbox storage: {}", error))?;
 
@@ -486,7 +480,7 @@ pub async fn start_with_config(
         Arc::clone(&inbox_storage),
     ));
     let websocket_mam_storage =
-        create_websocket_mam_storage(xmpp_config.mam_db_path.clone()).await?;
+        create_websocket_mam_storage(xmpp_config.mam_database_url.clone()).await?;
     let xmpp_native_auth_enabled = xmpp_config.native_auth_enabled;
     let acme_runtime = start_acme_runtime(&xmpp_config, stop_token.clone());
 
@@ -597,7 +591,7 @@ struct HttpServerDeps {
     state: Arc<AppState>,
     server_config: ServerConfig,
     xmpp_native_auth_enabled: bool,
-    mam_storage: Arc<LibSqlMamStorage>,
+    mam_storage: Arc<dyn MamStorage>,
     acme_http01_challenge_service: Option<TowerHttp01ChallengeService>,
     listener: tokio::net::TcpListener,
     stop_token: tokio_util::sync::CancellationToken,
@@ -669,22 +663,14 @@ async fn start_xmpp_server(
     Ok(())
 }
 
-async fn create_websocket_mam_storage(
-    mam_db_path: Option<PathBuf>,
-) -> Result<Arc<LibSqlMamStorage>> {
-    let db_path = mam_db_path
-        .as_ref()
-        .map(|path| path.to_string_lossy().to_string())
-        .unwrap_or_else(|| ":memory:".to_string());
-    let db = libsql::Builder::new_local(db_path.as_str()).build().await?;
-    let conn = db.connect()?;
-    let storage = Arc::new(LibSqlMamStorage::new(conn));
-    storage
-        .initialize()
-        .await
-        .map_err(|err| anyhow::anyhow!("Failed to initialize WebSocket MAM storage: {}", err))?;
-    info!(db_path = %db_path, "WebSocket MAM storage initialized");
-    Ok(storage)
+async fn create_websocket_mam_storage(database_url: Option<String>) -> Result<Arc<dyn MamStorage>> {
+    let storage = match database_url.as_deref() {
+        Some(database_url) => SqlxMamStorage::open(database_url).await,
+        None => SqlxMamStorage::open_in_memory().await,
+    }
+    .map_err(|error| anyhow::anyhow!("Failed to initialize WebSocket MAM storage: {error}"))?;
+
+    Ok(Arc::new(storage))
 }
 
 #[derive(Debug, Clone)]
@@ -759,7 +745,7 @@ async fn seed_fixed_test_account(
     db_pool: &Arc<DatabasePool>,
     config: &FixedTestAccountConfig,
 ) -> Result<()> {
-    let native_user_store = NativeUserStore::new(Arc::new(db_pool.global().clone()));
+    let native_user_store = NativeUserStore::new(db_pool.global_actor().clone());
     if native_user_store
         .user_exists(&config.username, &config.domain)
         .await
@@ -854,7 +840,7 @@ async fn create_router(
     state: Arc<AppState>,
     server_config: ServerConfig,
     xmpp_native_auth_enabled: bool,
-    mam_storage: Arc<LibSqlMamStorage>,
+    mam_storage: Arc<dyn MamStorage>,
     acme_http01_challenge_service: Option<TowerHttp01ChallengeService>,
 ) -> Router {
     // Create auth broker state
@@ -1321,6 +1307,15 @@ mod tests {
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
+    static ENV_MUTEX: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        ENV_MUTEX
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .expect("env mutex")
+    }
+
     async fn create_test_state() -> Arc<AppState> {
         let config = DatabaseConfig::default();
         let pool_config = PoolConfig::default();
@@ -1331,6 +1326,66 @@ mod tests {
         runner.run(db_pool.global()).await.unwrap();
 
         Arc::new(AppState::new(Arc::new(db_pool)))
+    }
+
+    #[test]
+    fn test_xmpp_config_prefers_dedicated_database_urls() {
+        let _guard = env_lock();
+        for key in [
+            "WADDLE_XMPP_MAM_DATABASE_URL",
+            "WADDLE_XMPP_INBOX_DATABASE_URL",
+            "WADDLE_DATABASE_URL",
+        ] {
+            std::env::remove_var(key);
+        }
+
+        std::env::set_var("WADDLE_DATABASE_URL", "postgres://main/runtime");
+        std::env::set_var("WADDLE_XMPP_MAM_DATABASE_URL", "postgres://mam/runtime");
+        std::env::set_var("WADDLE_XMPP_INBOX_DATABASE_URL", "postgres://inbox/runtime");
+
+        let config = XmppConfig::from_env();
+        assert_eq!(
+            config.mam_database_url.as_deref(),
+            Some("postgres://mam/runtime")
+        );
+        assert_eq!(
+            config.inbox_database_url.as_deref(),
+            Some("postgres://inbox/runtime")
+        );
+
+        for key in [
+            "WADDLE_XMPP_MAM_DATABASE_URL",
+            "WADDLE_XMPP_INBOX_DATABASE_URL",
+            "WADDLE_DATABASE_URL",
+        ] {
+            std::env::remove_var(key);
+        }
+    }
+
+    #[test]
+    fn test_xmpp_config_falls_back_to_main_database_url() {
+        let _guard = env_lock();
+        for key in [
+            "WADDLE_XMPP_MAM_DATABASE_URL",
+            "WADDLE_XMPP_INBOX_DATABASE_URL",
+            "WADDLE_DATABASE_URL",
+        ] {
+            std::env::remove_var(key);
+        }
+
+        std::env::set_var("WADDLE_DATABASE_URL", "postgres://main/runtime");
+
+        let config = XmppConfig::from_env();
+        assert_eq!(
+            config.mam_database_url.as_deref(),
+            Some("postgres://main/runtime")
+        );
+        assert_eq!(
+            config.inbox_database_url.as_deref(),
+            Some("postgres://main/runtime")
+        );
+
+        std::env::remove_var("WADDLE_DATABASE_URL");
     }
 
     #[tokio::test]
@@ -1567,7 +1622,7 @@ mod tests {
             .await
             .unwrap();
 
-        let native_user_store = NativeUserStore::new(Arc::new(state.db_pool.global().clone()));
+        let native_user_store = NativeUserStore::new(state.db_pool.global_actor().clone());
         assert!(native_user_store
             .user_exists(&config.username, &config.domain)
             .await
@@ -1581,7 +1636,7 @@ mod tests {
     #[tokio::test]
     async fn test_seed_fixed_test_account_replaces_existing_credentials() {
         let state = create_test_state().await;
-        let native_user_store = NativeUserStore::new(Arc::new(state.db_pool.global().clone()));
+        let native_user_store = NativeUserStore::new(state.db_pool.global_actor().clone());
         let old_password = format!("fixed-account-old-{}", rand::random::<u64>());
         let new_password = format!("fixed-account-new-{}", rand::random::<u64>());
 

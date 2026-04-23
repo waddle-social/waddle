@@ -1,10 +1,10 @@
 //! Database-backed blocking list storage for XEP-0191 compliance.
 //!
-//! This module implements blocking list storage using libSQL/Turso for
+//! This module implements blocking list storage using the internal SQLx-backed database adapter for
 //! persistent storage.
 
+use crate::db::IntoParams;
 use jid::BareJid;
-use libsql::params::IntoParams;
 use tracing::{debug, instrument};
 
 use super::Database;
@@ -32,7 +32,7 @@ impl DatabaseBlockingStorage {
         let mut rows = self
             .query_with_persistent(
                 "SELECT blocked_jid FROM blocking_list WHERE user_jid = ? ORDER BY created_at",
-                libsql::params![user_jid.to_string()],
+                crate::db_params![user_jid.to_string()],
             )
             .await?;
 
@@ -62,7 +62,7 @@ impl DatabaseBlockingStorage {
         let mut rows = self
             .query_with_persistent(
                 "SELECT 1 FROM blocking_list WHERE user_jid = ? AND blocked_jid = ?",
-                libsql::params![user_jid.to_string(), blocked_jid.to_string()],
+                crate::db_params![user_jid.to_string(), blocked_jid.to_string()],
             )
             .await?;
 
@@ -91,7 +91,7 @@ impl DatabaseBlockingStorage {
             let result = self
                 .execute_with_persistent(
                     "INSERT OR IGNORE INTO blocking_list (user_jid, blocked_jid) VALUES (?, ?)",
-                    libsql::params![user_jid.to_string(), blocked_jid.clone()],
+                    crate::db_params![user_jid.to_string(), blocked_jid.clone()],
                 )
                 .await?;
 
@@ -118,7 +118,7 @@ impl DatabaseBlockingStorage {
             let result = self
                 .execute_with_persistent(
                     "DELETE FROM blocking_list WHERE user_jid = ? AND blocked_jid = ?",
-                    libsql::params![user_jid.to_string(), blocked_jid.clone()],
+                    crate::db_params![user_jid.to_string(), blocked_jid.clone()],
                 )
                 .await?;
 
@@ -142,7 +142,7 @@ impl DatabaseBlockingStorage {
         let result = self
             .execute_with_persistent(
                 "DELETE FROM blocking_list WHERE user_jid = ?",
-                libsql::params![user_jid.to_string()],
+                crate::db_params![user_jid.to_string()],
             )
             .await?;
 
@@ -155,7 +155,7 @@ impl DatabaseBlockingStorage {
         &self,
         sql: &str,
         params: impl IntoParams,
-    ) -> Result<libsql::Rows, BlockingStorageError> {
+    ) -> Result<crate::db::Rows, BlockingStorageError> {
         let conn = self
             .db
             .guard()

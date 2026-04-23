@@ -1,6 +1,7 @@
 //! Server configuration.
 
 use crate::auth::providers::AuthProviderConfig;
+use crate::db::DatabaseDriver;
 use serde::{Deserialize, Serialize};
 use std::{fmt, str::FromStr};
 use tracing::info;
@@ -221,5 +222,41 @@ impl ServerInfo {
             native_auth_available: native_auth_enabled,
             features,
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DatabaseRuntimeConfig {
+    pub driver: DatabaseDriver,
+    pub database_url: String,
+}
+
+impl Default for DatabaseRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            driver: DatabaseDriver::Sqlite,
+            database_url: "sqlite::memory:".to_string(),
+        }
+    }
+}
+
+impl DatabaseRuntimeConfig {
+    pub fn from_env() -> Result<Self, String> {
+        let driver = std::env::var("WADDLE_DB_DRIVER")
+            .unwrap_or_else(|_| "sqlite".to_string())
+            .parse::<DatabaseDriver>()
+            .map_err(|e| format!("invalid WADDLE_DB_DRIVER: {}", e))?;
+
+        let database_url = std::env::var("WADDLE_DATABASE_URL").unwrap_or_else(|_| match driver {
+            DatabaseDriver::Sqlite => "sqlite::memory:".to_string(),
+            DatabaseDriver::Postgres => {
+                "postgres://postgres:postgres@localhost:5432/waddle".to_string()
+            }
+        });
+
+        Ok(Self {
+            driver,
+            database_url,
+        })
     }
 }

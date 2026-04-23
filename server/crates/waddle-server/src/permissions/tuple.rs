@@ -5,14 +5,17 @@
 
 use std::fmt;
 use std::str::FromStr;
+#[cfg(test)]
 use std::sync::Arc;
 
+use kameo::actor::ActorRef;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, instrument};
 use uuid::Uuid;
 
 use super::PermissionError;
-use crate::db::Database;
+use crate::db::actor::{DbActor, DbExecute, DbQuery, DbQueryOne, RowValues};
+use crate::db::{row_value, ValueExt};
 
 /// Types of objects that can be protected
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -354,13 +357,13 @@ impl FromStr for Tuple {
 
 /// Storage layer for permission tuples
 pub struct TupleStore {
-    db: Arc<Database>,
+    actor: ActorRef<DbActor>,
 }
 
 impl TupleStore {
     /// Create a new tuple store
-    pub fn new(db: Arc<Database>) -> Self {
-        Self { db }
+    pub fn new(actor: ActorRef<DbActor>) -> Self {
+        Self { actor }
     }
 
     /// Write a new tuple to the database
@@ -377,33 +380,35 @@ impl TupleStore {
             return Err(PermissionError::TupleAlreadyExists);
         }
 
-        let conn = self.get_connection().await?;
-
         let subject_relation = tuple.subject.relation.as_deref();
-
-        conn.execute(
-            r#"
-            INSERT INTO permission_tuples (id, object_type, object_id, relation, subject_type, subject_id, subject_relation)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            "#,
-            (
-                tuple.id.as_str(),
-                tuple.object.object_type.to_string(),
-                tuple.object.id.as_str(),
-                tuple.relation.name.as_str(),
-                tuple.subject.subject_type.to_string(),
-                tuple.subject.id.as_str(),
-                subject_relation,
-            ),
-        )
-        .await
-        .map_err(|e| {
-            if e.to_string().contains("UNIQUE constraint failed") {
-                PermissionError::TupleAlreadyExists
-            } else {
-                PermissionError::DatabaseError(e.to_string())
-            }
-        })?;
+        self.actor
+            .ask(DbExecute {
+                sql: r#"
+                    INSERT INTO permission_tuples (id, object_type, object_id, relation, subject_type, subject_id, subject_relation)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                "#
+                .to_string(),
+                params: vec![
+                    tuple.id.as_str().into(),
+                    tuple.object.object_type.to_string().into(),
+                    tuple.object.id.as_str().into(),
+                    tuple.relation.name.as_str().into(),
+                    tuple.subject.subject_type.to_string().into(),
+                    tuple.subject.id.as_str().into(),
+                    match subject_relation {
+                        Some(relation) => relation.into(),
+                        None => crate::db::Value::Null,
+                    },
+                ],
+            })
+            .await
+            .map_err(|e| {
+                if e.to_string().contains("UNIQUE constraint failed") {
+                    PermissionError::TupleAlreadyExists
+                } else {
+                    PermissionError::DatabaseError(e.to_string())
+                }
+            })?;
 
         Ok(())
     }
@@ -413,28 +418,33 @@ impl TupleStore {
     pub async fn delete(&self, tuple: &Tuple) -> Result<(), PermissionError> {
         debug!("Deleting tuple: {}", tuple);
 
-        let conn = self.get_connection().await?;
-
         let subject_relation = tuple.subject.relation.as_deref();
-
-        let rows = conn
-            .execute(
-                r#"
-                DELETE FROM permission_tuples
-                WHERE object_type = ? AND object_id = ? AND relation = ?
-                AND subject_type = ? AND subject_id = ?
-                AND (subject_relation = ? OR (subject_relation IS NULL AND ? IS NULL))
-                "#,
-                (
-                    tuple.object.object_type.to_string(),
-                    tuple.object.id.as_str(),
-                    tuple.relation.name.as_str(),
-                    tuple.subject.subject_type.to_string(),
-                    tuple.subject.id.as_str(),
-                    subject_relation,
-                    subject_relation,
-                ),
-            )
+        let rows = self
+            .actor
+            .ask(DbExecute {
+                sql: r#"
+                    DELETE FROM permission_tuples
+                    WHERE object_type = ? AND object_id = ? AND relation = ?
+                    AND subject_type = ? AND subject_id = ?
+                    AND (subject_relation = ? OR (subject_relation IS NULL AND ? IS NULL))
+                "#
+                .to_string(),
+                params: vec![
+                    tuple.object.object_type.to_string().into(),
+                    tuple.object.id.as_str().into(),
+                    tuple.relation.name.as_str().into(),
+                    tuple.subject.subject_type.to_string().into(),
+                    tuple.subject.id.as_str().into(),
+                    match subject_relation {
+                        Some(relation) => relation.into(),
+                        None => crate::db::Value::Null,
+                    },
+                    match subject_relation {
+                        Some(relation) => relation.into(),
+                        None => crate::db::Value::Null,
+                    },
+                ],
+            })
             .await
             .map_err(|e| PermissionError::DatabaseError(e.to_string()))?;
 
@@ -453,37 +463,38 @@ impl TupleStore {
         relation: &str,
         subject: &Subject,
     ) -> Result<bool, PermissionError> {
-        let conn = self.get_connection().await?;
-
         let subject_relation = subject.relation.as_deref();
-
-        let mut rows = conn
-            .query(
-                r#"
-                SELECT 1 FROM permission_tuples
-                WHERE object_type = ? AND object_id = ? AND relation = ?
-                AND subject_type = ? AND subject_id = ?
-                AND (subject_relation = ? OR (subject_relation IS NULL AND ? IS NULL))
-                LIMIT 1
-                "#,
-                (
-                    object.object_type.to_string(),
-                    object.id.as_str(),
-                    relation,
-                    subject.subject_type.to_string(),
-                    subject.id.as_str(),
-                    subject_relation,
-                    subject_relation,
-                ),
-            )
+        let row = self
+            .actor
+            .ask(DbQueryOne {
+                sql: r#"
+                    SELECT 1 FROM permission_tuples
+                    WHERE object_type = ? AND object_id = ? AND relation = ?
+                    AND subject_type = ? AND subject_id = ?
+                    AND (subject_relation = ? OR (subject_relation IS NULL AND ? IS NULL))
+                    LIMIT 1
+                "#
+                .to_string(),
+                params: vec![
+                    object.object_type.to_string().into(),
+                    object.id.as_str().into(),
+                    relation.into(),
+                    subject.subject_type.to_string().into(),
+                    subject.id.as_str().into(),
+                    match subject_relation {
+                        Some(relation) => relation.into(),
+                        None => crate::db::Value::Null,
+                    },
+                    match subject_relation {
+                        Some(relation) => relation.into(),
+                        None => crate::db::Value::Null,
+                    },
+                ],
+            })
             .await
             .map_err(|e| PermissionError::DatabaseError(e.to_string()))?;
 
-        Ok(rows
-            .next()
-            .await
-            .map_err(|e| PermissionError::DatabaseError(e.to_string()))?
-            .is_some())
+        Ok(row.is_some())
     }
 
     /// List all relations a subject has on an object
@@ -493,43 +504,42 @@ impl TupleStore {
         subject: &Subject,
         object: &Object,
     ) -> Result<Vec<String>, PermissionError> {
-        let conn = self.get_connection().await?;
-
         let subject_relation = subject.relation.as_deref();
-
-        let mut rows = conn
-            .query(
-                r#"
-                SELECT DISTINCT relation FROM permission_tuples
-                WHERE object_type = ? AND object_id = ?
-                AND subject_type = ? AND subject_id = ?
-                AND (subject_relation = ? OR (subject_relation IS NULL AND ? IS NULL))
-                "#,
-                (
-                    object.object_type.to_string(),
-                    object.id.as_str(),
-                    subject.subject_type.to_string(),
-                    subject.id.as_str(),
-                    subject_relation,
-                    subject_relation,
-                ),
-            )
+        let rows = self
+            .actor
+            .ask(DbQuery {
+                sql: r#"
+                    SELECT DISTINCT relation FROM permission_tuples
+                    WHERE object_type = ? AND object_id = ?
+                    AND subject_type = ? AND subject_id = ?
+                    AND (subject_relation = ? OR (subject_relation IS NULL AND ? IS NULL))
+                "#
+                .to_string(),
+                params: vec![
+                    object.object_type.to_string().into(),
+                    object.id.as_str().into(),
+                    subject.subject_type.to_string().into(),
+                    subject.id.as_str().into(),
+                    match subject_relation {
+                        Some(relation) => relation.into(),
+                        None => crate::db::Value::Null,
+                    },
+                    match subject_relation {
+                        Some(relation) => relation.into(),
+                        None => crate::db::Value::Null,
+                    },
+                ],
+            })
             .await
             .map_err(|e| PermissionError::DatabaseError(e.to_string()))?;
 
-        let mut relations = Vec::new();
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|e| PermissionError::DatabaseError(e.to_string()))?
-        {
-            let relation: String = row
-                .get(0)
-                .map_err(|e| PermissionError::DatabaseError(e.to_string()))?;
-            relations.push(relation);
-        }
-
-        Ok(relations)
+        rows.into_iter()
+            .map(|row| {
+                row_value(&row, 0)
+                    .and_then(ValueExt::as_string)
+                    .map_err(|e| PermissionError::DatabaseError(e.to_string()))
+            })
+            .collect()
     }
 
     /// List all subjects with a specific relation on an object
@@ -539,33 +549,33 @@ impl TupleStore {
         object: &Object,
         relation: &str,
     ) -> Result<Vec<Subject>, PermissionError> {
-        let conn = self.get_connection().await?;
-
-        let mut rows = conn
-            .query(
-                r#"
-                SELECT subject_type, subject_id, subject_relation FROM permission_tuples
-                WHERE object_type = ? AND object_id = ? AND relation = ?
-                "#,
-                (object.object_type.to_string(), object.id.as_str(), relation),
-            )
+        let rows = self
+            .actor
+            .ask(DbQuery {
+                sql: r#"
+                    SELECT subject_type, subject_id, subject_relation FROM permission_tuples
+                    WHERE object_type = ? AND object_id = ? AND relation = ?
+                "#
+                .to_string(),
+                params: vec![
+                    object.object_type.to_string().into(),
+                    object.id.as_str().into(),
+                    relation.into(),
+                ],
+            })
             .await
             .map_err(|e| PermissionError::DatabaseError(e.to_string()))?;
 
         let mut subjects = Vec::new();
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|e| PermissionError::DatabaseError(e.to_string()))?
-        {
-            let subject_type_str: String = row
-                .get(0)
+        for row in rows {
+            let subject_type_str = row_value(&row, 0)
+                .and_then(ValueExt::as_string)
                 .map_err(|e| PermissionError::DatabaseError(e.to_string()))?;
-            let subject_id: String = row
-                .get(1)
+            let subject_id = row_value(&row, 1)
+                .and_then(ValueExt::as_string)
                 .map_err(|e| PermissionError::DatabaseError(e.to_string()))?;
-            let subject_relation: Option<String> = row
-                .get(2)
+            let subject_relation = row_value(&row, 2)
+                .and_then(ValueExt::as_optional_string)
                 .map_err(|e| PermissionError::DatabaseError(e.to_string()))?;
 
             let subject_type = SubjectType::from_str(&subject_type_str)?;
@@ -589,27 +599,33 @@ impl TupleStore {
         subject_id: &str,
         subject_relation: Option<&str>,
     ) -> Result<Vec<Tuple>, PermissionError> {
-        let conn = self.get_connection().await?;
-
-        let mut rows = conn
-            .query(
-                r#"
-                SELECT id, object_type, object_id, relation, subject_type, subject_id, subject_relation, created_at
-                FROM permission_tuples
-                WHERE subject_type = ? AND subject_id = ?
-                AND (subject_relation = ? OR (subject_relation IS NULL AND ? IS NULL))
-                "#,
-                (
-                    subject_type.to_string(),
-                    subject_id,
-                    subject_relation,
-                    subject_relation,
-                ),
-            )
+        let rows = self
+            .actor
+            .ask(DbQuery {
+                sql: r#"
+                    SELECT id, object_type, object_id, relation, subject_type, subject_id, subject_relation, created_at
+                    FROM permission_tuples
+                    WHERE subject_type = ? AND subject_id = ?
+                    AND (subject_relation = ? OR (subject_relation IS NULL AND ? IS NULL))
+                "#
+                .to_string(),
+                params: vec![
+                    subject_type.to_string().into(),
+                    subject_id.into(),
+                    match subject_relation {
+                        Some(relation) => relation.into(),
+                        None => crate::db::Value::Null,
+                    },
+                    match subject_relation {
+                        Some(relation) => relation.into(),
+                        None => crate::db::Value::Null,
+                    },
+                ],
+            })
             .await
             .map_err(|e| PermissionError::DatabaseError(e.to_string()))?;
 
-        self.rows_to_tuples(&mut rows).await
+        self.rows_to_tuples(rows)
     }
 
     /// Get all tuples for an object (optionally filtered by relation)
@@ -619,67 +635,69 @@ impl TupleStore {
         object: &Object,
         relation: Option<&str>,
     ) -> Result<Vec<Tuple>, PermissionError> {
-        let conn = self.get_connection().await?;
-
-        let mut rows = if let Some(rel) = relation {
-            conn.query(
-                r#"
-                SELECT id, object_type, object_id, relation, subject_type, subject_id, subject_relation, created_at
-                FROM permission_tuples
-                WHERE object_type = ? AND object_id = ? AND relation = ?
-                "#,
-                (object.object_type.to_string(), object.id.as_str(), rel),
-            )
-            .await
-            .map_err(|e| PermissionError::DatabaseError(e.to_string()))?
+        let rows = if let Some(rel) = relation {
+            self.actor
+                .ask(DbQuery {
+                    sql: r#"
+                        SELECT id, object_type, object_id, relation, subject_type, subject_id, subject_relation, created_at
+                        FROM permission_tuples
+                        WHERE object_type = ? AND object_id = ? AND relation = ?
+                    "#
+                    .to_string(),
+                    params: vec![
+                        object.object_type.to_string().into(),
+                        object.id.as_str().into(),
+                        rel.into(),
+                    ],
+                })
+                .await
+                .map_err(|e| PermissionError::DatabaseError(e.to_string()))?
         } else {
-            conn.query(
-                r#"
-                SELECT id, object_type, object_id, relation, subject_type, subject_id, subject_relation, created_at
-                FROM permission_tuples
-                WHERE object_type = ? AND object_id = ?
-                "#,
-                (object.object_type.to_string(), object.id.as_str()),
-            )
-            .await
-            .map_err(|e| PermissionError::DatabaseError(e.to_string()))?
+            self.actor
+                .ask(DbQuery {
+                    sql: r#"
+                        SELECT id, object_type, object_id, relation, subject_type, subject_id, subject_relation, created_at
+                        FROM permission_tuples
+                        WHERE object_type = ? AND object_id = ?
+                    "#
+                    .to_string(),
+                    params: vec![object.object_type.to_string().into(), object.id.as_str().into()],
+                })
+                .await
+                .map_err(|e| PermissionError::DatabaseError(e.to_string()))?
         };
 
-        self.rows_to_tuples(&mut rows).await
+        self.rows_to_tuples(rows)
     }
 
     /// Helper to convert database rows to tuples
-    async fn rows_to_tuples(&self, rows: &mut libsql::Rows) -> Result<Vec<Tuple>, PermissionError> {
+    fn rows_to_tuples(&self, rows: Vec<RowValues>) -> Result<Vec<Tuple>, PermissionError> {
         let mut tuples = Vec::new();
 
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|e| PermissionError::DatabaseError(e.to_string()))?
-        {
-            let id: String = row
-                .get(0)
+        for row in rows {
+            let id = row_value(&row, 0)
+                .and_then(ValueExt::as_string)
                 .map_err(|e| PermissionError::DatabaseError(e.to_string()))?;
-            let object_type_str: String = row
-                .get(1)
+            let object_type_str = row_value(&row, 1)
+                .and_then(ValueExt::as_string)
                 .map_err(|e| PermissionError::DatabaseError(e.to_string()))?;
-            let object_id: String = row
-                .get(2)
+            let object_id = row_value(&row, 2)
+                .and_then(ValueExt::as_string)
                 .map_err(|e| PermissionError::DatabaseError(e.to_string()))?;
-            let relation: String = row
-                .get(3)
+            let relation = row_value(&row, 3)
+                .and_then(ValueExt::as_string)
                 .map_err(|e| PermissionError::DatabaseError(e.to_string()))?;
-            let subject_type_str: String = row
-                .get(4)
+            let subject_type_str = row_value(&row, 4)
+                .and_then(ValueExt::as_string)
                 .map_err(|e| PermissionError::DatabaseError(e.to_string()))?;
-            let subject_id: String = row
-                .get(5)
+            let subject_id = row_value(&row, 5)
+                .and_then(ValueExt::as_string)
                 .map_err(|e| PermissionError::DatabaseError(e.to_string()))?;
-            let subject_relation: Option<String> = row
-                .get(6)
+            let subject_relation = row_value(&row, 6)
+                .and_then(ValueExt::as_optional_string)
                 .map_err(|e| PermissionError::DatabaseError(e.to_string()))?;
-            let created_at: Option<String> = row
-                .get(7)
+            let created_at = row_value(&row, 7)
+                .and_then(ValueExt::as_optional_string)
                 .map_err(|e| PermissionError::DatabaseError(e.to_string()))?;
 
             let object_type = ObjectType::from_str(&object_type_str)?;
@@ -700,19 +718,12 @@ impl TupleStore {
 
         Ok(tuples)
     }
-
-    /// Get database connection, using persistent connection for in-memory databases
-    async fn get_connection(&self) -> Result<crate::db::ConnectionGuard<'_>, PermissionError> {
-        self.db
-            .guard()
-            .await
-            .map_err(|e| PermissionError::DatabaseError(e.to_string()))
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::Database;
 
     #[test]
     fn test_object_parse() {
@@ -788,7 +799,8 @@ mod tests {
         let runner = crate::db::MigrationRunner::global();
         runner.run(&db).await.unwrap();
 
-        let store = TupleStore::new(Arc::clone(&db));
+        let actor = kameo::spawn(crate::db::actor::DbActor::new((*db).clone()));
+        let store = TupleStore::new(actor);
 
         let object = Object::new(ObjectType::Waddle, "test-waddle");
         let subject = Subject::user("user-alice");
@@ -815,7 +827,8 @@ mod tests {
         let runner = crate::db::MigrationRunner::global();
         runner.run(&db).await.unwrap();
 
-        let store = TupleStore::new(Arc::clone(&db));
+        let actor = kameo::spawn(crate::db::actor::DbActor::new((*db).clone()));
+        let store = TupleStore::new(actor);
 
         let object = Object::new(ObjectType::Waddle, "test-waddle");
         let subject = Subject::user("user-alice");
@@ -843,7 +856,8 @@ mod tests {
         let runner = crate::db::MigrationRunner::global();
         runner.run(&db).await.unwrap();
 
-        let store = TupleStore::new(Arc::clone(&db));
+        let actor = kameo::spawn(crate::db::actor::DbActor::new((*db).clone()));
+        let store = TupleStore::new(actor);
 
         let object = Object::new(ObjectType::Waddle, "test-waddle");
 
@@ -887,7 +901,8 @@ mod tests {
         let runner = crate::db::MigrationRunner::global();
         runner.run(&db).await.unwrap();
 
-        let store = TupleStore::new(Arc::clone(&db));
+        let actor = kameo::spawn(crate::db::actor::DbActor::new((*db).clone()));
+        let store = TupleStore::new(actor);
         let object = Object::new(ObjectType::Waddle, "test-waddle");
         let subject = Subject::user("user-alice");
         let tuple = Tuple::new(object.clone(), Relation::new("owner"), subject.clone());

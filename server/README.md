@@ -33,7 +33,7 @@ waddle/
 ### Prerequisites
 
 - Rust 1.75+ (stable)
-- A Turso account (for database)
+- SQLite for local development or a PostgreSQL instance for remote testing
 - A Prosody XMPP server (for real-time messaging)
 
 ### Development
@@ -94,7 +94,9 @@ docker build -f Containerfile --target runtime -t waddle-server:local .
 docker run --rm \
   -p 3000:3000 -p 5269:5269 \
   -v waddle-data:/var/lib/waddle \
-  -e WADDLE_DB_PATH=/var/lib/waddle/waddle.db \
+  -e WADDLE_DATABASE_URL=sqlite:///var/lib/waddle/waddle.db \
+  -e WADDLE_XMPP_MAM_DATABASE_URL=sqlite:///var/lib/waddle/mam.db \
+  -e WADDLE_XMPP_INBOX_DATABASE_URL=sqlite:///var/lib/waddle/inbox.db \
   waddle-server:local
 ```
 
@@ -114,7 +116,7 @@ helm upgrade --install waddle ./charts/waddle-server --namespace waddle --create
 Waddle uses a unique architecture combining:
 
 - **Backend**: Rust + Axum for HTTP API
-- **Database**: Turso/libSQL with database-per-Waddle sharding
+- **Database**: SQLx-backed adapters for SQLite and PostgreSQL with a single logical Waddle database
 - **Real-time**: Prosody XMPP server for messaging
 - **Auth**: ATProto OAuth with DID-based identity
 - **Permissions**: Zanzibar-inspired authorization model

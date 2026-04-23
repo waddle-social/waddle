@@ -26,11 +26,6 @@ struct DesktopAuthenticatedShell: View {
         .sheet(isPresented: $showCreateSheet) {
             CreateWaddleSheet(model: model)
         }
-        .task {
-            if model.publicWaddles.isEmpty {
-                await model.refreshPublicWaddles()
-            }
-        }
     }
 
     private var shellBackdrop: some View {
@@ -123,10 +118,6 @@ private struct DesktopWorkspaceRail: View {
             VStack(spacing: 10) {
                 DesktopRailIconButton(systemName: "plus", accessibilityLabel: "Create workspace") {
                     showCreateSheet = true
-                }
-
-                DesktopRailIconButton(systemName: "arrow.clockwise", accessibilityLabel: "Refresh workspaces") {
-                    Task { await model.refreshPublicWaddles() }
                 }
 
                 DesktopRailIconButton(systemName: "gearshape", accessibilityLabel: "Settings") {

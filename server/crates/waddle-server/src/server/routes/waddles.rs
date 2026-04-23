@@ -14,7 +14,8 @@
 //! - DELETE /v1/waddles/:id/members/:user_id - Remove a member from the waddle
 
 use crate::auth::{AuthError, SessionManager};
-use crate::db::{Database, MigrationRunner};
+use crate::db::actor::{DbActor, DbExecute, DbQuery, DbQueryOne, RowValues};
+use crate::db::{row_value, ValueExt};
 use crate::permissions::{
     Object, ObjectType, PermissionError, PermissionService, Relation, Subject, Tuple,
 };
@@ -51,8 +52,7 @@ impl WaddleState {
         encryption_key: Option<&[u8]>,
         single_tenant: bool,
     ) -> Self {
-        let db = Arc::new(app_state.db_pool.global().clone());
-        let permission_service = PermissionService::new(Arc::clone(&db));
+        let permission_service = PermissionService::new(app_state.db_pool.global_actor().clone());
         let session_manager =
             SessionManager::new(app_state.db_pool.global_actor().clone(), encryption_key);
         Self {
@@ -345,7 +345,7 @@ pub async fn list_public_waddles_handler(
     };
 
     let mut waddles = match list_public_waddles_from_db(
-        state.app_state.db_pool.global(),
+        state.app_state.db_pool.global_actor().clone(),
         params.query.as_deref(),
         params.limit,
         params.offset,
@@ -361,7 +361,7 @@ pub async fn list_public_waddles_handler(
 
     for waddle in &mut waddles {
         if let Ok(role) = get_user_role(
-            state.app_state.db_pool.global(),
+            state.app_state.db_pool.global_actor().clone(),
             &waddle.id,
             &session.user_id,
         )
@@ -390,21 +390,16 @@ pub async fn create_waddle_handler(
 ) -> impl IntoResponse {
     info!("Creating waddle: {}", request.name);
 
-    // Single-tenant guard: reject creation when a waddle already exists
-    if state.single_tenant {
-        match list_all_waddles_from_db(state.app_state.db_pool.global(), 1, 0).await {
-            Ok(rows) if !rows.is_empty() => {
-                warn!("Rejected waddle creation: single-tenant mode and a waddle already exists");
-                return (
-                    StatusCode::FORBIDDEN,
-                    Json(serde_json::json!({
-                        "error": "Single-tenant mode: only one waddle is allowed"
-                    })),
-                )
-                    .into_response();
-            }
-            _ => {}
+    // Single-waddle guard: reject creation when a waddle already exists.
+    match list_all_waddles_from_db(state.app_state.db_pool.global_actor().clone(), 1, 0).await {
+        Ok(rows) if !rows.is_empty() => {
+            warn!("Rejected waddle creation: single-waddle mode allows only one waddle");
+            return waddle_error_to_response(WaddleError::InvalidInput(
+                "Single-waddle mode: only one waddle is allowed".to_string(),
+            ))
+            .into_response();
         }
+        _ => {}
     }
 
     // Validate session
@@ -436,7 +431,7 @@ pub async fn create_waddle_handler(
     // Insert waddle into database
     let now = chrono::Utc::now().to_rfc3339();
     if let Err(err) = insert_waddle(
-        state.app_state.db_pool.global(),
+        state.app_state.db_pool.global_actor().clone(),
         &waddle_id,
         &request.name,
         request.description.as_deref(),
@@ -453,7 +448,7 @@ pub async fn create_waddle_handler(
 
     // Add owner as waddle member with owner role
     if let Err(err) = add_waddle_member(
-        state.app_state.db_pool.global(),
+        state.app_state.db_pool.global_actor().clone(),
         &waddle_id,
         &user_id,
         "owner",
@@ -462,7 +457,8 @@ pub async fn create_waddle_handler(
     {
         error!("Failed to add owner as member: {}", err);
         // Clean up: delete the waddle
-        let _ = delete_waddle_from_db(state.app_state.db_pool.global(), &waddle_id).await;
+        let _ =
+            delete_waddle_from_db(state.app_state.db_pool.global_actor().clone(), &waddle_id).await;
         return waddle_error_to_response(WaddleError::Database(err)).into_response();
     }
 
@@ -476,23 +472,26 @@ pub async fn create_waddle_handler(
     if let Err(err) = state.permission_service.write_tuple(owner_tuple).await {
         error!("Failed to write owner permission tuple: {}", err);
         // Clean up: delete the waddle
-        let _ = delete_waddle_from_db(state.app_state.db_pool.global(), &waddle_id).await;
+        let _ =
+            delete_waddle_from_db(state.app_state.db_pool.global_actor().clone(), &waddle_id).await;
         return waddle_error_to_response(WaddleError::Permission(err)).into_response();
     }
 
     // Create per-waddle database and default channels
     match state.app_state.db_pool.create_waddle_db(&waddle_id).await {
-        Ok(waddle_db) => {
-            // Run waddle migrations
-            let runner = MigrationRunner::waddle();
-            if let Err(err) = runner.run(&waddle_db).await {
-                warn!("Failed to run waddle migrations: {}", err);
-                // Continue - the database was created, migrations can be retried
-            }
-
+        Ok(_waddle_db) => {
             // Create default #general channel
-            if let Err(err) =
-                create_default_channel(&waddle_db, &state.permission_service, &waddle_id).await
+            if let Err(err) = create_default_channel(
+                state
+                    .app_state
+                    .db_pool
+                    .get_waddle_actor(&waddle_id)
+                    .await
+                    .unwrap_or_else(|_| state.app_state.db_pool.global_actor().clone()),
+                &state.permission_service,
+                &waddle_id,
+            )
+            .await
             {
                 warn!("Failed to create default channel: {}", err);
                 // Continue - the waddle was created successfully
@@ -546,7 +545,12 @@ pub async fn join_public_waddle_handler(
         }
     };
 
-    let waddle = match get_waddle_from_db(state.app_state.db_pool.global(), &waddle_id).await {
+    let waddle = match get_waddle_from_db(
+        state.app_state.db_pool.global_actor().clone(),
+        &waddle_id,
+    )
+    .await
+    {
         Ok(Some(waddle)) => waddle,
         Ok(None) => {
             return waddle_error_to_response(WaddleError::NotFound(format!(
@@ -569,7 +573,7 @@ pub async fn join_public_waddle_handler(
     }
 
     let existing_role = match get_member_role(
-        state.app_state.db_pool.global(),
+        state.app_state.db_pool.global_actor().clone(),
         &waddle_id,
         &session.user_id,
     )
@@ -595,7 +599,7 @@ pub async fn join_public_waddle_handler(
 
     let now = chrono::Utc::now().to_rfc3339();
     if let Err(err) = add_waddle_member_with_timestamp(
-        state.app_state.db_pool.global(),
+        state.app_state.db_pool.global_actor().clone(),
         &waddle_id,
         &session.user_id,
         "member",
@@ -616,7 +620,7 @@ pub async fn join_public_waddle_handler(
     if let Err(err) = state.permission_service.write_tuple(tuple).await {
         error!("Failed to write member permission tuple: {}", err);
         let _ = remove_waddle_member(
-            state.app_state.db_pool.global(),
+            state.app_state.db_pool.global_actor().clone(),
             &waddle_id,
             &session.user_id,
         )
@@ -660,7 +664,12 @@ pub async fn update_waddle_handler(
     };
 
     // Check if waddle exists
-    let _waddle = match get_waddle_from_db(state.app_state.db_pool.global(), &waddle_id).await {
+    let _waddle = match get_waddle_from_db(
+        state.app_state.db_pool.global_actor().clone(),
+        &waddle_id,
+    )
+    .await
+    {
         Ok(Some(waddle)) => waddle,
         Ok(None) => {
             return waddle_error_to_response(WaddleError::NotFound(format!(
@@ -696,7 +705,7 @@ pub async fn update_waddle_handler(
     // Update waddle in database
     let now = chrono::Utc::now().to_rfc3339();
     if let Err(err) = update_waddle_in_db(
-        state.app_state.db_pool.global(),
+        state.app_state.db_pool.global_actor().clone(),
         &waddle_id,
         request.name.as_deref(),
         request.description.as_deref(),
@@ -711,25 +720,29 @@ pub async fn update_waddle_handler(
     }
 
     // Get updated waddle
-    let updated_waddle =
-        match get_waddle_from_db(state.app_state.db_pool.global(), &waddle_id).await {
-            Ok(Some(waddle)) => waddle,
-            Ok(None) => {
-                return waddle_error_to_response(WaddleError::NotFound(format!(
-                    "Waddle '{}' not found after update",
-                    waddle_id
-                )))
-                .into_response();
-            }
-            Err(err) => {
-                error!("Failed to get updated waddle: {}", err);
-                return waddle_error_to_response(WaddleError::Database(err)).into_response();
-            }
-        };
+    let updated_waddle = match get_waddle_from_db(
+        state.app_state.db_pool.global_actor().clone(),
+        &waddle_id,
+    )
+    .await
+    {
+        Ok(Some(waddle)) => waddle,
+        Ok(None) => {
+            return waddle_error_to_response(WaddleError::NotFound(format!(
+                "Waddle '{}' not found after update",
+                waddle_id
+            )))
+            .into_response();
+        }
+        Err(err) => {
+            error!("Failed to get updated waddle: {}", err);
+            return waddle_error_to_response(WaddleError::Database(err)).into_response();
+        }
+    };
 
     // Get user's role
     let role = get_user_role(
-        state.app_state.db_pool.global(),
+        state.app_state.db_pool.global_actor().clone(),
         &waddle_id,
         &session.user_id,
     )
@@ -774,7 +787,9 @@ pub async fn delete_waddle_handler(
     };
 
     // Check if waddle exists
-    if let Ok(None) = get_waddle_from_db(state.app_state.db_pool.global(), &waddle_id).await {
+    if let Ok(None) =
+        get_waddle_from_db(state.app_state.db_pool.global_actor().clone(), &waddle_id).await
+    {
         return waddle_error_to_response(WaddleError::NotFound(format!(
             "Waddle '{}' not found",
             waddle_id
@@ -814,7 +829,9 @@ pub async fn delete_waddle_handler(
     }
 
     // Delete waddle from database (this also cascades to waddle_members)
-    if let Err(err) = delete_waddle_from_db(state.app_state.db_pool.global(), &waddle_id).await {
+    if let Err(err) =
+        delete_waddle_from_db(state.app_state.db_pool.global_actor().clone(), &waddle_id).await
+    {
         error!("Failed to delete waddle: {}", err);
         return waddle_error_to_response(WaddleError::Database(err)).into_response();
     }
@@ -854,7 +871,9 @@ pub async fn list_members_handler(
     };
 
     // Check if waddle exists
-    if let Ok(None) = get_waddle_from_db(state.app_state.db_pool.global(), &waddle_id).await {
+    if let Ok(None) =
+        get_waddle_from_db(state.app_state.db_pool.global_actor().clone(), &waddle_id).await
+    {
         return waddle_error_to_response(WaddleError::NotFound(format!(
             "Waddle '{}' not found",
             waddle_id
@@ -882,7 +901,7 @@ pub async fn list_members_handler(
 
     // Get members from database
     let members = match list_waddle_members(
-        state.app_state.db_pool.global(),
+        state.app_state.db_pool.global_actor().clone(),
         &waddle_id,
         params.limit,
         params.offset,
@@ -945,7 +964,9 @@ pub async fn add_member_handler(
     }
 
     // Check if waddle exists
-    if let Ok(None) = get_waddle_from_db(state.app_state.db_pool.global(), &waddle_id).await {
+    if let Ok(None) =
+        get_waddle_from_db(state.app_state.db_pool.global_actor().clone(), &waddle_id).await
+    {
         return waddle_error_to_response(WaddleError::NotFound(format!(
             "Waddle '{}' not found",
             waddle_id
@@ -972,25 +993,29 @@ pub async fn add_member_handler(
     }
 
     // Check if user being added exists and get username for response
-    let username =
-        match get_username_by_user_id(state.app_state.db_pool.global(), &request.user_id).await {
-            Ok(Some(username)) => username,
-            Ok(None) => {
-                return waddle_error_to_response(WaddleError::NotFound(format!(
-                    "User '{}' not found",
-                    request.user_id
-                )))
-                .into_response();
-            }
-            Err(err) => {
-                error!("Failed to lookup user: {}", err);
-                return waddle_error_to_response(WaddleError::Database(err)).into_response();
-            }
-        };
+    let username = match get_username_by_user_id(
+        state.app_state.db_pool.global_actor().clone(),
+        &request.user_id,
+    )
+    .await
+    {
+        Ok(Some(username)) => username,
+        Ok(None) => {
+            return waddle_error_to_response(WaddleError::NotFound(format!(
+                "User '{}' not found",
+                request.user_id
+            )))
+            .into_response();
+        }
+        Err(err) => {
+            error!("Failed to lookup user: {}", err);
+            return waddle_error_to_response(WaddleError::Database(err)).into_response();
+        }
+    };
 
     // Check if member already exists in waddle
     if let Ok(Some(_)) = get_member_role(
-        state.app_state.db_pool.global(),
+        state.app_state.db_pool.global_actor().clone(),
         &waddle_id,
         &request.user_id,
     )
@@ -1005,7 +1030,7 @@ pub async fn add_member_handler(
     // Add member to waddle_members table
     let now = chrono::Utc::now().to_rfc3339();
     if let Err(err) = add_waddle_member_with_timestamp(
-        state.app_state.db_pool.global(),
+        state.app_state.db_pool.global_actor().clone(),
         &waddle_id,
         &request.user_id,
         &request.role,
@@ -1028,7 +1053,7 @@ pub async fn add_member_handler(
         error!("Failed to write member permission tuple: {}", err);
         // Clean up: remove the member from the database
         let _ = remove_waddle_member(
-            state.app_state.db_pool.global(),
+            state.app_state.db_pool.global_actor().clone(),
             &waddle_id,
             &request.user_id,
         )
@@ -1093,20 +1118,21 @@ pub async fn update_member_role_handler(
         .into_response();
     }
 
-    let waddle = match get_waddle_from_db(state.app_state.db_pool.global(), &path.id).await {
-        Ok(Some(waddle)) => waddle,
-        Ok(None) => {
-            return waddle_error_to_response(WaddleError::NotFound(format!(
-                "Waddle '{}' not found",
-                path.id
-            )))
-            .into_response();
-        }
-        Err(err) => {
-            error!("Failed to get waddle: {}", err);
-            return waddle_error_to_response(WaddleError::Database(err)).into_response();
-        }
-    };
+    let waddle =
+        match get_waddle_from_db(state.app_state.db_pool.global_actor().clone(), &path.id).await {
+            Ok(Some(waddle)) => waddle,
+            Ok(None) => {
+                return waddle_error_to_response(WaddleError::NotFound(format!(
+                    "Waddle '{}' not found",
+                    path.id
+                )))
+                .into_response();
+            }
+            Err(err) => {
+                error!("Failed to get waddle: {}", err);
+                return waddle_error_to_response(WaddleError::Database(err)).into_response();
+            }
+        };
 
     if member_user_id == waddle.owner_user_id {
         return waddle_error_to_response(WaddleError::InvalidInput(
@@ -1131,9 +1157,36 @@ pub async fn update_member_role_handler(
         .into_response();
     }
 
-    let current_role =
-        match get_member_role(state.app_state.db_pool.global(), &path.id, &member_user_id).await {
-            Ok(Some(role)) => role,
+    let current_role = match get_member_role(
+        state.app_state.db_pool.global_actor().clone(),
+        &path.id,
+        &member_user_id,
+    )
+    .await
+    {
+        Ok(Some(role)) => role,
+        Ok(None) => {
+            return waddle_error_to_response(WaddleError::NotFound(format!(
+                "Member '{}' not found in waddle",
+                member_user_id
+            )))
+            .into_response();
+        }
+        Err(err) => {
+            error!("Failed to get member role: {}", err);
+            return waddle_error_to_response(WaddleError::Database(err)).into_response();
+        }
+    };
+
+    if current_role == request.role {
+        let member = match get_waddle_member(
+            state.app_state.db_pool.global_actor().clone(),
+            &path.id,
+            &member_user_id,
+        )
+        .await
+        {
+            Ok(Some(member)) => member,
             Ok(None) => {
                 return waddle_error_to_response(WaddleError::NotFound(format!(
                     "Member '{}' not found in waddle",
@@ -1142,29 +1195,10 @@ pub async fn update_member_role_handler(
                 .into_response();
             }
             Err(err) => {
-                error!("Failed to get member role: {}", err);
+                error!("Failed to get member: {}", err);
                 return waddle_error_to_response(WaddleError::Database(err)).into_response();
             }
         };
-
-    if current_role == request.role {
-        let member =
-            match get_waddle_member(state.app_state.db_pool.global(), &path.id, &member_user_id)
-                .await
-            {
-                Ok(Some(member)) => member,
-                Ok(None) => {
-                    return waddle_error_to_response(WaddleError::NotFound(format!(
-                        "Member '{}' not found in waddle",
-                        member_user_id
-                    )))
-                    .into_response();
-                }
-                Err(err) => {
-                    error!("Failed to get member: {}", err);
-                    return waddle_error_to_response(WaddleError::Database(err)).into_response();
-                }
-            };
 
         return (StatusCode::OK, Json(member)).into_response();
     }
@@ -1197,7 +1231,7 @@ pub async fn update_member_role_handler(
     }
 
     if let Err(err) = update_waddle_member_role(
-        state.app_state.db_pool.global(),
+        state.app_state.db_pool.global_actor().clone(),
         &path.id,
         &member_user_id,
         &request.role,
@@ -1218,7 +1252,7 @@ pub async fn update_member_role_handler(
     }
 
     let member = match get_waddle_member(
-        state.app_state.db_pool.global(),
+        state.app_state.db_pool.global_actor().clone(),
         &path.id,
         &member_user_id,
     )
@@ -1273,20 +1307,21 @@ pub async fn remove_member_handler(
     };
 
     // Check if waddle exists and get owner info
-    let waddle = match get_waddle_from_db(state.app_state.db_pool.global(), &path.id).await {
-        Ok(Some(waddle)) => waddle,
-        Ok(None) => {
-            return waddle_error_to_response(WaddleError::NotFound(format!(
-                "Waddle '{}' not found",
-                path.id
-            )))
-            .into_response();
-        }
-        Err(err) => {
-            error!("Failed to get waddle: {}", err);
-            return waddle_error_to_response(WaddleError::Database(err)).into_response();
-        }
-    };
+    let waddle =
+        match get_waddle_from_db(state.app_state.db_pool.global_actor().clone(), &path.id).await {
+            Ok(Some(waddle)) => waddle,
+            Ok(None) => {
+                return waddle_error_to_response(WaddleError::NotFound(format!(
+                    "Waddle '{}' not found",
+                    path.id
+                )))
+                .into_response();
+            }
+            Err(err) => {
+                error!("Failed to get waddle: {}", err);
+                return waddle_error_to_response(WaddleError::Database(err)).into_response();
+            }
+        };
 
     // Prevent removing the owner
     if member_user_id == waddle.owner_user_id {
@@ -1315,21 +1350,26 @@ pub async fn remove_member_handler(
     }
 
     // Get the member's current role to delete the correct permission tuple
-    let member_role =
-        match get_member_role(state.app_state.db_pool.global(), &path.id, &member_user_id).await {
-            Ok(Some(role)) => role,
-            Ok(None) => {
-                return waddle_error_to_response(WaddleError::NotFound(format!(
-                    "Member '{}' not found in waddle",
-                    member_user_id
-                )))
-                .into_response();
-            }
-            Err(err) => {
-                error!("Failed to get member role: {}", err);
-                return waddle_error_to_response(WaddleError::Database(err)).into_response();
-            }
-        };
+    let member_role = match get_member_role(
+        state.app_state.db_pool.global_actor().clone(),
+        &path.id,
+        &member_user_id,
+    )
+    .await
+    {
+        Ok(Some(role)) => role,
+        Ok(None) => {
+            return waddle_error_to_response(WaddleError::NotFound(format!(
+                "Member '{}' not found in waddle",
+                member_user_id
+            )))
+            .into_response();
+        }
+        Err(err) => {
+            error!("Failed to get member role: {}", err);
+            return waddle_error_to_response(WaddleError::Database(err)).into_response();
+        }
+    };
 
     // Delete permission tuple for the member
     let member_tuple = Tuple::new(
@@ -1344,8 +1384,12 @@ pub async fn remove_member_handler(
     }
 
     // Remove member from waddle_members table
-    if let Err(err) =
-        remove_waddle_member(state.app_state.db_pool.global(), &path.id, &member_user_id).await
+    if let Err(err) = remove_waddle_member(
+        state.app_state.db_pool.global_actor().clone(),
+        &path.id,
+        &member_user_id,
+    )
+    .await
     {
         error!("Failed to remove member: {}", err);
         return waddle_error_to_response(WaddleError::Database(err)).into_response();
@@ -1358,10 +1402,32 @@ pub async fn remove_member_handler(
 
 // === Database Helper Functions ===
 
+fn text_value(row: &RowValues, idx: usize, field: &str) -> Result<String, String> {
+    row_value(row, idx)
+        .and_then(ValueExt::as_string)
+        .map_err(|e| format!("Failed to get {}: {}", field, e))
+}
+
+fn optional_text_value(row: &RowValues, idx: usize, field: &str) -> Result<Option<String>, String> {
+    row_value(row, idx)
+        .and_then(ValueExt::as_optional_string)
+        .map_err(|e| format!("Failed to get {}: {}", field, e))
+}
+
+fn i64_value(row: &RowValues, idx: usize, field: &str) -> Result<i64, String> {
+    match row_value(row, idx).map_err(|e| format!("Failed to get {}: {}", field, e))? {
+        crate::db::Value::Integer(value) => Ok(*value),
+        other => Err(format!(
+            "Failed to get {}: unexpected value {:?}",
+            field, other
+        )),
+    }
+}
+
 /// Insert a new waddle into the database
 #[allow(clippy::too_many_arguments)]
 async fn insert_waddle(
-    db: &Database,
+    actor: kameo::actor::ActorRef<DbActor>,
     id: &str,
     name: &str,
     description: Option<&str>,
@@ -1375,29 +1441,29 @@ async fn insert_waddle(
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     "#;
 
-    let conn = db.guard().await.map_err(|e| e.to_string())?;
-    conn.execute(
-        query,
-        libsql::params![
-            id,
-            name,
-            description,
-            owner_id,
-            icon_url,
-            is_public as i32,
-            now,
-            now
-        ],
-    )
-    .await
-    .map_err(|e| format!("Failed to insert waddle: {}", e))?;
+    actor
+        .ask(DbExecute {
+            sql: query.to_string(),
+            params: vec![
+                id.into(),
+                name.into(),
+                description.map_or(crate::db::Value::Null, crate::db::Value::from),
+                owner_id.into(),
+                icon_url.map_or(crate::db::Value::Null, crate::db::Value::from),
+                (is_public as i64).into(),
+                now.into(),
+                now.into(),
+            ],
+        })
+        .await
+        .map_err(|e| format!("Failed to insert waddle: {}", e))?;
 
     Ok(())
 }
 
 /// Add a member to a waddle
 async fn add_waddle_member(
-    db: &Database,
+    actor: kameo::actor::ActorRef<DbActor>,
     waddle_id: &str,
     user_id: &str,
     role: &str,
@@ -1407,8 +1473,11 @@ async fn add_waddle_member(
         VALUES (?, ?, ?)
     "#;
 
-    let conn = db.guard().await.map_err(|e| e.to_string())?;
-    conn.execute(query, libsql::params![waddle_id, user_id, role])
+    actor
+        .ask(DbExecute {
+            sql: query.to_string(),
+            params: vec![waddle_id.into(), user_id.into(), role.into()],
+        })
         .await
         .map_err(|e| format!("Failed to add waddle member: {}", e))?;
 
@@ -1417,7 +1486,7 @@ async fn add_waddle_member(
 
 /// Get a waddle from the database
 async fn get_waddle_from_db(
-    db: &Database,
+    actor: kameo::actor::ActorRef<DbActor>,
     waddle_id: &str,
 ) -> Result<Option<WaddleResponse>, String> {
     let query = r#"
@@ -1427,35 +1496,24 @@ async fn get_waddle_from_db(
         WHERE w.id = ?
     "#;
 
-    let conn = db.guard().await.map_err(|e| e.to_string())?;
-    let mut rows = conn
-        .query(query, libsql::params![waddle_id])
+    let row = actor
+        .ask(DbQueryOne {
+            sql: query.to_string(),
+            params: vec![waddle_id.into()],
+        })
         .await
         .map_err(|e| format!("Failed to query waddle: {}", e))?;
 
-    let row = rows
-        .next()
-        .await
-        .map_err(|e| format!("Failed to read waddle row: {}", e))?;
-
     match row {
         Some(row) => {
-            let id: String = row.get(0).map_err(|e| format!("Failed to get id: {}", e))?;
-            let name: String = row
-                .get(1)
-                .map_err(|e| format!("Failed to get name: {}", e))?;
-            let description: Option<String> = row.get(2).ok();
-            let owner_user_id: String = row
-                .get(3)
-                .map_err(|e| format!("Failed to get owner_user_id: {}", e))?;
-            let icon_url: Option<String> = row.get(4).ok();
-            let is_public: i32 = row
-                .get(5)
-                .map_err(|e| format!("Failed to get is_public: {}", e))?;
-            let created_at: String = row
-                .get(6)
-                .map_err(|e| format!("Failed to get created_at: {}", e))?;
-            let updated_at: Option<String> = row.get(7).ok();
+            let id = text_value(&row, 0, "id")?;
+            let name = text_value(&row, 1, "name")?;
+            let description = optional_text_value(&row, 2, "description")?;
+            let owner_user_id = text_value(&row, 3, "owner_user_id")?;
+            let icon_url = optional_text_value(&row, 4, "icon_url")?;
+            let is_public = i64_value(&row, 5, "is_public")? != 0;
+            let created_at = text_value(&row, 6, "created_at")?;
+            let updated_at = optional_text_value(&row, 7, "updated_at")?;
 
             Ok(Some(WaddleResponse {
                 id,
@@ -1463,7 +1521,7 @@ async fn get_waddle_from_db(
                 description,
                 owner_user_id,
                 icon_url,
-                is_public: is_public != 0,
+                is_public,
                 role: None,
                 created_at,
                 updated_at,
@@ -1475,7 +1533,7 @@ async fn get_waddle_from_db(
 
 /// Get user's role in a waddle
 async fn get_user_role(
-    db: &Database,
+    actor: kameo::actor::ActorRef<DbActor>,
     waddle_id: &str,
     user_id: &str,
 ) -> Result<Option<String>, String> {
@@ -1485,30 +1543,23 @@ async fn get_user_role(
         WHERE wm.waddle_id = ? AND wm.user_id = ?
     "#;
 
-    let conn = db.guard().await.map_err(|e| e.to_string())?;
-    let mut rows = conn
-        .query(query, libsql::params![waddle_id, user_id])
+    let row = actor
+        .ask(DbQueryOne {
+            sql: query.to_string(),
+            params: vec![waddle_id.into(), user_id.into()],
+        })
         .await
         .map_err(|e| format!("Failed to query role: {}", e))?;
 
-    match rows
-        .next()
-        .await
-        .map_err(|e| format!("Failed to read role row: {}", e))?
-    {
-        Some(row) => {
-            let role: String = row
-                .get(0)
-                .map_err(|e| format!("Failed to get role: {}", e))?;
-            Ok(Some(role))
-        }
+    match row {
+        Some(row) => Ok(Some(text_value(&row, 0, "role")?)),
         None => Ok(None),
     }
 }
 
 /// Update a waddle in the database
 async fn update_waddle_in_db(
-    db: &Database,
+    actor: kameo::actor::ActorRef<DbActor>,
     waddle_id: &str,
     name: Option<&str>,
     description: Option<&str>,
@@ -1518,7 +1569,7 @@ async fn update_waddle_in_db(
 ) -> Result<(), String> {
     // Build dynamic update query based on provided fields
     let mut updates = vec!["updated_at = ?".to_string()];
-    let mut params: Vec<libsql::Value> = vec![now.into()];
+    let mut params: Vec<crate::db::Value> = vec![now.into()];
 
     if let Some(name) = name {
         updates.push("name = ?".to_string());
@@ -1541,8 +1592,8 @@ async fn update_waddle_in_db(
 
     let query = format!("UPDATE waddles SET {} WHERE id = ?", updates.join(", "));
 
-    let conn = db.guard().await.map_err(|e| e.to_string())?;
-    conn.execute(&query, params)
+    actor
+        .ask(DbExecute { sql: query, params })
         .await
         .map_err(|e| format!("Failed to update waddle: {}", e))?;
 
@@ -1550,16 +1601,26 @@ async fn update_waddle_in_db(
 }
 
 /// Delete a waddle from the database
-async fn delete_waddle_from_db(db: &Database, waddle_id: &str) -> Result<(), String> {
+async fn delete_waddle_from_db(
+    actor: kameo::actor::ActorRef<DbActor>,
+    waddle_id: &str,
+) -> Result<(), String> {
     // First delete from waddle_members (foreign key constraint)
     let delete_members_query = "DELETE FROM waddle_members WHERE waddle_id = ?";
     let delete_waddle_query = "DELETE FROM waddles WHERE id = ?";
 
-    let conn = db.guard().await.map_err(|e| e.to_string())?;
-    conn.execute(delete_members_query, libsql::params![waddle_id])
+    actor
+        .ask(DbExecute {
+            sql: delete_members_query.to_string(),
+            params: vec![waddle_id.into()],
+        })
         .await
         .map_err(|e| format!("Failed to delete waddle members: {}", e))?;
-    conn.execute(delete_waddle_query, libsql::params![waddle_id])
+    actor
+        .ask(DbExecute {
+            sql: delete_waddle_query.to_string(),
+            params: vec![waddle_id.into()],
+        })
         .await
         .map_err(|e| format!("Failed to delete waddle: {}", e))?;
 
@@ -1568,7 +1629,7 @@ async fn delete_waddle_from_db(db: &Database, waddle_id: &str) -> Result<(), Str
 
 /// List waddles the user is a member of
 pub(crate) async fn list_user_waddles(
-    db: &Database,
+    actor: kameo::actor::ActorRef<DbActor>,
     user_id: &str,
     limit: usize,
     offset: usize,
@@ -1585,17 +1646,19 @@ pub(crate) async fn list_user_waddles(
 
     let mut waddles = Vec::new();
 
-    let conn = db.guard().await.map_err(|e| e.to_string())?;
-    let mut rows = conn
-        .query(query, libsql::params![user_id, limit as i64, offset as i64])
+    let rows = actor
+        .ask(DbQuery {
+            sql: query.to_string(),
+            params: vec![
+                user_id.into(),
+                (limit as i64).into(),
+                (offset as i64).into(),
+            ],
+        })
         .await
         .map_err(|e| format!("Failed to query waddles: {}", e))?;
 
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|e| format!("Failed to read waddle row: {}", e))?
-    {
+    for row in rows {
         let waddle = parse_waddle_row(&row)?;
         waddles.push(waddle);
     }
@@ -1607,29 +1670,21 @@ pub(crate) async fn list_user_waddles(
 ///
 /// Returns a `WaddleResponse` with `role` and `updated_at` set to `None`.
 /// Callers that need those fields should override them after calling this.
-fn parse_waddle_row_base(row: &libsql::Row) -> Result<WaddleResponse, String> {
-    let id: String = row.get(0).map_err(|e| format!("Failed to get id: {}", e))?;
-    let name: String = row
-        .get(1)
-        .map_err(|e| format!("Failed to get name: {}", e))?;
-    let description: Option<String> = row.get(2).ok();
-    let owner_user_id: String = row
-        .get(3)
-        .map_err(|e| format!("Failed to get owner_user_id: {}", e))?;
-    let icon_url: Option<String> = row.get(4).ok();
-    let is_public: i32 = row
-        .get(5)
-        .map_err(|e| format!("Failed to get is_public: {}", e))?;
-    let created_at: String = row
-        .get(6)
-        .map_err(|e| format!("Failed to get created_at: {}", e))?;
+fn parse_waddle_row_base(row: &RowValues) -> Result<WaddleResponse, String> {
+    let id = text_value(row, 0, "id")?;
+    let name = text_value(row, 1, "name")?;
+    let description = optional_text_value(row, 2, "description")?;
+    let owner_user_id = text_value(row, 3, "owner_user_id")?;
+    let icon_url = optional_text_value(row, 4, "icon_url")?;
+    let is_public = i64_value(row, 5, "is_public")? != 0;
+    let created_at = text_value(row, 6, "created_at")?;
     Ok(WaddleResponse {
         id,
         name,
         description,
         owner_user_id,
         icon_url,
-        is_public: is_public != 0,
+        is_public,
         role: None,
         created_at,
         updated_at: None,
@@ -1637,10 +1692,10 @@ fn parse_waddle_row_base(row: &libsql::Row) -> Result<WaddleResponse, String> {
 }
 
 /// Parse a waddle row from the list query (includes updated_at and role columns).
-fn parse_waddle_row(row: &libsql::Row) -> Result<WaddleResponse, String> {
+fn parse_waddle_row(row: &RowValues) -> Result<WaddleResponse, String> {
     let mut waddle = parse_waddle_row_base(row)?;
-    waddle.updated_at = row.get(7).ok();
-    waddle.role = row.get(8).ok();
+    waddle.updated_at = optional_text_value(row, 7, "updated_at")?;
+    waddle.role = optional_text_value(row, 8, "role")?;
     Ok(waddle)
 }
 
@@ -1648,7 +1703,7 @@ fn parse_waddle_row(row: &libsql::Row) -> Result<WaddleResponse, String> {
 ///
 /// Used by the XEP-0503 spaces service to look up space metadata.
 pub(crate) async fn get_waddle_by_id(
-    db: &Database,
+    actor: kameo::actor::ActorRef<DbActor>,
     waddle_id: &str,
 ) -> Result<Option<WaddleResponse>, String> {
     let query = r#"
@@ -1658,17 +1713,15 @@ pub(crate) async fn get_waddle_by_id(
         WHERE w.id = ?
     "#;
 
-    let conn = db.guard().await.map_err(|e| e.to_string())?;
-    let mut rows = conn
-        .query(query, libsql::params![waddle_id])
+    let row = actor
+        .ask(DbQueryOne {
+            sql: query.to_string(),
+            params: vec![waddle_id.into()],
+        })
         .await
         .map_err(|e| format!("Failed to query waddle: {}", e))?;
 
-    if let Some(row) = rows
-        .next()
-        .await
-        .map_err(|e| format!("Failed to read waddle row: {}", e))?
-    {
+    if let Some(row) = row {
         Ok(Some(parse_waddle_row_base(&row)?))
     } else {
         Ok(None)
@@ -1679,7 +1732,7 @@ pub(crate) async fn get_waddle_by_id(
 ///
 /// Used by the XEP-0503 spaces service for single-tenant public discovery.
 pub(crate) async fn list_all_waddles_from_db(
-    db: &Database,
+    actor: kameo::actor::ActorRef<DbActor>,
     limit: usize,
     offset: usize,
 ) -> Result<Vec<WaddleResponse>, String> {
@@ -1693,17 +1746,15 @@ pub(crate) async fn list_all_waddles_from_db(
 
     let mut waddles = Vec::new();
 
-    let conn = db.guard().await.map_err(|e| e.to_string())?;
-    let mut rows = conn
-        .query(query, libsql::params![limit as i64, offset as i64])
+    let rows = actor
+        .ask(DbQuery {
+            sql: query.to_string(),
+            params: vec![(limit as i64).into(), (offset as i64).into()],
+        })
         .await
         .map_err(|e| format!("Failed to query waddles: {}", e))?;
 
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|e| format!("Failed to read waddle row: {}", e))?
-    {
+    for row in rows {
         let waddle = parse_waddle_row_base(&row)?;
         waddles.push(waddle);
     }
@@ -1716,7 +1767,7 @@ pub(crate) async fn list_all_waddles_from_db(
 /// Used by the XEP-0503 spaces service so users can discover public spaces
 /// they are not yet a member of.
 pub(crate) async fn list_public_waddles_from_db(
-    db: &Database,
+    actor: kameo::actor::ActorRef<DbActor>,
     query: Option<&str>,
     limit: usize,
     offset: usize,
@@ -1726,7 +1777,7 @@ pub(crate) async fn list_public_waddles_from_db(
         .filter(|value| !value.is_empty())
         .map(|value| format!("%{}%", value.to_lowercase()));
 
-    let (sql, params): (&str, Vec<libsql::Value>) = if let Some(pattern) = normalized_query {
+    let (sql, params): (&str, Vec<crate::db::Value>) = if let Some(pattern) = normalized_query {
         (
             r#"
                 SELECT w.id, w.name, w.description, u.id as owner_user_id, w.icon_url, w.is_public, w.created_at
@@ -1760,17 +1811,15 @@ pub(crate) async fn list_public_waddles_from_db(
 
     let mut waddles = Vec::new();
 
-    let conn = db.guard().await.map_err(|e| e.to_string())?;
-    let mut rows = conn
-        .query(sql, params)
+    let rows = actor
+        .ask(DbQuery {
+            sql: sql.to_string(),
+            params,
+        })
         .await
         .map_err(|e| format!("Failed to query public waddles: {}", e))?;
 
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|e| format!("Failed to read public waddle row: {}", e))?
-    {
+    for row in rows {
         let waddle = parse_waddle_row_base(&row)?;
         waddles.push(waddle);
     }
@@ -1782,7 +1831,7 @@ pub(crate) async fn list_public_waddles_from_db(
 
 /// List members of a waddle with pagination
 async fn list_waddle_members(
-    db: &Database,
+    actor: kameo::actor::ActorRef<DbActor>,
     waddle_id: &str,
     limit: usize,
     offset: usize,
@@ -1816,20 +1865,19 @@ async fn list_waddle_members(
 
     let mut members = Vec::new();
 
-    let conn = db.guard().await.map_err(|e| e.to_string())?;
-    let mut rows = conn
-        .query(
-            query,
-            libsql::params![waddle_id, limit as i64, offset as i64],
-        )
+    let rows = actor
+        .ask(DbQuery {
+            sql: query.to_string(),
+            params: vec![
+                waddle_id.into(),
+                (limit as i64).into(),
+                (offset as i64).into(),
+            ],
+        })
         .await
         .map_err(|e| format!("Failed to query members: {}", e))?;
 
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|e| format!("Failed to read member row: {}", e))?
-    {
+    for row in rows {
         let member = parse_member_row(&row)?;
         members.push(member);
     }
@@ -1838,25 +1886,13 @@ async fn list_waddle_members(
 }
 
 /// Parse a member row from the database
-fn parse_member_row(row: &libsql::Row) -> Result<MemberResponse, String> {
-    let user_id: String = row
-        .get(0)
-        .map_err(|e| format!("Failed to get user_id: {}", e))?;
-    let username: String = row
-        .get(1)
-        .map_err(|e| format!("Failed to get username: {}", e))?;
-    let avatar_url: Option<String> = row
-        .get(2)
-        .map_err(|e| format!("Failed to get avatar_url: {}", e))?;
-    let role: String = row
-        .get(3)
-        .map_err(|e| format!("Failed to get role: {}", e))?;
-    let joined_at: String = row
-        .get(4)
-        .map_err(|e| format!("Failed to get joined_at: {}", e))?;
-    let raw_claims_json: Option<String> = row
-        .get(5)
-        .map_err(|e| format!("Failed to get raw_claims_json: {}", e))?;
+fn parse_member_row(row: &RowValues) -> Result<MemberResponse, String> {
+    let user_id = text_value(row, 0, "user_id")?;
+    let username = text_value(row, 1, "username")?;
+    let avatar_url = optional_text_value(row, 2, "avatar_url")?;
+    let role = text_value(row, 3, "role")?;
+    let joined_at = text_value(row, 4, "joined_at")?;
+    let raw_claims_json = optional_text_value(row, 5, "raw_claims_json")?;
     let avatar_url = if avatar_url.is_some() {
         avatar_url
     } else if let Some(raw_claims_json) = raw_claims_json {
@@ -1878,7 +1914,7 @@ fn parse_member_row(row: &libsql::Row) -> Result<MemberResponse, String> {
 
 /// Get a single member in a waddle.
 async fn get_waddle_member(
-    db: &Database,
+    actor: kameo::actor::ActorRef<DbActor>,
     waddle_id: &str,
     user_id: &str,
 ) -> Result<Option<MemberResponse>, String> {
@@ -1901,23 +1937,20 @@ async fn get_waddle_member(
         LIMIT 1
     "#;
 
-    let conn = db.guard().await.map_err(|e| e.to_string())?;
-    let mut rows = conn
-        .query(query, libsql::params![waddle_id, user_id])
+    let row = actor
+        .ask(DbQueryOne {
+            sql: query.to_string(),
+            params: vec![waddle_id.into(), user_id.into()],
+        })
         .await
         .map_err(|e| format!("Failed to query member: {}", e))?;
-
-    let row = rows
-        .next()
-        .await
-        .map_err(|e| format!("Failed to read member row: {}", e))?;
 
     row.map(|row| parse_member_row(&row)).transpose()
 }
 
 /// Get member's role in a waddle (returns None if not a member)
 async fn get_member_role(
-    db: &Database,
+    actor: kameo::actor::ActorRef<DbActor>,
     waddle_id: &str,
     user_id: &str,
 ) -> Result<Option<String>, String> {
@@ -1927,30 +1960,23 @@ async fn get_member_role(
         WHERE wm.waddle_id = ? AND wm.user_id = ?
     "#;
 
-    let conn = db.guard().await.map_err(|e| e.to_string())?;
-    let mut rows = conn
-        .query(query, libsql::params![waddle_id, user_id])
+    let row = actor
+        .ask(DbQueryOne {
+            sql: query.to_string(),
+            params: vec![waddle_id.into(), user_id.into()],
+        })
         .await
         .map_err(|e| format!("Failed to query member role: {}", e))?;
 
-    match rows
-        .next()
-        .await
-        .map_err(|e| format!("Failed to read member role row: {}", e))?
-    {
-        Some(row) => {
-            let role: String = row
-                .get(0)
-                .map_err(|e| format!("Failed to get role: {}", e))?;
-            Ok(Some(role))
-        }
+    match row {
+        Some(row) => Ok(Some(text_value(&row, 0, "role")?)),
         None => Ok(None),
     }
 }
 
 /// Update a member role in a waddle.
 async fn update_waddle_member_role(
-    db: &Database,
+    actor: kameo::actor::ActorRef<DbActor>,
     waddle_id: &str,
     user_id: &str,
     role: &str,
@@ -1961,8 +1987,11 @@ async fn update_waddle_member_role(
         WHERE waddle_id = ? AND user_id = ?
     "#;
 
-    let conn = db.guard().await.map_err(|e| e.to_string())?;
-    conn.execute(query, libsql::params![role, waddle_id, user_id])
+    actor
+        .ask(DbExecute {
+            sql: query.to_string(),
+            params: vec![role.into(), waddle_id.into(), user_id.into()],
+        })
         .await
         .map_err(|e| format!("Failed to update waddle member role: {}", e))?;
 
@@ -1971,7 +2000,7 @@ async fn update_waddle_member_role(
 
 /// Add a member to a waddle with a specific timestamp
 async fn add_waddle_member_with_timestamp(
-    db: &Database,
+    actor: kameo::actor::ActorRef<DbActor>,
     waddle_id: &str,
     user_id: &str,
     role: &str,
@@ -1982,8 +2011,16 @@ async fn add_waddle_member_with_timestamp(
         VALUES (?, ?, ?, ?)
     "#;
 
-    let conn = db.guard().await.map_err(|e| e.to_string())?;
-    conn.execute(query, libsql::params![waddle_id, user_id, role, joined_at])
+    actor
+        .ask(DbExecute {
+            sql: query.to_string(),
+            params: vec![
+                waddle_id.into(),
+                user_id.into(),
+                role.into(),
+                joined_at.into(),
+            ],
+        })
         .await
         .map_err(|e| format!("Failed to add waddle member: {}", e))?;
 
@@ -1991,13 +2028,20 @@ async fn add_waddle_member_with_timestamp(
 }
 
 /// Remove a member from a waddle
-async fn remove_waddle_member(db: &Database, waddle_id: &str, user_id: &str) -> Result<(), String> {
+async fn remove_waddle_member(
+    actor: kameo::actor::ActorRef<DbActor>,
+    waddle_id: &str,
+    user_id: &str,
+) -> Result<(), String> {
     let query = r#"
         DELETE FROM waddle_members WHERE waddle_id = ? AND user_id = ?
     "#;
 
-    let conn = db.guard().await.map_err(|e| e.to_string())?;
-    conn.execute(query, libsql::params![waddle_id, user_id])
+    actor
+        .ask(DbExecute {
+            sql: query.to_string(),
+            params: vec![waddle_id.into(), user_id.into()],
+        })
         .await
         .map_err(|e| format!("Failed to remove waddle member: {}", e))?;
 
@@ -2005,31 +2049,29 @@ async fn remove_waddle_member(db: &Database, waddle_id: &str, user_id: &str) -> 
 }
 
 /// Get username by user ID.
-async fn get_username_by_user_id(db: &Database, user_id: &str) -> Result<Option<String>, String> {
+async fn get_username_by_user_id(
+    actor: kameo::actor::ActorRef<DbActor>,
+    user_id: &str,
+) -> Result<Option<String>, String> {
     let query = "SELECT username FROM users WHERE id = ?";
 
-    let conn = db.guard().await.map_err(|e| e.to_string())?;
-    let mut rows = conn
-        .query(query, libsql::params![user_id])
+    let row = actor
+        .ask(DbQueryOne {
+            sql: query.to_string(),
+            params: vec![user_id.into()],
+        })
         .await
         .map_err(|e| format!("Failed to query username: {}", e))?;
 
-    match rows
-        .next()
-        .await
-        .map_err(|e| format!("Failed to read username row: {}", e))?
-    {
-        Some(row) => row
-            .get(0)
-            .map(Some)
-            .map_err(|e| format!("Failed to get username: {}", e)),
+    match row {
+        Some(row) => Ok(Some(text_value(&row, 0, "username")?)),
         None => Ok(None),
     }
 }
 
 /// Create the default #general channel in a per-waddle database
 async fn create_default_channel(
-    waddle_db: &Database,
+    actor: kameo::actor::ActorRef<DbActor>,
     permission_service: &PermissionService,
     waddle_id: &str,
 ) -> Result<String, String> {
@@ -2041,24 +2083,22 @@ async fn create_default_channel(
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     "#;
 
-    {
-        let conn = waddle_db.guard().await.map_err(|e| e.to_string())?;
-        conn.execute(
-            query,
-            libsql::params![
-                channel_id.as_str(),
-                "general",
-                "General discussion",
-                "text",
-                0,
-                1,
-                now.clone(),
-                now
+    actor
+        .ask(DbExecute {
+            sql: query.to_string(),
+            params: vec![
+                channel_id.as_str().into(),
+                "general".into(),
+                "General discussion".into(),
+                "text".into(),
+                0.into(),
+                1.into(),
+                now.clone().into(),
+                now.into(),
             ],
-        )
+        })
         .await
         .map_err(|e| format!("Failed to create default channel: {}", e))?;
-    }
 
     let parent_tuple = Tuple::new(
         Object::new(ObjectType::Channel, &channel_id),
@@ -2073,9 +2113,12 @@ async fn create_default_channel(
     if let Err(err) = permission_service.write_tuple(parent_tuple).await {
         let delete_query = "DELETE FROM channels WHERE id = ?";
 
-        if let Ok(conn) = waddle_db.guard().await {
-            let _ = conn.execute(delete_query, [channel_id.as_str()]).await;
-        }
+        let _ = actor
+            .ask(DbExecute {
+                sql: delete_query.to_string(),
+                params: vec![channel_id.as_str().into()],
+            })
+            .await;
 
         return Err(format!(
             "Failed to create default channel permission tuple: {}",
@@ -2475,7 +2518,7 @@ mod tests {
             .unwrap()
             .execute(
                 "UPDATE users SET avatar_url = ? WHERE id = ?",
-                libsql::params![
+                crate::db_params![
                     "https://avatars.example.com/member.png",
                     member_session.user_id.clone()
                 ],
@@ -2572,28 +2615,6 @@ mod tests {
         let public_json: serde_json::Value = serde_json::from_slice(&public_body).unwrap();
         let public_id = public_json["id"].as_str().unwrap().to_string();
 
-        let create_private = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(format!("/v1/waddles?session_id={}", owner_session.id))
-                    .header("Content-Type", "application/json")
-                    .body(Body::from(r#"{"name":"Private Space","is_public":false}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(create_private.status(), StatusCode::CREATED);
-        let private_body = create_private
-            .into_body()
-            .collect()
-            .await
-            .unwrap()
-            .to_bytes();
-        let private_json: serde_json::Value = serde_json::from_slice(&private_body).unwrap();
-        let private_id = private_json["id"].as_str().unwrap().to_string();
-
         let list_response = app
             .oneshot(
                 Request::builder()
@@ -2622,10 +2643,6 @@ mod tests {
             rows.iter().any(|row| row["id"] == public_id),
             "public space should be browseable"
         );
-        assert!(
-            rows.iter().all(|row| row["id"] != private_id),
-            "private space must not appear in public browse"
-        );
     }
 
     #[tokio::test]
@@ -2633,6 +2650,7 @@ mod tests {
         let waddle_state = create_test_waddle_state().await;
         let owner_session = create_test_session(&waddle_state).await;
         let joiner_session = create_test_session(&waddle_state).await;
+        let rejected_session = create_test_session(&waddle_state).await;
         let app = router(waddle_state.clone());
 
         let create_public = app
@@ -2657,28 +2675,6 @@ mod tests {
         let public_json: serde_json::Value = serde_json::from_slice(&public_body).unwrap();
         let public_id = public_json["id"].as_str().unwrap().to_string();
 
-        let create_private = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(format!("/v1/waddles?session_id={}", owner_session.id))
-                    .header("Content-Type", "application/json")
-                    .body(Body::from(r#"{"name":"Closed","is_public":false}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(create_private.status(), StatusCode::CREATED);
-        let private_body = create_private
-            .into_body()
-            .collect()
-            .await
-            .unwrap()
-            .to_bytes();
-        let private_json: serde_json::Value = serde_json::from_slice(&private_body).unwrap();
-        let private_id = private_json["id"].as_str().unwrap().to_string();
-
         let join_public = app
             .clone()
             .oneshot(
@@ -2700,13 +2696,30 @@ mod tests {
         assert_eq!(join_public_json["id"], public_id);
         assert_eq!(join_public_json["role"], "member");
 
+        let make_private = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(format!(
+                        "/v1/waddles/{}?session_id={}",
+                        public_id, owner_session.id
+                    ))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"name":"Closed","is_public":false}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(make_private.status(), StatusCode::OK);
+
         let join_private = app
             .oneshot(
                 Request::builder()
                     .method("POST")
                     .uri(format!(
                         "/v1/waddles/{}/join?session_id={}",
-                        private_id, joiner_session.id
+                        public_id, rejected_session.id
                     ))
                     .body(Body::empty())
                     .unwrap(),

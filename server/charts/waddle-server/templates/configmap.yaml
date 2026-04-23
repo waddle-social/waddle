@@ -7,6 +7,7 @@ metadata:
 data:
   WADDLE_MODE: {{ .Values.config.mode | quote }}
   WADDLE_BASE_URL: {{ .Values.config.baseUrl | quote }}
+  WADDLE_DB_DRIVER: {{ .Values.database.driver | quote }}
   WADDLE_XMPP_ENABLED: {{ .Values.xmpp.enabled | toString | quote }}
   WADDLE_XMPP_DOMAIN: {{ .Values.xmpp.domain | quote }}
   WADDLE_XMPP_S2S_ENABLED: {{ .Values.xmpp.s2sEnabled | toString | quote }}
@@ -21,6 +22,15 @@ data:
   {{- end }}
   {{- if .Values.config.authProvidersJson }}
   WADDLE_AUTH_PROVIDERS_JSON: {{ .Values.config.authProvidersJson | quote }}
+  {{- end }}
+  {{- if .Values.database.url }}
+  WADDLE_DATABASE_URL: {{ .Values.database.url | quote }}
+  {{- end }}
+  {{- if .Values.database.xmppMamUrl }}
+  WADDLE_XMPP_MAM_DATABASE_URL: {{ .Values.database.xmppMamUrl | quote }}
+  {{- end }}
+  {{- if .Values.database.xmppInboxUrl }}
+  WADDLE_XMPP_INBOX_DATABASE_URL: {{ .Values.database.xmppInboxUrl | quote }}
   {{- end }}
   {{- if .Values.telemetry.otlpEndpoint }}
   OTEL_EXPORTER_OTLP_ENDPOINT: {{ .Values.telemetry.otlpEndpoint | quote }}

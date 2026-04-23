@@ -429,17 +429,8 @@ struct WaddleChatWorkspaceView: View {
     }
 
     private var joinButton: some View {
-        Group {
-            if model.isJoined(waddle.id) {
-                Label("Joined", systemImage: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
-            } else {
-                Button("Join") {
-                    Task { await model.join(waddle) }
-                }
-                .buttonStyle(.borderedProminent)
-            }
-        }
+        Label("Member", systemImage: "checkmark.circle.fill")
+            .foregroundStyle(.green)
     }
 
     private var compactSidebar: some View {
@@ -624,16 +615,12 @@ struct WaddleChatWorkspaceView: View {
 
                     Spacer()
 
-                    if model.isJoined(waddle.id) {
-                        Text("Joined")
-                            .font(.system(size: 10, weight: .bold))
-                            .foregroundStyle(WaddleTheme.presenceOnline)
-                            .padding(.horizontal, 7)
-                            .padding(.vertical, 4)
-                            .background(WaddleTheme.presenceOnline.opacity(0.10), in: Capsule())
-                    } else {
-                        joinButton
-                    }
+                    Text("Member")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(WaddleTheme.presenceOnline)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 4)
+                        .background(WaddleTheme.presenceOnline.opacity(0.10), in: Capsule())
                 }
 
                 Text("\(store.rooms.count) channels · \(model.members.count) people")

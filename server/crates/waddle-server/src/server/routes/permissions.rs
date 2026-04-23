@@ -34,8 +34,7 @@ pub struct PermissionState {
 impl PermissionState {
     /// Create new permission state
     pub fn new(app_state: Arc<AppState>) -> Self {
-        let db = Arc::new(app_state.db_pool.global().clone());
-        let permission_service = PermissionService::new(db);
+        let permission_service = PermissionService::new(app_state.db_pool.global_actor().clone());
         Self {
             app_state,
             permission_service,

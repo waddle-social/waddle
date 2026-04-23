@@ -5,7 +5,7 @@ metadata:
   namespace: flux-system
 spec:
   dependsOn:
-    - name: infra-cilium-gateway
+    - name: infra-cloudnative-pg-cluster
     - name: infra-external-dns
   interval: 10m
   retryInterval: 1m

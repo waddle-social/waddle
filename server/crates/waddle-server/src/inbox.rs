@@ -1,11 +1,11 @@
-//! libSQL-backed storage for XEP-0430 inbox projections.
+//! Database-backed storage for XEP-0430 inbox projections.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::db::{DatabaseConfig, DatabaseDriver, IntoParams};
 use async_trait::async_trait;
 use jid::BareJid;
-use libsql::params::IntoParams;
 use tracing::{info, instrument};
 use waddle_xmpp::inbox::storage::{InboxStorage, InboxStorageError};
 use waddle_xmpp::inbox::{ConversationKind, InboxEntry};
@@ -13,26 +13,21 @@ use waddle_xmpp::inbox::{ConversationKind, InboxEntry};
 use crate::db::Database;
 
 #[derive(Clone)]
-pub struct LibSqlInboxStorage {
+pub struct DatabaseInboxStorage {
     db: Database,
 }
 
-impl LibSqlInboxStorage {
-    pub async fn open(path: Option<&Path>) -> Result<Self, InboxStorageError> {
-        let db = match path {
-            Some(path) => Database::open_local("inbox", path)
-                .await
-                .map_err(|error| InboxStorageError::Other(error.to_string()))?,
+impl DatabaseInboxStorage {
+    pub async fn open(database_url: Option<&str>) -> Result<Self, InboxStorageError> {
+        let db = match database_url {
+            Some(database_url) => open_database(database_url).await?,
             None => Database::in_memory("inbox")
                 .await
                 .map_err(|error| InboxStorageError::Other(error.to_string()))?,
         };
         let storage = Self { db };
         storage.initialize().await?;
-        match path {
-            Some(path) => info!(path = %path.display(), "Inbox storage initialized"),
-            None => info!("Inbox storage initialized in memory"),
-        }
+        info!(driver = ?storage.db.driver(), "Inbox storage initialized");
         Ok(storage)
     }
 
@@ -105,6 +100,10 @@ impl LibSqlInboxStorage {
 
     /// Returns true if inbox_entries exists but lacks the thread_id column.
     async fn needs_thread_migration(&self) -> Result<bool, InboxStorageError> {
+        if self.db.driver() != DatabaseDriver::Sqlite {
+            return Ok(false);
+        }
+
         let mut rows = self
             .query(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name='inbox_entries'",
@@ -148,7 +147,7 @@ impl LibSqlInboxStorage {
         &self,
         sql: &str,
         params: impl IntoParams,
-    ) -> Result<libsql::Rows, InboxStorageError> {
+    ) -> Result<crate::db::Rows, InboxStorageError> {
         let conn = self
             .db
             .guard()
@@ -182,7 +181,7 @@ impl LibSqlInboxStorage {
         Ok(())
     }
 
-    fn decode_row(row: &libsql::Row) -> Result<InboxEntry, InboxStorageError> {
+    fn decode_row(row: &crate::db::Row) -> Result<InboxEntry, InboxStorageError> {
         let partner_raw: String = row
             .get(0)
             .map_err(|error| InboxStorageError::Other(error.to_string()))?;
@@ -256,13 +255,15 @@ fn decode_kind(raw: &str) -> Result<ConversationKind, InboxStorageError> {
 const SELECT_COLS: &str = "partner_jid, thread_id, kind, last_stanza_id, last_updated, unread, preview, thread_title, reply_count, author";
 
 #[async_trait]
-impl InboxStorage for LibSqlInboxStorage {
+impl InboxStorage for DatabaseInboxStorage {
     #[instrument(skip(self), fields(user = %user))]
     async fn list(&self, user: &BareJid) -> Result<Vec<InboxEntry>, InboxStorageError> {
         let sql = format!(
             "SELECT {SELECT_COLS} FROM inbox_entries WHERE user_jid = ? AND thread_id = '' ORDER BY last_updated DESC, partner_jid ASC"
         );
-        let mut rows = self.query(&sql, libsql::params![user.to_string()]).await?;
+        let mut rows = self
+            .query(&sql, crate::db_params![user.to_string()])
+            .await?;
 
         let mut entries = Vec::new();
         while let Some(row) = rows
@@ -285,7 +286,7 @@ impl InboxStorage for LibSqlInboxStorage {
             "SELECT {SELECT_COLS} FROM inbox_entries WHERE user_jid = ? AND partner_jid = ? AND thread_id != '' ORDER BY last_updated DESC"
         );
         let mut rows = self
-            .query(&sql, libsql::params![user.to_string(), room.to_string()])
+            .query(&sql, crate::db_params![user.to_string(), room.to_string()])
             .await?;
 
         let mut entries = Vec::new();
@@ -337,7 +338,7 @@ impl InboxStorage for LibSqlInboxStorage {
         let mut rows = self
             .query(
                 &sql,
-                libsql::params![
+                crate::db_params![
                     user.to_string(),
                     entry.partner.to_string(),
                     thread_id.to_string(),
@@ -373,7 +374,7 @@ impl InboxStorage for LibSqlInboxStorage {
         let tid = thread_id.unwrap_or("");
         self.execute(
             "UPDATE inbox_entries SET unread = 0 WHERE user_jid = ? AND partner_jid = ? AND thread_id = ?",
-            libsql::params![user.to_string(), partner.to_string(), tid.to_string()],
+            crate::db_params![user.to_string(), partner.to_string(), tid.to_string()],
         )
         .await?;
         Ok(())
@@ -384,7 +385,7 @@ impl InboxStorage for LibSqlInboxStorage {
         let mut rows = self
             .query(
                 "SELECT COALESCE(SUM(unread), 0) FROM inbox_entries WHERE user_jid = ? AND thread_id = ''",
-                libsql::params![user.to_string()],
+                crate::db_params![user.to_string()],
             )
             .await?;
         let Some(row) = rows
@@ -402,9 +403,62 @@ impl InboxStorage for LibSqlInboxStorage {
 }
 
 pub async fn build_inbox_storage(
-    path: Option<PathBuf>,
+    database_url: Option<String>,
 ) -> Result<Arc<dyn InboxStorage>, InboxStorageError> {
-    Ok(Arc::new(LibSqlInboxStorage::open(path.as_deref()).await?))
+    Ok(Arc::new(
+        DatabaseInboxStorage::open(database_url.as_deref()).await?,
+    ))
+}
+
+async fn open_database(database_url: &str) -> Result<Database, InboxStorageError> {
+    ensure_sqlite_parent_dir(database_url)?;
+    let driver = infer_database_driver(database_url)?;
+    Database::from_config(
+        "inbox",
+        &DatabaseConfig::new(driver, database_url.to_string()),
+    )
+    .await
+    .map_err(|error| InboxStorageError::Other(error.to_string()))
+}
+
+fn infer_database_driver(database_url: &str) -> Result<DatabaseDriver, InboxStorageError> {
+    let lower = database_url.to_ascii_lowercase();
+    if lower.starts_with("postgres://") || lower.starts_with("postgresql://") {
+        return Ok(DatabaseDriver::Postgres);
+    }
+    if lower.starts_with("sqlite:") {
+        return Ok(DatabaseDriver::Sqlite);
+    }
+
+    Err(InboxStorageError::Other(format!(
+        "unsupported inbox database URL '{database_url}': expected sqlite: or postgres://"
+    )))
+}
+
+fn ensure_sqlite_parent_dir(database_url: &str) -> Result<(), InboxStorageError> {
+    let Some(path) = sqlite_database_path(database_url) else {
+        return Ok(());
+    };
+
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| InboxStorageError::Other(error.to_string()))?;
+    }
+
+    Ok(())
+}
+
+fn sqlite_database_path(database_url: &str) -> Option<&Path> {
+    let path = database_url
+        .strip_prefix("sqlite://")
+        .or_else(|| database_url.strip_prefix("sqlite:"))?;
+    if path.is_empty() || path.starts_with(":memory:") || path.starts_with("file:") {
+        return None;
+    }
+    Some(Path::new(path))
 }
 
 #[cfg(test)]
@@ -416,8 +470,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn libsql_inbox_storage_round_trips_entries() {
-        let storage = LibSqlInboxStorage::open(None).await.expect("storage");
+    async fn sqlx_inbox_storage_round_trips_entries() {
+        let storage = DatabaseInboxStorage::open(Some("sqlite::memory:"))
+            .await
+            .expect("storage");
         let user = jid("me@example.com");
         storage
             .upsert(
@@ -455,8 +511,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn libsql_inbox_storage_thread_entries() {
-        let storage = LibSqlInboxStorage::open(None).await.expect("storage");
+    async fn sqlx_inbox_storage_thread_entries() {
+        let storage = DatabaseInboxStorage::open(Some("sqlite::memory:"))
+            .await
+            .expect("storage");
         let user = jid("me@example.com");
         let room = jid("room@muc.example.com");
 
@@ -530,14 +588,14 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn libsql_inbox_storage_persists_file_backing() {
+    async fn sqlx_inbox_storage_persists_file_backing() {
         let artifacts = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/test-artifacts");
         std::fs::create_dir_all(&artifacts).expect("artifacts dir");
         let path = artifacts.join(format!("inbox-{}.db", uuid::Uuid::new_v4()));
         let user = jid("me@example.com");
 
         {
-            let storage = LibSqlInboxStorage::open(Some(&path))
+            let storage = DatabaseInboxStorage::open(Some(&format!("sqlite://{}", path.display())))
                 .await
                 .expect("storage");
             storage
@@ -556,7 +614,7 @@ mod tests {
                 .expect("upsert");
         }
 
-        let reopened = LibSqlInboxStorage::open(Some(&path))
+        let reopened = DatabaseInboxStorage::open(Some(&format!("sqlite://{}", path.display())))
             .await
             .expect("reopened storage");
         let entries = reopened.list(&user).await.expect("list");

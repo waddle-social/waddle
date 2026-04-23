@@ -31,10 +31,10 @@ pub use schema::{ComputedPermission, ObjectTypeSchema, PermissionSchema};
 #[allow(unused_imports)]
 pub use tuple::{Object, ObjectType, Relation, Subject, SubjectType, Tuple, TupleStore};
 
-use std::sync::Arc;
+use kameo::actor::ActorRef;
 use thiserror::Error;
 
-use crate::db::Database;
+use crate::db::actor::DbActor;
 
 /// Permission-specific errors
 #[derive(Error, Debug)]
@@ -86,10 +86,10 @@ pub struct PermissionService {
 
 impl PermissionService {
     /// Create a new permission service
-    pub fn new(db: Arc<Database>) -> Self {
-        let tuple_store = TupleStore::new(Arc::clone(&db));
+    pub fn new(actor: ActorRef<DbActor>) -> Self {
+        let tuple_store = TupleStore::new(actor.clone());
         let schema = PermissionSchema::default();
-        let checker = PermissionChecker::new(Arc::clone(&db), schema);
+        let checker = PermissionChecker::new(actor, schema);
 
         Self {
             tuple_store,
@@ -145,6 +145,8 @@ impl PermissionService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::Database;
+    use std::sync::Arc;
 
     #[tokio::test]
     async fn test_permission_service_basic() {
@@ -155,7 +157,8 @@ mod tests {
         let runner = crate::db::MigrationRunner::global();
         runner.run(&db).await.unwrap();
 
-        let service = PermissionService::new(db);
+        let actor = kameo::spawn(crate::db::actor::DbActor::new((*db).clone()));
+        let service = PermissionService::new(actor);
 
         // Create a tuple: user:alice is owner of waddle:test
         let tuple = Tuple::new(

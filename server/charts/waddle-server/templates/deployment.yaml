@@ -60,10 +60,6 @@ spec:
                 name: {{ . }}
             {{- end }}
           env:
-            - name: WADDLE_DB_PATH
-              value: {{ printf "%s/%s" .Values.persistence.mountPath .Values.persistence.dbFileName | quote }}
-            - name: WADDLE_XMPP_MAM_DB
-              value: {{ printf "%s/%s" .Values.persistence.mountPath .Values.persistence.mamDbFileName | quote }}
             - name: WADDLE_UPLOAD_DIR
               value: {{ printf "%s/%s" .Values.persistence.mountPath .Values.persistence.uploadSubPath | quote }}
             {{- if and .Values.xmpp.enabled .Values.xmpp.tls.secretName }}

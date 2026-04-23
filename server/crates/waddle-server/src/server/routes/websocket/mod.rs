@@ -25,7 +25,7 @@ use waddle_xmpp::{
     auth::{parse_oauthbearer, OAuthBearerResult},
     commands::CommandRegistry,
     inbox::storage::InboxStorage,
-    mam::LibSqlMamStorage,
+    mam::MamStorage,
     muc::{
         room_actor::{LeaveByRealJid, RoomActor},
         room_registry_actor::{
@@ -47,6 +47,9 @@ use waddle_xmpp::{
     Stanza,
 };
 use xmpp_parsers::minidom::Element;
+
+#[cfg(test)]
+use waddle_xmpp::mam::InMemoryMamStorage;
 
 use waddle_extensions::ExtensionManager;
 
@@ -78,7 +81,7 @@ pub struct ProtocolServices {
     /// Actor-backed registry for MUC rooms.
     pub room_registry: ActorRef<RoomRegistryActor>,
     /// Shared XMPP MAM storage for archived message history.
-    pub mam_storage: Arc<LibSqlMamStorage>,
+    pub mam_storage: Arc<dyn MamStorage>,
     /// Shared XEP-0430 inbox projection storage.
     pub inbox_storage: Arc<dyn InboxStorage>,
     /// Registry for ad-hoc commands exposed over the WebSocket transport.
@@ -1487,7 +1490,7 @@ async fn handle_sasl_scram_client_first(
 
     // Look up SCRAM credentials for the user
     let native_user_store =
-        NativeUserStore::new(Arc::new(state.deps.app_state.db_pool.global().clone()));
+        NativeUserStore::new(state.deps.app_state.db_pool.global_actor().clone());
 
     let creds = match native_user_store
         .get_scram_credentials(&username, domain)
@@ -1758,13 +1761,7 @@ mod tests {
             &server_config,
             Some(b"test-encryption-key-32-bytes!!!"),
         ));
-        let mam_db = libsql::Builder::new_local(":memory:")
-            .build()
-            .await
-            .expect("mam db");
-        let mam_conn = mam_db.connect().expect("mam conn");
-        let mam_storage = Arc::new(LibSqlMamStorage::new(mam_conn));
-        mam_storage.initialize().await.expect("mam init");
+        let mam_storage: Arc<dyn MamStorage> = Arc::new(InMemoryMamStorage::new());
 
         let mut dispatcher = StanzaDispatcher::new();
         waddle_xmpp::protocol::handlers::register_default_handlers(&mut dispatcher);
@@ -1811,7 +1808,7 @@ mod tests {
 
     async fn register_test_native_user(state: &WebSocketState, username: &str, password: &str) {
         let native_user_store =
-            NativeUserStore::new(Arc::new(state.deps.app_state.db_pool.global().clone()));
+            NativeUserStore::new(state.deps.app_state.db_pool.global_actor().clone());
         native_user_store
             .register(crate::auth::native::RegisterRequest {
                 username: username.to_string(),
@@ -3508,7 +3505,7 @@ mod tests {
             .expect("persistent connection");
         conn.execute(
             "INSERT INTO waddles (id, name, description, owner_id, icon_url, is_public, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            libsql::params![
+            crate::db_params![
                 waddle_id,
                 waddle_name,
                 Option::<String>::None,
@@ -3540,7 +3537,7 @@ mod tests {
             .expect("persistent connection");
         conn.execute(
             "INSERT INTO waddle_members (waddle_id, user_id, role, joined_at) VALUES (?, ?, 'member', ?)",
-            libsql::params![waddle_id, user_id, chrono::Utc::now().to_rfc3339()],
+            crate::db_params![waddle_id, user_id, chrono::Utc::now().to_rfc3339()],
         )
         .await
         .expect("insert waddle membership");
@@ -3684,7 +3681,7 @@ mod tests {
         let conn = waddle_db.guard().await.expect("persistent connection");
         conn.execute(
             "INSERT INTO channels (id, name, channel_type, position, is_default) VALUES (?, ?, 'text', 0, 0)",
-            libsql::params!["general", "General"],
+            crate::db_params!["general", "General"],
         )
         .await
         .expect("insert channel");

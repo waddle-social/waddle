@@ -129,10 +129,9 @@ final class RustXmppClient: ObservableObject {
 
     // MARK: - Discovery
 
-    func discoverWaddles() async -> [XMPPDiscoveredWaddle] {
-        let items = await waddleClient.discoverWaddles()
-        print("[RustXmppClient] discoverWaddles: got \(items.count) items from Rust FFI")
-        return items.map { XMPPDiscoveredWaddle(id: $0.id, name: $0.name, isPublic: $0.isPublic) }
+    func fetchCanonicalWaddle() async -> XMPPDiscoveredWaddle? {
+        let item = await waddleClient.fetchCanonicalWaddle()
+        return item.map { XMPPDiscoveredWaddle(id: $0.id, name: $0.name, isPublic: $0.isPublic) }
     }
 
     func discoverChannels(waddleID: String) async -> [XMPPDiscoveredChannel] {

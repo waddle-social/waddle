@@ -67,7 +67,6 @@ final class AppModel: ObservableObject {
     @Published var channels: [ChannelSummary] = []
     @Published var selectedChannelID: String?
     @Published var members: [MemberSummary] = []
-    @Published var searchQuery = ""
     @Published var joinedWaddleIDs: Set<String> = []
     @Published var deviceAuth: DeviceStartResponse?
     @Published var errorMessage = ""
@@ -88,11 +87,9 @@ final class AppModel: ObservableObject {
 
     private var serverURL: URL
     private var client: WaddleAPIClient
-    private var publicCatalogWaddles: [WaddleSummary] = []
     private var accessibleWaddles: [WaddleSummary] = []
     private var devicePollTask: Task<Void, Never>?
     private var reconnectTask: Task<Void, Never>?
-    private var searchTask: Task<Void, Never>?
     private var uploadServiceJID: String?
     private var rustClient: RustXmppClient?
     private var xmppEventsTask: Task<Void, Never>?
@@ -246,37 +243,6 @@ final class AppModel: ObservableObject {
         await loadProviders()
     }
 
-    func refreshPublicWaddles() async {
-        guard let session else { return }
-        isLoadingWaddles = true
-        defer { isLoadingWaddles = false }
-
-        do {
-            let previousSelection = selectedWaddleID
-            publicCatalogWaddles = try await client.listPublicWaddles(
-                sessionID: session.sessionID,
-                query: searchQuery
-            )
-            mergeVisibleWaddles()
-            if previousSelection == nil,
-               let selectedWaddleID,
-               rustClient?.connectionState == .ready {
-                await selectWaddle(selectedWaddleID)
-            }
-        } catch {
-            errorMessage = error.localizedDescription
-        }
-    }
-
-    func schedulePublicWaddleSearch() {
-        searchTask?.cancel()
-        searchTask = Task {
-            try? await Task.sleep(nanoseconds: 300_000_000)
-            guard !Task.isCancelled else { return }
-            await refreshPublicWaddles()
-        }
-    }
-
     func selectWaddle(_ waddleID: String?) async {
         guard selectedWaddleID != waddleID || channels.isEmpty else {
             return
@@ -332,19 +298,6 @@ final class AppModel: ObservableObject {
         await loadStructure(for: selectedWaddleID)
     }
 
-    func join(_ waddle: WaddleSummary) async {
-        guard let session else { return }
-
-        do {
-            try await client.joinWaddle(sessionID: session.sessionID, waddleID: waddle.id)
-            joinedWaddleIDs.insert(waddle.id)
-            await refreshAccessibleWaddles()
-            await selectWaddle(waddle.id)
-        } catch {
-            errorMessage = error.localizedDescription
-        }
-    }
-
     func createWaddle(name: String, description: String?, isPublic: Bool) async {
         guard let session else { return }
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -364,8 +317,7 @@ final class AppModel: ObservableObject {
                 isPublic: isPublic
             )
             joinedWaddleIDs.insert(created.id)
-            publicCatalogWaddles.insert(created, at: 0)
-            mergeVisibleWaddles()
+            await refreshAccessibleWaddles()
             await selectWaddle(created.id)
         } catch {
             errorMessage = error.localizedDescription
@@ -697,7 +649,7 @@ final class AppModel: ObservableObject {
         guard let session, let waddleID = selectedWaddleID else { return }
         do {
             try await client.updateWaddle(sessionID: session.sessionID, waddleID: waddleID, name: name, description: description)
-            await refreshPublicWaddles()
+            await refreshAccessibleWaddles()
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -711,7 +663,7 @@ final class AppModel: ObservableObject {
             channels = []
             selectedChannelID = nil
             members = []
-            await refreshPublicWaddles()
+            await refreshAccessibleWaddles()
             updateChatSurfaceState()
         } catch {
             errorMessage = error.localizedDescription
@@ -951,7 +903,6 @@ final class AppModel: ObservableObject {
         updateChatSurfaceState()
 
         await connectXMPP(using: loaded)
-        await refreshPublicWaddles()
     }
 
     private func connectXMPP(using session: WaddleSession) async {
@@ -1058,21 +1009,26 @@ final class AppModel: ObservableObject {
     private func refreshAccessibleWaddles() async {
         guard let rustClient else { return }
 
-        let discovered = await rustClient.discoverWaddles()
-        accessibleWaddles = discovered.map {
-            WaddleSummary(
-                id: $0.id,
-                name: $0.name,
+        isLoadingWaddles = true
+        defer { isLoadingWaddles = false }
+
+        if let discovered = await rustClient.fetchCanonicalWaddle() {
+            let summary = WaddleSummary(
+                id: discovered.id,
+                name: discovered.name,
                 description: nil,
                 ownerUserID: nil,
                 iconURL: nil,
-                isPublic: $0.isPublic,
+                isPublic: discovered.isPublic,
                 role: nil,
                 createdAt: nil,
                 updatedAt: nil
             )
+            accessibleWaddles = [summary]
+            joinedWaddleIDs.insert(discovered.id)
+        } else {
+            accessibleWaddles = []
         }
-        joinedWaddleIDs.formUnion(discovered.map(\.id))
         mergeVisibleWaddles()
     }
 
@@ -1900,15 +1856,7 @@ final class AppModel: ObservableObject {
     }
 
     private func mergeVisibleWaddles() {
-        var byID: [String: WaddleSummary] = [:]
-        for waddle in accessibleWaddles {
-            byID[waddle.id] = waddle
-        }
-        for waddle in publicCatalogWaddles {
-            byID[waddle.id] = waddle
-        }
-
-        publicWaddles = byID.values.sorted { $0.name.lowercased() < $1.name.lowercased() }
+        publicWaddles = accessibleWaddles.sorted { $0.name.lowercased() < $1.name.lowercased() }
         if selectedWaddleID == nil {
             selectedWaddleID = publicWaddles.first(where: { joinedWaddleIDs.contains($0.id) })?.id
                 ?? publicWaddles.first?.id
@@ -2050,7 +1998,6 @@ final class AppModel: ObservableObject {
         rustClient = nil
 
         session = nil
-        publicCatalogWaddles = []
         accessibleWaddles = []
         publicWaddles = []
         selectedWaddleID = nil

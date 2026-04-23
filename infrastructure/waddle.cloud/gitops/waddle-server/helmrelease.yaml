@@ -25,6 +25,8 @@ spec:
       corsOrigins: https://waddle.chat,http://localhost:4321
       s3Endpoint: "https://f90cc3950ab5b356ec869fe64c867ea7.r2.cloudflarestorage.com"
       s3Bucket: "waddle-social-files"
+    database:
+      driver: postgres
     extraSecretRefs:
       - waddle-r2-credentials
     # Ship traces + OTel-native metrics to Grafana Cloud via the
@@ -41,7 +43,6 @@ spec:
         value: "grpc"
     xmpp:
       domain: waddle.social
-      mamDbPath: /data/mam.db
       tls:
         secretName: waddle-xmpp-tls
     persistence:
@@ -83,5 +84,8 @@ spec:
 
     secret:
       create: true
+      databaseUrl: "postgresql://waddle-rw.cnpg-system.svc.cluster.local:5432/waddle"
+      xmppMamDatabaseUrl: "postgresql://waddle-rw.cnpg-system.svc.cluster.local:5432/waddle"
+      xmppInboxDatabaseUrl: "postgresql://waddle-rw.cnpg-system.svc.cluster.local:5432/waddle"
       authProvidersJson: >-
         [{"id":"colony","display_name":"Colony","kind":"oidc","dynamic_client_registration":true,"client_id":"","token_endpoint_auth_method":"none","require_dpop":true,"issuer":"https://colony.waddle.social","scopes":["openid","profile","email"],"subject_claim":"sub","username_claim":"preferred_username","email_claim":"email"}]

@@ -1,8 +1,12 @@
-# ADR-0004: Use Turso/libSQL for Storage
+# ADR-0004: Turso/libSQL Storage (Historical)
 
 ## Status
 
-Accepted
+Superseded
+
+## Replacement Note
+
+`waddle-server` now uses the internal SQLx adapter layer with SQLite and PostgreSQL backends, and the runtime operates on a single logical Waddle database rather than database-per-Waddle sharding. Keep this ADR as historical context only; do not use it to guide new storage work.
 
 ## Context
 
@@ -28,14 +32,14 @@ We evaluated:
 - **CockroachDB**: Distributed SQL, but heavy for small deployments
 - **ScyllaDB/Cassandra**: Write-optimized, but complex operations
 
-## Decision
+## Historical Decision
 
-We will use **Turso** (libSQL) as the primary database with a **database-per-Waddle** sharding strategy:
+At the time this ADR was written, the plan was to use **Turso** (libSQL) as the primary database with a **database-per-Waddle** sharding strategy:
 
 - One global database for authentication and cross-Waddle data
 - One database per Waddle for community-specific data (messages, channels, memberships)
 
-This approach leverages SQLite's strengths (simplicity, embeddability) while avoiding its single-writer limitation through natural sharding at the community boundary.
+That decision is no longer current.
 
 ## Consequences
 
