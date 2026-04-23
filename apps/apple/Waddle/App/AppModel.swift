@@ -837,6 +837,7 @@ final class AppModel: ObservableObject {
             while !Task.isCancelled {
                 do {
                     let result = try await client.pollDeviceAuth(deviceCode: flow.deviceCode)
+                    errorMessage = ""
                     switch result {
                     case .pending:
                         break
@@ -845,6 +846,11 @@ final class AppModel: ObservableObject {
                         return
                     }
                 } catch {
+                    if isTransientDeviceAuthPollError(error) {
+                        errorMessage = "Connection interrupted. Retrying sign-in…"
+                        try? await Task.sleep(nanoseconds: UInt64(flow.interval) * 1_000_000_000)
+                        continue
+                    }
                     errorMessage = error.localizedDescription
                     cancelDeviceAuthorization()
                     return
@@ -865,14 +871,24 @@ final class AppModel: ObservableObject {
     }
 
     private func verificationURL(for flow: DeviceStartResponse) -> URL? {
-        var components = URLComponents(url: serverURL, resolvingAgainstBaseURL: false)
-        components?.path = "/api/auth/device/verify"
-        components?.queryItems = [URLQueryItem(name: "code", value: flow.userCode)]
-        if let url = components?.url {
+        if let raw = flow.verificationURIComplete,
+           let url = normalizedVerificationURL(from: raw) {
             return url
         }
 
-        return normalizedVerificationURL(from: flow.verificationURIComplete)
+        if let raw = flow.verificationURI,
+           let base = normalizedVerificationURL(from: raw),
+           var components = URLComponents(url: base, resolvingAgainstBaseURL: false) {
+            components.queryItems = [URLQueryItem(name: "code", value: flow.userCode)]
+            if let url = components.url {
+                return url
+            }
+        }
+
+        var components = URLComponents(url: serverURL, resolvingAgainstBaseURL: false)
+        components?.path = "/api/auth/device/verify"
+        components?.queryItems = [URLQueryItem(name: "code", value: flow.userCode)]
+        return components?.url
     }
 
     private func normalizedVerificationURL(from raw: String) -> URL? {
@@ -888,6 +904,21 @@ final class AppModel: ObservableObject {
             .replacingOccurrences(of: "\\\"", with: "")
             .replacingOccurrences(of: "\"", with: "")
         return URL(string: unescaped)
+    }
+
+    private func isTransientDeviceAuthPollError(_ error: Error) -> Bool {
+        let nsError = error as NSError
+        guard nsError.domain == NSURLErrorDomain else {
+            return false
+        }
+        let code = URLError.Code(rawValue: nsError.code)
+
+        switch code {
+        case .networkConnectionLost, .timedOut:
+            return true
+        default:
+            return false
+        }
     }
 
     private func finalizeSignedInState(sessionID: String) async throws {

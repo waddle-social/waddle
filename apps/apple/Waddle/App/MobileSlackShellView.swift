@@ -614,7 +614,7 @@ private struct MobileHeroCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack(alignment: .top, spacing: 14) {
-                MobileWorkspaceAvatar(name: session?.username ?? "Waddle", size: 52)
+                WaddleBrandMark(size: 52)
 
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Waddle")

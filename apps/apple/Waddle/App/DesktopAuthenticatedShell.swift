@@ -192,14 +192,7 @@ private struct DesktopWorkspaceSidebar: View {
     private var header: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack(alignment: .center, spacing: 12) {
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(Color.accentColor.opacity(colorScheme == .dark ? 0.20 : 0.12))
-                    .frame(width: 38, height: 38)
-                    .overlay {
-                        Image(systemName: "bubble.left.and.bubble.right.fill")
-                            .font(.system(size: 15, weight: .semibold))
-                            .foregroundStyle(Color.accentColor)
-                    }
+                WaddleBrandMark(size: 38)
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Waddle")

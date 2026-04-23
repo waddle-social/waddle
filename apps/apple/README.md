@@ -8,7 +8,7 @@ Shared iOS + macOS SwiftUI app for Waddle.
 - Rust 1.78+ with `cargo`
 - `rustup` targets installed:
   ```bash
-  rustup target add aarch64-apple-darwin aarch64-apple-ios aarch64-apple-ios-sim
+  rustup target add aarch64-apple-darwin x86_64-apple-darwin aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
   ```
 - `xcodegen` (for project generation):
   ```bash
@@ -42,6 +42,7 @@ xcodegen generate
 ```
 
 This creates `Waddle.xcodeproj` from `project.yml`.
+Apple brand assets are synced from `chat/public/waddle-logo.svg` by a target pre-build script.
 
 ### Step 3: Build and Run
 
@@ -88,7 +89,7 @@ Xcode Cloud requires the Rust framework to be pre-built before building the Swif
 1. In Xcode Cloud settings, add a pre-build script:
    ```bash
    cd apps/apple
-   rustup target add aarch64-apple-darwin aarch64-apple-ios aarch64-apple-ios-sim
+   rustup target add aarch64-apple-darwin x86_64-apple-darwin aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
    bash ../../scripts/build-xcframework.sh --release
    ```
 2. Configure the script to run before the iOS and macOS build steps

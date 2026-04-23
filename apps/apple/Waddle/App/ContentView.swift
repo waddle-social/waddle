@@ -131,14 +131,18 @@ private struct SignInView: View {
 #endif
             }
 
-            VStack(alignment: .leading, spacing: 10) {
-                Text("Waddle")
-                    .font(.system(size: 34, weight: .bold, design: .rounded))
+            HStack(alignment: .center, spacing: 16) {
+                WaddleBrandMark(size: 68)
 
-                Text("Calm, native chat that follows your system theme and keeps longer conversations easy to read.")
-                    .font(.body)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Waddle")
+                        .font(.system(size: 34, weight: .bold, design: .rounded))
+
+                    Text("Calm, native chat that follows your system theme and keeps longer conversations easy to read.")
+                        .font(.body)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
 
             GroupBox("Server") {

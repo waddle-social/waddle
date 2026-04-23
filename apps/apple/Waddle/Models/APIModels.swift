@@ -39,10 +39,10 @@ struct WaddleSession: Decodable {
 struct DeviceStartResponse: Decodable {
     let deviceCode: String
     let userCode: String
-    let verificationURI: String
-    let verificationURIComplete: String
+    let verificationURI: String?
+    let verificationURIComplete: String?
     let interval: Int
-    let expiresIn: Int
+    let expiresIn: Int?
 
     enum CodingKeys: String, CodingKey {
         case deviceCode = "device_code"
@@ -52,27 +52,25 @@ struct DeviceStartResponse: Decodable {
         case interval
         case expiresIn = "expires_in"
     }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        deviceCode = try container.decode(String.self, forKey: .deviceCode)
+        userCode = try container.decode(String.self, forKey: .userCode)
+        verificationURI = try container.decodeIfPresent(String.self, forKey: .verificationURI)
+        verificationURIComplete = try container.decodeIfPresent(String.self, forKey: .verificationURIComplete)
+        interval = try container.decodeIfPresent(Int.self, forKey: .interval) ?? 5
+        expiresIn = try container.decodeIfPresent(Int.self, forKey: .expiresIn)
+    }
 }
 
 struct DevicePollCompleteResponse: Decodable {
     let status: String
     let sessionID: String
-    let userID: String
-    let username: String
-    let providerID: String
-    let jid: String
-    let xmppHost: String
-    let xmppPort: Int
 
     enum CodingKeys: String, CodingKey {
         case status
         case sessionID = "session_id"
-        case userID = "user_id"
-        case username
-        case providerID = "provider_id"
-        case jid
-        case xmppHost = "xmpp_host"
-        case xmppPort = "xmpp_port"
     }
 }
 

@@ -11,3 +11,7 @@ xcuserdata/
 # Only the top-level Generated/ (XCFramework binaries) is excluded;
 # Waddle/RustClient/Generated/ (Swift sources) is tracked.
 /Generated/
+
+# Apple brand assets are generated from chat/public/waddle-logo.svg
+/Waddle/Assets.xcassets/AppIcon.appiconset/*.png
+/Waddle/Assets.xcassets/WaddleLogo.imageset/waddle-logo.svg

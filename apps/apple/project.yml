@@ -24,13 +24,19 @@ targets:
       - framework: $(SRCROOT)/Generated/WaddleXmppClientFFI.xcframework
         embed: false
         link: true
+    preBuildScripts:
+      - name: Sync Waddle Brand Assets
+        script: |
+          set -euo pipefail
+          env -u SDKROOT -u SDK_NAME -u EFFECTIVE_PLATFORM_NAME -u PLATFORM_NAME -u ARCHS -u CURRENT_ARCH xcrun --sdk macosx swift "$SRCROOT/scripts/sync_brand_assets.swift"
     settings:
       base:
         PRODUCT_NAME: Waddle-iOS
         PRODUCT_BUNDLE_IDENTIFIER: p4x.waddle.social
         INFOPLIST_KEY_CFBundleDisplayName: Waddle
+        INFOPLIST_KEY_CFBundleIconName: AppIcon
         INFOPLIST_KEY_UILaunchStoryboardName: LaunchScreen
-        INFOPLIST_KEY_UISupportedInterfaceOrientations: "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
+        INFOPLIST_KEY_UISupportedInterfaceOrientations: "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
         INFOPLIST_KEY_UISupportedInterfaceOrientations~ipad: "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
         TARGETED_DEVICE_FAMILY: "1,2"
         SUPPORTS_MACCATALYST: NO
@@ -50,16 +56,21 @@ targets:
       - framework: $(SRCROOT)/Generated/WaddleXmppClientFFI.xcframework
         embed: false
         link: true
+    preBuildScripts:
+      - name: Sync Waddle Brand Assets
+        script: |
+          set -euo pipefail
+          env -u SDKROOT -u SDK_NAME -u EFFECTIVE_PLATFORM_NAME -u PLATFORM_NAME -u ARCHS -u CURRENT_ARCH xcrun --sdk macosx swift "$SRCROOT/scripts/sync_brand_assets.swift"
     settings:
       base:
         PRODUCT_NAME: Waddle-macOS
         PRODUCT_BUNDLE_IDENTIFIER: p4x.waddle.social
         INFOPLIST_KEY_CFBundleDisplayName: Waddle
+        INFOPLIST_KEY_CFBundleIconName: AppIcon
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.social-networking
         SWIFT_OBJC_BRIDGING_HEADER: "Waddle/Waddle-Bridging-Header.h"
         HEADER_SEARCH_PATHS: "$(inherited) $(SRCROOT)/Generated/WaddleXmppClientFFI.xcframework/*/Headers $(SRCROOT)/Waddle/RustClient"
         MODULEMAP_FILE: "$(SRCROOT)/Waddle/RustClient/module.modulemap"
-        ARCHS: arm64
 schemes:
   Waddle:
     build:
