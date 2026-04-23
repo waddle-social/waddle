@@ -35,8 +35,6 @@ data:
   {{- if .Values.spicedb.enabled }}
   WADDLE_SPICEDB_ENDPOINT: {{ .Values.spicedb.endpoint | quote }}
   WADDLE_SPICEDB_INSECURE: {{ .Values.spicedb.insecure | toString | quote }}
-  WADDLE_SPICEDB_BOOTSTRAP_SCHEMA: {{ .Values.spicedb.bootstrapSchema | toString | quote }}
-  WADDLE_SPICEDB_SCHEMA_VERSION: {{ .Values.spicedb.schemaVersion | toString | quote }}
   {{- end }}
   {{- if .Values.telemetry.otlpEndpoint }}
   OTEL_EXPORTER_OTLP_ENDPOINT: {{ .Values.telemetry.otlpEndpoint | quote }}

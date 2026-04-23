@@ -13,7 +13,8 @@
 {{- fail "spicedb.endpoint is required when spicedb.enabled is true" -}}
 {{- end -}}
 {{- $spicedbKey := coalesce .Values.secret.spicedbPresharedKey "" -}}
-{{- if not $spicedbKey -}}
-{{- fail "secret.spicedbPresharedKey is required when spicedb.enabled is true" -}}
+{{- $spicedbKeyFromSecretRef := or (ne .Values.secret.existingSecret "") (gt (len .Values.extraSecretRefs) 0) -}}
+{{- if not (or $spicedbKey $spicedbKeyFromSecretRef) -}}
+{{- fail "spicedb requires either secret.spicedbPresharedKey, secret.existingSecret, or extraSecretRefs providing WADDLE_SPICEDB_PRESHARED_KEY" -}}
 {{- end -}}
 {{- end -}}

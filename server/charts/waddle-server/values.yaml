@@ -129,8 +129,6 @@ spicedb:
   enabled: true
   endpoint: ""
   insecure: false
-  bootstrapSchema: false
-  schemaVersion: 1
 
 # Additional Kubernetes Secrets to inject as env vars (e.g. R2 credentials from ExternalSecrets).
 extraSecretRefs: []

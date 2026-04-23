@@ -417,7 +417,6 @@ impl TupleStore {
     }
 
     /// Delete a tuple from the database
-    #[cfg(test)]
     #[instrument(skip(self), fields(tuple = %tuple))]
     pub async fn delete(&self, tuple: &Tuple) -> Result<(), PermissionError> {
         debug!("Deleting tuple: {}", tuple);

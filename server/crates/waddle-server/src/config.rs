@@ -78,20 +78,12 @@ impl AuthConfig {
     }
 }
 
-/// SpiceDB schema configuration for bootstrap behavior.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SpiceDbSchemaConfig {
-    pub bootstrap: bool,
-    pub schema_version: u64,
-}
-
 /// SpiceDB backend configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpiceDbConfig {
     pub endpoint: String,
     pub preshared_key: String,
     pub insecure: bool,
-    pub schema: SpiceDbSchemaConfig,
 }
 
 impl SpiceDbConfig {
@@ -120,28 +112,10 @@ impl SpiceDbConfig {
                     .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
                     .unwrap_or(false);
 
-                let bootstrap = std::env::var("WADDLE_SPICEDB_BOOTSTRAP_SCHEMA")
-                    .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
-                    .unwrap_or(false);
-
-                let schema_version = match std::env::var("WADDLE_SPICEDB_SCHEMA_VERSION") {
-                    Ok(value) => value.parse::<u64>().map_err(|e| {
-                        format!(
-                            "invalid WADDLE_SPICEDB_SCHEMA_VERSION value '{}': {}",
-                            value, e
-                        )
-                    })?,
-                    Err(_) => 1,
-                };
-
                 Ok(Some(Self {
                     endpoint,
                     preshared_key,
                     insecure,
-                    schema: SpiceDbSchemaConfig {
-                        bootstrap,
-                        schema_version,
-                    },
                 }))
             }
         }

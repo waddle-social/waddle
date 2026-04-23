@@ -583,8 +583,9 @@ mod tests {
             Arc::new(crate::storage::LocalStorage::new(upload_dir.clone()));
 
         let db_pool = Arc::new(db_pool);
-        let permission_actor =
-            kameo::spawn(PermissionActor::new_for_tests(Arc::new(db_pool.global().clone())));
+        let permission_actor = kameo::spawn(PermissionActor::new_for_tests(Arc::new(
+            db_pool.global().clone(),
+        )));
         let app_state = Arc::new(AppState::new_with_deps(
             Arc::clone(&db_pool),
             blob_storage,

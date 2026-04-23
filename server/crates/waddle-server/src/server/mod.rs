@@ -434,7 +434,11 @@ pub async fn start_with_config(
     let db_pool = Arc::new(db_pool);
     ensure_fixed_test_account(&db_pool, &xmpp_config).await?;
     let global_db = Arc::new(db_pool.global().clone());
-    let permission_actor_impl = PermissionActor::from_server_config(&server_config).await?;
+    let permission_actor_impl = if server_config.spicedb.is_none() && fixed_test_account_enabled() {
+        PermissionActor::new_for_tests(Arc::clone(&global_db))
+    } else {
+        PermissionActor::from_server_config(&server_config).await?
+    };
     info!(
         backend = permission_actor_impl.backend_name(),
         "Permission backend configured"
@@ -667,13 +671,17 @@ struct FixedTestAccountConfig {
     email: Option<String>,
 }
 
+fn fixed_test_account_enabled() -> bool {
+    std::env::var("WADDLE_TEST_FIXED_ACCOUNT_ENABLED")
+        .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
+}
+
 async fn ensure_fixed_test_account(
     db_pool: &Arc<DatabasePool>,
     xmpp_config: &XmppConfig,
 ) -> Result<()> {
-    let enabled = std::env::var("WADDLE_TEST_FIXED_ACCOUNT_ENABLED")
-        .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
-        .unwrap_or(false);
+    let enabled = fixed_test_account_enabled();
     if !enabled {
         return Ok(());
     }

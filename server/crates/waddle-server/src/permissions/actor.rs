@@ -2,15 +2,11 @@ use kameo::message::Context;
 use kameo::Actor;
 
 use crate::config::ServerConfig;
-#[cfg(test)]
 use crate::db::actor::DbActor;
-#[cfg(test)]
 use crate::db::Database;
-#[cfg(test)]
 use std::sync::Arc;
 
 use super::spicedb::SpiceDbPermissionBackend;
-#[cfg(test)]
 use super::{CheckRequest, PermissionChecker, PermissionSchema, TupleStore};
 use super::{
     CheckResponse, Object, ObjectType, PermissionError, Relation, Subject, SubjectType, Tuple,
@@ -18,7 +14,6 @@ use super::{
 
 enum PermissionActorBackend {
     SpiceDb(Box<SpiceDbPermissionBackend>),
-    #[cfg(test)]
     Local {
         tuple_store: TupleStore,
         checker: PermissionChecker,
@@ -104,7 +99,6 @@ impl PermissionActor {
         Ok(Self::new(backend))
     }
 
-    #[cfg(test)]
     pub fn new_for_tests(db: Arc<Database>) -> Self {
         let actor = kameo::spawn(DbActor::new((*db).clone()));
         let tuple_store = TupleStore::new(actor.clone());
@@ -122,7 +116,6 @@ impl PermissionActor {
     pub fn backend_name(&self) -> &'static str {
         match &self.backend {
             PermissionActorBackend::SpiceDb(_) => "spicedb",
-            #[cfg(test)]
             PermissionActorBackend::Local { .. } => "local",
         }
     }
@@ -137,7 +130,6 @@ impl PermissionActor {
             PermissionActorBackend::SpiceDb(backend) => {
                 backend.check(subject, permission, object).await
             }
-            #[cfg(test)]
             PermissionActorBackend::Local { checker, .. } => {
                 checker
                     .check(CheckRequest {
@@ -153,7 +145,6 @@ impl PermissionActor {
     async fn write_tuple(&self, tuple: Tuple) -> Result<(), PermissionError> {
         match &self.backend {
             PermissionActorBackend::SpiceDb(backend) => backend.write_tuple(tuple).await,
-            #[cfg(test)]
             PermissionActorBackend::Local { tuple_store, .. } => tuple_store.write(tuple).await,
         }
     }
@@ -161,7 +152,6 @@ impl PermissionActor {
     async fn delete_tuple(&self, tuple: &Tuple) -> Result<(), PermissionError> {
         match &self.backend {
             PermissionActorBackend::SpiceDb(backend) => backend.delete_tuple(tuple).await,
-            #[cfg(test)]
             PermissionActorBackend::Local { tuple_store, .. } => tuple_store.delete(tuple).await,
         }
     }
@@ -175,7 +165,6 @@ impl PermissionActor {
             PermissionActorBackend::SpiceDb(backend) => {
                 backend.list_relations(subject, object).await
             }
-            #[cfg(test)]
             PermissionActorBackend::Local { tuple_store, .. } => {
                 tuple_store.list_relations(subject, object).await
             }
@@ -191,7 +180,6 @@ impl PermissionActor {
             PermissionActorBackend::SpiceDb(backend) => {
                 backend.list_subjects(object, relation).await
             }
-            #[cfg(test)]
             PermissionActorBackend::Local { tuple_store, .. } => {
                 tuple_store.list_subjects(object, relation).await
             }
@@ -210,7 +198,6 @@ impl PermissionActor {
                     .lookup_resources(subject, permission, object_type)
                     .await
             }
-            #[cfg(test)]
             PermissionActorBackend::Local { .. } => {
                 Err(PermissionError::UnsupportedOperation("local"))
             }
@@ -229,7 +216,6 @@ impl PermissionActor {
                     .lookup_subjects(object, permission, subject_type)
                     .await
             }
-            #[cfg(test)]
             PermissionActorBackend::Local { .. } => {
                 Err(PermissionError::UnsupportedOperation("local"))
             }
@@ -237,7 +223,6 @@ impl PermissionActor {
     }
 
     async fn clear_cache(&self) {
-        #[cfg(test)]
         if let PermissionActorBackend::Local { checker, .. } = &self.backend {
             checker.clear_cache().await;
         }

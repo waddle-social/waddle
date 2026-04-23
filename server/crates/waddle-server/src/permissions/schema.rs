@@ -7,8 +7,6 @@ use std::collections::HashMap;
 
 use super::tuple::ObjectType;
 
-pub const SPICEDB_SCHEMA: &str = include_str!("schema.zed");
-
 /// How a permission is computed
 #[derive(Debug, Clone, PartialEq)]
 pub enum ComputedPermission {
@@ -136,10 +134,6 @@ impl PermissionSchema {
         self.schemas
             .get(&object_type)
             .and_then(|s| s.get_permission(permission))
-    }
-
-    pub fn spicedb_schema(&self) -> &'static str {
-        SPICEDB_SCHEMA
     }
 }
 
@@ -385,19 +379,6 @@ mod tests {
         assert!(space_schema.get_permission("delete").is_some());
         assert!(space_schema.get_permission("view").is_some());
         assert!(space_schema.get_permission("invalid").is_none());
-    }
-
-    #[test]
-    fn test_spicedb_schema_embedded() {
-        let schema = PermissionSchema::default();
-        let spicedb = schema.spicedb_schema();
-
-        assert!(spicedb.contains("definition waddle"));
-        assert!(spicedb.contains("relation admin: user | owner"));
-        assert!(spicedb.contains("relation moderator: user | admin"));
-        assert!(spicedb.contains("relation member: user | moderator"));
-        assert!(spicedb.contains("permission edit = author"));
-        assert!(spicedb.contains("permission delete = author + channel->moderate"));
     }
 
     #[test]

@@ -6,33 +6,10 @@ use prescience::{
     Client, Consistency, ObjectReference, PermissionResult, Relationship, RelationshipFilter,
     RelationshipUpdate, SubjectFilter, SubjectReference,
 };
-use tracing::info;
 
 use crate::config::SpiceDbConfig;
 
 use super::{CheckResponse, Object, ObjectType, PermissionError, Subject, SubjectType, Tuple};
-
-const SCHEMA_VERSION_MARKER_A: &str = "waddle-schema-version:";
-const SCHEMA_VERSION_MARKER_B: &str = "waddle_schema_version:";
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SchemaBootstrapHook {
-    pub expected_version: u64,
-    pub schema_text: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SchemaBootstrapStatus {
-    UpToDate,
-    Applied { previous_version: Option<u64> },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SchemaBootstrapResult {
-    pub status: SchemaBootstrapStatus,
-    pub current_version: Option<u64>,
-    pub target_version: u64,
-}
 
 #[derive(Clone)]
 pub struct SpiceDbPermissionBackend {
@@ -210,83 +187,6 @@ impl SpiceDbPermissionBackend {
         Ok(subjects)
     }
 
-    pub async fn bootstrap_schema(
-        &self,
-        hook: &SchemaBootstrapHook,
-    ) -> Result<SchemaBootstrapResult, PermissionError> {
-        let target_version = extract_schema_version(&hook.schema_text).ok_or_else(|| {
-            PermissionError::SchemaError(format!(
-                "target schema missing version marker '{} <number>'",
-                SCHEMA_VERSION_MARKER_A
-            ))
-        })?;
-        if target_version != hook.expected_version {
-            return Err(PermissionError::SchemaError(format!(
-                "target schema version {} does not match expected version {}",
-                target_version, hook.expected_version
-            )));
-        }
-
-        let current_schema = match self.client.read_schema().await {
-            Ok((schema, _)) => schema,
-            Err(prescience::Error::Status { code, .. }) if format!("{code:?}") == "NotFound" => {
-                String::new()
-            }
-            Err(error) => return Err(map_spicedb_error(error)),
-        };
-        let current_version = if current_schema.trim().is_empty() {
-            None
-        } else {
-            Some(extract_schema_version(&current_schema).ok_or_else(|| {
-                PermissionError::SchemaError(format!(
-                    "current schema missing version marker '{} <number>'",
-                    SCHEMA_VERSION_MARKER_A
-                ))
-            })?)
-        };
-
-        if let Some(current_version) = current_version {
-            if current_version > hook.expected_version {
-                return Err(PermissionError::SchemaError(format!(
-                    "current schema version {} is newer than expected {}",
-                    current_version, hook.expected_version
-                )));
-            }
-            if current_version == hook.expected_version {
-                if current_schema.trim() == hook.schema_text.trim() {
-                    return Ok(SchemaBootstrapResult {
-                        status: SchemaBootstrapStatus::UpToDate,
-                        current_version: Some(current_version),
-                        target_version: hook.expected_version,
-                    });
-                }
-                return Err(PermissionError::SchemaError(format!(
-                    "schema version {} already exists but schema differs; bump WADDLE_SPICEDB_SCHEMA_VERSION",
-                    current_version
-                )));
-            }
-        }
-
-        self.client
-            .write_schema(&hook.schema_text)
-            .await
-            .map_err(map_spicedb_error)?;
-
-        info!(
-            previous_version = ?current_version,
-            new_version = hook.expected_version,
-            "Bootstrapped SpiceDB schema"
-        );
-
-        Ok(SchemaBootstrapResult {
-            status: SchemaBootstrapStatus::Applied {
-                previous_version: current_version,
-            },
-            current_version,
-            target_version: hook.expected_version,
-        })
-    }
-
     async fn relationship_exists(&self, tuple: &Tuple) -> Result<bool, PermissionError> {
         let mut stream = self
             .client
@@ -379,47 +279,5 @@ fn subject_filter(subject: &Subject) -> SubjectFilter {
         filter.relation(relation.clone())
     } else {
         filter
-    }
-}
-
-pub fn extract_schema_version(schema: &str) -> Option<u64> {
-    schema.lines().find_map(|line| {
-        let line = line.trim();
-        if !line.starts_with("//") {
-            return None;
-        }
-
-        let marker = if line.contains(SCHEMA_VERSION_MARKER_A) {
-            SCHEMA_VERSION_MARKER_A
-        } else if line.contains(SCHEMA_VERSION_MARKER_B) {
-            SCHEMA_VERSION_MARKER_B
-        } else {
-            return None;
-        };
-
-        line.split_once(marker)
-            .and_then(|(_, value)| value.trim().parse::<u64>().ok())
-    })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn extracts_schema_version_from_supported_markers() {
-        assert_eq!(
-            extract_schema_version("// waddle-schema-version: 3\ndefinition user {}"),
-            Some(3)
-        );
-        assert_eq!(
-            extract_schema_version("// waddle_schema_version: 4\ndefinition user {}"),
-            Some(4)
-        );
-    }
-
-    #[test]
-    fn returns_none_when_schema_marker_is_missing() {
-        assert_eq!(extract_schema_version("definition user {}"), None);
     }
 }
