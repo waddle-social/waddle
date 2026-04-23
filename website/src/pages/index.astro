@@ -135,17 +135,8 @@ const idleMessage = turnstileConfigured
 		</div>
 	</div>
 
-	<script is:inline>
-		window.waddleTurnstileOnLoad = () => {
-			window.dispatchEvent(new Event("waddle:turnstile-ready"));
-		};
-	</script>
-	<script
-		is:inline
-		src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit&onload=waddleTurnstileOnLoad"
-	></script>
-
 	<script>
+		const TURNSTILE_API_SRC = "https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit";
 		const logoButton = document.querySelector<HTMLButtonElement>("[data-toggle-waitlist]");
 		const panel = document.querySelector<HTMLElement>("[data-waitlist-panel]");
 		const form = document.querySelector<HTMLFormElement>("[data-waitlist-form]");
@@ -166,6 +157,7 @@ const idleMessage = turnstileConfigured
 			status?.dataset.verificationMessage ??
 			"Complete the quick human check, then try again.";
 		let widgetId: string | null = null;
+		let turnstileScriptPromise: Promise<boolean> | null = null;
 		let turnstileRenderPromise: Promise<void> | null = null;
 		let turnstileNeedsReset = false;
 
@@ -200,23 +192,49 @@ const idleMessage = turnstileConfigured
 			submitButton.disabled = busy;
 		};
 
+		const loadTurnstileScript = () => {
+			if (window.turnstile) {
+				return Promise.resolve(true);
+			}
+
+			if (turnstileScriptPromise) {
+				return turnstileScriptPromise;
+			}
+
+			turnstileScriptPromise = new Promise<boolean>((resolve) => {
+				const script = document.createElement("script");
+				script.src = TURNSTILE_API_SRC;
+				script.async = true;
+				script.defer = true;
+				script.dataset.turnstileScript = "true";
+				script.addEventListener(
+					"load",
+					() => {
+						resolve(Boolean(window.turnstile));
+					},
+					{ once: true },
+				);
+				script.addEventListener(
+					"error",
+					() => {
+						turnstileScriptPromise = null;
+						script.remove();
+						resolve(false);
+					},
+					{ once: true },
+				);
+				document.head.appendChild(script);
+			});
+
+			return turnstileScriptPromise;
+		};
+
 		const waitForTurnstile = async () => {
 			if (window.turnstile) {
 				return true;
 			}
 
-			return await new Promise<boolean>((resolve) => {
-				const onReady = () => {
-					window.clearTimeout(timeoutId);
-					resolve(Boolean(window.turnstile));
-				};
-				const timeoutId = window.setTimeout(() => {
-					window.removeEventListener("waddle:turnstile-ready", onReady);
-					resolve(false);
-				}, 4000);
-
-				window.addEventListener("waddle:turnstile-ready", onReady, { once: true });
-			});
+			return await loadTurnstileScript();
 		};
 
 		const resetTurnstile = () => {
@@ -311,6 +329,7 @@ const idleMessage = turnstileConfigured
 		};
 
 		setPanelOpen(panel?.classList.contains("is-open") ?? false);
+		void ensureTurnstileReady();
 
 		logoButton?.addEventListener("click", () => {
 			const next = !(panel?.classList.contains("is-open") ?? false);

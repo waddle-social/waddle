@@ -20,5 +20,4 @@ type TurnstileApi = {
 
 interface Window {
 	turnstile?: TurnstileApi;
-	waddleTurnstileOnLoad?: () => void;
 }
