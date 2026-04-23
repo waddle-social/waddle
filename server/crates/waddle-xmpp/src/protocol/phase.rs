@@ -6,8 +6,29 @@
 //! state that is valid in that phase; the type system forbids illegal
 //! access (e.g. reading the bound JID before authentication succeeds).
 
+use crate::auth::ScramServer;
 use jid::{BareJid, FullJid};
 use std::collections::HashSet;
+use std::fmt;
+
+/// In-flight SCRAM challenge state held between `<auth/>` and `<response/>`.
+pub struct ScramPendingState {
+    scram_server: ScramServer,
+    stored_key: Vec<u8>,
+    server_key: Vec<u8>,
+    username: String,
+}
+
+impl fmt::Debug for ScramPendingState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ScramPendingState")
+            .field("scram_server", &"<redacted>")
+            .field("stored_key", &"<redacted>")
+            .field("server_key", &"<redacted>")
+            .field("username", &self.username)
+            .finish()
+    }
+}
 
 /// XMPP connection lifecycle phases.
 ///
@@ -23,7 +44,7 @@ pub enum ConnectionPhase {
 
     /// SCRAM client-first has been accepted and the server has sent a
     /// challenge. The next legal client step is `<response>`.
-    ScramPending { username: String },
+    ScramPending { auth: ScramPendingState },
 
     /// SASL succeeded and the connection now has an authenticated bare JID,
     /// but resource binding has not yet completed.
@@ -56,10 +77,8 @@ impl ConnectionPhase {
         Self::Unauthenticated
     }
 
-    pub fn scram_pending(username: impl Into<String>) -> Self {
-        Self::ScramPending {
-            username: username.into(),
-        }
+    pub fn scram_pending(auth: ScramPendingState) -> Self {
+        Self::ScramPending { auth }
     }
 
     pub fn authenticated(full_jid: &FullJid) -> Self {
@@ -91,10 +110,207 @@ impl ConnectionPhase {
     pub fn is_ready(&self) -> bool {
         matches!(self, Self::Ready { .. })
     }
+
+    pub fn is_resumed(&self) -> bool {
+        matches!(self, Self::Ready { resumed: true, .. })
+    }
+
+    pub fn bound_jid(&self) -> Option<&FullJid> {
+        match self {
+            Self::Ready { full_jid, .. } => Some(full_jid),
+            _ => None,
+        }
+    }
+
+    pub fn authenticated_bare_jid(&self) -> Option<&BareJid> {
+        match self {
+            Self::Authenticated { bare_jid } => Some(bare_jid),
+            _ => None,
+        }
+    }
+
+    pub fn allows_sasl_auth(&self) -> bool {
+        matches!(self, Self::Unauthenticated)
+    }
+
+    pub fn allows_sasl_response(&self) -> bool {
+        matches!(self, Self::ScramPending { .. })
+    }
+
+    pub fn allows_resource_binding(&self) -> bool {
+        matches!(self, Self::Authenticated { .. })
+    }
+
+    pub fn allows_stream_management_enable(&self) -> bool {
+        self.is_ready()
+    }
+
+    pub fn allows_stream_management_resume(&self) -> bool {
+        matches!(self, Self::Unauthenticated | Self::Authenticated { .. })
+    }
+
+    pub fn is_closing(&self) -> bool {
+        matches!(self, Self::Closing)
+    }
+
+    pub fn scram_pending_username(&self) -> Option<&str> {
+        match self {
+            Self::ScramPending { auth } => Some(auth.username()),
+            _ => None,
+        }
+    }
+
+    pub fn take_scram_pending(&mut self) -> Option<ScramPendingState> {
+        let previous = std::mem::replace(self, Self::Unauthenticated);
+        match previous {
+            Self::ScramPending { auth } => Some(auth),
+            other => {
+                *self = other;
+                None
+            }
+        }
+    }
+}
+
+impl ScramPendingState {
+    pub fn new(
+        scram_server: ScramServer,
+        stored_key: Vec<u8>,
+        server_key: Vec<u8>,
+        username: impl Into<String>,
+    ) -> Self {
+        Self {
+            scram_server,
+            stored_key,
+            server_key,
+            username: username.into(),
+        }
+    }
+
+    pub fn username(&self) -> &str {
+        &self.username
+    }
+
+    pub fn process_client_final(
+        &mut self,
+        client_final: &str,
+    ) -> Result<crate::auth::ServerFinalMessage, crate::XmppError> {
+        self.scram_server
+            .process_client_final(client_final, &self.stored_key, &self.server_key)
+    }
 }
 
 impl Default for ConnectionPhase {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ConnectionPhase, ScramPendingState};
+    use crate::auth::ScramServer;
+    use jid::FullJid;
+
+    fn scram_pending_state(username: &str) -> ScramPendingState {
+        ScramPendingState::new(ScramServer::new(), vec![1, 2, 3], vec![4, 5, 6], username)
+    }
+
+    #[test]
+    fn unauthenticated_phase_allows_initial_auth_and_resume() {
+        let phase = ConnectionPhase::new();
+        assert!(phase.allows_sasl_auth());
+        assert!(phase.allows_stream_management_resume());
+        assert!(!phase.allows_sasl_response());
+        assert!(!phase.allows_resource_binding());
+        assert!(!phase.allows_stream_management_enable());
+    }
+
+    #[test]
+    fn scram_pending_phase_only_allows_sasl_response() {
+        let phase = ConnectionPhase::scram_pending(scram_pending_state("alice"));
+        assert!(!phase.allows_sasl_auth());
+        assert!(phase.allows_sasl_response());
+        assert!(!phase.allows_resource_binding());
+        assert!(!phase.allows_stream_management_enable());
+        assert!(!phase.allows_stream_management_resume());
+        assert_eq!(phase.scram_pending_username(), Some("alice"));
+    }
+
+    #[test]
+    fn authenticated_phase_allows_binding_and_resume() {
+        let full_jid = "alice@example.com/pending".parse().expect("valid jid");
+        let phase = ConnectionPhase::authenticated(&full_jid);
+        assert!(!phase.allows_sasl_auth());
+        assert!(!phase.allows_sasl_response());
+        assert!(phase.allows_resource_binding());
+        assert!(!phase.allows_stream_management_enable());
+        assert!(phase.allows_stream_management_resume());
+    }
+
+    #[test]
+    fn ready_phase_allows_stream_management_enable() {
+        let full_jid = "alice@example.com/web".parse().expect("valid jid");
+        let phase = ConnectionPhase::ready(full_jid, false);
+        assert!(!phase.allows_sasl_auth());
+        assert!(!phase.allows_sasl_response());
+        assert!(!phase.allows_resource_binding());
+        assert!(phase.allows_stream_management_enable());
+        assert!(!phase.allows_stream_management_resume());
+    }
+
+    #[test]
+    fn closing_phase_rejects_all_legal_transitions() {
+        let phase = ConnectionPhase::Closing;
+        assert!(phase.is_closing());
+        assert!(!phase.allows_sasl_auth());
+        assert!(!phase.allows_sasl_response());
+        assert!(!phase.allows_resource_binding());
+        assert!(!phase.allows_stream_management_enable());
+        assert!(!phase.allows_stream_management_resume());
+    }
+
+    #[test]
+    fn resumed_ready_phase_reports_resume_status() {
+        let fresh_jid = "alice@example.com/web".parse().expect("valid jid");
+        let resumed_jid = "alice@example.com/mobile".parse().expect("valid jid");
+
+        assert!(!ConnectionPhase::ready(fresh_jid, false).is_resumed());
+        assert!(ConnectionPhase::ready(resumed_jid, true).is_resumed());
+    }
+
+    #[test]
+    fn bound_jid_is_only_available_for_ready_phase() {
+        let pending_jid: FullJid = "alice@example.com/pending".parse().expect("valid jid");
+        let full_jid: FullJid = "alice@example.com/web".parse().expect("valid jid");
+
+        assert!(ConnectionPhase::new().bound_jid().is_none());
+        assert!(ConnectionPhase::authenticated(&pending_jid)
+            .bound_jid()
+            .is_none());
+        assert_eq!(
+            ConnectionPhase::ready(full_jid.clone(), false)
+                .bound_jid()
+                .map(ToString::to_string),
+            Some(full_jid.to_string())
+        );
+    }
+
+    #[test]
+    fn take_scram_pending_returns_state_and_resets_phase() {
+        let mut phase = ConnectionPhase::scram_pending(scram_pending_state("alice"));
+        let auth = phase.take_scram_pending().expect("scram pending state");
+        assert_eq!(auth.username(), "alice");
+        assert!(matches!(phase, ConnectionPhase::Unauthenticated));
+    }
+
+    #[test]
+    fn scram_pending_debug_redacts_secret_material() {
+        let phase = ConnectionPhase::scram_pending(scram_pending_state("alice"));
+        let debug = format!("{phase:?}");
+        assert!(debug.contains("alice"));
+        assert!(debug.contains("<redacted>"));
+        assert!(!debug.contains("[1, 2, 3]"));
+        assert!(!debug.contains("[4, 5, 6]"));
     }
 }

@@ -54,7 +54,8 @@ use waddle_xmpp::{
         frame::{
             inject_client_ns_if_missing, parse_frame, InboundFrame, ParseError, MAX_FRAME_SIZE,
         },
-        ConnectionPhase, StanzaContext as ProtocolStanzaContext, StanzaDispatcher,
+        ConnectionPhase, ScramPendingState, StanzaContext as ProtocolStanzaContext,
+        StanzaDispatcher,
     },
     registry::{BroadcastOutcome, ConnectionRegistry, OutboundStanza, SendResult},
     stream_management::{
@@ -139,37 +140,18 @@ pub struct ProtocolServices {
     pub resumable_sessions: Arc<dashmap::DashMap<String, Session>>,
 }
 
-/// In-progress SCRAM-SHA-256 authentication state between challenge and response.
-struct PendingScramAuth {
-    scram_server: ScramServer,
-    stored_key: Vec<u8>,
-    server_key: Vec<u8>,
-    username: String,
-}
-
 /// Per-connection mutable state threaded through the legacy dispatch path.
 ///
-/// The sans-I/O refactor (`waddle_xmpp::protocol::phase::ConnectionPhase`)
-/// will replace these loose booleans with an enum state machine. Until
-/// that migration completes (see the tracking PR), bundling them into a
-/// single struct cuts the per-function argument count and makes the
-/// invariants easier to audit.
+/// Holds the typed connection phase plus the remaining mutable transport/session
+/// adjuncts that have not moved into the protocol state machine yet.
 struct LegacyConnState {
     phase: ConnectionPhase,
-    authenticated: bool,
-    session_jid: Option<FullJid>,
+    /// The authenticated backend Session for this connection, if any.
+    /// Populated on SASL success and used for SM resume/detach.
     authenticated_session: Option<Session>,
-    resource_bound: bool,
-    pending_scram: Option<PendingScramAuth>,
     /// XEP-0198 state for this WebSocket. Counts stanzas in both directions
     /// once enabled and holds the unacked queue used for resumption.
     sm_state: StreamManagementState,
-    /// True when this WebSocket was bootstrapped via `<resume/>` rather than
-    /// a fresh SASL + bind. Used for structured logging on the first
-    /// register call; the registration itself still happens in the main
-    /// loop (when `pending_tx.take()` fires after authenticated+bound
-    /// become true), regardless of the path that set those flags.
-    resumed: bool,
     /// Per-connection XEP-0280 opt-in state. Updated when this resource
     /// sends `<enable/>` / `<disable/>` and restored from detached SM state
     /// on resume so re-registration preserves carbons behavior.
@@ -188,49 +170,10 @@ impl LegacyConnState {
     fn new() -> Self {
         Self {
             phase: ConnectionPhase::new(),
-            authenticated: false,
-            session_jid: None,
             authenticated_session: None,
-            resource_bound: false,
-            pending_scram: None,
             sm_state: StreamManagementState::new(),
-            resumed: false,
             carbons_enabled: false,
             suppress_sm_record_next_batch: false,
-        }
-    }
-
-    fn sync_phase_from_legacy(&mut self) {
-        if matches!(self.phase, ConnectionPhase::Closing) {
-            return;
-        }
-
-        if self.resource_bound {
-            if let Some(full_jid) = self.session_jid.clone() {
-                let joined_rooms = match &mut self.phase {
-                    ConnectionPhase::Ready { joined_rooms, .. } => std::mem::take(joined_rooms),
-                    _ => Default::default(),
-                };
-                self.phase =
-                    ConnectionPhase::ready_with_joined_rooms(full_jid, joined_rooms, self.resumed);
-            }
-            return;
-        }
-
-        if self.authenticated {
-            if let Some(full_jid) = self.session_jid.as_ref() {
-                self.phase = ConnectionPhase::authenticated(full_jid);
-            }
-            return;
-        }
-
-        if let Some(scram) = self.pending_scram.as_ref() {
-            self.phase = ConnectionPhase::scram_pending(scram.username.clone());
-            return;
-        }
-
-        if !matches!(self.phase, ConnectionPhase::Closing) {
-            self.phase = ConnectionPhase::Unauthenticated;
         }
     }
 }
@@ -301,8 +244,8 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
 
                         // Register connection after successful authentication AND resource binding
                         // This ensures the JID in ConnectionRegistry matches the JID stored in MUC room occupants
-                        if conn.phase.is_ready() && conn.session_jid.is_some() {
-                            if let (Some(jid), Some(tx)) = (conn.session_jid.as_ref(), pending_tx.take()) {
+                        if let Some(jid) = conn.phase.bound_jid() {
+                            if let Some(tx) = pending_tx.take() {
                                 state.deps.protocol.connection_registry.register_with_carbons(
                                     jid.clone(),
                                     tx,
@@ -310,7 +253,7 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
                                 );
                                 info!(
                                     jid = %jid,
-                                    resumed = conn.resumed,
+                                    resumed = conn.phase.is_resumed(),
                                     carbons_enabled = conn.carbons_enabled,
                                     "WebSocket connection registered"
                                 );
@@ -499,7 +442,7 @@ async fn cleanup_connection_shutdown(
         return;
     }
 
-    let Some(jid) = conn.session_jid.clone() else {
+    let Some(jid) = conn.phase.bound_jid().cloned() else {
         return;
     };
 
@@ -860,11 +803,7 @@ fn is_countable_stanza(frame: &str) -> bool {
 struct SmCtx<'a> {
     phase: &'a mut ConnectionPhase,
     sm_state: &'a mut StreamManagementState,
-    session_jid: &'a mut Option<FullJid>,
-    authenticated: &'a mut bool,
-    resource_bound: &'a mut bool,
     authenticated_session: &'a mut Option<Session>,
-    resumed: &'a mut bool,
     carbons_enabled: &'a mut bool,
     /// Set by `handle_sm_resume` so the main loop skips SM recording for
     /// the responses it returns — those are replay stanzas already tracked
@@ -878,7 +817,7 @@ async fn handle_sm_stanza(sm: SmStanza, state: &WebSocketState, ctx: SmCtx<'_>) 
     use waddle_xmpp::stream_management::SmAck;
 
     match sm {
-        SmStanza::Enable(enable) => handle_sm_enable(enable, ctx.sm_state, ctx.resource_bound),
+        SmStanza::Enable(enable) => handle_sm_enable(enable, ctx.sm_state, ctx.phase),
         SmStanza::Request => vec![SmAck::new(ctx.sm_state.get_inbound_count()).to_xml()],
         SmStanza::Ack(ack) => {
             ctx.sm_state.acknowledge(ack.h);
@@ -893,11 +832,11 @@ async fn handle_sm_stanza(sm: SmStanza, state: &WebSocketState, ctx: SmCtx<'_>) 
 fn handle_sm_enable(
     enable: SmEnable,
     sm_state: &mut StreamManagementState,
-    resource_bound: &bool,
+    phase: &ConnectionPhase,
 ) -> Vec<String> {
     use waddle_xmpp::stream_management::{SmEnabled, SmFailed};
 
-    if !*resource_bound {
+    if !phase.allows_stream_management_enable() {
         return vec![SmFailed::with_condition("unexpected-request").to_xml()];
     }
     if sm_state.enabled {
@@ -929,20 +868,47 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
     let SmCtx {
         phase,
         sm_state,
-        session_jid,
-        authenticated,
-        resource_bound,
         authenticated_session,
-        resumed,
         carbons_enabled,
         suppress_sm_record_next_batch,
     } = ctx;
 
-    // Refuse to resume a stream that's already been bound. Clients that sent
-    // both bind and resume are confused; don't attempt to reconcile.
-    if *resource_bound {
+    // Stream resumption is only legal before this transport has established a
+    // fresh SASL/bind lifecycle of its own.
+    if !phase.allows_stream_management_resume() {
         return vec![SmFailed::with_condition("unexpected-request").to_xml()];
     }
+
+    let detached = match state
+        .deps
+        .protocol
+        .sm_session_registry
+        .peek_session(&resume.previd)
+        .await
+    {
+        Ok(Some(session)) => session,
+        Ok(None) => {
+            info!(stream_id = %resume.previd, "SM resume rejected: session not found or expired");
+            return vec![SmFailed::with_condition("item-not-found").to_xml()];
+        }
+        Err(e) => {
+            warn!(stream_id = %resume.previd, error = %e, "SM resume failed: registry error");
+            return vec![SmFailed::with_condition("internal-server-error").to_xml()];
+        }
+    };
+
+    if let ConnectionPhase::Authenticated { bare_jid } = phase {
+        if detached.jid.to_bare() != *bare_jid {
+            warn!(
+                current_jid = %bare_jid,
+                resumed_jid = %detached.jid,
+                "SM resume rejected due to authenticated identity mismatch"
+            );
+            return vec![SmFailed::with_condition("not-authorized").to_xml()];
+        }
+    }
+
+    let preserve_authenticated_session = matches!(phase, ConnectionPhase::Authenticated { .. });
 
     let detached = match state
         .deps
@@ -953,7 +919,7 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
     {
         Ok(Some(session)) => session,
         Ok(None) => {
-            info!(stream_id = %resume.previd, "SM resume rejected: session not found or expired");
+            info!(stream_id = %resume.previd, "SM resume rejected: session disappeared before take");
             return vec![SmFailed::with_condition("item-not-found").to_xml()];
         }
         Err(e) => {
@@ -968,10 +934,10 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
     // handled. Acknowledge up to that point so the replay set is minimal.
     sm_state.acknowledge(resume.h);
 
-    // Restore authentication identity. If the sidecar has no matching
-    // Session (TTL expired / crash), resume still proceeds JID-only — the
-    // user retains basic messaging but any IQ that re-checks
-    // authenticated_session will re-deny until the next bind.
+    // Restore authentication identity. If the detached sidecar has no
+    // matching Session (TTL expired / crash), a resume from Unauthenticated
+    // proceeds JID-only; a resume from Authenticated keeps the fresh
+    // transport's current Session context.
     let restored_session = state
         .deps
         .protocol
@@ -979,18 +945,30 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
         .remove(&resume.previd)
         .map(|(_, s)| s);
     if restored_session.is_none() {
-        warn!(
-            stream_id = %resume.previd,
-            jid = %detached.jid,
-            "SM resumed without cached Session; authorization context is thinner than expected"
-        );
+        if preserve_authenticated_session {
+            warn!(
+                stream_id = %resume.previd,
+                jid = %detached.jid,
+                "SM resumed without cached detached Session; preserving current authenticated Session"
+            );
+        } else {
+            warn!(
+                stream_id = %resume.previd,
+                jid = %detached.jid,
+                "SM resumed without cached Session; authorization context is thinner than expected"
+            );
+        }
     }
 
-    *session_jid = Some(detached.jid.clone());
-    *authenticated = true;
-    *resource_bound = true;
-    *authenticated_session = restored_session;
-    *resumed = true;
+    let resumed_session = restored_session.or_else(|| {
+        if preserve_authenticated_session {
+            authenticated_session.clone()
+        } else {
+            None
+        }
+    });
+
+    *authenticated_session = resumed_session;
     *carbons_enabled = detached.carbons_enabled;
     *phase = ConnectionPhase::ready(detached.jid.clone(), true);
     // Responses below include replayed stanzas straight from the restored
@@ -1022,8 +1000,6 @@ async fn handle_xmpp_frame(
     state: &WebSocketState,
     conn: &mut LegacyConnState,
 ) -> Vec<String> {
-    conn.sync_phase_from_legacy();
-
     if frame.len() > MAX_FRAME_SIZE {
         warn!(len = frame.len(), "Dropping oversized XMPP frame");
         return vec![];
@@ -1031,13 +1007,8 @@ async fn handle_xmpp_frame(
 
     let LegacyConnState {
         phase,
-        authenticated,
-        session_jid,
         authenticated_session,
-        resource_bound,
-        pending_scram,
         sm_state,
-        resumed,
         carbons_enabled,
         suppress_sm_record_next_batch,
     } = conn;
@@ -1050,11 +1021,7 @@ async fn handle_xmpp_frame(
             let ctx = SmCtx {
                 phase,
                 sm_state,
-                session_jid,
-                authenticated,
-                resource_bound,
                 authenticated_session,
-                resumed,
                 carbons_enabled,
                 suppress_sm_record_next_batch,
             };
@@ -1067,6 +1034,9 @@ async fn handle_xmpp_frame(
         Err(ParseError::Empty) => return vec![],
         Err(err) => {
             if let Some(responses) = parse_error_responses(frame, &err) {
+                if phase.scram_pending_username().is_some() && is_sasl_parse_failure(frame, &err) {
+                    let _ = phase.take_scram_pending();
+                }
                 warn!(
                     error = %err,
                     len = frame.len(),
@@ -1098,41 +1068,45 @@ async fn handle_xmpp_frame(
             vec![r#"<close xmlns="urn:ietf:params:xml:ns:xmpp-framing"/>"#.to_string()]
         }
 
-        InboundFrame::Auth { mechanism, data } => match mechanism.as_str() {
-            "SCRAM-SHA-256" => {
-                handle_sasl_scram_client_first(&data, domain, state, pending_scram, phase).await
+        InboundFrame::Auth { mechanism, data } => {
+            if !phase.allows_sasl_auth() {
+                let reset_scram_phase = phase.scram_pending_username().is_some();
+                warn!(phase = ?phase, mechanism = %mechanism, "SASL auth received in invalid phase");
+                if reset_scram_phase {
+                    let _ = phase.take_scram_pending();
+                }
+                return vec![sasl_failure_xml("not-authorized")];
             }
-            "OAUTHBEARER" => {
-                handle_sasl_oauthbearer(
-                    &data,
-                    state,
-                    authenticated,
-                    session_jid,
-                    authenticated_session,
-                    phase,
-                )
-                .await
+            match mechanism.as_str() {
+                "SCRAM-SHA-256" => {
+                    handle_sasl_scram_client_first(&data, domain, state, phase).await
+                }
+                "OAUTHBEARER" => {
+                    handle_sasl_oauthbearer(&data, state, authenticated_session, phase)
+                        .await
+                }
+                other => {
+                    warn!(mechanism = %other, "Unsupported SASL mechanism");
+                    vec![sasl_failure_xml("invalid-mechanism")]
+                }
             }
-            other => {
-                warn!(mechanism = %other, "Unsupported SASL mechanism");
-                vec![sasl_failure_xml("invalid-mechanism")]
-            }
-        },
+        }
 
         InboundFrame::SaslResponse(data) => {
-            if let Some(scram) = pending_scram.take() {
-                return handle_sasl_scram_response(
-                    &data,
-                    domain,
-                    scram,
-                    authenticated,
-                    session_jid,
-                    authenticated_session,
-                    phase,
-                );
+            if !phase.allows_sasl_response() {
+                warn!(phase = ?phase, "SASL response received in invalid phase");
+                return vec![sasl_failure_xml("not-authorized")];
             }
-            warn!("SASL response received without pending SCRAM state");
-            vec![sasl_failure_xml("not-authorized")]
+            let scram = phase
+                .take_scram_pending()
+                .expect("SASL response must have pending SCRAM state");
+            handle_sasl_scram_response(
+                &data,
+                domain,
+                scram,
+                authenticated_session,
+                phase,
+            )
         }
 
         InboundFrame::Stanza(stanza) => {
@@ -1151,12 +1125,7 @@ async fn handle_xmpp_frame(
                         _ => false,
                     };
                     if is_bind {
-                        let (responses, success) =
-                            handle_resource_binding(&iq, domain, session_jid, phase);
-                        if success {
-                            *resource_bound = true;
-                        }
-                        return responses;
+                        return handle_resource_binding(&iq, domain, phase);
                     }
                     handle_iq_with_conn_state(
                         iq,
@@ -1164,9 +1133,7 @@ async fn handle_xmpp_frame(
                         &muc_domain,
                         state,
                         authenticated_session,
-                        session_jid,
-                        *authenticated,
-                        *resource_bound,
+                        phase,
                         carbons_enabled,
                     )
                     .await
@@ -1178,37 +1145,33 @@ async fn handle_xmpp_frame(
                         domain,
                         &muc_domain,
                         state,
-                        session_jid,
+                        phase,
                         authenticated_session,
                     )
                     .await
                 }
 
                 Stanza::Message(message) => {
-                    handle_message(
-                        message,
-                        &muc_domain,
-                        state,
-                        session_jid,
-                        authenticated_session,
-                    )
-                    .await
+                    handle_message(message, &muc_domain, state, phase, authenticated_session).await
                 }
             }
         }
     }
 }
 
-fn parse_error_responses(frame: &str, err: &ParseError) -> Option<Vec<String>> {
+fn is_sasl_parse_failure(frame: &str, err: &ParseError) -> bool {
     match (parse_error_root_name(frame), err) {
         (Some("auth" | "response"), ParseError::MalformedSasl(_) | ParseError::InvalidXml(_)) => {
-            let namespace = raw_xml_attr_value(frame, "xmlns").unwrap_or(waddle_xmpp::ns::SASL);
-            if namespace == waddle_xmpp::ns::SASL {
-                Some(vec![sasl_failure_xml("malformed-request")])
-            } else {
-                None
-            }
+            raw_xml_attr_value(frame, "xmlns").unwrap_or(waddle_xmpp::ns::SASL)
+                == waddle_xmpp::ns::SASL
         }
+        _ => false,
+    }
+}
+
+fn parse_error_responses(frame: &str, err: &ParseError) -> Option<Vec<String>> {
+    match (parse_error_root_name(frame), err) {
+        _ if is_sasl_parse_failure(frame, err) => Some(vec![sasl_failure_xml("malformed-request")]),
         (Some("iq"), ParseError::InvalidStanza { kind: "iq", .. } | ParseError::InvalidXml(_)) => {
             invalid_iq_parse_error_response(frame).map(|response| vec![response])
         }
@@ -1449,8 +1412,6 @@ fn raw_xml_attr_value<'a>(xml: &'a str, attr: &str) -> Option<&'a str> {
 async fn handle_sasl_oauthbearer(
     b64_data: &str,
     state: &WebSocketState,
-    authenticated: &mut bool,
-    session_jid: &mut Option<FullJid>,
     authenticated_session: &mut Option<Session>,
     phase: &mut ConnectionPhase,
 ) -> Vec<String> {
@@ -1512,14 +1473,8 @@ async fn handle_sasl_oauthbearer(
                 "SASL OAUTHBEARER authentication successful",
             );
 
-            *authenticated = true;
             *authenticated_session = Some(session);
-            *session_jid = Some(full_jid);
-            *phase = ConnectionPhase::authenticated(
-                session_jid
-                    .as_ref()
-                    .expect("just stored authenticated full JID"),
-            );
+            *phase = ConnectionPhase::authenticated(&full_jid);
 
             vec![sasl_success_xml()]
         }
@@ -1539,7 +1494,6 @@ async fn handle_sasl_scram_client_first(
     b64_data: &str,
     domain: &str,
     state: &WebSocketState,
-    pending_scram: &mut Option<PendingScramAuth>,
     phase: &mut ConnectionPhase,
 ) -> Vec<String> {
     debug!("SASL SCRAM-SHA-256 auth attempt");
@@ -1606,19 +1560,12 @@ async fn handle_sasl_scram_client_first(
     let challenge_b64 = BASE64_STANDARD.encode(server_first.message.as_bytes());
     debug!(username = %username, "SCRAM-SHA-256 challenge generated");
 
-    *pending_scram = Some(PendingScramAuth {
+    *phase = ConnectionPhase::scram_pending(ScramPendingState::new(
         scram_server,
-        stored_key: creds.stored_key,
-        server_key: creds.server_key,
+        creds.stored_key,
+        creds.server_key,
         username,
-    });
-    *phase = ConnectionPhase::scram_pending(
-        pending_scram
-            .as_ref()
-            .expect("just stored SCRAM pending state")
-            .username
-            .clone(),
-    );
+    ));
 
     vec![element_to_xml(
         Element::builder("challenge", waddle_xmpp::ns::SASL)
@@ -1634,9 +1581,7 @@ async fn handle_sasl_scram_client_first(
 fn handle_sasl_scram_response(
     b64_data: &str,
     domain: &str,
-    mut scram: PendingScramAuth,
-    authenticated: &mut bool,
-    session_jid: &mut Option<FullJid>,
+    mut scram: ScramPendingState,
     authenticated_session: &mut Option<Session>,
     phase: &mut ConnectionPhase,
 ) -> Vec<String> {
@@ -1656,20 +1601,20 @@ fn handle_sasl_scram_response(
         }
     };
 
-    let server_final = match scram.scram_server.process_client_final(
-        &client_final,
-        &scram.stored_key,
-        &scram.server_key,
-    ) {
+    let server_final = match scram.process_client_final(&client_final) {
         Ok(result) => result,
         Err(e) => {
-            warn!(error = %e, username = %scram.username, "SCRAM-SHA-256 authentication failed");
+            warn!(
+                error = %e,
+                username = %scram.username(),
+                "SCRAM-SHA-256 authentication failed"
+            );
             return vec![sasl_failure_xml("not-authorized")];
         }
     };
 
     // Authentication successful - create session
-    let bare_jid_str = format!("{}@{}", scram.username, domain);
+    let bare_jid_str = format!("{}@{}", scram.username(), domain);
     let full_jid = match format!("{}/pending", bare_jid_str).parse::<FullJid>() {
         Ok(jid) => jid,
         Err(e) => {
@@ -1691,16 +1636,10 @@ fn handle_sasl_scram_response(
         "SASL SCRAM-SHA-256 authentication successful",
     );
 
-    let session = Session::new(&bare_jid.to_string(), &scram.username, &scram.username);
+    let session = Session::new(&bare_jid.to_string(), scram.username(), scram.username());
 
-    *authenticated = true;
     *authenticated_session = Some(session);
-    *session_jid = Some(full_jid);
-    *phase = ConnectionPhase::authenticated(
-        session_jid
-            .as_ref()
-            .expect("just stored authenticated full JID"),
-    );
+    *phase = ConnectionPhase::authenticated(&full_jid);
 
     let success_b64 = BASE64_STANDARD.encode(server_final.message.as_bytes());
     vec![element_to_xml(
@@ -1728,21 +1667,24 @@ fn build_bind_result_xml(id: &str, full_jid: &FullJid) -> String {
     )
 }
 
-/// Handle resource binding IQ
-/// Returns (responses, success) where success indicates if binding completed successfully
+/// Handle resource binding IQ.
 fn handle_resource_binding(
     iq: &xmpp_parsers::iq::Iq,
     _domain: &str,
-    session_jid: &mut Option<FullJid>,
     phase: &mut ConnectionPhase,
-) -> (Vec<String>, bool) {
-    let Some(ref jid) = session_jid else {
-        warn!("Resource binding without authenticated session");
-        return (vec![], false);
-    };
-
+) -> Vec<String> {
     let id = iq.id.clone();
 
+    if !phase.allows_resource_binding() {
+        warn!(phase = ?phase, id = %id, "Resource binding received in invalid phase");
+        return vec![build_iq_error_xml(&id, "auth", "not-authorized")];
+    }
+
+    let Some(bare_jid) = phase.authenticated_bare_jid() else {
+        warn!(id = %id, "Resource binding without authenticated session");
+        return vec![build_iq_error_xml(&id, "auth", "not-authorized")];
+    };
+    let bare_jid = bare_jid.clone();
     let resource = match &iq.payload {
         xmpp_parsers::iq::IqType::Set(e) | xmpp_parsers::iq::IqType::Get(e) => e
             .get_child("resource", waddle_xmpp::ns::BIND)
@@ -1752,17 +1694,15 @@ fn handle_resource_binding(
     }
     .unwrap_or_else(|| format!("ws-{}", uuid::Uuid::new_v4()));
 
-    let bare_jid = jid.to_bare();
     let full_jid_str = format!("{}/{}", bare_jid, resource);
 
     if let Ok(full_jid) = full_jid_str.parse::<FullJid>() {
         info!(jid = %full_jid, id = %id, "Resource bound");
-        *session_jid = Some(full_jid.clone());
         *phase = ConnectionPhase::ready(full_jid.clone(), false);
-        (vec![build_bind_result_xml(&id, &full_jid)], true)
+        vec![build_bind_result_xml(&id, &full_jid)]
     } else {
         warn!(jid = %full_jid_str, "Invalid JID during resource binding");
-        (vec![], false)
+        vec![]
     }
 }
 
@@ -1772,7 +1712,7 @@ async fn handle_presence(
     domain: &str,
     muc_domain: &str,
     state: &WebSocketState,
-    session_jid: &Option<FullJid>,
+    phase: &ConnectionPhase,
     _authenticated_session: &Option<Session>,
 ) -> Vec<String> {
     let to = presence.to.as_ref().map(|jid| jid.to_string());
@@ -1790,7 +1730,7 @@ async fn handle_presence(
                 return vec![];
             };
 
-            let Some(ref sender_jid) = session_jid else {
+            let Some(sender_jid) = phase.bound_jid() else {
                 warn!("MUC presence without authenticated session");
                 return vec![];
             };
@@ -2034,13 +1974,9 @@ async fn handle_iq(
     muc_domain: &str,
     state: &WebSocketState,
     authenticated_session: &Option<Session>,
-    session_jid: &Option<FullJid>,
+    phase: &ConnectionPhase,
 ) -> Vec<String> {
-    let authenticated = authenticated_session.is_some() || session_jid.is_some();
-    let resource_bound = session_jid
-        .as_ref()
-        .is_some_and(|jid| jid.resource().as_str() != "pending");
-    let mut carbons_enabled = session_jid.as_ref().is_some_and(|jid| {
+    let mut carbons_enabled = phase.bound_jid().is_some_and(|jid| {
         state
             .deps
             .protocol
@@ -2062,9 +1998,7 @@ async fn handle_iq(
         muc_domain,
         state,
         authenticated_session,
-        session_jid,
-        authenticated,
-        resource_bound,
+        phase,
         &mut carbons_enabled,
     )
     .await
@@ -2076,9 +2010,7 @@ async fn handle_iq_with_conn_state(
     muc_domain: &str,
     state: &WebSocketState,
     authenticated_session: &Option<Session>,
-    session_jid: &Option<FullJid>,
-    authenticated: bool,
-    resource_bound: bool,
+    phase: &ConnectionPhase,
     carbons_enabled: &mut bool,
 ) -> Vec<String> {
     let spaces_domain = format!("spaces.{domain}");
@@ -2119,50 +2051,48 @@ async fn handle_iq_with_conn_state(
     // and any other namespaces not yet registered with the dispatcher)
     // continue to fall through to the legacy string-matching branches
     // below until the two-phase async callback machinery lands.
-    if let Some(full_jid) = session_jid.as_ref() {
-        let carbons_toggle = match &iq.payload {
-            xmpp_parsers::iq::IqType::Set(e)
-                if e.ns() == CARBONS_NS && (e.name() == "enable" || e.name() == "disable") =>
-            {
-                Some(e.name() == "enable")
-            }
-            _ => None,
-        };
-        if state
-            .deps
-            .protocol
-            .dispatcher
-            .has_iq_handler(payload_ns.as_str())
+    let carbons_toggle = match &iq.payload {
+        xmpp_parsers::iq::IqType::Set(e)
+            if e.ns() == CARBONS_NS && (e.name() == "enable" || e.name() == "disable") =>
         {
-            if !authenticated || !resource_bound {
-                return vec![build_iq_error_xml_with_addresses(
-                    &id,
-                    response_from,
-                    response_to,
-                    "auth",
-                    "not-authorized",
-                )];
-            }
-            if let Some(enabled) = carbons_toggle {
-                *carbons_enabled = enabled;
-                let _ = state
-                    .deps
-                    .protocol
-                    .connection_registry
-                    .set_carbons_enabled(full_jid, enabled);
-            }
-            let ctx = ProtocolStanzaContext { domain, full_jid };
-            let events = state.deps.protocol.dispatcher.dispatch_iq(&iq, &ctx);
-            let outcome = super::interpret::interpret(events).await;
-            if outcome.close {
-                warn!(
-                    ns = %payload_ns,
-                    "Sans-I/O handler requested transport close; \
-                     WebSocket adapter cannot honour CloseTransport yet"
-                );
-            }
-            return outcome.frames;
+            Some(e.name() == "enable")
         }
+        _ => None,
+    };
+    if state
+        .deps
+        .protocol
+        .dispatcher
+        .has_iq_handler(payload_ns.as_str())
+    {
+        let Some(full_jid) = phase.bound_jid() else {
+            return vec![build_iq_error_xml_with_addresses(
+                &id,
+                response_from,
+                response_to,
+                "auth",
+                "not-authorized",
+            )];
+        };
+        if let Some(enabled) = carbons_toggle {
+            *carbons_enabled = enabled;
+            let _ = state
+                .deps
+                .protocol
+                .connection_registry
+                .set_carbons_enabled(full_jid, enabled);
+        }
+        let ctx = ProtocolStanzaContext { domain, full_jid };
+        let events = state.deps.protocol.dispatcher.dispatch_iq(&iq, &ctx);
+        let outcome = super::interpret::interpret(events).await;
+        if outcome.close {
+            warn!(
+                ns = %payload_ns,
+                "Sans-I/O handler requested transport close; \
+                 WebSocket adapter cannot honour CloseTransport yet"
+            );
+        }
+        return outcome.frames;
     }
 
     // jabber:iq:roster is now served by protocol::handlers::roster::RosterHandler
@@ -2579,7 +2509,7 @@ async fn handle_iq_with_conn_state(
     }
 
     if payload_ns == "http://jabber.org/protocol/commands" {
-        return handle_command_iq(&iq, state, authenticated_session, session_jid).await;
+        return handle_command_iq(&iq, state, authenticated_session, phase.bound_jid()).await;
     }
 
     // MUC owner IQ (XEP-0045): instant room config submit and room destroy.
@@ -2662,13 +2592,9 @@ async fn handle_iq_with_conn_state(
         };
 
         // Determine whether this is a personal archive query (to=self) or a
-        // MUC room archive query.  Personal queries are allowed when the
-        // target JID matches the authenticated user's bare JID.
-        let sender_bare: Option<BareJid> = authenticated_session.as_ref().and_then(|session| {
-            format!("{}@{}", session.xmpp_localpart, domain)
-                .parse()
-                .ok()
-        });
+        // MUC room archive query. Personal queries are allowed only when the
+        // bound session identity matches the requested bare JID.
+        let sender_bare = phase.bound_jid().map(|jid| jid.to_bare());
 
         let is_personal = sender_bare
             .as_ref()
@@ -2713,11 +2639,7 @@ async fn handle_iq_with_conn_state(
             .from
             .as_ref()
             .map(|jid| jid.to_string())
-            .or_else(|| {
-                authenticated_session
-                    .as_ref()
-                    .map(|session| format!("{}@{}", session.xmpp_localpart, domain))
-            })
+            .or_else(|| phase.bound_jid().map(ToString::to_string))
             .unwrap_or_else(|| "unknown@localhost".to_string());
 
         let mut responses: Vec<String> =
@@ -2731,7 +2653,7 @@ async fn handle_iq_with_conn_state(
 
     if is_inbox_iq(&iq) {
         let request_iq = &iq;
-        let Some(user_jid) = session_jid.as_ref().map(|jid| jid.to_bare()) else {
+        let Some(user_jid) = phase.bound_jid().map(|jid| jid.to_bare()) else {
             return vec![build_iq_error_xml(&id, "auth", "not-authorized")];
         };
 
@@ -2830,6 +2752,9 @@ async fn handle_iq_with_conn_state(
     if payload_ns == "urn:xmpp:http:upload:0" {
         let request_iq = &iq;
         if is_upload_request(request_iq) {
+            let Some(sender_jid) = phase.bound_jid() else {
+                return vec![build_iq_error_xml(&id, "auth", "not-authorized")];
+            };
             let request = match parse_upload_request(request_iq) {
                 Ok(req) => req,
                 Err(e) => {
@@ -2878,10 +2803,7 @@ async fn handle_iq_with_conn_state(
                     "INSERT INTO upload_slots (id, requester_jid, filename, size_bytes, content_type, status, expires_at) VALUES (?, ?, ?, ?, ?, 'pending', ?)",
                     libsql::params![
                         slot_id.clone(),
-                        authenticated_session
-                            .as_ref()
-                            .map(|s| format!("{}@{}", s.xmpp_localpart, domain))
-                            .unwrap_or_else(|| "unknown@localhost".to_string()),
+                        sender_jid.to_bare().to_string(),
                         safe_filename.clone(),
                         request.size as i64,
                         content_type.clone(),
@@ -2916,7 +2838,7 @@ async fn handle_iq_with_conn_state(
 
     // PubSub / PEP (XEP-0060, XEP-0163)
     if is_pubsub_iq(&iq) {
-        if !authenticated || !resource_bound {
+        if !phase.is_ready() {
             return vec![build_iq_error_xml_with_addresses(
                 &id,
                 response_from,
@@ -2926,17 +2848,14 @@ async fn handle_iq_with_conn_state(
             )];
         }
 
-        let user_jid = match session_jid {
-            Some(jid) => jid.to_bare(),
-            None => {
-                return vec![build_iq_error_xml_with_addresses(
-                    &id,
-                    response_from,
-                    response_to,
-                    "auth",
-                    "not-authorized",
-                )];
-            }
+        let Some(user_jid) = phase.bound_jid().map(|jid| jid.to_bare()) else {
+            return vec![build_iq_error_xml_with_addresses(
+                &id,
+                response_from,
+                response_to,
+                "auth",
+                "not-authorized",
+            )];
         };
 
         let target_jid = match &iq.to {
@@ -3139,10 +3058,10 @@ async fn handle_message(
     mut incoming: xmpp_parsers::message::Message,
     muc_domain: &str,
     state: &WebSocketState,
-    session_jid: &Option<FullJid>,
+    phase: &ConnectionPhase,
     _authenticated_session: &Option<Session>,
 ) -> Vec<String> {
-    let Some(ref sender_jid) = session_jid else {
+    let Some(sender_jid) = phase.bound_jid() else {
         warn!("Message received without authenticated session");
         return vec![];
     };
@@ -4003,13 +3922,9 @@ async fn handle_command_iq(
     request_iq: &xmpp_parsers::iq::Iq,
     state: &WebSocketState,
     authenticated_session: &Option<Session>,
-    session_jid: &Option<FullJid>,
+    bound_jid: Option<&FullJid>,
 ) -> Vec<String> {
-    let sender_jid: Jid = match request_iq
-        .from
-        .clone()
-        .or_else(|| session_jid.as_ref().map(|jid| jid.clone().into()))
-    {
+    let sender_jid: Jid = match bound_jid.cloned().map(Jid::from) {
         Some(jid) => jid,
         None => {
             return vec![build_xmpp_error_response(
@@ -4085,6 +4000,9 @@ mod tests {
     use crate::db::{DatabaseConfig, DatabasePool, MigrationRunner, PoolConfig};
     use crate::server::AppState;
     use futures::Sink;
+    use hmac::{Hmac, Mac};
+    use pbkdf2::pbkdf2_hmac;
+    use sha2::{Digest, Sha256};
     use std::pin::Pin;
     use std::sync::Arc;
     use std::task::{Context, Poll};
@@ -4209,6 +4127,89 @@ mod tests {
         session
     }
 
+    async fn register_test_native_user(state: &WebSocketState, username: &str, password: &str) {
+        let native_user_store =
+            NativeUserStore::new(Arc::new(state.deps.app_state.db_pool.global().clone()));
+        native_user_store
+            .register(crate::auth::native::RegisterRequest {
+                username: username.to_string(),
+                domain: state.deps.auth_state.xmpp_domain.clone(),
+                password: password.to_string(),
+                email: None,
+            })
+            .await
+            .expect("native user");
+    }
+
+    fn scram_client_final_from_challenge(
+        username: &str,
+        password: &str,
+        client_nonce: &str,
+        challenge_b64: &str,
+    ) -> String {
+        type HmacSha256 = Hmac<Sha256>;
+
+        fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
+            let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key length");
+            mac.update(data);
+            mac.finalize().into_bytes().to_vec()
+        }
+
+        fn sha256(data: &[u8]) -> Vec<u8> {
+            let mut hasher = Sha256::new();
+            hasher.update(data);
+            hasher.finalize().to_vec()
+        }
+
+        let challenge = String::from_utf8(
+            BASE64_STANDARD
+                .decode(challenge_b64)
+                .expect("challenge base64"),
+        )
+        .expect("challenge utf8");
+        let mut combined_nonce = None;
+        let mut salt_b64 = None;
+        let mut iterations = None;
+        for attr in challenge.split(',') {
+            if let Some(value) = attr.strip_prefix("r=") {
+                combined_nonce = Some(value.to_string());
+            } else if let Some(value) = attr.strip_prefix("s=") {
+                salt_b64 = Some(value.to_string());
+            } else if let Some(value) = attr.strip_prefix("i=") {
+                iterations = Some(value.parse::<u32>().expect("iterations"));
+            }
+        }
+
+        let combined_nonce = combined_nonce.expect("combined nonce");
+        let salt = BASE64_STANDARD
+            .decode(salt_b64.expect("salt"))
+            .expect("salt base64");
+        let iterations = iterations.expect("iterations");
+
+        let mut salted_password = vec![0u8; 32];
+        pbkdf2_hmac::<Sha256>(password.as_bytes(), &salt, iterations, &mut salted_password);
+        let client_key = hmac_sha256(&salted_password, b"Client Key");
+        let stored_key = sha256(&client_key);
+        let channel_binding = BASE64_STANDARD.encode("n,,");
+        let client_final_without_proof = format!("c={channel_binding},r={combined_nonce}");
+        let client_first_bare = format!(
+            "n={},r={client_nonce}",
+            waddle_xmpp::auth::encode_sasl_name(username)
+        );
+        let auth_message = format!("{client_first_bare},{challenge},{client_final_without_proof}");
+        let client_signature = hmac_sha256(&stored_key, auth_message.as_bytes());
+        let client_proof: Vec<u8> = client_key
+            .iter()
+            .zip(client_signature.iter())
+            .map(|(left, right)| left ^ right)
+            .collect();
+
+        format!(
+            "{client_final_without_proof},p={}",
+            BASE64_STANDARD.encode(client_proof)
+        )
+    }
+
     async fn snapshot_room(
         state: &WebSocketState,
         room_jid: &BareJid,
@@ -4225,6 +4226,27 @@ mod tests {
             },
             _ => panic!("expected message stanza"),
         }
+    }
+
+    fn parse_iq_for_test(xml: &str) -> xmpp_parsers::iq::Iq {
+        match parse_frame(xml).expect("iq parses") {
+            InboundFrame::Stanza(stanza) => match *stanza {
+                Stanza::Iq(iq) => iq,
+                _ => panic!("expected iq stanza"),
+            },
+            _ => panic!("expected iq stanza"),
+        }
+    }
+
+    fn ready_phase(jid: &FullJid) -> ConnectionPhase {
+        ConnectionPhase::ready(jid.clone(), false)
+    }
+
+    fn authenticated_phase_for_session(session: &Session, domain: &str) -> ConnectionPhase {
+        let pending_jid: FullJid = format!("{}@{domain}/pending", session.xmpp_localpart)
+            .parse()
+            .expect("pending jid");
+        ConnectionPhase::authenticated(&pending_jid)
     }
 
     #[tokio::test]
@@ -4291,7 +4313,7 @@ mod tests {
         let responses = handle_xmpp_frame(&frame, "example.com", state.as_ref(), &mut conn).await;
 
         assert_eq!(responses, vec![sasl_success_xml()]);
-        assert!(conn.authenticated);
+        assert!(conn.phase.is_authenticated());
         assert!(conn.authenticated_session.is_some());
         assert!(matches!(conn.phase, ConnectionPhase::Authenticated { .. }));
     }
@@ -4397,9 +4419,8 @@ mod tests {
     async fn websocket_close_keeps_bound_connection_in_closing_phase() {
         let state = create_test_websocket_state().await;
         let mut conn = LegacyConnState::new();
-        conn.authenticated = true;
-        conn.resource_bound = true;
-        conn.session_jid = Some("alice@example.com/web".parse().expect("valid jid"));
+        let jid: FullJid = "alice@example.com/web".parse().expect("valid jid");
+        conn.phase = ConnectionPhase::ready(jid, false);
 
         let responses = handle_xmpp_frame(
             r#"<close xmlns="urn:ietf:params:xml:ns:xmpp-framing"/>"#,
@@ -4425,32 +4446,6 @@ mod tests {
         assert!(matches!(conn.phase, ConnectionPhase::Closing));
     }
 
-    #[test]
-    fn sync_phase_from_legacy_preserves_joined_rooms() {
-        let room_jid: BareJid = "waddle_channel@muc.example.com".parse().expect("room jid");
-        let full_jid: FullJid = "alice@example.com/web".parse().expect("full jid");
-        let mut joined_rooms = std::collections::HashSet::new();
-        joined_rooms.insert(room_jid.clone());
-
-        let mut conn = LegacyConnState::new();
-        conn.authenticated = true;
-        conn.resource_bound = true;
-        conn.session_jid = Some(full_jid.clone());
-        conn.phase =
-            ConnectionPhase::ready_with_joined_rooms(full_jid.clone(), joined_rooms, false);
-
-        conn.sync_phase_from_legacy();
-
-        assert!(matches!(
-            &conn.phase,
-            ConnectionPhase::Ready {
-                full_jid: phase_jid,
-                joined_rooms,
-                resumed: false,
-            } if phase_jid == &full_jid && joined_rooms.contains(&room_jid)
-        ));
-    }
-
     #[tokio::test]
     async fn websocket_rejects_plain_auth() {
         let state = create_test_websocket_state().await;
@@ -4465,9 +4460,8 @@ mod tests {
         let responses = handle_xmpp_frame(&frame, "example.com", state.as_ref(), &mut conn).await;
 
         assert_eq!(responses, vec![sasl_failure_xml("invalid-mechanism")]);
-        assert!(!conn.authenticated);
-        assert!(!conn.resource_bound);
-        assert!(conn.session_jid.is_none());
+        assert!(!conn.phase.is_authenticated());
+        assert!(!conn.phase.is_ready());
         assert!(conn.authenticated_session.is_none());
     }
 
@@ -4487,8 +4481,8 @@ mod tests {
         let responses = handle_xmpp_frame(&frame, "example.com", state.as_ref(), &mut conn).await;
 
         assert_eq!(responses, vec![sasl_success_xml()]);
-        assert!(conn.authenticated);
-        assert!(!conn.resource_bound);
+        assert!(conn.phase.is_authenticated());
+        assert!(!conn.phase.is_ready());
         assert_eq!(
             conn.authenticated_session
                 .as_ref()
@@ -4499,12 +4493,200 @@ mod tests {
             localpart_to_jid(&session.xmpp_localpart, &state.deps.auth_state.xmpp_domain)
                 .expect("session localpart should produce JID");
         assert_eq!(
-            conn.session_jid
-                .as_ref()
-                .map(|jid| jid.to_bare().to_string()),
+            conn.phase.authenticated_bare_jid().map(ToString::to_string),
             Some(expected_bare)
         );
         assert!(matches!(conn.phase, ConnectionPhase::Authenticated { .. }));
+    }
+
+    #[tokio::test]
+    async fn websocket_rejects_reauthentication_after_successful_sasl() {
+        let state = create_test_websocket_state().await;
+        let session = create_test_session(state.as_ref(), "alice").await;
+        let payload = BASE64_STANDARD.encode(format!("n,,\x01auth=Bearer {}\x01\x01", session.id));
+        let frame = element_to_xml(
+            Element::builder("auth", waddle_xmpp::ns::SASL)
+                .attr("mechanism", "OAUTHBEARER")
+                .append(payload)
+                .build(),
+        );
+        let mut conn = LegacyConnState::new();
+
+        let first = handle_xmpp_frame(&frame, "example.com", state.as_ref(), &mut conn).await;
+        assert_eq!(first, vec![sasl_success_xml()]);
+        let first_bare_jid = conn.phase.authenticated_bare_jid().cloned();
+        let first_user_id = conn
+            .authenticated_session
+            .as_ref()
+            .map(|saved| saved.user_id.clone());
+
+        let second = handle_xmpp_frame(&frame, "example.com", state.as_ref(), &mut conn).await;
+
+        assert_eq!(second, vec![sasl_failure_xml("not-authorized")]);
+        assert!(conn.phase.is_authenticated());
+        assert!(!conn.phase.is_ready());
+        assert_eq!(conn.phase.authenticated_bare_jid(), first_bare_jid.as_ref());
+        assert_eq!(
+            conn.authenticated_session
+                .as_ref()
+                .map(|saved| saved.user_id.clone()),
+            first_user_id
+        );
+        assert!(matches!(conn.phase, ConnectionPhase::Authenticated { .. }));
+    }
+
+    #[tokio::test]
+    async fn websocket_failed_scram_response_resets_phase_to_unauthenticated() {
+        let state = create_test_websocket_state().await;
+        let domain = state.deps.auth_state.xmpp_domain.clone();
+        register_test_native_user(state.as_ref(), "alice", "correct horse battery staple").await;
+        let client_first = BASE64_STANDARD.encode("n,,n=alice,r=fyko+d2lbbFgONRv9qkxdawL");
+        let auth_frame = element_to_xml(
+            Element::builder("auth", waddle_xmpp::ns::SASL)
+                .attr("mechanism", "SCRAM-SHA-256")
+                .append(client_first)
+                .build(),
+        );
+        let response_frame = element_to_xml(
+            Element::builder("response", waddle_xmpp::ns::SASL)
+                .append(BASE64_STANDARD.encode("not-valid"))
+                .build(),
+        );
+        let mut conn = LegacyConnState::new();
+
+        let auth_responses =
+            handle_xmpp_frame(&auth_frame, &domain, state.as_ref(), &mut conn).await;
+        assert_eq!(auth_responses.len(), 1);
+        let challenge = Element::from_str(&auth_responses[0]).expect("challenge xml");
+        assert_eq!(challenge.name(), "challenge");
+        assert_eq!(conn.phase.scram_pending_username(), Some("alice"));
+
+        let response_responses =
+            handle_xmpp_frame(&response_frame, &domain, state.as_ref(), &mut conn).await;
+
+        assert_eq!(response_responses, vec![sasl_failure_xml("not-authorized")]);
+        assert!(matches!(conn.phase, ConnectionPhase::Unauthenticated));
+        assert!(!conn.phase.is_authenticated());
+        assert!(conn.authenticated_session.is_none());
+    }
+
+    #[tokio::test]
+    async fn websocket_malformed_scram_response_resets_phase_and_allows_retry() {
+        let state = create_test_websocket_state().await;
+        let domain = state.deps.auth_state.xmpp_domain.clone();
+        register_test_native_user(state.as_ref(), "alice", "correct horse battery staple").await;
+        let client_first = BASE64_STANDARD.encode("n,,n=alice,r=fyko+d2lbbFgONRv9qkxdawL");
+        let auth_frame = element_to_xml(
+            Element::builder("auth", waddle_xmpp::ns::SASL)
+                .attr("mechanism", "SCRAM-SHA-256")
+                .append(client_first)
+                .build(),
+        );
+        let malformed_response = r#"<response xmlns="urn:ietf:params:xml:ns:xmpp-sasl">not-closed"#;
+        let mut conn = LegacyConnState::new();
+
+        let first = handle_xmpp_frame(&auth_frame, &domain, state.as_ref(), &mut conn).await;
+        assert_eq!(first.len(), 1);
+        assert_eq!(conn.phase.scram_pending_username(), Some("alice"));
+
+        let malformed =
+            handle_xmpp_frame(malformed_response, &domain, state.as_ref(), &mut conn).await;
+        assert_eq!(malformed, vec![sasl_failure_xml("malformed-request")]);
+        assert!(matches!(conn.phase, ConnectionPhase::Unauthenticated));
+        assert!(!conn.phase.is_authenticated());
+        assert!(conn.authenticated_session.is_none());
+
+        let retry = handle_xmpp_frame(&auth_frame, &domain, state.as_ref(), &mut conn).await;
+        assert_eq!(retry.len(), 1);
+        let challenge = Element::from_str(&retry[0]).expect("challenge xml");
+        assert_eq!(challenge.name(), "challenge");
+        assert_eq!(conn.phase.scram_pending_username(), Some("alice"));
+    }
+
+    #[tokio::test]
+    async fn websocket_failed_reauth_during_scram_resets_phase_and_allows_retry() {
+        let state = create_test_websocket_state().await;
+        let domain = state.deps.auth_state.xmpp_domain.clone();
+        register_test_native_user(state.as_ref(), "alice", "correct horse battery staple").await;
+        let client_first = BASE64_STANDARD.encode("n,,n=alice,r=fyko+d2lbbFgONRv9qkxdawL");
+        let auth_frame = element_to_xml(
+            Element::builder("auth", waddle_xmpp::ns::SASL)
+                .attr("mechanism", "SCRAM-SHA-256")
+                .append(client_first)
+                .build(),
+        );
+        let mut conn = LegacyConnState::new();
+
+        let first = handle_xmpp_frame(&auth_frame, &domain, state.as_ref(), &mut conn).await;
+        assert_eq!(first.len(), 1);
+        assert_eq!(conn.phase.scram_pending_username(), Some("alice"));
+
+        let second = handle_xmpp_frame(&auth_frame, &domain, state.as_ref(), &mut conn).await;
+        assert_eq!(second, vec![sasl_failure_xml("not-authorized")]);
+        assert!(matches!(conn.phase, ConnectionPhase::Unauthenticated));
+
+        let third = handle_xmpp_frame(&auth_frame, &domain, state.as_ref(), &mut conn).await;
+        assert_eq!(third.len(), 1);
+        let challenge = Element::from_str(&third[0]).expect("challenge xml");
+        assert_eq!(challenge.name(), "challenge");
+        assert_eq!(conn.phase.scram_pending_username(), Some("alice"));
+    }
+
+    #[tokio::test]
+    async fn sm_resume_is_rejected_during_scram_and_scram_can_still_complete() {
+        let state = create_test_websocket_state().await;
+        let domain = state.deps.auth_state.xmpp_domain.clone();
+        let password = "correct horse battery staple";
+        let client_nonce = "fyko+d2lbbFgONRv9qkxdawL";
+        register_test_native_user(state.as_ref(), "alice", password).await;
+
+        let auth_frame = element_to_xml(
+            Element::builder("auth", waddle_xmpp::ns::SASL)
+                .attr("mechanism", "SCRAM-SHA-256")
+                .append(BASE64_STANDARD.encode(format!("n,,n=alice,r={client_nonce}")))
+                .build(),
+        );
+        let mut conn = LegacyConnState::new();
+
+        let auth_responses =
+            handle_xmpp_frame(&auth_frame, &domain, state.as_ref(), &mut conn).await;
+        let challenge = Element::from_str(&auth_responses[0]).expect("challenge xml");
+        let challenge_b64 = challenge.text();
+        assert_eq!(conn.phase.scram_pending_username(), Some("alice"));
+
+        let resume_responses = handle_xmpp_frame(
+            "<resume xmlns='urn:xmpp:sm:3' previd='stream-xyz' h='0'/>",
+            &domain,
+            state.as_ref(),
+            &mut conn,
+        )
+        .await;
+        assert_eq!(resume_responses.len(), 1);
+        let failed = Element::from_str(&resume_responses[0]).expect("failed xml");
+        assert_eq!(failed.name(), "failed");
+        assert!(failed
+            .get_child("unexpected-request", "urn:ietf:params:xml:ns:xmpp-stanzas")
+            .is_some());
+        assert_eq!(conn.phase.scram_pending_username(), Some("alice"));
+
+        let response_frame = element_to_xml(
+            Element::builder("response", waddle_xmpp::ns::SASL)
+                .append(BASE64_STANDARD.encode(scram_client_final_from_challenge(
+                    "alice",
+                    password,
+                    client_nonce,
+                    &challenge_b64,
+                )))
+                .build(),
+        );
+        let response_responses =
+            handle_xmpp_frame(&response_frame, &domain, state.as_ref(), &mut conn).await;
+
+        assert_eq!(response_responses.len(), 1);
+        let success = Element::from_str(&response_responses[0]).expect("success xml");
+        assert_eq!(success.name(), "success");
+        assert!(matches!(conn.phase, ConnectionPhase::Authenticated { .. }));
+        assert!(conn.phase.is_authenticated());
     }
 
     #[tokio::test]
@@ -4542,7 +4724,7 @@ mod tests {
         let bind_responses =
             handle_xmpp_frame(&bind_frame, "example.com", state.as_ref(), &mut conn).await;
 
-        assert!(conn.resource_bound);
+        assert!(conn.phase.is_ready());
         assert_eq!(bind_responses.len(), 1);
 
         let response = Element::from_str(&bind_responses[0]).expect("bind response XML");
@@ -4565,9 +4747,9 @@ mod tests {
             jid.text() == expected_full,
             "bound jid should match expected resource"
         );
-        let session_jid = conn.session_jid.as_ref().map(ToString::to_string);
+        let bound_jid = conn.phase.bound_jid().map(ToString::to_string);
         assert!(
-            session_jid.as_deref() == Some(expected_full.as_str()),
+            bound_jid.as_deref() == Some(expected_full.as_str()),
             "connection state should store the bound jid"
         );
         assert!(matches!(
@@ -4607,7 +4789,7 @@ mod tests {
         let bind_responses =
             handle_xmpp_frame(&bind_frame, "example.com", state.as_ref(), &mut conn).await;
 
-        assert!(conn.resource_bound);
+        assert!(conn.phase.is_ready());
         assert_eq!(bind_responses.len(), 1);
 
         let response = Element::from_str(&bind_responses[0]).expect("bind response XML");
@@ -4635,6 +4817,68 @@ mod tests {
                 ..
             } if full_jid.to_string() == jid
         ));
+    }
+
+    #[tokio::test]
+    async fn websocket_rejects_second_resource_bind_after_ready() {
+        let state = create_test_websocket_state().await;
+        let session = create_test_session(state.as_ref(), "alice").await;
+        let payload = BASE64_STANDARD.encode(format!("n,,\x01auth=Bearer {}\x01\x01", session.id));
+        let auth_frame = element_to_xml(
+            Element::builder("auth", waddle_xmpp::ns::SASL)
+                .attr("mechanism", "OAUTHBEARER")
+                .append(payload)
+                .build(),
+        );
+        let bind_one = element_to_xml(
+            Element::builder("iq", waddle_xmpp::ns::JABBER_CLIENT)
+                .attr("id", "bind-1")
+                .attr("type", "set")
+                .append(
+                    Element::builder("bind", waddle_xmpp::ns::BIND)
+                        .append(
+                            Element::builder("resource", waddle_xmpp::ns::BIND)
+                                .append("web")
+                                .build(),
+                        )
+                        .build(),
+                )
+                .build(),
+        );
+        let bind_two = element_to_xml(
+            Element::builder("iq", waddle_xmpp::ns::JABBER_CLIENT)
+                .attr("id", "bind-2")
+                .attr("type", "set")
+                .append(
+                    Element::builder("bind", waddle_xmpp::ns::BIND)
+                        .append(
+                            Element::builder("resource", waddle_xmpp::ns::BIND)
+                                .append("mobile")
+                                .build(),
+                        )
+                        .build(),
+                )
+                .build(),
+        );
+        let mut conn = LegacyConnState::new();
+
+        let auth_responses =
+            handle_xmpp_frame(&auth_frame, "example.com", state.as_ref(), &mut conn).await;
+        assert_eq!(auth_responses, vec![sasl_success_xml()]);
+        let bind_one_responses =
+            handle_xmpp_frame(&bind_one, "example.com", state.as_ref(), &mut conn).await;
+        assert_eq!(bind_one_responses.len(), 1);
+        let first_bound_jid = conn.phase.bound_jid().cloned();
+
+        let bind_two_responses =
+            handle_xmpp_frame(&bind_two, "example.com", state.as_ref(), &mut conn).await;
+
+        assert_eq!(
+            bind_two_responses,
+            vec![build_iq_error_xml("bind-2", "auth", "not-authorized")]
+        );
+        assert_eq!(conn.phase.bound_jid(), first_bound_jid.as_ref());
+        assert!(matches!(conn.phase, ConnectionPhase::Ready { .. }));
     }
 
     #[tokio::test]
@@ -4741,7 +4985,7 @@ mod tests {
             "muc.example.com",
             state.as_ref(),
             &None,
-            &Some(jid),
+            &ready_phase(&jid),
         )
         .await;
         assert_eq!(responses.len(), 1);
@@ -4771,7 +5015,7 @@ mod tests {
             "muc.example.com",
             state.as_ref(),
             &None,
-            &Some(jid),
+            &ready_phase(&jid),
         )
         .await;
         assert_eq!(responses.len(), 1);
@@ -4784,6 +5028,33 @@ mod tests {
             iq.payload,
             xmpp_parsers::iq::IqType::Result(Some(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn handle_iq_roster_query_requires_ready_phase() {
+        let state = create_test_websocket_state().await;
+        let session = create_test_session(state.as_ref(), "alice").await;
+        let frame = r#"<iq xmlns="jabber:client" id="roster-prebind" type="get"><query xmlns="jabber:iq:roster"/></iq>"#;
+
+        let responses = handle_iq(
+            frame,
+            "example.com",
+            "muc.example.com",
+            state.as_ref(),
+            &Some(session.clone()),
+            &authenticated_phase_for_session(&session, "example.com"),
+        )
+        .await;
+
+        let response = responses.first().expect("roster auth error");
+        assert!(
+            response.contains("not-authorized"),
+            "pre-bind roster should be rejected: {response}"
+        );
+        assert!(
+            !response.contains("feature-not-implemented"),
+            "pre-bind roster should not fall through as unimplemented: {response}"
+        );
     }
 
     #[tokio::test]
@@ -5268,9 +5539,8 @@ mod tests {
     async fn handle_xmpp_frame_ping_roundtrips_through_sans_io_path() {
         let state = create_test_websocket_state().await;
         let mut conn = LegacyConnState::new();
-        conn.authenticated = true;
-        conn.resource_bound = true;
-        conn.session_jid = Some("alice@example.com/web".parse().expect("valid jid"));
+        let jid: FullJid = "alice@example.com/web".parse().expect("valid jid");
+        conn.phase = ConnectionPhase::ready(jid, false);
 
         let responses = handle_xmpp_frame(
             r#"<iq id="ping-roundtrip" type="get"><ping xmlns="urn:xmpp:ping"/></iq>"#,
@@ -5298,7 +5568,7 @@ mod tests {
             "muc.example.com",
             state.as_ref(),
             &None,
-            &Some(jid),
+            &ready_phase(&jid),
         )
         .await;
         assert_eq!(responses.len(), 1);
@@ -5337,7 +5607,7 @@ mod tests {
             "muc.example.com",
             state.as_ref(),
             &None,
-            &Some(jid.clone()),
+            &ready_phase(&jid),
         )
         .await;
         assert_eq!(enable_responses.len(), 1);
@@ -5354,7 +5624,7 @@ mod tests {
             "muc.example.com",
             state.as_ref(),
             &None,
-            &Some(jid.clone()),
+            &ready_phase(&jid),
         )
         .await;
         assert_eq!(disable_responses.len(), 1);
@@ -5375,7 +5645,7 @@ mod tests {
             "muc.example.com",
             state.as_ref(),
             &None,
-            &None,
+            &ConnectionPhase::Unauthenticated,
         )
         .await;
         assert_eq!(responses.len(), 1);
@@ -5410,7 +5680,7 @@ mod tests {
             "muc.example.com",
             state.as_ref(),
             &None,
-            &Some(sender_jid),
+            &ready_phase(&sender_jid),
         )
         .await;
         assert!(
@@ -5430,7 +5700,7 @@ mod tests {
             "muc.example.com",
             state.as_ref(),
             &None,
-            &Some(sender_jid),
+            &ready_phase(&sender_jid),
         )
         .await;
         assert!(
@@ -5470,7 +5740,7 @@ mod tests {
             "muc.example.com",
             state.as_ref(),
             &Some(session),
-            &Some(sender_jid),
+            &ready_phase(&sender_jid),
         )
         .await;
 
@@ -5487,6 +5757,54 @@ mod tests {
         assert!(
             !response.contains("feature-not-implemented"),
             "command IQ should not fall through to unhandled feature-not-implemented: {response}"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_iq_command_request_requires_ready_phase() {
+        let state = create_test_websocket_state().await;
+        state
+            .deps
+            .protocol
+            .command_registry
+            .register(
+                "waddle:create-channel",
+                "Create Channel",
+                |_ctx: CommandContext| async move {
+                    CommandResult::Executing {
+                        form: waddle_xmpp::xep::xep0004::DataForm::new(
+                            waddle_xmpp::xep::xep0004::FormType::Form,
+                        ),
+                        session_id: String::new(),
+                        notes: vec![],
+                    }
+                },
+            )
+            .await;
+
+        let session = create_test_session(state.as_ref(), "alice").await;
+        let pending_jid: FullJid = "alice@example.com/pending".parse().expect("pending jid");
+        let mut carbons_enabled = false;
+        let frame = r#"<iq xmlns="jabber:client" id="cmd-prebind-1" type="set" to="example.com"><command xmlns="http://jabber.org/protocol/commands" node="waddle:create-channel" action="execute"/></iq>"#;
+        let responses = handle_iq_with_conn_state(
+            parse_iq_for_test(frame),
+            "example.com",
+            "muc.example.com",
+            state.as_ref(),
+            &Some(session),
+            &ConnectionPhase::authenticated(&pending_jid),
+            &mut carbons_enabled,
+        )
+        .await;
+
+        let response = responses.first().expect("command error response");
+        assert!(
+            response.contains("not-authorized"),
+            "pre-bind command IQ should be rejected: {response}"
+        );
+        assert!(
+            !response.contains("status=\"executing\"") && !response.contains("status='executing'"),
+            "pre-bind command IQ must not reach the registry: {response}"
         );
     }
 
@@ -5559,7 +5877,7 @@ mod tests {
             muc_domain,
             state.as_ref(),
             &None,
-            &None,
+            &ConnectionPhase::Unauthenticated,
         )
         .await;
         let server_response = server_responses.first().expect("server disco response");
@@ -5573,7 +5891,7 @@ mod tests {
             muc_domain,
             state.as_ref(),
             &None,
-            &None,
+            &ConnectionPhase::Unauthenticated,
         )
         .await;
         let muc_response = muc_responses.first().expect("muc disco response");
@@ -5587,7 +5905,7 @@ mod tests {
             muc_domain,
             state.as_ref(),
             &None,
-            &None,
+            &ConnectionPhase::Unauthenticated,
         )
         .await;
         let room_response = room_responses.first().expect("room disco response");
@@ -5607,7 +5925,7 @@ mod tests {
             "muc.example.com",
             state.as_ref(),
             &None,
-            &None,
+            &ConnectionPhase::Unauthenticated,
         )
         .await;
         let response = responses.first().expect("server disco items response");
@@ -5635,6 +5953,10 @@ mod tests {
         .await;
 
         let authenticated_session = Some(session);
+        let authenticated_phase = authenticated_phase_for_session(
+            authenticated_session.as_ref().expect("session"),
+            "example.com",
+        );
         let query = r#"<iq xmlns="jabber:client" id="spaces-items" type="get" to="spaces.example.com"><query xmlns="http://jabber.org/protocol/disco#items"/></iq>"#;
 
         let responses = handle_iq(
@@ -5643,7 +5965,7 @@ mod tests {
             "muc.example.com",
             state.as_ref(),
             &authenticated_session,
-            &None,
+            &authenticated_phase,
         )
         .await;
         let response = responses.first().expect("spaces disco items response");
@@ -5687,6 +6009,10 @@ mod tests {
         drop(conn);
 
         let authenticated_session = Some(session);
+        let authenticated_phase = authenticated_phase_for_session(
+            authenticated_session.as_ref().expect("session"),
+            "example.com",
+        );
         let query = r#"<iq xmlns="jabber:client" id="space-node-items" type="get" to="spaces.example.com"><query xmlns="http://jabber.org/protocol/disco#items" node="waddle-bravo"/></iq>"#;
 
         let responses = handle_iq(
@@ -5695,7 +6021,7 @@ mod tests {
             "muc.example.com",
             state.as_ref(),
             &authenticated_session,
-            &None,
+            &authenticated_phase,
         )
         .await;
         let response = responses.first().expect("spaces node disco items response");
@@ -5724,6 +6050,7 @@ mod tests {
         )
         .await;
 
+        let viewer_phase = authenticated_phase_for_session(&viewer, "example.com");
         let query = r#"<iq xmlns="jabber:client" id="space-node-info" type="get" to="spaces.example.com"><query xmlns="http://jabber.org/protocol/disco#info" node="waddle-public"/></iq>"#;
         let responses = handle_iq(
             query,
@@ -5731,7 +6058,7 @@ mod tests {
             "muc.example.com",
             state.as_ref(),
             &Some(viewer),
-            &None,
+            &viewer_phase,
         )
         .await;
         let response = responses.first().expect("spaces node disco info response");
@@ -5764,6 +6091,7 @@ mod tests {
         )
         .await;
 
+        let viewer_phase = authenticated_phase_for_session(&viewer, "example.com");
         let query = r#"<iq xmlns="jabber:client" id="space-node-info-private" type="get" to="spaces.example.com"><query xmlns="http://jabber.org/protocol/disco#info" node="waddle-private"/></iq>"#;
         let responses = handle_iq(
             query,
@@ -5771,7 +6099,7 @@ mod tests {
             "muc.example.com",
             state.as_ref(),
             &Some(viewer),
-            &None,
+            &viewer_phase,
         )
         .await;
         let response = responses
@@ -5810,7 +6138,7 @@ mod tests {
             parse_message_for_test(&frame),
             "muc.example.com",
             state.as_ref(),
-            &Some(sender_jid),
+            &ConnectionPhase::ready(sender_jid.clone(), false),
             &None,
         )
         .await;
@@ -5879,7 +6207,7 @@ mod tests {
             ),
             "muc.example.com",
             state.as_ref(),
-            &Some(sender_jid),
+            &ConnectionPhase::ready(sender_jid.clone(), false),
             &None,
         )
         .await;
@@ -5946,7 +6274,7 @@ mod tests {
             ),
             "muc.example.com",
             state.as_ref(),
-            &Some(sender_jid),
+            &ConnectionPhase::ready(sender_jid.clone(), false),
             &None,
         )
         .await;
@@ -5999,7 +6327,7 @@ mod tests {
             parse_message_for_test(frame.as_str()),
             "muc.example.com",
             state.as_ref(),
-            &Some(sender_jid),
+            &ConnectionPhase::ready(sender_jid.clone(), false),
             &None,
         )
         .await;
@@ -6058,7 +6386,7 @@ mod tests {
             parse_message_for_test(message_xml.as_str()),
             "muc.example.com",
             state.as_ref(),
-            &Some(alice_jid),
+            &ConnectionPhase::ready(alice_jid.clone(), false),
             &Some(alice_session),
         )
         .await;
@@ -6076,7 +6404,7 @@ mod tests {
             "muc.example.com",
             state.as_ref(),
             &Some(bob_session.clone()),
-            &Some(bob_jid.clone()),
+            &ready_phase(&bob_jid),
         )
         .await;
         let inbox_xml = inbox_responses.first().expect("inbox response");
@@ -6105,7 +6433,7 @@ mod tests {
             "muc.example.com",
             state.as_ref(),
             &Some(bob_session.clone()),
-            &Some(bob_jid.clone()),
+            &ready_phase(&bob_jid),
         )
         .await;
         let mark_read_xml = mark_read_responses.first().expect("mark-read result");
@@ -6126,7 +6454,7 @@ mod tests {
             "muc.example.com",
             state.as_ref(),
             &Some(bob_session),
-            &Some(bob_jid),
+            &ready_phase(&bob_jid),
         )
         .await;
         let unread_only_xml = unread_only_responses.first().expect("unread-only response");
@@ -6137,6 +6465,31 @@ mod tests {
         assert!(
             !unread_only_xml.contains("<conversation "),
             "unread-only query should be empty after mark-read: {unread_only_xml}"
+        );
+    }
+
+    #[tokio::test]
+    async fn inbox_query_requires_ready_phase() {
+        let state = create_test_websocket_state().await;
+        let session = create_test_session(state.as_ref(), "bob").await;
+        let pending_jid: FullJid = "bob@example.com/pending".parse().expect("pending jid");
+        let mut carbons_enabled = false;
+        let frame = r#"<iq xmlns='jabber:client' type='get' to='bob@example.com' id='inbox-prebind-1'><query xmlns='urn:xmpp:inbox:0'/></iq>"#;
+        let responses = handle_iq_with_conn_state(
+            parse_iq_for_test(frame),
+            "example.com",
+            "muc.example.com",
+            state.as_ref(),
+            &Some(session),
+            &ConnectionPhase::authenticated(&pending_jid),
+            &mut carbons_enabled,
+        )
+        .await;
+
+        let response = responses.first().expect("inbox error response");
+        assert!(
+            response.contains("not-authorized"),
+            "pre-bind inbox IQ should be rejected: {response}"
         );
     }
 
@@ -6169,7 +6522,7 @@ mod tests {
             parse_message_for_test(message_xml.as_str()),
             "muc.example.com",
             state.as_ref(),
-            &Some(alice_jid),
+            &ConnectionPhase::ready(alice_jid.clone(), false),
             &Some(alice_session),
         )
         .await;
@@ -6190,7 +6543,7 @@ mod tests {
             "muc.example.com",
             state.as_ref(),
             &Some(bob_session),
-            &Some(bob_jid),
+            &ready_phase(&bob_jid),
         )
         .await;
         let inbox_xml = inbox_responses.first().expect("inbox response");
@@ -6248,7 +6601,7 @@ mod tests {
             parse_message_for_test(message_xml.as_str()),
             "muc.example.com",
             state.as_ref(),
-            &Some(sender_jid.clone()),
+            &ConnectionPhase::ready(sender_jid.clone(), false),
             &Some(session.clone()),
         )
         .await;
@@ -6274,7 +6627,7 @@ mod tests {
             "muc.example.com",
             state.as_ref(),
             &Some(session),
-            &Some(sender_jid),
+            &ready_phase(&sender_jid),
         )
         .await;
 
@@ -6298,6 +6651,113 @@ mod tests {
                 .any(|stanza| stanza.contains("<fin") && stanza.contains("urn:xmpp:mam:2")),
             "expected MAM fin stanza, got: {:?}",
             mam_responses
+        );
+    }
+
+    #[tokio::test]
+    async fn personal_mam_query_uses_ready_phase_when_sidecar_session_is_missing() {
+        let state = create_test_websocket_state().await;
+        let alice_session = create_test_session(state.as_ref(), "alice").await;
+        let bob_session = create_test_session(state.as_ref(), "bob").await;
+        let alice_jid: FullJid = format!("{}@example.com/web", alice_session.xmpp_localpart)
+            .parse()
+            .expect("alice jid");
+        let bob_jid: FullJid = format!("{}@example.com/mobile", bob_session.xmpp_localpart)
+            .parse()
+            .expect("bob jid");
+
+        let message_xml = format!(
+            "<message xmlns='jabber:client' to='{}' type='chat' id='dm-mam-1'>\
+                <body>Hello from Alice</body>\
+             </message>",
+            bob_jid.to_bare()
+        );
+        let message_responses = handle_message(
+            parse_message_for_test(message_xml.as_str()),
+            "muc.example.com",
+            state.as_ref(),
+            &ConnectionPhase::ready(alice_jid.clone(), false),
+            &Some(alice_session),
+        )
+        .await;
+        assert!(
+            message_responses.is_empty(),
+            "plain DM should not echo to sender"
+        );
+
+        let mam_query = format!(
+            "<iq xmlns='jabber:client' type='set' to='{}' id='mam-personal-1'>\
+                <query xmlns='urn:xmpp:mam:2' queryid='q1'>\
+                    <x xmlns='jabber:x:data' type='submit'>\
+                        <field var='FORM_TYPE' type='hidden'><value>urn:xmpp:mam:2</value></field>\
+                    </x>\
+                    <set xmlns='http://jabber.org/protocol/rsm'><max>50</max></set>\
+                </query>\
+             </iq>",
+            bob_jid.to_bare()
+        );
+        let mam_responses = handle_iq(
+            mam_query.as_str(),
+            "example.com",
+            "muc.example.com",
+            state.as_ref(),
+            &None,
+            &ready_phase(&bob_jid),
+        )
+        .await;
+
+        assert!(
+            mam_responses
+                .iter()
+                .any(|stanza| stanza.contains("urn:xmpp:mam:2") && stanza.contains("<result")),
+            "expected personal MAM result stanza for resumed ready phase, got: {:?}",
+            mam_responses
+        );
+        assert!(
+            mam_responses
+                .iter()
+                .any(|stanza| stanza.contains("Hello from Alice")),
+            "expected archived DM in personal MAM replay, got: {:?}",
+            mam_responses
+        );
+        assert!(
+            mam_responses
+                .iter()
+                .any(|stanza| stanza.contains(&format!("to=\"{}\"", bob_jid))
+                    || stanza.contains(&format!("to='{}'", bob_jid))),
+            "expected MAM results addressed to the resumed bound resource, got: {:?}",
+            mam_responses
+        );
+        assert!(
+            mam_responses
+                .iter()
+                .all(|stanza| !stanza.contains("unknown@localhost")),
+            "resumed personal MAM must not fall back to unknown recipient: {:?}",
+            mam_responses
+        );
+    }
+
+    #[tokio::test]
+    async fn upload_slot_request_requires_ready_phase() {
+        let state = create_test_websocket_state().await;
+        let session = create_test_session(state.as_ref(), "alice").await;
+        let pending_phase = authenticated_phase_for_session(&session, "example.com");
+        let frame = r#"<iq xmlns='jabber:client' type='get' to='upload.example.com' id='upload-prebind-1'><request xmlns='urn:xmpp:http:upload:0' filename='hello.txt' size='5' content-type='text/plain'/></iq>"#;
+
+        let responses = handle_iq(
+            frame,
+            "example.com",
+            "muc.example.com",
+            state.as_ref(),
+            &Some(session),
+            &pending_phase,
+        )
+        .await;
+
+        let response = responses.first().expect("upload error response");
+        assert!(
+            response.contains("not-authorized"),
+            "pre-bind upload request should be rejected: {response}"
         );
     }
 
@@ -6423,7 +6883,7 @@ mod tests {
             "muc.example.com",
             state.as_ref(),
             &None,
-            &Some(jid),
+            &ready_phase(&jid),
         )
         .await;
 
@@ -6450,7 +6910,7 @@ mod tests {
             "muc.example.com",
             state.as_ref(),
             &None,
-            &Some(jid),
+            &ready_phase(&jid),
         )
         .await;
 
@@ -6737,12 +7197,291 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sm_resume_is_allowed_after_auth_before_bind() {
+        let state = create_test_websocket_state().await;
+        let session = create_test_session(state.as_ref(), "alice").await;
+        let payload = BASE64_STANDARD.encode(format!("n,,\x01auth=Bearer {}\x01\x01", session.id));
+        let auth_frame = element_to_xml(
+            Element::builder("auth", waddle_xmpp::ns::SASL)
+                .attr("mechanism", "OAUTHBEARER")
+                .append(payload)
+                .build(),
+        );
+        let mut conn = LegacyConnState::new();
+
+        let auth_responses =
+            handle_xmpp_frame(&auth_frame, "example.com", state.as_ref(), &mut conn).await;
+        assert_eq!(auth_responses, vec![sasl_success_xml()]);
+
+        let responses = handle_xmpp_frame(
+            "<resume xmlns='urn:xmpp:sm:3' previd='stream-xyz' h='0'/>",
+            "example.com",
+            state.as_ref(),
+            &mut conn,
+        )
+        .await;
+
+        assert_eq!(responses.len(), 1);
+        let el = Element::from_str(&responses[0]).expect("xml");
+        assert_eq!(el.name(), "failed");
+        assert!(el
+            .get_child("item-not-found", "urn:ietf:params:xml:ns:xmpp-stanzas")
+            .is_some());
+        assert!(matches!(conn.phase, ConnectionPhase::Authenticated { .. }));
+        assert!(!conn.phase.is_resumed());
+    }
+
+    #[tokio::test]
+    async fn sm_resume_rejects_authenticated_identity_mismatch_and_preserves_session() {
+        use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+
+        let state = create_test_websocket_state().await;
+        let domain = state.deps.auth_state.xmpp_domain.clone();
+        let session = create_test_session(state.as_ref(), "bob").await;
+        let payload = BASE64_STANDARD.encode(format!("n,,\x01auth=Bearer {}\x01\x01", session.id));
+        let auth_frame = element_to_xml(
+            Element::builder("auth", waddle_xmpp::ns::SASL)
+                .attr("mechanism", "OAUTHBEARER")
+                .append(payload)
+                .build(),
+        );
+        let mut conn = LegacyConnState::new();
+        let auth_responses =
+            handle_xmpp_frame(&auth_frame, &domain, state.as_ref(), &mut conn).await;
+        assert_eq!(auth_responses, vec![sasl_success_xml()]);
+        assert!(matches!(conn.phase, ConnectionPhase::Authenticated { .. }));
+
+        let detached = DetachedSession {
+            stream_id: "stream-auth-mismatch".to_string(),
+            user_id: format!("alice@{domain}"),
+            jid: format!("alice@{domain}/web").parse().expect("jid"),
+            inbound_count: 0,
+            outbound_count: 0,
+            last_acked: 0,
+            unacked_stanzas: Vec::new(),
+            max_resume_time: Some(300),
+            detached_at: std::time::Instant::now(),
+            carbons_enabled: false,
+        };
+        state
+            .deps
+            .protocol
+            .sm_session_registry
+            .store_session(detached.clone())
+            .await
+            .expect("store");
+
+        let responses = handle_xmpp_frame(
+            "<resume xmlns='urn:xmpp:sm:3' previd='stream-auth-mismatch' h='0'/>",
+            &domain,
+            state.as_ref(),
+            &mut conn,
+        )
+        .await;
+
+        assert_eq!(responses.len(), 1);
+        let el = Element::from_str(&responses[0]).expect("xml");
+        assert_eq!(el.name(), "failed");
+        assert!(el
+            .get_child("not-authorized", "urn:ietf:params:xml:ns:xmpp-stanzas")
+            .is_some());
+        assert!(matches!(conn.phase, ConnectionPhase::Authenticated { .. }));
+        assert_eq!(
+            conn.phase.authenticated_bare_jid().map(ToString::to_string),
+            Some(format!("bob@{domain}"))
+        );
+
+        let stored = state
+            .deps
+            .protocol
+            .sm_session_registry
+            .take_session("stream-auth-mismatch")
+            .await
+            .expect("take")
+            .expect("detached session should remain");
+        assert_eq!(stored.jid, detached.jid);
+    }
+
+    #[tokio::test]
+    async fn sm_resume_matching_authenticated_identity_preserves_current_session_without_sidecar() {
+        use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+
+        let state = create_test_websocket_state().await;
+        let domain = state.deps.auth_state.xmpp_domain.clone();
+        let session = create_test_session(state.as_ref(), "bob").await;
+        let payload = BASE64_STANDARD.encode(format!("n,,\x01auth=Bearer {}\x01\x01", session.id));
+        let auth_frame = element_to_xml(
+            Element::builder("auth", waddle_xmpp::ns::SASL)
+                .attr("mechanism", "OAUTHBEARER")
+                .append(payload)
+                .build(),
+        );
+        let mut conn = LegacyConnState::new();
+        let auth_responses =
+            handle_xmpp_frame(&auth_frame, &domain, state.as_ref(), &mut conn).await;
+        assert_eq!(auth_responses, vec![sasl_success_xml()]);
+        assert!(matches!(conn.phase, ConnectionPhase::Authenticated { .. }));
+
+        let detached_jid: FullJid = format!("bob@{domain}/web").parse().expect("jid");
+        state
+            .deps
+            .protocol
+            .sm_session_registry
+            .store_session(DetachedSession {
+                stream_id: "stream-auth-match".to_string(),
+                user_id: format!("bob@{domain}"),
+                jid: detached_jid.clone(),
+                inbound_count: 2,
+                outbound_count: 3,
+                last_acked: 3,
+                unacked_stanzas: Vec::new(),
+                max_resume_time: Some(300),
+                detached_at: std::time::Instant::now(),
+                carbons_enabled: true,
+            })
+            .await
+            .expect("store");
+
+        let responses = handle_xmpp_frame(
+            "<resume xmlns='urn:xmpp:sm:3' previd='stream-auth-match' h='3'/>",
+            &domain,
+            state.as_ref(),
+            &mut conn,
+        )
+        .await;
+
+        assert_eq!(responses.len(), 1);
+        let resumed = Element::from_str(&responses[0]).expect("xml");
+        assert_eq!(resumed.name(), "resumed");
+        assert_eq!(conn.phase.bound_jid(), Some(&detached_jid));
+        assert!(conn.phase.is_ready());
+        assert!(conn.phase.is_resumed());
+        assert!(matches!(
+            &conn.phase,
+            ConnectionPhase::Ready {
+                full_jid,
+                resumed: true,
+                ..
+            } if full_jid == &detached_jid
+        ));
+        assert_eq!(
+            conn.authenticated_session
+                .as_ref()
+                .map(|saved| saved.user_id.as_str()),
+            Some(session.user_id.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn sm_resume_matching_authenticated_identity_prefers_detached_sidecar_session() {
+        use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+
+        let state = create_test_websocket_state().await;
+        let domain = state.deps.auth_state.xmpp_domain.clone();
+        let fresh_session = create_test_session(state.as_ref(), "bob").await;
+        let payload =
+            BASE64_STANDARD.encode(format!("n,,\x01auth=Bearer {}\x01\x01", fresh_session.id));
+        let auth_frame = element_to_xml(
+            Element::builder("auth", waddle_xmpp::ns::SASL)
+                .attr("mechanism", "OAUTHBEARER")
+                .append(payload)
+                .build(),
+        );
+        let mut conn = LegacyConnState::new();
+        let auth_responses =
+            handle_xmpp_frame(&auth_frame, &domain, state.as_ref(), &mut conn).await;
+        assert_eq!(auth_responses, vec![sasl_success_xml()]);
+
+        let stream_id = "stream-auth-match-with-sidecar";
+        let detached_jid: FullJid = format!("bob@{domain}/web").parse().expect("jid");
+        let resumed_session = Session::new(&fresh_session.user_id, "bob", "bob");
+        state
+            .deps
+            .protocol
+            .sm_session_registry
+            .store_session(DetachedSession {
+                stream_id: stream_id.to_string(),
+                user_id: format!("bob@{domain}"),
+                jid: detached_jid.clone(),
+                inbound_count: 0,
+                outbound_count: 0,
+                last_acked: 0,
+                unacked_stanzas: Vec::new(),
+                max_resume_time: Some(300),
+                detached_at: std::time::Instant::now(),
+                carbons_enabled: false,
+            })
+            .await
+            .expect("store");
+        state
+            .deps
+            .protocol
+            .resumable_sessions
+            .insert(stream_id.to_string(), resumed_session.clone());
+
+        let responses = handle_xmpp_frame(
+            &format!("<resume xmlns='urn:xmpp:sm:3' previd='{stream_id}' h='0'/>"),
+            &domain,
+            state.as_ref(),
+            &mut conn,
+        )
+        .await;
+
+        assert_eq!(responses.len(), 1);
+        let resumed = Element::from_str(&responses[0]).expect("xml");
+        assert_eq!(resumed.name(), "resumed");
+        assert!(matches!(
+            &conn.phase,
+            ConnectionPhase::Ready {
+                full_jid,
+                resumed: true,
+                ..
+            } if full_jid == &detached_jid
+        ));
+        assert_eq!(
+            conn.authenticated_session
+                .as_ref()
+                .map(|saved| saved.id.as_str()),
+            Some(resumed_session.id.as_str())
+        );
+        assert_ne!(
+            conn.authenticated_session
+                .as_ref()
+                .map(|saved| saved.id.as_str()),
+            Some(fresh_session.id.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn sm_resume_rejects_ready_phase() {
+        let state = create_test_websocket_state().await;
+        let mut conn = LegacyConnState::new();
+        let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+        conn.phase = ConnectionPhase::ready(jid, false);
+
+        let responses = handle_xmpp_frame(
+            "<resume xmlns='urn:xmpp:sm:3' previd='stream-xyz' h='0'/>",
+            "example.com",
+            state.as_ref(),
+            &mut conn,
+        )
+        .await;
+
+        assert_eq!(responses.len(), 1);
+        let el = Element::from_str(&responses[0]).expect("xml");
+        assert_eq!(el.name(), "failed");
+        assert!(el
+            .get_child("unexpected-request", "urn:ietf:params:xml:ns:xmpp-stanzas")
+            .is_some());
+        assert!(matches!(conn.phase, ConnectionPhase::Ready { .. }));
+    }
+
+    #[tokio::test]
     async fn sm_enable_after_bind_returns_enabled_and_tracks_counters() {
         let state = create_test_websocket_state().await;
         let mut conn = LegacyConnState::new();
-        conn.authenticated = true;
-        conn.resource_bound = true;
-        conn.session_jid = Some("alice@example.com/web".parse().expect("jid"));
+        let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+        conn.phase = ConnectionPhase::ready(jid, false);
 
         let responses = handle_xmpp_frame(
             "<enable xmlns='urn:xmpp:sm:3' resume='true'/>",
@@ -6848,10 +7587,10 @@ mod tests {
         assert!(responses[1].contains("m10"));
 
         // Session identity restored without SASL or bind frames.
-        assert!(conn.authenticated);
-        assert!(conn.resource_bound);
-        assert_eq!(conn.session_jid, Some(jid.clone()));
-        assert!(conn.resumed);
+        assert!(conn.phase.is_authenticated());
+        assert!(conn.phase.is_ready());
+        assert_eq!(conn.phase.bound_jid(), Some(&jid));
+        assert!(conn.phase.is_resumed());
         assert!(conn.carbons_enabled);
         assert!(matches!(
             &conn.phase,
@@ -6873,9 +7612,9 @@ mod tests {
         let el = Element::from_str(&responses[0]).expect("xml");
         assert_eq!(el.name(), "failed");
         // Must NOT mark the session as authenticated/bound.
-        assert!(!conn.authenticated);
-        assert!(!conn.resource_bound);
-        assert!(!conn.resumed);
+        assert!(!conn.phase.is_authenticated());
+        assert!(!conn.phase.is_ready());
+        assert!(!conn.phase.is_resumed());
     }
 
     #[tokio::test]
@@ -6955,9 +7694,6 @@ mod tests {
             .register(jid.clone(), tx);
 
         let mut conn = LegacyConnState::new();
-        conn.authenticated = true;
-        conn.resource_bound = true;
-        conn.session_jid = Some(jid.clone());
         conn.phase = ConnectionPhase::ready(jid.clone(), false);
         conn.sm_state
             .enable("stream-detach".to_string(), true, Some(300));
@@ -7006,12 +7742,9 @@ mod tests {
             .register(jid.clone(), tx);
 
         let mut conn = LegacyConnState::new();
-        conn.authenticated = true;
-        conn.resource_bound = true;
-        conn.session_jid = Some(jid.clone());
-        conn.phase = ConnectionPhase::Closing;
+        conn.phase = ConnectionPhase::ready(jid.clone(), false);
         conn.sm_state
-            .enable("stream-close".to_string(), true, Some(300));
+            .enable("stream-close".to_string(), false, Some(300));
 
         cleanup_connection_shutdown(state.as_ref(), &conn, false).await;
 
