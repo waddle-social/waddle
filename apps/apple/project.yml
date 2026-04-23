@@ -25,7 +25,7 @@ targets:
         embed: false
     settings:
       base:
-        PRODUCT_NAME: Waddle
+        PRODUCT_NAME: Waddle-iOS
         PRODUCT_BUNDLE_IDENTIFIER: p4x.waddle.social
         INFOPLIST_KEY_CFBundleDisplayName: Waddle
         INFOPLIST_KEY_UILaunchStoryboardName: LaunchScreen
@@ -33,6 +33,8 @@ targets:
         INFOPLIST_KEY_UISupportedInterfaceOrientations~ipad: "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
         TARGETED_DEVICE_FAMILY: "1,2"
         SUPPORTS_MACCATALYST: NO
+        SWIFT_OBJC_BRIDGING_HEADER: "Waddle/Waddle-Bridging-Header.h"
+        HEADER_SEARCH_PATHS: "$(inherited) $(SRCROOT)/Generated/WaddleXmppClientFFI.xcframework/*/Headers"
   Waddle-macOS:
     type: application
     platform: macOS
@@ -47,10 +49,12 @@ targets:
         embed: false
     settings:
       base:
-        PRODUCT_NAME: Waddle
+        PRODUCT_NAME: Waddle-macOS
         PRODUCT_BUNDLE_IDENTIFIER: p4x.waddle.social
         INFOPLIST_KEY_CFBundleDisplayName: Waddle
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.social-networking
+        SWIFT_OBJC_BRIDGING_HEADER: "Waddle/Waddle-Bridging-Header.h"
+        HEADER_SEARCH_PATHS: "$(inherited) $(SRCROOT)/Generated/WaddleXmppClientFFI.xcframework/*/Headers"
 schemes:
   Waddle:
     build:

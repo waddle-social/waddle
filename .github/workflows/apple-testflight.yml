@@ -1,0 +1,126 @@
+name: Apple TestFlight Build
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "apps/apple/**"
+      - "server/crates/waddle-xmpp-client**"
+      - "scripts/build-xcframework.sh"
+      - ".github/workflows/apple-testflight.yml"
+  pull_request:
+    paths:
+      - "apps/apple/**"
+      - "server/crates/waddle-xmpp-client**"
+      - "scripts/build-xcframework.sh"
+      - ".github/workflows/apple-testflight.yml"
+
+jobs:
+  build-framework:
+    name: Build Rust FFI Framework
+    runs-on: macos-latest-xlarge
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust targets
+        run: |
+          rustup target add aarch64-apple-darwin aarch64-apple-ios aarch64-apple-ios-sim
+
+      - name: Build xcframework
+        working-directory: ./
+        run: bash scripts/build-xcframework.sh --release
+
+      - name: Upload xcframework artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: WaddleXmppClientFFI-xcframework
+          path: apps/apple/Generated/WaddleXmppClientFFI.xcframework/
+          retention-days: 30
+
+      - name: Upload Swift bindings artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: WaddleXmppClientFFI-swift-bindings
+          path: apps/apple/Waddle/RustClient/Generated/
+          retention-days: 30
+
+  build-ios:
+    name: Build iOS App
+    needs: build-framework
+    runs-on: macos-latest-xlarge
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download xcframework artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: WaddleXmppClientFFI-xcframework
+          path: apps/apple/Generated/WaddleXmppClientFFI.xcframework/
+
+      - name: Download Swift bindings artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: WaddleXmppClientFFI-swift-bindings
+          path: apps/apple/Waddle/RustClient/Generated/
+
+      - name: Install xcodegen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        working-directory: apps/apple
+        run: xcodegen generate
+
+      - name: Build iOS (Simulator)
+        working-directory: apps/apple
+        run: |
+          xcodebuild \
+            -project Waddle.xcodeproj \
+            -scheme Waddle-iOS \
+            -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
+            -configuration Release \
+            build
+
+  build-macos:
+    name: Build macOS App
+    needs: build-framework
+    runs-on: macos-latest-xlarge
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download xcframework artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: WaddleXmppClientFFI-xcframework
+          path: apps/apple/Generated/WaddleXmppClientFFI.xcframework/
+
+      - name: Download Swift bindings artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: WaddleXmppClientFFI-swift-bindings
+          path: apps/apple/Waddle/RustClient/Generated/
+
+      - name: Install xcodegen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        working-directory: apps/apple
+        run: xcodegen generate
+
+      - name: Build macOS
+        working-directory: apps/apple
+        run: |
+          xcodebuild \
+            -project Waddle.xcodeproj \
+            -scheme Waddle-macOS \
+            -destination 'platform=macOS' \
+            -configuration Release \
+            build
+
+  testflight-ready:
+    name: Verify TestFlight Ready
+    needs: [build-ios, build-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - name: All builds successful
+        run: echo "✅ iOS and macOS builds completed successfully. Ready for TestFlight!"

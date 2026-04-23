@@ -887,7 +887,7 @@ struct ChatComposerView: View {
                     .padding(.top, 12)
                     .padding(.bottom, 8)
                     .onSubmit { if hasSendableText { onSend() } }
-#if os(macOS) || os(iOS)
+#if os(macOS)
                     .onPasteCommand(of: [.image]) { providers in
                         handlePastedImages(providers)
                     }

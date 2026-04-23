@@ -50,6 +50,7 @@
 
 /* Begin PBXFileReference section */
 		07E26B6F690A6F7903447AD7 /* WaddleXmppClientFFI.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = WaddleXmppClientFFI.xcframework; path = "$(SRCROOT)/Generated/WaddleXmppClientFFI.xcframework"; sourceTree = "<group>"; };
+		097A7976BC4F84384A7159AB /* module.modulemap */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.module-map"; path = module.modulemap; sourceTree = "<group>"; };
 		1A6469BF26A54A374566C70E /* WaddleTheme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WaddleTheme.swift; sourceTree = "<group>"; };
 		1C4757B3879EE7930D703759 /* GlassEffect.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlassEffect.swift; sourceTree = "<group>"; };
 		22F6B3902108DE9EA61D159F /* ChatStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatStore.swift; sourceTree = "<group>"; };
@@ -58,6 +59,7 @@
 		52C6274C7DC0B87C611DABD3 /* ChatWorkspaceView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatWorkspaceView.swift; sourceTree = "<group>"; };
 		6C1D7F0578FED187C1011D0F /* AppConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppConfig.swift; sourceTree = "<group>"; };
 		759562CCEFAFFE58FE58FE57 /* DesktopAuthenticatedShell.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DesktopAuthenticatedShell.swift; sourceTree = "<group>"; };
+		7F37048A8D96C01F7111FED0 /* Waddle-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Waddle-Bridging-Header.h"; sourceTree = "<group>"; };
 		7FD8BBA9FE130679024113ED /* ChatDomain.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatDomain.swift; sourceTree = "<group>"; };
 		8AB1A681F60A49913FEC6A38 /* waddle_xmpp_clientFFI.modulemap */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.module-map"; path = waddle_xmpp_clientFFI.modulemap; sourceTree = "<group>"; };
 		908AA7A66AF0FE4F0F8A2956 /* waddle_xmpp_client.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = waddle_xmpp_client.swift; sourceTree = "<group>"; };
@@ -68,8 +70,8 @@
 		BB8C551551F6E346F2CF6447 /* WaddleApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WaddleApp.swift; sourceTree = "<group>"; };
 		BF071F2F5CDF86AFDE28A7D2 /* ChatViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatViews.swift; sourceTree = "<group>"; };
 		C0991F6A051C48636FE46B67 /* WaddleAPIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WaddleAPIClient.swift; sourceTree = "<group>"; };
-		C94C2AEC9BB46D8AB65F1CD6 /* Waddle.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Waddle.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		CF3A01434FBAD0F850F5C623 /* Waddle.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Waddle.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		C94C2AEC9BB46D8AB65F1CD6 /* Waddle-macOS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Waddle-macOS.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		CF3A01434FBAD0F850F5C623 /* Waddle-iOS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Waddle-iOS.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		D8F4568A880738E76CC5AEDE /* RustXmppClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RustXmppClient.swift; sourceTree = "<group>"; };
 		F81C25EB811EDFB67DAF0188 /* LaunchScreen.storyboard */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; path = LaunchScreen.storyboard; sourceTree = "<group>"; };
 		FA49C7EBB1F4B7819123A37B /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
@@ -131,8 +133,8 @@
 		4FAB2C42DF256B6DC1D6F0F2 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				CF3A01434FBAD0F850F5C623 /* Waddle.app */,
-				C94C2AEC9BB46D8AB65F1CD6 /* Waddle.app */,
+				CF3A01434FBAD0F850F5C623 /* Waddle-iOS.app */,
+				C94C2AEC9BB46D8AB65F1CD6 /* Waddle-macOS.app */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -158,6 +160,7 @@
 			children = (
 				3F58BCC39D30A86E52EFE92E /* Assets.xcassets */,
 				F81C25EB811EDFB67DAF0188 /* LaunchScreen.storyboard */,
+				7F37048A8D96C01F7111FED0 /* Waddle-Bridging-Header.h */,
 				4DDC350C0234224B5EECE505 /* App */,
 				D644C05B53E5CF3B9A2E240C /* Chat */,
 				F1261F1BCDDD7AF6F28B5C41 /* Models */,
@@ -191,6 +194,7 @@
 		EAE55EFEB5EA516732F06260 /* RustClient */ = {
 			isa = PBXGroup;
 			children = (
+				097A7976BC4F84384A7159AB /* module.modulemap */,
 				D8F4568A880738E76CC5AEDE /* RustXmppClient.swift */,
 				1E07B9D645D31DD942C15D3D /* Generated */,
 			);
@@ -224,7 +228,7 @@
 			packageProductDependencies = (
 			);
 			productName = "Waddle-iOS";
-			productReference = CF3A01434FBAD0F850F5C623 /* Waddle.app */;
+			productReference = CF3A01434FBAD0F850F5C623 /* Waddle-iOS.app */;
 			productType = "com.apple.product-type.application";
 		};
 		D1537FCAB55E21CDA0F3F836 /* Waddle-macOS */ = {
@@ -243,7 +247,7 @@
 			packageProductDependencies = (
 			);
 			productName = "Waddle-macOS";
-			productReference = C94C2AEC9BB46D8AB65F1CD6 /* Waddle.app */;
+			productReference = C94C2AEC9BB46D8AB65F1CD6 /* Waddle-macOS.app */;
 			productType = "com.apple.product-type.application";
 		};
 /* End PBXNativeTarget section */
@@ -426,8 +430,11 @@
 					"$(inherited)",
 					"\"$(SRCROOT)/Generated\"",
 				);
+				HEADER_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/Generated/WaddleXmppClientFFI.xcframework/*/Headers",
+				);
 				INFOPLIST_KEY_CFBundleDisplayName = Waddle;
-				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.social-networking";
 				INFOPLIST_KEY_UILaunchStoryboardName = LaunchScreen;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				"INFOPLIST_KEY_UISupportedInterfaceOrientations~ipad" = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
@@ -437,9 +444,10 @@
 					"@executable_path/Frameworks",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = p4x.waddle.social;
-				PRODUCT_NAME = Waddle;
+				PRODUCT_NAME = "Waddle-iOS";
 				SDKROOT = iphoneos;
 				SUPPORTS_MACCATALYST = NO;
+				SWIFT_OBJC_BRIDGING_HEADER = "Waddle/Waddle-Bridging-Header.h";
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = Release;
@@ -457,6 +465,10 @@
 					"$(inherited)",
 					"\"$(SRCROOT)/Generated\"",
 				);
+				HEADER_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/Generated/WaddleXmppClientFFI.xcframework/*/Headers",
+				);
 				INFOPLIST_KEY_CFBundleDisplayName = Waddle;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.social-networking";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -465,9 +477,10 @@
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				PRODUCT_BUNDLE_IDENTIFIER = p4x.waddle.social;
-				PRODUCT_NAME = Waddle;
+				PRODUCT_NAME = "Waddle-macOS";
 				PROVISIONING_PROFILE_SPECIFIER = "";
 				SDKROOT = macosx;
+				SWIFT_OBJC_BRIDGING_HEADER = "Waddle/Waddle-Bridging-Header.h";
 			};
 			name = Debug;
 		};
@@ -481,8 +494,11 @@
 					"$(inherited)",
 					"\"$(SRCROOT)/Generated\"",
 				);
+				HEADER_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/Generated/WaddleXmppClientFFI.xcframework/*/Headers",
+				);
 				INFOPLIST_KEY_CFBundleDisplayName = Waddle;
-				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.social-networking";
 				INFOPLIST_KEY_UILaunchStoryboardName = LaunchScreen;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				"INFOPLIST_KEY_UISupportedInterfaceOrientations~ipad" = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
@@ -492,9 +508,10 @@
 					"@executable_path/Frameworks",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = p4x.waddle.social;
-				PRODUCT_NAME = Waddle;
+				PRODUCT_NAME = "Waddle-iOS";
 				SDKROOT = iphoneos;
 				SUPPORTS_MACCATALYST = NO;
+				SWIFT_OBJC_BRIDGING_HEADER = "Waddle/Waddle-Bridging-Header.h";
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = Debug;
@@ -512,6 +529,10 @@
 					"$(inherited)",
 					"\"$(SRCROOT)/Generated\"",
 				);
+				HEADER_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/Generated/WaddleXmppClientFFI.xcframework/*/Headers",
+				);
 				INFOPLIST_KEY_CFBundleDisplayName = Waddle;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.social-networking";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -520,9 +541,10 @@
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				PRODUCT_BUNDLE_IDENTIFIER = p4x.waddle.social;
-				PRODUCT_NAME = Waddle;
+				PRODUCT_NAME = "Waddle-macOS";
 				PROVISIONING_PROFILE_SPECIFIER = "";
 				SDKROOT = macosx;
+				SWIFT_OBJC_BRIDGING_HEADER = "Waddle/Waddle-Bridging-Header.h";
 			};
 			name = Release;
 		};
