@@ -12,12 +12,12 @@ spec:
   interval: 10m
   retryInterval: 1m
   timeout: 15m
-  path: ./livekit-sfu
+  path: ./
   prune: true
   wait: true
   sourceRef:
     kind: OCIRepository
-    name: bootstrap
+    name: livekit-sfu
   healthChecks:
     - apiVersion: helm.toolkit.fluxcd.io/v2
       kind: HelmRelease
