@@ -5,3 +5,4 @@ resources:
   - gateway.yaml
   - wildcard-certificate.yaml
   - api-certificate.yaml
+  - sfu-certificate.yaml

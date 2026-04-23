@@ -1,0 +1,12 @@
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: sfu-waddle-social-tls
+  namespace: default
+spec:
+  secretName: sfu-waddle-social-tls
+  issuerRef:
+    name: letsencrypt-production
+    kind: ClusterIssuer
+  dnsNames:
+    - sfu.waddle.social

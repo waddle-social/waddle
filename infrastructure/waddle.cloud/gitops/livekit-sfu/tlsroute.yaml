@@ -1,0 +1,16 @@
+apiVersion: gateway.networking.k8s.io/v1alpha2
+kind: TLSRoute
+metadata:
+  name: livekit-sfu-turn
+  namespace: livekit
+spec:
+  hostnames:
+    - turn.waddle.social
+  parentRefs:
+    - name: waddle-gateway
+      namespace: default
+      sectionName: turn-passthrough
+  rules:
+    - backendRefs:
+        - name: livekit-sfu-turn
+          port: 5349

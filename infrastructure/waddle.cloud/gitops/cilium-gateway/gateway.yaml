@@ -42,6 +42,33 @@ spec:
       allowedRoutes:
         namespaces:
           from: All
+    - name: https-sfu
+      protocol: HTTPS
+      port: 443
+      hostname: sfu.waddle.social
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - name: sfu-waddle-social-tls
+      allowedRoutes:
+        namespaces:
+          from: All
+    - name: http-sfu
+      protocol: HTTP
+      port: 80
+      hostname: sfu.waddle.social
+      allowedRoutes:
+        namespaces:
+          from: All
+    - name: turn-passthrough
+      protocol: TLS
+      port: 443
+      hostname: turn.waddle.social
+      tls:
+        mode: Passthrough
+      allowedRoutes:
+        namespaces:
+          from: All
     - name: teleport-passthrough
       protocol: TLS
       port: 443

@@ -1,0 +1,46 @@
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: livekit-sfu
+  namespace: livekit
+spec:
+  driftDetection:
+    mode: enabled
+  interval: 30m
+  chart:
+    spec:
+      chart: livekit-sfu
+      version: 0.1.x
+      sourceRef:
+        kind: HelmRepository
+        name: livekit-sfu
+        namespace: livekit
+      interval: 12h
+  values:
+    image:
+      repository: livekit/livekit-server
+      tag: v1.11.0
+    apiKeys:
+      existingSecret: livekit-sfu-api-keys
+    livekit:
+      log_level: info
+      rtc:
+        use_external_ip: true
+        tcp_port: 7881
+        udp_port: 7882
+      turn:
+        enabled: true
+        domain: turn.waddle.social
+        udp_port: 3478
+        tls_port: 5349
+        relay_range_start: 30000
+        relay_range_end: 40000
+    turn:
+      secretName: turn-waddle-social-tls
+    resources:
+      requests:
+        cpu: 500m
+        memory: 512Mi
+      limits:
+        cpu: "2"
+        memory: 2Gi

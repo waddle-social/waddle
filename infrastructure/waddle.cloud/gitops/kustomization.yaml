@@ -13,6 +13,7 @@ resources:
   - kustomization-infra-spicedb-operator.yaml
   - kustomization-infra-cert-manager-issuer.yaml
   - kustomization-infra-cilium-gateway.yaml
+  - kustomization-infra-livekit-sfu.yaml
   - kustomization-infra-teleport-core.yaml
   - kustomization-infra-teleport-postinstall.yaml
   - kustomization-infra-waddle-server.yaml
