@@ -23,12 +23,16 @@ if [ ! -f "$REPO_ROOT/scripts/build-xcframework.sh" ]; then
   exit 1
 fi
 
-# Install Rust if not present
-if ! command -v cargo &> /dev/null; then
-  echo "📦 Installing Rust via Homebrew..."
-  brew install rust
+# Install Rust/rustup if not present
+if ! command -v rustup &> /dev/null; then
+  echo "📦 Installing Rust via rustup..."
+  brew install rustup-init
+  # Initialize rustup
+  rustup-init -y --quiet
+  # Source the cargo environment
+  export PATH="$HOME/.cargo/bin:$PATH"
 else
-  echo "✅ Rust already installed: $(rustc --version)"
+  echo "✅ rustup already installed: $(rustup --version)"
 fi
 
 # Add Apple targets
