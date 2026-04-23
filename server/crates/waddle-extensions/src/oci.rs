@@ -1,11 +1,13 @@
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
 use oci_client::client::{Client, ClientConfig, ClientProtocol, ImageLayer};
 use oci_client::manifest::OciDescriptor;
 use oci_client::secrets::RegistryAuth;
 use oci_client::Reference;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::config::ExtensionModuleConfig;
 
@@ -20,6 +22,7 @@ pub struct OciExtensionPuller {
 
 const WASM_LAYER_MEDIA_TYPE: &str = "application/wasm";
 const EXTENSION_ARTIFACT_MEDIA_TYPE: &str = "application/vnd.waddle.extension.wasm.v1+wasm";
+const MAX_WASM_BYTES: usize = 50 * 1024 * 1024;
 
 impl OciExtensionPuller {
     pub fn new(cache_dir: impl Into<PathBuf>) -> Self {
@@ -42,9 +45,25 @@ impl OciExtensionPuller {
             return Ok(path);
         }
 
-        let cached = self.cached_wasm_path(module);
+        let cached = self.cached_wasm_path(module)?;
         if cached.exists() {
-            return Ok(cached);
+            match validate_cached_wasm_file(&module.name, &cached) {
+                Ok(()) => return Ok(cached),
+                Err(error) => {
+                    warn!(
+                        extension = %module.name,
+                        cache_path = %cached.display(),
+                        %error,
+                        "cached extension wasm failed validation; re-pulling artifact"
+                    );
+                    std::fs::remove_file(&cached).with_context(|| {
+                        format!(
+                            "failed to remove invalid cached extension {}",
+                            cached.display()
+                        )
+                    })?;
+                }
+            }
         }
 
         self.pull_module(module)
@@ -52,15 +71,15 @@ impl OciExtensionPuller {
             .with_context(|| format!("failed to pull extension {}", module.name))
     }
 
-    fn cached_wasm_path(&self, module: &ExtensionModuleConfig) -> PathBuf {
-        self.cache_dir
-            .join(&module.name)
-            .join(format!("{}.wasm", module.tag))
+    fn cached_wasm_path(&self, module: &ExtensionModuleConfig) -> Result<PathBuf> {
+        let module_name = validate_cache_component("name", &module.name)?;
+        let tag = validate_cache_component("tag", &module.tag)?;
+        Ok(self.cache_dir.join(module_name).join(format!("{tag}.wasm")))
     }
 
     pub async fn pull_module(&self, module: &ExtensionModuleConfig) -> Result<PathBuf> {
         let reference = self.reference_for(module)?;
-        let cached = self.cached_wasm_path(module);
+        let cached = self.cached_wasm_path(module)?;
         if let Some(parent) = cached.parent() {
             std::fs::create_dir_all(parent).with_context(|| {
                 format!("failed to create extension cache dir {}", parent.display())
@@ -85,20 +104,25 @@ impl OciExtensionPuller {
             .manifest
             .ok_or_else(|| anyhow!("OCI artifact {reference} returned no manifest"))?;
 
-        if let Some(artifact_type) = manifest.artifact_type.as_deref() {
-            if artifact_type != EXTENSION_ARTIFACT_MEDIA_TYPE {
-                bail!(
-                    "unexpected artifact type for {}: got {}, expected {}",
-                    module.name,
-                    artifact_type,
-                    EXTENSION_ARTIFACT_MEDIA_TYPE
-                );
-            }
+        let artifact_type = manifest.artifact_type.as_deref().ok_or_else(|| {
+            anyhow!(
+                "missing artifact type for {}: expected {}",
+                module.name,
+                EXTENSION_ARTIFACT_MEDIA_TYPE
+            )
+        })?;
+        if artifact_type != EXTENSION_ARTIFACT_MEDIA_TYPE {
+            bail!(
+                "unexpected artifact type for {}: got {}, expected {}",
+                module.name,
+                artifact_type,
+                EXTENSION_ARTIFACT_MEDIA_TYPE
+            );
         }
 
         let layer = select_wasm_layer(&module.name, &image.layers, &manifest.layers)?;
         validate_wasm_layer(&module.name, layer)?;
-        std::fs::write(&cached, &layer.data)
+        write_wasm_atomically(&cached, &layer.data)
             .with_context(|| format!("failed to write cached extension {}", cached.display()))?;
 
         info!(
@@ -147,13 +171,113 @@ fn select_wasm_layer<'a>(
 }
 
 fn validate_wasm_layer(module_name: &str, layer: &ImageLayer) -> Result<()> {
-    if layer.data.len() < 4 {
+    validate_wasm_bytes(module_name, layer.data.as_ref())
+}
+
+fn validate_wasm_bytes(module_name: &str, bytes: &[u8]) -> Result<()> {
+    if bytes.len() < 8 {
         bail!("extension {module_name} wasm payload is too small");
     }
-    if layer.data[..4] != [0x00, 0x61, 0x73, 0x6d] {
+    if bytes.len() > MAX_WASM_BYTES {
+        bail!("extension {module_name} wasm payload exceeds max size of {MAX_WASM_BYTES} bytes");
+    }
+    if bytes[..4] != [0x00, 0x61, 0x73, 0x6d] {
         bail!("extension {module_name} payload is not a wasm binary");
     }
+    if bytes[4..8] != [0x01, 0x00, 0x00, 0x00] {
+        bail!("extension {module_name} uses unsupported wasm binary version");
+    }
     Ok(())
+}
+
+fn validate_cached_wasm_file(module_name: &str, path: &Path) -> Result<()> {
+    let bytes = std::fs::read(path)
+        .with_context(|| format!("failed to read cached extension {}", path.display()))?;
+    validate_wasm_bytes(module_name, &bytes)
+}
+
+fn validate_cache_component<'a>(field: &str, value: &'a str) -> Result<&'a str> {
+    if value.is_empty() {
+        bail!("extension {field} must not be empty");
+    }
+    if value == "." || value == ".." {
+        bail!("extension {field} must not be '.' or '..'");
+    }
+    if value.contains('/') || value.contains('\\') {
+        bail!("extension {field} must not include path separators");
+    }
+    if !value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.')
+    {
+        bail!("extension {field} contains unsupported characters");
+    }
+    Ok(value)
+}
+
+fn write_wasm_atomically(path: &Path, bytes: &[u8]) -> Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        anyhow!(
+            "cached extension path has no parent directory: {}",
+            path.display()
+        )
+    })?;
+    let file_name = path.file_name().ok_or_else(|| {
+        anyhow!(
+            "cached extension path has no terminal filename: {}",
+            path.display()
+        )
+    })?;
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let temp_path = parent.join(format!(
+        ".{}.tmp-{}-{suffix}",
+        file_name.to_string_lossy(),
+        std::process::id()
+    ));
+
+    let mut file = std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&temp_path)
+        .with_context(|| {
+            format!(
+                "failed to create temporary cache file {}",
+                temp_path.display()
+            )
+        })?;
+    file.write_all(bytes).with_context(|| {
+        format!(
+            "failed to write temporary cache file {}",
+            temp_path.display()
+        )
+    })?;
+    file.sync_all().with_context(|| {
+        format!(
+            "failed to sync temporary cache file {}",
+            temp_path.display()
+        )
+    })?;
+
+    match std::fs::rename(&temp_path, path) {
+        Ok(()) => Ok(()),
+        Err(_error) if path.exists() => {
+            let _ = std::fs::remove_file(&temp_path);
+            info!(
+                cache_path = %path.display(),
+                "cached extension was created concurrently; using existing file"
+            );
+            Ok(())
+        }
+        Err(error) => {
+            let _ = std::fs::remove_file(&temp_path);
+            Err(error).with_context(|| {
+                format!("failed to atomically move cache file to {}", path.display())
+            })
+        }
+    }
 }
 
 #[cfg(test)]
@@ -165,7 +289,8 @@ mod tests {
 
     #[test]
     fn validates_reference_format() {
-        let puller = OciExtensionPuller::new("/tmp/waddle-test");
+        let cache_dir = std::env::temp_dir().join("waddle-test");
+        let puller = OciExtensionPuller::new(cache_dir);
         let module = ExtensionModuleConfig {
             name: "github-enricher".to_string(),
             registry: "ghcr.io/waddle-social/waddle/extensions/github-enricher".to_string(),
@@ -227,12 +352,33 @@ mod tests {
     #[test]
     fn rejects_invalid_wasm_payload() {
         let layer = ImageLayer {
-            data: vec![1, 2, 3, 4, 5].into(),
+            data: vec![1, 2, 3, 4, 0, 0, 0, 0].into(),
             media_type: "application/wasm".to_string(),
             annotations: None,
         };
         let error = validate_wasm_layer("github-enricher", &layer)
             .expect_err("invalid payload should fail");
         assert!(error.to_string().contains("payload is not a wasm binary"));
+    }
+
+    #[test]
+    fn rejects_invalid_cache_component() {
+        let puller = OciExtensionPuller::new(std::env::temp_dir().join("waddle-test"));
+        let module = ExtensionModuleConfig {
+            name: "../bad".to_string(),
+            registry: "ghcr.io/waddle-social/waddle/extensions/github-enricher".to_string(),
+            tag: "sha-abc123".to_string(),
+            namespace: "urn:waddle:github:0".to_string(),
+            config: serde_json::Value::Object(Default::default()),
+            config_secret_files: Default::default(),
+            local_path: None,
+        };
+
+        let error = puller
+            .cached_wasm_path(&module)
+            .expect_err("cache path should reject path traversal");
+        assert!(error
+            .to_string()
+            .contains("must not include path separators"));
     }
 }
