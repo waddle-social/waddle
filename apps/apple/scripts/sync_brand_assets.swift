@@ -40,6 +40,12 @@ private enum SyncError: Error, CustomStringConvertible {
 }
 
 private let fileManager = FileManager.default
+private let appIconBackgroundColor = NSColor(
+    srgbRed: 0x12 / 255.0,
+    green: 0x1F / 255.0,
+    blue: 0x2B / 255.0,
+    alpha: 1.0
+)
 
 private func repoRoot() -> URL {
     URL(fileURLWithPath: #filePath)
@@ -70,37 +76,35 @@ private func writeIfChanged(_ data: Data, to url: URL, updated: inout [String], 
     updated.append(relativePath(url, from: baseURL))
 }
 
-private func renderPNG(from image: NSImage, pixels: Int) throws -> Data {
+private func renderPNG(from image: NSImage, pixels: Int, backgroundColor: NSColor?) throws -> Data {
+    let hasAlpha = backgroundColor == nil
+    let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
+    let bitmapInfo = hasAlpha
+        ? CGImageAlphaInfo.premultipliedLast.rawValue
+        : CGImageAlphaInfo.noneSkipLast.rawValue
+
     guard
-        let bitmap = NSBitmapImageRep(
-            bitmapDataPlanes: nil,
-            pixelsWide: pixels,
-            pixelsHigh: pixels,
-            bitsPerSample: 8,
-            samplesPerPixel: 4,
-            hasAlpha: true,
-            isPlanar: false,
-            colorSpaceName: .deviceRGB,
+        let cgContext = CGContext(
+            data: nil,
+            width: pixels,
+            height: pixels,
+            bitsPerComponent: 8,
             bytesPerRow: 0,
-            bitsPerPixel: 0
+            space: colorSpace,
+            bitmapInfo: bitmapInfo
         )
     else {
         throw SyncError.bitmapCreationFailed(pixels)
     }
 
-    bitmap.size = NSSize(width: pixels, height: pixels)
-
     NSGraphicsContext.saveGraphicsState()
     defer { NSGraphicsContext.restoreGraphicsState() }
 
-    guard let context = NSGraphicsContext(bitmapImageRep: bitmap) else {
-        throw SyncError.bitmapCreationFailed(pixels)
-    }
-
+    let context = NSGraphicsContext(cgContext: cgContext, flipped: false)
     context.imageInterpolation = .high
     NSGraphicsContext.current = context
 
-    NSColor.clear.setFill()
+    (backgroundColor ?? .clear).setFill()
     NSRect(x: 0, y: 0, width: pixels, height: pixels).fill()
 
     image.draw(
@@ -110,6 +114,11 @@ private func renderPNG(from image: NSImage, pixels: Int) throws -> Data {
         fraction: 1.0
     )
 
+    guard let cgImage = cgContext.makeImage() else {
+        throw SyncError.bitmapCreationFailed(pixels)
+    }
+
+    let bitmap = NSBitmapImageRep(cgImage: cgImage)
     guard let data = bitmap.representation(using: .png, properties: [:]) else {
         throw SyncError.pngEncodingFailed(pixels)
     }
@@ -177,8 +186,26 @@ private func syncBrandAssets() throws {
         throw SyncError.missingIconFilenames(appIconContentsURL)
     }
 
+    let expectedFilenames = Set(entries.map(\.0))
+
+    let existingGeneratedIcons = try fileManager.contentsOfDirectory(
+        at: appIconSet,
+        includingPropertiesForKeys: nil,
+        options: [.skipsHiddenFiles]
+    )
+    .filter { $0.pathExtension.lowercased() == "png" && !expectedFilenames.contains($0.lastPathComponent) }
+
+    for url in existingGeneratedIcons {
+        try fileManager.removeItem(at: url)
+        updatedFiles.append(relativePath(url, from: root))
+    }
+
     for (filename, pixels) in entries {
-        let pngData = try renderPNG(from: svgImage, pixels: pixels)
+        let pngData = try renderPNG(
+            from: svgImage,
+            pixels: pixels,
+            backgroundColor: appIconBackgroundColor
+        )
         let targetURL = appIconSet.appendingPathComponent(filename)
         try writeIfChanged(pngData, to: targetURL, updated: &updatedFiles, baseURL: root)
     }
