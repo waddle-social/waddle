@@ -902,6 +902,8 @@ public struct WaddleArchivedMessage {
     public var to: String?
     public var messageType: String
     public var body: String?
+    public var reactionTargetId: String?
+    public var reactionEmojis: [String]
     public var thread: String?
     public var parentThreadId: String?
     public var replyToId: String?
@@ -911,7 +913,7 @@ public struct WaddleArchivedMessage {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(mamId: String, queryId: String?, stanzaId: String?, timestamp: String?, from: String?, to: String?, messageType: String, body: String?, thread: String?, parentThreadId: String?, replyToId: String?, replyToSender: String?, replyFallbackStart: UInt32?, replyFallbackEnd: UInt32?) {
+    public init(mamId: String, queryId: String?, stanzaId: String?, timestamp: String?, from: String?, to: String?, messageType: String, body: String?, reactionTargetId: String?, reactionEmojis: [String], thread: String?, parentThreadId: String?, replyToId: String?, replyToSender: String?, replyFallbackStart: UInt32?, replyFallbackEnd: UInt32?) {
         self.mamId = mamId
         self.queryId = queryId
         self.stanzaId = stanzaId
@@ -920,6 +922,8 @@ public struct WaddleArchivedMessage {
         self.to = to
         self.messageType = messageType
         self.body = body
+        self.reactionTargetId = reactionTargetId
+        self.reactionEmojis = reactionEmojis
         self.thread = thread
         self.parentThreadId = parentThreadId
         self.replyToId = replyToId
@@ -960,6 +964,12 @@ extension WaddleArchivedMessage: Equatable, Hashable {
         if lhs.body != rhs.body {
             return false
         }
+        if lhs.reactionTargetId != rhs.reactionTargetId {
+            return false
+        }
+        if lhs.reactionEmojis != rhs.reactionEmojis {
+            return false
+        }
         if lhs.thread != rhs.thread {
             return false
         }
@@ -990,6 +1000,8 @@ extension WaddleArchivedMessage: Equatable, Hashable {
         hasher.combine(to)
         hasher.combine(messageType)
         hasher.combine(body)
+        hasher.combine(reactionTargetId)
+        hasher.combine(reactionEmojis)
         hasher.combine(thread)
         hasher.combine(parentThreadId)
         hasher.combine(replyToId)
@@ -1016,6 +1028,8 @@ public struct FfiConverterTypeWaddleArchivedMessage: FfiConverterRustBuffer {
                 to: FfiConverterOptionString.read(from: &buf), 
                 messageType: FfiConverterString.read(from: &buf), 
                 body: FfiConverterOptionString.read(from: &buf), 
+                reactionTargetId: FfiConverterOptionString.read(from: &buf), 
+                reactionEmojis: FfiConverterSequenceString.read(from: &buf), 
                 thread: FfiConverterOptionString.read(from: &buf), 
                 parentThreadId: FfiConverterOptionString.read(from: &buf), 
                 replyToId: FfiConverterOptionString.read(from: &buf), 
@@ -1034,6 +1048,8 @@ public struct FfiConverterTypeWaddleArchivedMessage: FfiConverterRustBuffer {
         FfiConverterOptionString.write(value.to, into: &buf)
         FfiConverterString.write(value.messageType, into: &buf)
         FfiConverterOptionString.write(value.body, into: &buf)
+        FfiConverterOptionString.write(value.reactionTargetId, into: &buf)
+        FfiConverterSequenceString.write(value.reactionEmojis, into: &buf)
         FfiConverterOptionString.write(value.thread, into: &buf)
         FfiConverterOptionString.write(value.parentThreadId, into: &buf)
         FfiConverterOptionString.write(value.replyToId, into: &buf)
@@ -1596,6 +1612,8 @@ public struct WaddleMessage {
     public var originId: String?
     public var replacesId: String?
     public var retractsId: String?
+    public var reactionTargetId: String?
+    public var reactionEmojis: [String]
     public var isMuc: Bool
     public var thread: String?
     public var parentThreadId: String?
@@ -1618,7 +1636,7 @@ public struct WaddleMessage {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(id: String?, from: String?, to: String?, body: String?, messageType: String, timestamp: String?, stanzaId: String?, originId: String?, replacesId: String?, retractsId: String?, isMuc: Bool, thread: String?, parentThreadId: String?, 
+    public init(id: String?, from: String?, to: String?, body: String?, messageType: String, timestamp: String?, stanzaId: String?, originId: String?, replacesId: String?, retractsId: String?, reactionTargetId: String?, reactionEmojis: [String], isMuc: Bool, thread: String?, parentThreadId: String?, 
         /**
          * XEP-0461 reply target message id.
          */replyToId: String?, 
@@ -1641,6 +1659,8 @@ public struct WaddleMessage {
         self.originId = originId
         self.replacesId = replacesId
         self.retractsId = retractsId
+        self.reactionTargetId = reactionTargetId
+        self.reactionEmojis = reactionEmojis
         self.isMuc = isMuc
         self.thread = thread
         self.parentThreadId = parentThreadId
@@ -1688,6 +1708,12 @@ extension WaddleMessage: Equatable, Hashable {
         if lhs.retractsId != rhs.retractsId {
             return false
         }
+        if lhs.reactionTargetId != rhs.reactionTargetId {
+            return false
+        }
+        if lhs.reactionEmojis != rhs.reactionEmojis {
+            return false
+        }
         if lhs.isMuc != rhs.isMuc {
             return false
         }
@@ -1723,6 +1749,8 @@ extension WaddleMessage: Equatable, Hashable {
         hasher.combine(originId)
         hasher.combine(replacesId)
         hasher.combine(retractsId)
+        hasher.combine(reactionTargetId)
+        hasher.combine(reactionEmojis)
         hasher.combine(isMuc)
         hasher.combine(thread)
         hasher.combine(parentThreadId)
@@ -1752,6 +1780,8 @@ public struct FfiConverterTypeWaddleMessage: FfiConverterRustBuffer {
                 originId: FfiConverterOptionString.read(from: &buf), 
                 replacesId: FfiConverterOptionString.read(from: &buf), 
                 retractsId: FfiConverterOptionString.read(from: &buf), 
+                reactionTargetId: FfiConverterOptionString.read(from: &buf), 
+                reactionEmojis: FfiConverterSequenceString.read(from: &buf), 
                 isMuc: FfiConverterBool.read(from: &buf), 
                 thread: FfiConverterOptionString.read(from: &buf), 
                 parentThreadId: FfiConverterOptionString.read(from: &buf), 
@@ -1773,6 +1803,8 @@ public struct FfiConverterTypeWaddleMessage: FfiConverterRustBuffer {
         FfiConverterOptionString.write(value.originId, into: &buf)
         FfiConverterOptionString.write(value.replacesId, into: &buf)
         FfiConverterOptionString.write(value.retractsId, into: &buf)
+        FfiConverterOptionString.write(value.reactionTargetId, into: &buf)
+        FfiConverterSequenceString.write(value.reactionEmojis, into: &buf)
         FfiConverterBool.write(value.isMuc, into: &buf)
         FfiConverterOptionString.write(value.thread, into: &buf)
         FfiConverterOptionString.write(value.parentThreadId, into: &buf)
@@ -2540,6 +2572,31 @@ fileprivate struct FfiConverterOptionTypeWaddleThreadTarget: FfiConverterRustBuf
         case 1: return try FfiConverterTypeWaddleThreadTarget.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceString: FfiConverterRustBuffer {
+    typealias SwiftType = [String]
+
+    public static func write(_ value: [String], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterString.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [String] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [String]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterString.read(from: &buf))
+        }
+        return seq
     }
 }
 

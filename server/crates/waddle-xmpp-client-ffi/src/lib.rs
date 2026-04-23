@@ -44,6 +44,8 @@ pub struct WaddleMessage {
     pub origin_id: Option<String>,
     pub replaces_id: Option<String>,
     pub retracts_id: Option<String>,
+    pub reaction_target_id: Option<String>,
+    pub reaction_emojis: Vec<String>,
     pub is_muc: bool,
     pub thread: Option<String>,
     pub parent_thread_id: Option<String>,
@@ -67,6 +69,8 @@ pub struct WaddleArchivedMessage {
     pub to: Option<String>,
     pub message_type: String,
     pub body: Option<String>,
+    pub reaction_target_id: Option<String>,
+    pub reaction_emojis: Vec<String>,
     pub thread: Option<String>,
     pub parent_thread_id: Option<String>,
     pub reply_to_id: Option<String>,
@@ -642,6 +646,8 @@ fn inbound_to_ffi(msg: InboundMessage) -> WaddleMessage {
         origin_id: msg.origin_id,
         replaces_id: msg.replaces_id,
         retracts_id: msg.retracts_id,
+        reaction_target_id: msg.reaction_target_id,
+        reaction_emojis: msg.reaction_emojis,
         is_muc,
         thread: msg.thread_id.or(msg.thread),
         parent_thread_id: msg.parent_thread_id,
@@ -674,6 +680,11 @@ fn archived_to_ffi(archived: waddle_xmpp_client::ArchivedMessage) -> WaddleArchi
         to: archived.to,
         message_type: archived.message_type,
         body: archived.body,
+        reaction_target_id: parsed.as_ref().and_then(|m| m.reaction_target_id.clone()),
+        reaction_emojis: parsed
+            .as_ref()
+            .map(|m| m.reaction_emojis.clone())
+            .unwrap_or_default(),
         thread: archived.thread,
         parent_thread_id: parsed.as_ref().and_then(|m| m.parent_thread_id.clone()),
         reply_to_id: parsed.as_ref().and_then(|m| m.reply_to_id.clone()),
