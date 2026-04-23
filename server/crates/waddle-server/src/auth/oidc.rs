@@ -21,6 +21,7 @@ pub struct OidcDiscovery {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DynamicClientRegistration {
     pub client_id: String,
+    #[serde(default)]
     pub client_secret: String,
     pub token_endpoint_auth_method: String,
 }
@@ -139,7 +140,7 @@ pub async fn register_dynamic_client(
         )));
     }
 
-    let payload = res.json::<DynamicClientRegistration>().await.map_err(|e| {
+    let mut payload = res.json::<DynamicClientRegistration>().await.map_err(|e| {
         AuthError::AuthorizationFailed(format!("Invalid registration payload: {}", e))
     })?;
 
@@ -148,16 +149,18 @@ pub async fn register_dynamic_client(
             "dynamic registration returned empty client_id".to_string(),
         ));
     }
-    if payload.client_secret.trim().is_empty() {
-        return Err(AuthError::AuthorizationFailed(
-            "dynamic registration returned empty client_secret".to_string(),
-        ));
-    }
-    if payload.token_endpoint_auth_method.trim().is_empty() {
+    let token_endpoint_auth_method = payload.token_endpoint_auth_method.trim().to_string();
+    if token_endpoint_auth_method.is_empty() {
         return Err(AuthError::AuthorizationFailed(
             "dynamic registration returned empty token_endpoint_auth_method".to_string(),
         ));
     }
+    if token_endpoint_auth_method != "none" && payload.client_secret.trim().is_empty() {
+        return Err(AuthError::AuthorizationFailed(
+            "dynamic registration returned empty client_secret".to_string(),
+        ));
+    }
+    payload.token_endpoint_auth_method = token_endpoint_auth_method;
 
     Ok(payload)
 }
@@ -340,8 +343,106 @@ pub async fn claims_from_oauth2_fallback(
 
 #[cfg(test)]
 mod tests {
-    use super::avatar_url_from_claims;
+    use super::*;
+    use crate::auth::{AuthProviderKind, AuthProviderTokenEndpointAuthMethod};
     use serde_json::json;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn dynamic_oidc_provider(
+        token_endpoint_auth_method: AuthProviderTokenEndpointAuthMethod,
+    ) -> AuthProviderConfig {
+        AuthProviderConfig {
+            id: "colony".to_string(),
+            display_name: "Colony".to_string(),
+            kind: AuthProviderKind::Oidc,
+            dynamic_client_registration: true,
+            client_id: "".to_string(),
+            client_secret: "".to_string(),
+            token_endpoint_auth_method,
+            require_dpop: true,
+            scopes: vec![
+                "openid".to_string(),
+                "profile".to_string(),
+                "email".to_string(),
+            ],
+            issuer: Some("https://colony.waddle.social".to_string()),
+            authorization_endpoint: None,
+            token_endpoint: None,
+            userinfo_endpoint: None,
+            jwks_uri: None,
+            subject_claim: "sub".to_string(),
+            username_claim: Some("preferred_username".to_string()),
+            email_claim: Some("email".to_string()),
+        }
+    }
+
+    fn discovery(registration_endpoint: String) -> OidcDiscovery {
+        OidcDiscovery {
+            issuer: "https://colony.waddle.social".to_string(),
+            authorization_endpoint: "https://colony.waddle.social/api/auth/oauth2/authorize"
+                .to_string(),
+            token_endpoint: "https://colony.waddle.social/api/auth/oauth2/token".to_string(),
+            userinfo_endpoint: Some(
+                "https://colony.waddle.social/api/auth/oauth2/userinfo".to_string(),
+            ),
+            jwks_uri: "https://colony.waddle.social/api/auth/jwks".to_string(),
+            registration_endpoint: Some(registration_endpoint),
+        }
+    }
+
+    #[tokio::test]
+    async fn dynamic_registration_accepts_public_client_without_secret() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/register"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+                "client_id": "registered-public-client",
+                "token_endpoint_auth_method": "none"
+            })))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let registration = register_dynamic_client(
+            &Client::new(),
+            &dynamic_oidc_provider(AuthProviderTokenEndpointAuthMethod::NoAuthentication),
+            &discovery(format!("{}/register", mock_server.uri())),
+            "https://waddle.social/api/auth/callback",
+        )
+        .await
+        .expect("public DCR response should be accepted");
+
+        assert_eq!(registration.client_id, "registered-public-client");
+        assert_eq!(registration.token_endpoint_auth_method, "none");
+        assert!(registration.client_secret.is_empty());
+    }
+
+    #[tokio::test]
+    async fn dynamic_registration_requires_secret_for_confidential_client() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/register"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+                "client_id": "registered-confidential-client",
+                "token_endpoint_auth_method": "client_secret_post"
+            })))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let err = register_dynamic_client(
+            &Client::new(),
+            &dynamic_oidc_provider(AuthProviderTokenEndpointAuthMethod::ClientSecretPost),
+            &discovery(format!("{}/register", mock_server.uri())),
+            "https://waddle.social/api/auth/callback",
+        )
+        .await
+        .expect_err("confidential DCR response without secret should fail")
+        .to_string();
+
+        assert!(err.contains("dynamic registration returned empty client_secret"));
+    }
 
     #[test]
     fn avatar_url_prefers_picture_claim() {
