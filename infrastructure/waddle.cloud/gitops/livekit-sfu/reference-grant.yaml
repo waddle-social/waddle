@@ -1,0 +1,16 @@
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: gateway-to-livekit-sfu
+  namespace: livekit
+spec:
+  from:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      namespace: livekit
+    - group: gateway.networking.k8s.io
+      kind: TLSRoute
+      namespace: livekit
+  to:
+    - group: ""
+      kind: Service

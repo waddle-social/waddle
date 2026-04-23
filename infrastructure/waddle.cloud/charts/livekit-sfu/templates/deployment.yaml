@@ -1,0 +1,161 @@
+{{- $apiKeysEnabled := or .Values.apiKeys.existingSecret (gt (len .Values.apiKeys.values) 0) -}}
+{{- $turnTLS := and .Values.livekit.turn.enabled (gt (int (.Values.livekit.turn.tls_port | default 0)) 0) -}}
+{{- $turnTLSSecret := and $turnTLS (not .Values.livekit.turn.external_tls) -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "livekit-sfu.fullname" . }}
+  labels:
+    {{- include "livekit-sfu.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  revisionHistoryLimit: {{ .Values.revisionHistoryLimit }}
+  selector:
+    matchLabels:
+      {{- include "livekit-sfu.selectorLabels" . | nindent 6 }}
+  strategy:
+    {{- toYaml .Values.deploymentStrategy | nindent 4 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- if and (not .Values.apiKeys.existingSecret) (gt (len .Values.apiKeys.values) 0) }}
+        checksum/api-keys: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "livekit-sfu.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "livekit-sfu.serviceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.automountServiceAccountToken }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- if .Values.podHostNetwork }}
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      {{- end }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      containers:
+        - name: livekit
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --disable-strict-config
+          env:
+            - name: LIVEKIT_CONFIG
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "livekit-sfu.fullname" . }}
+                  key: config.yaml
+            {{- if $turnTLSSecret }}
+            - name: LIVEKIT_TURN_CERT
+              value: {{ printf "%s/%s" .Values.turn.mountPath .Values.turn.certKey | quote }}
+            - name: LIVEKIT_TURN_KEY
+              value: {{ printf "%s/%s" .Values.turn.mountPath .Values.turn.keyKey | quote }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.livekit.port }}
+              protocol: TCP
+            {{- if .Values.livekit.rtc.tcp_port }}
+            - name: rtc-tcp
+              containerPort: {{ .Values.livekit.rtc.tcp_port }}
+              hostPort: {{ .Values.livekit.rtc.tcp_port }}
+              protocol: TCP
+            {{- end }}
+            {{- if .Values.livekit.rtc.udp_port }}
+            - name: rtc-udp
+              containerPort: {{ .Values.livekit.rtc.udp_port }}
+              hostPort: {{ .Values.livekit.rtc.udp_port }}
+              protocol: UDP
+            {{- end }}
+            {{- if $turnTLS }}
+            - name: turn-tls
+              containerPort: {{ .Values.livekit.turn.tls_port }}
+              hostPort: {{ .Values.livekit.turn.tls_port }}
+              protocol: TCP
+            {{- end }}
+            {{- if and .Values.livekit.turn.enabled .Values.livekit.turn.udp_port }}
+            - name: turn-udp
+              containerPort: {{ .Values.livekit.turn.udp_port }}
+              hostPort: {{ .Values.livekit.turn.udp_port }}
+              protocol: UDP
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          {{- if or $apiKeysEnabled $turnTLSSecret .Values.tmpDir.enabled }}
+          volumeMounts:
+            {{- if $apiKeysEnabled }}
+            - name: api-keys
+              mountPath: {{ dir .Values.apiKeys.mountPath }}
+              readOnly: true
+            {{- end }}
+            {{- if $turnTLSSecret }}
+            - name: turn-cert
+              mountPath: {{ .Values.turn.mountPath }}
+              readOnly: true
+            {{- end }}
+            {{- if .Values.tmpDir.enabled }}
+            - name: tmp
+              mountPath: {{ .Values.tmpDir.mountPath }}
+            {{- end }}
+          {{- end }}
+      {{- if or $apiKeysEnabled $turnTLSSecret .Values.tmpDir.enabled }}
+      volumes:
+        {{- if $apiKeysEnabled }}
+        - name: api-keys
+          secret:
+            secretName: {{ include "livekit-sfu.apiKeysSecretName" . }}
+            defaultMode: 0440
+            items:
+              - key: {{ .Values.apiKeys.secretKey }}
+                path: {{ base .Values.apiKeys.mountPath }}
+        {{- end }}
+        {{- if $turnTLSSecret }}
+        - name: turn-cert
+          secret:
+            secretName: {{ .Values.turn.secretName }}
+            defaultMode: 0440
+            items:
+              - key: {{ .Values.turn.certKey }}
+                path: {{ .Values.turn.certKey }}
+              - key: {{ .Values.turn.keyKey }}
+                path: {{ .Values.turn.keyKey }}
+        {{- end }}
+        {{- if .Values.tmpDir.enabled }}
+        - name: tmp
+          emptyDir:
+            sizeLimit: {{ .Values.tmpDir.sizeLimit }}
+        {{- end }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

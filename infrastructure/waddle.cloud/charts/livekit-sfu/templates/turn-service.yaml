@@ -1,0 +1,17 @@
+{{- if and .Values.livekit.turn.enabled .Values.livekit.turn.tls_port }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "livekit-sfu.fullname" . }}-turn
+  labels:
+    {{- include "livekit-sfu.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - name: turn-tls
+      port: {{ .Values.livekit.turn.tls_port }}
+      targetPort: turn-tls
+      protocol: TCP
+  selector:
+    {{- include "livekit-sfu.selectorLabels" . | nindent 4 }}
+{{- end }}

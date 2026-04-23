@@ -1,0 +1,13 @@
+{{- $config := deepCopy .Values.livekit -}}
+{{- if or .Values.apiKeys.existingSecret (gt (len .Values.apiKeys.values) 0) -}}
+{{- $_ := set $config "key_file" .Values.apiKeys.mountPath -}}
+{{- end -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "livekit-sfu.fullname" . }}
+  labels:
+    {{- include "livekit-sfu.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+{{ toYaml $config | indent 4 }}

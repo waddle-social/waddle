@@ -1,0 +1,41 @@
+{{- if and (not .Values.apiKeys.existingSecret) (eq (len .Values.apiKeys.values) 0) -}}
+{{- fail "livekit-sfu requires apiKeys.existingSecret or apiKeys.values to be set" -}}
+{{- end -}}
+{{- range $apiKey, $apiSecret := .Values.apiKeys.values -}}
+{{- if lt (len (printf "%v" $apiSecret)) 32 -}}
+{{- fail (printf "apiKeys.values.%s must be at least 32 characters" $apiKey) -}}
+{{- end -}}
+{{- end -}}
+{{- if ne (int .Values.replicaCount) 1 -}}
+{{- fail "livekit-sfu is intentionally single-node for now; replicaCount must be 1" -}}
+{{- end -}}
+{{- if not .Values.podHostNetwork -}}
+{{- fail "livekit-sfu requires podHostNetwork=true so LiveKit can advertise node-reachable RTC ports" -}}
+{{- end -}}
+{{- if and .Values.livekit.port (lt (int .Values.livekit.port) 1024) -}}
+{{- fail "livekit.port must be >= 1024 with the hardened non-root container securityContext" -}}
+{{- end -}}
+{{- if and .Values.livekit.rtc.tcp_port (lt (int .Values.livekit.rtc.tcp_port) 1024) -}}
+{{- fail "livekit.rtc.tcp_port must be >= 1024 with the hardened non-root container securityContext" -}}
+{{- end -}}
+{{- if and .Values.livekit.rtc.udp_port (lt (int .Values.livekit.rtc.udp_port) 1024) -}}
+{{- fail "livekit.rtc.udp_port must be >= 1024 with the hardened non-root container securityContext" -}}
+{{- end -}}
+{{- if and .Values.livekit.turn.tls_port (lt (int .Values.livekit.turn.tls_port) 1024) -}}
+{{- fail "livekit.turn.tls_port must be >= 1024 with the hardened non-root container securityContext; expose 443 through the Gateway/LB instead" -}}
+{{- end -}}
+{{- if and .Values.livekit.turn.udp_port (lt (int .Values.livekit.turn.udp_port) 1024) -}}
+{{- fail "livekit.turn.udp_port must be >= 1024 with the hardened non-root container securityContext" -}}
+{{- end -}}
+{{- if and (not .Values.livekit.rtc.udp_port) (not (and .Values.livekit.rtc.port_range_start .Values.livekit.rtc.port_range_end)) -}}
+{{- fail "livekit-sfu requires either livekit.rtc.udp_port or livekit.rtc.port_range_start/livekit.rtc.port_range_end" -}}
+{{- end -}}
+{{- if and .Values.livekit.turn.enabled (not .Values.livekit.turn.domain) -}}
+{{- fail "livekit.turn.domain is required when turn.enabled=true" -}}
+{{- end -}}
+{{- if and .Values.livekit.turn.enabled (not (or .Values.livekit.turn.tls_port .Values.livekit.turn.udp_port)) -}}
+{{- fail "livekit.turn requires at least one of tls_port or udp_port when enabled" -}}
+{{- end -}}
+{{- if and .Values.livekit.turn.enabled .Values.livekit.turn.tls_port (not .Values.livekit.turn.external_tls) (not .Values.turn.secretName) -}}
+{{- fail "turn.secretName is required when livekit.turn.tls_port is set and livekit.turn.external_tls=false" -}}
+{{- end -}}

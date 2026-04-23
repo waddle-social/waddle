@@ -13,7 +13,7 @@ schema.#Project & {
 	tasks: {
 		"helm-push": schema.#Task & {
 			command: "bash"
-			args: ["-c", "helm package ../../server/charts/waddle-server && helm push waddle-server-*.tgz oci://ghcr.io/waddle-social/waddle/charts && rm -f waddle-server-*.tgz"]
+			args: ["-c", "helm package ../../server/charts/waddle-server && helm package ./charts/livekit-sfu && helm push waddle-server-*.tgz oci://ghcr.io/waddle-social/waddle/charts && helm push livekit-sfu-*.tgz oci://ghcr.io/waddle-social/waddle/charts && rm -f waddle-server-*.tgz livekit-sfu-*.tgz"]
 		}
 		"gitops-push": schema.#Task & {
 			command: "bash"
