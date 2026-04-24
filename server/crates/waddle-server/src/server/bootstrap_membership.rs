@@ -128,11 +128,7 @@ pub async fn reconcile_user_membership(
 
     let subject = Subject::user(user_id);
     let object = Object::new(ObjectType::Server, config.server_id.as_str());
-    for permission in [
-        Permission::Owner,
-        Permission::Admin,
-        Permission::Member,
-    ] {
+    for permission in [Permission::Owner, Permission::Admin, Permission::Member] {
         let response = permission_actor
             .ask(CheckPermission {
                 subject: subject.clone(),
