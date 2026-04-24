@@ -38,6 +38,7 @@ export function useWaddles(
 
   let spaceRequestId = 0;
   let structureRequestId = 0;
+  let memberRequestId = 0;
 
   const editWaddleForm = ref<CommunityFormData>({
     name: "",
@@ -176,9 +177,21 @@ export function useWaddles(
 
       activeChannelId.value = nextChannelId;
       const nextChannel = channelList.find((channel) => channel.id === nextChannelId);
-      members.value = nextChannelId && xmppClient.value
-        ? await xmppClient.value.listRoomMembers(nextChannelId, { roomJid: nextChannel?.jid })
-        : [];
+      if (nextChannelId && xmppClient.value) {
+        const memberReqId = ++memberRequestId;
+        try {
+          const freshMembers = await xmppClient.value.listRoomMembers(nextChannelId, { roomJid: nextChannel?.jid });
+          if (requestId === structureRequestId && memberReqId === memberRequestId) {
+            members.value = freshMembers;
+          }
+        } catch (e) {
+          if (requestId === structureRequestId && memberReqId === memberRequestId) {
+            actionError.value = normalizeError(e);
+          }
+        }
+      } else {
+        members.value = [];
+      }
       resetForms();
       return nextChannelId;
     } catch (e) {
@@ -213,6 +226,23 @@ export function useWaddles(
       return loadStructure();
     } else {
       return null;
+    }
+  }
+
+  async function reloadChannelMembers(channelId: string): Promise<void> {
+    if (!xmppClient.value) return;
+
+    const channel = channels.value.find((c) => c.id === channelId);
+    const requestId = ++memberRequestId;
+
+    try {
+      const freshMembers = await xmppClient.value.listRoomMembers(channelId, { roomJid: channel?.jid });
+      if (requestId !== memberRequestId) return;
+      members.value = freshMembers;
+    } catch (e) {
+      if (requestId === memberRequestId) {
+        actionError.value = normalizeError(e);
+      }
     }
   }
 
@@ -355,6 +385,7 @@ export function useWaddles(
   function clearData() {
     spaceRequestId++;
     structureRequestId++;
+    memberRequestId++;
     waddles.value = [];
     channels.value = [];
     members.value = [];
@@ -388,6 +419,7 @@ export function useWaddles(
     canManageMembers,
     loadSpace,
     loadStructure,
+    reloadChannelMembers,
     updateWaddle,
     deleteWaddle,
     createChannel,

@@ -56,18 +56,6 @@ const waddles = useWaddles(
   ui.clearActionError,
 );
 
-const members = useMembers(
-  xmppClient,
-  waddles.activeSpaceId,
-  waddles.activeChannelId,
-  waddles.members,
-  waddles.canManageMembers,
-  ui.normalizeError,
-  ui.actionError,
-  ui.clearActionError,
-  waddles.loadStructure,
-);
-
 const messaging = useMessaging(
   session,
   api,
@@ -165,6 +153,19 @@ const activeIsSearching = computed(() =>
 
 const selfDomain = computed(() => (session.value ? jidDomain(session.value.jid) : ""));
 const memberJidByNick = ref<Record<string, string>>({});
+const members = useMembers(
+  xmppClient,
+  waddles.activeSpaceId,
+  waddles.activeChannelId,
+  waddles.members,
+  messaging.roomPresence,
+  memberJidByNick,
+  waddles.canManageMembers,
+  ui.normalizeError,
+  ui.actionError,
+  ui.clearActionError,
+  waddles.loadStructure,
+);
 const activeDmPeer = computed(() => {
   const active = dmConversations.activePeerJid.value;
   if (!active) return null;
@@ -324,6 +325,9 @@ const activeTarget = computed(() =>
 
 const activeUploadProgress = computed(() =>
   ui.sidebarMode.value === "dms" ? dmMessaging.uploadProgress.value : messaging.uploadProgress.value,
+);
+const activeActionError = computed(() =>
+  ui.actionError.value || (ui.sidebarMode.value === "channels" ? members.mentionSourceDiagnostic.value : "")
 );
 
 async function sendActiveMessage(
@@ -541,6 +545,7 @@ async function applyRouteTarget(route: ReturnType<typeof parseRoute>, requestId:
     const channelId = ch?.id ?? waddles.activeChannelId.value;
     if (channelId) {
       waddles.activeChannelId.value = channelId;
+      void waddles.reloadChannelMembers(channelId);
       messaging.clearMessages();
       await messaging.loadMessages(waddles.activeSpaceId.value, channelId);
     }
@@ -622,6 +627,7 @@ async function selectChannel(channelId: string) {
   dmConversations.closeDm();
   memberJidByNick.value = {};
   waddles.activeChannelId.value = channelId;
+  void waddles.reloadChannelMembers(channelId);
   messaging.clearMessages();
   // XEP-0502: Clear activity indicator for this channel
   if (waddles.activeSpaceId.value && connectionStore.session) {
@@ -1023,7 +1029,7 @@ onUnmounted(() => {
               :messages="activeMessages"
               :first-unseen-id="activeFirstUnseenId"
               :xmpp-status="messaging.xmppStatus.value"
-              :action-error="ui.actionError.value"
+               :action-error="activeActionError"
               :update-available="appUpdate.updateAvailable.value"
               :is-applying-update="appUpdate.isApplyingUpdate.value"
               :is-loading-messages="activeIsLoadingMessages"
@@ -1033,9 +1039,9 @@ onUnmounted(() => {
               :current-user="connectionStore.session?.username"
               :self-domain="selfDomain"
               :avatar-url-by-author="avatarUrlByAuthor"
-              :author-jid-by-nick="memberJidByNick"
+               :author-jid-by-nick="members.authorJidByNick.value"
               :tenor-api-key="tenorApiKey"
-              :member-names="waddles.members.value.map((m) => m.username)"
+               :member-names="members.mentionNames.value"
               :room-hats="messaging.roomHats.value"
               :room-presence="messaging.roomPresence.value"
               :room-last-seen="messaging.roomLastSeen.value"
@@ -1103,12 +1109,12 @@ onUnmounted(() => {
               :resolve-entry="threads.resolveEntry"
               :current-user="connectionStore.session?.username"
               :avatar-url-by-author="avatarUrlByAuthor"
-              :author-jid-by-nick="memberJidByNick"
+               :author-jid-by-nick="members.authorJidByNick.value"
               :room-hats="messaging.roomHats.value"
               :room-presence="messaging.roomPresence.value"
               :room-last-seen="messaging.roomLastSeen.value"
               :tenor-api-key="tenorApiKey"
-              :member-names="waddles.members.value.map((m) => m.username)"
+               :member-names="members.mentionNames.value"
               :slow-mode-cooldown="messaging.slowModeCooldown.value"
               :is-sending="false"
               :upload-progress="{ uploading: false, progress: 0, filename: '' }"
@@ -1136,12 +1142,12 @@ onUnmounted(() => {
               :resolve-entry="threads.resolveEntry"
               :current-user="connectionStore.session?.username"
               :avatar-url-by-author="avatarUrlByAuthor"
-              :author-jid-by-nick="memberJidByNick"
+               :author-jid-by-nick="members.authorJidByNick.value"
               :room-hats="messaging.roomHats.value"
               :room-presence="messaging.roomPresence.value"
               :room-last-seen="messaging.roomLastSeen.value"
               :tenor-api-key="tenorApiKey"
-              :member-names="waddles.members.value.map((m) => m.username)"
+               :member-names="members.mentionNames.value"
               :slow-mode-cooldown="messaging.slowModeCooldown.value"
               :is-sending="messaging.isSending.value"
               :upload-progress="messaging.uploadProgress.value"
