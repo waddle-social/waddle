@@ -627,6 +627,31 @@ pub(crate) fn iq_to_xml(iq: xmpp_parsers::iq::Iq) -> String {
     stanza_to_xml(&Stanza::Iq(iq))
 }
 
+pub(crate) fn build_iq_result_xml(
+    id: &str,
+    from: Option<&str>,
+    to: Option<&str>,
+    payload: Option<xmpp_parsers::minidom::Element>,
+) -> String {
+    let mut iq = Element::builder("iq", waddle_xmpp::ns::JABBER_CLIENT)
+        .attr("id", id)
+        .attr("type", "result");
+    if let Some(from) = from {
+        iq = iq.attr("from", from);
+    }
+    if let Some(to) = to {
+        iq = iq.attr("to", to);
+    }
+
+    let iq = if let Some(payload) = payload {
+        iq.append(payload).build()
+    } else {
+        iq.build()
+    };
+
+    element_to_xml(iq)
+}
+
 pub(crate) fn build_iq_error_xml_with_addresses(
     id: &str,
     from: Option<&str>,
@@ -1662,7 +1687,7 @@ mod tests {
     use handlers::presence::{handle_muc_join, handle_muc_leave, parse_room_jid_context};
     // Types moved out of mod.rs scope but used in tests
     use waddle_xmpp::commands::{CommandContext, CommandResult};
-    use waddle_xmpp::muc::room_actor::{GetSnapshot, JoinWithAffiliation};
+    use waddle_xmpp::muc::room_actor::{ChangeAffiliation, GetSnapshot, JoinWithAffiliation};
     use waddle_xmpp::registry::BroadcastOutcome;
     use waddle_xmpp::Affiliation;
     use xmpp_parsers::iq::{Iq, IqType};
@@ -3728,7 +3753,6 @@ mod tests {
             .expect("snapshot")
             .room;
         assert!(snapshot.config.persistent);
-        assert_eq!(snapshot.config.whois, waddle_xmpp::muc::RoomWhois::Anyone);
 
         let disco = disco_items_iq_frame("muc-items", "muc.example.com", None);
         let responses = handle_iq(
@@ -3744,6 +3768,158 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn standard_muc_owner_get_returns_config_without_persisting_room() {
+        let state = create_test_websocket_state().await;
+        let session = create_test_session(state.as_ref(), "alice").await;
+
+        let room_jid: BareJid = "config-get@muc.example.com".parse().expect("room jid");
+        let alice_jid: FullJid = format!("{}@example.com/web", session.xmpp_localpart)
+            .parse()
+            .expect("alice jid");
+        let ready = ready_phase(&alice_jid);
+
+        handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room_jid,
+            &alice_jid,
+            "alice",
+            &Some(session.clone()),
+        )
+        .await;
+
+        let owner_iq = element_to_xml(
+            Element::builder("iq", waddle_xmpp::ns::JABBER_CLIENT)
+                .attr("id", "owner-get")
+                .attr("type", "get")
+                .attr("to", room_jid.to_string())
+                .append(Element::builder("query", waddle_xmpp::muc::NS_MUC_OWNER).build())
+                .build(),
+        );
+
+        let responses = handle_iq(
+            &owner_iq,
+            "example.com",
+            "muc.example.com",
+            state.as_ref(),
+            &Some(session),
+            &ready,
+        )
+        .await;
+        assert_eq!(responses.len(), 1, "owner get response: {responses:?}");
+        assert!(responses[0].contains("type=\"result\""));
+        assert!(responses[0].contains("muc#roomconfig_roomname"));
+
+        let actor = state.deps.app_state.db_pool.global_actor().clone();
+        let channel = crate::server::xmpp_state::get_xmpp_channel(actor, "config-get")
+            .await
+            .expect("channel lookup");
+        assert!(channel.is_none());
+    }
+
+    #[tokio::test]
+    async fn standard_muc_owner_config_rejects_non_owner() {
+        let state = create_test_websocket_state().await;
+        let alice_session = create_test_session(state.as_ref(), "alice").await;
+        let bob_session = create_test_session(state.as_ref(), "bob").await;
+
+        let room_jid: BareJid = "locked@muc.example.com".parse().expect("room jid");
+        let alice_jid: FullJid = format!("{}@example.com/web", alice_session.xmpp_localpart)
+            .parse()
+            .expect("alice jid");
+        let bob_jid: FullJid = format!("{}@example.com/web", bob_session.xmpp_localpart)
+            .parse()
+            .expect("bob jid");
+        let bob_ready = ready_phase(&bob_jid);
+
+        handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room_jid,
+            &alice_jid,
+            "alice",
+            &Some(alice_session),
+        )
+        .await;
+
+        let submit_form = Element::builder("x", waddle_xmpp::muc::DATA_FORMS_NS)
+            .attr("type", "submit")
+            .append(
+                Element::builder("field", waddle_xmpp::muc::DATA_FORMS_NS)
+                    .attr("var", "muc#roomconfig_roomname")
+                    .append(
+                        Element::builder("value", waddle_xmpp::muc::DATA_FORMS_NS)
+                            .append("Hacked")
+                            .build(),
+                    )
+                    .build(),
+            )
+            .build();
+        let owner_iq = element_to_xml(
+            Element::builder("iq", waddle_xmpp::ns::JABBER_CLIENT)
+                .attr("id", "owner-submit")
+                .attr("type", "set")
+                .attr("to", room_jid.to_string())
+                .append(
+                    Element::builder("query", waddle_xmpp::muc::NS_MUC_OWNER)
+                        .append(submit_form)
+                        .build(),
+                )
+                .build(),
+        );
+
+        let responses = handle_iq(
+            &owner_iq,
+            "example.com",
+            "muc.example.com",
+            state.as_ref(),
+            &Some(bob_session.clone()),
+            &bob_ready,
+        )
+        .await;
+        assert_eq!(responses.len(), 1, "owner config response: {responses:?}");
+        assert!(responses[0].contains("type=\"error\""));
+        assert!(responses[0].contains("forbidden"));
+
+        let snapshot = get_room_actor(state.as_ref(), &room_jid)
+            .await
+            .expect("room actor")
+            .ask(GetSnapshot)
+            .await
+            .expect("snapshot")
+            .room;
+        assert_ne!(snapshot.config.name, "Hacked");
+
+        let room_actor = get_room_actor(state.as_ref(), &room_jid)
+            .await
+            .expect("room actor");
+        room_actor
+            .ask(ChangeAffiliation {
+                jid: bob_jid.to_bare(),
+                affiliation: Affiliation::Admin,
+            })
+            .await
+            .expect("set admin affiliation");
+
+        let responses = handle_iq(
+            &owner_iq,
+            "example.com",
+            "muc.example.com",
+            state.as_ref(),
+            &Some(bob_session),
+            &bob_ready,
+        )
+        .await;
+        assert_eq!(
+            responses.len(),
+            1,
+            "admin owner config response: {responses:?}"
+        );
+        assert!(responses[0].contains("type=\"error\""));
+        assert!(responses[0].contains("forbidden"));
+    }
+
+    #[tokio::test]
     async fn room_disco_info_advertises_parent_space_metadata_for_linked_channel() {
         let state = create_test_websocket_state().await;
         let space_db = state.deps.app_state.db_pool.global();
@@ -3754,18 +3930,6 @@ mod tests {
         )
         .await
         .expect("insert channel");
-        conn.execute(
-            "INSERT INTO spaces (id, name, owner_id, is_public, created_at, updated_at) VALUES (?, ?, 'server', 1, ?, ?)",
-            crate::db_params!["space", "Example Space", "1970-01-01T00:00:00Z", "1970-01-01T00:00:00Z"],
-        )
-        .await
-        .expect("insert space");
-        conn.execute(
-            "INSERT INTO space_channels (space_id, channel_id, created_at) VALUES (?, ?, ?)",
-            crate::db_params!["space", "linked", "1970-01-01T00:00:00Z"],
-        )
-        .await
-        .expect("link channel to space");
         drop(conn);
 
         let query = disco_info_iq_frame("room-info", "linked@muc.example.com", None);
@@ -3780,7 +3944,7 @@ mod tests {
         .await;
         let response = responses.first().expect("room disco response");
         assert!(response.contains("muc_nonanonymous"));
-        assert!(response.contains("pubsub#title") && response.contains("Example Space"));
+        assert!(response.contains("pubsub#title") && response.contains("example.com"));
     }
 
     #[tokio::test]

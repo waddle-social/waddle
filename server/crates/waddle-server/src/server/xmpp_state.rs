@@ -22,9 +22,7 @@ use crate::vcard::VCardStore;
 use kameo::actor::ActorRef;
 use serde::Serialize;
 
-use crate::server::bootstrap_membership::{
-    provision_user_membership, BootstrapMembershipConfig,
-};
+use crate::server::bootstrap_membership::{provision_user_membership, BootstrapMembershipConfig};
 
 #[derive(Debug, Serialize)]
 pub(crate) struct XmppChannelRecord {

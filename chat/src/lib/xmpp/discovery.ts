@@ -109,7 +109,6 @@ export async function discoverTopology(
   xmpp: Agent,
   jid: string,
 ): Promise<DiscoveredTopology> {
-  const serverJid = jidDomain(jid);
   const mucDomain = mucServiceDomain(jid);
   const spacesDomain = spacesServiceDomain(jid);
 
