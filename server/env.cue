@@ -43,7 +43,6 @@ schema.#Project & {
 				permissions: packages: "write"
 				runners: arch: {
 					amd64: "ubuntu-latest"
-					arm64: "ubuntu-24.04-arm"
 				}
 			}
 			tasks: [
@@ -53,7 +52,7 @@ schema.#Project & {
 				_t.buildRelease,
 				{
 					task: _t.publishContainerImage
-					matrix: arch: ["amd64", "arm64"]
+					matrix: arch: ["amd64"]
 				},
 				{
 					task: _t.publishReleaseArtifacts
@@ -111,7 +110,7 @@ schema.#Project & {
 			context:    "."
 			dockerfile: "Containerfile"
 			registry:   "ghcr.io/waddle-social/waddle"
-			platform: ["linux/amd64", "linux/arm64"]
+			platform: ["linux/amd64"]
 			tags: ["main"]
 			inputs: list.Concat([_rustInputs, ["Containerfile", ".dockerignore"]])
 		}
@@ -179,7 +178,6 @@ schema.#Project & {
 				set -euo pipefail
 				case "${CUENV_ARCH}" in
 				  amd64) PLATFORM="linux/amd64" ;;
-				  arm64) PLATFORM="linux/arm64" ;;
 				  *) echo "unsupported CUENV_ARCH=${CUENV_ARCH}" >&2; exit 1 ;;
 				esac
 
