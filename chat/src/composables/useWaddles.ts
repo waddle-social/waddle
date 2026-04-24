@@ -4,7 +4,12 @@ import type { WaddleSession } from "@/lib/server-auth";
 import type { BrowserXmppClient } from "@/lib/xmpp-client";
 import type { CommunityFormData, CreateFormData, ChannelEditFormData } from "@/lib/chat-ui";
 import { defaultCreateForm } from "@/lib/chat-ui";
-import { executeCreateChannelCommand } from "@/lib/xmpp/commands";
+import {
+  createMucRoom,
+  createSpaceNode,
+  createMucInSpace,
+  createSpaceWithMuc,
+} from "@/lib/xmpp/protocol-helpers";
 import { jidDomain } from "@/lib/xmpp/jid";
 
 interface LoadSpaceOptions {
@@ -170,8 +175,9 @@ export function useWaddles(
             : channelList[0]?.id ?? null;
 
       activeChannelId.value = nextChannelId;
+      const nextChannel = channelList.find((channel) => channel.id === nextChannelId);
       members.value = nextChannelId && xmppClient.value
-        ? await xmppClient.value.listRoomMembers(nextChannelId)
+        ? await xmppClient.value.listRoomMembers(nextChannelId, { roomJid: nextChannel?.jid })
         : [];
       resetForms();
       return nextChannelId;
@@ -220,66 +226,116 @@ export function useWaddles(
 
   async function createChannel() {
     const form = createChannelForm.value;
+    if (!xmppClient.value || !session.value) return undefined;
 
-    if (form.intent === "space") {
-      actionError.value = "Space creation via XMPP is not yet implemented.";
+    const xmppAgent = xmppClient.value.agent;
+    if (!xmppAgent) {
+      actionError.value = "XMPP connection not available";
       return undefined;
     }
 
-    if (form.intent === "space-muc") {
-      actionError.value = "Adding a channel to an existing space via XMPP is not yet implemented.";
-      return undefined;
-    }
-
-    if (form.intent === "space-with-muc") {
-      actionError.value = "Combined space and channel creation via XMPP is not yet implemented.";
-      return undefined;
-    }
-
-    // intent === "muc"
-    if (!xmppClient.value || !session.value || !form.name.trim()) return undefined;
+    const domain = jidDomain(session.value.jid);
+    const mucServiceJid = `muc.${domain}`;
+    const spacesServiceJid = `spaces.${domain}`;
+    const nick = session.value.username;
 
     isSubmitting.value = true;
     clearActionError();
 
     try {
-      const desc = form.description.trim();
-      const serverJid = jidDomain(session.value.jid);
+      if (form.intent === "muc") {
+        if (!form.name.trim()) return undefined;
 
-      const xmppAgent = xmppClient.value.agent;
-      if (!xmppAgent) {
-        actionError.value = "XMPP connection not available";
-        return undefined;
-      }
-
-      const result = await executeCreateChannelCommand(
-        xmppAgent,
-        serverJid,
-        {
+        const { roomJid } = await createMucRoom(xmppAgent, mucServiceJid, {
+          roomLocalpart: form.name.trim().toLowerCase().replace(/\s+/g, "-"),
+          nick,
           name: form.name.trim(),
-          description: desc || undefined,
-          channelType: form.muc_type,
-          position: channels.value.length,
-        },
-        "waddle:create-muc",
-      );
+          description: form.description.trim() || undefined,
+          mucType: form.muc_type,
+        });
 
-      if (!result.success) {
-        actionError.value = result.error ?? "Failed to create channel";
-        return undefined;
+        const channelId = roomJid.split("@")[0] ?? form.name.trim();
+        const createdChannel = {
+          id: channelId,
+          jid: roomJid,
+          name: form.name.trim(),
+          channel_type: form.muc_type,
+        };
+        createChannelForm.value = defaultCreateForm();
+        await loadStructure(channelId);
+        return createdChannel;
       }
 
-      const createdChannel = {
-        id: result.channelId!,
-        name: form.name.trim(),
-        channel_type: form.muc_type,
-      };
+      if (form.intent === "space") {
+        if (!form.name.trim()) return undefined;
 
-      createChannelForm.value = defaultCreateForm();
+        const { node, serviceJid } = await createSpaceNode(xmppAgent, spacesServiceJid, {
+          name: form.name.trim(),
+          description: form.description.trim() || undefined,
+        });
 
-      await loadStructure(result.channelId ?? null);
+        createChannelForm.value = defaultCreateForm();
+        await loadStructure(null);
+        return { id: node, jid: serviceJid, name: form.name.trim(), channel_type: "text" as const };
+      }
 
-      return createdChannel;
+      if (form.intent === "space-muc") {
+        if (!form.name.trim() || !form.space_jid.trim()) return undefined;
+
+        const spaceNode = form.space_jid.split("@")[0] ?? form.space_jid;
+        const { roomJid } = await createMucInSpace(xmppAgent, mucServiceJid, spacesServiceJid, {
+          roomLocalpart: form.name.trim().toLowerCase().replace(/\s+/g, "-"),
+          nick,
+          name: form.name.trim(),
+          description: form.description.trim() || undefined,
+          mucType: form.muc_type,
+          spaceNode,
+        });
+
+        const channelId = roomJid.split("@")[0] ?? form.name.trim();
+        const createdChannel = {
+          id: channelId,
+          jid: roomJid,
+          name: form.name.trim(),
+          channel_type: form.muc_type,
+        };
+        createChannelForm.value = defaultCreateForm();
+        await loadStructure(channelId);
+        return createdChannel;
+      }
+
+      if (form.intent === "space-with-muc") {
+        if (!form.space_name.trim() || !form.muc_name.trim()) return undefined;
+
+        const { roomJid, spaceNode } = await createSpaceWithMuc(
+          xmppAgent,
+          mucServiceJid,
+          spacesServiceJid,
+          {
+            spaceName: form.space_name.trim(),
+            spaceDescription: form.space_description.trim() || undefined,
+            roomLocalpart: form.muc_name.trim().toLowerCase().replace(/\s+/g, "-"),
+            nick,
+            mucName: form.muc_name.trim(),
+            mucDescription: form.muc_description.trim() || undefined,
+            mucType: form.muc_type,
+          },
+        );
+
+        const channelId = roomJid.split("@")[0] ?? form.muc_name.trim();
+        const createdChannel = {
+          id: channelId,
+          jid: roomJid,
+          name: form.muc_name.trim(),
+          channel_type: form.muc_type,
+          spaceNode,
+        };
+        createChannelForm.value = defaultCreateForm();
+        await loadStructure(channelId);
+        return createdChannel;
+      }
+
+      return undefined;
     } catch (e) {
       actionError.value = normalizeError(e);
       return undefined;
