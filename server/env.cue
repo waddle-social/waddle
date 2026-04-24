@@ -11,6 +11,16 @@ let _rustInputs = [
 	"Cargo.toml",
 	"Cargo.lock",
 	"crates/**",
+	"wit/**",
+]
+
+let _nixInputs = [
+	"../flake.nix",
+	"../flake.lock",
+	"Cargo.toml",
+	"Cargo.lock",
+	"crates/**",
+	"wit/**",
 ]
 
 schema.#Project & {
@@ -25,9 +35,57 @@ schema.#Project & {
 
 	ci: providers: ["github"]
 	ci: contributors: [
-		c.#Nix,
+		schema.#Contributor & {
+			id: "nix"
+			tasks: [{
+				id:       "nix.install"
+				label:    "Install Nix"
+				priority: 0
+				provider: github: uses: "DeterminateSystems/determinate-nix-action@v3"
+			}]
+		},
 		c.#CuenvRelease,
 		c.#OnePassword,
+		schema.#Contributor & {
+			id: "flakehub"
+			when: environment: ["flakehub"]
+			tasks: [
+				{
+					id:       "checkout.tag"
+					label:    "Checkout tag"
+					priority: 1
+					provider: github: {
+						uses: "actions/checkout@v6"
+						with: {
+							"persist-credentials": false
+							ref: "${{ (inputs.tag != null) && format('refs/tags/{0}', inputs.tag) || '' }}"
+						}
+					}
+				},
+				{
+					id:        "determinate-nix"
+					label:     "Setup Determinate Nix"
+					priority: 2
+					dependsOn: ["checkout.tag"]
+					provider: github: uses: "DeterminateSystems/determinate-nix-action@v3"
+				},
+				{
+					id:        "push"
+					label:     "Push to FlakeHub"
+					priority: 3
+					dependsOn: ["determinate-nix"]
+					provider: github: {
+						uses: "DeterminateSystems/flakehub-push@main"
+						with: {
+							visibility:             "public"
+							name:                   "waddle-social/waddle"
+							tag:                    "${{ inputs.tag }}"
+							"include-output-paths": true
+						}
+					}
+				},
+			]
+		},
 	]
 
 	ci: pipelines: {
@@ -48,9 +106,24 @@ schema.#Project & {
 				_t.fmt,
 				_t.clippy,
 				_t.test,
-				_t.buildRelease,
 				_t.publishContainerImage,
 			]
+		}
+		"Publish tags to FlakeHub": {
+			environment: "flakehub"
+			when: {
+				tag: ["v?[0-9]+.[0-9]+.[0-9]+*"]
+				manual: tag: {
+					description: "The existing tag to publish to FlakeHub"
+					type:        "string"
+					required:    true
+				}
+			}
+			provider: github: permissions: {
+				"id-token": "write"
+				contents:   "read"
+			}
+			tasks: [_t.flakehubPublished]
 		}
 		pullRequest: {
 			when: {
@@ -94,17 +167,6 @@ schema.#Project & {
 		}
 	}
 
-	images: {
-		server: schema.#ContainerImage & {
-			context:    "."
-			dockerfile: "Containerfile"
-			registry:   "ghcr.io/waddle-social/waddle"
-			platform: ["linux/amd64"]
-			tags: ["main"]
-			inputs: list.Concat([_rustInputs, ["Containerfile", ".dockerignore"]])
-		}
-	}
-
 	tasks: {
 		checkCiDrift: schema.#Task & {
 			command: "cuenv"
@@ -145,15 +207,14 @@ schema.#Project & {
 			command: "bash"
 			args: ["-c", #"""
 					set -euo pipefail
-					docker buildx create --use --name waddle-pr || true
-					docker buildx build \
-					  --platform linux/amd64 \
-					  --build-arg WADDLE_GIT_SHA="$(git rev-parse HEAD)" \
-					  --file Containerfile \
-					  --target runtime \
-					  .
+					if [ "$(uname -s)" != "Linux" ]; then
+					  echo "waddle-server-image-stream is linux-only; run this with a Linux Nix builder or in CI." >&2
+					  exit 1
+					fi
+					image_stream="$(nix build --print-out-paths ../#waddle-server-image-stream)"
+					"${image_stream}" | docker image load
 				"""#]
-			inputs: list.Concat([_rustInputs, ["Containerfile", ".dockerignore"]])
+			inputs: _nixInputs
 			dependsOn: [tasks.buildCi]
 		}
 
@@ -169,53 +230,31 @@ schema.#Project & {
 			args: ["-c", #"""
 				set -euo pipefail
 				case "${CUENV_ARCH}" in
-				  amd64) PLATFORM="linux/amd64" ;;
+				  amd64) ;;
 				  *) echo "unsupported CUENV_ARCH=${CUENV_ARCH}" >&2; exit 1 ;;
 				esac
 
 				echo "${GITHUB_TOKEN}" | docker login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
-				docker buildx create --use --name "waddle-${CUENV_ARCH}" || true
 				FULL_SHA="$(git rev-parse HEAD)"
+				SHORT_SHA="$(git rev-parse --short HEAD)"
 				mkdir -p ../target/digests
-				docker buildx build \
-				  --platform "${PLATFORM}" \
-				  --build-arg WADDLE_GIT_SHA="${FULL_SHA}" \
-				  --file Containerfile \
-				  --target runtime \
-				  --output "type=image,name=ghcr.io/waddle-social/waddle,push-by-digest=true,name-canonical=true,push=true" \
-				  . \
-				  2>&1 | tee "../target/digests/build-${CUENV_ARCH}.log"
-				grep -Eo 'sha256:[a-f0-9]{64}' "../target/digests/build-${CUENV_ARCH}.log" | tail -n1 > "../target/digests/${CUENV_ARCH}.txt"
-			"""#]
-			inputs: list.Concat([_rustInputs, ["Containerfile", ".dockerignore"]])
-			outputs: ["../target/digests/**"]
-		}
 
-		publishReleaseArtifacts: schema.#Task & {
-			command: "bash"
-			env: {
-				GITHUB_TOKEN:    schema.#EnvPassthrough
-				GITHUB_ACTOR:    schema.#EnvPassthrough
-				GITHUB_REF_TYPE: schema.#EnvPassthrough
-				GITHUB_REF_NAME: schema.#EnvPassthrough
-			}
-			args: ["-c", #"""
-				set -euo pipefail
-				echo "${GITHUB_TOKEN}" | docker login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
+				image_stream="$(nix build --print-out-paths ../#waddle-server-image-stream)"
+				"${image_stream}" | docker image load
 
-				mapfile -t DIGESTS < <(cat "../target/digests/${CUENV_ARCH}.txt" | sed '/^$/d' | sort -u)
-				if [ "${#DIGESTS[@]}" -ne 1 ]; then
-				  echo "No image digests found" >&2
+				docker tag ghcr.io/waddle-social/waddle:nix "ghcr.io/waddle-social/waddle:sha-${SHORT_SHA}"
+				docker push "ghcr.io/waddle-social/waddle:sha-${SHORT_SHA}" 2>&1 | tee "../target/digests/push-${CUENV_ARCH}.log"
+				digest="$(docker inspect --format='{{index .RepoDigests 0}}' "ghcr.io/waddle-social/waddle:sha-${SHORT_SHA}" | sed 's/^.*@//')"
+				if [ -z "${digest}" ]; then
+				  digest="$(grep -Eo 'sha256:[a-f0-9]{64}' "../target/digests/push-${CUENV_ARCH}.log" | tail -n1)"
+				fi
+				if [ -z "${digest}" ]; then
+				  echo "No image digest found" >&2
 				  exit 1
 				fi
-
-				REFS=()
-				for digest in "${DIGESTS[@]}"; do
-				  REFS+=("ghcr.io/waddle-social/waddle@${digest}")
-				done
+				printf '%s\n' "${digest}" > "../target/digests/${CUENV_ARCH}.txt"
 
 				TAG_ARGS=()
-				SHORT_SHA="$(git rev-parse --short HEAD)"
 				TAG_ARGS+=("-t" "ghcr.io/waddle-social/waddle:sha-${SHORT_SHA}")
 				if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
 				  VERSION="${GITHUB_REF_NAME}"
@@ -232,7 +271,7 @@ schema.#Project & {
 				  TAG_ARGS+=("-t" "ghcr.io/waddle-social/waddle:main")
 				fi
 
-				docker buildx imagetools create "${TAG_ARGS[@]}" "${REFS[@]}"
+				docker buildx imagetools create "${TAG_ARGS[@]}" "ghcr.io/waddle-social/waddle@${digest}"
 				docker buildx imagetools inspect "${TAG_ARGS[1]}"
 
 				echo "${GITHUB_TOKEN}" | helm registry login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
@@ -246,9 +285,17 @@ schema.#Project & {
 				  --source="$(git config --get remote.origin.url)" \
 				  --revision="${SHORT_SHA}"
 				"""#]
-			inputs: list.Concat([_rustInputs, ["Containerfile", ".dockerignore", "charts/**"]])
-			outputs: ["target/digests/**"]
-			dependsOn: [tasks.buildRelease]
+			inputs: list.Concat([_nixInputs, ["charts/**"]])
+			outputs: ["../target/digests/**"]
+			dependsOn: [tasks.fmt, tasks.clippy, tasks.test]
+		}
+
+		flakehubPublished: schema.#Task & {
+			command: "true"
+			inputs: [
+				"../flake.nix",
+				"../flake.lock",
+			]
 		}
 
 		build: schema.#Task & {

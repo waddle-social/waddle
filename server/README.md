@@ -86,12 +86,13 @@ cuenv task dev
 
 ```bash
 # Build a local runtime image
-docker build -f Containerfile --target runtime -t waddle-server:local .
+image_stream="$(nix build --print-out-paths ..#waddle-server-image-stream)"
+"${image_stream}" | docker image load
+docker tag ghcr.io/waddle-social/waddle:nix waddle-server:local
 
 # Run the server container
 docker run --rm \
   -p 3000:3000 -p 5269:5269 \
-  -v waddle-data:/var/lib/waddle \
   -e WADDLE_DATABASE_URL=sqlite:///var/lib/waddle/waddle.db \
   -e WADDLE_XMPP_MAM_DATABASE_URL=sqlite:///var/lib/waddle/mam.db \
   -e WADDLE_XMPP_INBOX_DATABASE_URL=sqlite:///var/lib/waddle/inbox.db \

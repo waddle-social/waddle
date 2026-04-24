@@ -9,14 +9,15 @@ on:
     paths:
     - .github/workflows/waddle-server-default.yml
     - cue.mod/**
-    - server/.dockerignore
+    - server/../flake.lock
+    - server/../flake.nix
     - server/Cargo.lock
     - server/Cargo.toml
-    - server/Containerfile
     - server/charts/**
     - server/crates/**
     - server/env.cue
     - server/schema/**
+    - server/wit/**
   workflow_dispatch: {}
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
