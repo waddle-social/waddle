@@ -102,6 +102,7 @@ pub struct MockAppState {
     pub space_channels: Vec<waddle_xmpp::ChannelInfo>,
     blocked_jids: Mutex<HashMap<String, HashSet<String>>>,
     known_users: Mutex<HashSet<String>>,
+    permission_relations: Mutex<HashMap<(String, String), HashSet<String>>>,
     inbox_storage: InMemoryInboxStorage,
 }
 
@@ -114,6 +115,7 @@ impl MockAppState {
             space_channels: Vec::new(),
             blocked_jids: Mutex::new(HashMap::new()),
             known_users: Mutex::new(HashSet::new()),
+            permission_relations: Mutex::new(HashMap::new()),
             inbox_storage: InMemoryInboxStorage::new(),
         }
     }
@@ -126,6 +128,7 @@ impl MockAppState {
             space_channels: Vec::new(),
             blocked_jids: Mutex::new(HashMap::new()),
             known_users: Mutex::new(HashSet::new()),
+            permission_relations: Mutex::new(HashMap::new()),
             inbox_storage: InMemoryInboxStorage::new(),
         }
     }
@@ -139,6 +142,71 @@ impl MockAppState {
         self.space_details = Some(details);
         self.space_channels = channels;
         self
+    }
+
+    pub fn with_permission_grant(mut self, resource: &str, relation: &str, subject: &str) -> Self {
+        self.permission_relations
+            .get_mut()
+            .entry((resource.to_string(), subject.to_string()))
+            .or_default()
+            .insert(relation.to_string());
+        self
+    }
+
+    fn relation_implies(resource: &str, granted: &str, required: &str) -> bool {
+        if granted == required {
+            return true;
+        }
+
+        if resource.starts_with("waddle:") {
+            return matches!(
+                (granted, required),
+                ("owner", "admin" | "moderator" | "member" | "view")
+                    | ("admin", "moderator" | "member" | "view")
+                    | ("moderator", "member" | "view")
+                    | ("member", "view")
+            );
+        }
+
+        if resource.starts_with("channel:") {
+            return matches!(
+                (granted, required),
+                (
+                    "manager",
+                    "moderator" | "writer" | "viewer" | "read" | "view"
+                ) | ("moderator", "writer" | "viewer" | "read" | "view")
+                    | ("writer", "viewer" | "read" | "view")
+                    | ("viewer", "read" | "view")
+            );
+        }
+
+        false
+    }
+
+    fn derived_relations_for(resource: &str, direct: &HashSet<String>) -> HashSet<String> {
+        let mut all = direct.clone();
+        let candidates = [
+            "owner",
+            "admin",
+            "moderator",
+            "member",
+            "manager",
+            "writer",
+            "viewer",
+            "view",
+            "read",
+        ];
+
+        for required in candidates {
+            if direct
+                .iter()
+                .any(|granted| Self::relation_implies(resource, granted, required))
+            {
+                all.insert(required.to_string());
+            }
+        }
+
+        all
     }
 }
 
@@ -166,11 +234,22 @@ impl AppState for MockAppState {
 
     async fn check_permission(
         &self,
-        _resource: &str,
-        _action: &str,
-        _subject: &str,
+        resource: &str,
+        action: &str,
+        subject: &str,
     ) -> Result<bool, XmppError> {
-        Ok(true)
+        let grants = self.permission_relations.lock().await;
+        if grants.is_empty() {
+            return Ok(true);
+        }
+
+        let Some(relations) = grants.get(&(resource.to_string(), subject.to_string())) else {
+            return Ok(false);
+        };
+
+        Ok(relations
+            .iter()
+            .any(|granted| Self::relation_implies(resource, granted, action)))
     }
 
     async fn validate_session_token(&self, token: &str) -> Result<Session, XmppError> {
@@ -208,20 +287,49 @@ impl AppState for MockAppState {
 
     async fn list_relations(
         &self,
-        _resource: &str,
-        _subject: &str,
+        resource: &str,
+        subject: &str,
     ) -> Result<Vec<String>, XmppError> {
-        // Mock returns member relation by default
-        Ok(vec!["member".to_string()])
+        let grants = self.permission_relations.lock().await;
+        if grants.is_empty() {
+            return Ok(vec!["member".to_string()]);
+        }
+        let Some(relations) = grants.get(&(resource.to_string(), subject.to_string())) else {
+            return Ok(vec![]);
+        };
+
+        let mut derived: Vec<String> = Self::derived_relations_for(resource, relations)
+            .into_iter()
+            .collect();
+        derived.sort();
+        Ok(derived)
     }
 
     async fn list_subjects(
         &self,
-        _resource: &str,
-        _relation: &str,
+        resource: &str,
+        relation: &str,
     ) -> Result<Vec<String>, XmppError> {
-        // Mock returns empty list by default
-        Ok(vec![])
+        let grants = self.permission_relations.lock().await;
+        if grants.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let mut subjects = Vec::new();
+        for ((grant_resource, subject), relations) in grants.iter() {
+            if grant_resource != resource {
+                continue;
+            }
+            if relations
+                .iter()
+                .any(|granted| Self::relation_implies(resource, granted, relation))
+            {
+                subjects.push(subject.clone());
+            }
+        }
+
+        subjects.sort();
+        Ok(subjects)
     }
 
     async fn lookup_scram_credentials(

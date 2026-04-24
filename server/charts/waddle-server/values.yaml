@@ -125,6 +125,11 @@ config:
   # Extra key/value env vars rendered into ConfigMap data (non-sensitive).
   extraEnv: {}
 
+spicedb:
+  enabled: true
+  endpoint: ""
+  insecure: false
+
 # Additional Kubernetes Secrets to inject as env vars (e.g. R2 credentials from ExternalSecrets).
 extraSecretRefs: []
 
@@ -147,6 +152,7 @@ secret:
   xmppMamDatabaseUrl: ""
   xmppInboxDatabaseUrl: ""
   githubToken: ""
+  spicedbPresharedKey: ""
 
 probes:
   liveness:

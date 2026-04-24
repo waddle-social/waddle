@@ -158,50 +158,75 @@ fn space_schema() -> ObjectTypeSchema {
         .with_relation("moderator")
         .with_relation("member")
         // Permissions
+        .with_permission("owner", ComputedPermission::direct("owner"))
+        .with_permission(
+            "admin",
+            ComputedPermission::union(vec![
+                ComputedPermission::direct("admin"),
+                ComputedPermission::direct("owner"),
+            ]),
+        )
+        .with_permission(
+            "moderator",
+            ComputedPermission::union(vec![
+                ComputedPermission::direct("moderator"),
+                ComputedPermission::direct("admin"),
+                ComputedPermission::direct("owner"),
+            ]),
+        )
+        .with_permission(
+            "member",
+            ComputedPermission::union(vec![
+                ComputedPermission::direct("member"),
+                ComputedPermission::direct("moderator"),
+                ComputedPermission::direct("admin"),
+                ComputedPermission::direct("owner"),
+            ]),
+        )
         .with_permission("delete", ComputedPermission::direct("owner"))
         .with_permission(
             "manage_settings",
             ComputedPermission::union(vec![
-                ComputedPermission::direct("owner"),
                 ComputedPermission::direct("admin"),
+                ComputedPermission::direct("owner"),
             ]),
         )
         .with_permission(
             "manage_roles",
             ComputedPermission::union(vec![
-                ComputedPermission::direct("owner"),
                 ComputedPermission::direct("admin"),
+                ComputedPermission::direct("owner"),
             ]),
         )
         .with_permission(
             "manage_members",
             ComputedPermission::union(vec![
-                ComputedPermission::direct("owner"),
                 ComputedPermission::direct("admin"),
                 ComputedPermission::direct("moderator"),
+                ComputedPermission::direct("owner"),
             ]),
         )
         .with_permission(
             "create_channel",
             ComputedPermission::union(vec![
-                ComputedPermission::direct("owner"),
                 ComputedPermission::direct("admin"),
+                ComputedPermission::direct("owner"),
             ]),
         )
         .with_permission(
             "view",
             ComputedPermission::union(vec![
-                ComputedPermission::direct("owner"),
-                ComputedPermission::direct("admin"),
-                ComputedPermission::direct("moderator"),
                 ComputedPermission::direct("member"),
+                ComputedPermission::direct("moderator"),
+                ComputedPermission::direct("admin"),
+                ComputedPermission::direct("owner"),
             ]),
         )
         .with_permission(
             "update",
             ComputedPermission::union(vec![
-                ComputedPermission::direct("owner"),
                 ComputedPermission::direct("admin"),
+                ComputedPermission::direct("owner"),
             ]),
         )
 }

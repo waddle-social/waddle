@@ -27,8 +27,13 @@ spec:
       s3Bucket: "waddle-social-files"
     database:
       driver: postgres
+    spicedb:
+      enabled: true
+      endpoint: spicedb.spicedb.svc.cluster.local:50051
+      insecure: true
     extraSecretRefs:
       - waddle-r2-credentials
+      - waddle-spicedb
     # Ship traces + OTel-native metrics to Grafana Cloud via the
     # in-cluster Alloy collector. `telemetry.rs` reads these env vars
     # (default endpoint was `localhost:4317`, which silently dropped

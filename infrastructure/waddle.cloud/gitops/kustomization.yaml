@@ -12,6 +12,7 @@ resources:
   - kustomization-infra-cloudnative-pg-cluster.yaml
   - kustomization-infra-spicedb-operator-source.yaml
   - kustomization-infra-spicedb-operator.yaml
+  - kustomization-infra-spicedb.yaml
   - kustomization-infra-cert-manager-issuer.yaml
   - kustomization-infra-cilium-gateway.yaml
   - livekit-sfu-source.yaml

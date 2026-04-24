@@ -12,6 +12,8 @@ pub struct ScenarioFile {
 pub struct Scenario {
     pub name: String,
     pub users: BTreeMap<String, User>,
+    #[serde(default)]
+    pub fixtures: ScenarioFixtures,
     pub steps: Vec<Step>,
 }
 
@@ -46,6 +48,8 @@ pub struct SendStep {
 pub struct ExpectStanzaStep {
     pub target: ActorRef,
     pub contains: Vec<String>,
+    #[serde(default = "default_expect_stanza_until")]
+    pub until: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -61,6 +65,37 @@ pub struct ExpectDbStep {
     pub where_clause: BTreeMap<String, String>,
     #[serde(rename = "minRows")]
     pub min_rows: u64,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct ScenarioFixtures {
+    #[serde(default)]
+    pub channels: Vec<ChannelFixture>,
+    #[serde(default, rename = "permissionGrants")]
+    pub permission_grants: Vec<PermissionGrant>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ChannelFixture {
+    #[serde(rename = "waddleId")]
+    pub waddle_id: String,
+    #[serde(rename = "channelId")]
+    pub channel_id: String,
+    #[serde(rename = "channelName")]
+    pub channel_name: String,
+    #[serde(rename = "channelType")]
+    pub channel_type: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PermissionGrant {
+    pub resource: String,
+    pub relation: String,
+    pub subject: String,
+}
+
+fn default_expect_stanza_until() -> String {
+    "</message>".to_string()
 }
 
 pub fn load_scenario_from_dir(dir_path: &Path, package_name: &str) -> Result<Scenario> {
@@ -149,6 +184,9 @@ fn validate(scenario: &Scenario) -> Result<()> {
                     index
                 ));
             }
+            if expect.until.is_empty() {
+                return Err(anyhow!("step {} expectStanza.until must not be empty", index));
+            }
         }
         if let Some(expect_db) = &step.expect_db {
             if expect_db.table.is_empty() {
@@ -173,5 +211,54 @@ fn validate(scenario: &Scenario) -> Result<()> {
             }
         }
     }
+
+    for (index, channel) in scenario.fixtures.channels.iter().enumerate() {
+        if channel.waddle_id.is_empty() {
+            return Err(anyhow!(
+                "fixtures.channels[{}].waddleId must not be empty",
+                index
+            ));
+        }
+        if channel.channel_id.is_empty() {
+            return Err(anyhow!(
+                "fixtures.channels[{}].channelId must not be empty",
+                index
+            ));
+        }
+        if channel.channel_name.is_empty() {
+            return Err(anyhow!(
+                "fixtures.channels[{}].channelName must not be empty",
+                index
+            ));
+        }
+        if channel.channel_type.is_empty() {
+            return Err(anyhow!(
+                "fixtures.channels[{}].channelType must not be empty",
+                index
+            ));
+        }
+    }
+
+    for (index, grant) in scenario.fixtures.permission_grants.iter().enumerate() {
+        if grant.resource.is_empty() {
+            return Err(anyhow!(
+                "fixtures.permissionGrants[{}].resource must not be empty",
+                index
+            ));
+        }
+        if grant.relation.is_empty() {
+            return Err(anyhow!(
+                "fixtures.permissionGrants[{}].relation must not be empty",
+                index
+            ));
+        }
+        if grant.subject.is_empty() {
+            return Err(anyhow!(
+                "fixtures.permissionGrants[{}].subject must not be empty",
+                index
+            ));
+        }
+    }
+
     Ok(())
 }

@@ -15,7 +15,8 @@ use crate::auth::{
 use crate::db::actor::{DbActor, DbExecute, DbQuery, DbQueryOne, GetDatabase};
 use crate::db::{row_value, Database, DatabasePool, ValueExt};
 use crate::permissions::{
-    Object, ObjectType, PermissionService, Relation, Subject, SubjectType, Tuple,
+    CheckPermission, ListRelations, ListSubjects, Object, ObjectType, Permission, PermissionActor,
+    Relation, Subject, SubjectType, Tuple, WriteTuple,
 };
 use crate::vcard::VCardStore;
 use kameo::actor::ActorRef;
@@ -141,7 +142,7 @@ impl SpaceDbService {
 ///
 /// This struct implements `waddle_xmpp::AppState` by delegating to:
 /// - `SessionManager` for session validation
-/// - `PermissionService` for permission checks
+/// - `PermissionActor` for permission checks
 /// - `NativeUserStore` for XEP-0077 registration and SCRAM authentication
 /// - `VCardStore` for XEP-0054 vcard-temp storage
 /// - `Database` for upload slot storage (XEP-0363)
@@ -150,8 +151,8 @@ pub struct XmppAppState {
     domain: String,
     /// Session manager for validating XMPP authentication tokens
     session_manager: SessionManager,
-    /// Permission service for authorization checks
-    permission_service: PermissionService,
+    /// Permission actor for authorization checks
+    permission_actor: ActorRef<PermissionActor>,
     /// Native user store for XEP-0077 registration and SCRAM authentication
     native_user_store: NativeUserStore,
     /// vCard store for XEP-0054 vcard-temp
@@ -176,17 +177,17 @@ impl XmppAppState {
         domain: String,
         db: Arc<Database>,
         db_actor: ActorRef<DbActor>,
+        permission_actor: ActorRef<PermissionActor>,
         encryption_key: Option<&[u8]>,
     ) -> Self {
         let session_manager = SessionManager::new(db_actor.clone(), encryption_key);
-        let permission_service = PermissionService::new(db_actor.clone());
         let native_user_store = NativeUserStore::new(db_actor.clone());
         let vcard_store = VCardStore::new(Arc::clone(&db));
 
         Self {
             domain,
             session_manager,
-            permission_service,
+            permission_actor,
             native_user_store,
             vcard_store,
             global_db_actor: db_actor,
@@ -312,8 +313,12 @@ impl waddle_xmpp::AppState for XmppAppState {
         let subject = Self::parse_subject(subject)?;
 
         let response = self
-            .permission_service
-            .check(&subject, action, &object)
+            .permission_actor
+            .ask(CheckPermission {
+                subject,
+                permission: Permission::Custom(action.to_string()),
+                object,
+            })
             .await
             .map_err(|e| {
                 warn!(
@@ -419,8 +424,8 @@ impl waddle_xmpp::AppState for XmppAppState {
         let subject = Self::parse_subject(subject)?;
 
         let relations = self
-            .permission_service
-            .list_relations(&subject, &object)
+            .permission_actor
+            .ask(ListRelations { subject, object })
             .await
             .map_err(|e| {
                 warn!(
@@ -437,7 +442,10 @@ impl waddle_xmpp::AppState for XmppAppState {
             "Listed relations"
         );
 
-        Ok(relations)
+        Ok(relations
+            .into_iter()
+            .map(|relation| relation.name)
+            .collect())
     }
 
     /// List all subjects with a specific relation on an object.
@@ -457,9 +465,11 @@ impl waddle_xmpp::AppState for XmppAppState {
         let object = Self::parse_resource(resource)?;
 
         let subjects = self
-            .permission_service
-            .tuple_store
-            .list_subjects(&object, relation)
+            .permission_actor
+            .ask(ListSubjects {
+                object,
+                relation: Relation::new(relation),
+            })
             .await
             .map_err(|e| {
                 warn!(
@@ -1431,10 +1441,15 @@ impl waddle_xmpp::commands::CreateChannelDeps for XmppAppState {
         let waddle_object = Object::new(ObjectType::Space, space_id);
 
         let can_create = self
-            .permission_service
-            .check(&subject, "create_channel", &waddle_object)
+            .permission_actor
+            .ask(CheckPermission {
+                subject,
+                permission: Permission::CreateChannel,
+                object: waddle_object,
+            })
             .await
-            .map(|r| r.allowed)
+            .ok()
+            .map(|response| response.allowed)
             .unwrap_or(false);
 
         if !can_create {
@@ -1489,7 +1504,14 @@ impl waddle_xmpp::commands::CreateChannelDeps for XmppAppState {
             },
         );
 
-        if let Err(err) = self.permission_service.write_tuple(parent_tuple).await {
+        if let Err(err) = self
+            .permission_actor
+            .ask(WriteTuple {
+                tuple: parent_tuple,
+            })
+            .await
+            .map_err(|e| e.to_string())
+        {
             error!("Failed to write parent permission tuple: {}", err);
             // Clean up: delete the channel
             let _ = space_db_actor
@@ -1518,7 +1540,7 @@ impl waddle_xmpp::commands::CreateChannelDeps for XmppAppState {
 mod tests {
     use super::*;
     use crate::db::MigrationRunner;
-    use crate::permissions::ObjectType;
+    use crate::permissions::{ObjectType, PermissionActor};
     use waddle_xmpp::AppState;
 
     async fn create_test_db() -> (Arc<Database>, ActorRef<DbActor>) {
@@ -1538,7 +1560,13 @@ mod tests {
     #[tokio::test]
     async fn test_xmpp_state_creation() {
         let (db, actor) = create_test_db().await;
-        let state = XmppAppState::new("waddle.social".to_string(), db, actor, None);
+        let state = XmppAppState::new(
+            "waddle.social".to_string(),
+            Arc::clone(&db),
+            actor,
+            kameo::spawn(PermissionActor::new_for_tests(db)),
+            None,
+        );
 
         assert_eq!(state.domain(), "waddle.social");
     }
@@ -1576,7 +1604,13 @@ mod tests {
     #[tokio::test]
     async fn test_private_xml_roundtrip_uses_actor_boundary() {
         let (db, actor) = create_test_db().await;
-        let state = XmppAppState::new("waddle.social".to_string(), db, actor, None);
+        let state = XmppAppState::new(
+            "waddle.social".to_string(),
+            Arc::clone(&db),
+            actor,
+            kameo::spawn(PermissionActor::new_for_tests(db)),
+            None,
+        );
         let jid: jid::BareJid = "alice@waddle.social".parse().expect("valid bare jid");
 
         state

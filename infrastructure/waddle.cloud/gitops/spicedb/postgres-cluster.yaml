@@ -1,0 +1,16 @@
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: spicedb-postgres
+  namespace: spicedb
+spec:
+  instances: 1
+  bootstrap:
+    initdb:
+      database: spicedb
+      owner: spicedb
+      secret:
+        name: spicedb-postgres-app-user
+  storage:
+    size: 10Gi
+    storageClass: openebs-mayastor

@@ -78,6 +78,50 @@ impl AuthConfig {
     }
 }
 
+/// SpiceDB backend configuration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpiceDbConfig {
+    pub endpoint: String,
+    pub preshared_key: String,
+    pub insecure: bool,
+}
+
+impl SpiceDbConfig {
+    pub fn from_env() -> Result<Option<Self>, String> {
+        let endpoint = std::env::var("WADDLE_SPICEDB_ENDPOINT")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        let preshared_key = std::env::var("WADDLE_SPICEDB_PRESHARED_KEY")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+
+        match (endpoint, preshared_key) {
+            (None, None) => Ok(None),
+            (Some(_), None) => Err(
+                "WADDLE_SPICEDB_PRESHARED_KEY is required when WADDLE_SPICEDB_ENDPOINT is set"
+                    .to_string(),
+            ),
+            (None, Some(_)) => Err(
+                "WADDLE_SPICEDB_ENDPOINT is required when WADDLE_SPICEDB_PRESHARED_KEY is set"
+                    .to_string(),
+            ),
+            (Some(endpoint), Some(preshared_key)) => {
+                let insecure = std::env::var("WADDLE_SPICEDB_INSECURE")
+                    .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+                    .unwrap_or(false);
+
+                Ok(Some(Self {
+                    endpoint,
+                    preshared_key,
+                    insecure,
+                }))
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
     pub mode: ServerMode,
@@ -86,6 +130,9 @@ pub struct ServerConfig {
     pub auth: AuthConfig,
     /// Runtime extension configuration.
     pub extensions: ExtensionConfig,
+    /// SpiceDB backend configuration.
+    /// Runtime startup requires this to be set.
+    pub spicedb: Option<SpiceDbConfig>,
 }
 
 impl Default for ServerConfig {
@@ -96,6 +143,7 @@ impl Default for ServerConfig {
             session_key: None,
             auth: AuthConfig::default(),
             extensions: ExtensionConfig::default(),
+            spicedb: None,
         }
     }
 }
@@ -113,6 +161,7 @@ impl ServerConfig {
 
         let extensions =
             ExtensionConfig::from_env().map_err(|e| format!("invalid extension config: {e}"))?;
+        let spicedb = SpiceDbConfig::from_env()?;
 
         Ok(Self {
             mode,
@@ -120,6 +169,7 @@ impl ServerConfig {
             session_key,
             auth,
             extensions,
+            spicedb,
         })
     }
 
@@ -149,6 +199,7 @@ impl ServerConfig {
             session_key: Some("test-key-32-bytes-long-for-aes!".to_string()),
             auth: AuthConfig::default(),
             extensions: ExtensionConfig::default(),
+            spicedb: None,
         }
     }
 
@@ -160,6 +211,7 @@ impl ServerConfig {
             session_key: Some("test-key-32-bytes-long-for-aes!".to_string()),
             auth: AuthConfig::default(),
             extensions: ExtensionConfig::default(),
+            spicedb: None,
         }
     }
 }
