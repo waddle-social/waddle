@@ -17,9 +17,6 @@ on:
     - server/crates/**
     - server/env.cue
     - server/schema/**
-  release:
-    types:
-    - published
   workflow_dispatch: {}
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
@@ -184,17 +181,16 @@ jobs:
         path: target/release/waddle-server
         if-no-files-found: ignore
         include-hidden-files: true
-  publishContainerImage-amd64:
-    name: publishContainerImage (amd64)
+  clippy:
+    name: clippy
     runs-on: ubuntu-latest
     needs:
     - build-cuenv
-    timeout-minutes: 60
     steps:
     - name: Checkout
       uses: actions/checkout@v4
       with:
-        fetch-depth: 0
+        fetch-depth: 2
     - name: Install Nix
       uses: DeterminateSystems/nix-installer-action@v16
       with:
@@ -210,7 +206,74 @@ jobs:
         curl -sSL -o /usr/local/bin/cuenv "https://github.com/cuenv/cuenv/releases/latest/download/${cuenv_asset}" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync -A
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    - name: publishContainerImage (amd64)
+    - name: clippy
+      run: cuenv task clippy --skip-dependencies
+      working-directory: server
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GITHUB_ACTOR: ${{ github.actor }}
+        GITHUB_REF_TYPE: ${{ github.ref_type }}
+        GITHUB_REF_NAME: ${{ github.ref_name }}
+  fmt:
+    name: fmt
+    runs-on: ubuntu-latest
+    needs:
+    - build-cuenv
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 2
+    - name: Install Nix
+      uses: DeterminateSystems/nix-installer-action@v16
+      with:
+        extra-conf: accept-flake-config = true
+    - name: Setup cuenv (release)
+      run: |-
+        arch="$(uname -m)"
+        case "$arch" in
+          x86_64|amd64) cuenv_asset="cuenv-linux-x64" ;;
+          aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
+          *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
+        esac
+        curl -sSL -o /usr/local/bin/cuenv "https://github.com/cuenv/cuenv/releases/latest/download/${cuenv_asset}" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync -A
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    - name: fmt
+      run: cuenv task fmt --skip-dependencies
+      working-directory: server
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GITHUB_ACTOR: ${{ github.actor }}
+        GITHUB_REF_TYPE: ${{ github.ref_type }}
+        GITHUB_REF_NAME: ${{ github.ref_name }}
+  publishContainerImage:
+    name: publishContainerImage
+    runs-on: ubuntu-latest
+    needs:
+    - build-cuenv
+    - buildRelease
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 2
+    - name: Install Nix
+      uses: DeterminateSystems/nix-installer-action@v16
+      with:
+        extra-conf: accept-flake-config = true
+    - name: Setup cuenv (release)
+      run: |-
+        arch="$(uname -m)"
+        case "$arch" in
+          x86_64|amd64) cuenv_asset="cuenv-linux-x64" ;;
+          aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
+          *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
+        esac
+        curl -sSL -o /usr/local/bin/cuenv "https://github.com/cuenv/cuenv/releases/latest/download/${cuenv_asset}" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync -A
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    - name: publishContainerImage
       run: cuenv task publishContainerImage --skip-dependencies
       working-directory: server
       env:
@@ -219,22 +282,20 @@ jobs:
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: publishContainerImage-amd64
+        name: publishContainerImage-artifacts
         path: target/digests/**
         if-no-files-found: ignore
         include-hidden-files: true
-  publishReleaseArtifacts:
-    name: publishReleaseArtifacts
+  test:
+    name: test
     runs-on: ubuntu-latest
     needs:
     - build-cuenv
-    - publishContainerImage-amd64
-    timeout-minutes: 30
     steps:
     - name: Checkout
       uses: actions/checkout@v4
       with:
-        fetch-depth: 0
+        fetch-depth: 2
     - name: Install Nix
       uses: DeterminateSystems/nix-installer-action@v16
       with:
@@ -250,13 +311,8 @@ jobs:
         curl -sSL -o /usr/local/bin/cuenv "https://github.com/cuenv/cuenv/releases/latest/download/${cuenv_asset}" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync -A
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    - name: Download publishContainerImage-amd64
-      uses: actions/download-artifact@v4
-      with:
-        name: publishContainerImage-amd64
-        path: target/digests/amd64
-    - name: publishReleaseArtifacts
-      run: cuenv task publishReleaseArtifacts --skip-dependencies
+    - name: test
+      run: cuenv task test --skip-dependencies
       working-directory: server
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

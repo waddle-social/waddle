@@ -13,12 +13,12 @@ spec:
   interval: 10m
   retryInterval: 1m
   timeout: 15m
-  path: ./waddle-server
+  path: ./
   prune: true
   wait: true
   sourceRef:
     kind: OCIRepository
-    name: bootstrap
+    name: waddle-server
   healthChecks:
     - apiVersion: postgresql.cnpg.io/v1
       kind: Cluster
