@@ -7,7 +7,7 @@ import type { MemberSummary, UserSearchResult } from "../chat-types";
 import type { WaddleHat } from "./extensions/hats";
 import type {
   ChatStateEvent, ChatStateType, DiscoveredChannel, DisplayedEvent,
-  DmChatStateEvent, DmDisplayedEvent, DmReactionEvent, LiveDmMessage, LiveRoomMessage,
+  DmChatStateEvent, DmDisplayedEvent, DmReactionEvent, ListRoomMembersOptions, LiveDmMessage, LiveRoomMessage,
   OccupantPresence, PresenceUpdateEvent, ReactionEvent, RoomActivityEvent,
   RoomHats, RoomPresence, SessionLifecycleEvent, XmppErrorEvent, XmppStatusSnapshot,
 } from "./types";
@@ -1193,27 +1193,66 @@ export class BrowserXmppClient {
     return discovery.discoverTopology(this.xmpp, this.session.jid);
   }
 
-  async listRoomMembers(channelId: string): Promise<MemberSummary[]> {
+  async listRoomMembers(channelId: string, options?: ListRoomMembersOptions): Promise<MemberSummary[]> {
     await this.connect();
     if (!this.xmpp) return [];
-    const roomJid = roomBareJidFor(this.session, channelId);
+    const roomJid = options?.roomJid ?? roomBareJidFor(this.session, channelId);
     const muc = this.xmpp as Agent & {
       getRoomMembers?: (room: string, opts: { affiliation: string }) => Promise<{ muc?: { users?: Array<{ jid?: string; affiliation?: string }> } }>;
     };
+    if (!muc.getRoomMembers) {
+      this.emitError({ kind: "member-query", recoverable: false, detail: "missing getRoomMembers — XMPP agent lacks MUC affiliation list support" });
+      throw new Error("missing getRoomMembers");
+    }
     const affiliations = ["owner", "admin", "member", "outcast"] as const;
-    const results = await Promise.all(
-      affiliations.map(async (affiliation) => {
-        const response = await muc.getRoomMembers?.(roomJid, { affiliation });
-        return (response?.muc?.users ?? []).map((item) => ({
-          jid: String(item.jid ?? ""),
-          username: String(item.jid ?? "").split("@")[0] ?? "",
-          avatar_url: null,
-          role: affiliation,
-          joined_at: "",
-        }));
-      }),
-    );
-    return results.flat().filter((member) => member.jid);
+    // Member-bearing affiliations — if ALL of these fail we refuse to silently
+    // return an empty list, because it likely means the room JID was wrong.
+    const memberBearing = new Set<string>(["owner", "admin", "member"]);
+    const memberBearingFailures: string[] = [];
+    const members: MemberSummary[] = [];
+    for (const affiliation of affiliations) {
+      try {
+        const response = await muc.getRoomMembers(roomJid, { affiliation });
+        const users = response?.muc?.users ?? [];
+        for (const item of users) {
+          if (item.jid) {
+            members.push({
+              jid: String(item.jid),
+              username: String(item.jid).split("@")[0] ?? "",
+              avatar_url: null,
+              role: affiliation,
+              joined_at: "",
+            });
+          }
+        }
+      } catch (err: unknown) {
+        const condition =
+          (err as { condition?: string })?.condition ??
+          (err as { error?: { condition?: string } })?.error?.condition ??
+          "unknown";
+        let detail: string;
+        if (condition === "forbidden") {
+          detail = `forbidden affiliation query for ${affiliation} — ${roomJid}`;
+        } else if (condition === "service-unavailable") {
+          detail = `unsupported member query for ${affiliation} — ${roomJid}`;
+        } else {
+          detail = `affiliation query failed for ${affiliation} — ${roomJid}: ${condition}`;
+        }
+        this.emitError({ kind: "member-query", recoverable: true, detail, condition, cause: err });
+        if (memberBearing.has(affiliation)) {
+          memberBearingFailures.push(affiliation);
+        }
+      }
+    }
+    if (members.length === 0 && memberBearingFailures.length > 0) {
+      this.emitError({
+        kind: "member-query",
+        recoverable: false,
+        detail: `refusing to show Members 0 — member-bearing affiliation queries failed (${memberBearingFailures.join(", ")}); reconstructed room JID may not match`,
+      });
+      throw new Error("refusing to show Members 0");
+    }
+    return members;
   }
 
   async setRoomAffiliation(channelId: string, jid: string, affiliation: MemberSummary["role"]): Promise<void> {

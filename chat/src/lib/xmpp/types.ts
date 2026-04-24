@@ -27,7 +27,8 @@ export type SessionLifecycleEvent = { type: "resumed" } | { type: "fresh" };
 export type XmppErrorKind =
   | "stream"
   | "auth"
-  | "connect-timeout";
+  | "connect-timeout"
+  | "member-query";
 
 export interface XmppErrorEvent {
   kind: XmppErrorKind;
@@ -39,6 +40,14 @@ export interface XmppErrorEvent {
   cause?: unknown;
   /** XMPP stream-error condition when `kind === "stream"`. */
   condition?: string;
+}
+
+export interface ListRoomMembersOptions {
+  /**
+   * Canonical room JID discovered from disco/topology. Prefer this over
+   * reconstructing `${channelId}@muc.domain` when callers have it.
+   */
+  roomJid?: string;
 }
 
 export interface ReplyPreview {

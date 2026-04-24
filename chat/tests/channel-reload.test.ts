@@ -46,6 +46,48 @@ function makeWaddles(client: BrowserXmppClient | null = null) {
   return { w, xmppClient, actionError };
 }
 
+describe("useWaddles.loadStructure", () => {
+  test("loads members for the first channel when no preferred channel is supplied", async () => {
+    const listRoomMembers = mock(async (_id: string, _opts?: { roomJid?: string }) => [ALICE]);
+    const client = makeClient({ listRoomMembers });
+    const { w } = makeWaddles(client);
+
+    await w.loadStructure();
+
+    expect(listRoomMembers).toHaveBeenCalledTimes(1);
+    expect(listRoomMembers.mock.calls[0]![0]).toBe("general");
+    expect(listRoomMembers.mock.calls[0]![1]).toEqual({ roomJid: "general@conference.example.com" });
+    expect(w.members.value).toEqual([ALICE]);
+  });
+
+  test("loads members for the preferred channel when a channelId is supplied", async () => {
+    const listRoomMembers = mock(async (_id: string, _opts?: { roomJid?: string }) => [BOB]);
+    const client = makeClient({ listRoomMembers });
+    const { w } = makeWaddles(client);
+
+    const returned = await w.loadStructure("random");
+
+    expect(returned).toBe("random");
+    expect(listRoomMembers).toHaveBeenCalledTimes(1);
+    expect(listRoomMembers.mock.calls[0]![0]).toBe("random");
+    expect(listRoomMembers.mock.calls[0]![1]).toEqual({ roomJid: "random@conference.example.com" });
+    expect(w.members.value).toEqual([BOB]);
+    expect(w.activeChannelId.value).toBe("random");
+  });
+
+  test("routes to the first channel when preferred channel is not in the topology", async () => {
+    const listRoomMembers = mock(async (_id: string, _opts?: { roomJid?: string }) => [ALICE]);
+    const client = makeClient({ listRoomMembers });
+    const { w } = makeWaddles(client);
+
+    const returned = await w.loadStructure("does-not-exist");
+
+    expect(returned).toBe("general");
+    expect(listRoomMembers.mock.calls[0]![0]).toBe("general");
+    expect(w.activeChannelId.value).toBe("general");
+  });
+});
+
 describe("useWaddles.reloadChannelMembers", () => {
   test("loads members for the active channel using its discovered JID", async () => {
     const listRoomMembers = mock(async (_id: string, _opts?: { roomJid?: string }) => [ALICE]);
