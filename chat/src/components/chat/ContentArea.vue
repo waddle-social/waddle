@@ -10,7 +10,7 @@ import {
   orderTimelineForScrollDirection,
 } from "@/lib/scroll-direction";
 import { extractFilesFromEvent } from "@/lib/xmpp/file-upload";
-import type { ChannelSummary, WaddleSummary } from "@/lib/waddle-api";
+import type { ChannelSummary, SpaceSummary } from "@/lib/chat-types";
 import type { TimelineMessage, MarkupSpan, MessageReference } from "@/lib/chat-ui";
 import type { BrowserXmppClient, XmppStatusSnapshot, RoomHats, RoomPresence } from "@/lib/xmpp-client";
 import { useScrollDirection } from "@/composables/useScrollDirection";
@@ -24,7 +24,7 @@ const draft = defineModel<string>("draft", { required: true });
 const forumTitle = defineModel<string>("forumTitle", { default: "" });
 
 const props = defineProps<{
-  waddle: WaddleSummary | null;
+  waddle: SpaceSummary | null;
   channel: ChannelSummary | null;
   dmPeer?: { peerJid: string; peerUsername: string; presenceShow?: string } | null;
   sidebarMode?: "channels" | "dms";

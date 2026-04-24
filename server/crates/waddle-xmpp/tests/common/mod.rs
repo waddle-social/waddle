@@ -96,10 +96,10 @@ pub struct MockAppState {
     pub domain: String,
     /// Whether to accept all auth attempts (true) or reject them (false)
     pub accept_auth: bool,
-    /// XEP-0503: waddle details for spaces service tests
-    pub waddle_details: Vec<waddle_xmpp::WaddleDetails>,
-    /// XEP-0503: channels per waddle (keyed by waddle ID)
-    pub waddle_channels: std::collections::HashMap<String, Vec<waddle_xmpp::ChannelInfo>>,
+    /// XEP-0503: canonical space details for spaces service tests.
+    pub space_details: Option<waddle_xmpp::SpaceDetails>,
+    /// XEP-0503: channels for the canonical test space.
+    pub space_channels: Vec<waddle_xmpp::ChannelInfo>,
     blocked_jids: Mutex<HashMap<String, HashSet<String>>>,
     known_users: Mutex<HashSet<String>>,
     inbox_storage: InMemoryInboxStorage,
@@ -110,8 +110,8 @@ impl MockAppState {
         Self {
             domain: domain.to_string(),
             accept_auth: true,
-            waddle_details: Vec::new(),
-            waddle_channels: std::collections::HashMap::new(),
+            space_details: None,
+            space_channels: Vec::new(),
             blocked_jids: Mutex::new(HashMap::new()),
             known_users: Mutex::new(HashSet::new()),
             inbox_storage: InMemoryInboxStorage::new(),
@@ -122,23 +122,22 @@ impl MockAppState {
         Self {
             domain: domain.to_string(),
             accept_auth: false,
-            waddle_details: Vec::new(),
-            waddle_channels: std::collections::HashMap::new(),
+            space_details: None,
+            space_channels: Vec::new(),
             blocked_jids: Mutex::new(HashMap::new()),
             known_users: Mutex::new(HashSet::new()),
             inbox_storage: InMemoryInboxStorage::new(),
         }
     }
 
-    /// Add a waddle with its channels for XEP-0503 tests.
-    pub fn with_waddle(
+    /// Add the canonical space with its channels for XEP-0503 tests.
+    pub fn with_space(
         mut self,
-        details: waddle_xmpp::WaddleDetails,
+        details: waddle_xmpp::SpaceDetails,
         channels: Vec<waddle_xmpp::ChannelInfo>,
     ) -> Self {
-        let waddle_id = details.id.clone();
-        self.waddle_details.push(details);
-        self.waddle_channels.insert(waddle_id, channels);
+        self.space_details = Some(details);
+        self.space_channels = channels;
         self
     }
 }
@@ -513,70 +512,28 @@ impl AppState for MockAppState {
             .map_err(|error| XmppError::internal(format!("Inbox error: {}", error)))
     }
 
-    async fn list_user_waddles(
-        &self,
-        _user_id: &str,
-    ) -> Result<Vec<waddle_xmpp::WaddleInfo>, XmppError> {
-        // Mock returns no waddles — auto-join is a no-op in tests by default
-        Ok(Vec::new())
-    }
-
-    async fn list_waddle_channels(
-        &self,
-        waddle_id: &str,
-    ) -> Result<Vec<waddle_xmpp::ChannelInfo>, XmppError> {
-        Ok(self
-            .waddle_channels
-            .get(waddle_id)
-            .cloned()
-            .unwrap_or_default())
+    async fn list_space_channels(&self) -> Result<Vec<waddle_xmpp::ChannelInfo>, XmppError> {
+        Ok(self.space_channels.clone())
     }
 
     async fn get_channel_room_info(
         &self,
-        waddle_id: &str,
         channel_id: &str,
     ) -> Result<Option<waddle_xmpp::ChannelRoomInfo>, XmppError> {
-        Ok(self
-            .waddle_channels
-            .get(waddle_id)
-            .and_then(|channels| {
-                channels
-                    .iter()
-                    .find(|channel| channel.id == channel_id)
-                    .cloned()
+        Ok(self.space_channels.iter().find_map(|channel| {
+            (channel.id == channel_id).then(|| waddle_xmpp::ChannelRoomInfo {
+                waddle_id: self
+                    .space_details
+                    .as_ref()
+                    .map(|space| space.id.clone())
+                    .unwrap_or_else(|| "space".to_string()),
+                channel: channel.clone(),
             })
-            .map(|channel| waddle_xmpp::ChannelRoomInfo {
-                waddle_id: waddle_id.to_string(),
-                channel,
-            }))
+        }))
     }
 
-    async fn get_waddle_details(
-        &self,
-        waddle_id: &str,
-    ) -> Result<Option<waddle_xmpp::WaddleDetails>, XmppError> {
-        Ok(self
-            .waddle_details
-            .iter()
-            .find(|w| w.id == waddle_id)
-            .cloned())
-    }
-
-    async fn get_user_waddles_with_details(
-        &self,
-        _user_id: &str,
-    ) -> Result<Vec<waddle_xmpp::WaddleDetails>, XmppError> {
-        // In tests, return all waddles for any authenticated user
-        Ok(self.waddle_details.clone())
-    }
-
-    async fn list_all_waddles(
-        &self,
-        limit: usize,
-        _offset: usize,
-    ) -> Result<Vec<waddle_xmpp::WaddleDetails>, XmppError> {
-        Ok(self.waddle_details.iter().take(limit).cloned().collect())
+    async fn get_space_details(&self) -> Result<Option<waddle_xmpp::SpaceDetails>, XmppError> {
+        Ok(self.space_details.clone())
     }
 }
 
@@ -656,16 +613,11 @@ impl TestServer {
 
     /// Start a test server with custom app state.
     pub async fn start_with_state<S: AppState>(app_state: Arc<S>) -> Self {
-        Self::start_with_state_config(app_state, false).await
-    }
-
-    /// Start a test server with custom app state and single-tenant mode.
-    pub async fn start_with_state_single_tenant<S: AppState>(app_state: Arc<S>) -> Self {
-        Self::start_with_state_config(app_state, true).await
+        Self::start_with_state_config(app_state).await
     }
 
     /// Start a test server with custom app state and configuration.
-    async fn start_with_state_config<S: AppState>(app_state: Arc<S>, single_tenant: bool) -> Self {
+    async fn start_with_state_config<S: AppState>(app_state: Arc<S>) -> Self {
         install_crypto_provider();
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
@@ -685,7 +637,6 @@ impl TestServer {
             domain.clone(),
             app_state,
             shutdown_rx,
-            single_tenant,
         ));
 
         Self {
@@ -717,7 +668,6 @@ async fn run_test_server<S: AppState>(
     domain: String,
     app_state: Arc<S>,
     mut shutdown_rx: oneshot::Receiver<()>,
-    single_tenant: bool,
 ) {
     // Create SHARED registries at server level - these are used by all connections
     let muc_domain = format!("muc.{}", domain);
@@ -773,10 +723,9 @@ async fn run_test_server<S: AppState>(
                         let cmd_registry = Arc::clone(&command_registry);
                         // Enable registration for tests
                         let registration_enabled = true;
-                        let st = single_tenant;
                         tokio::spawn(async move {
                             let _ = waddle_xmpp::connection::ConnectionActor::handle_connection(
-                                stream, peer_addr, tls, dom, state, rooms, conns, users, mam, isr, sm_reg, registration_enabled, pubsub, ext, st, push_store, push_sender, cmd_registry
+                                stream, peer_addr, tls, dom, state, rooms, conns, users, mam, isr, sm_reg, registration_enabled, pubsub, ext, push_store, push_sender, cmd_registry
                             ).await;
                         });
                     }

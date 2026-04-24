@@ -5,7 +5,7 @@
 use super::actor::{DbActor, DbHealthCheck};
 use super::{Database, DatabaseConfig, DatabaseError};
 use kameo::actor::ActorRef;
-use tracing::{debug, info, instrument};
+use tracing::{info, instrument};
 
 /// Configuration for the database pool.
 #[derive(Debug, Clone)]
@@ -52,38 +52,6 @@ impl DatabasePool {
 
     pub fn global_actor(&self) -> &ActorRef<DbActor> {
         &self.global_actor
-    }
-
-    /// Single-database model: waddle DB requests map to the global DB.
-    #[instrument(skip_all, fields(waddle_id = %waddle_id))]
-    pub async fn get_waddle_db(&self, waddle_id: &str) -> Result<Database, DatabaseError> {
-        debug!(waddle_id = %waddle_id, "Single database mode: returning global database handle");
-        Ok(self.global_db.clone())
-    }
-
-    /// Single-database model: waddle actor requests map to the global actor.
-    pub async fn get_waddle_actor(
-        &self,
-        waddle_id: &str,
-    ) -> Result<ActorRef<DbActor>, DatabaseError> {
-        debug!(waddle_id = %waddle_id, "Single database mode: returning global actor");
-        Ok(self.global_actor.clone())
-    }
-
-    /// Single-database model: creation is a no-op returning global handle.
-    #[instrument(skip_all, fields(waddle_id = %waddle_id))]
-    pub async fn create_waddle_db(&self, waddle_id: &str) -> Result<Database, DatabaseError> {
-        debug!(waddle_id = %waddle_id, "Single database mode: create_waddle_db is a no-op");
-        Ok(self.global_db.clone())
-    }
-
-    #[allow(dead_code)]
-    pub fn waddle_db_exists(&self, _waddle_id: &str) -> bool {
-        true
-    }
-
-    pub fn unload_waddle_db(&self, _waddle_id: &str) {
-        debug!("Single database mode: unload_waddle_db is a no-op");
     }
 
     #[allow(dead_code)]
@@ -143,17 +111,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_single_database_aliases() {
+    async fn test_single_database_accessors() {
         let config = DatabaseConfig::default();
         let pool = DatabasePool::new(config, PoolConfig::default())
             .await
             .unwrap();
 
-        let db = pool.create_waddle_db("test-waddle").await.unwrap();
-        let db2 = pool.get_waddle_db("test-waddle").await.unwrap();
-
-        assert_eq!(db.name(), "global");
-        assert_eq!(db2.name(), "global");
+        assert_eq!(pool.global().name(), "global");
         assert_eq!(pool.loaded_waddle_count(), 1);
     }
 }

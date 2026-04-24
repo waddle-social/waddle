@@ -10,17 +10,17 @@ describe("jid helpers", () => {
         session_id: "tok",
         xmpp_websocket_url: "wss://example.com/xmpp",
       },
-      "w1",
       "roadmap",
-    )).toBe("w1_roadmap@muc.example.com");
+    )).toBe("roadmap@muc.example.com");
     expect(jidDomain("alice@example.com/desktop")).toBe("example.com");
   });
 
   test("parseManagedRoomBareJid extracts the canonical managed room identifiers", () => {
     expect(parseManagedRoomBareJid("w1_road_map@muc.example.com/Alice")).toEqual({
-      waddleId: "w1",
-      channelId: "road_map",
+      channelId: "w1_road_map",
     });
-    expect(parseManagedRoomBareJid("roadmap@muc.example.com")).toBeNull();
+    expect(parseManagedRoomBareJid("roadmap@muc.example.com")).toEqual({
+      channelId: "roadmap",
+    });
   });
 });

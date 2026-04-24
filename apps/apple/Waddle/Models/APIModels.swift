@@ -74,28 +74,10 @@ struct DevicePollCompleteResponse: Decodable {
     }
 }
 
-struct WaddleSummary: Decodable, Identifiable, Hashable {
+struct SpaceSummary: Decodable, Identifiable, Hashable {
     let id: String
     let name: String
     let description: String?
-    let ownerUserID: String?
-    let iconURL: String?
-    let isPublic: Bool?
-    let role: String?
-    let createdAt: String?
-    let updatedAt: String?
-
-    enum CodingKeys: String, CodingKey {
-        case id
-        case name
-        case description
-        case ownerUserID = "owner_user_id"
-        case iconURL = "icon_url"
-        case isPublic = "is_public"
-        case role
-        case createdAt = "created_at"
-        case updatedAt = "updated_at"
-    }
 }
 
 struct ChannelSummary: Decodable, Identifiable, Hashable {
@@ -104,7 +86,7 @@ struct ChannelSummary: Decodable, Identifiable, Hashable {
     let description: String?
     let channelType: String?
     let position: Int?
-    /// Full XMPP room JID (e.g. `{spaceUUID}_{channelUUID}@muc.domain`).
+    /// Full XMPP room JID (e.g. `{channelUUID}@muc.domain`).
     /// Set from XMPP discovery; not decoded from JSON.
     var roomJid: String
 
@@ -154,14 +136,7 @@ struct MemberSummary: Decodable, Identifiable, Hashable {
     }
 }
 
-struct CreateWaddleRequest: Encodable {
+struct CreateSpaceRequest: Encodable {
     let name: String
     let description: String?
-    let isPublic: Bool
-
-    enum CodingKeys: String, CodingKey {
-        case name
-        case description
-        case isPublic = "is_public"
-    }
 }

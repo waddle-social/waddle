@@ -194,12 +194,6 @@ export interface PresenceUpdateEvent {
   status?: string;
 }
 
-export interface DiscoveredWaddle {
-  id: string;
-  name: string;
-  isPublic: boolean;
-}
-
 export interface DiscoveredChannel {
   id: string;
   name: string;

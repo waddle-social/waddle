@@ -2,12 +2,12 @@
 import { Lock, Globe, X } from "lucide-vue-next";
 import AppDialog from "@/components/ui/AppDialog.vue";
 import type { CommunityFormData } from "@/lib/chat-ui";
-import type { WaddleSummary } from "@/lib/waddle-api";
+import type { SpaceSummary } from "@/lib/chat-types";
 
 const open = defineModel<boolean>("open", { required: true });
 
 defineProps<{
-  waddle: WaddleSummary | null;
+  waddle: SpaceSummary | null;
   form: CommunityFormData;
   isSubmitting: boolean;
 }>();

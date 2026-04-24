@@ -2,11 +2,11 @@
 import { computed } from "vue";
 import { Hash, MessagesSquare, Plus, Settings, Users, ChevronDown, MessageCircle } from "lucide-vue-next";
 import { isForumChannel as detectForumChannel } from "@/lib/channel-types";
-import type { ChannelSummary, WaddleSummary } from "@/lib/waddle-api";
+import type { ChannelSummary, SpaceSummary } from "@/lib/chat-types";
 import type { ThreadInboxEntry } from "@/composables/useChannelUnread";
 
 const props = defineProps<{
-  waddle: WaddleSummary | null;
+  waddle: SpaceSummary | null;
   channels: ChannelSummary[];
   activeChannelId: string | null;
   canManageChannels: boolean;

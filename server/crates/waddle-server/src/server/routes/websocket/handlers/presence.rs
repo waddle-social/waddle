@@ -11,7 +11,7 @@ use xmpp_parsers::minidom::Element;
 
 use super::super::{element_to_xml, get_or_create_room_actor, get_room_actor, WebSocketState};
 use crate::auth::Session;
-use crate::server::routes::channels::get_channel_from_db;
+use crate::server::xmpp_state::{get_xmpp_channel, XmppChannelRecord};
 use waddle_xmpp::protocol::ConnectionPhase;
 
 pub async fn handle_presence(
@@ -98,7 +98,10 @@ pub async fn handle_muc_join(
 
             let (waddle_id, channel_id) = managed_channel
                 .as_ref()
-                .map(|channel| (channel.waddle_id.clone(), channel.id.clone()))
+                .map(|channel| {
+                    let (waddle_id, _) = parse_room_jid_context(room_jid);
+                    (waddle_id, channel.id.clone())
+                })
                 .unwrap_or_else(|| parse_room_jid_context(room_jid));
 
             let Some(actor) =
@@ -426,14 +429,14 @@ fn role_str(role: Role) -> &'static str {
     }
 }
 
-/// Derive waddle_id and channel_id from a room's bare JID node.
+/// Derive the single-space id and channel id from a room's bare JID node.
 
 ///
-/// Convention: node is "waddleId_channelId" (first underscore separates).
+/// Convention: node is the channel id.
 /// Falls back to ("default", "default") if the node can't be parsed.
 pub fn parse_room_jid_context(room_jid: &jid::BareJid) -> (String, String) {
-    if let Some((waddle_id, channel_id)) = waddle_xmpp::parse_managed_room_jid(room_jid) {
-        return (waddle_id, channel_id);
+    if let Some(channel_id) = waddle_xmpp::parse_managed_room_jid(room_jid) {
+        return ("space".to_string(), channel_id);
     }
     ("default".to_string(), "default".to_string())
 }
@@ -441,17 +444,8 @@ pub fn parse_room_jid_context(room_jid: &jid::BareJid) -> (String, String) {
 pub async fn get_managed_channel_for_room(
     state: &WebSocketState,
     room_jid: &BareJid,
-) -> Option<crate::server::routes::channels::ChannelResponse> {
-    let (waddle_id, channel_id) = waddle_xmpp::parse_managed_room_jid(room_jid)?;
-    let waddle_actor = state
-        .deps
-        .app_state
-        .db_pool
-        .get_waddle_actor(&waddle_id)
-        .await
-        .ok()?;
-    get_channel_from_db(waddle_actor, &waddle_id, &channel_id)
-        .await
-        .ok()
-        .flatten()
+) -> Option<XmppChannelRecord> {
+    let channel_id = waddle_xmpp::parse_managed_room_jid(room_jid)?;
+    let actor = state.deps.app_state.db_pool.global_actor().clone();
+    get_xmpp_channel(actor, &channel_id).await.ok().flatten()
 }

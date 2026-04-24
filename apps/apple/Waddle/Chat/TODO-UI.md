@@ -7,7 +7,7 @@ Target: Slack/Discord-quality native iOS experience
 - [ ] Messages don't appear on first channel load (need channel switch workaround)
 
 ## Mobile Shell Redesign (Slack-style)
-- [ ] Workspace sidebar: vertical icon strip (left edge) with server/waddle avatars
+- [ ] Sidebar: compact server controls for the single server space
 - [ ] Channel list: collapsible sections (Channels, Direct Messages, Starred)
 - [ ] Tab bar: Home, DMs, Activity/Notifications, More, Search
 - [ ] Dark theme as default with proper contrast

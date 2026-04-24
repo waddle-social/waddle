@@ -421,7 +421,7 @@ describe("XEP-0198 self-echo reconciliation (group chat)", () => {
 
   test("fresh room session self-echo reconciles preserved sending entries", async () => {
     const currentSession = session();
-    const roomJid = roomBareJidFor(currentSession, "w1", "c1");
+    const roomJid = roomBareJidFor(currentSession, "c1");
     const queryMam = mock(async () => []);
     const sendGroupMessage = mock(async () => ({ id: "client-room", state: "sending" as const }));
     const sendChatState = mock(async () => undefined);

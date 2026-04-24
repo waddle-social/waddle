@@ -314,6 +314,7 @@ impl WsXmppClient {
     }
 
     /// Receive frames until one matches the predicate. Returns all collected frames.
+    #[allow(dead_code)]
     pub async fn recv_until<F: Fn(&str) -> bool>(
         &mut self,
         predicate: F,

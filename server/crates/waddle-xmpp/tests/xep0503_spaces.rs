@@ -12,10 +12,10 @@ use common::{
 };
 use std::sync::Arc;
 
-fn test_waddle() -> waddle_xmpp::WaddleDetails {
-    waddle_xmpp::WaddleDetails {
-        id: "waddle-1".to_string(),
-        name: "Test Waddle".to_string(),
+fn test_space() -> waddle_xmpp::SpaceDetails {
+    waddle_xmpp::SpaceDetails {
+        id: "space-1".to_string(),
+        name: "Test Space".to_string(),
         description: Some("A test community".to_string()),
         owner_id: "alice".to_string(),
         icon_url: None,
@@ -193,14 +193,13 @@ async fn xep0503_spaces_service_disco_info() {
 }
 
 // =========================================================================
-// Test: disco#items to spaces domain returns user's waddles
+// Test: disco#items to spaces domain returns canonical space
 // =========================================================================
 
 #[tokio::test]
-async fn xep0503_spaces_disco_items_returns_user_waddles() {
+async fn xep0503_spaces_disco_items_returns_canonical_space() {
     init_test_env();
-    let state =
-        Arc::new(MockAppState::new("localhost").with_waddle(test_waddle(), test_channels()));
+    let state = Arc::new(MockAppState::new("localhost").with_space(test_space(), test_channels()));
     let server = TestServer::start_with_state(state).await;
     let mut client = RawXmppClient::connect(server.addr).await.unwrap();
     establish_bound_session(&mut client, &server, "alice", "desktop")
@@ -216,15 +215,15 @@ async fn xep0503_spaces_disco_items_returns_user_waddles() {
         "Expected result IQ, got: {}",
         response
     );
-    // Waddle should be listed as a disco item with node attribute
+    // Space should be listed as a disco item with node attribute
     assert!(
-        response.contains("waddle-1"),
-        "Expected waddle-1 node in response, got: {}",
+        response.contains("space-1"),
+        "Expected space-1 node in response, got: {}",
         response
     );
     assert!(
-        response.contains("Test Waddle"),
-        "Expected waddle name in response, got: {}",
+        response.contains("Test Space"),
+        "Expected space name in response, got: {}",
         response
     );
 }
@@ -236,8 +235,7 @@ async fn xep0503_spaces_disco_items_returns_user_waddles() {
 #[tokio::test]
 async fn xep0503_space_node_disco_info_returns_metadata() {
     init_test_env();
-    let state =
-        Arc::new(MockAppState::new("localhost").with_waddle(test_waddle(), test_channels()));
+    let state = Arc::new(MockAppState::new("localhost").with_space(test_space(), test_channels()));
     let server = TestServer::start_with_state(state).await;
     let mut client = RawXmppClient::connect(server.addr).await.unwrap();
     establish_bound_session(&mut client, &server, "alice", "desktop")
@@ -245,7 +243,7 @@ async fn xep0503_space_node_disco_info_returns_metadata() {
         .unwrap();
 
     let response =
-        disco_info_query_with_node(&mut client, "spaces.localhost", "space-node-1", "waddle-1")
+        disco_info_query_with_node(&mut client, "spaces.localhost", "space-node-1", "space-1")
             .await
             .unwrap();
 
@@ -290,22 +288,16 @@ async fn xep0503_space_node_disco_info_returns_metadata() {
 #[tokio::test]
 async fn xep0503_pubsub_items_returns_bookmarks() {
     init_test_env();
-    let state =
-        Arc::new(MockAppState::new("localhost").with_waddle(test_waddle(), test_channels()));
+    let state = Arc::new(MockAppState::new("localhost").with_space(test_space(), test_channels()));
     let server = TestServer::start_with_state(state).await;
     let mut client = RawXmppClient::connect(server.addr).await.unwrap();
     establish_bound_session(&mut client, &server, "alice", "desktop")
         .await
         .unwrap();
 
-    let response = pubsub_items_query(
-        &mut client,
-        "spaces.localhost",
-        "pubsub-items-1",
-        "waddle-1",
-    )
-    .await
-    .unwrap();
+    let response = pubsub_items_query(&mut client, "spaces.localhost", "pubsub-items-1", "space-1")
+        .await
+        .unwrap();
 
     assert!(
         response.contains("type='result'") || response.contains("type=\"result\""),
@@ -319,7 +311,7 @@ async fn xep0503_pubsub_items_returns_bookmarks() {
         response
     );
     assert!(
-        response.contains("waddle-1_general@muc.localhost"),
+        response.contains("general@muc.localhost"),
         "Expected canonical general room JID, got: {}",
         response
     );
@@ -329,7 +321,7 @@ async fn xep0503_pubsub_items_returns_bookmarks() {
         response
     );
     assert!(
-        response.contains("waddle-1_random@muc.localhost"),
+        response.contains("random@muc.localhost"),
         "Expected canonical random room JID, got: {}",
         response
     );
@@ -344,8 +336,7 @@ async fn xep0503_pubsub_items_returns_bookmarks() {
 #[tokio::test]
 async fn xep0503_space_node_disco_items_use_canonical_room_jids() {
     init_test_env();
-    let state =
-        Arc::new(MockAppState::new("localhost").with_waddle(test_waddle(), test_channels()));
+    let state = Arc::new(MockAppState::new("localhost").with_space(test_space(), test_channels()));
     let server = TestServer::start_with_state(state).await;
     let mut client = RawXmppClient::connect(server.addr).await.unwrap();
     establish_bound_session(&mut client, &server, "alice", "desktop")
@@ -356,18 +347,18 @@ async fn xep0503_space_node_disco_items_use_canonical_room_jids() {
         &mut client,
         "spaces.localhost",
         "spaces-node-items-1",
-        Some("waddle-1"),
+        Some("space-1"),
     )
     .await
     .unwrap();
 
     assert!(
-        response.contains("waddle-1_general@muc.localhost"),
+        response.contains("general@muc.localhost"),
         "Expected canonical general room JID, got: {}",
         response
     );
     assert!(
-        response.contains("waddle-1_random@muc.localhost"),
+        response.contains("random@muc.localhost"),
         "Expected canonical random room JID, got: {}",
         response
     );
@@ -442,56 +433,26 @@ async fn xep0503_pubsub_write_returns_service_unavailable() {
 }
 
 // =========================================================================
-// Test: single-tenant mode returns exactly one canonical space
+// Test: spaces service returns canonical space
 // =========================================================================
 
 #[tokio::test]
-async fn xep0503_single_tenant_returns_canonical_space() {
+async fn xep0503_returns_canonical_space() {
     init_test_env();
-    // Create 3 waddles in the mock
-    let state = Arc::new(
-        MockAppState::new("localhost")
-            .with_waddle(
-                waddle_xmpp::WaddleDetails {
-                    id: "waddle-a".to_string(),
-                    name: "Waddle Alpha".to_string(),
-                    description: Some("First".to_string()),
-                    owner_id: "admin".to_string(),
-                    icon_url: None,
-                    is_public: true,
-                    created_at: "2026-01-01T00:00:00Z".to_string(),
-                },
-                vec![],
-            )
-            .with_waddle(
-                waddle_xmpp::WaddleDetails {
-                    id: "waddle-b".to_string(),
-                    name: "Waddle Beta".to_string(),
-                    description: Some("Second".to_string()),
-                    owner_id: "admin".to_string(),
-                    icon_url: None,
-                    is_public: true,
-                    created_at: "2026-01-02T00:00:00Z".to_string(),
-                },
-                vec![],
-            )
-            .with_waddle(
-                waddle_xmpp::WaddleDetails {
-                    id: "waddle-c".to_string(),
-                    name: "Waddle Charlie".to_string(),
-                    description: Some("Third".to_string()),
-                    owner_id: "admin".to_string(),
-                    icon_url: None,
-                    is_public: true,
-                    created_at: "2026-01-03T00:00:00Z".to_string(),
-                },
-                vec![],
-            ),
-    );
-    // Start server in single-tenant mode
-    let server = TestServer::start_with_state_single_tenant(state).await;
+    let state = Arc::new(MockAppState::new("localhost").with_space(
+        waddle_xmpp::SpaceDetails {
+            id: "space-a".to_string(),
+            name: "Space Alpha".to_string(),
+            description: Some("First".to_string()),
+            owner_id: "admin".to_string(),
+            icon_url: None,
+            is_public: true,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+        },
+        vec![],
+    ));
+    let server = TestServer::start_with_state(state).await;
     let mut client = RawXmppClient::connect(server.addr).await.unwrap();
-    // Use a non-member user to prove single-tenant ignores membership
     establish_bound_session(&mut client, &server, "stranger", "phone")
         .await
         .unwrap();
@@ -505,21 +466,10 @@ async fn xep0503_single_tenant_returns_canonical_space() {
         "Expected result IQ, got: {}",
         response
     );
-    // Single-tenant returns exactly one canonical space (limit=1)
+    // Single-tenant returns the canonical space.
     assert!(
-        response.contains("waddle-a"),
-        "Expected canonical waddle in response, got: {}",
-        response
-    );
-    // Should NOT contain the other waddles (only one returned)
-    assert!(
-        !response.contains("waddle-b"),
-        "Expected only one waddle in single-tenant mode, got: {}",
-        response
-    );
-    assert!(
-        !response.contains("waddle-c"),
-        "Expected only one waddle in single-tenant mode, got: {}",
+        response.contains("space-a"),
+        "Expected canonical space in response, got: {}",
         response
     );
 }

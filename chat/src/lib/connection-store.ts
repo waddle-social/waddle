@@ -1,14 +1,13 @@
 import { shallowReactive } from "vue";
 import type { BrowserXmppClient } from "@/lib/xmpp-client";
 import type { WaddleSession, AuthProvider } from "@/lib/server-auth";
-import type { WaddleApi } from "@/lib/waddle-api";
 import type { AppState } from "@/lib/chat-ui";
 
 interface ConnectionStore {
   client: BrowserXmppClient | null;
   appState: AppState;
   session: WaddleSession | null;
-  api: WaddleApi | null;
+  api: null;
   appError: string;
   activeServerUrl: string;
   providers: AuthProvider[];
@@ -22,7 +21,7 @@ export const connectionStore: ConnectionStore = shallowReactive({
   client: null,
   appState: "loading" as AppState,
   session: null as WaddleSession | null,
-  api: null as WaddleApi | null,
+  api: null,
   appError: "",
   activeServerUrl: "",
   providers: [] as AuthProvider[],

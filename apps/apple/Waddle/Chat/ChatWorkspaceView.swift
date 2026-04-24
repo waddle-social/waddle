@@ -1,9 +1,9 @@
 import SwiftUI
 
-struct WaddleChatWorkspaceView: View {
+struct WaddleChatSpaceView: View {
     @ObservedObject var model: AppModel
     @ObservedObject var store: ChatSurfaceStore
-    let waddle: WaddleSummary
+    let space: SpaceSummary
     @Environment(\.colorScheme) private var colorScheme
     @State private var showMembersSheet = false
     @State private var showChannelSidebar = false
@@ -22,10 +22,10 @@ struct WaddleChatWorkspaceView: View {
     @State private var showEditChannelSheet = false
     @State private var editChannelName = ""
     @State private var editChannelDescription = ""
-    @State private var showWaddleSettingsSheet = false
-    @State private var editWaddleName = ""
-    @State private var editWaddleDescription = ""
-    @State private var showDeleteWaddleConfirm = false
+    @State private var showSpaceSettingsSheet = false
+    @State private var editSpaceName = ""
+    @State private var editSpaceDescription = ""
+    @State private var showDeleteSpaceConfirm = false
     @State private var newTopicTitle = ""
     @State private var newTopicBody = ""
     @State private var forumReplyText = ""
@@ -61,7 +61,7 @@ struct WaddleChatWorkspaceView: View {
                     regularLayout(showMembersInline: showMembersInline)
                 }
             }
-            .background(workspaceBackground.ignoresSafeArea())
+            .background(spaceBackground.ignoresSafeArea())
             .overlay(alignment: .top) {
                 if let toast = store.notificationToast {
                     ChatNotificationToastView(toast: toast) {
@@ -149,47 +149,47 @@ struct WaddleChatWorkspaceView: View {
             }
             .presentationDetents([.medium, .large])
         }
-        .sheet(isPresented: $showWaddleSettingsSheet) {
+        .sheet(isPresented: $showSpaceSettingsSheet) {
             NavigationStack {
                 Form {
-                    Section("Waddle Details") {
-                        TextField("Name", text: $editWaddleName)
-                        TextField("Description", text: $editWaddleDescription)
+                    Section("Space Details") {
+                        TextField("Name", text: $editSpaceName)
+                        TextField("Description", text: $editSpaceDescription)
                     }
                     Section {
                         Button(role: .destructive) {
-                            showDeleteWaddleConfirm = true
+                            showDeleteSpaceConfirm = true
                         } label: {
-                            Label("Delete Waddle", systemImage: "trash")
+                            Label("Delete Space", systemImage: "trash")
                         }
                     }
                 }
-                .navigationTitle("Waddle Settings")
+                .navigationTitle("Space Settings")
 #if os(iOS)
                 .navigationBarTitleDisplayMode(.inline)
 #endif
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) {
-                        Button("Cancel") { showWaddleSettingsSheet = false }
+                        Button("Cancel") { showSpaceSettingsSheet = false }
                     }
                     ToolbarItem(placement: .confirmationAction) {
                         Button("Save") {
                             Task {
-                                await model.updateWaddle(
-                                    name: editWaddleName,
-                                    description: editWaddleDescription.isEmpty ? nil : editWaddleDescription
+                                await model.updateSpace(
+                                    name: editSpaceName,
+                                    description: editSpaceDescription.isEmpty ? nil : editSpaceDescription
                                 )
-                                showWaddleSettingsSheet = false
+                                showSpaceSettingsSheet = false
                             }
                         }
-                        .disabled(editWaddleName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .disabled(editSpaceName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     }
                 }
-                .alert("Delete Waddle?", isPresented: $showDeleteWaddleConfirm) {
+                .alert("Delete Space?", isPresented: $showDeleteSpaceConfirm) {
                     Button("Delete", role: .destructive) {
                         Task {
-                            await model.deleteWaddle()
-                            showWaddleSettingsSheet = false
+                            await model.deleteSpace()
+                            showSpaceSettingsSheet = false
                         }
                     }
                     Button("Cancel", role: .cancel) {}
@@ -436,14 +436,14 @@ struct WaddleChatWorkspaceView: View {
     private var compactSidebar: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 10) {
-                Text(waddle.name.prefix(2).uppercased())
+                Text(space.name.prefix(2).uppercased())
                     .font(.caption.weight(.bold))
                     .foregroundStyle(.white)
                     .frame(width: 32, height: 32)
                     .background(WaddleTheme.accent, in: RoundedRectangle(cornerRadius: 8))
 
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(waddle.name)
+                    Text(space.name)
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(WaddleTheme.textPrimary)
                     Text("\(model.members.count) members")
@@ -572,7 +572,7 @@ struct WaddleChatWorkspaceView: View {
                     }
 
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(waddle.name)
+                    Text(space.name)
                         .font(.system(size: 17, weight: .semibold))
                         .lineLimit(1)
                     Text(serverLabel)
@@ -583,17 +583,17 @@ struct WaddleChatWorkspaceView: View {
 
                 Spacer(minLength: 0)
 
-                DesktopActionButton(systemName: "plus", accessibilityLabel: "Create channel") {
+                SpaceActionButton(systemName: "plus", accessibilityLabel: "Create channel") {
                     showCreateChannelSheet = true
                 }
 
-                DesktopActionButton(systemName: "gearshape", accessibilityLabel: "Workspace settings") {
-                    editWaddleName = waddle.name
-                    editWaddleDescription = waddle.description ?? ""
-                    showWaddleSettingsSheet = true
+                SpaceActionButton(systemName: "gearshape", accessibilityLabel: "Space settings") {
+                    editSpaceName = space.name
+                    editSpaceDescription = space.description ?? ""
+                    showSpaceSettingsSheet = true
                 }
 
-                DesktopActionButton(systemName: "sidebar.leading", accessibilityLabel: "Collapse channels") {
+                SpaceActionButton(systemName: "sidebar.leading", accessibilityLabel: "Collapse channels") {
                     withAnimation(.easeOut(duration: 0.18)) {
                         showDesktopChannelRail = false
                     }
@@ -634,7 +634,7 @@ struct WaddleChatWorkspaceView: View {
             if store.rooms.isEmpty {
                 ChatEmptyStateView(
                     title: "No channels yet",
-                    message: "Join this waddle or wait for live discovery to finish.",
+                    message: "Channels will appear here once the server space has rooms.",
                     systemImage: "number"
                 )
                 .padding(.horizontal, 18)
@@ -808,7 +808,7 @@ struct WaddleChatWorkspaceView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         case .error(let title, let message):
             ChatErrorStateView(title: title, message: message) {
-                Task { await model.reloadSelectedWaddleStructure() }
+                Task { await model.reloadSelectedSpaceStructure() }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         case .idle:
@@ -948,7 +948,7 @@ struct WaddleChatWorkspaceView: View {
         case .error(let title, let message):
             return AnyView(
                 ChatErrorStateView(title: title, message: message) {
-                    Task { await model.reloadSelectedWaddleStructure() }
+                    Task { await model.reloadSelectedSpaceStructure() }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             )
@@ -1247,7 +1247,7 @@ struct WaddleChatWorkspaceView: View {
         }
     }
 
-    private var workspaceBackground: Color {
+    private var spaceBackground: Color {
         WaddleTheme.chatBackground
     }
 
@@ -1272,6 +1272,36 @@ struct WaddleChatWorkspaceView: View {
             return true
         case .offline, .unknown:
             return false
+        }
+    }
+}
+
+private struct SpaceActionButton: View {
+    let systemName: String
+    let accessibilityLabel: String
+    let action: () -> Void
+    @State private var isHovering = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(WaddleTheme.textPrimary)
+                .frame(width: 32, height: 32)
+                .background(
+                    RoundedRectangle(cornerRadius: 11, style: .continuous)
+                        .fill(isHovering ? WaddleTheme.surfaceHover : WaddleTheme.surfaceRaised)
+                )
+                .overlay {
+                    RoundedRectangle(cornerRadius: 11, style: .continuous)
+                        .strokeBorder(WaddleTheme.divider, lineWidth: 1)
+                }
+        }
+        .buttonStyle(.plain)
+        .help(accessibilityLabel)
+        .accessibilityLabel(accessibilityLabel)
+        .onHover { hovering in
+            isHovering = hovering
         }
     }
 }

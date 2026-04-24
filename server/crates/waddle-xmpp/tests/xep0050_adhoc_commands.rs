@@ -104,11 +104,11 @@ async fn xep0050_create_channel_command_prevents_managed_jid_instant_room() {
         .await
         .expect("bind");
 
-    // Try to join a managed channel JID (waddle_channel pattern) that doesn't exist
+    // Try to join a managed channel JID that doesn't exist
     // This should be blocked to prevent bypassing the create-channel command
     client
         .send(
-            "<presence to='test-waddle_test-channel@muc.localhost/alice' xmlns='jabber:client'>\
+            "<presence to='test-channel@muc.localhost/alice' xmlns='jabber:client'>\
                 <x xmlns='http://jabber.org/protocol/muc'/>\
             </presence>",
         )
@@ -145,7 +145,7 @@ async fn xep0050_managed_jid_owner_query_blocked() {
     // This should be blocked
     client
         .send(
-            "<iq type='get' id='owner-1' to='test-waddle_test-channel@muc.localhost' xmlns='jabber:client'>\
+            "<iq type='get' id='owner-1' to='test-channel@muc.localhost' xmlns='jabber:client'>\
                 <query xmlns='http://jabber.org/protocol/muc#owner'/>\
             </iq>",
         )

@@ -268,23 +268,9 @@ func jidDomain(_ jid: String) -> String {
     return bare.split(separator: "@", maxSplits: 1, omittingEmptySubsequences: false).last.map(String.init) ?? bare
 }
 
-func roomBareJID(accountJID: String, waddleID: String, channelID: String) -> String {
-    "\(waddleID)_\(channelID)@muc.\(jidDomain(accountJID))"
-}
-
-func parseManagedRoomBareJID(_ roomJID: String) -> (waddleID: String, channelID: String)? {
+func parseManagedRoomBareJID(_ roomJID: String) -> String? {
     let node = barePeerJID(roomJID).split(separator: "@", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? ""
-    guard let separator = node.firstIndex(of: "_") else {
-        return nil
-    }
-
-    let waddleID = String(node[..<separator])
-    let channelID = String(node[node.index(after: separator)...])
-    guard !waddleID.isEmpty, !channelID.isEmpty else {
-        return nil
-    }
-
-    return (waddleID, channelID)
+    return node.isEmpty ? nil : node
 }
 
 // MARK: - Channel creation result

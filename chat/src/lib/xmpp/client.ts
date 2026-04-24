@@ -5,7 +5,7 @@ import type { ReceivedMUCPresence, ReceivedMessage, ReceivedPresence } from "sta
 import type { WaddleSession } from "../server-auth";
 import type { WaddleHat } from "./extensions/hats";
 import type {
-  ChatStateEvent, ChatStateType, DiscoveredChannel, DiscoveredWaddle, DisplayedEvent,
+  ChatStateEvent, ChatStateType, DiscoveredChannel, DisplayedEvent,
   DmChatStateEvent, DmDisplayedEvent, DmReactionEvent, LiveDmMessage, LiveRoomMessage,
   OccupantPresence, PresenceUpdateEvent, ReactionEvent, RoomActivityEvent,
   RoomHats, RoomPresence, SessionLifecycleEvent, XmppErrorEvent, XmppStatusSnapshot,
@@ -553,9 +553,9 @@ export class BrowserXmppClient {
 
   // -- Room management --
 
-  async switchRoom(waddleId: string, channelId: string) {
+  async switchRoom(_spaceId: string, channelId: string) {
     await this.connect();
-    const nextRoom = roomBareJidFor(this.session, waddleId, channelId);
+    const nextRoom = roomBareJidFor(this.session, channelId);
 
     const pendingSwitch = this.roomSwitchPromise;
     if (pendingSwitch) {
@@ -671,7 +671,7 @@ export class BrowserXmppClient {
   }
 
   private async requireJoinedRoom(w: string, c: string): Promise<{ xmpp: Agent; roomJid: string }> {
-    const roomJid = roomBareJidFor(this.session, w, c);
+    const roomJid = roomBareJidFor(this.session, c);
     await this.switchRoom(w, c);
     if (!this.xmpp || !this.connected || this.destroying || this.currentRoom !== roomJid) {
       throw new Error(`Room is not ready: ${roomJid}`);
@@ -892,7 +892,7 @@ export class BrowserXmppClient {
     const hasFiles = !!files && files.length > 0;
     if (!text && !hasFiles) return null;
 
-    const roomJid = roomBareJidFor(this.session, w, c);
+    const roomJid = roomBareJidFor(this.session, c);
 
     // Fast path: connected and already in this room — send directly,
     // no awaits, no UI freeze. Any other state (offline, reconnecting,
@@ -1125,17 +1125,17 @@ export class BrowserXmppClient {
 
   async queryMam(w: string, c: string, max = 50): Promise<LiveRoomMessage[]> {
     await this.connect(); await this.switchRoom(w, c);
-    return this.xmpp ? history.queryMam(this.xmpp, roomBareJidFor(this.session, w, c), max) : [];
+    return this.xmpp ? history.queryMam(this.xmpp, roomBareJidFor(this.session, c), max) : [];
   }
   async queryMamByThread(w: string, c: string, threadId: string, max = 100): Promise<LiveRoomMessage[]> {
     await this.connect(); await this.switchRoom(w, c);
     return this.xmpp
-      ? history.queryMamByThread(this.xmpp, roomBareJidFor(this.session, w, c), threadId, max)
+      ? history.queryMamByThread(this.xmpp, roomBareJidFor(this.session, c), threadId, max)
       : [];
   }
-  async searchMessages(w: string, c: string, query: string, max = 20) {
+  async searchMessages(_spaceId: string, c: string, query: string, max = 20) {
     await this.connect();
-    return this.xmpp ? history.searchMessages(this.xmpp, roomBareJidFor(this.session, w, c), query, max) : [];
+    return this.xmpp ? history.searchMessages(this.xmpp, roomBareJidFor(this.session, c), query, max) : [];
   }
   async queryPersonalMam(peerJid: string, max = 100): Promise<LiveDmMessage[]> {
     await this.connect();
@@ -1151,13 +1151,6 @@ export class BrowserXmppClient {
     await this.connect();
     this.xmpp?.subscribe(barePeerJid(peerJid));
   }
-  async discoverWaddles(): Promise<DiscoveredWaddle[]> {
-    await this.connect();
-    return this.xmpp
-      ? discovery.discoverWaddles(this.xmpp, this.session.jid)
-      : [];
-  }
-
   /**
    * XEP-0092 Software Version — ask the user's home server what it is running.
    * Returns null if the query fails (e.g. federation, timeout, feature not
@@ -1177,11 +1170,10 @@ export class BrowserXmppClient {
       return null;
     }
   }
-  async discoverChannels(waddleId: string): Promise<DiscoveredChannel[]> {
+  async discoverSpaceChannels(): Promise<DiscoveredChannel[]> {
     await this.connect();
-    return this.xmpp
-      ? discovery.discoverChannels(this.xmpp, this.session.jid, waddleId)
-      : [];
+    if (!this.xmpp) return [];
+    return discovery.discoverChannels(this.xmpp, this.session.jid);
   }
 
   /**

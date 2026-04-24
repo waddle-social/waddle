@@ -1690,6 +1690,7 @@ mod tests {
     use waddle_xmpp::muc::room_actor::{GetSnapshot, JoinWithAffiliation};
     use waddle_xmpp::registry::BroadcastOutcome;
     use waddle_xmpp::Affiliation;
+    use xmpp_parsers::iq::{Iq, IqType};
 
     #[derive(Default)]
     struct TestSink {
@@ -1915,6 +1916,36 @@ mod tests {
             },
             _ => panic!("expected iq stanza"),
         }
+    }
+
+    fn disco_items_iq_frame(id: &str, to: &str, node: Option<&str>) -> String {
+        let mut query = xmpp_parsers::minidom::Element::builder(
+            "query",
+            waddle_xmpp::disco::DISCO_ITEMS_NS,
+        );
+        if let Some(node) = node {
+            query = query.attr("node", node);
+        }
+        stanza_to_xml(&Stanza::Iq(Iq {
+            from: None,
+            to: Some(to.parse().expect("valid iq destination")),
+            id: id.to_string(),
+            payload: IqType::Get(query.build()),
+        }))
+    }
+
+    fn disco_info_iq_frame(id: &str, to: &str, node: Option<&str>) -> String {
+        let mut query =
+            xmpp_parsers::minidom::Element::builder("query", waddle_xmpp::disco::DISCO_INFO_NS);
+        if let Some(node) = node {
+            query = query.attr("node", node);
+        }
+        stanza_to_xml(&Stanza::Iq(Iq {
+            from: None,
+            to: Some(to.parse().expect("valid iq destination")),
+            id: id.to_string(),
+            payload: IqType::Get(query.build()),
+        }))
     }
 
     fn ready_phase(jid: &FullJid) -> ConnectionPhase {
@@ -2563,7 +2594,7 @@ mod tests {
     #[tokio::test]
     async fn muc_stale_leave_does_not_remove_current_resource() {
         let state = create_test_websocket_state().await;
-        let room_jid: BareJid = "waddle_channel@muc.example.com".parse().expect("room jid");
+        let room_jid: BareJid = "channel@muc.example.com".parse().expect("room jid");
         let current_jid: FullJid = "alice@example.com/current".parse().expect("current jid");
         let stale_jid: FullJid = "alice@example.com/stale".parse().expect("stale jid");
 
@@ -2593,7 +2624,7 @@ mod tests {
     #[tokio::test]
     async fn muc_join_responses_use_client_namespace() {
         let state = create_test_websocket_state().await;
-        let room_jid: BareJid = "waddle_channel@muc.example.com".parse().expect("room jid");
+        let room_jid: BareJid = "channel@muc.example.com".parse().expect("room jid");
         let sender_jid: FullJid = "alice@example.com/web".parse().expect("sender jid");
 
         let responses = handle_muc_join(
@@ -2626,31 +2657,18 @@ mod tests {
 
     #[test]
     fn test_parse_room_jid_valid() {
-        let jid: jid::BareJid = "waddle123_channel456@muc.example.com".parse().unwrap();
+        let jid: jid::BareJid = "channel456@muc.example.com".parse().unwrap();
         let (waddle, channel) = parse_room_jid_context(&jid);
-        assert_eq!(waddle, "waddle123");
+        assert_eq!(waddle, "space");
         assert_eq!(channel, "channel456");
     }
 
     #[test]
     fn test_parse_room_jid_fallback() {
-        // No underscore
         let jid: jid::BareJid = "singlename@muc.example.com".parse().unwrap();
         let (waddle, channel) = parse_room_jid_context(&jid);
-        assert_eq!(waddle, "default");
-        assert_eq!(channel, "default");
-
-        // Leading underscore (empty waddle)
-        let jid: jid::BareJid = "_channel@muc.example.com".parse().unwrap();
-        let (waddle, channel) = parse_room_jid_context(&jid);
-        assert_eq!(waddle, "default");
-        assert_eq!(channel, "default");
-
-        // Trailing underscore (empty channel)
-        let jid: jid::BareJid = "waddle_@muc.example.com".parse().unwrap();
-        let (waddle, channel) = parse_room_jid_context(&jid);
-        assert_eq!(waddle, "default");
-        assert_eq!(channel, "default");
+        assert_eq!(waddle, "space");
+        assert_eq!(channel, "singlename");
     }
 
     #[tokio::test]
@@ -3487,71 +3505,15 @@ mod tests {
         );
     }
 
-    async fn seed_waddle(
-        state: &WebSocketState,
-        owner_id: &str,
-        waddle_id: &str,
-        waddle_name: &str,
-        is_public: bool,
-    ) {
-        let now = chrono::Utc::now().to_rfc3339();
-        let conn = state
-            .deps
-            .app_state
-            .db_pool
-            .global()
-            .guard()
-            .await
-            .expect("persistent connection");
-        conn.execute(
-            "INSERT INTO waddles (id, name, description, owner_id, icon_url, is_public, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            crate::db_params![
-                waddle_id,
-                waddle_name,
-                Option::<String>::None,
-                owner_id,
-                Option::<String>::None,
-                if is_public { 1i64 } else { 0i64 },
-                now.clone(),
-                now
-            ],
-        )
-        .await
-        .expect("insert waddle");
-    }
-
-    async fn seed_user_waddle_membership(
-        state: &WebSocketState,
-        user_id: &str,
-        waddle_id: &str,
-        waddle_name: &str,
-    ) {
-        seed_waddle(state, user_id, waddle_id, waddle_name, true).await;
-        let conn = state
-            .deps
-            .app_state
-            .db_pool
-            .global()
-            .guard()
-            .await
-            .expect("persistent connection");
-        conn.execute(
-            "INSERT INTO waddle_members (waddle_id, user_id, role, joined_at) VALUES (?, ?, 'member', ?)",
-            crate::db_params![waddle_id, user_id, chrono::Utc::now().to_rfc3339()],
-        )
-        .await
-        .expect("insert waddle membership");
-    }
-
     #[tokio::test]
     async fn handle_iq_disco_info_advertises_replies() {
         let server_domain = "example.com";
         let muc_domain = "muc.example.com";
         let state = create_test_websocket_state().await;
 
-        let server_query = r#"<iq xmlns="jabber:client" id="srv1" type="get" to="example.com"><query xmlns="http://jabber.org/protocol/disco#info"/></iq>"#;
+        let server_query = disco_info_iq_frame("srv1", "example.com", None);
         let server_responses = handle_iq(
-            server_query,
+            &server_query,
             server_domain,
             muc_domain,
             state.as_ref(),
@@ -3563,9 +3525,9 @@ mod tests {
         assert!(server_response.contains("urn:xmpp:reply:0"));
         assert!(server_response.contains("urn:waddle:github:0"));
 
-        let muc_query = r#"<iq xmlns="jabber:client" id="muc1" type="get" to="muc.example.com"><query xmlns="http://jabber.org/protocol/disco#info"/></iq>"#;
+        let muc_query = disco_info_iq_frame("muc1", "muc.example.com", None);
         let muc_responses = handle_iq(
-            muc_query,
+            &muc_query,
             server_domain,
             muc_domain,
             state.as_ref(),
@@ -3577,9 +3539,9 @@ mod tests {
         assert!(muc_response.contains("urn:xmpp:reply:0"));
         assert!(muc_response.contains("urn:waddle:github:0"));
 
-        let room_query = r#"<iq xmlns="jabber:client" id="room1" type="get" to="room@muc.example.com"><query xmlns="http://jabber.org/protocol/disco#info"/></iq>"#;
+        let room_query = disco_info_iq_frame("room1", "room@muc.example.com", None);
         let room_responses = handle_iq(
-            room_query,
+            &room_query,
             server_domain,
             muc_domain,
             state.as_ref(),
@@ -3596,10 +3558,10 @@ mod tests {
     #[tokio::test]
     async fn handle_iq_disco_items_server_advertises_spaces_service() {
         let state = create_test_websocket_state().await;
-        let query = r#"<iq xmlns="jabber:client" id="srv-items" type="get" to="example.com"><query xmlns="http://jabber.org/protocol/disco#items"/></iq>"#;
+        let query = disco_items_iq_frame("srv-items", "example.com", None);
 
         let responses = handle_iq(
-            query,
+            &query,
             "example.com",
             "muc.example.com",
             state.as_ref(),
@@ -3620,26 +3582,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handle_iq_disco_items_spaces_lists_user_waddles() {
+    async fn handle_iq_disco_items_spaces_lists_canonical_space() {
         let state = create_test_websocket_state().await;
         let session = create_test_session(state.as_ref(), "alice").await;
-        seed_user_waddle_membership(
-            state.as_ref(),
-            &session.user_id,
-            "waddle-alpha",
-            "Alpha Space",
-        )
-        .await;
 
         let authenticated_session = Some(session);
         let authenticated_phase = authenticated_phase_for_session(
             authenticated_session.as_ref().expect("session"),
             "example.com",
         );
-        let query = r#"<iq xmlns="jabber:client" id="spaces-items" type="get" to="spaces.example.com"><query xmlns="http://jabber.org/protocol/disco#items"/></iq>"#;
+        let query = disco_items_iq_frame("spaces-items", "spaces.example.com", None);
 
         let responses = handle_iq(
-            query,
+            &query,
             "example.com",
             "muc.example.com",
             state.as_ref(),
@@ -3650,11 +3605,11 @@ mod tests {
         let response = responses.first().expect("spaces disco items response");
 
         assert!(
-            response.contains("waddle-alpha"),
+            response.contains("node=\"space\"") || response.contains("node='space'"),
             "expected space node in spaces disco#items: {response}"
         );
         assert!(
-            response.contains("Alpha Space"),
+            response.contains("example.com"),
             "expected space name in spaces disco#items: {response}"
         );
     }
@@ -3663,22 +3618,13 @@ mod tests {
     async fn handle_iq_disco_items_spaces_node_lists_channels() {
         let state = create_test_websocket_state().await;
         let session = create_test_session(state.as_ref(), "alice").await;
-        let waddle_id = "waddle-bravo";
-        seed_user_waddle_membership(state.as_ref(), &session.user_id, waddle_id, "Bravo Space")
-            .await;
 
-        let waddle_db = state
-            .deps
-            .app_state
-            .db_pool
-            .create_waddle_db(waddle_id)
-            .await
-            .expect("create waddle db");
+        let space_db = state.deps.app_state.db_pool.global();
         MigrationRunner::waddle()
-            .run(&waddle_db)
+            .run(&space_db)
             .await
-            .expect("waddle migrations");
-        let conn = waddle_db.guard().await.expect("persistent connection");
+            .expect("space migrations");
+        let conn = space_db.guard().await.expect("persistent connection");
         conn.execute(
             "INSERT INTO channels (id, name, channel_type, position, is_default) VALUES (?, ?, 'text', 0, 0)",
             crate::db_params!["general", "General"],
@@ -3692,10 +3638,10 @@ mod tests {
             authenticated_session.as_ref().expect("session"),
             "example.com",
         );
-        let query = r#"<iq xmlns="jabber:client" id="space-node-items" type="get" to="spaces.example.com"><query xmlns="http://jabber.org/protocol/disco#items" node="waddle-bravo"/></iq>"#;
+        let query = disco_items_iq_frame("space-node-items", "spaces.example.com", Some("space"));
 
         let responses = handle_iq(
-            query,
+            &query,
             "example.com",
             "muc.example.com",
             state.as_ref(),
@@ -3706,7 +3652,7 @@ mod tests {
         let response = responses.first().expect("spaces node disco items response");
 
         assert!(
-            response.contains("waddle-bravo_general@muc.example.com"),
+            response.contains("general@muc.example.com"),
             "expected channel room JID in spaces node disco#items: {response}"
         );
         assert!(
@@ -3718,21 +3664,12 @@ mod tests {
     #[tokio::test]
     async fn handle_iq_disco_info_spaces_node_reports_open_for_public_space() {
         let state = create_test_websocket_state().await;
-        let owner = create_test_session(state.as_ref(), "owner").await;
         let viewer = create_test_session(state.as_ref(), "viewer").await;
-        seed_waddle(
-            state.as_ref(),
-            &owner.user_id,
-            "waddle-public",
-            "Public Space",
-            true,
-        )
-        .await;
 
         let viewer_phase = authenticated_phase_for_session(&viewer, "example.com");
-        let query = r#"<iq xmlns="jabber:client" id="space-node-info" type="get" to="spaces.example.com"><query xmlns="http://jabber.org/protocol/disco#info" node="waddle-public"/></iq>"#;
+        let query = disco_info_iq_frame("space-node-info", "spaces.example.com", Some("space"));
         let responses = handle_iq(
-            query,
+            &query,
             "example.com",
             "muc.example.com",
             state.as_ref(),
@@ -3757,23 +3694,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handle_iq_disco_info_spaces_node_hides_private_space_from_non_member() {
+    async fn handle_iq_disco_info_unknown_spaces_node_returns_item_not_found() {
         let state = create_test_websocket_state().await;
-        let owner = create_test_session(state.as_ref(), "owner").await;
         let viewer = create_test_session(state.as_ref(), "viewer").await;
-        seed_waddle(
-            state.as_ref(),
-            &owner.user_id,
-            "waddle-private",
-            "Private Space",
-            false,
-        )
-        .await;
 
         let viewer_phase = authenticated_phase_for_session(&viewer, "example.com");
-        let query = r#"<iq xmlns="jabber:client" id="space-node-info-private" type="get" to="spaces.example.com"><query xmlns="http://jabber.org/protocol/disco#info" node="waddle-private"/></iq>"#;
+        let query =
+            disco_info_iq_frame("space-node-info-private", "spaces.example.com", Some("unknown"));
         let responses = handle_iq(
-            query,
+            &query,
             "example.com",
             "muc.example.com",
             state.as_ref(),
@@ -3787,7 +3716,7 @@ mod tests {
 
         assert!(
             response.contains("item-not-found"),
-            "private space should not be discoverable by non-members: {response}"
+            "unknown space node should not be discoverable: {response}"
         );
     }
 
@@ -4246,7 +4175,7 @@ mod tests {
         let session = create_test_session(state.as_ref(), "alice").await;
         let waddle_id = "waddle-alpha";
         let channel_id = "channel-bravo";
-        let room_jid: BareJid = format!("{waddle_id}_{channel_id}@muc.example.com")
+        let room_jid: BareJid = format!("{channel_id}@muc.example.com")
             .parse()
             .expect("room jid");
         let sender_jid: FullJid = format!("{}@example.com/web", session.xmpp_localpart)
@@ -4740,7 +4669,7 @@ mod tests {
         // in the response (which used to be seen as a "ghost" occupant and
         // broke self-presence detection on the client).
         let state = create_test_websocket_state().await;
-        let room_jid: BareJid = "rejoin_channel@muc.example.com".parse().expect("room");
+        let room_jid: BareJid = "rejoin-channel@muc.example.com".parse().expect("room");
         let first: FullJid = "alice@example.com/tab-1".parse().expect("first");
         let second: FullJid = "alice@example.com/tab-2".parse().expect("second");
 
@@ -4804,7 +4733,7 @@ mod tests {
         // <presence type='error'/> with <conflict/>, and room state for
         // the incumbent is untouched.
         let state = create_test_websocket_state().await;
-        let room_jid: BareJid = "conflict_channel@muc.example.com".parse().expect("room");
+        let room_jid: BareJid = "conflict-channel@muc.example.com".parse().expect("room");
         let alice: FullJid = "alice@example.com/desktop".parse().expect("alice");
         let bob: FullJid = "bob@example.com/phone".parse().expect("bob");
 
@@ -5353,7 +5282,7 @@ mod tests {
     #[tokio::test]
     async fn cleanup_shutdown_detaches_resumable_session_on_transport_drop() {
         let state = create_test_websocket_state().await;
-        let room_jid: BareJid = "detached_channel@muc.example.com".parse().expect("room");
+        let room_jid: BareJid = "detached-channel@muc.example.com".parse().expect("room");
         let jid: FullJid = "alice@example.com/web".parse().expect("jid");
 
         let _ = handle_muc_join(
@@ -5401,7 +5330,7 @@ mod tests {
     #[tokio::test]
     async fn cleanup_shutdown_does_not_detach_explicit_close() {
         let state = create_test_websocket_state().await;
-        let room_jid: BareJid = "closing_channel@muc.example.com".parse().expect("room");
+        let room_jid: BareJid = "closing-channel@muc.example.com".parse().expect("room");
         let jid: FullJid = "alice@example.com/web".parse().expect("jid");
 
         let _ = handle_muc_join(
@@ -5453,7 +5382,7 @@ mod tests {
         // occupant that was held while the session was detached.
         use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
         let state = create_test_websocket_state().await;
-        let room_jid: BareJid = "expired_channel@muc.example.com".parse().expect("room");
+        let room_jid: BareJid = "expired-channel@muc.example.com".parse().expect("room");
         let jid: FullJid = "alice@example.com/web".parse().expect("jid");
 
         // Put alice in the room, as if she'd detached with SM.

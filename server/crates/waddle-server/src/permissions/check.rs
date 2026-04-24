@@ -188,7 +188,7 @@ impl PermissionChecker {
                     let userset_object = Object::new(
                         match tuple_subject.subject_type {
                             SubjectType::User => continue, // Users can't be usersets
-                            SubjectType::Waddle => ObjectType::Waddle,
+                            SubjectType::Space => ObjectType::Space,
                             SubjectType::Role => ObjectType::Role,
                         },
                         &tuple_subject.id,
@@ -257,7 +257,7 @@ impl PermissionChecker {
                                 let userset_object = Object::new(
                                     match tuple_subject.subject_type {
                                         SubjectType::User => continue,
-                                        SubjectType::Waddle => ObjectType::Waddle,
+                                        SubjectType::Space => ObjectType::Space,
                                         SubjectType::Role => ObjectType::Role,
                                     },
                                     &tuple_subject.id,
@@ -324,7 +324,7 @@ impl PermissionChecker {
                         let parent_object = Object::new(
                             match tuple.subject.subject_type {
                                 SubjectType::User => continue, // Users can't be parent objects
-                                SubjectType::Waddle => ObjectType::Waddle,
+                                SubjectType::Space => ObjectType::Space,
                                 SubjectType::Role => ObjectType::Role,
                             },
                             &tuple.subject.id,
@@ -401,19 +401,19 @@ mod tests {
         let (actor, store) = setup_test_db().await;
         let checker = PermissionChecker::new(actor.clone(), PermissionSchema::default());
 
-        // Create tuple: alice is owner of waddle:test
+        // Create tuple: alice is owner of space:test
         let tuple = Tuple::new(
-            Object::new(ObjectType::Waddle, "test"),
+            Object::new(ObjectType::Space, "test"),
             Relation::new("owner"),
             Subject::user("user-alice"),
         );
         store.write(tuple).await.unwrap();
 
-        // Check: alice has owner permission on waddle:test
+        // Check: alice has owner permission on space:test
         let request = CheckRequest::new(
             Subject::user("user-alice"),
             "owner",
-            Object::new(ObjectType::Waddle, "test"),
+            Object::new(ObjectType::Space, "test"),
         );
         let response = checker.check(request).await.unwrap();
         assert!(response.allowed);
@@ -422,7 +422,7 @@ mod tests {
         let request = CheckRequest::new(
             Subject::user("user-bob"),
             "owner",
-            Object::new(ObjectType::Waddle, "test"),
+            Object::new(ObjectType::Space, "test"),
         );
         let response = checker.check(request).await.unwrap();
         assert!(!response.allowed);
@@ -433,9 +433,9 @@ mod tests {
         let (actor, store) = setup_test_db().await;
         let checker = PermissionChecker::new(actor.clone(), PermissionSchema::default());
 
-        // Create tuple: alice is admin of waddle:test (not owner)
+        // Create tuple: alice is admin of space:test (not owner)
         let tuple = Tuple::new(
-            Object::new(ObjectType::Waddle, "test"),
+            Object::new(ObjectType::Space, "test"),
             Relation::new("admin"),
             Subject::user("user-alice"),
         );
@@ -445,7 +445,7 @@ mod tests {
         let request = CheckRequest::new(
             Subject::user("user-alice"),
             "manage_settings",
-            Object::new(ObjectType::Waddle, "test"),
+            Object::new(ObjectType::Space, "test"),
         );
         let response = checker.check(request).await.unwrap();
         assert!(response.allowed);
@@ -457,11 +457,11 @@ mod tests {
         let checker = PermissionChecker::new(actor.clone(), PermissionSchema::default());
 
         // Setup:
-        // 1. alice is admin of waddle:test
-        // 2. channel:general has parent waddle:test
+        // 1. alice is admin of space:test
+        // 2. channel:general has parent space:test
         store
             .write(Tuple::new(
-                Object::new(ObjectType::Waddle, "test"),
+                Object::new(ObjectType::Space, "test"),
                 Relation::new("admin"),
                 Subject::user("user-alice"),
             ))
@@ -472,7 +472,7 @@ mod tests {
             .write(Tuple::new(
                 Object::new(ObjectType::Channel, "general"),
                 Relation::new("parent"),
-                Subject::userset(SubjectType::Waddle, "test", ""),
+                Subject::userset(SubjectType::Space, "test", ""),
             ))
             .await
             .unwrap();
@@ -496,11 +496,11 @@ mod tests {
         let checker = PermissionChecker::new(actor.clone(), PermissionSchema::default());
 
         // Setup:
-        // 1. alice is a member of waddle:test
-        // 2. channel:general has parent waddle:test
+        // 1. alice is a member of space:test
+        // 2. channel:general has parent space:test
         store
             .write(Tuple::new(
-                Object::new(ObjectType::Waddle, "test"),
+                Object::new(ObjectType::Space, "test"),
                 Relation::new("member"),
                 Subject::user("user-alice"),
             ))
@@ -511,7 +511,7 @@ mod tests {
             .write(Tuple::new(
                 Object::new(ObjectType::Channel, "general"),
                 Relation::new("parent"),
-                Subject::userset(SubjectType::Waddle, "test", ""),
+                Subject::userset(SubjectType::Space, "test", ""),
             ))
             .await
             .unwrap();
@@ -525,7 +525,7 @@ mod tests {
         let response = checker.check(request).await.unwrap();
         assert!(
             response.allowed,
-            "Waddle member should be able to view channel through inheritance"
+            "Space member should be able to view channel through inheritance"
         );
     }
 
@@ -535,11 +535,11 @@ mod tests {
         let checker = PermissionChecker::new(db.clone(), PermissionSchema::default());
 
         // Setup:
-        // 1. alice is a member of waddle:test
-        // 2. channel:general grants viewer to waddle:test#member (all members)
+        // 1. alice is a member of space:test
+        // 2. channel:general grants viewer to space:test#member (all members)
         store
             .write(Tuple::new(
-                Object::new(ObjectType::Waddle, "test"),
+                Object::new(ObjectType::Space, "test"),
                 Relation::new("member"),
                 Subject::user("user-alice"),
             ))
@@ -550,7 +550,7 @@ mod tests {
             .write(Tuple::new(
                 Object::new(ObjectType::Channel, "general"),
                 Relation::new("viewer"),
-                Subject::userset(SubjectType::Waddle, "test", "member"),
+                Subject::userset(SubjectType::Space, "test", "member"),
             ))
             .await
             .unwrap();
@@ -576,7 +576,7 @@ mod tests {
         // Create tuple
         store
             .write(Tuple::new(
-                Object::new(ObjectType::Waddle, "test"),
+                Object::new(ObjectType::Space, "test"),
                 Relation::new("owner"),
                 Subject::user("user-alice"),
             ))
@@ -587,7 +587,7 @@ mod tests {
         let request = CheckRequest::new(
             Subject::user("user-alice"),
             "owner",
-            Object::new(ObjectType::Waddle, "test"),
+            Object::new(ObjectType::Space, "test"),
         );
         let response1 = checker.check(request.clone()).await.unwrap();
         assert!(response1.allowed);
@@ -606,7 +606,7 @@ mod tests {
         // Create owner tuple
         store
             .write(Tuple::new(
-                Object::new(ObjectType::Waddle, "test"),
+                Object::new(ObjectType::Space, "test"),
                 Relation::new("owner"),
                 Subject::user("user-alice"),
             ))
@@ -617,7 +617,7 @@ mod tests {
         let request = CheckRequest::new(
             Subject::user("user-alice"),
             "delete",
-            Object::new(ObjectType::Waddle, "test"),
+            Object::new(ObjectType::Space, "test"),
         );
         let response = checker.check(request).await.unwrap();
         assert!(response.allowed, "Owner should have delete permission");

@@ -91,8 +91,8 @@ impl WebPushSender for HttpWebPushSender {
 
 fn room_jid_to_path(room_jid: &str) -> String {
     let localpart = room_jid.split('@').next().unwrap_or_default();
-    if let Some((waddle_id, channel_id)) = crate::parse_managed_room_localpart(localpart) {
-        return format!("/{}/{}", waddle_id, channel_id);
+    if let Some(channel_id) = crate::parse_managed_room_localpart(localpart) {
+        return format!("/{}", channel_id);
     }
     "/".to_string()
 }
@@ -211,8 +211,8 @@ mod tests {
     }
 
     #[test]
-    fn room_jid_to_path_uses_waddle_and_channel_ids() {
-        assert_eq!(room_jid_to_path("w1_c2@conference.example.com"), "/w1/c2");
-        assert_eq!(room_jid_to_path("room@conference.example.com"), "/");
+    fn room_jid_to_path_uses_channel_id() {
+        assert_eq!(room_jid_to_path("c2@conference.example.com"), "/c2");
+        assert_eq!(room_jid_to_path("@conference.example.com"), "/");
     }
 }

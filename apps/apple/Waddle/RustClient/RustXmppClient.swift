@@ -146,10 +146,7 @@ final class RustXmppClient: ObservableObject {
 
     // MARK: - Channel creation stub
 
-    func createChannel(
-        waddleID: String, name: String, description: String?,
-        channelType: String, position: Int
-    ) async -> CreateChannelResult? { nil }
+    func createChannel(name: String, description: String?, channelType: String, position: Int) async -> CreateChannelResult? { nil }
 
     // MARK: - Stubs (features not yet in WaddleClient)
 

@@ -12,10 +12,10 @@ use common::{
 };
 use minidom::Element;
 
-fn forum_waddle() -> waddle_xmpp::WaddleDetails {
-    waddle_xmpp::WaddleDetails {
-        id: "waddle-forums".to_string(),
-        name: "Forum Waddle".to_string(),
+fn forum_space() -> waddle_xmpp::SpaceDetails {
+    waddle_xmpp::SpaceDetails {
+        id: "space-forums".to_string(),
+        name: "Forum Space".to_string(),
         description: Some("Forum tests".to_string()),
         owner_id: "owner".to_string(),
         icon_url: None,
@@ -40,6 +40,14 @@ fn forum_channel_two() -> waddle_xmpp::ChannelInfo {
     }
 }
 
+fn text_channel(id: &str, name: &str) -> waddle_xmpp::ChannelInfo {
+    waddle_xmpp::ChannelInfo {
+        id: id.to_string(),
+        name: name.to_string(),
+        channel_type: "text".to_string(),
+    }
+}
+
 fn owner_form_field_value(iq_xml: &str, var: &str) -> Option<String> {
     let iq: Element = iq_xml.parse().ok()?;
     let query = iq.get_child("query", "http://jabber.org/protocol/muc#owner")?;
@@ -57,10 +65,10 @@ async fn xep0508_thread_create_broadcast_in_forum_room() {
     init_test_env();
     let state = Arc::new(
         MockAppState::new("localhost")
-            .with_waddle(forum_waddle(), vec![forum_channel(), forum_channel_two()]),
+            .with_space(forum_space(), vec![forum_channel(), forum_channel_two()]),
     );
     let server = TestServer::start_with_state(state).await;
-    let room_jid = waddle_xmpp::managed_room_jid("waddle-forums", "forum-channel", "muc.localhost")
+    let room_jid = waddle_xmpp::managed_room_jid("forum-channel", "muc.localhost")
         .expect("canonical room jid");
 
     let mut alice = RawXmppClient::connect(server.addr).await.expect("connect");
@@ -108,12 +116,11 @@ async fn xep0508_thread_reply_broadcast_in_forum_room() {
     init_test_env();
     let state = Arc::new(
         MockAppState::new("localhost")
-            .with_waddle(forum_waddle(), vec![forum_channel(), forum_channel_two()]),
+            .with_space(forum_space(), vec![forum_channel(), forum_channel_two()]),
     );
     let server = TestServer::start_with_state(state).await;
-    let room_jid =
-        waddle_xmpp::managed_room_jid("waddle-forums", "forum-channel-2", "muc.localhost")
-            .expect("canonical room jid");
+    let room_jid = waddle_xmpp::managed_room_jid("forum-channel-2", "muc.localhost")
+        .expect("canonical room jid");
 
     let mut alice = RawXmppClient::connect(server.addr).await.expect("connect");
     establish_bound_session(&mut alice, &server, "alice", "desktop")
@@ -158,7 +165,7 @@ async fn xep0508_thread_reply_broadcast_in_forum_room() {
 async fn xep0508_channel_backed_forum_room_advertises_forum_feature() {
     init_test_env();
     let state =
-        Arc::new(MockAppState::new("localhost").with_waddle(forum_waddle(), vec![forum_channel()]));
+        Arc::new(MockAppState::new("localhost").with_space(forum_space(), vec![forum_channel()]));
     let server = TestServer::start_with_state(state).await;
 
     let mut alice = RawXmppClient::connect(server.addr).await.expect("connect");
@@ -166,7 +173,7 @@ async fn xep0508_channel_backed_forum_room_advertises_forum_feature() {
         .await
         .expect("bind alice");
 
-    let room_jid = waddle_xmpp::managed_room_jid("waddle-forums", "forum-channel", "muc.localhost")
+    let room_jid = waddle_xmpp::managed_room_jid("forum-channel", "muc.localhost")
         .expect("canonical room jid");
     let response = disco_info_query(&mut alice, &room_jid.to_string(), "forum-disco-1")
         .await
@@ -187,7 +194,11 @@ async fn xep0508_channel_backed_forum_room_advertises_forum_feature() {
 #[tokio::test]
 async fn xep0508_owner_config_round_trips_forum_mode() {
     init_test_env();
-    let server = TestServer::start().await;
+    let state = Arc::new(MockAppState::new("localhost").with_space(
+        forum_space(),
+        vec![text_channel("forum-config", "Forum Config")],
+    ));
+    let server = TestServer::start_with_state(state).await;
 
     let mut alice = RawXmppClient::connect(server.addr).await.expect("connect");
     establish_bound_session(&mut alice, &server, "alice", "desktop")

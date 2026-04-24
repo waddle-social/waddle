@@ -3,7 +3,6 @@ import type { Agent } from "stanza";
 import type { IQ, AdHocCommand, DataForm } from "stanza/protocol";
 
 interface CreateChannelCommandInput {
-  waddleId: string;
   name: string;
   description?: string;
   channelType: "text" | "forum";
@@ -88,7 +87,6 @@ export async function executeCreateChannelCommand(
         form: {
           type: "submit",
           fields: [
-            { name: "waddle_id", value: input.waddleId, type: "hidden" },
             { name: "name", value: input.name, type: "text-single" },
             ...(input.description
               ? [{ name: "description", value: input.description, type: "text-multi" }]

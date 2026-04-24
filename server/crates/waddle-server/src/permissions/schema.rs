@@ -1,6 +1,6 @@
 //! Permission schema definitions
 //!
-//! Defines the permission model for Waddle object types following
+//! Defines the permission model for space object types following
 //! the Zanzibar-inspired approach with computed permissions.
 
 use std::collections::HashMap;
@@ -138,10 +138,10 @@ impl PermissionSchema {
 }
 
 impl Default for PermissionSchema {
-    /// Create the default Waddle permission schema
+    /// Create the default space permission schema
     fn default() -> Self {
         Self::new()
-            .with_type(ObjectType::Waddle, waddle_schema())
+            .with_type(ObjectType::Space, space_schema())
             .with_type(ObjectType::Channel, channel_schema())
             .with_type(ObjectType::Message, message_schema())
             .with_type(ObjectType::Dm, dm_schema())
@@ -149,8 +149,8 @@ impl Default for PermissionSchema {
     }
 }
 
-/// Schema for Waddle (community) objects
-fn waddle_schema() -> ObjectTypeSchema {
+/// Schema for Space objects
+fn space_schema() -> ObjectTypeSchema {
     ObjectTypeSchema::new()
         // Relations
         .with_relation("owner")
@@ -218,7 +218,7 @@ fn channel_schema() -> ObjectTypeSchema {
         // Permissions
         .with_permission(
             "delete",
-            // Only waddle admin can delete channels
+            // Only space admin can delete channels
             ComputedPermission::arrow("parent", "admin"),
         )
         .with_permission(
@@ -308,7 +308,7 @@ fn dm_schema() -> ObjectTypeSchema {
 fn role_schema() -> ObjectTypeSchema {
     ObjectTypeSchema::new()
         // Relations
-        .with_relation("waddle")
+        .with_relation("space")
         .with_relation("member")
         .with_relation("manager")
         // Permissions
@@ -316,21 +316,21 @@ fn role_schema() -> ObjectTypeSchema {
             "assign",
             ComputedPermission::union(vec![
                 ComputedPermission::direct("manager"),
-                ComputedPermission::arrow("waddle", "admin"),
+                ComputedPermission::arrow("space", "admin"),
             ]),
         )
         .with_permission(
             "delete",
             ComputedPermission::union(vec![
                 ComputedPermission::direct("manager"),
-                ComputedPermission::arrow("waddle", "admin"),
+                ComputedPermission::arrow("space", "admin"),
             ]),
         )
         .with_permission(
             "edit",
             ComputedPermission::union(vec![
                 ComputedPermission::direct("manager"),
-                ComputedPermission::arrow("waddle", "admin"),
+                ComputedPermission::arrow("space", "admin"),
             ]),
         )
 }
@@ -340,20 +340,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_waddle_schema() {
+    fn test_space_schema() {
         let schema = PermissionSchema::default();
-        let waddle_schema = schema.get_schema(ObjectType::Waddle).unwrap();
+        let space_schema = schema.get_schema(ObjectType::Space).unwrap();
 
         // Check relations
-        assert!(waddle_schema.is_valid_relation("owner"));
-        assert!(waddle_schema.is_valid_relation("admin"));
-        assert!(waddle_schema.is_valid_relation("member"));
-        assert!(!waddle_schema.is_valid_relation("invalid"));
+        assert!(space_schema.is_valid_relation("owner"));
+        assert!(space_schema.is_valid_relation("admin"));
+        assert!(space_schema.is_valid_relation("member"));
+        assert!(!space_schema.is_valid_relation("invalid"));
 
         // Check permissions
-        assert!(waddle_schema.get_permission("delete").is_some());
-        assert!(waddle_schema.get_permission("view").is_some());
-        assert!(waddle_schema.get_permission("invalid").is_none());
+        assert!(space_schema.get_permission("delete").is_some());
+        assert!(space_schema.get_permission("view").is_some());
+        assert!(space_schema.get_permission("invalid").is_none());
     }
 
     #[test]

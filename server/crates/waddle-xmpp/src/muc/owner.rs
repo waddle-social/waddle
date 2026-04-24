@@ -105,18 +105,6 @@ pub fn parse_owner_query(iq: &Iq, muc_domain: &str) -> Result<OwnerQuery, XmppEr
         ))));
     }
 
-    // Block instant room creation/configuration for managed channel JIDs
-    // Managed channels must be created via XEP-0050 ad-hoc commands (waddle:create-channel)
-    // Pattern: {waddle_id}_{channel_id}@muc.{domain}
-    if let Some(localpart) = room_jid.node() {
-        if crate::parse_managed_room_localpart(localpart.as_str()).is_some() {
-            // This is a managed channel JID - block direct room creation/config
-            return Err(XmppError::not_allowed(Some(
-                "Cannot create or configure managed channel rooms directly. Use the waddle:create-channel ad-hoc command instead.".into(),
-            )));
-        }
-    }
-
     // Get the sender's JID
     let from = iq
         .from

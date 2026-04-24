@@ -7,8 +7,7 @@ An open-source consumer chat/communication platform with ATProto integration.
 Waddle Social is a community-focused messaging platform that combines:
 - **ATProto Identity**: Login with your Bluesky account
 - **XMPP Protocol**: Real-time messaging infrastructure
-- **Waddles**: Discord-like communities with channels
-- **CLI TUI Client**: Vim-style terminal interface (MVP)
+- **Space Channels**: Native XMPP chatrooms backed by server channels
 
 ## License
 
@@ -19,8 +18,7 @@ This project is licensed under the **AGPL-3.0** license. See [LICENSE](LICENSE) 
 ```
 waddle/
 ├── crates/
-│   ├── waddle-server/    # Backend HTTP/XMPP server (Axum + Prosody)
-│   └── waddle-cli/       # Terminal UI client (Ratatui)
+│   └── waddle-server/    # Backend HTTP/XMPP server
 ├── docs/
 │   ├── adrs/            # Architecture Decision Records
 │   ├── rfcs/            # Feature proposals

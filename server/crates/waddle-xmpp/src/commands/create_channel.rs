@@ -12,6 +12,7 @@ pub const NODE_CREATE_CHANNEL: &str = "waddle:create-channel";
 
 #[derive(Debug)]
 pub struct ChannelMetadata {
+    pub id: String,
     pub name: String,
     pub description: Option<String>,
     pub channel_type: String,
@@ -45,6 +46,8 @@ enum ParseChannelFormError {
     MissingRequiredField(&'static str),
     #[error("Channel name cannot be empty")]
     EmptyChannelName,
+    #[error("Channel name must contain at least one letter or number")]
+    InvalidChannelName,
     #[error("Unsupported channel_type '{0}'. Expected one of: text, forum")]
     UnsupportedChannelType(String),
 }
@@ -53,13 +56,32 @@ pub trait CreateChannelDeps: Send + Sync {
     fn create_channel(
         &self,
         user_id: &str,
-        waddle_id: &str,
         metadata: ChannelMetadata,
     ) -> impl std::future::Future<Output = Result<CreateChannelResult, CreateChannelError>> + Send;
 }
 
-fn parse_channel_form(form: &DataForm) -> Result<(String, ChannelMetadata), ParseChannelFormError> {
-    let mut waddle_id: Option<String> = None;
+fn slugify_channel_name(name: &str) -> String {
+    let mut slug = String::new();
+    let mut previous_dash = false;
+
+    for character in name.trim().chars().flat_map(char::to_lowercase) {
+        if character.is_ascii_alphanumeric() {
+            slug.push(character);
+            previous_dash = false;
+        } else if !previous_dash && !slug.is_empty() {
+            slug.push('-');
+            previous_dash = true;
+        }
+    }
+
+    if previous_dash {
+        slug.pop();
+    }
+
+    slug
+}
+
+fn parse_channel_form(form: &DataForm) -> Result<ChannelMetadata, ParseChannelFormError> {
     let mut name: Option<String> = None;
     let mut description: Option<String> = None;
     let mut channel_type: Option<String> = None;
@@ -72,7 +94,6 @@ fn parse_channel_form(form: &DataForm) -> Result<(String, ChannelMetadata), Pars
         };
 
         match var {
-            "waddle_id" => waddle_id = field.value().map(|v| v.to_string()),
             "name" => name = field.value().map(|v| v.to_string()),
             "description" => description = field.value().map(|v| v.to_string()),
             "channel_type" => channel_type = field.value().map(|v| v.to_string()),
@@ -81,7 +102,6 @@ fn parse_channel_form(form: &DataForm) -> Result<(String, ChannelMetadata), Pars
         }
     }
 
-    let waddle_id = waddle_id.ok_or(ParseChannelFormError::MissingRequiredField("waddle_id"))?;
     let name = name.ok_or(ParseChannelFormError::MissingRequiredField("name"))?;
     let channel_type = channel_type.unwrap_or_else(|| "text".to_string());
     let position = position.unwrap_or(0);
@@ -90,24 +110,26 @@ fn parse_channel_form(form: &DataForm) -> Result<(String, ChannelMetadata), Pars
         return Err(ParseChannelFormError::EmptyChannelName);
     }
 
+    let id = slugify_channel_name(&name);
+    if id.is_empty() {
+        return Err(ParseChannelFormError::InvalidChannelName);
+    }
+
     let channel_type = ChannelType::parse(&channel_type)
         .map(|kind| kind.as_str().to_string())
         .ok_or_else(|| ParseChannelFormError::UnsupportedChannelType(channel_type.clone()))?;
 
-    Ok((
-        waddle_id,
-        ChannelMetadata {
-            name,
-            description,
-            channel_type,
-            position,
-        },
-    ))
+    Ok(ChannelMetadata {
+        id,
+        name,
+        description,
+        channel_type,
+        position,
+    })
 }
 
 fn build_request_form() -> DataForm {
     DataForm::new(FormType::Form)
-        .add_field(Field::hidden("waddle_id", "").with_label("Waddle ID (required)"))
         .add_field(
             Field::text_single("name", "")
                 .with_label("Channel Name")
@@ -173,7 +195,7 @@ pub async fn handle_create_channel<D: CreateChannelDeps>(
                 }
             };
 
-            let (waddle_id, metadata) = match parse_channel_form(form) {
+            let metadata = match parse_channel_form(form) {
                 Ok(parsed) => parsed,
                 Err(err) => {
                     return CommandResult::Completed {
@@ -192,7 +214,7 @@ pub async fn handle_create_channel<D: CreateChannelDeps>(
                 }
             };
 
-            match deps.create_channel(user_id, &waddle_id, metadata).await {
+            match deps.create_channel(user_id, metadata).await {
                 Ok(result) => {
                     let result_form = build_result_form(&result.channel_id, &result.channel_jid);
                     CommandResult::Completed {
@@ -234,13 +256,12 @@ mod tests {
         async fn create_channel(
             &self,
             user_id: &str,
-            _waddle_id: &str,
             _metadata: ChannelMetadata,
         ) -> Result<CreateChannelResult, CreateChannelError> {
             *self.captured_user_id.lock().unwrap() = Some(user_id.to_string());
             Ok(CreateChannelResult {
                 channel_id: "channel-123".to_string(),
-                channel_jid: "test-waddle_channel-123@muc.localhost".to_string(),
+                channel_jid: "channel-123@muc.localhost".to_string(),
             })
         }
     }
@@ -271,12 +292,10 @@ mod tests {
 
     #[test]
     fn test_parse_channel_form_minimal() {
-        let form = DataForm::new(FormType::Submit)
-            .add_field(Field::hidden("waddle_id", "test-waddle"))
-            .add_field(Field::text_single("name", "General"));
+        let form = DataForm::new(FormType::Submit).add_field(Field::text_single("name", "General"));
 
-        let (waddle_id, metadata) = parse_channel_form(&form).unwrap();
-        assert_eq!(waddle_id, "test-waddle");
+        let metadata = parse_channel_form(&form).unwrap();
+        assert_eq!(metadata.id, "general");
         assert_eq!(metadata.name, "General");
         assert_eq!(metadata.channel_type, "text");
         assert_eq!(metadata.position, 0);
@@ -285,17 +304,16 @@ mod tests {
     #[test]
     fn test_parse_channel_form_full() {
         let form = DataForm::new(FormType::Submit)
-            .add_field(Field::hidden("waddle_id", "test-waddle"))
-            .add_field(Field::text_single("name", "Announcements"))
+            .add_field(Field::text_single("name", "Release Announcements!"))
             .add_field(
                 Field::new("description", FieldType::TextMulti).with_value("Important updates"),
             )
             .add_field(Field::new("channel_type", FieldType::ListSingle).with_value("forum"))
             .add_field(Field::text_single("position", "10"));
 
-        let (waddle_id, metadata) = parse_channel_form(&form).unwrap();
-        assert_eq!(waddle_id, "test-waddle");
-        assert_eq!(metadata.name, "Announcements");
+        let metadata = parse_channel_form(&form).unwrap();
+        assert_eq!(metadata.id, "release-announcements");
+        assert_eq!(metadata.name, "Release Announcements!");
         assert_eq!(metadata.description, Some("Important updates".to_string()));
         assert_eq!(metadata.channel_type, "forum");
         assert_eq!(metadata.position, 10);
@@ -304,7 +322,6 @@ mod tests {
     #[test]
     fn test_parse_channel_form_invalid_type() {
         let form = DataForm::new(FormType::Submit)
-            .add_field(Field::hidden("waddle_id", "test-waddle"))
             .add_field(Field::text_single("name", "General"))
             .add_field(Field::new("channel_type", FieldType::ListSingle).with_value("invalid"));
 
@@ -318,8 +335,7 @@ mod tests {
 
     #[test]
     fn test_parse_channel_form_missing_name() {
-        let form =
-            DataForm::new(FormType::Submit).add_field(Field::hidden("waddle_id", "test-waddle"));
+        let form = DataForm::new(FormType::Submit);
 
         let result = parse_channel_form(&form);
         assert!(matches!(
@@ -345,9 +361,7 @@ mod tests {
     #[tokio::test]
     async fn test_complete_uses_authenticated_user_id_for_create_channel() {
         let deps = Arc::new(MockDeps::default());
-        let form = DataForm::new(FormType::Submit)
-            .add_field(Field::hidden("waddle_id", "test-waddle"))
-            .add_field(Field::text_single("name", "General"));
+        let form = DataForm::new(FormType::Submit).add_field(Field::text_single("name", "General"));
 
         let result = handle_create_channel(
             Arc::clone(&deps),
@@ -377,7 +391,6 @@ mod tests {
         async fn create_channel(
             &self,
             _user_id: &str,
-            _waddle_id: &str,
             _metadata: ChannelMetadata,
         ) -> Result<CreateChannelResult, CreateChannelError> {
             Err(CreateChannelError::PermissionDenied)
@@ -386,9 +399,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_complete_surfaces_typed_dependency_error_message() {
-        let form = DataForm::new(FormType::Submit)
-            .add_field(Field::hidden("waddle_id", "test-waddle"))
-            .add_field(Field::text_single("name", "General"));
+        let form = DataForm::new(FormType::Submit).add_field(Field::text_single("name", "General"));
 
         let result = handle_create_channel(
             Arc::new(FailingDeps),

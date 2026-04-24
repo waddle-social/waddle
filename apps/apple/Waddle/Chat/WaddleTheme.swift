@@ -49,7 +49,7 @@ enum WaddleTheme {
         light: ns(233, 235, 245),
         dark:  ns(9,   10,  16)
     )
-    /// Far-left workspace rail.
+    /// Far-left app rail.
     static let railBackground = adaptive(
         light: ns(222, 225, 238),
         dark:  ns(7,   8,   13)

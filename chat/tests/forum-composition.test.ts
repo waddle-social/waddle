@@ -1,6 +1,6 @@
 import { describe, expect, mock, test } from "bun:test";
 import { ref } from "vue";
-import type { ChannelSummary } from "../src/lib/waddle-api";
+import type { ChannelSummary } from "../src/lib/chat-types";
 import type { WaddleSession } from "../src/lib/server-auth";
 import { useMessaging } from "../src/composables/useMessaging";
 import { handlerStubs } from "./helpers/xmpp-client-mock";
@@ -111,7 +111,7 @@ describe("forum composition", () => {
       {
         id: "topic-1",
         author: "Bob",
-        authorJid: "w1_c1@muc.example.com/Bob",
+        authorJid: "c1@muc.example.com/Bob",
         body: "Let's map the next release.",
         createdAt: "2024-01-01T00:00:00Z",
         isSelf: false,
@@ -123,7 +123,7 @@ describe("forum composition", () => {
       {
         id: "reply-1",
         author: "Carol",
-        authorJid: "w1_c1@muc.example.com/Carol",
+        authorJid: "c1@muc.example.com/Carol",
         body: "Start with onboarding.",
         createdAt: "2024-01-01T00:01:00Z",
         isSelf: false,
@@ -146,7 +146,7 @@ describe("forum composition", () => {
       expect.objectContaining({
         replyTo: {
           id: "reply-1",
-          author: "w1_c1@muc.example.com/Carol",
+          author: "c1@muc.example.com/Carol",
           body: "Start with onboarding.",
         },
         threadId: "topic-1",

@@ -1,8 +1,7 @@
-import type { WaddleSummary, ChannelSummary } from "@/lib/waddle-api";
+import type { ChannelSummary } from "@/lib/chat-types";
 
 interface RouteState {
   page: "chat" | "settings";
-  waddleSlug: string | null;
   channelSlug: string | null;
   dmUsername: string | null;
   /** XEP-0201 thread stack from `?thread=rootId,childId,...`. Empty = panel closed. */
@@ -46,7 +45,7 @@ function buildSearch(threadStack: string[] | undefined): string {
   return `?thread=${encoded}`;
 }
 
-// Parses /{waddleSlug}/{channelSlug}[?thread=a,b,c] from URL.
+// Parses /{channelSlug}[?thread=a,b,c] from URL.
 export function parseRoute(pathname: string, search?: string): RouteState {
   const segments = pathname.split("/").filter(Boolean);
   const resolvedSearch = search ?? (typeof window !== "undefined" ? window.location.search : "");
@@ -54,7 +53,6 @@ export function parseRoute(pathname: string, search?: string): RouteState {
   if (pathname === SETTINGS_PATH) {
     return {
       page: "settings",
-      waddleSlug: null,
       channelSlug: null,
       dmUsername: null,
       threadStack: [],
@@ -63,7 +61,6 @@ export function parseRoute(pathname: string, search?: string): RouteState {
   if (segments[0] === "dm") {
     return {
       page: "chat",
-      waddleSlug: null,
       channelSlug: null,
       dmUsername: segments[1] ? decodeURIComponent(segments[1]) : null,
       threadStack,
@@ -71,20 +68,10 @@ export function parseRoute(pathname: string, search?: string): RouteState {
   }
   return {
     page: "chat",
-    waddleSlug: segments[0] ? decodeURIComponent(segments[0]) : null,
-    channelSlug: segments[1] ? decodeURIComponent(segments[1]) : null,
+    channelSlug: segments[0] ? decodeURIComponent(segments[0]) : null,
     dmUsername: null,
     threadStack,
   };
-}
-
-export function resolveWaddle(slug: string, waddles: WaddleSummary[]): WaddleSummary | undefined {
-  const lower = slug.toLowerCase();
-  return (
-    waddles.find((w) => slugify(w.name) === lower) ??
-    waddles.find((w) => w.name.toLowerCase() === lower) ??
-    waddles.find((w) => w.id === slug)
-  );
 }
 
 export function resolveChannel(slug: string, channels: ChannelSummary[]): ChannelSummary | undefined {
@@ -97,17 +84,11 @@ export function resolveChannel(slug: string, channels: ChannelSummary[]): Channe
 }
 
 export function buildPath(
-  waddle: WaddleSummary | null,
   channel: ChannelSummary | null,
   threadStack?: string[],
 ): string {
   const search = buildSearch(threadStack);
-  if (!waddle) return `/${search}`;
-  const wSlug = encodeURIComponent(slugify(waddle.name));
-  if (channel) {
-    return `/${wSlug}/${encodeURIComponent(slugify(channel.name))}${search}`;
-  }
-  return `/${wSlug}${search}`;
+  return channel ? `/${encodeURIComponent(slugify(channel.name))}${search}` : `/${search}`;
 }
 
 export function buildDmPath(username: string | null, threadStack?: string[]): string {
@@ -120,11 +101,10 @@ export function buildSettingsPath(): string {
 }
 
 export function pushRoute(
-  waddle: WaddleSummary | null,
   channel: ChannelSummary | null,
   threadStack?: string[],
 ) {
-  const path = buildPath(waddle, channel, threadStack);
+  const path = buildPath(channel, threadStack);
   const current = window.location.pathname + window.location.search;
   if (current !== path) {
     window.history.pushState({ waddlePage: "chat" }, "", path);

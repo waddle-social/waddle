@@ -1,0 +1,27 @@
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: waddle
+  namespace: waddle
+spec:
+  instances: 2
+
+  bootstrap:
+    initdb:
+      database: waddle
+      owner: waddle
+
+  storage:
+    size: 10Gi
+    storageClass: openebs-mayastor
+
+  walStorage:
+    size: 2Gi
+    storageClass: openebs-mayastor
+
+  resources:
+    requests:
+      memory: 512Mi
+      cpu: 250m
+    limits:
+      memory: 1Gi

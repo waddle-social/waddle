@@ -5,8 +5,8 @@
 
 const PREFIX = "waddle.chat.last-seen";
 
-export function roomKey(waddleId: string, channelId: string): string {
-  return `${PREFIX}.room.${waddleId}.${channelId}`;
+export function roomKey(channelId: string): string {
+  return `${PREFIX}.room.${channelId}`;
 }
 
 export function dmKey(peerBareJid: string): string {

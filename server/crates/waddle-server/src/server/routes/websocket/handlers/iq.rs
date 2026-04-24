@@ -33,7 +33,7 @@ use waddle_xmpp::{
         build_command_items, build_command_result, build_spaces_metadata_form,
         parse_command_from_iq, Command, CommandStatus, NODE_COMMANDS,
     },
-    Stanza, StanzaErrorCondition, StanzaErrorType, WaddleDetails, XmppError,
+    SpaceDetails, Stanza, StanzaErrorCondition, StanzaErrorType, XmppError,
 };
 
 use super::super::{
@@ -43,10 +43,7 @@ use super::super::{
 use super::presence::get_managed_channel_for_room;
 use crate::auth::Session;
 use crate::db::actor::DbExecute;
-use crate::server::routes::channels::list_channels_from_db;
-use crate::server::routes::waddles::{
-    get_waddle_by_id, list_all_waddles_from_db, list_user_waddles,
-};
+use crate::server::xmpp_state::list_xmpp_channels;
 
 /// Only called from test helpers — suppress dead_code lint for binary crate.
 #[allow(dead_code)]
@@ -96,9 +93,6 @@ pub async fn handle_iq_with_conn_state(
     carbons_enabled: &mut bool,
 ) -> Vec<String> {
     let spaces_domain = format!("spaces.{domain}");
-    let single_tenant = std::env::var("WADDLE_SINGLE_TENANT")
-        .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
-        .unwrap_or(false);
 
     let id = iq.id.clone();
     let to = iq.to.as_ref().map(|jid| jid.to_string());
@@ -307,72 +301,28 @@ pub async fn handle_iq_with_conn_state(
         // Disco info on spaces service
         if to.as_deref() == Some(spaces_domain.as_str()) {
             if let Some(node) = query.node.as_deref() {
-                let waddle = match get_waddle_by_id(
-                    state.deps.app_state.db_pool.global_actor().clone(),
-                    node,
-                )
-                .await
-                {
-                    Ok(Some(waddle)) => waddle,
-                    Ok(None) => {
-                        return vec![build_iq_error_xml(&id, "cancel", "item-not-found")];
-                    }
-                    Err(err) => {
-                        warn!(
-                            node = %node,
-                            error = %err,
-                            "Failed to load space node for disco#info"
-                        );
-                        return vec![build_iq_error_xml(&id, "wait", "internal-server-error")];
-                    }
-                };
-
-                let is_member = if single_tenant {
-                    true
-                } else if let Some(session) = authenticated_session {
-                    match list_user_waddles(
-                        state.deps.app_state.db_pool.global_actor().clone(),
-                        &session.user_id,
-                        200,
-                        0,
-                    )
-                    .await
-                    {
-                        Ok(waddles) => waddles.iter().any(|candidate| candidate.id == node),
-                        Err(err) => {
-                            warn!(
-                                user_id = %session.user_id,
-                                node = %node,
-                                error = %err,
-                                "Failed membership check for space node disco#info"
-                            );
-                            false
-                        }
-                    }
-                } else {
-                    false
-                };
-
-                if !single_tenant && !is_member && !waddle.is_public {
+                if node != "space" {
                     return vec![build_iq_error_xml(&id, "cancel", "item-not-found")];
                 }
 
-                let identities = vec![Identity::pubsub_leaf(Some(&waddle.name))];
+                let space = SpaceDetails {
+                    id: "space".to_string(),
+                    name: domain.to_string(),
+                    description: None,
+                    owner_id: "server".to_string(),
+                    icon_url: None,
+                    is_public: true,
+                    created_at: "1970-01-01T00:00:00Z".to_string(),
+                };
+
+                let identities = vec![Identity::pubsub_leaf(Some(&space.name))];
                 let features = vec![
                     Feature::disco_info(),
                     Feature::pubsub(),
                     Feature::pubsub_retrieve_items(),
                     Feature::spaces(),
                 ];
-                let metadata = build_spaces_metadata_form(&WaddleDetails {
-                    id: waddle.id.clone(),
-                    name: waddle.name.clone(),
-                    description: waddle.description.clone(),
-                    owner_id: waddle.owner_user_id.clone(),
-                    icon_url: waddle.icon_url.clone(),
-                    is_public: waddle.is_public,
-                    created_at: waddle.created_at.clone(),
-                });
+                let metadata = build_spaces_metadata_form(&space);
                 let response = build_disco_info_response_with_extensions(
                     request_iq,
                     &identities,
@@ -469,125 +419,39 @@ pub async fn handle_iq_with_conn_state(
             let global_db_actor = state.deps.app_state.db_pool.global_actor().clone();
             let items: Vec<DiscoItem> = match query.node.as_deref() {
                 Some(node) => {
-                    let can_list_channels = if single_tenant {
-                        true
-                    } else if let Some(session) = authenticated_session {
-                        match list_user_waddles(global_db_actor.clone(), &session.user_id, 200, 0)
-                            .await
-                        {
-                            Ok(waddles) => waddles.iter().any(|w| w.id == node),
-                            Err(err) => {
-                                warn!(
-                                    user_id = %session.user_id,
-                                    node = %node,
-                                    error = %err,
-                                    "Failed membership check for spaces node discovery"
-                                );
-                                false
-                            }
-                        }
-                    } else {
-                        false
-                    };
-
-                    if !can_list_channels {
+                    if node != "space" {
                         vec![]
                     } else {
-                        match state.deps.app_state.db_pool.get_waddle_actor(node).await {
-                            Ok(waddle_actor) => {
-                                match list_channels_from_db(waddle_actor, node, 200, 0).await {
-                                    Ok(channels) => {
-                                        channels
-                                            .into_iter()
-                                            .filter_map(|channel| {
-                                                waddle_xmpp::managed_room_jid(
-                                                    node,
-                                                    &channel.id,
-                                                    muc_domain,
-                                                )
-                                                .ok()
-                                                .map(|room_jid| {
-                                                    DiscoItem::muc_room(
-                                                        &room_jid.to_string(),
-                                                        &channel.name,
-                                                    )
-                                                })
-                                            })
-                                            .collect()
-                                    }
-                                    Err(err) => {
-                                        warn!(
-                                            node = %node,
-                                            error = %err,
-                                            "Failed to list channels for spaces node discovery"
-                                        );
-                                        vec![]
-                                    }
-                                }
-                            }
+                        match list_xmpp_channels(global_db_actor.clone(), 200, 0).await {
+                            Ok(channels) => channels
+                                .into_iter()
+                                .filter_map(|channel| {
+                                    waddle_xmpp::managed_room_jid(&channel.id, muc_domain)
+                                        .ok()
+                                        .map(|room_jid| {
+                                            DiscoItem::muc_room(
+                                                &room_jid.to_string(),
+                                                &channel.name,
+                                            )
+                                        })
+                                })
+                                .collect(),
                             Err(err) => {
                                 warn!(
                                     node = %node,
                                     error = %err,
-                                    "Failed to open waddle database for spaces node discovery"
+                                    "Failed to list channels for spaces node discovery"
                                 );
                                 vec![]
                             }
                         }
                     }
                 }
-                None => {
-                    let waddles = if single_tenant {
-                        match list_all_waddles_from_db(global_db_actor.clone(), 1, 0).await {
-                            Ok(rows) => rows,
-                            Err(err) => {
-                                warn!(error = %err, "Failed to list canonical single-tenant space");
-                                vec![]
-                            }
-                        }
-                    } else if let Some(session) = authenticated_session {
-                        const PAGE_SIZE: usize = 200;
-                        let mut offset = 0usize;
-                        let mut all = Vec::new();
-
-                        loop {
-                            match list_user_waddles(
-                                global_db_actor.clone(),
-                                &session.user_id,
-                                PAGE_SIZE,
-                                offset,
-                            )
-                            .await
-                            {
-                                Ok(page) => {
-                                    let count = page.len();
-                                    all.extend(page);
-                                    if count < PAGE_SIZE {
-                                        break;
-                                    }
-                                    offset += PAGE_SIZE;
-                                }
-                                Err(err) => {
-                                    warn!(
-                                        user_id = %session.user_id,
-                                        error = %err,
-                                        "Failed to list user spaces for discovery"
-                                    );
-                                    break;
-                                }
-                            }
-                        }
-
-                        all
-                    } else {
-                        vec![]
-                    };
-
-                    waddles
-                        .into_iter()
-                        .map(|w| DiscoItem::spaces_node(&spaces_domain, &w.id, Some(&w.name)))
-                        .collect()
-                }
+                None => vec![DiscoItem::spaces_node(
+                    &spaces_domain,
+                    "space",
+                    Some(domain),
+                )],
             };
 
             let response = build_disco_items_response(request_iq, &items, query.node.as_deref());

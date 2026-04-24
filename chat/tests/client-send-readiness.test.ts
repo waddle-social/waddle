@@ -72,7 +72,7 @@ describe("client send readiness", () => {
   test("room sends immediately when the room is ready", async () => {
     const xmpp = { sendMessage: mock(() => undefined) };
     const client = new BrowserXmppClient(session());
-    const roomJid = roomBareJidFor(session(), "w1", "c1");
+    const roomJid = roomBareJidFor(session(), "c1");
     // Pre-set the ready state: sendGroupMessage takes the fast path
     // (no awaits, no switchRoom call) when `roomIsReady` is already
     // true at call time. Anything else enqueues optimistically and
@@ -114,7 +114,7 @@ describe("client send readiness", () => {
     const result = await client.sendGroupMessage("w1", "c1", "hello room");
 
     expect(result?.state).toBe("queued");
-    expect(listQueuedRoomMessages("alice@example.com", roomBareJidFor(session(), "w1", "c1"))).toHaveLength(1);
+    expect(listQueuedRoomMessages("alice@example.com", roomBareJidFor(session(), "c1"))).toHaveLength(1);
     await expect(client.sendReaction("w1", "c1", "msg-1", ["👍"])).rejects.toThrow("Reconnection timed out");
     await expect(client.sendDisplayed("w1", "c1", "msg-1")).rejects.toThrow("Reconnection timed out");
     await expect(client.sendChatState("w1", "c1", "composing")).rejects.toThrow("Reconnection timed out");

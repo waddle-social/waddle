@@ -47,36 +47,17 @@ const serverBaseUrl = env.SERVER_BASE_URL;
       // Faro RUM bootstrap. `initTelemetry` is a no-op unless
       // `PUBLIC_FARO_URL` is set, so this ships on every build but
       // stays silent locally and in tests. Vite inlines
-      // `import.meta.env.PUBLIC_*` at build time. The default server
-      // origin arrives via the `waddle:server-base-url` meta tag; the
-      // active server URL — which can differ after a user logs into a
-      // federated waddle server — is read from localStorage here so
-      // Faro's trace-header injection covers both at init time. (Faro
-      // does not support mutating `propagateTraceHeaderCorsUrls` after
-      // `TracingInstrumentation` is registered, so a mid-session
-      // switch to an entirely new server origin needs a page reload
-      // to be traced; the persisted key below keeps returning users
-      // covered, which is the common case.)
+      // `import.meta.env.PUBLIC_*` at build time. The configured
+      // server origin arrives via the `waddle:server-base-url` meta tag.
       import { initTelemetry } from "@/lib/telemetry";
       const serverBaseUrl = document
         .querySelector('meta[name="waddle:server-base-url"]')
         ?.getAttribute("content") ?? "";
-      let activeServerUrl = "";
-      try {
-        activeServerUrl = window.localStorage.getItem(
-          "waddle.chat.active-server",
-        ) ?? "";
-      } catch {
-        // localStorage can throw in privacy mode; fall back to the default.
-      }
-      const propagateTraceHeadersTo = Array.from(
-        new Set([serverBaseUrl, activeServerUrl].filter((url) => url.length > 0)),
-      );
       initTelemetry({
         url: import.meta.env.PUBLIC_FARO_URL,
         appName: import.meta.env.PUBLIC_FARO_APP_NAME,
         release: import.meta.env.PUBLIC_COMMIT_SHA,
-        propagateTraceHeadersTo,
+        propagateTraceHeadersTo: serverBaseUrl ? [serverBaseUrl] : [],
       });
     </script>
     <ClientRouter />

@@ -44,7 +44,7 @@ struct ContentView: View {
         if horizontalSizeClass == .compact {
             MobileSlackShellView(model: model, showCreateSheet: $showCreateSheet)
                 .sheet(isPresented: $showCreateSheet) {
-                    CreateWaddleSheet(model: model)
+                    CreateSpaceSheet(model: model)
                 }
         } else {
             desktopAuthenticatedShell
@@ -74,7 +74,7 @@ struct ContentView: View {
             WaddleDetailView(model: model)
         }
         .sheet(isPresented: $showCreateSheet) {
-            CreateWaddleSheet(model: model)
+            CreateSpaceSheet(model: model)
         }
 #endif
     }
@@ -253,7 +253,7 @@ private struct WaddleListView: View {
     var body: some View {
         List {
             Section {
-                if let space = model.selectedWaddle {
+                if let space = model.selectedSpace {
                     HStack(alignment: .top, spacing: 12) {
                         VStack(alignment: .leading, spacing: 4) {
                             Text(space.name)
@@ -365,35 +365,34 @@ private struct AppSettingsPanel: View {
 struct WaddleDetailView: View {
     @ObservedObject var model: AppModel
 
-    private var selectedWaddle: WaddleSummary? {
-        model.selectedWaddle
+    private var selectedSpace: SpaceSummary? {
+        model.selectedSpace
     }
 
     var body: some View {
         Group {
-            if let waddle = selectedWaddle {
-                WaddleChatWorkspaceView(model: model, store: model.chatStore, waddle: waddle)
+            if let space = selectedSpace {
+                WaddleChatSpaceView(model: model, store: model.chatStore, space: space)
             } else {
                 ChatEmptyStateView(
-                    title: "Pick a waddle",
-                    message: "Browse waddles, pick a channel, and your chat view will open here.",
+                    title: "Set up the space",
+                    message: "Create or load the server space, then your chat view will open here.",
                     systemImage: "bubble.left.and.bubble.right"
                 )
             }
         }
-        .navigationTitle(selectedWaddle?.name ?? "Waddle")
+        .navigationTitle(selectedSpace?.name ?? "Space")
 #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
 #endif
     }
 }
 
-struct CreateWaddleSheet: View {
+struct CreateSpaceSheet: View {
     @ObservedObject var model: AppModel
     @Environment(\.dismiss) private var dismiss
     @State private var name = ""
     @State private var description = ""
-    @State private var isPublic = true
 
     var body: some View {
         NavigationStack {
@@ -402,10 +401,9 @@ struct CreateWaddleSheet: View {
                     TextField("Name", text: $name)
                     TextField("Description", text: $description, axis: .vertical)
                         .lineLimit(3, reservesSpace: true)
-                    Toggle("Public", isOn: $isPublic)
                 }
             }
-            .navigationTitle("Create Waddle")
+            .navigationTitle("Create Space")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }
@@ -413,13 +411,13 @@ struct CreateWaddleSheet: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Create") {
                         Task {
-                            await model.createWaddle(name: name, description: description, isPublic: isPublic)
+                            await model.createSpace(name: name, description: description)
                             if model.errorMessage.isEmpty {
                                 dismiss()
                             }
                         }
                     }
-                    .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.isCreatingWaddle)
+                    .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.isCreatingSpace)
                 }
             }
         }

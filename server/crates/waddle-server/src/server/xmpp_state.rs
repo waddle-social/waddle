@@ -13,35 +13,127 @@ use crate::auth::{
     jid_to_localpart, localpart_to_jid, NativeUserStore, RegisterRequest, SessionManager,
 };
 use crate::db::actor::{DbActor, DbExecute, DbQuery, DbQueryOne, GetDatabase};
-use crate::db::{row_value, Database, DatabaseError, DatabasePool, ValueExt};
+use crate::db::{row_value, Database, DatabasePool, ValueExt};
 use crate::permissions::{
     Object, ObjectType, PermissionService, Relation, Subject, SubjectType, Tuple,
 };
 use crate::vcard::VCardStore;
 use kameo::actor::ActorRef;
+use serde::Serialize;
+
+#[derive(Debug, Serialize)]
+pub(crate) struct XmppChannelRecord {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub channel_type: String,
+    pub position: i32,
+    pub is_default: bool,
+    pub created_at: String,
+    pub updated_at: Option<String>,
+}
+
+fn db_string(
+    row: &crate::db::actor::RowValues,
+    index: usize,
+    name: &str,
+) -> Result<String, String> {
+    row_value(row, index)
+        .and_then(ValueExt::as_string)
+        .map_err(|e| format!("Failed to get {name}: {e}"))
+}
+
+fn db_optional_string(
+    row: &crate::db::actor::RowValues,
+    index: usize,
+    name: &str,
+) -> Result<Option<String>, String> {
+    row_value(row, index)
+        .and_then(ValueExt::as_optional_string)
+        .map_err(|e| format!("Failed to get {name}: {e}"))
+}
+
+fn db_i32(row: &crate::db::actor::RowValues, index: usize, name: &str) -> Result<i32, String> {
+    match row_value(row, index).map_err(|e| format!("Failed to get {name}: {e}"))? {
+        crate::db::Value::Integer(value) => Ok(*value as i32),
+        other => Err(format!("Failed to get {name}: unexpected value {other:?}")),
+    }
+}
+
+fn db_bool(row: &crate::db::actor::RowValues, index: usize, name: &str) -> Result<bool, String> {
+    match row_value(row, index).map_err(|e| format!("Failed to get {name}: {e}"))? {
+        crate::db::Value::Integer(value) => Ok(*value != 0),
+        other => Err(format!("Failed to get {name}: unexpected value {other:?}")),
+    }
+}
+
+fn parse_channel_record(row: &crate::db::actor::RowValues) -> Result<XmppChannelRecord, String> {
+    Ok(XmppChannelRecord {
+        id: db_string(row, 0, "id")?,
+        name: db_string(row, 1, "name")?,
+        description: db_optional_string(row, 2, "description")?,
+        channel_type: db_string(row, 3, "channel_type")?,
+        position: db_i32(row, 4, "position")?,
+        is_default: db_bool(row, 5, "is_default")?,
+        created_at: db_string(row, 6, "created_at")?,
+        updated_at: db_optional_string(row, 7, "updated_at")?,
+    })
+}
+
+pub(crate) async fn get_xmpp_channel(
+    actor: ActorRef<DbActor>,
+    channel_id: &str,
+) -> Result<Option<XmppChannelRecord>, String> {
+    let row = actor
+        .ask(DbQueryOne {
+            sql: r#"
+                SELECT id, name, description, channel_type, position, is_default, created_at, updated_at
+                FROM channels
+                WHERE id = ?
+            "#
+            .to_string(),
+            params: vec![channel_id.into()],
+        })
+        .await
+        .map_err(|e| format!("Failed to query channel: {e}"))?;
+
+    row.as_ref().map(parse_channel_record).transpose()
+}
+
+pub(crate) async fn list_xmpp_channels(
+    actor: ActorRef<DbActor>,
+    limit: usize,
+    offset: usize,
+) -> Result<Vec<XmppChannelRecord>, String> {
+    let rows = actor
+        .ask(DbQuery {
+            sql: r#"
+                SELECT id, name, description, channel_type, position, is_default, created_at, updated_at
+                FROM channels
+                ORDER BY position ASC, created_at ASC
+                LIMIT ? OFFSET ?
+            "#
+            .to_string(),
+            params: vec![(limit as i64).into(), (offset as i64).into()],
+        })
+        .await
+        .map_err(|e| format!("Failed to query channels: {e}"))?;
+
+    rows.iter().map(parse_channel_record).collect()
+}
 
 #[derive(Clone)]
-struct WaddleDbService {
+struct SpaceDbService {
     db_pool: Arc<DatabasePool>,
 }
 
-impl WaddleDbService {
+impl SpaceDbService {
     fn new(db_pool: Arc<DatabasePool>) -> Self {
         Self { db_pool }
     }
 
-    async fn actor_for_waddle(&self, waddle_id: &str) -> Result<ActorRef<DbActor>, XmppError> {
-        self.db_pool.get_waddle_actor(waddle_id).await.map_err(|e| {
-            warn!(waddle_id = %waddle_id, error = %e, "Failed to get waddle database actor");
-            XmppError::internal(format!("Failed to access waddle database: {}", e))
-        })
-    }
-
-    async fn actor_for_waddle_with_migrations(
-        &self,
-        waddle_id: &str,
-    ) -> Result<ActorRef<DbActor>, XmppError> {
-        self.actor_for_waddle(waddle_id).await
+    fn actor(&self) -> ActorRef<DbActor> {
+        self.db_pool.global_actor().clone()
     }
 }
 
@@ -66,8 +158,8 @@ pub struct XmppAppState {
     vcard_store: VCardStore,
     /// Global database actor for runtime repository access.
     global_db_actor: ActorRef<DbActor>,
-    /// Waddle database service for per-waddle actor access.
-    waddle_db_service: Option<WaddleDbService>,
+    /// Database service for canonical space data.
+    space_db_service: Option<SpaceDbService>,
     /// Shared XEP-0430 inbox projection storage.
     inbox_storage: Option<Arc<dyn InboxStorage>>,
 }
@@ -98,17 +190,14 @@ impl XmppAppState {
             native_user_store,
             vcard_store,
             global_db_actor: db_actor,
-            waddle_db_service: None,
+            space_db_service: None,
             inbox_storage: None,
         }
     }
 
-    /// Set the database pool for per-waddle database access.
-    ///
-    /// This enables auto-join channel enumeration by providing access
-    /// to per-waddle SQLite databases.
+    /// Set the database pool for canonical space data access.
     pub fn with_db_pool(mut self, db_pool: Arc<DatabasePool>) -> Self {
-        self.waddle_db_service = Some(WaddleDbService::new(db_pool));
+        self.space_db_service = Some(SpaceDbService::new(db_pool));
         self
     }
 
@@ -120,7 +209,7 @@ impl XmppAppState {
 
     /// Parse a resource string into an Object.
     ///
-    /// Resource format: "waddle:{id}" or "channel:{id}"
+    /// Resource format: "space:{id}" or "channel:{id}"
     fn parse_resource(resource: &str) -> Result<Object, XmppError> {
         Object::parse(resource).map_err(|e| {
             XmppError::internal(format!("Invalid resource format '{}': {}", resource, e))
@@ -129,7 +218,7 @@ impl XmppAppState {
 
     /// Parse a subject string into a Subject.
     ///
-    /// Subject format: "user:{user_id}" or "waddle:{id}#member"
+    /// Subject format: "user:{user_id}" or "space:{id}#member"
     fn parse_subject(subject: &str) -> Result<Subject, XmppError> {
         Subject::parse(subject).map_err(|e| {
             XmppError::internal(format!("Invalid subject format '{}': {}", subject, e))
@@ -204,7 +293,7 @@ impl waddle_xmpp::AppState for XmppAppState {
 
     /// Check if a subject has permission to perform an action on a resource.
     ///
-    /// Resource format: "waddle:{id}" or "channel:{id}"
+    /// Resource format: "space:{id}" or "channel:{id}"
     /// Subject format: "user:{user_id}"
     async fn check_permission(
         &self,
@@ -1120,85 +1209,19 @@ impl waddle_xmpp::AppState for XmppAppState {
     }
 
     // =========================================================================
-    // Auto-Join: Waddle & Channel Enumeration
+    // Auto-Join: Space & Channel Enumeration
     // =========================================================================
 
-    /// List all waddles a user belongs to.
-    async fn list_user_waddles(
-        &self,
-        user_id: &str,
-    ) -> Result<Vec<waddle_xmpp::WaddleInfo>, XmppError> {
-        debug!(user_id = %user_id, "Listing user waddles for auto-join");
+    /// List all channels in the canonical space.
+    async fn list_space_channels(&self) -> Result<Vec<waddle_xmpp::ChannelInfo>, XmppError> {
+        debug!("Listing space channels for auto-join");
 
-        const PAGE_SIZE: usize = 200;
-        let mut offset = 0usize;
-        let mut result = Vec::new();
-
-        loop {
-            let rows = self
-                .global_db_actor
-                .ask(DbQuery {
-                    sql: r#"
-                        SELECT w.id, w.name
-                        FROM waddles w
-                        JOIN waddle_members wm ON w.id = wm.waddle_id
-                        WHERE wm.user_id = ?
-                        ORDER BY w.created_at DESC
-                        LIMIT ? OFFSET ?
-                    "#
-                    .to_string(),
-                    params: vec![
-                        crate::db::Value::from(user_id.to_string()),
-                        crate::db::Value::from(PAGE_SIZE as i64),
-                        crate::db::Value::from(offset as i64),
-                    ],
-                })
-                .await
-                .map_err(|e| {
-                    warn!(user_id = %user_id, error = %e, "Failed to list user waddles");
-                    XmppError::internal(format!("Failed to list user waddles: {}", e))
-                })?;
-
-            let page_len = rows.len();
-            for row in rows {
-                let id = row_value(&row, 0)
-                    .and_then(|value| value.as_string())
-                    .map_err(|e| {
-                        XmppError::internal(format!("Failed to parse waddle id: {}", e))
-                    })?;
-                let name = row_value(&row, 1)
-                    .and_then(|value| value.as_string())
-                    .map_err(|e| {
-                        XmppError::internal(format!("Failed to parse waddle name: {}", e))
-                    })?;
-                result.push(waddle_xmpp::WaddleInfo { id, name });
-            }
-
-            if page_len < PAGE_SIZE {
-                break;
-            }
-            offset += PAGE_SIZE;
-        }
-
-        debug!(user_id = %user_id, count = result.len(), "Found user waddles");
-        Ok(result)
-    }
-
-    /// List all channels in a waddle.
-    async fn list_waddle_channels(
-        &self,
-        waddle_id: &str,
-    ) -> Result<Vec<waddle_xmpp::ChannelInfo>, XmppError> {
-        debug!(waddle_id = %waddle_id, "Listing waddle channels for auto-join");
-
-        let waddle_db_service = self.waddle_db_service.as_ref().ok_or_else(|| {
+        let space_db_service = self.space_db_service.as_ref().ok_or_else(|| {
             warn!("Database pool not configured for auto-join channel enumeration");
             XmppError::internal("Database pool not configured".to_string())
         })?;
 
-        let actor = waddle_db_service
-            .actor_for_waddle_with_migrations(waddle_id)
-            .await?;
+        let actor = space_db_service.actor();
 
         const PAGE_SIZE: usize = 200;
         let mut offset = 0usize;
@@ -1221,7 +1244,7 @@ impl waddle_xmpp::AppState for XmppAppState {
                 })
                 .await
                 .map_err(|e| {
-                    warn!(waddle_id = %waddle_id, error = %e, "Failed to list channels");
+                    warn!(error = %e, "Failed to list channels");
                     XmppError::internal(format!("Failed to list channels: {}", e))
                 })?;
 
@@ -1255,37 +1278,26 @@ impl waddle_xmpp::AppState for XmppAppState {
             offset += PAGE_SIZE;
         }
 
-        debug!(waddle_id = %waddle_id, count = result.len(), "Found waddle channels");
+        debug!(count = result.len(), "Found space channels");
         Ok(result)
     }
 
     /// Look up a channel-backed room by channel ID.
     async fn get_channel_room_info(
         &self,
-        waddle_id: &str,
         channel_id: &str,
     ) -> Result<Option<waddle_xmpp::ChannelRoomInfo>, XmppError> {
         debug!(
-            waddle_id = %waddle_id,
             channel_id = %channel_id,
             "Looking up channel-backed room metadata"
         );
 
-        let Some(waddle_db_service) = self.waddle_db_service.as_ref() else {
+        let Some(space_db_service) = self.space_db_service.as_ref() else {
             debug!("Database pool not configured for channel room lookup");
             return Ok(None);
         };
 
-        let actor = match waddle_db_service
-            .actor_for_waddle_with_migrations(waddle_id)
-            .await
-        {
-            Ok(actor) => actor,
-            Err(e) => {
-                warn!(waddle_id = %waddle_id, error = %e, "Failed to open waddle database actor");
-                return Ok(None);
-            }
-        };
+        let actor = space_db_service.actor();
 
         match actor
             .ask(DbQueryOne {
@@ -1316,7 +1328,7 @@ impl waddle_xmpp::AppState for XmppAppState {
                         XmppError::internal(format!("Failed to parse channel type: {}", e))
                     })?;
                 Ok(Some(waddle_xmpp::ChannelRoomInfo {
-                    waddle_id: waddle_id.to_string(),
+                    waddle_id: "space".to_string(),
                     channel: waddle_xmpp::ChannelInfo {
                         id,
                         name,
@@ -1327,10 +1339,9 @@ impl waddle_xmpp::AppState for XmppAppState {
             Ok(None) => Ok(None),
             Err(e) => {
                 warn!(
-                    waddle_id = %waddle_id,
                     channel_id = %channel_id,
                     error = %e,
-                    "Failed to query channel from waddle database actor"
+                    "Failed to query channel from database actor"
                 );
                 Ok(None)
             }
@@ -1338,259 +1349,26 @@ impl waddle_xmpp::AppState for XmppAppState {
     }
 
     // =========================================================================
-    // XEP-0503: Spaces Service (Waddle Details)
+    // XEP-0503: Spaces Service
     // =========================================================================
 
-    /// Get detailed information about a specific waddle.
-    async fn get_waddle_details(
-        &self,
-        waddle_id: &str,
-    ) -> Result<Option<waddle_xmpp::WaddleDetails>, XmppError> {
-        debug!(waddle_id = %waddle_id, "Getting waddle details for spaces service");
-
-        let row = self
-            .global_db_actor
-            .ask(DbQueryOne {
-                sql: r#"
-                    SELECT w.id, w.name, w.description, u.id as owner_user_id, w.icon_url, w.is_public, w.created_at
-                    FROM waddles w
-                    JOIN users u ON w.owner_id = u.id
-                    WHERE w.id = ?
-                "#
-                .to_string(),
-                params: vec![crate::db::Value::from(waddle_id.to_string())],
-            })
-            .await
-            .map_err(|e| {
-                warn!(waddle_id = %waddle_id, error = %e, "Failed to get waddle details");
-                XmppError::internal(format!("Failed to get waddle details: {}", e))
-            })?;
-
-        Ok(row
-            .map(|row| -> Result<_, XmppError> {
-                Ok(waddle_xmpp::WaddleDetails {
-                    id: row_value(&row, 0)
-                        .and_then(|value| value.as_string())
-                        .map_err(|e| {
-                            XmppError::internal(format!("Failed to parse waddle id: {}", e))
-                        })?,
-                    name: row_value(&row, 1)
-                        .and_then(|value| value.as_string())
-                        .map_err(|e| {
-                            XmppError::internal(format!("Failed to parse waddle name: {}", e))
-                        })?,
-                    description: row_value(&row, 2)
-                        .and_then(|value| value.as_optional_string())
-                        .map_err(|e| {
-                            XmppError::internal(format!(
-                                "Failed to parse waddle description: {}",
-                                e
-                            ))
-                        })?,
-                    owner_id: row_value(&row, 3)
-                        .and_then(|value| value.as_string())
-                        .map_err(|e| {
-                            XmppError::internal(format!("Failed to parse waddle owner: {}", e))
-                        })?,
-                    icon_url: row_value(&row, 4)
-                        .and_then(|value| value.as_optional_string())
-                        .map_err(|e| {
-                            XmppError::internal(format!("Failed to parse waddle icon: {}", e))
-                        })?,
-                    is_public: row_value(&row, 5).and_then(value_as_bool).map_err(|e| {
-                        XmppError::internal(format!("Failed to parse waddle visibility: {}", e))
-                    })?,
-                    created_at: row_value(&row, 6)
-                        .and_then(|value| value.as_string())
-                        .map_err(|e| {
-                            XmppError::internal(format!("Failed to parse waddle created_at: {}", e))
-                        })?,
-                })
-            })
-            .transpose()?)
-    }
-
-    /// Get detailed information about all waddles a user belongs to.
-    async fn get_user_waddles_with_details(
-        &self,
-        user_id: &str,
-    ) -> Result<Vec<waddle_xmpp::WaddleDetails>, XmppError> {
-        debug!(user_id = %user_id, "Listing user waddles with details for spaces service");
-
-        const PAGE_SIZE: usize = 200;
-        let mut offset = 0usize;
-        let mut result = Vec::new();
-
-        loop {
-            let rows = self
-                .global_db_actor
-                .ask(DbQuery {
-                    sql: r#"
-                        SELECT w.id, w.name, w.description, u.id as owner_user_id, w.icon_url, w.is_public, w.created_at
-                        FROM waddles w
-                        JOIN users u ON w.owner_id = u.id
-                        JOIN waddle_members wm ON w.id = wm.waddle_id
-                        WHERE wm.user_id = ?
-                        ORDER BY w.created_at DESC
-                        LIMIT ? OFFSET ?
-                    "#
-                    .to_string(),
-                    params: vec![
-                        crate::db::Value::from(user_id.to_string()),
-                        crate::db::Value::from(PAGE_SIZE as i64),
-                        crate::db::Value::from(offset as i64),
-                    ],
-                })
-                .await
-                .map_err(|e| {
-                    warn!(user_id = %user_id, error = %e, "Failed to list user waddles with details");
-                    XmppError::internal(format!("Failed to list user waddles: {}", e))
-                })?;
-
-            let page_len = rows.len();
-            for row in rows {
-                result.push(waddle_xmpp::WaddleDetails {
-                    id: row_value(&row, 0)
-                        .and_then(|value| value.as_string())
-                        .map_err(|e| {
-                            XmppError::internal(format!("Failed to parse waddle id: {}", e))
-                        })?,
-                    name: row_value(&row, 1)
-                        .and_then(|value| value.as_string())
-                        .map_err(|e| {
-                            XmppError::internal(format!("Failed to parse waddle name: {}", e))
-                        })?,
-                    description: row_value(&row, 2)
-                        .and_then(|value| value.as_optional_string())
-                        .map_err(|e| {
-                            XmppError::internal(format!(
-                                "Failed to parse waddle description: {}",
-                                e
-                            ))
-                        })?,
-                    owner_id: row_value(&row, 3)
-                        .and_then(|value| value.as_string())
-                        .map_err(|e| {
-                            XmppError::internal(format!("Failed to parse waddle owner: {}", e))
-                        })?,
-                    icon_url: row_value(&row, 4)
-                        .and_then(|value| value.as_optional_string())
-                        .map_err(|e| {
-                            XmppError::internal(format!("Failed to parse waddle icon: {}", e))
-                        })?,
-                    is_public: row_value(&row, 5).and_then(value_as_bool).map_err(|e| {
-                        XmppError::internal(format!("Failed to parse waddle visibility: {}", e))
-                    })?,
-                    created_at: row_value(&row, 6)
-                        .and_then(|value| value.as_string())
-                        .map_err(|e| {
-                            XmppError::internal(format!("Failed to parse waddle created_at: {}", e))
-                        })?,
-                });
-            }
-
-            if page_len < PAGE_SIZE {
-                break;
-            }
-            offset += PAGE_SIZE;
-        }
-
-        debug!(user_id = %user_id, count = result.len(), "Found user waddles with details");
-        Ok(result)
-    }
-
-    /// List all waddles with pagination.
-    async fn list_all_waddles(
-        &self,
-        limit: usize,
-        offset: usize,
-    ) -> Result<Vec<waddle_xmpp::WaddleDetails>, XmppError> {
-        debug!(
-            limit = limit,
-            offset = offset,
-            "Listing all waddles for spaces service"
-        );
-
-        let rows = self
-            .global_db_actor
-            .ask(DbQuery {
-                sql: r#"
-                    SELECT w.id, w.name, w.description, u.id as owner_user_id, w.icon_url, w.is_public, w.created_at
-                    FROM waddles w
-                    JOIN users u ON w.owner_id = u.id
-                    ORDER BY w.created_at DESC
-                    LIMIT ? OFFSET ?
-                "#
-                .to_string(),
-                params: vec![
-                    crate::db::Value::from(limit as i64),
-                    crate::db::Value::from(offset as i64),
-                ],
-            })
-            .await
-            .map_err(|e| {
-                warn!(error = %e, "Failed to list all waddles");
-                XmppError::internal(format!("Failed to list all waddles: {}", e))
-            })?;
-
-        rows.into_iter()
-            .map(|row| {
-                Ok(waddle_xmpp::WaddleDetails {
-                    id: row_value(&row, 0)
-                        .and_then(|value| value.as_string())
-                        .map_err(|e| {
-                            XmppError::internal(format!("Failed to parse waddle id: {}", e))
-                        })?,
-                    name: row_value(&row, 1)
-                        .and_then(|value| value.as_string())
-                        .map_err(|e| {
-                            XmppError::internal(format!("Failed to parse waddle name: {}", e))
-                        })?,
-                    description: row_value(&row, 2)
-                        .and_then(|value| value.as_optional_string())
-                        .map_err(|e| {
-                            XmppError::internal(format!(
-                                "Failed to parse waddle description: {}",
-                                e
-                            ))
-                        })?,
-                    owner_id: row_value(&row, 3)
-                        .and_then(|value| value.as_string())
-                        .map_err(|e| {
-                            XmppError::internal(format!("Failed to parse waddle owner: {}", e))
-                        })?,
-                    icon_url: row_value(&row, 4)
-                        .and_then(|value| value.as_optional_string())
-                        .map_err(|e| {
-                            XmppError::internal(format!("Failed to parse waddle icon: {}", e))
-                        })?,
-                    is_public: row_value(&row, 5).and_then(value_as_bool).map_err(|e| {
-                        XmppError::internal(format!("Failed to parse waddle visibility: {}", e))
-                    })?,
-                    created_at: row_value(&row, 6)
-                        .and_then(|value| value.as_string())
-                        .map_err(|e| {
-                            XmppError::internal(format!("Failed to parse waddle created_at: {}", e))
-                        })?,
-                })
-            })
-            .collect()
+    /// Get detailed information about the canonical space.
+    async fn get_space_details(&self) -> Result<Option<waddle_xmpp::SpaceDetails>, XmppError> {
+        Ok(Some(waddle_xmpp::SpaceDetails {
+            id: "space".to_string(),
+            name: self.domain.clone(),
+            description: None,
+            owner_id: "server".to_string(),
+            icon_url: None,
+            is_public: true,
+            created_at: "1970-01-01T00:00:00Z".to_string(),
+        }))
     }
 }
 
 // =========================================================================
 // Roster Conversion Helpers
 // =========================================================================
-
-fn value_as_bool(value: &crate::db::Value) -> Result<bool, DatabaseError> {
-    match value {
-        crate::db::Value::Integer(v) => Ok(*v != 0),
-        other => Err(DatabaseError::QueryFailed(format!(
-            "expected integer boolean, got {:?}",
-            other
-        ))),
-    }
-}
 
 /// Convert a database roster item row to a waddle_xmpp RosterItem.
 fn row_to_roster_item(
@@ -1642,15 +1420,15 @@ impl waddle_xmpp::commands::CreateChannelDeps for XmppAppState {
     async fn create_channel(
         &self,
         user_id: &str,
-        waddle_id: &str,
         metadata: waddle_xmpp::commands::ChannelMetadata,
     ) -> Result<waddle_xmpp::commands::CreateChannelResult, waddle_xmpp::commands::CreateChannelError>
     {
         use tracing::error;
 
         // Check permission
+        let space_id = "space";
         let subject = Subject::user(user_id);
-        let waddle_object = Object::new(ObjectType::Waddle, waddle_id);
+        let waddle_object = Object::new(ObjectType::Space, space_id);
 
         let can_create = self
             .permission_service
@@ -1663,24 +1441,17 @@ impl waddle_xmpp::commands::CreateChannelDeps for XmppAppState {
             return Err(waddle_xmpp::commands::CreateChannelError::PermissionDenied);
         }
 
-        // Get waddle database
-        let waddle_db_service = match &self.waddle_db_service {
+        let space_db_service = match &self.space_db_service {
             Some(service) => service,
             None => return Err(waddle_xmpp::commands::CreateChannelError::DatabasePoolUnavailable),
         };
 
-        let waddle_db_actor = waddle_db_service
-            .actor_for_waddle_with_migrations(waddle_id)
-            .await
-            .map_err(|e| {
-                waddle_xmpp::commands::CreateChannelError::WaddleDatabaseAccessFailed(e.to_string())
-            })?;
+        let space_db_actor = space_db_service.actor();
 
-        // Generate channel ID
-        let channel_id = uuid::Uuid::new_v4().to_string();
+        let channel_id = metadata.id;
         let now = chrono::Utc::now().to_rfc3339();
 
-        waddle_db_actor
+        space_db_actor
             .ask(DbExecute {
                 sql: r#"
                     INSERT INTO channels (id, name, description, channel_type, position, is_default, created_at, updated_at)
@@ -1707,13 +1478,13 @@ impl waddle_xmpp::commands::CreateChannelDeps for XmppAppState {
                 waddle_xmpp::commands::CreateChannelError::DatabaseConnectionFailed(e.to_string())
             })?;
 
-        // Create permission tuple: channel#parent@waddle
+        // Create permission tuple: channel#parent@space
         let parent_tuple = Tuple::new(
             Object::new(ObjectType::Channel, &channel_id),
             Relation::new("parent"),
             Subject {
-                subject_type: SubjectType::Waddle,
-                id: waddle_id.to_string(),
+                subject_type: SubjectType::Space,
+                id: space_id.to_string(),
                 relation: None,
             },
         );
@@ -1721,7 +1492,7 @@ impl waddle_xmpp::commands::CreateChannelDeps for XmppAppState {
         if let Err(err) = self.permission_service.write_tuple(parent_tuple).await {
             error!("Failed to write parent permission tuple: {}", err);
             // Clean up: delete the channel
-            let _ = waddle_db_actor
+            let _ = space_db_actor
                 .ask(DbExecute {
                     sql: "DELETE FROM channels WHERE id = ?".to_string(),
                     params: vec![crate::db::Value::from(channel_id.as_str())],
@@ -1734,9 +1505,7 @@ impl waddle_xmpp::commands::CreateChannelDeps for XmppAppState {
             );
         }
 
-        // Build channel JID: {waddleId}_{channelId}@muc.{domain}
-        let channel_jid = format!("{}_{}", waddle_id, channel_id);
-        let channel_jid = format!("{}@muc.{}", channel_jid, self.domain);
+        let channel_jid = format!("{}@muc.{}", channel_id, self.domain);
 
         Ok(waddle_xmpp::commands::CreateChannelResult {
             channel_id,
@@ -1776,8 +1545,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_parse_resource() {
-        let obj = XmppAppState::parse_resource("waddle:penguin-club").expect("Failed to parse");
-        assert_eq!(obj.object_type, ObjectType::Waddle);
+        let obj = XmppAppState::parse_resource("space:penguin-club").expect("Failed to parse");
+        assert_eq!(obj.object_type, ObjectType::Space);
         assert_eq!(obj.id, "penguin-club");
 
         let obj = XmppAppState::parse_resource("channel:general").expect("Failed to parse");

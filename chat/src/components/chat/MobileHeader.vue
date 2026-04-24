@@ -1,11 +1,11 @@
 <script setup lang="ts">
 import { Menu, Info, Hash, MessageCircle, Settings } from "lucide-vue-next";
-import type { ChannelSummary, WaddleSummary } from "@/lib/waddle-api";
+import type { ChannelSummary, SpaceSummary } from "@/lib/chat-types";
 import type { WaddleSession } from "@/lib/server-auth";
 
 defineProps<{
   page?: "chat" | "settings";
-  waddle: WaddleSummary | null;
+  waddle: SpaceSummary | null;
   channel: ChannelSummary | null;
   dmPeer?: { peerUsername: string } | null;
   sidebarMode?: "channels" | "dms";

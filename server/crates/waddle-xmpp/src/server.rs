@@ -42,10 +42,6 @@ pub struct XmppServerConfig {
     /// When enabled, users can register new accounts before authentication.
     /// Security note: Enable with caution on public servers.
     pub registration_enabled: bool,
-    /// Whether the server operates in single-tenant mode (default: false).
-    /// When true, all spaces are publicly discoverable regardless of membership.
-    /// Controlled by `WADDLE_SINGLE_TENANT` env var.
-    pub single_tenant: bool,
     /// Runtime extension configuration.
     pub extensions: ExtensionConfig,
 }
@@ -62,7 +58,6 @@ impl Default for XmppServerConfig {
             mam_database_url: None,
             native_auth_enabled: true,
             registration_enabled: false, // Disabled by default for security
-            single_tenant: false,
             extensions: ExtensionConfig::default(),
         }
     }

@@ -7,8 +7,6 @@ export function useUiState() {
   const sidebarMode = ref<"channels" | "dms">("channels");
   const showMobileNav = ref(false);
   const showMobileDetails = ref(false);
-  const showCreateWaddle = ref(false);
-  const showBrowsePublicWaddles = ref(false);
   const showCreateChannel = ref(false);
   const showEditChannel = ref(false);
   const showWaddleSettings = ref(false);
@@ -33,8 +31,6 @@ export function useUiState() {
     sidebarMode,
     showMobileNav,
     showMobileDetails,
-    showCreateWaddle,
-    showBrowsePublicWaddles,
     showCreateChannel,
     showEditChannel,
     showWaddleSettings,

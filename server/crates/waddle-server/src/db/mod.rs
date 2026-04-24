@@ -14,6 +14,7 @@ use sqlx::sqlite::{
     SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions, SqliteRow,
 };
 use sqlx::Row as SqlxRow;
+#[cfg(test)]
 use std::path::Path;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -218,7 +219,6 @@ impl std::str::FromStr for DatabaseDriver {
 
 #[async_trait]
 trait DatabaseAdapter: Send + Sync {
-    fn driver(&self) -> DatabaseDriver;
     async fn connect(&self, database_url: &str) -> Result<DatabaseBackend, DatabaseError>;
 }
 
@@ -227,10 +227,6 @@ pub struct SqlxSqliteAdapter;
 
 #[async_trait]
 impl DatabaseAdapter for SqlxSqliteAdapter {
-    fn driver(&self) -> DatabaseDriver {
-        DatabaseDriver::Sqlite
-    }
-
     async fn connect(&self, database_url: &str) -> Result<DatabaseBackend, DatabaseError> {
         let connect_options = SqliteConnectOptions::from_str(database_url)
             .map_err(|e| DatabaseError::ConnectionFailed(e.to_string()))?
@@ -250,10 +246,6 @@ pub struct SqlxPostgresAdapter;
 
 #[async_trait]
 impl DatabaseAdapter for SqlxPostgresAdapter {
-    fn driver(&self) -> DatabaseDriver {
-        DatabaseDriver::Postgres
-    }
-
     async fn connect(&self, database_url: &str) -> Result<DatabaseBackend, DatabaseError> {
         let pool = PgPoolOptions::new()
             .max_connections(10)
@@ -773,10 +765,6 @@ impl ConnectionGuard {
     pub async fn query(&self, sql: &str, params: impl IntoParams) -> Result<Rows, DatabaseError> {
         self.backend.query(sql, params.into_params()).await
     }
-
-    pub fn last_insert_rowid(&self) -> i64 {
-        self.last_insert_rowid.load(Ordering::Relaxed)
-    }
 }
 
 /// Extension trait for extracting typed values from row values.
@@ -832,12 +820,6 @@ pub enum DatabaseError {
     #[error("Migration failed: {0}")]
     MigrationFailed(String),
 
-    #[error("Database not found: {0}")]
-    NotFound(String),
-
-    #[error("Database already exists: {0}")]
-    AlreadyExists(String),
-
     #[error("Internal database error: {0}")]
     Internal(#[from] sqlx::Error),
 }
@@ -866,13 +848,6 @@ impl DatabaseConfig {
         }
     }
 
-    pub fn development(base_path: &str) -> Self {
-        let db_path = Path::new(base_path).join("global.db");
-        Self::new(
-            DatabaseDriver::Sqlite,
-            format!("sqlite://{}", db_path.to_string_lossy()),
-        )
-    }
 }
 
 /// Logical database handle.
@@ -888,6 +863,7 @@ impl Database {
         Self::from_config(name, &DatabaseConfig::default()).await
     }
 
+    #[cfg(test)]
     #[instrument(skip_all, fields(path = %path.as_ref().display()))]
     pub async fn open_local(name: &str, path: impl AsRef<Path>) -> Result<Self, DatabaseError> {
         let path = path.as_ref();
@@ -953,6 +929,7 @@ impl Database {
         }
     }
 
+    #[cfg(test)]
     #[instrument(skip_all, fields(name = %self.name))]
     pub async fn execute(&self, sql: &str) -> Result<u64, DatabaseError> {
         let conn = self.guard().await?;

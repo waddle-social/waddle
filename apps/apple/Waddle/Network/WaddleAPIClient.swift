@@ -125,10 +125,9 @@ final class WaddleAPIClient {
 
     func createSpace(sessionID: String, name: String, description: String?) async throws {
         let body = try encoder.encode(
-            CreateWaddleRequest(
+            CreateSpaceRequest(
                 name: name,
-                description: description?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty,
-                isPublic: false
+                description: description?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
             )
         )
         let _ = try await send(

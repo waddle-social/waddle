@@ -2,7 +2,7 @@
 import { X } from "lucide-vue-next";
 import AppDialog from "@/components/ui/AppDialog.vue";
 import type { ChannelEditFormData } from "@/lib/chat-ui";
-import type { ChannelSummary } from "@/lib/waddle-api";
+import type { ChannelSummary } from "@/lib/chat-types";
 
 const open = defineModel<boolean>("open", { required: true });
 

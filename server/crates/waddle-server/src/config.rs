@@ -84,9 +84,6 @@ pub struct ServerConfig {
     pub base_url: String,
     pub session_key: Option<String>,
     pub auth: AuthConfig,
-    /// When true, all spaces are publicly discoverable (single-tenant mode).
-    /// Controlled by `WADDLE_SINGLE_TENANT` env var.
-    pub single_tenant: bool,
     /// Runtime extension configuration.
     pub extensions: ExtensionConfig,
 }
@@ -98,7 +95,6 @@ impl Default for ServerConfig {
             base_url: "http://localhost:3000".to_string(),
             session_key: None,
             auth: AuthConfig::default(),
-            single_tenant: false,
             extensions: ExtensionConfig::default(),
         }
     }
@@ -115,9 +111,6 @@ impl ServerConfig {
         let session_key = std::env::var("WADDLE_SESSION_KEY").ok();
         let auth = AuthConfig::from_env()?;
 
-        let single_tenant = std::env::var("WADDLE_SINGLE_TENANT")
-            .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
-            .unwrap_or(false);
         let extensions =
             ExtensionConfig::from_env().map_err(|e| format!("invalid extension config: {e}"))?;
 
@@ -126,7 +119,6 @@ impl ServerConfig {
             base_url,
             session_key,
             auth,
-            single_tenant,
             extensions,
         })
     }
@@ -147,14 +139,6 @@ impl ServerConfig {
                 "disabled"
             }
         );
-        info!(
-            "Single-tenant mode: {}",
-            if self.single_tenant {
-                "enabled"
-            } else {
-                "disabled"
-            }
-        );
     }
 
     #[cfg(test)]
@@ -164,7 +148,6 @@ impl ServerConfig {
             base_url: "http://localhost:3000".to_string(),
             session_key: Some("test-key-32-bytes-long-for-aes!".to_string()),
             auth: AuthConfig::default(),
-            single_tenant: false,
             extensions: ExtensionConfig::default(),
         }
     }
@@ -176,54 +159,11 @@ impl ServerConfig {
             base_url: "http://localhost:3000".to_string(),
             session_key: Some("test-key-32-bytes-long-for-aes!".to_string()),
             auth: AuthConfig::default(),
-            single_tenant: false,
             extensions: ExtensionConfig::default(),
         }
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ServerInfo {
-    pub version: String,
-    pub license: String,
-    pub mode: ServerMode,
-    pub auth_enabled: bool,
-    pub native_auth_available: bool,
-    pub features: ServerFeatures,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ServerFeatures {
-    pub oauth: bool,
-    pub device_flow: bool,
-    pub xmpp_oauth: bool,
-    pub auth_page: bool,
-    pub websocket: bool,
-    pub communities: bool,
-}
-
-impl ServerInfo {
-    pub fn from_config(config: &ServerConfig, native_auth_enabled: bool) -> Self {
-        let auth_enabled = config.auth_enabled();
-        let features = ServerFeatures {
-            oauth: auth_enabled,
-            device_flow: auth_enabled,
-            xmpp_oauth: auth_enabled,
-            auth_page: auth_enabled,
-            websocket: true,
-            communities: true,
-        };
-
-        Self {
-            version: env!("CARGO_PKG_VERSION").to_string(),
-            license: "AGPL-3.0".to_string(),
-            mode: config.mode,
-            auth_enabled,
-            native_auth_available: native_auth_enabled,
-            features,
-        }
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct DatabaseRuntimeConfig {

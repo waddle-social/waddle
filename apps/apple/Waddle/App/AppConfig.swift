@@ -62,7 +62,6 @@ enum AppConfig {
     static let themePreferenceKey = "waddle.apple.theme-preference"
     static let scrollDirectionKey = "waddle.apple.scroll-direction"
     static let mobileShellTabKey = "waddle.apple.mobile-shell-tab"
-    static let mobileWorkspaceFilterKey = "waddle.apple.mobile-workspace-filter"
 
     static let defaultServerURL = URL(string: "https://xmpp.waddle.social")!
 #if os(macOS)

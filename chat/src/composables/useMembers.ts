@@ -1,17 +1,17 @@
 import { ref, watch, type Ref } from "vue";
-import type { WaddleApi, MemberSummary, UserSearchResult } from "@/lib/waddle-api";
+import type { MemberSummary, UserSearchResult } from "@/lib/chat-types";
 import type { EditableRole } from "@/lib/chat-ui";
 
 export function useMembers(
-  api: Ref<WaddleApi | null>,
-  activeWaddleId: Ref<string | null>,
-  activeChannelId: Ref<string | null>,
-  members: Ref<MemberSummary[]>,
+  _api: Ref<null>,
+  activeSpaceId: Ref<string | null>,
+  _activeChannelId: Ref<string | null>,
+  _members: Ref<MemberSummary[]>,
   canManageMembers: Ref<boolean>,
-  normalizeError: (v: unknown) => string,
+  _normalizeError: (v: unknown) => string,
   actionError: Ref<string>,
   clearActionError: () => void,
-  reloadStructure: (waddleId: string, channelId?: string | null) => Promise<string | null>,
+  _reloadStructure: (channelId?: string | null) => Promise<string | null>,
 ) {
   const memberQuery = ref("");
   const newMemberRole = ref<EditableRole>("member");
@@ -28,7 +28,7 @@ export function useMembers(
     }
 
     const trimmed = query.trim();
-    if (!trimmed || !api.value || !canManageMembers.value || !activeWaddleId.value) {
+    if (!trimmed || !canManageMembers.value || !activeSpaceId.value) {
       searchRequestId++;
       memberSearchResults.value = [];
       isSearchingUsers.value = false;
@@ -37,79 +37,36 @@ export function useMembers(
 
     searchTimer = setTimeout(async () => {
       const requestId = ++searchRequestId;
-      const client = api.value;
-      const waddleId = activeWaddleId.value;
-      if (!client || !waddleId || !canManageMembers.value) return;
+      const spaceId = activeSpaceId.value;
+      if (!spaceId || !canManageMembers.value) return;
 
       isSearchingUsers.value = true;
-      try {
-        const res = await client.searchUsers(trimmed);
-        if (
-          requestId !== searchRequestId ||
-          activeWaddleId.value !== waddleId ||
-          memberQuery.value.trim() !== trimmed
-        )
-          return;
-
-        const existingIds = new Set(members.value.map((m) => m.user_id));
-        memberSearchResults.value = res.users.filter((u) => !existingIds.has(u.id));
-      } catch (e) {
-        if (requestId === searchRequestId) {
-          actionError.value = normalizeError(e);
-        }
-      } finally {
-        if (requestId === searchRequestId) {
-          isSearchingUsers.value = false;
-        }
+      if (
+        requestId === searchRequestId &&
+        activeSpaceId.value === spaceId &&
+        memberQuery.value.trim() === trimmed
+      ) {
+        memberSearchResults.value = [];
+      }
+      if (requestId === searchRequestId) {
+        isSearchingUsers.value = false;
       }
     }, 220);
   });
 
-  async function addMember(userId: string) {
-    const waddleId = activeWaddleId.value;
-    const channelId = activeChannelId.value;
-    if (!api.value || !waddleId) return;
-
+  async function addMember(_userId: string) {
     clearActionError();
-    try {
-      await api.value.addMember(waddleId, {
-        user_id: userId,
-        role: newMemberRole.value,
-      });
-      memberQuery.value = "";
-      memberSearchResults.value = [];
-      await reloadStructure(waddleId, channelId);
-    } catch (e) {
-      actionError.value = normalizeError(e);
-    }
+    actionError.value = "Member management is not available in the XMPP-only client yet.";
   }
 
-  async function updateMemberRole(member: MemberSummary, role: EditableRole) {
-    const waddleId = activeWaddleId.value;
-    const channelId = activeChannelId.value;
-    if (!api.value || !waddleId || member.role === "owner") return;
-
+  async function updateMemberRole(_member: MemberSummary, _role: EditableRole) {
     clearActionError();
-    try {
-      await api.value.updateMemberRole(waddleId, member.user_id, role);
-      await reloadStructure(waddleId, channelId);
-    } catch (e) {
-      actionError.value = normalizeError(e);
-    }
+    actionError.value = "Member role management is not available in the XMPP-only client yet.";
   }
 
-  async function removeMember(member: MemberSummary) {
-    const waddleId = activeWaddleId.value;
-    const channelId = activeChannelId.value;
-    if (!api.value || !waddleId || member.role === "owner") return;
-
+  async function removeMember(_member: MemberSummary) {
     clearActionError();
-    try {
-      await api.value.removeMember(waddleId, member.user_id);
-      await reloadStructure(waddleId, channelId);
-    } catch (e) {
-      actionError.value = normalizeError(e);
-    }
+    actionError.value = "Member removal is not available in the XMPP-only client yet.";
   }
 
   function clearSearch() {

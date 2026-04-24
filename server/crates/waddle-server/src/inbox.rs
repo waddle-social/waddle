@@ -1,6 +1,6 @@
 //! Database-backed storage for XEP-0430 inbox projections.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use crate::db::{DatabaseConfig, DatabaseDriver, IntoParams};
@@ -464,6 +464,7 @@ fn sqlite_database_path(database_url: &str) -> Option<&Path> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     fn jid(value: &str) -> BareJid {
         value.parse().expect("valid JID")

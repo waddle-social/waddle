@@ -63,36 +63,26 @@ impl ChannelType {
 }
 
 /// Build the canonical localpart for a managed channel room.
-pub fn managed_room_localpart(waddle_id: &str, channel_id: &str) -> String {
-    format!("{waddle_id}_{channel_id}")
+pub fn managed_room_localpart(channel_id: &str) -> String {
+    channel_id.to_string()
 }
 
 /// Parse the canonical localpart for a managed channel room.
-pub fn parse_managed_room_localpart(localpart: &str) -> Option<(String, String)> {
-    let (waddle_id, channel_id) = localpart.split_once('_')?;
-    if waddle_id.is_empty() || channel_id.is_empty() {
+pub fn parse_managed_room_localpart(localpart: &str) -> Option<String> {
+    if localpart.is_empty() {
         return None;
     }
-    Some((waddle_id.to_string(), channel_id.to_string()))
+    Some(localpart.to_string())
 }
 
 /// Parse a bare room JID into managed channel coordinates.
-pub fn parse_managed_room_jid(room_jid: &jid::BareJid) -> Option<(String, String)> {
+pub fn parse_managed_room_jid(room_jid: &jid::BareJid) -> Option<String> {
     parse_managed_room_localpart(room_jid.node()?.as_str())
 }
 
 /// Build the canonical bare JID for a managed channel room.
-pub fn managed_room_jid(
-    waddle_id: &str,
-    channel_id: &str,
-    muc_domain: &str,
-) -> Result<jid::BareJid, jid::Error> {
-    format!(
-        "{}@{}",
-        managed_room_localpart(waddle_id, channel_id),
-        muc_domain
-    )
-    .parse()
+pub fn managed_room_jid(channel_id: &str, muc_domain: &str) -> Result<jid::BareJid, jid::Error> {
+    format!("{}@{}", managed_room_localpart(channel_id), muc_domain).parse()
 }
 
 /// Detailed waddle information for XEP-0503 spaces service.
@@ -131,27 +121,24 @@ mod tests {
 
     #[test]
     fn managed_room_helpers_round_trip() {
-        let localpart = managed_room_localpart("waddle-1", "channel-9");
-        assert_eq!(localpart, "waddle-1_channel-9");
+        let localpart = managed_room_localpart("channel-9");
+        assert_eq!(localpart, "channel-9");
         assert_eq!(
             parse_managed_room_localpart(&localpart),
-            Some(("waddle-1".to_string(), "channel-9".to_string()))
+            Some("channel-9".to_string())
         );
 
-        let room_jid =
-            managed_room_jid("waddle-1", "channel-9", "muc.example.com").expect("managed room jid");
-        assert_eq!(room_jid.to_string(), "waddle-1_channel-9@muc.example.com");
+        let room_jid = managed_room_jid("channel-9", "muc.example.com").expect("managed room jid");
+        assert_eq!(room_jid.to_string(), "channel-9@muc.example.com");
         assert_eq!(
             parse_managed_room_jid(&room_jid),
-            Some(("waddle-1".to_string(), "channel-9".to_string()))
+            Some("channel-9".to_string())
         );
     }
 
     #[test]
     fn managed_room_parser_rejects_invalid_localparts() {
-        assert_eq!(parse_managed_room_localpart("single"), None);
-        assert_eq!(parse_managed_room_localpart("_channel"), None);
-        assert_eq!(parse_managed_room_localpart("waddle_"), None);
+        assert_eq!(parse_managed_room_localpart(""), None);
     }
 
     #[test]

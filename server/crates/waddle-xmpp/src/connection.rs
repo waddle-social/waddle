@@ -63,7 +63,7 @@ use crate::muc::room_actor::{
     LeaveByRealJid, PingSelfCheck, PresenceUpdateData, ReconcileChannelBackedRoom, RoomActor,
 };
 use crate::muc::room_registry_actor::{
-    CreateInstantRoom, DestroyRoom, GetOrCreateRoom, GetRoom, IsMucJid, ListRooms,
+    DestroyRoom, GetOrCreateRoom, GetRoom, IsMucJid, ListRooms,
     RoomRegistryActor, RoomRegistryError,
 };
 use crate::muc::{
@@ -313,9 +313,6 @@ pub struct ConnectionActor<S: AppState, M: MamStorage> {
     converting_avatar: bool,
     /// Wasm extension runtime manager for message enrichments and feature advertisements
     extension_manager: Arc<ExtensionManager>,
-    /// Whether the server operates in single-tenant mode (XEP-0503).
-    /// When true, all spaces are publicly discoverable regardless of membership.
-    single_tenant: bool,
     /// XEP-0357 Push notification subscription store
     push_store: Arc<dyn crate::push::PushSubscriptionStore + Send + Sync>,
     /// XEP-0357 Push notification sender
@@ -347,7 +344,6 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         registration_enabled: bool,
         pubsub_storage: Arc<dyn PubSubStorage + Send + Sync>,
         extension_manager: Arc<ExtensionManager>,
-        single_tenant: bool,
         push_store: Arc<dyn crate::push::PushSubscriptionStore + Send + Sync>,
         push_sender: Arc<dyn crate::push::WebPushSender + Send + Sync>,
         command_registry: Arc<CommandRegistry>,
@@ -382,7 +378,6 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             last_available_presence: None,
             converting_avatar: false, // XEP-0398: guard against infinite conversion loops
             extension_manager,        // Runtime extension enrichment + dynamic feature discovery
-            single_tenant,            // XEP-0503: single-tenant mode for spaces
             push_store,               // XEP-0357: push subscription store
             push_sender,              // XEP-0357: push notification sender
             command_registry,         // XEP-0050: ad-hoc commands
@@ -2451,35 +2446,6 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             .map_err(Self::map_room_registry_error)
     }
 
-    async fn create_instant_room_actor(
-        &self,
-        room_jid: BareJid,
-    ) -> Result<ActorRef<RoomActor>, XmppError> {
-        let started = Instant::now();
-        self.record_actor_depth("room_registry", "must_deliver", &self.room_registry);
-        self.room_registry
-            .ask(CreateInstantRoom { room_jid })
-            .mailbox_timeout(ACTOR_MUST_DELIVER_TIMEOUT)
-            .await
-            .inspect(|_| {
-                record_actor_mailbox_latency(
-                    "room_registry",
-                    "create_instant_room",
-                    "must_deliver",
-                    started.elapsed().as_secs_f64() * 1000.0,
-                );
-            })
-            .inspect_err(|error| {
-                self.record_actor_send_error_metrics(
-                    "room_registry",
-                    "create_instant_room",
-                    "must_deliver",
-                    error,
-                );
-            })
-            .map_err(Self::map_room_registry_error)
-    }
-
     /// Handle a groupchat (MUC) message.
     ///
     /// Routes the message to the appropriate MUC room, which broadcasts
@@ -3212,20 +3178,21 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         &self,
         room_jid: &jid::BareJid,
     ) -> Result<Option<ActorRef<RoomActor>>, XmppError> {
-        let Some((waddle_id, channel_id)) = parse_managed_room_jid(room_jid) else {
+        let Some(channel_id) = parse_managed_room_jid(room_jid) else {
             return Ok(None);
         };
 
-        let room_info = self
-            .app_state
-            .get_channel_room_info(&waddle_id, &channel_id)
-            .await?
-            .ok_or_else(|| {
-                XmppError::item_not_found(Some(format!(
-                    "Managed channel room {} not found",
-                    room_jid
-                )))
-            })?;
+        let Some(room_info) = self.app_state.get_channel_room_info(&channel_id).await? else {
+            debug!(
+                room = %room_jid,
+                channel_id = %channel_id,
+                "No channel metadata found for room JID"
+            );
+            return Err(XmppError::item_not_found(Some(format!(
+                "Channel '{}' not found",
+                channel_id
+            ))));
+        };
 
         debug!(
             room = %room_jid,
@@ -3278,8 +3245,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 join_req.sender_jid.to_bare().to_string()
             });
 
-        // Get the room data, materialize it from stored channel metadata, or create an instant
-        // room if nothing backs this JID.
+        // Get the room data or materialize it from stored channel metadata.
         let (room_actor, room_created) = match self.get_room_actor(&join_req.room_jid).await? {
             Some(actor) => (actor, false),
             None => {
@@ -3289,24 +3255,10 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 {
                     (actor, false)
                 } else {
-                    // Block instant room creation for managed channel JIDs
-                    // Managed channels must be created via XEP-0050 ad-hoc commands
-                    if crate::parse_managed_room_jid(&join_req.room_jid).is_some() {
-                        return Err(XmppError::not_allowed(Some(
-                            "Cannot join managed channel room that doesn't exist. Create the channel first using the waddle:create-channel ad-hoc command.".into(),
-                        )));
-                    }
-
-                    // Create instant room (XEP-0045 Section 10.1.2)
-                    debug!(
-                        room = %join_req.room_jid,
-                        creator = %join_req.sender_jid,
-                        "Creating instant room on first join"
-                    );
-                    let actor = self
-                        .create_instant_room_actor(join_req.room_jid.clone())
-                        .await?;
-                    (actor, true)
+                    return Err(XmppError::item_not_found(Some(format!(
+                        "Room {} not found",
+                        join_req.room_jid
+                    ))));
                 }
             }
         };
@@ -3665,10 +3617,10 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         }
     }
 
-    /// Auto-join all channels the user has access to (Slack-like semantics).
+    /// Auto-join all channels in the canonical space (Slack-like semantics).
     ///
     /// Called after resource bind to automatically place the user in every
-    /// MUC room corresponding to channels in their waddles. This provides
+    /// MUC room corresponding to channels in the canonical space. This provides
     /// Slack-like behavior where users see all channels immediately on login.
     ///
     /// Joins are batched (groups of 10 with a short delay between batches)
@@ -3691,46 +3643,35 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
 
         info!(user_id = %user_id, "Auto-joining all channels");
 
-        // Step 1: Get the user's waddles
-        let waddles = match self.app_state.list_user_waddles(&user_id).await {
-            Ok(w) => w,
+        let space = match self.app_state.get_space_details().await {
+            Ok(space) => space,
             Err(e) => {
-                warn!(user_id = %user_id, error = %e, "Failed to list user waddles for auto-join");
+                warn!(user_id = %user_id, error = %e, "Failed to get space details for auto-join");
                 return Ok(()); // Non-fatal
             }
         };
 
-        if waddles.is_empty() {
-            debug!(user_id = %user_id, "User has no waddles, skipping auto-join");
+        let Some(space) = space else {
+            debug!(user_id = %user_id, "No canonical space, skipping auto-join");
             return Ok(());
-        }
+        };
 
         let muc_domain = self.muc_domain.clone();
 
-        // Derive nick from JID localpart (e.g., "alice" from "alice@waddle.social/res")
+        // Derive nick from JID localpart (e.g., "alice" from "alice@example.com/res")
         let nick = full_jid
             .node()
             .map(|n| n.to_string())
             .unwrap_or_else(|| "user".to_string());
 
-        // Collect all (waddle_id, channel) pairs
-        let mut all_channels: Vec<(String, crate::ChannelInfo)> = Vec::new();
-        for waddle in &waddles {
-            match self.app_state.list_waddle_channels(&waddle.id).await {
-                Ok(channels) => {
-                    for channel in channels {
-                        all_channels.push((waddle.id.clone(), channel));
-                    }
-                }
-                Err(e) => {
-                    warn!(
-                        waddle_id = %waddle.id,
-                        error = %e,
-                        "Failed to list channels for waddle, skipping"
-                    );
-                }
+        let space_id = space.id.clone();
+        let all_channels = match self.app_state.list_space_channels().await {
+            Ok(channels) => channels,
+            Err(e) => {
+                warn!(error = %e, "Failed to list channels, skipping auto-join");
+                Vec::new()
             }
-        }
+        };
 
         if all_channels.is_empty() {
             debug!(user_id = %user_id, "No channels to auto-join");
@@ -3740,7 +3681,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         info!(
             user_id = %user_id,
             channel_count = all_channels.len(),
-            waddle_count = waddles.len(),
+            space_id = %space_id,
             "Auto-joining channels"
         );
 
@@ -3753,10 +3694,10 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
             }
 
-            for (waddle_id, channel) in batch {
+            for channel in batch {
                 let Some(channel_type) = ChannelType::parse(&channel.channel_type) else {
                     warn!(
-                        waddle_id = %waddle_id,
+                        space_id = %space_id,
                         channel_id = %channel.id,
                         channel_type = %channel.channel_type,
                         "Skipping auto-join for unsupported channel type"
@@ -3764,11 +3705,11 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                     continue;
                 };
 
-                let room_jid = match managed_room_jid(waddle_id, &channel.id, &muc_domain) {
+                let room_jid = match managed_room_jid(&channel.id, &muc_domain) {
                     Ok(jid) => jid,
                     Err(e) => {
                         warn!(
-                            waddle_id = %waddle_id,
+                            space_id = %space_id,
                             channel_id = %channel.id,
                             error = ?e,
                             "Invalid room JID, skipping"
@@ -3778,7 +3719,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 };
 
                 let room_info = crate::ChannelRoomInfo {
-                    waddle_id: waddle_id.clone(),
+                    waddle_id: space_id.clone(),
                     channel: channel.clone(),
                 };
                 if let Err(e) = self.ensure_channel_backed_room(&room_jid, &room_info).await {
@@ -5122,33 +5063,26 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             // Query to spaces service domain (XEP-0503)
             Some(target) if target == spaces_domain => {
                 if let Some(ref node) = query.node {
-                    // disco#info for a specific space node (waddle)
+                    // disco#info for the canonical space node.
                     debug!(domain = %spaces_domain, node = %node, "disco#info query to space node");
 
-                    // In multi-tenant mode, verify requester is a member
-                    if !self.single_tenant && !self.is_user_in_waddle(node).await {
-                        return Err(XmppError::item_not_found(Some(format!(
-                            "Space node '{}' not found",
-                            node
-                        ))));
-                    }
-
-                    if let Ok(Some(waddle)) = self.app_state.get_waddle_details(node).await {
-                        (
-                            vec![Identity::pubsub_leaf(Some(&waddle.name))],
+                    match self.app_state.get_space_details().await {
+                        Ok(Some(space)) if space.id == *node => (
+                            vec![Identity::pubsub_leaf(Some(&space.name))],
                             vec![
                                 crate::disco::Feature::disco_info(),
                                 crate::disco::Feature::pubsub(),
                                 crate::disco::Feature::pubsub_retrieve_items(),
                                 crate::disco::Feature::spaces(),
                             ],
-                            vec![crate::xep::xep0503::build_spaces_metadata_form(&waddle)],
-                        )
-                    } else {
-                        return Err(XmppError::item_not_found(Some(format!(
-                            "Space node '{}' not found",
-                            node
-                        ))));
+                            vec![crate::xep::xep0503::build_spaces_metadata_form(&space)],
+                        ),
+                        _ => {
+                            return Err(XmppError::item_not_found(Some(format!(
+                                "Space node '{}' not found",
+                                node
+                            ))));
+                        }
                     }
                 } else {
                     // disco#info for the spaces service itself
@@ -6154,31 +6088,10 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         Ok(())
     }
 
-    /// Check if the current user is a member of the given waddle.
-    ///
-    /// Used for authorization in multi-tenant mode (XEP-0503).
-    async fn is_user_in_waddle(&self, waddle_id: &str) -> bool {
-        let user_id = match self.jid.as_ref() {
-            Some(jid) => jid
-                .to_bare()
-                .node()
-                .map(|n| n.to_string())
-                .unwrap_or_default(),
-            None => return false,
-        };
-        let waddles = self
-            .app_state
-            .get_user_waddles_with_details(&user_id)
-            .await
-            .unwrap_or_default();
-        waddles.iter().any(|w| w.id == waddle_id)
-    }
-
     /// Handle disco#items queries directed at the spaces service (XEP-0503).
     ///
-    /// Without a node: lists all space nodes (waddles) the user belongs to,
-    /// or all waddles in single-tenant mode.
-    /// With a node: lists channels in that waddle as disco items.
+    /// Without a node: lists the canonical space node.
+    /// With a node: lists channels in the canonical space.
     async fn handle_spaces_disco_items(
         &mut self,
         query: &crate::disco::DiscoItemsQuery,
@@ -6187,36 +6100,26 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         let muc_domain = self.muc_domain.as_str();
 
         match query.node.as_deref() {
-            // No node: list space nodes (waddles)
+            // No node: list the canonical space node.
             None => {
-                debug!(domain = %spaces_domain, single_tenant = self.single_tenant, "disco#items query to spaces domain - listing spaces");
+                debug!(domain = %spaces_domain, "disco#items query to spaces domain - listing spaces");
 
-                let waddles = if self.single_tenant {
-                    // Single-tenant mode: return the canonical space (limit=1)
-                    self.app_state
-                        .list_all_waddles(1, 0)
-                        .await
-                        .unwrap_or_default()
-                } else {
-                    // Multi-tenant mode: only show user's spaces
-                    let user_jid = self.jid.as_ref().map(|j| j.to_bare());
-                    if let Some(ref jid) = user_jid {
-                        let user_id = jid.node().map(|n| n.to_string()).unwrap_or_default();
-                        self.app_state
-                            .get_user_waddles_with_details(&user_id)
-                            .await
-                            .unwrap_or_default()
-                    } else {
-                        vec![]
-                    }
-                };
-
-                Ok(waddles
-                    .iter()
-                    .map(|w| DiscoItem::spaces_node(&spaces_domain, &w.id, Some(&w.name)))
-                    .collect())
+                Ok(self
+                    .app_state
+                    .get_space_details()
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|space| {
+                        vec![DiscoItem::spaces_node(
+                            &spaces_domain,
+                            &space.id,
+                            Some(&space.name),
+                        )]
+                    })
+                    .unwrap_or_default())
             }
-            // With node: list channels in that waddle
+            // With node: list channels in the canonical space.
             Some(node) => {
                 debug!(
                     domain = %spaces_domain,
@@ -6224,14 +6127,17 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                     "disco#items query to spaces domain - listing channels in space"
                 );
 
-                // In multi-tenant mode, verify the requester is a member
-                if !self.single_tenant && !self.is_user_in_waddle(node).await {
+                let Some(space) = self.app_state.get_space_details().await.ok().flatten() else {
+                    return Ok(vec![]);
+                };
+
+                if space.id != node {
                     return Ok(vec![]);
                 }
 
                 let channels = self
                     .app_state
-                    .list_waddle_channels(node)
+                    .list_space_channels()
                     .await
                     .unwrap_or_default();
 
@@ -6240,7 +6146,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                     .filter_map(|c| {
                         if ChannelType::parse(&c.channel_type).is_none() {
                             warn!(
-                                waddle_id = %node,
+                                space_id = %node,
                                 channel_id = %c.id,
                                 channel_type = %c.channel_type,
                                 "Skipping unsupported channel type in spaces disco#items"
@@ -6248,7 +6154,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                             return None;
                         }
 
-                        managed_room_jid(node, &c.id, muc_domain)
+                        managed_room_jid(&c.id, muc_domain)
                             .ok()
                             .map(|room_jid| DiscoItem::muc_room(&room_jid.to_string(), &c.name))
                     })
@@ -6282,23 +6188,16 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 debug!(node = %node, "Spaces pubsub items request");
                 let muc_domain = self.muc_domain.as_str();
 
-                // Verify space exists
-                match self.app_state.get_waddle_details(&node).await {
-                    Ok(Some(_)) => {
-                        // In multi-tenant mode, verify requester is a member
-                        if !self.single_tenant && !self.is_user_in_waddle(&node).await {
-                            let error = build_pubsub_error(&iq, PubSubError::NodeNotFound);
-                            self.stream.write_stanza(&Stanza::Iq(error)).await?;
-                            return Ok(());
-                        }
-                    }
-                    Ok(None) => {
+                // Verify the requested node is the canonical space.
+                match self.app_state.get_space_details().await {
+                    Ok(Some(space)) if space.id == node => {}
+                    Ok(_) => {
                         let error = build_pubsub_error(&iq, PubSubError::NodeNotFound);
                         self.stream.write_stanza(&Stanza::Iq(error)).await?;
                         return Ok(());
                     }
                     Err(e) => {
-                        warn!(node = %node, error = %e, "Failed to get waddle details for spaces");
+                        warn!(node = %node, error = %e, "Failed to get space details for spaces");
                         let error = build_pubsub_error(&iq, PubSubError::NodeNotFound);
                         self.stream.write_stanza(&Stanza::Iq(error)).await?;
                         return Ok(());
@@ -6308,15 +6207,13 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 // Get channels and build bookmark items
                 let channels = self
                     .app_state
-                    .list_waddle_channels(&node)
+                    .list_space_channels()
                     .await
                     .unwrap_or_default();
 
                 let mut items: Vec<PubSubItem> = channels
                     .iter()
-                    .filter_map(|c| {
-                        crate::xep::xep0503::build_channel_item(&node, c, muc_domain).ok()
-                    })
+                    .filter_map(|c| crate::xep::xep0503::build_channel_item(c, muc_domain).ok())
                     .collect();
 
                 // Apply item_ids filter if specified
@@ -8715,15 +8612,15 @@ mod tests {
 
     #[test]
     fn reconcile_channel_backed_room_resets_instant_room_to_managed_defaults() {
-        let room_jid: jid::BareJid = "waddle-forums_forum-channel@muc.localhost"
+        let room_jid: jid::BareJid = "forum-channel@muc.localhost"
             .parse()
             .expect("valid room jid");
         let mut room = MucRoom::new(
             room_jid.clone(),
-            "instant:waddle-forums_forum-channel".to_string(),
-            "waddle-forums_forum-channel".to_string(),
+            "instant:forum-channel".to_string(),
+            "forum-channel".to_string(),
             RoomConfig {
-                name: "waddle-forums_forum-channel".to_string(),
+                name: "forum-channel".to_string(),
                 persistent: false,
                 members_only: false,
                 enable_logging: false,
@@ -8762,7 +8659,7 @@ mod tests {
 
     #[test]
     fn reconcile_channel_backed_room_preserves_non_placeholder_name() {
-        let room_jid: jid::BareJid = "waddle-forums_forum-channel@muc.localhost"
+        let room_jid: jid::BareJid = "forum-channel@muc.localhost"
             .parse()
             .expect("valid room jid");
         let mut room = MucRoom::new(

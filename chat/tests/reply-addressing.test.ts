@@ -38,7 +38,7 @@ describe("reply addressing", () => {
       {
         id: "parent-1",
         author: "Friendly Bob",
-        authorJid: "w1_c1@muc.example.com/Friendly Bob",
+        authorJid: "c1@muc.example.com/Friendly Bob",
         body: "hello there",
         createdAt: "2024-01-01T00:00:00Z",
         isSelf: false,
@@ -58,7 +58,7 @@ describe("reply addressing", () => {
       expect.objectContaining({
         replyTo: {
           id: "parent-1",
-          author: "w1_c1@muc.example.com/Friendly Bob",
+          author: "c1@muc.example.com/Friendly Bob",
           body: "hello there",
         },
       }),
@@ -142,7 +142,7 @@ describe("reply addressing", () => {
       {
         id: "current-1",
         author: "Carol",
-        authorJid: "w1_c2@muc.example.com/Carol",
+        authorJid: "c2@muc.example.com/Carol",
         body: "different room",
         createdAt: "2024-01-01T00:00:00Z",
         isSelf: false,

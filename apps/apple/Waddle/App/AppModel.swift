@@ -68,7 +68,7 @@ final class AppModel: ObservableObject {
     @Published var errorMessage = ""
     @Published var isLoadingProviders = false
     @Published var isLoadingStructure = false
-    @Published var isCreatingWaddle = false
+    @Published var isCreatingSpace = false
 
     /// XEP-0084 avatar cache keyed by bare JID (lowercase). A present-but-
     /// empty `Data` value means "we asked and they have no avatar" — that
@@ -118,18 +118,12 @@ final class AppModel: ObservableObject {
 
     /// Synthetic display object for the implicit single space.
     /// Has no backend ID — views use it only for `.name` and `.description`.
-    var selectedWaddle: WaddleSummary? {
+    var selectedSpace: SpaceSummary? {
         guard let spaceName else { return nil }
-        return WaddleSummary(
+        return SpaceSummary(
             id: "",
             name: spaceName,
-            description: nil,
-            ownerUserID: nil,
-            iconURL: nil,
-            isPublic: false,
-            role: nil,
-            createdAt: nil,
-            updatedAt: nil
+            description: nil
         )
     }
 
@@ -282,20 +276,20 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func reloadSelectedWaddleStructure() async {
+    func reloadSelectedSpaceStructure() async {
         await loadRooms()
     }
 
-    func createWaddle(name: String, description: String?, isPublic: Bool) async {
+    func createSpace(name: String, description: String?) async {
         guard let session else { return }
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedName.isEmpty else {
-            errorMessage = "Waddle name is required."
+            errorMessage = "Space name is required."
             return
         }
 
-        isCreatingWaddle = true
-        defer { isCreatingWaddle = false }
+        isCreatingSpace = true
+        defer { isCreatingSpace = false }
 
         do {
             try await client.createSpace(
@@ -630,7 +624,7 @@ final class AppModel: ObservableObject {
         pushNotificationsEnabled = true
     }
 
-    func updateWaddle(name: String, description: String?) async {
+    func updateSpace(name: String, description: String?) async {
         guard let session else { return }
         do {
             try await client.updateSpace(sessionID: session.sessionID, name: name, description: description)
@@ -640,7 +634,7 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func deleteWaddle() async {
+    func deleteSpace() async {
         guard let session else { return }
         do {
             try await client.deleteSpace(sessionID: session.sessionID)
@@ -658,7 +652,7 @@ final class AppModel: ObservableObject {
         guard let session else { return }
         do {
             try await client.updateChannel(sessionID: session.sessionID, channelID: channelID, name: name, description: description, position: position)
-            await reloadSelectedWaddleStructure()
+            await reloadSelectedSpaceStructure()
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -668,7 +662,7 @@ final class AppModel: ObservableObject {
         guard let session else { return }
         do {
             try await client.addMember(sessionID: session.sessionID, userID: userID, role: role)
-            await reloadSelectedWaddleStructure()
+            await reloadSelectedSpaceStructure()
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -678,7 +672,7 @@ final class AppModel: ObservableObject {
         guard let session else { return }
         do {
             try await client.removeMember(sessionID: session.sessionID, userID: userID)
-            await reloadSelectedWaddleStructure()
+            await reloadSelectedSpaceStructure()
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -688,7 +682,7 @@ final class AppModel: ObservableObject {
         guard let session else { return }
         do {
             try await client.updateMemberRole(sessionID: session.sessionID, userID: userID, role: role)
-            await reloadSelectedWaddleStructure()
+            await reloadSelectedSpaceStructure()
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -755,7 +749,6 @@ final class AppModel: ObservableObject {
 
         let position = channels.count
         let result = await rustClient.createChannel(
-            waddleID: "",
             name: trimmedName,
             description: description,
             channelType: channelType,
@@ -975,7 +968,7 @@ final class AppModel: ObservableObject {
     }
 
     /// Loads the room list and member list for the implicit single space.
-    /// No waddle ID is fetched, stored, or passed — the space is entirely implicit.
+    /// No per-space ID is fetched, stored, or passed — the server space is implicit.
     private func loadRooms() async {
         guard let session, let rustClient else {
             updateChatSurfaceState()
@@ -994,7 +987,7 @@ final class AppModel: ObservableObject {
 
             channels = rooms
                 .map { room in
-                    let channelID = parseManagedRoomBareJID(room.jid)?.channelID ?? room.jid
+                    let channelID = parseManagedRoomBareJID(room.jid) ?? room.jid
                     return ChannelSummary(
                         id: channelID,
                         roomJid: room.jid,
@@ -1852,7 +1845,7 @@ final class AppModel: ObservableObject {
         }
 
         guard selectedChannelID != nil else {
-            chatStore.setSurfaceState(.empty(title: "No channels yet", message: "Join the waddle or wait for room discovery to finish."))
+            chatStore.setSurfaceState(.empty(title: "No channels yet", message: "Channels will appear here once the server space has rooms."))
             return
         }
 
@@ -1928,7 +1921,7 @@ final class AppModel: ObservableObject {
         chatStore.replaceMembers([])
         chatStore.replaceMessages([])
         chatStore.setBannerState(.hidden)
-        chatStore.setSurfaceState(.empty(title: "Sign in", message: "Sign in to browse and join live rooms."))
+        chatStore.setSurfaceState(.empty(title: "Sign in", message: "Sign in to load the server space and connect to live rooms."))
     }
 
     func handleAppBecameActive() {

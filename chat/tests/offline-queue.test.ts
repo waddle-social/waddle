@@ -152,7 +152,7 @@ describe("offline outbound queue replay", () => {
     await client.sendGroupMessage("w1", "c1", "first", { id: "room-1" });
     await client.sendGroupMessage("w1", "c1", "second", { id: "room-2" });
 
-    const roomJid = roomBareJidFor(session(), "w1", "c1");
+    const roomJid = roomBareJidFor(session(), "c1");
     expect(listQueuedRoomMessages("alice@example.com", roomJid).map((message) => message.id)).toEqual([
       "room-1",
       "room-2",
@@ -197,7 +197,7 @@ describe("offline outbound queue replay", () => {
 
 describe("offline outbound queue hydration", () => {
   test("room timelines restore queued messages from localStorage", async () => {
-    const roomJid = roomBareJidFor(session(), "w1", "c1");
+    const roomJid = roomBareJidFor(session(), "c1");
     enqueueQueuedMessage("alice@example.com", {
       kind: "room",
       id: "queued-room-1",

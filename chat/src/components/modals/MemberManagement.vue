@@ -2,7 +2,7 @@
 import { X, Search } from "lucide-vue-next";
 import AppDialog from "@/components/ui/AppDialog.vue";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
-import type { MemberSummary, UserSearchResult } from "@/lib/waddle-api";
+import type { MemberSummary, UserSearchResult } from "@/lib/chat-types";
 import type { EditableRole } from "@/lib/chat-ui";
 import type { RoomPresence } from "@/lib/xmpp-client";
 

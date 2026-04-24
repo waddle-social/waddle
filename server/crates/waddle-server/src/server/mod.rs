@@ -1,5 +1,5 @@
 use crate::auth::{NativeUserStore, RegisterRequest};
-use crate::config::{ServerConfig, ServerInfo};
+use crate::config::ServerConfig;
 use crate::db::{DatabasePool, PoolHealth};
 use crate::inbox::build_inbox_storage;
 use anyhow::Result;
@@ -14,10 +14,7 @@ use futures::StreamExt;
 use opentelemetry::trace::TraceContextExt;
 use opentelemetry_http::HeaderExtractor;
 use routes::auth::AuthState;
-use routes::channels::ChannelState;
-use routes::permissions::PermissionState;
 use routes::uploads::UploadState;
-use routes::waddles::WaddleState;
 use routes::websocket::{ProtocolServices, WebSocketDeps, WebSocketState};
 use rustls::ServerConfig as RustlsServerConfig;
 use rustls_acme::caches::DirCache;
@@ -127,10 +124,6 @@ pub struct XmppConfig {
     /// When enabled, users can register new accounts before authentication.
     /// Security note: Enable with caution on public servers.
     pub registration_enabled: bool,
-    /// Whether the server operates in single-tenant mode (default: false).
-    /// When true, all spaces are publicly discoverable regardless of membership.
-    /// Controlled by `WADDLE_SINGLE_TENANT` env var.
-    pub single_tenant: bool,
     /// ACME configuration for managed TLS certificates.
     pub acme: XmppAcmeConfig,
     /// Whether to generate ephemeral self-signed TLS certificates in memory.
@@ -153,7 +146,6 @@ impl Default for XmppConfig {
             inbox_database_url: None,
             native_auth_enabled: true,
             registration_enabled: false, // Disabled by default for security
-            single_tenant: false,
             extensions: ExtensionConfig::default(),
             acme: XmppAcmeConfig {
                 enabled: false,
@@ -207,10 +199,6 @@ impl XmppConfig {
             .map(|v| v.to_lowercase() == "true" || v == "1")
             .unwrap_or(false);
 
-        let single_tenant = std::env::var("WADDLE_SINGLE_TENANT")
-            .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
-            .unwrap_or(false);
-
         let s2s_enabled = std::env::var("WADDLE_XMPP_S2S_ENABLED")
             .map(|v| v.to_lowercase() == "true" || v == "1")
             .unwrap_or(false);
@@ -240,7 +228,6 @@ impl XmppConfig {
             inbox_database_url,
             native_auth_enabled,
             registration_enabled,
-            single_tenant,
             extensions,
             acme: XmppAcmeConfig {
                 enabled: acme_enabled,
@@ -271,7 +258,6 @@ impl XmppConfig {
             mam_database_url: self.mam_database_url.clone(),
             native_auth_enabled: self.native_auth_enabled,
             registration_enabled: self.registration_enabled,
-            single_tenant: self.single_tenant,
             extensions: self.extensions.clone(),
         }
     }
@@ -457,20 +443,6 @@ pub async fn start_with_config(
         None
     };
 
-    // Single-tenant boot-time guard: fail-fast if no waddles exist
-    if xmpp_config.single_tenant {
-        if let Some(ref xmpp_state) = xmpp_app_state {
-            use waddle_xmpp::AppState as XmppAppStateTrait;
-            let waddles = xmpp_state.list_all_waddles(1, 0).await.unwrap_or_default();
-            if waddles.is_empty() {
-                anyhow::bail!(
-                    "Single-tenant mode is enabled (WADDLE_SINGLE_TENANT=true) but no waddles exist. \
-                     Create a waddle before enabling single-tenant mode."
-                );
-            }
-        }
-    }
-
     // Create HTTP state (shares db_pool via Arc)
     let blob_storage = crate::storage::build_blob_storage()
         .map_err(|e| anyhow::anyhow!("Failed to initialize blob storage: {}", e))?;
@@ -481,7 +453,6 @@ pub async fn start_with_config(
     ));
     let websocket_mam_storage =
         create_websocket_mam_storage(xmpp_config.mam_database_url.clone()).await?;
-    let xmpp_native_auth_enabled = xmpp_config.native_auth_enabled;
     let acme_runtime = start_acme_runtime(&xmpp_config, stop_token.clone());
 
     // Start HTTP server
@@ -496,7 +467,6 @@ pub async fn start_with_config(
         start_http_server(HttpServerDeps {
             state: http_state,
             server_config: http_server_config,
-            xmpp_native_auth_enabled,
             mam_storage: http_mam_storage,
             acme_http01_challenge_service,
             listener: http_listener,
@@ -590,7 +560,6 @@ pub async fn start_with_config(
 struct HttpServerDeps {
     state: Arc<AppState>,
     server_config: ServerConfig,
-    xmpp_native_auth_enabled: bool,
     mam_storage: Arc<dyn MamStorage>,
     acme_http01_challenge_service: Option<TowerHttp01ChallengeService>,
     listener: tokio::net::TcpListener,
@@ -602,7 +571,6 @@ async fn start_http_server(deps: HttpServerDeps) -> Result<()> {
     let HttpServerDeps {
         state,
         server_config,
-        xmpp_native_auth_enabled,
         mam_storage,
         acme_http01_challenge_service,
         listener,
@@ -612,7 +580,6 @@ async fn start_http_server(deps: HttpServerDeps) -> Result<()> {
     let app = create_router(
         state,
         server_config,
-        xmpp_native_auth_enabled,
         mam_storage,
         acme_http01_challenge_service,
     )
@@ -775,12 +742,6 @@ async fn seed_fixed_test_account(
     Ok(())
 }
 
-/// State for the server-info endpoint
-#[derive(Clone)]
-struct ServerInfoState {
-    server_info: ServerInfo,
-}
-
 /// Configure CORS layer.
 ///
 /// If `WADDLE_CORS_ORIGINS` is set (comma-separated list of origins),
@@ -839,7 +800,6 @@ fn build_cors(origins: Option<&str>) -> CorsLayer {
 async fn create_router(
     state: Arc<AppState>,
     server_config: ServerConfig,
-    xmpp_native_auth_enabled: bool,
     mam_storage: Arc<dyn MamStorage>,
     acme_http01_challenge_service: Option<TowerHttp01ChallengeService>,
 ) -> Router {
@@ -992,37 +952,14 @@ async fn create_router(
 
     let websocket_router = routes::websocket::router(websocket_state);
 
-    // Permission router with Zanzibar-inspired permission service
-    let permission_state = Arc::new(PermissionState::new(state.clone()));
-    let permission_router = routes::permissions::router(permission_state);
-
-    // Waddles router for community CRUD operations
-    let waddle_state = Arc::new(WaddleState::new(
-        state.clone(),
-        encryption_key.as_ref().map(|s| s.as_bytes()),
-        server_config.single_tenant,
-    ));
-    let waddles_router = routes::waddles::router(waddle_state.clone());
-
-    // Channels router for channel CRUD operations
-    let channel_state = Arc::new(ChannelState::new(
-        state.clone(),
-        encryption_key.as_ref().map(|s| s.as_bytes()),
-    ));
-    let channels_router = routes::channels::router(channel_state.clone());
-
     // Upload router for XEP-0363 HTTP File Upload
     let upload_state = Arc::new(UploadState::new(state.clone()));
     let upload_router = routes::uploads::router(upload_state);
-    let users_router = routes::users::router(waddle_state.clone());
 
-    // Create server info for the /api/v1/server-info endpoint
-    let server_info = ServerInfo::from_config(&server_config, xmpp_native_auth_enabled);
-    let server_info_state = ServerInfoState { server_info };
     // Well-known endpoints for XMPP service discovery (XEP-0156)
     let well_known_router = routes::well_known::router(auth_state.clone());
 
-    // Build the base router with health and server-info endpoints
+    // Build the base router with operational health endpoints.
     let mut router = Router::new()
         .route("/health", get(health_handler))
         .route("/healthz", get(health_handler))
@@ -1030,9 +967,7 @@ async fn create_router(
         .route("/readyz", get(readiness_handler))
         .route("/metrics", get(metrics_handler))
         .route("/api/v1/health", get(detailed_health_handler))
-        .with_state(state)
-        .route("/api/v1/server-info", get(server_info_handler))
-        .with_state(server_info_state);
+        .with_state(state);
 
     if let Some(challenge_service) = acme_http01_challenge_service {
         router = router.route_service(
@@ -1054,18 +989,10 @@ async fn create_router(
         .merge(xmpp_oauth_router)
         .merge(auth_page_router);
 
-    // Always merge common routes (WebSocket, permissions, waddles, channels, uploads)
+    // Always merge common routes required by XMPP, auth, upload, and operations.
     router
         // Merge XMPP over WebSocket endpoint
         .merge(websocket_router)
-        // Merge permission routes
-        .merge(permission_router)
-        // Merge waddles routes
-        .merge(waddles_router)
-        // Merge channels routes
-        .merge(channels_router)
-        // Merge authenticated user search
-        .merge(users_router)
         // Merge well-known endpoints for XMPP service discovery
         .merge(well_known_router)
         // Merge upload routes for XEP-0363 HTTP File Upload
@@ -1104,11 +1031,6 @@ fn make_request_span(request: &axum::http::Request<axum::body::Body>) -> Span {
         span.set_parent(parent_cx);
     }
     span
-}
-
-/// Handler for the /api/v1/server-info endpoint
-async fn server_info_handler(State(state): State<ServerInfoState>) -> impl IntoResponse {
-    (StatusCode::OK, Json(state.server_info))
 }
 
 /// Response for detailed health check
@@ -1393,7 +1315,7 @@ mod tests {
         let state = create_test_state().await;
         let server_config = ServerConfig::test_homeserver();
         let mam_storage = create_websocket_mam_storage(None).await.unwrap();
-        let app = create_router(state, server_config, true, mam_storage, None).await;
+        let app = create_router(state, server_config, mam_storage, None).await;
 
         let response = app
             .oneshot(
@@ -1420,7 +1342,7 @@ mod tests {
         let state = create_test_state().await;
         let server_config = ServerConfig::test_homeserver();
         let mam_storage = create_websocket_mam_storage(None).await.unwrap();
-        let app = create_router(state, server_config, true, mam_storage, None).await;
+        let app = create_router(state, server_config, mam_storage, None).await;
 
         let response = app
             .oneshot(
@@ -1440,7 +1362,7 @@ mod tests {
         let state = create_test_state().await;
         let server_config = ServerConfig::test_homeserver();
         let mam_storage = create_websocket_mam_storage(None).await.unwrap();
-        let app = create_router(state, server_config, true, mam_storage, None).await;
+        let app = create_router(state, server_config, mam_storage, None).await;
 
         let response = app
             .oneshot(
@@ -1468,7 +1390,7 @@ mod tests {
         let state = create_test_state().await;
         let server_config = ServerConfig::test_homeserver();
         let mam_storage = create_websocket_mam_storage(None).await.unwrap();
-        let app = create_router(state, server_config, true, mam_storage, None).await;
+        let app = create_router(state, server_config, mam_storage, None).await;
 
         let response = app
             .oneshot(
@@ -1493,7 +1415,7 @@ mod tests {
         let state = create_test_state().await;
         let server_config = ServerConfig::test_homeserver();
         let mam_storage = create_websocket_mam_storage(None).await.unwrap();
-        let app = create_router(state, server_config, true, mam_storage, None).await;
+        let app = create_router(state, server_config, mam_storage, None).await;
 
         let response = app
             .oneshot(
@@ -1513,7 +1435,7 @@ mod tests {
         let state = create_test_state().await;
         let server_config = ServerConfig::test_homeserver();
         let mam_storage = create_websocket_mam_storage(None).await.unwrap();
-        let app = create_router(state, server_config, true, mam_storage, None).await;
+        let app = create_router(state, server_config, mam_storage, None).await;
 
         let response = app
             .oneshot(
@@ -1587,15 +1509,13 @@ mod tests {
         let health = state.db_pool.health_check().await.unwrap();
         assert!(health.is_healthy());
 
-        // Verify we can create waddle databases
-        let waddle_db = state.db_pool.create_waddle_db("test-waddle").await.unwrap();
+        let db = state.db_pool.global();
 
-        // Run waddle migrations
         let runner = MigrationRunner::waddle();
-        runner.run(&waddle_db).await.unwrap();
+        runner.run(db).await.unwrap();
 
         // Verify tables exist - use persistent connection for in-memory database
-        let conn = waddle_db.guard().await.unwrap();
+        let conn = db.guard().await.unwrap();
         let mut rows = conn
             .query(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name='channels'",

@@ -2,8 +2,8 @@
 import type { Agent } from "stanza";
 import type { DataFormField, DiscoInfoResult } from "stanza/protocol";
 import { normalizeChannelType } from "@/lib/channel-types";
-import type { DiscoveredChannel, DiscoveredWaddle } from "./types";
-import { jidDomain, parseManagedRoomBareJid } from "./jid";
+import type { DiscoveredChannel } from "./types";
+import { barePeerJid, jidDomain } from "./jid";
 
 const NS_FORUMS_0 = "urn:xmpp:forums:0";
 const FIELD_FORUM_MODE = "muc#roomconfig_forum";
@@ -25,22 +25,6 @@ function metadataField(infoResult: DiscoInfoResult, name: string): string | null
   return null;
 }
 
-function parseAccessModel(infoResult: DiscoInfoResult): "open" | "whitelist" | null {
-  const value = metadataField(infoResult, "pubsub#access_model")?.toLowerCase();
-  if (value) {
-    if (value === "open" || value === "whitelist") return value;
-  }
-  return null;
-}
-
-function parseWaddleName(infoResult: DiscoInfoResult): string | null {
-  return (
-    metadataField(infoResult, "pubsub#title") ??
-    infoResult.identities.find((identity) => identity.name)?.name?.trim() ??
-    null
-  );
-}
-
 function parseBooleanValue(value: string | null): boolean | null {
   if (!value) return null;
   const normalized = value.toLowerCase();
@@ -59,73 +43,53 @@ function spacesServiceDomain(jid: string): string {
   return `spaces.${jidDomain(jid)}`;
 }
 
-export async function discoverWaddles(
-  xmpp: Agent,
-  jid: string,
-): Promise<DiscoveredWaddle[]> {
-  const spacesDomain = spacesServiceDomain(jid);
-  const response = await xmpp.getDiscoItems(spacesDomain, "");
-
-  const discovered = (response.items ?? [])
-    .map((item) => ({ id: item.node ?? "", name: item.name ?? item.node ?? "" }))
-    .filter((w) => w.id);
-
-  return Promise.all(
-    discovered.map(async (waddle) => {
-      try {
-        const info = await xmpp.getDiscoInfo(spacesDomain, waddle.id);
-        return {
-          ...waddle,
-          name: parseWaddleName(info) ?? waddle.name,
-          isPublic: parseAccessModel(info) !== "whitelist",
-        };
-      } catch {
-        return { ...waddle, isPublic: true };
-      }
-    }),
-  );
-}
-
 export async function discoverChannels(
   xmpp: Agent,
   jid: string,
-  waddleId: string,
 ): Promise<DiscoveredChannel[]> {
   const spacesDomain = spacesServiceDomain(jid);
-  const response = await xmpp.getDiscoItems(spacesDomain, waddleId);
+  const response = await xmpp.getDiscoItems(spacesDomain);
 
-  const prefix = `${waddleId}_`;
   const discovered = (response.items ?? [])
     .map((item, position) => {
       const itemJid = item.jid ?? "";
-      const parsedRoom = parseManagedRoomBareJid(itemJid);
-      const localPart = itemJid.split("@")[0] ?? "";
-      const channelId = parsedRoom?.waddleId === waddleId
-        ? parsedRoom.channelId
-        : localPart.startsWith(prefix)
-          ? localPart.slice(prefix.length)
-          : localPart;
-      return { id: channelId, name: item.name ?? channelId, jid: item.jid, position };
+      const channelId = barePeerJid(itemJid).split("@")[0] ?? "";
+      return {
+        id: channelId,
+        name: item.name ?? channelId,
+        jid: item.jid,
+        position,
+      };
     })
     .filter((channel) => channel.id);
 
   return Promise.all(
     discovered.map(async (channel) => {
       if (!channel.jid) {
-        return { id: channel.id, name: channel.name, channelType: "text", position: channel.position } satisfies DiscoveredChannel;
-      }
+         return {
+           id: channel.id,
+           name: channel.name,
+           channelType: "text",
+           position: channel.position,
+         } satisfies DiscoveredChannel;
+       }
 
-      try {
+       try {
         const info = await xmpp.getDiscoInfo(channel.jid);
         return {
-          id: channel.id,
-          name: channel.name,
-          channelType: parseChannelType(info),
-          position: channel.position,
-        } satisfies DiscoveredChannel;
-      } catch {
-        return { id: channel.id, name: channel.name, channelType: "text", position: channel.position } satisfies DiscoveredChannel;
-      }
-    }),
-  );
+           id: channel.id,
+           name: channel.name,
+           channelType: parseChannelType(info),
+           position: channel.position,
+         } satisfies DiscoveredChannel;
+       } catch {
+         return {
+           id: channel.id,
+           name: channel.name,
+           channelType: "text",
+           position: channel.position,
+         } satisfies DiscoveredChannel;
+       }
+     }),
+   );
 }

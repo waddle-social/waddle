@@ -65,11 +65,30 @@ pub use types::*;
 pub use waddle_xmpp_core::Stanza;
 pub use waddle_xmpp_core::{
     managed_room_jid, managed_room_localpart, parse_managed_room_jid, parse_managed_room_localpart,
-    ChannelInfo, ChannelRoomInfo, ChannelType, UploadSlotInfo, WaddleDetails, WaddleInfo,
+    ChannelInfo, ChannelRoomInfo, ChannelType, UploadSlotInfo,
 };
 pub use xep::xep0077::{RegistrationError, RegistrationRequest};
 
 use std::sync::Arc;
+
+/// Detailed canonical space information for XEP-0503.
+#[derive(Debug, Clone)]
+pub struct SpaceDetails {
+    /// Space node ID.
+    pub id: String,
+    /// Human-readable space name.
+    pub name: String,
+    /// Optional space description.
+    pub description: Option<String>,
+    /// Owner user ID.
+    pub owner_id: String,
+    /// Optional icon URL.
+    pub icon_url: Option<String>,
+    /// Whether the space is public.
+    pub is_public: bool,
+    /// Creation timestamp in ISO 8601 format.
+    pub created_at: String,
+}
 
 /// Shared application state passed to the XMPP server.
 ///
@@ -425,25 +444,15 @@ pub trait AppState: Send + Sync + 'static {
     ) -> impl std::future::Future<Output = Result<u64, XmppError>> + Send;
 
     // =========================================================================
-    // Auto-Join: Waddle & Channel Enumeration
+    // Auto-Join: Space & Channel Enumeration
     // =========================================================================
 
-    /// List all waddles a user belongs to.
+    /// List all channels in the canonical space.
     ///
     /// Used for auto-joining all channels on login (Slack-like semantics).
-    /// Returns a list of (waddle_id, waddle_name) pairs.
-    fn list_user_waddles(
+    /// Returns a list of channel info for the canonical space.
+    fn list_space_channels(
         &self,
-        user_id: &str,
-    ) -> impl std::future::Future<Output = Result<Vec<WaddleInfo>, XmppError>> + Send;
-
-    /// List all channels in a waddle.
-    ///
-    /// Used for auto-joining all channels on login (Slack-like semantics).
-    /// Returns a list of channel info for the given waddle.
-    fn list_waddle_channels(
-        &self,
-        waddle_id: &str,
     ) -> impl std::future::Future<Output = Result<Vec<ChannelInfo>, XmppError>> + Send;
 
     /// Look up channel-backed room metadata by channel ID.
@@ -452,39 +461,19 @@ pub trait AppState: Send + Sync + 'static {
     /// falling back to a generic instant room.
     fn get_channel_room_info(
         &self,
-        waddle_id: &str,
         channel_id: &str,
     ) -> impl std::future::Future<Output = Result<Option<ChannelRoomInfo>, XmppError>> + Send;
 
     // =========================================================================
-    // XEP-0503: Spaces Service (Waddle Details)
+    // XEP-0503: Spaces Service
     // =========================================================================
 
-    /// Get detailed information about a specific waddle by ID.
+    /// Get detailed information about the canonical space.
     ///
     /// Used by the XEP-0503 spaces service to return space metadata.
-    fn get_waddle_details(
+    fn get_space_details(
         &self,
-        waddle_id: &str,
-    ) -> impl std::future::Future<Output = Result<Option<WaddleDetails>, XmppError>> + Send;
-
-    /// Get detailed information about all waddles a user belongs to.
-    ///
-    /// Used by the XEP-0503 spaces service for per-user space enumeration.
-    fn get_user_waddles_with_details(
-        &self,
-        user_id: &str,
-    ) -> impl std::future::Future<Output = Result<Vec<WaddleDetails>, XmppError>> + Send;
-
-    /// List all waddles with pagination.
-    ///
-    /// Used by the XEP-0503 spaces service for single-tenant discovery
-    /// where all spaces are publicly browsable.
-    fn list_all_waddles(
-        &self,
-        limit: usize,
-        offset: usize,
-    ) -> impl std::future::Future<Output = Result<Vec<WaddleDetails>, XmppError>> + Send;
+    ) -> impl std::future::Future<Output = Result<Option<SpaceDetails>, XmppError>> + Send;
 }
 
 /// User session information.

@@ -1,7 +1,6 @@
 import { ref, computed, nextTick, watch, type Ref } from "vue";
 import { useStore } from "@nanostores/vue";
-import type { WaddleApi } from "@/lib/waddle-api";
-import type { ChannelSummary } from "@/lib/waddle-api";
+import type { ChannelSummary } from "@/lib/chat-types";
 import { isForumChannel } from "@/lib/channel-types";
 import type { WaddleSession } from "@/lib/server-auth";
 import {
@@ -188,9 +187,9 @@ export function formatStamp(value: string) {
 
 export function useMessaging(
   session: Ref<WaddleSession | null>,
-  _api: Ref<WaddleApi | null>,
+  _api: Ref<null>,
   xmppClient: Ref<BrowserXmppClient | null>,
-  activeWaddleId: Ref<string | null>,
+  activeSpaceId: Ref<string | null>,
   activeChannelId: Ref<string | null>,
   currentChannel: Ref<ChannelSummary | null>,
   normalizeError: (v: unknown) => string,
@@ -237,8 +236,8 @@ export function useMessaging(
   const pendingEchoClientIds = new Set<string>();
 
   const currentRoomJid = computed(() => {
-    if (!session.value || !activeWaddleId.value || !activeChannelId.value) return null;
-    return roomBareJidFor(session.value, activeWaddleId.value, activeChannelId.value);
+    if (!session.value || !activeSpaceId.value || !activeChannelId.value) return null;
+    return roomBareJidFor(session.value, activeChannelId.value);
   });
   const channelIsForum = computed(() => isForumChannel(currentChannel.value));
 
@@ -396,13 +395,13 @@ export function useMessaging(
 
   function notifyComposing() {
     const client = xmppClient.value;
-    const waddleId = activeWaddleId.value;
+    const spaceId = activeSpaceId.value;
     const channelId = activeChannelId.value;
-    if (!client || !waddleId || !channelId) return;
+    if (!client || !spaceId || !channelId) return;
 
     if (lastChatState !== "composing") {
       lastChatState = "composing";
-      void client.sendChatState(waddleId, channelId, "composing").catch(() => undefined);
+      void client.sendChatState(spaceId, channelId, "composing").catch(() => undefined);
     }
 
     // Reset the pause timer: if user stops typing for 3s, send "paused"
@@ -410,12 +409,12 @@ export function useMessaging(
     composingTimeout = setTimeout(() => {
       if (
         xmppClient.value !== client ||
-        activeWaddleId.value !== waddleId ||
+        activeSpaceId.value !== spaceId ||
         activeChannelId.value !== channelId
       )
         return;
       lastChatState = "paused";
-      void client.sendChatState(waddleId, channelId, "paused").catch(() => undefined);
+      void client.sendChatState(spaceId, channelId, "paused").catch(() => undefined);
     }, 3000);
   }
 
@@ -445,8 +444,8 @@ export function useMessaging(
     setTimeout(() => observer.disconnect(), 500);
   }
 
-  function persistLastSeen(waddleId: string, channelId: string, messageId: string) {
-    setLastSeen(roomKey(waddleId, channelId), messageId);
+  function persistLastSeen(channelId: string, messageId: string) {
+    setLastSeen(roomKey(channelId), messageId);
   }
 
   async function scrollFirstUnseenIntoView(messageId: string) {
@@ -492,9 +491,9 @@ export function useMessaging(
   }
 
   function markDisplayed(messageId: string) {
-    if (!xmppClient.value || !activeWaddleId.value || !activeChannelId.value) return;
+    if (!xmppClient.value || !activeSpaceId.value || !activeChannelId.value) return;
     const targetId = findMessageById(messages.value, messageId)?.id ?? messageId;
-    void xmppClient.value.sendDisplayed(activeWaddleId.value, activeChannelId.value, targetId)
+    void xmppClient.value.sendDisplayed(activeSpaceId.value, activeChannelId.value, targetId)
       .catch(() => undefined);
   }
 
@@ -590,15 +589,15 @@ export function useMessaging(
       if (wasPending) pendingEchoClientIds.delete(existing.id);
       return;
     }
-    const waddleId = activeWaddleId.value;
+    const spaceId = activeSpaceId.value;
     const channelId = activeChannelId.value;
     messages.value = applyForumContext([...messages.value, msg]);
     // mergeLiveMessage always snaps to the active edge, so last-seen should advance
     // in lockstep regardless of the user's prior scroll position — if we're
     // scrolling them to the message, by definition they can see it.
     void scrollToPinnedEdge();
-    if (waddleId && channelId && isFeedVisible(msg)) {
-      persistLastSeen(waddleId, channelId, msg.id);
+    if (spaceId && channelId && isFeedVisible(msg)) {
+      persistLastSeen(channelId, msg.id);
     }
   }
 
@@ -647,9 +646,9 @@ export function useMessaging(
    */
   function onSessionLifecycle(event: SessionLifecycleEvent) {
     if (event.type !== "fresh") return;
-    const waddleId = activeWaddleId.value;
+    const spaceId = activeSpaceId.value;
     const channelId = activeChannelId.value;
-    if (!waddleId || !channelId) return;
+    if (!spaceId || !channelId) return;
     // Only catch up if we had already loaded this channel; otherwise the
     // standard loadMessages call on channel-select handles it.
     if (messages.value.length === 0) return;
@@ -662,10 +661,10 @@ export function useMessaging(
         ),
     );
     void (async () => {
-      await loadMessages(waddleId, channelId);
+      await loadMessages(spaceId, channelId);
       if (
         preserved.length === 0 ||
-        activeWaddleId.value !== waddleId ||
+        activeSpaceId.value !== spaceId ||
         activeChannelId.value !== channelId
       )
         return;
@@ -681,11 +680,11 @@ export function useMessaging(
     return !m.threadId || m.id === m.threadId;
   }
 
-  async function loadMessages(waddleId: string, channelId: string) {
+  async function loadMessages(spaceId: string, channelId: string) {
     if (!session.value) return;
 
     const requestId = ++messageRequestId;
-    const roomJid = roomBareJidFor(session.value, waddleId, channelId);
+    const roomJid = roomBareJidFor(session.value, channelId);
     isLoadingMessages.value = true;
     // Reset the divider anchor up-front: a previous conversation's id could
     // coincidentally match a message in the new timeline, and an aborted
@@ -698,12 +697,12 @@ export function useMessaging(
     try {
       // XEP-0313: Load message history via MAM (XMPP-native)
       const mamResults = xmppClient.value
-        ? await xmppClient.value.queryMam(waddleId, channelId, 100)
+        ? await xmppClient.value.queryMam(spaceId, channelId, 100)
         : [];
 
       if (
         requestId !== messageRequestId ||
-        activeWaddleId.value !== waddleId ||
+        activeSpaceId.value !== spaceId ||
         activeChannelId.value !== channelId
       ) {
         return;
@@ -796,7 +795,7 @@ export function useMessaging(
       // above it. ContentArea renders `feedMessages` (thread replies hidden),
       // so the anchor must match something actually rendered. Otherwise
       // scroll to bottom and track the newest feed message as last-seen.
-      const lastSeenId = getLastSeen(roomKey(waddleId, channelId));
+      const lastSeenId = getLastSeen(roomKey(channelId));
       const lastSeenIdx = lastSeenId
         ? timelineWithQueue.findIndex((m) => matchMessageId(m, lastSeenId))
         : -1;
@@ -811,7 +810,7 @@ export function useMessaging(
         firstUnseenId.value = null;
         await scrollToPinnedEdgeAndPin();
         const newest = [...timelineWithQueue].reverse().find(isFeedVisible);
-        if (newest) persistLastSeen(waddleId, channelId, newest.id);
+        if (newest) persistLastSeen(channelId, newest.id);
       }
     } catch (e) {
       if (requestId === messageRequestId) {
@@ -832,13 +831,13 @@ export function useMessaging(
    */
   async function backfillThread(threadId: string): Promise<void> {
     const client = xmppClient.value;
-    const waddleId = activeWaddleId.value;
+    const spaceId = activeSpaceId.value;
     const channelId = activeChannelId.value;
-    if (!client || !waddleId || !channelId || !threadId || !session.value) return;
-    const results = await client.queryMamByThread(waddleId, channelId, threadId, 100);
+    if (!client || !spaceId || !channelId || !threadId || !session.value) return;
+    const results = await client.queryMamByThread(spaceId, channelId, threadId, 100);
     if (
       xmppClient.value !== client ||
-      activeWaddleId.value !== waddleId ||
+      activeSpaceId.value !== spaceId ||
       activeChannelId.value !== channelId
     ) {
       return;
@@ -861,10 +860,10 @@ export function useMessaging(
   }
 
   async function selectChannel(channelId: string) {
-    if (!activeWaddleId.value) return;
+    if (!activeSpaceId.value) return;
     messages.value = [];
     clearTypingState();
-    await loadMessages(activeWaddleId.value, channelId);
+    await loadMessages(activeSpaceId.value, channelId);
   }
 
   async function sendMessage(
@@ -886,12 +885,12 @@ export function useMessaging(
       ? forumTitleOrThreadOverride
       : undefined;
     const client = xmppClient.value;
-    const waddleId = activeWaddleId.value;
+    const spaceId = activeSpaceId.value;
     const channelId = activeChannelId.value;
     const hasFiles = !!files && files.length > 0;
     const isForumPost = channelIsForum.value && !replyTo;
     const resolvedForumTitle = (forumTitle ?? forumPostTitle.value).trim();
-    if (!client || !waddleId || !channelId) return;
+    if (!client || !spaceId || !channelId) return;
     if (!bodyText.trim() && !hasFiles) return;
     if (isForumPost && !resolvedForumTitle) {
       actionError.value = "Add a title before posting to this forum.";
@@ -941,7 +940,7 @@ export function useMessaging(
       const threadReply = channelIsForum.value && replyTo && threadId
         ? { threadId }
         : undefined;
-      const result = await client.sendGroupMessage(waddleId, channelId, bodyText, {
+      const result = await client.sendGroupMessage(spaceId, channelId, bodyText, {
         markup,
         references,
         files: attachments,
@@ -954,7 +953,7 @@ export function useMessaging(
       const msgId = result?.id ?? null;
       const isStillCurrentChannel =
         xmppClient.value === client &&
-        activeWaddleId.value === waddleId &&
+        activeSpaceId.value === spaceId &&
         activeChannelId.value === channelId;
 
       if (msgId && session.value && isStillCurrentChannel) {
@@ -1020,7 +1019,7 @@ export function useMessaging(
         lastChatState = "active";
       }
       if (result?.state === "sending") {
-        void client.sendChatState(waddleId, channelId, "active").catch(() => undefined);
+        void client.sendChatState(spaceId, channelId, "active").catch(() => undefined);
       }
     } catch (e) {
       actionError.value = normalizeError(e);
@@ -1031,7 +1030,7 @@ export function useMessaging(
   }
 
   async function toggleReaction(messageId: string, emoji: string) {
-    if (!xmppClient.value || !activeWaddleId.value || !activeChannelId.value || !session.value)
+    if (!xmppClient.value || !activeSpaceId.value || !activeChannelId.value || !session.value)
       return;
 
     // Compute the new reaction set for this user
@@ -1055,7 +1054,7 @@ export function useMessaging(
 
     try {
       await xmppClient.value.sendReaction(
-        activeWaddleId.value,
+        activeSpaceId.value,
         activeChannelId.value,
         targetId,
         [...myEmojis],
@@ -1066,14 +1065,14 @@ export function useMessaging(
   }
 
   async function retractMessage(messageId: string) {
-    if (!xmppClient.value || !activeWaddleId.value || !activeChannelId.value) return;
+    if (!xmppClient.value || !activeSpaceId.value || !activeChannelId.value) return;
     const targetId = findMessageById(messages.value, messageId)?.id ?? messageId;
 
     clearActionError();
 
     try {
       await xmppClient.value.sendRetraction(
-        activeWaddleId.value,
+        activeSpaceId.value,
         activeChannelId.value,
         targetId,
       );
@@ -1083,14 +1082,14 @@ export function useMessaging(
   }
 
   async function moderateMessage(messageId: string, reason?: string) {
-    if (!xmppClient.value || !activeWaddleId.value || !activeChannelId.value) return;
+    if (!xmppClient.value || !activeSpaceId.value || !activeChannelId.value) return;
     const targetId = findMessageById(messages.value, messageId)?.id ?? messageId;
 
     clearActionError();
 
     try {
       await xmppClient.value.sendModeration(
-        activeWaddleId.value,
+        activeSpaceId.value,
         activeChannelId.value,
         targetId,
         reason,
@@ -1101,7 +1100,7 @@ export function useMessaging(
   }
 
   async function editMessage(messageId: string, newBody: string, markup?: MarkupSpan[], references?: MessageReference[]) {
-    if (!xmppClient.value || !activeWaddleId.value || !activeChannelId.value || !newBody.trim())
+    if (!xmppClient.value || !activeSpaceId.value || !activeChannelId.value || !newBody.trim())
       return;
     const targetId = findMessageById(messages.value, messageId)?.id ?? messageId;
 
@@ -1109,7 +1108,7 @@ export function useMessaging(
 
     try {
       await xmppClient.value.sendCorrection(
-        activeWaddleId.value,
+        activeSpaceId.value,
         activeChannelId.value,
         newBody,
         targetId,
@@ -1143,9 +1142,9 @@ export function useMessaging(
 
   async function searchMessages(query: string) {
     const client = xmppClient.value;
-    const waddleId = activeWaddleId.value;
+    const spaceId = activeSpaceId.value;
     const channelId = activeChannelId.value;
-    if (!client || !waddleId || !channelId) return;
+    if (!client || !spaceId || !channelId) return;
     const requestId = ++searchRequestId;
     const trimmed = query.trim();
     searchQuery.value = trimmed;
@@ -1156,11 +1155,11 @@ export function useMessaging(
     }
     isSearching.value = true;
     try {
-      const results = await client.searchMessages(waddleId, channelId, trimmed);
+      const results = await client.searchMessages(spaceId, channelId, trimmed);
       if (
         requestId === searchRequestId &&
         xmppClient.value === client &&
-        activeWaddleId.value === waddleId &&
+        activeSpaceId.value === spaceId &&
         activeChannelId.value === channelId
       ) {
         searchResults.value = results;

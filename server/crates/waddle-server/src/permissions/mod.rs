@@ -1,24 +1,24 @@
-//! Zanzibar-inspired permission system for Waddle
+//! Zanzibar-inspired permission system for spaces
 //!
 //! This module implements a relationship-based access control (ReBAC) model
 //! inspired by Google's Zanzibar paper. The core concepts are:
 //!
 //! - **Tuples**: `<object>#<relation>@<subject>` - the fundamental unit
-//! - **Objects**: Resources that are protected (waddle, channel, message, etc.)
+//! - **Objects**: Resources that are protected (space, channel, message, etc.)
 //! - **Subjects**: Entities that access objects (users, groups of users)
 //! - **Relations**: Named connections between objects and subjects
 //!
 //! # Example
 //!
 //! ```ignore
-//! // Alice is owner of penguin-club waddle
-//! waddle:penguin-club#owner@user:user-alice
+//! // Alice is owner of penguin-club space
+//! space:penguin-club#owner@user:user-alice
 //!
 //! // Channel general belongs to penguin-club
-//! channel:general#parent@waddle:penguin-club
+//! channel:general#parent@space:penguin-club
 //!
 //! // All penguin-club members can view general channel
-//! channel:general#viewer@waddle:penguin-club#member
+//! channel:general#viewer@space:penguin-club#member
 //! ```
 
 mod check;
@@ -55,6 +55,7 @@ pub enum PermissionError {
     #[error("Invalid relation: {0}")]
     InvalidRelation(String),
 
+    #[cfg(test)]
     #[error("Tuple not found")]
     TupleNotFound,
 
@@ -118,6 +119,7 @@ impl PermissionService {
     }
 
     /// Delete a permission tuple
+    #[cfg(test)]
     pub async fn delete_tuple(&self, tuple: &Tuple) -> Result<(), PermissionError> {
         self.tuple_store.delete(tuple).await
     }
@@ -160,9 +162,9 @@ mod tests {
         let actor = kameo::spawn(crate::db::actor::DbActor::new((*db).clone()));
         let service = PermissionService::new(actor);
 
-        // Create a tuple: user:alice is owner of waddle:test
+        // Create a tuple: user:alice is owner of space:test
         let tuple = Tuple::new(
-            Object::new(ObjectType::Waddle, "test-waddle"),
+            Object::new(ObjectType::Space, "test-space"),
             Relation::new("owner"),
             Subject::user("user-alice"),
         );
@@ -172,7 +174,7 @@ mod tests {
 
         // Check permission - owner should have delete permission
         let subject = Subject::user("user-alice");
-        let object = Object::new(ObjectType::Waddle, "test-waddle");
+        let object = Object::new(ObjectType::Space, "test-space");
 
         let response = service.check(&subject, "delete", &object).await.unwrap();
         assert!(response.allowed);

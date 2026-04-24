@@ -48,7 +48,6 @@ However, there are **real issues** to fix:
 | 10 | `waddle-xmpp/src/connection.rs:4917` | stale-doc | Docstring says "stub implementation that returns an empty roster" but the method delegates to `self.app_state.get_roster()` which is fully wired to `DatabaseRosterStorage`. | Fix: update docstring to reflect actual implementation. |
 | 11 | `waddle-xmpp/src/connection.rs:5019` | stale-doc | Docstring says "stub implementation that acknowledges the request but does not persist changes" but the method calls `self.app_state.set_roster_item()` and `self.app_state.remove_roster_item()` which persist to SQLite. | Fix: update docstring. |
 | 12 | `waddle-xmpp/src/connection.rs:5095` | cosmetic | Comment "Treat these as idempotent no-op removals" — this is intentional behavior for legacy client compat, not a stub. | No action needed, already correct. |
-| 13 | `waddle-cli/src/main.rs:429` | TODO | `// TODO: Store for later / show notification` — incoming message handling in CLI client. | Low priority, CLI is a dev tool. |
 | 14 | `waddle-server/src/server/routes/websocket.rs:443-444` | placeholder | `/pending` resource JID created before resource binding. Verified: it IS properly replaced during `handle_resource_binding()`. | No action needed — working as designed. |
 
 ---
@@ -132,7 +131,6 @@ One concern: the dialback verification in `connection.rs:424-432` does local-onl
 |-------|-----------|-----------|-------|
 | waddle-xmpp | 13 | 17 | 30 |
 | waddle-server | 6 | 18 | 24 |
-| waddle-cli | 3 | 1 | 4 |
 | waddle-ecdysis | 0 | 10 | 10 |
 | waddle-xmpp-xep-github | 12 | 2 | 14 |
 | **Total** | **34** | **48** | **82** |
@@ -172,7 +170,6 @@ One concern: the dialback verification in `connection.rs:424-432` does local-onl
 | `waddle-server/src/server/mod.rs` | 285 | `c2s_listener.expect(...)` | RISKY | P2 |
 | `waddle-server/src/server/routes/websocket.rs` | 575 | `.expect("Room just created")` | RISKY | P2 |
 | `waddle-xmpp-xep-github/src/client.rs` | 213-439 | `self.*.lock().unwrap()` ×11 | RISKY | P2 |
-| `waddle-cli/src/app.rs` | 389,408,419 | `.unwrap()` on channel send | RISKY | P2 |
 | `waddle-ecdysis/src/restart.rs` | 46,143,147,158 | `.expect(...)` on exe path/CString | RISKY | P3 |
 
 ---

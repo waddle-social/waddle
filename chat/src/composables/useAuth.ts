@@ -1,12 +1,8 @@
 import { ref, type Ref } from "vue";
 import { createServerAuth, type WaddleSession, type AuthProvider } from "@/lib/server-auth";
-import { WaddleApi } from "@/lib/waddle-api";
 import type { AppState } from "@/lib/chat-ui";
 
-const ACTIVE_SERVER_STORAGE_KEY = "waddle.chat.active-server";
-const SESSION_STORAGE_KEY = "waddle.chat.sessions";
-
-type SessionMap = Record<string, string>;
+const SESSION_STORAGE_KEY = "waddle.chat.session";
 
 function trimTrailingSlash(value: string) {
   return value.endsWith("/") ? value.slice(0, -1) : value;
@@ -16,120 +12,47 @@ function normalizeServerUrl(value: string) {
   return trimTrailingSlash(value.trim());
 }
 
-function readSessionMap(): SessionMap {
-  if (typeof window === "undefined") {
-    return {};
-  }
+function getStoredSessionId() {
+  if (typeof window === "undefined") return null;
 
   try {
-    const raw = window.localStorage.getItem(SESSION_STORAGE_KEY);
-    if (!raw) {
-      return {};
-    }
-
-    const parsed = JSON.parse(raw) as unknown;
-    return parsed && typeof parsed === "object" ? (parsed as SessionMap) : {};
+    return window.localStorage.getItem(SESSION_STORAGE_KEY);
   } catch {
-    return {};
+    return null;
   }
 }
 
-function writeSessionMap(sessions: SessionMap) {
-  if (typeof window === "undefined") {
-    return;
-  }
+function storeSessionId(sessionId: string) {
+  if (typeof window === "undefined") return;
 
   try {
-    window.localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(sessions));
+    window.localStorage.setItem(SESSION_STORAGE_KEY, sessionId);
   } catch {
     // ignore storage failures
   }
 }
 
-function getStoredSessionId(serverUrl: string) {
-  return readSessionMap()[normalizeServerUrl(serverUrl)] ?? null;
-}
-
-function storeSessionId(serverUrl: string, sessionId: string) {
-  const sessions = readSessionMap();
-  sessions[normalizeServerUrl(serverUrl)] = sessionId;
-  writeSessionMap(sessions);
-}
-
-function clearStoredSessionId(serverUrl: string) {
-  const sessions = readSessionMap();
-  delete sessions[normalizeServerUrl(serverUrl)];
-  writeSessionMap(sessions);
-}
-
-function loadActiveServer(defaultServerUrl: string) {
-  if (typeof window === "undefined") {
-    return defaultServerUrl;
-  }
+function clearStoredSessionId() {
+  if (typeof window === "undefined") return;
 
   try {
-    return normalizeServerUrl(
-      window.localStorage.getItem(ACTIVE_SERVER_STORAGE_KEY) || defaultServerUrl,
-    );
-  } catch {
-    return defaultServerUrl;
-  }
-}
-
-function saveActiveServer(serverUrl: string) {
-  if (typeof window === "undefined") {
-    return;
-  }
-
-  try {
-    window.localStorage.setItem(ACTIVE_SERVER_STORAGE_KEY, normalizeServerUrl(serverUrl));
+    window.localStorage.removeItem(SESSION_STORAGE_KEY);
   } catch {
     // ignore storage failures
   }
 }
 
-function buildReturnUrl(currentUrl: string, serverUrl: string, defaultServerUrl: string) {
-  const url = new URL(currentUrl);
-  const active = normalizeServerUrl(serverUrl);
-  const defaultServer = normalizeServerUrl(defaultServerUrl);
-
-  if (active !== defaultServer) {
-    url.searchParams.set("waddle_server", active);
-  } else {
-    url.searchParams.delete("waddle_server");
-  }
-
-  const hashParams = new URLSearchParams(url.hash.replace(/^#/, ""));
-  hashParams.delete("waddle_session_id");
-  const hash = hashParams.toString();
-  url.hash = hash ? `#${hash}` : "";
-
-  return url.toString();
-}
-
-function consumeRedirectState(defaultServerUrl: string) {
-  const fallbackServerUrl = loadActiveServer(defaultServerUrl);
-
-  if (typeof window === "undefined") {
-    return {
-      serverUrl: fallbackServerUrl,
-      sessionId: getStoredSessionId(fallbackServerUrl),
-    };
-  }
+function consumeRedirectSession() {
+  if (typeof window === "undefined") return getStoredSessionId();
 
   const url = new URL(window.location.href);
   const hashParams = new URLSearchParams(url.hash.replace(/^#/, ""));
-  const requestedServer = url.searchParams.get("waddle_server");
-  const serverUrl = normalizeServerUrl(requestedServer || fallbackServerUrl);
   const sessionId = hashParams.get("waddle_session_id");
 
-  if (requestedServer) {
-    url.searchParams.delete("waddle_server");
-    saveActiveServer(serverUrl);
-  }
+  url.searchParams.delete("waddle_server");
 
   if (sessionId) {
-    storeSessionId(serverUrl, sessionId);
+    storeSessionId(sessionId);
     hashParams.delete("waddle_session_id");
   }
 
@@ -141,22 +64,17 @@ function consumeRedirectState(defaultServerUrl: string) {
     window.history.replaceState(null, "", cleanedUrl);
   }
 
-  return {
-    serverUrl,
-    sessionId: sessionId ?? getStoredSessionId(serverUrl),
-  };
+  return sessionId ?? getStoredSessionId();
 }
 
 export function useAuth(defaultServerUrl: string) {
-  const normalizedDefaultServerUrl = normalizeServerUrl(defaultServerUrl);
-  const activeServerUrl = ref(loadActiveServer(normalizedDefaultServerUrl));
+  const activeServerUrl = ref(normalizeServerUrl(defaultServerUrl));
   const providers = ref<AuthProvider[]>([]);
-
-  let auth = createServerAuth(activeServerUrl.value);
+  const auth = createServerAuth(activeServerUrl.value);
 
   const appState = ref<AppState>("loading");
   const session: Ref<WaddleSession | null> = ref(null);
-  const api: Ref<WaddleApi | null> = ref(null);
+  const api: Ref<null> = ref(null);
   const appError = ref("");
   const isBootstrapping = ref(false);
 
@@ -176,28 +94,20 @@ export function useAuth(defaultServerUrl: string) {
     appError.value = "";
 
     try {
-      const redirectState = consumeRedirectState(normalizedDefaultServerUrl);
-      if (redirectState.serverUrl !== activeServerUrl.value) {
-        activeServerUrl.value = redirectState.serverUrl;
-        auth = createServerAuth(activeServerUrl.value);
-      }
-
-      const loaded = await auth.getSession(redirectState.sessionId ?? undefined);
+      const loaded = await auth.getSession(consumeRedirectSession() ?? undefined);
 
       if (!loaded || loaded.is_expired) {
-        clearStoredSessionId(activeServerUrl.value);
+        clearStoredSessionId();
         session.value = null;
         api.value = null;
-        // Fetch available providers for the login screen
         await loadProviders();
         appState.value = "signed-out";
         return;
       }
 
-      saveActiveServer(activeServerUrl.value);
-      storeSessionId(activeServerUrl.value, loaded.session_id);
+      storeSessionId(loaded.session_id);
       session.value = loaded;
-      api.value = new WaddleApi(activeServerUrl.value, loaded.session_id);
+      api.value = null;
       appState.value = "ready";
     } catch (e) {
       appError.value = e instanceof Error ? e.message : "Something went wrong.";
@@ -207,54 +117,40 @@ export function useAuth(defaultServerUrl: string) {
     }
   }
 
-  async function login(serverUrl?: string, providerId?: string) {
-    const nextServerUrl = normalizeServerUrl(serverUrl || activeServerUrl.value);
-    if (nextServerUrl !== activeServerUrl.value) {
-      activeServerUrl.value = nextServerUrl;
-      auth = createServerAuth(nextServerUrl);
-      await loadProviders();
-    }
-
-    saveActiveServer(activeServerUrl.value);
+  async function login(_serverUrl?: string, providerId?: string) {
     const pid = providerId ?? providers.value[0]?.id;
     if (!pid) {
       appError.value = "No auth providers available on this server.";
       return;
     }
 
-    const nextUrl = buildReturnUrl(
-      window.location.href,
-      activeServerUrl.value,
-      normalizedDefaultServerUrl,
-    );
+    const nextUrl = new URL(window.location.href);
+    nextUrl.searchParams.delete("waddle_server");
+    const hashParams = new URLSearchParams(nextUrl.hash.replace(/^#/, ""));
+    hashParams.delete("waddle_session_id");
+    const hash = hashParams.toString();
+    nextUrl.hash = hash ? `#${hash}` : "";
+
     const pageOrigin = window.location.origin;
     const serverOrigin = new URL(activeServerUrl.value).origin;
     const sessionTransport = pageOrigin === serverOrigin ? "cookie" : "fragment";
 
-    window.location.href = auth.loginUrl(nextUrl, pid, {
+    window.location.href = auth.loginUrl(nextUrl.toString(), pid, {
       sessionTransport,
     });
   }
 
-  async function fetchProviders(serverUrl: string) {
-    const nextServerUrl = normalizeServerUrl(serverUrl);
-    if (nextServerUrl !== activeServerUrl.value) {
-      activeServerUrl.value = nextServerUrl;
-      auth = createServerAuth(nextServerUrl);
-    }
-    saveActiveServer(activeServerUrl.value);
+  async function fetchProviders(_serverUrl?: string) {
     await loadProviders();
   }
 
   async function logout() {
     try {
-      const sessionId =
-        session.value?.session_id ?? getStoredSessionId(activeServerUrl.value) ?? undefined;
-      await auth.logout(sessionId);
+      await auth.logout(session.value?.session_id ?? getStoredSessionId() ?? undefined);
     } catch {
       // ignore logout errors
     }
-    clearStoredSessionId(activeServerUrl.value);
+    clearStoredSessionId();
     await loadProviders();
     session.value = null;
     api.value = null;

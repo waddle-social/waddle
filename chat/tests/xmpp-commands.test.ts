@@ -14,7 +14,6 @@ describe("XMPP Ad-Hoc Commands", () => {
           form: {
             type: "form",
             fields: [
-              { name: "waddle_id", type: "hidden" },
               { name: "name", type: "text-single" },
               { name: "description", type: "text-multi" },
               { name: "channel_type", type: "list-single" },
@@ -33,7 +32,7 @@ describe("XMPP Ad-Hoc Commands", () => {
             type: "result",
             fields: [
               { name: "channel_id", value: "new-channel-id" },
-              { name: "channel_jid", value: "test_waddle_new-channel-id@muc.localhost" },
+              { name: "channel_jid", value: "new-channel-id@muc.localhost" },
             ],
           },
           notes: [{ type: "info", value: "Channel created" }],
@@ -46,7 +45,6 @@ describe("XMPP Ad-Hoc Commands", () => {
         mockXmpp as any,
         "localhost",
         {
-          waddleId: "test-waddle",
           name: "Test Channel",
           description: "A test channel",
           channelType: "text",
@@ -56,7 +54,7 @@ describe("XMPP Ad-Hoc Commands", () => {
 
       expect(result.success).toBe(true);
       expect(result.channelId).toBe("new-channel-id");
-      expect(result.channelJid).toBe("test_waddle_new-channel-id@muc.localhost");
+      expect(result.channelJid).toBe("new-channel-id@muc.localhost");
       expect(result.error).toBeUndefined();
 
       // Verify the command execution flow
@@ -83,7 +81,6 @@ describe("XMPP Ad-Hoc Commands", () => {
           form: expect.objectContaining({
             type: "submit",
             fields: expect.arrayContaining([
-              expect.objectContaining({ name: "waddle_id", value: "test-waddle" }),
               expect.objectContaining({ name: "name", value: "Test Channel" }),
             ]),
           }),
@@ -116,7 +113,6 @@ describe("XMPP Ad-Hoc Commands", () => {
         mockXmpp as any,
         "localhost",
         {
-          waddleId: "test-waddle",
           name: "Test Channel",
           channelType: "text",
           position: 0,
@@ -143,7 +139,6 @@ describe("XMPP Ad-Hoc Commands", () => {
         mockXmpp as any,
         "localhost",
         {
-          waddleId: "test-waddle",
           name: "Test Channel",
           channelType: "forum",
           position: 1,
@@ -170,7 +165,6 @@ describe("XMPP Ad-Hoc Commands", () => {
         mockXmpp as any,
         "localhost",
         {
-          waddleId: "test-waddle",
           name: "Test Channel",
           channelType: "text",
           position: 0,
@@ -209,7 +203,6 @@ describe("XMPP Ad-Hoc Commands", () => {
         mockXmpp as any,
         "localhost",
         {
-          waddleId: "test-waddle",
           name: "Test Channel",
           channelType: "text",
           position: 0,

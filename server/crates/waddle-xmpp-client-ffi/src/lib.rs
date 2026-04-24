@@ -500,7 +500,8 @@ impl WaddleClient {
             Ok(items) => items,
             Err(e) => {
                 drop(guard);
-                self.listener.on_error(format!("list_rooms: space discovery failed: {e}"));
+                self.listener
+                    .on_error(format!("list_rooms: space discovery failed: {e}"));
                 return vec![];
             }
         };
@@ -525,7 +526,8 @@ impl WaddleClient {
                 .collect(),
             Err(e) => {
                 drop(guard);
-                self.listener.on_error(format!("list_rooms: room discovery failed: {e}"));
+                self.listener
+                    .on_error(format!("list_rooms: room discovery failed: {e}"));
                 vec![]
             }
         }

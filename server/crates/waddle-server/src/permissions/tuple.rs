@@ -21,7 +21,7 @@ use crate::db::{row_value, ValueExt};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ObjectType {
-    Waddle,
+    Space,
     Channel,
     Message,
     Dm,
@@ -31,7 +31,7 @@ pub enum ObjectType {
 impl fmt::Display for ObjectType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ObjectType::Waddle => write!(f, "waddle"),
+            ObjectType::Space => write!(f, "space"),
             ObjectType::Channel => write!(f, "channel"),
             ObjectType::Message => write!(f, "message"),
             ObjectType::Dm => write!(f, "dm"),
@@ -45,7 +45,7 @@ impl FromStr for ObjectType {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "waddle" => Ok(ObjectType::Waddle),
+            "space" => Ok(ObjectType::Space),
             "channel" => Ok(ObjectType::Channel),
             "message" => Ok(ObjectType::Message),
             "dm" => Ok(ObjectType::Dm),
@@ -63,7 +63,7 @@ impl FromStr for ObjectType {
 #[serde(rename_all = "lowercase")]
 pub enum SubjectType {
     User,
-    Waddle,
+    Space,
     Role,
 }
 
@@ -71,7 +71,7 @@ impl fmt::Display for SubjectType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             SubjectType::User => write!(f, "user"),
-            SubjectType::Waddle => write!(f, "waddle"),
+            SubjectType::Space => write!(f, "space"),
             SubjectType::Role => write!(f, "role"),
         }
     }
@@ -83,7 +83,7 @@ impl FromStr for SubjectType {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "user" => Ok(SubjectType::User),
-            "waddle" => Ok(SubjectType::Waddle),
+            "space" => Ok(SubjectType::Space),
             "role" => Ok(SubjectType::Role),
             _ => Err(PermissionError::InvalidSubject(format!(
                 "Unknown subject type: {}",
@@ -93,7 +93,7 @@ impl FromStr for SubjectType {
     }
 }
 
-/// An object in the permission system (e.g., waddle:penguin-club)
+/// An object in the permission system (e.g., space:penguin-club)
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Object {
     pub object_type: ObjectType,
@@ -178,12 +178,12 @@ impl FromStr for Relation {
 ///
 /// Can be:
 /// - A direct user: `user:user-alice`
-/// - A userset: `waddle:penguin-club#member` (all members of penguin-club)
+/// - A userset: `space:penguin-club#member` (all members of penguin-club)
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Subject {
     pub subject_type: SubjectType,
     pub id: String,
-    /// For userset subjects, the relation (e.g., "member" in waddle:penguin-club#member)
+    /// For userset subjects, the relation (e.g., "member" in space:penguin-club#member)
     pub relation: Option<String>,
 }
 
@@ -198,7 +198,7 @@ impl Subject {
         }
     }
 
-    /// Create a userset subject (e.g., all members of a waddle)
+    /// Create a userset subject (e.g., all members of a space)
     #[allow(dead_code)]
     pub fn userset(
         subject_type: SubjectType,
@@ -414,6 +414,7 @@ impl TupleStore {
     }
 
     /// Delete a tuple from the database
+    #[cfg(test)]
     #[instrument(skip(self), fields(tuple = %tuple))]
     pub async fn delete(&self, tuple: &Tuple) -> Result<(), PermissionError> {
         debug!("Deleting tuple: {}", tuple);
@@ -727,8 +728,8 @@ mod tests {
 
     #[test]
     fn test_object_parse() {
-        let obj = Object::parse("waddle:penguin-club").unwrap();
-        assert_eq!(obj.object_type, ObjectType::Waddle);
+        let obj = Object::parse("space:penguin-club").unwrap();
+        assert_eq!(obj.object_type, ObjectType::Space);
         assert_eq!(obj.id, "penguin-club");
 
         let obj = Object::parse("channel:general").unwrap();
@@ -738,8 +739,8 @@ mod tests {
 
     #[test]
     fn test_object_display() {
-        let obj = Object::new(ObjectType::Waddle, "penguin-club");
-        assert_eq!(obj.to_string(), "waddle:penguin-club");
+        let obj = Object::new(ObjectType::Space, "penguin-club");
+        assert_eq!(obj.to_string(), "space:penguin-club");
     }
 
     #[test]
@@ -752,8 +753,8 @@ mod tests {
 
     #[test]
     fn test_subject_parse_userset() {
-        let subj = Subject::parse("waddle:penguin-club#member").unwrap();
-        assert_eq!(subj.subject_type, SubjectType::Waddle);
+        let subj = Subject::parse("space:penguin-club#member").unwrap();
+        assert_eq!(subj.subject_type, SubjectType::Space);
         assert_eq!(subj.id, "penguin-club");
         assert_eq!(subj.relation, Some("member".to_string()));
     }
@@ -763,14 +764,14 @@ mod tests {
         let subj = Subject::user("user-alice");
         assert_eq!(subj.to_string(), "user:user-alice");
 
-        let subj = Subject::userset(SubjectType::Waddle, "penguin-club", "member");
-        assert_eq!(subj.to_string(), "waddle:penguin-club#member");
+        let subj = Subject::userset(SubjectType::Space, "penguin-club", "member");
+        assert_eq!(subj.to_string(), "space:penguin-club#member");
     }
 
     #[test]
     fn test_tuple_parse() {
-        let tuple = Tuple::parse("waddle:penguin-club#owner@user:user-alice").unwrap();
-        assert_eq!(tuple.object.object_type, ObjectType::Waddle);
+        let tuple = Tuple::parse("space:penguin-club#owner@user:user-alice").unwrap();
+        assert_eq!(tuple.object.object_type, ObjectType::Space);
         assert_eq!(tuple.object.id, "penguin-club");
         assert_eq!(tuple.relation.name, "owner");
         assert_eq!(tuple.subject.subject_type, SubjectType::User);
@@ -780,13 +781,13 @@ mod tests {
     #[test]
     fn test_tuple_display() {
         let tuple = Tuple::new(
-            Object::new(ObjectType::Waddle, "penguin-club"),
+            Object::new(ObjectType::Space, "penguin-club"),
             Relation::new("owner"),
             Subject::user("user-alice"),
         );
         assert_eq!(
             tuple.to_string(),
-            "waddle:penguin-club#owner@user:user-alice"
+            "space:penguin-club#owner@user:user-alice"
         );
     }
 
@@ -802,7 +803,7 @@ mod tests {
         let actor = kameo::spawn(crate::db::actor::DbActor::new((*db).clone()));
         let store = TupleStore::new(actor);
 
-        let object = Object::new(ObjectType::Waddle, "test-waddle");
+        let object = Object::new(ObjectType::Space, "test-space");
         let subject = Subject::user("user-alice");
 
         // Initially should not exist
@@ -830,7 +831,7 @@ mod tests {
         let actor = kameo::spawn(crate::db::actor::DbActor::new((*db).clone()));
         let store = TupleStore::new(actor);
 
-        let object = Object::new(ObjectType::Waddle, "test-waddle");
+        let object = Object::new(ObjectType::Space, "test-space");
         let subject = Subject::user("user-alice");
 
         // Write the tuple
@@ -859,7 +860,7 @@ mod tests {
         let actor = kameo::spawn(crate::db::actor::DbActor::new((*db).clone()));
         let store = TupleStore::new(actor);
 
-        let object = Object::new(ObjectType::Waddle, "test-waddle");
+        let object = Object::new(ObjectType::Space, "test-space");
 
         // Add multiple members
         store
@@ -890,7 +891,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_tuple_store_write_and_exists_file_backed() {
-        let base_dir = std::env::temp_dir().join(format!("waddle-tuple-store-{}", Uuid::new_v4()));
+        let base_dir = std::env::temp_dir().join(format!("space-tuple-store-{}", Uuid::new_v4()));
         let db_path = base_dir.join("permissions.db");
 
         let db = Database::open_local("test-tuple-store-file", &db_path)
@@ -903,7 +904,7 @@ mod tests {
 
         let actor = kameo::spawn(crate::db::actor::DbActor::new((*db).clone()));
         let store = TupleStore::new(actor);
-        let object = Object::new(ObjectType::Waddle, "test-waddle");
+        let object = Object::new(ObjectType::Space, "test-space");
         let subject = Subject::user("user-alice");
         let tuple = Tuple::new(object.clone(), Relation::new("owner"), subject.clone());
 

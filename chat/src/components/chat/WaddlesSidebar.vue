@@ -1,14 +1,13 @@
 <script setup lang="ts">
-import { computed } from "vue";
-import { Plus, Lock, Compass, MessageCircle } from "lucide-vue-next";
-import type { WaddleSummary } from "@/lib/waddle-api";
+import { MessageCircle } from "lucide-vue-next";
+import type { SpaceSummary } from "@/lib/chat-types";
 import type { WaddleSession } from "@/lib/server-auth";
 import type { ServerVersion } from "@/composables/useVersion";
 import ProfilePanel from "@/components/chat/ProfilePanel.vue";
 
 const props = defineProps<{
-  waddles: WaddleSummary[];
-  activeWaddleId: string | null;
+  waddles: SpaceSummary[];
+  activeSpaceId: string | null;
   activeSidebarMode?: "channels" | "dms";
   hasUnreadDms?: boolean;
   session: WaddleSession | null;
@@ -22,9 +21,7 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
-  selectWaddle: [id: string];
-  createWaddle: [];
-  browsePublicWaddles: [];
+  selectSpace: [id: string];
   toggleDms: [];
   openSettings: [];
   logout: [];
@@ -32,30 +29,26 @@ const emit = defineEmits<{
   "toggle-notifications": [];
 }>();
 
-const publicWaddles = computed(() =>
-  props.waddles.filter((w) => w.is_public),
-);
-
-const privateWaddles = computed(() =>
-  props.waddles.filter((w) => !w.is_public),
-);
-
-function waddleInitial(waddle: WaddleSummary): string {
+function waddleInitial(waddle: SpaceSummary): string {
   return (waddle.name[0] ?? "W").toUpperCase();
 }
 
-function waddleColor(waddle: WaddleSummary): string {
+function waddleColor(waddle: SpaceSummary): string {
   const colors = [
     "oklch(0.78 0.14 184)", "oklch(0.68 0.19 28)", "oklch(0.72 0.15 158)", "oklch(0.78 0.15 78)",
     "oklch(0.64 0.16 252)", "oklch(0.66 0.16 305)", "oklch(0.68 0.17 350)", "oklch(0.66 0.14 205)",
     "oklch(0.72 0.17 54)", "oklch(0.64 0.15 286)",
   ];
   let hash = 0;
-  for (const char of waddle.id) hash = ((hash << 5) - hash + char.charCodeAt(0)) | 0;
+  for (const char of waddle.name) hash = ((hash << 5) - hash + char.charCodeAt(0)) | 0;
   return colors[Math.abs(hash) % colors.length];
 }
 
-function waddleGlow(waddle: WaddleSummary): string {
+function waddleKey(waddle: SpaceSummary): string {
+  return waddle.name.toLowerCase() || "space";
+}
+
+function waddleGlow(waddle: SpaceSummary): string {
   return `0 0 16px color-mix(in oklab, ${waddleColor(waddle)} 30%, transparent)`;
 }
 </script>
@@ -89,65 +82,29 @@ function waddleGlow(waddle: WaddleSummary): string {
         : 'chat-rail-list-vertical'"
     >
       <button
-        v-for="waddle in privateWaddles"
-        :key="waddle.id"
+        v-for="waddle in waddles"
+        :key="waddleKey(waddle)"
         class="type-control relative w-10 h-10 rounded-lg flex items-center justify-center transition-all duration-200 group flex-shrink-0"
-        :class="activeWaddleId === waddle.id
+        :class="activeSpaceId
           ? 'text-primary-foreground shadow-lg'
           : 'text-rail-foreground hover:text-rail-active hover:scale-105'"
-        :style="activeWaddleId === waddle.id
+        :style="activeSpaceId
           ? { backgroundColor: waddleColor(waddle), boxShadow: waddleGlow(waddle) }
           : { backgroundColor: 'var(--rail-hover)' }"
         :title="waddle.name"
         :aria-label="`Open ${waddle.name}`"
-        :aria-current="activeWaddleId === waddle.id ? 'page' : undefined"
+        :aria-current="activeSpaceId ? 'page' : undefined"
         type="button"
-        @click="emit('selectWaddle', waddle.id)"
+        @click="emit('selectSpace', activeSpaceId ?? 'space')"
       >
         <span class="type-rail-initial">{{ waddleInitial(waddle) }}</span>
-        <!-- Active indicator -->
         <span
-          v-if="activeWaddleId === waddle.id && !horizontal"
+          v-if="activeSpaceId && !horizontal"
           class="chat-rail-indicator-vertical absolute -left-2 top-1/2 -translate-y-1/2 rounded-r-full"
           :style="{ backgroundColor: waddleColor(waddle) }"
         />
         <span
-          v-if="activeWaddleId === waddle.id && horizontal"
-          class="chat-rail-indicator-horizontal absolute bottom-0 left-1/2 -translate-x-1/2 rounded-t-full"
-          :style="{ backgroundColor: waddleColor(waddle) }"
-        />
-        <!-- Lock badge -->
-        <Lock class="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 text-muted-foreground/50" />
-      </button>
-
-      <template v-if="publicWaddles.length > 0 && privateWaddles.length > 0">
-        <div class="bg-border flex-shrink-0" :class="horizontal ? 'chat-rail-divider-horizontal' : 'chat-rail-divider-vertical'" />
-      </template>
-
-      <button
-        v-for="waddle in publicWaddles"
-        :key="waddle.id"
-        class="type-control relative w-10 h-10 rounded-lg flex items-center justify-center transition-all duration-200 flex-shrink-0"
-        :class="activeWaddleId === waddle.id
-          ? 'text-primary-foreground shadow-lg'
-          : 'text-rail-foreground hover:text-rail-active hover:scale-105'"
-        :style="activeWaddleId === waddle.id
-          ? { backgroundColor: waddleColor(waddle), boxShadow: waddleGlow(waddle) }
-          : { backgroundColor: 'var(--rail-hover)' }"
-        :title="waddle.name"
-        :aria-label="`Open ${waddle.name}`"
-        :aria-current="activeWaddleId === waddle.id ? 'page' : undefined"
-        type="button"
-        @click="emit('selectWaddle', waddle.id)"
-      >
-        <span class="type-rail-initial">{{ waddleInitial(waddle) }}</span>
-        <span
-          v-if="activeWaddleId === waddle.id && !horizontal"
-          class="chat-rail-indicator-vertical absolute -left-2 top-1/2 -translate-y-1/2 rounded-r-full"
-          :style="{ backgroundColor: waddleColor(waddle) }"
-        />
-        <span
-          v-if="activeWaddleId === waddle.id && horizontal"
+          v-if="activeSpaceId && horizontal"
           class="chat-rail-indicator-horizontal absolute bottom-0 left-1/2 -translate-x-1/2 rounded-t-full"
           :style="{ backgroundColor: waddleColor(waddle) }"
         />
@@ -158,7 +115,7 @@ function waddleGlow(waddle: WaddleSummary): string {
         class="type-meta text-muted-foreground/30 text-center"
         :class="horizontal ? 'flex-1 self-stretch flex items-center justify-center' : 'self-stretch px-2'"
       >
-        No waddles
+        No space
       </div>
     </div>
 
@@ -180,24 +137,6 @@ function waddleGlow(waddle: WaddleSummary): string {
           v-if="hasUnreadDms"
           class="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-primary shadow-[0_0_6px_var(--glow-strong)]"
         />
-      </button>
-      <button
-        class="w-10 h-10 flex items-center justify-center rounded-lg text-rail-foreground hover:bg-rail-hover hover:text-primary transition-all duration-200 hover:scale-105"
-        title="Browse public spaces"
-        aria-label="Browse public spaces"
-        type="button"
-        @click="emit('browsePublicWaddles')"
-      >
-        <Compass class="w-4 h-4" />
-      </button>
-      <button
-        class="w-10 h-10 flex items-center justify-center rounded-lg text-rail-foreground hover:bg-rail-hover hover:text-primary transition-all duration-200 hover:scale-105"
-        title="Create waddle"
-        aria-label="Create waddle"
-        type="button"
-        @click="emit('createWaddle')"
-      >
-        <Plus class="w-4 h-4" />
       </button>
     </div>
 

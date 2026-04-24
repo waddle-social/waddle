@@ -50,8 +50,6 @@ PRAGMA foreign_keys = OFF;
 
 DROP TABLE IF EXISTS auth_identities;
 DROP TABLE IF EXISTS sessions;
-DROP TABLE IF EXISTS waddle_members;
-DROP TABLE IF EXISTS waddles;
 DROP TABLE IF EXISTS permission_tuples;
 DROP TABLE IF EXISTS users;
 DROP TABLE IF EXISTS native_users;
@@ -102,33 +100,6 @@ CREATE TABLE sessions (
 
 CREATE INDEX idx_sessions_user_id ON sessions(user_id);
 CREATE INDEX idx_sessions_expires_at ON sessions(expires_at);
-
-CREATE TABLE waddles (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    description TEXT,
-    owner_id TEXT NOT NULL,
-    icon_url TEXT,
-    is_public INTEGER NOT NULL DEFAULT 1,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    FOREIGN KEY (owner_id) REFERENCES users(id) ON DELETE CASCADE
-);
-
-CREATE INDEX idx_waddles_owner_id ON waddles(owner_id);
-CREATE INDEX idx_waddles_is_public ON waddles(is_public);
-
-CREATE TABLE waddle_members (
-    waddle_id TEXT NOT NULL,
-    user_id TEXT NOT NULL,
-    role TEXT NOT NULL DEFAULT 'member',
-    joined_at TEXT NOT NULL DEFAULT (datetime('now')),
-    PRIMARY KEY (waddle_id, user_id),
-    FOREIGN KEY (waddle_id) REFERENCES waddles(id) ON DELETE CASCADE,
-    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-);
-
-CREATE INDEX idx_waddle_members_user_id ON waddle_members(user_id);
 
 CREATE TABLE permission_tuples (
     id TEXT PRIMARY KEY,
@@ -246,8 +217,6 @@ PRAGMA foreign_keys = ON;
     pub const V0001_AUTH_BROKER_SCHEMA_POSTGRES: &str = r#"
 DROP TABLE IF EXISTS auth_identities CASCADE;
 DROP TABLE IF EXISTS sessions CASCADE;
-DROP TABLE IF EXISTS waddle_members CASCADE;
-DROP TABLE IF EXISTS waddles CASCADE;
 DROP TABLE IF EXISTS permission_tuples CASCADE;
 DROP TABLE IF EXISTS users CASCADE;
 DROP TABLE IF EXISTS native_users CASCADE;
@@ -298,33 +267,6 @@ CREATE TABLE sessions (
 
 CREATE INDEX idx_sessions_user_id ON sessions(user_id);
 CREATE INDEX idx_sessions_expires_at ON sessions(expires_at);
-
-CREATE TABLE waddles (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    description TEXT,
-    owner_id TEXT NOT NULL,
-    icon_url TEXT,
-    is_public INTEGER NOT NULL DEFAULT 1,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    FOREIGN KEY (owner_id) REFERENCES users(id) ON DELETE CASCADE
-);
-
-CREATE INDEX idx_waddles_owner_id ON waddles(owner_id);
-CREATE INDEX idx_waddles_is_public ON waddles(is_public);
-
-CREATE TABLE waddle_members (
-    waddle_id TEXT NOT NULL,
-    user_id TEXT NOT NULL,
-    role TEXT NOT NULL DEFAULT 'member',
-    joined_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP::TEXT,
-    PRIMARY KEY (waddle_id, user_id),
-    FOREIGN KEY (waddle_id) REFERENCES waddles(id) ON DELETE CASCADE,
-    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-);
-
-CREATE INDEX idx_waddle_members_user_id ON waddle_members(user_id);
 
 CREATE TABLE permission_tuples (
     id TEXT PRIMARY KEY,
@@ -612,11 +554,13 @@ impl MigrationRunner {
     }
 
     /// Create a runner for global database migrations
+    #[cfg(test)]
     pub fn global() -> Self {
         Self::single()
     }
 
-    /// Create a runner for per-waddle database migrations
+    /// Create a runner for channel/message schema migrations.
+    #[cfg(test)]
     pub fn waddle() -> Self {
         Self::new(waddle::all())
     }
