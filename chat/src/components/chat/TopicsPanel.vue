@@ -89,8 +89,8 @@ const emit = defineEmits<{
         <button
           v-if="canManageChannels"
           class="chat-icon-button chat-icon-button--sm hover:bg-sidebar-accent"
-          title="Add channel"
-          aria-label="Add channel"
+          title="New MUC"
+          aria-label="New MUC"
           type="button"
           @click="emit('createChannel')"
         >
@@ -115,7 +115,18 @@ const emit = defineEmits<{
         </div>
 
         <div v-else-if="channels.length === 0" class="type-caption text-center py-10 text-sidebar-muted">
-          No channels yet
+          <div class="flex flex-col items-center gap-3 px-4">
+            <span>There are no channels or spaces configured yet.</span>
+            <button
+              v-if="canManageChannels"
+              class="type-control inline-flex h-8 items-center gap-1.5 rounded-md border border-border px-3 text-sidebar-foreground hover:bg-sidebar-accent"
+              type="button"
+              @click="emit('createChannel')"
+            >
+              <Plus class="h-3.5 w-3.5" />
+              New MUC
+            </button>
+          </div>
         </div>
 
         <div v-else class="chat-list-stack">

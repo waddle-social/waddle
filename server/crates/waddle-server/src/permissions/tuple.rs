@@ -21,6 +21,7 @@ use crate::db::{row_value, ValueExt};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ObjectType {
+    Server,
     Space,
     Channel,
     Message,
@@ -31,6 +32,7 @@ pub enum ObjectType {
 impl fmt::Display for ObjectType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            ObjectType::Server => write!(f, "server"),
             ObjectType::Space => write!(f, "space"),
             ObjectType::Channel => write!(f, "channel"),
             ObjectType::Message => write!(f, "message"),
@@ -45,6 +47,7 @@ impl FromStr for ObjectType {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
+            "server" => Ok(ObjectType::Server),
             "space" => Ok(ObjectType::Space),
             "channel" => Ok(ObjectType::Channel),
             "message" => Ok(ObjectType::Message),

@@ -30,6 +30,7 @@ import {
   type MessageReference,
   type TimelineSharedFile,
 } from "@/lib/chat-ui";
+import { mentionMatchesUsername } from "@/lib/mentions";
 import { richMessageToTiptap, tiptapToRichMessage } from "@/lib/rich-message";
 import { applyShikiToCodeBlocks } from "@/lib/shiki";
 import { decryptEncryptedAttachment, encryptedAttachmentKey, hasEncryptedAttachmentMetadata } from "@/lib/xmpp/encrypted-attachments";
@@ -349,9 +350,7 @@ function startReplyInThreadFromMenu() {
 const isMentioned = computed(() => {
   if (props.message.broadcastMention) return true;
   if (!props.currentUser || !props.message.mentions) return false;
-  return props.message.mentions.some(
-    (m) => m === props.currentUser || m.split("@")[0] === props.currentUser,
-  );
+  return props.message.mentions.some((mention) => mentionMatchesUsername(mention, props.currentUser));
 });
 const isForumTopic = computed(() => props.message.forumPostKind === "topic" && !!props.message.forumTitle);
 const isForumReply = computed(() => props.message.forumPostKind === "reply");

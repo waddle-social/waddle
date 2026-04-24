@@ -27,6 +27,8 @@ export function useWaddles(
 
   const isLoadingStructure = ref(false);
   const isSubmitting = ref(false);
+  const canCreateMuc = ref(false);
+  const canCreateSpace = ref(false);
 
   let spaceRequestId = 0;
   let structureRequestId = 0;
@@ -57,6 +59,7 @@ export function useWaddles(
   );
 
   const currentRole = computed(() => {
+    if (canCreateMuc.value || canCreateSpace.value) return "owner";
     if (!session.value || !currentSpace.value) return null;
     return (
       members.value.find((m) => m.jid === session.value!.jid.split("/")[0])?.role ??
@@ -137,17 +140,30 @@ export function useWaddles(
     clearActionError();
 
     try {
-      const discoveredChannels = await xmppClient.value.discoverSpaceChannels();
+      const topology = await xmppClient.value.discoverTopology();
 
       if (requestId !== structureRequestId) {
         return null;
       }
 
-      activeSpaceId.value = "space";
+      canCreateMuc.value = topology.canCreateMuc;
+      canCreateSpace.value = topology.canCreateSpace;
+      const discoveredSpaces = topology.spaces.length > 0
+        ? topology.spaces.map((space) => ({
+            name: space.name,
+            role: topology.canCreateMuc || topology.canCreateSpace ? "owner" : null,
+          }) satisfies SpaceSummary)
+        : [{
+            name: "Waddle",
+            role: topology.canCreateMuc || topology.canCreateSpace ? "owner" : null,
+          } satisfies SpaceSummary];
+      waddles.value = discoveredSpaces;
+      activeSpaceId.value = topology.spaces[0]?.id ?? "deployment";
 
-      const channelList: ChannelSummary[] = discoveredChannels.map((c) => ({
+      const channelList: ChannelSummary[] = topology.rooms.map((c) => ({
         id: c.id,
         name: c.name,
+        jid: c.jid,
         channel_type: c.channelType,
         position: c.position,
       }));
@@ -190,7 +206,7 @@ export function useWaddles(
 
     const canonical: SpaceSummary = {
       name: "Waddle",
-      role: "owner",
+      role: canCreateMuc.value || canCreateSpace.value ? "owner" : null,
     };
     waddles.value = [canonical];
     const nextId = activeSpaceId.value ?? "space";
@@ -236,6 +252,7 @@ export function useWaddles(
           channelType: createChannelForm.value.channel_type as "text" | "forum",
           position: createChannelForm.value.position,
         },
+        "waddle:create-muc",
       );
 
       if (!result.success) {
@@ -283,6 +300,8 @@ export function useWaddles(
     waddles.value = [];
     channels.value = [];
     members.value = [];
+    canCreateMuc.value = false;
+    canCreateSpace.value = false;
     activeSpaceId.value = null;
     activeChannelId.value = null;
   }
@@ -295,6 +314,8 @@ export function useWaddles(
     activeChannelId,
     isLoadingStructure,
     isSubmitting,
+    canCreateMuc,
+    canCreateSpace,
     editWaddleForm,
     createChannelForm,
     editChannelForm,

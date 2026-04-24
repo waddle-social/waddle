@@ -53,6 +53,7 @@ export async function executeCreateChannelCommand(
   xmpp: Agent,
   serverJid: string,
   input: CreateChannelCommandInput,
+  node = "waddle:create-channel",
 ): Promise<CreateChannelCommandResult> {
   try {
     // Step 1: Execute the command to get the data form
@@ -61,7 +62,7 @@ export async function executeCreateChannelCommand(
       to: serverJid,
       command: {
         type: "command",
-        node: "waddle:create-channel",
+        node,
         action: "execute",
       } as AdHocCommand,
     } as IQ);
@@ -81,7 +82,7 @@ export async function executeCreateChannelCommand(
       to: serverJid,
       command: {
         type: "command",
-        node: "waddle:create-channel",
+        node,
         action: "complete",
         sid: executeResponse.sid,
         form: {

@@ -19,11 +19,11 @@ const emit = defineEmits<{
 <template>
   <AppDialog v-model:open="open">
     <div class="chat-dialog-header">
-      <h2 class="type-dialog-title">Create channel</h2>
+      <h2 class="type-dialog-title">Create MUC</h2>
       <button
         class="chat-icon-button hover:bg-muted"
         type="button"
-        aria-label="Close create channel dialog"
+        aria-label="Close create MUC dialog"
         @click="open = false"
       >
         <X class="w-4 h-4 text-muted-foreground" />
@@ -59,7 +59,7 @@ const emit = defineEmits<{
 
       <div class="chat-field-stack">
         <label class="type-section-label text-muted-foreground">
-          Channel type
+          MUC type
         </label>
         <div class="grid grid-cols-2 gap-2">
           <button

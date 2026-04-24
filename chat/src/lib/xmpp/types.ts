@@ -197,8 +197,23 @@ export interface PresenceUpdateEvent {
 export interface DiscoveredChannel {
   id: string;
   name: string;
+  jid?: string;
   channelType: WaddleChannelType;
   position: number;
+  spaceId?: string;
+  standalone?: boolean;
+}
+
+export interface DiscoveredSpace {
+  id: string;
+  name: string;
+}
+
+export interface DiscoveredTopology {
+  spaces: DiscoveredSpace[];
+  rooms: DiscoveredChannel[];
+  canCreateMuc: boolean;
+  canCreateSpace: boolean;
 }
 
 /** Cross-room activity event with optional mention data for notifications. */

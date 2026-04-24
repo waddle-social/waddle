@@ -7,6 +7,7 @@ use crate::db::Database;
 use std::sync::Arc;
 
 use super::spicedb::SpiceDbPermissionBackend;
+use super::schema::SPICEDB_SCHEMA;
 use super::{CheckRequest, PermissionChecker, PermissionSchema, TupleStore};
 use super::{
     CheckResponse, Object, ObjectType, PermissionError, Relation, Subject, SubjectType, Tuple,
@@ -33,6 +34,8 @@ pub enum Permission {
     ManageRoles,
     ManageMembers,
     CreateChannel,
+    CreateSpace,
+    CreateMuc,
     Update,
     View,
     Manage,
@@ -60,6 +63,8 @@ impl Permission {
             Permission::ManageRoles => "manage_roles",
             Permission::ManageMembers => "manage_members",
             Permission::CreateChannel => "create_channel",
+            Permission::CreateSpace => "create_space",
+            Permission::CreateMuc => "create_muc",
             Permission::Update => "update",
             Permission::View => "view",
             Permission::Manage => "manage",
@@ -227,6 +232,28 @@ impl PermissionActor {
         if let PermissionActorBackend::Local { checker, .. } = &self.backend {
             checker.clear_cache().await;
         }
+    }
+
+    async fn ensure_schema(&self) -> Result<(), PermissionError> {
+        match &self.backend {
+            PermissionActorBackend::SpiceDb(backend) => backend.ensure_schema(SPICEDB_SCHEMA).await,
+            PermissionActorBackend::Local { .. } => Ok(()),
+        }
+    }
+}
+
+/// Ensure the external authorization backend has Waddle's built-in schema.
+pub struct EnsureSchema;
+
+impl kameo::message::Message<EnsureSchema> for PermissionActor {
+    type Reply = Result<(), PermissionError>;
+
+    async fn handle(
+        &mut self,
+        _msg: EnsureSchema,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.ensure_schema().await
     }
 }
 

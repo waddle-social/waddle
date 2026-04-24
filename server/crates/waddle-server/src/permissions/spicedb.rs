@@ -26,6 +26,19 @@ impl SpiceDbPermissionBackend {
         Ok(Self { client })
     }
 
+    pub async fn ensure_schema(&self, schema: &str) -> Result<(), PermissionError> {
+        match self.client.read_schema().await {
+            Ok((current, _)) if current.trim() == schema.trim() => Ok(()),
+            Ok(_) | Err(_) => {
+                self.client
+                    .write_schema(schema)
+                    .await
+                    .map_err(map_spicedb_error)?;
+                Ok(())
+            }
+        }
+    }
+
     pub async fn check(
         &self,
         subject: &Subject,

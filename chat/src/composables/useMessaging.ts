@@ -37,6 +37,7 @@ import {
   listQueuedRoomMessages,
   type PersistedQueuedRoomMessage,
 } from "@/lib/outbound-queue-store";
+import { mentionMatchesUsername } from "@/lib/mentions";
 import { useScrollDirection } from "@/composables/useScrollDirection";
 
 export function fromLiveMessage(
@@ -288,9 +289,7 @@ export function useMessaging(
         if (msg.nick !== session.value?.username && isTabHidden) {
           const isMentioned =
             !!msg.broadcastMention ||
-            msg.mentions?.some(
-              (m) => m === session.value?.username || m.split("@")[0] === session.value?.username,
-            );
+            msg.mentions?.some((mention) => mentionMatchesUsername(mention, session.value?.username));
           if (isMentioned) {
             const activity: RoomActivityEvent = {
               roomJid: msg.roomJid,

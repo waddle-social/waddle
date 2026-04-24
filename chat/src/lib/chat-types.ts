@@ -11,6 +11,7 @@ export interface SpaceSummary {
 export interface ChannelSummary {
   id: string;
   name: string;
+  jid?: string;
   description?: string | null;
   channel_type?: string;
   position?: number;

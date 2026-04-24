@@ -8,8 +8,8 @@ mod tuple;
 
 #[allow(unused_imports)]
 pub use actor::{
-    CheckPermission, DeleteTuple, ListRelations, ListSubjects, LookupResources, LookupSubjects,
-    Permission, PermissionActor, WriteTuple,
+    CheckPermission, DeleteTuple, EnsureSchema, ListRelations, ListSubjects, LookupResources,
+    LookupSubjects, Permission, PermissionActor, WriteTuple,
 };
 #[allow(unused_imports)]
 pub use check::{CheckRequest, CheckResponse, PermissionChecker};

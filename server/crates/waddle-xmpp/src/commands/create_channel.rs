@@ -9,6 +9,7 @@ use thiserror::Error;
 use tracing::debug;
 
 pub const NODE_CREATE_CHANNEL: &str = "waddle:create-channel";
+pub const NODE_CREATE_MUC: &str = "waddle:create-muc";
 
 #[derive(Debug)]
 pub struct ChannelMetadata {

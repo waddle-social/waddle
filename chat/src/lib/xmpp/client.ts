@@ -167,6 +167,7 @@ export class BrowserXmppClient {
   private dmReactionHandler: ((event: DmReactionEvent) => void) | null = null;
   private dmDisplayedHandler: ((event: DmDisplayedEvent) => void) | null = null;
   private presenceUpdateHandler: ((event: PresenceUpdateEvent) => void) | null = null;
+  private roomMemberJids: Record<string, string> = {};
   private memberJidHandler: ((nick: string, bareJid: string) => void) | null = null;
   private hatsHandler: ((hats: RoomHats) => void) | null = null;
   private slowModeHandler: ((seconds: number) => void) | null = null;
@@ -383,6 +384,7 @@ export class BrowserXmppClient {
       this.hatsHandler?.({});
       this.roomPresence = {};
       this.presenceHandler?.({});
+      this.roomMemberJids = {};
       this.xmpp = null;
     }
     try { xmpp.disconnect(); } catch { /* ignore stale client */ }
@@ -591,6 +593,7 @@ export class BrowserXmppClient {
     this.hatsHandler?.({});
     this.roomPresence = {};
     this.presenceHandler?.({});
+    this.roomMemberJids = {};
     const xmpp = this.xmpp;
     if (!xmpp) return;
 
@@ -613,6 +616,7 @@ export class BrowserXmppClient {
         this.hatsHandler?.({});
         this.roomPresence = {};
         this.presenceHandler?.({});
+        this.roomMemberJids = {};
       }
       throw error;
     }
@@ -827,6 +831,7 @@ export class BrowserXmppClient {
         const messageId = messaging.sendGroupMessage(this.xmpp, roomJid, entry.body, {
           ...(entry.markup && entry.markup.length > 0 ? { markup: entry.markup } : {}),
           ...(entry.references && entry.references.length > 0 ? { references: entry.references } : {}),
+          mentionJidsByNick: this.roomMemberJids,
           ...(entry.files && entry.files.length > 0 ? { files: entry.files } : {}),
           ...(entry.replyTo ? { replyTo: entry.replyTo } : {}),
           ...(entry.threadId ? { threadId: entry.threadId } : {}),
@@ -902,7 +907,10 @@ export class BrowserXmppClient {
     // button from hanging on connect(15s) + switchRoom(10s→4s) while
     // the user is staring at a spinner.
     if (this.roomIsReady(roomJid) && this.xmpp) {
-      const id = messaging.sendGroupMessage(this.xmpp, roomJid, body, opts);
+      const id = messaging.sendGroupMessage(this.xmpp, roomJid, body, {
+        ...opts,
+        mentionJidsByNick: this.roomMemberJids,
+      });
       this.recordPendingSend(id, "room");
       return { id, state: "sending" };
     }
@@ -1175,6 +1183,14 @@ export class BrowserXmppClient {
     await this.connect();
     if (!this.xmpp) return [];
     return discovery.discoverChannels(this.xmpp, this.session.jid);
+  }
+
+  async discoverTopology(): Promise<import("./types").DiscoveredTopology> {
+    await this.connect();
+    if (!this.xmpp) {
+      return { spaces: [], rooms: [], canCreateMuc: false, canCreateSpace: false };
+    }
+    return discovery.discoverTopology(this.xmpp, this.session.jid);
   }
 
   async listRoomMembers(channelId: string): Promise<MemberSummary[]> {
@@ -1513,6 +1529,7 @@ export class BrowserXmppClient {
         this.hatsHandler?.({});
         this.roomPresence = {};
         this.presenceHandler?.({});
+        this.roomMemberJids = {};
         try {
           await this.performRoomSwitch(roomToRejoin);
         } catch (error) {
@@ -1614,6 +1631,7 @@ export class BrowserXmppClient {
         this.hatsHandler?.({});
         this.roomPresence = {};
         this.presenceHandler?.({});
+        this.roomMemberJids = {};
         this.emitStatus({ state: "offline", detail: err?.message ?? "Disconnected" });
       } else {
         // Unexpected drop — keep xmpp + currentRoom alive for auto-reconnect.
@@ -1684,6 +1702,7 @@ export class BrowserXmppClient {
           this.presenceHandler?.({ ...this.roomPresence });
           const item = (ext(pres).muc as { item?: { jid?: string } } | undefined)?.item;
           if (item?.jid) {
+            this.roomMemberJids[nick] = barePeerJid(item.jid);
             this.memberJidHandler?.(nick, barePeerJid(item.jid));
           }
         }
@@ -1702,6 +1721,7 @@ export class BrowserXmppClient {
           this.hatsHandler?.({ ...this.roomHats });
           this.roomPresence[nick] = "offline";
           this.presenceHandler?.({ ...this.roomPresence });
+          delete this.roomMemberJids[nick];
           this.lastSeenHandler?.(nick, Date.now());
         }
       } catch (error) {

@@ -6,6 +6,7 @@ import type { WaddleThreadCreate, WaddleThreadReply } from "./extensions/forums"
 import type { WaddleEncryptedFile } from "./extensions/encrypted-file";
 import { shiftMarkupSpans, type WaddleMarkupSpan } from "./extensions/markup";
 import type { ChatStateType } from "./types";
+import { isBroadcastMention, resolveMentionUri } from "@/lib/mentions";
 import { codePointLength } from "@/lib/text-offsets";
 
 export interface OutboundFileAttachment {
@@ -133,6 +134,32 @@ function toStanzaReferences(references: readonly MessageReference[]): Array<Reco
   }));
 }
 
+interface MentionToken {
+  token: string;
+  begin: number;
+  end: number;
+}
+
+const INLINE_MENTION_RE = /(^|[\s])@([^\s<.,;:!?'")\]}&]+?)(?=[\s<.,;:!?'")\]}&]|$)/g;
+
+function extractMentionTokens(text: string, offset: number): MentionToken[] {
+  const tokens: MentionToken[] = [];
+  let match: RegExpExecArray | null;
+
+  while ((match = INLINE_MENTION_RE.exec(text)) !== null) {
+    const leading = match[1] ?? "";
+    const token = match[2] ?? "";
+    if (!token) continue;
+
+    const mentionStartCodeUnits = match.index + leading.length;
+    const begin = offset + codePointLength(text.slice(0, mentionStartCodeUnits));
+    const end = begin + codePointLength(`@${token}`);
+    tokens.push({ token, begin, end });
+  }
+
+  return tokens;
+}
+
 export function sendCorrection(
   xmpp: Agent,
   roomJid: string,
@@ -143,6 +170,24 @@ export function sendCorrection(
 ): string | null {
   if (!body.trim()) return null;
   const msgId = crypto.randomUUID();
+  const mentionTokens = extractMentionTokens(body, 0);
+  const stanzaReferences: MessageReference[] = references ? [...references] : [];
+  for (const mention of mentionTokens) {
+    if (isBroadcastMention(mention.token)) continue;
+    stanzaReferences.push({
+      type: "mention",
+      begin: mention.begin,
+      end: mention.end,
+      uri: resolveMentionUri(mention.token),
+    });
+  }
+  const explicitMentions: Array<{ mentions: string; active?: boolean }> = [];
+  if (mentionTokens.some((mention) => mention.token.toLowerCase() === "everyone")) {
+    explicitMentions.push({ mentions: "urn:xmpp:mentions:0#channel" });
+  }
+  if (mentionTokens.some((mention) => mention.token.toLowerCase() === "here")) {
+    explicitMentions.push({ mentions: "urn:xmpp:mentions:0#channel", active: true });
+  }
   const msgData: Record<string, unknown> = {
     id: msgId,
     to: roomJid,
@@ -154,9 +199,10 @@ export function sendCorrection(
   if (markup && markup.length > 0) {
     msgData.markup = { spans: toStanzaSpans(markup) };
   }
-  if (references && references.length > 0) {
-    msgData.references = toStanzaReferences(references);
+  if (stanzaReferences.length > 0) {
+    msgData.references = toStanzaReferences(stanzaReferences);
   }
+  if (explicitMentions.length > 0) msgData.explicitMentions = explicitMentions;
   xmpp.sendMessage(msgData as Parameters<Agent["sendMessage"]>[0]);
   return msgId;
 }
@@ -164,6 +210,7 @@ export function sendCorrection(
 export interface SendGroupMessageOptions {
   markup?: MarkupSpan[];
   references?: MessageReference[];
+  mentionJidsByNick?: Readonly<Record<string, string>>;
   files?: OutboundFileAttachment[];
   replyTo?: ReplyTarget;
   threadId?: string;
@@ -191,7 +238,18 @@ export function sendGroupMessage(
   body: string,
   opts: SendGroupMessageOptions = {},
 ): string | null {
-  const { markup, references: richReferences, files, replyTo, threadId, parentThreadId, id, threadCreate, threadReply } = opts;
+  const {
+    markup,
+    references: richReferences,
+    mentionJidsByNick,
+    files,
+    replyTo,
+    threadId,
+    parentThreadId,
+    id,
+    threadCreate,
+    threadReply,
+  } = opts;
   const text = body;
   const hasText = text.trim().length > 0;
   const hasFiles = !!files && files.length > 0;
@@ -211,25 +269,24 @@ export function sendGroupMessage(
 
   // XEP-0372: Build reference objects for @mentions (only scan user text)
   const references: MessageReference[] = rebasedRichReferences ? [...rebasedRichReferences] : [];
-  if (hasText) {
-    const mentionRe = /(?:^|\s)@(\S+)/g;
-    let match: RegExpExecArray | null;
-    while ((match = mentionRe.exec(text)) !== null) {
-      const nick = match[1]!;
-      const mentionStartCodeUnits = match.index + (match[0].length - nick.length - 1);
-      const begin = prefixLength + codePointLength(text.slice(0, mentionStartCodeUnits));
-      const end = begin + codePointLength(`@${nick}`);
-      references.push({ type: "mention", begin, end, uri: `xmpp:${nick}` });
-    }
+  const mentionTokens = hasText ? extractMentionTokens(text, prefixLength) : [];
+  for (const mention of mentionTokens) {
+    if (isBroadcastMention(mention.token)) continue;
+    references.push({
+      type: "mention",
+      begin: mention.begin,
+      end: mention.end,
+      uri: resolveMentionUri(mention.token, mentionJidsByNick),
+    });
   }
 
   // XEP-0513: Explicit channel mentions. @here is represented as a channel
   // mention with the XEP-0513 active modifier.
   const explicitMentions: Array<{ mentions: string; active?: boolean }> = [];
-  if (hasText && /(?:^|\s)@everyone(?:\s|$)/i.test(text)) {
+  if (mentionTokens.some((mention) => mention.token.toLowerCase() === "everyone")) {
     explicitMentions.push({ mentions: "urn:xmpp:mentions:0#channel" });
   }
-  if (hasText && /(?:^|\s)@here(?:\s|$)/i.test(text)) {
+  if (mentionTokens.some((mention) => mention.token.toLowerCase() === "here")) {
     explicitMentions.push({ mentions: "urn:xmpp:mentions:0#channel", active: true });
   }
 

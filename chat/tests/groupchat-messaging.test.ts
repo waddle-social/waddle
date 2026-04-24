@@ -266,4 +266,44 @@ describe("groupchat messaging", () => {
     );
   });
 
+  test("resolves room mentions to canonical bare JIDs and trims trailing punctuation", () => {
+    const xmpp = makeAgent();
+
+    sendGroupMessage(xmpp, "general@muc.waddle.social", "Hey @Bob, talk to @rawkode.", {
+      mentionJidsByNick: {
+        bob: "bob@localhost",
+        rawkode: "rawkode@waddle.social",
+      },
+    });
+
+    const call = (xmpp.sendMessage as ReturnType<typeof mock>).mock.calls[0][0] as Record<string, unknown>;
+    expect(call.references).toEqual([
+      {
+        type: "mention",
+        uri: "xmpp:bob@localhost",
+        begin: String("Hey ".length),
+        end: String("Hey @Bob".length),
+      },
+      {
+        type: "mention",
+        uri: "xmpp:rawkode@waddle.social",
+        begin: String("Hey @Bob, talk to ".length),
+        end: String("Hey @Bob, talk to @rawkode".length),
+      },
+    ]);
+  });
+
+  test("uses explicit channel mentions without synthesizing XEP-0372 references for broadcasts", () => {
+    const xmpp = makeAgent();
+
+    sendGroupMessage(xmpp, "general@muc.waddle.social", "Heads up @everyone and @here");
+
+    const call = (xmpp.sendMessage as ReturnType<typeof mock>).mock.calls[0][0] as Record<string, unknown>;
+    expect(call.references).toBeUndefined();
+    expect(call.explicitMentions).toEqual([
+      { mentions: "urn:xmpp:mentions:0#channel" },
+      { mentions: "urn:xmpp:mentions:0#channel", active: true },
+    ]);
+  });
+
 });

@@ -141,12 +141,133 @@ impl Default for PermissionSchema {
     /// Create the default space permission schema
     fn default() -> Self {
         Self::new()
+            .with_type(ObjectType::Server, server_schema())
             .with_type(ObjectType::Space, space_schema())
             .with_type(ObjectType::Channel, channel_schema())
             .with_type(ObjectType::Message, message_schema())
             .with_type(ObjectType::Dm, dm_schema())
             .with_type(ObjectType::Role, role_schema())
     }
+}
+
+pub const SPICEDB_SCHEMA: &str = r#"
+definition user {}
+
+definition server {
+  relation owner: user
+  relation admin: user
+  relation member: user
+
+  permission owner = owner
+  permission admin = admin + owner
+  permission member = member + admin
+  permission create_space = admin
+  permission create_muc = admin
+}
+
+definition space {
+  relation owner: user
+  relation admin: user
+  relation moderator: user
+  relation member: user
+
+  permission owner = owner
+  permission admin = admin + owner
+  permission moderator = moderator + admin
+  permission member = member + moderator
+  permission delete = owner
+  permission manage_settings = admin
+  permission manage_roles = admin
+  permission manage_members = moderator
+  permission create_channel = admin
+  permission view = member
+  permission update = admin
+}
+
+definition channel {
+  relation parent: space
+  relation owner: user
+  relation admin: user
+  relation member: user
+  relation outcast: user
+  relation manager: user
+  relation moderator: user
+  relation writer: user
+  relation viewer: user
+
+  permission delete = parent->admin
+  permission manage = owner + admin + manager + parent->admin
+  permission moderate = owner + admin + moderator + manager + parent->moderator + parent->admin
+  permission send_message = owner + admin + member + writer + moderator + manager + parent->view
+  permission read = owner + admin + member + viewer + writer + moderator + manager + parent->view
+  permission view = owner + admin + member + viewer + writer + moderator + manager + parent->view
+}
+
+definition message {
+  relation channel: channel
+  relation author: user
+
+  permission read = channel->read
+  permission edit = author
+  permission delete = author + channel->moderate
+  permission react = channel->read
+}
+
+definition dm {
+  relation participant: user
+
+  permission read = participant
+  permission send = participant
+  permission add_participant = participant
+  permission leave = participant
+}
+
+definition role {
+  relation parent: space
+  relation assignee: user
+  relation manager: user
+
+  permission assign = manager + parent->admin
+  permission manage = manager + parent->admin
+}
+"#;
+
+/// Schema for deployment/server objects.
+fn server_schema() -> ObjectTypeSchema {
+    ObjectTypeSchema::new()
+        .with_relation("owner")
+        .with_relation("admin")
+        .with_relation("member")
+        .with_permission("owner", ComputedPermission::direct("owner"))
+        .with_permission(
+            "admin",
+            ComputedPermission::union(vec![
+                ComputedPermission::direct("admin"),
+                ComputedPermission::direct("owner"),
+            ]),
+        )
+        .with_permission(
+            "member",
+            ComputedPermission::union(vec![
+                ComputedPermission::direct("member"),
+                ComputedPermission::direct("admin"),
+                ComputedPermission::direct("owner"),
+            ]),
+        )
+        .with_permission(
+            "create_space",
+            ComputedPermission::union(vec![
+                ComputedPermission::direct("admin"),
+                ComputedPermission::direct("owner"),
+            ]),
+        )
+        .with_permission(
+            "create_muc",
+            ComputedPermission::union(vec![
+                ComputedPermission::direct("admin"),
+                ComputedPermission::direct("owner"),
+            ]),
+        )
 }
 
 /// Schema for Space objects

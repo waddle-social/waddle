@@ -22,7 +22,9 @@ use crate::vcard::VCardStore;
 use kameo::actor::ActorRef;
 use serde::Serialize;
 
-use crate::server::bootstrap_membership::{provision_user_membership, BootstrapMembershipConfig};
+use crate::server::bootstrap_membership::{
+    provision_user_membership, BootstrapMembershipConfig, DEPLOYMENT_SERVER_ID,
+};
 
 #[derive(Debug, Serialize)]
 pub(crate) struct XmppChannelRecord {
@@ -81,6 +83,50 @@ fn parse_channel_record(row: &crate::db::actor::RowValues) -> Result<XmppChannel
         created_at: db_string(row, 6, "created_at")?,
         updated_at: db_optional_string(row, 7, "updated_at")?,
     })
+}
+
+async fn can_create_space_channel(
+    permission_actor: &ActorRef<PermissionActor>,
+    user_id: &str,
+) -> bool {
+    let subject = Subject::user(user_id);
+    let object = Object::new(ObjectType::Server, DEPLOYMENT_SERVER_ID);
+
+    match permission_actor
+        .ask(CheckPermission {
+            subject: subject.clone(),
+            permission: Permission::CreateMuc,
+            object: object.clone(),
+        })
+        .await
+    {
+        Ok(response) if response.allowed => return true,
+        Ok(_) => {}
+        Err(error) => {
+            warn!(
+                user_id = %user_id,
+                error = %error,
+                "Create-MUC permission evaluation failed; falling back to direct deployment relations"
+            );
+        }
+    }
+
+    match permission_actor
+        .ask(ListRelations { subject, object })
+        .await
+    {
+        Ok(relations) => relations
+            .iter()
+            .any(|relation| matches!(relation.name.as_str(), "owner" | "admin")),
+        Err(error) => {
+            warn!(
+                user_id = %user_id,
+                error = %error,
+                "Failed to list direct deployment relations for create-MUC fallback"
+            );
+            false
+        }
+    }
 }
 
 pub(crate) async fn get_xmpp_channel(
@@ -1589,22 +1635,8 @@ impl waddle_xmpp::commands::CreateChannelDeps for XmppAppState {
     {
         use tracing::error;
 
-        // Check permission
         let space_id = "space";
-        let subject = Subject::user(user_id);
-        let waddle_object = Object::new(ObjectType::Space, space_id);
-
-        let can_create = self
-            .permission_actor
-            .ask(CheckPermission {
-                subject,
-                permission: Permission::CreateChannel,
-                object: waddle_object,
-            })
-            .await
-            .ok()
-            .map(|response| response.allowed)
-            .unwrap_or(false);
+        let can_create = can_create_space_channel(&self.permission_actor, user_id).await;
 
         if !can_create {
             return Err(waddle_xmpp::commands::CreateChannelError::PermissionDenied);

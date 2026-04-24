@@ -33,6 +33,7 @@ import MemberManagement from "@/components/modals/MemberManagement.vue";
 import ConfirmDialog from "@/components/ui/ConfirmDialog.vue";
 import type { MemberSummary } from "@/lib/chat-types";
 import type { MarkupSpan, MessageReference } from "@/lib/chat-ui";
+import { mentionMatchesUsername } from "@/lib/mentions";
 
 const props = defineProps<{
   tenorApiKey?: string;
@@ -208,8 +209,8 @@ watch(() => messaging.lastMentionActivity.value, (event) => {
 
   const channelName = resolveChannelNameFromJid(event.roomJid) ?? "unknown";
   const isBroadcast = !!event.broadcastMention;
-  const isPersonalMention = event.mentions?.some(
-    (m) => m === connectionStore.session?.username || m.split("@")[0] === connectionStore.session?.username,
+  const isPersonalMention = event.mentions?.some((mention) =>
+    mentionMatchesUsername(mention, connectionStore.session?.username)
   );
 
   if (isBroadcast || isPersonalMention) {

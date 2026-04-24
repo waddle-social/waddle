@@ -5,15 +5,17 @@ use tracing::{debug, info, warn};
 use crate::db::actor::{DbActor, DbQuery};
 use crate::db::{row_value, ValueExt};
 use crate::permissions::{
-    CheckPermission, DeleteTuple, Object, ObjectType, Permission, PermissionActor, PermissionError,
-    Relation, Subject, Tuple, WriteTuple,
+    CheckPermission, Object, ObjectType, Permission, PermissionActor, PermissionError, Relation,
+    Subject, Tuple, WriteTuple,
 };
 
+pub const DEPLOYMENT_SERVER_ID: &str = "deployment";
 const DEFAULT_SPACE_ID: &str = "space";
 const OWNER_ENV: &str = "WADDLE_SERVER_OWNER_LOCALPARTS";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BootstrapMembershipConfig {
+    pub server_id: String,
     pub space_id: String,
     owner_localparts: Vec<String>,
 }
@@ -21,6 +23,7 @@ pub struct BootstrapMembershipConfig {
 impl BootstrapMembershipConfig {
     pub fn from_env() -> Self {
         Self {
+            server_id: DEPLOYMENT_SERVER_ID.to_string(),
             space_id: DEFAULT_SPACE_ID.to_string(),
             owner_localparts: parse_owner_localparts(
                 std::env::var(OWNER_ENV).unwrap_or_default().as_str(),
@@ -31,6 +34,7 @@ impl BootstrapMembershipConfig {
     #[cfg(test)]
     pub fn new(owner_localparts: Vec<String>) -> Self {
         Self {
+            server_id: DEPLOYMENT_SERVER_ID.to_string(),
             space_id: DEFAULT_SPACE_ID.to_string(),
             owner_localparts: owner_localparts
                 .into_iter()
@@ -85,27 +89,28 @@ pub async fn provision_user_membership(
     xmpp_localpart: &str,
 ) -> Result<(), String> {
     let subject = Subject::user(user_id);
-    let object = Object::new(ObjectType::Space, config.space_id.as_str());
-    let desired_relation = if config.is_owner(xmpp_localpart) {
-        "owner"
-    } else {
-        "member"
-    };
+    if config.is_owner(xmpp_localpart) {
+        let object = Object::new(ObjectType::Server, config.server_id.as_str());
+        let tuple = Tuple::new(object, Relation::new("owner"), subject);
+        write_tuple_if_absent(permission_actor, tuple).await?;
 
-    for relation in ["owner", "admin", "moderator", "member"] {
-        if relation == desired_relation {
-            continue;
-        }
-        delete_tuple_if_present(permission_actor, &object, relation, &subject).await?;
+        debug!(
+            user_id = %user_id,
+            xmpp_localpart = %xmpp_localpart,
+            relation = "owner",
+            "Provisioned deployment owner membership"
+        );
+        return Ok(());
     }
 
-    let tuple = Tuple::new(object, Relation::new(desired_relation), subject);
+    let object = Object::new(ObjectType::Server, config.server_id.as_str());
+    let tuple = Tuple::new(object, Relation::new("member"), subject);
     write_tuple_if_absent(permission_actor, tuple).await?;
 
     debug!(
         user_id = %user_id,
         xmpp_localpart = %xmpp_localpart,
-        relation = desired_relation,
+        relation = "member",
         "Provisioned bootstrap membership"
     );
     Ok(())
@@ -122,11 +127,10 @@ pub async fn reconcile_user_membership(
     }
 
     let subject = Subject::user(user_id);
-    let object = Object::new(ObjectType::Space, config.space_id.as_str());
+    let object = Object::new(ObjectType::Server, config.server_id.as_str());
     for permission in [
         Permission::Owner,
         Permission::Admin,
-        Permission::Moderator,
         Permission::Member,
     ] {
         let response = permission_actor
@@ -143,31 +147,6 @@ pub async fn reconcile_user_membership(
     }
 
     provision_user_membership(permission_actor, config, user_id, xmpp_localpart).await
-}
-
-async fn delete_tuple_if_present(
-    permission_actor: &ActorRef<PermissionActor>,
-    object: &Object,
-    relation: &str,
-    subject: &Subject,
-) -> Result<(), String> {
-    let tuple = Tuple::new(object.clone(), Relation::new(relation), subject.clone());
-    match permission_actor.ask(DeleteTuple { tuple }).await {
-        Ok(()) => Ok(()),
-        Err(SendError::ActorNotRunning(_)) => {
-            Err("permission actor is not running while deleting membership tuple".to_string())
-        }
-        Err(SendError::HandlerError(PermissionError::TupleNotFound)) => Ok(()),
-        Err(SendError::HandlerError(err)) => {
-            Err(format!("failed deleting membership tuple: {err}"))
-        }
-        Err(SendError::Timeout(_)) => {
-            Err("timed out deleting membership tuple through permission actor".to_string())
-        }
-        Err(err) => Err(format!(
-            "permission actor failed deleting membership tuple: {err}"
-        )),
-    }
 }
 
 async fn write_tuple_if_absent(
@@ -286,7 +265,7 @@ mod tests {
             .ask(CheckPermission {
                 subject: Subject::user("user-owner"),
                 permission: Permission::Owner,
-                object: Object::new(ObjectType::Space, "space"),
+                object: Object::new(ObjectType::Server, DEPLOYMENT_SERVER_ID),
             })
             .await
             .expect("owner check");
@@ -294,7 +273,7 @@ mod tests {
             .ask(CheckPermission {
                 subject: Subject::user("user-member"),
                 permission: Permission::Member,
-                object: Object::new(ObjectType::Space, "space"),
+                object: Object::new(ObjectType::Server, DEPLOYMENT_SERVER_ID),
             })
             .await
             .expect("member check");

@@ -445,6 +445,10 @@ pub async fn start_with_config(
         "Permission backend configured"
     );
     let permission_actor = kameo::spawn(permission_actor_impl);
+    permission_actor
+        .ask(crate::permissions::EnsureSchema)
+        .await
+        .map_err(|error| anyhow::anyhow!("Failed to ensure permission schema: {}", error))?;
     bootstrap_membership::reconcile_existing_accounts_or_warn(
         db_pool.global_actor(),
         &permission_actor,
@@ -872,7 +876,7 @@ async fn create_router(
 
     let websocket_command_registry = Arc::new(waddle_xmpp::commands::CommandRegistry::new());
     {
-        use waddle_xmpp::commands::{handle_create_channel, NODE_CREATE_CHANNEL};
+        use waddle_xmpp::commands::{handle_create_channel, NODE_CREATE_CHANNEL, NODE_CREATE_MUC};
 
         let app_state_for_command = Arc::new(
             XmppAppState::new(
@@ -884,13 +888,21 @@ async fn create_router(
             )
             .with_db_pool(Arc::clone(&state.db_pool)),
         );
+        let app_state_for_channel_command = Arc::clone(&app_state_for_command);
+        let app_state_for_muc_command = Arc::clone(&app_state_for_command);
         websocket_command_registry
             .register(NODE_CREATE_CHANNEL, "Create Channel", move |ctx| {
-                let deps = Arc::clone(&app_state_for_command);
+                let deps = Arc::clone(&app_state_for_channel_command);
                 handle_create_channel(deps, ctx)
             })
             .await;
-        info!("Registered create-channel command for WebSocket");
+        websocket_command_registry
+            .register(NODE_CREATE_MUC, "Create MUC", move |ctx| {
+                let deps = Arc::clone(&app_state_for_muc_command);
+                handle_create_channel(deps, ctx)
+            })
+            .await;
+        info!("Registered create-channel and create-muc commands for WebSocket");
     }
 
     // Build the sans-I/O stanza dispatcher with the handlers migrated so far.
