@@ -8,32 +8,35 @@
 mod common;
 
 use common::{
-    establish_bound_session, init_test_env, join_muc_room, RawXmppClient, TestServer,
+    establish_bound_session, init_test_env, start_server_with_channels, RawXmppClient,
     DEFAULT_TIMEOUT,
 };
 
 #[tokio::test]
 async fn xep0184_receipt_request_forwarded_in_muc() {
     init_test_env();
-    let server = TestServer::start().await;
+    let server = start_server_with_channels(&["receipts"]).await;
 
-    // Alice joins room
+    // Alice joins via auto-join
     let mut alice = RawXmppClient::connect(server.addr).await.expect("connect");
     establish_bound_session(&mut alice, &server, "alice", "desktop")
         .await
         .expect("bind alice");
-    join_muc_room(&mut alice, "receipts@muc.localhost", "Alice")
-        .await
-        .expect("alice join");
+    let _ = alice.read_until("</presence>", DEFAULT_TIMEOUT).await;
+    alice.clear();
 
-    // Bob joins room
+    // Bob joins via auto-join
     let mut bob = RawXmppClient::connect(server.addr).await.expect("connect");
     establish_bound_session(&mut bob, &server, "bob", "mobile")
         .await
         .expect("bind bob");
-    join_muc_room(&mut bob, "receipts@muc.localhost", "Bob")
-        .await
-        .expect("bob join");
+    let _ = bob.read_until("</presence>", DEFAULT_TIMEOUT).await;
+    bob.clear();
+
+    // Drain cross-join notifications
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    alice.clear();
+    bob.clear();
 
     // Alice sends message with receipt request
     alice
@@ -62,25 +65,26 @@ async fn xep0184_receipt_request_forwarded_in_muc() {
 #[tokio::test]
 async fn xep0184_receipt_received_delivered_to_sender() {
     init_test_env();
-    let server = TestServer::start().await;
+    let server = start_server_with_channels(&["rcpt2"]).await;
 
     let mut alice = RawXmppClient::connect(server.addr).await.expect("connect");
     establish_bound_session(&mut alice, &server, "alice", "desktop")
         .await
         .expect("bind alice");
+    let _ = alice.read_until("</presence>", DEFAULT_TIMEOUT).await;
+    alice.clear();
 
     let mut bob = RawXmppClient::connect(server.addr).await.expect("connect");
     establish_bound_session(&mut bob, &server, "bob", "mobile")
         .await
         .expect("bind bob");
+    let _ = bob.read_until("</presence>", DEFAULT_TIMEOUT).await;
+    bob.clear();
 
-    // Join same MUC
-    join_muc_room(&mut alice, "rcpt2@muc.localhost", "Alice")
-        .await
-        .expect("alice join");
-    join_muc_room(&mut bob, "rcpt2@muc.localhost", "Bob")
-        .await
-        .expect("bob join");
+    // Drain cross-join notifications
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    alice.clear();
+    bob.clear();
 
     // Bob sends receipt acknowledgment as groupchat
     bob.send(

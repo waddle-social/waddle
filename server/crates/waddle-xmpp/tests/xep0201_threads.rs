@@ -7,30 +7,33 @@ mod common;
 use std::time::{Duration, Instant};
 
 use common::{
-    disco_info_query, establish_bound_session, init_test_env, join_muc_room, RawXmppClient,
-    TestServer, DEFAULT_TIMEOUT,
+    disco_info_query, establish_bound_session, init_test_env, start_server_with_channels,
+    RawXmppClient, TestServer, DEFAULT_TIMEOUT,
 };
 
 #[tokio::test]
 async fn xep0201_thread_broadcast_in_muc() {
     init_test_env();
-    let server = TestServer::start().await;
+    let server = start_server_with_channels(&["thread"]).await;
 
     let mut alice = RawXmppClient::connect(server.addr).await.expect("connect");
     establish_bound_session(&mut alice, &server, "alice", "desktop")
         .await
         .expect("bind alice");
-    join_muc_room(&mut alice, "thread@muc.localhost", "Alice")
-        .await
-        .expect("alice join");
+    let _ = alice.read_until("</presence>", DEFAULT_TIMEOUT).await;
+    alice.clear();
 
     let mut bob = RawXmppClient::connect(server.addr).await.expect("connect");
     establish_bound_session(&mut bob, &server, "bob", "mobile")
         .await
         .expect("bind bob");
-    join_muc_room(&mut bob, "thread@muc.localhost", "Bob")
-        .await
-        .expect("bob join");
+    let _ = bob.read_until("</presence>", DEFAULT_TIMEOUT).await;
+    bob.clear();
+
+    // Drain cross-join notifications
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    alice.clear();
+    bob.clear();
 
     bob.send(
         "<message type='groupchat' to='thread@muc.localhost' id='thread-msg-1' xmlns='jabber:client'>\
@@ -61,23 +64,26 @@ async fn xep0201_thread_broadcast_in_muc() {
 #[tokio::test]
 async fn xep0201_thread_parent_round_trip_in_muc() {
     init_test_env();
-    let server = TestServer::start().await;
+    let server = start_server_with_channels(&["thread-parent"]).await;
 
     let mut alice = RawXmppClient::connect(server.addr).await.expect("connect");
     establish_bound_session(&mut alice, &server, "alice", "desktop")
         .await
         .expect("bind alice");
-    join_muc_room(&mut alice, "thread-parent@muc.localhost", "Alice")
-        .await
-        .expect("alice join");
+    let _ = alice.read_until("</presence>", DEFAULT_TIMEOUT).await;
+    alice.clear();
 
     let mut bob = RawXmppClient::connect(server.addr).await.expect("connect");
     establish_bound_session(&mut bob, &server, "bob", "mobile")
         .await
         .expect("bind bob");
-    join_muc_room(&mut bob, "thread-parent@muc.localhost", "Bob")
-        .await
-        .expect("bob join");
+    let _ = bob.read_until("</presence>", DEFAULT_TIMEOUT).await;
+    bob.clear();
+
+    // Drain cross-join notifications
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    alice.clear();
+    bob.clear();
 
     bob.send(
         "<message type='groupchat' to='thread-parent@muc.localhost' id='thread-child-1' xmlns='jabber:client'>\
@@ -109,23 +115,26 @@ async fn xep0201_thread_parent_round_trip_in_muc() {
 #[tokio::test]
 async fn xep0201_thread_survives_mam_query() {
     init_test_env();
-    let server = TestServer::start().await;
+    let server = start_server_with_channels(&["thread-mam"]).await;
 
     let mut alice = RawXmppClient::connect(server.addr).await.expect("connect");
     establish_bound_session(&mut alice, &server, "alice", "desktop")
         .await
         .expect("bind alice");
-    join_muc_room(&mut alice, "thread-mam@muc.localhost", "Alice")
-        .await
-        .expect("alice join");
+    let _ = alice.read_until("</presence>", DEFAULT_TIMEOUT).await;
+    alice.clear();
 
     let mut bob = RawXmppClient::connect(server.addr).await.expect("connect");
     establish_bound_session(&mut bob, &server, "bob", "mobile")
         .await
         .expect("bind bob");
-    join_muc_room(&mut bob, "thread-mam@muc.localhost", "Bob")
-        .await
-        .expect("bob join");
+    let _ = bob.read_until("</presence>", DEFAULT_TIMEOUT).await;
+    bob.clear();
+
+    // Drain cross-join notifications
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    alice.clear();
+    bob.clear();
 
     bob.send(
         "<message type='groupchat' to='thread-mam@muc.localhost' id='thread-msg-1' xmlns='jabber:client'>\
@@ -187,23 +196,26 @@ async fn xep0201_thread_survives_mam_query() {
 #[tokio::test]
 async fn xep0201_thread_parent_survives_muc_history_replay() {
     init_test_env();
-    let server = TestServer::start().await;
+    let server = start_server_with_channels(&["thread-history"]).await;
 
     let mut alice = RawXmppClient::connect(server.addr).await.expect("connect");
     establish_bound_session(&mut alice, &server, "alice", "desktop")
         .await
         .expect("bind alice");
-    join_muc_room(&mut alice, "thread-history@muc.localhost", "Alice")
-        .await
-        .expect("alice join");
+    let _ = alice.read_until("</presence>", DEFAULT_TIMEOUT).await;
+    alice.clear();
 
     let mut bob = RawXmppClient::connect(server.addr).await.expect("connect");
     establish_bound_session(&mut bob, &server, "bob", "mobile")
         .await
         .expect("bind bob");
-    join_muc_room(&mut bob, "thread-history@muc.localhost", "Bob")
-        .await
-        .expect("bob join");
+    let _ = bob.read_until("</presence>", DEFAULT_TIMEOUT).await;
+    bob.clear();
+
+    // Drain cross-join notifications
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    alice.clear();
+    bob.clear();
 
     bob.send(
         "<message type='groupchat' to='thread-history@muc.localhost' id='thread-history-1' xmlns='jabber:client'>\
@@ -225,16 +237,21 @@ async fn xep0201_thread_parent_survives_muc_history_replay() {
     establish_bound_session(&mut carol, &server, "carol", "tablet")
         .await
         .expect("bind carol");
+    // Drain auto-join fully (maxstanzas=0): read until 110 self-presence then clear
+    let _ = carol.read_until("110", DEFAULT_TIMEOUT).await;
+    carol.clear();
+
+    // Explicitly rejoin with history to trigger history replay (same nick as auto-join)
     carol
         .send(
-            "<presence to='thread-history@muc.localhost/Carol' xmlns='jabber:client'>\
+            "<presence to='thread-history@muc.localhost/carol' xmlns='jabber:client'>\
                 <x xmlns='http://jabber.org/protocol/muc'>\
                     <history maxstanzas='10'/>\
                 </x>\
             </presence>",
         )
         .await
-        .expect("carol join with history");
+        .expect("carol rejoin with history");
 
     let history_response = carol
         .read_until("110", DEFAULT_TIMEOUT)
@@ -288,15 +305,14 @@ async fn xep0201_thread_feature_advertised_in_server_disco() {
 #[tokio::test]
 async fn xep0201_thread_feature_advertised_in_muc_disco() {
     init_test_env();
-    let server = TestServer::start().await;
+    let server = start_server_with_channels(&["thread-disco"]).await;
 
     let mut alice = RawXmppClient::connect(server.addr).await.expect("connect");
     establish_bound_session(&mut alice, &server, "alice", "desktop")
         .await
         .expect("bind alice");
-    join_muc_room(&mut alice, "thread-disco@muc.localhost", "Alice")
-        .await
-        .expect("alice join");
+    let _ = alice.read_until("</presence>", DEFAULT_TIMEOUT).await;
+    alice.clear();
 
     let response = disco_info_query(
         &mut alice,
