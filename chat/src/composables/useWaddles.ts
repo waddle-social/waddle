@@ -2,7 +2,7 @@ import { ref, computed, watch, type Ref } from "vue";
 import type { SpaceSummary, ChannelSummary, MemberSummary } from "@/lib/chat-types";
 import type { WaddleSession } from "@/lib/server-auth";
 import type { BrowserXmppClient } from "@/lib/xmpp-client";
-import type { CommunityFormData, CreateFormData, ChannelEditFormData } from "@/lib/chat-ui";
+import type { CommunityFormData, CreateFormData, ChannelEditFormData, CreateChannelResult } from "@/lib/chat-ui";
 import { defaultCreateForm } from "@/lib/chat-ui";
 import {
   createMucRoom,
@@ -14,6 +14,11 @@ import { jidDomain } from "@/lib/xmpp/jid";
 
 interface LoadSpaceOptions {
   loadStructure?: boolean;
+}
+
+interface LoadStructureOptions {
+  /** When true, skip auto-selection of any channel and set activeChannelId to null. */
+  noChannelSelect?: boolean;
 }
 
 export function useWaddles(
@@ -129,7 +134,7 @@ export function useWaddles(
     createChannelForm.value = defaultCreateForm();
   }
 
-  async function loadStructure(preferredChannelId?: string | null): Promise<string | null> {
+  async function loadStructure(preferredChannelId?: string | null, opts?: LoadStructureOptions): Promise<string | null> {
     if (!xmppClient.value) return null;
 
     const requestId = ++structureRequestId;
@@ -167,6 +172,12 @@ export function useWaddles(
 
       channels.value = channelList;
       members.value = [];
+
+      if (opts?.noChannelSelect) {
+        activeChannelId.value = null;
+        resetForms();
+        return null;
+      }
 
       const nextChannelId =
         preferredChannelId && channelList.some((c) => c.id === preferredChannelId)
@@ -254,7 +265,7 @@ export function useWaddles(
     actionError.value = "Deleting the configured space is not available in the XMPP-only client.";
   }
 
-  async function createChannel() {
+  async function createChannel(): Promise<CreateChannelResult | undefined> {
     const form = createChannelForm.value;
     if (!xmppClient.value || !session.value) return undefined;
 
@@ -285,28 +296,32 @@ export function useWaddles(
         });
 
         const channelId = roomJid.split("@")[0] ?? form.name.trim();
-        const createdChannel = {
-          id: channelId,
-          jid: roomJid,
-          name: form.name.trim(),
-          channel_type: form.muc_type,
-        };
         createChannelForm.value = defaultCreateForm();
         await loadStructure(channelId);
-        return createdChannel;
+        return {
+          intent: "muc",
+          channelId,
+          channelJid: roomJid,
+          channelName: form.name.trim(),
+          channelType: form.muc_type,
+        } satisfies CreateChannelResult;
       }
 
       if (form.intent === "space") {
         if (!form.name.trim()) return undefined;
 
-        const { node, serviceJid } = await createSpaceNode(xmppAgent, spacesServiceJid, {
+        const { node } = await createSpaceNode(xmppAgent, spacesServiceJid, {
           name: form.name.trim(),
           description: form.description.trim() || undefined,
         });
 
         createChannelForm.value = defaultCreateForm();
-        await loadStructure(null);
-        return { id: node, jid: serviceJid, name: form.name.trim(), channel_type: "text" as const };
+        await loadStructure(null, { noChannelSelect: true });
+        return {
+          intent: "space",
+          spaceId: node,
+          spaceName: form.name.trim(),
+        } satisfies CreateChannelResult;
       }
 
       if (form.intent === "space-muc") {
@@ -323,15 +338,16 @@ export function useWaddles(
         });
 
         const channelId = roomJid.split("@")[0] ?? form.name.trim();
-        const createdChannel = {
-          id: channelId,
-          jid: roomJid,
-          name: form.name.trim(),
-          channel_type: form.muc_type,
-        };
         createChannelForm.value = defaultCreateForm();
         await loadStructure(channelId);
-        return createdChannel;
+        return {
+          intent: "space-muc",
+          channelId,
+          channelJid: roomJid,
+          channelName: form.name.trim(),
+          channelType: form.muc_type,
+          spaceNode,
+        } satisfies CreateChannelResult;
       }
 
       if (form.intent === "space-with-muc") {
@@ -353,16 +369,16 @@ export function useWaddles(
         );
 
         const channelId = roomJid.split("@")[0] ?? form.muc_name.trim();
-        const createdChannel = {
-          id: channelId,
-          jid: roomJid,
-          name: form.muc_name.trim(),
-          channel_type: form.muc_type,
-          spaceNode,
-        };
         createChannelForm.value = defaultCreateForm();
         await loadStructure(channelId);
-        return createdChannel;
+        return {
+          intent: "space-with-muc",
+          channelId,
+          channelJid: roomJid,
+          channelName: form.muc_name.trim(),
+          channelType: form.muc_type,
+          spaceNode,
+        } satisfies CreateChannelResult;
       }
 
       return undefined;

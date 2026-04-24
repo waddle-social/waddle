@@ -131,6 +131,29 @@ export function defaultCreateForm(): CreateMucFormData {
   return { intent: "muc", name: "", description: "", muc_type: "text" };
 }
 
+// ── Create result typed model ────────────────────────────────────────
+
+/** Returned by createChannel() for a Space-only creation — no room was created. */
+export interface CreateSpaceResult {
+  intent: "space";
+  spaceId: string;
+  spaceName: string;
+}
+
+/** Returned by createChannel() when a MUC was created (standalone or in/with a Space). */
+export interface CreateMucResult {
+  intent: "muc" | "space-muc" | "space-with-muc";
+  channelId: string;
+  channelJid: string;
+  channelName: string;
+  channelType: MucSubtype;
+  /** Present when a Space was involved (space-muc or space-with-muc). */
+  spaceNode?: string;
+}
+
+/** Discriminated union of all possible create results. */
+export type CreateChannelResult = CreateSpaceResult | CreateMucResult;
+
 export interface ChannelEditFormData {
   name: string;
   description: string;

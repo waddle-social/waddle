@@ -663,12 +663,16 @@ async function handleNewDm(username: string) {
 
 async function handleCreateChannel() {
   const created = await waddles.createChannel();
-  if (created) {
-    ui.showCreateChannel.value = false;
-    if (waddles.activeSpaceId.value) {
-      messaging.clearMessages();
-      await messaging.loadMessages(waddles.activeSpaceId.value, created.id);
-    }
+  if (!created) return;
+  ui.showCreateChannel.value = false;
+  if (created.intent === "space") {
+    // Space-only: topology reloaded, no room to load — leave channel unselected.
+    return;
+  }
+  // MUC was created (muc / space-muc / space-with-muc): select and load messages.
+  if (waddles.activeSpaceId.value) {
+    messaging.clearMessages();
+    await messaging.loadMessages(waddles.activeSpaceId.value, created.channelId);
   }
 }
 
