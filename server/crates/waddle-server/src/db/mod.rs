@@ -539,6 +539,10 @@ fn postgres_value_from_row(row: &PgRow, idx: usize) -> Result<Value, DatabaseErr
         return Ok(value.map_or(Value::Null, Value::Integer));
     }
 
+    if let Ok(value) = row.try_get::<Option<i32>, _>(idx) {
+        return Ok(value.map_or(Value::Null, |v| Value::Integer(i64::from(v))));
+    }
+
     if let Ok(value) = row.try_get::<Option<bool>, _>(idx) {
         return Ok(value.map_or(Value::Null, |v| Value::Integer(i64::from(v))));
     }
