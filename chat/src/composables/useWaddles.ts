@@ -2,7 +2,8 @@ import { ref, computed, watch, type Ref } from "vue";
 import type { SpaceSummary, ChannelSummary, MemberSummary } from "@/lib/chat-types";
 import type { WaddleSession } from "@/lib/server-auth";
 import type { BrowserXmppClient } from "@/lib/xmpp-client";
-import type { CommunityFormData, ChannelCreateFormData, ChannelEditFormData } from "@/lib/chat-ui";
+import type { CommunityFormData, CreateFormData, ChannelEditFormData } from "@/lib/chat-ui";
+import { defaultCreateForm } from "@/lib/chat-ui";
 import { executeCreateChannelCommand } from "@/lib/xmpp/commands";
 import { jidDomain } from "@/lib/xmpp/jid";
 
@@ -39,12 +40,7 @@ export function useWaddles(
     is_public: true,
   });
 
-  const createChannelForm = ref<ChannelCreateFormData>({
-    name: "",
-    description: "",
-    channel_type: "text",
-    position: 0,
-  });
+  const createChannelForm = ref<CreateFormData>(defaultCreateForm());
 
   const editChannelForm = ref<ChannelEditFormData>({
     name: "",
@@ -124,12 +120,7 @@ export function useWaddles(
   });
 
   function resetForms() {
-    createChannelForm.value = {
-      name: "",
-      description: "",
-      channel_type: "text",
-      position: channels.value.length,
-    };
+    createChannelForm.value = defaultCreateForm();
   }
 
   async function loadStructure(preferredChannelId?: string | null): Promise<string | null> {
@@ -228,29 +219,47 @@ export function useWaddles(
   }
 
   async function createChannel() {
-    if (!xmppClient.value || !session.value || !createChannelForm.value.name.trim()) return undefined;
+    const form = createChannelForm.value;
+
+    if (form.intent === "space") {
+      actionError.value = "Space creation via XMPP is not yet implemented.";
+      return undefined;
+    }
+
+    if (form.intent === "space-muc") {
+      actionError.value = "Adding a channel to an existing space via XMPP is not yet implemented.";
+      return undefined;
+    }
+
+    if (form.intent === "space-with-muc") {
+      actionError.value = "Combined space and channel creation via XMPP is not yet implemented.";
+      return undefined;
+    }
+
+    // intent === "muc"
+    if (!xmppClient.value || !session.value || !form.name.trim()) return undefined;
 
     isSubmitting.value = true;
     clearActionError();
 
     try {
-      const desc = createChannelForm.value.description.trim();
+      const desc = form.description.trim();
       const serverJid = jidDomain(session.value.jid);
-      
+
       const xmppAgent = xmppClient.value.agent;
       if (!xmppAgent) {
         actionError.value = "XMPP connection not available";
         return undefined;
       }
-      
+
       const result = await executeCreateChannelCommand(
         xmppAgent,
         serverJid,
         {
-          name: createChannelForm.value.name.trim(),
+          name: form.name.trim(),
           description: desc || undefined,
-          channelType: createChannelForm.value.channel_type as "text" | "forum",
-          position: createChannelForm.value.position,
+          channelType: form.muc_type,
+          position: channels.value.length,
         },
         "waddle:create-muc",
       );
@@ -260,23 +269,16 @@ export function useWaddles(
         return undefined;
       }
 
-      // Capture created channel data before resetting the form
       const createdChannel = {
         id: result.channelId!,
-        name: createChannelForm.value.name.trim(),
-        channel_type: createChannelForm.value.channel_type,
+        name: form.name.trim(),
+        channel_type: form.muc_type,
       };
 
-      createChannelForm.value = {
-        name: "",
-        description: "",
-        channel_type: "text",
-        position: channels.value.length + 1,
-      };
+      createChannelForm.value = defaultCreateForm();
 
-      // Refresh channel discovery to show the new channel
       await loadStructure(result.channelId ?? null);
-      
+
       return createdChannel;
     } catch (e) {
       actionError.value = normalizeError(e);

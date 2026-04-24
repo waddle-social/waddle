@@ -89,8 +89,8 @@ const emit = defineEmits<{
         <button
           v-if="canManageChannels"
           class="chat-icon-button chat-icon-button--sm hover:bg-sidebar-accent"
-          title="New MUC"
-          aria-label="New MUC"
+          title="New channel or space"
+          aria-label="New channel or space"
           type="button"
           @click="emit('createChannel')"
         >
@@ -124,7 +124,7 @@ const emit = defineEmits<{
               @click="emit('createChannel')"
             >
               <Plus class="h-3.5 w-3.5" />
-              New MUC
+              New channel or space
             </button>
           </div>
         </div>

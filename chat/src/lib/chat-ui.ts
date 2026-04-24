@@ -77,11 +77,58 @@ export interface CommunityFormData {
   is_public: boolean;
 }
 
-export interface ChannelCreateFormData {
+// ── Create intent typed form model ──────────────────────────────────
+
+/** The four possible targets for the create flow. */
+export type CreateIntent = "space" | "muc" | "space-muc" | "space-with-muc";
+
+/** MUC subtype — only applicable when a MUC is being created. */
+export type MucSubtype = "text" | "forum";
+
+/** Create a new Space (empty — do not auto-create a default MUC). */
+export interface CreateSpaceFormData {
+  intent: "space";
   name: string;
   description: string;
-  channel_type: string;
-  position: number;
+}
+
+/** Create a standalone MUC (not attached to any Space). */
+export interface CreateMucFormData {
+  intent: "muc";
+  name: string;
+  description: string;
+  muc_type: MucSubtype;
+}
+
+/** Create a MUC inside an existing Space. */
+export interface CreateSpaceMucFormData {
+  intent: "space-muc";
+  /** Bare JID of the target Space. */
+  space_jid: string;
+  name: string;
+  description: string;
+  muc_type: MucSubtype;
+}
+
+/** Create a new Space together with its first MUC in one action. */
+export interface CreateSpaceWithMucFormData {
+  intent: "space-with-muc";
+  space_name: string;
+  space_description: string;
+  muc_name: string;
+  muc_description: string;
+  muc_type: MucSubtype;
+}
+
+export type CreateFormData =
+  | CreateSpaceFormData
+  | CreateMucFormData
+  | CreateSpaceMucFormData
+  | CreateSpaceWithMucFormData;
+
+/** Returns a freshly initialised default create form (standalone MUC). */
+export function defaultCreateForm(): CreateMucFormData {
+  return { intent: "muc", name: "", description: "", muc_type: "text" };
 }
 
 export interface ChannelEditFormData {
