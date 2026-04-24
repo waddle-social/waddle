@@ -4,6 +4,7 @@ use std::time::Instant;
 
 use kameo::message::Context;
 use kameo::Actor;
+use sqlx::query;
 
 use super::{Database, DatabaseError};
 
@@ -57,6 +58,104 @@ impl kameo::message::Message<DbExecute> for DbActor {
         self.touch();
         let conn = self.db.guard().await?;
         conn.execute(&msg.sql, msg.params).await
+    }
+}
+
+pub struct CreateAuthSession {
+    pub session_id: String,
+    pub user_id: String,
+    pub username: String,
+    pub xmpp_localpart: String,
+    pub token_hash: String,
+    pub expires_at: Option<String>,
+    pub created_at: String,
+    pub last_used_at: String,
+}
+
+impl kameo::message::Message<CreateAuthSession> for DbActor {
+    type Reply = Result<(), DatabaseError>;
+
+    async fn handle(
+        &mut self,
+        msg: CreateAuthSession,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.touch();
+
+        match &self.db.backend {
+            super::DatabaseBackend::Sqlite(pool) => {
+                let mut tx = pool.begin().await?;
+
+                query(
+                    r#"
+                    INSERT INTO users (id, username, xmpp_localpart, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT DO NOTHING
+                    "#,
+                )
+                .bind(&msg.user_id)
+                .bind(&msg.username)
+                .bind(&msg.xmpp_localpart)
+                .bind(msg.created_at.clone())
+                .bind(msg.created_at.clone())
+                .execute(&mut *tx)
+                .await?;
+
+                query(
+                    r#"
+                    INSERT INTO sessions (id, user_id, token_hash, expires_at, created_at, last_used_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    "#,
+                )
+                .bind(&msg.session_id)
+                .bind(&msg.user_id)
+                .bind(&msg.token_hash)
+                .bind(&msg.expires_at)
+                .bind(&msg.created_at)
+                .bind(&msg.last_used_at)
+                .execute(&mut *tx)
+                .await?;
+
+                tx.commit().await?;
+            }
+            super::DatabaseBackend::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+
+                query(
+                    r#"
+                    INSERT INTO users (id, username, xmpp_localpart, created_at, updated_at)
+                    VALUES ($1, $2, $3, $4, $5)
+                    ON CONFLICT DO NOTHING
+                    "#,
+                )
+                .bind(&msg.user_id)
+                .bind(&msg.username)
+                .bind(&msg.xmpp_localpart)
+                .bind(msg.created_at.clone())
+                .bind(msg.created_at.clone())
+                .execute(&mut *tx)
+                .await?;
+
+                query(
+                    r#"
+                    INSERT INTO sessions (id, user_id, token_hash, expires_at, created_at, last_used_at)
+                    VALUES ($1, $2, $3, $4, $5, $6)
+                    "#,
+                )
+                .bind(&msg.session_id)
+                .bind(&msg.user_id)
+                .bind(&msg.token_hash)
+                .bind(&msg.expires_at)
+                .bind(&msg.created_at)
+                .bind(&msg.last_used_at)
+                .execute(&mut *tx)
+                .await?;
+
+                tx.commit().await?;
+            }
+        }
+
+        Ok(())
     }
 }
 

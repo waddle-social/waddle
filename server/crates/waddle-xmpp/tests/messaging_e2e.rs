@@ -14,7 +14,8 @@ mod common;
 use std::time::Duration;
 
 use common::{
-    encode_sasl_plain, extract_bound_jid, test_secret, RawXmppClient, TestServer, DEFAULT_TIMEOUT,
+    encode_sasl_plain, extract_bound_jid, start_server_with_channels, test_secret, RawXmppClient,
+    TestServer, DEFAULT_TIMEOUT,
 };
 
 /// Initialize tracing and crypto provider for tests.
@@ -139,32 +140,6 @@ async fn establish_session(
 }
 
 /// Helper to join a MUC room.
-async fn join_room(client: &mut RawXmppClient, room: &str, nick: &str) {
-    client
-        .send(&format!(
-            "<presence to='{}/{}' xmlns='jabber:client'>\
-            <x xmlns='http://jabber.org/protocol/muc'>\
-                <history maxstanzas='0'/>\
-            </x>\
-        </presence>",
-            room, nick
-        ))
-        .await
-        .expect("Send MUC join");
-
-    // Wait for self-presence
-    let response = client
-        .read_until("</presence>", DEFAULT_TIMEOUT)
-        .await
-        .expect("Read join presence");
-    assert!(
-        response.contains("110"),
-        "Self-presence should have status code 110, got: {}",
-        response
-    );
-    client.clear();
-}
-
 // =============================================================================
 // Test: Groupchat Message Multi-Occupant
 // =============================================================================
@@ -179,57 +154,38 @@ async fn join_room(client: &mut RawXmppClient, room: &str, nick: &str) {
 async fn test_groupchat_message_multi_occupant() {
     init_test();
 
-    let server = TestServer::start().await;
+    let server = start_server_with_channels(&["test-room"]).await;
     let room = "test-room@muc.localhost";
 
     // Create two clients
     let mut alice = RawXmppClient::connect(server.addr).await.unwrap();
     let mut bob = RawXmppClient::connect(server.addr).await.unwrap();
 
-    // Establish sessions
+    // Establish sessions — auto-join fires after each bind (nick = username).
     let alice_jid = establish_session(&mut alice, &server, "alice", "client1").await;
     let bob_jid = establish_session(&mut bob, &server, "bob", "client2").await;
 
     println!("Alice JID: {}", alice_jid);
     println!("Bob JID: {}", bob_jid);
 
-    // Alice joins room first
-    join_room(&mut alice, room, "Alice").await;
-    println!("Alice joined room");
-
-    // Bob joins room - should see Alice's presence first, then self-presence
-    bob.send(&format!(
-        "<presence to='{}/{}' xmlns='jabber:client'>\
-            <x xmlns='http://jabber.org/protocol/muc'>\
-                <history maxstanzas='0'/>\
-            </x>\
-        </presence>",
-        room, "Bob"
-    ))
-    .await
-    .expect("Bob join");
-
-    // Bob should receive Alice's presence and his own (110)
-    let response = bob
+    // Drain each user's auto-join self-presence (status 110).
+    alice
         .read_until("110", DEFAULT_TIMEOUT)
         .await
-        .expect("Bob join presence");
-    println!("Bob received join presences: {}", response.len());
-    bob.clear();
-
-    // Alice should also see Bob's join presence
-    let alice_notif = alice
-        .read_until("</presence>", DEFAULT_TIMEOUT)
-        .await
-        .expect("Alice sees Bob join");
-    assert!(
-        alice_notif.contains("Bob"),
-        "Alice should see Bob's join, got: {}",
-        alice_notif
-    );
+        .expect("Alice auto-join self-presence");
     alice.clear();
 
-    println!("Both users in room");
+    bob.read_until("110", DEFAULT_TIMEOUT)
+        .await
+        .expect("Bob auto-join self-presence");
+    bob.clear();
+
+    // Let join notifications propagate, then drain any cross-notifications.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    alice.clear();
+    bob.clear();
+
+    println!("Both users auto-joined room");
 
     // Alice sends a groupchat message
     let test_message = "Hello from Alice to the room!";
@@ -243,7 +199,6 @@ async fn test_groupchat_message_multi_occupant() {
         .await
         .expect("Send message");
 
-    // Both should receive the message
     // Alice gets the echo
     let alice_echo = alice
         .read_until("</message>", DEFAULT_TIMEOUT)
@@ -259,7 +214,7 @@ async fn test_groupchat_message_multi_occupant() {
         "Echo should be groupchat type"
     );
 
-    // Bob receives the message
+    // Bob receives the message (from = room/alice, the auto-join nick)
     let bob_msg = bob
         .read_until("</message>", DEFAULT_TIMEOUT)
         .await
@@ -270,15 +225,14 @@ async fn test_groupchat_message_multi_occupant() {
         bob_msg
     );
     assert!(
-        bob_msg.contains("from='test-room@muc.localhost/Alice'")
-            || bob_msg.contains("from=\"test-room@muc.localhost/Alice\""),
+        bob_msg.contains("from='test-room@muc.localhost/alice'")
+            || bob_msg.contains("from=\"test-room@muc.localhost/alice\""),
         "Message should be from room/nick, got: {}",
         bob_msg
     );
 
     println!("Message delivery verified for both occupants");
 
-    // Cleanup
     alice.send("</stream:stream>").await.ok();
     bob.send("</stream:stream>").await.ok();
 }
@@ -443,43 +397,34 @@ async fn test_chat_message_direct_github_payload_echoed_to_sender() {
 async fn test_real_time_delivery_ordering() {
     init_test();
 
-    let server = TestServer::start().await;
+    let server = start_server_with_channels(&["order-room"]).await;
     let room = "order-room@muc.localhost";
 
     // Create two clients
     let mut sender = RawXmppClient::connect(server.addr).await.unwrap();
     let mut receiver = RawXmppClient::connect(server.addr).await.unwrap();
 
-    // Establish sessions
+    // Establish sessions — auto-join fires after each bind (nick = username).
     let _sender_jid = establish_session(&mut sender, &server, "sender", "s1").await;
     let _receiver_jid = establish_session(&mut receiver, &server, "receiver", "r1").await;
 
-    // Both join room
-    join_room(&mut sender, room, "Sender").await;
-
-    receiver
-        .send(&format!(
-            "<presence to='{}/{}' xmlns='jabber:client'>\
-            <x xmlns='http://jabber.org/protocol/muc'>\
-                <history maxstanzas='0'/>\
-            </x>\
-        </presence>",
-            room, "Receiver"
-        ))
+    // Drain auto-join self-presences.
+    sender
+        .read_until("110", DEFAULT_TIMEOUT)
         .await
-        .expect("Receiver join");
+        .expect("Sender auto-join self-presence");
+    sender.clear();
+
     receiver
         .read_until("110", DEFAULT_TIMEOUT)
         .await
-        .expect("Receiver self presence");
+        .expect("Receiver auto-join self-presence");
     receiver.clear();
 
-    // Sender should see receiver join
-    sender
-        .read_until("Receiver", DEFAULT_TIMEOUT)
-        .await
-        .expect("Sender sees receiver");
+    // Let join notifications propagate, then drain any cross-notifications.
+    tokio::time::sleep(Duration::from_millis(100)).await;
     sender.clear();
+    receiver.clear();
 
     println!("Both users in room for ordering test");
 
@@ -562,13 +507,18 @@ async fn test_real_time_delivery_ordering() {
 async fn test_message_has_stanza_id() {
     init_test();
 
-    let server = TestServer::start().await;
+    let server = start_server_with_channels(&["stanza-id-room"]).await;
     let room = "stanza-id-room@muc.localhost";
 
     let mut client = RawXmppClient::connect(server.addr).await.unwrap();
     let _jid = establish_session(&mut client, &server, "user", "client").await;
 
-    join_room(&mut client, room, "User").await;
+    // Drain the auto-join self-presence.
+    client
+        .read_until("110", DEFAULT_TIMEOUT)
+        .await
+        .expect("Auto-join self-presence");
+    client.clear();
 
     // Send a message
     client
@@ -612,7 +562,7 @@ async fn test_message_has_stanza_id() {
 async fn test_muc_presence_updates() {
     init_test();
 
-    let server = TestServer::start().await;
+    let server = start_server_with_channels(&["presence-room"]).await;
     let room = "presence-room@muc.localhost";
 
     let mut alice = RawXmppClient::connect(server.addr).await.unwrap();
@@ -621,36 +571,27 @@ async fn test_muc_presence_updates() {
     let _alice_jid = establish_session(&mut alice, &server, "alice", "pres1").await;
     let _bob_jid = establish_session(&mut bob, &server, "bob", "pres2").await;
 
-    // Alice joins
-    join_room(&mut alice, room, "Alice").await;
-
-    // Bob joins
-    bob.send(&format!(
-        "<presence to='{}/{}' xmlns='jabber:client'>\
-            <x xmlns='http://jabber.org/protocol/muc'>\
-                <history maxstanzas='0'/>\
-            </x>\
-        </presence>",
-        room, "Bob"
-    ))
-    .await
-    .expect("Bob join");
-    bob.read_until("110", DEFAULT_TIMEOUT)
-        .await
-        .expect("Bob self presence");
-    bob.clear();
-
-    // Alice sees Bob join
+    // Drain auto-join self-presences (nick = username).
     alice
-        .read_until("Bob", DEFAULT_TIMEOUT)
+        .read_until("110", DEFAULT_TIMEOUT)
         .await
-        .expect("Alice sees Bob");
+        .expect("Alice auto-join self-presence");
     alice.clear();
 
-    // Bob leaves - send unavailable presence
+    bob.read_until("110", DEFAULT_TIMEOUT)
+        .await
+        .expect("Bob auto-join self-presence");
+    bob.clear();
+
+    // Let join notifications propagate, then drain any cross-notifications.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    alice.clear();
+    bob.clear();
+
+    // Bob leaves — auto-join nick is lowercase "bob".
     bob.send(&format!(
         "<presence to='{}/{}' type='unavailable' xmlns='jabber:client'/>",
-        room, "Bob"
+        room, "bob"
     ))
     .await
     .expect("Bob leave");
@@ -671,7 +612,7 @@ async fn test_muc_presence_updates() {
         .await
         .expect("Alice sees Bob leave");
     assert!(
-        alice_notif.contains("Bob"),
+        alice_notif.contains("bob"),
         "Alice should see Bob's leave, got: {}",
         alice_notif
     );

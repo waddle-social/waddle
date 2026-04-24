@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 use tracing::{debug, instrument, warn};
 use uuid::Uuid;
 
-use crate::db::actor::{DbActor, DbExecute, DbQueryOne, RowValues};
+use crate::db::actor::{CreateAuthSession, DbActor, DbExecute, DbQueryOne, RowValues};
 use crate::db::{row_value, ValueExt};
 
 type HmacSha256 = Hmac<Sha256>;
@@ -31,6 +31,44 @@ pub struct Session {
     pub expires_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub last_used_at: DateTime<Utc>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Session, SessionManager};
+    use crate::db::{actor::DbActor, Database, MigrationRunner};
+
+    #[tokio::test]
+    async fn create_session_creates_missing_user_and_allows_existing_user() {
+        let db = Database::in_memory("test-auth-session")
+            .await
+            .expect("in-memory database");
+        MigrationRunner::single()
+            .run(&db)
+            .await
+            .expect("migrations");
+        let actor = kameo::spawn(DbActor::new(db.clone()));
+        let manager = SessionManager::new(actor, Some(b"test-session-key"));
+
+        let first = Session::new("user-1", "alice", "alice");
+        manager.create_session(&first).await.expect("first session");
+
+        let second = Session::new("user-1", "alice", "alice");
+        manager
+            .create_session(&second)
+            .await
+            .expect("second session for existing user");
+
+        let loaded = manager
+            .get_session(&second.id)
+            .await
+            .expect("load session")
+            .expect("session exists");
+
+        assert_eq!(loaded.user_id, "user-1");
+        assert_eq!(loaded.username, "alice");
+        assert_eq!(loaded.xmpp_localpart, "alice");
+    }
 }
 
 impl Session {
@@ -89,56 +127,23 @@ impl SessionManager {
         AuthError::DatabaseError(e.to_string())
     }
 
-    async fn ensure_user_exists(&self, session: &Session) -> Result<(), AuthError> {
-        let sql = r#"
-            INSERT OR IGNORE INTO users (id, username, xmpp_localpart, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?)
-        "#
-        .to_string();
-
-        self.actor
-            .ask(DbExecute {
-                sql,
-                params: vec![
-                    crate::db::Value::from(session.user_id.as_str()),
-                    crate::db::Value::from(session.username.as_str()),
-                    crate::db::Value::from(session.xmpp_localpart.as_str()),
-                    crate::db::Value::from(session.created_at.to_rfc3339()),
-                    crate::db::Value::from(session.created_at.to_rfc3339()),
-                ],
-            })
-            .await
-            .map_err(Self::ask_err)?;
-        Ok(())
-    }
-
     #[instrument(skip(self, session))]
     pub async fn create_session(&self, session: &Session) -> Result<(), AuthError> {
-        self.ensure_user_exists(session).await?;
-
         let token_hash = self.token_hash(&session.id);
         let expires_at = session.expires_at.map(|v| v.to_rfc3339());
-
-        let sql = r#"
-            INSERT INTO sessions (id, user_id, token_hash, expires_at, created_at, last_used_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-        "#
-        .to_string();
+        let created_at = session.created_at.to_rfc3339();
+        let last_used_at = session.last_used_at.to_rfc3339();
 
         self.actor
-            .ask(DbExecute {
-                sql,
-                params: vec![
-                    crate::db::Value::from(session.id.as_str()),
-                    crate::db::Value::from(session.user_id.as_str()),
-                    crate::db::Value::from(token_hash),
-                    match expires_at {
-                        Some(v) => crate::db::Value::from(v),
-                        None => crate::db::Value::Null,
-                    },
-                    crate::db::Value::from(session.created_at.to_rfc3339()),
-                    crate::db::Value::from(session.last_used_at.to_rfc3339()),
-                ],
+            .ask(CreateAuthSession {
+                session_id: session.id.clone(),
+                user_id: session.user_id.clone(),
+                username: session.username.clone(),
+                xmpp_localpart: session.xmpp_localpart.clone(),
+                token_hash,
+                expires_at,
+                created_at,
+                last_used_at,
             })
             .await
             .map_err(Self::ask_err)?;

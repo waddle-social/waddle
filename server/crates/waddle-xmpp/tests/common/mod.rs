@@ -645,6 +645,33 @@ impl AppState for MockAppState {
     }
 }
 
+/// Start a test server with the given channel IDs pre-seeded so that MUC
+/// joins to `<channel_id>@muc.localhost` resolve.
+///
+/// The server auto-joins all registered channels after resource bind, using
+/// the bound user's username as the MUC nick.
+pub async fn start_server_with_channels(channel_ids: &[&str]) -> TestServer {
+    let space = waddle_xmpp::SpaceDetails {
+        id: "space-test".to_string(),
+        name: "Test Space".to_string(),
+        description: Some("Test space for MUC tests".to_string()),
+        owner_id: "owner".to_string(),
+        icon_url: None,
+        is_public: true,
+        created_at: "2026-01-01T00:00:00Z".to_string(),
+    };
+    let channels: Vec<waddle_xmpp::ChannelInfo> = channel_ids
+        .iter()
+        .map(|id| waddle_xmpp::ChannelInfo {
+            id: (*id).to_string(),
+            name: (*id).to_string(),
+            channel_type: "text".to_string(),
+        })
+        .collect();
+    let state = MockAppState::new("localhost").with_space(space, channels);
+    TestServer::start_with_state(Arc::new(state)).await
+}
+
 /// Generated TLS credentials for testing.
 pub struct TestTlsCredentials {
     pub cert_pem: Vec<u8>,

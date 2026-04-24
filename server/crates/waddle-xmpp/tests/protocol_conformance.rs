@@ -11,11 +11,12 @@
 mod common;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use common::{
     disco_info_query, encode_sasl_plain, establish_bound_session, extract_bound_jid, init_test_env,
-    join_muc_room, ping_query, test_secret, validate_stream_header, MockAppState, RawXmppClient,
-    TestServer, DEFAULT_TIMEOUT,
+    join_muc_room, ping_query, start_server_with_channels, test_secret, validate_stream_header,
+    MockAppState, RawXmppClient, TestServer, DEFAULT_TIMEOUT,
 };
 
 // =============================================================================
@@ -441,7 +442,7 @@ async fn rfc6121_roster_set_adds_item() {
 #[tokio::test]
 async fn xep0045_join_room_returns_self_presence() {
     init_test_env();
-    let server = TestServer::start().await;
+    let server = start_server_with_channels(&["testroom"]).await;
     let mut client = RawXmppClient::connect(server.addr).await.expect("connect");
     establish_bound_session(&mut client, &server, "alice", "desktop")
         .await
@@ -461,7 +462,7 @@ async fn xep0045_join_room_returns_self_presence() {
 #[tokio::test]
 async fn xep0045_groupchat_message_broadcast() {
     init_test_env();
-    let server = TestServer::start().await;
+    let server = start_server_with_channels(&["broadcast"]).await;
 
     let mut alice = RawXmppClient::connect(server.addr).await.expect("connect");
     establish_bound_session(&mut alice, &server, "alice", "desktop")
@@ -502,7 +503,7 @@ async fn xep0045_groupchat_message_broadcast() {
 #[tokio::test]
 async fn xep0045_leave_room_sends_unavailable_presence() {
     init_test_env();
-    let server = TestServer::start().await;
+    let server = start_server_with_channels(&["leave"]).await;
 
     let mut alice = RawXmppClient::connect(server.addr).await.expect("connect");
     establish_bound_session(&mut alice, &server, "alice", "desktop")
@@ -514,16 +515,26 @@ async fn xep0045_leave_room_sends_unavailable_presence() {
         .await
         .expect("bind bob");
 
-    join_muc_room(&mut alice, "leave@muc.localhost", "Alice")
-        .await
-        .expect("alice join");
-    join_muc_room(&mut bob, "leave@muc.localhost", "Bob")
-        .await
-        .expect("bob join");
-
-    // Alice leaves
+    // Drain auto-join self-presences for both users (nick = username).
     alice
-        .send("<presence type='unavailable' to='leave@muc.localhost/Alice' xmlns='jabber:client'/>")
+        .read_until("110", DEFAULT_TIMEOUT)
+        .await
+        .expect("alice auto-join");
+    alice.clear();
+
+    bob.read_until("110", DEFAULT_TIMEOUT)
+        .await
+        .expect("bob auto-join");
+    bob.clear();
+
+    // Let join notifications propagate, then drain any cross-notifications.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    alice.clear();
+    bob.clear();
+
+    // Alice leaves using the auto-join nick (lowercase username).
+    alice
+        .send("<presence type='unavailable' to='leave@muc.localhost/alice' xmlns='jabber:client'/>")
         .await
         .expect("send leave");
 

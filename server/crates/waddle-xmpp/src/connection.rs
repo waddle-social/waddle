@@ -7600,6 +7600,28 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             "Processing MUC owner IQ"
         );
 
+        // Managed channels (registered in space_channels) must be configured
+        // exclusively through XEP-0050 ad-hoc commands, not direct owner IQ.
+        if let Some(channel_id) = parse_managed_room_jid(&query.room_jid) {
+            if self
+                .app_state
+                .get_channel_room_info(&channel_id)
+                .await?
+                .is_some()
+            {
+                let error = crate::generate_iq_error(
+                    &iq.id,
+                    iq.to.as_ref().map(|j| j.to_string()).as_deref(),
+                    iq.from.as_ref().map(|j| j.to_string()).as_deref(),
+                    crate::StanzaErrorCondition::NotAllowed,
+                    crate::StanzaErrorType::Cancel,
+                    Some("Managed channels must be configured via ad-hoc commands"),
+                );
+                self.stream.write_raw(&error).await?;
+                return Ok(());
+            }
+        }
+
         let room_actor = match self.get_room_actor(&query.room_jid).await? {
             Some(actor) => actor,
             None => {

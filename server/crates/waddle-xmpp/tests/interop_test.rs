@@ -13,8 +13,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::{
-    encode_sasl_plain, extract_bound_jid, test_secret, validate_stream_header, MockAppState,
-    RawXmppClient, TestServer, DEFAULT_TIMEOUT,
+    encode_sasl_plain, extract_bound_jid, start_server_with_channels, test_secret,
+    validate_stream_header, MockAppState, RawXmppClient, TestServer, DEFAULT_TIMEOUT,
 };
 
 /// Initialize tracing and crypto provider for tests (only once).
@@ -1762,48 +1762,29 @@ async fn establish_session(
 async fn test_muc_join_room() {
     init_tracing();
 
-    let server = TestServer::start().await;
+    let server = start_server_with_channels(&["testroom"]).await;
     let mut client = RawXmppClient::connect(server.addr).await.unwrap();
 
-    // Establish session
     let jid = establish_session(&mut client, &server, "alice", "client1").await;
     println!("User session established: {}", jid);
 
-    // Join MUC room
-    // Per XEP-0045, send presence to room@muc.domain/nickname with <x xmlns='http://jabber.org/protocol/muc'/>
-    client
-        .send(
-            "<presence to='testroom@muc.localhost/Alice' xmlns='jabber:client'>\
-        <x xmlns='http://jabber.org/protocol/muc'/>\
-    </presence>",
-        )
-        .await
-        .expect("Send MUC join");
-
-    // Read self-presence response
-    // Should receive presence from testroom@muc.localhost/Alice with:
-    // - <x xmlns='http://jabber.org/protocol/muc#user'> containing <item> and <status code='110'/>
+    // The server auto-joins all registered channels after resource bind.
+    // Wait for the self-presence confirming the join (nick = username = "alice").
     let response = client
         .read_until("</presence>", DEFAULT_TIMEOUT)
         .await
-        .expect("Read MUC presence");
+        .expect("Read MUC auto-join presence");
 
-    // Verify it's from the room
     assert!(
-        response.contains("from='testroom@muc.localhost/Alice'")
-            || response.contains("from=\"testroom@muc.localhost/Alice\""),
-        "Presence should be from room/nick, got: {}",
+        response.contains("testroom@muc.localhost/alice"),
+        "Presence should be from testroom/alice, got: {}",
         response
     );
-
-    // Verify MUC user extension is present
     assert!(
         response.contains("http://jabber.org/protocol/muc#user"),
         "Response should contain MUC user namespace, got: {}",
         response
     );
-
-    // Verify self-presence indicator (status code 110)
     assert!(
         response.contains("110"),
         "Self-presence should have status code 110, got: {}",
@@ -1811,8 +1792,6 @@ async fn test_muc_join_room() {
     );
 
     println!("MUC join successful!");
-
-    // Clean shutdown
     client.send("</stream:stream>").await.ok();
 }
 
@@ -1823,36 +1802,26 @@ async fn test_muc_join_room() {
 async fn test_muc_leave_room() {
     init_tracing();
 
-    let server = TestServer::start().await;
+    let server = start_server_with_channels(&["leavetest"]).await;
     let mut client = RawXmppClient::connect(server.addr).await.unwrap();
 
-    // Establish session
     let _jid = establish_session(&mut client, &server, "bob", "client1").await;
 
-    // Join MUC room first
-    client
-        .send(
-            "<presence to='leavetest@muc.localhost/Bob' xmlns='jabber:client'>\
-        <x xmlns='http://jabber.org/protocol/muc'/>\
-    </presence>",
-        )
-        .await
-        .expect("Send MUC join");
+    // Drain the auto-join self-presence (nick = "bob").
     client
         .read_until("</presence>", DEFAULT_TIMEOUT)
         .await
-        .expect("Read join presence");
+        .expect("Drain auto-join presence");
     client.clear();
 
-    // Now leave the room
+    // Leave the room; auto-join used the username "bob" as the nick.
     client
         .send(
-            "<presence to='leavetest@muc.localhost/Bob' type='unavailable' xmlns='jabber:client'/>",
+            "<presence to='leavetest@muc.localhost/bob' type='unavailable' xmlns='jabber:client'/>",
         )
         .await
         .expect("Send MUC leave");
 
-    // Should receive unavailable presence back
     let response = client
         .read_until("</presence>", DEFAULT_TIMEOUT)
         .await
@@ -1863,7 +1832,6 @@ async fn test_muc_leave_room() {
         "Leave response should be unavailable presence, got: {}",
         response
     );
-
     assert!(
         response.contains("110"),
         "Self-presence should have status code 110, got: {}",
@@ -1871,7 +1839,6 @@ async fn test_muc_leave_room() {
     );
 
     println!("MUC leave successful!");
-
     client.send("</stream:stream>").await.ok();
 }
 
@@ -1883,25 +1850,16 @@ async fn test_muc_leave_room() {
 async fn test_muc_send_groupchat_message() {
     init_tracing();
 
-    let server = TestServer::start().await;
+    let server = start_server_with_channels(&["msgtest"]).await;
     let mut client = RawXmppClient::connect(server.addr).await.unwrap();
 
-    // Establish session
     let _jid = establish_session(&mut client, &server, "charlie", "client1").await;
 
-    // Join MUC room
-    client
-        .send(
-            "<presence to='msgtest@muc.localhost/Charlie' xmlns='jabber:client'>\
-        <x xmlns='http://jabber.org/protocol/muc'/>\
-    </presence>",
-        )
-        .await
-        .expect("Send MUC join");
+    // Drain the auto-join self-presence (nick = "charlie").
     client
         .read_until("</presence>", DEFAULT_TIMEOUT)
         .await
-        .expect("Read join presence");
+        .expect("Drain auto-join presence");
     client.clear();
 
     // Send a groupchat message to the room
@@ -1922,10 +1880,10 @@ async fn test_muc_send_groupchat_message() {
         response
     );
 
-    // Verify 'from' is room/nick
+    // Verify 'from' is room/nick (auto-join nick = lowercase username "charlie")
     assert!(
-        response.contains("from='msgtest@muc.localhost/Charlie'")
-            || response.contains("from=\"msgtest@muc.localhost/Charlie\""),
+        response.contains("from='msgtest@muc.localhost/charlie'")
+            || response.contains("from=\"msgtest@muc.localhost/charlie\""),
         "Message should be from room/nick, got: {}",
         response
     );
@@ -1950,12 +1908,26 @@ async fn test_muc_send_groupchat_message() {
 async fn test_muc_complete_lifecycle() {
     init_tracing();
 
-    let server = TestServer::start().await;
+    let server = start_server_with_channels(&["lifecycle-room"]).await;
     let mut client = RawXmppClient::connect(server.addr).await.unwrap();
 
     // === Step 1: Establish authenticated session ===
     let jid = establish_session(&mut client, &server, "dave", "lifecycle-test").await;
     println!("Step 1: Session established with JID: {}", jid);
+
+    // Drain the auto-join self-presence (nick = username = "dave").
+    // This must happen before subsequent reads so it doesn't pollute later buffers.
+    let auto_join = client
+        .read_until("</presence>", DEFAULT_TIMEOUT)
+        .await
+        .expect("Read auto-join presence");
+    client.clear();
+    assert!(
+        auto_join.contains("lifecycle-room@muc.localhost/dave"),
+        "Auto-join presence should be from lifecycle-room/dave, got: {}",
+        auto_join
+    );
+    println!("Step 1b: Auto-joined lifecycle-room as 'dave'");
 
     // === Step 2: Discover MUC service via disco#items ===
     client
@@ -2003,34 +1975,10 @@ async fn test_muc_complete_lifecycle() {
     );
     println!("Step 3: MUC service supports XEP-0045");
 
-    // === Step 4: Join room ===
+    // === Step 4: Room membership confirmed via auto-join ===
     let room_jid = "lifecycle-room@muc.localhost";
-    let nick = "Dave";
-
-    client
-        .send(&format!(
-            "<presence to='{}/{}' xmlns='jabber:client'>\
-        <x xmlns='http://jabber.org/protocol/muc'>\
-            <history maxstanzas='0'/>\
-        </x>\
-    </presence>",
-            room_jid, nick
-        ))
-        .await
-        .expect("Send MUC join");
-
-    let response = client
-        .read_until("</presence>", DEFAULT_TIMEOUT)
-        .await
-        .expect("Read join presence");
-    client.clear();
-
-    assert!(
-        response.contains("110"),
-        "Join should include self-presence (110), got: {}",
-        response
-    );
-    println!("Step 4: Joined room as {}/{}", room_jid, nick);
+    let nick = "dave"; // auto-join nick = username (lowercase)
+    println!("Step 4: In room as {}/{}", room_jid, nick);
 
     // === Step 5: Send groupchat message ===
     let test_message = "Hello from the lifecycle test!";
@@ -2112,33 +2060,21 @@ async fn test_muc_complete_lifecycle() {
 async fn test_mam_query_basic() {
     init_tracing();
 
-    let server = TestServer::start().await;
+    let server = start_server_with_channels(&["mam-test-room"]).await;
     let mut client = RawXmppClient::connect(server.addr).await.unwrap();
 
     // === Step 1: Establish authenticated session ===
     let jid = establish_session(&mut client, &server, "mamtester", "mam-client").await;
     println!("Session established: {}", jid);
 
-    // === Step 2: Join MUC room ===
+    // === Step 2: Drain the auto-join self-presence ===
+    // The server auto-joins all registered channels after resource bind (nick = username).
     let room_jid = "mam-test-room@muc.localhost";
-    let nick = "MamTester";
-
-    client
-        .send(&format!(
-            "<presence to='{}/{}' xmlns='jabber:client'>\
-        <x xmlns='http://jabber.org/protocol/muc'>\
-            <history maxstanzas='0'/>\
-        </x>\
-    </presence>",
-            room_jid, nick
-        ))
-        .await
-        .expect("Send MUC join");
 
     let response = client
         .read_until("</presence>", DEFAULT_TIMEOUT)
         .await
-        .expect("Read join presence");
+        .expect("Read auto-join presence");
     client.clear();
 
     assert!(
@@ -2146,7 +2082,7 @@ async fn test_mam_query_basic() {
         "Join should include self-presence (110), got: {}",
         response
     );
-    println!("Joined room {}/{}", room_jid, nick);
+    println!("Joined room {}", room_jid);
 
     // === Step 3: Send multiple messages to the room ===
     let test_messages = [
@@ -2289,33 +2225,21 @@ async fn test_mam_query_basic() {
 async fn test_mam_query_with_rsm() {
     init_tracing();
 
-    let server = TestServer::start().await;
+    let server = start_server_with_channels(&["rsm-test-room"]).await;
     let mut client = RawXmppClient::connect(server.addr).await.unwrap();
 
     // === Step 1: Establish session ===
     let jid = establish_session(&mut client, &server, "rsmtester", "rsm-client").await;
     println!("Session established: {}", jid);
 
-    // === Step 2: Join MUC room ===
+    // === Step 2: Drain the auto-join self-presence ===
+    // The server auto-joins all registered channels after resource bind (nick = username).
     let room_jid = "rsm-test-room@muc.localhost";
-    let nick = "RsmTester";
-
-    client
-        .send(&format!(
-            "<presence to='{}/{}' xmlns='jabber:client'>\
-        <x xmlns='http://jabber.org/protocol/muc'>\
-            <history maxstanzas='0'/>\
-        </x>\
-    </presence>",
-            room_jid, nick
-        ))
-        .await
-        .expect("Send MUC join");
 
     client
         .read_until("</presence>", DEFAULT_TIMEOUT)
         .await
-        .expect("Read join presence");
+        .expect("Read auto-join presence");
     client.clear();
 
     // === Step 3: Send enough messages to test pagination ===
