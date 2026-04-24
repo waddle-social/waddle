@@ -2,7 +2,7 @@ apiVersion: authzed.com/v1alpha1
 kind: SpiceDBCluster
 metadata:
   name: spicedb
-  namespace: spicedb
+  namespace: waddle
 spec:
   channel: stable
   secretName: spicedb-config

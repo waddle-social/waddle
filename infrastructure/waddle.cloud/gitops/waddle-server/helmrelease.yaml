@@ -29,7 +29,7 @@ spec:
       driver: postgres
     spicedb:
       enabled: true
-      endpoint: spicedb.spicedb.svc.cluster.local:50051
+      endpoint: spicedb:50051
       insecure: true
     extraSecretRefs:
       - waddle-r2-credentials
@@ -89,8 +89,8 @@ spec:
 
     secret:
       create: true
-      databaseUrl: "postgresql://waddle-rw.cnpg-system.svc.cluster.local:5432/waddle"
-      xmppMamDatabaseUrl: "postgresql://waddle-rw.cnpg-system.svc.cluster.local:5432/waddle"
-      xmppInboxDatabaseUrl: "postgresql://waddle-rw.cnpg-system.svc.cluster.local:5432/waddle"
+      databaseUrl: "postgresql://postgresql-rw:5432/waddle"
+      xmppMamDatabaseUrl: "postgresql://postgresql-rw:5432/waddle"
+      xmppInboxDatabaseUrl: "postgresql://postgresql-rw:5432/waddle"
       authProvidersJson: >-
         [{"id":"colony","display_name":"Colony","kind":"oidc","dynamic_client_registration":true,"client_id":"","token_endpoint_auth_method":"none","require_dpop":true,"issuer":"https://colony.waddle.social","scopes":["openid","profile","email"],"subject_claim":"sub","username_claim":"preferred_username","email_claim":"email"}]

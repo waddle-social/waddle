@@ -5,9 +5,11 @@ metadata:
   namespace: flux-system
 spec:
   dependsOn:
-    - name: infra-cloudnative-pg-cluster
+    - name: infra-cloudnative-pg
     - name: infra-external-dns
-    - name: infra-spicedb
+    - name: infra-onepassword-connect
+    - name: infra-spicedb-operator
+    - name: infra-waddle-namespace
   interval: 10m
   retryInterval: 1m
   timeout: 15m
@@ -18,6 +20,18 @@ spec:
     kind: OCIRepository
     name: bootstrap
   healthChecks:
+    - apiVersion: postgresql.cnpg.io/v1
+      kind: Cluster
+      name: postgresql
+      namespace: waddle
+    - apiVersion: postgresql.cnpg.io/v1
+      kind: Cluster
+      name: postgresql-spicedb
+      namespace: waddle
+    - apiVersion: authzed.com/v1alpha1
+      kind: SpiceDBCluster
+      name: spicedb
+      namespace: waddle
     - apiVersion: helm.toolkit.fluxcd.io/v2
       kind: HelmRelease
       name: waddle-server

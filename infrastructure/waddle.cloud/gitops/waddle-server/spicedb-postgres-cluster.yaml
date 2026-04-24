@@ -1,8 +1,8 @@
 apiVersion: postgresql.cnpg.io/v1
 kind: Cluster
 metadata:
-  name: spicedb-postgres
-  namespace: spicedb
+  name: postgresql-spicedb
+  namespace: waddle
 spec:
   instances: 1
   bootstrap:

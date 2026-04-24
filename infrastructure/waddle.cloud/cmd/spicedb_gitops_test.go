@@ -14,15 +14,6 @@ type resourceKustomization struct {
 	Resources []string `yaml:"resources"`
 }
 
-type fluxKustomizationManifest struct {
-	Spec struct {
-		DependsOn []struct {
-			Name string `yaml:"name"`
-		} `yaml:"dependsOn"`
-		Path string `yaml:"path"`
-	} `yaml:"spec"`
-}
-
 type externalSecretManifest struct {
 	Spec struct {
 		Data []struct {
@@ -69,48 +60,31 @@ func readYAML[T any](t *testing.T, path string) T {
 	return manifest
 }
 
-func TestGitOpsRootIncludesManagedSpiceDBStack(t *testing.T) {
+func TestGitOpsRootDoesNotSplitWaddleRuntimeStack(t *testing.T) {
 	root := readYAML[resourceKustomization](t, gitOpsPath("kustomization.yaml"))
-	if !slices.Contains(root.Resources, "kustomization-infra-spicedb.yaml") {
-		t.Fatalf("root gitops kustomization missing infra SpiceDB stack: %#v", root.Resources)
-	}
-
-	infraSpiceDB := readYAML[fluxKustomizationManifest](t, gitOpsPath("kustomization-infra-spicedb.yaml"))
-	if infraSpiceDB.Spec.Path != "./spicedb" {
-		t.Fatalf("infra SpiceDB kustomization path = %q, want %q", infraSpiceDB.Spec.Path, "./spicedb")
-	}
-
-	dependsOn := make([]string, 0, len(infraSpiceDB.Spec.DependsOn))
-	for _, dependency := range infraSpiceDB.Spec.DependsOn {
-		dependsOn = append(dependsOn, dependency.Name)
-	}
-	for _, expected := range []string{
-		"infra-onepassword-connect",
-		"infra-cloudnative-pg",
-		"infra-spicedb-operator",
+	for _, forbidden := range []string{
+		"kustomization-infra-cloudnative-pg-cluster.yaml",
+		"kustomization-infra-spicedb.yaml",
 	} {
-		if !slices.Contains(dependsOn, expected) {
-			t.Fatalf("infra SpiceDB dependencies = %#v, missing %q", dependsOn, expected)
-		}
-	}
-
-	stack := readYAML[resourceKustomization](t, gitOpsPath("spicedb", "kustomization.yaml"))
-	for _, expected := range []string{
-		"external-secret-postgres.yaml",
-		"external-secret-config.yaml",
-		"postgres-cluster.yaml",
-		"spicedb-cluster.yaml",
-	} {
-		if !slices.Contains(stack.Resources, expected) {
-			t.Fatalf("spicedb stack resources = %#v, missing %q", stack.Resources, expected)
+		if slices.Contains(root.Resources, forbidden) {
+			t.Fatalf("root gitops kustomization still splits runtime stack via %q: %#v", forbidden, root.Resources)
 		}
 	}
 }
 
 func TestWaddleServerGitOpsUsesRuntimeSpiceDBSecretsOnly(t *testing.T) {
 	waddleServer := readYAML[resourceKustomization](t, gitOpsPath("waddle-server", "kustomization.yaml"))
-	if !slices.Contains(waddleServer.Resources, "spicedb-external-secret.yaml") {
-		t.Fatalf("waddle-server kustomization missing SpiceDB secret wiring: %#v", waddleServer.Resources)
+	for _, expected := range []string{
+		"postgresql-cluster.yaml",
+		"spicedb-postgres-app-user-external-secret.yaml",
+		"spicedb-config-external-secret.yaml",
+		"spicedb-postgres-cluster.yaml",
+		"spicedb-cluster.yaml",
+		"spicedb-external-secret.yaml",
+	} {
+		if !slices.Contains(waddleServer.Resources, expected) {
+			t.Fatalf("waddle-server kustomization missing %q: %#v", expected, waddleServer.Resources)
+		}
 	}
 
 	externalSecretPath := gitOpsPath("waddle-server", "spicedb-external-secret.yaml")
@@ -137,11 +111,11 @@ func TestWaddleServerGitOpsUsesRuntimeSpiceDBSecretsOnly(t *testing.T) {
 	if !helmRelease.Spec.Values.SpiceDB.Enabled {
 		t.Fatal("waddle-server HelmRelease must keep SpiceDB enabled")
 	}
-	if helmRelease.Spec.Values.SpiceDB.Endpoint != "spicedb.spicedb.svc.cluster.local:50051" {
+	if helmRelease.Spec.Values.SpiceDB.Endpoint != "spicedb:50051" {
 		t.Fatalf(
 			"spicedb endpoint = %q, want %q",
 			helmRelease.Spec.Values.SpiceDB.Endpoint,
-			"spicedb.spicedb.svc.cluster.local:50051",
+			"spicedb:50051",
 		)
 	}
 	if !helmRelease.Spec.Values.SpiceDB.Insecure {
