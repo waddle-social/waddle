@@ -184,7 +184,7 @@ schema.#Project & {
 				echo "${GITHUB_TOKEN}" | docker login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
 				docker buildx create --use --name "waddle-${CUENV_ARCH}" || true
 				FULL_SHA="$(git rev-parse HEAD)"
-				mkdir -p target/digests
+				mkdir -p ../target/digests
 				docker buildx build \
 				  --platform "${PLATFORM}" \
 				  --build-arg WADDLE_GIT_SHA="${FULL_SHA}" \
@@ -192,8 +192,8 @@ schema.#Project & {
 				  --target runtime \
 				  --output "type=image,name=ghcr.io/waddle-social/waddle,push-by-digest=true,name-canonical=true,push=true" \
 				  . \
-				  2>&1 | tee "target/digests/build-${CUENV_ARCH}.log"
-				grep -Eo 'sha256:[a-f0-9]{64}' "target/digests/build-${CUENV_ARCH}.log" | tail -n1 > "target/digests/${CUENV_ARCH}.txt"
+				  2>&1 | tee "../target/digests/build-${CUENV_ARCH}.log"
+				grep -Eo 'sha256:[a-f0-9]{64}' "../target/digests/build-${CUENV_ARCH}.log" | tail -n1 > "../target/digests/${CUENV_ARCH}.txt"
 			"""#]
 			inputs: list.Concat([_rustInputs, ["Containerfile", ".dockerignore"]])
 			outputs: ["target/digests/**"]
@@ -211,7 +211,7 @@ schema.#Project & {
 				set -euo pipefail
 				echo "${GITHUB_TOKEN}" | docker login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
 
-				mapfile -t DIGESTS < <(find target/digests -name '*.txt' -type f -print0 | xargs -0 cat | sed '/^$/d' | sort -u)
+				mapfile -t DIGESTS < <(find ../target/digests -name '*.txt' -type f -print0 | xargs -0 cat | sed '/^$/d' | sort -u)
 				if [ "${#DIGESTS[@]}" -eq 0 ]; then
 				  echo "No image digests found" >&2
 				  exit 1
