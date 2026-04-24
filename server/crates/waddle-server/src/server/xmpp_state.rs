@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use tracing::{debug, warn};
 use waddle_xmpp::inbox::{storage::InboxStorage, InboxEntry};
-use waddle_xmpp::{Session as XmppSession, XmppError};
+use waddle_xmpp::{Session as XmppSession, UserDirectoryEntry, XmppError};
 
 use crate::auth::{
     jid_to_localpart, localpart_to_jid, NativeUserStore, RegisterRequest, SessionManager,
@@ -15,12 +15,14 @@ use crate::auth::{
 use crate::db::actor::{DbActor, DbExecute, DbQuery, DbQueryOne, GetDatabase};
 use crate::db::{row_value, Database, DatabasePool, ValueExt};
 use crate::permissions::{
-    CheckPermission, ListRelations, ListSubjects, Object, ObjectType, Permission, PermissionActor,
-    Relation, Subject, SubjectType, Tuple, WriteTuple,
+    CheckPermission, DeleteTuple, ListRelations, ListSubjects, Object, ObjectType, Permission,
+    PermissionActor, Relation, Subject, SubjectType, Tuple, WriteTuple,
 };
 use crate::vcard::VCardStore;
 use kameo::actor::ActorRef;
 use serde::Serialize;
+
+use crate::server::bootstrap_membership::{provision_user_membership, BootstrapMembershipConfig};
 
 #[derive(Debug, Serialize)]
 pub(crate) struct XmppChannelRecord {
@@ -494,6 +496,147 @@ impl waddle_xmpp::AppState for XmppAppState {
         Ok(subject_strings)
     }
 
+    async fn resolve_subject_jid(&self, subject: &str) -> Result<Option<jid::BareJid>, XmppError> {
+        let subject = Self::parse_subject(subject)?;
+        if subject.subject_type != SubjectType::User || subject.relation.is_some() {
+            return Ok(None);
+        }
+
+        let row = self
+            .global_db_actor
+            .ask(DbQueryOne {
+                sql: "SELECT xmpp_localpart FROM users WHERE id = ? LIMIT 1".to_string(),
+                params: vec![subject.id.as_str().into()],
+            })
+            .await
+            .map_err(|e| XmppError::internal(format!("Failed to resolve user JID: {}", e)))?;
+
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let localpart = db_string(&row, 0, "xmpp_localpart")
+            .map_err(|e| XmppError::internal(format!("Failed to decode user JID: {}", e)))?;
+        let jid = localpart_to_jid(&localpart, &self.domain)
+            .map_err(|e| XmppError::internal(format!("Failed to build user JID: {}", e)))?
+            .parse()
+            .map_err(|e| XmppError::internal(format!("Failed to parse user JID: {}", e)))?;
+        Ok(Some(jid))
+    }
+
+    async fn search_users(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<UserDirectoryEntry>, XmppError> {
+        let pattern = format!("%{}%", query.trim());
+        let rows = self
+            .global_db_actor
+            .ask(DbQuery {
+                sql: r#"
+                    SELECT username, xmpp_localpart, display_name, avatar_url
+                    FROM users
+                    WHERE username LIKE ? OR xmpp_localpart LIKE ? OR display_name LIKE ?
+                    ORDER BY username ASC
+                    LIMIT ?
+                "#
+                .to_string(),
+                params: vec![
+                    pattern.as_str().into(),
+                    pattern.as_str().into(),
+                    pattern.as_str().into(),
+                    (limit as i64).into(),
+                ],
+            })
+            .await
+            .map_err(|e| XmppError::internal(format!("Failed to search users: {}", e)))?;
+
+        rows.iter()
+            .map(|row| {
+                let username = db_string(row, 0, "username").map_err(|e| {
+                    XmppError::internal(format!("Failed to decode username: {}", e))
+                })?;
+                let localpart = db_string(row, 1, "xmpp_localpart").map_err(|e| {
+                    XmppError::internal(format!("Failed to decode xmpp_localpart: {}", e))
+                })?;
+                let display_name = db_optional_string(row, 2, "display_name").map_err(|e| {
+                    XmppError::internal(format!("Failed to decode display_name: {}", e))
+                })?;
+                let avatar_url = db_optional_string(row, 3, "avatar_url").map_err(|e| {
+                    XmppError::internal(format!("Failed to decode avatar_url: {}", e))
+                })?;
+                let jid = localpart_to_jid(&localpart, &self.domain)
+                    .map_err(|e| XmppError::internal(format!("Failed to build user JID: {}", e)))?
+                    .parse()
+                    .map_err(|e| XmppError::internal(format!("Failed to parse user JID: {}", e)))?;
+                Ok(UserDirectoryEntry {
+                    jid,
+                    username,
+                    display_name,
+                    avatar_url,
+                })
+            })
+            .collect()
+    }
+
+    async fn set_room_affiliation(
+        &self,
+        channel_id: &str,
+        jid: &jid::BareJid,
+        affiliation: waddle_xmpp::Affiliation,
+    ) -> Result<(), XmppError> {
+        let Some(localpart) = jid.node() else {
+            return Err(XmppError::bad_request(Some("JID has no localpart".into())));
+        };
+        let row = self
+            .global_db_actor
+            .ask(DbQueryOne {
+                sql: "SELECT id FROM users WHERE xmpp_localpart = ? LIMIT 1".to_string(),
+                params: vec![localpart.as_str().into()],
+            })
+            .await
+            .map_err(|e| XmppError::internal(format!("Failed to resolve user: {}", e)))?;
+        let Some(row) = row else {
+            return Err(XmppError::item_not_found(Some(format!(
+                "User {} not found",
+                jid
+            ))));
+        };
+        let user_id = db_string(&row, 0, "id")
+            .map_err(|e| XmppError::internal(format!("Failed to decode user id: {}", e)))?;
+
+        let object = Object::new(ObjectType::Channel, channel_id);
+        let subject = Subject::user(&user_id);
+        for relation in ["owner", "admin", "member", "outcast"] {
+            let tuple = Tuple::new(object.clone(), Relation::new(relation), subject.clone());
+            self.permission_actor
+                .ask(DeleteTuple { tuple })
+                .await
+                .map_err(|e| {
+                    XmppError::internal(format!("Failed to clear MUC affiliation tuple: {}", e))
+                })?;
+        }
+
+        let relation = match affiliation {
+            waddle_xmpp::Affiliation::Owner => Some("owner"),
+            waddle_xmpp::Affiliation::Admin => Some("admin"),
+            waddle_xmpp::Affiliation::Member => Some("member"),
+            waddle_xmpp::Affiliation::Outcast => Some("outcast"),
+            waddle_xmpp::Affiliation::None => None,
+        };
+
+        if let Some(relation) = relation {
+            let tuple = Tuple::new(object, Relation::new(relation), subject);
+            self.permission_actor
+                .ask(WriteTuple { tuple })
+                .await
+                .map_err(|e| {
+                    XmppError::internal(format!("Failed to write MUC affiliation tuple: {}", e))
+                })?;
+        }
+
+        Ok(())
+    }
+
     /// Lookup SCRAM credentials for a native JID user.
     ///
     /// Queries the NativeUserStore for SCRAM credentials if the user exists.
@@ -553,6 +696,17 @@ impl waddle_xmpp::AppState for XmppAppState {
 
         match self.native_user_store.register(request).await {
             Ok(user_id) => {
+                let subject_user_id = format!("{}@{}", username, self.domain);
+                provision_user_membership(
+                    &self.permission_actor,
+                    &BootstrapMembershipConfig::from_env(),
+                    &subject_user_id,
+                    username,
+                )
+                .await
+                .map_err(|err| {
+                    XmppError::internal(format!("Failed to provision account membership: {err}"))
+                })?;
                 debug!(
                     username = username,
                     user_id = user_id,
@@ -1514,6 +1668,32 @@ impl waddle_xmpp::commands::CreateChannelDeps for XmppAppState {
         {
             error!("Failed to write parent permission tuple: {}", err);
             // Clean up: delete the channel
+            let _ = space_db_actor
+                .ask(DbExecute {
+                    sql: "DELETE FROM channels WHERE id = ?".to_string(),
+                    params: vec![crate::db::Value::from(channel_id.as_str())],
+                })
+                .await;
+            return Err(
+                waddle_xmpp::commands::CreateChannelError::PermissionTupleWriteFailed(
+                    err.to_string(),
+                ),
+            );
+        }
+
+        let owner_tuple = Tuple::new(
+            Object::new(ObjectType::Channel, &channel_id),
+            Relation::new("owner"),
+            Subject::user(user_id),
+        );
+
+        if let Err(err) = self
+            .permission_actor
+            .ask(WriteTuple { tuple: owner_tuple })
+            .await
+            .map_err(|e| e.to_string())
+        {
+            error!("Failed to write channel owner permission tuple: {}", err);
             let _ = space_db_actor
                 .ask(DbExecute {
                     sql: "DELETE FROM channels WHERE id = ?".to_string(),

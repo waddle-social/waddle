@@ -417,7 +417,7 @@ pub trait AffiliationResolver: Send + Sync {
     fn resolve_affiliation(
         &self,
         user_id: &str,
-        waddle_id: &str,
+        _waddle_id: &str,
         channel_id: &str,
     ) -> impl Future<Output = Result<Affiliation, XmppError>> + Send;
 
@@ -548,7 +548,6 @@ impl AffiliationEntry {
 /// AppState trait interface.
 pub struct AppStateAffiliationResolver<S> {
     app_state: Arc<S>,
-    mapper: PermissionMapper,
     /// Domain for JID construction (for future use)
     #[allow(dead_code)]
     domain: String,
@@ -557,21 +556,13 @@ pub struct AppStateAffiliationResolver<S> {
 impl<S> AppStateAffiliationResolver<S> {
     /// Create a new resolver with the given app state.
     pub fn new(app_state: Arc<S>, domain: String) -> Self {
-        Self {
-            app_state,
-            mapper: PermissionMapper::new(),
-            domain,
-        }
+        Self { app_state, domain }
     }
 
     /// Create a new resolver with a custom permission mapper.
     #[allow(dead_code)]
-    pub fn with_mapper(app_state: Arc<S>, domain: String, mapper: PermissionMapper) -> Self {
-        Self {
-            app_state,
-            mapper,
-            domain,
-        }
+    pub fn with_mapper(app_state: Arc<S>, domain: String, _mapper: PermissionMapper) -> Self {
+        Self { app_state, domain }
     }
 }
 
@@ -587,71 +578,53 @@ where
         channel_id: &str,
     ) -> impl Future<Output = Result<Affiliation, XmppError>> + Send {
         let app_state = Arc::clone(&self.app_state);
-        let mapper = self.mapper.clone();
         let user_id = user_id.to_string();
         let waddle_id = waddle_id.to_string();
         let channel_id = channel_id.to_string();
 
         async move {
-            // Check permissions in order of privilege (highest first)
-            // This is more efficient than checking all and taking the max
+            let subject = format!("user:{}", user_id);
+            let channel_resource = format!("channel:{}", channel_id);
+            if app_state
+                .check_permission(&channel_resource, "outcast", &subject)
+                .await?
+            {
+                return Ok(Affiliation::Outcast);
+            }
+
             let relations_to_check = [
                 ("owner", Affiliation::Owner),
                 ("admin", Affiliation::Admin),
-                ("moderator", Affiliation::Admin),
-                ("manager", Affiliation::Admin),
                 ("member", Affiliation::Member),
-                ("writer", Affiliation::Member),
-                ("viewer", Affiliation::Member),
             ];
 
-            // First check waddle-level permissions (inherit to all channels)
-            for (relation, expected_affiliation) in &relations_to_check {
-                let resource = format!("waddle:{}", waddle_id);
-                let subject = format!("user:{}", user_id);
+            let resources = [
+                (
+                    format!("space:{}", waddle_id),
+                    "space-level MUC affiliation",
+                ),
+                (channel_resource, "channel-level MUC affiliation"),
+            ];
 
-                match app_state
-                    .check_permission(&resource, relation, &subject)
-                    .await
-                {
-                    Ok(true) => {
-                        debug!(
-                            relation = %relation,
-                            affiliation = %expected_affiliation,
-                            "User has waddle-level permission"
-                        );
-                        return Ok(*expected_affiliation);
-                    }
-                    Ok(false) => continue,
-                    Err(e) => {
-                        warn!(error = %e, "Error checking waddle permission");
-                        // Continue checking other permissions
-                    }
-                }
-            }
-
-            // Then check channel-level permissions (more specific)
-            for (relation, _) in &relations_to_check {
-                let resource = format!("channel:{}", channel_id);
-                let subject = format!("user:{}", user_id);
-
-                match app_state
-                    .check_permission(&resource, relation, &subject)
-                    .await
-                {
-                    Ok(true) => {
-                        let affiliation = mapper.map_relation(relation);
-                        debug!(
-                            relation = %relation,
-                            affiliation = %affiliation,
-                            "User has channel-level permission"
-                        );
-                        return Ok(affiliation);
-                    }
-                    Ok(false) => continue,
-                    Err(e) => {
-                        warn!(error = %e, "Error checking channel permission");
-                        // Continue checking other permissions
+            for (resource, scope) in resources {
+                for (relation, affiliation) in &relations_to_check {
+                    match app_state
+                        .check_permission(&resource, relation, &subject)
+                        .await
+                    {
+                        Ok(true) => {
+                            debug!(
+                                relation = %relation,
+                                affiliation = %affiliation,
+                                    scope = %scope,
+                                    "User has MUC affiliation"
+                            );
+                            return Ok(*affiliation);
+                        }
+                        Ok(false) => continue,
+                        Err(e) => {
+                            warn!(error = %e, resource = %resource, "Error checking MUC affiliation");
+                        }
                     }
                 }
             }
@@ -669,76 +642,50 @@ where
         affiliation: Affiliation,
     ) -> impl Future<Output = Result<Vec<AffiliationEntry>, XmppError>> + Send {
         let app_state = Arc::clone(&self.app_state);
-        let mapper = self.mapper.clone();
-        let domain = self.domain.clone();
         let waddle_id = waddle_id.to_string();
         let channel_id = channel_id.to_string();
 
         async move {
-            // Determine which relations map to this affiliation
             let relations_to_query: Vec<&str> = match affiliation {
                 Affiliation::Owner => vec!["owner"],
-                Affiliation::Admin => vec!["admin", "moderator", "manager"],
-                Affiliation::Member => vec!["member", "writer", "viewer"],
-                Affiliation::None => return Ok(Vec::new()), // No-affiliation users aren't stored
-                Affiliation::Outcast => vec!["banned"],     // Banned users if we track them
+                Affiliation::Admin => vec!["admin"],
+                Affiliation::Member => vec!["member"],
+                Affiliation::None => return Ok(Vec::new()),
+                Affiliation::Outcast => vec!["outcast"],
             };
 
             let mut entries = Vec::new();
 
-            // Query channel-level permissions first
-            for relation in &relations_to_query {
-                let resource = format!("channel:{}", channel_id);
-                match app_state.list_subjects(&resource, relation).await {
-                    Ok(subjects) => {
-                        for subject_str in subjects {
-                            // Parse the subject (expected format: "user:<user_id>")
-                            if let Some(user_id) = subject_str.strip_prefix("user:") {
-                                // Convert user identifier to a synthetic JID.
-                                if let Ok(jid) =
-                                    format!("{}@{}", user_id.replace(':', "_"), domain).parse()
-                                {
-                                    let aff = mapper.map_relation(relation);
-                                    if aff == affiliation {
+            let resources = [
+                format!("space:{}", waddle_id),
+                format!("channel:{}", channel_id),
+            ];
+
+            for resource in resources {
+                for relation in &relations_to_query {
+                    match app_state.list_subjects(&resource, relation).await {
+                        Ok(subjects) => {
+                            for subject_str in subjects {
+                                match app_state.resolve_subject_jid(&subject_str).await {
+                                    Ok(Some(jid)) => {
                                         entries.push(AffiliationEntry::new(jid, affiliation));
                                     }
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        warn!(error = %e, relation = %relation, "Error listing subjects for channel");
-                    }
-                }
-            }
-
-            // Also query waddle-level permissions (they inherit to channels)
-            for relation in &relations_to_query {
-                let resource = format!("waddle:{}", waddle_id);
-                match app_state.list_subjects(&resource, relation).await {
-                    Ok(subjects) => {
-                        for subject_str in subjects {
-                            if let Some(user_id) = subject_str.strip_prefix("user:") {
-                                if let Ok(jid) = format!("{}@{}", user_id.replace(':', "_"), domain)
-                                    .parse::<BareJid>()
-                                {
-                                    // Only add if not already present (channel-level takes precedence)
-                                    if !entries.iter().any(|e| e.jid == jid) {
-                                        let aff = mapper.map_relation(relation);
-                                        if aff == affiliation {
-                                            entries.push(AffiliationEntry::new(jid, affiliation));
-                                        }
+                                    Ok(None) => {}
+                                    Err(e) => {
+                                        warn!(error = %e, subject = %subject_str, "Error resolving subject JID");
                                     }
                                 }
                             }
                         }
-                    }
-                    Err(e) => {
-                        warn!(error = %e, relation = %relation, "Error listing subjects for waddle");
+                        Err(e) => {
+                            warn!(error = %e, relation = %relation, resource = %resource, "Error listing subjects for MUC affiliation");
+                        }
                     }
                 }
             }
 
+            entries.sort_by_key(|entry| entry.jid.to_string());
+            entries.dedup_by(|a, b| a.jid == b.jid);
             debug!(count = entries.len(), "Listed affiliations");
             Ok(entries)
         }
@@ -763,23 +710,26 @@ where
                 return Ok(true);
             }
 
-            // For members-only rooms, check if user has any membership
-            // Check waddle membership first (inherits to channels)
-            let resource = format!("waddle:{}", waddle_id);
             let subject = format!("user:{}", user_id);
+            let channel_resource = format!("channel:{}", channel_id);
 
-            // Check if user has view permission (minimum required)
             if app_state
-                .check_permission(&resource, "view", &subject)
+                .check_permission(&channel_resource, "outcast", &subject)
+                .await?
+            {
+                return Ok(false);
+            }
+
+            let space_resource = format!("space:{}", waddle_id);
+            if app_state
+                .check_permission(&space_resource, "view", &subject)
                 .await?
             {
                 return Ok(true);
             }
 
-            // Check channel-specific membership
-            let resource = format!("channel:{}", channel_id);
             if app_state
-                .check_permission(&resource, "read", &subject)
+                .check_permission(&channel_resource, "read", &subject)
                 .await?
             {
                 return Ok(true);

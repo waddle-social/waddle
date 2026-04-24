@@ -29,6 +29,8 @@ use super::{
 };
 use crate::types::{Affiliation, Role};
 
+const OCCUPANT_ID_SECRET: &[u8] = b"waddle-xmpp-occupant-id-v1";
+
 /// Represents the delivery target for MUC presence stanzas.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PresenceDeliveryTarget {
@@ -618,10 +620,9 @@ impl MucRoom {
     ) -> FederatedMessageSet {
         let mut result = FederatedMessageSet::new();
 
-        // Verify sender is an occupant
-        if !self.occupants.contains_key(sender_nick) {
-            return result; // Sender not found, nothing to broadcast
-        }
+        let Some(sender_occupant) = self.occupants.get(sender_nick) else {
+            return result;
+        };
 
         // Build the 'from' JID: room@domain/sender_nick
         let from_room_jid = match self.room_jid.with_resource_str(sender_nick) {
@@ -636,6 +637,12 @@ impl MucRoom {
                 broadcast_msg.type_ = MessageType::Groupchat;
                 broadcast_msg.from = Some(Jid::from(from_room_jid.clone()));
                 broadcast_msg.to = Some(Jid::from(recipient_jid.clone()));
+                let occupant_id = crate::xep::xep0421::generate_occupant_id(
+                    &sender_occupant.real_jid.to_bare().to_string(),
+                    &self.room_jid.to_string(),
+                    OCCUPANT_ID_SECRET,
+                );
+                crate::xep::xep0421::set_occupant_id_on_message(&mut broadcast_msg, &occupant_id);
 
                 let outbound = OutboundMucMessage::new(recipient_jid.clone(), broadcast_msg);
 

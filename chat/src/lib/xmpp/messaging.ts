@@ -223,10 +223,15 @@ export function sendGroupMessage(
     }
   }
 
-  // XEP-0513: Explicit @everyone / @here
-  const explicitMentionItems: Array<{ type: string }> = [];
-  if (hasText && /(?:^|\s)@everyone(?:\s|$)/i.test(text)) explicitMentionItems.push({ type: "everyone" });
-  if (hasText && /(?:^|\s)@here(?:\s|$)/i.test(text)) explicitMentionItems.push({ type: "here" });
+  // XEP-0513: Explicit channel mentions. @here is represented as a channel
+  // mention with the XEP-0513 active modifier.
+  const explicitMentions: Array<{ mentions: string; active?: boolean }> = [];
+  if (hasText && /(?:^|\s)@everyone(?:\s|$)/i.test(text)) {
+    explicitMentions.push({ mentions: "urn:xmpp:mentions:0#channel" });
+  }
+  if (hasText && /(?:^|\s)@here(?:\s|$)/i.test(text)) {
+    explicitMentions.push({ mentions: "urn:xmpp:mentions:0#channel", active: true });
+  }
 
   const fallbacks: WaddleFallback[] = [];
   if (replyTo && prefixLength > 0) {
@@ -240,7 +245,7 @@ export function sendGroupMessage(
     processingHints: { store: true },
   };
   if (references.length > 0) msgData.references = toStanzaReferences(references);
-  if (explicitMentionItems.length > 0) msgData.explicitMentions = { items: explicitMentionItems };
+  if (explicitMentions.length > 0) msgData.explicitMentions = explicitMentions;
   if (rebasedMarkup && rebasedMarkup.length > 0) {
     msgData.markup = { spans: toStanzaSpans(rebasedMarkup) };
   }

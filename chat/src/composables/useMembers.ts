@@ -1,12 +1,13 @@
 import { ref, watch, type Ref } from "vue";
 import type { MemberSummary, UserSearchResult } from "@/lib/chat-types";
 import type { EditableRole } from "@/lib/chat-ui";
+import type { BrowserXmppClient } from "@/lib/xmpp-client";
 
 export function useMembers(
-  _api: Ref<null>,
+  xmppClient: Ref<BrowserXmppClient | null>,
   activeSpaceId: Ref<string | null>,
-  _activeChannelId: Ref<string | null>,
-  _members: Ref<MemberSummary[]>,
+  activeChannelId: Ref<string | null>,
+  members: Ref<MemberSummary[]>,
   canManageMembers: Ref<boolean>,
   _normalizeError: (v: unknown) => string,
   actionError: Ref<string>,
@@ -38,35 +39,49 @@ export function useMembers(
     searchTimer = setTimeout(async () => {
       const requestId = ++searchRequestId;
       const spaceId = activeSpaceId.value;
-      if (!spaceId || !canManageMembers.value) return;
+      if (!spaceId || !canManageMembers.value || !xmppClient.value) return;
 
       isSearchingUsers.value = true;
-      if (
-        requestId === searchRequestId &&
-        activeSpaceId.value === spaceId &&
-        memberQuery.value.trim() === trimmed
-      ) {
-        memberSearchResults.value = [];
-      }
-      if (requestId === searchRequestId) {
+      try {
+        const results = await xmppClient.value.searchUsers(trimmed);
+        if (
+          requestId === searchRequestId &&
+          activeSpaceId.value === spaceId &&
+          memberQuery.value.trim() === trimmed
+        ) {
+          const existing = new Set(members.value.map((member) => member.jid));
+          memberSearchResults.value = results.filter((user) => !existing.has(user.jid));
+        }
+      } catch (e) {
+        if (requestId === searchRequestId) actionError.value = _normalizeError(e);
+      } finally {
+        if (requestId === searchRequestId) {
         isSearchingUsers.value = false;
+        }
       }
     }, 220);
   });
 
-  async function addMember(_userId: string) {
+  async function addMember(userId: string) {
     clearActionError();
-    actionError.value = "Member management is not available in the XMPP-only client yet.";
+    if (!xmppClient.value || !activeChannelId.value) return;
+    await xmppClient.value.setRoomAffiliation(activeChannelId.value, userId, newMemberRole.value);
+    members.value = await xmppClient.value.listRoomMembers(activeChannelId.value);
+    clearSearch();
   }
 
-  async function updateMemberRole(_member: MemberSummary, _role: EditableRole) {
+  async function updateMemberRole(member: MemberSummary, role: EditableRole) {
     clearActionError();
-    actionError.value = "Member role management is not available in the XMPP-only client yet.";
+    if (!xmppClient.value || !activeChannelId.value) return;
+    await xmppClient.value.setRoomAffiliation(activeChannelId.value, member.jid, role);
+    members.value = await xmppClient.value.listRoomMembers(activeChannelId.value);
   }
 
-  async function removeMember(_member: MemberSummary) {
+  async function removeMember(member: MemberSummary) {
     clearActionError();
-    actionError.value = "Member removal is not available in the XMPP-only client yet.";
+    if (!xmppClient.value || !activeChannelId.value) return;
+    await xmppClient.value.setRoomAffiliation(activeChannelId.value, member.jid, "none");
+    members.value = await xmppClient.value.listRoomMembers(activeChannelId.value);
   }
 
   function clearSearch() {

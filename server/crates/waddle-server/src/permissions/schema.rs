@@ -236,6 +236,10 @@ fn channel_schema() -> ObjectTypeSchema {
     ObjectTypeSchema::new()
         // Relations
         .with_relation("parent")
+        .with_relation("owner")
+        .with_relation("admin")
+        .with_relation("member")
+        .with_relation("outcast")
         .with_relation("manager")
         .with_relation("moderator")
         .with_relation("writer")
@@ -249,6 +253,8 @@ fn channel_schema() -> ObjectTypeSchema {
         .with_permission(
             "manage",
             ComputedPermission::union(vec![
+                ComputedPermission::direct("owner"),
+                ComputedPermission::direct("admin"),
                 ComputedPermission::direct("manager"),
                 ComputedPermission::arrow("parent", "admin"),
             ]),
@@ -256,6 +262,8 @@ fn channel_schema() -> ObjectTypeSchema {
         .with_permission(
             "moderate",
             ComputedPermission::union(vec![
+                ComputedPermission::direct("owner"),
+                ComputedPermission::direct("admin"),
                 ComputedPermission::direct("moderator"),
                 ComputedPermission::direct("manager"),
                 ComputedPermission::arrow("parent", "moderator"),
@@ -265,6 +273,9 @@ fn channel_schema() -> ObjectTypeSchema {
         .with_permission(
             "send_message",
             ComputedPermission::union(vec![
+                ComputedPermission::direct("owner"),
+                ComputedPermission::direct("admin"),
+                ComputedPermission::direct("member"),
                 ComputedPermission::direct("writer"),
                 ComputedPermission::direct("moderator"),
                 ComputedPermission::direct("manager"),
@@ -274,6 +285,9 @@ fn channel_schema() -> ObjectTypeSchema {
         .with_permission(
             "read",
             ComputedPermission::union(vec![
+                ComputedPermission::direct("owner"),
+                ComputedPermission::direct("admin"),
+                ComputedPermission::direct("member"),
                 ComputedPermission::direct("viewer"),
                 ComputedPermission::direct("writer"),
                 ComputedPermission::direct("moderator"),
@@ -284,6 +298,9 @@ fn channel_schema() -> ObjectTypeSchema {
         .with_permission(
             "view",
             ComputedPermission::union(vec![
+                ComputedPermission::direct("owner"),
+                ComputedPermission::direct("admin"),
+                ComputedPermission::direct("member"),
                 ComputedPermission::direct("viewer"),
                 ComputedPermission::direct("writer"),
                 ComputedPermission::direct("moderator"),

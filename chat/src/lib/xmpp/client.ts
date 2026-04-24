@@ -3,6 +3,7 @@ import { createClient } from "stanza";
 import type { Agent } from "stanza";
 import type { ReceivedMUCPresence, ReceivedMessage, ReceivedPresence } from "stanza/protocol";
 import type { WaddleSession } from "../server-auth";
+import type { MemberSummary, UserSearchResult } from "../chat-types";
 import type { WaddleHat } from "./extensions/hats";
 import type {
   ChatStateEvent, ChatStateType, DiscoveredChannel, DisplayedEvent,
@@ -1174,6 +1175,63 @@ export class BrowserXmppClient {
     await this.connect();
     if (!this.xmpp) return [];
     return discovery.discoverChannels(this.xmpp, this.session.jid);
+  }
+
+  async listRoomMembers(channelId: string): Promise<MemberSummary[]> {
+    await this.connect();
+    if (!this.xmpp) return [];
+    const roomJid = roomBareJidFor(this.session.jid, channelId);
+    const muc = this.xmpp as Agent & {
+      getRoomMembers?: (room: string, opts: { affiliation: string }) => Promise<{ muc?: { users?: Array<{ jid?: string; affiliation?: string }> } }>;
+    };
+    const affiliations = ["owner", "admin", "member", "outcast"] as const;
+    const results = await Promise.all(
+      affiliations.map(async (affiliation) => {
+        const response = await muc.getRoomMembers?.(roomJid, { affiliation });
+        return (response?.muc?.users ?? []).map((item) => ({
+          jid: String(item.jid ?? ""),
+          username: String(item.jid ?? "").split("@")[0] ?? "",
+          avatar_url: null,
+          role: affiliation,
+          joined_at: "",
+        }));
+      }),
+    );
+    return results.flat().filter((member) => member.jid);
+  }
+
+  async setRoomAffiliation(channelId: string, jid: string, affiliation: MemberSummary["role"]): Promise<void> {
+    await this.connect();
+    if (!this.xmpp) return;
+    const roomJid = roomBareJidFor(this.session.jid, channelId);
+    const muc = this.xmpp as Agent & {
+      setRoomAffiliation?: (room: string, jid: string, affiliation: string) => Promise<void>;
+    };
+    await muc.setRoomAffiliation?.(roomJid, jid, affiliation === "none" ? "none" : affiliation);
+  }
+
+  async searchUsers(query: string): Promise<UserSearchResult[]> {
+    await this.connect();
+    if (!this.xmpp || !query.trim()) return [];
+    const domain = jidDomain(this.session.jid);
+    if (!domain) return [];
+    const response = await this.xmpp.sendIQ({
+      type: "set",
+      to: domain,
+      search: { nick: query },
+    } as unknown as Parameters<Agent["sendIQ"]>[0]);
+    const items = ((response as { search?: { items?: Array<Record<string, unknown>> } }).search?.items ?? []);
+    return items.map((item) => {
+      const jid = String(item.jid ?? "");
+      const username = String(item.nick ?? jid.split("@")[0] ?? "");
+      return {
+        id: jid,
+        jid,
+        username,
+        display_name: (item.name as string | undefined) ?? null,
+        avatar_url: null,
+      };
+    }).filter((user) => user.jid);
   }
 
   /**

@@ -224,12 +224,17 @@ function extractReferences(msg: ReceivedMessage, base: MessageExtensionsTarget):
 }
 
 function extractExplicitMentions(msg: ReceivedMessage, base: MessageExtensionsTarget): void {
-  const em = ext(msg).explicitMentions as { items?: Array<{ type?: string }> } | undefined;
-  if (!em?.items) return;
+  const mentions = ext(msg).explicitMentions as
+    | Array<{ mentions?: string; active?: boolean }>
+    | { mentions?: string; active?: boolean }
+    | undefined;
+  if (!mentions) return;
 
-  for (const m of em.items) {
-    if (m.type === "everyone") { base.broadcastMention = "everyone"; return; }
-    if (m.type === "here") { base.broadcastMention = "here"; return; }
+  for (const m of Array.isArray(mentions) ? mentions : [mentions]) {
+    if (m.mentions === "urn:xmpp:mentions:0#channel") {
+      base.broadcastMention = m.active ? "here" : "everyone";
+      return;
+    }
   }
 }
 

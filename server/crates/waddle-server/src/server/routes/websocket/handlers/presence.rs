@@ -430,7 +430,6 @@ fn role_str(role: Role) -> &'static str {
 }
 
 /// Derive the single-space id and channel id from a room's bare JID node.
-
 ///
 /// Convention: node is the channel id.
 /// Falls back to ("default", "default") if the node can't be parsed.

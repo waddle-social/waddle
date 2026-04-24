@@ -3619,7 +3619,7 @@ mod tests {
 
         let space_db = state.deps.app_state.db_pool.global();
         MigrationRunner::waddle()
-            .run(&space_db)
+            .run(space_db)
             .await
             .expect("space migrations");
         let conn = space_db.guard().await.expect("persistent connection");

@@ -601,9 +601,10 @@ pub use xep0488::{
 };
 
 pub use xep0513::{
-    build_mentions_element, extract_explicit_mentions, has_explicit_mentions, is_mentions_element,
-    parse_mentions_element, set_explicit_mentions, strip_explicit_mentions, ExplicitMentionCarrier,
-    ExplicitMentions, MentionType, NS_EXPLICIT_MENTIONS,
+    build_mention_element, build_mentions_elements, extract_explicit_mentions,
+    has_explicit_mentions, is_mention_element, parse_mention_element, set_explicit_mentions,
+    strip_explicit_mentions, ExplicitMention, ExplicitMentionCarrier, ExplicitMentions,
+    CHANNEL_MENTION, NS_EXPLICIT_MENTIONS,
 };
 
 pub use xep0508::{

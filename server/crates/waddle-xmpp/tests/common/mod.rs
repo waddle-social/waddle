@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use base64::prelude::*;
-use jid::Jid;
+use jid::{BareJid, Jid};
 use rcgen::{generate_simple_self_signed, CertifiedKey};
 use rustls::pki_types::PrivateKeyDer;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -32,7 +32,7 @@ use waddle_xmpp::inbox::{
     storage::{InMemoryInboxStorage, InboxStorage},
     InboxEntry,
 };
-use waddle_xmpp::{roster, AppState, ScramCredentials, Session, XmppError};
+use waddle_xmpp::{roster, AppState, ScramCredentials, Session, UserDirectoryEntry, XmppError};
 
 /// Install the ring crypto provider for rustls.
 /// Must be called once before any TLS operations.
@@ -172,15 +172,34 @@ impl MockAppState {
             return matches!(
                 (granted, required),
                 (
-                    "manager",
-                    "moderator" | "writer" | "viewer" | "read" | "view"
-                ) | ("moderator", "writer" | "viewer" | "read" | "view")
+                    "owner",
+                    "admin" | "member" | "read" | "view" | "send_message" | "manage" | "moderate"
+                ) | (
+                    "admin",
+                    "member" | "read" | "view" | "send_message" | "manage" | "moderate"
+                ) | ("member", "read" | "view" | "send_message")
+                    | (
+                        "manager",
+                        "moderator" | "writer" | "viewer" | "read" | "view"
+                    )
+                    | ("moderator", "writer" | "viewer" | "read" | "view")
                     | ("writer", "viewer" | "read" | "view")
                     | ("viewer", "read" | "view")
             );
         }
 
         false
+    }
+
+    fn localpart_from_subject(subject: &str) -> Option<String> {
+        let user_id = subject.strip_prefix("user:")?;
+        user_id
+            .strip_prefix("user-test-")
+            .or_else(|| user_id.strip_prefix("user-mock-"))
+            .unwrap_or(user_id)
+            .split('#')
+            .next()
+            .map(str::to_string)
     }
 
     fn derived_relations_for(resource: &str, direct: &HashSet<String>) -> HashSet<String> {
@@ -330,6 +349,77 @@ impl AppState for MockAppState {
 
         subjects.sort();
         Ok(subjects)
+    }
+
+    async fn resolve_subject_jid(&self, subject: &str) -> Result<Option<BareJid>, XmppError> {
+        let Some(localpart) = Self::localpart_from_subject(subject) else {
+            return Ok(None);
+        };
+        let jid = format!("{}@{}", localpart, self.domain)
+            .parse()
+            .map_err(|e| XmppError::internal(format!("Invalid mock user JID: {e}")))?;
+        Ok(Some(jid))
+    }
+
+    async fn search_users(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<UserDirectoryEntry>, XmppError> {
+        let query = query.to_ascii_lowercase();
+        let mut users: Vec<String> = self.known_users.lock().await.iter().cloned().collect();
+        users.sort();
+        users
+            .into_iter()
+            .filter(|username| username.to_ascii_lowercase().contains(&query))
+            .take(limit)
+            .map(|username| {
+                let jid = format!("{}@{}", username, self.domain)
+                    .parse()
+                    .map_err(|e| XmppError::internal(format!("Invalid mock user JID: {e}")))?;
+                Ok(UserDirectoryEntry {
+                    jid,
+                    username,
+                    display_name: None,
+                    avatar_url: None,
+                })
+            })
+            .collect()
+    }
+
+    async fn set_room_affiliation(
+        &self,
+        channel_id: &str,
+        jid: &BareJid,
+        affiliation: waddle_xmpp::Affiliation,
+    ) -> Result<(), XmppError> {
+        let Some(localpart) = jid.node().map(|node| node.to_string()) else {
+            return Err(XmppError::bad_request(Some("JID has no localpart".into())));
+        };
+        let resource = format!("channel:{channel_id}");
+        let subject = format!("user:user-test-{localpart}");
+        let mut grants = self.permission_relations.lock().await;
+        let key = (resource, subject);
+        let relations = grants.entry(key).or_default();
+        for relation in ["owner", "admin", "member", "outcast"] {
+            relations.remove(relation);
+        }
+        match affiliation {
+            waddle_xmpp::Affiliation::Owner => {
+                relations.insert("owner".to_string());
+            }
+            waddle_xmpp::Affiliation::Admin => {
+                relations.insert("admin".to_string());
+            }
+            waddle_xmpp::Affiliation::Member => {
+                relations.insert("member".to_string());
+            }
+            waddle_xmpp::Affiliation::Outcast => {
+                relations.insert("outcast".to_string());
+            }
+            waddle_xmpp::Affiliation::None => {}
+        }
+        Ok(())
     }
 
     async fn lookup_scram_credentials(

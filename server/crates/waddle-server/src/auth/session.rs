@@ -33,44 +33,6 @@ pub struct Session {
     pub last_used_at: DateTime<Utc>,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{Session, SessionManager};
-    use crate::db::{actor::DbActor, Database, MigrationRunner};
-
-    #[tokio::test]
-    async fn create_session_creates_missing_user_and_allows_existing_user() {
-        let db = Database::in_memory("test-auth-session")
-            .await
-            .expect("in-memory database");
-        MigrationRunner::single()
-            .run(&db)
-            .await
-            .expect("migrations");
-        let actor = kameo::spawn(DbActor::new(db.clone()));
-        let manager = SessionManager::new(actor, Some(b"test-session-key"));
-
-        let first = Session::new("user-1", "alice", "alice");
-        manager.create_session(&first).await.expect("first session");
-
-        let second = Session::new("user-1", "alice", "alice");
-        manager
-            .create_session(&second)
-            .await
-            .expect("second session for existing user");
-
-        let loaded = manager
-            .get_session(&second.id)
-            .await
-            .expect("load session")
-            .expect("session exists");
-
-        assert_eq!(loaded.user_id, "user-1");
-        assert_eq!(loaded.username, "alice");
-        assert_eq!(loaded.xmpp_localpart, "alice");
-    }
-}
-
 impl Session {
     pub fn new(user_id: &str, username: &str, xmpp_localpart: &str) -> Self {
         Self {
@@ -307,5 +269,43 @@ impl SessionManager {
             .await
             .map_err(Self::ask_err)?;
         Ok(deleted as usize)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Session, SessionManager};
+    use crate::db::{actor::DbActor, Database, MigrationRunner};
+
+    #[tokio::test]
+    async fn create_session_creates_missing_user_and_allows_existing_user() {
+        let db = Database::in_memory("test-auth-session")
+            .await
+            .expect("in-memory database");
+        MigrationRunner::single()
+            .run(&db)
+            .await
+            .expect("migrations");
+        let actor = kameo::spawn(DbActor::new(db.clone()));
+        let manager = SessionManager::new(actor, Some(b"test-session-key"));
+
+        let first = Session::new("user-1", "alice", "alice");
+        manager.create_session(&first).await.expect("first session");
+
+        let second = Session::new("user-1", "alice", "alice");
+        manager
+            .create_session(&second)
+            .await
+            .expect("second session for existing user");
+
+        let loaded = manager
+            .get_session(&second.id)
+            .await
+            .expect("load session")
+            .expect("session exists");
+
+        assert_eq!(loaded.user_id, "user-1");
+        assert_eq!(loaded.username, "alice");
+        assert_eq!(loaded.xmpp_localpart, "alice");
     }
 }

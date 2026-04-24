@@ -9,7 +9,7 @@ export type { MarkupSpan, MessageReference } from "@/lib/rich-message";
 
 export type AppState = "loading" | "signed-out" | "ready" | "error";
 export type AdminTab = "rooms" | "people" | "settings";
-export type EditableRole = "member" | "moderator" | "admin";
+export type EditableRole = "member" | "admin" | "owner" | "outcast";
 
 /** Delivery status for messages sent by the current user. */
 export type DeliveryStatus = "queued" | "sending" | "delivered" | "failed";

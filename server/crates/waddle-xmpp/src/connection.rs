@@ -242,7 +242,7 @@ enum SessionRuntimeEvent {
 /// Typed runtime effects produced by the session actor loop.
 #[derive(Debug)]
 enum RuntimeEffect {
-    WriteStanza(Stanza),
+    WriteStanza(Box<Stanza>),
     TrackOutboundForSm,
     StopSession,
 }
@@ -319,6 +319,17 @@ pub struct ConnectionActor<S: AppState, M: MamStorage> {
     push_sender: Arc<dyn crate::push::WebPushSender + Send + Sync>,
     /// XEP-0050 Ad-Hoc Commands registry
     command_registry: Arc<CommandRegistry>,
+}
+
+fn search_query_element(iq: &xmpp_parsers::iq::Iq) -> Option<&minidom::Element> {
+    match &iq.payload {
+        IqType::Get(elem) | IqType::Set(elem) if elem.is("query", "jabber:iq:search") => Some(elem),
+        _ => None,
+    }
+}
+
+fn is_search_iq(iq: &xmpp_parsers::iq::Iq) -> bool {
+    search_query_element(iq).is_some()
 }
 
 impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
@@ -1139,7 +1150,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             SessionRuntimeEvent::RoutedOutbound(outbound_stanza) => {
                 debug!("Received outbound stanza from registry");
                 vec![
-                    RuntimeEffect::WriteStanza(outbound_stanza.stanza),
+                    RuntimeEffect::WriteStanza(Box::new(outbound_stanza.stanza)),
                     RuntimeEffect::TrackOutboundForSm,
                 ]
             }
@@ -1156,7 +1167,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         for effect in effects {
             match effect {
                 RuntimeEffect::WriteStanza(stanza) => {
-                    if let Err(error) = self.send_stanza_with_csi(stanza).await {
+                    if let Err(error) = self.send_stanza_with_csi(*stanza).await {
                         // Don't break - the client might still be readable.
                         warn!(error = %error, "Error writing outbound stanza");
                     }
@@ -2103,9 +2114,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         &self,
         jid: &FullJid,
     ) -> Option<(Option<String>, Option<String>, i8)> {
-        let Some(user_actor) = self.user_actor(&jid.to_bare()).await else {
-            return None;
-        };
+        let user_actor = self.user_actor(&jid.to_bare()).await?;
         match user_actor.ask(GetPresenceState { jid: jid.clone() }).await {
             Ok(state) => state.map(|s| (s.show, s.status, s.priority)),
             Err(error) => {
@@ -2619,7 +2628,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         if muc_msg.has_body() {
             let mut push_jids = crate::xep::xep0372::extract_mentioned_jids(&muc_msg.message);
             let explicit = crate::xep::xep0513::extract_explicit_mentions(&muc_msg.message);
-            let is_broadcast = explicit.as_ref().is_some_and(|m| m.has_broadcast());
+            let is_broadcast = explicit.as_ref().is_some_and(|m| m.has_channel());
 
             // For broadcast mentions (@everyone/@here), expand to all room occupants
             if is_broadcast {
@@ -4839,6 +4848,10 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             return self.handle_time_query(iq).await;
         }
 
+        if is_search_iq(&iq) {
+            return self.handle_search_iq(iq).await;
+        }
+
         // Check if this is an ISR token refresh request (XEP-0397)
         if is_isr_token_request(&iq) {
             return self.handle_isr_token_request(iq).await;
@@ -4966,6 +4979,61 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             None,
         );
         self.stream.write_raw(&error).await?;
+        Ok(())
+    }
+
+    async fn handle_search_iq(&mut self, iq: xmpp_parsers::iq::Iq) -> Result<(), XmppError> {
+        let Some(query) = search_query_element(&iq) else {
+            return Err(XmppError::bad_request(Some("Missing search query".into())));
+        };
+
+        let mut result = minidom::Element::builder("query", "jabber:iq:search").build();
+        match &iq.payload {
+            IqType::Get(_) => {
+                result.append_child(
+                    minidom::Element::builder("instructions", "jabber:iq:search")
+                        .append("Search users by nickname")
+                        .build(),
+                );
+                result.append_child(minidom::Element::builder("nick", "jabber:iq:search").build());
+            }
+            IqType::Set(_) => {
+                let search_text = query
+                    .get_child("nick", "jabber:iq:search")
+                    .or_else(|| query.get_child("first", "jabber:iq:search"))
+                    .or_else(|| query.get_child("last", "jabber:iq:search"))
+                    .or_else(|| query.get_child("email", "jabber:iq:search"))
+                    .map(|elem| elem.text())
+                    .unwrap_or_default();
+                for user in self.app_state.search_users(&search_text, 25).await? {
+                    let mut item = minidom::Element::builder("item", "jabber:iq:search")
+                        .attr("jid", user.jid.to_string())
+                        .build();
+                    item.append_child(
+                        minidom::Element::builder("nick", "jabber:iq:search")
+                            .append(user.username)
+                            .build(),
+                    );
+                    if let Some(display_name) = user.display_name {
+                        item.append_child(
+                            minidom::Element::builder("first", "jabber:iq:search")
+                                .append(display_name)
+                                .build(),
+                        );
+                    }
+                    result.append_child(item);
+                }
+            }
+            _ => {}
+        }
+
+        let response = xmpp_parsers::iq::Iq {
+            from: iq.to.clone(),
+            to: iq.from.clone(),
+            id: iq.id.clone(),
+            payload: IqType::Result(Some(result)),
+        };
+        self.stream.write_stanza(&Stanza::Iq(response)).await?;
         Ok(())
     }
 
@@ -7449,18 +7517,31 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 // Get the requested affiliation from the first item (per XEP-0045)
                 let requested_affiliation = query.items.first().and_then(|item| item.affiliation);
 
-                let items: Vec<(jid::BareJid, Affiliation)> = match requested_affiliation {
-                    Some(aff) => room
-                        .get_jids_by_affiliation(aff)
-                        .into_iter()
-                        .map(|jid| (jid, aff))
-                        .collect(),
-                    None => room
-                        .get_all_affiliations()
-                        .into_iter()
-                        .map(|entry| (entry.jid, entry.affiliation))
-                        .collect(),
-                };
+                let resolver = AppStateAffiliationResolver::new(
+                    Arc::clone(&self.app_state),
+                    self.domain.clone(),
+                );
+                let requested = requested_affiliation
+                    .map(|aff| vec![aff])
+                    .unwrap_or_else(|| {
+                        vec![
+                            Affiliation::Owner,
+                            Affiliation::Admin,
+                            Affiliation::Member,
+                            Affiliation::Outcast,
+                        ]
+                    });
+                let mut items = Vec::new();
+                for aff in requested {
+                    let entries = resolver
+                        .list_affiliations(&room.waddle_id, &room.channel_id, aff)
+                        .await?;
+                    items.extend(
+                        entries
+                            .into_iter()
+                            .map(|entry| (entry.jid, entry.affiliation)),
+                    );
+                }
 
                 let response =
                     build_admin_result(&query.iq_id, &query.room_jid, &query.from, &items);
@@ -7526,6 +7607,16 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                     }
                     other => Self::map_room_actor_error(other),
                 })?;
+            if !is_role_change {
+                for item in &query.items {
+                    let (Some(jid), Some(affiliation)) = (&item.jid, item.affiliation) else {
+                        continue;
+                    };
+                    self.app_state
+                        .set_room_affiliation(&room.channel_id, jid, affiliation)
+                        .await?;
+                }
+            }
             for (to_jid, presence) in presence_updates {
                 match self
                     .connection_registry

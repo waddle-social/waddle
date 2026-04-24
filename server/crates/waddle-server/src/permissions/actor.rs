@@ -22,6 +22,7 @@ enum PermissionActorBackend {
 
 /// Typed permission names used by runtime actor messages.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[allow(dead_code)]
 pub enum Permission {
     Owner,
     Admin,

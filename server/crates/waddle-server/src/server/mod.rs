@@ -38,6 +38,7 @@ use waddle_xmpp::mam::{MamStorage, SqlxMamStorage};
 use waddle_xmpp::XmppServerConfig;
 use waddle_xmpp::{muc::room_registry_actor::RoomRegistryActor, registry::ConnectionRegistry};
 
+pub(crate) mod bootstrap_membership;
 mod routes;
 pub mod xmpp_state;
 
@@ -444,6 +445,12 @@ pub async fn start_with_config(
         "Permission backend configured"
     );
     let permission_actor = kameo::spawn(permission_actor_impl);
+    bootstrap_membership::reconcile_existing_accounts_or_warn(
+        db_pool.global_actor(),
+        &permission_actor,
+        &bootstrap_membership::BootstrapMembershipConfig::from_env(),
+    )
+    .await;
     let inbox_storage = build_inbox_storage(xmpp_config.inbox_database_url.clone())
         .await
         .map_err(|error| anyhow::anyhow!("Failed to initialize inbox storage: {}", error))?;

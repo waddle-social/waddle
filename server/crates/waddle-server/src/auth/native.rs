@@ -176,7 +176,7 @@ impl NativeUserStore {
         match row {
             Some(row) => {
                 let iterations = match row_value(&row, 1).map_err(db_err)? {
-                    crate::db::Value::Integer(value) => *value as i64,
+                    crate::db::Value::Integer(value) => *value,
                     other => {
                         return Err(AuthError::DatabaseError(format!(
                             "invalid iterations value: {:?}",

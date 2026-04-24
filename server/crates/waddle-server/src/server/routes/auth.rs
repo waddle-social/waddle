@@ -17,6 +17,8 @@ use crate::auth::{
 use crate::config::ServerConfig;
 use crate::db::actor::{DbExecute, DbQueryOne};
 use crate::db::{row_value, ValueExt};
+use crate::permissions::PermissionActor;
+use crate::server::bootstrap_membership::{reconcile_user_membership, BootstrapMembershipConfig};
 use crate::server::AppState;
 use axum::{
     extract::{Query, State},
@@ -28,6 +30,7 @@ use axum::{
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use chrono::{DateTime, Duration, Utc};
 use dashmap::DashMap;
+use kameo::actor::ActorRef;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -49,6 +52,8 @@ pub struct AuthState {
     pub xmpp_auth_codes: Arc<DashMap<String, XmppAuthCode>>,
     pub dynamic_oidc_clients: Arc<DashMap<String, oidc::DynamicClientRegistration>>,
     pub dynamic_oidc_client_locks: Arc<DashMap<String, Arc<Mutex<()>>>>,
+    pub permission_actor: ActorRef<PermissionActor>,
+    pub bootstrap_membership: BootstrapMembershipConfig,
 }
 
 impl AuthState {
@@ -76,6 +81,8 @@ impl AuthState {
             xmpp_auth_codes: Arc::new(DashMap::new()),
             dynamic_oidc_clients: Arc::new(DashMap::new()),
             dynamic_oidc_client_locks: Arc::new(DashMap::new()),
+            permission_actor: app_state.permission_actor.clone(),
+            bootstrap_membership: BootstrapMembershipConfig::from_env(),
         }
     }
 
@@ -774,6 +781,20 @@ pub async fn callback_handler(
         Ok(v) => v,
         Err(err) => return auth_error_to_response(err).into_response(),
     };
+
+    if let Err(err) = reconcile_user_membership(
+        &state.permission_actor,
+        &state.bootstrap_membership,
+        &linked.user.id,
+        &linked.user.xmpp_localpart,
+    )
+    .await
+    {
+        return auth_error_to_response(AuthError::DatabaseError(format!(
+            "Failed to provision account membership: {err}"
+        )))
+        .into_response();
+    }
 
     let session = Session::new(
         &linked.user.id,

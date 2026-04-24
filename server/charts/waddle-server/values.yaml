@@ -114,6 +114,7 @@ config:
   mode: homeserver
   baseUrl: https://waddle.local
   corsOrigins: ""
+  serverOwnerLocalparts: []
   # Optional non-sensitive provider JSON (usually keep this empty and use secret.authProvidersJson).
   authProvidersJson: ""
   drainTimeoutSeconds: 30

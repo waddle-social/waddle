@@ -56,7 +56,7 @@ const waddles = useWaddles(
 );
 
 const members = useMembers(
-  api,
+  xmppClient,
   waddles.activeSpaceId,
   waddles.activeChannelId,
   waddles.members,

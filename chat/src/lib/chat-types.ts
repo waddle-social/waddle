@@ -20,10 +20,11 @@ export interface ChannelSummary {
 }
 
 export interface MemberSummary {
-  user_id: string;
+  jid: string;
+  user_id?: string;
   username: string;
   avatar_url: string | null;
-  role: "owner" | "admin" | "moderator" | "member";
+  role: "owner" | "admin" | "member" | "outcast" | "none";
   joined_at: string;
 }
 

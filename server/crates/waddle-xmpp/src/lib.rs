@@ -71,6 +71,8 @@ pub use xep::xep0077::{RegistrationError, RegistrationRequest};
 
 use std::sync::Arc;
 
+use jid::BareJid;
+
 /// Detailed canonical space information for XEP-0503.
 #[derive(Debug, Clone)]
 pub struct SpaceDetails {
@@ -88,6 +90,15 @@ pub struct SpaceDetails {
     pub is_public: bool,
     /// Creation timestamp in ISO 8601 format.
     pub created_at: String,
+}
+
+/// User directory entry exposed through native XMPP discovery/search flows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserDirectoryEntry {
+    pub jid: BareJid,
+    pub username: String,
+    pub display_name: Option<String>,
+    pub avatar_url: Option<String>,
 }
 
 /// Shared application state passed to the XMPP server.
@@ -149,6 +160,27 @@ pub trait AppState: Send + Sync + 'static {
         resource: &str,
         relation: &str,
     ) -> impl std::future::Future<Output = Result<Vec<String>, XmppError>> + Send;
+
+    /// Resolve a permission subject (`user:{id}`) into a canonical bare JID.
+    fn resolve_subject_jid(
+        &self,
+        subject: &str,
+    ) -> impl std::future::Future<Output = Result<Option<BareJid>, XmppError>> + Send;
+
+    /// Search local users via native XMPP directory/search features.
+    fn search_users(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> impl std::future::Future<Output = Result<Vec<UserDirectoryEntry>, XmppError>> + Send;
+
+    /// Persist a MUC affiliation relation through the backing authorization system.
+    fn set_room_affiliation(
+        &self,
+        channel_id: &str,
+        jid: &BareJid,
+        affiliation: Affiliation,
+    ) -> impl std::future::Future<Output = Result<(), XmppError>> + Send;
 
     /// Lookup SCRAM credentials for a native JID user.
     ///

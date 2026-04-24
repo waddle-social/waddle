@@ -139,7 +139,6 @@ async fn establish_session(
     extract_bound_jid(&response).expect("Should have JID in response")
 }
 
-/// Helper to join a MUC room.
 // =============================================================================
 // Test: Groupchat Message Multi-Occupant
 // =============================================================================

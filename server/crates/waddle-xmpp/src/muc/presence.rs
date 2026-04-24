@@ -14,6 +14,8 @@ use xmpp_parsers::presence::{Presence, Type as PresenceType};
 use crate::types::{Affiliation, Role};
 use crate::XmppError;
 
+const OCCUPANT_ID_SECRET: &[u8] = b"waddle-xmpp-occupant-id-v1";
+
 /// Namespace for MUC user protocol.
 pub const NS_MUC_USER: &str = "http://jabber.org/protocol/muc#user";
 
@@ -299,6 +301,13 @@ pub fn build_occupant_presence(
     // Convert MucUser to Element and add to payloads
     let muc_element: Element = muc_user.into();
     presence.payloads.push(muc_element);
+    add_presence_identity_payloads(
+        &mut presence,
+        from_room_jid,
+        affiliation,
+        role,
+        occupant_real_jid.map(|jid| jid.to_bare()),
+    );
 
     presence
 }
@@ -339,8 +348,39 @@ pub fn build_leave_presence(
 
     let muc_element: Element = muc_user.into();
     presence.payloads.push(muc_element);
+    add_presence_identity_payloads(&mut presence, from_room_jid, affiliation, Role::None, None);
 
     presence
+}
+
+fn add_presence_identity_payloads(
+    presence: &mut Presence,
+    from_room_jid: &FullJid,
+    affiliation: Affiliation,
+    role: Role,
+    occupant_bare_jid: Option<BareJid>,
+) {
+    let affiliation_name = match affiliation {
+        Affiliation::Owner => "owner",
+        Affiliation::Admin => "admin",
+        Affiliation::Member => "member",
+        Affiliation::None => "none",
+        Affiliation::Outcast => "outcast",
+    };
+    let mut hats = crate::xep::xep0317::hats_from_affiliation(affiliation_name);
+    if role == Role::Moderator && !hats.has_uri(crate::xep::xep0317::well_known::MODERATOR) {
+        hats = hats.with_hat(crate::xep::xep0317::Hat::moderator());
+    }
+    crate::xep::xep0317::set_hats(presence, &hats);
+
+    if let Some(occupant_bare_jid) = occupant_bare_jid {
+        let occupant_id = crate::xep::xep0421::generate_occupant_id(
+            &occupant_bare_jid.to_string(),
+            &from_room_jid.to_bare().to_string(),
+            OCCUPANT_ID_SECRET,
+        );
+        crate::xep::xep0421::set_occupant_id_on_presence(presence, &occupant_id);
+    }
 }
 
 /// Convert internal Affiliation to xmpp_parsers MUC Affiliation.

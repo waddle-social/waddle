@@ -59,7 +59,7 @@ export function useWaddles(
   const currentRole = computed(() => {
     if (!session.value || !currentSpace.value) return null;
     return (
-      members.value.find((m) => m.user_id === session.value!.user_id)?.role ??
+      members.value.find((m) => m.jid === session.value!.jid.split("/")[0])?.role ??
       currentSpace.value.role ??
       null
     );
@@ -80,7 +80,7 @@ export function useWaddles(
   );
 
   const sortedMembers = computed(() => {
-    const order = { owner: 0, admin: 1, moderator: 2, member: 3 } as const;
+    const order = { owner: 0, admin: 1, member: 2, outcast: 3, none: 4 } as const;
     return [...members.value].sort(
       (a, b) =>
         (order[a.role] ?? 4) - (order[b.role] ?? 4) ||
@@ -93,7 +93,7 @@ export function useWaddles(
   );
 
   const canManageChannels = computed(() =>
-    ["owner", "admin", "moderator"].includes(currentRole.value ?? ""),
+    ["owner", "admin"].includes(currentRole.value ?? ""),
   );
 
   const canManageMembers = computed(() =>
@@ -163,6 +163,9 @@ export function useWaddles(
             : channelList[0]?.id ?? null;
 
       activeChannelId.value = nextChannelId;
+      members.value = nextChannelId && xmppClient.value
+        ? await xmppClient.value.listRoomMembers(nextChannelId)
+        : [];
       resetForms();
       return nextChannelId;
     } catch (e) {

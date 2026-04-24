@@ -369,24 +369,14 @@ schema.#Project & {
 				IMAGE="ghcr.io/waddle-social/waddle/extensions/github-enricher"
 				echo "${GITHUB_TOKEN}" | oras login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
 				FULL_SHA="$(git rev-parse HEAD)"
-				SOURCE_URL="https://github.com/waddle-social/waddle"
-				ANNOTATIONS=(
-				  "--annotation" "org.opencontainers.image.source=${SOURCE_URL}"
-				  "--annotation" "org.opencontainers.image.revision=${FULL_SHA}"
-				  "--annotation" "org.opencontainers.image.description=Waddle GitHub link enricher extension"
-				  "--annotation" "org.opencontainers.image.licenses=AGPL-3.0"
-				)
 				oras push "${IMAGE}:sha-${FULL_SHA}" \
 				  --artifact-type application/vnd.waddle.extension.wasm.v1+wasm \
-				  "${ANNOTATIONS[@]}" \
 				  "${WASM_FILE}:application/wasm"
 				oras push "${IMAGE}:main" \
 				  --artifact-type application/vnd.waddle.extension.wasm.v1+wasm \
-				  "${ANNOTATIONS[@]}" \
 				  "${WASM_FILE}:application/wasm"
 				oras push "${IMAGE}:latest" \
 				  --artifact-type application/vnd.waddle.extension.wasm.v1+wasm \
-				  "${ANNOTATIONS[@]}" \
 				  "${WASM_FILE}:application/wasm"
 			"""#]
 			dependsOn: [tasks.buildGithubEnricher]
@@ -412,14 +402,11 @@ schema.#Project & {
 			args: ["-c", #"""
 				set -euo pipefail
 				echo "${GITHUB_TOKEN}" | docker login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
-				FULL_SHA="$(git rev-parse HEAD)"
 				flux push artifact \
 				  oci://ghcr.io/waddle-social/waddle/gitops:latest \
 				  --path=../infrastructure/waddle.cloud/gitops \
 				  --source="$(git config --get remote.origin.url)" \
-				  --revision="$(git rev-parse --short HEAD)" \
-				  --annotations="org.opencontainers.image.source=https://github.com/waddle-social/waddle" \
-				  --annotations="org.opencontainers.image.revision=${FULL_SHA}"
+				  --revision="$(git rev-parse --short HEAD)"
 			"""#]
 			dependsOn: [tasks.pinGithubEnricherTag]
 		}

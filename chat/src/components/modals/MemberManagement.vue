@@ -27,7 +27,7 @@ const emit = defineEmits<{
   removeMember: [member: MemberSummary];
 }>();
 
-const roles: EditableRole[] = ["member", "moderator", "admin"];
+const roles: EditableRole[] = ["member", "admin", "owner", "outcast"];
 </script>
 
 <template>
@@ -105,7 +105,7 @@ const roles: EditableRole[] = ["member", "moderator", "admin"];
     <div class="flex max-h-96 flex-col gap-1 overflow-auto px-4 py-3 sm:px-5">
       <div
         v-for="member in members"
-        :key="member.user_id"
+        :key="member.jid"
         class="chat-list-row flex min-h-12 items-center gap-2.5 p-2 hover:bg-muted/50"
       >
         <AppAvatar :name="member.username" :src="member.avatar_url" :presence="roomPresence?.[member.username] ?? 'offline'" :last-seen="roomLastSeen?.[member.username]" size="sm" />

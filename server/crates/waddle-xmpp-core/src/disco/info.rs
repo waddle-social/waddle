@@ -224,6 +224,18 @@ impl Feature {
         Self::new("urn:xmpp:occupant-id:0")
     }
 
+    pub fn hats() -> Self {
+        Self::new("urn:xmpp:hats:0")
+    }
+
+    pub fn explicit_mentions() -> Self {
+        Self::new("urn:xmpp:mentions:0")
+    }
+
+    pub fn channel_mentions() -> Self {
+        Self::new("urn:xmpp:mentions:0#channel")
+    }
+
     pub fn muc_persistent() -> Self {
         Self::new("muc_persistent")
     }
@@ -527,6 +539,9 @@ pub fn muc_room_features(
         Feature::threads(),
         Feature::vcard(),
         Feature::occupant_id(),
+        Feature::hats(),
+        Feature::explicit_mentions(),
+        Feature::channel_mentions(),
         Feature::muc_semianonymous(),
     ];
 

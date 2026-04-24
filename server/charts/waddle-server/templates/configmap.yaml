@@ -16,6 +16,7 @@ data:
   WADDLE_REGISTRATION_ENABLED: {{ .Values.xmpp.registrationEnabled | toString | quote }}
   WADDLE_EXTENSIONS_JSON: {{ .Values.extensions | toJson | quote }}
   WADDLE_DRAIN_TIMEOUT_SECS: {{ .Values.config.drainTimeoutSeconds | toString | quote }}
+  WADDLE_SERVER_OWNER_LOCALPARTS: {{ join "," .Values.config.serverOwnerLocalparts | quote }}
   RUST_LOG: {{ .Values.config.rustLog | quote }}
   {{- if .Values.config.corsOrigins }}
   WADDLE_CORS_ORIGINS: {{ .Values.config.corsOrigins | quote }}
