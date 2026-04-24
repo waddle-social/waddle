@@ -171,6 +171,10 @@ schema.#Project & {
 
 		publishContainerImage: schema.#Task & {
 			command: "bash"
+			env: {
+				GITHUB_TOKEN: schema.#EnvPassthrough
+				GITHUB_ACTOR: schema.#EnvPassthrough
+			}
 			args: ["-c", #"""
 				set -euo pipefail
 				case "${CUENV_ARCH}" in
@@ -199,6 +203,12 @@ schema.#Project & {
 
 		publishReleaseArtifacts: schema.#Task & {
 			command: "bash"
+			env: {
+				GITHUB_TOKEN:    schema.#EnvPassthrough
+				GITHUB_ACTOR:    schema.#EnvPassthrough
+				GITHUB_REF_TYPE: schema.#EnvPassthrough
+				GITHUB_REF_NAME: schema.#EnvPassthrough
+			}
 			args: ["-c", #"""
 				set -euo pipefail
 				echo "${GITHUB_TOKEN}" | docker login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
@@ -250,6 +260,10 @@ schema.#Project & {
 
 		helmPush: schema.#Task & {
 			command: "bash"
+			env: {
+				GITHUB_TOKEN: schema.#EnvPassthrough
+				GITHUB_ACTOR: schema.#EnvPassthrough
+			}
 			args: ["-c", #"""
 				echo "${GITHUB_TOKEN}" | helm registry login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
 				helm package charts/waddle-server -d /tmp/charts
@@ -345,6 +359,10 @@ schema.#Project & {
 
 		pushGithubEnricherOci: schema.#Task & {
 			command: "bash"
+			env: {
+				GITHUB_TOKEN: schema.#EnvPassthrough
+				GITHUB_ACTOR: schema.#EnvPassthrough
+			}
 			args: ["-c", #"""
 				set -euo pipefail
 				WASM_FILE="target/wasm32-wasip2/release/github_enricher.wasm"
