@@ -29,7 +29,7 @@ spec:
       driver: postgres
     spicedb:
       enabled: true
-      endpoint: spicedb:50051
+      endpoint: http://spicedb:50051
       insecure: true
     extraSecretRefs:
       - waddle-r2-credentials
@@ -46,6 +46,21 @@ spec:
     containerExtraEnv:
       - name: OTEL_EXPORTER_OTLP_PROTOCOL
         value: "grpc"
+      - name: WADDLE_DATABASE_URL
+        valueFrom:
+          secretKeyRef:
+            name: postgresql-app
+            key: uri
+      - name: WADDLE_XMPP_MAM_DATABASE_URL
+        valueFrom:
+          secretKeyRef:
+            name: postgresql-app
+            key: uri
+      - name: WADDLE_XMPP_INBOX_DATABASE_URL
+        valueFrom:
+          secretKeyRef:
+            name: postgresql-app
+            key: uri
     xmpp:
       domain: waddle.social
       tls:
@@ -59,7 +74,7 @@ spec:
     # file mounts and referenced below via config_secret_files.
     extensions:
       enabled: true
-      cache_dir: /var/lib/waddle/extensions
+      cacheDir: /var/lib/waddle/extensions
       modules:
         - name: github-enricher
           registry: ghcr.io/waddle-social/waddle/extensions/github-enricher

@@ -111,11 +111,11 @@ func TestWaddleServerGitOpsUsesRuntimeSpiceDBSecretsOnly(t *testing.T) {
 	if !helmRelease.Spec.Values.SpiceDB.Enabled {
 		t.Fatal("waddle-server HelmRelease must keep SpiceDB enabled")
 	}
-	if helmRelease.Spec.Values.SpiceDB.Endpoint != "spicedb:50051" {
+	if helmRelease.Spec.Values.SpiceDB.Endpoint != "http://spicedb:50051" {
 		t.Fatalf(
 			"spicedb endpoint = %q, want %q",
 			helmRelease.Spec.Values.SpiceDB.Endpoint,
-			"spicedb:50051",
+			"http://spicedb:50051",
 		)
 	}
 	if !helmRelease.Spec.Values.SpiceDB.Insecure {
