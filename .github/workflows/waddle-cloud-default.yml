@@ -20,6 +20,7 @@ permissions:
   contents: read
   checks: write
   pull-requests: write
+  packages: write
 jobs:
   waddle-cloud-default:
     name: waddle-cloud-default

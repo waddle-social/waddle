@@ -25,6 +25,7 @@ schema.#Project & {
 				defaultBranch: true
 				manual:        true
 			}
+			provider: github: permissions: packages: "write"
 			tasks: [_t["helm-push"], _t["gitops-push"]]
 		}
 	}
