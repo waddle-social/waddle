@@ -6,7 +6,7 @@ import type { OccupantPresence } from "@/lib/xmpp-client";
 const props = defineProps<{
   name: string;
   src?: string | null;
-  size?: "xs" | "sm" | "md" | "lg";
+  size?: "xs" | "sm" | "md" | "lg" | "message";
   presence?: OccupantPresence;
   lastSeen?: number;
 }>();
@@ -23,15 +23,17 @@ const initials = computed(() =>
 );
 
 const sizeClass = computed(() => {
-  if (props.size === "xs") return "w-6 h-6 text-[10px]";
-  if (props.size === "sm") return "w-7 h-7 text-[11px]";
-  if (props.size === "lg") return "w-12 h-12 text-base";
-  return "w-8 h-8 text-xs";
+  if (props.size === "xs") return "w-6 h-6 type-avatar-xs";
+  if (props.size === "sm") return "w-7 h-7 type-avatar-sm";
+  if (props.size === "message") return "app-avatar-message-size type-avatar-md";
+  if (props.size === "lg") return "w-12 h-12 type-avatar-lg";
+  return "w-8 h-8 type-avatar-md";
 });
 
 const wrapperSizeClass = computed(() => {
   if (props.size === "xs") return "w-6 h-6";
   if (props.size === "sm") return "w-7 h-7";
+  if (props.size === "message") return "app-avatar-message-size";
   if (props.size === "lg") return "w-12 h-12";
   return "w-8 h-8";
 });
@@ -41,17 +43,18 @@ const showImage = computed(() => !!props.src && !imageFailed.value);
 
 const presenceDotColor = computed(() => {
   switch (props.presence) {
-    case "online": return "bg-success shadow-[0_0_4px_var(--success)]";
-    case "away":   return "bg-warning shadow-[0_0_4px_var(--warning)]";
-    case "dnd":    return "bg-destructive shadow-[0_0_4px_var(--destructive)]";
-    case "offline": return "bg-muted-foreground/30";
+    case "online": return "bg-success/75";
+    case "away":   return "bg-warning/75";
+    case "dnd":    return "bg-destructive/75";
+    case "offline": return "bg-muted-foreground/25";
     default:       return null;
   }
 });
 
 const dotSize = computed(() => {
-  if (props.size === "xs") return "w-[7px] h-[7px] border-[1.5px]";
-  if (props.size === "lg") return "w-2.5 h-2.5 border-2";
+  if (props.size === "xs") return "w-1.5 h-1.5 border";
+  if (props.size === "message") return "w-2 h-2 border-[1.5px]";
+  if (props.size === "lg") return "w-2 h-2 border-[1.5px]";
   return "w-2 h-2 border-[1.5px]";
 });
 
@@ -106,14 +109,14 @@ watch(
     />
     <div
       v-else
-      :class="[sizeClass, 'flex items-center justify-center font-semibold text-white rounded-lg']"
+      :class="[sizeClass, 'type-avatar-mark flex items-center justify-center rounded-lg text-white']"
       :style="{ backgroundColor: bgColor, boxShadow: `0 2px 8px ${bgColor}30` }"
     >
       {{ initials }}
     </div>
     <span
       v-if="presenceDotColor"
-      class="absolute bottom-0 right-0 translate-x-[2px] translate-y-[2px] rounded-full border-background"
+      class="app-avatar-presence-dot absolute rounded-full border-background"
       :class="[dotSize, presenceDotColor]"
     />
   </div>

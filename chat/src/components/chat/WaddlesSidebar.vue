@@ -46,67 +46,74 @@ function waddleInitial(waddle: WaddleSummary): string {
 
 function waddleColor(waddle: WaddleSummary): string {
   const colors = [
-    "#00ddc0", "#ef4444", "#10b981", "#f59e0b",
-    "#3b82f6", "#8b5cf6", "#ec4899", "#14b8a6",
-    "#f97316", "#6366f1",
+    "oklch(0.78 0.14 184)", "oklch(0.68 0.19 28)", "oklch(0.72 0.15 158)", "oklch(0.78 0.15 78)",
+    "oklch(0.64 0.16 252)", "oklch(0.66 0.16 305)", "oklch(0.68 0.17 350)", "oklch(0.66 0.14 205)",
+    "oklch(0.72 0.17 54)", "oklch(0.64 0.15 286)",
   ];
   let hash = 0;
   for (const char of waddle.id) hash = ((hash << 5) - hash + char.charCodeAt(0)) | 0;
   return colors[Math.abs(hash) % colors.length];
 }
+
+function waddleGlow(waddle: WaddleSummary): string {
+  return `0 0 16px color-mix(in oklab, ${waddleColor(waddle)} 30%, transparent)`;
+}
 </script>
 
 <template>
   <div
-    class="bg-rail flex flex-shrink-0"
+    class="chat-rail"
     :class="horizontal
-      ? 'w-full flex-row items-center px-3 py-2 gap-2'
-      : 'w-[64px] flex-col items-center py-4 gap-1.5'"
+      ? 'chat-rail-horizontal'
+      : 'chat-rail-vertical'"
   >
     <!-- Logo -->
-    <div class="w-10 h-10 flex items-center justify-center flex-shrink-0" :class="horizontal ? '' : 'mb-2'">
+    <div class="chat-rail-logo-slot flex flex-shrink-0 items-center justify-center">
       <img
         src="/waddle-logo.svg"
         alt="Waddle"
         width="40"
         height="40"
-        class="h-10 w-10 rounded-lg object-contain"
+        class="chat-rail-logo-mark rounded-lg object-contain"
       />
     </div>
 
     <!-- Divider -->
-    <div class="bg-border flex-shrink-0" :class="horizontal ? 'h-7 w-px' : 'w-7 h-px mb-1'" />
+    <div class="bg-border flex-shrink-0" :class="horizontal ? 'chat-rail-divider-horizontal' : 'chat-rail-divider-vertical'" />
 
     <!-- Waddle icons -->
     <div
-      class="flex-1 overflow-auto flex gap-1.5"
+      class="chat-pane-scroll chat-rail-list"
       :class="horizontal
-        ? 'flex-row items-center min-w-0 py-0.5'
-        : 'flex-col items-center w-full px-2'"
+        ? 'chat-rail-list-horizontal'
+        : 'chat-rail-list-vertical'"
     >
       <button
         v-for="waddle in privateWaddles"
         :key="waddle.id"
-        class="relative w-10 h-10 rounded-xl flex items-center justify-center text-xs font-semibold transition-all duration-200 group flex-shrink-0"
+        class="type-control relative w-10 h-10 rounded-lg flex items-center justify-center transition-all duration-200 group flex-shrink-0"
         :class="activeWaddleId === waddle.id
           ? 'text-primary-foreground shadow-lg'
           : 'text-rail-foreground hover:text-rail-active hover:scale-105'"
         :style="activeWaddleId === waddle.id
-          ? { backgroundColor: waddleColor(waddle), boxShadow: `0 0 16px ${waddleColor(waddle)}40` }
+          ? { backgroundColor: waddleColor(waddle), boxShadow: waddleGlow(waddle) }
           : { backgroundColor: 'var(--rail-hover)' }"
         :title="waddle.name"
+        :aria-label="`Open ${waddle.name}`"
+        :aria-current="activeWaddleId === waddle.id ? 'page' : undefined"
+        type="button"
         @click="emit('selectWaddle', waddle.id)"
       >
-        <span class="font-display font-bold">{{ waddleInitial(waddle) }}</span>
+        <span class="type-rail-initial">{{ waddleInitial(waddle) }}</span>
         <!-- Active indicator -->
         <span
           v-if="activeWaddleId === waddle.id && !horizontal"
-          class="absolute -left-2 top-1/2 -translate-y-1/2 w-[3px] h-5 rounded-r-full"
+          class="chat-rail-indicator-vertical absolute -left-2 top-1/2 -translate-y-1/2 rounded-r-full"
           :style="{ backgroundColor: waddleColor(waddle) }"
         />
         <span
           v-if="activeWaddleId === waddle.id && horizontal"
-          class="absolute bottom-0 left-1/2 -translate-x-1/2 h-[3px] w-5 rounded-t-full"
+          class="chat-rail-indicator-horizontal absolute bottom-0 left-1/2 -translate-x-1/2 rounded-t-full"
           :style="{ backgroundColor: waddleColor(waddle) }"
         />
         <!-- Lock badge -->
@@ -114,52 +121,58 @@ function waddleColor(waddle: WaddleSummary): string {
       </button>
 
       <template v-if="publicWaddles.length > 0 && privateWaddles.length > 0">
-        <div class="bg-border flex-shrink-0" :class="horizontal ? 'h-7 w-px mx-0.5' : 'w-7 h-px my-0.5'" />
+        <div class="bg-border flex-shrink-0" :class="horizontal ? 'chat-rail-divider-horizontal' : 'chat-rail-divider-vertical'" />
       </template>
 
       <button
         v-for="waddle in publicWaddles"
         :key="waddle.id"
-        class="relative w-10 h-10 rounded-xl flex items-center justify-center text-xs font-semibold transition-all duration-200 flex-shrink-0"
+        class="type-control relative w-10 h-10 rounded-lg flex items-center justify-center transition-all duration-200 flex-shrink-0"
         :class="activeWaddleId === waddle.id
           ? 'text-primary-foreground shadow-lg'
           : 'text-rail-foreground hover:text-rail-active hover:scale-105'"
         :style="activeWaddleId === waddle.id
-          ? { backgroundColor: waddleColor(waddle), boxShadow: `0 0 16px ${waddleColor(waddle)}40` }
+          ? { backgroundColor: waddleColor(waddle), boxShadow: waddleGlow(waddle) }
           : { backgroundColor: 'var(--rail-hover)' }"
         :title="waddle.name"
+        :aria-label="`Open ${waddle.name}`"
+        :aria-current="activeWaddleId === waddle.id ? 'page' : undefined"
+        type="button"
         @click="emit('selectWaddle', waddle.id)"
       >
-        <span class="font-display font-bold">{{ waddleInitial(waddle) }}</span>
+        <span class="type-rail-initial">{{ waddleInitial(waddle) }}</span>
         <span
           v-if="activeWaddleId === waddle.id && !horizontal"
-          class="absolute -left-2 top-1/2 -translate-y-1/2 w-[3px] h-5 rounded-r-full"
+          class="chat-rail-indicator-vertical absolute -left-2 top-1/2 -translate-y-1/2 rounded-r-full"
           :style="{ backgroundColor: waddleColor(waddle) }"
         />
         <span
           v-if="activeWaddleId === waddle.id && horizontal"
-          class="absolute bottom-0 left-1/2 -translate-x-1/2 h-[3px] w-5 rounded-t-full"
+          class="chat-rail-indicator-horizontal absolute bottom-0 left-1/2 -translate-x-1/2 rounded-t-full"
           :style="{ backgroundColor: waddleColor(waddle) }"
         />
       </button>
 
       <div
         v-if="waddles.length === 0"
-        class="text-muted-foreground/30 text-[10px] text-center"
-        :class="horizontal ? 'flex-1 self-stretch flex items-center justify-center' : 'mt-3'"
+        class="type-meta text-muted-foreground/30 text-center"
+        :class="horizontal ? 'flex-1 self-stretch flex items-center justify-center' : 'self-stretch px-2'"
       >
         No waddles
       </div>
     </div>
 
     <!-- Bottom actions -->
-    <div class="flex gap-1.5 flex-shrink-0" :class="horizontal ? 'flex-row items-center' : 'flex-col items-center mt-2'">
+    <div class="chat-rail-actions" :class="horizontal ? 'chat-rail-actions-horizontal' : 'chat-rail-actions-vertical'">
       <button
-        class="relative w-10 h-10 flex items-center justify-center rounded-xl transition-all duration-200 hover:scale-105"
+        class="relative w-10 h-10 flex items-center justify-center rounded-lg transition-all duration-200 hover:scale-105"
         :class="activeSidebarMode === 'dms'
           ? 'bg-rail-hover text-primary'
           : 'text-rail-foreground hover:bg-rail-hover hover:text-primary'"
         title="Direct messages"
+        aria-label="Direct messages"
+        :aria-pressed="activeSidebarMode === 'dms'"
+        type="button"
         @click="emit('toggleDms')"
       >
         <MessageCircle class="w-4 h-4" />
@@ -169,15 +182,19 @@ function waddleColor(waddle: WaddleSummary): string {
         />
       </button>
       <button
-        class="w-10 h-10 flex items-center justify-center rounded-xl text-rail-foreground hover:bg-rail-hover hover:text-primary transition-all duration-200 hover:scale-105"
+        class="w-10 h-10 flex items-center justify-center rounded-lg text-rail-foreground hover:bg-rail-hover hover:text-primary transition-all duration-200 hover:scale-105"
         title="Browse public spaces"
+        aria-label="Browse public spaces"
+        type="button"
         @click="emit('browsePublicWaddles')"
       >
         <Compass class="w-4 h-4" />
       </button>
       <button
-        class="w-10 h-10 flex items-center justify-center rounded-xl text-rail-foreground hover:bg-rail-hover hover:text-primary transition-all duration-200 hover:scale-105"
+        class="w-10 h-10 flex items-center justify-center rounded-lg text-rail-foreground hover:bg-rail-hover hover:text-primary transition-all duration-200 hover:scale-105"
         title="Create waddle"
+        aria-label="Create waddle"
+        type="button"
         @click="emit('createWaddle')"
       >
         <Plus class="w-4 h-4" />

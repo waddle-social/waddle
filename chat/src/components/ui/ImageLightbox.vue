@@ -62,13 +62,13 @@ onBeforeUnmount(() => {
   <Teleport to="body">
     <div
       v-if="open && current"
-      class="fixed inset-0 z-[60] animate-fade-in flex items-center justify-center"
+      class="z-lightbox fixed inset-0 animate-fade-in flex items-center justify-center"
       role="dialog"
       aria-modal="true"
     >
       <div class="absolute inset-0 bg-background/85 backdrop-blur-md" @click="close" />
 
-      <div class="absolute top-3 right-3 z-10 flex items-center gap-1">
+      <div class="z-sticky absolute top-3 right-3 flex items-center gap-1">
         <a
           :href="current.url"
           :download="current.name ?? ''"
@@ -82,6 +82,7 @@ onBeforeUnmount(() => {
         </a>
         <button
           class="h-9 w-9 flex items-center justify-center rounded-full bg-card/80 backdrop-blur border border-border text-foreground hover:bg-card transition-colors"
+          type="button"
           title="Close"
           @click="close"
         >
@@ -91,7 +92,8 @@ onBeforeUnmount(() => {
 
       <button
         v-if="hasPrev"
-        class="absolute left-3 top-1/2 -translate-y-1/2 z-10 h-10 w-10 flex items-center justify-center rounded-full bg-card/80 backdrop-blur border border-border text-foreground hover:bg-card transition-colors"
+        class="z-sticky absolute left-3 top-1/2 -translate-y-1/2 h-10 w-10 flex items-center justify-center rounded-full bg-card/80 backdrop-blur border border-border text-foreground hover:bg-card transition-colors"
+        type="button"
         title="Previous"
         @click.stop="prev"
       >
@@ -99,25 +101,26 @@ onBeforeUnmount(() => {
       </button>
       <button
         v-if="hasNext"
-        class="absolute right-3 top-1/2 -translate-y-1/2 z-10 h-10 w-10 flex items-center justify-center rounded-full bg-card/80 backdrop-blur border border-border text-foreground hover:bg-card transition-colors"
+        class="z-sticky absolute right-3 top-1/2 -translate-y-1/2 h-10 w-10 flex items-center justify-center rounded-full bg-card/80 backdrop-blur border border-border text-foreground hover:bg-card transition-colors"
+        type="button"
         title="Next"
         @click.stop="next"
       >
         <ChevronRight class="w-5 h-5" />
       </button>
 
-      <div class="relative max-w-[92vw] max-h-[90vh] flex flex-col items-center justify-center" @click.stop>
+      <div class="chat-lightbox-frame relative flex flex-col items-center justify-center" @click.stop>
         <img
           :src="current.url"
           :alt="current.name ?? 'Image'"
-          class="max-w-[92vw] max-h-[82vh] object-contain rounded-xl shadow-2xl animate-slide-up"
+          class="chat-lightbox-image object-contain rounded-lg shadow-2xl animate-slide-up"
         />
         <div
           v-if="current.name || images.length > 1"
-          class="mt-3 text-[12px] text-muted-foreground tabular-nums flex items-center gap-2"
+          class="type-caption mt-3 flex items-center gap-2 text-muted-foreground"
         >
-          <span v-if="current.name" class="truncate max-w-[60vw]">{{ current.name }}</span>
-          <span v-if="images.length > 1" class="font-mono">{{ index + 1 }} / {{ images.length }}</span>
+          <span v-if="current.name" class="chat-lightbox-caption truncate">{{ current.name }}</span>
+          <span v-if="images.length > 1" class="type-numeric">{{ index + 1 }} / {{ images.length }}</span>
         </div>
       </div>
     </div>

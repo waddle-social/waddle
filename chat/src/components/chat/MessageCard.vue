@@ -436,8 +436,8 @@ const desktopToolbarLockedByAnother = computed(() =>
 );
 const desktopToolbarVisibilityClass = computed(() => (
   ownsDesktopToolbarLock.value
-    ? "opacity-100 pointer-events-auto z-[60]"
-    : "opacity-0 group-hover:opacity-100 focus-within:opacity-100 pointer-events-none group-hover:pointer-events-auto focus-within:pointer-events-auto z-10"
+    ? "opacity-100 pointer-events-auto z-floating"
+    : "opacity-0 group-hover:opacity-100 focus-within:opacity-100 pointer-events-none group-hover:pointer-events-auto focus-within:pointer-events-auto z-sticky"
 ));
 const anyOverlayOpen = computed(() => pickerOpen.value || sheetOpen.value);
 
@@ -581,24 +581,24 @@ watch(
   <div
     v-if="message.isRetracted"
     :data-message-id="message.id"
-    class="grid min-h-12 grid-cols-[2rem_minmax(0,1fr)] items-start gap-x-3 px-4 py-1.5 opacity-35 animate-message-in"
+    class="chat-message-grid opacity-35 animate-message-in"
   >
     <AppAvatar
-      class="mt-0.5"
+      class="chat-message-avatar-cell"
       :name="message.author"
       :src="avatarUrl"
       :presence="presence"
       :last-seen="lastSeen"
-      size="md"
+      size="message"
     />
-    <div class="min-w-0">
-      <div class="mb-0.5 flex min-h-4 items-center gap-2">
-        <span class="text-[13px] font-medium leading-4">{{ message.author }}</span>
-        <span class="font-mono text-[11px] leading-4 text-muted-foreground tabular-nums">
+    <div class="chat-message-body-stack">
+      <div class="chat-message-meta-row">
+        <span class="type-message-author">{{ message.author }}</span>
+        <span class="type-meta type-numeric text-muted-foreground">
           {{ formatStamp(message.createdAt) }}
         </span>
       </div>
-      <p class="text-[13px] leading-[18px] italic text-muted-foreground">This message was deleted.</p>
+      <p class="type-message-body italic text-muted-foreground">This message was deleted.</p>
     </div>
   </div>
 
@@ -608,15 +608,15 @@ watch(
     ref="bubbleEl"
     :data-message-id="message.id"
     :data-sheet-open="sheetOpen ? 'true' : 'false'"
-    class="group relative grid min-h-12 grid-cols-[2rem_minmax(0,1fr)] items-start gap-x-3 rounded-lg px-4 py-1.5 ring-1 ring-transparent transition-colors duration-150 animate-message-in"
+    class="chat-message-grid group relative ring-1 ring-transparent transition-colors duration-150 animate-message-in"
     :class="[
       isMentioned
-        ? 'ring-warning/25 bg-warning/5'
+        ? 'chat-message-grid--mention'
         : isForumTopic
-          ? 'ring-border/70 bg-card/55 shadow-sm hover:bg-card/75'
+          ? 'chat-message-grid--forum shadow-sm'
           : message.threadId
-            ? 'ring-primary/15 hover:bg-muted/40'
-            : 'hover:bg-muted/40',
+            ? 'chat-message-grid--thread'
+            : '',
       message.deliveryStatus === 'sending' || message.deliveryStatus === 'queued' ? 'opacity-50' : '',
       longPress.isPressing.value ? 'no-callout' : '',
     ]"
@@ -628,36 +628,37 @@ watch(
     @contextmenu="onBubbleContextMenu"
   >
     <button
-      class="mt-0.5 flex h-8 w-8 items-center justify-center rounded-lg self-start"
+      class="chat-message-avatar-cell rounded-lg"
       type="button"
+      :aria-label="`Open profile for ${message.author}`"
       @click.stop="emitAvatarClick"
     >
-      <AppAvatar :name="message.author" :src="avatarUrl" :presence="presence" :last-seen="lastSeen" size="md" />
+      <AppAvatar :name="message.author" :src="avatarUrl" :presence="presence" :last-seen="lastSeen" size="message" />
     </button>
-    <div class="min-w-0">
-      <div class="mb-0.5 flex min-h-4 items-center gap-x-2 gap-y-1 flex-wrap">
-        <span class="text-[13px] font-semibold leading-4">{{ message.author }}</span>
+    <div class="chat-message-body-stack">
+      <div class="chat-message-meta-row">
+        <span class="type-message-author">{{ message.author }}</span>
         <span
           v-for="hat in hats"
           :key="hat.uri"
-          class="inline-block px-1.5 py-px text-[9px] font-bold uppercase tracking-wider rounded-md leading-none"
+          class="type-badge inline-block rounded-md px-1.5 py-px"
           :class="HAT_COLORS[hat.uri] ?? 'bg-muted text-muted-foreground'"
           :title="hat.title"
         >{{ HAT_LABELS[hat.uri] ?? hat.title }}</span>
-        <span class="font-mono text-[11px] leading-4 text-muted-foreground/60 tabular-nums">
+        <span class="type-meta type-numeric text-muted-foreground/60">
           {{ formatStamp(message.createdAt) }}
         </span>
-        <span v-if="message.isEdited" class="text-[11px] leading-4 text-muted-foreground/50">(edited)</span>
+        <span v-if="message.isEdited" class="type-meta text-muted-foreground/50">(edited)</span>
         <span
           v-if="message.isSelf && deliveryStatusLabel"
-          class="text-[11px] leading-4"
+          class="type-meta"
           :class="deliveryStatusClass"
         >
           {{ deliveryStatusLabel }}
         </span>
         <span
           v-if="message.isSelf && message.readBy && message.readBy.length > 0"
-          class="text-[11px] leading-4 text-muted-foreground/50"
+          class="type-meta text-muted-foreground/50"
           :title="message.readBy.join(', ')"
         >
           Read by {{ message.readBy.length }}
@@ -666,18 +667,18 @@ watch(
 
     <div
       v-if="isForumTopic && forumThreadLabel"
-      class="mb-2 rounded-lg border border-primary/10 bg-primary/6 px-3 py-2"
+      class="chat-forum-topic-card chat-message-fill"
     >
-      <div class="text-[10px] font-semibold uppercase tracking-[0.14em] text-primary/75">
+      <div class="type-section-label text-primary/75">
         Topic
       </div>
-      <h3 class="mt-1 text-[15px] font-display font-bold tracking-tight text-foreground">
+      <h3 class="type-card-title text-foreground">
         {{ forumThreadLabel }}
       </h3>
     </div>
     <div
       v-else-if="isForumReply && forumThreadLabel"
-      class="mb-1 inline-flex h-7 max-w-full items-center gap-1.5 rounded-full border border-border bg-muted/50 px-2.5 text-[11px] text-muted-foreground"
+      class="chat-forum-reply-chip chat-message-fill type-caption"
     >
       <CornerDownRight class="w-3 h-3 flex-shrink-0 text-primary/70" />
       <span class="truncate">In {{ forumThreadLabel }}</span>
@@ -686,40 +687,40 @@ watch(
          preview is available we also expand it inline so users still see the
          full quoted text even when the parent has scrolled off-screen or
          hasn't loaded from history yet. -->
-    <div v-if="message.replyTo" class="mb-1">
+    <div v-if="message.replyTo" class="chat-message-fill">
       <button
         type="button"
-        class="flex min-h-7 max-w-full items-center gap-1.5 rounded-lg bg-muted/35 px-2 text-left text-[11px] text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground"
+        class="type-caption flex min-h-7 max-w-full items-center gap-1.5 rounded-lg bg-muted/35 px-2 text-left text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground"
         :aria-expanded="replyChipExpanded"
         :title="message.replyTo.preview ? 'Show full quoted message and jump to it' : 'Jump to replied message'"
         @click="onReplyChipClick"
       >
         <CornerDownRight class="w-3 h-3 flex-shrink-0" />
-        <span class="text-primary/80 font-medium">@{{ replyAuthorName }}</span>
+        <span class="type-emphasis text-primary/80">@{{ replyAuthorName }}</span>
         <span
           v-if="message.replyTo.preview"
           :class="['flex-1 min-w-0 opacity-70', replyChipExpanded ? 'whitespace-pre-wrap break-words' : 'truncate']"
         >{{ message.replyTo.preview }}</span>
-        <span v-else class="opacity-60 font-mono">{{ message.replyTo.id.slice(0, 8) }}</span>
+        <span v-else class="type-mono opacity-60">{{ message.replyTo.id.slice(0, 8) }}</span>
       </button>
     </div>
 
     <!-- Edit mode -->
-    <div v-if="isEditing" class="mt-1 flex min-w-0 items-start gap-1.5">
-      <div class="min-w-0 flex-1">
+    <div v-if="isEditing" class="chat-message-fill flex min-w-0 items-start gap-1.5">
+      <div class="flex min-w-0 flex-1 flex-col gap-1.5">
         <ChatEditor
           :ref="setEditEditorRef"
           compact
           :initial-content="editInitialContent"
-          placeholder="Edit message..."
+          placeholder="Edit message…"
           @send="submitEditFromEditor"
           @cancel="cancelEdit"
         />
-        <p class="mt-1.5 text-[11px] leading-4 text-muted-foreground/70">
+        <p class="type-caption text-muted-foreground/70">
           escape to
           <button
             type="button"
-            class="font-medium text-primary/85 transition-colors hover:text-primary hover:underline"
+            class="type-emphasis text-primary/85 transition-colors hover:text-primary hover:underline"
             @click="cancelEdit"
           >
             cancel
@@ -727,7 +728,7 @@ watch(
           <span class="mx-1 text-muted-foreground/35">•</span>
           <button
             type="button"
-            class="font-medium text-primary/85 transition-colors hover:text-primary hover:underline"
+            class="type-emphasis text-primary/85 transition-colors hover:text-primary hover:underline"
             @click="submitEditFromLink"
           >
             enter
@@ -739,40 +740,40 @@ watch(
     </div>
 
     <!-- Sticker -->
-    <div v-else-if="message.isSticker && imageAttachments.length > 0" class="mt-1">
+    <div v-else-if="message.isSticker && imageAttachments.length > 0">
       <img
         :src="imageAttachments[0].url"
         :alt="imageAttachments[0].desc ?? message.body ?? 'Sticker'"
-        class="max-w-28 max-h-28 object-contain"
+        class="max-w-28 max-h-28 rounded-lg object-contain"
         loading="lazy"
       />
     </div>
 
-    <template v-else>
+    <div v-else class="chat-message-media-stack">
       <!-- User text body (shown alongside attachments) -->
       <div
         v-if="displayBody"
         :ref="setStyledBodyRef"
-        class="text-[13px] leading-[18px] break-words styled-body"
+        class="type-message-body break-words styled-body"
         v-html="styledHtml"
       />
 
       <!-- Inline GIF -->
-      <div v-else-if="isGif" class="mt-2">
+      <div v-else-if="isGif">
         <img
           :src="message.body.trim()"
           alt="GIF"
-          class="max-w-xs max-h-56 rounded-xl border border-border object-contain"
+          class="chat-attachment-image rounded-lg border border-border object-contain"
           loading="lazy"
         />
       </div>
 
       <!-- Image attachments gallery -->
-      <div v-if="imageAttachments.length > 0" class="mt-2 flex flex-wrap gap-2">
+      <div v-if="imageAttachments.length > 0" class="chat-attachment-strip">
         <div
           v-for="img in imageAttachments"
           :key="attachmentKey(img)"
-          class="rounded-xl border border-border overflow-hidden bg-muted/40"
+          class="rounded-lg border border-border overflow-hidden bg-muted/40"
         >
           <button
             v-if="resolvedAttachmentUrl(img)"
@@ -784,20 +785,20 @@ watch(
             <img
               :src="resolvedAttachmentUrl(img) || ''"
               :alt="img.name ?? 'Shared image'"
-              class="max-w-xs max-h-56 object-cover"
+              class="chat-attachment-image object-cover"
               loading="lazy"
             />
           </button>
           <div
             v-else
-            class="flex h-36 w-48 flex-col items-center justify-center gap-2 px-4 text-center text-[12px] text-muted-foreground"
+            class="type-caption flex h-36 w-48 flex-col items-center justify-center gap-2 px-4 text-center text-muted-foreground"
           >
             <Lock class="h-4 w-4 text-primary/70" />
             <span>{{ attachmentError(img) ?? (isDecryptingAttachment(img) ? "Decrypting image…" : "Preparing image…") }}</span>
             <button
               v-if="attachmentError(img)"
               type="button"
-              class="rounded-lg border border-border bg-background px-2.5 py-1 text-[11px] text-foreground hover:bg-muted transition-colors"
+              class="type-caption rounded-lg border border-border bg-background px-2.5 py-1 text-foreground hover:bg-muted transition-colors"
               @click="downloadAttachment(img)"
             >
               Download
@@ -805,7 +806,7 @@ watch(
           </div>
           <div
             v-if="img.encrypted"
-            class="flex items-center gap-1 border-t border-border/70 px-2 py-1 text-[10px] font-medium text-muted-foreground"
+            class="type-meta type-emphasis flex items-center gap-1 border-t border-border/70 px-2 py-1 text-muted-foreground"
           >
             <Lock class="h-3 w-3 text-primary/70" />
             <span>Encrypted</span>
@@ -814,11 +815,11 @@ watch(
       </div>
 
       <!-- Inline video attachments -->
-      <div v-if="videoAttachments.length > 0" class="mt-2 flex flex-col gap-2">
+      <div v-if="videoAttachments.length > 0" class="flex flex-col gap-2">
         <div
           v-for="file in videoAttachments"
           :key="attachmentKey(file)"
-          class="max-w-md rounded-xl border border-border bg-muted/30 p-2"
+          class="chat-attachment-card flex flex-col gap-2 rounded-lg border border-border bg-muted/30 p-2"
         >
           <video
             v-if="resolvedAttachmentUrl(file)"
@@ -830,20 +831,20 @@ watch(
           />
           <div
             v-else
-            class="flex h-40 w-full flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-border px-4 text-center text-[12px] text-muted-foreground"
+            class="type-caption flex h-40 w-full flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-border px-4 text-center text-muted-foreground"
           >
             <Lock class="h-4 w-4 text-primary/70" />
             <span>{{ attachmentError(file) ?? (isDecryptingAttachment(file) ? "Decrypting video…" : "Preparing video…") }}</span>
             <button
               v-if="attachmentError(file)"
               type="button"
-              class="rounded-lg border border-border bg-background px-2.5 py-1 text-[11px] text-foreground hover:bg-muted transition-colors"
+              class="type-caption rounded-lg border border-border bg-background px-2.5 py-1 text-foreground hover:bg-muted transition-colors"
               @click="downloadAttachment(file)"
             >
               Download
             </button>
           </div>
-          <div class="mt-2 text-[11px] text-muted-foreground">
+          <div class="type-caption text-muted-foreground">
             {{ file.name ?? "Video" }} · {{ file.mediaType ?? "video" }}
             <span v-if="file.size"> · {{ formatFileSize(file.size) }}</span>
             <span v-if="file.encrypted"> · Encrypted</span>
@@ -852,11 +853,11 @@ watch(
       </div>
 
       <!-- Inline audio attachments -->
-      <div v-if="audioAttachments.length > 0" class="mt-2 flex flex-col gap-2">
+      <div v-if="audioAttachments.length > 0" class="flex flex-col gap-2">
         <div
           v-for="file in audioAttachments"
           :key="attachmentKey(file)"
-          class="max-w-md rounded-xl border border-border bg-muted/30 p-3"
+          class="chat-attachment-card flex flex-col gap-2 rounded-lg border border-border bg-muted/30 p-3"
         >
           <audio
             v-if="resolvedAttachmentUrl(file)"
@@ -867,20 +868,20 @@ watch(
           />
           <div
             v-else
-            class="flex min-h-20 w-full flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-border px-4 text-center text-[12px] text-muted-foreground"
+            class="type-caption flex min-h-20 w-full flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-border px-4 text-center text-muted-foreground"
           >
             <Lock class="h-4 w-4 text-primary/70" />
             <span>{{ attachmentError(file) ?? (isDecryptingAttachment(file) ? "Decrypting audio…" : "Preparing audio…") }}</span>
             <button
               v-if="attachmentError(file)"
               type="button"
-              class="rounded-lg border border-border bg-background px-2.5 py-1 text-[11px] text-foreground hover:bg-muted transition-colors"
+              class="type-caption rounded-lg border border-border bg-background px-2.5 py-1 text-foreground hover:bg-muted transition-colors"
               @click="downloadAttachment(file)"
             >
               Download
             </button>
           </div>
-          <div class="mt-2 text-[11px] text-muted-foreground">
+          <div class="type-caption text-muted-foreground">
             {{ file.name ?? "Audio" }} · {{ file.mediaType ?? "audio" }}
             <span v-if="file.size"> · {{ formatFileSize(file.size) }}</span>
             <span v-if="file.encrypted"> · Encrypted</span>
@@ -889,11 +890,11 @@ watch(
       </div>
 
       <!-- Inline PDF attachments -->
-      <div v-if="pdfAttachments.length > 0" class="mt-2 flex flex-col gap-2">
+      <div v-if="pdfAttachments.length > 0" class="flex flex-col gap-2">
         <div
           v-for="file in pdfAttachments"
           :key="attachmentKey(file)"
-          class="max-w-md rounded-xl border border-border bg-muted/30 p-2"
+          class="chat-attachment-card flex flex-col gap-2 rounded-lg border border-border bg-muted/30 p-2"
         >
           <iframe
             v-if="resolvedAttachmentUrl(file)"
@@ -903,20 +904,20 @@ watch(
           />
           <div
             v-else
-            class="flex h-40 w-full flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-border px-4 text-center text-[12px] text-muted-foreground"
+            class="type-caption flex h-40 w-full flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-border px-4 text-center text-muted-foreground"
           >
             <Lock class="h-4 w-4 text-primary/70" />
             <span>{{ attachmentError(file) ?? (isDecryptingAttachment(file) ? "Decrypting PDF…" : "Preparing PDF…") }}</span>
             <button
               v-if="attachmentError(file)"
               type="button"
-              class="rounded-lg border border-border bg-background px-2.5 py-1 text-[11px] text-foreground hover:bg-muted transition-colors"
+              class="type-caption rounded-lg border border-border bg-background px-2.5 py-1 text-foreground hover:bg-muted transition-colors"
               @click="downloadAttachment(file)"
             >
               Download
             </button>
           </div>
-          <div class="mt-2 text-[11px] text-muted-foreground">
+          <div class="type-caption text-muted-foreground">
             {{ file.name ?? "PDF" }} · {{ file.mediaType ?? "application/pdf" }}
             <span v-if="file.size"> · {{ formatFileSize(file.size) }}</span>
             <span v-if="file.encrypted"> · Encrypted</span>
@@ -925,18 +926,18 @@ watch(
       </div>
 
       <!-- Downloadable attachments -->
-      <div v-if="downloadableAttachments.length > 0" class="mt-2 flex flex-col gap-1.5">
+      <div v-if="downloadableAttachments.length > 0" class="flex flex-col gap-1.5">
         <template v-for="file in downloadableAttachments" :key="attachmentKey(file)">
           <button
             v-if="file.encrypted"
             type="button"
-            class="inline-flex items-center gap-3 bg-muted rounded-xl p-3 hover:bg-muted/80 transition-all duration-200 max-w-md text-left"
+            class="chat-file-card inline-flex items-center gap-3 bg-muted rounded-lg p-3 hover:bg-muted/80 transition-all duration-200 text-left"
             @click="downloadAttachment(file)"
           >
             <FileDown class="w-4 h-4 text-muted-foreground flex-shrink-0" />
             <div class="flex-1 min-w-0">
-              <div class="text-[13px] font-medium truncate">{{ file.name ?? "File" }}</div>
-              <div class="flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground">
+              <div class="type-control truncate">{{ file.name ?? "File" }}</div>
+              <div class="type-caption flex flex-wrap items-center gap-1.5 text-muted-foreground">
                 <span>{{ file.mediaType ?? "file" }}</span>
                 <span v-if="file.size">· {{ formatFileSize(file.size) }}</span>
                 <span class="inline-flex items-center gap-1 rounded-full bg-primary/8 px-1.5 py-0.5 text-primary/80">
@@ -944,7 +945,7 @@ watch(
                   Encrypted
                 </span>
               </div>
-              <div v-if="attachmentError(file)" class="mt-1 text-[11px] text-destructive">
+              <div v-if="attachmentError(file)" class="type-caption text-destructive">
                 {{ attachmentError(file) }}
               </div>
             </div>
@@ -954,12 +955,12 @@ watch(
             :href="file.url"
             target="_blank"
             rel="noopener noreferrer"
-            class="inline-flex items-center gap-3 bg-muted rounded-xl p-3 hover:bg-muted/80 transition-all duration-200 max-w-md"
+            class="chat-file-card inline-flex items-center gap-3 bg-muted rounded-lg p-3 hover:bg-muted/80 transition-all duration-200"
           >
             <FileDown class="w-4 h-4 text-muted-foreground flex-shrink-0" />
             <div class="flex-1 min-w-0">
-              <div class="text-[13px] font-medium truncate">{{ file.name ?? "File" }}</div>
-              <div class="text-[11px] text-muted-foreground">
+              <div class="type-control truncate">{{ file.name ?? "File" }}</div>
+              <div class="type-caption text-muted-foreground">
                 {{ file.mediaType ?? "file" }}
                 <span v-if="file.size"> · {{ formatFileSize(file.size) }}</span>
               </div>
@@ -967,7 +968,7 @@ watch(
           </a>
         </template>
       </div>
-    </template>
+    </div>
 
     <ImageLightbox
       v-model:open="lightboxOpen"
@@ -981,25 +982,26 @@ watch(
     <button
       v-if="showThreadChip"
       type="button"
-      class="inline-flex h-7 items-center gap-1.5 mt-1.5 px-2 text-[11px] font-medium rounded-lg bg-primary/10 text-primary hover:bg-primary/20 transition-colors"
+      class="chat-thread-chip type-caption type-emphasis inline-flex h-7 items-center gap-1.5 rounded-md bg-primary/10 px-2 text-primary transition-colors hover:bg-primary/20"
       :title="`Open thread (${threadReplyCount} ${threadReplyCount === 1 ? 'reply' : 'replies'})`"
       @click="openThreadFromChip"
     >
-      <MessageSquare class="w-3 h-3" />
-      <span>{{ threadReplyCount }} {{ threadReplyCount === 1 ? "reply" : "replies" }}</span>
+      <MessageSquare class="w-3 h-3 flex-shrink-0" />
+      <span class="min-w-0 truncate">{{ threadReplyCount }} {{ threadReplyCount === 1 ? "reply" : "replies" }}</span>
     </button>
 
     <!-- Existing reactions (inline, always visible when present) -->
-    <div v-if="message.reactions && Object.keys(message.reactions).length > 0" class="flex flex-wrap gap-1 mt-1.5">
+    <div v-if="message.reactions && Object.keys(message.reactions).length > 0" class="chat-message-reactions flex flex-wrap gap-1">
       <button
         v-for="(nicks, emoji) in message.reactions"
         :key="emoji"
-        class="inline-flex h-7 items-center gap-1 px-2 text-[12px] rounded-lg bg-muted/60 hover:bg-muted transition-all duration-200"
+        type="button"
+        class="type-caption inline-flex h-7 items-center gap-1 px-2 rounded-lg bg-muted/60 hover:bg-muted transition-all duration-200"
         :title="nicks.join(', ')"
         @click="emit('react', message.id, emoji)"
       >
         <span>{{ emoji }}</span>
-        <span class="text-muted-foreground font-mono text-[10px] tabular-nums">{{ nicks.length }}</span>
+        <span class="type-meta type-numeric text-muted-foreground">{{ nicks.length }}</span>
       </button>
     </div>
 
@@ -1010,7 +1012,7 @@ watch(
     <div
       v-if="!isEditing && !desktopToolbarLockedByAnother"
       :class="[
-        'absolute -top-4 right-3 flex items-center gap-1 transition-opacity duration-150 bg-card/95 backdrop-blur border border-border rounded-lg shadow-lg p-1.5 [@media(pointer:coarse)]:hidden',
+        'absolute -top-4 right-3 flex items-center gap-1 transition-opacity duration-150 bg-card/95 backdrop-blur border border-border rounded-lg shadow-lg p-1 [@media(pointer:coarse)]:hidden',
         desktopToolbarVisibilityClass,
       ]"
     >
@@ -1018,7 +1020,7 @@ watch(
         v-for="e in quickEmojis"
         :key="e"
         type="button"
-        class="h-8 w-8 flex items-center justify-center text-[16px] leading-none rounded-md hover:bg-muted hover:scale-105 transition-all duration-150"
+        class="type-emoji-button h-8 w-8 flex items-center justify-center rounded-md hover:bg-muted hover:scale-105 transition-all duration-150"
         :title="`React with ${e}`"
         :aria-label="`React to message with ${e}`"
         @click="react(e)"
@@ -1090,7 +1092,7 @@ watch(
     <button
       v-if="!isEditing"
       type="button"
-      class="absolute top-1 right-1 z-10 hidden h-8 w-8 [@media(pointer:coarse)]:flex [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11 items-center justify-center rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted opacity-70 transition-all duration-150"
+      class="z-sticky absolute top-1 right-1 hidden h-8 w-8 [@media(pointer:coarse)]:flex [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11 items-center justify-center rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted opacity-70 transition-all duration-150"
       title="Message actions"
       aria-label="Message actions"
       :aria-expanded="sheetOpen"
@@ -1108,7 +1110,7 @@ watch(
   <Teleport to="body">
     <div
       v-if="sheetOpen"
-      class="fixed inset-0 z-[55] flex items-end sm:items-center justify-center animate-fade-in"
+      class="z-modal fixed inset-0 flex items-end sm:items-center justify-center animate-fade-in"
       role="presentation"
     >
       <div class="absolute inset-0 bg-background/60 backdrop-blur-sm" @click="closeSheet" />
@@ -1116,26 +1118,26 @@ watch(
         role="dialog"
         aria-modal="true"
         aria-label="Message actions"
-        class="relative w-full sm:max-w-sm glass-panel border border-border rounded-t-2xl sm:rounded-2xl shadow-2xl animate-slide-up p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]"
+        class="chat-action-sheet-stack relative w-full sm:max-w-sm glass-panel border border-border rounded-t-lg sm:rounded-lg shadow-2xl animate-slide-up p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]"
         @pointerdown.stop
       >
-        <div class="sm:hidden flex justify-center mb-2">
+        <div class="chat-action-sheet-handle sm:hidden">
           <div class="h-1 w-10 rounded-full bg-muted-foreground/30" />
         </div>
 
         <template v-if="sheetView === 'actions'">
-          <div class="grid grid-cols-6 gap-1 mb-3">
+          <div class="chat-action-sheet-reactions">
             <button
               v-for="e in quickEmojis"
               :key="`sheet-${e}`"
               type="button"
-              class="h-12 flex items-center justify-center text-[26px] leading-none rounded-xl hover:bg-muted active:bg-muted transition-colors"
+              class="type-emoji-sheet h-12 flex items-center justify-center rounded-lg hover:bg-muted active:bg-muted transition-colors"
               :aria-label="`React with ${e}`"
               @click="react(e)"
             >{{ e }}</button>
             <button
               type="button"
-              class="h-12 flex items-center justify-center rounded-xl text-muted-foreground hover:text-foreground hover:bg-muted active:bg-muted transition-colors"
+              class="h-12 flex items-center justify-center rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted active:bg-muted transition-colors"
               aria-label="More reactions"
               @click="sheetView = 'emoji'"
             >
@@ -1145,7 +1147,7 @@ watch(
 
           <button
             type="button"
-            class="w-full flex items-center gap-3 px-3 h-12 rounded-xl text-[15px] hover:bg-muted active:bg-muted transition-colors text-left"
+            class="type-field w-full flex items-center gap-3 px-3 h-12 rounded-lg hover:bg-muted active:bg-muted transition-colors text-left"
             @click="startReplyFromMenu"
           >
             <Reply class="w-5 h-5 text-muted-foreground" aria-hidden="true" />
@@ -1153,7 +1155,7 @@ watch(
           </button>
           <button
             type="button"
-            class="w-full flex items-center gap-3 px-3 h-12 rounded-xl text-[15px] hover:bg-muted active:bg-muted transition-colors text-left"
+            class="type-field w-full flex items-center gap-3 px-3 h-12 rounded-lg hover:bg-muted active:bg-muted transition-colors text-left"
             @click="startReplyInThreadFromMenu"
           >
             <MessageSquare class="w-5 h-5 text-muted-foreground" aria-hidden="true" />
@@ -1162,7 +1164,7 @@ watch(
           <template v-if="message.isSelf">
             <button
               type="button"
-              class="w-full flex items-center gap-3 px-3 h-12 rounded-xl text-[15px] hover:bg-muted active:bg-muted transition-colors text-left"
+              class="type-field w-full flex items-center gap-3 px-3 h-12 rounded-lg hover:bg-muted active:bg-muted transition-colors text-left"
               @click="startEditFromMenu"
             >
               <Pencil class="w-5 h-5 text-muted-foreground" aria-hidden="true" />
@@ -1170,7 +1172,7 @@ watch(
             </button>
             <button
               type="button"
-              class="w-full flex items-center gap-3 px-3 h-12 rounded-xl text-[15px] text-destructive hover:bg-destructive/10 active:bg-destructive/10 transition-colors text-left"
+              class="type-field w-full flex items-center gap-3 px-3 h-12 rounded-lg text-destructive hover:bg-destructive/10 active:bg-destructive/10 transition-colors text-left"
               @click="retractFromMenu"
             >
               <Trash2 class="w-5 h-5" aria-hidden="true" />
@@ -1179,7 +1181,7 @@ watch(
           </template>
           <button
             type="button"
-            class="sm:hidden mt-2 w-full h-12 rounded-xl text-[14px] text-muted-foreground hover:bg-muted active:bg-muted transition-colors"
+            class="type-field sm:hidden w-full h-12 rounded-lg text-muted-foreground hover:bg-muted active:bg-muted transition-colors"
             @click="closeSheet"
           >Cancel</button>
         </template>

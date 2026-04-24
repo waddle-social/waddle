@@ -17,7 +17,7 @@ const options: ReadonlyArray<{
 <template>
   <div class="flex flex-col gap-2">
     <div class="flex items-center justify-between gap-3">
-      <span class="text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground/70">
+      <span class="type-section-label text-muted-foreground/70">
         Scroll direction
       </span>
     </div>
@@ -38,9 +38,11 @@ const options: ReadonlyArray<{
           : 'text-muted-foreground hover:text-foreground'"
         @click="setScrollDirection(option.value)"
       >
-        <div class="text-[12px] font-medium">{{ option.label }}</div>
-        <div class="mt-0.5 text-[11px] leading-snug text-muted-foreground">
-          {{ option.description }}
+        <div class="flex flex-col gap-0.5">
+          <span class="type-control">{{ option.label }}</span>
+          <span class="type-meta text-muted-foreground">
+            {{ option.description }}
+          </span>
         </div>
       </button>
     </div>

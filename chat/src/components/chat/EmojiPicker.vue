@@ -188,7 +188,7 @@ onBeforeUnmount(detachWindowListeners);
       :class="[
         'flex flex-col overflow-hidden',
         variant === 'popover'
-          ? 'fixed w-[22rem] glass-panel border border-border rounded-xl z-[80] shadow-2xl animate-fade-in max-h-96'
+          ? 'z-popover fixed w-[var(--chat-reaction-popover-width)] glass-panel border border-border rounded-lg shadow-2xl animate-fade-in max-h-96'
           : 'w-full max-h-[60vh]',
       ]"
       :style="variant === 'popover' ? popoverStyle : undefined"
@@ -204,9 +204,9 @@ onBeforeUnmount(detachWindowListeners);
             ref="searchInputEl"
             v-model="query"
             type="text"
-            placeholder="Search emoji..."
+            placeholder="Search emoji…"
             aria-label="Search emoji"
-            class="min-h-10 w-full rounded-lg border-none bg-transparent py-2.5 pl-9 pr-11 text-[13px] leading-5 placeholder:text-muted-foreground/40 focus:outline-none"
+            class="type-field min-h-10 w-full rounded-lg border-none bg-transparent py-2.5 pl-9 pr-11 placeholder:text-muted-foreground/40 focus:outline-none"
           />
           <button
             type="button"
@@ -221,15 +221,15 @@ onBeforeUnmount(detachWindowListeners);
 
       <div class="flex-1 overflow-auto p-2">
         <template v-if="searchResults.length > 0">
-          <div class="flex h-6 items-center px-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground/70">Results</div>
+          <div class="type-section-label flex h-6 items-center px-1 text-muted-foreground/70">Results</div>
           <div :class="['grid gap-1', variant === 'sheet' ? 'grid-cols-7' : 'grid-cols-8']">
             <button
               v-for="e in searchResults"
               :key="`s-${e}`"
               type="button"
               :class="[
-                'flex items-center justify-center leading-none rounded-lg hover:bg-muted active:bg-muted transition-all duration-150',
-                variant === 'sheet' ? 'h-12 text-[24px]' : 'h-9 w-9 text-[20px]',
+                'flex items-center justify-center rounded-lg hover:bg-muted active:bg-muted transition-all duration-150',
+                variant === 'sheet' ? 'type-emoji-sheet h-12' : 'type-emoji-picker h-9 w-9',
               ]"
               :aria-label="`React with ${e}`"
               @click="onSelect(e)"
@@ -237,34 +237,34 @@ onBeforeUnmount(detachWindowListeners);
           </div>
         </template>
         <template v-else-if="query.trim().length >= 2">
-          <div class="flex h-24 items-center justify-center rounded-lg text-[12px] text-muted-foreground">No emoji found</div>
+          <div class="type-caption flex h-24 items-center justify-center rounded-lg text-muted-foreground">No emoji found</div>
         </template>
         <template v-else>
           <template v-if="recents.length > 0">
-            <div class="flex h-6 items-center px-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground/70">Recent</div>
+            <div class="type-section-label flex h-6 items-center px-1 text-muted-foreground/70">Recent</div>
             <div :class="['grid gap-1 mb-2', variant === 'sheet' ? 'grid-cols-7' : 'grid-cols-8']">
               <button
                 v-for="e in recents"
                 :key="`r-${e}`"
                 type="button"
                 :class="[
-                  'flex items-center justify-center leading-none rounded-lg hover:bg-muted active:bg-muted transition-all duration-150',
-                  variant === 'sheet' ? 'h-12 text-[24px]' : 'h-9 w-9 text-[20px]',
+                  'flex items-center justify-center rounded-lg hover:bg-muted active:bg-muted transition-all duration-150',
+                  variant === 'sheet' ? 'type-emoji-sheet h-12' : 'type-emoji-picker h-9 w-9',
                 ]"
                 :aria-label="`React with ${e}`"
                 @click="onSelect(e)"
               >{{ e }}</button>
             </div>
           </template>
-          <div class="flex h-6 items-center px-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground/70">Common</div>
+          <div class="type-section-label flex h-6 items-center px-1 text-muted-foreground/70">Common</div>
           <div :class="['grid gap-1', variant === 'sheet' ? 'grid-cols-7' : 'grid-cols-8']">
             <button
               v-for="e in COMMON_EMOJIS"
               :key="`c-${e}`"
               type="button"
               :class="[
-                'flex items-center justify-center leading-none rounded-lg hover:bg-muted active:bg-muted transition-all duration-150',
-                variant === 'sheet' ? 'h-12 text-[24px]' : 'h-9 w-9 text-[20px]',
+                'flex items-center justify-center rounded-lg hover:bg-muted active:bg-muted transition-all duration-150',
+                variant === 'sheet' ? 'type-emoji-sheet h-12' : 'type-emoji-picker h-9 w-9',
               ]"
               :aria-label="`React with ${e}`"
               @click="onSelect(e)"

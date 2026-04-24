@@ -47,18 +47,18 @@ watch(
 </script>
 
 <template>
-  <AppDrawer v-model:open="open" side="right" width-class="w-[min(88vw,20rem)]">
+  <AppDrawer v-model:open="open" side="right" width-class="w-[var(--chat-profile-drawer-width)]" label="Profile drawer">
     <template #title>
-      <span class="text-[14px] font-semibold">Profile</span>
+      <span class="type-pane-title">Profile</span>
     </template>
 
-    <div class="space-y-4 p-4">
+    <div class="chat-dialog-stack p-4">
       <!-- Header -->
       <div class="flex flex-col items-center gap-2 pt-2 text-center">
         <AppAvatar :name="username" :src="avatarUrl ?? null" size="lg" :presence="presence" />
         <div>
-          <div class="text-[15px] font-semibold">{{ username }}</div>
-          <div class="text-[12px] text-muted-foreground">{{ presenceText ?? "offline" }}</div>
+          <div class="type-card-title">{{ username }}</div>
+          <div class="type-caption text-muted-foreground">{{ presenceText ?? "offline" }}</div>
         </div>
       </div>
 
@@ -67,20 +67,20 @@ watch(
         <span
           v-for="hat in hats"
           :key="hat.uri"
-          class="inline-flex h-7 items-center rounded-full border border-border bg-muted/30 px-2 text-[11px] font-medium text-muted-foreground"
+          class="type-caption type-emphasis inline-flex h-7 items-center rounded-full border border-border bg-muted/30 px-2 text-muted-foreground"
         >
           {{ hat.title }}
         </span>
       </div>
 
       <!-- Loading skeleton -->
-      <div v-if="loading" class="space-y-3">
-        <div class="rounded-lg border border-border bg-muted/20 px-3 py-3 animate-pulse">
-          <div class="h-3 w-16 rounded bg-muted/50 mb-2" />
+      <div v-if="loading" class="chat-panel-stack">
+        <div class="flex flex-col gap-2 rounded-lg border border-border bg-muted/20 px-3 py-3 animate-pulse">
+          <div class="h-3 w-16 rounded bg-muted/50" />
           <div class="h-4 w-2/3 rounded bg-muted/50" />
         </div>
-        <div class="rounded-lg border border-border bg-muted/20 px-3 py-3 animate-pulse">
-          <div class="h-3 w-20 rounded bg-muted/50 mb-2" />
+        <div class="flex flex-col gap-2 rounded-lg border border-border bg-muted/20 px-3 py-3 animate-pulse">
+          <div class="h-3 w-20 rounded bg-muted/50" />
           <div class="h-4 w-1/2 rounded bg-muted/50" />
         </div>
       </div>
@@ -89,8 +89,8 @@ watch(
       <template v-if="!loading && pepProfile">
         <!-- Mood -->
         <section v-if="pepProfile.mood" class="rounded-lg border border-border bg-muted/20 px-3 py-3">
-          <div class="text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground/75 mb-1">Mood</div>
-          <div class="text-[13px]">
+          <div class="type-section-label text-muted-foreground/75">Mood</div>
+          <div class="type-field">
             {{ formatPepKeyword(pepProfile.mood.kind) }}
             <span v-if="pepProfile.mood.text" class="text-muted-foreground"> &mdash; {{ pepProfile.mood.text }}</span>
           </div>
@@ -98,8 +98,8 @@ watch(
 
         <!-- Activity -->
         <section v-if="pepProfile.activity" class="rounded-lg border border-border bg-muted/20 px-3 py-3">
-          <div class="text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground/75 mb-1">Activity</div>
-          <div class="text-[13px]">
+          <div class="type-section-label text-muted-foreground/75">Activity</div>
+          <div class="type-field">
             {{ formatPepKeyword(pepProfile.activity.general) }}
             <span v-if="pepProfile.activity.specific"> &middot; {{ formatPepKeyword(pepProfile.activity.specific) }}</span>
             <span v-if="pepProfile.activity.text" class="text-muted-foreground"> &mdash; {{ pepProfile.activity.text }}</span>
@@ -108,8 +108,8 @@ watch(
 
         <!-- Tune -->
         <section v-if="pepProfile.tune" class="rounded-lg border border-border bg-muted/20 px-3 py-3">
-          <div class="text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground/75 mb-1">Listening To</div>
-          <div class="text-[13px]">
+          <div class="type-section-label text-muted-foreground/75">Listening to</div>
+          <div class="type-field">
             <template v-if="pepProfile.tune.title">{{ pepProfile.tune.title }}</template>
             <template v-if="pepProfile.tune.artist"> &mdash; {{ pepProfile.tune.artist }}</template>
             <span v-if="pepProfile.tune.source" class="text-muted-foreground"> ({{ pepProfile.tune.source }})</span>
@@ -120,7 +120,9 @@ watch(
       <!-- Message button (hidden for own profile) -->
       <button
         v-if="!isSelf"
-        class="flex h-9 w-full items-center justify-center gap-2 rounded-lg bg-primary text-[13px] font-semibold text-primary-foreground hover:shadow-[0_0_16px_var(--glow-strong)] transition-all duration-200"
+        class="chat-action-button chat-action-button--primary type-action w-full"
+        type="button"
+        aria-label="Message this person"
         @click="emit('message')"
       >
         <MessageCircle class="h-4 w-4" />

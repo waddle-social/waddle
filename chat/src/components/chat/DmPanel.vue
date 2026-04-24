@@ -20,61 +20,65 @@ function preview(text?: string): string {
 }
 
 function dotClass(show?: DmConversation["presenceShow"]): string {
-  if (show === "away") return "bg-warning";
-  if (show === "dnd") return "bg-destructive";
-  if (show === "xa") return "bg-orange-500";
-  if (show === "available") return "bg-success";
-  return "bg-muted-foreground/40";
+  if (show === "away") return "bg-warning/75";
+  if (show === "dnd") return "bg-destructive/75";
+  if (show === "xa") return "bg-warning/55";
+  if (show === "available") return "bg-success/75";
+  return "bg-muted-foreground/25";
 }
 </script>
 
 <template>
-  <div class="w-[248px] border-r border-border glass-panel flex flex-col flex-shrink-0">
-    <div class="h-14 px-4 flex items-center justify-between border-b border-border">
+  <div class="chat-sidebar-pane glass-panel">
+    <div class="chat-sidebar-header">
       <div class="flex items-center gap-2">
         <MessageCircle class="w-4 h-4 text-primary/70" />
-        <h2 class="text-[14px] font-display font-bold tracking-tight text-sidebar-foreground">Direct Messages</h2>
+        <h2 class="type-pane-title text-sidebar-foreground">Direct messages</h2>
       </div>
       <button
-        class="h-8 w-8 flex items-center justify-center rounded-lg text-sidebar-muted hover:bg-sidebar-accent hover:text-sidebar-foreground transition-all duration-200"
+        class="chat-icon-button text-sidebar-muted hover:bg-sidebar-accent hover:text-sidebar-foreground"
         title="New message"
+        aria-label="New direct message"
+        type="button"
         @click="emit('newDm')"
       >
         <Plus class="w-4 h-4" />
       </button>
     </div>
 
-    <div class="flex-1 overflow-auto py-3 px-2">
-      <div v-if="conversations.length === 0" class="text-center py-8 text-[13px] text-sidebar-muted">
+    <div class="chat-pane-scroll chat-sidebar-scroll">
+      <div v-if="conversations.length === 0" class="type-caption text-center py-10 text-sidebar-muted">
         No conversations yet
       </div>
 
-      <div v-else class="space-y-0.5">
+      <div v-else class="chat-list-stack">
         <button
           v-for="conversation in conversations"
           :key="conversation.peerJid"
-          class="w-full min-h-14 flex items-center gap-2.5 px-2.5 py-2 rounded-lg transition-all duration-200 text-left group"
+          class="chat-list-row w-full min-h-14 flex items-center gap-3 px-3 py-2 text-left group"
           :class="activePeerJid === conversation.peerJid
             ? 'bg-sidebar-accent text-sidebar-foreground'
             : 'text-sidebar-muted hover:bg-sidebar-accent/50 hover:text-sidebar-foreground'"
+          :aria-current="activePeerJid === conversation.peerJid ? 'page' : undefined"
+          type="button"
           @click="emit('selectDm', conversation.peerJid)"
         >
           <div class="relative">
             <AppAvatar :name="conversation.peerUsername" :src="conversation.peerAvatarUrl ?? null" size="sm" />
-            <span class="absolute -right-0.5 -bottom-0.5 w-2.5 h-2.5 rounded-full border border-background" :class="dotClass(conversation.presenceShow)" />
+            <span class="absolute -right-0.5 -bottom-0.5 w-2 h-2 rounded-full border border-background" :class="dotClass(conversation.presenceShow)" />
           </div>
           <div class="min-w-0 flex-1">
             <div class="flex items-center justify-between gap-2">
-              <span class="text-[13px] truncate font-medium">{{ conversation.peerUsername }}</span>
-              <span v-if="conversation.lastMessageAt" class="text-[10px] font-mono text-sidebar-muted tabular-nums">
+              <span class="type-control truncate">{{ conversation.peerUsername }}</span>
+              <span v-if="conversation.lastMessageAt" class="type-meta type-numeric text-sidebar-muted">
                 {{ formatStamp(conversation.lastMessageAt) }}
               </span>
             </div>
             <div class="flex items-center gap-1.5">
-              <span class="text-[11px] text-sidebar-muted truncate">{{ preview(conversation.lastMessageBody) }}</span>
+              <span class="type-caption text-sidebar-muted truncate">{{ preview(conversation.lastMessageBody) }}</span>
               <span
                 v-if="conversation.unreadCount > 0"
-                class="ml-auto inline-flex min-w-[18px] h-[18px] px-1 items-center justify-center rounded-full text-[10px] font-semibold bg-primary text-primary-foreground"
+                class="type-count-badge ml-auto inline-flex min-w-[18px] h-[18px] px-1 items-center justify-center rounded-full bg-primary text-primary-foreground"
               >
                 {{ conversation.unreadCount }}
               </span>

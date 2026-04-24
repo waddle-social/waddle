@@ -419,138 +419,144 @@ watch(
 
 <template>
   <div
-    class="relative px-4 py-3 flex-shrink-0"
+    class="chat-composer relative flex-shrink-0 bg-background/75"
     :class="isTopPinned ? 'border-b border-border' : 'border-t border-border'"
     @keydown.capture="onKeydown"
   >
-    <!-- Reply context chip -->
     <div
-      v-if="replyingTo"
-      class="flex items-center gap-2 px-3 py-1.5 mb-2 rounded-xl bg-muted/70 border border-border text-[12px] animate-fade-in"
+      v-if="replyingTo || showForumTitleInput || pendingAttachments.length > 0 || uploadProgress.uploading"
+      class="chat-composer-aux-stack"
     >
-      <span class="text-muted-foreground">Replying to</span>
-      <span class="font-medium text-primary/90">@{{ replyAuthorName }}</span>
-      <span v-if="replyingTo.preview" class="text-muted-foreground truncate flex-1">{{ replyingTo.preview }}</span>
-      <button
-        type="button"
-        class="ml-auto h-6 w-6 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
-        title="Cancel reply"
-        aria-label="Cancel reply"
-        @click="emit('cancelReply')"
-      >
-        <X class="w-3.5 h-3.5" />
-      </button>
-    </div>
-
-    <div
-      v-if="showForumTitleInput"
-      class="mb-2 rounded-xl border border-border bg-card/60 px-3 py-2.5 animate-fade-in"
-    >
-      <div class="mb-1.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
-        New topic
-      </div>
-      <input
-        v-model="forumTitle"
-        type="text"
-        class="w-full bg-transparent text-[14px] font-medium placeholder:text-muted-foreground/45 focus:outline-none"
-        :disabled="disabled || isSending"
-        placeholder="Add a clear title"
-      />
-      <p class="mt-1 text-[11px] text-muted-foreground">
-        Top-level forum posts need a title.
-      </p>
-    </div>
-
-    <!-- Pending attachment previews -->
-    <div
-      v-if="pendingAttachments.length > 0"
-      class="flex flex-wrap gap-2 mb-2 animate-fade-in"
-    >
+      <!-- Reply context chip -->
       <div
-        v-for="att in pendingAttachments"
-        :key="att.id"
-        class="relative group/att rounded-xl border border-border bg-muted overflow-hidden"
+        v-if="replyingTo"
+        class="type-caption flex items-center gap-2 rounded-lg border border-border bg-muted/70 px-3 py-1.5 animate-fade-in"
       >
-        <img
-          v-if="att.previewKind === 'image'"
-          :src="att.previewUrl"
-          :alt="att.name"
-          class="h-20 w-20 object-cover"
+        <span class="text-muted-foreground">Replying to</span>
+        <span class="type-emphasis text-primary/90">@{{ replyAuthorName }}</span>
+        <span v-if="replyingTo.preview" class="text-muted-foreground truncate flex-1">{{ replyingTo.preview }}</span>
+        <button
+          type="button"
+          class="ml-auto h-8 w-8 flex items-center justify-center rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+          title="Cancel reply"
+          aria-label="Cancel reply"
+          @click="emit('cancelReply')"
+        >
+          <X class="w-3.5 h-3.5" />
+        </button>
+      </div>
+
+      <div
+        v-if="showForumTitleInput"
+        class="chat-field-stack rounded-lg border border-border bg-card/60 px-3 py-2.5 animate-fade-in"
+      >
+        <div class="type-section-label text-muted-foreground">
+          New topic
+        </div>
+        <input
+          v-model="forumTitle"
+          type="text"
+          class="type-card-title w-full bg-transparent placeholder:text-muted-foreground/45 focus:outline-none"
+          :disabled="disabled || isSending"
+          placeholder="Add a clear title"
+          aria-label="Topic title"
         />
-        <div v-else-if="att.previewKind === 'video'" class="w-44">
-          <video
+        <p class="type-caption text-muted-foreground">
+          Top-level forum posts need a title.
+        </p>
+      </div>
+
+      <!-- Pending attachment previews -->
+      <div
+        v-if="pendingAttachments.length > 0"
+        class="chat-composer-attachment-grid animate-fade-in"
+      >
+        <div
+          v-for="att in pendingAttachments"
+          :key="att.id"
+          class="relative group/att rounded-lg border border-border bg-muted overflow-hidden"
+        >
+          <img
+            v-if="att.previewKind === 'image'"
             :src="att.previewUrl"
-            class="h-24 w-full bg-black object-cover"
-            controls
-            muted
-            playsinline
-            preload="metadata"
+            :alt="att.name"
+            class="h-20 w-20 object-cover"
           />
-          <div class="px-2 py-1.5 text-[11px]">
-            <div class="truncate font-medium text-foreground">{{ att.name }}</div>
-            <div class="text-muted-foreground">{{ formatFileSize(att.size) }}</div>
-          </div>
-        </div>
-        <div v-else-if="att.previewKind === 'audio'" class="w-72 p-3">
-          <div class="mb-2 flex items-center gap-2 text-[12px] font-medium">
-            <Music4 class="h-4 w-4 text-primary" />
-            <span class="truncate">{{ att.name }}</span>
-          </div>
-          <audio :src="att.previewUrl" controls class="h-9 w-full" />
-          <div class="mt-1 text-[11px] text-muted-foreground">
-            {{ att.mediaType }} · {{ formatFileSize(att.size) }}
-          </div>
-        </div>
-        <div v-else-if="att.previewKind === 'pdf'" class="w-44">
-          <object
-            :data="att.previewUrl"
-            type="application/pdf"
-            class="h-24 w-full bg-background"
-          >
-            <div class="flex h-24 w-full flex-col items-center justify-center gap-2 text-[12px] text-muted-foreground">
-              <FileText class="h-5 w-5 text-primary" />
-              <span>PDF preview</span>
+          <div v-else-if="att.previewKind === 'video'" class="w-44">
+            <video
+              :src="att.previewUrl"
+              class="h-24 w-full bg-black object-cover"
+              controls
+              muted
+              playsinline
+              preload="metadata"
+            />
+            <div class="type-caption px-2 py-1.5">
+              <div class="type-emphasis truncate text-foreground">{{ att.name }}</div>
+              <div class="text-muted-foreground">{{ formatFileSize(att.size) }}</div>
             </div>
-          </object>
-          <div class="px-2 py-1.5 text-[11px]">
-            <div class="truncate font-medium text-foreground">{{ att.name }}</div>
-            <div class="text-muted-foreground">{{ formatFileSize(att.size) }}</div>
           </div>
-        </div>
-        <div v-else class="flex w-72 items-center gap-3 p-3">
-          <FileText class="h-5 w-5 flex-shrink-0 text-primary" />
-          <div class="min-w-0 flex-1">
-            <div class="truncate text-[12px] font-medium text-foreground">{{ att.name }}</div>
-            <div class="truncate text-[11px] text-muted-foreground">
+          <div v-else-if="att.previewKind === 'audio'" class="flex w-full max-w-72 flex-col gap-2 p-3">
+            <div class="type-caption type-emphasis flex items-center gap-2">
+              <Music4 class="h-4 w-4 text-primary" />
+              <span class="truncate">{{ att.name }}</span>
+            </div>
+            <audio :src="att.previewUrl" controls class="h-9 w-full" />
+            <div class="type-caption text-muted-foreground">
               {{ att.mediaType }} · {{ formatFileSize(att.size) }}
             </div>
           </div>
+          <div v-else-if="att.previewKind === 'pdf'" class="w-44">
+            <object
+              :data="att.previewUrl"
+              type="application/pdf"
+              class="h-24 w-full bg-background"
+            >
+              <div class="type-caption flex h-24 w-full flex-col items-center justify-center gap-2 text-muted-foreground">
+                <FileText class="h-5 w-5 text-primary" />
+                <span>PDF preview</span>
+              </div>
+            </object>
+            <div class="type-caption px-2 py-1.5">
+              <div class="type-emphasis truncate text-foreground">{{ att.name }}</div>
+              <div class="text-muted-foreground">{{ formatFileSize(att.size) }}</div>
+            </div>
+          </div>
+          <div v-else class="flex w-full max-w-72 items-center gap-3 p-3">
+            <FileText class="h-5 w-5 flex-shrink-0 text-primary" />
+            <div class="min-w-0 flex-1">
+              <div class="type-control truncate text-foreground">{{ att.name }}</div>
+              <div class="type-caption truncate text-muted-foreground">
+                {{ att.mediaType }} · {{ formatFileSize(att.size) }}
+              </div>
+            </div>
+          </div>
+          <button
+            type="button"
+            class="absolute top-1 right-1 h-6 w-6 flex items-center justify-center rounded-full bg-background/90 text-muted-foreground hover:text-destructive border border-border shadow-sm opacity-0 group-hover/att:opacity-100 focus:opacity-100 transition-opacity"
+            :title="`Remove ${att.name}`"
+            :aria-label="`Remove attachment ${att.name}`"
+            @click="removeAttachment(att.id)"
+          >
+            <X class="w-3.5 h-3.5" aria-hidden="true" />
+          </button>
         </div>
-        <button
-          type="button"
-          class="absolute top-1 right-1 h-6 w-6 flex items-center justify-center rounded-full bg-background/90 text-muted-foreground hover:text-destructive border border-border shadow-sm opacity-0 group-hover/att:opacity-100 focus:opacity-100 transition-opacity"
-          :title="`Remove ${att.name}`"
-          :aria-label="`Remove attachment ${att.name}`"
-          @click="removeAttachment(att.id)"
-        >
-          <X class="w-3.5 h-3.5" aria-hidden="true" />
-        </button>
       </div>
-    </div>
 
-    <!-- Upload progress bar -->
-    <div
-      v-if="uploadProgress.uploading"
-      class="flex items-center gap-2 text-[11px] text-muted-foreground mb-2 animate-fade-in"
-    >
-      <span class="truncate max-w-40">Uploading {{ uploadProgress.filename }}...</span>
-      <div class="flex-1 h-1 bg-muted rounded-full overflow-hidden">
-        <div
-          class="h-full bg-primary rounded-full transition-all duration-300"
-          :style="{ width: `${Math.round(uploadProgress.progress * 100)}%` }"
-        />
+      <!-- Upload progress bar -->
+      <div
+        v-if="uploadProgress.uploading"
+        class="type-caption flex items-center gap-2 text-muted-foreground animate-fade-in"
+      >
+        <span class="truncate max-w-40">Uploading {{ uploadProgress.filename }}…</span>
+        <div class="flex-1 h-1 bg-muted rounded-full overflow-hidden">
+          <div
+            class="h-full bg-primary rounded-full transition-all duration-300"
+            :style="{ width: `${Math.round(uploadProgress.progress * 100)}%` }"
+          />
+        </div>
+        <span class="type-numeric">{{ Math.round(uploadProgress.progress * 100) }}%</span>
       </div>
-      <span class="tabular-nums font-mono">{{ Math.round(uploadProgress.progress * 100) }}%</span>
     </div>
 
     <GifPicker
@@ -564,19 +570,20 @@ watch(
     <!-- @mention autocomplete -->
     <div
       v-if="showMentions && mentionResults.length > 0"
-      class="absolute left-4 right-4 glass-panel border border-border rounded-xl max-h-56 overflow-auto z-50 min-w-0 shadow-xl animate-fade-in p-1"
+      class="z-popover chat-composer-popover absolute glass-panel border border-border rounded-lg max-h-56 overflow-auto min-w-0 shadow-xl animate-fade-in p-1"
       :class="isTopPinned ? 'top-full mt-2' : 'bottom-full mb-2'"
     >
       <div class="flex flex-col gap-1">
         <button
           v-for="(name, i) in mentionResults"
           :key="name"
-          class="w-full h-9 px-3 py-0 text-left text-[13px] hover:bg-muted transition-colors flex items-center gap-2 rounded-lg"
+          type="button"
+          class="type-control w-full h-9 px-3 py-0 text-left hover:bg-muted transition-colors flex items-center gap-2 rounded-lg"
           :class="i === selectedIndex ? 'bg-muted' : ''"
           @mousedown.prevent="insertMention(name)"
         >
-          <span class="text-primary text-[11px]">@</span>
-          <span class="font-medium">{{ name }}</span>
+          <span class="type-caption text-primary">@</span>
+          <span class="type-emphasis">{{ name }}</span>
         </button>
       </div>
     </div>
@@ -584,25 +591,26 @@ watch(
     <!-- :emoji autocomplete -->
     <div
       v-if="showEmoji && emojiResults.length > 0"
-      class="absolute left-4 right-4 glass-panel border border-border rounded-xl max-h-56 overflow-auto z-50 min-w-0 shadow-xl animate-fade-in p-1"
+      class="z-popover chat-composer-popover absolute glass-panel border border-border rounded-lg max-h-56 overflow-auto min-w-0 shadow-xl animate-fade-in p-1"
       :class="isTopPinned ? 'top-full mt-2' : 'bottom-full mb-2'"
     >
       <div class="flex flex-col gap-1">
         <button
           v-for="(entry, i) in emojiResults"
           :key="entry.name"
-          class="w-full h-9 px-3 py-0 text-left text-[13px] hover:bg-muted transition-colors flex items-center gap-2 rounded-lg"
+          type="button"
+          class="type-control w-full h-9 px-3 py-0 text-left hover:bg-muted transition-colors flex items-center gap-2 rounded-lg"
           :class="i === selectedIndex ? 'bg-muted' : ''"
           @mousedown.prevent="insertEmoji(entry.emoji)"
         >
           <span>{{ entry.emoji }}</span>
-          <span class="text-muted-foreground text-[11px]">:{{ entry.name }}:</span>
+          <span class="type-caption text-muted-foreground">:{{ entry.name }}:</span>
         </button>
       </div>
     </div>
 
     <div
-      class="flex min-w-0 flex-nowrap items-center gap-1.5 rounded-lg bg-muted p-1.5 transition-all duration-300 has-[:focus]:ring-2 has-[:focus]:ring-primary/20 has-[:focus]:shadow-[0_0_16px_var(--glow)]"
+      class="chat-composer-input-shell flex min-w-0 flex-nowrap items-center gap-2 bg-muted p-1 transition-all duration-300 has-[:focus]:ring-2 has-[:focus]:ring-primary/20 has-[:focus]:shadow-[0_0_16px_var(--glow)]"
     >
       <input
         :ref="setFileInputRef"
@@ -613,7 +621,7 @@ watch(
       />
       <button
         type="button"
-        class="h-9 w-9 shrink-0 flex items-center justify-center rounded-md transition-all duration-200 text-muted-foreground hover:bg-background/70 hover:text-primary disabled:opacity-40"
+        class="chat-composer-input-action h-9 w-9 shrink-0 flex items-center justify-center transition-all duration-200 text-muted-foreground hover:bg-background/70 hover:text-primary disabled:opacity-40 [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11"
         title="Attach files"
         aria-label="Attach files"
         :disabled="disabled"
@@ -635,10 +643,11 @@ watch(
       />
       <button
         type="button"
-        class="h-9 w-9 shrink-0 flex items-center justify-center rounded-md transition-all duration-200"
+        class="chat-composer-input-action h-9 w-9 shrink-0 flex items-center justify-center transition-all duration-200 [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11"
         :class="showGifPicker ? 'bg-background/80 text-primary' : 'text-muted-foreground hover:bg-background/70 hover:text-primary'"
         title="Open GIF picker"
         aria-label="Open GIF picker"
+        :aria-expanded="showGifPicker"
         :disabled="disabled"
         @click="showGifPicker = !showGifPicker"
       >
@@ -646,12 +655,12 @@ watch(
       </button>
       <button
         type="button"
-        class="h-9 w-9 shrink-0 flex items-center justify-center bg-primary text-primary-foreground rounded-md hover:shadow-[0_0_20px_var(--glow-strong)] transition-all duration-300 disabled:opacity-20"
+        class="chat-composer-input-action h-9 w-9 shrink-0 flex items-center justify-center bg-primary text-primary-foreground hover:shadow-[0_0_20px_var(--glow-strong)] transition-all duration-300 disabled:opacity-20 [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11"
         :disabled="!canSend"
         aria-label="Send message"
         @click="onSend(editorRef?.getJSON?.() ?? { type: 'doc', content: [] })"
       >
-        <span v-if="slowModeCooldown > 0" class="text-[10px] font-bold font-mono tabular-nums">{{ slowModeCooldown }}</span>
+        <span v-if="slowModeCooldown > 0" class="type-meta type-numeric type-strong">{{ slowModeCooldown }}</span>
         <Send v-else class="w-4 h-4" aria-hidden="true" />
       </button>
     </div>

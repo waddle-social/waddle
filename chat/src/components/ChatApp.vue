@@ -881,7 +881,7 @@ onUnmounted(() => {
   />
 
   <!-- Ready -->
-  <div v-else class="h-dvh flex flex-col bg-background">
+  <div v-else class="chat-app-shell">
     <!-- Mobile header -->
     <MobileHeader
       :page="ui.activePage.value"
@@ -895,11 +895,11 @@ onUnmounted(() => {
     />
 
     <!-- Mobile nav drawer -->
-    <AppDrawer v-model:open="ui.showMobileNav.value" side="left">
+    <AppDrawer v-model:open="ui.showMobileNav.value" side="left" label="Navigation drawer">
       <template #title>
-        <span class="text-[13px] font-semibold">Navigation</span>
+        <span class="type-pane-title">Navigation</span>
       </template>
-      <div class="flex flex-col h-full">
+      <div class="chat-mobile-nav-body">
         <div class="border-b border-border">
           <WaddlesSidebar
             :waddles="waddles.sortedWaddles.value"
@@ -959,28 +959,30 @@ onUnmounted(() => {
     </AppDrawer>
 
     <!-- Mobile details drawer -->
-    <AppDrawer v-model:open="ui.showMobileDetails.value" side="right">
+    <AppDrawer v-model:open="ui.showMobileDetails.value" side="right" label="Details drawer">
       <template #title>
-        <span class="text-[13px] font-semibold">Details</span>
+        <span class="type-pane-title">Details</span>
       </template>
-      <div class="p-4 space-y-3">
-        <div v-if="waddles.currentWaddle.value" class="space-y-1.5">
-          <h3 class="text-[14px] font-semibold">{{ waddles.currentWaddle.value.name }}</h3>
-          <p v-if="waddles.currentWaddle.value.description" class="text-[13px] text-muted-foreground">
+      <div class="flex flex-col gap-4 p-4">
+        <div v-if="waddles.currentWaddle.value" class="flex flex-col gap-1.5">
+          <h3 class="type-pane-title">{{ waddles.currentWaddle.value.name }}</h3>
+          <p v-if="waddles.currentWaddle.value.description" class="type-field text-muted-foreground">
             {{ waddles.currentWaddle.value.description }}
           </p>
         </div>
 
-        <div class="space-y-1.5">
+        <div class="flex flex-col gap-1.5">
           <button
             v-if="waddles.currentChannel.value && waddles.canManageChannels.value"
-            class="h-9 w-full rounded-lg border border-border px-3 text-[13px] font-medium hover:bg-muted transition-colors"
+            class="type-control h-9 w-full rounded-lg border border-border px-3 hover:bg-muted transition-colors"
+            type="button"
             @click="openChannelEdit(); ui.showMobileDetails.value = false"
           >
-            Edit Channel
+            Edit channel
           </button>
           <button
-            class="h-9 w-full rounded-lg border border-border px-3 text-[13px] font-medium hover:bg-muted transition-colors"
+            class="type-control h-9 w-full rounded-lg border border-border px-3 hover:bg-muted transition-colors"
+            type="button"
             @click="ui.showMobileDetails.value = false; ui.showMembers.value = true"
           >
             Members ({{ waddles.members.value.length }})
@@ -990,9 +992,9 @@ onUnmounted(() => {
     </AppDrawer>
 
     <!-- Desktop layout -->
-    <div class="flex-1 flex overflow-hidden">
+    <div class="chat-desktop-shell">
       <!-- Icon rail: waddle switcher -->
-      <div class="hidden lg:flex">
+      <div class="chat-desktop-rail-slot">
         <WaddlesSidebar
           :waddles="waddles.sortedWaddles.value"
           :active-waddle-id="waddles.activeWaddleId.value"
@@ -1017,7 +1019,7 @@ onUnmounted(() => {
       </div>
 
       <!-- Channel sidebar -->
-      <div class="hidden lg:flex">
+      <div class="chat-sidebar-slot">
         <TopicsPanel
           v-if="ui.sidebarMode.value === 'channels'"
           :waddle="waddles.currentWaddle.value"
@@ -1070,161 +1072,163 @@ onUnmounted(() => {
              - depth 0: visible and flex-1 (full remaining width)
              - depth 1: hidden on mobile, flex-1 on desktop (left pane)
              - depth 2+: hidden entirely (parent thread pane takes its place) -->
-        <div
-          :class="[
-            'flex flex-col min-w-0 min-h-0',
-            activeThreadStack.length === 0
-              ? 'flex-1'
-              : activeThreadStack.length === 1
-                ? 'hidden lg:flex lg:flex-1'
-                : 'hidden',
-          ]"
-        >
-          <ContentArea
-            :ref="setContentAreaRef"
-            v-model:draft="activeDraft"
-            v-model:forum-title="activeForumTitle"
-            :waddle="waddles.currentWaddle.value"
-            :channel="ui.sidebarMode.value === 'dms' ? null : waddles.currentChannel.value"
-            :dm-peer="activeDmPeer"
-            :sidebar-mode="ui.sidebarMode.value"
-            :messages="activeMessages"
-            :first-unseen-id="activeFirstUnseenId"
-            :xmpp-status="messaging.xmppStatus.value"
-            :action-error="ui.actionError.value"
-            :update-available="appUpdate.updateAvailable.value"
-            :is-applying-update="appUpdate.isApplyingUpdate.value"
-            :is-loading-messages="activeIsLoadingMessages"
-            :is-sending="activeIsSending"
-            :can-manage-channels="waddles.canManageChannels.value"
-            :typing-users="activeTypingUsers"
-            :current-user="connectionStore.session?.username"
-            :self-domain="selfDomain"
-            :avatar-url-by-author="avatarUrlByAuthor"
-            :author-jid-by-nick="memberJidByNick"
-            :tenor-api-key="tenorApiKey"
-            :member-names="waddles.members.value.map((m) => m.username)"
-            :room-hats="messaging.roomHats.value"
-            :room-presence="messaging.roomPresence.value"
-            :room-last-seen="messaging.roomLastSeen.value"
-            :slow-mode-cooldown="messaging.slowModeCooldown.value"
-            :search-results="activeSearchResults"
-            :is-searching="activeIsSearching"
-            :upload-progress="activeUploadProgress"
-            :thread-index="threads.index.value"
-            :xmpp-client="xmppClient"
-            @send="sendActiveMessage"
-            @typing="notifyActiveComposing"
-            @edit-message="editActiveMessage"
-            @retract-message="retractActiveMessage"
-            @react-message="reactActiveMessage"
-            @displayed="markActiveDisplayed"
-            @search="searchActiveMessages"
-            @clear-search="clearActiveSearch"
-            @edit-channel="openChannelEdit"
-            @open-dm="handleOpenDm"
-            @open-thread="openThread"
-            @refresh-update="refreshAppUpdate"
-          />
-        </div>
-
-        <!-- Collapsed accordion bars: one per hidden ancestor level (desktop only, depth >= 2).
-             Each bar is a thin vertical strip with a rotated label; clicking
-             navigates to that level. The channel bar returns to the main feed,
-             thread bars collapse levels older than the parent context pane. -->
-        <template v-if="ui.sidebarMode.value === 'channels' && activeThreadStack.length >= 2">
-          <!-- Channel / main-feed bar -->
-          <button
-            type="button"
-            class="hidden lg:flex flex-col items-center justify-start w-10 min-h-0 border-l border-border bg-muted/30 hover:bg-muted/60 transition-colors cursor-pointer flex-shrink-0 pt-4 gap-1"
-            title="Back to channel"
-            @click="closeThreadPanel"
+        <div class="chat-workspace">
+          <div
+            :class="[
+              'chat-content-pane',
+              activeThreadStack.length === 0
+                ? ''
+                : activeThreadStack.length === 1
+                  ? 'chat-content-pane--desktop-split'
+                  : 'chat-content-pane--hidden',
+            ]"
           >
-            <span class="accordion-bar-label text-muted-foreground/80">
-              {{ waddles.currentChannel.value?.name ?? 'Channel' }}
-            </span>
-          </button>
-          <!-- Ancestor thread bars: levels older than the parent (skip last 2 = parent + active) -->
-          <button
-            v-for="(threadId, i) in activeThreadStack.slice(0, -2)"
-            :key="threadId"
-            type="button"
-            class="hidden lg:flex flex-col items-center justify-start w-10 min-h-0 border-l border-border bg-muted/20 hover:bg-muted/50 transition-colors cursor-pointer flex-shrink-0 pt-4 gap-1"
-            :title="getThreadLabel(threadId)"
-            @click="popThreadTo(i)"
+            <ContentArea
+              :ref="setContentAreaRef"
+              v-model:draft="activeDraft"
+              v-model:forum-title="activeForumTitle"
+              :waddle="waddles.currentWaddle.value"
+              :channel="ui.sidebarMode.value === 'dms' ? null : waddles.currentChannel.value"
+              :dm-peer="activeDmPeer"
+              :sidebar-mode="ui.sidebarMode.value"
+              :messages="activeMessages"
+              :first-unseen-id="activeFirstUnseenId"
+              :xmpp-status="messaging.xmppStatus.value"
+              :action-error="ui.actionError.value"
+              :update-available="appUpdate.updateAvailable.value"
+              :is-applying-update="appUpdate.isApplyingUpdate.value"
+              :is-loading-messages="activeIsLoadingMessages"
+              :is-sending="activeIsSending"
+              :can-manage-channels="waddles.canManageChannels.value"
+              :typing-users="activeTypingUsers"
+              :current-user="connectionStore.session?.username"
+              :self-domain="selfDomain"
+              :avatar-url-by-author="avatarUrlByAuthor"
+              :author-jid-by-nick="memberJidByNick"
+              :tenor-api-key="tenorApiKey"
+              :member-names="waddles.members.value.map((m) => m.username)"
+              :room-hats="messaging.roomHats.value"
+              :room-presence="messaging.roomPresence.value"
+              :room-last-seen="messaging.roomLastSeen.value"
+              :slow-mode-cooldown="messaging.slowModeCooldown.value"
+              :search-results="activeSearchResults"
+              :is-searching="activeIsSearching"
+              :upload-progress="activeUploadProgress"
+              :thread-index="threads.index.value"
+              :xmpp-client="xmppClient"
+              @send="sendActiveMessage"
+              @typing="notifyActiveComposing"
+              @edit-message="editActiveMessage"
+              @retract-message="retractActiveMessage"
+              @react-message="reactActiveMessage"
+              @displayed="markActiveDisplayed"
+              @search="searchActiveMessages"
+              @clear-search="clearActiveSearch"
+              @edit-channel="openChannelEdit"
+              @open-dm="handleOpenDm"
+              @open-thread="openThread"
+              @refresh-update="refreshAppUpdate"
+            />
+          </div>
+
+          <!-- Collapsed accordion bars: one per hidden ancestor level (desktop only, depth >= 2).
+               Each bar is a thin vertical strip with a rotated label; clicking
+               navigates to that level. The channel bar returns to the main feed,
+               thread bars collapse levels older than the parent context pane. -->
+          <template v-if="ui.sidebarMode.value === 'channels' && activeThreadStack.length >= 2">
+            <!-- Channel / main-feed bar -->
+            <button
+              type="button"
+              class="chat-accordion-bar bg-muted/30 hover:bg-muted/60"
+              title="Back to channel"
+              @click="closeThreadPanel"
+            >
+              <span class="accordion-bar-label text-muted-foreground/80">
+                {{ waddles.currentChannel.value?.name ?? 'Channel' }}
+              </span>
+            </button>
+            <!-- Ancestor thread bars: levels older than the parent (skip last 2 = parent + active) -->
+            <button
+              v-for="(threadId, i) in activeThreadStack.slice(0, -2)"
+              :key="threadId"
+              type="button"
+              class="chat-accordion-bar bg-muted/20 hover:bg-muted/50"
+              :title="getThreadLabel(threadId)"
+              @click="popThreadTo(i)"
+            >
+              <span class="accordion-bar-label text-muted-foreground/60">
+                {{ getThreadLabel(threadId) }}
+              </span>
+            </button>
+          </template>
+
+          <!-- Parent thread pane: desktop-only context when depth >= 2.
+               Shows the second-to-last thread in read-only mode (no composer). -->
+          <div
+            v-if="ui.sidebarMode.value === 'channels' && activeThreadStack.length >= 2"
+            class="chat-parent-thread-pane"
           >
-            <span class="accordion-bar-label text-muted-foreground/60">
-              {{ getThreadLabel(threadId) }}
-            </span>
-          </button>
-        </template>
+            <ThreadPanel
+              :thread-stack="activeThreadStack.slice(0, -1)"
+              :thread-index="threads.index.value"
+              :resolve-entry="threads.resolveEntry"
+              :current-user="connectionStore.session?.username"
+              :avatar-url-by-author="avatarUrlByAuthor"
+              :author-jid-by-nick="memberJidByNick"
+              :room-hats="messaging.roomHats.value"
+              :room-presence="messaging.roomPresence.value"
+              :room-last-seen="messaging.roomLastSeen.value"
+              :tenor-api-key="tenorApiKey"
+              :member-names="waddles.members.value.map((m) => m.username)"
+              :slow-mode-cooldown="messaging.slowModeCooldown.value"
+              :is-sending="false"
+              :upload-progress="{ uploading: false, progress: 0, filename: '' }"
+              :channel-name="waddles.currentChannel.value?.name ?? ''"
+              :hide-composer="true"
+              @close="closeThreadPanel"
+              @pop-to="popThreadTo"
+              @push-thread="pushThread"
+              @edit-message="editActiveMessage"
+              @retract-message="retractActiveMessage"
+              @react-message="reactActiveMessage"
+              @displayed="markActiveDisplayed"
+            />
+          </div>
 
-        <!-- Parent thread pane: desktop-only context when depth >= 2.
-             Shows the second-to-last thread in read-only mode (no composer). -->
-        <div
-          v-if="ui.sidebarMode.value === 'channels' && activeThreadStack.length >= 2"
-          class="hidden lg:flex lg:flex-col lg:flex-1 min-w-0 min-h-0"
-        >
-          <ThreadPanel
-            :thread-stack="activeThreadStack.slice(0, -1)"
-            :thread-index="threads.index.value"
-            :resolve-entry="threads.resolveEntry"
-            :current-user="connectionStore.session?.username"
-            :avatar-url-by-author="avatarUrlByAuthor"
-            :author-jid-by-nick="memberJidByNick"
-            :room-hats="messaging.roomHats.value"
-            :room-presence="messaging.roomPresence.value"
-            :room-last-seen="messaging.roomLastSeen.value"
-            :tenor-api-key="tenorApiKey"
-            :member-names="waddles.members.value.map((m) => m.username)"
-            :slow-mode-cooldown="messaging.slowModeCooldown.value"
-            :is-sending="false"
-            :upload-progress="{ uploading: false, progress: 0, filename: '' }"
-            :channel-name="waddles.currentChannel.value?.name ?? ''"
-            :hide-composer="true"
-            @close="closeThreadPanel"
-            @pop-to="popThreadTo"
-            @push-thread="pushThread"
-            @edit-message="editActiveMessage"
-            @retract-message="retractActiveMessage"
-            @react-message="reactActiveMessage"
-            @displayed="markActiveDisplayed"
-          />
-        </div>
-
-        <!-- Active thread pane: shown when any thread is open.
-             Full-width on mobile; shares space with parent context on desktop. -->
-        <div
-          v-if="ui.sidebarMode.value === 'channels' && activeThreadStack.length >= 1"
-          class="flex flex-col flex-1 min-w-0 min-h-0"
-        >
-          <ThreadPanel
-            :thread-stack="activeThreadStack"
-            :thread-index="threads.index.value"
-            :resolve-entry="threads.resolveEntry"
-            :current-user="connectionStore.session?.username"
-            :avatar-url-by-author="avatarUrlByAuthor"
-            :author-jid-by-nick="memberJidByNick"
-            :room-hats="messaging.roomHats.value"
-            :room-presence="messaging.roomPresence.value"
-            :room-last-seen="messaging.roomLastSeen.value"
-            :tenor-api-key="tenorApiKey"
-            :member-names="waddles.members.value.map((m) => m.username)"
-            :slow-mode-cooldown="messaging.slowModeCooldown.value"
-            :is-sending="messaging.isSending.value"
-            :upload-progress="messaging.uploadProgress.value"
-            :channel-name="waddles.currentChannel.value?.name ?? ''"
-            @close="closeThreadPanel"
-            @pop-to="popThreadTo"
-            @push-thread="pushThread"
-            @send="sendThreadMessage"
-            @edit-message="editActiveMessage"
-            @retract-message="retractActiveMessage"
-            @react-message="reactActiveMessage"
-            @displayed="markActiveDisplayed"
-            @select-gif="sendGif"
-            @typing="notifyActiveComposing"
-          />
+          <!-- Active thread pane: shown when any thread is open.
+               Full-width on mobile; shares space with parent context on desktop. -->
+          <div
+            v-if="ui.sidebarMode.value === 'channels' && activeThreadStack.length >= 1"
+            class="chat-active-thread-pane"
+          >
+            <ThreadPanel
+              :thread-stack="activeThreadStack"
+              :thread-index="threads.index.value"
+              :resolve-entry="threads.resolveEntry"
+              :current-user="connectionStore.session?.username"
+              :avatar-url-by-author="avatarUrlByAuthor"
+              :author-jid-by-nick="memberJidByNick"
+              :room-hats="messaging.roomHats.value"
+              :room-presence="messaging.roomPresence.value"
+              :room-last-seen="messaging.roomLastSeen.value"
+              :tenor-api-key="tenorApiKey"
+              :member-names="waddles.members.value.map((m) => m.username)"
+              :slow-mode-cooldown="messaging.slowModeCooldown.value"
+              :is-sending="messaging.isSending.value"
+              :upload-progress="messaging.uploadProgress.value"
+              :channel-name="waddles.currentChannel.value?.name ?? ''"
+              @close="closeThreadPanel"
+              @pop-to="popThreadTo"
+              @push-thread="pushThread"
+              @send="sendThreadMessage"
+              @edit-message="editActiveMessage"
+              @retract-message="retractActiveMessage"
+              @react-message="reactActiveMessage"
+              @displayed="markActiveDisplayed"
+              @select-gif="sendGif"
+              @typing="notifyActiveComposing"
+            />
+          </div>
         </div>
       </template>
     </div>
@@ -1302,9 +1306,9 @@ onUnmounted(() => {
     <!-- Confirmation dialogs -->
     <ConfirmDialog
       v-model:open="ui.confirmDeleteWaddle.value"
-      title="Delete Waddle?"
+      title="Delete waddle?"
       :message="`Are you sure you want to delete ${waddles.currentWaddle.value?.name ?? 'this waddle'}? All channels and messages will be permanently removed.`"
-      confirm-label="Delete Waddle"
+      confirm-label="Delete waddle"
       destructive
       :loading="waddles.isSubmitting.value"
       @confirm="confirmDeleteWaddle"
@@ -1312,9 +1316,9 @@ onUnmounted(() => {
 
     <ConfirmDialog
       v-model:open="ui.confirmDeleteChannel.value"
-      title="Delete Channel?"
+      title="Delete channel?"
       :message="`Are you sure you want to delete #${waddles.currentChannel.value?.name ?? 'this channel'}? All messages in this channel will be permanently removed.`"
-      confirm-label="Delete Channel"
+      confirm-label="Delete channel"
       destructive
       :loading="waddles.isSubmitting.value"
       @confirm="confirmDeleteChannel"
@@ -1322,9 +1326,9 @@ onUnmounted(() => {
 
     <ConfirmDialog
       :open="ui.confirmRemoveMember.value !== null"
-      title="Remove Member?"
+      title="Remove member?"
       :message="`Are you sure you want to remove ${ui.confirmRemoveMember.value ?? 'this member'} from the waddle?`"
-      confirm-label="Remove Member"
+      confirm-label="Remove member"
       destructive
       @update:open="(v: boolean) => { if (!v) ui.confirmRemoveMember.value = null }"
       @confirm="confirmRemoveMember"

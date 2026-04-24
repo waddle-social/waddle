@@ -17,7 +17,6 @@
   "ignoreDependencies": [
     "@fontsource-variable/jetbrains-mono",
     "@fontsource-variable/outfit",
-    "@fontsource-variable/syne",
     "tailwindcss",
     "events",
     "cloudflare"

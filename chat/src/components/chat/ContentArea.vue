@@ -292,29 +292,29 @@ const connectionStatusClasses = computed(() => {
     case "offline":
       return {
         banner: "bg-muted/35 text-foreground",
-        iconWrap: "border-border bg-background/70 text-muted-foreground",
-        chip: "border-border bg-background/75 text-muted-foreground",
+        iconWrap: "border-border/70 bg-background/60 text-muted-foreground/80",
+        chip: "border-border/70 bg-transparent text-muted-foreground/80",
         body: "text-muted-foreground",
       };
     case "reconnecting":
       return {
         banner: "bg-warning/10 text-foreground",
-        iconWrap: "border-warning/20 bg-background/75 text-warning",
-        chip: "border-warning/20 bg-warning/10 text-warning",
+        iconWrap: "border-warning/15 bg-background/60 text-warning/80",
+        chip: "border-warning/15 bg-transparent text-warning/80",
         body: "text-foreground/75",
       };
     case "error":
       return {
         banner: "bg-destructive/10 text-foreground",
-        iconWrap: "border-destructive/20 bg-background/75 text-destructive",
-        chip: "border-destructive/20 bg-destructive/10 text-destructive",
+        iconWrap: "border-destructive/15 bg-background/60 text-destructive/80",
+        chip: "border-destructive/15 bg-transparent text-destructive/80",
         body: "text-foreground/80",
       };
     case "reconnected":
       return {
         banner: "bg-primary/8 text-foreground",
-        iconWrap: "border-primary/15 bg-background/75 text-primary",
-        chip: "border-primary/15 bg-primary/8 text-primary",
+        iconWrap: "border-primary/12 bg-background/60 text-primary/80",
+        chip: "border-primary/12 bg-transparent text-primary/80",
         body: "text-foreground/75",
       };
     default:
@@ -446,60 +446,69 @@ function showDividerAfter(messageId: string): boolean {
     <!-- Drop zone overlay -->
     <div
       v-if="isDragging"
-      class="absolute inset-0 z-50 bg-primary/10 border-2 border-dashed border-primary rounded-xl flex flex-col items-center justify-center pointer-events-none animate-fade-in"
+      class="z-popover absolute inset-3 flex flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed border-primary bg-primary/10 pointer-events-none animate-fade-in"
     >
-      <Upload class="w-8 h-8 text-primary mb-2" />
-      <span class="text-primary font-display font-bold text-lg">Drop files to upload</span>
+      <Upload class="w-8 h-8 text-primary" />
+      <span class="type-display-title text-primary">Drop files to upload</span>
     </div>
 
     <!-- Header — sleek, floating feel -->
-    <div class="h-14 border-b border-border px-6 flex items-center justify-between gap-3 flex-shrink-0 glass-surface">
-      <div class="flex items-center gap-3">
-        <div class="flex items-center gap-2">
-          <component :is="dmPeer ? MessageCircle : isForumChannel ? MessagesSquare : Hash" class="w-4 h-4 text-primary/70" />
-          <h1 class="text-[15px] font-display font-bold tracking-tight">
-            {{ dmPeer ? dmPeer.peerUsername : channel?.name ?? "..." }}
-          </h1>
-          <span
-            v-if="isForumChannel"
-            class="rounded-full border border-primary/15 bg-primary/8 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-primary/80"
-          >
-            Forum
+    <div class="chat-pane-header border-b border-border px-[var(--chat-content-inline)] py-0 flex flex-shrink-0 items-center glass-surface">
+      <div class="chat-message-lane chat-pane-header-row">
+        <div class="chat-pane-title-group">
+          <span class="chat-pane-title-icon rounded-lg bg-primary/8">
+            <component :is="dmPeer ? MessageCircle : isForumChannel ? MessagesSquare : Hash" class="w-4 h-4 text-primary/70" />
           </span>
-          <span v-if="dmPeer" class="text-[11px] text-muted-foreground">· {{ presenceText(dmPeer.presenceShow) }}</span>
+          <div class="flex min-w-0 items-center gap-2">
+            <h1 class="type-chat-title truncate">
+              {{ dmPeer ? dmPeer.peerUsername : channel?.name ?? "…" }}
+            </h1>
+            <span
+              v-if="isForumChannel"
+              class="type-badge rounded-full border border-primary/15 bg-primary/8 px-2 py-0.5 text-primary/80"
+            >
+              Forum
+            </span>
+            <span v-if="dmPeer" class="type-meta text-muted-foreground">· {{ presenceText(dmPeer.presenceShow) }}</span>
+          </div>
         </div>
-      </div>
-      <div class="flex items-center gap-2">
-        <div
-          v-if="connectionNotice && connectionStatusClasses"
-          class="hidden md:inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-medium tracking-tight"
-          :class="connectionStatusClasses.chip"
-        >
-          <component
-            :is="connectionStatusIcon"
-            class="w-3.5 h-3.5"
-            :class="{ 'motion-safe:animate-spin': connectionNotice.tone === 'reconnecting' }"
-          />
-          <span>{{ connectionNotice.shortLabel }}</span>
-        </div>
-        <div class="flex gap-1">
-          <button
-            v-if="channel || dmPeer"
-            class="h-8 w-8 flex items-center justify-center rounded-lg transition-all duration-200"
-            :class="showSearch ? 'bg-muted text-primary' : 'text-muted-foreground hover:bg-muted hover:text-foreground'"
-            title="Search messages"
-            @click="showSearch = !showSearch"
+        <div class="flex shrink-0 items-center gap-3">
+          <div
+            v-if="connectionNotice && connectionStatusClasses"
+            class="type-caption type-emphasis hidden md:inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1"
+            :class="connectionStatusClasses.chip"
           >
-            <Search class="w-3.5 h-3.5" />
-          </button>
-          <button
-            v-if="canManageChannels && channel"
-            class="h-8 w-8 flex items-center justify-center rounded-lg text-muted-foreground hover:bg-muted hover:text-foreground transition-all duration-200"
-            title="Channel settings"
-            @click="emit('editChannel')"
-          >
-            <Settings class="w-3.5 h-3.5" />
-          </button>
+            <component
+              :is="connectionStatusIcon"
+              class="w-3.5 h-3.5"
+              :class="{ 'motion-safe:animate-spin': connectionNotice.tone === 'reconnecting' }"
+            />
+            <span>{{ connectionNotice.shortLabel }}</span>
+          </div>
+          <div class="flex gap-1.5">
+            <button
+              v-if="channel || dmPeer"
+              class="chat-icon-button chat-icon-button--md transition-all duration-200"
+              :class="showSearch ? 'bg-muted text-primary' : 'text-muted-foreground hover:bg-muted hover:text-foreground'"
+              title="Search messages"
+              aria-label="Search messages"
+              :aria-pressed="showSearch"
+              type="button"
+              @click="showSearch = !showSearch"
+            >
+              <Search class="w-3.5 h-3.5" />
+            </button>
+            <button
+              v-if="canManageChannels && channel"
+              class="chat-icon-button chat-icon-button--md text-muted-foreground hover:bg-muted hover:text-foreground"
+              title="Channel settings"
+              aria-label="Channel settings"
+              type="button"
+              @click="emit('editChannel')"
+            >
+              <Settings class="w-3.5 h-3.5" />
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -511,7 +520,7 @@ function showDividerAfter(messageId: string): boolean {
       class="border-b border-border/80 animate-fade-in"
       :class="connectionStatusClasses.banner"
     >
-      <div class="px-6 py-3 flex items-start gap-3">
+      <div class="chat-message-lane flex items-start gap-3 px-[var(--chat-content-inline)] py-3">
         <div
           class="mt-0.5 flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full border"
           :class="connectionStatusClasses.iconWrap"
@@ -522,11 +531,11 @@ function showDividerAfter(messageId: string): boolean {
             :class="{ 'motion-safe:animate-spin': connectionNotice.tone === 'reconnecting' }"
           />
         </div>
-        <div class="min-w-0 space-y-0.5">
-          <p class="text-[13px] font-medium tracking-tight">
+        <div class="flex min-w-0 flex-col gap-0.5">
+          <p class="type-control">
             {{ connectionNotice.title }}
           </p>
-          <p class="max-w-[72ch] text-[12px] leading-5" :class="connectionStatusClasses.body">
+          <p class="type-caption chat-copy-measure" :class="connectionStatusClasses.body">
             {{ connectionNotice.body }}
           </p>
         </div>
@@ -539,7 +548,7 @@ function showDividerAfter(messageId: string): boolean {
       aria-atomic="true"
       class="border-b border-primary/12 bg-primary/8 text-foreground"
     >
-      <div class="px-6 py-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+      <div class="chat-message-lane flex flex-col gap-3 px-[var(--chat-content-inline)] py-3.5 sm:flex-row sm:items-center sm:justify-between">
         <div class="flex min-w-0 items-start gap-3">
           <div class="mt-0.5 flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full border border-primary/15 bg-background/75 text-primary">
             <RefreshCw
@@ -547,18 +556,18 @@ function showDividerAfter(messageId: string): boolean {
               :class="{ 'motion-safe:animate-spin': isApplyingUpdate }"
             />
           </div>
-          <div class="min-w-0 space-y-0.5">
-            <p class="text-[13px] font-medium tracking-tight">
+          <div class="flex min-w-0 flex-col gap-0.5">
+            <p class="type-control">
               Update ready
             </p>
-            <p class="max-w-[72ch] text-[12px] leading-5 text-foreground/75">
+            <p class="type-caption chat-copy-measure text-foreground/75">
               {{ updateNoticeBody }}
             </p>
           </div>
         </div>
         <button
           type="button"
-          class="inline-flex h-8 shrink-0 items-center justify-center gap-1.5 rounded-full bg-primary px-3.5 text-[12px] font-medium text-primary-foreground transition-colors hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/35 disabled:cursor-wait disabled:opacity-75"
+          class="type-control inline-flex h-8 shrink-0 items-center justify-center gap-1.5 rounded-full bg-primary px-3.5 text-primary-foreground transition-colors hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/35 disabled:cursor-wait disabled:opacity-75"
           :disabled="isApplyingUpdate"
           @click="emit('refreshUpdate')"
         >
@@ -572,39 +581,48 @@ function showDividerAfter(messageId: string): boolean {
     </div>
 
     <!-- Search bar -->
-    <div v-if="showSearch" class="px-6 py-2.5 border-b border-border glass-surface flex items-center gap-2.5 flex-shrink-0 animate-fade-in">
-      <Search class="w-3.5 h-3.5 text-muted-foreground flex-shrink-0" />
-      <input
-        v-model="searchInput"
-        placeholder="Search messages..."
-        class="flex-1 text-[13px] bg-transparent focus:outline-none placeholder:text-muted-foreground/40"
-        @keydown.enter="doSearch"
-      />
-      <button
-        v-if="searchInput"
-        class="p-0.5 rounded text-muted-foreground hover:text-foreground transition-colors"
-        @click="closeSearch"
-      >
-        <X class="w-3.5 h-3.5" />
-      </button>
+    <div v-if="showSearch" class="px-[var(--chat-content-inline)] py-2.5 border-b border-border glass-surface flex items-center gap-3 flex-shrink-0 animate-fade-in">
+      <div class="chat-message-lane flex items-center gap-3">
+        <Search class="w-3.5 h-3.5 text-muted-foreground flex-shrink-0" />
+        <input
+          v-model="searchInput"
+          placeholder="Search messages…"
+          aria-label="Search messages"
+          class="type-field flex-1 bg-transparent focus:outline-none placeholder:text-muted-foreground/40"
+          @keydown.enter="doSearch"
+        />
+        <button
+          v-if="searchInput"
+          class="chat-icon-button chat-icon-button--md text-muted-foreground hover:bg-muted hover:text-foreground"
+          aria-label="Clear search"
+          type="button"
+          @click="closeSearch"
+        >
+          <X class="w-3.5 h-3.5" />
+        </button>
+      </div>
     </div>
 
     <!-- Search results -->
     <div v-if="showSearch && (searchResults.length > 0 || isSearching)" class="border-b border-border glass-surface max-h-56 overflow-auto flex-shrink-0">
-      <div v-if="isSearching" class="px-6 py-3 text-[13px] text-muted-foreground">
-        Searching...
-      </div>
-      <div v-else class="divide-y divide-border">
-        <div
-          v-for="result in searchResults"
-          :key="result.id"
-          class="px-6 py-3 hover:bg-muted/50 transition-colors cursor-pointer"
-        >
-          <div class="flex items-baseline gap-2">
-            <span class="font-medium text-[12px]">{{ result.nick }}</span>
-            <span class="text-[11px] font-mono text-muted-foreground tabular-nums">{{ formatStamp(result.createdAt) }}</span>
-          </div>
-          <p class="text-[12px] text-muted-foreground truncate mt-0.5">{{ result.body }}</p>
+      <div class="chat-message-lane">
+        <div v-if="isSearching" class="type-caption px-[var(--chat-content-inline)] py-3 text-muted-foreground">
+          Searching…
+        </div>
+        <div v-else class="divide-y divide-border">
+          <button
+            v-for="result in searchResults"
+            :key="result.id"
+            class="w-full px-[var(--chat-content-inline)] py-3 text-left hover:bg-muted/50 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/25"
+            type="button"
+            @click="scrollToMessage(result.id)"
+          >
+            <div class="flex items-baseline gap-2">
+              <span class="type-control">{{ result.nick }}</span>
+              <span class="type-meta type-numeric text-muted-foreground">{{ formatStamp(result.createdAt) }}</span>
+            </div>
+            <p class="type-caption truncate text-muted-foreground">{{ result.body }}</p>
+          </button>
         </div>
       </div>
     </div>
@@ -612,18 +630,20 @@ function showDividerAfter(messageId: string): boolean {
     <!-- Error banner -->
     <div
       v-if="actionError"
-      class="px-6 py-2.5 bg-destructive/10 border-b border-destructive/20 text-[13px] text-destructive animate-fade-in"
+      class="type-control bg-destructive/10 border-b border-destructive/20 text-destructive animate-fade-in"
     >
-      <div>{{ actionError }}</div>
+      <div class="chat-message-lane px-[var(--chat-content-inline)] py-3">{{ actionError }}</div>
     </div>
     <div
       v-if="replyJumpNotice"
       role="status"
       aria-live="polite"
       aria-atomic="true"
-      class="px-6 py-2 text-[12px] text-muted-foreground bg-muted/35 border-b border-border animate-fade-in"
+      class="type-caption text-muted-foreground bg-muted/35 border-b border-border animate-fade-in"
     >
-      {{ replyJumpNotice }}
+      <div class="chat-message-lane px-[var(--chat-content-inline)] py-2.5">
+        {{ replyJumpNotice }}
+      </div>
     </div>
 
     <!-- Composer (social / top-pinned mode) -->
@@ -654,34 +674,36 @@ function showDividerAfter(messageId: string): boolean {
     <!-- Typing indicator (social / top-pinned mode) -->
     <div
       v-if="typingUsers.length > 0 && isTopPinned"
-      class="px-6 py-1.5 text-[11px] text-muted-foreground flex items-center gap-2 flex-shrink-0 border-b border-border"
+      class="type-caption px-[var(--chat-content-inline)] py-2 text-muted-foreground flex-shrink-0 border-b border-border"
     >
-      <span class="flex gap-0.5">
-        <span class="typing-dot" />
-        <span class="typing-dot" />
-        <span class="typing-dot" />
-      </span>
-      <span v-if="typingUsers.length === 1">{{ typingUsers[0] }} is typing</span>
-      <span v-else-if="typingUsers.length === 2">{{ typingUsers[0] }} and {{ typingUsers[1] }} are typing</span>
-      <span v-else>{{ typingUsers[0] }} and {{ typingUsers.length - 1 }} others are typing</span>
+      <div class="chat-message-lane flex items-center gap-2">
+        <span class="flex gap-0.5">
+          <span class="typing-dot" />
+          <span class="typing-dot" />
+          <span class="typing-dot" />
+        </span>
+        <span v-if="typingUsers.length === 1">{{ typingUsers[0] }} is typing</span>
+        <span v-else-if="typingUsers.length === 2">{{ typingUsers[0] }} and {{ typingUsers[1] }} are typing</span>
+        <span v-else>{{ typingUsers[0] }} and {{ typingUsers.length - 1 }} others are typing</span>
+      </div>
     </div>
 
     <!-- Messages -->
-    <div :ref="setMessagesContainer" class="flex-1 min-h-0 overflow-auto px-6 py-4">
-      <div v-if="isLoadingMessages" class="text-center py-16 text-[13px] text-muted-foreground">
+    <div :ref="setMessagesContainer" class="chat-pane-scroll chat-message-scroll flex-1 min-h-0 overflow-auto px-[var(--chat-content-inline)]">
+      <div v-if="isLoadingMessages" class="type-caption flex flex-col items-center justify-center gap-3 py-16 text-center text-muted-foreground">
         <div class="flex items-center justify-center gap-1.5">
           <span class="typing-dot" />
           <span class="typing-dot" />
           <span class="typing-dot" />
         </div>
-        <p class="mt-3 text-muted-foreground/60">Loading messages...</p>
+        <p class="text-muted-foreground/60">Loading messages…</p>
       </div>
 
-      <div v-else-if="!channel && !dmPeer" class="flex flex-col items-center justify-center py-20">
-        <div class="w-12 h-12 rounded-xl bg-muted flex items-center justify-center mb-4">
+      <div v-else-if="!channel && !dmPeer" class="chat-empty-state">
+        <div class="w-12 h-12 rounded-lg bg-muted flex items-center justify-center">
           <component :is="sidebarMode === 'dms' ? MessageCircle : isForumChannel ? MessagesSquare : Hash" class="w-5 h-5 text-primary/50" />
         </div>
-        <p class="text-[14px] text-muted-foreground font-display">
+        <p class="type-empty-title text-muted-foreground">
           {{ sidebarMode === "dms"
             ? "Select a conversation"
             : isForumChannel
@@ -690,25 +712,27 @@ function showDividerAfter(messageId: string): boolean {
         </p>
       </div>
 
-      <div v-else-if="feedMessages.length === 0" class="flex flex-col items-center justify-center py-20">
-        <div class="w-12 h-12 rounded-xl bg-primary/10 flex items-center justify-center mb-4">
+      <div v-else-if="feedMessages.length === 0" class="chat-empty-state">
+        <div class="w-12 h-12 rounded-lg bg-primary/10 flex items-center justify-center">
           <component :is="dmPeer ? MessageCircle : isForumChannel ? MessagesSquare : Hash" class="w-5 h-5 text-primary" />
         </div>
-        <p class="text-[16px] font-display font-bold mb-1">
-          {{ dmPeer ? `Conversation with @${dmPeer.peerUsername}` : `Welcome to #${channel?.name}` }}
-        </p>
-        <p class="text-[13px] text-muted-foreground">
-          {{ isForumChannel
-            ? "Start the first topic with a clear title so people can follow the thread."
-            : "This is the start of the conversation." }}
-        </p>
+        <div class="chat-field-stack">
+          <p class="type-empty-title">
+            {{ dmPeer ? `Conversation with @${dmPeer.peerUsername}` : `Welcome to #${channel?.name}` }}
+          </p>
+          <p class="type-field text-muted-foreground">
+            {{ isForumChannel
+              ? "Start the first topic with a clear title so people can follow the thread."
+              : "This is the start of the conversation." }}
+          </p>
+        </div>
       </div>
 
-      <div v-else class="max-w-none">
+      <div v-else class="chat-message-lane chat-message-list">
         <template v-for="msg in orderedFeedMessages" :key="msg.id">
           <div
             v-if="showDividerBefore(msg.id)"
-            class="flex items-center gap-3 py-2 text-[11px] font-medium uppercase tracking-wide text-destructive"
+            class="type-section-label flex items-center gap-3 py-2 text-destructive"
             data-new-messages-divider
             role="separator"
             aria-label="New messages"
@@ -736,7 +760,7 @@ function showDividerAfter(messageId: string): boolean {
           />
           <div
             v-if="showDividerAfter(msg.id)"
-            class="flex items-center gap-3 py-2 text-[11px] font-medium uppercase tracking-wide text-destructive"
+            class="type-section-label flex items-center gap-3 py-2 text-destructive"
             data-new-messages-divider
             role="separator"
             aria-label="New messages"
@@ -752,16 +776,18 @@ function showDividerAfter(messageId: string): boolean {
     <!-- Typing indicator -->
     <div
       v-if="typingUsers.length > 0 && !isTopPinned"
-      class="px-6 py-1.5 text-[11px] text-muted-foreground flex items-center gap-2 flex-shrink-0"
+      class="type-caption px-[var(--chat-content-inline)] py-2 text-muted-foreground flex-shrink-0"
     >
-      <span class="flex gap-0.5">
-        <span class="typing-dot" />
-        <span class="typing-dot" />
-        <span class="typing-dot" />
-      </span>
-      <span v-if="typingUsers.length === 1">{{ typingUsers[0] }} is typing</span>
-      <span v-else-if="typingUsers.length === 2">{{ typingUsers[0] }} and {{ typingUsers[1] }} are typing</span>
-      <span v-else>{{ typingUsers[0] }} and {{ typingUsers.length - 1 }} others are typing</span>
+      <div class="chat-message-lane flex items-center gap-2">
+        <span class="flex gap-0.5">
+          <span class="typing-dot" />
+          <span class="typing-dot" />
+          <span class="typing-dot" />
+        </span>
+        <span v-if="typingUsers.length === 1">{{ typingUsers[0] }} is typing</span>
+        <span v-else-if="typingUsers.length === 2">{{ typingUsers[0] }} and {{ typingUsers[1] }} are typing</span>
+        <span v-else>{{ typingUsers[0] }} and {{ typingUsers.length - 1 }} others are typing</span>
+      </div>
     </div>
 
     <!-- Composer -->

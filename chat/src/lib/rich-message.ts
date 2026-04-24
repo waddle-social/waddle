@@ -829,7 +829,7 @@ function escapeHtmlWithMentions(text: string): string {
   let match: RegExpExecArray | null;
   while ((match = pattern.exec(text)) !== null) {
     out += escapeHtml(text.slice(cursor, match.index));
-    out += `<span class="text-blue-500 font-bold">${escapeHtml(match[0])}</span>`;
+    out += `<span class="rich-mention">${escapeHtml(match[0])}</span>`;
     cursor = match.index + match[0].length;
   }
   out += escapeHtml(text.slice(cursor));

@@ -43,11 +43,11 @@ interface StatusFeedback {
   message: string;
 }
 
-const fieldLabelClass = "text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground/75";
-const fieldClass = "h-9 w-full rounded-lg border border-border/70 bg-muted/65 px-3 text-[13px] transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-primary/20 disabled:opacity-50";
-const textareaClass = "min-h-20 w-full rounded-lg border border-border/70 bg-muted/65 px-3 py-2 text-[13px] transition-all duration-200 resize-y focus:outline-none focus:ring-2 focus:ring-primary/20 disabled:opacity-50";
-const primaryButtonClass = "h-9 rounded-lg bg-primary px-3 text-[13px] font-medium text-primary-foreground transition-all duration-200 hover:shadow-[0_0_12px_var(--glow)] disabled:opacity-40";
-const secondaryButtonClass = "h-9 rounded-lg border border-border px-3 text-[13px] font-medium transition-colors duration-200 hover:bg-muted disabled:opacity-40";
+const fieldLabelClass = "type-section-label text-muted-foreground/75";
+const fieldClass = "chat-field-control type-field disabled:opacity-50";
+const textareaClass = "chat-field-control chat-textarea-control type-field disabled:opacity-50";
+const primaryButtonClass = "chat-action-button chat-action-button--primary type-control disabled:opacity-40";
+const secondaryButtonClass = "chat-action-button chat-action-button--secondary type-control disabled:opacity-40";
 
 const moodOptions = MOOD_KINDS.map((kind) => ({
   value: kind,
@@ -338,45 +338,46 @@ async function clearTuneStatus() {
 
 <template>
   <div class="flex-1 min-w-0 min-h-0 overflow-auto bg-background">
-    <div class="sticky top-0 z-10 border-b border-border glass-surface">
-      <div class="mx-auto flex h-14 max-w-3xl items-center gap-3 px-4 sm:px-6">
+    <div class="z-sticky sticky top-0 border-b border-border glass-surface">
+      <div class="mx-auto flex h-14 max-w-4xl items-center gap-3 px-4 sm:px-6">
         <button
-          class="flex h-9 items-center gap-1.5 rounded-lg border border-border/70 px-3 text-[12px] font-medium text-muted-foreground transition-colors duration-200 hover:bg-muted hover:text-foreground"
+          class="chat-action-button chat-action-button--secondary type-control text-muted-foreground hover:text-foreground"
+          type="button"
           @click="emit('close')"
         >
           <ChevronLeft class="h-4 w-4" />
           <span>Back</span>
         </button>
         <div class="min-w-0">
-          <h1 class="font-display text-[16px] font-bold tracking-tight">Settings</h1>
-          <p class="text-[12px] text-muted-foreground">Share profile signals, tune reading flow, and check build details.</p>
+          <h1 class="type-chat-title">Settings</h1>
+          <p class="type-caption text-muted-foreground">Share profile signals, tune reading flow, and check build details.</p>
         </div>
       </div>
     </div>
 
-    <div class="mx-auto flex max-w-3xl flex-col gap-3 px-4 py-4 sm:px-6">
-      <section class="glass-panel rounded-xl border border-border p-4">
+    <div class="mx-auto flex max-w-4xl flex-col gap-4 px-4 py-5 sm:px-6">
+      <section class="chat-section-card glass-panel">
         <div class="flex items-center gap-3">
           <AppAvatar :name="session.username" :src="session.avatar_url" size="md" />
           <div class="min-w-0">
-            <div class="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground/70">
+            <div class="type-section-label flex items-center gap-2 text-muted-foreground/70">
               <UserRound class="h-3.5 w-3.5" />
               <span>Signed in</span>
             </div>
-            <h2 class="mt-1 truncate text-[16px] font-semibold">{{ session.username }}</h2>
-            <p class="text-[12px] text-muted-foreground">Reading preferences, profile signals, and build details for this device.</p>
+            <h2 class="type-chat-title mt-1 truncate">{{ session.username }}</h2>
+            <p class="type-caption text-muted-foreground">Reading preferences, profile signals, and build details for this device.</p>
           </div>
         </div>
       </section>
 
-      <section class="glass-panel rounded-xl border border-border p-4">
-        <div class="mb-4 flex items-start gap-3">
+      <section class="chat-section-card glass-panel">
+        <div class="flex items-start gap-3 pb-4">
           <div class="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10 text-primary">
             <MessageCircle class="h-4 w-4" />
           </div>
-          <div class="max-w-2xl">
-            <h2 class="text-[14px] font-semibold">Profile signals</h2>
-            <p class="mt-1 text-[12px] leading-relaxed text-muted-foreground">
+          <div class="chat-settings-copy max-w-2xl">
+            <h2 class="type-pane-title">Profile signals</h2>
+            <p class="type-caption text-muted-foreground">
               Publish lightweight XMPP profile signals for mood, activity, and tune. Keep them short, calm, and easy to scan.
             </p>
           </div>
@@ -384,26 +385,27 @@ async function clearTuneStatus() {
 
         <p
           v-if="!xmppClient"
-          class="mb-4 rounded-lg border border-border/70 bg-muted/50 px-3 py-2 text-[12px] text-muted-foreground"
+          class="type-caption mb-4 rounded-lg border border-border/70 bg-muted/50 px-3 py-2 text-muted-foreground"
+          role="status"
         >
           Reconnect before publishing or clearing profile signals.
         </p>
 
         <div class="divide-y divide-border/70">
           <form
-            class="grid gap-4 pb-4 lg:grid-cols-[minmax(0,13rem)_1fr]"
+            class="chat-settings-form pb-4"
             @submit.prevent="publishMoodStatus"
           >
-            <div class="space-y-1">
-              <p class="text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground/70">XEP-0107</p>
-              <h3 class="text-[14px] font-semibold">Mood</h3>
-              <p class="text-[12px] leading-relaxed text-muted-foreground">
+            <div class="chat-settings-copy">
+              <p class="type-section-label text-muted-foreground/70">XEP-0107</p>
+              <h3 class="type-pane-title">Mood</h3>
+              <p class="type-caption text-muted-foreground">
                 Share how things feel right now, with an optional note for context.
               </p>
             </div>
 
             <div class="grid gap-3">
-              <div class="grid gap-3 sm:grid-cols-[minmax(0,13rem)_1fr]">
+              <div class="chat-settings-field-row">
                 <label class="grid gap-1.5">
                   <span :class="fieldLabelClass">Mood</span>
                   <select v-model="moodDraft.kind" :class="fieldClass">
@@ -446,7 +448,7 @@ async function clearTuneStatus() {
                 >
                   Clear
                 </button>
-                <p class="text-[11px] leading-relaxed" :class="feedbackClass(moodFeedback.tone)">
+                <p class="type-caption" :class="feedbackClass(moodFeedback.tone)" aria-live="polite">
                   {{ moodFeedback.message }}
                 </p>
               </div>
@@ -454,13 +456,13 @@ async function clearTuneStatus() {
           </form>
 
           <form
-            class="grid gap-4 py-4 lg:grid-cols-[minmax(0,13rem)_1fr]"
+            class="chat-settings-form py-4"
             @submit.prevent="publishActivityStatus"
           >
-            <div class="space-y-1">
-              <p class="text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground/70">XEP-0108</p>
-              <h3 class="text-[14px] font-semibold">Activity</h3>
-              <p class="text-[12px] leading-relaxed text-muted-foreground">
+            <div class="chat-settings-copy">
+              <p class="type-section-label text-muted-foreground/70">XEP-0108</p>
+              <h3 class="type-pane-title">Activity</h3>
+              <p class="type-caption text-muted-foreground">
                 Pick a broad category, then add a specific detail if you want a more precise signal.
               </p>
             </div>
@@ -479,7 +481,7 @@ async function clearTuneStatus() {
                       {{ option.label }}
                     </option>
                   </select>
-                  <p v-if="activityErrors.general" class="text-[11px] leading-relaxed text-destructive">
+                  <p v-if="activityErrors.general" class="type-caption text-destructive">
                     {{ activityErrors.general }}
                   </p>
                 </label>
@@ -494,7 +496,7 @@ async function clearTuneStatus() {
                     type="text"
                   />
                   <p
-                    class="text-[11px] leading-relaxed"
+                    class="type-caption"
                     :class="activityErrors.specific ? 'text-destructive' : 'text-muted-foreground'"
                   >
                     {{ activityErrors.specific ?? activitySpecificHint }}
@@ -529,7 +531,7 @@ async function clearTuneStatus() {
                 >
                   Clear
                 </button>
-                <p class="text-[11px] leading-relaxed" :class="feedbackClass(activityFeedback.tone)">
+                <p class="type-caption" :class="feedbackClass(activityFeedback.tone)" aria-live="polite">
                   {{ activityFeedback.message }}
                 </p>
               </div>
@@ -537,13 +539,13 @@ async function clearTuneStatus() {
           </form>
 
           <form
-            class="grid gap-4 pt-4 lg:grid-cols-[minmax(0,13rem)_1fr]"
+            class="chat-settings-form pt-4"
             @submit.prevent="publishTuneStatus"
           >
-            <div class="space-y-1">
-              <p class="text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground/70">XEP-0118</p>
-              <h3 class="text-[14px] font-semibold">Tune</h3>
-              <p class="text-[12px] leading-relaxed text-muted-foreground">
+            <div class="chat-settings-copy">
+              <p class="type-section-label text-muted-foreground/70">XEP-0118</p>
+              <h3 class="type-pane-title">Tune</h3>
+              <p class="type-caption text-muted-foreground">
                 Share what is playing now. Any field is optional, but at least one detail is needed to publish.
               </p>
             </div>
@@ -604,7 +606,7 @@ async function clearTuneStatus() {
                     type="text"
                   />
                   <p
-                    class="text-[11px] leading-relaxed"
+                    class="type-caption"
                     :class="tuneErrors.length ? 'text-destructive' : 'text-muted-foreground'"
                   >
                     {{ tuneErrors.length ?? "Optional. Use whole seconds." }}
@@ -621,7 +623,7 @@ async function clearTuneStatus() {
                     type="text"
                   />
                   <p
-                    class="text-[11px] leading-relaxed"
+                    class="type-caption"
                     :class="tuneErrors.rating ? 'text-destructive' : 'text-muted-foreground'"
                   >
                     {{ tuneErrors.rating ?? "Optional. Whole numbers from 1 to 10." }}
@@ -638,7 +640,7 @@ async function clearTuneStatus() {
                     type="text"
                   />
                   <p
-                    class="text-[11px] leading-relaxed"
+                    class="type-caption"
                     :class="tuneErrors.uri ? 'text-destructive' : 'text-muted-foreground'"
                   >
                     {{ tuneErrors.uri ?? "Optional. Use a full URL or URI." }}
@@ -662,7 +664,7 @@ async function clearTuneStatus() {
                 >
                   Clear
                 </button>
-                <p class="text-[11px] leading-relaxed" :class="feedbackClass(tuneFeedback.tone)">
+                <p class="type-caption" :class="feedbackClass(tuneFeedback.tone)" aria-live="polite">
                   {{ tuneErrors.form ?? tuneFeedback.message }}
                 </p>
               </div>
@@ -671,14 +673,14 @@ async function clearTuneStatus() {
         </div>
       </section>
 
-      <section class="glass-panel rounded-xl border border-border p-4">
-        <div class="mb-4 flex items-start gap-3">
+      <section class="chat-section-card glass-panel">
+        <div class="flex items-start gap-3 pb-4">
           <div class="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10 text-primary">
             <ScanText class="h-4 w-4" />
           </div>
-          <div>
-            <h2 class="text-[14px] font-semibold">Reading flow</h2>
-            <p class="mt-1 text-[12px] leading-relaxed text-muted-foreground">
+          <div class="chat-settings-copy">
+            <h2 class="type-pane-title">Reading flow</h2>
+            <p class="type-caption text-muted-foreground">
               Set whether the newest messages land at the bottom or the top.
             </p>
           </div>
@@ -686,12 +688,12 @@ async function clearTuneStatus() {
         <ScrollDirectionSwitcher />
       </section>
 
-      <section class="glass-panel rounded-xl border border-border p-4">
-        <h2 class="text-[14px] font-semibold">About this build</h2>
-        <p class="mt-1 text-[12px] leading-relaxed text-muted-foreground">
+      <section class="chat-section-card glass-panel">
+        <h2 class="type-pane-title">About this build</h2>
+        <p class="type-caption pt-1 text-muted-foreground">
           Helpful version details when you need to compare client and server behavior.
         </p>
-        <div class="mt-4">
+        <div class="pt-4">
           <VersionFooter
             :web-commit-sha="webCommitSha"
             :server-version="serverVersion"

@@ -180,8 +180,8 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
 <template>
   <div class="flex flex-col flex-1 min-h-0 bg-background border-l border-border">
     <!-- Header: breadcrumb trail + close / back button -->
-    <div class="h-14 flex-shrink-0 flex items-center justify-between gap-2 px-4 py-0 border-b border-border glass-panel">
-      <div class="flex min-w-0 flex-1 items-center gap-1 text-[13px] font-semibold truncate">
+    <div class="chat-pane-header flex-shrink-0 flex items-center justify-between gap-3 border-b border-border px-4 py-0 glass-panel">
+      <div class="type-control flex min-w-0 flex-1 items-center gap-1.5 truncate">
         <span class="text-muted-foreground">Thread</span>
         <template v-for="(label, i) in breadcrumbLabels" :key="i">
           <ChevronRight class="w-3 h-3 text-muted-foreground/60 flex-shrink-0" />
@@ -198,8 +198,9 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
       <button
         v-if="threadStack.length > 1"
         type="button"
-        class="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg hover:bg-muted transition-all duration-200 lg:hidden"
+        class="chat-icon-button flex-shrink-0 hover:bg-muted lg:hidden"
         title="Go back"
+        aria-label="Go back"
         @click="emit('popTo', threadStack.length - 2)"
       >
         <ChevronLeft class="w-4 h-4" />
@@ -207,8 +208,9 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
       <!-- Close button: closes the entire thread panel -->
       <button
         type="button"
-        class="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg hover:bg-muted transition-all duration-200"
+        class="chat-icon-button flex-shrink-0 hover:bg-muted"
         title="Close thread"
+        aria-label="Close thread"
         @click="emit('close')"
       >
         <X class="w-4 h-4" />
@@ -237,9 +239,9 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
     </div>
 
     <!-- Messages scroll area -->
-    <div ref="scrollContainerRef" class="flex-1 min-h-0 overflow-auto px-3 py-3">
-      <template v-if="activeEntry">
-        <div v-if="!activeEntry.root" class="text-[12px] text-muted-foreground px-3 py-2 rounded-xl bg-muted/40 mb-2">
+    <div ref="scrollContainerRef" class="chat-pane-scroll flex-1 min-h-0 overflow-auto px-3 py-4 lg:px-4">
+      <div v-if="activeEntry" class="chat-panel-stack">
+        <div v-if="!activeEntry.root" class="type-caption rounded-lg bg-muted/40 px-3 py-2 text-muted-foreground">
           Thread root isn't in the loaded history. Scroll the main channel or reload to backfill.
         </div>
         <MessageCard
@@ -281,11 +283,11 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
             @reply="beginReplyInThread"
             @open-thread="onOpenThreadFromCard"
           />
-          <div class="flex flex-wrap items-center gap-2 pl-12 pb-1.5 -mt-0.5">
+          <div class="chat-thread-actions">
             <button
               v-if="replyChildHasNestedThread(child)"
               type="button"
-              class="inline-flex items-center gap-1 text-[11px] text-primary/80 hover:text-primary transition-colors"
+              class="type-caption inline-flex items-center gap-1 text-primary/80 hover:text-primary transition-colors"
               @click="onOpenThreadFromCard(child.id)"
             >
               <CornerDownRight class="w-3 h-3" />
@@ -294,7 +296,7 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
             <button
               v-else
               type="button"
-              class="inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-primary transition-colors opacity-60 group-hover/thread-child:opacity-100 focus-visible:opacity-100"
+              class="type-caption inline-flex items-center gap-1 text-muted-foreground hover:text-primary transition-colors opacity-60 group-hover/thread-child:opacity-100 focus-visible:opacity-100"
               title="Start sub-thread"
               @click="startSubThread(child)"
             >
@@ -306,16 +308,16 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
 
         <div
           v-if="activeEntry.directChildren.length === 0 && !hideComposer"
-          class="text-center py-8 text-[12px] text-muted-foreground"
+          class="type-caption text-center py-8 text-muted-foreground"
         >
           No replies yet. Start the conversation.
         </div>
-      </template>
+      </div>
       <div
         v-else
-        class="text-center py-10 text-[13px] text-muted-foreground"
+        class="type-caption text-center py-10 text-muted-foreground"
       >
-        Loading thread...
+        Loading thread…
       </div>
     </div>
 

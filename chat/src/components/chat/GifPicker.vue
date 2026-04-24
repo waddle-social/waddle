@@ -57,7 +57,7 @@ function selectGif(gif: GiphyGif) {
 
 <template>
   <div
-    class="absolute left-0 right-0 glass-panel border border-border rounded-xl max-h-96 flex flex-col z-50 shadow-2xl animate-fade-in overflow-hidden"
+    class="z-popover absolute left-0 right-0 glass-panel border border-border rounded-lg max-h-96 flex flex-col shadow-2xl animate-fade-in overflow-hidden"
     :class="isTopPinned ? 'top-full mt-2' : 'bottom-full mb-2'"
   >
     <!-- Header -->
@@ -70,9 +70,9 @@ function selectGif(gif: GiphyGif) {
         <input
           v-model="query"
           type="text"
-          placeholder="Search GIFs..."
+          placeholder="Search GIFs…"
           aria-label="Search GIFs"
-          class="min-h-10 w-full rounded-lg border-none bg-transparent py-2.5 pl-9 pr-11 text-[13px] leading-5 placeholder:text-muted-foreground/40 focus:outline-none"
+          class="type-field min-h-10 w-full rounded-lg border-none bg-transparent py-2.5 pl-9 pr-11 placeholder:text-muted-foreground/40 focus:outline-none"
         />
         <button
           type="button"
@@ -86,21 +86,21 @@ function selectGif(gif: GiphyGif) {
     </div>
 
     <!-- No API key -->
-    <div v-if="!apiKey" class="flex h-24 items-center justify-center px-4 text-center text-[13px] text-muted-foreground">
-      GIPHY_API_KEY not configured.
+    <div v-if="!apiKey" class="type-control flex h-24 items-center justify-center px-4 text-center text-muted-foreground">
+      GIF search is not configured.
     </div>
 
     <!-- Results -->
     <div v-else class="flex-1 overflow-auto p-2">
-      <div v-if="isLoading" class="flex h-24 items-center justify-center text-[13px] text-muted-foreground">
+      <div v-if="isLoading" class="type-control flex h-24 items-center justify-center text-muted-foreground">
         <div class="flex items-center justify-center gap-1.5">
           <span class="typing-dot" />
           <span class="typing-dot" />
           <span class="typing-dot" />
         </div>
       </div>
-      <div v-else-if="results.length === 0" class="flex h-24 items-center justify-center rounded-lg text-center text-[13px] text-muted-foreground">
-        {{ query ? "No GIFs found" : "Loading trending GIFs..." }}
+      <div v-else-if="results.length === 0" class="type-control flex h-24 items-center justify-center rounded-lg text-center text-muted-foreground">
+        {{ query ? "No GIFs found" : "Loading trending GIFs…" }}
       </div>
       <div v-else class="grid grid-cols-3 gap-2">
         <button
@@ -108,11 +108,12 @@ function selectGif(gif: GiphyGif) {
           :key="gif.id"
           type="button"
           class="aspect-square overflow-hidden rounded-lg bg-muted/40 ring-1 ring-border/50 transition-all duration-200 hover:ring-primary/35 hover:shadow-[0_0_8px_var(--glow)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/35"
+          :aria-label="`Select ${gif.title || 'GIF'}`"
           @click="selectGif(gif)"
         >
           <img
             :src="gif.images.fixed_height_small.url"
-            :alt="gif.title"
+            :alt="gif.title || 'GIF result'"
             class="h-full w-full object-cover"
             loading="lazy"
           />
@@ -122,7 +123,7 @@ function selectGif(gif: GiphyGif) {
 
     <!-- Attribution -->
     <div class="flex h-8 items-center justify-end border-t border-border px-3">
-      <span class="text-[10px] font-medium text-muted-foreground/50">Powered by GIPHY</span>
+      <span class="type-meta type-emphasis text-muted-foreground/50">Powered by GIPHY</span>
     </div>
   </div>
 </template>

@@ -152,12 +152,13 @@ const items = computed(() => [
 <template>
   <BubbleMenu :editor="editor">
     <div
-      class="z-50 flex items-center gap-1.5 p-1.5 glass-panel border border-border rounded-lg shadow-xl animate-fade-in"
+      class="z-popover flex items-center gap-1.5 p-1.5 glass-panel border border-border rounded-lg shadow-xl animate-fade-in"
     >
       <button
         v-for="item in items"
         :key="item.name"
-        class="h-8 w-8 flex items-center justify-center rounded-md transition-all duration-150 text-[13px]"
+        type="button"
+        class="type-control h-8 w-8 flex items-center justify-center rounded-md transition-all duration-150"
         :class="
           (editingLink && item.name === 'link') || item.isActive?.()
             ? 'bg-primary/10 text-primary'
@@ -174,7 +175,7 @@ const items = computed(() => [
         v-model="linkUrl"
         type="url"
         inputmode="url"
-        class="h-8 w-48 rounded-md border border-border bg-background px-2 text-[12px] text-foreground outline-none focus:border-primary"
+        class="type-caption h-8 w-48 rounded-md border border-border bg-background px-2 text-foreground outline-none focus:border-primary"
         placeholder="https://example.com"
         @keydown.enter.prevent="applyLink"
         @keydown.esc.prevent="editingLink = false"

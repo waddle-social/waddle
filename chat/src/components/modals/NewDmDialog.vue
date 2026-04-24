@@ -22,38 +22,46 @@ function handleSubmit() {
 
 <template>
   <AppDialog v-model:open="open">
-    <div class="flex h-14 items-center justify-between border-b border-border px-4 sm:px-5">
-      <h2 class="text-[16px] font-display font-bold">New Message</h2>
-      <button class="flex h-8 w-8 items-center justify-center rounded-lg hover:bg-muted transition-all duration-200" @click="open = false">
+    <div class="chat-dialog-header">
+      <h2 class="type-dialog-title">New message</h2>
+      <button
+        class="chat-icon-button hover:bg-muted"
+        type="button"
+        aria-label="Close new message dialog"
+        @click="open = false"
+      >
         <X class="w-4 h-4 text-muted-foreground" />
       </button>
     </div>
 
-    <form class="px-4 py-4 sm:px-5" @submit.prevent="handleSubmit">
-      <label class="block text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground mb-1.5">
+    <form class="chat-field-stack chat-dialog-body" @submit.prevent="handleSubmit">
+      <label for="new-dm-username" class="type-section-label text-muted-foreground">
         Username
       </label>
       <input
+        id="new-dm-username"
         v-model="username"
-        class="h-9 w-full rounded-lg bg-muted px-3 text-[13px] transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-primary/20"
+        class="chat-field-control type-field"
         placeholder="alice"
         autofocus
       />
     </form>
 
-    <div class="flex min-h-14 justify-end gap-2 border-t border-border px-4 py-3 sm:px-5">
+    <div class="chat-dialog-footer">
       <button
-        class="h-9 rounded-lg border border-border px-3 text-[13px] font-medium hover:bg-muted transition-all duration-200"
+        class="chat-action-button chat-action-button--secondary type-control"
+        type="button"
         @click="open = false"
       >
         Cancel
       </button>
       <button
-        class="h-9 rounded-lg bg-primary px-3 text-[13px] font-medium text-primary-foreground hover:shadow-[0_0_12px_var(--glow)] transition-all duration-200 disabled:opacity-40"
+        class="chat-action-button chat-action-button--primary type-control disabled:opacity-40"
+        type="button"
         :disabled="!username.replace(/^@/, '').trim()"
         @click="handleSubmit"
       >
-        Start Conversation
+        Start conversation
       </button>
     </div>
   </AppDialog>
