@@ -37,6 +37,8 @@
               pkgs.cargo-chef
               pkgs.teleport
               pkgs.protobuf
+              pkgs.oras
+              pkgs.yq-go
             ];
 
             shellHook = ''

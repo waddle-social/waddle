@@ -1,3 +1,5 @@
+# This workflow is intentionally maintained manually.
+# CodeQL uses GitHub-native security scanning (github/codeql-action) which has no cuenv equivalent.
 name: "CodeQL"
 
 on:
