@@ -286,7 +286,7 @@ schema.#Project & {
 				  --revision="${SHORT_SHA}"
 				"""#]
 			inputs: list.Concat([_nixInputs, ["charts/**"]])
-			outputs: ["../target/digests/**"]
+			outputs: ["target/digests/**"]
 			dependsOn: [tasks.fmt, tasks.clippy, tasks.test]
 		}
 

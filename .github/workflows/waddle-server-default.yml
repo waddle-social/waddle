@@ -145,7 +145,7 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: publishContainerImage-artifacts
-        path: ../target/digests/**
+        path: target/digests/**
         if-no-files-found: ignore
         include-hidden-files: true
   test:
