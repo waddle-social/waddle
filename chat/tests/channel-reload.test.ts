@@ -8,8 +8,6 @@ const ALICE: MemberSummary = { jid: "alice@example.com", username: "alice", avat
 const BOB: MemberSummary = { jid: "bob@example.com", username: "bob", avatar_url: null, role: "member", joined_at: "" };
 
 const BASE_TOPOLOGY = {
-  canCreateMuc: false,
-  canCreateSpace: false,
   spaces: [],
   rooms: [
     { id: "general", name: "General", jid: "general@conference.example.com", channelType: "text" as const, position: 0 },

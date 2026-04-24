@@ -1188,7 +1188,7 @@ export class BrowserXmppClient {
   async discoverTopology(): Promise<import("./types").DiscoveredTopology> {
     await this.connect();
     if (!this.xmpp) {
-      return { spaces: [], rooms: [], canCreateMuc: false, canCreateSpace: false };
+      return { spaces: [], rooms: [] };
     }
     return discovery.discoverTopology(this.xmpp, this.session.jid);
   }

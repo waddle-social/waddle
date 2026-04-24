@@ -81,19 +81,6 @@ async function hydrateChannelType(
   }
 }
 
-async function discoverCommandCapability(
-  xmpp: Agent,
-  serverJid: string,
-  node: string,
-): Promise<boolean> {
-  try {
-    const response = await xmpp.getDiscoItems(serverJid, "http://jabber.org/protocol/commands");
-    return (response.items ?? []).some((item) => item.node === node);
-  } catch {
-    return false;
-  }
-}
-
 export async function discoverChannels(
   xmpp: Agent,
   jid: string,
@@ -122,7 +109,6 @@ export async function discoverTopology(
   xmpp: Agent,
   jid: string,
 ): Promise<DiscoveredTopology> {
-  const serverJid = jidDomain(jid);
   const mucDomain = mucServiceDomain(jid);
   const spacesDomain = spacesServiceDomain(jid);
 
@@ -174,15 +160,8 @@ export async function discoverTopology(
       .map((room, position) => hydrateChannelType(xmpp, { ...room, position })),
   );
 
-  const [canCreateMuc, canCreateSpace] = await Promise.all([
-    discoverCommandCapability(xmpp, serverJid, "waddle:create-muc"),
-    discoverCommandCapability(xmpp, serverJid, "waddle:create-space"),
-  ]);
-
   return {
     spaces,
     rooms,
-    canCreateMuc: canCreateMuc || await discoverCommandCapability(xmpp, serverJid, "waddle:create-channel"),
-    canCreateSpace,
   };
 }

@@ -252,6 +252,10 @@ impl Feature {
         Self::new("muc_semianonymous")
     }
 
+    pub fn muc_nonanonymous() -> Self {
+        Self::new("muc_nonanonymous")
+    }
+
     pub fn muc_unmoderated() -> Self {
         Self::new("muc_unmoderated")
     }
@@ -542,7 +546,7 @@ pub fn muc_room_features(
         Feature::hats(),
         Feature::explicit_mentions(),
         Feature::channel_mentions(),
-        Feature::muc_semianonymous(),
+        Feature::muc_nonanonymous(),
     ];
 
     if forum {

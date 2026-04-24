@@ -875,35 +875,6 @@ async fn create_router(
     );
 
     let websocket_command_registry = Arc::new(waddle_xmpp::commands::CommandRegistry::new());
-    {
-        use waddle_xmpp::commands::{handle_create_channel, NODE_CREATE_CHANNEL, NODE_CREATE_MUC};
-
-        let app_state_for_command = Arc::new(
-            XmppAppState::new(
-                xmpp_domain.clone(),
-                Arc::new(state.db_pool.global().clone()),
-                state.db_pool.global_actor().clone(),
-                state.permission_actor.clone(),
-                encryption_key.as_ref().map(|s| s.as_bytes()),
-            )
-            .with_db_pool(Arc::clone(&state.db_pool)),
-        );
-        let app_state_for_channel_command = Arc::clone(&app_state_for_command);
-        let app_state_for_muc_command = Arc::clone(&app_state_for_command);
-        websocket_command_registry
-            .register(NODE_CREATE_CHANNEL, "Create Channel", move |ctx| {
-                let deps = Arc::clone(&app_state_for_channel_command);
-                handle_create_channel(deps, ctx)
-            })
-            .await;
-        websocket_command_registry
-            .register(NODE_CREATE_MUC, "Create MUC", move |ctx| {
-                let deps = Arc::clone(&app_state_for_muc_command);
-                handle_create_channel(deps, ctx)
-            })
-            .await;
-        info!("Registered create-channel and create-muc commands for WebSocket");
-    }
 
     // Build the sans-I/O stanza dispatcher with the handlers migrated so far.
     // See `waddle_xmpp::protocol` for the state-machine design; any IQ

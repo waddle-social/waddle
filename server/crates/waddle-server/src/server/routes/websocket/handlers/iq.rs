@@ -12,7 +12,11 @@ use waddle_xmpp::{
     },
     inbox::runtime::filter_query,
     mam::{build_fin_iq, build_result_messages, is_mam_query, parse_mam_query},
-    muc::room_actor::GetSnapshot,
+    muc::{
+        owner::build_config_form,
+        room_actor::{GetSnapshot, UpdateConfig},
+        DATA_FORMS_NS,
+    },
     protocol::{
         frame::{parse_frame, InboundFrame},
         ConnectionPhase, StanzaContext as ProtocolStanzaContext,
@@ -33,8 +37,9 @@ use waddle_xmpp::{
         build_command_items, build_command_result, build_spaces_metadata_form,
         parse_command_from_iq, Command, CommandStatus, NODE_COMMANDS,
     },
-    SpaceDetails, Stanza, StanzaErrorCondition, StanzaErrorType, XmppError,
+    Affiliation, SpaceDetails, Stanza, StanzaErrorCondition, StanzaErrorType, XmppError,
 };
+use xmpp_parsers::minidom::Element;
 
 use super::super::{
     build_iq_error_xml, build_iq_error_xml_with_addresses, build_iq_result_xml, destroy_room_actor,
@@ -240,8 +245,18 @@ pub async fn handle_iq_with_conn_state(
                             .into_iter()
                             .map(|ns| Feature::new(&ns)),
                     );
-                    let response =
-                        build_disco_info_response(request_iq, &identities, &features, None);
+                    let extensions = room_space_metadata_extensions(state, &room_jid, domain).await;
+                    let response = if extensions.is_empty() {
+                        build_disco_info_response(request_iq, &identities, &features, None)
+                    } else {
+                        build_disco_info_response_with_extensions(
+                            request_iq,
+                            &identities,
+                            &features,
+                            None,
+                            &extensions,
+                        )
+                    };
                     return vec![iq_to_xml(response)];
                 }
 
@@ -259,8 +274,19 @@ pub async fn handle_iq_with_conn_state(
                                 .into_iter()
                                 .map(|ns| Feature::new(&ns)),
                         );
-                        let response =
-                            build_disco_info_response(request_iq, &identities, &features, None);
+                        let extensions =
+                            room_space_metadata_extensions(state, &room_jid, domain).await;
+                        let response = if extensions.is_empty() {
+                            build_disco_info_response(request_iq, &identities, &features, None)
+                        } else {
+                            build_disco_info_response_with_extensions(
+                                request_iq,
+                                &identities,
+                                &features,
+                                None,
+                                &extensions,
+                            )
+                        };
                         return vec![iq_to_xml(response)];
                     }
 
@@ -504,6 +530,42 @@ pub async fn handle_iq_with_conn_state(
             )];
         }
 
+        let Some(sender_jid) = phase.bound_jid() else {
+            return vec![build_iq_error_xml_with_addresses(
+                &id,
+                response_from,
+                response_to,
+                "auth",
+                "not-authorized",
+            )];
+        };
+        match muc_owner_authorized(state, &room_jid, sender_jid).await {
+            Ok(true) => {}
+            Ok(false) => {
+                return vec![build_iq_error_xml_with_addresses(
+                    &id,
+                    response_from,
+                    response_to,
+                    "auth",
+                    "forbidden",
+                )];
+            }
+            Err(error) => {
+                warn!(
+                    room = %room_jid,
+                    error = %error,
+                    "Failed to authorize MUC owner IQ"
+                );
+                return vec![build_iq_error_xml_with_addresses(
+                    &id,
+                    response_from,
+                    response_to,
+                    "wait",
+                    "internal-server-error",
+                )];
+            }
+        }
+
         if has_destroy {
             if destroy_room_actor(state, &room_jid).await {
                 debug!(room = %room_jid, "Destroyed MUC room via owner IQ");
@@ -522,6 +584,41 @@ pub async fn handle_iq_with_conn_state(
                 response_to,
                 "cancel",
                 "item-not-found",
+            )];
+        }
+
+        if matches!(&iq.payload, xmpp_parsers::iq::IqType::Get(_)) {
+            match build_muc_owner_config_response(state, &room_jid, &id, response_to).await {
+                Ok(response) => return vec![response],
+                Err(error) => {
+                    warn!(
+                        room = %room_jid,
+                        error = %error,
+                        "Failed to build MUC owner config response"
+                    );
+                    return vec![build_iq_error_xml_with_addresses(
+                        &id,
+                        response_from,
+                        response_to,
+                        "wait",
+                        "internal-server-error",
+                    )];
+                }
+            }
+        }
+
+        if let Err(error) = apply_muc_owner_config(state, &room_jid, &iq).await {
+            warn!(
+                room = %room_jid,
+                error = %error,
+                "Failed to apply MUC owner config"
+            );
+            return vec![build_iq_error_xml_with_addresses(
+                &id,
+                response_from,
+                response_to,
+                "wait",
+                "internal-server-error",
             )];
         }
 
@@ -1033,6 +1130,174 @@ fn build_xmpp_error_response(request_iq: &xmpp_parsers::iq::Iq, err: XmppError) 
             Some(&other.to_string()),
         ),
     }
+}
+
+async fn muc_owner_authorized(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    sender_jid: &FullJid,
+) -> Result<bool, String> {
+    let room_actor = get_room_actor(state, room_jid)
+        .await
+        .ok_or_else(|| "room actor not found".to_string())?;
+    let snapshot = room_actor
+        .ask(GetSnapshot)
+        .await
+        .map_err(|error| format!("snapshot failed: {error:?}"))?;
+    Ok(matches!(
+        snapshot.room.get_affiliation(&sender_jid.to_bare()),
+        Affiliation::Owner
+    ))
+}
+
+async fn build_muc_owner_config_response(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    id: &str,
+    response_to: Option<&str>,
+) -> Result<String, String> {
+    let room_actor = get_room_actor(state, room_jid)
+        .await
+        .ok_or_else(|| "room actor not found".to_string())?;
+    let snapshot = room_actor
+        .ask(GetSnapshot)
+        .await
+        .map_err(|error| format!("snapshot failed: {error:?}"))?;
+    let form = build_config_form(&snapshot.room);
+    let query = Element::builder("query", waddle_xmpp::muc::NS_MUC_OWNER)
+        .append(form)
+        .build();
+    let room_jid_string = room_jid.to_string();
+    Ok(build_iq_result_xml(
+        id,
+        Some(room_jid_string.as_str()),
+        response_to,
+        Some(query),
+    ))
+}
+
+fn canonical_space_details(domain: &str) -> SpaceDetails {
+    SpaceDetails {
+        id: "space".to_string(),
+        name: domain.to_string(),
+        description: None,
+        owner_id: "server".to_string(),
+        icon_url: None,
+        is_public: true,
+        created_at: "1970-01-01T00:00:00Z".to_string(),
+    }
+}
+
+async fn room_space_metadata_extensions(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    domain: &str,
+) -> Vec<Element> {
+    if get_managed_channel_for_room(state, room_jid)
+        .await
+        .is_some()
+    {
+        vec![build_spaces_metadata_form(&canonical_space_details(domain))]
+    } else {
+        vec![]
+    }
+}
+
+fn data_form_value(form: &Element, var: &str) -> Option<String> {
+    form.children()
+        .filter(|child| child.name() == "field" && child.ns() == DATA_FORMS_NS)
+        .find(|field| field.attr("var") == Some(var))
+        .and_then(|field| field.get_child("value", DATA_FORMS_NS))
+        .map(|value| value.texts().collect())
+}
+
+fn data_form_bool(form: &Element, var: &str) -> Option<bool> {
+    data_form_value(form, var).and_then(|value| match value.as_str() {
+        "1" | "true" | "True" | "TRUE" => Some(true),
+        "0" | "false" | "False" | "FALSE" => Some(false),
+        _ => None,
+    })
+}
+
+async fn apply_muc_owner_config(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    iq: &xmpp_parsers::iq::Iq,
+) -> Result<(), String> {
+    let room_actor = get_room_actor(state, room_jid)
+        .await
+        .ok_or_else(|| "room actor not found".to_string())?;
+    let mut config = room_actor
+        .ask(GetSnapshot)
+        .await
+        .map_err(|error| format!("snapshot failed: {error:?}"))?
+        .room
+        .config;
+
+    if let xmpp_parsers::iq::IqType::Set(query) = &iq.payload {
+        if let Some(form) = query.get_child("x", DATA_FORMS_NS) {
+            if let Some(name) =
+                data_form_value(form, "muc#roomconfig_roomname").filter(|value| !value.is_empty())
+            {
+                config.name = name;
+            }
+            config.description = data_form_value(form, "muc#roomconfig_roomdesc")
+                .filter(|value| !value.is_empty())
+                .or(config.description);
+            if let Some(members_only) = data_form_bool(form, "muc#roomconfig_membersonly") {
+                config.members_only = members_only;
+            }
+            if let Some(moderated) = data_form_bool(form, "muc#roomconfig_moderatedroom") {
+                config.moderated = moderated;
+            }
+            if let Some(enable_logging) = data_form_bool(form, "muc#roomconfig_enablelogging") {
+                config.enable_logging = enable_logging;
+            }
+            if let Some(forum) = data_form_bool(form, "muc#roomconfig_forum") {
+                config.forum = forum;
+            }
+        }
+    }
+
+    // Waddle rooms are persistent, non-anonymous collaboration surfaces.
+    config.persistent = true;
+
+    room_actor
+        .ask(UpdateConfig {
+            config: config.clone(),
+        })
+        .await
+        .map_err(|error| format!("config update failed: {error:?}"))?;
+
+    let Some(channel_id) = waddle_xmpp::parse_managed_room_jid(room_jid) else {
+        return Ok(());
+    };
+    let now = chrono::Utc::now().to_rfc3339();
+    let actor = state.deps.app_state.db_pool.global_actor().clone();
+    actor
+        .ask(DbExecute {
+            sql: r#"
+                INSERT INTO channels (id, name, description, channel_type, position, is_default, created_at, updated_at)
+                VALUES (?, ?, ?, ?, 0, 0, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    name = excluded.name,
+                    description = excluded.description,
+                    channel_type = excluded.channel_type,
+                    updated_at = excluded.updated_at
+            "#
+            .to_string(),
+            params: vec![
+                channel_id.into(),
+                config.name.into(),
+                config.description.into(),
+                (if config.forum { "forum" } else { "text" }).into(),
+                now.clone().into(),
+                now.into(),
+            ],
+        })
+        .await
+        .map(|_| ())
+        .map_err(|error| format!("channel upsert failed: {error}"))
 }
 
 async fn handle_command_iq(
