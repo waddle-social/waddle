@@ -36,6 +36,7 @@
               pkgs.jujutsu
               pkgs.cargo-chef
               pkgs.teleport
+              pkgs.protobuf
             ];
 
             shellHook = ''
