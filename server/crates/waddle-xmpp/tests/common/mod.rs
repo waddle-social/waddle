@@ -259,7 +259,10 @@ impl AppState for MockAppState {
     ) -> Result<bool, XmppError> {
         let grants = self.permission_relations.lock().await;
         if grants.is_empty() {
-            return Ok(true);
+            // "outcast" is a denial relation - nobody is banned by default.
+            // All other checks (owner, admin, member, …) return true so that
+            // tests without explicit grants can exercise the happy path.
+            return Ok(action != "outcast");
         }
 
         let Some(relations) = grants.get(&(resource.to_string(), subject.to_string())) else {

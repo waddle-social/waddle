@@ -36,6 +36,8 @@
               pkgs.jujutsu
               pkgs.cargo-chef
               pkgs.teleport
+              pkgs.openssl
+              pkgs.pkg-config
               pkgs.protobuf
               pkgs.oras
               pkgs.fluxcd
