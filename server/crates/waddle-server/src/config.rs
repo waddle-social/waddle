@@ -216,7 +216,6 @@ impl ServerConfig {
     }
 }
 
-
 #[derive(Debug, Clone)]
 pub struct DatabaseRuntimeConfig {
     pub driver: DatabaseDriver,

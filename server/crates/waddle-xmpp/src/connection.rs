@@ -63,8 +63,8 @@ use crate::muc::room_actor::{
     LeaveByRealJid, PingSelfCheck, PresenceUpdateData, ReconcileChannelBackedRoom, RoomActor,
 };
 use crate::muc::room_registry_actor::{
-    DestroyRoom, GetOrCreateRoom, GetRoom, IsMucJid, ListRooms,
-    RoomRegistryActor, RoomRegistryError,
+    DestroyRoom, GetOrCreateRoom, GetRoom, IsMucJid, ListRooms, RoomRegistryActor,
+    RoomRegistryError,
 };
 use crate::muc::{
     admin::{

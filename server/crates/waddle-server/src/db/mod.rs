@@ -847,7 +847,6 @@ impl DatabaseConfig {
             database_url: database_url.into(),
         }
     }
-
 }
 
 /// Logical database handle.

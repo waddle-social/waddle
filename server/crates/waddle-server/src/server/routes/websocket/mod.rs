@@ -1919,10 +1919,8 @@ mod tests {
     }
 
     fn disco_items_iq_frame(id: &str, to: &str, node: Option<&str>) -> String {
-        let mut query = xmpp_parsers::minidom::Element::builder(
-            "query",
-            waddle_xmpp::disco::DISCO_ITEMS_NS,
-        );
+        let mut query =
+            xmpp_parsers::minidom::Element::builder("query", waddle_xmpp::disco::DISCO_ITEMS_NS);
         if let Some(node) = node {
             query = query.attr("node", node);
         }
@@ -3699,8 +3697,11 @@ mod tests {
         let viewer = create_test_session(state.as_ref(), "viewer").await;
 
         let viewer_phase = authenticated_phase_for_session(&viewer, "example.com");
-        let query =
-            disco_info_iq_frame("space-node-info-private", "spaces.example.com", Some("unknown"));
+        let query = disco_info_iq_frame(
+            "space-node-info-private",
+            "spaces.example.com",
+            Some("unknown"),
+        );
         let responses = handle_iq(
             &query,
             "example.com",
