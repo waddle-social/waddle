@@ -8,13 +8,14 @@ on:
     - .github/workflows/waddle-server-pullrequest.yml
     - cue.mod/**
     - server/**/env.cue
-    - server/.dockerignore
+    - server/../flake.lock
+    - server/../flake.nix
     - server/Cargo.lock
     - server/Cargo.toml
-    - server/Containerfile
     - server/crates/**
     - server/env.cue
     - server/schema/**
+    - server/wit/**
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
@@ -33,9 +34,7 @@ jobs:
       with:
         fetch-depth: 2
     - name: Install Nix
-      uses: DeterminateSystems/nix-installer-action@v16
-      with:
-        extra-conf: accept-flake-config = true
+      uses: DeterminateSystems/determinate-nix-action@v3
     - name: Setup cuenv (release)
       run: |-
         arch="$(uname -m)"

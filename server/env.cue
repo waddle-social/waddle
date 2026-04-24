@@ -11,6 +11,16 @@ let _rustInputs = [
 	"Cargo.toml",
 	"Cargo.lock",
 	"crates/**",
+	"wit/**",
+]
+
+let _nixInputs = [
+	"../flake.nix",
+	"../flake.lock",
+	"Cargo.toml",
+	"Cargo.lock",
+	"crates/**",
+	"wit/**",
 ]
 
 schema.#Project & {
@@ -25,19 +35,66 @@ schema.#Project & {
 
 	ci: providers: ["github"]
 	ci: contributors: [
-		c.#Nix,
+		schema.#Contributor & {
+			id: "nix"
+			tasks: [{
+				id:       "nix.install"
+				label:    "Install Nix"
+				priority: 0
+				provider: github: uses: "DeterminateSystems/determinate-nix-action@v3"
+			}]
+		},
 		c.#CuenvRelease,
 		c.#OnePassword,
+		schema.#Contributor & {
+			id: "flakehub"
+			when: environment: ["flakehub"]
+			tasks: [
+				{
+					id:       "checkout.tag"
+					label:    "Checkout tag"
+					priority: 1
+					provider: github: {
+						uses: "actions/checkout@v6"
+						with: {
+							"persist-credentials": false
+							ref: "${{ (inputs.tag != null) && format('refs/tags/{0}', inputs.tag) || '' }}"
+						}
+					}
+				},
+				{
+					id:        "determinate-nix"
+					label:     "Setup Determinate Nix"
+					priority: 2
+					dependsOn: ["checkout.tag"]
+					provider: github: uses: "DeterminateSystems/determinate-nix-action@v3"
+				},
+				{
+					id:        "push"
+					label:     "Push to FlakeHub"
+					priority: 3
+					dependsOn: ["determinate-nix"]
+					provider: github: {
+						uses: "DeterminateSystems/flakehub-push@main"
+						with: {
+							visibility:             "public"
+							name:                   "waddle-social/waddle"
+							tag:                    "${{ inputs.tag }}"
+							"include-output-paths": true
+						}
+					}
+				},
+			]
+		},
 	]
 
 	ci: pipelines: {
 		default: {
 			mode: "expanded"
 			when: {
-				branch:        ["main"]
+				branch: ["main"]
 				defaultBranch: true
 				manual:        true
-				release:       ["published"]
 			}
 			provider: github: {
 				permissions: packages: "write"
@@ -49,19 +106,24 @@ schema.#Project & {
 				_t.fmt,
 				_t.clippy,
 				_t.test,
-				_t.buildRelease,
-				{
-					task: _t.publishContainerImage
-					matrix: arch: ["amd64"]
-				},
-				{
-					task: _t.publishReleaseArtifacts
-					artifacts: [{
-						from: "publishContainerImage"
-						to:   "target/digests"
-					}]
-				},
+				_t.publishContainerImage,
 			]
+		}
+		"Publish tags to FlakeHub": {
+			environment: "flakehub"
+			when: {
+				tag: ["v?[0-9]+.[0-9]+.[0-9]+*"]
+				manual: tag: {
+					description: "The existing tag to publish to FlakeHub"
+					type:        "string"
+					required:    true
+				}
+			}
+			provider: github: permissions: {
+				"id-token": "write"
+				contents:   "read"
+			}
+			tasks: [_t.flakehubPublished]
 		}
 		pullRequest: {
 			when: {
@@ -71,7 +133,7 @@ schema.#Project & {
 		}
 		xmppCompliance: {
 			when: {
-				branch:        ["main"]
+				branch: ["main"]
 				defaultBranch: true
 				pullRequest:   true
 				manual:        true
@@ -89,7 +151,7 @@ schema.#Project & {
 		}
 		githubEnricher: {
 			when: {
-				branch:        ["main"]
+				branch: ["main"]
 				defaultBranch: true
 				manual:        true
 			}
@@ -105,17 +167,6 @@ schema.#Project & {
 		}
 	}
 
-	images: {
-		server: schema.#ContainerImage & {
-			context:    "."
-			dockerfile: "Containerfile"
-			registry:   "ghcr.io/waddle-social/waddle"
-			platform: ["linux/amd64"]
-			tags: ["main"]
-			inputs: list.Concat([_rustInputs, ["Containerfile", ".dockerignore"]])
-		}
-	}
-
 	tasks: {
 		checkCiDrift: schema.#Task & {
 			command: "cuenv"
@@ -124,30 +175,30 @@ schema.#Project & {
 		}
 
 		fmt: xRust.#Fmt & {
-			args:   ["fmt", "--all", "--", "--check"]
+			args: ["fmt", "--all", "--", "--check"]
 			inputs: _rustInputs
 		}
 
 		clippy: xRust.#Clippy & {
-			args:   ["clippy", "--all-targets", "--all-features", "--", "-D", "clippy::correctness"]
+			args: ["clippy", "--all-targets", "--all-features", "--", "-D", "clippy::correctness"]
 			inputs: _rustInputs
 		}
 
 		test: xRust.#Test & {
-			args:   ["test", "--workspace", "--all-targets", "--locked"]
+			args: ["test", "--workspace", "--all-targets", "--locked"]
 			inputs: _rustInputs
 		}
 
 		buildCi: xRust.#Build & {
-			args:    ["build", "--profile", "ci", "--locked", "--package", "waddle-server"]
-			inputs:  _rustInputs
+			args: ["build", "--profile", "ci", "--locked", "--package", "waddle-server"]
+			inputs: _rustInputs
 			outputs: ["target/ci/waddle-server"]
 			dependsOn: [tasks.fmt, tasks.clippy, tasks.test]
 		}
 
 		buildRelease: xRust.#Build & {
-			args:    ["build", "--release", "--locked", "--package", "waddle-server"]
-			inputs:  _rustInputs
+			args: ["build", "--release", "--locked", "--package", "waddle-server"]
+			inputs: _rustInputs
 			outputs: ["target/release/waddle-server"]
 			dependsOn: [tasks.fmt, tasks.clippy, tasks.test]
 		}
@@ -155,75 +206,55 @@ schema.#Project & {
 		buildContainerImage: schema.#Task & {
 			command: "bash"
 			args: ["-c", #"""
-				set -euo pipefail
-				docker buildx create --use --name waddle-pr || true
-				docker buildx build \
-				  --platform linux/amd64 \
-				  --build-arg WADDLE_GIT_SHA="$(git rev-parse HEAD)" \
-				  --file Containerfile \
-				  --target runtime \
-				  .
-			"""#]
-			inputs: list.Concat([_rustInputs, ["Containerfile", ".dockerignore"]])
+					set -euo pipefail
+					if [ "$(uname -s)" != "Linux" ]; then
+					  echo "waddle-server-image-stream is linux-only; run this with a Linux Nix builder or in CI." >&2
+					  exit 1
+					fi
+					image_stream="$(nix build --print-out-paths ../#waddle-server-image-stream)"
+					"${image_stream}" | docker image load
+				"""#]
+			inputs: _nixInputs
 			dependsOn: [tasks.buildCi]
 		}
 
 		publishContainerImage: schema.#Task & {
 			command: "bash"
 			env: {
-				GITHUB_TOKEN: schema.#EnvPassthrough
-				GITHUB_ACTOR: schema.#EnvPassthrough
+				GITHUB_TOKEN:    schema.#EnvPassthrough
+				GITHUB_ACTOR:    "${{ github.actor }}"
+				GITHUB_REF_TYPE: "${{ github.ref_type }}"
+				GITHUB_REF_NAME: "${{ github.ref_name }}"
+				CUENV_ARCH:      "amd64"
 			}
 			args: ["-c", #"""
 				set -euo pipefail
 				case "${CUENV_ARCH}" in
-				  amd64) PLATFORM="linux/amd64" ;;
+				  amd64) ;;
 				  *) echo "unsupported CUENV_ARCH=${CUENV_ARCH}" >&2; exit 1 ;;
 				esac
 
 				echo "${GITHUB_TOKEN}" | docker login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
-				docker buildx create --use --name "waddle-${CUENV_ARCH}" || true
 				FULL_SHA="$(git rev-parse HEAD)"
+				SHORT_SHA="$(git rev-parse --short HEAD)"
 				mkdir -p ../target/digests
-				docker buildx build \
-				  --platform "${PLATFORM}" \
-				  --build-arg WADDLE_GIT_SHA="${FULL_SHA}" \
-				  --file Containerfile \
-				  --target runtime \
-				  --output "type=image,name=ghcr.io/waddle-social/waddle,push-by-digest=true,name-canonical=true,push=true" \
-				  . \
-				  2>&1 | tee "../target/digests/build-${CUENV_ARCH}.log"
-				grep -Eo 'sha256:[a-f0-9]{64}' "../target/digests/build-${CUENV_ARCH}.log" | tail -n1 > "../target/digests/${CUENV_ARCH}.txt"
-			"""#]
-			inputs: list.Concat([_rustInputs, ["Containerfile", ".dockerignore"]])
-			outputs: ["target/digests/**"]
-		}
 
-		publishReleaseArtifacts: schema.#Task & {
-			command: "bash"
-			env: {
-				GITHUB_TOKEN:    schema.#EnvPassthrough
-				GITHUB_ACTOR:    schema.#EnvPassthrough
-				GITHUB_REF_TYPE: schema.#EnvPassthrough
-				GITHUB_REF_NAME: schema.#EnvPassthrough
-			}
-			args: ["-c", #"""
-				set -euo pipefail
-				echo "${GITHUB_TOKEN}" | docker login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
+				image_stream="$(nix build --print-out-paths ../#waddle-server-image-stream)"
+				"${image_stream}" | docker image load
 
-				mapfile -t DIGESTS < <(find ../target/digests -name '*.txt' -type f -print0 | xargs -0 cat | sed '/^$/d' | sort -u)
-				if [ "${#DIGESTS[@]}" -eq 0 ]; then
-				  echo "No image digests found" >&2
+				docker tag ghcr.io/waddle-social/waddle:nix "ghcr.io/waddle-social/waddle:sha-${SHORT_SHA}"
+				docker push "ghcr.io/waddle-social/waddle:sha-${SHORT_SHA}" 2>&1 | tee "../target/digests/push-${CUENV_ARCH}.log"
+				digest="$(docker inspect --format='{{index .RepoDigests 0}}' "ghcr.io/waddle-social/waddle:sha-${SHORT_SHA}" | sed 's/^.*@//')"
+				if [ -z "${digest}" ]; then
+				  digest="$(grep -Eo 'sha256:[a-f0-9]{64}' "../target/digests/push-${CUENV_ARCH}.log" | tail -n1)"
+				fi
+				if [ -z "${digest}" ]; then
+				  echo "No image digest found" >&2
 				  exit 1
 				fi
-
-				REFS=()
-				for digest in "${DIGESTS[@]}"; do
-				  REFS+=("ghcr.io/waddle-social/waddle@${digest}")
-				done
+				printf '%s\n' "${digest}" > "../target/digests/${CUENV_ARCH}.txt"
 
 				TAG_ARGS=()
-				SHORT_SHA="$(git rev-parse --short HEAD)"
 				TAG_ARGS+=("-t" "ghcr.io/waddle-social/waddle:sha-${SHORT_SHA}")
 				if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
 				  VERSION="${GITHUB_REF_NAME}"
@@ -240,49 +271,31 @@ schema.#Project & {
 				  TAG_ARGS+=("-t" "ghcr.io/waddle-social/waddle:main")
 				fi
 
-				docker buildx imagetools create "${TAG_ARGS[@]}" "${REFS[@]}"
+				docker buildx imagetools create "${TAG_ARGS[@]}" "ghcr.io/waddle-social/waddle@${digest}"
 				docker buildx imagetools inspect "${TAG_ARGS[1]}"
 
 				echo "${GITHUB_TOKEN}" | helm registry login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
 				helm package charts/waddle-server -d /tmp/charts
 				helm push /tmp/charts/waddle-server-*.tgz oci://ghcr.io/waddle-social/waddle/charts || echo "Chart version already exists, skipping"
 
-				sed -i "s/tag: main/tag: sha-${SHORT_SHA}/" ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml
-				flux push artifact oci://ghcr.io/waddle-social/waddle/gitops:latest \
-				  --path=../infrastructure/waddle.cloud/gitops \
+				yq -i ".spec.values.image.tag = \"sha-${SHORT_SHA}\"" ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml
+				yq -e ".spec.values.image.tag == \"sha-${SHORT_SHA}\"" ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml > /dev/null
+				flux push artifact oci://ghcr.io/waddle-social/waddle/gitops-waddle-server:latest \
+				  --path=../infrastructure/waddle.cloud/gitops/waddle-server \
 				  --source="$(git config --get remote.origin.url)" \
 				  --revision="${SHORT_SHA}"
-			"""#]
-			inputs: ["charts/**"]
+				"""#]
+			inputs: list.Concat([_nixInputs, ["charts/**"]])
+			outputs: ["../target/digests/**"]
+			dependsOn: [tasks.fmt, tasks.clippy, tasks.test]
 		}
 
-		helmPush: schema.#Task & {
-			command: "bash"
-			env: {
-				GITHUB_TOKEN: schema.#EnvPassthrough
-				GITHUB_ACTOR: schema.#EnvPassthrough
-			}
-			args: ["-c", #"""
-				echo "${GITHUB_TOKEN}" | helm registry login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
-				helm package charts/waddle-server -d /tmp/charts
-				helm push /tmp/charts/waddle-server-*.tgz oci://ghcr.io/waddle-social/waddle/charts || echo "Chart version already exists, skipping"
-				mkdir -p target/published
-				touch target/published/helm-chart
-			"""#]
-			inputs: ["charts/**"]
-			outputs: ["target/published/helm-chart"]
-		}
-
-		gitopsPush: schema.#Task & {
-			command: "bash"
-			args: ["-c", #"""
-				SHORT_SHA=$(git rev-parse --short HEAD)
-				sed -i "s/tag: main/tag: sha-${SHORT_SHA}/" ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml
-				flux push artifact oci://ghcr.io/waddle-social/waddle/gitops:latest \
-				  --path=../infrastructure/waddle.cloud/gitops \
-				  --source="$(git config --get remote.origin.url)" \
-				  --revision="${SHORT_SHA}"
-			"""#]
+		flakehubPublished: schema.#Task & {
+			command: "true"
+			inputs: [
+				"../flake.nix",
+				"../flake.lock",
+			]
 		}
 
 		build: schema.#Task & {
@@ -303,42 +316,42 @@ schema.#Project & {
 
 		// XMPP compliance tasks — run as the xmppCompliance pipeline
 		xmppUnitTests: xRust.#Test & {
-			args:   ["test", "--package", "waddle-xmpp", "--lib", "--verbose"]
+			args: ["test", "--package", "waddle-xmpp", "--lib", "--verbose"]
 			inputs: _rustInputs
 		}
 
 		xmppServerTests: xRust.#Test & {
-			args:   ["test", "--package", "waddle-server", "--verbose"]
+			args: ["test", "--package", "waddle-server", "--verbose"]
 			inputs: _rustInputs
 		}
 
 		xmppProtocolConformance: xRust.#Test & {
-			args:   ["test", "--package", "waddle-xmpp", "--test", "protocol_conformance", "--verbose"]
+			args: ["test", "--package", "waddle-xmpp", "--test", "protocol_conformance", "--verbose"]
 			inputs: _rustInputs
 		}
 
 		xmppComplianceFastRegression: xRust.#Test & {
-			args:   ["test", "--package", "waddle-xmpp", "--test", "compliance_fast_regression", "--verbose"]
+			args: ["test", "--package", "waddle-xmpp", "--test", "compliance_fast_regression", "--verbose"]
 			inputs: _rustInputs
 		}
 
 		xmppXepIntegration: xRust.#Test & {
-			args:   ["test", "--package", "waddle-xmpp", "--tests", "--verbose"]
+			args: ["test", "--package", "waddle-xmpp", "--tests", "--verbose"]
 			inputs: _rustInputs
 		}
 
 		xmppE2eMessaging: xRust.#Test & {
-			args:   ["test", "--package", "waddle-xmpp", "--test", "messaging_e2e", "--verbose"]
+			args: ["test", "--package", "waddle-xmpp", "--test", "messaging_e2e", "--verbose"]
 			inputs: _rustInputs
 		}
 
 		xmppFederatedMuc: xRust.#Test & {
-			args:   ["test", "--package", "waddle-xmpp", "--test", "federated_muc", "--verbose"]
+			args: ["test", "--package", "waddle-xmpp", "--test", "federated_muc", "--verbose"]
 			inputs: _rustInputs
 		}
 
 		xmppS2sIntegration: xRust.#Test & {
-			args:   ["test", "--package", "waddle-xmpp", "--test", "s2s_integration", "--verbose"]
+			args: ["test", "--package", "waddle-xmpp", "--test", "s2s_integration", "--verbose"]
 			inputs: _rustInputs
 		}
 
@@ -351,7 +364,7 @@ schema.#Project & {
 				"--target-dir", "target",
 				"--manifest-path", "extensions/github-enricher/Cargo.toml",
 			]
-			inputs:  ["extensions/github-enricher/**", "Cargo.lock"]
+			inputs: ["extensions/github-enricher/**", "Cargo.lock"]
 			outputs: ["target/wasm32-wasip2/release/github_enricher.wasm"]
 		}
 
@@ -362,32 +375,32 @@ schema.#Project & {
 				GITHUB_ACTOR: schema.#EnvPassthrough
 			}
 			args: ["-c", #"""
-				set -euo pipefail
-				WASM_FILE="target/wasm32-wasip2/release/github_enricher.wasm"
-				IMAGE="ghcr.io/waddle-social/waddle/extensions/github-enricher"
-				echo "${GITHUB_TOKEN}" | oras login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
-				FULL_SHA="$(git rev-parse HEAD)"
-				oras push "${IMAGE}:sha-${FULL_SHA}" \
-				  --artifact-type application/vnd.waddle.extension.wasm.v1+wasm \
-				  "${WASM_FILE}:application/wasm"
-				oras push "${IMAGE}:main" \
-				  --artifact-type application/vnd.waddle.extension.wasm.v1+wasm \
-				  "${WASM_FILE}:application/wasm"
-				oras push "${IMAGE}:latest" \
-				  --artifact-type application/vnd.waddle.extension.wasm.v1+wasm \
-				  "${WASM_FILE}:application/wasm"
-			"""#]
+					set -euo pipefail
+					WASM_FILE="target/wasm32-wasip2/release/github_enricher.wasm"
+					IMAGE="ghcr.io/waddle-social/waddle/extensions/github-enricher"
+					echo "${GITHUB_TOKEN}" | oras login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+					FULL_SHA="$(git rev-parse HEAD)"
+					oras push "${IMAGE}:sha-${FULL_SHA}" \
+					  --artifact-type application/vnd.waddle.extension.wasm.v1+wasm \
+					  "${WASM_FILE}:application/wasm"
+					oras push "${IMAGE}:main" \
+					  --artifact-type application/vnd.waddle.extension.wasm.v1+wasm \
+					  "${WASM_FILE}:application/wasm"
+					oras push "${IMAGE}:latest" \
+					  --artifact-type application/vnd.waddle.extension.wasm.v1+wasm \
+					  "${WASM_FILE}:application/wasm"
+				"""#]
 			dependsOn: [tasks.buildGithubEnricher]
 		}
 
 		pinGithubEnricherTag: schema.#Task & {
 			command: "bash"
 			args: ["-c", #"""
-				set -euo pipefail
-				FULL_SHA="$(git rev-parse HEAD)"
-				yq -i "(.spec.values.extensions.modules[] | select(.name == \"github-enricher\") | .tag) = \"sha-${FULL_SHA}\"" ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml
-				yq -e ".spec.values.extensions.modules[] | select(.name == \"github-enricher\") | .tag == \"sha-${FULL_SHA}\"" ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml > /dev/null
-			"""#]
+					set -euo pipefail
+					FULL_SHA="$(git rev-parse HEAD)"
+					yq -i "(.spec.values.extensions.modules[] | select(.name == \"github-enricher\") | .tag) = \"sha-${FULL_SHA}\"" ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml
+					yq -e ".spec.values.extensions.modules[] | select(.name == \"github-enricher\") | .tag == \"sha-${FULL_SHA}\"" ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml > /dev/null
+				"""#]
 			dependsOn: [tasks.pushGithubEnricherOci]
 		}
 
@@ -399,13 +412,13 @@ schema.#Project & {
 			}
 			args: ["-c", #"""
 				set -euo pipefail
-				echo "${GITHUB_TOKEN}" | docker login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
-				flux push artifact \
-				  oci://ghcr.io/waddle-social/waddle/gitops:latest \
-				  --path=../infrastructure/waddle.cloud/gitops \
-				  --source="$(git config --get remote.origin.url)" \
-				  --revision="$(git rev-parse --short HEAD)"
-			"""#]
+					echo "${GITHUB_TOKEN}" | docker login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
+					flux push artifact \
+					  oci://ghcr.io/waddle-social/waddle/gitops-waddle-server:latest \
+					  --path=../infrastructure/waddle.cloud/gitops/waddle-server \
+					  --source="$(git config --get remote.origin.url)" \
+					  --revision="$(git rev-parse --short HEAD)"
+				"""#]
 			dependsOn: [tasks.pinGithubEnricherTag]
 		}
 	}

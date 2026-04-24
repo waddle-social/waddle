@@ -16,6 +16,7 @@ resources:
   - kustomization-infra-cilium-gateway.yaml
   - livekit-sfu-source.yaml
   - kustomization-infra-livekit-sfu.yaml
+  - waddle-server-source.yaml
   - kustomization-infra-teleport-core.yaml
   - kustomization-infra-teleport-postinstall.yaml
   - kustomization-infra-waddle-server.yaml
