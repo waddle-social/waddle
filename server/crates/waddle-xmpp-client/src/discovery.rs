@@ -17,7 +17,6 @@ pub const DISCO_ITEMS_NS: &str = "http://jabber.org/protocol/disco#items";
 pub const UPLOAD_NS: &str = "urn:xmpp:http:upload:0";
 pub const INBOX_NS: &str = "erlang-solutions.com:xmpp:inbox:0";
 pub const PUSH_NS: &str = "urn:xmpp:push:0";
-pub const ADHOC_NS: &str = "http://jabber.org/protocol/commands";
 pub const CLIENT_NS: &str = "jabber:client";
 pub const DATA_FORMS_NS: &str = "jabber:x:data";
 pub const RSM_NS: &str = "http://jabber.org/protocol/rsm";
@@ -91,13 +90,6 @@ pub struct DiscoveredChannel {
     pub name: String,
     pub channel_type: String,
     pub position: i32,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct CreateChannelResult {
-    pub room_jid: String,
-    pub waddle_id: String,
-    pub channel_id: String,
 }
 
 // ── Parse helpers ─────────────────────────────────────────────────────────────
@@ -345,60 +337,6 @@ fn build_disable_push_iq(push_service_jid: &str, node: &str) -> Element {
         .build()
 }
 
-fn build_create_channel_iq(
-    service_jid: &str,
-    waddle_id: &str,
-    name: &str,
-    channel_type: &str,
-) -> Element {
-    let id = format!("create-channel-{}", next_id());
-    let form = Element::builder("x", DATA_FORMS_NS)
-        .attr("type", "submit")
-        .append(
-            Element::builder("field", DATA_FORMS_NS)
-                .attr("var", "name")
-                .append(
-                    Element::builder("value", DATA_FORMS_NS)
-                        .append(name)
-                        .build(),
-                )
-                .build(),
-        )
-        .append(
-            Element::builder("field", DATA_FORMS_NS)
-                .attr("var", "type")
-                .append(
-                    Element::builder("value", DATA_FORMS_NS)
-                        .append(channel_type)
-                        .build(),
-                )
-                .build(),
-        )
-        .append(
-            Element::builder("field", DATA_FORMS_NS)
-                .attr("var", "waddle_id")
-                .append(
-                    Element::builder("value", DATA_FORMS_NS)
-                        .append(waddle_id)
-                        .build(),
-                )
-                .build(),
-        )
-        .build();
-    Element::builder("iq", CLIENT_NS)
-        .attr("type", "set")
-        .attr("to", service_jid)
-        .attr("id", id)
-        .append(
-            Element::builder("command", ADHOC_NS)
-                .attr("node", "create-channel")
-                .attr("action", "execute")
-                .append(form)
-                .build(),
-        )
-        .build()
-}
-
 // ── Private helpers ───────────────────────────────────────────────────────────
 
 /// Parse a channel node attribute in the format `{type}_{position}_{id}`.
@@ -414,36 +352,6 @@ fn parse_channel_node(node: Option<&str>, jid: &str) -> (String, i32, String) {
     }
     let id = jid.split('@').next().unwrap_or(jid).to_string();
     ("text".to_string(), 0, id)
-}
-
-/// Parse the result of a `create-channel` ad-hoc command IQ.
-fn parse_create_channel_result(iq: &Element) -> Option<CreateChannelResult> {
-    let command = iq.get_child("command", ADHOC_NS)?;
-    let form = command.get_child("x", DATA_FORMS_NS)?;
-
-    let room_jid = form
-        .children()
-        .filter(|c| c.name() == "field" && c.ns() == DATA_FORMS_NS)
-        .find(|c| c.attr("var") == Some("room_jid"))
-        .and_then(|c| c.get_child("value", DATA_FORMS_NS))
-        .map(|v| v.text())?;
-
-    let (waddle_id, channel_id) = parse_room_jid_parts(&room_jid);
-
-    Some(CreateChannelResult {
-        room_jid,
-        waddle_id,
-        channel_id,
-    })
-}
-
-/// Extract `waddle_id` and `channel_id` from `{waddleID}_{channelID}@muc.domain`.
-fn parse_room_jid_parts(room_jid: &str) -> (String, String) {
-    let local = room_jid.split('@').next().unwrap_or(room_jid);
-    let mut parts = local.splitn(2, '_');
-    let waddle_id = parts.next().unwrap_or("").to_string();
-    let channel_id = parts.next().unwrap_or("").to_string();
-    (waddle_id, channel_id)
 }
 
 fn parse_error() -> ClientError {
@@ -506,15 +414,6 @@ pub trait DiscoveryExt {
 
     /// Discover channels within a waddle.
     async fn discover_channels(&self, waddle_jid: &str) -> ClientResult<Vec<DiscoveredChannel>>;
-
-    /// Create a new channel via the Waddle ad-hoc command.
-    async fn create_channel(
-        &self,
-        service_jid: &str,
-        waddle_id: &str,
-        name: &str,
-        channel_type: &str,
-    ) -> ClientResult<CreateChannelResult>;
 }
 
 // ── Implementation ────────────────────────────────────────────────────────────
@@ -658,18 +557,6 @@ impl DiscoveryExt for ClientHandle {
             })
             .collect();
         Ok(channels)
-    }
-
-    async fn create_channel(
-        &self,
-        service_jid: &str,
-        waddle_id: &str,
-        name: &str,
-        channel_type: &str,
-    ) -> ClientResult<CreateChannelResult> {
-        let iq = build_create_channel_iq(service_jid, waddle_id, name, channel_type);
-        let result = self.send_iq(iq).await?;
-        parse_create_channel_result(&result).ok_or_else(parse_error)
     }
 }
 

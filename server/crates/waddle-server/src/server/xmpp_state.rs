@@ -23,7 +23,7 @@ use kameo::actor::ActorRef;
 use serde::Serialize;
 
 use crate::server::bootstrap_membership::{
-    provision_user_membership, BootstrapMembershipConfig, DEPLOYMENT_SERVER_ID,
+    provision_user_membership, BootstrapMembershipConfig,
 };
 
 #[derive(Debug, Serialize)]
@@ -83,50 +83,6 @@ fn parse_channel_record(row: &crate::db::actor::RowValues) -> Result<XmppChannel
         created_at: db_string(row, 6, "created_at")?,
         updated_at: db_optional_string(row, 7, "updated_at")?,
     })
-}
-
-async fn can_create_space_channel(
-    permission_actor: &ActorRef<PermissionActor>,
-    user_id: &str,
-) -> bool {
-    let subject = Subject::user(user_id);
-    let object = Object::new(ObjectType::Server, DEPLOYMENT_SERVER_ID);
-
-    match permission_actor
-        .ask(CheckPermission {
-            subject: subject.clone(),
-            permission: Permission::CreateMuc,
-            object: object.clone(),
-        })
-        .await
-    {
-        Ok(response) if response.allowed => return true,
-        Ok(_) => {}
-        Err(error) => {
-            warn!(
-                user_id = %user_id,
-                error = %error,
-                "Create-MUC permission evaluation failed; falling back to direct deployment relations"
-            );
-        }
-    }
-
-    match permission_actor
-        .ask(ListRelations { subject, object })
-        .await
-    {
-        Ok(relations) => relations
-            .iter()
-            .any(|relation| matches!(relation.name.as_str(), "owner" | "admin")),
-        Err(error) => {
-            warn!(
-                user_id = %user_id,
-                error = %error,
-                "Failed to list direct deployment relations for create-MUC fallback"
-            );
-            false
-        }
-    }
 }
 
 pub(crate) async fn get_xmpp_channel(
@@ -1619,132 +1575,6 @@ fn roster_item_to_row(item: &waddle_xmpp::roster::RosterItem) -> crate::db::rost
         subscription: item.subscription.as_str().to_string(),
         ask: item.ask.map(|a| a.as_str().to_string()),
         groups: item.groups.clone(),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// CreateChannelDeps implementation
-// ---------------------------------------------------------------------------
-
-impl waddle_xmpp::commands::CreateChannelDeps for XmppAppState {
-    async fn create_channel(
-        &self,
-        user_id: &str,
-        metadata: waddle_xmpp::commands::ChannelMetadata,
-    ) -> Result<waddle_xmpp::commands::CreateChannelResult, waddle_xmpp::commands::CreateChannelError>
-    {
-        use tracing::error;
-
-        let space_id = "space";
-        let can_create = can_create_space_channel(&self.permission_actor, user_id).await;
-
-        if !can_create {
-            return Err(waddle_xmpp::commands::CreateChannelError::PermissionDenied);
-        }
-
-        let space_db_service = match &self.space_db_service {
-            Some(service) => service,
-            None => return Err(waddle_xmpp::commands::CreateChannelError::DatabasePoolUnavailable),
-        };
-
-        let space_db_actor = space_db_service.actor();
-
-        let channel_id = metadata.id;
-        let now = chrono::Utc::now().to_rfc3339();
-
-        space_db_actor
-            .ask(DbExecute {
-                sql: r#"
-                    INSERT INTO channels (id, name, description, channel_type, position, is_default, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                "#
-                .to_string(),
-                params: vec![
-                    crate::db::Value::from(channel_id.as_str()),
-                    crate::db::Value::from(metadata.name.as_str()),
-                    metadata
-                        .description
-                        .as_deref()
-                        .map(crate::db::Value::from)
-                        .unwrap_or(crate::db::Value::Null),
-                    crate::db::Value::from(metadata.channel_type.as_str()),
-                    crate::db::Value::from(metadata.position as i64),
-                    crate::db::Value::from(0_i64),
-                    crate::db::Value::from(now.as_str()),
-                    crate::db::Value::from(now.as_str()),
-                ],
-            })
-            .await
-            .map_err(|e| {
-                waddle_xmpp::commands::CreateChannelError::DatabaseConnectionFailed(e.to_string())
-            })?;
-
-        // Create permission tuple: channel#parent@space
-        let parent_tuple = Tuple::new(
-            Object::new(ObjectType::Channel, &channel_id),
-            Relation::new("parent"),
-            Subject {
-                subject_type: SubjectType::Space,
-                id: space_id.to_string(),
-                relation: None,
-            },
-        );
-
-        if let Err(err) = self
-            .permission_actor
-            .ask(WriteTuple {
-                tuple: parent_tuple,
-            })
-            .await
-            .map_err(|e| e.to_string())
-        {
-            error!("Failed to write parent permission tuple: {}", err);
-            // Clean up: delete the channel
-            let _ = space_db_actor
-                .ask(DbExecute {
-                    sql: "DELETE FROM channels WHERE id = ?".to_string(),
-                    params: vec![crate::db::Value::from(channel_id.as_str())],
-                })
-                .await;
-            return Err(
-                waddle_xmpp::commands::CreateChannelError::PermissionTupleWriteFailed(
-                    err.to_string(),
-                ),
-            );
-        }
-
-        let owner_tuple = Tuple::new(
-            Object::new(ObjectType::Channel, &channel_id),
-            Relation::new("owner"),
-            Subject::user(user_id),
-        );
-
-        if let Err(err) = self
-            .permission_actor
-            .ask(WriteTuple { tuple: owner_tuple })
-            .await
-            .map_err(|e| e.to_string())
-        {
-            error!("Failed to write channel owner permission tuple: {}", err);
-            let _ = space_db_actor
-                .ask(DbExecute {
-                    sql: "DELETE FROM channels WHERE id = ?".to_string(),
-                    params: vec![crate::db::Value::from(channel_id.as_str())],
-                })
-                .await;
-            return Err(
-                waddle_xmpp::commands::CreateChannelError::PermissionTupleWriteFailed(
-                    err.to_string(),
-                ),
-            );
-        }
-
-        let channel_jid = format!("{}@muc.{}", channel_id, self.domain);
-
-        Ok(waddle_xmpp::commands::CreateChannelResult {
-            channel_id,
-            channel_jid,
-        })
     }
 }
 

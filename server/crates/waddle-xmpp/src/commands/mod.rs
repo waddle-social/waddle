@@ -3,13 +3,8 @@
 //! This module implements the runtime infrastructure for ad-hoc commands,
 //! allowing the server to register and dispatch XEP-0050 commands dynamically.
 
-pub mod create_channel;
 pub mod registry;
 
-pub use create_channel::{
-    handle_create_channel, ChannelMetadata, CreateChannelDeps, CreateChannelError,
-    CreateChannelResult, NODE_CREATE_CHANNEL, NODE_CREATE_MUC,
-};
 pub use registry::{
     CommandContext, CommandHandler, CommandMetadata, CommandRegistry, CommandResult, CommandSession,
 };

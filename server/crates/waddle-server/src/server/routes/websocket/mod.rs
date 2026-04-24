@@ -627,31 +627,6 @@ pub(crate) fn iq_to_xml(iq: xmpp_parsers::iq::Iq) -> String {
     stanza_to_xml(&Stanza::Iq(iq))
 }
 
-pub(crate) fn build_iq_result_xml(
-    id: &str,
-    from: Option<&str>,
-    to: Option<&str>,
-    payload: Option<xmpp_parsers::minidom::Element>,
-) -> String {
-    let mut iq = xmpp_parsers::minidom::Element::builder("iq", "jabber:client")
-        .attr("id", id)
-        .attr("type", "result");
-    if let Some(from) = from {
-        iq = iq.attr("from", from);
-    }
-    if let Some(to) = to {
-        iq = iq.attr("to", to);
-    }
-
-    let iq = if let Some(payload) = payload {
-        iq.append(payload).build()
-    } else {
-        iq.build()
-    };
-
-    element_to_xml(iq)
-}
-
 pub(crate) fn build_iq_error_xml_with_addresses(
     id: &str,
     from: Option<&str>,
@@ -3412,8 +3387,8 @@ mod tests {
             .protocol
             .command_registry
             .register(
-                "waddle:create-channel",
-                "Create Channel",
+                "test:adhoc-command",
+                "Test Command",
                 |ctx: CommandContext| async move {
                     CommandResult::Executing {
                         form: waddle_xmpp::xep::xep0004::DataForm::new(
@@ -3428,7 +3403,7 @@ mod tests {
 
         let session = create_test_session(state.as_ref(), "alice").await;
         let sender_jid: FullJid = "alice@example.com/web".parse().expect("sender jid");
-        let frame = r#"<iq xmlns="jabber:client" id="cmd-1" type="set" to="example.com"><command xmlns="http://jabber.org/protocol/commands" node="waddle:create-channel" action="execute"/></iq>"#;
+        let frame = r#"<iq xmlns="jabber:client" id="cmd-1" type="set" to="example.com"><command xmlns="http://jabber.org/protocol/commands" node="test:adhoc-command" action="execute"/></iq>"#;
         let responses = handle_iq(
             frame,
             "example.com",
@@ -3463,8 +3438,8 @@ mod tests {
             .protocol
             .command_registry
             .register(
-                "waddle:create-channel",
-                "Create Channel",
+                "test:adhoc-command",
+                "Test Command",
                 |_ctx: CommandContext| async move {
                     CommandResult::Executing {
                         form: waddle_xmpp::xep::xep0004::DataForm::new(
@@ -3480,7 +3455,7 @@ mod tests {
         let session = create_test_session(state.as_ref(), "alice").await;
         let pending_jid: FullJid = "alice@example.com/pending".parse().expect("pending jid");
         let mut carbons_enabled = false;
-        let frame = r#"<iq xmlns="jabber:client" id="cmd-prebind-1" type="set" to="example.com"><command xmlns="http://jabber.org/protocol/commands" node="waddle:create-channel" action="execute"/></iq>"#;
+        let frame = r#"<iq xmlns="jabber:client" id="cmd-prebind-1" type="set" to="example.com"><command xmlns="http://jabber.org/protocol/commands" node="test:adhoc-command" action="execute"/></iq>"#;
         let responses = handle_iq_with_conn_state(
             parse_iq_for_test(frame),
             "example.com",
@@ -3657,6 +3632,155 @@ mod tests {
             response.contains("General"),
             "expected channel name in spaces node disco#items: {response}"
         );
+    }
+
+    #[tokio::test]
+    async fn standard_muc_owner_config_persists_room_and_enforces_nonanonymous_defaults() {
+        let state = create_test_websocket_state().await;
+        let session = create_test_session(state.as_ref(), "alice").await;
+
+        let room_jid: BareJid = "project@muc.example.com".parse().expect("room jid");
+        let alice_jid: FullJid = format!("{}@example.com/web", session.xmpp_localpart)
+            .parse()
+            .expect("alice jid");
+        let ready = ready_phase(&alice_jid);
+
+        handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room_jid,
+            &alice_jid,
+            "alice",
+            &Some(session.clone()),
+        )
+        .await;
+
+        let submit_form = Element::builder("x", waddle_xmpp::muc::DATA_FORMS_NS)
+            .attr("type", "submit")
+            .append(
+                Element::builder("field", waddle_xmpp::muc::DATA_FORMS_NS)
+                    .attr("var", "muc#roomconfig_roomname")
+                    .append(
+                        Element::builder("value", waddle_xmpp::muc::DATA_FORMS_NS)
+                            .append("Project Room")
+                            .build(),
+                    )
+                    .build(),
+            )
+            .append(
+                Element::builder("field", waddle_xmpp::muc::DATA_FORMS_NS)
+                    .attr("var", "muc#roomconfig_persistentroom")
+                    .append(
+                        Element::builder("value", waddle_xmpp::muc::DATA_FORMS_NS)
+                            .append("0")
+                            .build(),
+                    )
+                    .build(),
+            )
+            .append(
+                Element::builder("field", waddle_xmpp::muc::DATA_FORMS_NS)
+                    .attr("var", "muc#roomconfig_whois")
+                    .append(
+                        Element::builder("value", waddle_xmpp::muc::DATA_FORMS_NS)
+                            .append("moderators")
+                            .build(),
+                    )
+                    .build(),
+            )
+            .build();
+        let owner_iq = element_to_xml(
+            Element::builder("iq", waddle_xmpp::ns::JABBER_CLIENT)
+                .attr("id", "owner-submit")
+                .attr("type", "set")
+                .attr("to", room_jid.to_string())
+                .append(
+                    Element::builder("query", waddle_xmpp::muc::NS_MUC_OWNER)
+                        .append(submit_form)
+                        .build(),
+                )
+                .build(),
+        );
+
+        let responses = handle_iq(
+            &owner_iq,
+            "example.com",
+            "muc.example.com",
+            state.as_ref(),
+            &Some(session),
+            &ready,
+        )
+        .await;
+        assert_eq!(responses.len(), 1, "owner config response: {responses:?}");
+        assert!(responses[0].contains("type=\"result\""));
+
+        let actor = state.deps.app_state.db_pool.global_actor().clone();
+        let channel = crate::server::xmpp_state::get_xmpp_channel(actor, "project")
+            .await
+            .expect("channel lookup")
+            .expect("persisted channel");
+        assert_eq!(channel.name, "Project Room");
+
+        let snapshot = get_room_actor(state.as_ref(), &room_jid)
+            .await
+            .expect("room actor")
+            .ask(GetSnapshot)
+            .await
+            .expect("snapshot")
+            .room;
+        assert!(snapshot.config.persistent);
+        assert_eq!(snapshot.config.whois, waddle_xmpp::muc::RoomWhois::Anyone);
+
+        let disco = disco_items_iq_frame("muc-items", "muc.example.com", None);
+        let responses = handle_iq(
+            &disco,
+            "example.com",
+            "muc.example.com",
+            state.as_ref(),
+            &None,
+            &ConnectionPhase::Unauthenticated,
+        )
+        .await;
+        assert!(responses[0].contains("project@muc.example.com"));
+    }
+
+    #[tokio::test]
+    async fn room_disco_info_advertises_parent_space_metadata_for_linked_channel() {
+        let state = create_test_websocket_state().await;
+        let space_db = state.deps.app_state.db_pool.global();
+        let conn = space_db.guard().await.expect("persistent connection");
+        conn.execute(
+            "INSERT INTO channels (id, name, channel_type, position, is_default) VALUES (?, ?, 'text', 0, 0)",
+            crate::db_params!["linked", "Linked"],
+        )
+        .await
+        .expect("insert channel");
+        conn.execute(
+            "INSERT INTO spaces (id, name, owner_id, is_public, created_at, updated_at) VALUES (?, ?, 'server', 1, ?, ?)",
+            crate::db_params!["space", "Example Space", "1970-01-01T00:00:00Z", "1970-01-01T00:00:00Z"],
+        )
+        .await
+        .expect("insert space");
+        conn.execute(
+            "INSERT INTO space_channels (space_id, channel_id, created_at) VALUES (?, ?, ?)",
+            crate::db_params!["space", "linked", "1970-01-01T00:00:00Z"],
+        )
+        .await
+        .expect("link channel to space");
+        drop(conn);
+
+        let query = disco_info_iq_frame("room-info", "linked@muc.example.com", None);
+        let responses = handle_iq(
+            &query,
+            "example.com",
+            "muc.example.com",
+            state.as_ref(),
+            &None,
+            &ConnectionPhase::Unauthenticated,
+        )
+        .await;
+        let response = responses.first().expect("room disco response");
+        assert!(response.contains("muc_nonanonymous"));
+        assert!(response.contains("pubsub#title") && response.contains("Example Space"));
     }
 
     #[tokio::test]

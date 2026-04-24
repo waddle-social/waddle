@@ -221,8 +221,6 @@ export interface DiscoveredSpace {
 export interface DiscoveredTopology {
   spaces: DiscoveredSpace[];
   rooms: DiscoveredChannel[];
-  canCreateMuc: boolean;
-  canCreateSpace: boolean;
 }
 
 /** Cross-room activity event with optional mention data for notifications. */
