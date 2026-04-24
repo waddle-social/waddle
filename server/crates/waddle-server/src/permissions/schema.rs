@@ -158,9 +158,6 @@ definition server {
   relation admin: user
   relation member: user
 
-  permission owner = owner
-  permission admin = admin + owner
-  permission member = member + admin
   permission create_space = admin
   permission create_muc = admin
 }
@@ -171,10 +168,6 @@ definition space {
   relation moderator: user
   relation member: user
 
-  permission owner = owner
-  permission admin = admin + owner
-  permission moderator = moderator + admin
-  permission member = member + moderator
   permission delete = owner
   permission manage_settings = admin
   permission manage_roles = admin
@@ -558,5 +551,52 @@ mod tests {
     fn spicedb_schema_uses_valid_direct_message_namespace() {
         assert!(SPICEDB_SCHEMA.contains("definition direct_message {"));
         assert!(!SPICEDB_SCHEMA.contains("definition dm {"));
+    }
+
+    #[test]
+    fn spicedb_schema_does_not_reuse_relation_names_as_permissions() {
+        let mut current_definition = None;
+        let mut relations = std::collections::HashSet::new();
+        let mut permissions = std::collections::HashSet::new();
+
+        for line in SPICEDB_SCHEMA.lines().map(str::trim) {
+            if let Some(definition) = line
+                .strip_prefix("definition ")
+                .and_then(|line| line.strip_suffix(" {"))
+            {
+                current_definition = Some(definition);
+                relations.clear();
+                permissions.clear();
+                continue;
+            }
+
+            if line == "}" {
+                if let Some(definition) = current_definition.take() {
+                    let duplicates = relations
+                        .intersection(&permissions)
+                        .copied()
+                        .collect::<Vec<_>>();
+                    assert!(
+                        duplicates.is_empty(),
+                        "definition {definition} reuses relation names as permissions: {duplicates:?}"
+                    );
+                }
+                continue;
+            }
+
+            if let Some(name) = line
+                .strip_prefix("relation ")
+                .and_then(|line| line.split(':').next())
+            {
+                relations.insert(name.trim());
+            }
+
+            if let Some(name) = line
+                .strip_prefix("permission ")
+                .and_then(|line| line.split('=').next())
+            {
+                permissions.insert(name.trim());
+            }
+        }
     }
 }
