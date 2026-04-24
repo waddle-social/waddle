@@ -36,7 +36,7 @@ impl fmt::Display for ObjectType {
             ObjectType::Space => write!(f, "space"),
             ObjectType::Channel => write!(f, "channel"),
             ObjectType::Message => write!(f, "message"),
-            ObjectType::Dm => write!(f, "dm"),
+            ObjectType::Dm => write!(f, "direct_message"),
             ObjectType::Role => write!(f, "role"),
         }
     }
@@ -51,7 +51,7 @@ impl FromStr for ObjectType {
             "space" => Ok(ObjectType::Space),
             "channel" => Ok(ObjectType::Channel),
             "message" => Ok(ObjectType::Message),
-            "dm" => Ok(ObjectType::Dm),
+            "direct_message" => Ok(ObjectType::Dm),
             "role" => Ok(ObjectType::Role),
             _ => Err(PermissionError::InvalidObject(format!(
                 "Unknown object type: {}",

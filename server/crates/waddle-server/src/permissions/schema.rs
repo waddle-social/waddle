@@ -213,7 +213,7 @@ definition message {
   permission react = channel->read
 }
 
-definition dm {
+definition direct_message {
   relation participant: user
 
   permission read = participant
@@ -552,5 +552,11 @@ mod tests {
             }
             _ => panic!("Expected DirectRelation permission"),
         }
+    }
+
+    #[test]
+    fn spicedb_schema_uses_valid_direct_message_namespace() {
+        assert!(SPICEDB_SCHEMA.contains("definition direct_message {"));
+        assert!(!SPICEDB_SCHEMA.contains("definition dm {"));
     }
 }

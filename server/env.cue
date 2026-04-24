@@ -314,6 +314,16 @@ schema.#Project & {
 			dependsOn: [tasks.build]
 		}
 
+		reconcileServerWithSource: schema.#Task & {
+			command: "bash"
+			args: ["-c", #"""
+				set -euo pipefail
+				flux reconcile source oci waddle-server -n flux-system
+				flux reconcile kustomization infra-waddle-server -n flux-system --with-source
+				flux reconcile helmrelease waddle-server -n waddle --with-source
+			"""#]
+		}
+
 		// XMPP compliance tasks — run as the xmppCompliance pipeline
 		xmppUnitTests: xRust.#Test & {
 			args: ["test", "--package", "waddle-xmpp", "--lib", "--verbose"]

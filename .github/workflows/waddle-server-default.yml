@@ -78,6 +78,9 @@ jobs:
       working-directory: server
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GITHUB_ACTOR: ${{ github.actor }}
+        GITHUB_REF_TYPE: ${{ github.ref_type }}
+        GITHUB_REF_NAME: ${{ github.ref_name }}
   fmt:
     name: fmt
     runs-on: ubuntu-latest
@@ -106,6 +109,9 @@ jobs:
       working-directory: server
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GITHUB_ACTOR: ${{ github.actor }}
+        GITHUB_REF_TYPE: ${{ github.ref_type }}
+        GITHUB_REF_NAME: ${{ github.ref_name }}
   publishContainerImage:
     name: publishContainerImage
     runs-on: ubuntu-latest
@@ -137,10 +143,10 @@ jobs:
       working-directory: server
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        CUENV_ARCH: amd64
         GITHUB_ACTOR: ${{ github.actor }}
-        GITHUB_REF_NAME: ${{ github.ref_name }}
         GITHUB_REF_TYPE: ${{ github.ref_type }}
+        GITHUB_REF_NAME: ${{ github.ref_name }}
+        CUENV_ARCH: amd64
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
       with:
@@ -176,3 +182,6 @@ jobs:
       working-directory: server
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GITHUB_ACTOR: ${{ github.actor }}
+        GITHUB_REF_TYPE: ${{ github.ref_type }}
+        GITHUB_REF_NAME: ${{ github.ref_name }}
