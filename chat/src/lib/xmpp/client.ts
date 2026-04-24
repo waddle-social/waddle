@@ -1180,7 +1180,7 @@ export class BrowserXmppClient {
   async listRoomMembers(channelId: string): Promise<MemberSummary[]> {
     await this.connect();
     if (!this.xmpp) return [];
-    const roomJid = roomBareJidFor(this.session.jid, channelId);
+    const roomJid = roomBareJidFor(this.session, channelId);
     const muc = this.xmpp as Agent & {
       getRoomMembers?: (room: string, opts: { affiliation: string }) => Promise<{ muc?: { users?: Array<{ jid?: string; affiliation?: string }> } }>;
     };
@@ -1203,7 +1203,7 @@ export class BrowserXmppClient {
   async setRoomAffiliation(channelId: string, jid: string, affiliation: MemberSummary["role"]): Promise<void> {
     await this.connect();
     if (!this.xmpp) return;
-    const roomJid = roomBareJidFor(this.session.jid, channelId);
+    const roomJid = roomBareJidFor(this.session, channelId);
     const muc = this.xmpp as Agent & {
       setRoomAffiliation?: (room: string, jid: string, affiliation: string) => Promise<void>;
     };
