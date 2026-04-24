@@ -48,7 +48,12 @@ export async function discoverChannels(
   jid: string,
 ): Promise<DiscoveredChannel[]> {
   const spacesDomain = spacesServiceDomain(jid);
-  const response = await xmpp.getDiscoItems(spacesDomain);
+  const spacesResponse = await xmpp.getDiscoItems(spacesDomain);
+  const spaceNode = spacesResponse.items?.find((item) => item.node)?.node;
+
+  if (!spaceNode) return [];
+
+  const response = await xmpp.getDiscoItems(spacesDomain, spaceNode);
 
   const discovered = (response.items ?? [])
     .map((item, position) => {

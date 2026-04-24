@@ -384,22 +384,17 @@ pub async fn handle_iq_with_conn_state(
             let mut rooms = list_room_jids(state).await;
             rooms.sort_by_key(|room| room.to_string());
 
-            let items: Vec<DiscoItem> = if rooms.is_empty() {
-                let lobby_jid = format!("lobby@{muc_domain}");
-                vec![DiscoItem::muc_room(&lobby_jid, "Lobby")]
-            } else {
-                rooms
-                    .into_iter()
-                    .map(|room_jid| {
-                        let room_jid_string = room_jid.to_string();
-                        let name = room_jid
-                            .node()
-                            .map(|n| n.to_string())
-                            .unwrap_or_else(|| room_jid_string.clone());
-                        DiscoItem::muc_room(&room_jid_string, &name)
-                    })
-                    .collect()
-            };
+            let items: Vec<DiscoItem> = rooms
+                .into_iter()
+                .map(|room_jid| {
+                    let room_jid_string = room_jid.to_string();
+                    let name = room_jid
+                        .node()
+                        .map(|n| n.to_string())
+                        .unwrap_or_else(|| room_jid_string.clone());
+                    DiscoItem::muc_room(&room_jid_string, &name)
+                })
+                .collect();
 
             let response = build_disco_items_response(request_iq, &items, None);
             return vec![iq_to_xml(response)];
