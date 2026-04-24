@@ -81,7 +81,6 @@ jobs:
         GITHUB_ACTOR: ${{ github.actor }}
         GITHUB_REF_TYPE: ${{ github.ref_type }}
         GITHUB_REF_NAME: ${{ github.ref_name }}
-        CUENV_HOOK_TIMEOUT: '900'
   fmt:
     name: fmt
     runs-on: ubuntu-latest
@@ -113,7 +112,6 @@ jobs:
         GITHUB_ACTOR: ${{ github.actor }}
         GITHUB_REF_TYPE: ${{ github.ref_type }}
         GITHUB_REF_NAME: ${{ github.ref_name }}
-        CUENV_HOOK_TIMEOUT: '900'
   publishContainerImage:
     name: publishContainerImage
     runs-on: ubuntu-latest
@@ -149,7 +147,6 @@ jobs:
         GITHUB_REF_TYPE: ${{ github.ref_type }}
         GITHUB_REF_NAME: ${{ github.ref_name }}
         CUENV_ARCH: amd64
-        CUENV_HOOK_TIMEOUT: '900'
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
       with:
@@ -188,4 +185,3 @@ jobs:
         GITHUB_ACTOR: ${{ github.actor }}
         GITHUB_REF_TYPE: ${{ github.ref_type }}
         GITHUB_REF_NAME: ${{ github.ref_name }}
-        CUENV_HOOK_TIMEOUT: '900'

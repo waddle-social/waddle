@@ -32,9 +32,6 @@ schema.#Project & {
 	}
 
 	let _t = tasks
-	let _ciTaskEnv = {
-		CUENV_HOOK_TIMEOUT: "900"
-	}
 
 	ci: providers: ["github"]
 	ci: contributors: [
@@ -173,31 +170,26 @@ schema.#Project & {
 	tasks: {
 		checkCiDrift: schema.#Task & {
 			command: "cuenv"
-			env:     _ciTaskEnv
 			args: ["sync", "ci", "--check", "-A"]
 			inputs: ["**/env.cue"]
 		}
 
 		fmt: xRust.#Fmt & {
-			env:    _ciTaskEnv
 			args: ["fmt", "--all", "--", "--check"]
 			inputs: _rustInputs
 		}
 
 		clippy: xRust.#Clippy & {
-			env: _ciTaskEnv
 			args: ["clippy", "--all-targets", "--all-features", "--", "-D", "clippy::correctness"]
 			inputs: _rustInputs
 		}
 
 		test: xRust.#Test & {
-			env:    _ciTaskEnv
 			args: ["test", "--workspace", "--all-targets", "--locked"]
 			inputs: _rustInputs
 		}
 
 		buildCi: xRust.#Build & {
-			env: _ciTaskEnv
 			args: ["build", "--profile", "ci", "--locked", "--package", "waddle-server"]
 			inputs: _rustInputs
 			outputs: ["target/ci/waddle-server"]
@@ -205,7 +197,6 @@ schema.#Project & {
 		}
 
 		buildRelease: xRust.#Build & {
-			env: _ciTaskEnv
 			args: ["build", "--release", "--locked", "--package", "waddle-server"]
 			inputs: _rustInputs
 			outputs: ["target/release/waddle-server"]
@@ -214,7 +205,6 @@ schema.#Project & {
 
 		buildContainerImage: schema.#Task & {
 			command: "bash"
-			env:     _ciTaskEnv
 			args: ["-c", #"""
 					set -euo pipefail
 					if [ "$(uname -s)" != "Linux" ]; then
@@ -230,7 +220,7 @@ schema.#Project & {
 
 		publishContainerImage: schema.#Task & {
 			command: "bash"
-			env: _ciTaskEnv & {
+			env: {
 				GITHUB_TOKEN:    schema.#EnvPassthrough
 				GITHUB_ACTOR:    "${{ github.actor }}"
 				GITHUB_REF_TYPE: "${{ github.ref_type }}"
@@ -302,7 +292,6 @@ schema.#Project & {
 
 		flakehubPublished: schema.#Task & {
 			command: "true"
-			env:     _ciTaskEnv
 			inputs: [
 				"../flake.nix",
 				"../flake.lock",
@@ -337,56 +326,47 @@ schema.#Project & {
 
 		// XMPP compliance tasks — run as the xmppCompliance pipeline
 		xmppUnitTests: xRust.#Test & {
-			env:    _ciTaskEnv
 			args: ["test", "--package", "waddle-xmpp", "--lib", "--verbose"]
 			inputs: _rustInputs
 		}
 
 		xmppServerTests: xRust.#Test & {
-			env:    _ciTaskEnv
 			args: ["test", "--package", "waddle-server", "--verbose"]
 			inputs: _rustInputs
 		}
 
 		xmppProtocolConformance: xRust.#Test & {
-			env: _ciTaskEnv
 			args: ["test", "--package", "waddle-xmpp", "--test", "protocol_conformance", "--verbose"]
 			inputs: _rustInputs
 		}
 
 		xmppComplianceFastRegression: xRust.#Test & {
-			env: _ciTaskEnv
 			args: ["test", "--package", "waddle-xmpp", "--test", "compliance_fast_regression", "--verbose"]
 			inputs: _rustInputs
 		}
 
 		xmppXepIntegration: xRust.#Test & {
-			env:    _ciTaskEnv
 			args: ["test", "--package", "waddle-xmpp", "--tests", "--verbose"]
 			inputs: _rustInputs
 		}
 
 		xmppE2eMessaging: xRust.#Test & {
-			env:    _ciTaskEnv
 			args: ["test", "--package", "waddle-xmpp", "--test", "messaging_e2e", "--verbose"]
 			inputs: _rustInputs
 		}
 
 		xmppFederatedMuc: xRust.#Test & {
-			env:    _ciTaskEnv
 			args: ["test", "--package", "waddle-xmpp", "--test", "federated_muc", "--verbose"]
 			inputs: _rustInputs
 		}
 
 		xmppS2sIntegration: xRust.#Test & {
-			env:    _ciTaskEnv
 			args: ["test", "--package", "waddle-xmpp", "--test", "s2s_integration", "--verbose"]
 			inputs: _rustInputs
 		}
 
 		buildGithubEnricher: schema.#Task & {
 			command: "cargo"
-			env:     _ciTaskEnv
 			args: [
 				"build",
 				"--release",
@@ -400,7 +380,7 @@ schema.#Project & {
 
 		pushGithubEnricherOci: schema.#Task & {
 			command: "bash"
-			env: _ciTaskEnv & {
+			env: {
 				GITHUB_TOKEN: schema.#EnvPassthrough
 				GITHUB_ACTOR: schema.#EnvPassthrough
 			}
@@ -425,7 +405,6 @@ schema.#Project & {
 
 		pinGithubEnricherTag: schema.#Task & {
 			command: "bash"
-			env:     _ciTaskEnv
 			args: ["-c", #"""
 					set -euo pipefail
 					FULL_SHA="$(git rev-parse HEAD)"
@@ -437,7 +416,7 @@ schema.#Project & {
 
 		pushGithubEnricherGitops: schema.#Task & {
 			command: "bash"
-			env: _ciTaskEnv & {
+			env: {
 				GITHUB_TOKEN: schema.#EnvPassthrough
 				GITHUB_ACTOR: schema.#EnvPassthrough
 			}
