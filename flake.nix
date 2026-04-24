@@ -38,6 +38,7 @@
               pkgs.teleport
               pkgs.protobuf
               pkgs.oras
+              pkgs.fluxcd
               pkgs.yq-go
             ];
 

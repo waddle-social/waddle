@@ -15,7 +15,7 @@ This document specifies how Waddle Social implements XMPP for real-time messagin
 │  │   Axum HTTP      │     │      waddle-xmpp                 │  │
 │  │   (REST + WS)    │     │      (Shared XMPP Protocol)      │  │
 │  │                  │     │                                  │  │
-│  │  /auth/*         │     │  WebSocket C2S (/xmpp-websocket) │  │
+│  │  /auth/*         │     │  WebSocket C2S (/ws) │  │
 │  │  /waddles/*      │     │  TCP 5269 (S2S, optional)        │  │
 │  │  /channels/*     │     │                                  │  │
 │  └────────┬─────────┘     │  Connection Actors (Kameo)       │  │
@@ -114,7 +114,7 @@ Response:
   "token": "xmpp-session-token",
   "expires_at": "2024-01-15T11:30:00Z",
   "xmpp_host": "waddle.social",
-  "websocket_url": "wss://waddle.social/xmpp-websocket"
+  "websocket_url": "wss://waddle.social/ws"
 }
 ```
 
@@ -214,7 +214,7 @@ async fn handle_join(&mut self, jid: &Jid, app_state: &AppState) -> Result<(), M
 For first-party clients:
 
 ```
-Endpoint: wss://waddle.social/xmpp-websocket
+Endpoint: wss://waddle.social/ws
 ```
 
 The WebSocket transport is handled by Axum's WebSocket support and is the only supported C2S transport.

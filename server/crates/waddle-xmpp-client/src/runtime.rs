@@ -572,7 +572,7 @@ mod tests {
     fn config() -> ClientConfig {
         ClientConfig::new(
             ConnectionConfig::new(BareJid::from_str("waddle.example").unwrap()),
-            WebSocketConfig::new(Url::parse("wss://chat.example.com/xmpp").unwrap()).unwrap(),
+            WebSocketConfig::new(Url::parse("wss://chat.example.com/ws").unwrap()).unwrap(),
             OAuthBearerConfig::new(
                 BareJid::from_str("alice@example.com").unwrap(),
                 ClientResource::new("macbook").unwrap(),

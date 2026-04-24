@@ -219,7 +219,7 @@ mod tests {
 
     #[test]
     fn websocket_config_rejects_non_websocket_schemes() {
-        let endpoint = Url::parse("https://chat.example.com/xmpp").unwrap();
+        let endpoint = Url::parse("https://chat.example.com/ws").unwrap();
         let error = WebSocketConfig::new(endpoint).unwrap_err();
         assert!(matches!(
             error,
@@ -231,7 +231,7 @@ mod tests {
     fn client_config_validates_successfully() {
         let connection = ConnectionConfig::new(BareJid::from_str("waddle.example").unwrap());
         let transport =
-            WebSocketConfig::new(Url::parse("wss://chat.example.com/xmpp").unwrap()).unwrap();
+            WebSocketConfig::new(Url::parse("wss://chat.example.com/ws").unwrap()).unwrap();
         let auth = OAuthBearerConfig::new(
             BareJid::from_str("alice@example.com").unwrap(),
             ClientResource::new("phone").unwrap(),

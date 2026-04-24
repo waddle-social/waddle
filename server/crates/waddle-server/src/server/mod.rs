@@ -500,7 +500,7 @@ pub async fn start_with_config(
 
     // Start the standalone XMPP listener only for optional federation.
     // Client-to-server traffic is WebSocket-only and is served by the HTTP
-    // router at `/xmpp-websocket`.
+    // router at `/ws`.
     let xmpp_handle = if xmpp_config.enabled && xmpp_config.s2s_enabled {
         let xmpp_app_state = xmpp_app_state.expect("XMPP enabled but missing app state");
         let xmpp_tls_server_config = if xmpp_config.ephemeral_certs {

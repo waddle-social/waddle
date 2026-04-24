@@ -147,11 +147,11 @@ impl WsConnState {
 /// Create the WebSocket router
 pub fn router(state: Arc<WebSocketState>) -> Router {
     Router::new()
-        .route("/xmpp-websocket", get(xmpp_websocket_handler))
+        .route("/ws", get(xmpp_websocket_handler))
         .with_state(state)
 }
 
-/// GET /xmpp-websocket
+/// GET /ws
 ///
 /// WebSocket endpoint for XMPP over WebSocket (RFC 7395).
 /// Upgrades HTTP connection to WebSocket and handles XMPP framing.

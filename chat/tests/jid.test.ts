@@ -8,7 +8,7 @@ describe("jid helpers", () => {
         username: "alice",
         jid: "alice@example.com/desktop",
         session_id: "tok",
-        xmpp_websocket_url: "wss://example.com/xmpp",
+        xmpp_websocket_url: "wss://example.com/ws",
       },
       "roadmap",
     )).toBe("roadmap@muc.example.com");

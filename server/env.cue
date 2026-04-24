@@ -336,6 +336,7 @@ schema.#Project & {
 				"build",
 				"--release",
 				"--target", "wasm32-wasip2",
+				"--target-dir", "target",
 				"--manifest-path", "extensions/github-enricher/Cargo.toml",
 			]
 			inputs:  ["extensions/github-enricher/**", "Cargo.lock"]
@@ -345,6 +346,7 @@ schema.#Project & {
 		pushGithubEnricherOci: schema.#Task & {
 			command: "bash"
 			args: ["-c", #"""
+				set -euo pipefail
 				WASM_FILE="target/wasm32-wasip2/release/github_enricher.wasm"
 				IMAGE="ghcr.io/waddle-social/waddle/extensions/github-enricher"
 				echo "${GITHUB_TOKEN}" | oras login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
@@ -359,26 +361,31 @@ schema.#Project & {
 				  --artifact-type application/vnd.waddle.extension.wasm.v1+wasm \
 				  "${WASM_FILE}:application/wasm"
 			"""#]
+			dependsOn: [tasks.buildGithubEnricher]
 		}
 
 		pinGithubEnricherTag: schema.#Task & {
 			command: "bash"
 			args: ["-c", #"""
+				set -euo pipefail
 				FULL_SHA="$(git rev-parse HEAD)"
-				yq -i ".spec.values.extensions.modules[] |= (if .name == \"github-enricher\" then .tag = \"sha-${FULL_SHA}\" else . end)" ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml
+				yq -i "(.spec.values.extensions.modules[] | select(.name == \"github-enricher\") | .tag) = \"sha-${FULL_SHA}\"" ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml
 				yq -e ".spec.values.extensions.modules[] | select(.name == \"github-enricher\") | .tag == \"sha-${FULL_SHA}\"" ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml > /dev/null
 			"""#]
+			dependsOn: [tasks.pushGithubEnricherOci]
 		}
 
 		pushGithubEnricherGitops: schema.#Task & {
 			command: "bash"
 			args: ["-c", #"""
+				set -euo pipefail
 				flux push artifact \
 				  oci://ghcr.io/waddle-social/waddle/gitops:latest \
 				  --path=../infrastructure/waddle.cloud/gitops \
 				  --source="$(git config --get remote.origin.url)" \
 				  --revision="$(git rev-parse --short HEAD)"
 			"""#]
+			dependsOn: [tasks.pinGithubEnricherTag]
 		}
 	}
 

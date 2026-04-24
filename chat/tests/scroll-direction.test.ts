@@ -34,7 +34,7 @@ function session(partial: Partial<WaddleSession> = {}): WaddleSession {
     username: "alice",
     jid: "alice@example.com/desktop",
     session_id: "tok",
-    xmpp_websocket_url: "wss://example.com/xmpp",
+    xmpp_websocket_url: "wss://example.com/ws",
     ...partial,
   } as WaddleSession;
 }

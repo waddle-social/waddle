@@ -115,7 +115,7 @@ impl AuthState {
     pub(crate) fn websocket_url(&self) -> String {
         let parsed = match url::Url::parse(&self.base_url) {
             Ok(parsed) => parsed,
-            Err(_) => return "ws://localhost/xmpp-websocket".to_string(),
+            Err(_) => return "ws://localhost/ws".to_string(),
         };
 
         let scheme = match parsed.scheme() {
@@ -124,7 +124,7 @@ impl AuthState {
         };
 
         let Some(host) = parsed.host_str() else {
-            return "ws://localhost/xmpp-websocket".to_string();
+            return "ws://localhost/ws".to_string();
         };
 
         let authority = match parsed.port() {
@@ -132,7 +132,7 @@ impl AuthState {
             None => host.to_string(),
         };
 
-        format!("{scheme}://{authority}/xmpp-websocket")
+        format!("{scheme}://{authority}/ws")
     }
 
     fn session_cookie_header(&self, session_id: Option<&str>, max_age: i64) -> String {
@@ -1040,7 +1040,7 @@ mod tests {
         assert_eq!(json["jid"].as_str(), Some(expected_jid.as_str()));
         assert_eq!(
             json["xmpp_websocket_url"].as_str(),
-            Some("ws://localhost:3000/xmpp-websocket")
+            Some("ws://localhost:3000/ws")
         );
     }
 

@@ -5,7 +5,7 @@ stack, authentication bootstrap, upload transfer, or operations require it.
 
 ## Retained Routes
 
-- `GET /xmpp-websocket`: RFC 7395 XMPP over WebSocket client transport.
+- `GET /ws`: RFC 7395 XMPP over WebSocket client transport.
 - `GET /.well-known/host-meta`: XEP-0156 WebSocket discovery.
 - `GET /.well-known/host-meta.json`: XEP-0156 WebSocket discovery.
 - `GET /.well-known/oauth-authorization-server`: OAuth metadata for XMPP OAuth clients.

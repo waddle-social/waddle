@@ -51,7 +51,7 @@ struct XMPPCredentials: Sendable, Equatable {
         bareJID = parsedJID?.bare ?? session.jid
         domain = parsedJID?.domain ?? AppConfig.defaultServerURL.host ?? "xmpp.waddle.social"
         websocketURL = URL(string: session.xmppWebsocketURL)
-            ?? URL(string: "wss://\(domain)/xmpp-websocket")!
+            ?? URL(string: "wss://\(domain)/ws")!
 
         let suffix = session.sessionID.prefix(8)
         resource = "waddle-\(suffix.isEmpty ? "client" : suffix)"

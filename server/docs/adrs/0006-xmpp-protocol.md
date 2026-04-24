@@ -125,7 +125,7 @@ rustls = "0.23"             # TLS
 
 ### Phase 0: Foundation
 - Create `crates/waddle-xmpp/` crate
-- WebSocket C2S endpoint at `/xmpp-websocket`
+- WebSocket C2S endpoint at `/ws`
 - Optional TCP listener on 5269 for federation
 - XML stream parsing via xmpp-parsers
 - OpenTelemetry setup (traces, metrics)

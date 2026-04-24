@@ -10,7 +10,7 @@ const session: WaddleSession = {
   avatar_url: null,
   xmpp_localpart: "bob",
   jid: "bob@waddle.social",
-  xmpp_websocket_url: "wss://example/xmpp",
+  xmpp_websocket_url: "wss://example.com/ws",
   is_expired: false,
   expires_at: null,
 };

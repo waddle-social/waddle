@@ -520,7 +520,7 @@ External integrations and bot platform.
 
 ### M0: XMPP Foundation
 - [x] waddle-xmpp crate created
-- [x] WebSocket C2S endpoint served at `/xmpp-websocket`
+- [x] WebSocket C2S endpoint served at `/ws`
 - [x] RFC 7395 framing working
 - [x] Stream negotiation completes
 - [x] SASL authentication working (PLAIN mechanism)

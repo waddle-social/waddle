@@ -106,7 +106,7 @@ impl TestServer {
 
     /// WebSocket URL for the XMPP endpoint.
     pub fn ws_url(&self) -> String {
-        format!("ws://127.0.0.1:{}/xmpp-websocket", self.http_port)
+        format!("ws://127.0.0.1:{}/ws", self.http_port)
     }
 
     /// The password for the fixed test account (username: "admin").
