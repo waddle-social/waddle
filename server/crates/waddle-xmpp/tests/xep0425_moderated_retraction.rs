@@ -5,20 +5,20 @@
 mod common;
 
 use common::{
-    disco_info_query, establish_bound_session, init_test_env, join_muc_room, RawXmppClient,
-    TestServer, DEFAULT_TIMEOUT,
+    disco_info_query, establish_bound_session, init_test_env, join_muc_room,
+    start_server_with_channels, RawXmppClient, DEFAULT_TIMEOUT,
 };
 
 #[tokio::test]
 async fn xep0425_muc_room_does_not_advertise_message_moderation() {
     init_test_env();
-    let server = TestServer::start().await;
+    let server = start_server_with_channels(&["modtest"]).await;
     let mut client = RawXmppClient::connect(server.addr).await.expect("connect");
     establish_bound_session(&mut client, &server, "alice", "desktop")
         .await
         .expect("bind");
 
-    join_muc_room(&mut client, "modtest@muc.localhost", "Alice")
+    join_muc_room(&mut client, "modtest@muc.localhost", "alice")
         .await
         .expect("join");
 
@@ -41,13 +41,13 @@ async fn xep0425_muc_room_does_not_advertise_message_moderation() {
 #[tokio::test]
 async fn xep0425_iq_moderation_request_returns_service_unavailable() {
     init_test_env();
-    let server = TestServer::start().await;
+    let server = start_server_with_channels(&["modact"]).await;
 
     let mut alice = RawXmppClient::connect(server.addr).await.expect("connect");
     establish_bound_session(&mut alice, &server, "alice", "desktop")
         .await
         .expect("bind alice");
-    join_muc_room(&mut alice, "modact@muc.localhost", "Alice")
+    join_muc_room(&mut alice, "modact@muc.localhost", "alice")
         .await
         .expect("alice join");
 
@@ -55,7 +55,7 @@ async fn xep0425_iq_moderation_request_returns_service_unavailable() {
     establish_bound_session(&mut bob, &server, "bob", "mobile")
         .await
         .expect("bind bob");
-    join_muc_room(&mut bob, "modact@muc.localhost", "Bob")
+    join_muc_room(&mut bob, "modact@muc.localhost", "bob")
         .await
         .expect("bob join");
 

@@ -5,21 +5,21 @@
 mod common;
 
 use common::{
-    establish_bound_session, init_test_env, join_muc_room, RawXmppClient, TestServer,
-    DEFAULT_TIMEOUT,
+    establish_bound_session, init_test_env, join_muc_room, start_server_with_channels,
+    RawXmppClient, DEFAULT_TIMEOUT,
 };
 
 #[tokio::test]
 async fn xep0488_invite_request_to_muc_returns_service_unavailable() {
     init_test_env();
-    let server = TestServer::start().await;
+    let server = start_server_with_channels(&["invroom"]).await;
     let mut client = RawXmppClient::connect(server.addr).await.expect("connect");
     establish_bound_session(&mut client, &server, "alice", "desktop")
         .await
         .expect("bind");
 
     // Join room first
-    join_muc_room(&mut client, "invroom@muc.localhost", "Alice")
+    join_muc_room(&mut client, "invroom@muc.localhost", "alice")
         .await
         .expect("join");
 
@@ -52,13 +52,13 @@ async fn xep0488_invite_request_to_muc_returns_service_unavailable() {
 #[tokio::test]
 async fn xep0488_invite_share_in_message() {
     init_test_env();
-    let server = TestServer::start().await;
+    let server = start_server_with_channels(&["invshare"]).await;
 
     let mut alice = RawXmppClient::connect(server.addr).await.expect("connect");
     establish_bound_session(&mut alice, &server, "alice", "desktop")
         .await
         .expect("bind alice");
-    join_muc_room(&mut alice, "invshare@muc.localhost", "Alice")
+    join_muc_room(&mut alice, "invshare@muc.localhost", "alice")
         .await
         .expect("alice join");
 
@@ -66,7 +66,7 @@ async fn xep0488_invite_share_in_message() {
     establish_bound_session(&mut bob, &server, "bob", "mobile")
         .await
         .expect("bind bob");
-    join_muc_room(&mut bob, "invshare@muc.localhost", "Bob")
+    join_muc_room(&mut bob, "invshare@muc.localhost", "bob")
         .await
         .expect("bob join");
 

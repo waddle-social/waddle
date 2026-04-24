@@ -5,20 +5,20 @@
 mod common;
 
 use common::{
-    disco_info_query, establish_bound_session, init_test_env, join_muc_room, RawXmppClient,
-    TestServer, DEFAULT_TIMEOUT,
+    disco_info_query, establish_bound_session, init_test_env, join_muc_room,
+    start_server_with_channels, RawXmppClient, DEFAULT_TIMEOUT,
 };
 
 #[tokio::test]
 async fn xep0500_muc_room_advertises_slow_mode() {
     init_test_env();
-    let server = TestServer::start().await;
+    let server = start_server_with_channels(&["slowroom"]).await;
     let mut client = RawXmppClient::connect(server.addr).await.expect("connect");
     establish_bound_session(&mut client, &server, "alice", "desktop")
         .await
         .expect("bind");
 
-    join_muc_room(&mut client, "slowroom@muc.localhost", "Alice")
+    join_muc_room(&mut client, "slowroom@muc.localhost", "alice")
         .await
         .expect("join");
 
@@ -37,13 +37,13 @@ async fn xep0500_muc_room_advertises_slow_mode() {
 #[tokio::test]
 async fn xep0500_messages_delivered_without_slow_mode() {
     init_test_env();
-    let server = TestServer::start().await;
+    let server = start_server_with_channels(&["noslow"]).await;
 
     let mut alice = RawXmppClient::connect(server.addr).await.expect("connect");
     establish_bound_session(&mut alice, &server, "alice", "desktop")
         .await
         .expect("bind alice");
-    join_muc_room(&mut alice, "noslow@muc.localhost", "Alice")
+    join_muc_room(&mut alice, "noslow@muc.localhost", "alice")
         .await
         .expect("alice join");
 
@@ -51,7 +51,7 @@ async fn xep0500_messages_delivered_without_slow_mode() {
     establish_bound_session(&mut bob, &server, "bob", "mobile")
         .await
         .expect("bind bob");
-    join_muc_room(&mut bob, "noslow@muc.localhost", "Bob")
+    join_muc_room(&mut bob, "noslow@muc.localhost", "bob")
         .await
         .expect("bob join");
 

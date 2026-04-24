@@ -5,20 +5,20 @@
 mod common;
 
 use common::{
-    establish_bound_session, init_test_env, join_muc_room, RawXmppClient, TestServer,
-    DEFAULT_TIMEOUT,
+    establish_bound_session, init_test_env, join_muc_room, start_server_with_channels,
+    RawXmppClient, DEFAULT_TIMEOUT,
 };
 
 #[tokio::test]
 async fn xep0333_markable_message_forwarded_in_muc() {
     init_test_env();
-    let server = TestServer::start().await;
+    let server = start_server_with_channels(&["markers"]).await;
 
     let mut alice = RawXmppClient::connect(server.addr).await.expect("connect");
     establish_bound_session(&mut alice, &server, "alice", "desktop")
         .await
         .expect("bind alice");
-    join_muc_room(&mut alice, "markers@muc.localhost", "Alice")
+    join_muc_room(&mut alice, "markers@muc.localhost", "alice")
         .await
         .expect("alice join");
 
@@ -26,7 +26,7 @@ async fn xep0333_markable_message_forwarded_in_muc() {
     establish_bound_session(&mut bob, &server, "bob", "mobile")
         .await
         .expect("bind bob");
-    join_muc_room(&mut bob, "markers@muc.localhost", "Bob")
+    join_muc_room(&mut bob, "markers@muc.localhost", "bob")
         .await
         .expect("bob join");
 
@@ -55,13 +55,13 @@ async fn xep0333_markable_message_forwarded_in_muc() {
 #[tokio::test]
 async fn xep0333_displayed_marker_broadcast_in_muc() {
     init_test_env();
-    let server = TestServer::start().await;
+    let server = start_server_with_channels(&["markers2"]).await;
 
     let mut alice = RawXmppClient::connect(server.addr).await.expect("connect");
     establish_bound_session(&mut alice, &server, "alice", "desktop")
         .await
         .expect("bind alice");
-    join_muc_room(&mut alice, "markers2@muc.localhost", "Alice")
+    join_muc_room(&mut alice, "markers2@muc.localhost", "alice")
         .await
         .expect("alice join");
 
@@ -69,7 +69,7 @@ async fn xep0333_displayed_marker_broadcast_in_muc() {
     establish_bound_session(&mut bob, &server, "bob", "mobile")
         .await
         .expect("bind bob");
-    join_muc_room(&mut bob, "markers2@muc.localhost", "Bob")
+    join_muc_room(&mut bob, "markers2@muc.localhost", "bob")
         .await
         .expect("bob join");
 

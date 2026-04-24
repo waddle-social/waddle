@@ -6,26 +6,26 @@ mod common;
 
 use common::{
     disco_info_query, establish_bound_session, init_test_env, join_muc_room, ping_query,
-    RawXmppClient, TestServer,
+    start_server_with_channels, RawXmppClient, TestServer,
 };
 
 #[tokio::test]
 async fn xep0410_self_ping_succeeds_for_own_occupant() {
     init_test_env();
 
-    let server = TestServer::start().await;
+    let server = start_server_with_channels(&["selfping"]).await;
     let mut client = RawXmppClient::connect(server.addr).await.expect("connect");
     establish_bound_session(&mut client, &server, "xep0410", "desktop")
         .await
         .expect("bind session");
 
-    join_muc_room(&mut client, "selfping@muc.localhost", "SelfNick")
+    join_muc_room(&mut client, "selfping@muc.localhost", "xep0410")
         .await
         .expect("join room");
 
     let response = ping_query(
         &mut client,
-        "selfping@muc.localhost/SelfNick",
+        "selfping@muc.localhost/xep0410",
         "xep0410-self-ping",
     )
     .await
@@ -42,13 +42,13 @@ async fn xep0410_self_ping_succeeds_for_own_occupant() {
 async fn xep0410_ping_to_unknown_occupant_returns_item_not_found() {
     init_test_env();
 
-    let server = TestServer::start().await;
+    let server = start_server_with_channels(&["missing"]).await;
     let mut client = RawXmppClient::connect(server.addr).await.expect("connect");
     establish_bound_session(&mut client, &server, "xep0410neg", "desktop")
         .await
         .expect("bind session");
 
-    join_muc_room(&mut client, "missing@muc.localhost", "ExistingNick")
+    join_muc_room(&mut client, "missing@muc.localhost", "xep0410neg")
         .await
         .expect("join room");
 

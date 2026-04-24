@@ -5,8 +5,8 @@
 mod common;
 
 use common::{
-    disco_info_query, establish_bound_session, init_test_env, join_muc_room, RawXmppClient,
-    TestServer, DEFAULT_TIMEOUT,
+    disco_info_query, establish_bound_session, init_test_env, join_muc_room,
+    start_server_with_channels, RawXmppClient, TestServer, DEFAULT_TIMEOUT,
 };
 
 #[tokio::test]
@@ -37,14 +37,14 @@ async fn xep0433_muc_service_does_not_advertise_channel_search() {
 #[tokio::test]
 async fn xep0433_search_request_to_muc_returns_service_unavailable() {
     init_test_env();
-    let server = TestServer::start().await;
+    let server = start_server_with_channels(&["searchable"]).await;
     let mut client = RawXmppClient::connect(server.addr).await.expect("connect");
     establish_bound_session(&mut client, &server, "alice", "desktop")
         .await
         .expect("bind");
 
     // Create a room first by joining
-    join_muc_room(&mut client, "searchable@muc.localhost", "Alice")
+    join_muc_room(&mut client, "searchable@muc.localhost", "alice")
         .await
         .expect("join room");
 
@@ -78,14 +78,14 @@ async fn xep0433_search_request_to_muc_returns_service_unavailable() {
 #[tokio::test]
 async fn xep0433_muc_disco_items_lists_rooms() {
     init_test_env();
-    let server = TestServer::start().await;
+    let server = start_server_with_channels(&["listed"]).await;
     let mut client = RawXmppClient::connect(server.addr).await.expect("connect");
     establish_bound_session(&mut client, &server, "alice", "desktop")
         .await
         .expect("bind");
 
     // Create a room first
-    join_muc_room(&mut client, "listed@muc.localhost", "Alice")
+    join_muc_room(&mut client, "listed@muc.localhost", "alice")
         .await
         .expect("join room");
 

@@ -5,20 +5,20 @@
 mod common;
 
 use common::{
-    establish_bound_session, init_test_env, join_muc_room, RawXmppClient, TestServer,
-    DEFAULT_TIMEOUT,
+    establish_bound_session, init_test_env, join_muc_room, start_server_with_channels,
+    RawXmppClient, DEFAULT_TIMEOUT,
 };
 
 #[tokio::test]
 async fn xep0317_presence_with_hats_broadcast_in_muc() {
     init_test_env();
-    let server = TestServer::start().await;
+    let server = start_server_with_channels(&["hats"]).await;
 
     let mut alice = RawXmppClient::connect(server.addr).await.expect("connect");
     establish_bound_session(&mut alice, &server, "alice", "desktop")
         .await
         .expect("bind alice");
-    join_muc_room(&mut alice, "hats@muc.localhost", "Alice")
+    join_muc_room(&mut alice, "hats@muc.localhost", "alice")
         .await
         .expect("alice join");
 
@@ -26,14 +26,14 @@ async fn xep0317_presence_with_hats_broadcast_in_muc() {
     establish_bound_session(&mut bob, &server, "bob", "mobile")
         .await
         .expect("bind bob");
-    join_muc_room(&mut bob, "hats@muc.localhost", "Bob")
+    join_muc_room(&mut bob, "hats@muc.localhost", "bob")
         .await
         .expect("bob join");
 
     // Alice sends presence with hats
     alice
         .send(
-            "<presence to='hats@muc.localhost/Alice' xmlns='jabber:client'>\
+            "<presence to='hats@muc.localhost/alice' xmlns='jabber:client'>\
                 <hats xmlns='urn:xmpp:hats:0'>\
                     <hat uri='urn:xmpp:hats:0#admin' title='Admin'/>\
                 </hats>\

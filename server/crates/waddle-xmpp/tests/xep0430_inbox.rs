@@ -14,8 +14,8 @@ use waddle_xmpp::xep::xep0430::{
 use xmpp_parsers::iq::{Iq, IqType};
 
 use common::{
-    disco_info_query, establish_bound_session, init_test_env, join_muc_room, RawXmppClient,
-    TestServer, DEFAULT_TIMEOUT,
+    disco_info_query, establish_bound_session, init_test_env, join_muc_room,
+    start_server_with_channels, RawXmppClient, TestServer, DEFAULT_TIMEOUT,
 };
 
 fn jid(s: &str) -> jid::BareJid {
@@ -361,7 +361,7 @@ async fn inbox_is_advertised_and_direct_messages_round_trip_over_tcp() {
 async fn groupchat_messages_project_into_tcp_inbox() {
     init_test_env();
 
-    let server = TestServer::start().await;
+    let server = start_server_with_channels(&["inbox-room"]).await;
     let mut alice = RawXmppClient::connect(server.addr)
         .await
         .expect("alice connect");

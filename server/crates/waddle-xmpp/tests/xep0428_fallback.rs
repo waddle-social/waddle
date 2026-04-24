@@ -7,20 +7,20 @@ mod common;
 use std::time::{Duration, Instant};
 
 use common::{
-    disco_info_query, establish_bound_session, init_test_env, join_muc_room, RawXmppClient,
-    TestServer, DEFAULT_TIMEOUT,
+    disco_info_query, establish_bound_session, init_test_env, join_muc_room,
+    start_server_with_channels, RawXmppClient, TestServer, DEFAULT_TIMEOUT,
 };
 
 #[tokio::test]
 async fn xep0428_fallback_broadcast_preserves_body_range() {
     init_test_env();
-    let server = TestServer::start().await;
+    let server = start_server_with_channels(&["fallback"]).await;
 
     let mut alice = RawXmppClient::connect(server.addr).await.expect("connect");
     establish_bound_session(&mut alice, &server, "alice", "desktop")
         .await
         .expect("bind alice");
-    join_muc_room(&mut alice, "fallback@muc.localhost", "Alice")
+    join_muc_room(&mut alice, "fallback@muc.localhost", "alice")
         .await
         .expect("alice join");
 
@@ -28,14 +28,14 @@ async fn xep0428_fallback_broadcast_preserves_body_range() {
     establish_bound_session(&mut bob, &server, "bob", "mobile")
         .await
         .expect("bind bob");
-    join_muc_room(&mut bob, "fallback@muc.localhost", "Bob")
+    join_muc_room(&mut bob, "fallback@muc.localhost", "bob")
         .await
         .expect("bob join");
 
     bob.send(
         "<message type='groupchat' to='fallback@muc.localhost' id='msg-fallback-1' xmlns='jabber:client'>\
             <body>&gt; original quote\n\nmy reply</body>\
-            <reply xmlns='urn:xmpp:reply:0' to='fallback@muc.localhost/Alice' id='parent-1'/>\
+            <reply xmlns='urn:xmpp:reply:0' to='fallback@muc.localhost/alice' id='parent-1'/>\
             <fallback xmlns='urn:xmpp:fallback:0' for='urn:xmpp:reply:0'>\
                 <body start='0' end='18'/>\
             </fallback>\
@@ -75,13 +75,13 @@ async fn xep0428_fallback_broadcast_preserves_body_range() {
 #[tokio::test]
 async fn xep0428_fallback_survives_mam_query() {
     init_test_env();
-    let server = TestServer::start().await;
+    let server = start_server_with_channels(&["fallback-mam"]).await;
 
     let mut alice = RawXmppClient::connect(server.addr).await.expect("connect");
     establish_bound_session(&mut alice, &server, "alice", "desktop")
         .await
         .expect("bind alice");
-    join_muc_room(&mut alice, "fallback-mam@muc.localhost", "Alice")
+    join_muc_room(&mut alice, "fallback-mam@muc.localhost", "alice")
         .await
         .expect("alice join");
 
@@ -89,14 +89,14 @@ async fn xep0428_fallback_survives_mam_query() {
     establish_bound_session(&mut bob, &server, "bob", "mobile")
         .await
         .expect("bind bob");
-    join_muc_room(&mut bob, "fallback-mam@muc.localhost", "Bob")
+    join_muc_room(&mut bob, "fallback-mam@muc.localhost", "bob")
         .await
         .expect("bob join");
 
     bob.send(
         "<message type='groupchat' to='fallback-mam@muc.localhost' id='msg-fallback-1' xmlns='jabber:client'>\
             <body>&gt; parent\n\nreply</body>\
-            <reply xmlns='urn:xmpp:reply:0' to='fallback-mam@muc.localhost/Alice' id='parent-1'/>\
+            <reply xmlns='urn:xmpp:reply:0' to='fallback-mam@muc.localhost/alice' id='parent-1'/>\
             <fallback xmlns='urn:xmpp:fallback:0' for='urn:xmpp:reply:0'>\
                 <body start='0' end='10'/>\
             </fallback>\
@@ -171,13 +171,13 @@ async fn xep0428_fallback_feature_advertised_in_server_disco() {
 #[tokio::test]
 async fn xep0428_fallback_feature_advertised_in_muc_disco() {
     init_test_env();
-    let server = TestServer::start().await;
+    let server = start_server_with_channels(&["fallback-disco"]).await;
 
     let mut alice = RawXmppClient::connect(server.addr).await.expect("connect");
     establish_bound_session(&mut alice, &server, "alice", "desktop")
         .await
         .expect("bind alice");
-    join_muc_room(&mut alice, "fallback-disco@muc.localhost", "Alice")
+    join_muc_room(&mut alice, "fallback-disco@muc.localhost", "alice")
         .await
         .expect("alice join");
 

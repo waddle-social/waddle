@@ -7,20 +7,20 @@ mod common;
 use std::time::{Duration, Instant};
 
 use common::{
-    disco_info_query, establish_bound_session, init_test_env, join_muc_room, RawXmppClient,
-    TestServer, DEFAULT_TIMEOUT,
+    disco_info_query, establish_bound_session, init_test_env, join_muc_room,
+    start_server_with_channels, RawXmppClient, TestServer, DEFAULT_TIMEOUT,
 };
 
 #[tokio::test]
 async fn xep0461_reply_broadcast_in_muc() {
     init_test_env();
-    let server = TestServer::start().await;
+    let server = start_server_with_channels(&["reply"]).await;
 
     let mut alice = RawXmppClient::connect(server.addr).await.expect("connect");
     establish_bound_session(&mut alice, &server, "alice", "desktop")
         .await
         .expect("bind alice");
-    join_muc_room(&mut alice, "reply@muc.localhost", "Alice")
+    join_muc_room(&mut alice, "reply@muc.localhost", "alice")
         .await
         .expect("alice join");
 
@@ -28,7 +28,7 @@ async fn xep0461_reply_broadcast_in_muc() {
     establish_bound_session(&mut bob, &server, "bob", "mobile")
         .await
         .expect("bind bob");
-    join_muc_room(&mut bob, "reply@muc.localhost", "Bob")
+    join_muc_room(&mut bob, "reply@muc.localhost", "bob")
         .await
         .expect("bob join");
 
@@ -48,7 +48,7 @@ async fn xep0461_reply_broadcast_in_muc() {
     bob.send(
         "<message type='groupchat' to='reply@muc.localhost' id='reply-1' xmlns='jabber:client'>\
             <body>Responding to you</body>\
-            <reply xmlns='urn:xmpp:reply:0' to='reply@muc.localhost/Alice' id='msg-reply-1'/>\
+            <reply xmlns='urn:xmpp:reply:0' to='reply@muc.localhost/alice' id='msg-reply-1'/>\
         </message>",
     )
     .await
@@ -75,13 +75,13 @@ async fn xep0461_reply_broadcast_in_muc() {
 #[tokio::test]
 async fn xep0461_reply_survives_mam_query() {
     init_test_env();
-    let server = TestServer::start().await;
+    let server = start_server_with_channels(&["reply-mam"]).await;
 
     let mut alice = RawXmppClient::connect(server.addr).await.expect("connect");
     establish_bound_session(&mut alice, &server, "alice", "desktop")
         .await
         .expect("bind alice");
-    join_muc_room(&mut alice, "reply-mam@muc.localhost", "Alice")
+    join_muc_room(&mut alice, "reply-mam@muc.localhost", "alice")
         .await
         .expect("alice join");
 
@@ -89,7 +89,7 @@ async fn xep0461_reply_survives_mam_query() {
     establish_bound_session(&mut bob, &server, "bob", "mobile")
         .await
         .expect("bind bob");
-    join_muc_room(&mut bob, "reply-mam@muc.localhost", "Bob")
+    join_muc_room(&mut bob, "reply-mam@muc.localhost", "bob")
         .await
         .expect("bob join");
 
@@ -109,7 +109,7 @@ async fn xep0461_reply_survives_mam_query() {
     bob.send(
         "<message type='groupchat' to='reply-mam@muc.localhost' id='reply-1' xmlns='jabber:client'>\
             <body>Reply body</body>\
-            <reply xmlns='urn:xmpp:reply:0' to='reply-mam@muc.localhost/Alice' id='msg-reply-1'/>\
+            <reply xmlns='urn:xmpp:reply:0' to='reply-mam@muc.localhost/alice' id='msg-reply-1'/>\
         </message>",
     )
     .await
@@ -186,13 +186,13 @@ async fn xep0461_reply_feature_advertised_in_server_disco() {
 #[tokio::test]
 async fn xep0461_reply_feature_advertised_in_muc_disco() {
     init_test_env();
-    let server = TestServer::start().await;
+    let server = start_server_with_channels(&["reply-disco"]).await;
 
     let mut alice = RawXmppClient::connect(server.addr).await.expect("connect");
     establish_bound_session(&mut alice, &server, "alice", "desktop")
         .await
         .expect("bind alice");
-    join_muc_room(&mut alice, "reply-disco@muc.localhost", "Alice")
+    join_muc_room(&mut alice, "reply-disco@muc.localhost", "alice")
         .await
         .expect("alice join");
 

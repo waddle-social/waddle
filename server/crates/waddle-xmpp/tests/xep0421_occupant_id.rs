@@ -5,8 +5,8 @@
 mod common;
 
 use common::{
-    disco_info_query, establish_bound_session, init_test_env, join_muc_room, RawXmppClient,
-    TestServer,
+    disco_info_query, establish_bound_session, init_test_env, join_muc_room,
+    start_server_with_channels, RawXmppClient, TestServer,
 };
 
 const OCCUPANT_ID_FEATURE: &str = "urn:xmpp:occupant-id:0";
@@ -15,13 +15,13 @@ const OCCUPANT_ID_FEATURE: &str = "urn:xmpp:occupant-id:0";
 async fn xep0421_muc_room_advertises_occupant_id_feature() {
     init_test_env();
 
-    let server = TestServer::start().await;
+    let server = start_server_with_channels(&["xep0421"]).await;
     let mut client = RawXmppClient::connect(server.addr).await.expect("connect");
     establish_bound_session(&mut client, &server, "xep0421", "desktop")
         .await
         .expect("bind session");
 
-    join_muc_room(&mut client, "xep0421@muc.localhost", "RoomNick")
+    join_muc_room(&mut client, "xep0421@muc.localhost", "xep0421")
         .await
         .expect("join room");
 
