@@ -6,8 +6,8 @@ use crate::db::actor::DbActor;
 use crate::db::Database;
 use std::sync::Arc;
 
-use super::spicedb::SpiceDbPermissionBackend;
 use super::schema::SPICEDB_SCHEMA;
+use super::spicedb::SpiceDbPermissionBackend;
 use super::{CheckRequest, PermissionChecker, PermissionSchema, TupleStore};
 use super::{
     CheckResponse, Object, ObjectType, PermissionError, Relation, Subject, SubjectType, Tuple,
