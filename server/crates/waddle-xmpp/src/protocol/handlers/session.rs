@@ -7,10 +7,10 @@
 //! request with an empty result IQ and otherwise does nothing.
 
 use super::empty_iq_result;
-use crate::connection::Stanza;
 use crate::parser::ns;
 use crate::protocol::event::{OutboundEvent, StanzaContext};
 use crate::protocol::traits::IqHandler;
+use crate::Stanza;
 use xmpp_parsers::iq::Iq;
 
 /// Handler for `urn:ietf:params:xml:ns:xmpp-session`.

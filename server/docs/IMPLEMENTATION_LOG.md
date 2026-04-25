@@ -32,7 +32,7 @@ This document tracks the detailed implementation progress of Waddle Social.
 
 **Next Steps:**
 - Turso/libSQL database setup
-- Prosody XMPP server integration
+- Embedded WebSocket XMPP C2S integration
 - ATProto OAuth authentication flow
 
 ---

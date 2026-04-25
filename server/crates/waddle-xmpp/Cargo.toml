@@ -20,7 +20,6 @@ async-trait = "0.1"
 kameo = { workspace = true }
 
 # XMPP
-tokio-xmpp = { workspace = true }
 jid = { workspace = true }
 xmpp-parsers = { workspace = true }
 minidom = { workspace = true }
@@ -31,8 +30,6 @@ dashmap = { workspace = true }
 
 # TLS
 rustls = { workspace = true, features = ["ring"] }
-tokio-rustls = { version = "0.26", features = ["ring"] }
-rustls-pemfile = "2.2"
 
 # Serialization
 serde = { workspace = true }
@@ -55,9 +52,6 @@ base64 = { workspace = true }
 # HTML rendering
 html-escape = "0.2"
 
-# DNS Resolution
-hickory-resolver = { workspace = true }
-
 # SCRAM-SHA-256 Authentication and XEP-0115 Entity Capabilities
 sha1 = { workspace = true }
 sha2 = { workspace = true }
@@ -71,9 +65,6 @@ reqwest = { workspace = true }
 # Wasm extension runtime
 waddle-extensions = { path = "../waddle-extensions" }
 waddle-xmpp-core = { path = "../waddle-xmpp-core" }
-
-# Ephemeral TLS certificate generation
-rcgen = "0.13"
 
 # Database
 sqlx = { workspace = true }

@@ -178,14 +178,11 @@ impl XmlParser {
         }
 
         // Simple heuristic: look for matching opening and closing tags
-        // for top-level stanzas (message, presence, iq, starttls, auth, etc.)
+        // for top-level WebSocket-served stanzas and nonzas.
         let stanza_tags = [
             "message",
             "presence",
             "iq",
-            "starttls",
-            "proceed",
-            "failure",
             "auth",
             "success",
             "stream:features",
@@ -197,9 +194,6 @@ impl XmlParser {
             "failed",
             "r",
             "a",
-            // XEP-0220 Server Dialback elements
-            "db:result",
-            "db:verify",
         ];
 
         for tag in stanza_tags {
@@ -240,9 +234,6 @@ impl XmlParser {
         // e.g., "<resume" must come before "<r" since "<r" would otherwise match "<resume"
         type StanzaParser = fn(&str) -> Result<ParsedStanza, XmppError>;
         let stanza_patterns: &[(&str, StanzaParser)] = &[
-            ("<starttls", parse_starttls),
-            ("<proceed", parse_tls_proceed),
-            ("<failure", parse_tls_failure),
             ("<stream:features", parse_stream_features),
             ("<stream:error", parse_stream_error),
             ("<auth", parse_auth),
@@ -257,9 +248,6 @@ impl XmlParser {
             ("<resume", parse_sm_nonza), // Must come before <r
             ("<r", parse_sm_nonza),
             ("<a ", parse_sm_nonza), // Note: space to avoid matching <auth
-            // XEP-0220 Server Dialback stanzas
-            ("<db:result", parse_dialback_result),
-            ("<db:verify", parse_dialback_verify),
             // XEP-0352 Client State Indication stanzas
             ("<active", parse_csi_active),
             ("<inactive", parse_csi_inactive),
@@ -339,20 +327,8 @@ fn find_stanza_end(data: &str, start: usize, tag_name: &str) -> Option<usize> {
 /// Parsed stanza variants.
 #[derive(Debug, Clone)]
 pub enum ParsedStanza {
-    /// STARTTLS request
-    StartTls,
-    /// TLS proceed response (server accepts STARTTLS)
-    TlsProceed,
-    /// TLS failure response (server rejects STARTTLS)
-    TlsFailure,
     /// Stream features
     Features {
-        /// Whether STARTTLS is advertised
-        starttls: bool,
-        /// Whether STARTTLS is required
-        starttls_required: bool,
-        /// Whether dialback is advertised
-        dialback: bool,
         /// SASL mechanisms available
         sasl_mechanisms: Vec<String>,
     },
@@ -385,68 +361,14 @@ pub enum ParsedStanza {
     SmAck { h: u32 },
     /// XEP-0198: Stream Management resume request
     SmResume { previd: String, h: u32 },
-    /// XEP-0220: Server Dialback result (initial request or response)
-    DialbackResult {
-        /// Originating domain (from attribute)
-        from: String,
-        /// Receiving domain (to attribute)
-        to: String,
-        /// Dialback key (content of db:result for initial request)
-        key: Option<String>,
-        /// Result type (only present in response: "valid" or "invalid")
-        result_type: Option<String>,
-    },
-    /// XEP-0220: Server Dialback verification request/response
-    DialbackVerify {
-        /// Originating domain (from attribute)
-        from: String,
-        /// Receiving domain (to attribute)
-        to: String,
-        /// Stream ID being verified
-        id: String,
-        /// Dialback key (content for request, empty for response)
-        key: Option<String>,
-        /// Result type (only present in response: "valid" or "invalid")
-        result_type: Option<String>,
-    },
     /// XEP-0352: Client State Indication - active
     CsiActive,
     /// XEP-0352: Client State Indication - inactive
     CsiInactive,
 }
 
-fn parse_starttls(data: &str) -> Result<ParsedStanza, XmppError> {
-    if data.contains("starttls") {
-        Ok(ParsedStanza::StartTls)
-    } else {
-        Err(XmppError::xml_parse("Invalid starttls element"))
-    }
-}
-
-/// Parse TLS proceed response from server.
-fn parse_tls_proceed(data: &str) -> Result<ParsedStanza, XmppError> {
-    if data.contains("proceed") {
-        Ok(ParsedStanza::TlsProceed)
-    } else {
-        Err(XmppError::xml_parse("Invalid TLS proceed element"))
-    }
-}
-
-/// Parse TLS failure response from server.
-fn parse_tls_failure(data: &str) -> Result<ParsedStanza, XmppError> {
-    if data.contains("failure") && data.contains(ns::TLS) {
-        Ok(ParsedStanza::TlsFailure)
-    } else {
-        Err(XmppError::xml_parse("Invalid TLS failure element"))
-    }
-}
-
 /// Parse stream features element.
 fn parse_stream_features(data: &str) -> Result<ParsedStanza, XmppError> {
-    let starttls = data.contains("<starttls");
-    let starttls_required = data.contains("<required");
-    let dialback = data.contains("dialback") || data.contains("db:");
-
     // Extract SASL mechanisms
     let mut sasl_mechanisms = Vec::new();
     let mut search_pos = 0;
@@ -461,12 +383,7 @@ fn parse_stream_features(data: &str) -> Result<ParsedStanza, XmppError> {
         }
     }
 
-    Ok(ParsedStanza::Features {
-        starttls,
-        starttls_required,
-        dialback,
-        sasl_mechanisms,
-    })
+    Ok(ParsedStanza::Features { sasl_mechanisms })
 }
 
 /// Parse stream error element.
@@ -592,87 +509,6 @@ fn parse_sm_nonza(data: &str) -> Result<ParsedStanza, XmppError> {
     }
 }
 
-/// Parse XEP-0220 Server Dialback result element.
-///
-/// Handles both initial requests (with key content) and responses (with type attribute).
-fn parse_dialback_result(data: &str) -> Result<ParsedStanza, XmppError> {
-    let from = extract_attribute(data, "from")
-        .ok_or_else(|| XmppError::xml_parse("db:result missing 'from' attribute"))?;
-    let to = extract_attribute(data, "to")
-        .ok_or_else(|| XmppError::xml_parse("db:result missing 'to' attribute"))?;
-
-    // Check for type attribute (present in responses)
-    let result_type = extract_attribute(data, "type");
-
-    // Extract key content (present in initial requests)
-    let key = if result_type.is_none() {
-        // Extract content between > and </db:result>
-        let content_start = data.find('>').map(|i| i + 1).unwrap_or(0);
-        let content_end = data.find("</db:result>").unwrap_or(data.len());
-        if content_start < content_end {
-            let content = data[content_start..content_end].trim();
-            if !content.is_empty() {
-                Some(content.to_string())
-            } else {
-                None
-            }
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    Ok(ParsedStanza::DialbackResult {
-        from,
-        to,
-        key,
-        result_type,
-    })
-}
-
-/// Parse XEP-0220 Server Dialback verify element.
-///
-/// Handles both verification requests (with key content) and responses (with type attribute).
-fn parse_dialback_verify(data: &str) -> Result<ParsedStanza, XmppError> {
-    let from = extract_attribute(data, "from")
-        .ok_or_else(|| XmppError::xml_parse("db:verify missing 'from' attribute"))?;
-    let to = extract_attribute(data, "to")
-        .ok_or_else(|| XmppError::xml_parse("db:verify missing 'to' attribute"))?;
-    let id = extract_attribute(data, "id")
-        .ok_or_else(|| XmppError::xml_parse("db:verify missing 'id' attribute"))?;
-
-    // Check for type attribute (present in responses)
-    let result_type = extract_attribute(data, "type");
-
-    // Extract key content (present in verification requests)
-    let key = if result_type.is_none() {
-        // Extract content between > and </db:verify>
-        let content_start = data.find('>').map(|i| i + 1).unwrap_or(0);
-        let content_end = data.find("</db:verify>").unwrap_or(data.len());
-        if content_start < content_end {
-            let content = data[content_start..content_end].trim();
-            if !content.is_empty() {
-                Some(content.to_string())
-            } else {
-                None
-            }
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    Ok(ParsedStanza::DialbackVerify {
-        from,
-        to,
-        id,
-        key,
-        result_type,
-    })
-}
-
 /// Parse XEP-0352 Client State Indication active element.
 fn parse_csi_active(data: &str) -> Result<ParsedStanza, XmppError> {
     if data.contains("<active") && data.contains(ns::CSI) {
@@ -796,17 +632,6 @@ mod tests {
 
         assert_eq!(header.to, Some("localhost".to_string()));
         assert_eq!(header.version, Some("1.0".to_string()));
-    }
-
-    #[test]
-    fn test_parser_starttls() {
-        let mut parser = XmlParser::new();
-        parser.feed(b"<starttls xmlns='urn:ietf:params:xml:ns:xmpp-tls'/>");
-
-        assert!(parser.has_complete_stanza());
-
-        let stanza = parser.next_stanza().unwrap();
-        assert!(matches!(stanza, Some(ParsedStanza::StartTls)));
     }
 
     #[test]

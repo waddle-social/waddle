@@ -9,10 +9,10 @@
 //! The behaviour matches what the legacy string-matching path in
 //! `routes::websocket::handle_iq` did for `jabber:iq:roster`.
 
-use crate::connection::Stanza;
 use crate::protocol::event::{OutboundEvent, StanzaContext};
 use crate::protocol::traits::IqHandler;
 use crate::roster::ROSTER_NS;
+use crate::Stanza;
 use minidom::Element;
 use xmpp_parsers::iq::{Iq, IqType};
 

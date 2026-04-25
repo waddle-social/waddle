@@ -7,8 +7,8 @@
 //!
 //! ## Architecture
 //!
-//! - **Transport**: WebSocket-only C2S in `waddle-server`, optional TCP 5269 listener for S2S
-//! - **Connection Actors**: S2S connections managed by a Kameo actor
+//! - **Transport**: WebSocket-only XMPP in `waddle-server`
+//! - **Connection Registry**: Active WebSocket sessions routed by typed JID
 //! - **MUC Room Actors**: Multi-user chat rooms as separate actors
 //! - **Stream Processing**: XML stream parsing via xmpp-parsers
 //!
@@ -26,8 +26,6 @@ pub mod auth;
 pub mod c2s;
 pub mod carbons;
 pub mod commands;
-#[doc(hidden)]
-pub mod connection;
 pub mod disco;
 pub mod inbox;
 pub mod isr;
@@ -44,9 +42,6 @@ pub mod push;
 pub mod registry;
 pub mod roster;
 pub mod routing;
-pub mod s2s;
-pub mod server;
-pub mod stream;
 pub mod stream_management;
 pub mod xep;
 
@@ -59,8 +54,6 @@ pub use error::{
 };
 pub use parser::{ns, StreamHeader};
 pub use routing::{RouterConfig, RoutingDestination, RoutingResult, StanzaRouter};
-pub use server::{generate_ephemeral_tls_config, XmppServer, XmppServerConfig};
-pub use stream::{PreAuthResult, SaslAuthResult};
 pub use types::*;
 pub use waddle_xmpp_core::Stanza;
 pub use waddle_xmpp_core::{
@@ -68,8 +61,6 @@ pub use waddle_xmpp_core::{
     ChannelInfo, ChannelRoomInfo, ChannelType, UploadSlotInfo,
 };
 pub use xep::xep0077::{RegistrationError, RegistrationRequest};
-
-use std::sync::Arc;
 
 use jid::BareJid;
 
@@ -535,14 +526,4 @@ pub struct ScramCredentials {
     pub salt_b64: String,
     /// Number of PBKDF2 iterations used
     pub iterations: u32,
-}
-
-/// Start the XMPP server with the given configuration, state, listeners, and shutdown token.
-pub async fn start<S: AppState>(
-    config: XmppServerConfig,
-    app_state: Arc<S>,
-    s2s_listener: Option<tokio::net::TcpListener>,
-    shutdown_token: tokio_util::sync::CancellationToken,
-) -> Result<XmppServer<S>, XmppError> {
-    XmppServer::new(config, app_state, s2s_listener, shutdown_token).await
 }

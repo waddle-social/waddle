@@ -11,7 +11,7 @@ The current Waddle implementation requires ATProto OAuth for all users. This cre
 
 1. **Self-hosted deployments** - Operators may want native XMPP auth without ATProto
 2. **XMPP interoperability** - Standard XMPP clients expect SCRAM-SHA-256
-3. **Federation** - Remote servers need to verify identities via standard mechanisms
+3. **Self-hosting** - Native credentials are useful for deployments that do not use ATProto
 
 ## Decision
 
@@ -29,18 +29,7 @@ Client → Home Server
 
 **JID format:** `{did_hash}@waddle.social`
 
-### Path B: Federated Credential (ATProto users on remote servers)
-
-```
-Client → Remote Waddle
-1. Client presents SignedCredential from home server
-2. Remote server verifies signature via S2S
-3. Access granted with federated identity
-```
-
-**JID format:** `{did_hash}@waddle.social` (verified remotely)
-
-### Path C: SCRAM-SHA-256 (Native JID users)
+### Path B: SCRAM-SHA-256 (Native JID users)
 
 ```
 Client → Any Waddle
@@ -51,7 +40,7 @@ Client → Any Waddle
 
 **JID format:** `{username}@{waddle_domain}`
 
-### Path D: In-Band Registration (XEP-0077)
+### Path C: In-Band Registration (XEP-0077)
 
 ```
 Client → Waddle with registration enabled
@@ -138,8 +127,6 @@ pub struct AuthConfig {
     /// Enable SCRAM-SHA-256 for native users
     pub scram_enabled: bool,
 
-    /// Enable federated credential verification
-    pub federation_enabled: bool,
 }
 ```
 
@@ -150,7 +137,6 @@ pub struct AuthConfig {
 atproto_enabled = true
 registration_enabled = false  # ATProto is the identity source
 scram_enabled = true          # For local verification
-federation_enabled = true
 ```
 
 ### Standalone Waddle Configuration
@@ -160,7 +146,6 @@ federation_enabled = true
 atproto_enabled = false       # Optional
 registration_enabled = true   # Native JID registration
 scram_enabled = true
-federation_enabled = true     # Accept federated users
 ```
 
 ## SASL Mechanism Advertisement
@@ -182,7 +167,6 @@ Server advertises available mechanisms based on configuration:
 
 - Self-hosted waddles work without ATProto dependency
 - Standard XMPP clients can connect natively
-- Full XMPP federation support
 - Gradual adoption path for ATProto
 
 ### Negative
@@ -194,10 +178,8 @@ Server advertises available mechanisms based on configuration:
 ### Neutral
 
 - Native users cannot use ATProto features (Bluesky posting, etc.)
-- Federation requires trust establishment
+- Native and ATProto identities have different account-lifecycle semantics
 
 ## Related
 
-- [RFC-0015: Federation Architecture](../rfcs/0015-federation-architecture.md)
 - [ADR-0005: ATProto Identity](0005-atproto-identity.md)
-- [Spec: S2S Federation](../specs/s2s-federation.md)

@@ -40,16 +40,12 @@ sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite", "postgre
 # Actor Framework
 kameo = "0.15"
 
-# XMPP Server
-tokio-xmpp = "4.0"
 jid = { version = "0.11", features = ["serde"] }
 xmpp-parsers = "0.21"
 minidom = "0.16"
 rxml = "0.12"
 dashmap = "6.0"
 
-# XMPP Client
-xmpp = "0.6"
 tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
 
 # Object Storage
@@ -100,7 +96,6 @@ url = "2.5"
 base64 = "0.22"
 rand = "0.9"
 hex = "0.4"
-hickory-resolver = "0.25"
 lru = "0.12"
 regex = "1.10"
 jsonwebtoken = "9.3"

@@ -16,7 +16,7 @@
 //! machine.
 
 use super::frame::InboundFrame;
-use crate::connection::Stanza;
+use crate::Stanza;
 use jid::{BareJid, FullJid};
 use tracing::Level;
 use xmpp_parsers::iq::Iq;

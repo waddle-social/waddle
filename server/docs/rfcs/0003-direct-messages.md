@@ -128,7 +128,7 @@ Users configure via backend API:
 - `show_read_receipts`: Boolean (XEP-0184)
 - `show_typing_indicator`: Boolean (XEP-0085)
 
-These settings are enforced via Prosody modules that check the backend before allowing message delivery.
+These settings are enforced by the embedded XMPP/WebSocket server before allowing message delivery.
 
 ### Message Features
 

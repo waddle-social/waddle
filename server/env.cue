@@ -141,12 +141,7 @@ schema.#Project & {
 			tasks: [
 				_t.xmppUnitTests,
 				_t.xmppServerTests,
-				_t.xmppProtocolConformance,
-				_t.xmppComplianceFastRegression,
 				_t.xmppXepIntegration,
-				_t.xmppE2eMessaging,
-				_t.xmppFederatedMuc,
-				_t.xmppS2sIntegration,
 			]
 		}
 		githubEnricher: {
@@ -335,33 +330,8 @@ schema.#Project & {
 			inputs: _rustInputs
 		}
 
-		xmppProtocolConformance: xRust.#Test & {
-			args: ["test", "--package", "waddle-xmpp", "--test", "protocol_conformance", "--verbose"]
-			inputs: _rustInputs
-		}
-
-		xmppComplianceFastRegression: xRust.#Test & {
-			args: ["test", "--package", "waddle-xmpp", "--test", "compliance_fast_regression", "--verbose"]
-			inputs: _rustInputs
-		}
-
 		xmppXepIntegration: xRust.#Test & {
 			args: ["test", "--package", "waddle-xmpp", "--tests", "--verbose"]
-			inputs: _rustInputs
-		}
-
-		xmppE2eMessaging: xRust.#Test & {
-			args: ["test", "--package", "waddle-xmpp", "--test", "messaging_e2e", "--verbose"]
-			inputs: _rustInputs
-		}
-
-		xmppFederatedMuc: xRust.#Test & {
-			args: ["test", "--package", "waddle-xmpp", "--test", "federated_muc", "--verbose"]
-			inputs: _rustInputs
-		}
-
-		xmppS2sIntegration: xRust.#Test & {
-			args: ["test", "--package", "waddle-xmpp", "--test", "s2s_integration", "--verbose"]
 			inputs: _rustInputs
 		}
 

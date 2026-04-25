@@ -15,10 +15,10 @@ This document specifies how Waddle Social implements XMPP for real-time messagin
 │  │   Axum HTTP      │     │      waddle-xmpp                 │  │
 │  │   (REST + WS)    │     │      (Shared XMPP Protocol)      │  │
 │  │                  │     │                                  │  │
-│  │  /auth/*         │     │  WebSocket C2S (/ws) │  │
-│  │  /waddles/*      │     │  TCP 5269 (S2S, optional)        │  │
+│  │  /auth/*         │     │  WebSocket C2S (/ws)             │  │
+│  │  /waddles/*      │     │  Sans-I/O protocol handlers      │  │
 │  │  /channels/*     │     │                                  │  │
-│  └────────┬─────────┘     │  Connection Actors (Kameo)       │  │
+│  └────────┬─────────┘     │  Connection registry             │  │
 │           │               │  MUC Room Actors (Kameo)         │  │
 │           │               └────────────┬─────────────────────┘  │
 │           │                            │                        │
@@ -269,13 +269,6 @@ The WebSocket transport is handled by Axum's WebSocket support and is the only s
 | XEP-0077 | In-Band Registration | Required |
 | XEP-0133 | Service Administration | Required |
 
-### Phase 5: Federation
-
-| XEP/RFC | Name | Status |
-|---------|------|--------|
-| RFC 6120 | Server Dialback | Required |
-| XEP-0220 | Server Dialback | Required |
-
 ## Error Handling
 
 ### Authentication Errors
@@ -325,20 +318,16 @@ All XMPP operations are instrumented with OpenTelemetry (see [ADR-0014](../adrs/
 | `xmpp.stanzas.processed` | Counter | `type`, `direction` |
 | `xmpp.stanza.latency` | Histogram | `type` |
 
-## Connection Actor Model
+## WebSocket Connection Model
 
-Each XMPP connection is managed by a Kameo actor:
+Each XMPP client connection is handled by the WebSocket C2S adapter and
+registered in the shared connection registry:
 
 ```rust
-struct ConnectionActor {
+struct WebSocketConnection {
     jid: Jid,
-    stream: XmppStream,
     session: Session,
     state: ConnectionState,
-}
-
-impl Actor for ConnectionActor {
-    type Mailbox = UnboundedMailbox<Self>;
 }
 
 #[derive(Clone)]

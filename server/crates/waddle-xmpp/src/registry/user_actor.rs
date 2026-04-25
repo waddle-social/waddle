@@ -11,8 +11,8 @@ use kameo::message::Context;
 use kameo::Actor;
 use tracing::debug;
 
-use crate::connection::Stanza;
 use crate::registry::connection_registry::PresenceState;
+use crate::Stanza;
 
 /// Actor that manages per-user connection state.
 ///

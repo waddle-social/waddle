@@ -43,11 +43,6 @@ spec:
             - name: http
               containerPort: {{ .Values.service.ports.http }}
               protocol: TCP
-            {{- if and .Values.xmpp.enabled .Values.xmpp.s2sEnabled }}
-            - name: xmpp-s2s
-              containerPort: {{ .Values.service.ports.xmppS2S }}
-              protocol: TCP
-            {{- end }}
           envFrom:
             - configMapRef:
                 name: {{ include "waddle-server.configMapName" . }}

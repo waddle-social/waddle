@@ -11,7 +11,6 @@
 
 pub mod admin;
 pub mod affiliation;
-pub mod federation;
 pub mod messages;
 pub mod owner;
 pub mod presence;
@@ -24,11 +23,6 @@ pub use admin::{
     is_muc_admin_get, is_muc_admin_iq, is_muc_admin_set, is_muc_owner_get, is_muc_owner_set,
     is_role_change_query, parse_admin_query, AdminItem, AdminQuery, AffiliationChangeResult,
     KickBanInfo, MucStatusCode, RoleChangeResult, NS_MUC_ADMIN, NS_MUC_OWNER,
-};
-pub use federation::{
-    build_s2s_leave_presence, build_s2s_muc_message, build_s2s_occupant_presence, FederatedMessage,
-    FederatedMessageSet, FederatedPresence, FederatedPresenceSet, MessageDeliveryTarget,
-    PresenceDeliveryTarget,
 };
 pub use messages::{
     create_broadcast_message, create_subject_message, is_muc_groupchat, looks_like_muc_jid,
@@ -65,8 +59,7 @@ use affiliation::{
 /// Check if a JID is from a remote server.
 ///
 /// A JID is considered remote if its domain differs from the local server domain.
-/// This is used for S2S federation to determine which occupants need presence/messages
-/// routed via server-to-server connections.
+/// This is used to reject non-local MUC occupants on the WebSocket-only server.
 ///
 /// # Arguments
 /// * `jid` - The JID to check
@@ -111,15 +104,12 @@ pub struct RoomConfig {
     /// Whether the room is in forum mode (XEP-0508)
     #[serde(default)]
     pub forum: bool,
-    /// Federation permission policy for this room.
+    /// Federation permission policy retained for serialized room configs.
     ///
-    /// Controls which users from remote servers can join this room.
-    /// See [`FederatedPermissionPolicy`] for details on each policy type.
+    /// Remote XMPP federation is not served by Waddle, so active joins must still be local
+    /// WebSocket C2S joins.
     pub federation_policy: FederatedPermissionPolicy,
-    /// Configuration for federated user affiliations.
-    ///
-    /// Stores allow/block lists and affiliation overrides for federated users.
-    /// Only relevant when `federation_policy` is not `Closed`.
+    /// Legacy federation-affiliation configuration retained for serialized room configs.
     pub federated_affiliation_config: FederatedAffiliationConfig,
 }
 
@@ -152,9 +142,9 @@ pub struct Occupant {
     pub role: Role,
     /// Affiliation with the room
     pub affiliation: Affiliation,
-    /// Whether this occupant is from a remote server (S2S federation)
+    /// Whether this occupant is from a remote server.
     pub is_remote: bool,
-    /// The home server domain for this occupant (for S2S routing)
+    /// The home server domain for this occupant.
     pub home_server: Option<String>,
 }
 
@@ -537,12 +527,12 @@ impl MucRoom {
         self.find_occupant_by_real_jid(jid).map(|o| o.nick.as_str())
     }
 
-    // === Remote Occupant Management (S2S Federation) ===
+    // === Remote Occupant Metadata ===
 
     /// Get all remote occupants in the room.
     ///
     /// Returns occupants whose `is_remote` flag is true, meaning they are
-    /// connected via S2S federation from another server.
+    /// connected from another server.
     ///
     /// This is useful for routing presence updates and messages to remote
     /// servers during federation.
@@ -556,8 +546,7 @@ impl MucRoom {
     /// Local occupants (where `home_server` is `None`) are grouped under
     /// the key "local".
     ///
-    /// This is useful for efficient S2S routing - instead of sending individual
-    /// stanzas, you can batch messages/presence by destination server.
+    /// This is useful for callers that need to inspect room locality.
     ///
     /// # Example
     /// ```ignore
@@ -565,9 +554,6 @@ impl MucRoom {
     /// for (domain, occupants) in occupants_by_domain {
     ///     if domain == "local" {
     ///         // Handle local occupants via C2S
-    ///     } else {
-    ///         // Route to remote server via S2S
-    ///         s2s_pool.send_to_server(&domain, stanzas);
     ///     }
     /// }
     /// ```
@@ -620,7 +606,7 @@ impl MucRoom {
 
     /// Get all unique remote server domains that have occupants in this room.
     ///
-    /// Useful for determining which S2S connections are needed for this room.
+    /// Useful for determining whether a room contains non-local occupants.
     pub fn get_remote_domains(&self) -> Vec<String> {
         let mut domains: Vec<String> = self
             .occupants

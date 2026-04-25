@@ -50,32 +50,6 @@ jobs:
       - name: Run server crate tests
         run: cargo test --package waddle-server --verbose
 
-  protocol-conformance:
-    name: Protocol Conformance
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-conformance-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Run protocol conformance suite
-        run: cargo test --package waddle-xmpp --test protocol_conformance --verbose
-
-      - name: Run compliance fast regression
-        run: cargo test --package waddle-xmpp --test compliance_fast_regression --verbose
-
   xep-integration-tests:
     name: XEP Integration Tests
     runs-on: ubuntu-latest
@@ -106,35 +80,6 @@ jobs:
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "All XEP integration tests ran as native Rust tests." >> "$GITHUB_STEP_SUMMARY"
           echo "No Docker, CAAS, or external dependencies required." >> "$GITHUB_STEP_SUMMARY"
-
-  e2e-messaging:
-    name: E2E Messaging & Federation
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-e2e-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Run messaging E2E tests
-        run: cargo test --package waddle-xmpp --test messaging_e2e --verbose
-
-      - name: Run federated MUC tests
-        run: cargo test --package waddle-xmpp --test federated_muc --verbose
-
-      - name: Run S2S integration tests
-        run: cargo test --package waddle-xmpp --test s2s_integration --verbose
 
   lint:
     name: Lint & Format

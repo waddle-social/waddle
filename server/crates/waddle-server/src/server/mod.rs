@@ -18,7 +18,6 @@ use opentelemetry_http::HeaderExtractor;
 use routes::auth::AuthState;
 use routes::uploads::UploadState;
 use routes::websocket::{ProtocolServices, WebSocketDeps, WebSocketState};
-use rustls::ServerConfig as RustlsServerConfig;
 use rustls_acme::caches::DirCache;
 use rustls_acme::tower::TowerHttp01ChallengeService;
 use rustls_acme::{AcmeConfig, UseChallenge};
@@ -35,14 +34,11 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 use waddle_extensions::{ExtensionConfig, ExtensionManager};
 use waddle_xmpp::inbox::storage::InboxStorage;
 use waddle_xmpp::mam::{MamStorage, SqlxMamStorage};
-use waddle_xmpp::XmppServerConfig;
 use waddle_xmpp::{muc::room_registry_actor::RoomRegistryActor, registry::ConnectionRegistry};
 
 pub(crate) mod bootstrap_membership;
 mod routes;
 pub mod xmpp_state;
-
-pub use xmpp_state::XmppAppState;
 
 #[derive(Debug, Clone)]
 pub struct XmppAcmeConfig {
@@ -58,7 +54,6 @@ pub struct XmppAcmeConfig {
 
 #[derive(Clone)]
 struct AcmeRuntime {
-    tls_server_config: Arc<RustlsServerConfig>,
     http01_challenge_service: TowerHttp01ChallengeService,
 }
 
@@ -116,14 +111,6 @@ pub struct XmppConfig {
     pub enabled: bool,
     /// XMPP server domain (default: "localhost")
     pub domain: String,
-    /// Server-to-server bind address (default: "0.0.0.0:5269")
-    pub s2s_addr: SocketAddr,
-    /// Whether S2S federation is enabled (default: false)
-    pub s2s_enabled: bool,
-    /// TLS certificate path (default: "certs/server.crt")
-    pub tls_cert_path: String,
-    /// TLS key path (default: "certs/server.key")
-    pub tls_key_path: String,
     /// MAM database URL (prefers dedicated XMPP DSN, otherwise the main runtime DSN)
     pub mam_database_url: Option<String>,
     /// Inbox database URL (prefers dedicated XMPP DSN, otherwise the main runtime DSN)
@@ -131,17 +118,8 @@ pub struct XmppConfig {
     /// Whether native JID authentication is enabled (default: true)
     /// When enabled, users can authenticate with SCRAM-SHA-256 using native credentials.
     pub native_auth_enabled: bool,
-    /// Whether XEP-0077 In-Band Registration is enabled (default: false)
-    /// When enabled, users can register new accounts before authentication.
-    /// Security note: Enable with caution on public servers.
-    pub registration_enabled: bool,
     /// ACME configuration for managed TLS certificates.
     pub acme: XmppAcmeConfig,
-    /// Whether to generate ephemeral self-signed TLS certificates in memory.
-    /// Enabled via `WADDLE_CERTS_EPHEMERAL=true` or `--ephemeral-certs`.
-    pub ephemeral_certs: bool,
-    /// Runtime extension configuration.
-    pub extensions: ExtensionConfig,
 }
 
 impl Default for XmppConfig {
@@ -149,22 +127,15 @@ impl Default for XmppConfig {
         Self {
             enabled: true,
             domain: "localhost".to_string(),
-            s2s_addr: "0.0.0.0:5269".parse().expect("Valid default S2S address"),
-            s2s_enabled: false, // Disabled by default
-            tls_cert_path: "certs/server.crt".to_string(),
-            tls_key_path: "certs/server.key".to_string(),
             mam_database_url: None,
             inbox_database_url: None,
             native_auth_enabled: true,
-            registration_enabled: false, // Disabled by default for security
-            extensions: ExtensionConfig::default(),
             acme: XmppAcmeConfig {
                 enabled: false,
                 email: None,
                 cache_dir: PathBuf::from("certs/acme-cache"),
                 production: false,
             },
-            ephemeral_certs: false,
         }
     }
 }
@@ -179,22 +150,12 @@ impl XmppConfig {
         let domain =
             std::env::var("WADDLE_XMPP_DOMAIN").unwrap_or_else(|_| "localhost".to_string());
 
-        let tls_cert_path = std::env::var("WADDLE_XMPP_TLS_CERT")
-            .unwrap_or_else(|_| "certs/server.crt".to_string());
-
-        let tls_key_path =
-            std::env::var("WADDLE_XMPP_TLS_KEY").unwrap_or_else(|_| "certs/server.key".to_string());
-
         let mam_database_url = resolve_xmpp_database_url("WADDLE_XMPP_MAM_DATABASE_URL");
         let inbox_database_url = resolve_xmpp_database_url("WADDLE_XMPP_INBOX_DATABASE_URL");
 
         let native_auth_enabled = std::env::var("WADDLE_NATIVE_AUTH_ENABLED")
             .map(|v| v.to_lowercase() != "false" && v != "0")
             .unwrap_or(true);
-
-        let registration_enabled = std::env::var("WADDLE_REGISTRATION_ENABLED")
-            .map(|v| v.to_lowercase() == "true" || v == "1")
-            .unwrap_or(false);
 
         let acme_enabled = std::env::var("WADDLE_XMPP_ACME_ENABLED")
             .map(|v| v.to_lowercase() == "true" || v == "1")
@@ -210,66 +171,18 @@ impl XmppConfig {
             .map(|v| v.to_lowercase() == "true" || v == "1")
             .unwrap_or(false);
 
-        let s2s_enabled = std::env::var("WADDLE_XMPP_S2S_ENABLED")
-            .map(|v| v.to_lowercase() == "true" || v == "1")
-            .unwrap_or(false);
-
-        let s2s_addr = std::env::var("WADDLE_XMPP_S2S_ADDR")
-            .unwrap_or_else(|_| "0.0.0.0:5269".to_string())
-            .parse()
-            .unwrap_or_else(|_| "0.0.0.0:5269".parse().expect("Valid fallback S2S address"));
-        let extensions = ExtensionConfig::from_env().unwrap_or_else(|error| {
-            warn!(error = %error, "Invalid extension config from environment; using defaults");
-            ExtensionConfig::default()
-        });
-
-        let ephemeral_certs = std::env::var("WADDLE_CERTS_EPHEMERAL")
-            .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
-            .unwrap_or(false)
-            || std::env::args().any(|a| a == "--ephemeral-certs");
-
         Self {
             enabled,
             domain,
-            s2s_addr,
-            s2s_enabled,
-            tls_cert_path,
-            tls_key_path,
             mam_database_url,
             inbox_database_url,
             native_auth_enabled,
-            registration_enabled,
-            extensions,
             acme: XmppAcmeConfig {
                 enabled: acme_enabled,
                 email: acme_email,
                 cache_dir: acme_cache_dir,
                 production: acme_production,
             },
-            ephemeral_certs,
-        }
-    }
-
-    /// Convert to waddle_xmpp::XmppServerConfig.
-    pub fn to_xmpp_server_config(
-        &self,
-        tls_server_config: Option<Arc<RustlsServerConfig>>,
-    ) -> XmppServerConfig {
-        XmppServerConfig {
-            s2s_addr: if self.s2s_enabled {
-                Some(self.s2s_addr)
-            } else {
-                None
-            },
-            s2s_enabled: self.s2s_enabled,
-            tls_cert_path: self.tls_cert_path.clone(),
-            tls_key_path: self.tls_key_path.clone(),
-            tls_server_config,
-            domain: self.domain.clone(),
-            mam_database_url: self.mam_database_url.clone(),
-            native_auth_enabled: self.native_auth_enabled,
-            registration_enabled: self.registration_enabled,
-            extensions: self.extensions.clone(),
         }
     }
 }
@@ -318,7 +231,6 @@ fn start_acme_runtime(
     }
 
     let mut state = acme_config.state();
-    let tls_server_config = state.default_rustls_config();
     let http01_challenge_service = state.http01_challenge_tower_service();
 
     tokio::spawn(async move {
@@ -350,7 +262,6 @@ fn start_acme_runtime(
     );
 
     Some(AcmeRuntime {
-        tls_server_config,
         http01_challenge_service,
     })
 }
@@ -376,23 +287,15 @@ pub async fn start_with_config(
     server_config: ServerConfig,
     mut inherited: Option<waddle_ecdysis::ListenerSet>,
 ) -> Result<()> {
-    let encryption_key = server_config.session_key.clone();
-
     // Set up Ecdysis graceful shutdown coordinator
     let shutdown = waddle_ecdysis::GracefulShutdown::from_env();
     let stop_token = shutdown.stop_token();
 
     // Acquire listeners: inherited from parent process, or bind fresh.
     // Two explicit paths — no silent fallback.
-    let (http_listener, s2s_listener) = if let Some(ref mut set) = inherited {
+    let http_listener = if let Some(ref mut set) = inherited {
         // Ecdysis restart path: all listeners MUST be inherited
-        let http = set.take("http");
-        let s2s = if xmpp_config.enabled && xmpp_config.s2s_enabled {
-            Some(set.take("xmpp-s2s"))
-        } else {
-            None
-        };
-        (http, s2s)
+        set.take("http")
     } else {
         // Cold start path: bind listeners fresh
         let http_addr: SocketAddr = std::env::var("WADDLE_HTTP_ADDR")
@@ -406,15 +309,7 @@ pub async fn start_with_config(
             info!(addr = %http_addr, "Bound HTTP listener");
         }
 
-        let s2s = if xmpp_config.enabled && xmpp_config.s2s_enabled {
-            let listener = tokio::net::TcpListener::bind(xmpp_config.s2s_addr).await?;
-            info!(addr = %xmpp_config.s2s_addr, "Bound XMPP S2S listener");
-            Some(listener)
-        } else {
-            None
-        };
-
-        (http, s2s)
+        http
     };
 
     // If we inherited, verify we consumed everything
@@ -459,23 +354,6 @@ pub async fn start_with_config(
         .await
         .map_err(|error| anyhow::anyhow!("Failed to initialize inbox storage: {}", error))?;
 
-    // Create XMPP app state
-    let xmpp_app_state = if xmpp_config.enabled {
-        Some(Arc::new(
-            XmppAppState::new(
-                xmpp_config.domain.clone(),
-                Arc::clone(&global_db),
-                db_pool.global_actor().clone(),
-                permission_actor.clone(),
-                encryption_key.as_ref().map(|s| s.as_bytes()),
-            )
-            .with_db_pool(Arc::clone(&db_pool))
-            .with_inbox_storage(Arc::clone(&inbox_storage)),
-        ))
-    } else {
-        None
-    };
-
     // Create HTTP state (shares db_pool via Arc)
     let blob_storage = crate::storage::build_blob_storage()
         .map_err(|e| anyhow::anyhow!("Failed to initialize blob storage: {}", e))?;
@@ -509,34 +387,7 @@ pub async fn start_with_config(
         .await
     });
 
-    // Start the standalone XMPP listener only for optional federation.
-    // Client-to-server traffic is WebSocket-only and is served by the HTTP
-    // router at `/ws`.
-    let xmpp_handle = if xmpp_config.enabled && xmpp_config.s2s_enabled {
-        let xmpp_app_state = xmpp_app_state.expect("XMPP enabled but missing app state");
-        let xmpp_tls_server_config = if xmpp_config.ephemeral_certs {
-            info!(
-                "Using ephemeral self-signed TLS certificate for domain '{}'",
-                xmpp_config.domain
-            );
-            Some(waddle_xmpp::generate_ephemeral_tls_config(
-                &xmpp_config.domain,
-            )?)
-        } else {
-            acme_runtime
-                .as_ref()
-                .map(|runtime| runtime.tls_server_config.clone())
-        };
-        let xmpp_server_config = xmpp_config.to_xmpp_server_config(xmpp_tls_server_config);
-        let xmpp_stop = stop_token.clone();
-
-        Some(tokio::spawn(async move {
-            start_xmpp_server(xmpp_server_config, xmpp_app_state, s2s_listener, xmpp_stop).await
-        }))
-    } else {
-        info!("TCP XMPP listener disabled; serving WebSocket C2S only");
-        None
-    };
+    info!("TCP XMPP listener disabled; serving WebSocket C2S only");
 
     // Run the Ecdysis shutdown lifecycle
     let shutdown_handle = tokio::spawn(async move {
@@ -566,21 +417,6 @@ pub async fn start_with_config(
                 },
                 Ok(Err(e)) => Err(e),
                 Err(e) => Err(anyhow::anyhow!("HTTP server task failed: {}", e)),
-            }
-        }
-        result = async {
-            match xmpp_handle {
-                Some(handle) => handle.await,
-                None => std::future::pending().await,
-            }
-        } => {
-            match result {
-                Ok(Ok(())) => {
-                    info!("XMPP server stopped");
-                    Ok(())
-                },
-                Ok(Err(e)) => Err(e),
-                Err(e) => Err(anyhow::anyhow!("XMPP server task failed: {}", e)),
             }
         }
         _ = shutdown_handle => {
@@ -636,30 +472,6 @@ async fn start_http_server(deps: HttpServerDeps) -> Result<()> {
             info!("HTTP server received shutdown signal, draining connections");
         })
         .await?;
-
-    Ok(())
-}
-
-/// Start the XMPP server.
-async fn start_xmpp_server(
-    config: XmppServerConfig,
-    app_state: Arc<XmppAppState>,
-    s2s_listener: Option<tokio::net::TcpListener>,
-    stop_token: tokio_util::sync::CancellationToken,
-) -> Result<()> {
-    info!(
-        domain = %config.domain,
-        "Starting XMPP server"
-    );
-
-    let server = waddle_xmpp::start(config, Arc::clone(&app_state), s2s_listener, stop_token)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to create XMPP server: {}", e))?;
-
-    server
-        .run()
-        .await
-        .map_err(|e| anyhow::anyhow!("XMPP server error: {}", e))?;
 
     Ok(())
 }
@@ -739,11 +551,34 @@ async fn ensure_fixed_test_account(
         &FixedTestAccountConfig {
             username,
             password,
-            domain,
+            domain: domain.clone(),
             email,
         },
     )
-    .await
+    .await?;
+
+    if let Ok(extra_accounts) = std::env::var("WADDLE_TEST_EXTRA_FIXED_ACCOUNTS") {
+        for account in extra_accounts
+            .split(',')
+            .filter(|entry| !entry.trim().is_empty())
+        {
+            let Some((username, password)) = account.split_once(':') else {
+                anyhow::bail!("WADDLE_TEST_EXTRA_FIXED_ACCOUNTS entries must be username:password");
+            };
+            seed_fixed_test_account(
+                db_pool,
+                &FixedTestAccountConfig {
+                    username: username.trim().to_string(),
+                    password: password.trim().to_string(),
+                    domain: domain.clone(),
+                    email: None,
+                },
+            )
+            .await?;
+        }
+    }
+
+    Ok(())
 }
 
 async fn seed_fixed_test_account(
@@ -887,6 +722,8 @@ async fn create_router(
     // Shared PubSub/PEP storage for the WebSocket transport (XEP-0060/0163).
     let pubsub_storage: Arc<dyn waddle_xmpp::pubsub::PubSubStorage> =
         Arc::new(waddle_xmpp::pubsub::InMemoryPubSubStorage::new());
+    let push_store: Arc<dyn waddle_xmpp::push::PushSubscriptionStore> =
+        Arc::new(waddle_xmpp::push::InMemoryPushStore::new());
 
     // XEP-0198 detached-session registry for stream resumption across
     // transient WebSocket drops.
@@ -909,6 +746,9 @@ async fn create_router(
                 extension_manager,
                 dispatcher: stanza_dispatcher,
                 pubsub_storage,
+                push_store,
+                pubsub_subscriptions: Arc::new(dashmap::DashSet::new()),
+                isr_token_store: waddle_xmpp::isr::create_shared_store(),
                 sm_session_registry,
                 resumable_sessions,
             },

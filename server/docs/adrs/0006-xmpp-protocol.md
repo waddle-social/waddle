@@ -39,12 +39,8 @@ crates/
 ├── waddle-xmpp/           # XMPP server library
 │   ├── src/
 │   │   ├── lib.rs
-│   │   ├── server.rs      # Optional S2S listener
-│   │   ├── connection.rs  # Legacy C2S actor (to be removed)
-│   │   ├── stream.rs      # XML stream handling
 │   │   ├── auth/          # SASL mechanisms
-│   │   ├── c2s/           # Client-to-server
-│   │   ├── s2s/           # Server-to-server (Phase 5+)
+│   │   ├── protocol/      # Sans-I/O C2S protocol
 │   │   ├── muc/           # XEP-0045 MUC
 │   │   ├── mam/           # XEP-0313 Archive
 │   │   └── presence/      # Presence management
@@ -58,7 +54,6 @@ waddle-server binary
 ├── Axum HTTP (REST API)
 ├── Axum WebSocket (RFC 7395 C2S)
 ├── waddle-xmpp (XMPP Server)
-│   ├── TCP Listener (5269 S2S)
 │   ├── Sans-I/O protocol + handlers
 │   └── MUC Room Actors (Kameo)
 └── Shared AppState
@@ -82,13 +77,11 @@ XMPP JID: abc123xyz@waddle.social
 | MVP | RFC 6120/6121, XEP-0045 (MUC), XEP-0313 (MAM), XEP-0198 (Stream Mgmt), XEP-0280 (Carbons), XEP-0030 (Disco) | Core messaging |
 | Phase 2 | XEP-0363 (HTTP Upload), XEP-0372 (Mentions), XEP-0444 (Reactions), XEP-0461 (Replies), XEP-0308 (Edit), XEP-0424 (Delete) | Rich messaging |
 | Phase 3 | XEP-0384 (OMEMO), XEP-0077 (In-Band Reg), XEP-0133 (Admin) | Security/Admin |
-| Phase 5 | S2S Federation (RFC 6120 server dialback, XEP-0220) | Cross-instance federation |
 
 ### Key Dependencies
 
 ```toml
 # XMPP Server
-tokio-xmpp = "4.0"          # Async XMPP primitives
 jid = "0.10"                # JID handling
 xmpp-parsers = "0.21"       # Stanza parsing
 dashmap = "6.0"             # Concurrent session storage
@@ -106,7 +99,6 @@ rustls = "0.23"             # TLS
 - **Battle-tested Protocol**: XMPP powers WhatsApp, Zoom chat, and others
 - **Rich Extension Ecosystem**: 400+ XEPs cover nearly every messaging feature
 - **Client Libraries**: Mature libraries for every platform (Strophe.js, Smack, etc.)
-- **Federation Ready**: S2S support enables cross-instance messaging
 - **AGPL Source**: All components are open source
 
 ### Negative
@@ -117,19 +109,18 @@ rustls = "0.23"             # TLS
 
 ### Mitigations
 
-- **Incremental Delivery**: XEPs implemented in phases, MVP → Rich → Federation
+- **Incremental Delivery**: XEPs implemented in phases, MVP → Rich
 - **Interop Testing**: XMPP compliance tests in CI catch regressions
-- **Library Reuse**: `tokio-xmpp` and `xmpp-parsers` handle low-level details
+- **Library Reuse**: `xmpp-parsers` handles typed stanza parsing
 
 ## Implementation Phases
 
 ### Phase 0: Foundation
 - Create `crates/waddle-xmpp/` crate
 - WebSocket C2S endpoint at `/ws`
-- Optional TCP listener on 5269 for federation
 - XML stream parsing via xmpp-parsers
 - OpenTelemetry setup (traces, metrics)
-- Connection actor (Kameo) lifecycle
+- Sans-I/O protocol lifecycle
 
 ### Phase 1: Authentication & Presence
 - SASL PLAIN authentication
@@ -157,13 +148,6 @@ rustls = "0.23"             # TLS
 - XEP-0444 Reactions, XEP-0461 Replies
 - XEP-0372 Mentions
 - XEP-0363 HTTP File Upload
-
-### Phase 5: S2S Federation
-- S2S TCP listener on 5269
-- Server dialback (XEP-0220)
-- TLS for S2S connections
-- Remote JID routing
-- Federated MUC participation
 
 ## Related
 

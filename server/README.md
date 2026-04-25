@@ -32,7 +32,7 @@ waddle/
 
 - Rust 1.75+ (stable)
 - SQLite for local development or a PostgreSQL instance for remote testing
-- A Prosody XMPP server (for real-time messaging)
+- WebSocket-capable clients for XMPP real-time messaging
 
 ### Development
 
@@ -92,7 +92,7 @@ docker tag ghcr.io/waddle-social/waddle:nix waddle-server:local
 
 # Run the server container
 docker run --rm \
-  -p 3000:3000 -p 5269:5269 \
+  -p 3000:3000 \
   -e WADDLE_DATABASE_URL=sqlite:///var/lib/waddle/waddle.db \
   -e WADDLE_XMPP_MAM_DATABASE_URL=sqlite:///var/lib/waddle/mam.db \
   -e WADDLE_XMPP_INBOX_DATABASE_URL=sqlite:///var/lib/waddle/inbox.db \
@@ -116,7 +116,7 @@ Waddle uses a unique architecture combining:
 
 - **Backend**: Rust + Axum for HTTP API
 - **Database**: SQLx-backed adapters for SQLite and PostgreSQL with a single logical Waddle database
-- **Real-time**: Prosody XMPP server for messaging
+- **Real-time**: Embedded WebSocket XMPP C2S server for messaging
 - **Auth**: ATProto OAuth with DID-based identity
 - **Permissions**: Zanzibar-inspired authorization model
 - **Actors**: Kameo for concurrent task management

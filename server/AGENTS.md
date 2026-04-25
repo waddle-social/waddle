@@ -3,14 +3,13 @@
 ## XMPP conformance testing
 - All XMPP conformance tests are native Rust tests — no Docker, CAAS, or external containers.
 - Run all conformance tests: `cargo test -p waddle-xmpp`
-- Run protocol conformance suite: `cargo test -p waddle-xmpp --test protocol_conformance`
-- Run a specific XEP test: `cargo test -p waddle-xmpp --test xep0199_ping`
+- Run a specific XEP test: `cargo test -p waddle-xmpp --test xep0172_pep_nick`
 - Run all integration tests: `cargo test -p waddle-xmpp --test '*'`
 - Every implemented XEP has either:
   - Inline unit tests in `src/xep/xepNNNN.rs` (parsing, building, validation)
-  - Integration tests in `tests/xepNNNN_*.rs` (server behavior, IQ handling, MUC)
+  - WebSocket integration tests in `crates/waddle-server/tests/xepNNNN_*.rs` for transport behavior
   - Or both.
-- The `protocol_conformance` test replaces the old Docker-based CAAS compliance suite.
+- The active C2S transport is WebSocket only; do not add TCP C2S or S2S harness tests.
 
 ## Graceful restart (Ecdysis)
 

@@ -140,7 +140,7 @@ Client responsibilities:
 
 ### Privacy Controls
 
-Configured via backend API, enforced by Prosody:
+Configured via backend API, enforced by the embedded XMPP/WebSocket server:
 
 ```
 PresenceSettings
@@ -206,7 +206,7 @@ Real-time presence comes directly from XMPP.
 
 ## Scaling Considerations
 
-- Presence is handled by XMPP server (Prosody/ejabberd)
+- Presence is handled by the embedded XMPP/WebSocket server
 - Multi-node deployments use server clustering
 - Typing indicators scoped to room occupants only
 - Consider presence-lite for large rooms (>1000 users)

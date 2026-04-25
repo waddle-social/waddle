@@ -44,8 +44,18 @@ pub struct TestServer {
 impl TestServer {
     /// Start a waddle-server with test configuration on dynamic ports.
     pub fn start() -> Self {
+        Self::start_with_extra_accounts(&[])
+    }
+
+    /// Start a waddle-server and seed additional native users.
+    pub fn start_with_extra_accounts(extra_accounts: &[(&str, &str)]) -> Self {
         let bin = env!("CARGO_BIN_EXE_waddle-server");
         let fixed_account_password = format!("ws-test-password-{}", uuid::Uuid::new_v4());
+        let extra_accounts_env = extra_accounts
+            .iter()
+            .map(|(username, password)| format!("{username}:{password}"))
+            .collect::<Vec<_>>()
+            .join(",");
 
         // Temp file where the server writes its bound HTTP port
         let port_file =
@@ -58,6 +68,7 @@ impl TestServer {
                 "WADDLE_TEST_FIXED_ACCOUNT_PASSWORD",
                 &fixed_account_password,
             )
+            .env("WADDLE_TEST_EXTRA_FIXED_ACCOUNTS", extra_accounts_env)
             .env("WADDLE_HTTP_ADDR", "127.0.0.1:0")
             .env("WADDLE_XMPP_DOMAIN", "localhost")
             .env("WADDLE_XMPP_MAM_DATABASE_URL", "sqlite::memory:")
@@ -351,6 +362,62 @@ impl WsXmppClient {
     }
 }
 
+#[allow(dead_code)]
+pub async fn disco_info_query(
+    client: &mut WsXmppClient,
+    to: &str,
+    id: &str,
+) -> Result<String, String> {
+    client
+        .send(&format!(
+            r#"<iq xmlns="jabber:client" type="get" id="{id}" to="{to}"><query xmlns="http://jabber.org/protocol/disco#info"/></iq>"#
+        ))
+        .await?;
+    client.recv_matching(|frame| frame.contains(id)).await
+}
+
+#[allow(dead_code)]
+pub async fn version_query(
+    client: &mut WsXmppClient,
+    to: &str,
+    id: &str,
+) -> Result<String, String> {
+    client
+        .send(&format!(
+            r#"<iq xmlns="jabber:client" type="get" id="{id}" to="{to}"><query xmlns="jabber:iq:version"/></iq>"#
+        ))
+        .await?;
+    client.recv_matching(|frame| frame.contains(id)).await
+}
+
+#[allow(dead_code)]
+pub async fn entity_time_query(
+    client: &mut WsXmppClient,
+    to: &str,
+    id: &str,
+) -> Result<String, String> {
+    client
+        .send(&format!(
+            r#"<iq xmlns="jabber:client" type="get" id="{id}" to="{to}"><time xmlns="urn:xmpp:time"/></iq>"#
+        ))
+        .await?;
+    client.recv_matching(|frame| frame.contains(id)).await
+}
+
+#[allow(dead_code)]
+pub async fn last_activity_query(
+    client: &mut WsXmppClient,
+    to: &str,
+    id: &str,
+) -> Result<String, String> {
+    client
+        .send(&format!(
+            r#"<iq xmlns="jabber:client" type="get" id="{id}" to="{to}"><query xmlns="jabber:iq:last"/></iq>"#
+        ))
+        .await?;
+    client.recv_matching(|frame| frame.contains(id)).await
+}
+
 // ---------------------------------------------------------------------------
 // Crypto helpers
 // ---------------------------------------------------------------------------
@@ -376,7 +443,7 @@ fn sha256(data: &[u8]) -> Vec<u8> {
 // XML helpers
 // ---------------------------------------------------------------------------
 
-fn extract_element_text(xml: &str, tag: &str) -> Option<String> {
+pub fn extract_element_text(xml: &str, tag: &str) -> Option<String> {
     let open = format!("<{tag}");
     let close = format!("</{tag}>");
     let start_idx = xml.find(&open)?;

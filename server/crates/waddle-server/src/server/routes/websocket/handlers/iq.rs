@@ -1,6 +1,8 @@
 use chrono;
 use jid::{BareJid, FullJid, Jid};
+use std::sync::Arc;
 use tracing::{debug, warn};
+use url::{Host, Url};
 use waddle_xmpp::{
     carbons::CARBONS_NS,
     commands::{CommandContext, CommandResult},
@@ -11,10 +13,15 @@ use waddle_xmpp::{
         Feature, Identity,
     },
     inbox::runtime::filter_query,
+    isr::{build_isr_token_error, build_isr_token_result, is_isr_token_request, IsrToken, ISR_NS},
     mam::{build_fin_iq, build_result_messages, is_mam_query, parse_mam_query},
     muc::{
+        admin::{
+            build_admin_result, build_admin_set_result, build_role_result, is_muc_admin_iq,
+            is_role_change_query, parse_admin_query,
+        },
         owner::build_config_form,
-        room_actor::{GetSnapshot, UpdateConfig},
+        room_actor::{ApplyAdminItems, GetAdminContext, GetSnapshot, PingSelfCheck, UpdateConfig},
         DATA_FORMS_NS,
     },
     protocol::{
@@ -23,7 +30,12 @@ use waddle_xmpp::{
     },
     pubsub::{
         build_pubsub_error, build_pubsub_items_result, build_pubsub_publish_result,
-        build_pubsub_success, is_pubsub_iq, parse_pubsub_iq, PubSubError, PubSubRequest,
+        build_pubsub_success, is_pubsub_iq, parse_pubsub_iq, PubSubError, PubSubItem,
+        PubSubRequest,
+    },
+    xep::xep0357::{
+        build_push_disable_result, build_push_enable_result, is_push_disable, is_push_enable,
+        parse_push_disable, parse_push_enable,
     },
     xep::xep0363::{
         build_upload_error, build_upload_slot_response, effective_content_type, is_upload_request,
@@ -34,8 +46,11 @@ use waddle_xmpp::{
         parse_mark_read,
     },
     xep::{
-        build_command_items, build_command_result, build_spaces_metadata_form,
-        parse_command_from_iq, Command, CommandStatus, NODE_COMMANDS,
+        build_command_items, build_command_result, build_last_activity_response,
+        build_search_response, build_spaces_metadata_form, is_last_activity_query,
+        is_search_request, is_time_query, is_version_query, parse_command_from_iq,
+        parse_search_request, ChannelResult, Command, CommandStatus, Searchable, NODE_COMMANDS,
+        NS_CHANNEL_SEARCH,
     },
     Affiliation, SpaceDetails, Stanza, StanzaErrorCondition, StanzaErrorType, XmppError,
 };
@@ -46,9 +61,12 @@ use super::super::{
     get_room_actor, iq_to_xml, is_muc_room_jid, list_room_jids, stanza_to_xml, WebSocketState,
 };
 use super::presence::get_managed_channel_for_room;
-use crate::auth::Session;
-use crate::db::actor::DbExecute;
+use crate::auth::{NativeUserStore, Session};
+use crate::db::actor::{DbExecute, DbQuery, DbQueryOne, GetDatabase};
+use crate::db::blocking::DatabaseBlockingStorage;
+use crate::db::{row_value, Database, Value, ValueExt};
 use crate::server::xmpp_state::list_xmpp_channels;
+use crate::vcard::VCardStore;
 
 /// Only called from test helpers — suppress dead_code lint for binary crate.
 #[allow(dead_code)]
@@ -124,6 +142,31 @@ pub async fn handle_iq_with_conn_state(
         _ => false,
     };
 
+    if waddle_xmpp::xep::xep0410::is_self_ping(&iq)
+        && iq
+            .to
+            .as_ref()
+            .is_some_and(|to| to.domain().as_str() == muc_domain)
+    {
+        return handle_muc_self_ping_iq(&iq, state, phase.bound_jid(), response_from, response_to)
+            .await;
+    }
+
+    if is_isr_token_request(&iq) {
+        return handle_isr_token_request_iq(&iq, state, authenticated_session, phase.bound_jid())
+            .await;
+    }
+
+    if let Some(target) = iq
+        .to
+        .as_ref()
+        .and_then(|jid| jid.clone().try_into_full().ok())
+    {
+        if target.domain().as_str() == domain {
+            return route_full_jid_iq(iq, state, phase.bound_jid(), target, response_from).await;
+        }
+    }
+
     // Sans-I/O dispatch: if the IQ namespace has a registered handler in
     // the protocol dispatcher, route through it and translate the emitted
     // OutboundEvents into outbound XML frames via `interpret()`.
@@ -146,6 +189,53 @@ pub async fn handle_iq_with_conn_state(
         .dispatcher
         .has_iq_handler(payload_ns.as_str())
     {
+        if payload_ns == waddle_xmpp::xep::NS_VERSION && !is_version_query(&iq) {
+            return vec![build_iq_error_xml_with_addresses(
+                &id,
+                response_from,
+                response_to,
+                "modify",
+                "bad-request",
+            )];
+        }
+        if payload_ns == waddle_xmpp::xep::NS_VERSION
+            && iq
+                .to
+                .as_ref()
+                .is_some_and(|target| target.to_bare().as_str() != domain)
+        {
+            return vec![build_iq_error_xml_with_addresses(
+                &id,
+                response_from,
+                response_to,
+                "cancel",
+                "service-unavailable",
+            )];
+        }
+        if payload_ns == waddle_xmpp::xep::NS_TIME {
+            if !is_time_query(&iq) {
+                return vec![build_iq_error_xml_with_addresses(
+                    &id,
+                    response_from,
+                    response_to,
+                    "modify",
+                    "bad-request",
+                )];
+            }
+            if iq
+                .to
+                .as_ref()
+                .is_some_and(|target| target.to_bare().as_str() != domain)
+            {
+                return vec![build_iq_error_xml_with_addresses(
+                    &id,
+                    response_from,
+                    response_to,
+                    "cancel",
+                    "service-unavailable",
+                )];
+            }
+        }
         let Some(full_jid) = phase.bound_jid() else {
             return vec![build_iq_error_xml_with_addresses(
                 &id,
@@ -183,6 +273,50 @@ pub async fn handle_iq_with_conn_state(
     // jabber:iq:roster is now served by protocol::handlers::roster::RosterHandler
     // through the sans-I/O dispatcher short-circuit above.
 
+    if waddle_xmpp::xep::xep0054::is_vcard_get(&iq) || waddle_xmpp::xep::xep0054::is_vcard_set(&iq)
+    {
+        return handle_vcard_iq(&iq, state, phase.bound_jid(), response_from, response_to).await;
+    }
+
+    if is_last_activity_query(&iq) {
+        return handle_last_activity_iq(
+            &iq,
+            domain,
+            state,
+            phase.bound_jid(),
+            response_from,
+            response_to,
+        )
+        .await;
+    }
+
+    if waddle_xmpp::xep::xep0049::is_private_storage_query(&iq) {
+        return handle_private_storage_iq(
+            &iq,
+            state,
+            phase.bound_jid(),
+            response_from,
+            response_to,
+        )
+        .await;
+    }
+
+    if waddle_xmpp::xep::xep0191::is_blocking_query(&iq) {
+        return handle_blocking_iq(&iq, state, phase.bound_jid(), response_from, response_to).await;
+    }
+
+    if is_push_enable(&iq) || is_push_disable(&iq) {
+        return handle_push_iq(&iq, state, phase.bound_jid(), response_from, response_to).await;
+    }
+
+    if is_search_request(&iq) {
+        return handle_channel_search_iq(&iq, muc_domain, state, response_from, response_to).await;
+    }
+
+    if payload_ns == "jabber:iq:search" {
+        return handle_user_search_iq(&iq, domain, state, response_from, response_to).await;
+    }
+
     // Disco info on MUC service
     if payload_ns == "http://jabber.org/protocol/disco#info" {
         let request_iq = &iq;
@@ -193,7 +327,12 @@ pub async fn handle_iq_with_conn_state(
 
         if to.as_deref() == Some(muc_domain) {
             let identities = vec![Identity::muc_service(Some("Waddle Chatrooms"))];
-            let mut features = vec![Feature::muc(), Feature::replies()];
+            let mut features = vec![
+                Feature::muc(),
+                Feature::replies(),
+                Feature::muc_self_ping_optimization(),
+                Feature::new(NS_CHANNEL_SEARCH),
+            ];
             features.extend(
                 state
                     .deps
@@ -261,7 +400,8 @@ pub async fn handle_iq_with_conn_state(
                 }
 
                 if is_muc_room_jid(state, &room_jid).await {
-                    if let Some(channel) = get_managed_channel_for_room(state, &room_jid).await {
+                    if let Ok(Some(channel)) = get_managed_channel_for_room(state, &room_jid).await
+                    {
                         let identities = vec![Identity::muc_room(Some(&channel.name))];
                         let mut features =
                             muc_room_features(true, false, false, channel.channel_type == "forum");
@@ -383,6 +523,12 @@ pub async fn handle_iq_with_conn_state(
             Feature::disco_items(),
             Feature::commands(),
             Feature::spaces(),
+            Feature::last_activity(),
+            Feature::software_version(),
+            Feature::entity_time(),
+            Feature::blocking(),
+            Feature::new("jabber:iq:search"),
+            Feature::new(ISR_NS),
         ];
         features.extend(
             state
@@ -492,6 +638,18 @@ pub async fn handle_iq_with_conn_state(
 
     if payload_ns == "http://jabber.org/protocol/commands" {
         return handle_command_iq(&iq, state, authenticated_session, phase.bound_jid()).await;
+    }
+
+    if payload_ns == "http://jabber.org/protocol/muc#admin" && is_muc_admin_iq(&iq, muc_domain) {
+        return handle_muc_admin_iq(
+            &iq,
+            muc_domain,
+            state,
+            phase.bound_jid(),
+            response_from,
+            response_to,
+        )
+        .await;
     }
 
     // MUC owner IQ (XEP-0045): instant room config submit and room destroy.
@@ -1080,7 +1238,57 @@ pub async fn handle_iq_with_conn_state(
                 }
             }
 
-            PubSubRequest::Subscribe { .. } | PubSubRequest::Unsubscribe { .. } => {
+            PubSubRequest::Subscribe { node, jid } => {
+                let subscription_jid = jid.to_bare();
+                if subscription_jid != user_jid {
+                    let error = build_pubsub_error(&iq, PubSubError::Forbidden);
+                    return vec![iq_to_xml(error)];
+                }
+                let is_spaces_node = target_jid.to_string() == spaces_domain && node == "space";
+                if !is_spaces_node {
+                    match state
+                        .deps
+                        .protocol
+                        .pubsub_storage
+                        .get_node(&target_jid, &node)
+                        .await
+                    {
+                        Ok(Some(_)) => {}
+                        Ok(None) => {
+                            let error = build_pubsub_error(&iq, PubSubError::NodeNotFound);
+                            return vec![iq_to_xml(error)];
+                        }
+                        Err(e) => {
+                            warn!("PubSub subscribe node lookup failed: {}", e);
+                            let error = build_pubsub_error(&iq, PubSubError::NodeNotFound);
+                            return vec![iq_to_xml(error)];
+                        }
+                    }
+                }
+                state.deps.protocol.pubsub_subscriptions.insert((
+                    target_jid.to_string(),
+                    node,
+                    subscription_jid.to_string(),
+                ));
+                let response = build_pubsub_success(&iq);
+                return vec![iq_to_xml(response)];
+            }
+
+            PubSubRequest::Unsubscribe { node, jid, .. } => {
+                let subscription_jid = jid.to_bare();
+                if subscription_jid != user_jid {
+                    let error = build_pubsub_error(&iq, PubSubError::Forbidden);
+                    return vec![iq_to_xml(error)];
+                }
+                let removed = state.deps.protocol.pubsub_subscriptions.remove(&(
+                    target_jid.to_string(),
+                    node,
+                    subscription_jid.to_string(),
+                ));
+                if removed.is_none() {
+                    let error = build_pubsub_error(&iq, PubSubError::NotSubscribed);
+                    return vec![iq_to_xml(error)];
+                }
                 let response = build_pubsub_success(&iq);
                 return vec![iq_to_xml(response)];
             }
@@ -1096,6 +1304,661 @@ pub async fn handle_iq_with_conn_state(
         response_to,
         "cancel",
         "feature-not-implemented",
+    )]
+}
+
+async fn handle_muc_self_ping_iq(
+    iq: &xmpp_parsers::iq::Iq,
+    state: &WebSocketState,
+    sender_jid: Option<&FullJid>,
+    response_from: Option<&str>,
+    response_to: Option<&str>,
+) -> Vec<String> {
+    let Some(sender_jid) = sender_jid else {
+        return vec![build_iq_error_xml_with_addresses(
+            &iq.id,
+            response_from,
+            response_to,
+            "auth",
+            "not-authorized",
+        )];
+    };
+    let Some(target) = iq
+        .to
+        .as_ref()
+        .and_then(|jid| jid.clone().try_into_full().ok())
+    else {
+        return vec![build_iq_error_xml_with_addresses(
+            &iq.id,
+            response_from,
+            response_to,
+            "modify",
+            "bad-request",
+        )];
+    };
+    let room_jid = target.to_bare();
+    let nick = target.resource().to_string();
+    let Some(room_actor) = get_room_actor(state, &room_jid).await else {
+        return vec![build_iq_error_xml_with_addresses(
+            &iq.id,
+            response_from,
+            response_to,
+            "cancel",
+            "item-not-found",
+        )];
+    };
+    match room_actor
+        .ask(PingSelfCheck {
+            nick,
+            sender_jid: sender_jid.clone(),
+        })
+        .await
+    {
+        Ok(()) => vec![build_iq_result_xml(
+            &iq.id,
+            response_from,
+            response_to,
+            None,
+        )],
+        Err(kameo::error::SendError::HandlerError(_)) => vec![build_iq_error_xml_with_addresses(
+            &iq.id,
+            response_from,
+            response_to,
+            "cancel",
+            "not-acceptable",
+        )],
+        Err(error) => {
+            warn!(room = %room_jid, error = ?error, "Failed to process MUC self-ping");
+            vec![build_iq_error_xml_with_addresses(
+                &iq.id,
+                response_from,
+                response_to,
+                "wait",
+                "internal-server-error",
+            )]
+        }
+    }
+}
+
+async fn handle_isr_token_request_iq(
+    iq: &xmpp_parsers::iq::Iq,
+    state: &WebSocketState,
+    authenticated_session: &Option<Session>,
+    sender_jid: Option<&FullJid>,
+) -> Vec<String> {
+    let (Some(session), Some(sender_jid)) = (authenticated_session.as_ref(), sender_jid) else {
+        return vec![iq_to_xml(build_isr_token_error(iq, "not-authorized"))];
+    };
+    let token: IsrToken = state
+        .deps
+        .protocol
+        .isr_token_store
+        .create_token(session.user_id.to_string(), sender_jid.to_bare());
+    vec![iq_to_xml(build_isr_token_result(iq, &token))]
+}
+
+async fn route_full_jid_iq(
+    mut iq: xmpp_parsers::iq::Iq,
+    state: &WebSocketState,
+    sender_jid: Option<&FullJid>,
+    target: FullJid,
+    response_from: Option<&str>,
+) -> Vec<String> {
+    let Some(sender_jid) = sender_jid else {
+        return vec![build_iq_error_xml_with_addresses(
+            &iq.id,
+            response_from,
+            None,
+            "auth",
+            "not-authorized",
+        )];
+    };
+    let blocking = DatabaseBlockingStorage::new(state.deps.app_state.db_pool.global().clone());
+    match blocking
+        .is_blocked(&target.to_bare(), &sender_jid.to_bare())
+        .await
+    {
+        Ok(true) => {
+            return vec![build_iq_error_xml_with_addresses(
+                &iq.id,
+                response_from,
+                Some(sender_jid.as_str()),
+                "cancel",
+                "service-unavailable",
+            )];
+        }
+        Ok(false) => {}
+        Err(error) => {
+            warn!(error = %error, target = %target, sender = %sender_jid, "Failed to check blocklist before routing IQ");
+            return vec![build_iq_error_xml_with_addresses(
+                &iq.id,
+                response_from,
+                Some(sender_jid.as_str()),
+                "wait",
+                "internal-server-error",
+            )];
+        }
+    }
+    iq.from = Some(Jid::from(sender_jid.clone()));
+    iq.to = Some(Jid::from(target.clone()));
+    match state
+        .deps
+        .protocol
+        .connection_registry
+        .send_to(&target, Stanza::Iq(iq.clone()))
+        .await
+    {
+        waddle_xmpp::registry::SendResult::Sent => Vec::new(),
+        waddle_xmpp::registry::SendResult::NotConnected
+        | waddle_xmpp::registry::SendResult::ChannelClosed => {
+            let sender = sender_jid.to_string();
+            vec![build_iq_error_xml_with_addresses(
+                &iq.id,
+                response_from,
+                Some(sender.as_str()),
+                "cancel",
+                "service-unavailable",
+            )]
+        }
+    }
+}
+
+async fn handle_channel_search_iq(
+    iq: &xmpp_parsers::iq::Iq,
+    muc_domain: &str,
+    state: &WebSocketState,
+    response_from: Option<&str>,
+    response_to: Option<&str>,
+) -> Vec<String> {
+    if iq
+        .to
+        .as_ref()
+        .is_some_and(|to| to.to_string() != muc_domain)
+    {
+        return vec![build_iq_error_xml_with_addresses(
+            &iq.id,
+            response_from,
+            response_to,
+            "cancel",
+            "item-not-found",
+        )];
+    }
+    let Some(request) = parse_search_request(iq) else {
+        return vec![build_iq_error_xml_with_addresses(
+            &iq.id,
+            response_from,
+            response_to,
+            "modify",
+            "bad-request",
+        )];
+    };
+    let limit = request.max.unwrap_or(50).clamp(1, 200) as usize;
+    let channels =
+        match list_xmpp_channels(state.deps.app_state.db_pool.global_actor().clone(), 500, 0).await
+        {
+            Ok(channels) => channels,
+            Err(error) => {
+                warn!(error = %error, "Failed to load channels for WebSocket search");
+                return vec![build_iq_error_xml_with_addresses(
+                    &iq.id,
+                    response_from,
+                    response_to,
+                    "wait",
+                    "internal-server-error",
+                )];
+            }
+        };
+    let mut results = Vec::new();
+    for channel in channels {
+        let Some(room_jid) = waddle_xmpp::managed_room_jid(&channel.id, muc_domain).ok() else {
+            continue;
+        };
+        let result = ChannelResult::new(room_jid.to_string())
+            .with_name(channel.name)
+            .with_description(channel.description.unwrap_or_default());
+        if result.matches_query(&request.query) {
+            results.push(result);
+            if results.len() >= limit {
+                break;
+            }
+        }
+    }
+    vec![iq_to_xml(build_search_response(iq, &results))]
+}
+
+async fn handle_user_search_iq(
+    iq: &xmpp_parsers::iq::Iq,
+    domain: &str,
+    state: &WebSocketState,
+    response_from: Option<&str>,
+    response_to: Option<&str>,
+) -> Vec<String> {
+    match &iq.payload {
+        xmpp_parsers::iq::IqType::Get(_) => {
+            let payload = Element::builder("query", "jabber:iq:search")
+                .append(
+                    Element::builder("instructions", "jabber:iq:search")
+                        .append("Search users by username or email")
+                        .build(),
+                )
+                .append(Element::builder("nick", "jabber:iq:search").build())
+                .append(Element::builder("email", "jabber:iq:search").build())
+                .build();
+            vec![build_iq_result_xml(
+                &iq.id,
+                response_from,
+                response_to,
+                Some(payload),
+            )]
+        }
+        xmpp_parsers::iq::IqType::Set(query) => {
+            let term = query
+                .children()
+                .find(|child| matches!(child.name(), "nick" | "email" | "first" | "last"))
+                .map(|child| child.text())
+                .unwrap_or_default();
+            let like = format!("%{}%", term.trim());
+            let rows = match state
+                .deps
+                .app_state
+                .db_pool
+                .global_actor()
+                .clone()
+                .ask(DbQuery {
+                    sql: "SELECT username, email FROM native_users WHERE domain = ? AND (username LIKE ? OR COALESCE(email, '') LIKE ?) ORDER BY username LIMIT 50".to_string(),
+                    params: vec![domain.into(), like.clone().into(), like.into()],
+                })
+                .await
+            {
+                Ok(rows) => rows,
+                Err(error) => {
+                    warn!(error = %error, "Failed to search native users over WebSocket");
+                    return vec![build_iq_error_xml_with_addresses(
+                        &iq.id,
+                        response_from,
+                        response_to,
+                        "wait",
+                        "internal-server-error",
+                    )];
+                }
+            };
+            let mut query = Element::builder("query", "jabber:iq:search");
+            for row in rows {
+                let username = row_value(&row, 0)
+                    .and_then(ValueExt::as_string)
+                    .unwrap_or_default();
+                if username.is_empty() {
+                    continue;
+                }
+                let email = row_value(&row, 1)
+                    .and_then(ValueExt::as_optional_string)
+                    .ok()
+                    .flatten();
+                let mut item = Element::builder("item", "jabber:iq:search")
+                    .attr("jid", format!("{username}@{domain}"))
+                    .append(
+                        Element::builder("nick", "jabber:iq:search")
+                            .append(username.clone())
+                            .build(),
+                    );
+                if let Some(email) = email {
+                    item = item.append(
+                        Element::builder("email", "jabber:iq:search")
+                            .append(email)
+                            .build(),
+                    );
+                }
+                query = query.append(item.build());
+            }
+            vec![build_iq_result_xml(
+                &iq.id,
+                response_from,
+                response_to,
+                Some(query.build()),
+            )]
+        }
+        _ => vec![build_iq_error_xml_with_addresses(
+            &iq.id,
+            response_from,
+            response_to,
+            "modify",
+            "bad-request",
+        )],
+    }
+}
+
+async fn handle_muc_admin_iq(
+    iq: &xmpp_parsers::iq::Iq,
+    muc_domain: &str,
+    state: &WebSocketState,
+    sender_jid: Option<&FullJid>,
+    response_from: Option<&str>,
+    response_to: Option<&str>,
+) -> Vec<String> {
+    let Some(sender_jid) = sender_jid else {
+        return vec![build_iq_error_xml_with_addresses(
+            &iq.id,
+            response_from,
+            response_to,
+            "auth",
+            "not-authorized",
+        )];
+    };
+    let mut iq_with_from = iq.clone();
+    iq_with_from.from = Some(Jid::from(sender_jid.clone()));
+    let query = match parse_admin_query(&iq_with_from, muc_domain) {
+        Ok(query) => query,
+        Err(error) => return vec![build_xmpp_error_response(&iq_with_from, error)],
+    };
+    let Some(room_actor) = get_room_actor(state, &query.room_jid).await else {
+        return vec![build_iq_error_xml_with_addresses(
+            &iq.id,
+            response_from,
+            response_to,
+            "cancel",
+            "item-not-found",
+        )];
+    };
+    let context = match room_actor
+        .ask(GetAdminContext {
+            sender_jid: sender_jid.clone(),
+        })
+        .await
+    {
+        Ok(context) => context,
+        Err(_) => {
+            return vec![build_iq_error_xml_with_addresses(
+                &iq.id,
+                response_from,
+                response_to,
+                "wait",
+                "internal-server-error",
+            )]
+        }
+    };
+    let is_admin = matches!(context.affiliation, Affiliation::Owner | Affiliation::Admin)
+        || matches!(context.role, waddle_xmpp::Role::Moderator);
+    if !is_admin {
+        return vec![build_iq_error_xml_with_addresses(
+            &iq.id,
+            response_from,
+            response_to,
+            "auth",
+            "forbidden",
+        )];
+    }
+    if query.is_get {
+        let snapshot = match room_actor.ask(GetSnapshot).await {
+            Ok(snapshot) => snapshot.room,
+            Err(_) => {
+                return vec![build_iq_error_xml_with_addresses(
+                    &iq.id,
+                    response_from,
+                    response_to,
+                    "wait",
+                    "internal-server-error",
+                )]
+            }
+        };
+        let to_jid = Jid::from(sender_jid.clone());
+        if is_role_change_query(&query.items) {
+            let role_filter = query.items.iter().find_map(|item| item.role);
+            let items: Vec<(String, waddle_xmpp::Role, Option<BareJid>)> = snapshot
+                .occupants
+                .values()
+                .filter(|occupant| role_filter.is_none_or(|role| occupant.role == role))
+                .map(|occupant| {
+                    (
+                        occupant.nick.clone(),
+                        occupant.role,
+                        Some(occupant.real_jid.to_bare()),
+                    )
+                })
+                .collect();
+            return vec![iq_to_xml(build_role_result(
+                &iq.id,
+                &query.room_jid,
+                &to_jid,
+                &items,
+            ))];
+        }
+        let affiliation_filter = query.items.iter().find_map(|item| item.affiliation);
+        let items: Vec<(BareJid, Affiliation)> = if let Some(affiliation) = affiliation_filter {
+            snapshot
+                .get_jids_by_affiliation(affiliation)
+                .into_iter()
+                .map(|jid| (jid, affiliation))
+                .collect()
+        } else {
+            snapshot
+                .get_all_affiliations()
+                .into_iter()
+                .map(|entry| (entry.jid, entry.affiliation))
+                .collect()
+        };
+        return vec![iq_to_xml(build_admin_result(
+            &iq.id,
+            &query.room_jid,
+            &to_jid,
+            &items,
+        ))];
+    }
+    let room_jid = query.room_jid.clone();
+    let updates = match room_actor
+        .ask(ApplyAdminItems {
+            sender_jid: sender_jid.clone(),
+            sender_affiliation: context.affiliation,
+            sender_role: context.role,
+            items: query.items,
+        })
+        .await
+    {
+        Ok(updates) => updates,
+        Err(kameo::error::SendError::HandlerError(error)) => {
+            warn!(room = %room_jid, error = %error, "MUC admin set rejected");
+            return vec![build_iq_error_xml_with_addresses(
+                &iq.id,
+                response_from,
+                response_to,
+                "auth",
+                "forbidden",
+            )];
+        }
+        Err(error) => {
+            warn!(room = %room_jid, error = ?error, "Failed to apply MUC admin IQ");
+            return vec![build_iq_error_xml_with_addresses(
+                &iq.id,
+                response_from,
+                response_to,
+                "wait",
+                "internal-server-error",
+            )];
+        }
+    };
+    for (recipient, presence) in updates {
+        let _ = state
+            .deps
+            .protocol
+            .connection_registry
+            .send_to(&recipient, Stanza::Presence(presence))
+            .await;
+    }
+    vec![iq_to_xml(build_admin_set_result(
+        &iq.id,
+        &room_jid,
+        &Jid::from(sender_jid.clone()),
+    ))]
+}
+
+async fn handle_last_activity_iq(
+    iq: &xmpp_parsers::iq::Iq,
+    domain: &str,
+    state: &WebSocketState,
+    sender_jid: Option<&FullJid>,
+    response_from: Option<&str>,
+    response_to: Option<&str>,
+) -> Vec<String> {
+    let Some(sender_jid) = sender_jid else {
+        return vec![build_iq_error_xml_with_addresses(
+            &iq.id,
+            response_from,
+            response_to,
+            "auth",
+            "not-authorized",
+        )];
+    };
+
+    let Some(target) = &iq.to else {
+        let response = build_last_activity_response(
+            iq,
+            state
+                .deps
+                .protocol
+                .connection_registry
+                .server_uptime_seconds(),
+            None,
+        );
+        return vec![iq_to_xml(response)];
+    };
+
+    if target.node().is_none() && target.domain().as_str() == domain {
+        let response = build_last_activity_response(
+            iq,
+            state
+                .deps
+                .protocol
+                .connection_registry
+                .server_uptime_seconds(),
+            None,
+        );
+        return vec![iq_to_xml(response)];
+    }
+
+    if target.node().is_some() && target.resource().is_none() && target.domain().as_str() == domain
+    {
+        let target_bare = target.to_bare();
+        let global_db = match state
+            .deps
+            .app_state
+            .db_pool
+            .global_actor()
+            .clone()
+            .ask(GetDatabase)
+            .await
+        {
+            Ok(db) => db,
+            Err(error) => {
+                warn!(error = %error, "Failed to access database for last-activity block check");
+                return vec![build_iq_error_xml_with_addresses(
+                    &iq.id,
+                    response_from,
+                    response_to,
+                    "wait",
+                    "internal-server-error",
+                )];
+            }
+        };
+        let blocking_storage = DatabaseBlockingStorage::new(global_db);
+        match blocking_storage
+            .is_blocked(&target_bare, &sender_jid.to_bare())
+            .await
+        {
+            Ok(true) => {
+                return vec![build_iq_error_xml_with_addresses(
+                    &iq.id,
+                    response_from,
+                    response_to,
+                    "cancel",
+                    "service-unavailable",
+                )];
+            }
+            Ok(false) => {}
+            Err(error) => {
+                warn!(error = %error, target = %target_bare, "Failed to check last-activity block state");
+                return vec![build_iq_error_xml_with_addresses(
+                    &iq.id,
+                    response_from,
+                    response_to,
+                    "wait",
+                    "internal-server-error",
+                )];
+            }
+        }
+
+        if !state
+            .deps
+            .protocol
+            .connection_registry
+            .get_available_resources_for_user(&target_bare)
+            .is_empty()
+        {
+            return vec![iq_to_xml(build_last_activity_response(iq, 0, None))];
+        }
+
+        if let Some(last_activity) = state
+            .deps
+            .protocol
+            .connection_registry
+            .get_last_activity(&target_bare)
+        {
+            let seconds = chrono::Utc::now()
+                .signed_duration_since(last_activity.timestamp)
+                .num_seconds()
+                .max(0) as u64;
+            let response =
+                build_last_activity_response(iq, seconds, last_activity.status.as_deref());
+            return vec![iq_to_xml(response)];
+        }
+
+        let Some(node) = target_bare.node() else {
+            return vec![build_iq_error_xml_with_addresses(
+                &iq.id,
+                response_from,
+                response_to,
+                "cancel",
+                "service-unavailable",
+            )];
+        };
+        let native_user_store =
+            NativeUserStore::new(state.deps.app_state.db_pool.global_actor().clone());
+        match native_user_store.user_exists(node.as_str(), domain).await {
+            Ok(false) => {
+                return vec![build_iq_error_xml_with_addresses(
+                    &iq.id,
+                    response_from,
+                    response_to,
+                    "cancel",
+                    "service-unavailable",
+                )];
+            }
+            Ok(true) => {
+                return vec![build_iq_error_xml_with_addresses(
+                    &iq.id,
+                    response_from,
+                    response_to,
+                    "auth",
+                    "forbidden",
+                )];
+            }
+            Err(error) => {
+                warn!(error = %error, target = %target_bare, "Failed to check local user for last-activity query");
+                return vec![build_iq_error_xml_with_addresses(
+                    &iq.id,
+                    response_from,
+                    response_to,
+                    "wait",
+                    "internal-server-error",
+                )];
+            }
+        }
+    }
+
+    vec![build_iq_error_xml_with_addresses(
+        &iq.id,
+        response_from,
+        response_to,
+        "cancel",
+        "service-unavailable",
     )]
 }
 
@@ -1129,6 +1992,582 @@ fn build_xmpp_error_response(request_iq: &xmpp_parsers::iq::Iq, err: XmppError) 
             StanzaErrorType::Wait,
             Some(&other.to_string()),
         ),
+    }
+}
+
+async fn global_database(state: &WebSocketState) -> Result<Database, String> {
+    state
+        .deps
+        .app_state
+        .db_pool
+        .global_actor()
+        .clone()
+        .ask(GetDatabase)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+async fn handle_vcard_iq(
+    iq: &xmpp_parsers::iq::Iq,
+    state: &WebSocketState,
+    sender_jid: Option<&FullJid>,
+    response_from: Option<&str>,
+    response_to: Option<&str>,
+) -> Vec<String> {
+    let Some(sender_jid) = sender_jid else {
+        return vec![build_iq_error_xml_with_addresses(
+            &iq.id,
+            response_from,
+            response_to,
+            "auth",
+            "not-authorized",
+        )];
+    };
+
+    let db = match global_database(state).await {
+        Ok(db) => Arc::new(db),
+        Err(error) => {
+            warn!(error = %error, "Failed to access database for vCard IQ");
+            return vec![build_iq_error_xml_with_addresses(
+                &iq.id,
+                response_from,
+                response_to,
+                "wait",
+                "internal-server-error",
+            )];
+        }
+    };
+    let store = VCardStore::new(db);
+
+    if waddle_xmpp::xep::xep0054::is_vcard_get(iq) {
+        let target_jid = iq
+            .to
+            .as_ref()
+            .map(|jid| jid.to_bare())
+            .unwrap_or_else(|| sender_jid.to_bare());
+        let response = match store.get(&target_jid).await {
+            Ok(Some(xml)) => match xml.parse::<Element>() {
+                Ok(vcard) => xmpp_parsers::iq::Iq {
+                    from: iq.to.clone(),
+                    to: iq.from.clone(),
+                    id: iq.id.clone(),
+                    payload: xmpp_parsers::iq::IqType::Result(Some(vcard)),
+                },
+                Err(error) => {
+                    warn!(target = %target_jid, error = %error, "Stored vCard XML is invalid");
+                    waddle_xmpp::xep::xep0054::build_empty_vcard_response(iq)
+                }
+            },
+            Ok(None) => waddle_xmpp::xep::xep0054::build_empty_vcard_response(iq),
+            Err(error) => {
+                warn!(target = %target_jid, error = %error, "Failed to load vCard");
+                return vec![build_iq_error_xml_with_addresses(
+                    &iq.id,
+                    response_from,
+                    response_to,
+                    "wait",
+                    "internal-server-error",
+                )];
+            }
+        };
+        return vec![iq_to_xml(response)];
+    }
+
+    if let Some(to) = &iq.to {
+        if to.to_bare() != sender_jid.to_bare() {
+            return vec![build_iq_error_xml_with_addresses(
+                &iq.id,
+                response_from,
+                response_to,
+                "auth",
+                "forbidden",
+            )];
+        }
+    }
+
+    let xmpp_parsers::iq::IqType::Set(vcard) = &iq.payload else {
+        return vec![build_iq_error_xml_with_addresses(
+            &iq.id,
+            response_from,
+            response_to,
+            "modify",
+            "bad-request",
+        )];
+    };
+
+    if let Err(error) = store.set(&sender_jid.to_bare(), &String::from(vcard)).await {
+        warn!(jid = %sender_jid, error = %error, "Failed to store vCard");
+        return vec![build_iq_error_xml_with_addresses(
+            &iq.id,
+            response_from,
+            response_to,
+            "wait",
+            "internal-server-error",
+        )];
+    }
+
+    vec![iq_to_xml(waddle_xmpp::xep::xep0054::build_vcard_success(
+        iq,
+    ))]
+}
+
+async fn handle_private_storage_iq(
+    iq: &xmpp_parsers::iq::Iq,
+    state: &WebSocketState,
+    sender_jid: Option<&FullJid>,
+    response_from: Option<&str>,
+    response_to: Option<&str>,
+) -> Vec<String> {
+    let Some(sender_jid) = sender_jid else {
+        return vec![build_iq_error_xml_with_addresses(
+            &iq.id,
+            response_from,
+            response_to,
+            "auth",
+            "not-authorized",
+        )];
+    };
+    let bare_jid = sender_jid.to_bare();
+
+    if let Some(key) = waddle_xmpp::xep::xep0049::parse_private_storage_get(iq) {
+        if waddle_xmpp::xep::xep0048::is_legacy_bookmarks_namespace(&key.namespace) {
+            let stored_items = state
+                .deps
+                .protocol
+                .pubsub_storage
+                .get_items(&bare_jid, waddle_xmpp::xep::xep0402::PEP_NODE, None, &[])
+                .await
+                .unwrap_or_default();
+            let native_bookmarks: Vec<waddle_xmpp::xep::xep0402::Bookmark> = stored_items
+                .iter()
+                .filter_map(|item| {
+                    let xml = item.payload_xml.as_ref()?;
+                    let elem: Element = xml.parse().ok()?;
+                    waddle_xmpp::xep::xep0402::parse_bookmark(&item.id, &elem).ok()
+                })
+                .collect();
+            let legacy: Vec<waddle_xmpp::xep::xep0048::LegacyBookmark> = native_bookmarks
+                .iter()
+                .map(waddle_xmpp::xep::xep0048::from_native_bookmark)
+                .collect();
+            let bookmarks = waddle_xmpp::xep::xep0048::build_legacy_bookmarks_element(&legacy);
+            let response = waddle_xmpp::xep::xep0049::build_private_storage_result(
+                iq,
+                Some(&String::from(&bookmarks)),
+                &key,
+            );
+            return vec![iq_to_xml(response)];
+        }
+
+        let row = match state
+            .deps
+            .app_state
+            .db_pool
+            .global_actor()
+            .clone()
+            .ask(DbQueryOne {
+                sql: "SELECT xml_content FROM private_xml_storage WHERE jid = ? AND namespace = ?"
+                    .to_string(),
+                params: vec![
+                    Value::from(bare_jid.to_string()),
+                    Value::from(key.namespace.clone()),
+                ],
+            })
+            .await
+        {
+            Ok(row) => row,
+            Err(error) => {
+                warn!(jid = %bare_jid, namespace = %key.namespace, error = %error, "Failed to load private XML");
+                return vec![build_iq_error_xml_with_addresses(
+                    &iq.id,
+                    response_from,
+                    response_to,
+                    "wait",
+                    "internal-server-error",
+                )];
+            }
+        };
+        let stored = match row {
+            Some(values) => match row_value(&values, 0).and_then(|value| value.as_string()) {
+                Ok(value) => Some(value),
+                Err(error) => {
+                    warn!(jid = %bare_jid, namespace = %key.namespace, error = %error, "Failed to decode private XML row");
+                    return vec![build_iq_error_xml_with_addresses(
+                        &iq.id,
+                        response_from,
+                        response_to,
+                        "wait",
+                        "internal-server-error",
+                    )];
+                }
+            },
+            None => None,
+        };
+        let response =
+            waddle_xmpp::xep::xep0049::build_private_storage_result(iq, stored.as_deref(), &key);
+        return vec![iq_to_xml(response)];
+    }
+
+    if let Some((key, xml_content)) = waddle_xmpp::xep::xep0049::parse_private_storage_set(iq) {
+        if waddle_xmpp::xep::xep0048::is_legacy_bookmarks_namespace(&key.namespace) {
+            if let Ok(elem) = xml_content.parse::<Element>() {
+                for legacy in waddle_xmpp::xep::xep0048::parse_legacy_bookmarks(&elem) {
+                    if let Some(native) = waddle_xmpp::xep::xep0048::to_native_bookmark(&legacy) {
+                        let bookmark_elem =
+                            waddle_xmpp::xep::xep0402::build_bookmark_element(&native);
+                        let item =
+                            PubSubItem::new(Some(native.jid.to_string()), Some(bookmark_elem));
+                        let _ = state
+                            .deps
+                            .protocol
+                            .pubsub_storage
+                            .publish_item(
+                                &bare_jid,
+                                waddle_xmpp::xep::xep0402::PEP_NODE,
+                                &item,
+                                Some(&bare_jid),
+                                true,
+                            )
+                            .await;
+                    }
+                }
+            }
+            return vec![iq_to_xml(
+                waddle_xmpp::xep::xep0049::build_private_storage_success(iq),
+            )];
+        }
+
+        if let Err(error) = state
+            .deps
+            .app_state
+            .db_pool
+            .global_actor()
+            .clone()
+            .ask(DbExecute {
+                sql: "INSERT OR REPLACE INTO private_xml_storage (jid, namespace, xml_content, updated_at) VALUES (?, ?, ?, datetime('now'))".to_string(),
+                params: vec![
+                    Value::from(bare_jid.to_string()),
+                    Value::from(key.namespace),
+                    Value::from(xml_content),
+                ],
+            })
+            .await
+        {
+            warn!(jid = %bare_jid, error = %error, "Failed to store private XML");
+            return vec![build_iq_error_xml_with_addresses(
+                &iq.id,
+                response_from,
+                response_to,
+                "wait",
+                "internal-server-error",
+            )];
+        }
+        return vec![iq_to_xml(
+            waddle_xmpp::xep::xep0049::build_private_storage_success(iq),
+        )];
+    }
+
+    vec![build_iq_error_xml_with_addresses(
+        &iq.id,
+        response_from,
+        response_to,
+        "modify",
+        "bad-request",
+    )]
+}
+
+async fn handle_blocking_iq(
+    iq: &xmpp_parsers::iq::Iq,
+    state: &WebSocketState,
+    sender_jid: Option<&FullJid>,
+    response_from: Option<&str>,
+    response_to: Option<&str>,
+) -> Vec<String> {
+    let Some(sender_jid) = sender_jid else {
+        return vec![build_iq_error_xml_with_addresses(
+            &iq.id,
+            response_from,
+            response_to,
+            "auth",
+            "not-authorized",
+        )];
+    };
+    let user_bare = sender_jid.to_bare();
+    let db = match global_database(state).await {
+        Ok(db) => db,
+        Err(error) => {
+            warn!(error = %error, "Failed to access database for blocking IQ");
+            return vec![build_iq_error_xml_with_addresses(
+                &iq.id,
+                response_from,
+                response_to,
+                "wait",
+                "internal-server-error",
+            )];
+        }
+    };
+    let storage = DatabaseBlockingStorage::new(db);
+    let request = match waddle_xmpp::xep::xep0191::parse_blocking_request(iq) {
+        Ok(request) => request,
+        Err(error) => {
+            warn!(error = %error, "Invalid blocking IQ");
+            return vec![build_iq_error_xml_with_addresses(
+                &iq.id,
+                response_from,
+                response_to,
+                "modify",
+                "bad-request",
+            )];
+        }
+    };
+
+    match request {
+        waddle_xmpp::xep::xep0191::BlockingRequest::GetBlocklist => {
+            match storage.get_blocklist(&user_bare).await {
+                Ok(blocked) => vec![iq_to_xml(
+                    waddle_xmpp::xep::xep0191::build_blocklist_response(iq, &blocked),
+                )],
+                Err(error) => {
+                    warn!(jid = %user_bare, error = %error, "Failed to load blocklist");
+                    vec![build_iq_error_xml_with_addresses(
+                        &iq.id,
+                        response_from,
+                        response_to,
+                        "wait",
+                        "internal-server-error",
+                    )]
+                }
+            }
+        }
+        waddle_xmpp::xep::xep0191::BlockingRequest::Block(jids) => {
+            if let Err(error) = storage.add_blocks(&user_bare, &jids).await {
+                warn!(jid = %user_bare, error = %error, "Failed to add blocks");
+                return vec![build_iq_error_xml_with_addresses(
+                    &iq.id,
+                    response_from,
+                    response_to,
+                    "wait",
+                    "internal-server-error",
+                )];
+            }
+            send_blocking_pushes(state, &user_bare, true, &jids).await;
+            vec![iq_to_xml(
+                waddle_xmpp::xep::xep0191::build_blocking_success(iq),
+            )]
+        }
+        waddle_xmpp::xep::xep0191::BlockingRequest::Unblock(jids) => {
+            let unblocked_jids = if jids.is_empty() {
+                let current = match storage.get_blocklist(&user_bare).await {
+                    Ok(current) => current,
+                    Err(error) => {
+                        warn!(jid = %user_bare, error = %error, "Failed to load blocklist before unblock-all");
+                        return vec![build_iq_error_xml_with_addresses(
+                            &iq.id,
+                            response_from,
+                            response_to,
+                            "wait",
+                            "internal-server-error",
+                        )];
+                    }
+                };
+                if let Err(error) = storage.remove_all_blocks(&user_bare).await {
+                    warn!(jid = %user_bare, error = %error, "Failed to remove all blocks");
+                    return vec![build_iq_error_xml_with_addresses(
+                        &iq.id,
+                        response_from,
+                        response_to,
+                        "wait",
+                        "internal-server-error",
+                    )];
+                }
+                current
+            } else {
+                if let Err(error) = storage.remove_blocks(&user_bare, &jids).await {
+                    warn!(jid = %user_bare, error = %error, "Failed to remove blocks");
+                    return vec![build_iq_error_xml_with_addresses(
+                        &iq.id,
+                        response_from,
+                        response_to,
+                        "wait",
+                        "internal-server-error",
+                    )];
+                }
+                jids
+            };
+            send_blocking_pushes(state, &user_bare, false, &unblocked_jids).await;
+            vec![iq_to_xml(
+                waddle_xmpp::xep::xep0191::build_blocking_success(iq),
+            )]
+        }
+    }
+}
+
+async fn send_blocking_pushes(
+    state: &WebSocketState,
+    user_bare: &BareJid,
+    blocked: bool,
+    jids: &[String],
+) {
+    for resource_jid in state
+        .deps
+        .protocol
+        .connection_registry
+        .get_resources_for_user(user_bare)
+    {
+        let push = if blocked {
+            waddle_xmpp::xep::xep0191::build_block_push(&resource_jid.clone().into(), jids)
+        } else {
+            waddle_xmpp::xep::xep0191::build_unblock_push(&resource_jid.clone().into(), jids)
+        };
+        let _ = state
+            .deps
+            .protocol
+            .connection_registry
+            .send_to(&resource_jid, Stanza::Iq(push))
+            .await;
+    }
+}
+
+async fn handle_push_iq(
+    iq: &xmpp_parsers::iq::Iq,
+    state: &WebSocketState,
+    sender_jid: Option<&FullJid>,
+    response_from: Option<&str>,
+    response_to: Option<&str>,
+) -> Vec<String> {
+    let Some(sender_jid) = sender_jid else {
+        return vec![build_iq_error_xml_with_addresses(
+            &iq.id,
+            response_from,
+            response_to,
+            "auth",
+            "not-authorized",
+        )];
+    };
+    let bare_jid = sender_jid.to_bare().to_string();
+
+    if is_push_enable(iq) {
+        let Some(enable) = parse_push_enable(iq) else {
+            return vec![build_iq_error_xml_with_addresses(
+                &iq.id,
+                response_from,
+                response_to,
+                "modify",
+                "bad-request",
+            )];
+        };
+        let endpoint = enable
+            .options
+            .iter()
+            .find(|(key, _)| key == "endpoint")
+            .map(|(_, value)| value.clone());
+        let p256dh = enable
+            .options
+            .iter()
+            .find(|(key, _)| key == "p256dh")
+            .map(|(_, value)| value.clone());
+        let auth_key = enable
+            .options
+            .iter()
+            .find(|(key, _)| key == "auth")
+            .map(|(_, value)| value.clone());
+
+        if !endpoint.as_deref().is_some_and(valid_push_endpoint)
+            || p256dh.is_none()
+            || auth_key.is_none()
+        {
+            return vec![build_iq_error_xml_with_addresses(
+                &iq.id,
+                response_from,
+                response_to,
+                "modify",
+                "bad-request",
+            )];
+        }
+
+        let subscription = waddle_xmpp::push::PushSubscription {
+            user_jid: bare_jid.clone(),
+            service_jid: enable.jid,
+            node: enable.node,
+            endpoint,
+            p256dh,
+            auth_key,
+        };
+        if let Err(error) = state.deps.protocol.push_store.register(subscription).await {
+            warn!(user = %bare_jid, error = %error, "Failed to register push subscription");
+            return vec![build_iq_error_xml_with_addresses(
+                &iq.id,
+                response_from,
+                response_to,
+                "wait",
+                "internal-server-error",
+            )];
+        }
+        return vec![iq_to_xml(build_push_enable_result(iq))];
+    }
+
+    let Some(disable) = parse_push_disable(iq) else {
+        return vec![build_iq_error_xml_with_addresses(
+            &iq.id,
+            response_from,
+            response_to,
+            "modify",
+            "bad-request",
+        )];
+    };
+    if let Err(error) = state
+        .deps
+        .protocol
+        .push_store
+        .remove(&bare_jid, &disable.jid, disable.node.as_deref())
+        .await
+    {
+        warn!(user = %bare_jid, error = %error, "Failed to remove push subscription");
+        return vec![build_iq_error_xml_with_addresses(
+            &iq.id,
+            response_from,
+            response_to,
+            "wait",
+            "internal-server-error",
+        )];
+    }
+    vec![iq_to_xml(build_push_disable_result(iq))]
+}
+
+fn valid_push_endpoint(value: &str) -> bool {
+    let Ok(url) = Url::parse(value) else {
+        return false;
+    };
+    if url.scheme() != "https" {
+        return false;
+    }
+    match url.host() {
+        Some(Host::Ipv4(addr)) => {
+            !(addr.is_private()
+                || addr.is_loopback()
+                || addr.is_link_local()
+                || addr.is_multicast()
+                || addr.is_broadcast()
+                || addr.is_unspecified())
+        }
+        Some(Host::Ipv6(addr)) => {
+            !(addr.is_loopback()
+                || addr.is_unspecified()
+                || addr.is_unique_local()
+                || addr.is_unicast_link_local()
+                || addr.is_multicast())
+        }
+        Some(Host::Domain(host)) => {
+            let host = host.trim_end_matches('.').to_ascii_lowercase();
+            matches!(
+                host.as_str(),
+                "updates.push.services.mozilla.com"
+                    | "fcm.googleapis.com"
+                    | "android.googleapis.com"
+                    | "web.push.apple.com"
+            ) || host.ends_with(".notify.windows.com")
+        }
+        None => false,
     }
 }
 
@@ -1195,6 +2634,8 @@ async fn room_space_metadata_extensions(
 ) -> Vec<Element> {
     if get_managed_channel_for_room(state, room_jid)
         .await
+        .ok()
+        .flatten()
         .is_some()
     {
         vec![build_spaces_metadata_form(&canonical_space_details(domain))]

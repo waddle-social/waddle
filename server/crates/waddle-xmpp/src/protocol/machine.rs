@@ -12,7 +12,7 @@ use super::dispatch::StanzaDispatcher;
 use super::event::{CallbackId, InboundEvent, OutboundEvent, StanzaContext};
 use super::frame::InboundFrame;
 use super::phase::ConnectionPhase;
-use crate::connection::Stanza;
+use crate::Stanza;
 use std::collections::HashMap;
 use tracing::Level;
 

@@ -17,8 +17,8 @@ use waddle_xmpp::{
     xep::xep0430::build_inbox_push,
     xep::{
         has_file_sharing, is_moderation_request_message, is_moderation_result_message,
-        is_reaction_message, is_retraction_message, is_sticker_message, should_skip_storage,
-        NS_REPLY,
+        is_reaction_message, is_retraction_message, is_sticker_message, message_has_direct_invite,
+        should_skip_storage, NS_REPLY,
     },
     Stanza,
 };
@@ -26,6 +26,7 @@ use xmpp_parsers::message::MessageType as XmppMessageType;
 
 use super::super::{get_room_actor, stanza_to_xml, WebSocketState};
 use crate::auth::Session;
+use crate::db::blocking::DatabaseBlockingStorage;
 use waddle_xmpp::protocol::ConnectionPhase;
 
 fn archived_stanza_xml(message: &xmpp_parsers::message::Message) -> String {
@@ -47,8 +48,14 @@ pub async fn handle_message(
     // Always stamp the authenticated sender.
     incoming.from = Some(jid::Jid::from(sender_jid.clone()));
 
-    // Handle groupchat messages
-    if incoming.type_ == XmppMessageType::Groupchat {
+    // Handle local MUC groupchat messages. Full-JID groupchat stanzas that are
+    // not addressed to the local MUC service fall through to direct routing.
+    if incoming.type_ == XmppMessageType::Groupchat
+        && incoming
+            .to
+            .as_ref()
+            .is_some_and(|jid| jid.to_bare().domain().as_str() == muc_domain)
+    {
         let Some(to_jid) = incoming.to.as_ref() else {
             warn!("Groupchat message without 'to' attribute");
             return vec![];
@@ -56,11 +63,6 @@ pub async fn handle_message(
 
         // Parse room JID (strip resource if present)
         let room_jid = to_jid.to_bare();
-
-        if room_jid.domain().as_str() != muc_domain {
-            warn!(to = %to_jid, "Groupchat message to non-MUC JID");
-            return vec![];
-        }
 
         debug!(room = %room_jid, sender = %sender_jid, "Groupchat message");
 
@@ -104,7 +106,7 @@ pub async fn handle_message(
             }
         };
         let sender_nick = broadcast.sender_nick;
-        let mut local_messages = broadcast.federated_messages.local;
+        let mut local_messages = broadcast.messages;
         let occupant_bare_jids = broadcast.occupant_bare_jids;
 
         let from_room_jid = format!("{}/{}", room_jid, sender_nick);
@@ -273,8 +275,22 @@ pub async fn handle_message(
         return echo_response.into_iter().collect();
     }
 
-    // Handle direct messages (chat)
-    if incoming.type_ == XmppMessageType::Chat {
+    // Handle direct messages, including default/normal messages and XEP-0249
+    // direct MUC invites which are often sent as normal messages.
+    let direct_full_jid_message = incoming
+        .to
+        .as_ref()
+        .is_some_and(|to| to.clone().try_into_full().is_ok())
+        && matches!(
+            incoming.type_,
+            XmppMessageType::Groupchat | XmppMessageType::Error
+        );
+    if matches!(
+        incoming.type_,
+        XmppMessageType::Chat | XmppMessageType::Normal | XmppMessageType::Headline
+    ) || message_has_direct_invite(&incoming)
+        || direct_full_jid_message
+    {
         if let Some(to_jid) = incoming.to.as_ref() {
             debug!(to = %to_jid, from = %sender_jid, "Direct chat message");
 
@@ -286,9 +302,24 @@ pub async fn handle_message(
                     .or_else(|| Some(uuid::Uuid::new_v4().to_string()));
             }
             prototype.from = Some(jid::Jid::from(sender_jid.clone()));
-            prototype.type_ = XmppMessageType::Chat;
             let should_carbon =
                 prototype.type_ == XmppMessageType::Chat && should_copy_message(&prototype);
+            let blocking =
+                DatabaseBlockingStorage::new(state.deps.app_state.db_pool.global().clone());
+            match blocking
+                .is_blocked(&to_jid.to_bare(), &sender_jid.to_bare())
+                .await
+            {
+                Ok(true) => {
+                    info!(sender = %sender_jid, recipient = %to_jid, "Blocked direct message");
+                    return vec![];
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    warn!(error = %error, sender = %sender_jid, recipient = %to_jid, "Failed to check blocklist before routing direct message");
+                    return vec![];
+                }
+            }
 
             // Enrich: detect GitHub links and append embed XML elements
             let _embeds_added = state
@@ -489,8 +520,7 @@ async fn push_inbox_update(state: &WebSocketState, user: &BareJid, entry: &Inbox
 
 /// Returns true if this groupchat message should be written to the MAM archive.
 ///
-/// Mirrors the `should_archive_timeline_message` predicate in `connection.rs`:
-/// body/subject-bearing messages are always archived; body-less protocol
+/// Body/subject-bearing messages are always archived; body-less protocol
 /// events (reactions, retractions, moderation, file-shares, stickers) are
 /// archived too so that MAM replay faithfully reproduces the room timeline.
 /// Error messages and messages carrying a `<no-store/>` hint are excluded.

@@ -9,7 +9,7 @@
 //! Messages can then be routed to any connected user by their JID.
 //!
 //! ```text
-//! ConnectionActor (user1@domain/resource1) <-> ConnectionRegistry <-> ConnectionActor (user2@domain/resource2)
+//! WebSocket C2S (user1@domain/resource1) <-> ConnectionRegistry <-> WebSocket C2S (user2@domain/resource2)
 //!            |                                       |                           |
 //!            v                                       v                           v
 //!      mpsc::Sender                            DashMap<FullJid,              mpsc::Sender

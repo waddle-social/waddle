@@ -13,12 +13,11 @@ use xmpp_parsers::message::Message;
 use xmpp_parsers::presence::Presence;
 
 use super::admin::{is_role_change_query, AdminItem};
-use super::federation::FederatedMessageSet;
 use super::owner::{apply_config_form, build_destroy_notification, ConfigFormData, DestroyRequest};
 use super::room_registry::RoomInfo;
 use super::{
     build_affiliation_change_presence, build_ban_presence, build_kick_presence,
-    build_role_change_presence, MucRoom, RoomConfig,
+    build_role_change_presence, MucRoom, OutboundMucMessage, RoomConfig,
 };
 use crate::types::{Affiliation, Role};
 
@@ -43,7 +42,7 @@ pub struct RoomSnapshot {
 #[derive(Debug, Clone)]
 pub struct GroupchatBroadcastResult {
     pub sender_nick: String,
-    pub federated_messages: FederatedMessageSet,
+    pub messages: Vec<OutboundMucMessage>,
     pub occupant_bare_jids: Vec<String>,
 }
 
@@ -424,9 +423,10 @@ impl kameo::message::Message<BuildGroupchatBroadcast> for RoomActor {
             ));
         }
 
-        let federated_messages = self
+        let messages = self
             .room
-            .broadcast_message_federated(&sender_nick, &msg.message);
+            .broadcast_message(&sender_nick, &msg.message)
+            .map_err(|error| RoomActorError::OccupantNotFound(error.to_string()))?;
 
         let sender_jid_for_filter = msg.sender_jid;
         let occupant_bare_jids: Vec<String> = self
@@ -444,7 +444,7 @@ impl kameo::message::Message<BuildGroupchatBroadcast> for RoomActor {
 
         Ok(GroupchatBroadcastResult {
             sender_nick,
-            federated_messages,
+            messages,
             occupant_bare_jids,
         })
     }

@@ -9,7 +9,7 @@
 //! [`ParseError`] if the frame is malformed. Internal callers that already
 //! have one complete top-level element can also reuse the same classifier.
 
-use crate::connection::Stanza;
+use crate::Stanza;
 use std::str::FromStr;
 use thiserror::Error;
 use xmpp_parsers::minidom::Element;
@@ -40,7 +40,7 @@ pub enum InboundFrame {
     SaslResponse(String),
     /// A typed XMPP stanza (IQ, message, or presence).
     ///
-    /// Uses [`crate::connection::Stanza`] for uniformity with the rest of
+    /// Uses [`crate::Stanza`] for uniformity with the rest of
     /// the crate's typed stanza pipeline. Boxed because `Stanza` is ~300
     /// bytes and the other variants are unit — without the box every
     /// `InboundFrame` pays that cost on every move (clippy

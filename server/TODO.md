@@ -4,7 +4,7 @@
 
 - `cargo test -p waddle-xmpp` (full suite): **~12s** (~1,580 tests)
 - `cargo test -p waddle-xmpp --lib` (unit only): **~1.9s** (~1,546 tests)
-- `cargo test -p waddle-xmpp --test protocol_conformance`: **~5s** (20 tests)
+- WebSocket C2S transport tests live under `crates/waddle-server/tests/xep*_ws.rs`.
 
 All tests are native Rust — no Docker, CAAS, or external dependencies required.
 

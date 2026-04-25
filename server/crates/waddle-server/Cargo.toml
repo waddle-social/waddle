@@ -34,9 +34,6 @@ waddle-ecdysis = { path = "../waddle-ecdysis" }
 jid = { workspace = true }
 dashmap = { workspace = true }
 
-# XMPP Client (for testing/integration)
-xmpp = { workspace = true }
-
 xmpp-parsers = { workspace = true }
 
 # Object Storage
@@ -86,7 +83,6 @@ url = { workspace = true }
 base64 = { workspace = true }
 rand = { workspace = true }
 hex = { workspace = true }
-hickory-resolver = { workspace = true }
 lru = { workspace = true }
 percent-encoding = "2.3"
 urlencoding = "2.1"

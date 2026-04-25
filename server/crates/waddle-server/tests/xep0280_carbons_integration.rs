@@ -1,7 +1,7 @@
 //! XEP-0280 Message Carbons integration over the WebSocket transport.
 //!
 //! This covers the app-facing `waddle-server` WebSocket path, which is
-//! separate from the raw TCP XMPP server exercised by `xmpp-e2e-suite`.
+//! the only supported XMPP C2S transport.
 
 mod ws_common;
 

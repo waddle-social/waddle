@@ -21,7 +21,7 @@ Ephemeral messages use a combination of:
 
 - **XEP-0334 (Message Processing Hints)**: `<no-store/>` to prevent archiving
 - **Custom expiry extension**: Based on proposed XEP for message expiry
-- **Server-side enforcement**: Prosody module tracks and deletes expired messages
+- **Server-side enforcement**: Embedded server task tracks and deletes expired messages
 
 ### Message with TTL
 
@@ -109,7 +109,7 @@ For DMs, both parties can configure TTL:
 - Either party can enable ephemeral mode
 - Changes apply to future messages only
 
-Configuration stored in backend, enforced by Prosody module.
+Configuration stored in backend, enforced by the embedded server.
 
 ### Attachments
 
@@ -138,7 +138,7 @@ The `expires-at` timestamp is absolute, allowing clients to hide expired message
 
 ### Cleanup Process
 
-Prosody module (`mod_waddle_expiry`):
+Embedded expiry worker:
 
 1. Runs periodically (every minute)
 2. Queries messages past expiry time

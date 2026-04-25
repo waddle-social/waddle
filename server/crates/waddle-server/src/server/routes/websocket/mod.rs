@@ -94,6 +94,12 @@ pub struct ProtocolServices {
     pub dispatcher: Arc<StanzaDispatcher>,
     /// Shared PubSub/PEP storage (XEP-0060/XEP-0163).
     pub pubsub_storage: Arc<dyn PubSubStorage>,
+    /// XEP-0357 push subscription storage.
+    pub push_store: Arc<dyn waddle_xmpp::push::PushSubscriptionStore>,
+    /// Runtime PubSub subscription index for WebSocket-served components.
+    pub pubsub_subscriptions: Arc<dashmap::DashSet<(String, String, String)>>,
+    /// XEP-0397 Instant Stream Resumption token store.
+    pub isr_token_store: waddle_xmpp::isr::SharedIsrTokenStore,
     /// XEP-0198 detached-session registry — holds state for clients whose
     /// WebSocket has closed but may still resume within the session timeout.
     pub sm_session_registry: Arc<InMemorySmSessionRegistry>,
@@ -698,6 +704,7 @@ fn build_stream_features_xml(authenticated: bool) -> String {
         // XEP-0198: advertise stream management so clients can <enable/> it
         // after bind or <resume/> a detached session.
         features = features.append(Element::builder("sm", SM_NS).build());
+        features = features.append(Element::builder("isr", waddle_xmpp::isr::ISR_NS).build());
     } else {
         features = features.append(
             Element::builder("mechanisms", waddle_xmpp::ns::SASL)
@@ -1788,6 +1795,9 @@ mod tests {
                     ),
                     dispatcher: Arc::new(dispatcher),
                     pubsub_storage: Arc::new(waddle_xmpp::pubsub::InMemoryPubSubStorage::new()),
+                    push_store: Arc::new(waddle_xmpp::push::InMemoryPushStore::new()),
+                    pubsub_subscriptions: Arc::new(dashmap::DashSet::new()),
+                    isr_token_store: waddle_xmpp::isr::create_shared_store(),
                     sm_session_registry: Arc::new(InMemorySmSessionRegistry::new()),
                     resumable_sessions: Arc::new(dashmap::DashMap::new()),
                 },

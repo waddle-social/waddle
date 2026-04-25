@@ -5,20 +5,18 @@
 This document tracks implementation progress for Waddle Social, an open-source consumer chat/communication platform with ATProto integration.
 
 **License**: AGPL-3.0
-**MVP Target**: Federated XMPP ecosystem with optional ATProto identity
+**MVP Target**: WebSocket-first XMPP chat with optional ATProto identity
 
 ---
 
-## Current Priority: Federation Architecture
+## Current Priority: WebSocket XMPP Chat
 
-The immediate focus is building a **federated XMPP ecosystem** where:
+The immediate focus is building a **WebSocket-only XMPP service** where:
 
 1. **waddle.social** acts as the identity home-server for ATProto users
-2. Anyone can run self-hosted waddles (independent XMPP servers)
-3. Users can federate across waddles using standard XMPP S2S
+2. Anyone can run self-hosted waddles without legacy TCP XMPP listeners
+3. Clients connect over the active WebSocket C2S endpoint
 4. Traditional JID users can participate without ATProto
-
-See [RFC-0015: Federation Architecture](rfcs/0015-federation-architecture.md) for full details.
 
 ---
 
@@ -57,10 +55,10 @@ crates/waddle-server/src/config.rs            (modify)
 
 | Task | Status | Priority | Documentation |
 |------|--------|----------|---------------|
-| `ServerMode` enum (HomeServer/Standalone) | ✅ Complete | P0 | [RFC-0015](rfcs/0015-federation-architecture.md) |
-| Conditional ATProto initialization | ✅ Complete | P0 | [RFC-0015](rfcs/0015-federation-architecture.md) |
-| `WADDLE_MODE` environment variable | ✅ Complete | P0 | [RFC-0015](rfcs/0015-federation-architecture.md) |
-| Mode-specific route registration | ✅ Complete | P0 | [RFC-0015](rfcs/0015-federation-architecture.md) |
+| `ServerMode` enum (HomeServer/Standalone) | ✅ Complete | P0 | Config-driven server modes |
+| Conditional ATProto initialization | ✅ Complete | P0 | Config-driven server modes |
+| `WADDLE_MODE` environment variable | ✅ Complete | P0 | Config-driven server modes |
+| Mode-specific route registration | ✅ Complete | P0 | Config-driven server modes |
 
 **Verification:**
 - [x] Start server with `WADDLE_MODE=standalone`
@@ -73,56 +71,13 @@ crates/waddle-server/src/config.rs            (complete)
 crates/waddle-server/src/main.rs              (complete)
 ```
 
-### Phase F3: S2S Federation Core (P0 - CRITICAL) 🔄 IN PROGRESS
+### Phase F3: Federated MUC Participation (Removed from active scope)
 
-**Goal:** Enable XMPP server-to-server communication
+TCP federation has been removed from the active server. The deployable
+server exposes WebSocket C2S only, so federated MUC work is no longer part of
+the current implementation plan.
 
-| Task | Status | Priority | Documentation |
-|------|--------|----------|---------------|
-| S2S listener on port 5269 | ✅ Complete | P0 | [Spec: S2S](specs/s2s-federation.md) |
-| TLS 1.3 for S2S connections | ✅ Complete | P0 | [Spec: S2S](specs/s2s-federation.md) |
-| Stream negotiation (S2S) | ✅ Complete | P0 | [Spec: S2S](specs/s2s-federation.md) |
-| XEP-0220 Server Dialback | ✅ Complete | P0 | [Spec: S2S](specs/s2s-federation.md) |
-| DNS SRV record resolution | ✅ Complete | P0 | [Spec: S2S](specs/s2s-federation.md) |
-| S2S connection pool | ✅ Complete | P0 | [Spec: S2S](specs/s2s-federation.md) |
-| Remote JID routing | ✅ Complete | P0 | [Spec: S2S](specs/s2s-federation.md) |
-
-**Verification:**
-- [ ] Two waddle instances communicate (waddle.social:5269, test.local:5269)
-- [ ] User on test.local sends message to user@waddle.social
-- [ ] Message delivered via S2S
-
-**Files to create:**
-```
-crates/waddle-xmpp/src/s2s/mod.rs             (new)
-crates/waddle-xmpp/src/s2s/connection.rs      (new)
-crates/waddle-xmpp/src/s2s/dialback.rs        (new)
-crates/waddle-xmpp/src/s2s/pool.rs            (new)
-crates/waddle-xmpp/src/s2s/dns.rs             (new)
-crates/waddle-xmpp/src/routing.rs             (modify)
-```
-
-### Phase F4: Federated MUC Participation (P0 - CRITICAL) 🔄 IN PROGRESS
-
-**Goal:** Users from remote servers can join local MUC rooms
-
-| Task | Status | Priority | Documentation |
-|------|--------|----------|---------------|
-| Accept remote JIDs as MUC occupants | ✅ Complete | P0 | [RFC-0015](rfcs/0015-federation-architecture.md) |
-| Route presence to remote occupants | ✅ Complete | P0 | [RFC-0015](rfcs/0015-federation-architecture.md) |
-| Route messages to remote occupants | ✅ Complete | P0 | [RFC-0015](rfcs/0015-federation-architecture.md) |
-| Permission model for federated users | ✅ Complete | P0 | [RFC-0015](rfcs/0015-federation-architecture.md) |
-
-**Verification:**
-- [ ] Native JID user on alice.dev joins channel on waddle.social
-- [ ] ATProto user on waddle.social joins channel on alice.dev
-- [ ] Both see each other's messages in real-time
-
-**Files to create/modify:**
-```
-crates/waddle-xmpp/src/muc/mod.rs             (modify)
-crates/waddle-xmpp/src/muc/federation.rs      (new)
-```
+No active tasks remain in this phase.
 
 ### Phase F5: Hosted Waddle Subdomains (P1)
 
@@ -149,8 +104,7 @@ crates/waddle-xmpp/src/muc/federation.rs      (new)
 | XEP-0115 Entity Capabilities | ✅ Complete | P0 | waddle-xmpp/src/xep/xep0115.rs |
 
 **Currently Passing (from internal interop tests):**
-- RFC 6120 (XMPP Core) - stream.rs, connection.rs
-- RFC 7590 (TLS) - STARTTLS in stream.rs
+- RFC 6120 (XMPP Core) - WebSocket C2S framing and stanza handling
 - XEP-0030 (Service Discovery) - disco/
 
 **Verification:**
@@ -198,9 +152,6 @@ crates/waddle-xmpp/src/muc/federation.rs      (new)
 | XEP-0398 Avatar Conversion | ✅ Complete | P1 | PEP↔vCard avatar bridge (xep/xep0398.rs) |
 | XEP-0402 PEP Native Bookmarks | ✅ Complete | P1 | Modern bookmark storage (xep/xep0402.rs) |
 | XEP-0410 MUC Self-Ping | ✅ Complete | P1 | Connection state verification |
-
-**CI Currently Disabled:**
-- XEP-0220 (Server Dialback) - S2S federation (separate concern)
 
 **Verification:**
 - [x] MAM queries return correct history
@@ -305,7 +256,7 @@ Enhanced messaging and collaboration features.
 | Typing indicators (XEP-0085) | ⬜ Not Started | P2 | [RFC-0006](rfcs/0006-presence-system.md) |
 | **Ephemeral Content** |
 | Message TTL configuration | ⬜ Not Started | P3 | [RFC-0005](rfcs/0005-ephemeral-content.md) |
-| Prosody expiry module | ⬜ Not Started | P3 | [RFC-0005](rfcs/0005-ephemeral-content.md) |
+| Embedded expiry worker | ⬜ Not Started | P3 | [RFC-0005](rfcs/0005-ephemeral-content.md) |
 | Channel-level TTL | ⬜ Not Started | P3 | [RFC-0005](rfcs/0005-ephemeral-content.md) |
 | **Search** |
 | Full-text search (FTS5) | ⬜ Not Started | P3 | [RFC-0012](rfcs/0012-search.md) |
@@ -416,7 +367,6 @@ External integrations and bot platform.
 | [0012](rfcs/0012-search.md) | Full-Text Search | 📝 Draft |
 | [0013](rfcs/0013-moderation.md) | Moderation System | 📝 Draft |
 | [0014](rfcs/0014-bot-framework.md) | Bot/Assistant Framework | 📝 Draft |
-| [0015](rfcs/0015-federation-architecture.md) | Federation Architecture | 📝 Draft |
 
 ### Technical Specifications
 
@@ -430,7 +380,6 @@ External integrations and bot platform.
 | [cli-commands](specs/cli-commands.md) | CLI TUI Specification | 📝 Draft |
 | [atproto-integration](specs/atproto-integration.md) | ATProto Integration | 📝 Draft |
 | [file-upload](specs/file-upload.md) | File Upload Protocol | 📝 Draft |
-| [s2s-federation](specs/s2s-federation.md) | S2S Federation | 📝 Draft |
 
 ---
 
@@ -469,11 +418,8 @@ External integrations and bot platform.
 - [x] `WADDLE_MODE=homeserver` runs full stack
 - [x] Mode-specific feature flags working
 
-### MF3: S2S Federation
-- [ ] S2S listener on 5269
-- [ ] Server dialback (XEP-0220) working
-- [ ] Two waddle instances can exchange messages
-- [ ] DNS SRV resolution working
+### MF3: TCP Federation (Removed)
+- [x] TCP federation listener and dialback removed from the active server
 
 ### MF4: Federated MUC
 - [x] Remote user can join local MUC

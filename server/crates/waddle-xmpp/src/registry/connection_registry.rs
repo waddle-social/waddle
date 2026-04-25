@@ -14,8 +14,8 @@ use jid::{BareJid, FullJid};
 use tokio::sync::mpsc;
 use tracing::{debug, info, instrument};
 
-use crate::connection::Stanza;
 use crate::prometheus;
+use crate::Stanza;
 
 /// A stanza to be sent to a connection.
 ///
@@ -63,7 +63,7 @@ impl ConnectionEntry {
 
     /// Get the carbons_enabled handle for this connection.
     ///
-    /// The returned Arc can be used by the ConnectionActor to update
+    /// The returned Arc can be used by the WebSocket C2S adapter to update
     /// the carbons status when enable/disable IQs are received.
     pub fn carbons_handle(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.carbons_enabled)
@@ -198,7 +198,7 @@ impl ConnectionRegistry {
 
     /// Register a connection with its outbound channel.
     ///
-    /// Returns a handle to the carbons_enabled flag that the ConnectionActor
+    /// Returns a handle to the carbons_enabled flag that the WebSocket C2S adapter
     /// can use to update the carbons status when enable/disable IQs are received.
     ///
     /// If a connection with the same JID already exists, it will be replaced.

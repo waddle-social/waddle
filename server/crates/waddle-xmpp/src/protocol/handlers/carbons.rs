@@ -15,9 +15,9 @@
 
 use super::empty_iq_result;
 use crate::carbons::CARBONS_NS;
-use crate::connection::Stanza;
 use crate::protocol::event::{OutboundEvent, StanzaContext};
 use crate::protocol::traits::IqHandler;
+use crate::Stanza;
 use xmpp_parsers::iq::Iq;
 
 /// Handler for `urn:xmpp:carbons:2` IQ set.

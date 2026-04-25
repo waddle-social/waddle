@@ -1,7 +1,7 @@
-//! Stanza routing for XMPP federation.
+//! Stanza routing for local WebSocket XMPP delivery.
 //!
 //! This module provides the `StanzaRouter` which determines whether a JID is local
-//! or remote (requires S2S federation) and routes stanzas accordingly.
+//! or remote and routes local stanzas through the in-process connection registry.
 //!
 //! # Routing Logic
 //!
@@ -9,34 +9,32 @@
 //! 1. Extracts the destination JID from the stanza
 //! 2. Checks if the JID's domain matches the local domain
 //! 3. If local: routes via the `ConnectionRegistry` to local users
-//! 4. If remote: routes via the `S2sConnectionPool` to the remote server
+//! 4. If remote: returns `RemoteUnsupported`
 //!
 //! # Example
 //!
 //! ```ignore
-//! use waddle_xmpp::routing::StanzaRouter;
+//! use waddle_xmpp::routing::{RouterConfig, StanzaRouter};
 //!
 //! let router = StanzaRouter::new(
-//!     "waddle.social".to_string(),
+//!     RouterConfig::new("waddle.social".to_string()),
 //!     connection_registry,
-//!     Some(s2s_pool),
 //! );
 //!
-//! // Route a message - automatically determines local vs remote
+//! // Route a message locally or return RemoteUnsupported for remote domains.
 //! router.route_message(message, sender_jid).await?;
 //! ```
 
 use std::sync::Arc;
 
 use jid::{BareJid, FullJid, Jid};
-use tracing::{debug, info, instrument, warn};
+use tracing::{debug, info, instrument};
 use xmpp_parsers::iq::Iq;
 use xmpp_parsers::message::Message;
 use xmpp_parsers::presence::Presence;
 
-use crate::connection::Stanza;
 use crate::registry::{ConnectionRegistry, SendResult};
-use crate::s2s::pool::{S2sConnectionPool, S2sPoolError};
+use crate::Stanza;
 use crate::XmppError;
 
 /// Result of a routing operation.
@@ -49,15 +47,10 @@ pub enum RoutingResult {
         /// Number of recipients that were offline
         offline_count: usize,
     },
-    /// Stanza was sent to remote server via S2S
-    SentToRemote {
-        /// The remote domain the stanza was sent to
-        domain: String,
-    },
     /// No destination JID in stanza
     NoDestination,
-    /// S2S federation is not enabled
-    FederationDisabled,
+    /// Remote domains are not routed by the WebSocket-only server.
+    RemoteUnsupported,
     /// Routing failed
     Failed {
         /// Error description
@@ -74,8 +67,6 @@ pub struct RouterConfig {
     pub muc_domain: String,
     /// The Spaces subdomain (e.g., "spaces.waddle.social") for XEP-0503
     pub spaces_domain: String,
-    /// Whether S2S federation is enabled
-    pub federation_enabled: bool,
 }
 
 impl RouterConfig {
@@ -87,14 +78,7 @@ impl RouterConfig {
             local_domain,
             muc_domain,
             spaces_domain,
-            federation_enabled: false,
         }
-    }
-
-    /// Enable S2S federation.
-    pub fn with_federation(mut self, enabled: bool) -> Self {
-        self.federation_enabled = enabled;
-        self
     }
 
     /// Set a custom MUC domain.
@@ -113,24 +97,22 @@ pub enum RoutingDestination {
     LocalMuc,
     /// JID is for the Spaces service on this server (XEP-0503)
     LocalSpaces,
-    /// JID is on a remote server (requires S2S)
+    /// JID is on a remote server.
     Remote {
         /// The remote domain
         domain: String,
     },
 }
 
-/// Stanza router for local and S2S message delivery.
+/// Stanza router for local message delivery.
 ///
 /// The router examines each stanza's destination JID and determines whether
-/// to deliver locally via the connection registry or remotely via S2S federation.
+/// to deliver locally via the connection registry.
 pub struct StanzaRouter {
     /// Router configuration
     config: RouterConfig,
     /// Connection registry for local users
     connection_registry: Arc<ConnectionRegistry>,
-    /// S2S connection pool for remote servers (None if federation disabled)
-    s2s_pool: Option<Arc<S2sConnectionPool>>,
 }
 
 impl StanzaRouter {
@@ -140,25 +122,16 @@ impl StanzaRouter {
     ///
     /// * `config` - Router configuration including local domain
     /// * `connection_registry` - Registry of local connections for message delivery
-    /// * `s2s_pool` - Optional S2S connection pool for federation (None = federation disabled)
-    pub fn new(
-        config: RouterConfig,
-        connection_registry: Arc<ConnectionRegistry>,
-        s2s_pool: Option<Arc<S2sConnectionPool>>,
-    ) -> Self {
-        let federation_enabled = s2s_pool.is_some() && config.federation_enabled;
-
+    pub fn new(config: RouterConfig, connection_registry: Arc<ConnectionRegistry>) -> Self {
         info!(
             local_domain = %config.local_domain,
             muc_domain = %config.muc_domain,
-            federation_enabled = federation_enabled,
             "StanzaRouter initialized"
         );
 
         Self {
             config,
             connection_registry,
-            s2s_pool,
         }
     }
 
@@ -172,9 +145,9 @@ impl StanzaRouter {
         &self.config.local_domain
     }
 
-    /// Check if S2S federation is enabled.
-    pub fn is_federation_enabled(&self) -> bool {
-        self.s2s_pool.is_some() && self.config.federation_enabled
+    /// Remote routing is disabled for the WebSocket-only server.
+    pub fn is_remote_routing_enabled(&self) -> bool {
+        false
     }
 
     /// Determine the routing destination for a JID.
@@ -215,7 +188,7 @@ impl StanzaRouter {
         matches!(self.get_destination(jid), RoutingDestination::LocalMuc)
     }
 
-    /// Check if a JID requires S2S federation.
+    /// Check if a JID is outside the local WebSocket-served domains.
     pub fn is_remote_jid(&self, jid: &Jid) -> bool {
         matches!(self.get_destination(jid), RoutingDestination::Remote { .. })
     }
@@ -223,7 +196,7 @@ impl StanzaRouter {
     /// Route a message stanza to its destination.
     ///
     /// For local recipients, the message is sent via the connection registry.
-    /// For remote recipients, the message is sent via S2S federation.
+    /// Remote recipients are not routed by the WebSocket-only server.
     #[instrument(skip(self, message), fields(to = ?message.to, msg_type = ?message.type_))]
     pub async fn route_message(
         &self,
@@ -249,16 +222,12 @@ impl StanzaRouter {
                     offline_count: 0,
                 })
             }
-            RoutingDestination::Remote { domain } => {
-                self.route_message_remote(message, &domain).await
-            }
+            RoutingDestination::Remote { domain } => self.route_message_remote(&domain).await,
         }
     }
 
     /// Route a message to local users.
     ///
-    /// This is also used by the S2S listener to route inbound messages
-    /// from remote servers to local recipients.
     pub async fn route_message_local(&self, message: Message) -> Result<RoutingResult, XmppError> {
         let to_jid = message.to.as_ref().ok_or_else(|| {
             XmppError::bad_request(Some("Message has no destination".to_string()))
@@ -309,47 +278,10 @@ impl StanzaRouter {
         })
     }
 
-    /// Route a message to a remote server via S2S.
-    async fn route_message_remote(
-        &self,
-        message: Message,
-        domain: &str,
-    ) -> Result<RoutingResult, XmppError> {
-        if !self.is_federation_enabled() {
-            debug!(domain = %domain, "S2S federation disabled, cannot route to remote");
-            return Ok(RoutingResult::FederationDisabled);
-        }
-
-        let pool = self
-            .s2s_pool
-            .as_ref()
-            .ok_or_else(|| XmppError::internal("S2S pool not available".to_string()))?;
-
-        // Serialize the message to XML
-        let xml = message_to_xml(&message)?;
-
-        // Send the stanza through the S2S connection pool
-        match pool.send_stanza(domain, xml.as_bytes()).await {
-            Ok(()) => {
-                info!(
-                    domain = %domain,
-                    "Message sent to remote server via S2S"
-                );
-
-                Ok(RoutingResult::SentToRemote {
-                    domain: domain.to_string(),
-                })
-            }
-            Err(S2sPoolError::Shutdown) => {
-                Err(XmppError::internal("S2S pool is shutting down".to_string()))
-            }
-            Err(e) => {
-                warn!(domain = %domain, error = %e, "Failed to send message via S2S");
-                Ok(RoutingResult::Failed {
-                    reason: format!("S2S send failed: {}", e),
-                })
-            }
-        }
+    /// Reject a message addressed to a remote server.
+    async fn route_message_remote(&self, domain: &str) -> Result<RoutingResult, XmppError> {
+        debug!(domain = %domain, "Remote routing is not supported");
+        Ok(RoutingResult::RemoteUnsupported)
     }
 
     /// Route a presence stanza to its destination.
@@ -378,16 +310,12 @@ impl StanzaRouter {
                     offline_count: 0,
                 })
             }
-            RoutingDestination::Remote { domain } => {
-                self.route_presence_remote(presence, &domain).await
-            }
+            RoutingDestination::Remote { domain } => self.route_presence_remote(&domain).await,
         }
     }
 
     /// Route presence to local users.
     ///
-    /// This is also used by the S2S listener to route inbound presence
-    /// from remote servers to local recipients.
     pub async fn route_presence_local(
         &self,
         presence: Presence,
@@ -439,46 +367,10 @@ impl StanzaRouter {
         }
     }
 
-    /// Route presence to a remote server via S2S.
-    async fn route_presence_remote(
-        &self,
-        presence: Presence,
-        domain: &str,
-    ) -> Result<RoutingResult, XmppError> {
-        if !self.is_federation_enabled() {
-            return Ok(RoutingResult::FederationDisabled);
-        }
-
-        let pool = self
-            .s2s_pool
-            .as_ref()
-            .ok_or_else(|| XmppError::internal("S2S pool not available".to_string()))?;
-
-        // Serialize the presence to XML
-        let xml = presence_to_xml(&presence)?;
-
-        // Send the stanza through the S2S connection pool
-        match pool.send_stanza(domain, xml.as_bytes()).await {
-            Ok(()) => {
-                info!(
-                    domain = %domain,
-                    "Presence sent to remote server via S2S"
-                );
-
-                Ok(RoutingResult::SentToRemote {
-                    domain: domain.to_string(),
-                })
-            }
-            Err(S2sPoolError::Shutdown) => {
-                Err(XmppError::internal("S2S pool is shutting down".to_string()))
-            }
-            Err(e) => {
-                warn!(domain = %domain, error = %e, "Failed to send presence via S2S");
-                Ok(RoutingResult::Failed {
-                    reason: format!("S2S send failed: {}", e),
-                })
-            }
-        }
+    /// Reject presence addressed to a remote server.
+    async fn route_presence_remote(&self, domain: &str) -> Result<RoutingResult, XmppError> {
+        debug!(domain = %domain, "Remote routing is not supported");
+        Ok(RoutingResult::RemoteUnsupported)
     }
 
     /// Route an IQ stanza to its destination.
@@ -504,14 +396,12 @@ impl StanzaRouter {
                     offline_count: 0,
                 })
             }
-            RoutingDestination::Remote { domain } => self.route_iq_remote(iq, &domain).await,
+            RoutingDestination::Remote { domain } => self.route_iq_remote(&domain).await,
         }
     }
 
     /// Route IQ to local users.
     ///
-    /// This is also used by the S2S listener to route inbound IQs
-    /// from remote servers to local recipients.
     pub async fn route_iq_local(&self, iq: Iq) -> Result<RoutingResult, XmppError> {
         // Clone the destination JID before moving iq into the stanza
         let to_jid = iq
@@ -578,64 +468,11 @@ impl StanzaRouter {
         self.route_iq_local_unchecked(iq, to_jid).await
     }
 
-    /// Route IQ to a remote server via S2S.
-    async fn route_iq_remote(&self, iq: Iq, domain: &str) -> Result<RoutingResult, XmppError> {
-        if !self.is_federation_enabled() {
-            return Ok(RoutingResult::FederationDisabled);
-        }
-
-        let pool = self
-            .s2s_pool
-            .as_ref()
-            .ok_or_else(|| XmppError::internal("S2S pool not available".to_string()))?;
-
-        // Serialize the IQ to XML
-        let xml = iq_to_xml(&iq)?;
-
-        // Send the stanza through the S2S connection pool
-        match pool.send_stanza(domain, xml.as_bytes()).await {
-            Ok(()) => {
-                info!(
-                    domain = %domain,
-                    "IQ sent to remote server via S2S"
-                );
-
-                Ok(RoutingResult::SentToRemote {
-                    domain: domain.to_string(),
-                })
-            }
-            Err(S2sPoolError::Shutdown) => {
-                Err(XmppError::internal("S2S pool is shutting down".to_string()))
-            }
-            Err(e) => {
-                warn!(domain = %domain, error = %e, "Failed to send IQ via S2S");
-                Ok(RoutingResult::Failed {
-                    reason: format!("S2S send failed: {}", e),
-                })
-            }
-        }
+    /// Reject IQ addressed to a remote server.
+    async fn route_iq_remote(&self, domain: &str) -> Result<RoutingResult, XmppError> {
+        debug!(domain = %domain, "Remote routing is not supported");
+        Ok(RoutingResult::RemoteUnsupported)
     }
-}
-
-/// Convert a Message to XML string.
-fn message_to_xml(message: &Message) -> Result<String, XmppError> {
-    use minidom::Element;
-    let element: Element = message.clone().into();
-    Ok(String::from(&element))
-}
-
-/// Convert a Presence to XML string.
-fn presence_to_xml(presence: &Presence) -> Result<String, XmppError> {
-    use minidom::Element;
-    let element: Element = presence.clone().into();
-    Ok(String::from(&element))
-}
-
-/// Convert an IQ to XML string.
-fn iq_to_xml(iq: &Iq) -> Result<String, XmppError> {
-    use minidom::Element;
-    let element: Element = iq.clone().into();
-    Ok(String::from(&element))
 }
 
 #[cfg(test)]
@@ -662,10 +499,6 @@ mod tests {
         let config = RouterConfig::new("example.com".to_string());
         assert_eq!(config.local_domain, "example.com");
         assert_eq!(config.muc_domain, "muc.example.com");
-        assert!(!config.federation_enabled);
-
-        let config = config.with_federation(true);
-        assert!(config.federation_enabled);
 
         let config = config.with_muc_domain("chat.example.com".to_string());
         assert_eq!(config.muc_domain, "chat.example.com");
@@ -675,7 +508,7 @@ mod tests {
     fn test_get_destination_local() {
         let config = create_test_config();
         let registry = Arc::new(ConnectionRegistry::new());
-        let router = StanzaRouter::new(config, registry, None);
+        let router = StanzaRouter::new(config, registry);
 
         let jid = create_test_jid("user@waddle.social");
         assert_eq!(router.get_destination(&jid), RoutingDestination::Local);
@@ -688,7 +521,7 @@ mod tests {
     fn test_get_destination_muc() {
         let config = create_test_config();
         let registry = Arc::new(ConnectionRegistry::new());
-        let router = StanzaRouter::new(config, registry, None);
+        let router = StanzaRouter::new(config, registry);
 
         let jid = create_test_jid("room@muc.waddle.social");
         assert_eq!(router.get_destination(&jid), RoutingDestination::LocalMuc);
@@ -701,7 +534,7 @@ mod tests {
     fn test_get_destination_spaces() {
         let config = create_test_config();
         let registry = Arc::new(ConnectionRegistry::new());
-        let router = StanzaRouter::new(config, registry, None);
+        let router = StanzaRouter::new(config, registry);
 
         let jid = create_test_jid("spaces.waddle.social");
         assert_eq!(
@@ -714,7 +547,7 @@ mod tests {
     fn test_get_destination_remote() {
         let config = create_test_config();
         let registry = Arc::new(ConnectionRegistry::new());
-        let router = StanzaRouter::new(config, registry, None);
+        let router = StanzaRouter::new(config, registry);
 
         let jid = create_test_jid("user@example.com");
         assert_eq!(
@@ -737,7 +570,7 @@ mod tests {
     fn test_is_local_jid() {
         let config = create_test_config();
         let registry = Arc::new(ConnectionRegistry::new());
-        let router = StanzaRouter::new(config, registry, None);
+        let router = StanzaRouter::new(config, registry);
 
         assert!(router.is_local_jid(&create_test_jid("user@waddle.social")));
         assert!(router.is_local_jid(&create_test_jid("room@muc.waddle.social")));
@@ -749,7 +582,7 @@ mod tests {
     fn test_is_muc_jid() {
         let config = create_test_config();
         let registry = Arc::new(ConnectionRegistry::new());
-        let router = StanzaRouter::new(config, registry, None);
+        let router = StanzaRouter::new(config, registry);
 
         assert!(!router.is_muc_jid(&create_test_jid("user@waddle.social")));
         assert!(router.is_muc_jid(&create_test_jid("room@muc.waddle.social")));
@@ -760,7 +593,7 @@ mod tests {
     fn test_is_remote_jid() {
         let config = create_test_config();
         let registry = Arc::new(ConnectionRegistry::new());
-        let router = StanzaRouter::new(config, registry, None);
+        let router = StanzaRouter::new(config, registry);
 
         assert!(!router.is_remote_jid(&create_test_jid("user@waddle.social")));
         assert!(!router.is_remote_jid(&create_test_jid("room@muc.waddle.social")));
@@ -771,16 +604,16 @@ mod tests {
     fn test_federation_disabled_by_default() {
         let config = create_test_config();
         let registry = Arc::new(ConnectionRegistry::new());
-        let router = StanzaRouter::new(config, registry, None);
+        let router = StanzaRouter::new(config, registry);
 
-        assert!(!router.is_federation_enabled());
+        assert!(!router.is_remote_routing_enabled());
     }
 
     #[tokio::test]
     async fn test_route_message_local_not_connected() {
         let config = create_test_config();
         let registry = Arc::new(ConnectionRegistry::new());
-        let router = StanzaRouter::new(config, registry, None);
+        let router = StanzaRouter::new(config, registry);
 
         let sender_jid: FullJid = "sender@waddle.social/resource".parse().unwrap();
         let mut message = Message::new(Some(Jid::from(
@@ -806,7 +639,7 @@ mod tests {
     async fn test_route_message_no_destination() {
         let config = create_test_config();
         let registry = Arc::new(ConnectionRegistry::new());
-        let router = StanzaRouter::new(config, registry, None);
+        let router = StanzaRouter::new(config, registry);
 
         let sender_jid: FullJid = "sender@waddle.social/resource".parse().unwrap();
         let message = Message::new(None);
@@ -817,10 +650,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_route_message_remote_federation_disabled() {
+    async fn test_route_message_remote_unsupported() {
         let config = create_test_config();
         let registry = Arc::new(ConnectionRegistry::new());
-        let router = StanzaRouter::new(config, registry, None);
+        let router = StanzaRouter::new(config, registry);
 
         let sender_jid: FullJid = "sender@waddle.social/resource".parse().unwrap();
         let message = Message::new(Some(Jid::from(
@@ -829,7 +662,7 @@ mod tests {
 
         let result = router.route_message(message, &sender_jid).await.unwrap();
 
-        assert!(matches!(result, RoutingResult::FederationDisabled));
+        assert!(matches!(result, RoutingResult::RemoteUnsupported));
     }
 
     #[tokio::test]
@@ -839,7 +672,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(16);
         let full_room_jid: FullJid = "room@muc.waddle.social/nick".parse().unwrap();
         registry.register(full_room_jid, tx);
-        let router = StanzaRouter::new(config, registry, None);
+        let router = StanzaRouter::new(config, registry);
 
         let sender_jid: FullJid = "sender@waddle.social/resource".parse().unwrap();
         let iq = parse_iq(

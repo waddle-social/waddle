@@ -55,7 +55,6 @@ This document lists the recommended Rust crates for Waddle Social, organized by 
 
 | Crate | Purpose | ADR Reference |
 |-------|---------|---------------|
-| `tokio-xmpp` | Async XMPP primitives | [ADR-0006](adrs/0006-xmpp-protocol.md) |
 | `xmpp-parsers` | XMPP stanza parsing | [ADR-0006](adrs/0006-xmpp-protocol.md) |
 | `jid` | JID (Jabber ID) handling | [ADR-0006](adrs/0006-xmpp-protocol.md) |
 | `dashmap` | Concurrent session storage | [ADR-0006](adrs/0006-xmpp-protocol.md) |

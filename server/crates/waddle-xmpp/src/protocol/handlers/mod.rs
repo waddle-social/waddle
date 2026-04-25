@@ -13,6 +13,8 @@
 //! - RFC 6121 roster — [`roster::RosterHandler`] (stateless empty-roster ack)
 //! - XEP-0280 carbons enable/disable — [`carbons::CarbonsHandler`]
 //!   (ack only; per-connection toggle still pending)
+//! - XEP-0092 software version — [`version::VersionHandler`]
+//! - XEP-0202 entity time — [`time::TimeHandler`]
 //!
 //! ⏳ Staying in the legacy `websocket.rs` path until the two-phase async
 //! callback machinery lands:
@@ -26,6 +28,8 @@ pub mod carbons;
 pub mod ping;
 pub mod roster;
 pub mod session;
+pub mod time;
+pub mod version;
 
 use super::dispatch::StanzaDispatcher;
 use std::sync::Arc;
@@ -42,6 +46,8 @@ pub fn register_default_handlers(dispatcher: &mut StanzaDispatcher) {
     dispatcher.register_iq(Arc::new(session::SessionHandler));
     dispatcher.register_iq(Arc::new(roster::RosterHandler));
     dispatcher.register_iq(Arc::new(carbons::CarbonsHandler));
+    dispatcher.register_iq(Arc::new(version::VersionHandler));
+    dispatcher.register_iq(Arc::new(time::TimeHandler));
 }
 
 /// Build an empty `type="result"` IQ with `from`/`to` swapped relative to

@@ -39,7 +39,6 @@ service:
   annotations: {}
   ports:
     http: 3000
-    xmppS2S: 5269
 
 ingress:
   enabled: false
@@ -88,8 +87,6 @@ database:
 xmpp:
   enabled: true
   domain: waddle.local
-  s2sEnabled: false
-  s2sAddr: 0.0.0.0:5269
   tls:
     secretName: ""
     mountPath: /etc/waddle/tls

@@ -9,10 +9,6 @@ pub enum ConnectionState {
     Initial,
     /// Stream opened, negotiating features
     Negotiating,
-    /// STARTTLS upgrade in progress
-    StartTls,
-    /// TLS established, ready for SASL
-    TlsEstablished,
     /// SASL authentication in progress
     Authenticating,
     /// Authenticated, binding resource
@@ -28,10 +24,6 @@ pub enum ConnectionState {
 /// Transport type for the connection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Transport {
-    /// Plain TCP (pre-STARTTLS)
-    Tcp,
-    /// TCP with TLS (post-STARTTLS)
-    TcpTls,
     /// WebSocket
     WebSocket,
     /// WebSocket with TLS
@@ -41,8 +33,6 @@ pub enum Transport {
 impl std::fmt::Display for Transport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Transport::Tcp => write!(f, "tcp"),
-            Transport::TcpTls => write!(f, "tcp+tls"),
             Transport::WebSocket => write!(f, "ws"),
             Transport::WebSocketTls => write!(f, "wss"),
         }

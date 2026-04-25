@@ -3,10 +3,10 @@
 //! The simplest possible handler: takes a `<ping>` IQ-get, emits the
 //! corresponding IQ-result with swapped `to`/`from` addresses.
 
-use crate::connection::Stanza;
 use crate::protocol::event::{OutboundEvent, StanzaContext};
 use crate::protocol::traits::IqHandler;
 use crate::xep::xep0199;
+use crate::Stanza;
 use xmpp_parsers::iq::Iq;
 
 /// Handler for `urn:xmpp:ping` (XEP-0199).
