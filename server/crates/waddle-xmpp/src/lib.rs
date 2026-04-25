@@ -436,7 +436,7 @@ pub trait AppState: Send + Sync + 'static {
     ) -> impl std::future::Future<Output = Result<(), XmppError>> + Send;
 
     // =========================================================================
-    // XEP-0430 Inbox Projection Methods
+    // Waddle Inbox Projection Methods
     // =========================================================================
 
     /// List inbox entries for a user, newest first.

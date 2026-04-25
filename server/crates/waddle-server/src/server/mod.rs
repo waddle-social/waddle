@@ -4,6 +4,7 @@ use crate::db::actor::{DbExecute, DbQueryOne};
 use crate::db::{DatabasePool, PoolHealth};
 use crate::inbox::build_inbox_storage;
 use crate::permissions::PermissionActor;
+use crate::pubsub::build_pubsub_storage;
 use anyhow::Result;
 use axum::{
     extract::State,
@@ -65,7 +66,7 @@ pub struct AppState {
     pub db_pool: Arc<DatabasePool>,
     /// Blob storage backend for file uploads (XEP-0363).
     pub blob_storage: Arc<dyn crate::storage::BlobStorage>,
-    /// Shared XEP-0430 inbox projection storage.
+    /// Shared Waddle inbox projection storage.
     pub inbox_storage: Arc<dyn InboxStorage>,
     /// Shared permission actor handle.
     pub permission_actor: ActorRef<PermissionActor>,
@@ -119,6 +120,8 @@ pub struct XmppConfig {
     pub mam_database_url: Option<String>,
     /// Inbox database URL (prefers dedicated XMPP DSN, otherwise the main runtime DSN)
     pub inbox_database_url: Option<String>,
+    /// PubSub/PEP database URL (prefers dedicated XMPP DSN, otherwise the main runtime DSN)
+    pub pubsub_database_url: Option<String>,
     /// Whether native JID authentication is enabled (default: true)
     /// When enabled, users can authenticate with SCRAM-SHA-256 using native credentials.
     pub native_auth_enabled: bool,
@@ -134,6 +137,7 @@ impl Default for XmppConfig {
             component_domain: "localhost".to_string(),
             mam_database_url: None,
             inbox_database_url: None,
+            pubsub_database_url: None,
             native_auth_enabled: true,
             acme: XmppAcmeConfig {
                 enabled: false,
@@ -159,6 +163,7 @@ impl XmppConfig {
 
         let mam_database_url = resolve_xmpp_database_url("WADDLE_XMPP_MAM_DATABASE_URL");
         let inbox_database_url = resolve_xmpp_database_url("WADDLE_XMPP_INBOX_DATABASE_URL");
+        let pubsub_database_url = resolve_xmpp_database_url("WADDLE_XMPP_PUBSUB_DATABASE_URL");
 
         let native_auth_enabled = std::env::var("WADDLE_NATIVE_AUTH_ENABLED")
             .map(|v| v.to_lowercase() != "false" && v != "0")
@@ -184,6 +189,7 @@ impl XmppConfig {
             component_domain,
             mam_database_url,
             inbox_database_url,
+            pubsub_database_url,
             native_auth_enabled,
             acme: XmppAcmeConfig {
                 enabled: acme_enabled,
@@ -299,7 +305,7 @@ async fn bootstrap_fresh_xmpp_topology(
         .await
         .map_err(|error| anyhow::anyhow!("failed to create General space node: {error}"))?;
     pubsub_storage
-        .update_node_config(&spaces_jid, "general", &NodeConfig::public())
+        .update_node_config(&spaces_jid, "general", &NodeConfig::spaces_public())
         .await
         .map_err(|error| anyhow::anyhow!("failed to configure General space node: {error}"))?;
 
@@ -852,9 +858,10 @@ async fn create_router(
     waddle_xmpp::protocol::handlers::register_default_handlers(&mut stanza_dispatcher);
     let stanza_dispatcher = Arc::new(stanza_dispatcher);
 
-    // Shared PubSub/PEP storage for the WebSocket transport (XEP-0060/0163).
-    let pubsub_storage: Arc<dyn waddle_xmpp::pubsub::PubSubStorage> =
-        Arc::new(waddle_xmpp::pubsub::InMemoryPubSubStorage::new());
+    // Shared durable PubSub/PEP storage for the WebSocket transport (XEP-0060/0163).
+    let pubsub_storage = build_pubsub_storage(xmpp_config.pubsub_database_url.clone())
+        .await
+        .unwrap_or_else(|error| panic!("Failed to initialize PubSub storage: {error}"));
     if let Err(error) =
         bootstrap_fresh_xmpp_topology(&state, Arc::clone(&pubsub_storage), &service_domains).await
     {

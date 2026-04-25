@@ -1,13 +1,13 @@
-//! Inbox — unified conversation list with unread counters.
+//! Waddle inbox — unified conversation list with unread counters.
 //!
 //! This module carries the IQ-level protocol for the "inbox" feature:
 //! a single query that returns an ordered list of conversations for the
 //! requesting user, each with its last message and unread counter.
 //!
 //! The contract maps to the in-process types defined in [`crate::inbox`]:
-//! `list → Vec<InboxEntry>`, `mark-read`, `total-unread`. We use the
-//! `urn:xmpp:inbox:0` namespace while the XSF consolidates the spec; the
-//! on-wire shape is stable and already consumed by MongooseIM / Movim.
+//! `list → Vec<InboxEntry>`, `mark-read`, `total-unread`. This is Waddle's
+//! private IQ shape; exact XEP-0430 support uses `urn:xmpp:inbox:1`,
+//! `<inbox/>`, streamed `<entry/>` messages, and final `<fin/>`.
 //!
 //! Thread-level entries extend the `<conversation>` element with optional
 //! `thread`, `thread-title`, `reply-count`, and `author` attributes.
@@ -22,8 +22,8 @@ use xmpp_parsers::message::{Message, MessageType};
 
 use crate::inbox::{ConversationKind, InboxEntry};
 
-/// Inbox protocol namespace.
-pub const NS_INBOX: &str = "urn:xmpp:inbox:0";
+/// Private Waddle inbox protocol namespace.
+pub const NS_INBOX: &str = "urn:waddle:inbox:0";
 
 /// Errors returned by inbox stanza parsing.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -42,7 +42,7 @@ pub enum InboxError {
     WrongIqType,
 }
 
-/// A `<query xmlns='urn:xmpp:inbox:0'/>` request for the user's inbox.
+/// A `<query xmlns='urn:waddle:inbox:0'/>` request for the user's inbox.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct InboxQuery {
     /// Optional lower bound on `last_updated` (inclusive).
@@ -260,7 +260,7 @@ pub fn build_mark_read_result(original: &Iq) -> Iq {
 ///
 /// The stanza carries a single `<conversation>` child in the inbox namespace,
 /// identical to what `build_inbox_query_result` emits for each entry.  Clients
-/// that understand `urn:xmpp:inbox:0` can parse this the same way they parse
+/// that understand `urn:waddle:inbox:0` can parse this the same way they parse
 /// query results and update their local unread state in real time.
 pub fn build_inbox_push(to: jid::Jid, entry: &InboxEntry) -> Message {
     let mut msg = Message::new(Some(to));

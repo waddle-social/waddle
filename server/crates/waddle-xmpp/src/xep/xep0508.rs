@@ -1,8 +1,7 @@
-//! XEP-0508: MUC Forums
+//! Waddle MUC thread metadata.
 //!
-//! Extends MUC rooms with forum-style threaded discussions. Unlike
-//! real-time chat, forums organize messages into topic threads with
-//! structured replies.
+//! This is a private Waddle message payload used by the chat UI while real
+//! XEP-0508 support is implemented through PubSub/XEP-0472.
 //!
 //! ## XML Format
 //!
@@ -10,7 +9,7 @@
 //! ```xml
 //! <message type='groupchat' to='forum@muc.example.com'>
 //!   <body>Welcome to the discussion!</body>
-//!   <thread-create xmlns='urn:xmpp:forums:0'
+//!   <thread-create xmlns='urn:waddle:forums:0'
 //!                  title='Getting Started Guide'/>
 //! </message>
 //! ```
@@ -19,7 +18,7 @@
 //! ```xml
 //! <message type='groupchat' to='forum@muc.example.com'>
 //!   <body>Great guide, thanks!</body>
-//!   <thread-reply xmlns='urn:xmpp:forums:0' thread-id='thread-123'/>
+//!   <thread-reply xmlns='urn:waddle:forums:0' thread-id='thread-123'/>
 //! </message>
 //! ```
 //!
@@ -31,8 +30,8 @@
 use minidom::Element;
 use xmpp_parsers::message::Message;
 
-/// Namespace for XEP-0508 Forums.
-pub const NS_FORUMS: &str = "urn:xmpp:forums:0";
+/// Private Waddle namespace for MUC thread metadata.
+pub const NS_FORUMS: &str = "urn:waddle:forums:0";
 
 /// Room config field for enabling forum mode.
 pub const FIELD_FORUM_MODE: &str = "muc#roomconfig_forum";
@@ -237,7 +236,7 @@ mod tests {
     fn test_extract_thread_create() {
         let xml = "<message xmlns='jabber:client' type='groupchat'>\
                     <body>Welcome!</body>\
-                    <thread-create xmlns='urn:xmpp:forums:0' title='Getting Started'/>\
+                    <thread-create xmlns='urn:waddle:forums:0' title='Getting Started'/>\
                     </message>";
         let msg =
             Message::try_from(xml.parse::<Element>().expect("valid xml")).expect("valid message");
@@ -252,7 +251,7 @@ mod tests {
     fn test_extract_thread_reply() {
         let xml = "<message xmlns='jabber:client' type='groupchat'>\
                     <body>Great guide!</body>\
-                    <thread-reply xmlns='urn:xmpp:forums:0' thread-id='thread-42'/>\
+                    <thread-reply xmlns='urn:waddle:forums:0' thread-id='thread-42'/>\
                     </message>";
         let msg =
             Message::try_from(xml.parse::<Element>().expect("valid xml")).expect("valid message");
@@ -315,7 +314,7 @@ mod tests {
     #[test]
     fn test_forum_carrier_trait() {
         let xml = "<message xmlns='jabber:client' type='groupchat'>\
-                    <thread-create xmlns='urn:xmpp:forums:0' title='Test'/>\
+                    <thread-create xmlns='urn:waddle:forums:0' title='Test'/>\
                     </message>";
         let msg =
             Message::try_from(xml.parse::<Element>().expect("valid xml")).expect("valid message");

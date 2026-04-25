@@ -1,5 +1,5 @@
 /**
- * XEP-0430 (urn:xmpp:inbox:0) — Unified inbox.
+ * Private Waddle inbox.
  *
  * Mirrors the Rust types in `server/crates/waddle-xmpp/src/inbox/mod.rs`
  * and the protocol wrapper in `server/crates/waddle-xmpp/src/xep/xep0430.rs`.
@@ -8,12 +8,12 @@
  *
  * Request:
  *   <iq type='get'>
- *     <query xmlns='urn:xmpp:inbox:0' since='1700000' only-unread='true'/>
+ *     <query xmlns='urn:waddle:inbox:0' since='1700000' only-unread='true'/>
  *   </iq>
  *
  * Result:
  *   <iq type='result'>
- *     <query xmlns='urn:xmpp:inbox:0' total-unread='3'>
+ *     <query xmlns='urn:waddle:inbox:0' total-unread='3'>
  *       <conversation partner='alice@example.com' kind='direct'
  *                     last-stanza-id='sid' last-updated='1700000' unread='2'>
  *         <preview>hi there</preview>
@@ -23,13 +23,13 @@
  *
  * Mark read:
  *   <iq type='set'>
- *     <mark-read xmlns='urn:xmpp:inbox:0' partner='alice@example.com'/>
+ *     <mark-read xmlns='urn:waddle:inbox:0' partner='alice@example.com'/>
  *   </iq>
  */
 import type { DefinitionOptions } from "stanza/jxt";
 import { attribute, booleanAttribute, childText, integerAttribute } from "stanza/jxt";
 
-export const NS_INBOX_0 = "urn:xmpp:inbox:0";
+const NS_WADDLE_INBOX_0 = "urn:waddle:inbox:0";
 
 export type InboxConversationKind = "direct" | "muc";
 
@@ -57,7 +57,7 @@ const definitions: DefinitionOptions[] = [
       threads: booleanAttribute("threads"),
       totalUnread: integerAttribute("total-unread"),
     },
-    namespace: NS_INBOX_0,
+    namespace: NS_WADDLE_INBOX_0,
   },
   {
     aliases: [
@@ -71,13 +71,13 @@ const definitions: DefinitionOptions[] = [
       lastStanzaId: attribute("last-stanza-id"),
       lastUpdated: integerAttribute("last-updated"),
       unread: integerAttribute("unread"),
-      preview: childText(NS_INBOX_0, "preview"),
+      preview: childText(NS_WADDLE_INBOX_0, "preview"),
       thread: attribute("thread"),
       threadTitle: attribute("thread-title"),
       replyCount: integerAttribute("reply-count"),
       author: attribute("author"),
     },
-    namespace: NS_INBOX_0,
+    namespace: NS_WADDLE_INBOX_0,
   },
   {
     aliases: [{ path: "iq.inboxMarkRead", multiple: false }],
@@ -86,7 +86,7 @@ const definitions: DefinitionOptions[] = [
       partner: attribute("partner"),
       thread: attribute("thread"),
     },
-    namespace: NS_INBOX_0,
+    namespace: NS_WADDLE_INBOX_0,
   },
 ];
 

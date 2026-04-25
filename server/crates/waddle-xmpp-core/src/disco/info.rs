@@ -546,9 +546,7 @@ pub fn muc_room_features(
         Feature::muc_nonanonymous(),
     ];
 
-    if forum {
-        features.push(Feature::forums());
-    }
+    let _ = forum;
 
     if persistent {
         features.push(Feature::muc_persistent());
@@ -659,7 +657,7 @@ mod tests {
     #[test]
     fn test_muc_room_features_forum_room() {
         let features = muc_room_features(true, true, false, true);
-        assert!(features.contains(&Feature::forums()));
+        assert!(!features.contains(&Feature::forums()));
         assert!(features.contains(&Feature::muc_persistent()));
         assert!(features.contains(&Feature::muc_membersonly()));
         assert!(features.contains(&Feature::muc_unmoderated()));

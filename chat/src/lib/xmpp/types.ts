@@ -88,7 +88,7 @@ export interface LiveRoomMessage {
   /** RFC 6121 / XEP-0201 */
   threadId?: string;
   parentThreadId?: string;
-  /** XEP-0508 */
+  /** Waddle thread metadata */
   forumPostKind?: "topic" | "reply";
   forumTitle?: string;
   forumThreadTitle?: string;
@@ -120,7 +120,7 @@ export interface LiveDmMessage {
   /** RFC 6121 / XEP-0201 */
   threadId?: string;
   parentThreadId?: string;
-  /** XEP-0508 */
+  /** Waddle thread metadata */
   forumPostKind?: "topic" | "reply";
   forumTitle?: string;
   forumThreadTitle?: string;

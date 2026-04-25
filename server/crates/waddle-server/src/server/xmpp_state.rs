@@ -163,7 +163,7 @@ pub struct XmppAppState {
     global_db_actor: ActorRef<DbActor>,
     /// Database service for canonical space data.
     space_db_service: Option<SpaceDbService>,
-    /// Shared XEP-0430 inbox projection storage.
+    /// Shared Waddle inbox projection storage.
     inbox_storage: Option<Arc<dyn InboxStorage>>,
 }
 
@@ -1304,7 +1304,7 @@ impl waddle_xmpp::AppState for XmppAppState {
     }
 
     // =========================================================================
-    // XEP-0430 Inbox Projection Methods
+    // Waddle Inbox Projection Methods
     // =========================================================================
 
     async fn list_inbox(&self, user_jid: &jid::BareJid) -> Result<Vec<InboxEntry>, XmppError> {

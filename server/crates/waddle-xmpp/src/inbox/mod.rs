@@ -103,7 +103,7 @@ pub struct InboxEntry {
     pub preview: Option<String>,
     /// RFC 6121 thread identifier — `None` for channel-level entries.
     pub thread_id: Option<String>,
-    /// Thread title (XEP-0508 `thread-create` title or first-message preview).
+    /// Thread title (Waddle thread metadata title or first-message preview).
     pub thread_title: Option<String>,
     /// Total replies in this thread.
     pub reply_count: u32,

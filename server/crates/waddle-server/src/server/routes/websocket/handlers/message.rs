@@ -152,7 +152,7 @@ pub async fn handle_message(
             // Thread-level inbox projection: if the message carries a <thread/>,
             // upsert a thread-scoped entry alongside the channel-level one.
             let thread_entry = prototype.thread.as_ref().map(|thread| {
-                // Resolve thread title: XEP-0508 thread-create title, or first message preview
+                // Resolve thread title from Waddle thread metadata or first message preview.
                 let forum_title = waddle_xmpp::xep::xep0508::extract_forum_action(&prototype)
                     .and_then(|action| match action {
                         waddle_xmpp::xep::xep0508::ForumAction::CreateThread(tc) => Some(tc.title),

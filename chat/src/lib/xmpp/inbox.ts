@@ -1,4 +1,4 @@
-/** XEP-0430 Inbox: high-level client helpers. */
+/** Waddle inbox: high-level client helpers. */
 import type { Agent } from "stanza";
 import type { InboxConversationKind, WaddleInboxConversation } from "./extensions/inbox";
 

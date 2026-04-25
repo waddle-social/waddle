@@ -1,9 +1,20 @@
 # waddle Development Guidelines
 
 - use jj when .jj exists, git otherwise
+- Before implementation work begins, create a branch and open a draft PR whose
+  title summarizes the intended work and whose description contains the plan.
+  Make this the first action for all non-trivial tasks unless explicitly told
+  not to.
 - XMPP Native, Never use out of band/XMPP APIs.
 - Always review your plan against the XEPS in ./xeps
     - If ./xeps doesn't exist, clone xsf/xeps into ./xeps
+- XEP conformance hard rule:
+  - Prefer conformant XEP/XMPP shapes at all times. Use custom `urn:waddle:*`
+    namespaces only when no suitable XEP-defined shape exists.
+  - If Waddle advertises an official XEP feature or uses an official
+    `urn:xmpp:*`, `jabber:*`, or `http://jabber.org/*` namespace, the wire
+    shape and behavior MUST conform to that XEP exactly.
+  - Do not use official XEP namespaces for Waddle-specific semantics.
 
 ## Active Technologies
 

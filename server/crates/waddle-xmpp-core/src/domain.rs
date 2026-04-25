@@ -34,7 +34,7 @@ pub struct ChannelRoomInfo {
 pub enum ChannelType {
     /// Standard text chat channel.
     Text,
-    /// XEP-0508 forum channel.
+    /// Waddle thread-oriented channel.
     Forum,
 }
 

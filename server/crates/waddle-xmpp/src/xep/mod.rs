@@ -120,8 +120,8 @@
 //! - **XEP-0461**: Message Replies - Reply references and thread metadata.
 //! - **XEP-0513**: Explicit Mentions - @everyone, @here, @role, @user
 //!   mentions with notification decision logic.
-//! - **XEP-0508**: Forums - Forum-style threaded discussions with
-//!   thread-create and thread-reply elements for topic-based MUC.
+//! - Private Waddle MUC thread metadata, used until XEP-0508 is implemented
+//!   through PubSub/XEP-0472 forum nodes.
 //! - **XEP-0503**: Server-side Spaces - Community discovery via pubsub.
 
 pub mod xep0004;

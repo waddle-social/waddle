@@ -140,6 +140,34 @@ impl Default for NodeConfig {
 }
 
 impl NodeConfig {
+    /// XEP-0503 configuration for a public Space node.
+    pub fn spaces_public() -> Self {
+        Self {
+            access_model: AccessModel::Open,
+            publish_model: PublishModel::Publishers,
+            max_items: u32::MAX,
+            persist_items: true,
+            deliver_payloads: true,
+            notify_retract: true,
+            notify_delete: true,
+            send_last_published_item: SendLastPublishedItem::OnSub,
+        }
+    }
+
+    /// XEP-0503 configuration for a private Space node.
+    pub fn spaces_private() -> Self {
+        Self {
+            access_model: AccessModel::Whitelist,
+            publish_model: PublishModel::Publishers,
+            max_items: u32::MAX,
+            persist_items: true,
+            deliver_payloads: true,
+            notify_retract: true,
+            notify_delete: true,
+            send_last_published_item: SendLastPublishedItem::OnSub,
+        }
+    }
+
     /// Default configuration for PEP nodes.
     pub fn pep_default() -> Self {
         Self {
@@ -209,5 +237,20 @@ mod tests {
         assert_eq!(config, NodeConfig::pep_default());
         assert_eq!(config.max_items, 1);
         assert!(config.persist_items);
+    }
+
+    #[test]
+    fn spaces_configs_do_not_inherit_pep_single_item_retention() {
+        let public = NodeConfig::spaces_public();
+        assert_eq!(public.access_model, AccessModel::Open);
+        assert_eq!(public.max_items, u32::MAX);
+        assert!(public.persist_items);
+        assert!(public.notify_retract);
+
+        let private = NodeConfig::spaces_private();
+        assert_eq!(private.access_model, AccessModel::Whitelist);
+        assert_eq!(private.max_items, u32::MAX);
+        assert!(private.persist_items);
+        assert!(private.notify_retract);
     }
 }
