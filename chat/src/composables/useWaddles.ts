@@ -58,6 +58,9 @@ export function useWaddles(
   });
 
   const currentSpace = computed(() => (activeSpaceId.value && waddles.value[0]) ? waddles.value[0] : null);
+  const isEmptyDeployment = computed(() =>
+    waddles.value.length === 0 && channels.value.length === 0 && !isLoadingStructure.value,
+  );
 
   const currentChannel = computed(
     () => channels.value.find((c) => c.id === activeChannelId.value) ?? null,
@@ -100,7 +103,7 @@ export function useWaddles(
   );
 
   const canManageChannels = computed(() =>
-    ["owner", "admin"].includes(currentRole.value ?? ""),
+    isEmptyDeployment.value || ["owner", "admin"].includes(currentRole.value ?? ""),
   );
 
   const canManageMembers = computed(() =>
@@ -145,17 +148,12 @@ export function useWaddles(
         return null;
       }
 
-      const discoveredSpaces = topology.spaces.length > 0
-        ? topology.spaces.map((space) => ({
-            name: space.name,
-            role: null,
-          }) satisfies SpaceSummary)
-        : [{
-            name: "Waddle",
-            role: null,
-          } satisfies SpaceSummary];
+      const discoveredSpaces = topology.spaces.map((space) => ({
+        name: space.name,
+        role: null,
+      }) satisfies SpaceSummary);
       waddles.value = discoveredSpaces;
-      activeSpaceId.value = topology.spaces[0]?.id ?? "deployment";
+      activeSpaceId.value = topology.spaces[0]?.id ?? null;
 
       const channelList: ChannelSummary[] = topology.rooms.map((c) => ({
         id: c.id,
@@ -219,14 +217,6 @@ export function useWaddles(
     clearActionError();
 
     if (requestId !== spaceRequestId) return null;
-
-    const canonical: SpaceSummary = {
-      name: "Waddle",
-      role: null,
-    };
-    waddles.value = [canonical];
-    const nextId = activeSpaceId.value ?? "space";
-    activeSpaceId.value = nextId;
 
     if (options.loadStructure !== false) {
       return loadStructure();
@@ -416,6 +406,7 @@ export function useWaddles(
     createChannelForm,
     editChannelForm,
     currentSpace,
+    isEmptyDeployment,
     currentChannel,
     currentRole,
     sortedSpaces,

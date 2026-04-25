@@ -329,6 +329,31 @@ const activeUploadProgress = computed(() =>
 const activeActionError = computed(() =>
   ui.actionError.value || (ui.sidebarMode.value === "channels" ? members.mentionSourceDiagnostic.value : "")
 );
+let setupPromptShown = false;
+
+function showFirstRunSetupIfNeeded() {
+  if (
+    setupPromptShown ||
+    connectionStore.appState !== "ready" ||
+    ui.sidebarMode.value !== "channels" ||
+    ui.activePage.value !== "chat" ||
+    !waddles.isEmptyDeployment.value ||
+    waddles.isLoadingStructure.value
+  ) {
+    return;
+  }
+
+  setupPromptShown = true;
+  waddles.createChannelForm.value = {
+    intent: "space-with-muc",
+    space_name: "",
+    space_description: "",
+    muc_name: "general",
+    muc_description: "",
+    muc_type: "text",
+  };
+  ui.showCreateChannel.value = true;
+}
 
 async function sendActiveMessage(
   body?: string,
@@ -579,6 +604,7 @@ async function onConnectionReady() {
     if (requestId === routeRequestId) {
       await applyRouteTarget(route, requestId);
     }
+    showFirstRunSetupIfNeeded();
   } finally {
     if (requestId === routeRequestId) {
       isApplyingRoute.value = false;
@@ -603,6 +629,7 @@ async function handleLogout() {
   messaging.disconnect();
   dmMessaging.disconnect();
   waddles.clearData();
+  setupPromptShown = false;
   messaging.clearMessages();
   dmMessaging.clearMessages();
   pushRoute(null);

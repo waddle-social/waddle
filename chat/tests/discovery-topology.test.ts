@@ -190,4 +190,5 @@ describe("topology discovery", () => {
       "http://jabber.org/protocol/commands",
     ]);
   });
+
 });
