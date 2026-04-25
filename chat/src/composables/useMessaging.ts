@@ -394,9 +394,9 @@ export function useMessaging(
 
   function notifyComposing() {
     const client = xmppClient.value;
-    const spaceId = activeSpaceId.value;
+    const spaceId = activeSpaceId.value ?? "";
     const channelId = activeChannelId.value;
-    if (!client || !spaceId || !channelId) return;
+    if (!client || !channelId) return;
 
     if (lastChatState !== "composing") {
       lastChatState = "composing";
@@ -859,10 +859,9 @@ export function useMessaging(
   }
 
   async function selectChannel(channelId: string) {
-    if (!activeSpaceId.value) return;
     messages.value = [];
     clearTypingState();
-    await loadMessages(activeSpaceId.value, channelId);
+    await loadMessages(activeSpaceId.value ?? "", channelId);
   }
 
   async function sendMessage(
@@ -884,12 +883,12 @@ export function useMessaging(
       ? forumTitleOrThreadOverride
       : undefined;
     const client = xmppClient.value;
-    const spaceId = activeSpaceId.value;
+    const spaceId = activeSpaceId.value ?? "";
     const channelId = activeChannelId.value;
     const hasFiles = !!files && files.length > 0;
     const isForumPost = channelIsForum.value && !replyTo;
     const resolvedForumTitle = (forumTitle ?? forumPostTitle.value).trim();
-    if (!client || !spaceId || !channelId) return;
+    if (!client || !channelId) return;
     if (!bodyText.trim() && !hasFiles) return;
     if (isForumPost && !resolvedForumTitle) {
       actionError.value = "Add a title before posting to this forum.";

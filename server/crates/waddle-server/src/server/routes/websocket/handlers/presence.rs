@@ -634,6 +634,7 @@ pub async fn handle_muc_join(
                     name: channel.name.clone(),
                     description: channel.description.clone(),
                     members_only: true,
+                    moderated: channel.channel_type == "announcement",
                     forum: channel.channel_type == "forum",
                     ..Default::default()
                 })
@@ -801,6 +802,18 @@ async fn resolve_managed_channel_affiliation(
     ] {
         if check_channel_permission(state, object.clone(), subject.clone(), permission).await? {
             return Ok(Some(affiliation));
+        }
+    }
+
+    if matches!(channel_id, "chat" | "announcements") {
+        let server = Object::new(ObjectType::Server, DEPLOYMENT_SERVER_ID);
+        if check_channel_permission(state, server.clone(), subject.clone(), Permission::Owner)
+            .await?
+        {
+            return Ok(Some(Affiliation::Owner));
+        }
+        if check_channel_permission(state, server, subject.clone(), Permission::Member).await? {
+            return Ok(Some(Affiliation::Member));
         }
     }
 

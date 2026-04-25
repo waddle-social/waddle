@@ -197,6 +197,7 @@ export class BrowserXmppClient {
   private roomHats: RoomHats = {};
   private roomPresence: RoomPresence = {};
   private uploadServiceJid: string | null = null;
+  private discoveredRoomJids = new Map<string, string>();
   private visibilityListener: (() => void) | null = null;
   private onlineListener: (() => void) | null = null;
   private reconnectNudgeAt = 0;
@@ -556,9 +557,13 @@ export class BrowserXmppClient {
 
   // -- Room management --
 
+  private roomJidForChannel(channelId: string): string {
+    return this.discoveredRoomJids.get(channelId) ?? roomBareJidFor(this.session, channelId);
+  }
+
   async switchRoom(_spaceId: string, channelId: string) {
     await this.connect();
-    const nextRoom = roomBareJidFor(this.session, channelId);
+    const nextRoom = this.roomJidForChannel(channelId);
 
     const pendingSwitch = this.roomSwitchPromise;
     if (pendingSwitch) {
@@ -676,7 +681,7 @@ export class BrowserXmppClient {
   }
 
   private async requireJoinedRoom(w: string, c: string): Promise<{ xmpp: Agent; roomJid: string }> {
-    const roomJid = roomBareJidFor(this.session, c);
+    const roomJid = this.roomJidForChannel(c);
     await this.switchRoom(w, c);
     if (!this.xmpp || !this.connected || this.destroying || this.currentRoom !== roomJid) {
       throw new Error(`Room is not ready: ${roomJid}`);
@@ -898,7 +903,7 @@ export class BrowserXmppClient {
     const hasFiles = !!files && files.length > 0;
     if (!text && !hasFiles) return null;
 
-    const roomJid = roomBareJidFor(this.session, c);
+    const roomJid = this.roomJidForChannel(c);
 
     // Fast path: connected and already in this room — send directly,
     // no awaits, no UI freeze. Any other state (offline, reconnecting,
@@ -1134,17 +1139,17 @@ export class BrowserXmppClient {
 
   async queryMam(w: string, c: string, max = 50): Promise<LiveRoomMessage[]> {
     await this.connect(); await this.switchRoom(w, c);
-    return this.xmpp ? history.queryMam(this.xmpp, roomBareJidFor(this.session, c), max) : [];
+    return this.xmpp ? history.queryMam(this.xmpp, this.roomJidForChannel(c), max) : [];
   }
   async queryMamByThread(w: string, c: string, threadId: string, max = 100): Promise<LiveRoomMessage[]> {
     await this.connect(); await this.switchRoom(w, c);
     return this.xmpp
-      ? history.queryMamByThread(this.xmpp, roomBareJidFor(this.session, c), threadId, max)
+      ? history.queryMamByThread(this.xmpp, this.roomJidForChannel(c), threadId, max)
       : [];
   }
   async searchMessages(_spaceId: string, c: string, query: string, max = 20) {
     await this.connect();
-    return this.xmpp ? history.searchMessages(this.xmpp, roomBareJidFor(this.session, c), query, max) : [];
+    return this.xmpp ? history.searchMessages(this.xmpp, this.roomJidForChannel(c), query, max) : [];
   }
   async queryPersonalMam(peerJid: string, max = 100): Promise<LiveDmMessage[]> {
     await this.connect();
@@ -1190,13 +1195,15 @@ export class BrowserXmppClient {
     if (!this.xmpp) {
       return { spaces: [], rooms: [] };
     }
-    return discovery.discoverTopology(this.xmpp, this.session.jid);
+    const topology = await discovery.discoverTopology(this.xmpp, this.session.jid);
+    this.discoveredRoomJids = new Map(topology.rooms.flatMap((room) => room.jid ? [[room.id, room.jid] as const] : []));
+    return topology;
   }
 
   async listRoomMembers(channelId: string, options?: ListRoomMembersOptions): Promise<MemberSummary[]> {
     await this.connect();
     if (!this.xmpp) return [];
-    const roomJid = options?.roomJid ?? roomBareJidFor(this.session, channelId);
+    const roomJid = options?.roomJid ?? this.roomJidForChannel(channelId);
     const muc = this.xmpp as Agent & {
       getRoomMembers?: (room: string, opts: { affiliation: string }) => Promise<{ muc?: { users?: Array<{ jid?: string; affiliation?: string }> } }>;
     };
@@ -1205,10 +1212,6 @@ export class BrowserXmppClient {
       throw new Error("missing getRoomMembers");
     }
     const affiliations = ["owner", "admin", "member", "outcast"] as const;
-    // Member-bearing affiliations — if ALL of these fail we refuse to silently
-    // return an empty list, because it likely means the room JID was wrong.
-    const memberBearing = new Set<string>(["owner", "admin", "member"]);
-    const memberBearingFailures: string[] = [];
     const members: MemberSummary[] = [];
     for (const affiliation of affiliations) {
       try {
@@ -1239,18 +1242,7 @@ export class BrowserXmppClient {
           detail = `affiliation query failed for ${affiliation} — ${roomJid}: ${condition}`;
         }
         this.emitError({ kind: "member-query", recoverable: true, detail, condition, cause: err });
-        if (memberBearing.has(affiliation)) {
-          memberBearingFailures.push(affiliation);
-        }
       }
-    }
-    if (members.length === 0 && memberBearingFailures.length > 0) {
-      this.emitError({
-        kind: "member-query",
-        recoverable: false,
-        detail: `refusing to show Members 0 — member-bearing affiliation queries failed (${memberBearingFailures.join(", ")}); reconstructed room JID may not match`,
-      });
-      throw new Error("refusing to show Members 0");
     }
     return members;
   }
@@ -1258,7 +1250,7 @@ export class BrowserXmppClient {
   async setRoomAffiliation(channelId: string, jid: string, affiliation: MemberSummary["role"]): Promise<void> {
     await this.connect();
     if (!this.xmpp) return;
-    const roomJid = roomBareJidFor(this.session, channelId);
+    const roomJid = this.roomJidForChannel(channelId);
     const muc = this.xmpp as Agent & {
       setRoomAffiliation?: (room: string, jid: string, affiliation: string) => Promise<void>;
     };
@@ -1791,8 +1783,7 @@ export class BrowserXmppClient {
     xmpp.on("presence", (pres: ReceivedPresence) => {
       const from = barePeerJid(pres.from ?? "");
       if (!from) return;
-      const selfDomain = barePeerJid(this.session.jid).split("@")[1] ?? "";
-      if (selfDomain && from.endsWith(`@muc.${selfDomain}`)) return;
+      if (from.includes("@muc.")) return;
 
       if (pres.type === "subscribe") {
         if (from !== barePeerJid(this.session.jid)) {

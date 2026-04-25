@@ -87,6 +87,7 @@ database:
 xmpp:
   enabled: true
   domain: waddle.local
+  componentDomain: waddle.local
   tls:
     secretName: ""
     mountPath: /etc/waddle/tls

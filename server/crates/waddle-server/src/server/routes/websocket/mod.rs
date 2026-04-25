@@ -61,6 +61,23 @@ use waddle_xmpp::pubsub::PubSubStorage;
 
 pub mod handlers;
 
+#[derive(Debug, Clone)]
+pub struct XmppServiceDomains {
+    pub muc: String,
+    pub spaces: String,
+    pub upload: String,
+}
+
+impl XmppServiceDomains {
+    pub fn new(xmpp_domain: &str, component_parent_domain: &str) -> Self {
+        Self {
+            muc: format!("muc.{component_parent_domain}"),
+            spaces: format!("spaces.{component_parent_domain}"),
+            upload: format!("upload.{xmpp_domain}"),
+        }
+    }
+}
+
 /// WebSocket route dependencies kept narrower than the full server graph.
 pub struct WebSocketState {
     pub deps: WebSocketDeps,
@@ -71,6 +88,8 @@ pub struct WebSocketDeps {
     pub app_state: Arc<AppState>,
     /// Authentication state for session validation.
     pub auth_state: Arc<AuthState>,
+    /// Authoritative XMPP component/service JIDs used by this deployment.
+    pub service_domains: XmppServiceDomains,
     /// Protocol/runtime services used by the WebSocket C2S path.
     pub protocol: ProtocolServices,
 }
@@ -980,7 +999,7 @@ async fn handle_xmpp_frame(
         carbons_enabled,
         suppress_sm_record_next_batch,
     } = conn;
-    let muc_domain = format!("muc.{}", domain);
+    let muc_domain = state.deps.service_domains.muc.clone();
 
     // SM nonzas (enable/resume/r/a) are not part of the parse_frame typed
     // vocabulary — keep the direct SmStanza check before parse_frame.
@@ -1780,6 +1799,11 @@ mod tests {
             deps: WebSocketDeps {
                 app_state,
                 auth_state,
+                service_domains: XmppServiceDomains {
+                    muc: "muc.example.com".to_string(),
+                    spaces: "spaces.example.com".to_string(),
+                    upload: "upload.example.com".to_string(),
+                },
                 protocol: ProtocolServices {
                     connection_registry: Arc::new(ConnectionRegistry::new()),
                     room_registry: kameo::spawn(RoomRegistryActor::new(

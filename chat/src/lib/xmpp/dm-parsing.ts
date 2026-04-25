@@ -28,10 +28,7 @@ export function dispatchChat(msg: ReceivedMessage, h: DmHandlers): void {
   const toBare = barePeerJid(msg.to ?? "");
   if (!fromBare || !toBare) return;
 
-  // Derive the MUC service domain from the user's own JID domain.
-  const selfDomain = h.selfBareJid.split("@")[1] ?? "";
-  const mucSuffix = selfDomain ? `@muc.${selfDomain}` : null;
-  if (mucSuffix && (fromBare.endsWith(mucSuffix) || toBare.endsWith(mucSuffix))) return;
+  if (fromBare.includes("@muc.") || toBare.includes("@muc.")) return;
 
   const isSelf = fromBare === h.selfBareJid;
   const peerJid = isSelf ? toBare : fromBare;

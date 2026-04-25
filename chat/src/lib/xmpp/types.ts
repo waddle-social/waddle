@@ -223,6 +223,10 @@ export interface DiscoveredTopology {
   spaces: DiscoveredSpace[];
   rooms: DiscoveredChannel[];
   serverRole?: "owner" | "admin" | "moderator" | "member" | null;
+  services?: {
+    muc?: string;
+    spaces?: string;
+  };
 }
 
 /** Cross-room activity event with optional mention data for notifications. */

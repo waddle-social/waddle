@@ -10,7 +10,7 @@ import {
   createMucInSpace,
   createSpaceWithMuc,
 } from "@/lib/xmpp/protocol-helpers";
-import { jidDomain } from "@/lib/xmpp/jid";
+import { mucServiceDomain, spacesServiceDomain } from "@/lib/xmpp/discovery";
 
 interface LoadSpaceOptions {
   loadStructure?: boolean;
@@ -33,6 +33,8 @@ export function useWaddles(
   const channels = ref<ChannelSummary[]>([]);
   const members = ref<MemberSummary[]>([]);
   const serverRole = ref<SpaceSummary["role"]>(null);
+  const mucServiceJid = ref<string | null>(null);
+  const spacesServiceJid = ref<string | null>(null);
 
   const activeSpaceId: Ref<string | null> = ref(null);
   const activeChannelId: Ref<string | null> = ref(null);
@@ -159,6 +161,8 @@ export function useWaddles(
       }
 
       serverRole.value = topology.serverRole ?? null;
+      mucServiceJid.value = topology.services?.muc ?? null;
+      spacesServiceJid.value = topology.services?.spaces ?? null;
       const discoveredSpaces = topology.spaces.map((space) => ({
         id: space.id,
         name: space.name,
@@ -190,7 +194,7 @@ export function useWaddles(
           ? preferredChannelId
           : activeChannelId.value && channelList.some((c) => c.id === activeChannelId.value)
             ? activeChannelId.value
-            : channelList[0]?.id ?? null;
+            : channelList.find((c) => c.id === "chat" || c.name.toLowerCase() === "chat")?.id ?? channelList[0]?.id ?? null;
 
       activeChannelId.value = nextChannelId;
       const nextChannel = channelList.find((channel) => channel.id === nextChannelId);
@@ -204,7 +208,8 @@ export function useWaddles(
           }
         } catch (e) {
           if (requestId === structureRequestId && memberReqId === memberRequestId) {
-            actionError.value = normalizeError(e);
+            console.warn("Unable to load room members", e);
+            members.value = [];
           }
         }
       } else {
@@ -283,9 +288,8 @@ export function useWaddles(
       return undefined;
     }
 
-    const domain = jidDomain(session.value.jid);
-    const mucServiceJid = `muc.${domain}`;
-    const spacesServiceJid = `spaces.${domain}`;
+    const mucService = mucServiceJid.value ?? mucServiceDomain(session.value.jid);
+    const spacesService = spacesServiceJid.value ?? spacesServiceDomain(session.value.jid);
     const nick = session.value.username;
 
     isSubmitting.value = true;
@@ -295,7 +299,7 @@ export function useWaddles(
       if (form.intent === "muc") {
         if (!form.name.trim()) return undefined;
 
-        const { roomJid } = await createMucRoom(xmppAgent, mucServiceJid, {
+        const { roomJid } = await createMucRoom(xmppAgent, mucService, {
           roomLocalpart: form.name.trim().toLowerCase().replace(/\s+/g, "-"),
           nick,
           name: form.name.trim(),
@@ -318,7 +322,7 @@ export function useWaddles(
       if (form.intent === "space") {
         if (!form.name.trim()) return undefined;
 
-        const { node } = await createSpaceNode(xmppAgent, spacesServiceJid, {
+        const { node } = await createSpaceNode(xmppAgent, spacesService, {
           name: form.name.trim(),
           description: form.description.trim() || undefined,
         });
@@ -336,7 +340,7 @@ export function useWaddles(
         if (!form.name.trim() || !form.space_node.trim()) return undefined;
 
         const spaceNode = form.space_node;
-        const { roomJid } = await createMucInSpace(xmppAgent, mucServiceJid, spacesServiceJid, {
+        const { roomJid } = await createMucInSpace(xmppAgent, mucService, spacesService, {
           roomLocalpart: form.name.trim().toLowerCase().replace(/\s+/g, "-"),
           nick,
           name: form.name.trim(),
@@ -363,8 +367,8 @@ export function useWaddles(
 
         const { roomJid, spaceNode } = await createSpaceWithMuc(
           xmppAgent,
-          mucServiceJid,
-          spacesServiceJid,
+          mucService,
+          spacesService,
           {
             spaceName: form.space_name.trim(),
             spaceDescription: form.space_description.trim() || undefined,

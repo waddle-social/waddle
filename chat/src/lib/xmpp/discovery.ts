@@ -7,6 +7,8 @@ import { barePeerJid, jidDomain } from "./jid";
 
 const NS_FORUMS_0 = "urn:xmpp:forums:0";
 const NS_BOOKMARKS_1 = "urn:xmpp:bookmarks:1";
+const NS_MUC = "http://jabber.org/protocol/muc";
+const NS_SPACES_0 = "urn:xmpp:spaces:0";
 const FIELD_FORUM_MODE = "muc#roomconfig_forum";
 type DiscoveryRole = "owner" | "admin" | "moderator" | "member" | null;
 type PubsubItem = {
@@ -69,12 +71,50 @@ function parseDiscoveryRole(value: string | null): DiscoveryRole {
   }
 }
 
-function spacesServiceDomain(jid: string): string {
+export function spacesServiceDomain(jid: string): string {
   return `spaces.${jidDomain(jid)}`;
 }
 
-function mucServiceDomain(jid: string): string {
+export function mucServiceDomain(jid: string): string {
   return `muc.${jidDomain(jid)}`;
+}
+
+async function discoverComponentServices(
+  xmpp: Agent,
+  domain: string,
+  jid: string,
+): Promise<{ muc: string; spaces: string }> {
+  const fallback = {
+    muc: mucServiceDomain(jid),
+    spaces: spacesServiceDomain(jid),
+  };
+
+  try {
+    const response = await xmpp.getDiscoItems(domain);
+    const candidates = response.items?.map((item) => item.jid).filter((value): value is string => !!value) ?? [];
+    const infos = await Promise.all(
+      candidates.map(async (serviceJid) => {
+        try {
+          return { serviceJid, info: await xmpp.getDiscoInfo(serviceJid) };
+        } catch {
+          return { serviceJid, info: null };
+        }
+      }),
+    );
+    return infos.reduce((services, candidate) => {
+      const features = candidate.info?.features ?? [];
+      const identities = candidate.info?.identities ?? [];
+      if (features.includes(NS_MUC) || identities.some((identity) => identity.category === "conference")) {
+        services.muc = candidate.serviceJid;
+      }
+      if (features.includes(NS_SPACES_0) || identities.some((identity) => identity.category === "pubsub")) {
+        services.spaces = candidate.serviceJid;
+      }
+      return services;
+    }, fallback);
+  } catch {
+    return fallback;
+  }
 }
 
 function channelFromDiscoItem(
@@ -159,15 +199,17 @@ export async function discoverTopology(
   xmpp: Agent,
   jid: string,
 ): Promise<DiscoveredTopology> {
-  const mucDomain = mucServiceDomain(jid);
-  const spacesDomain = spacesServiceDomain(jid);
+  const domain = jidDomain(jid);
+  const services = await discoverComponentServices(xmpp, domain, jid);
+  const mucDomain = services.muc;
+  const spacesDomain = services.spaces;
 
   const roomsByJid = new Map<string, DiscoveredChannel>();
   const spaces: DiscoveredSpace[] = [];
   let serverRole: DiscoveryRole = null;
 
   try {
-    const serverInfo = await xmpp.getDiscoInfo(jidDomain(jid));
+    const serverInfo = await xmpp.getDiscoInfo(domain);
     serverRole = parseDiscoveryRole(metadataField(serverInfo, "waddle#server_affiliation"));
   } catch {
     serverRole = null;
@@ -234,5 +276,6 @@ export async function discoverTopology(
     spaces,
     rooms,
     serverRole,
+    services,
   };
 }

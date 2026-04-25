@@ -121,7 +121,8 @@ pub async fn handle_iq_with_conn_state(
     phase: &ConnectionPhase,
     carbons_enabled: &mut bool,
 ) -> Vec<String> {
-    let spaces_domain = format!("spaces.{domain}");
+    let spaces_domain = state.deps.service_domains.spaces.clone();
+    let upload_domain = state.deps.service_domains.upload.clone();
 
     let id = iq.id.clone();
     let to = iq.to.as_ref().map(|jid| jid.to_string());
@@ -409,8 +410,12 @@ pub async fn handle_iq_with_conn_state(
                     if let Ok(Some(channel)) = get_managed_channel_for_room(state, &room_jid).await
                     {
                         let identities = vec![Identity::muc_room(Some(&channel.name))];
-                        let mut features =
-                            muc_room_features(true, false, false, channel.channel_type == "forum");
+                        let mut features = muc_room_features(
+                            true,
+                            true,
+                            channel.channel_type == "announcement",
+                            channel.channel_type == "forum",
+                        );
                         features.extend(
                             state
                                 .deps
@@ -521,7 +526,6 @@ pub async fn handle_iq_with_conn_state(
         }
 
         // Disco info on upload service (XEP-0363)
-        let upload_domain = format!("upload.{domain}");
         if to.as_deref() == Some(upload_domain.as_str()) {
             let identities = vec![Identity::upload_service(Some("HTTP File Upload"))];
             let features = upload_service_features();
@@ -607,7 +611,10 @@ pub async fn handle_iq_with_conn_state(
                     {
                         Ok(nodes) => nodes
                             .into_iter()
-                            .map(|node| DiscoItem::spaces_node(&spaces_domain, &node, Some(&node)))
+                            .map(|node| {
+                                let name = if node == "general" { "General" } else { &node };
+                                DiscoItem::spaces_node(&spaces_domain, &node, Some(name))
+                            })
                             .collect(),
                         Err(error) => {
                             warn!(error = %error, "Failed to list Spaces nodes");
@@ -626,7 +633,6 @@ pub async fn handle_iq_with_conn_state(
         }
 
         debug!("Disco items query on server");
-        let upload_domain = format!("upload.{domain}");
         let items = vec![
             DiscoItem::muc_service(muc_domain, Some("Chatrooms")),
             DiscoItem::upload_service(&upload_domain, Some("HTTP File Upload")),
@@ -2945,9 +2951,14 @@ fn spaces_service_bare_jid(spaces_domain: &str) -> Result<BareJid, String> {
 }
 
 fn space_details_from_node(node: &waddle_xmpp::pubsub::PubSubNode) -> SpaceDetails {
+    let name = if node.node_name == "general" {
+        "General".to_string()
+    } else {
+        node.node_name.clone()
+    };
     SpaceDetails {
         id: node.node_name.clone(),
-        name: node.node_name.clone(),
+        name,
         description: None,
         owner_id: node.owner.to_string(),
         icon_url: None,
@@ -3205,9 +3216,9 @@ async fn handle_spaces_retract(
 async fn room_space_metadata_extensions(
     state: &WebSocketState,
     room_jid: &BareJid,
-    domain: &str,
+    _domain: &str,
 ) -> Vec<Element> {
-    let spaces_domain = format!("spaces.{domain}");
+    let spaces_domain = state.deps.service_domains.spaces.clone();
     let Ok(spaces_jid) = spaces_service_bare_jid(&spaces_domain) else {
         return vec![];
     };

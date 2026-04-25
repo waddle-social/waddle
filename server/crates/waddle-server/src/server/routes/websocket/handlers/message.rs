@@ -23,10 +23,13 @@ use waddle_xmpp::{
     Stanza,
 };
 use xmpp_parsers::message::MessageType as XmppMessageType;
+use xmpp_parsers::minidom::Element;
 
 use super::super::{get_room_actor, stanza_to_xml, WebSocketState};
 use crate::auth::Session;
 use crate::db::blocking::DatabaseBlockingStorage;
+use crate::permissions::{CheckPermission, Object, ObjectType, Permission, Subject};
+use crate::server::bootstrap_membership::DEPLOYMENT_SERVER_ID;
 use waddle_xmpp::protocol::ConnectionPhase;
 
 fn archived_stanza_xml(message: &xmpp_parsers::message::Message) -> String {
@@ -38,7 +41,7 @@ pub async fn handle_message(
     muc_domain: &str,
     state: &WebSocketState,
     phase: &ConnectionPhase,
-    _authenticated_session: &Option<Session>,
+    authenticated_session: &Option<Session>,
 ) -> Vec<String> {
     let Some(sender_jid) = phase.bound_jid() else {
         warn!("Message received without authenticated session");
@@ -65,6 +68,14 @@ pub async fn handle_message(
         let room_jid = to_jid.to_bare();
 
         debug!(room = %room_jid, sender = %sender_jid, "Groupchat message");
+
+        if waddle_xmpp::parse_managed_room_jid(&room_jid).as_deref() == Some("announcements")
+            && !session_is_server_owner(state, authenticated_session).await
+        {
+            return vec![stanza_to_xml(&Stanza::Message(forbidden_message_error(
+                &incoming, &room_jid, sender_jid,
+            )))];
+        }
 
         let Some(room_actor) = get_room_actor(state, &room_jid).await else {
             warn!(room = %room_jid, "Message to non-existent room");
@@ -435,6 +446,40 @@ pub async fn handle_message(
 
     debug!(msg_type = ?incoming.type_, "Message stanza received");
     vec![]
+}
+
+async fn session_is_server_owner(state: &WebSocketState, session: &Option<Session>) -> bool {
+    let Some(session) = session.as_ref() else {
+        return false;
+    };
+    state
+        .deps
+        .app_state
+        .permission_actor
+        .ask(CheckPermission {
+            object: Object::new(ObjectType::Server, DEPLOYMENT_SERVER_ID),
+            subject: Subject::user(&session.user_id),
+            permission: Permission::Owner,
+        })
+        .await
+        .is_ok_and(|response| response.allowed)
+}
+
+fn forbidden_message_error(
+    incoming: &xmpp_parsers::message::Message,
+    room_jid: &BareJid,
+    sender_jid: &FullJid,
+) -> xmpp_parsers::message::Message {
+    let mut error = incoming.clone();
+    error.type_ = XmppMessageType::Error;
+    error.from = Some(jid::Jid::from(room_jid.clone()));
+    error.to = Some(jid::Jid::from(sender_jid.clone()));
+    let stanza_error = Element::builder("error", "jabber:client")
+        .attr("type", "auth")
+        .append(Element::builder("forbidden", "urn:ietf:params:xml:ns:xmpp-stanzas").build())
+        .build();
+    error.payloads.push(stanza_error);
+    error
 }
 
 async fn send_sent_carbons_to_websocket_resources(

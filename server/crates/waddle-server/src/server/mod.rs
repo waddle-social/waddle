@@ -1,5 +1,6 @@
 use crate::auth::{NativeUserStore, RegisterRequest};
 use crate::config::ServerConfig;
+use crate::db::actor::{DbExecute, DbQueryOne};
 use crate::db::{DatabasePool, PoolHealth};
 use crate::inbox::build_inbox_storage;
 use crate::permissions::PermissionActor;
@@ -17,7 +18,7 @@ use opentelemetry::trace::TraceContextExt;
 use opentelemetry_http::HeaderExtractor;
 use routes::auth::AuthState;
 use routes::uploads::UploadState;
-use routes::websocket::{ProtocolServices, WebSocketDeps, WebSocketState};
+use routes::websocket::{ProtocolServices, WebSocketDeps, WebSocketState, XmppServiceDomains};
 use rustls_acme::caches::DirCache;
 use rustls_acme::tower::TowerHttp01ChallengeService;
 use rustls_acme::{AcmeConfig, UseChallenge};
@@ -34,6 +35,7 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 use waddle_extensions::{ExtensionConfig, ExtensionManager};
 use waddle_xmpp::inbox::storage::InboxStorage;
 use waddle_xmpp::mam::{MamStorage, SqlxMamStorage};
+use waddle_xmpp::pubsub::{NodeConfig, PubSubItem, PubSubStorage};
 use waddle_xmpp::{muc::room_registry_actor::RoomRegistryActor, registry::ConnectionRegistry};
 
 pub(crate) mod bootstrap_membership;
@@ -111,6 +113,8 @@ pub struct XmppConfig {
     pub enabled: bool,
     /// XMPP server domain (default: "localhost")
     pub domain: String,
+    /// Parent domain for XMPP component services such as MUC and Spaces.
+    pub component_domain: String,
     /// MAM database URL (prefers dedicated XMPP DSN, otherwise the main runtime DSN)
     pub mam_database_url: Option<String>,
     /// Inbox database URL (prefers dedicated XMPP DSN, otherwise the main runtime DSN)
@@ -127,6 +131,7 @@ impl Default for XmppConfig {
         Self {
             enabled: true,
             domain: "localhost".to_string(),
+            component_domain: "localhost".to_string(),
             mam_database_url: None,
             inbox_database_url: None,
             native_auth_enabled: true,
@@ -149,6 +154,8 @@ impl XmppConfig {
 
         let domain =
             std::env::var("WADDLE_XMPP_DOMAIN").unwrap_or_else(|_| "localhost".to_string());
+        let component_domain =
+            std::env::var("WADDLE_XMPP_COMPONENT_DOMAIN").unwrap_or_else(|_| domain.clone());
 
         let mam_database_url = resolve_xmpp_database_url("WADDLE_XMPP_MAM_DATABASE_URL");
         let inbox_database_url = resolve_xmpp_database_url("WADDLE_XMPP_INBOX_DATABASE_URL");
@@ -174,6 +181,7 @@ impl XmppConfig {
         Self {
             enabled,
             domain,
+            component_domain,
             mam_database_url,
             inbox_database_url,
             native_auth_enabled,
@@ -198,6 +206,125 @@ fn resolve_xmpp_database_url(env_key: &str) -> Option<String> {
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty())
         })
+}
+
+async fn bootstrap_fresh_xmpp_topology(
+    state: &Arc<AppState>,
+    pubsub_storage: Arc<dyn PubSubStorage>,
+    services: &XmppServiceDomains,
+) -> Result<()> {
+    let actor = state.db_pool.global_actor().clone();
+    let row = actor
+        .ask(DbQueryOne {
+            sql: "SELECT COUNT(*) FROM channels".to_string(),
+            params: vec![],
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("failed to count channels: {error}"))?;
+    let channel_count = row
+        .as_ref()
+        .and_then(|row| row.first())
+        .and_then(|value| match value {
+            crate::db::Value::Integer(value) => Some(*value),
+            _ => None,
+        })
+        .unwrap_or(0);
+    let should_seed_db = channel_count == 0;
+    let should_seed_pubsub = should_seed_db
+        || (actor
+            .ask(DbQueryOne {
+                sql: "SELECT 1 FROM channels WHERE id = 'chat'".to_string(),
+                params: vec![],
+            })
+            .await
+            .map_err(|error| anyhow::anyhow!("failed to inspect chat channel: {error}"))?
+            .is_some()
+            && actor
+                .ask(DbQueryOne {
+                    sql: "SELECT 1 FROM channels WHERE id = 'announcements'".to_string(),
+                    params: vec![],
+                })
+                .await
+                .map_err(|error| {
+                    anyhow::anyhow!("failed to inspect announcements channel: {error}")
+                })?
+                .is_some());
+    if !should_seed_pubsub {
+        return Ok(());
+    }
+
+    if should_seed_db {
+        let now = chrono::Utc::now().to_rfc3339();
+        for (id, name, description, position, is_default, channel_type) in [
+            ("chat", "Chat", "General member chat", 0_i64, 1_i64, "text"),
+            (
+                "announcements",
+                "Announcements",
+                "Owner-posted announcements",
+                1_i64,
+                0_i64,
+                "announcement",
+            ),
+        ] {
+            actor
+                .ask(DbExecute {
+                    sql: r#"
+                        INSERT INTO channels (id, name, description, channel_type, position, is_default, created_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(id) DO NOTHING
+                    "#
+                    .to_string(),
+                    params: vec![
+                        id.into(),
+                        name.into(),
+                        description.into(),
+                        channel_type.into(),
+                        position.into(),
+                        is_default.into(),
+                        now.clone().into(),
+                        now.clone().into(),
+                    ],
+                })
+                .await
+                .map_err(|error| anyhow::anyhow!("failed to seed channel {id}: {error}"))?;
+        }
+    }
+
+    let spaces_jid: jid::BareJid = services
+        .spaces
+        .parse()
+        .map_err(|error| anyhow::anyhow!("invalid spaces service JID: {error}"))?;
+    pubsub_storage
+        .get_or_create_node(&spaces_jid, "general")
+        .await
+        .map_err(|error| anyhow::anyhow!("failed to create General space node: {error}"))?;
+    pubsub_storage
+        .update_node_config(&spaces_jid, "general", &NodeConfig::public())
+        .await
+        .map_err(|error| anyhow::anyhow!("failed to configure General space node: {error}"))?;
+
+    for (id, name) in [("chat", "Chat"), ("announcements", "Announcements")] {
+        let room_jid = waddle_xmpp::managed_room_jid(id, &services.muc)
+            .map_err(|error| anyhow::anyhow!("invalid seeded room JID: {error}"))?;
+        let bookmark = waddle_xmpp::xep::xep0402::Bookmark::new(room_jid)
+            .with_name(name)
+            .with_autojoin(id == "chat");
+        let item = PubSubItem {
+            id: Some(bookmark.jid.to_string()),
+            payload: Some(waddle_xmpp::xep::xep0402::build_bookmark_element(&bookmark)),
+        };
+        pubsub_storage
+            .publish_item(&spaces_jid, "general", &item, Some(&spaces_jid), false)
+            .await
+            .map_err(|error| anyhow::anyhow!("failed to publish {name} bookmark: {error}"))?;
+    }
+
+    info!(
+        muc = %services.muc,
+        spaces = %services.spaces,
+        "Seeded fresh XMPP General Space with Chat and Announcements MUCs"
+    );
+    Ok(())
 }
 
 fn start_acme_runtime(
@@ -371,6 +498,7 @@ pub async fn start_with_config(
     let http_state = state.clone();
     let http_mam_storage = websocket_mam_storage.clone();
     let http_server_config = server_config.clone();
+    let http_xmpp_config = xmpp_config.clone();
     let http_stop = stop_token.clone();
     let acme_http01_challenge_service = acme_runtime
         .as_ref()
@@ -379,6 +507,7 @@ pub async fn start_with_config(
         start_http_server(HttpServerDeps {
             state: http_state,
             server_config: http_server_config,
+            xmpp_config: http_xmpp_config,
             mam_storage: http_mam_storage,
             acme_http01_challenge_service,
             listener: http_listener,
@@ -430,6 +559,7 @@ pub async fn start_with_config(
 struct HttpServerDeps {
     state: Arc<AppState>,
     server_config: ServerConfig,
+    xmpp_config: XmppConfig,
     mam_storage: Arc<dyn MamStorage>,
     acme_http01_challenge_service: Option<TowerHttp01ChallengeService>,
     listener: tokio::net::TcpListener,
@@ -441,6 +571,7 @@ async fn start_http_server(deps: HttpServerDeps) -> Result<()> {
     let HttpServerDeps {
         state,
         server_config,
+        xmpp_config,
         mam_storage,
         acme_http01_challenge_service,
         listener,
@@ -450,6 +581,7 @@ async fn start_http_server(deps: HttpServerDeps) -> Result<()> {
     let app = create_router(
         state,
         server_config,
+        xmpp_config,
         mam_storage,
         acme_http01_challenge_service,
     )
@@ -673,6 +805,7 @@ fn build_cors(origins: Option<&str>) -> CorsLayer {
 async fn create_router(
     state: Arc<AppState>,
     server_config: ServerConfig,
+    xmpp_config: XmppConfig,
     mam_storage: Arc<dyn MamStorage>,
     acme_http01_challenge_service: Option<TowerHttp01ChallengeService>,
 ) -> Router {
@@ -690,8 +823,8 @@ async fn create_router(
 
     // Create MUC room registry with the XMPP domain (not the HTTP base_url host)
     let xmpp_domain = auth_state.xmpp_domain.clone();
-    let muc_domain = format!("muc.{}", xmpp_domain);
-    let room_registry = kameo::spawn(RoomRegistryActor::new(muc_domain));
+    let service_domains = XmppServiceDomains::new(&xmpp_domain, &xmpp_config.component_domain);
+    let room_registry = kameo::spawn(RoomRegistryActor::new(service_domains.muc.clone()));
 
     let extension_manager = Arc::new(
         match ExtensionManager::from_config(server_config.extensions.clone()).await {
@@ -722,6 +855,11 @@ async fn create_router(
     // Shared PubSub/PEP storage for the WebSocket transport (XEP-0060/0163).
     let pubsub_storage: Arc<dyn waddle_xmpp::pubsub::PubSubStorage> =
         Arc::new(waddle_xmpp::pubsub::InMemoryPubSubStorage::new());
+    if let Err(error) =
+        bootstrap_fresh_xmpp_topology(&state, Arc::clone(&pubsub_storage), &service_domains).await
+    {
+        warn!(error = %error, "Failed to bootstrap fresh XMPP topology");
+    }
     let push_store: Arc<dyn waddle_xmpp::push::PushSubscriptionStore> =
         Arc::new(waddle_xmpp::push::InMemoryPushStore::new());
 
@@ -737,6 +875,7 @@ async fn create_router(
         deps: WebSocketDeps {
             app_state: state.clone(),
             auth_state: auth_state.clone(),
+            service_domains,
             protocol: ProtocolServices {
                 connection_registry,
                 room_registry,
@@ -1173,7 +1312,14 @@ mod tests {
         let state = create_test_state().await;
         let server_config = ServerConfig::test_homeserver();
         let mam_storage = create_websocket_mam_storage(None).await.unwrap();
-        let app = create_router(state, server_config, mam_storage, None).await;
+        let app = create_router(
+            state,
+            server_config,
+            XmppConfig::default(),
+            mam_storage,
+            None,
+        )
+        .await;
 
         let response = app
             .oneshot(
@@ -1200,7 +1346,14 @@ mod tests {
         let state = create_test_state().await;
         let server_config = ServerConfig::test_homeserver();
         let mam_storage = create_websocket_mam_storage(None).await.unwrap();
-        let app = create_router(state, server_config, mam_storage, None).await;
+        let app = create_router(
+            state,
+            server_config,
+            XmppConfig::default(),
+            mam_storage,
+            None,
+        )
+        .await;
 
         let response = app
             .oneshot(
@@ -1220,7 +1373,14 @@ mod tests {
         let state = create_test_state().await;
         let server_config = ServerConfig::test_homeserver();
         let mam_storage = create_websocket_mam_storage(None).await.unwrap();
-        let app = create_router(state, server_config, mam_storage, None).await;
+        let app = create_router(
+            state,
+            server_config,
+            XmppConfig::default(),
+            mam_storage,
+            None,
+        )
+        .await;
 
         let response = app
             .oneshot(
@@ -1248,7 +1408,14 @@ mod tests {
         let state = create_test_state().await;
         let server_config = ServerConfig::test_homeserver();
         let mam_storage = create_websocket_mam_storage(None).await.unwrap();
-        let app = create_router(state, server_config, mam_storage, None).await;
+        let app = create_router(
+            state,
+            server_config,
+            XmppConfig::default(),
+            mam_storage,
+            None,
+        )
+        .await;
 
         let response = app
             .oneshot(
@@ -1273,7 +1440,14 @@ mod tests {
         let state = create_test_state().await;
         let server_config = ServerConfig::test_homeserver();
         let mam_storage = create_websocket_mam_storage(None).await.unwrap();
-        let app = create_router(state, server_config, mam_storage, None).await;
+        let app = create_router(
+            state,
+            server_config,
+            XmppConfig::default(),
+            mam_storage,
+            None,
+        )
+        .await;
 
         let response = app
             .oneshot(
@@ -1293,7 +1467,14 @@ mod tests {
         let state = create_test_state().await;
         let server_config = ServerConfig::test_homeserver();
         let mam_storage = create_websocket_mam_storage(None).await.unwrap();
-        let app = create_router(state, server_config, mam_storage, None).await;
+        let app = create_router(
+            state,
+            server_config,
+            XmppConfig::default(),
+            mam_storage,
+            None,
+        )
+        .await;
 
         let response = app
             .oneshot(

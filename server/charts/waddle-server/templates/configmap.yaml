@@ -10,6 +10,7 @@ data:
   WADDLE_DB_DRIVER: {{ .Values.database.driver | quote }}
   WADDLE_XMPP_ENABLED: {{ .Values.xmpp.enabled | toString | quote }}
   WADDLE_XMPP_DOMAIN: {{ .Values.xmpp.domain | quote }}
+  WADDLE_XMPP_COMPONENT_DOMAIN: {{ .Values.xmpp.componentDomain | quote }}
   WADDLE_NATIVE_AUTH_ENABLED: {{ .Values.xmpp.nativeAuthEnabled | toString | quote }}
   WADDLE_REGISTRATION_ENABLED: {{ .Values.xmpp.registrationEnabled | toString | quote }}
   WADDLE_EXTENSIONS_JSON: {{ .Values.extensions | toJson | quote }}
