@@ -71,7 +71,7 @@ use crate::permissions::{
     WriteTuple,
 };
 use crate::server::bootstrap_membership::DEPLOYMENT_SERVER_ID;
-use crate::server::xmpp_state::{list_xmpp_channels, XmppChannelRecord};
+use crate::server::xmpp_state::{get_xmpp_channel, list_xmpp_channels, XmppChannelRecord};
 use crate::vcard::VCardStore;
 
 /// Only called from test helpers — suppress dead_code lint for binary crate.
@@ -3064,8 +3064,17 @@ async fn handle_spaces_publish(
     if bookmark.jid.domain().as_str() != muc_domain {
         return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::InvalidJid))];
     }
-    if get_room_actor(state, &bookmark.jid).await.is_none() {
-        return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::ItemNotFound))];
+    let Some(channel_id) = waddle_xmpp::parse_managed_room_jid(&bookmark.jid) else {
+        return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::InvalidJid))];
+    };
+    let db_actor = state.deps.app_state.db_pool.global_actor().clone();
+    match get_xmpp_channel(db_actor, &channel_id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::ItemNotFound))],
+        Err(error) => {
+            warn!(channel_id, error = %error, "Failed to look up channel for Spaces bookmark");
+            return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::ItemNotFound))];
+        }
     }
 
     match state
@@ -3139,46 +3148,25 @@ async fn room_space_metadata_extensions(
     let Ok(spaces_jid) = spaces_service_bare_jid(&spaces_domain) else {
         return vec![];
     };
-    let Ok(nodes) = state
+    let room_item_id = room_jid.to_string();
+    match state
         .deps
         .protocol
         .pubsub_storage
-        .list_nodes(&spaces_jid)
+        .find_node_for_item(&spaces_jid, &room_item_id)
         .await
-    else {
-        return vec![];
-    };
-    let room_item_id = room_jid.to_string();
-    for node in nodes {
-        let Ok(items) = state
-            .deps
-            .protocol
-            .pubsub_storage
-            .get_items(
-                &spaces_jid,
-                &node,
-                None,
-                std::slice::from_ref(&room_item_id),
-            )
-            .await
-        else {
-            continue;
-        };
-        if items.iter().any(|item| item.id == room_item_id) {
-            if let Ok(Some(space_node)) = state
-                .deps
-                .protocol
-                .pubsub_storage
-                .get_node(&spaces_jid, &node)
-                .await
-            {
-                return vec![build_spaces_metadata_form(&space_details_from_node(
-                    &space_node,
-                ))];
-            }
+    {
+        Ok(Some(space_node)) => {
+            vec![build_spaces_metadata_form(&space_details_from_node(
+                &space_node,
+            ))]
+        }
+        Ok(None) => vec![],
+        Err(error) => {
+            warn!(room = %room_jid, error = %error, "Failed to find Space node for room");
+            vec![]
         }
     }
-    vec![]
 }
 
 fn data_form_value(form: &Element, var: &str) -> Option<String> {

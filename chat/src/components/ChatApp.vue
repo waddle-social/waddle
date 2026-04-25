@@ -1232,7 +1232,7 @@ onUnmounted(() => {
       v-model:open="ui.showCreateChannel.value"
       :form="waddles.createChannelForm.value"
       :is-submitting="waddles.isSubmitting.value"
-      :spaces="waddles.sortedSpaces.value.map((space) => ({ jid: space.id, name: space.name }))"
+      :spaces="waddles.sortedSpaces.value.map((space) => ({ node: space.id, name: space.name }))"
       @update:form="waddles.createChannelForm.value = $event"
       @submit="handleCreateChannel"
     />

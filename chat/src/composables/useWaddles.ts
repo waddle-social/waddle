@@ -112,7 +112,8 @@ export function useWaddles(
   );
 
   const canManageChannels = computed(() =>
-    ["owner"].includes(serverRole.value ?? ""),
+    ["owner"].includes(serverRole.value ?? "") ||
+    ["owner"].includes(currentSpaceRole.value ?? currentRole.value ?? ""),
   );
 
   const canManageMembers = computed(() =>

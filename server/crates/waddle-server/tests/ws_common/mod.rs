@@ -69,6 +69,10 @@ impl TestServer {
                 &fixed_account_password,
             )
             .env("WADDLE_TEST_EXTRA_FIXED_ACCOUNTS", extra_accounts_env)
+            // The fixed test account ("admin") is always provisioned as a
+            // server owner so integration tests can exercise owner-gated
+            // operations (MUC creation, Space node creation, etc.)
+            .env("WADDLE_SERVER_OWNER_LOCALPARTS", "admin")
             .env("WADDLE_HTTP_ADDR", "127.0.0.1:0")
             .env("WADDLE_XMPP_DOMAIN", "localhost")
             .env("WADDLE_XMPP_MAM_DATABASE_URL", "sqlite::memory:")

@@ -18,7 +18,7 @@ const props = defineProps<{
   form: CreateFormData;
   isSubmitting: boolean;
   /** Available spaces for the "MUC in existing Space" intent (node id → display name). */
-  spaces?: { jid: string; name: string }[];
+  spaces?: { node: string; name: string }[];
 }>();
 
 const emit = defineEmits<{
@@ -212,7 +212,7 @@ const dialogTitle = computed(() => {
               @change="$emit('update:form', { ...form, space_jid: ($event.target as HTMLSelectElement).value })"
             >
               <option value="" disabled>Select a space…</option>
-              <option v-for="s in spaces" :key="s.jid" :value="s.jid">{{ s.name }}</option>
+              <option v-for="s in spaces" :key="s.node" :value="s.node">{{ s.name }}</option>
             </select>
           </template>
           <template v-else>
