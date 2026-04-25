@@ -1679,6 +1679,8 @@ mod tests {
     use super::*;
     use crate::config::ServerConfig;
     use crate::db::{DatabaseConfig, DatabasePool, MigrationRunner, PoolConfig};
+    use crate::permissions::{Object, ObjectType, Relation, Subject, Tuple, WriteTuple};
+    use crate::server::bootstrap_membership::DEPLOYMENT_SERVER_ID;
     use crate::server::AppState;
     use futures::Sink;
     use hmac::{Hmac, Mac};
@@ -1814,6 +1816,24 @@ mod tests {
             .create_session(&session)
             .await
             .expect("session");
+        session
+    }
+
+    async fn create_test_server_owner_session(state: &WebSocketState, username: &str) -> Session {
+        let session = create_test_session(state, username).await;
+        state
+            .deps
+            .app_state
+            .permission_actor
+            .ask(WriteTuple {
+                tuple: Tuple::new(
+                    Object::new(ObjectType::Server, DEPLOYMENT_SERVER_ID),
+                    Relation::new("owner"),
+                    Subject::user(&session.user_id),
+                ),
+            })
+            .await
+            .expect("server owner tuple");
         session
     }
 
@@ -2018,7 +2038,7 @@ mod tests {
     #[tokio::test]
     async fn handle_xmpp_frame_auth_dispatches_via_typed_ingress() {
         let state = create_test_websocket_state().await;
-        let session = create_test_session(state.as_ref(), "alice").await;
+        let session = create_test_server_owner_session(state.as_ref(), "alice").await;
         let payload = BASE64_STANDARD.encode(format!("n,,\x01auth=Bearer {}\x01\x01", session.id));
         let frame = element_to_xml(
             Element::builder("auth", waddle_xmpp::ns::SASL)
@@ -2186,7 +2206,7 @@ mod tests {
     #[tokio::test]
     async fn websocket_oauthbearer_authenticates_session_token() {
         let state = create_test_websocket_state().await;
-        let session = create_test_session(state.as_ref(), "alice").await;
+        let session = create_test_server_owner_session(state.as_ref(), "alice").await;
         let payload = BASE64_STANDARD.encode(format!("n,,\x01auth=Bearer {}\x01\x01", session.id));
         let frame = element_to_xml(
             Element::builder("auth", waddle_xmpp::ns::SASL)
@@ -2602,6 +2622,7 @@ mod tests {
     #[tokio::test]
     async fn muc_stale_leave_does_not_remove_current_resource() {
         let state = create_test_websocket_state().await;
+        let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
         let room_jid: BareJid = "channel@muc.example.com".parse().expect("room jid");
         let current_jid: FullJid = "alice@example.com/current".parse().expect("current jid");
         let stale_jid: FullJid = "alice@example.com/stale".parse().expect("stale jid");
@@ -2612,7 +2633,7 @@ mod tests {
             &room_jid,
             &current_jid,
             "alice",
-            &None,
+            &Some(owner_session),
         )
         .await;
 
@@ -2632,6 +2653,7 @@ mod tests {
     #[tokio::test]
     async fn muc_join_responses_use_client_namespace() {
         let state = create_test_websocket_state().await;
+        let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
         let room_jid: BareJid = "channel@muc.example.com".parse().expect("room jid");
         let sender_jid: FullJid = "alice@example.com/web".parse().expect("sender jid");
 
@@ -2641,7 +2663,7 @@ mod tests {
             &room_jid,
             &sender_jid,
             "alice",
-            &None,
+            &Some(owner_session),
         )
         .await;
 
@@ -3611,7 +3633,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handle_iq_disco_items_spaces_lists_canonical_space() {
+    async fn handle_iq_disco_items_spaces_is_empty_without_owner_created_spaces() {
         let state = create_test_websocket_state().await;
         let session = create_test_session(state.as_ref(), "alice").await;
 
@@ -3640,33 +3662,38 @@ mod tests {
         let response = responses.first().expect("spaces disco items response");
 
         assert!(
-            response.contains("node=\"space\"") || response.contains("node='space'"),
-            "expected space node in spaces disco#items: {response}"
-        );
-        assert!(
-            response.contains("example.com"),
-            "expected space name in spaces disco#items: {response}"
+            !response.contains("node="),
+            "fresh deployments must not advertise a synthetic space node: {response}"
         );
     }
 
     #[tokio::test]
-    async fn handle_iq_pubsub_items_spaces_node_lists_bookmarked_channels() {
+    async fn handle_iq_pubsub_items_spaces_node_lists_published_bookmarks() {
         let state = create_test_websocket_state().await;
         let session = create_test_session(state.as_ref(), "alice").await;
 
-        let space_db = state.deps.app_state.db_pool.global();
-        MigrationRunner::waddle()
-            .run(space_db)
+        let spaces_jid: BareJid = "spaces.example.com".parse().expect("spaces jid");
+        state
+            .deps
+            .protocol
+            .pubsub_storage
+            .get_or_create_node(&spaces_jid, "team")
             .await
-            .expect("space migrations");
-        let conn = space_db.guard().await.expect("persistent connection");
-        conn.execute(
-            "INSERT INTO channels (id, name, channel_type, position, is_default) VALUES (?, ?, 'text', 0, 0)",
-            crate::db_params!["general", "General"],
-        )
-        .await
-        .expect("insert channel");
-        drop(conn);
+            .expect("space node");
+        let channel = waddle_xmpp::ChannelInfo {
+            id: "general".to_string(),
+            name: "General".to_string(),
+            channel_type: "text".to_string(),
+        };
+        let item = waddle_xmpp::xep::build_channel_item(&channel, "muc.example.com")
+            .expect("bookmark item");
+        state
+            .deps
+            .protocol
+            .pubsub_storage
+            .publish_item(&spaces_jid, "team", &item, None, false)
+            .await
+            .expect("publish bookmark");
 
         let authenticated_session = Some(session);
         let authenticated_jid: FullJid = format!(
@@ -3679,7 +3706,7 @@ mod tests {
         .parse()
         .expect("authenticated jid");
         let authenticated_phase = ready_phase(&authenticated_jid);
-        let query = r#"<iq xmlns="jabber:client" id="space-node-items" type="get" to="spaces.example.com"><pubsub xmlns="http://jabber.org/protocol/pubsub"><items node="space"/></pubsub></iq>"#;
+        let query = r#"<iq xmlns="jabber:client" id="space-node-items" type="get" to="spaces.example.com"><pubsub xmlns="http://jabber.org/protocol/pubsub"><items node="team"/></pubsub></iq>"#;
 
         let responses = handle_iq(
             query,
@@ -3711,7 +3738,7 @@ mod tests {
     #[tokio::test]
     async fn standard_muc_owner_config_persists_room_and_enforces_nonanonymous_defaults() {
         let state = create_test_websocket_state().await;
-        let session = create_test_session(state.as_ref(), "alice").await;
+        let session = create_test_server_owner_session(state.as_ref(), "alice").await;
 
         let room_jid: BareJid = "project@muc.example.com".parse().expect("room jid");
         let alice_jid: FullJid = format!("{}@example.com/web", session.xmpp_localpart)
@@ -3819,7 +3846,7 @@ mod tests {
     #[tokio::test]
     async fn standard_muc_owner_get_returns_config_without_persisting_room() {
         let state = create_test_websocket_state().await;
-        let session = create_test_session(state.as_ref(), "alice").await;
+        let session = create_test_server_owner_session(state.as_ref(), "alice").await;
 
         let room_jid: BareJid = "config-get@muc.example.com".parse().expect("room jid");
         let alice_jid: FullJid = format!("{}@example.com/web", session.xmpp_localpart)
@@ -3869,7 +3896,7 @@ mod tests {
     #[tokio::test]
     async fn standard_muc_owner_config_rejects_non_owner() {
         let state = create_test_websocket_state().await;
-        let alice_session = create_test_session(state.as_ref(), "alice").await;
+        let alice_session = create_test_server_owner_session(state.as_ref(), "alice").await;
         let bob_session = create_test_session(state.as_ref(), "bob").await;
 
         let room_jid: BareJid = "locked@muc.example.com".parse().expect("room jid");
@@ -3980,6 +4007,28 @@ mod tests {
         .await
         .expect("insert channel");
         drop(conn);
+        let spaces_jid: BareJid = "spaces.example.com".parse().expect("spaces jid");
+        state
+            .deps
+            .protocol
+            .pubsub_storage
+            .get_or_create_node(&spaces_jid, "team")
+            .await
+            .expect("space node");
+        let channel = waddle_xmpp::ChannelInfo {
+            id: "linked".to_string(),
+            name: "Linked".to_string(),
+            channel_type: "text".to_string(),
+        };
+        let item = waddle_xmpp::xep::build_channel_item(&channel, "muc.example.com")
+            .expect("bookmark item");
+        state
+            .deps
+            .protocol
+            .pubsub_storage
+            .publish_item(&spaces_jid, "team", &item, None, false)
+            .await
+            .expect("publish bookmark");
 
         let query = disco_info_iq_frame("room-info", "linked@muc.example.com", None);
         let responses = handle_iq(
@@ -3993,16 +4042,24 @@ mod tests {
         .await;
         let response = responses.first().expect("room disco response");
         assert!(response.contains("muc_nonanonymous"));
-        assert!(response.contains("pubsub#title") && response.contains("example.com"));
+        assert!(response.contains("pubsub#title") && response.contains("team"));
     }
 
     #[tokio::test]
     async fn handle_iq_disco_info_spaces_node_reports_open_for_public_space() {
         let state = create_test_websocket_state().await;
         let viewer = create_test_session(state.as_ref(), "viewer").await;
+        let spaces_jid: BareJid = "spaces.example.com".parse().expect("spaces jid");
+        state
+            .deps
+            .protocol
+            .pubsub_storage
+            .get_or_create_node(&spaces_jid, "team")
+            .await
+            .expect("space node");
 
         let viewer_phase = authenticated_phase_for_session(&viewer, "example.com");
-        let query = disco_info_iq_frame("space-node-info", "spaces.example.com", Some("space"));
+        let query = disco_info_iq_frame("space-node-info", "spaces.example.com", Some("team"));
         let responses = handle_iq(
             &query,
             "example.com",
@@ -5007,6 +5064,7 @@ mod tests {
         // in the response (which used to be seen as a "ghost" occupant and
         // broke self-presence detection on the client).
         let state = create_test_websocket_state().await;
+        let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
         let room_jid: BareJid = "rejoin-channel@muc.example.com".parse().expect("room");
         let first: FullJid = "alice@example.com/tab-1".parse().expect("first");
         let second: FullJid = "alice@example.com/tab-2".parse().expect("second");
@@ -5017,7 +5075,7 @@ mod tests {
             &room_jid,
             &first,
             "alice",
-            &None,
+            &Some(owner_session),
         )
         .await;
         let responses = handle_muc_join(
@@ -5068,6 +5126,7 @@ mod tests {
     #[tokio::test]
     async fn muc_join_broadcast_includes_real_occupant_jid() {
         let state = create_test_websocket_state().await;
+        let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
         let room_jid: BareJid = "public-channel@muc.example.com".parse().expect("room");
         let alice: FullJid = "alice@example.com/web".parse().expect("alice");
         let bob: FullJid = "bob@example.com/phone".parse().expect("bob");
@@ -5085,7 +5144,7 @@ mod tests {
             &room_jid,
             &alice,
             "alice",
-            &None,
+            &Some(owner_session),
         )
         .await;
         let _ = handle_muc_join(state.as_ref(), "example.com", &room_jid, &bob, "bob", &None).await;
@@ -5121,6 +5180,7 @@ mod tests {
         // <presence type='error'/> with <conflict/>, and room state for
         // the incumbent is untouched.
         let state = create_test_websocket_state().await;
+        let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
         let room_jid: BareJid = "conflict-channel@muc.example.com".parse().expect("room");
         let alice: FullJid = "alice@example.com/desktop".parse().expect("alice");
         let bob: FullJid = "bob@example.com/phone".parse().expect("bob");
@@ -5131,7 +5191,7 @@ mod tests {
             &room_jid,
             &alice,
             "dino",
-            &None,
+            &Some(owner_session),
         )
         .await;
         let responses = handle_muc_join(
@@ -5670,6 +5730,7 @@ mod tests {
     #[tokio::test]
     async fn cleanup_shutdown_detaches_resumable_session_on_transport_drop() {
         let state = create_test_websocket_state().await;
+        let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
         let room_jid: BareJid = "detached-channel@muc.example.com".parse().expect("room");
         let jid: FullJid = "alice@example.com/web".parse().expect("jid");
 
@@ -5679,7 +5740,7 @@ mod tests {
             &room_jid,
             &jid,
             "alice",
-            &None,
+            &Some(owner_session),
         )
         .await;
         let (tx, _rx) = mpsc::channel::<OutboundStanza>(4);
@@ -5718,6 +5779,7 @@ mod tests {
     #[tokio::test]
     async fn cleanup_shutdown_does_not_detach_explicit_close() {
         let state = create_test_websocket_state().await;
+        let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
         let room_jid: BareJid = "closing-channel@muc.example.com".parse().expect("room");
         let jid: FullJid = "alice@example.com/web".parse().expect("jid");
 
@@ -5727,7 +5789,7 @@ mod tests {
             &room_jid,
             &jid,
             "alice",
-            &None,
+            &Some(owner_session),
         )
         .await;
         let (tx, _rx) = mpsc::channel::<OutboundStanza>(4);
@@ -5770,6 +5832,7 @@ mod tests {
         // occupant that was held while the session was detached.
         use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
         let state = create_test_websocket_state().await;
+        let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
         let room_jid: BareJid = "expired-channel@muc.example.com".parse().expect("room");
         let jid: FullJid = "alice@example.com/web".parse().expect("jid");
 
@@ -5780,7 +5843,7 @@ mod tests {
             &room_jid,
             &jid,
             "alice",
-            &None,
+            &Some(owner_session),
         )
         .await;
         assert!(snapshot_room(state.as_ref(), &room_jid)

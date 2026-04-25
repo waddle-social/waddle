@@ -43,14 +43,14 @@ describe("create intent form model", () => {
     it("narrows to CreateSpaceMucFormData when intent is space-muc", () => {
       const form: CreateFormData = {
         intent: "space-muc",
-        space_jid: "team@conference.example.org",
+        space_node: "team-space",
         name: "announcements",
         description: "",
         muc_type: "text",
       };
       if (form.intent === "space-muc") {
         const typed: CreateSpaceMucFormData = form;
-        expect(typed.space_jid).toBe("team@conference.example.org");
+        expect(typed.space_node).toBe("team-space");
         expect(typed.muc_type).toBe("text");
       } else {
         throw new Error("Expected space-muc intent");
@@ -87,9 +87,9 @@ describe("create intent form model", () => {
       expect(form.name.trim().length > 0).toBe(false);
     });
 
-    it("space-muc form requires both space_jid and name", () => {
-      const incomplete: CreateSpaceMucFormData = { intent: "space-muc", space_jid: "", name: "general", description: "", muc_type: "text" };
-      const isValid = incomplete.space_jid.trim().length > 0 && incomplete.name.trim().length > 0;
+    it("space-muc form requires both space_node and name", () => {
+      const incomplete: CreateSpaceMucFormData = { intent: "space-muc", space_node: "", name: "general", description: "", muc_type: "text" };
+      const isValid = incomplete.space_node.trim().length > 0 && incomplete.name.trim().length > 0;
       expect(isValid).toBe(false);
     });
 

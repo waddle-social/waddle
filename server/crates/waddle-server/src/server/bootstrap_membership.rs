@@ -10,13 +10,11 @@ use crate::permissions::{
 };
 
 pub const DEPLOYMENT_SERVER_ID: &str = "deployment";
-const DEFAULT_SPACE_ID: &str = "space";
 const OWNER_ENV: &str = "WADDLE_SERVER_OWNER_LOCALPARTS";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BootstrapMembershipConfig {
     pub server_id: String,
-    pub space_id: String,
     owner_localparts: Vec<String>,
 }
 
@@ -24,7 +22,6 @@ impl BootstrapMembershipConfig {
     pub fn from_env() -> Self {
         Self {
             server_id: DEPLOYMENT_SERVER_ID.to_string(),
-            space_id: DEFAULT_SPACE_ID.to_string(),
             owner_localparts: parse_owner_localparts(
                 std::env::var(OWNER_ENV).unwrap_or_default().as_str(),
             ),
@@ -35,7 +32,6 @@ impl BootstrapMembershipConfig {
     pub fn new(owner_localparts: Vec<String>) -> Self {
         Self {
             server_id: DEPLOYMENT_SERVER_ID.to_string(),
-            space_id: DEFAULT_SPACE_ID.to_string(),
             owner_localparts: owner_localparts
                 .into_iter()
                 .filter_map(|value| normalize_localpart(&value))
@@ -90,13 +86,9 @@ pub async fn provision_user_membership(
 ) -> Result<(), String> {
     let subject = Subject::user(user_id);
     if config.is_owner(xmpp_localpart) {
-        for object in [
-            Object::new(ObjectType::Server, config.server_id.as_str()),
-            Object::new(ObjectType::Space, config.space_id.as_str()),
-        ] {
-            let tuple = Tuple::new(object, Relation::new("owner"), subject.clone());
-            write_tuple_if_absent(permission_actor, tuple).await?;
-        }
+        let object = Object::new(ObjectType::Server, config.server_id.as_str());
+        let tuple = Tuple::new(object, Relation::new("owner"), subject);
+        write_tuple_if_absent(permission_actor, tuple).await?;
 
         debug!(
             user_id = %user_id,
@@ -241,7 +233,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn provisions_owner_and_default_member_through_permission_actor() {
+    async fn provisions_server_owner_and_default_member_through_permission_actor() {
         let db = Arc::new(
             Database::in_memory("bootstrap-membership")
                 .await
@@ -277,18 +269,8 @@ mod tests {
             })
             .await
             .expect("member check");
-        let space_owner = actor
-            .ask(CheckPermission {
-                subject: Subject::user("user-owner"),
-                permission: Permission::Owner,
-                object: Object::new(ObjectType::Space, DEFAULT_SPACE_ID),
-            })
-            .await
-            .expect("space owner check");
-
         assert!(owner.allowed);
         assert!(member.allowed);
-        assert!(space_owner.allowed);
     }
 
     #[tokio::test]

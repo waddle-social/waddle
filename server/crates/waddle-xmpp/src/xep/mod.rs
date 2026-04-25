@@ -615,7 +615,8 @@ pub use xep0508::{
 };
 
 pub use xep0503::{
-    build_channel_item, build_spaces_metadata_form, build_spaces_type_form, NS_SPACES,
+    build_channel_item, build_server_role_form, build_spaces_metadata_form,
+    build_spaces_metadata_form_for_requester, build_spaces_type_form, SpaceAffiliation, NS_SPACES,
 };
 
 // Re-export commonly used items at the xep module level

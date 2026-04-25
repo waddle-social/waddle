@@ -150,6 +150,21 @@ pub trait PubSubStorage: Send + Sync + 'static {
     /// List all nodes owned by a JID.
     async fn list_nodes(&self, owner: &BareJid) -> Result<Vec<String>, XmppError>;
 
+    /// Find the first node owned by `owner` that contains an item with the
+    /// given `item_id`, returning both the node name and the node metadata.
+    ///
+    /// Returns `Ok(None)` when no node contains the item.
+    ///
+    /// SQL-backed implementations should use an indexed join, e.g.:
+    /// `SELECT nodes.* FROM nodes JOIN items ON nodes.id = items.node_id
+    ///  WHERE nodes.owner = ? AND items.id = ?`
+    /// to avoid a full table scan.
+    async fn find_node_for_item(
+        &self,
+        owner: &BareJid,
+        item_id: &str,
+    ) -> Result<Option<PubSubNode>, XmppError>;
+
     /// Update node configuration.
     async fn update_node_config(
         &self,
@@ -366,6 +381,27 @@ impl PubSubStorage for InMemoryPubSubStorage {
             .collect();
 
         Ok(nodes)
+    }
+
+    async fn find_node_for_item(
+        &self,
+        owner: &BareJid,
+        item_id: &str,
+    ) -> Result<Option<PubSubNode>, XmppError> {
+        let owner_str = owner.to_string();
+        for entry in self.nodes.iter() {
+            if entry.key().0 != owner_str {
+                continue;
+            }
+            let key = entry.key().clone();
+            let node = entry.value().clone();
+            if let Some(items) = self.items.get(&key) {
+                if items.iter().any(|i| i.id == item_id) {
+                    return Ok(Some(node));
+                }
+            }
+        }
+        Ok(None)
     }
 
     async fn update_node_config(

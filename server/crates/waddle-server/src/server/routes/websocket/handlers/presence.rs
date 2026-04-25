@@ -22,6 +22,7 @@ use crate::db::actor::GetDatabase;
 use crate::db::blocking::DatabaseBlockingStorage;
 use crate::db::roster::{DatabaseRosterStorage, RosterItemRow};
 use crate::permissions::{CheckPermission, Object, ObjectType, Permission, Subject};
+use crate::server::bootstrap_membership::DEPLOYMENT_SERVER_ID;
 use crate::server::xmpp_state::{get_xmpp_channel, XmppChannelRecord};
 use waddle_xmpp::protocol::ConnectionPhase;
 
@@ -609,6 +610,24 @@ pub async fn handle_muc_join(
     let (room_actor, created_instant_room) = match existing_room_actor {
         Some(actor) => (actor, false),
         None => {
+            if managed_channel.is_none()
+                && !server_permission_allowed(
+                    state,
+                    authenticated_session.as_ref(),
+                    Permission::CreateMuc,
+                )
+                .await
+                .unwrap_or(false)
+            {
+                return vec![build_muc_join_error_xml(
+                    room_jid,
+                    nick,
+                    sender_jid,
+                    "cancel",
+                    "not-allowed",
+                )];
+            }
+
             let config = managed_channel
                 .as_ref()
                 .map(|channel| RoomConfig {
@@ -1000,6 +1019,30 @@ fn build_muc_self_unavailable_xml(room_jid: &BareJid, nick: &str, sender_jid: &F
         Some(sender_jid),
     );
     stanza_to_xml(&Stanza::Presence(presence))
+}
+
+async fn server_permission_allowed(
+    state: &WebSocketState,
+    session: Option<&Session>,
+    permission: Permission,
+) -> Result<bool, ()> {
+    let Some(session) = session else {
+        return Ok(false);
+    };
+    state
+        .deps
+        .app_state
+        .permission_actor
+        .ask(CheckPermission {
+            subject: Subject::user(&session.user_id),
+            permission,
+            object: Object::new(ObjectType::Server, DEPLOYMENT_SERVER_ID),
+        })
+        .await
+        .map(|response| response.allowed)
+        .map_err(|error| {
+            warn!(error = %error, "Failed to authorize MUC creation");
+        })
 }
 
 /// Create a presence stanza for MUC

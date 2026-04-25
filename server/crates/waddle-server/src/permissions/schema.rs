@@ -158,8 +158,8 @@ definition server {
   relation admin: user
   relation member: user
 
-  permission create_space = owner + admin
-  permission create_muc = owner + admin
+  permission create_space = owner
+  permission create_muc = owner
 }
 
 definition space {
@@ -172,7 +172,7 @@ definition space {
   permission manage_settings = owner + admin
   permission manage_roles = owner + admin
   permission manage_members = owner + admin + moderator
-  permission create_channel = owner + admin
+  permission create_channel = owner
   permission view = member
   permission update = owner + admin
 }
@@ -247,20 +247,8 @@ fn server_schema() -> ObjectTypeSchema {
                 ComputedPermission::direct("owner"),
             ]),
         )
-        .with_permission(
-            "create_space",
-            ComputedPermission::union(vec![
-                ComputedPermission::direct("admin"),
-                ComputedPermission::direct("owner"),
-            ]),
-        )
-        .with_permission(
-            "create_muc",
-            ComputedPermission::union(vec![
-                ComputedPermission::direct("admin"),
-                ComputedPermission::direct("owner"),
-            ]),
-        )
+        .with_permission("create_space", ComputedPermission::direct("owner"))
+        .with_permission("create_muc", ComputedPermission::direct("owner"))
 }
 
 /// Schema for Space objects
@@ -320,13 +308,7 @@ fn space_schema() -> ObjectTypeSchema {
                 ComputedPermission::direct("owner"),
             ]),
         )
-        .with_permission(
-            "create_channel",
-            ComputedPermission::union(vec![
-                ComputedPermission::direct("admin"),
-                ComputedPermission::direct("owner"),
-            ]),
-        )
+        .with_permission("create_channel", ComputedPermission::direct("owner"))
         .with_permission(
             "view",
             ComputedPermission::union(vec![

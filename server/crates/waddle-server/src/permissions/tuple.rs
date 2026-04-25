@@ -211,10 +211,15 @@ impl Subject {
         id: impl Into<String>,
         relation: impl Into<String>,
     ) -> Self {
+        let relation = relation.into();
         Self {
             subject_type,
             id: id.into(),
-            relation: Some(relation.into()),
+            relation: if relation.is_empty() {
+                None
+            } else {
+                Some(relation)
+            },
         }
     }
 
@@ -771,6 +776,10 @@ mod tests {
 
         let subj = Subject::userset(SubjectType::Space, "penguin-club", "member");
         assert_eq!(subj.to_string(), "space:penguin-club#member");
+
+        let subj = Subject::userset(SubjectType::Space, "penguin-club", "");
+        assert_eq!(subj.to_string(), "space:penguin-club");
+        assert_eq!(subj.relation, None);
     }
 
     #[test]

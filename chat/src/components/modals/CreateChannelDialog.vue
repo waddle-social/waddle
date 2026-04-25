@@ -17,8 +17,8 @@ const open = defineModel<boolean>("open", { required: true });
 const props = defineProps<{
   form: CreateFormData;
   isSubmitting: boolean;
-  /** Available spaces for the "MUC in existing Space" intent (bare JID → display name). */
-  spaces?: { jid: string; name: string }[];
+  /** Available spaces for the "MUC in existing Space" intent (node id → display name). */
+  spaces?: { node: string; name: string }[];
 }>();
 
 const emit = defineEmits<{
@@ -64,7 +64,7 @@ function selectIntent(intent: CreateIntent) {
       emit("update:form", { intent: "muc", name: "", description: "", muc_type: "text" } satisfies CreateMucFormData);
       break;
     case "space-muc":
-      emit("update:form", { intent: "space-muc", space_jid: "", name: "", description: "", muc_type: "text" } satisfies CreateSpaceMucFormData);
+      emit("update:form", { intent: "space-muc", space_node: "", name: "", description: "", muc_type: "text" } satisfies CreateSpaceMucFormData);
       break;
     case "space-with-muc":
       emit("update:form", { intent: "space-with-muc", space_name: "", space_description: "", muc_name: "", muc_description: "", muc_type: "text" } satisfies CreateSpaceWithMucFormData);
@@ -98,7 +98,7 @@ const isSubmitDisabled = computed(() => {
   const f = props.form;
   if (f.intent === "space") return !f.name.trim();
   if (f.intent === "muc") return !f.name.trim();
-  if (f.intent === "space-muc") return !f.space_jid.trim() || !f.name.trim();
+  if (f.intent === "space-muc") return !f.space_node.trim() || !f.name.trim();
   if (f.intent === "space-with-muc") return !f.space_name.trim() || !f.muc_name.trim();
   return true;
 });
@@ -203,27 +203,27 @@ const dialogTitle = computed(() => {
       <!-- ── MUC in existing Space fields ── -->
       <template v-else-if="form.intent === 'space-muc'">
         <div class="chat-field-stack">
-          <label for="create-spacemuc-space" class="type-section-label text-muted-foreground">Target Space (JID)</label>
+          <label for="create-spacemuc-space" class="type-section-label text-muted-foreground">Target Space</label>
           <template v-if="spaces && spaces.length > 0">
             <select
               id="create-spacemuc-space"
-              :value="form.space_jid"
+              :value="form.space_node"
               class="chat-field-control type-field"
-              @change="$emit('update:form', { ...form, space_jid: ($event.target as HTMLSelectElement).value })"
+              @change="$emit('update:form', { ...form, space_node: ($event.target as HTMLSelectElement).value })"
             >
               <option value="" disabled>Select a space…</option>
-              <option v-for="s in spaces" :key="s.jid" :value="s.jid">{{ s.name }}</option>
+              <option v-for="s in spaces" :key="s.node" :value="s.node">{{ s.name }}</option>
             </select>
           </template>
           <template v-else>
             <input
               id="create-spacemuc-space"
-              :value="form.space_jid"
+              :value="form.space_node"
               class="chat-field-control type-field"
-              placeholder="space@conference.example.org"
-              @input="$emit('update:form', { ...form, space_jid: ($event.target as HTMLInputElement).value })"
+              placeholder="team-space"
+              @input="$emit('update:form', { ...form, space_node: ($event.target as HTMLInputElement).value })"
             />
-            <p class="type-caption text-muted-foreground">Enter the bare JID of the target space.</p>
+            <p class="type-caption text-muted-foreground">Enter an existing Spaces service node.</p>
           </template>
         </div>
         <div class="chat-field-stack">

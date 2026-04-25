@@ -32,6 +32,7 @@ export function useWaddles(
   const waddles = ref<SpaceSummary[]>([]);
   const channels = ref<ChannelSummary[]>([]);
   const members = ref<MemberSummary[]>([]);
+  const serverRole = ref<SpaceSummary["role"]>(null);
 
   const activeSpaceId: Ref<string | null> = ref(null);
   const activeChannelId: Ref<string | null> = ref(null);
@@ -57,7 +58,11 @@ export function useWaddles(
     position: 0,
   });
 
-  const currentSpace = computed(() => (activeSpaceId.value && waddles.value[0]) ? waddles.value[0] : null);
+  const currentSpace = computed(() =>
+    activeSpaceId.value
+      ? waddles.value.find((w) => w.id === activeSpaceId.value) ?? null
+      : null,
+  );
   const isEmptyDeployment = computed(() =>
     waddles.value.length === 0 && channels.value.length === 0 && !isLoadingStructure.value,
   );
@@ -83,7 +88,9 @@ export function useWaddles(
   );
 
   const sortedChannels = computed(() =>
-    [...channels.value].sort(
+    [...channels.value]
+      .filter((channel) => !activeSpaceId.value || channel.spaceId === activeSpaceId.value)
+      .sort(
       (a, b) =>
         (a.position ?? 0) - (b.position ?? 0) ||
         a.name.localeCompare(b.name, undefined, { sensitivity: "base" }),
@@ -100,11 +107,13 @@ export function useWaddles(
   });
 
   const canManageCommunity = computed(() =>
-    ["owner", "admin"].includes(currentSpaceRole.value ?? currentRole.value ?? ""),
+    ["owner"].includes(serverRole.value ?? "") ||
+    ["owner"].includes(currentSpaceRole.value ?? currentRole.value ?? ""),
   );
 
   const canManageChannels = computed(() =>
-    ["owner", "admin"].includes(currentSpaceRole.value ?? currentRole.value ?? ""),
+    ["owner"].includes(serverRole.value ?? "") ||
+    ["owner"].includes(currentSpaceRole.value ?? currentRole.value ?? ""),
   );
 
   const canManageMembers = computed(() =>
@@ -149,7 +158,9 @@ export function useWaddles(
         return null;
       }
 
+      serverRole.value = topology.serverRole ?? null;
       const discoveredSpaces = topology.spaces.map((space) => ({
+        id: space.id,
         name: space.name,
         role: space.role ?? null,
       }) satisfies SpaceSummary);
@@ -160,6 +171,7 @@ export function useWaddles(
         id: c.id,
         name: c.name,
         jid: c.jid,
+        spaceId: c.spaceId,
         channel_type: c.channelType,
         position: c.position,
       }));
@@ -182,6 +194,7 @@ export function useWaddles(
 
       activeChannelId.value = nextChannelId;
       const nextChannel = channelList.find((channel) => channel.id === nextChannelId);
+      activeSpaceId.value = nextChannel?.spaceId ?? activeSpaceId.value;
       if (nextChannelId && xmppClient.value) {
         const memberReqId = ++memberRequestId;
         try {
@@ -241,6 +254,15 @@ export function useWaddles(
         actionError.value = normalizeError(e);
       }
     }
+  }
+
+  function selectDiscoveredSpace(spaceId: string): string | null {
+    if (!waddles.value.some((space) => space.id === spaceId)) return null;
+    activeSpaceId.value = spaceId;
+    const nextChannelId = channels.value.find((channel) => channel.spaceId === spaceId)?.id ?? null;
+    activeChannelId.value = nextChannelId;
+    members.value = [];
+    return nextChannelId;
   }
 
   async function updateWaddle() {
@@ -311,9 +333,9 @@ export function useWaddles(
       }
 
       if (form.intent === "space-muc") {
-        if (!form.name.trim() || !form.space_jid.trim()) return undefined;
+        if (!form.name.trim() || !form.space_node.trim()) return undefined;
 
-        const spaceNode = form.space_jid.split("@")[0] ?? form.space_jid;
+        const spaceNode = form.space_node;
         const { roomJid } = await createMucInSpace(xmppAgent, mucServiceJid, spacesServiceJid, {
           roomLocalpart: form.name.trim().toLowerCase().replace(/\s+/g, "-"),
           nick,
@@ -391,6 +413,7 @@ export function useWaddles(
     waddles.value = [];
     channels.value = [];
     members.value = [];
+    serverRole.value = null;
     activeSpaceId.value = null;
     activeChannelId.value = null;
   }
@@ -399,6 +422,7 @@ export function useWaddles(
     waddles,
     channels,
     members,
+    serverRole,
     activeSpaceId,
     activeChannelId,
     isLoadingStructure,
@@ -419,6 +443,7 @@ export function useWaddles(
     loadSpace,
     loadStructure,
     reloadChannelMembers,
+    selectDiscoveredSpace,
     updateWaddle,
     deleteWaddle,
     createChannel,

@@ -613,6 +613,22 @@ async fn websocket_normal_message_routes_as_direct_message() {
 async fn websocket_pubsub_subscribe_and_unsubscribe_acknowledge_spaces_node() {
     let (_server, mut client) = setup().await;
 
+    // Create the spaces node first (requires server owner; admin is owner in TestServer).
+    client
+        .send(
+            r#"<iq xmlns="jabber:client" type="set" id="ws-create-space" to="spaces.localhost"><pubsub xmlns="http://jabber.org/protocol/pubsub"><create node="space"/></pubsub></iq>"#,
+        )
+        .await
+        .expect("send pubsub create node");
+    let created = client
+        .recv_matching(|frame| frame.contains("ws-create-space"))
+        .await
+        .expect("pubsub create node response");
+    assert!(
+        created.contains("type=\"result\"") || created.contains("type='result'"),
+        "expected pubsub create-node result, got: {created}"
+    );
+
     client
         .send(
             r#"<iq xmlns="jabber:client" type="set" id="ws-pubsub-sub" to="spaces.localhost"><pubsub xmlns="http://jabber.org/protocol/pubsub"><subscribe node="space" jid="admin@localhost"/></pubsub></iq>"#,
