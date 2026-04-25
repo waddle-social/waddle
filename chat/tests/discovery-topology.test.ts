@@ -46,6 +46,19 @@ describe("topology discovery", () => {
     });
 
     const getDiscoInfo = mock(async (jid: string, node?: string) => {
+      if (jid === "example.com") {
+        return {
+          features: [],
+          identities: [],
+          extensions: [
+            metadataForm([
+              { name: "FORM_TYPE", value: "urn:waddle:server-info:0" },
+              { name: "waddle#server_affiliation", value: "publisher" },
+            ]),
+          ],
+        };
+      }
+
       if (jid === "muc.example.com") {
         return {
           features: [NS_MUC],
@@ -79,6 +92,7 @@ describe("topology discovery", () => {
               { name: "pubsub#title", value: "Primary Space" },
               { name: "pubsub#description", value: "Team hub" },
               { name: "pubsub#owner", value: "alice@example.com" },
+              { name: "pubsub#affiliation", value: "owner" },
               { name: "pubsub#creation_date", value: "2026-01-15T10:00:00Z" },
               { name: "pubsub#access_model", value: "open" },
             ]),
@@ -120,7 +134,7 @@ describe("topology discovery", () => {
     } as unknown as Agent, "alice@example.com/desktop");
 
     expect(topology.spaces).toEqual([
-      { id: "space-1", name: "Primary Space" },
+      { id: "space-1", name: "Primary Space", role: "owner" },
     ]);
     expect(topology.rooms).toEqual([
       {
@@ -156,6 +170,14 @@ describe("topology discovery", () => {
     });
 
     const getDiscoInfo = mock(async (jid: string) => {
+      if (jid === "example.com") {
+        return {
+          features: [],
+          identities: [],
+          extensions: [],
+        };
+      }
+
       if (jid === "muc.example.com") {
         return {
           features: [],

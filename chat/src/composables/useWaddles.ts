@@ -103,7 +103,7 @@ export function useWaddles(
   );
 
   const canManageChannels = computed(() =>
-    isEmptyDeployment.value || ["owner", "admin"].includes(currentRole.value ?? ""),
+    ["owner", "admin"].includes(currentRole.value ?? ""),
   );
 
   const canManageMembers = computed(() =>
@@ -150,7 +150,7 @@ export function useWaddles(
 
       const discoveredSpaces = topology.spaces.map((space) => ({
         name: space.name,
-        role: null,
+        role: space.role ?? null,
       }) satisfies SpaceSummary);
       waddles.value = discoveredSpaces;
       activeSpaceId.value = topology.spaces[0]?.id ?? null;

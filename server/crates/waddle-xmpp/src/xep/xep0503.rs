@@ -31,6 +31,31 @@ use crate::{managed_room_jid, ChannelInfo, ChannelType, SpaceDetails, XmppError}
 /// XEP-0503 Spaces namespace.
 pub const NS_SPACES: &str = "urn:xmpp:spaces:0";
 
+/// Waddle's service-discovery form namespace for authenticated server metadata.
+pub const NS_WADDLE_SERVER_INFO: &str = "urn:waddle:server-info:0";
+
+/// XEP-0060 PubSub affiliation for a requester against a Space node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpaceAffiliation {
+    Owner,
+    Publisher,
+    Member,
+    Outcast,
+    None,
+}
+
+impl SpaceAffiliation {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Owner => "owner",
+            Self::Publisher => "publisher",
+            Self::Member => "member",
+            Self::Outcast => "outcast",
+            Self::None => "none",
+        }
+    }
+}
+
 /// Build a pubsub `<item>` for a channel inside a space.
 ///
 /// Each channel is represented as an XEP-0402 `<conference>` bookmark element
@@ -67,6 +92,14 @@ pub fn build_channel_item(
 /// Includes all metadata fields specified by XEP-0503: type, title, description,
 /// owner, creation date, and access model.
 pub fn build_spaces_metadata_form(space: &SpaceDetails) -> Element {
+    build_spaces_metadata_form_for_requester(space, None)
+}
+
+/// Build a rich `pubsub#meta-data` form with an optional requester affiliation.
+pub fn build_spaces_metadata_form_for_requester(
+    space: &SpaceDetails,
+    requester_affiliation: Option<SpaceAffiliation>,
+) -> Element {
     let mut form = DataForm::new(FormType::Result)
         .add_field(Field::form_type(
             "http://jabber.org/protocol/pubsub#meta-data",
@@ -78,7 +111,8 @@ pub fn build_spaces_metadata_form(space: &SpaceDetails) -> Element {
         form = form.add_field(Field::text_single("pubsub#description", desc));
     }
 
-    form.add_field(Field::text_single("pubsub#owner", &space.owner_id))
+    form = form
+        .add_field(Field::text_single("pubsub#owner", &space.owner_id))
         .add_field(Field::text_single(
             "pubsub#creation_date",
             &space.created_at,
@@ -86,6 +120,25 @@ pub fn build_spaces_metadata_form(space: &SpaceDetails) -> Element {
         .add_field(Field::text_single(
             "pubsub#access_model",
             if space.is_public { "open" } else { "whitelist" },
+        ));
+
+    if let Some(affiliation) = requester_affiliation {
+        form = form.add_field(Field::text_single(
+            "pubsub#affiliation",
+            affiliation.as_str(),
+        ));
+    }
+
+    form.into_element()
+}
+
+/// Build authenticated server role metadata for XEP-0030 disco#info.
+pub fn build_server_role_form(role: SpaceAffiliation) -> Element {
+    DataForm::new(FormType::Result)
+        .add_field(Field::form_type(NS_WADDLE_SERVER_INFO))
+        .add_field(Field::text_single(
+            "waddle#server_affiliation",
+            role.as_str(),
         ))
         .into_element()
 }

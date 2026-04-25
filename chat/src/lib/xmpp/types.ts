@@ -216,6 +216,7 @@ export interface DiscoveredChannel {
 export interface DiscoveredSpace {
   id: string;
   name: string;
+  role?: "owner" | "admin" | "moderator" | "member" | null;
 }
 
 export interface DiscoveredTopology {

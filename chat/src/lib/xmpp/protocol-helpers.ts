@@ -187,7 +187,7 @@ export async function createSpaceNode(
   spacesServiceJid: string,
   params: CreateSpaceNodeParams,
 ): Promise<CreateSpaceNodeResult> {
-  const nodeId = params.nodeId ?? `space-${Date.now()}`;
+  const nodeId = params.nodeId ?? "space";
 
   const configFields: Array<{ name: string; value: string; type?: string }> = [
     { name: "FORM_TYPE", value: NS_PUBSUB_NODE_CONFIG, type: "hidden" },

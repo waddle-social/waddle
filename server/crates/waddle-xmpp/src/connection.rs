@@ -72,7 +72,8 @@ use crate::muc::{
         is_role_change_query, parse_admin_query,
     },
     affiliation::{AffiliationResolver, AppStateAffiliationResolver},
-    build_leave_presence, build_occupant_presence, is_muc_owner_get, is_muc_owner_set,
+    build_leave_presence, build_occupant_presence, build_occupant_presence_update,
+    is_muc_owner_get, is_muc_owner_set,
     owner::{
         build_config_form, build_config_result, build_owner_set_result, parse_owner_query,
         OwnerAction,
@@ -333,6 +334,44 @@ fn is_search_iq(iq: &xmpp_parsers::iq::Iq) -> bool {
 }
 
 impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
+    async fn requester_affiliation_for_resource(
+        &self,
+        resource: &str,
+    ) -> crate::xep::xep0503::SpaceAffiliation {
+        let Some(session) = self.session.as_ref() else {
+            return crate::xep::xep0503::SpaceAffiliation::None;
+        };
+        let subject = format!("user:{}", session.user_id);
+        let relations = self
+            .app_state
+            .list_relations(resource, &subject)
+            .await
+            .unwrap_or_default();
+
+        if relations.iter().any(|relation| relation == "owner") {
+            crate::xep::xep0503::SpaceAffiliation::Owner
+        } else if relations
+            .iter()
+            .any(|relation| relation == "admin" || relation == "moderator")
+        {
+            crate::xep::xep0503::SpaceAffiliation::Publisher
+        } else if relations.iter().any(|relation| relation == "member") {
+            crate::xep::xep0503::SpaceAffiliation::Member
+        } else if relations.iter().any(|relation| relation == "outcast") {
+            crate::xep::xep0503::SpaceAffiliation::Outcast
+        } else {
+            crate::xep::xep0503::SpaceAffiliation::None
+        }
+    }
+
+    async fn requester_can_manage_resource(&self, resource: &str) -> bool {
+        matches!(
+            self.requester_affiliation_for_resource(resource).await,
+            crate::xep::xep0503::SpaceAffiliation::Owner
+                | crate::xep::xep0503::SpaceAffiliation::Publisher
+        )
+    }
+
     /// Handle a new incoming connection.
     #[instrument(
         name = "xmpp.connection.handle",
@@ -3908,6 +3947,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                     occupant_jid,
                     affiliation,
                     false, // not self
+                    Some(&leave_req.sender_jid),
                 );
 
                 let stanza = Stanza::Presence(presence);
@@ -3921,6 +3961,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             &leave_req.sender_jid,
             affiliation,
             true, // is_self - includes status code 110
+            Some(&leave_req.sender_jid),
         );
 
         self.stream
@@ -3989,6 +4030,9 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         };
 
         let sender_nick = outcome.sender_nick;
+        let sender_real_jid = outcome.sender_real_jid;
+        let sender_role = outcome.sender_role;
+        let sender_affiliation = outcome.sender_affiliation;
         let room_jid = outcome.room_jid;
         let recipients = outcome.recipients;
 
@@ -4000,9 +4044,15 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         record_muc_presence("update", &room_jid.to_string());
 
         for recipient in recipients {
-            let mut routed_presence = incoming_presence.clone();
-            routed_presence.from = Some(jid::Jid::from(from_room_jid.clone()));
-            routed_presence.to = Some(jid::Jid::from(recipient.clone()));
+            let routed_presence = build_occupant_presence_update(
+                incoming_presence,
+                &from_room_jid,
+                &recipient,
+                sender_affiliation,
+                sender_role,
+                recipient == sender_real_jid,
+                Some(&sender_real_jid),
+            );
             let _ = self
                 .connection_registry
                 .send_to(&recipient, Stanza::Presence(routed_presence))
@@ -5095,10 +5145,16 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             // Query to server domain
             Some(target) if target == self.domain => {
                 debug!(domain = %self.domain, "disco#info query to server domain");
+                let server_affiliation = self
+                    .requester_affiliation_for_resource("server:deployment")
+                    .await;
                 (
                     vec![Identity::server(Some("Waddle XMPP Server"))],
                     merge_extension_features(server_features(), &extension_features),
-                    vec![build_server_info_abuse_form(&self.domain)],
+                    vec![
+                        build_server_info_abuse_form(&self.domain),
+                        crate::xep::xep0503::build_server_role_form(server_affiliation),
+                    ],
                 )
             }
             // Query to MUC domain
@@ -5135,16 +5191,27 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                     debug!(domain = %spaces_domain, node = %node, "disco#info query to space node");
 
                     match self.app_state.get_space_details().await {
-                        Ok(Some(space)) if space.id == *node => (
-                            vec![Identity::pubsub_leaf(Some(&space.name))],
-                            vec![
-                                crate::disco::Feature::disco_info(),
-                                crate::disco::Feature::pubsub(),
-                                crate::disco::Feature::pubsub_retrieve_items(),
-                                crate::disco::Feature::spaces(),
-                            ],
-                            vec![crate::xep::xep0503::build_spaces_metadata_form(&space)],
-                        ),
+                        Ok(Some(space)) if space.id == *node => {
+                            let space_resource = format!("space:{}", space.id);
+                            let space_affiliation = self
+                                .requester_affiliation_for_resource(&space_resource)
+                                .await;
+                            (
+                                vec![Identity::pubsub_leaf(Some(&space.name))],
+                                vec![
+                                    crate::disco::Feature::disco_info(),
+                                    crate::disco::Feature::pubsub(),
+                                    crate::disco::Feature::pubsub_retrieve_items(),
+                                    crate::disco::Feature::spaces(),
+                                ],
+                                vec![
+                                    crate::xep::xep0503::build_spaces_metadata_form_for_requester(
+                                        &space,
+                                        Some(space_affiliation),
+                                    ),
+                                ],
+                            )
+                        }
                         _ => {
                             return Err(XmppError::item_not_found(Some(format!(
                                 "Space node '{}' not found",
@@ -6248,6 +6315,67 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         };
 
         match request {
+            PubSubRequest::CreateNode { node } => {
+                debug!(node = %node, "Spaces pubsub create node request");
+                let Some(space) = self.app_state.get_space_details().await.ok().flatten() else {
+                    let error = build_pubsub_error(&iq, PubSubError::NodeNotFound);
+                    self.stream.write_stanza(&Stanza::Iq(error)).await?;
+                    return Ok(());
+                };
+
+                if space.id != node {
+                    let error = build_pubsub_error(&iq, PubSubError::NodeNotFound);
+                    self.stream.write_stanza(&Stanza::Iq(error)).await?;
+                    return Ok(());
+                }
+
+                if !self
+                    .requester_can_manage_resource("server:deployment")
+                    .await
+                    && !self
+                        .requester_can_manage_resource(&format!("space:{}", space.id))
+                        .await
+                {
+                    let error = build_pubsub_error(&iq, PubSubError::Forbidden);
+                    self.stream.write_stanza(&Stanza::Iq(error)).await?;
+                    return Ok(());
+                }
+
+                let response = build_pubsub_success(&iq);
+                self.stream.write_stanza(&Stanza::Iq(response)).await?;
+                debug!(node = %node, "Accepted canonical spaces node create request");
+            }
+            PubSubRequest::Publish { node, item } => {
+                debug!(node = %node, item_id = ?item.id, "Spaces pubsub publish request");
+                let Some(space) = self.app_state.get_space_details().await.ok().flatten() else {
+                    let error = build_pubsub_error(&iq, PubSubError::NodeNotFound);
+                    self.stream.write_stanza(&Stanza::Iq(error)).await?;
+                    return Ok(());
+                };
+
+                if space.id != node {
+                    let error = build_pubsub_error(&iq, PubSubError::NodeNotFound);
+                    self.stream.write_stanza(&Stanza::Iq(error)).await?;
+                    return Ok(());
+                }
+
+                if !self
+                    .requester_can_manage_resource(&format!("space:{}", space.id))
+                    .await
+                    && !self
+                        .requester_can_manage_resource("server:deployment")
+                        .await
+                {
+                    let error = build_pubsub_error(&iq, PubSubError::Forbidden);
+                    self.stream.write_stanza(&Stanza::Iq(error)).await?;
+                    return Ok(());
+                }
+
+                let item_id = item.id.unwrap_or_else(|| node.clone());
+                let response = build_pubsub_publish_result(&iq, &node, &item_id);
+                self.stream.write_stanza(&Stanza::Iq(response)).await?;
+                debug!(node = %node, item_id = %item_id, "Accepted spaces bookmark publish request");
+            }
             PubSubRequest::Items {
                 node,
                 max_items,
@@ -6298,7 +6426,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 self.stream.write_stanza(&Stanza::Iq(response)).await?;
                 debug!(node = %node, count = items.len(), "Sent spaces pubsub items response");
             }
-            // Write operations are not supported in Phase A - return service-unavailable
+            // Subscription and deletion are not supported for the canonical space service.
             _ => {
                 debug!("Spaces service received unsupported pubsub operation, returning service-unavailable");
                 let error = crate::generate_iq_error(

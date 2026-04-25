@@ -428,8 +428,14 @@ pub fn build_s2s_leave_presence(
 ) -> Result<OutboundMucPresence, jid::Error> {
     let from_room_jid = room_jid.with_resource_str(leaving_nick)?;
 
-    let presence =
-        build_leave_presence(&from_room_jid, &to_occupant.real_jid, affiliation, is_self);
+    let occupant_real_jid = is_self.then_some(&to_occupant.real_jid);
+    let presence = build_leave_presence(
+        &from_room_jid,
+        &to_occupant.real_jid,
+        affiliation,
+        is_self,
+        occupant_real_jid,
+    );
 
     Ok(OutboundMucPresence::new(
         to_occupant.real_jid.clone(),
@@ -536,6 +542,7 @@ impl MucRoom {
             Ok(jid) => jid,
             Err(_) => return result,
         };
+        let leaving_real_jid = self.occupants.get(leaving_nick).map(|o| &o.real_jid);
 
         // Build leave presence for each remaining occupant
         for recipient in self.occupants.values() {
@@ -549,6 +556,7 @@ impl MucRoom {
                 &recipient.real_jid,
                 affiliation,
                 false, // not self
+                leaving_real_jid,
             );
 
             let outbound = OutboundMucPresence::new(recipient.real_jid.clone(), presence);
@@ -587,7 +595,13 @@ impl MucRoom {
     ) -> Result<OutboundMucPresence, jid::Error> {
         let from_room_jid = self.room_jid.with_resource_str(nick)?;
 
-        let presence = build_leave_presence(&from_room_jid, leaving_jid, affiliation, true);
+        let presence = build_leave_presence(
+            &from_room_jid,
+            leaving_jid,
+            affiliation,
+            true,
+            Some(leaving_jid),
+        );
 
         Ok(OutboundMucPresence::new(leaving_jid.clone(), presence))
     }

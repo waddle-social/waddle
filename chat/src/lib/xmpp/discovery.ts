@@ -7,6 +7,7 @@ import { barePeerJid, jidDomain } from "./jid";
 
 const NS_FORUMS_0 = "urn:xmpp:forums:0";
 const FIELD_FORUM_MODE = "muc#roomconfig_forum";
+type DiscoveryRole = "owner" | "admin" | "moderator" | "member" | null;
 
 function fieldStringValue(field: DataFormField | undefined): string | null {
   if (!field || field.value === undefined) return null;
@@ -37,6 +38,22 @@ function parseChannelType(infoResult: DiscoInfoResult) {
   const hasForumFeature = infoResult.features?.includes(NS_FORUMS_0);
   const forumField = parseBooleanValue(metadataField(infoResult, FIELD_FORUM_MODE));
   return normalizeChannelType(hasForumFeature || forumField ? "forum" : "text");
+}
+
+function parseDiscoveryRole(value: string | null): DiscoveryRole {
+  switch (value) {
+    case "owner":
+      return "owner";
+    case "admin":
+    case "publisher":
+      return "admin";
+    case "moderator":
+      return "moderator";
+    case "member":
+      return "member";
+    default:
+      return null;
+  }
 }
 
 function spacesServiceDomain(jid: string): string {
@@ -114,6 +131,14 @@ export async function discoverTopology(
 
   const roomsByJid = new Map<string, DiscoveredChannel>();
   const spaces: DiscoveredSpace[] = [];
+  let serverRole: DiscoveryRole = null;
+
+  try {
+    const serverInfo = await xmpp.getDiscoInfo(jidDomain(jid));
+    serverRole = parseDiscoveryRole(metadataField(serverInfo, "waddle#server_affiliation"));
+  } catch {
+    serverRole = null;
+  }
 
   try {
     const mucResponse = await xmpp.getDiscoItems(mucDomain);
@@ -130,9 +155,21 @@ export async function discoverTopology(
     for (const [spacePosition, item] of (spacesResponse.items ?? []).entries()) {
       const spaceId = item.node ?? barePeerJid(item.jid ?? "").split("@")[0] ?? `space-${spacePosition}`;
       if (!spaceId) continue;
+      let spaceRole = serverRole;
+      if (item.node) {
+        try {
+          const spaceInfo = await xmpp.getDiscoInfo(spacesDomain, item.node);
+          spaceRole =
+            parseDiscoveryRole(metadataField(spaceInfo, "pubsub#affiliation")) ??
+            serverRole;
+        } catch {
+          spaceRole = serverRole;
+        }
+      }
       spaces.push({
         id: spaceId,
         name: item.name ?? spaceId,
+        role: spaceRole,
       });
 
       if (!item.node) continue;

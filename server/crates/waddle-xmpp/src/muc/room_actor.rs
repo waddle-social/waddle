@@ -78,6 +78,9 @@ pub struct LeaveOutcome {
 #[derive(Debug, Clone)]
 pub struct PresenceUpdateOutcome {
     pub sender_nick: String,
+    pub sender_real_jid: FullJid,
+    pub sender_role: Role,
+    pub sender_affiliation: Affiliation,
     pub room_jid: BareJid,
     pub recipients: Vec<FullJid>,
 }
@@ -625,6 +628,9 @@ impl kameo::message::Message<PresenceUpdateData> for RoomActor {
             return Ok(None);
         };
         let sender_nick = sender_occupant.nick.clone();
+        let sender_real_jid = sender_occupant.real_jid.clone();
+        let sender_role = sender_occupant.role;
+        let sender_affiliation = sender_occupant.affiliation;
         let room_jid = self.room.room_jid.clone();
         let recipients = self
             .room
@@ -634,6 +640,9 @@ impl kameo::message::Message<PresenceUpdateData> for RoomActor {
             .collect();
         Ok(Some(PresenceUpdateOutcome {
             sender_nick,
+            sender_real_jid,
+            sender_role,
+            sender_affiliation,
             room_jid,
             recipients,
         }))
@@ -755,6 +764,7 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
                             is_self,
                             item.reason.as_deref(),
                             Some(&msg.sender_jid.to_bare()),
+                            Some(&target_occupant.real_jid),
                         );
                         presence_updates.push((occupant.real_jid.clone(), presence));
                     }
@@ -771,7 +781,7 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
                             target_occupant.affiliation,
                             new_role,
                             is_self,
-                            None,
+                            Some(&target_occupant.real_jid),
                         );
                         presence_updates.push((occupant.real_jid.clone(), presence));
                     }
@@ -839,6 +849,7 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
                                 is_self,
                                 item.reason.as_deref(),
                                 Some(&msg.sender_jid.to_bare()),
+                                Some(&occupant.real_jid),
                             );
                             presence_updates.push((occ.real_jid.clone(), presence));
                         }
@@ -852,7 +863,7 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
                                 new_affiliation,
                                 occupant.role,
                                 is_self,
-                                None,
+                                Some(&occupant.real_jid),
                             );
                             presence_updates.push((occ.real_jid.clone(), presence));
                         }

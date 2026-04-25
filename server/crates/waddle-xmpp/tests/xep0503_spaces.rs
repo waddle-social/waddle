@@ -235,7 +235,11 @@ async fn xep0503_spaces_disco_items_returns_canonical_space() {
 #[tokio::test]
 async fn xep0503_space_node_disco_info_returns_metadata() {
     init_test_env();
-    let state = Arc::new(MockAppState::new("localhost").with_space(test_space(), test_channels()));
+    let state = Arc::new(
+        MockAppState::new("localhost")
+            .with_space(test_space(), test_channels())
+            .with_permission_grant("space:space-1", "owner", "user:user-test-alice"),
+    );
     let server = TestServer::start_with_state(state).await;
     let mut client = RawXmppClient::connect(server.addr).await.unwrap();
     establish_bound_session(&mut client, &server, "alice", "desktop")
@@ -277,6 +281,55 @@ async fn xep0503_space_node_disco_info_returns_metadata() {
     assert!(
         response.contains("pubsub#title"),
         "Expected pubsub#title field in metadata form, got: {}",
+        response
+    );
+    assert!(
+        response.contains("pubsub#affiliation"),
+        "Expected requester pubsub affiliation in metadata form, got: {}",
+        response
+    );
+    assert!(
+        response.contains("owner"),
+        "Expected owner affiliation in metadata form, got: {}",
+        response
+    );
+}
+
+// =========================================================================
+// Test: server disco#info exposes authenticated deployment role metadata
+// =========================================================================
+
+#[tokio::test]
+async fn xep0503_server_disco_info_returns_requester_server_role() {
+    init_test_env();
+    let state = Arc::new(MockAppState::new("localhost").with_permission_grant(
+        "server:deployment",
+        "owner",
+        "user:user-test-alice",
+    ));
+    let server = TestServer::start_with_state(state).await;
+    let mut client = RawXmppClient::connect(server.addr).await.unwrap();
+    establish_bound_session(&mut client, &server, "alice", "desktop")
+        .await
+        .unwrap();
+
+    let response = disco_info_query(&mut client, "localhost", "server-info-role-1")
+        .await
+        .unwrap();
+
+    assert!(
+        response.contains("urn:waddle:server-info:0"),
+        "Expected Waddle server role metadata form, got: {}",
+        response
+    );
+    assert!(
+        response.contains("waddle#server_affiliation"),
+        "Expected server affiliation field, got: {}",
+        response
+    );
+    assert!(
+        response.contains("owner"),
+        "Expected owner server affiliation, got: {}",
         response
     );
 }
@@ -394,11 +447,11 @@ async fn xep0503_unknown_node_returns_not_found() {
 }
 
 // =========================================================================
-// Test: pubsub write operations return service-unavailable
+// Test: PubSub writes to unknown spaces return node-not-found
 // =========================================================================
 
 #[tokio::test]
-async fn xep0503_pubsub_write_returns_service_unavailable() {
+async fn xep0503_pubsub_write_to_unknown_space_returns_node_not_found() {
     init_test_env();
     let server = TestServer::start().await;
     let mut client = RawXmppClient::connect(server.addr).await.unwrap();
@@ -421,13 +474,79 @@ async fn xep0503_pubsub_write_returns_service_unavailable() {
         .unwrap();
 
     client
-        .read_until("service-unavailable", DEFAULT_TIMEOUT)
+        .read_until("item-not-found", DEFAULT_TIMEOUT)
         .await
         .unwrap();
     let response = client.take_buffer();
     assert!(
-        response.contains("service-unavailable"),
-        "Expected service-unavailable error for write operation, got: {}",
+        response.contains("item-not-found"),
+        "Expected item-not-found error for unknown space write, got: {}",
+        response
+    );
+}
+
+// =========================================================================
+// Test: owners can create the canonical space node and publish bookmarks
+// =========================================================================
+
+#[tokio::test]
+async fn xep0503_owner_can_create_and_publish_to_canonical_space() {
+    init_test_env();
+    let state = Arc::new(
+        MockAppState::new("localhost")
+            .with_space(test_space(), test_channels())
+            .with_permission_grant("server:deployment", "owner", "user:user-test-alice")
+            .with_permission_grant("space:space-1", "owner", "user:user-test-alice"),
+    );
+    let server = TestServer::start_with_state(state).await;
+    let mut client = RawXmppClient::connect(server.addr).await.unwrap();
+    establish_bound_session(&mut client, &server, "alice", "desktop")
+        .await
+        .unwrap();
+
+    client
+        .send(
+            "<iq type='set' id='create-space-1' to='spaces.localhost' xmlns='jabber:client'>\
+                <pubsub xmlns='http://jabber.org/protocol/pubsub'>\
+                    <create node='space-1'/>\
+                </pubsub>\
+            </iq>",
+        )
+        .await
+        .unwrap();
+    client
+        .read_until("create-space-1", DEFAULT_TIMEOUT)
+        .await
+        .unwrap();
+    let response = client.take_buffer();
+    assert!(
+        response.contains("type='result'") || response.contains("type=\"result\""),
+        "Expected create node result IQ, got: {}",
+        response
+    );
+
+    client
+        .send(
+            "<iq type='set' id='publish-space-1' to='spaces.localhost' xmlns='jabber:client'>\
+                <pubsub xmlns='http://jabber.org/protocol/pubsub'>\
+                    <publish node='space-1'>\
+                        <item id='general@muc.localhost'/>\
+                    </publish>\
+                </pubsub>\
+            </iq>",
+        )
+        .await
+        .unwrap();
+    client.read_until("</iq>", DEFAULT_TIMEOUT).await.unwrap();
+    let response = client.take_buffer();
+    assert!(
+        response.contains("type='result'") || response.contains("type=\"result\""),
+        "Expected publish result IQ, got: {}",
+        response
+    );
+    assert!(
+        response.contains("general@muc.localhost"),
+        "Expected published item id in result, got: {}",
         response
     );
 }

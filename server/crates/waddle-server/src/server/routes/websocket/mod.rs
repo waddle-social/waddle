@@ -3405,6 +3405,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn handle_xmpp_frame_server_iq_error_returns_empty_response() {
+        let state = create_test_websocket_state().await;
+        let mut conn = WsConnState::new();
+        let sender_jid: FullJid = "alice@example.com/web".parse().expect("sender jid");
+        conn.phase = ConnectionPhase::ready(sender_jid, false);
+
+        let responses = handle_xmpp_frame(
+            r#"<iq xmlns="jabber:client" from="waddle.social" id="016f8556-3f56-4a75-b159-ee0a1eb0823e" type="error"><error type="cancel"><feature-not-implemented xmlns="urn:ietf:params:xml:ns:xmpp-stanzas"/></error></iq>"#,
+            "waddle.social",
+            state.as_ref(),
+            &mut conn,
+        )
+        .await;
+
+        assert!(
+            responses.is_empty(),
+            "IQ error should produce no response, got: {responses:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn handle_iq_command_request_routes_to_registry() {
         let state = create_test_websocket_state().await;
         state
