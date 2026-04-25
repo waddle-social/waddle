@@ -22,7 +22,7 @@ import TopicsPanel from "@/components/chat/TopicsPanel.vue";
 import DmPanel from "@/components/chat/DmPanel.vue";
 import ContentArea from "@/components/chat/ContentArea.vue";
 import ThreadPanel from "@/components/chat/ThreadPanel.vue";
-import MobileHeader from "@/components/chat/MobileHeader.vue";
+import SettingsMobileHeader from "@/components/chat/SettingsMobileHeader.vue";
 import ProfilePanel from "@/components/chat/ProfilePanel.vue";
 import UserSettingsPage from "@/components/chat/UserSettingsPage.vue";
 import AppDrawer from "@/components/ui/AppDrawer.vue";
@@ -933,16 +933,10 @@ onUnmounted(() => {
 
   <!-- Ready -->
   <div v-else class="chat-app-shell">
-    <!-- Mobile header -->
-    <MobileHeader
-      :page="ui.activePage.value"
-      :waddle="waddles.currentSpace.value"
-      :channel="waddles.currentChannel.value"
-      :dm-peer="activeDmPeer"
-      :sidebar-mode="ui.sidebarMode.value"
-      :session="connectionStore.session"
+    <!-- Mobile header (settings page only — chat pages render the consolidated header inside ContentArea) -->
+    <SettingsMobileHeader
+      v-if="ui.activePage.value === 'settings'"
       @open-nav="ui.showMobileNav.value = true"
-      @open-details="ui.showMobileDetails.value = true"
     />
 
     <!-- Mobile nav drawer -->
@@ -1147,6 +1141,7 @@ onUnmounted(() => {
               :is-loading-messages="activeIsLoadingMessages"
               :is-sending="activeIsSending"
               :can-manage-channels="waddles.canManageChannels.value"
+              :member-count="waddles.members.value.length"
               :typing-users="activeTypingUsers"
               :current-user="connectionStore.session?.username"
               :self-domain="selfDomain"
@@ -1172,6 +1167,8 @@ onUnmounted(() => {
               @search="searchActiveMessages"
               @clear-search="clearActiveSearch"
               @edit-channel="openChannelEdit"
+              @open-nav="ui.showMobileNav.value = true"
+              @open-details="ui.showMobileDetails.value = true"
               @open-dm="handleOpenDm"
               @open-thread="openThread"
               @refresh-update="refreshAppUpdate"

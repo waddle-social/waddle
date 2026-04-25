@@ -1,8 +1,8 @@
 import type { XmppStatusSnapshot } from "@/lib/xmpp/types";
 
-type ConnectionNoticeTone = "offline" | "reconnecting" | "error" | "reconnected";
+export type ConnectionNoticeTone = "offline" | "reconnecting" | "error" | "reconnected";
 
-interface ConnectionNoticeCopy {
+export interface ConnectionNoticeCopy {
   tone: ConnectionNoticeTone;
   shortLabel: string;
   title: string;

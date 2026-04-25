@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
-import { AlertCircle, CheckCircle2, Hash, MessageCircle, MessagesSquare, RefreshCw, Settings, Search, Upload, WifiOff, X } from "lucide-vue-next";
+import { AlertCircle, CheckCircle2, Hash, MessageCircle, MessagesSquare, RefreshCw, Search, Upload, WifiOff, X } from "lucide-vue-next";
 import { isForumChannel as detectForumChannel } from "@/lib/channel-types";
 import { getConnectionNoticeCopy } from "@/lib/connection-notice";
 import { findMessageElementById } from "@/lib/message-targeting";
@@ -17,6 +17,7 @@ import type { BrowserXmppClient, XmppStatusSnapshot, RoomHats, RoomPresence } fr
 import { useScrollDirection } from "@/composables/useScrollDirection";
 import type { ThreadIndex } from "@/composables/useThreads";
 import { formatStamp, formatDayDivider, isSameDay } from "@/composables/useMessaging";
+import ChatHeader from "@/components/chat/ChatHeader.vue";
 import MessageCard from "@/components/chat/MessageCard.vue";
 import MessageComposer from "@/components/chat/MessageComposer.vue";
 import UserProfileDrawer from "@/components/chat/UserProfileDrawer.vue";
@@ -38,6 +39,7 @@ const props = defineProps<{
   isLoadingMessages: boolean;
   isSending: boolean;
   canManageChannels: boolean;
+  memberCount: number;
   typingUsers: string[];
   currentUser?: string;
   selfDomain?: string;
@@ -71,6 +73,8 @@ const emit = defineEmits<{
   reactMessage: [messageId: string, emoji: string];
   displayed: [messageId: string];
   editChannel: [];
+  openNav: [];
+  openDetails: [];
   search: [query: string];
   clearSearch: [];
   openDm: [peerJid: string];
@@ -494,66 +498,21 @@ function dayDividerLabel(createdAt: string): string {
       <span class="type-display-title text-primary">Drop files to upload</span>
     </div>
 
-    <!-- Header — sleek, floating feel -->
-    <div class="chat-pane-header border-b border-border px-[var(--chat-content-inline)] py-0 flex flex-shrink-0 items-center glass-surface">
-      <div class="chat-message-lane chat-pane-header-row">
-        <div class="chat-pane-title-group">
-          <span class="chat-pane-title-icon rounded-lg bg-primary/8">
-            <component :is="dmPeer ? MessageCircle : isForumChannel ? MessagesSquare : Hash" class="w-4 h-4 text-primary/70" />
-          </span>
-          <div class="flex min-w-0 items-center gap-2">
-            <h1 class="type-chat-title truncate">
-              {{ dmPeer ? dmPeer.peerUsername : channel?.name ?? "…" }}
-            </h1>
-            <span
-              v-if="isForumChannel"
-              class="type-badge rounded-full border border-primary/15 bg-primary/8 px-2 py-0.5 text-primary/80"
-            >
-              Forum
-            </span>
-            <span v-if="dmPeer" class="type-meta text-muted-foreground">· {{ presenceText(dmPeer.presenceShow) }}</span>
-          </div>
-        </div>
-        <div class="flex shrink-0 items-center gap-3">
-          <div
-            v-if="connectionNotice && connectionStatusClasses"
-            class="type-caption type-emphasis hidden md:inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1"
-            :class="connectionStatusClasses.chip"
-          >
-            <component
-              :is="connectionStatusIcon"
-              class="w-3.5 h-3.5"
-              :class="{ 'motion-safe:animate-spin': connectionNotice.tone === 'reconnecting' }"
-            />
-            <span>{{ connectionNotice.shortLabel }}</span>
-          </div>
-          <div class="flex gap-1.5">
-            <button
-              v-if="channel || dmPeer"
-              class="chat-icon-button chat-icon-button--md transition-all duration-200"
-              :class="showSearch ? 'bg-muted text-primary' : 'text-muted-foreground hover:bg-muted hover:text-foreground'"
-              title="Search messages"
-              aria-label="Search messages"
-              :aria-pressed="showSearch"
-              type="button"
-              @click="showSearch = !showSearch"
-            >
-              <Search class="w-3.5 h-3.5" />
-            </button>
-            <button
-              v-if="canManageChannels && channel"
-              class="chat-icon-button chat-icon-button--md text-muted-foreground hover:bg-muted hover:text-foreground"
-              title="Channel settings"
-              aria-label="Channel settings"
-              type="button"
-              @click="emit('editChannel')"
-            >
-              <Settings class="w-3.5 h-3.5" />
-            </button>
-          </div>
-        </div>
-      </div>
-    </div>
+    <ChatHeader
+      v-model:show-search="showSearch"
+      :waddle="waddle"
+      :channel="channel"
+      :dm-peer="dmPeer"
+      :is-forum-channel="isForumChannel"
+      :can-manage-channels="canManageChannels"
+      :member-count="memberCount"
+      :connection-notice="connectionNotice"
+      :connection-status-classes="connectionStatusClasses"
+      :connection-status-icon="connectionStatusIcon"
+      @open-nav="emit('openNav')"
+      @open-details="emit('openDetails')"
+      @edit-channel="emit('editChannel')"
+    />
     <div
       v-if="connectionNotice && connectionStatusClasses"
       role="status"
