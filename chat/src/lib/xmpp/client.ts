@@ -1122,7 +1122,7 @@ export class BrowserXmppClient {
     }
   }
 
-  // -- Inbox (XEP-0430) --
+  // -- Waddle inbox --
 
   async fetchInbox(opts: inboxApi.FetchInboxOptions = {}): Promise<inboxApi.InboxResult> {
     await this.connect();

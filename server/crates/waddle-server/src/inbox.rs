@@ -1,4 +1,4 @@
-//! Database-backed storage for XEP-0430 inbox projections.
+//! Database-backed storage for Waddle inbox projections.
 
 use std::path::Path;
 use std::sync::Arc;

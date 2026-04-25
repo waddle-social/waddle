@@ -66,7 +66,7 @@ pub struct AppState {
     pub db_pool: Arc<DatabasePool>,
     /// Blob storage backend for file uploads (XEP-0363).
     pub blob_storage: Arc<dyn crate::storage::BlobStorage>,
-    /// Shared XEP-0430 inbox projection storage.
+    /// Shared Waddle inbox projection storage.
     pub inbox_storage: Arc<dyn InboxStorage>,
     /// Shared permission actor handle.
     pub permission_actor: ActorRef<PermissionActor>,

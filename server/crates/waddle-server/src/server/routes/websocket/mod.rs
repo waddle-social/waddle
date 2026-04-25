@@ -101,7 +101,7 @@ pub struct ProtocolServices {
     pub room_registry: ActorRef<RoomRegistryActor>,
     /// Shared XMPP MAM storage for archived message history.
     pub mam_storage: Arc<dyn MamStorage>,
-    /// Shared XEP-0430 inbox projection storage.
+    /// Shared Waddle inbox projection storage.
     pub inbox_storage: Arc<dyn InboxStorage>,
     /// Registry for ad-hoc commands exposed over the WebSocket transport.
     pub command_registry: Arc<CommandRegistry>,
@@ -4421,7 +4421,7 @@ mod tests {
 
         let inbox_query = format!(
             "<iq xmlns='jabber:client' type='get' to='{}' id='inbox-1'>\
-                <query xmlns='urn:xmpp:inbox:0'/>\
+                <query xmlns='urn:waddle:inbox:0'/>\
              </iq>",
             bob_jid.to_bare()
         );
@@ -4450,7 +4450,7 @@ mod tests {
 
         let mark_read = format!(
             "<iq xmlns='jabber:client' type='set' to='{}' id='inbox-2'>\
-                <mark-read xmlns='urn:xmpp:inbox:0' partner='alice@example.com'/>\
+                <mark-read xmlns='urn:waddle:inbox:0' partner='alice@example.com'/>\
              </iq>",
             bob_jid.to_bare()
         );
@@ -4471,7 +4471,7 @@ mod tests {
 
         let unread_only_query = format!(
             "<iq xmlns='jabber:client' type='get' to='{}' id='inbox-3'>\
-                <query xmlns='urn:xmpp:inbox:0' only-unread='true'/>\
+                <query xmlns='urn:waddle:inbox:0' only-unread='true'/>\
              </iq>",
             bob_jid.to_bare()
         );
@@ -4501,7 +4501,7 @@ mod tests {
         let session = create_test_session(state.as_ref(), "bob").await;
         let pending_jid: FullJid = "bob@example.com/pending".parse().expect("pending jid");
         let mut carbons_enabled = false;
-        let frame = r#"<iq xmlns='jabber:client' type='get' to='bob@example.com' id='inbox-prebind-1'><query xmlns='urn:xmpp:inbox:0'/></iq>"#;
+        let frame = r#"<iq xmlns='jabber:client' type='get' to='bob@example.com' id='inbox-prebind-1'><query xmlns='urn:waddle:inbox:0'/></iq>"#;
         let responses = handle_iq_with_conn_state(
             parse_iq_for_test(frame),
             "example.com",
@@ -4560,7 +4560,7 @@ mod tests {
 
         let inbox_query = format!(
             "<iq xmlns='jabber:client' type='get' to='{}' id='inbox-esfs-1'>\
-                <query xmlns='urn:xmpp:inbox:0'/>\
+                <query xmlns='urn:waddle:inbox:0'/>\
              </iq>",
             bob_jid.to_bare()
         );

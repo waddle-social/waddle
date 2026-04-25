@@ -6,8 +6,7 @@ pub use waddle_xmpp_core::pubsub::{
 
 use waddle_xmpp_core::disco::info::Feature;
 
-/// Extended PEP features: core PEP features plus waddle-specific extensions
-/// (currently: XEP-0430 Inbox advertisement).
+/// Extended PEP features: core PEP features plus Waddle-specific extensions.
 pub fn pep_features() -> Vec<Feature> {
     let mut features = waddle_xmpp_core::pubsub::pep_features();
     features.push(Feature::new(crate::xep::xep0430::NS_INBOX));

@@ -1,4 +1,4 @@
-//! Shared runtime helpers for projecting live message traffic into XEP-0430 inbox rows.
+//! Shared runtime helpers for projecting live message traffic into Waddle inbox rows.
 
 use jid::BareJid;
 use xmpp_parsers::message::Message;
