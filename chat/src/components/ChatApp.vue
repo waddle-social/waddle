@@ -33,7 +33,7 @@ import MemberManagement from "@/components/modals/MemberManagement.vue";
 import ConfirmDialog from "@/components/ui/ConfirmDialog.vue";
 import type { MemberSummary } from "@/lib/chat-types";
 import type { MarkupSpan, MessageReference } from "@/lib/chat-ui";
-import { mentionMatchesUsername } from "@/lib/mentions";
+import { mentionAutocompleteNames, mentionMatchesUsername, mergeMentionMembers } from "@/lib/mentions";
 
 const props = defineProps<{
   tenorApiKey?: string;
@@ -165,6 +165,20 @@ const members = useMembers(
   ui.actionError,
   ui.clearActionError,
   waddles.loadStructure,
+);
+const mergedMentionMembers = computed(() =>
+  mergeMentionMembers({
+    members: waddles.members.value,
+    roomPresence: messaging.roomPresence.value,
+    memberJidsByNick: memberJidByNick.value,
+  }),
+);
+const authorJidByNick = computed(() => mergedMentionMembers.value.authorJidByNick);
+const mentionNames = computed(() =>
+  mentionAutocompleteNames(mergedMentionMembers.value.members.map((member) => member.username)),
+);
+const mentionSourceDiagnostic = computed(() =>
+  mergedMentionMembers.value.diagnostics.join(" "),
 );
 const activeDmPeer = computed(() => {
   const active = dmConversations.activePeerJid.value;
@@ -327,7 +341,7 @@ const activeUploadProgress = computed(() =>
   ui.sidebarMode.value === "dms" ? dmMessaging.uploadProgress.value : messaging.uploadProgress.value,
 );
 const activeActionError = computed(() =>
-  ui.actionError.value || (ui.sidebarMode.value === "channels" ? members.mentionSourceDiagnostic.value : "")
+  ui.actionError.value || (ui.sidebarMode.value === "channels" ? mentionSourceDiagnostic.value : "")
 );
 let setupPromptShown = false;
 
@@ -1070,9 +1084,9 @@ onUnmounted(() => {
               :current-user="connectionStore.session?.username"
               :self-domain="selfDomain"
               :avatar-url-by-author="avatarUrlByAuthor"
-               :author-jid-by-nick="members.authorJidByNick.value"
+               :author-jid-by-nick="authorJidByNick"
               :tenor-api-key="tenorApiKey"
-               :member-names="members.mentionNames.value"
+               :member-names="mentionNames"
               :room-hats="messaging.roomHats.value"
               :room-presence="messaging.roomPresence.value"
               :room-last-seen="messaging.roomLastSeen.value"
@@ -1140,12 +1154,12 @@ onUnmounted(() => {
               :resolve-entry="threads.resolveEntry"
               :current-user="connectionStore.session?.username"
               :avatar-url-by-author="avatarUrlByAuthor"
-               :author-jid-by-nick="members.authorJidByNick.value"
+               :author-jid-by-nick="authorJidByNick"
               :room-hats="messaging.roomHats.value"
               :room-presence="messaging.roomPresence.value"
               :room-last-seen="messaging.roomLastSeen.value"
               :tenor-api-key="tenorApiKey"
-               :member-names="members.mentionNames.value"
+               :member-names="mentionNames"
               :slow-mode-cooldown="messaging.slowModeCooldown.value"
               :is-sending="false"
               :upload-progress="{ uploading: false, progress: 0, filename: '' }"
@@ -1173,12 +1187,12 @@ onUnmounted(() => {
               :resolve-entry="threads.resolveEntry"
               :current-user="connectionStore.session?.username"
               :avatar-url-by-author="avatarUrlByAuthor"
-               :author-jid-by-nick="members.authorJidByNick.value"
+               :author-jid-by-nick="authorJidByNick"
               :room-hats="messaging.roomHats.value"
               :room-presence="messaging.roomPresence.value"
               :room-last-seen="messaging.roomLastSeen.value"
               :tenor-api-key="tenorApiKey"
-               :member-names="members.mentionNames.value"
+               :member-names="mentionNames"
               :slow-mode-cooldown="messaging.slowModeCooldown.value"
               :is-sending="messaging.isSending.value"
               :upload-progress="messaging.uploadProgress.value"
