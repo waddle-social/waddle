@@ -1066,7 +1066,7 @@
 
 .chat-message-meta-row > .type-message-author {
   min-width: 0;
-  max-width: min(14rem, 44vw);
+  max-width: min(20rem, 60vw);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1076,6 +1076,68 @@
 .chat-message-meta-row > .type-meta {
   flex-shrink: 0;
   white-space: nowrap;
+}
+
+/* Sticky day banner above the first message of each calendar day. Mirrors
+ * the existing "New messages" divider but in muted tone and with a blurred
+ * backdrop so it stays legible while pinning at the top of the viewport. */
+.chat-day-divider {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding-block: var(--space-xs);
+  color: var(--muted-foreground);
+  background: color-mix(in oklab, var(--background) 80%, transparent);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+}
+
+.chat-day-divider__rule {
+  flex: 1;
+  height: 1px;
+  background: color-mix(in oklab, var(--border) 70%, transparent);
+}
+
+.chat-day-divider__label {
+  flex-shrink: 0;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 0.6875rem;
+}
+
+/* Grouped follow-up: same author, < 5 min after the previous rendered
+ * message. The avatar column is reserved (visibility: hidden) so the body
+ * stays aligned under the burst's first message; the meta row is hidden
+ * inside MessageCard via v-if. The avatar slot becomes a hover-revealed
+ * timestamp gutter so the user can still read the per-message time. */
+.chat-message-grouped {
+  margin-block-start: calc(-1 * var(--chat-message-row-gap, var(--space-xs)));
+}
+
+.chat-message-time-gutter {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transition: opacity 0.12s ease-out;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+
+.chat-message-grouped:hover .chat-message-time-gutter,
+.chat-message-grouped:focus-within .chat-message-time-gutter {
+  opacity: 1;
+}
+
+@media (pointer: coarse) {
+  /* On touch devices the active state (long-press) reveals the timestamp.
+   * Hover does not exist; tapping the row briefly is enough. */
+  .chat-message-grouped:active .chat-message-time-gutter {
+    opacity: 1;
+  }
 }
 
 .chat-thread-actions {

@@ -186,6 +186,38 @@ export function formatStamp(value: string) {
   }).format(new Date(value));
 }
 
+export function formatTimeOfDay(value: string) {
+  return new Intl.DateTimeFormat("en", {
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date(value));
+}
+
+const DAY_DIVIDER_FORMATTER = new Intl.DateTimeFormat("en", {
+  weekday: "short",
+  month: "short",
+  day: "numeric",
+});
+
+function startOfDay(date: Date): number {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
+}
+
+export function formatDayDivider(value: string) {
+  const date = new Date(value);
+  const today = startOfDay(new Date());
+  const target = startOfDay(date);
+  const oneDay = 24 * 60 * 60 * 1000;
+  if (target === today) return "Today";
+  if (target === today - oneDay) return "Yesterday";
+  // Older messages get a full weekday + month + day banner.
+  return DAY_DIVIDER_FORMATTER.format(date);
+}
+
+export function isSameDay(a: string, b: string): boolean {
+  return startOfDay(new Date(a)) === startOfDay(new Date(b));
+}
+
 export function useMessaging(
   session: Ref<WaddleSession | null>,
   _api: Ref<null>,

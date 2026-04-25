@@ -9,6 +9,7 @@ import type { OccupantHat, OccupantPresence, RoomHats, RoomPresence } from "@/li
 import type { ThreadEntry, ThreadIndex } from "@/composables/useThreads";
 import { useScrollDirection } from "@/composables/useScrollDirection";
 import { isTopPinnedScrollDirection, orderTimelineForScrollDirection, getPinnedScrollTop } from "@/lib/scroll-direction";
+import { formatDayDivider, isSameDay } from "@/composables/useMessaging";
 
 const props = defineProps<{
   threadStack: string[];
@@ -72,6 +73,45 @@ const orderedChildren = computed(() => {
   const children = activeEntry.value?.directChildren ?? [];
   return orderTimelineForScrollDirection(children, scrollDirectionMode.value);
 });
+
+// Burst window matches the main feed (ContentArea.vue): same author + < 5 min
+// apart + same day, no intervening other-author message in rendered order.
+const BURST_WINDOW_MS = 5 * 60 * 1000;
+
+const threadDisplayMeta = computed(() => {
+  const grouped = new Set<string>();
+  const dayDivider = new Set<string>();
+  const root = activeEntry.value?.root;
+  const sequence: TimelineMessage[] = root ? [root, ...orderedChildren.value] : [...orderedChildren.value];
+  for (let i = 0; i < sequence.length; i++) {
+    const cur = sequence[i];
+    if (!cur) continue;
+    const prev = i > 0 ? sequence[i - 1] : null;
+    if (!prev) continue;
+    const sameDay = isSameDay(prev.createdAt, cur.createdAt);
+    if (!sameDay) dayDivider.add(cur.id);
+    if (
+      sameDay
+      && prev.author === cur.author
+      && Math.abs(new Date(cur.createdAt).getTime() - new Date(prev.createdAt).getTime()) < BURST_WINDOW_MS
+    ) {
+      grouped.add(cur.id);
+    }
+  }
+  return { grouped, dayDivider };
+});
+
+function isGroupedFollowUp(messageId: string): boolean {
+  return threadDisplayMeta.value.grouped.has(messageId);
+}
+
+function showDayDividerBefore(messageId: string): boolean {
+  return threadDisplayMeta.value.dayDivider.has(messageId);
+}
+
+function dayDividerLabel(createdAt: string): string {
+  return formatDayDivider(createdAt);
+}
 
 const isTopPinned = computed(() =>
   isTopPinnedScrollDirection(scrollDirectionMode.value),
@@ -263,27 +303,35 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
           @open-thread="onOpenThreadFromCard"
         />
 
-        <div
-          v-for="child in orderedChildren"
-          :key="child.id"
-          class="relative group/thread-child"
-        >
-          <MessageCard
-            :message="child"
-            :current-user="currentUser"
-            :avatar-url="avatarUrlByAuthor[child.author] ?? null"
-            :hats="hatsFor(child.author)"
-            :presence="presenceFor(child.author)"
-            :last-seen="roomLastSeen[child.author]"
-            :author-jid="authorJidByNick?.[child.author]"
-            :thread-reply-count="threadIndex.get(child.id)?.count ?? 0"
-            hide-thread-chip
-            @edit="(id, body, m, r) => emit('editMessage', id, body, m, r)"
-            @retract="(id) => emit('retractMessage', id)"
-            @react="(id, emoji) => emit('reactMessage', id, emoji)"
-            @reply="beginReplyInThread"
-            @open-thread="onOpenThreadFromCard"
-          />
+        <template v-for="child in orderedChildren" :key="child.id">
+          <div
+            v-if="showDayDividerBefore(child.id)"
+            class="chat-day-divider type-section-label"
+            role="separator"
+            :aria-label="dayDividerLabel(child.createdAt)"
+          >
+            <div class="chat-day-divider__rule" />
+            <span class="chat-day-divider__label">{{ dayDividerLabel(child.createdAt) }}</span>
+            <div class="chat-day-divider__rule" />
+          </div>
+          <div class="relative group/thread-child">
+            <MessageCard
+              :message="child"
+              :current-user="currentUser"
+              :avatar-url="avatarUrlByAuthor[child.author] ?? null"
+              :hats="hatsFor(child.author)"
+              :presence="presenceFor(child.author)"
+              :last-seen="roomLastSeen[child.author]"
+              :author-jid="authorJidByNick?.[child.author]"
+              :thread-reply-count="threadIndex.get(child.id)?.count ?? 0"
+              :grouped="isGroupedFollowUp(child.id)"
+              hide-thread-chip
+              @edit="(id, body, m, r) => emit('editMessage', id, body, m, r)"
+              @retract="(id) => emit('retractMessage', id)"
+              @react="(id, emoji) => emit('reactMessage', id, emoji)"
+              @reply="beginReplyInThread"
+              @open-thread="onOpenThreadFromCard"
+            />
           <div class="chat-thread-actions">
             <button
               v-if="replyChildHasNestedThread(child)"
@@ -305,7 +353,8 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
               <span>Start sub-thread</span>
             </button>
           </div>
-        </div>
+          </div>
+        </template>
 
         <div
           v-if="activeEntry.directChildren.length === 0 && !hideComposer"

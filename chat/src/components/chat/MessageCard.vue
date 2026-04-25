@@ -35,7 +35,7 @@ import { richMessageToTiptap, tiptapToRichMessage } from "@/lib/rich-message";
 import { applyShikiToCodeBlocks } from "@/lib/shiki";
 import { decryptEncryptedAttachment, encryptedAttachmentKey, hasEncryptedAttachmentMetadata } from "@/lib/xmpp/encrypted-attachments";
 import type { OccupantHat, OccupantPresence } from "@/lib/xmpp-client";
-import { formatStamp } from "@/composables/useMessaging";
+import { formatTimeOfDay } from "@/composables/useMessaging";
 import { useLongPress } from "@/composables/useLongPress";
 import { $desktopToolbarOwnerId } from "@/stores/message-toolbar";
 
@@ -55,6 +55,18 @@ const HAT_COLORS: Record<string, string> = {
   "urn:xmpp:hats:verified": "bg-primary/10 text-primary",
 };
 
+// Higher rank wins when an author holds multiple hats. Owner subsumes
+// moderator (an owner can already moderate), so per-message we render only
+// the senior hat to keep the meta row breathable on mobile. The full hat
+// list is still passed through so the avatar/profile surface can show it.
+const HAT_RANK: Record<string, number> = {
+  "urn:xmpp:hats:owner": 4,
+  "urn:xmpp:hats:admin": 3,
+  "urn:xmpp:hats:moderator": 2,
+  "urn:xmpp:hats:verified": 1,
+  "urn:xmpp:hats:bot": 0,
+};
+
 const props = defineProps<{
   message: TimelineMessage;
   currentUser?: string;
@@ -65,6 +77,7 @@ const props = defineProps<{
   authorJid?: string;
   threadReplyCount?: number;
   hideThreadChip?: boolean;
+  grouped?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -78,6 +91,20 @@ const emit = defineEmits<{
 }>();
 
 const quickEmojis = ["👍", "❤️", "😂", "🎉", "👀"];
+
+const seniorHat = computed<OccupantHat | null>(() => {
+  if (!props.hats || props.hats.length === 0) return null;
+  let best: OccupantHat | null = null;
+  let bestRank = -Infinity;
+  for (const hat of props.hats) {
+    const rank = HAT_RANK[hat.uri] ?? 0;
+    if (rank > bestRank || (rank === bestRank && best && hat.uri < best.uri)) {
+      best = hat;
+      bestRank = rank;
+    }
+  }
+  return best;
+});
 
 const styledHtml = computed(() => renderStyledBody(displayBody.value, props.message.markup, props.message.references));
 const styledBodyRef = ref<HTMLDivElement | null>(null);
@@ -581,8 +608,13 @@ watch(
     v-if="message.isRetracted"
     :data-message-id="message.id"
     class="chat-message-grid opacity-35 animate-message-in"
+    :class="grouped ? 'chat-message-grouped' : ''"
   >
+    <div v-if="grouped" class="chat-message-avatar-cell chat-message-time-gutter">
+      <span class="type-meta type-numeric text-muted-foreground/60">{{ formatTimeOfDay(message.createdAt) }}</span>
+    </div>
     <AppAvatar
+      v-else
       class="chat-message-avatar-cell"
       :name="message.author"
       :src="avatarUrl"
@@ -591,10 +623,10 @@ watch(
       size="message"
     />
     <div class="chat-message-body-stack">
-      <div class="chat-message-meta-row">
+      <div v-if="!grouped" class="chat-message-meta-row">
         <span class="type-message-author">{{ message.author }}</span>
         <span class="type-meta type-numeric text-muted-foreground">
-          {{ formatStamp(message.createdAt) }}
+          {{ formatTimeOfDay(message.createdAt) }}
         </span>
       </div>
       <p class="type-message-body italic text-muted-foreground">This message was deleted.</p>
@@ -618,6 +650,7 @@ watch(
             : '',
       message.deliveryStatus === 'sending' || message.deliveryStatus === 'queued' ? 'opacity-50' : '',
       longPress.isPressing.value ? 'no-callout' : '',
+      grouped ? 'chat-message-grouped' : '',
     ]"
     @pointerdown="longPress.handlers.onPointerdown"
     @pointermove="longPress.handlers.onPointermove"
@@ -626,7 +659,11 @@ watch(
     @pointerleave="longPress.handlers.onPointerleave"
     @contextmenu="onBubbleContextMenu"
   >
+    <div v-if="grouped" class="chat-message-avatar-cell chat-message-time-gutter" aria-hidden="true">
+      <span class="type-meta type-numeric text-muted-foreground/60">{{ formatTimeOfDay(message.createdAt) }}</span>
+    </div>
     <button
+      v-else
       class="chat-message-avatar-cell rounded-lg"
       type="button"
       :aria-label="`Open profile for ${message.author}`"
@@ -635,17 +672,16 @@ watch(
       <AppAvatar :name="message.author" :src="avatarUrl" :presence="presence" :last-seen="lastSeen" size="message" />
     </button>
     <div class="chat-message-body-stack">
-      <div class="chat-message-meta-row">
+      <div v-if="!grouped" class="chat-message-meta-row">
         <span class="type-message-author">{{ message.author }}</span>
         <span
-          v-for="hat in hats"
-          :key="hat.uri"
+          v-if="seniorHat"
           class="type-badge inline-block rounded-md px-1.5 py-px"
-          :class="HAT_COLORS[hat.uri] ?? 'bg-muted text-muted-foreground'"
-          :title="hat.title"
-        >{{ HAT_LABELS[hat.uri] ?? hat.title }}</span>
+          :class="HAT_COLORS[seniorHat.uri] ?? 'bg-muted text-muted-foreground'"
+          :title="hats.length > 1 ? hats.map(h => HAT_LABELS[h.uri] ?? h.title).join(' · ') : seniorHat.title"
+        >{{ HAT_LABELS[seniorHat.uri] ?? seniorHat.title }}</span>
         <span class="type-meta type-numeric text-muted-foreground/60">
-          {{ formatStamp(message.createdAt) }}
+          {{ formatTimeOfDay(message.createdAt) }}
         </span>
         <span v-if="message.isEdited" class="type-meta text-muted-foreground/50">(edited)</span>
         <span

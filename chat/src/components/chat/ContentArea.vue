@@ -16,7 +16,7 @@ import type { MentionCandidate } from "@/lib/mentions";
 import type { BrowserXmppClient, XmppStatusSnapshot, RoomHats, RoomPresence } from "@/lib/xmpp-client";
 import { useScrollDirection } from "@/composables/useScrollDirection";
 import type { ThreadIndex } from "@/composables/useThreads";
-import { formatStamp } from "@/composables/useMessaging";
+import { formatStamp, formatDayDivider, isSameDay } from "@/composables/useMessaging";
 import MessageCard from "@/components/chat/MessageCard.vue";
 import MessageComposer from "@/components/chat/MessageComposer.vue";
 import UserProfileDrawer from "@/components/chat/UserProfileDrawer.vue";
@@ -434,6 +434,47 @@ function showDividerBefore(messageId: string): boolean {
 function showDividerAfter(messageId: string): boolean {
   return props.firstUnseenId === messageId && newMessagesDividerPlacement.value === "after";
 }
+
+// Burst window: same author + < 5 min apart + same day, with no
+// intervening other-author message in the rendered order.
+const BURST_WINDOW_MS = 5 * 60 * 1000;
+
+const messageDisplayMeta = computed(() => {
+  const grouped = new Set<string>();
+  const dayDivider = new Set<string>();
+  const list = orderedFeedMessages.value;
+  for (let i = 0; i < list.length; i++) {
+    const cur = list[i];
+    if (!cur) continue;
+    const prev = i > 0 ? list[i - 1] : null;
+    if (!prev) {
+      dayDivider.add(cur.id);
+      continue;
+    }
+    const sameDay = isSameDay(prev.createdAt, cur.createdAt);
+    if (!sameDay) dayDivider.add(cur.id);
+    if (
+      sameDay
+      && prev.author === cur.author
+      && Math.abs(new Date(cur.createdAt).getTime() - new Date(prev.createdAt).getTime()) < BURST_WINDOW_MS
+    ) {
+      grouped.add(cur.id);
+    }
+  }
+  return { grouped, dayDivider };
+});
+
+function isGroupedFollowUp(messageId: string): boolean {
+  return messageDisplayMeta.value.grouped.has(messageId);
+}
+
+function showDayDividerBefore(messageId: string): boolean {
+  return messageDisplayMeta.value.dayDivider.has(messageId);
+}
+
+function dayDividerLabel(createdAt: string): string {
+  return formatDayDivider(createdAt);
+}
 </script>
 
 <template>
@@ -732,6 +773,16 @@ function showDividerAfter(messageId: string): boolean {
       <div v-else class="chat-message-lane chat-message-list">
         <template v-for="msg in orderedFeedMessages" :key="msg.id">
           <div
+            v-if="showDayDividerBefore(msg.id)"
+            class="chat-day-divider type-section-label"
+            role="separator"
+            :aria-label="dayDividerLabel(msg.createdAt)"
+          >
+            <div class="chat-day-divider__rule" />
+            <span class="chat-day-divider__label">{{ dayDividerLabel(msg.createdAt) }}</span>
+            <div class="chat-day-divider__rule" />
+          </div>
+          <div
             v-if="showDividerBefore(msg.id)"
             class="type-section-label flex items-center gap-3 py-2 text-destructive"
             data-new-messages-divider
@@ -751,6 +802,7 @@ function showDividerAfter(messageId: string): boolean {
             :last-seen="roomLastSeen[msg.author]"
             :author-jid="authorJidByNick?.[msg.author]"
             :thread-reply-count="threadIndex.get(msg.id)?.count ?? 0"
+            :grouped="isGroupedFollowUp(msg.id)"
             @edit="(id, body, m, r) => emit('editMessage', id, body, m, r)"
             @retract="(id) => emit('retractMessage', id)"
             @react="(id, emoji) => emit('reactMessage', id, emoji)"

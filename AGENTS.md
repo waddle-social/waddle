@@ -2,6 +2,8 @@
 
 - use jj when .jj exists, git otherwise
 - XMPP Native, Never use out of band/XMPP APIs.
+- Always review your plan against the XEPS in ./xeps
+    - If ./xeps doesn't exist, clone xsf/xeps into ./xeps
 
 ## Active Technologies
 
