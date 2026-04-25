@@ -3115,8 +3115,28 @@ async fn handle_spaces_publish(
                     channel_id = %channel_id,
                     node,
                     error = %error,
-                    "Published Spaces item but failed to sync channel parent tuple"
+                    "Published Spaces item but failed to sync channel parent tuple; \
+                     retracting to keep PubSub and permission graph consistent"
                 );
+                // Compensating retract: remove the just-published bookmark so
+                // the server does not end up in a state where the item is
+                // advertised in PubSub but the channel is not accessible via
+                // Space membership (XEP-0503 §4).
+                if let Err(retract_err) = state
+                    .deps
+                    .protocol
+                    .pubsub_storage
+                    .retract_item(&spaces_jid, node, &result.item_id)
+                    .await
+                {
+                    warn!(
+                        channel_id = %channel_id,
+                        node,
+                        item_id = %result.item_id,
+                        error = %retract_err,
+                        "Compensating retract also failed; manual cleanup may be required"
+                    );
+                }
                 return vec![iq_to_xml(build_pubsub_error(
                     iq,
                     PubSubError::InternalServerError,
@@ -3312,17 +3332,28 @@ async fn apply_muc_owner_config(
 
     // Write channel#owner → session user so the creator can always rejoin the
     // managed room after a server restart (before a Space bookmark is published).
-    if let Some(session) = session {
-        write_tuple_if_absent(
-            state,
-            Tuple::new(
-                Object::new(ObjectType::Channel, &channel_id),
-                Relation::new("owner"),
-                Subject::user(&session.user_id),
-            ),
-        )
-        .await
-        .map_err(|error| format!("channel owner tuple failed: {error}"))?;
+    // XEP-0045 §10 requires the room creator to be an owner; without this tuple
+    // the channel becomes unjoinable after restart.
+    match session {
+        Some(session) => {
+            write_tuple_if_absent(
+                state,
+                Tuple::new(
+                    Object::new(ObjectType::Channel, &channel_id),
+                    Relation::new("owner"),
+                    Subject::user(&session.user_id),
+                ),
+            )
+            .await
+            .map_err(|error| format!("channel owner tuple failed: {error}"))?;
+        }
+        None => {
+            warn!(
+                channel_id = %channel_id,
+                "apply_muc_owner_config called without a session; \
+                 channel owner tuple not written — room may be inaccessible after server restart"
+            );
+        }
     }
 
     Ok(())
