@@ -73,3 +73,20 @@ fn spicedb_runtime_and_chart_stay_free_of_removed_bootstrap_knobs() {
     let secret = read("../../charts/waddle-server/templates/secret.yaml");
     assert!(secret.contains("WADDLE_SPICEDB_PRESHARED_KEY"));
 }
+
+#[test]
+fn spicedb_schema_ensure_always_writes_builtin_schema() {
+    let contents = read("src/permissions/spicedb.rs");
+    assert!(
+        contents.contains("pub async fn ensure_schema(&self, schema: &str)"),
+        "SpiceDB backend should own schema reconciliation",
+    );
+    assert!(
+        contents.contains(".write_schema(schema)"),
+        "startup schema reconciliation must write the built-in schema idempotently",
+    );
+    assert!(
+        !contents.contains("current.trim() == schema.trim()"),
+        "schema reconciliation must not skip writes based on read_schema equality; SpiceDB can serve cached schema after direct datastore resets",
+    );
+}
