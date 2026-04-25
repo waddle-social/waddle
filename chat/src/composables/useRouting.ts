@@ -83,6 +83,14 @@ export function resolveChannel(slug: string, channels: ChannelSummary[]): Channe
   );
 }
 
+export function shouldLoadStructureForRoute(
+  route: RouteState,
+  activeSpaceId: string | null,
+  channelCount: number,
+): boolean {
+  return route.page === "chat" && !route.dmUsername && (!activeSpaceId || channelCount === 0);
+}
+
 export function buildPath(
   channel: ChannelSummary | null,
   threadStack?: string[],

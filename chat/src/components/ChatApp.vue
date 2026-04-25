@@ -11,7 +11,7 @@ import { useAppUpdate } from "@/composables/useAppUpdate";
 import { useNotifications } from "@/composables/useNotifications";
 import { useChannelUnread } from "@/composables/useChannelUnread";
 import { useVersion } from "@/composables/useVersion";
-import { buildDmPath, buildPath, buildSettingsPath, parseRoute, pushDmRoute, pushRoute, pushSettingsRoute, resolveChannel } from "@/composables/useRouting";
+import { buildDmPath, buildPath, buildSettingsPath, parseRoute, pushDmRoute, pushRoute, pushSettingsRoute, resolveChannel, shouldLoadStructureForRoute } from "@/composables/useRouting";
 import { barePeerJid, jidDomain, parseManagedRoomBareJid, roomBareJidFor } from "@/lib/xmpp-client";
 import { mergeRoomHats, roomHatsFromMembers } from "@/lib/xmpp/occupant-badges";
 import { connectionStore } from "@/lib/connection-store";
@@ -632,7 +632,7 @@ async function applyRouteTarget(route: ReturnType<typeof parseRoute>, requestId:
     return;
   }
 
-  if (waddles.activeSpaceId.value && waddles.channels.value.length === 0) {
+  if (shouldLoadStructureForRoute(route, waddles.activeSpaceId.value, waddles.channels.value.length)) {
     await waddles.loadStructure();
     if (requestId !== routeRequestId) return;
   }
@@ -672,7 +672,7 @@ async function onConnectionReady() {
   isApplyingRoute.value = true;
 
   try {
-    await waddles.loadSpace({ loadStructure: !route.channelSlug });
+    await waddles.loadSpace({ loadStructure: !shouldLoadStructureForRoute(route, waddles.activeSpaceId.value, waddles.channels.value.length) });
     if (requestId === routeRequestId) {
       await applyRouteTarget(route, requestId);
     }

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { buildPath, buildSettingsPath, parseRoute } from "../src/composables/useRouting";
+import { buildPath, buildSettingsPath, parseRoute, shouldLoadStructureForRoute } from "../src/composables/useRouting";
 import type { ChannelSummary } from "../src/lib/chat-types";
 
 const channel: ChannelSummary = {
@@ -84,5 +84,23 @@ describe("parseRoute / buildPath threadStack", () => {
     const [pathname, search] = path.split("?");
     const route = parseRoute(pathname, search ? `?${search}` : "");
     expect(route.threadStack).toEqual(stack);
+  });
+});
+
+describe("shouldLoadStructureForRoute", () => {
+  test("loads topology on a cold direct channel refresh", () => {
+    expect(shouldLoadStructureForRoute(parseRoute("/general"), null, 0)).toBe(true);
+  });
+
+  test("loads topology on the root chat route when nothing is hydrated", () => {
+    expect(shouldLoadStructureForRoute(parseRoute("/"), null, 0)).toBe(true);
+  });
+
+  test("skips topology when channel data is already present", () => {
+    expect(shouldLoadStructureForRoute(parseRoute("/general"), "team", 2)).toBe(false);
+  });
+
+  test("does not load channel topology for DM routes", () => {
+    expect(shouldLoadStructureForRoute(parseRoute("/dm/alice"), null, 0)).toBe(false);
   });
 });
