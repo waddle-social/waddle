@@ -46,11 +46,12 @@ use waddle_xmpp::{
         parse_mark_read,
     },
     xep::{
-        build_channel_item, build_command_items, build_command_result,
-        build_last_activity_response, build_search_response, build_spaces_metadata_form,
-        is_last_activity_query, is_search_request, is_time_query, is_version_query,
-        parse_command_from_iq, parse_search_request, ChannelResult, Command, CommandStatus,
-        Searchable, NODE_COMMANDS, NS_CHANNEL_SEARCH,
+        build_command_items, build_command_result, build_last_activity_response,
+        build_search_response, build_server_role_form, build_spaces_metadata_form,
+        build_spaces_metadata_form_for_requester, is_last_activity_query, is_search_request,
+        is_time_query, is_version_query, parse_command_from_iq, parse_search_request,
+        ChannelResult, Command, CommandStatus, Searchable, SpaceAffiliation, NODE_COMMANDS,
+        NS_CHANNEL_SEARCH,
     },
     Affiliation, SpaceDetails, Stanza, StanzaErrorCondition, StanzaErrorType, XmppError,
 };
@@ -66,8 +67,8 @@ use crate::db::actor::{DbExecute, DbQuery, DbQueryOne, GetDatabase};
 use crate::db::blocking::DatabaseBlockingStorage;
 use crate::db::{row_value, Database, Value, ValueExt};
 use crate::permissions::{
-    CheckPermission, Object, ObjectType, Permission, PermissionError, Relation, Subject,
-    SubjectType, Tuple, WriteTuple,
+    CheckPermission, Object, ObjectType, Permission, PermissionError, Relation, Subject, Tuple,
+    WriteTuple,
 };
 use crate::server::bootstrap_membership::DEPLOYMENT_SERVER_ID;
 use crate::server::xmpp_state::{list_xmpp_channels, XmppChannelRecord};
@@ -472,20 +473,28 @@ pub async fn handle_iq_with_conn_state(
         // Disco info on spaces service
         if to.as_deref() == Some(spaces_domain.as_str()) {
             if let Some(node) = query.node.as_deref() {
-                if node != "space" {
-                    return vec![build_iq_error_xml(&id, "cancel", "item-not-found")];
-                }
-
-                let space = SpaceDetails {
-                    id: "space".to_string(),
-                    name: domain.to_string(),
-                    description: None,
-                    owner_id: "server".to_string(),
-                    icon_url: None,
-                    is_public: true,
-                    created_at: "1970-01-01T00:00:00Z".to_string(),
+                let Ok(spaces_jid) = spaces_service_bare_jid(&spaces_domain) else {
+                    return vec![build_iq_error_xml(&id, "wait", "internal-server-error")];
+                };
+                let space_node = match state
+                    .deps
+                    .protocol
+                    .pubsub_storage
+                    .get_node(&spaces_jid, node)
+                    .await
+                {
+                    Ok(Some(node)) => node,
+                    Ok(None) => return vec![build_iq_error_xml(&id, "cancel", "item-not-found")],
+                    Err(error) => {
+                        warn!(node, error = %error, "Failed to resolve Spaces node info");
+                        return vec![build_iq_error_xml(&id, "cancel", "item-not-found")];
+                    }
                 };
 
+                let space = space_details_from_node(&space_node);
+                let requester_affiliation =
+                    space_affiliation_for_requester(state, authenticated_session.as_ref(), node)
+                        .await;
                 let identities = vec![Identity::pubsub_leaf(Some(&space.name))];
                 let features = vec![
                     Feature::disco_info(),
@@ -493,7 +502,8 @@ pub async fn handle_iq_with_conn_state(
                     Feature::pubsub_retrieve_items(),
                     Feature::spaces(),
                 ];
-                let metadata = build_spaces_metadata_form(&space);
+                let metadata =
+                    build_spaces_metadata_form_for_requester(&space, requester_affiliation);
                 let response = build_disco_info_response_with_extensions(
                     request_iq,
                     &identities,
@@ -544,7 +554,17 @@ pub async fn handle_iq_with_conn_state(
                 .into_iter()
                 .map(|ns| Feature::new(&ns)),
         );
-        let response = build_disco_info_response(request_iq, &identities, &features, None);
+        let response =
+            match server_affiliation_for_requester(state, authenticated_session.as_ref()).await {
+                Some(role) => build_disco_info_response_with_extensions(
+                    request_iq,
+                    &identities,
+                    &features,
+                    None,
+                    &[build_server_role_form(role)],
+                ),
+                None => build_disco_info_response(request_iq, &identities, &features, None),
+            };
         return vec![iq_to_xml(response)];
     }
 
@@ -576,18 +596,29 @@ pub async fn handle_iq_with_conn_state(
 
         if to.as_deref() == Some(spaces_domain.as_str()) {
             let items: Vec<DiscoItem> = match query.node.as_deref() {
-                Some(node) => {
-                    if node != "space" {
-                        vec![]
-                    } else {
+                Some(_) => vec![],
+                None => match spaces_service_bare_jid(&spaces_domain) {
+                    Ok(spaces_jid) => match state
+                        .deps
+                        .protocol
+                        .pubsub_storage
+                        .list_nodes(&spaces_jid)
+                        .await
+                    {
+                        Ok(nodes) => nodes
+                            .into_iter()
+                            .map(|node| DiscoItem::spaces_node(&spaces_domain, &node, Some(&node)))
+                            .collect(),
+                        Err(error) => {
+                            warn!(error = %error, "Failed to list Spaces nodes");
+                            vec![]
+                        }
+                    },
+                    Err(error) => {
+                        warn!(error = %error, "Invalid Spaces service JID");
                         vec![]
                     }
-                }
-                None => vec![DiscoItem::spaces_node(
-                    &spaces_domain,
-                    "space",
-                    Some(domain),
-                )],
+                },
             };
 
             let response = build_disco_items_response(request_iq, &items, query.node.as_deref());
@@ -1053,11 +1084,13 @@ pub async fn handle_iq_with_conn_state(
 
         match request {
             PubSubRequest::Publish { node, item } => {
-                if target_jid.to_string() == spaces_domain && node == "space" {
+                if target_jid.to_string() == spaces_domain {
                     return handle_spaces_publish(
                         &iq,
                         state,
                         muc_domain,
+                        &spaces_domain,
+                        &node,
                         item,
                         authenticated_session.as_ref(),
                     )
@@ -1096,8 +1129,16 @@ pub async fn handle_iq_with_conn_state(
                 max_items,
                 item_ids,
             } => {
-                if target_jid.to_string() == spaces_domain && node == "space" {
-                    return handle_spaces_items(&iq, state, muc_domain, max_items, &item_ids).await;
+                if target_jid.to_string() == spaces_domain {
+                    return handle_spaces_items(
+                        &iq,
+                        state,
+                        &spaces_domain,
+                        &node,
+                        max_items,
+                        &item_ids,
+                    )
+                    .await;
                 }
 
                 let result = state
@@ -1132,11 +1173,13 @@ pub async fn handle_iq_with_conn_state(
                 item_id,
                 notify: _,
             } => {
-                if target_jid.to_string() == spaces_domain && node == "space" {
+                if target_jid.to_string() == spaces_domain {
                     return handle_spaces_retract(
                         &iq,
                         state,
                         muc_domain,
+                        &spaces_domain,
+                        &node,
                         &item_id,
                         authenticated_session.as_ref(),
                     )
@@ -1176,23 +1219,58 @@ pub async fn handle_iq_with_conn_state(
 
             PubSubRequest::CreateNode { node } => {
                 if target_jid.to_string() == spaces_domain {
-                    if node == "space" {
-                        if server_permission_allowed(
-                            state,
-                            authenticated_session.as_ref(),
-                            Permission::CreateSpace,
-                        )
-                        .await
-                        .unwrap_or(false)
+                    if server_permission_allowed(
+                        state,
+                        authenticated_session.as_ref(),
+                        Permission::CreateSpace,
+                    )
+                    .await
+                    .unwrap_or(false)
+                    {
+                        let Ok(spaces_jid) = spaces_service_bare_jid(&spaces_domain) else {
+                            return vec![iq_to_xml(build_pubsub_error(
+                                &iq,
+                                PubSubError::InvalidJid,
+                            ))];
+                        };
+                        match state
+                            .deps
+                            .protocol
+                            .pubsub_storage
+                            .get_or_create_node(&spaces_jid, &node)
+                            .await
                         {
-                            let response = build_pubsub_success(&iq);
-                            return vec![iq_to_xml(response)];
+                            Ok((_, true)) => {
+                                if let Err(error) = write_space_owner_tuple(
+                                    state,
+                                    &node,
+                                    authenticated_session.as_ref(),
+                                )
+                                .await
+                                {
+                                    warn!(node = %node, error = %error, "Failed to persist Space owner tuple");
+                                    return vec![iq_to_xml(build_pubsub_error(
+                                        &iq,
+                                        PubSubError::Forbidden,
+                                    ))];
+                                }
+                                let response = build_pubsub_success(&iq);
+                                return vec![iq_to_xml(response)];
+                            }
+                            Ok((_, false)) => {
+                                let error = build_pubsub_error(&iq, PubSubError::NodeExists);
+                                return vec![iq_to_xml(error)];
+                            }
+                            Err(error) => {
+                                warn!(node = %node, error = %error, "Failed to create Spaces node");
+                                let error = build_pubsub_error(&iq, PubSubError::Forbidden);
+                                return vec![iq_to_xml(error)];
+                            }
                         }
+                    } else {
                         let error = build_pubsub_error(&iq, PubSubError::Forbidden);
                         return vec![iq_to_xml(error)];
                     }
-                    let error = build_pubsub_error(&iq, PubSubError::Forbidden);
-                    return vec![iq_to_xml(error)];
                 }
 
                 if target_jid != user_jid {
@@ -1226,15 +1304,39 @@ pub async fn handle_iq_with_conn_state(
             }
 
             PubSubRequest::ConfigureNode { node } => {
-                if target_jid.to_string() == spaces_domain && node == "space" {
-                    if server_permission_allowed(
-                        state,
-                        authenticated_session.as_ref(),
-                        Permission::CreateSpace,
-                    )
-                    .await
-                    .unwrap_or(false)
+                if target_jid.to_string() == spaces_domain {
+                    if spaces_node_mutation_allowed(state, authenticated_session.as_ref(), &node)
+                        .await
+                        .unwrap_or(false)
                     {
+                        let Ok(spaces_jid) = spaces_service_bare_jid(&spaces_domain) else {
+                            return vec![iq_to_xml(build_pubsub_error(
+                                &iq,
+                                PubSubError::InvalidJid,
+                            ))];
+                        };
+                        match state
+                            .deps
+                            .protocol
+                            .pubsub_storage
+                            .get_node(&spaces_jid, &node)
+                            .await
+                        {
+                            Ok(Some(_)) => {}
+                            Ok(None) => {
+                                return vec![iq_to_xml(build_pubsub_error(
+                                    &iq,
+                                    PubSubError::NodeNotFound,
+                                ))];
+                            }
+                            Err(error) => {
+                                warn!(node = %node, error = %error, "Failed to configure Spaces node");
+                                return vec![iq_to_xml(build_pubsub_error(
+                                    &iq,
+                                    PubSubError::NodeNotFound,
+                                ))];
+                            }
+                        }
                         let response = build_pubsub_success(&iq);
                         return vec![iq_to_xml(response)];
                     }
@@ -1284,25 +1386,22 @@ pub async fn handle_iq_with_conn_state(
                     let error = build_pubsub_error(&iq, PubSubError::Forbidden);
                     return vec![iq_to_xml(error)];
                 }
-                let is_spaces_node = target_jid.to_string() == spaces_domain && node == "space";
-                if !is_spaces_node {
-                    match state
-                        .deps
-                        .protocol
-                        .pubsub_storage
-                        .get_node(&target_jid, &node)
-                        .await
-                    {
-                        Ok(Some(_)) => {}
-                        Ok(None) => {
-                            let error = build_pubsub_error(&iq, PubSubError::NodeNotFound);
-                            return vec![iq_to_xml(error)];
-                        }
-                        Err(e) => {
-                            warn!("PubSub subscribe node lookup failed: {}", e);
-                            let error = build_pubsub_error(&iq, PubSubError::NodeNotFound);
-                            return vec![iq_to_xml(error)];
-                        }
+                match state
+                    .deps
+                    .protocol
+                    .pubsub_storage
+                    .get_node(&target_jid, &node)
+                    .await
+                {
+                    Ok(Some(_)) => {}
+                    Ok(None) => {
+                        let error = build_pubsub_error(&iq, PubSubError::NodeNotFound);
+                        return vec![iq_to_xml(error)];
+                    }
+                    Err(e) => {
+                        warn!("PubSub subscribe node lookup failed: {}", e);
+                        let error = build_pubsub_error(&iq, PubSubError::NodeNotFound);
+                        return vec![iq_to_xml(error)];
                     }
                 }
                 state.deps.protocol.pubsub_subscriptions.insert((
@@ -2648,28 +2747,76 @@ async fn server_permission_allowed(
     .await
 }
 
-async fn default_space_permission_allowed(
+async fn server_affiliation_for_requester(
     state: &WebSocketState,
     session: Option<&Session>,
-    permission: Permission,
-) -> Result<bool, String> {
-    permission_allowed(
-        state,
-        session,
-        Object::new(ObjectType::Space, "space"),
-        permission,
-    )
-    .await
+) -> Option<SpaceAffiliation> {
+    if server_permission_allowed(state, session, Permission::Owner)
+        .await
+        .unwrap_or(false)
+    {
+        return Some(SpaceAffiliation::Owner);
+    }
+    if server_permission_allowed(state, session, Permission::Admin)
+        .await
+        .unwrap_or(false)
+    {
+        return Some(SpaceAffiliation::Publisher);
+    }
+    if server_permission_allowed(state, session, Permission::Member)
+        .await
+        .unwrap_or(false)
+    {
+        return Some(SpaceAffiliation::Member);
+    }
+    None
 }
 
-async fn channel_creation_allowed(
+async fn space_affiliation_for_requester(
     state: &WebSocketState,
     session: Option<&Session>,
-) -> Result<bool, String> {
-    if default_space_permission_allowed(state, session, Permission::CreateChannel).await? {
-        return Ok(true);
+    node: &str,
+) -> Option<SpaceAffiliation> {
+    if server_permission_allowed(state, session, Permission::Owner)
+        .await
+        .unwrap_or(false)
+    {
+        return Some(SpaceAffiliation::Owner);
     }
-    server_permission_allowed(state, session, Permission::CreateMuc).await
+    if permission_allowed(
+        state,
+        session,
+        Object::new(ObjectType::Space, node),
+        Permission::Owner,
+    )
+    .await
+    .unwrap_or(false)
+    {
+        return Some(SpaceAffiliation::Owner);
+    }
+    if permission_allowed(
+        state,
+        session,
+        Object::new(ObjectType::Space, node),
+        Permission::Admin,
+    )
+    .await
+    .unwrap_or(false)
+    {
+        return Some(SpaceAffiliation::Publisher);
+    }
+    if permission_allowed(
+        state,
+        session,
+        Object::new(ObjectType::Space, node),
+        Permission::Member,
+    )
+    .await
+    .unwrap_or(false)
+    {
+        return Some(SpaceAffiliation::Member);
+    }
+    None
 }
 
 async fn write_tuple_if_absent(state: &WebSocketState, tuple: Tuple) -> Result<(), String> {
@@ -2686,28 +2833,35 @@ async fn write_tuple_if_absent(state: &WebSocketState, tuple: Tuple) -> Result<(
     }
 }
 
-async fn write_channel_membership_tuples(
+async fn spaces_node_mutation_allowed(
     state: &WebSocketState,
-    channel_id: &str,
+    session: Option<&Session>,
+    node: &str,
+) -> Result<bool, String> {
+    if server_permission_allowed(state, session, Permission::CreateSpace).await? {
+        return Ok(true);
+    }
+    permission_allowed(
+        state,
+        session,
+        Object::new(ObjectType::Space, node),
+        Permission::Owner,
+    )
+    .await
+}
+
+async fn write_space_owner_tuple(
+    state: &WebSocketState,
+    node: &str,
     session: Option<&Session>,
 ) -> Result<(), String> {
     let Some(session) = session else {
         return Ok(());
     };
-    let channel = Object::new(ObjectType::Channel, channel_id);
     write_tuple_if_absent(
         state,
         Tuple::new(
-            channel.clone(),
-            Relation::new("parent"),
-            Subject::userset(SubjectType::Space, "space", ""),
-        ),
-    )
-    .await?;
-    write_tuple_if_absent(
-        state,
-        Tuple::new(
-            channel,
+            Object::new(ObjectType::Space, node),
             Relation::new("owner"),
             Subject::user(&session.user_id),
         ),
@@ -2719,7 +2873,7 @@ async fn muc_owner_authorized(
     state: &WebSocketState,
     room_jid: &BareJid,
     sender_jid: &FullJid,
-    session: Option<&Session>,
+    _session: Option<&Session>,
 ) -> Result<bool, String> {
     let room_actor = get_room_actor(state, room_jid)
         .await
@@ -2735,7 +2889,7 @@ async fn muc_owner_authorized(
         return Ok(true);
     }
 
-    channel_creation_allowed(state, session).await
+    Ok(false)
 }
 
 async fn build_muc_owner_config_response(
@@ -2764,15 +2918,21 @@ async fn build_muc_owner_config_response(
     ))
 }
 
-fn canonical_space_details(domain: &str) -> SpaceDetails {
+fn spaces_service_bare_jid(spaces_domain: &str) -> Result<BareJid, String> {
+    spaces_domain
+        .parse::<BareJid>()
+        .map_err(|error| format!("invalid spaces service JID: {error}"))
+}
+
+fn space_details_from_node(node: &waddle_xmpp::pubsub::PubSubNode) -> SpaceDetails {
     SpaceDetails {
-        id: "space".to_string(),
-        name: domain.to_string(),
+        id: node.node_name.clone(),
+        name: node.node_name.clone(),
         description: None,
-        owner_id: "server".to_string(),
+        owner_id: node.owner.to_string(),
         icon_url: None,
         is_public: true,
-        created_at: "1970-01-01T00:00:00Z".to_string(),
+        created_at: node.created_at.to_rfc3339(),
     }
 }
 
@@ -2807,53 +2967,47 @@ async fn canonical_channel_disco_items(
     }
 }
 
-async fn canonical_space_pubsub_items(
-    state: &WebSocketState,
-    muc_domain: &str,
-    max_items: Option<u32>,
-    item_ids: &[String],
-) -> Result<Vec<PubSubItem>, String> {
-    let limit = max_items.unwrap_or(500).clamp(1, 500) as usize;
-    let channels = list_xmpp_channels(
-        state.deps.app_state.db_pool.global_actor().clone(),
-        limit,
-        0,
-    )
-    .await?;
-    let requested: std::collections::HashSet<&str> = item_ids.iter().map(String::as_str).collect();
-
-    channels
-        .into_iter()
-        .filter(|channel| {
-            if requested.is_empty() {
-                return true;
-            }
-            waddle_xmpp::managed_room_jid(&channel.id, muc_domain)
-                .map(|jid| requested.contains(jid.to_string().as_str()))
-                .unwrap_or(false)
-        })
-        .map(|channel| {
-            let channel = waddle_xmpp::ChannelInfo {
-                id: channel.id,
-                name: channel.name,
-                channel_type: channel.channel_type,
-            };
-            build_channel_item(&channel, muc_domain).map_err(|error| error.to_string())
-        })
-        .collect()
-}
-
 async fn handle_spaces_items(
     iq: &xmpp_parsers::iq::Iq,
     state: &WebSocketState,
-    muc_domain: &str,
+    spaces_domain: &str,
+    node: &str,
     max_items: Option<u32>,
     item_ids: &[String],
 ) -> Vec<String> {
-    match canonical_space_pubsub_items(state, muc_domain, max_items, item_ids).await {
-        Ok(items) => vec![iq_to_xml(build_pubsub_items_result(iq, "space", &items))],
+    let Ok(spaces_jid) = spaces_service_bare_jid(spaces_domain) else {
+        return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::InvalidJid))];
+    };
+    match state
+        .deps
+        .protocol
+        .pubsub_storage
+        .get_node(&spaces_jid, node)
+        .await
+    {
+        Ok(Some(_)) => {}
+        Ok(None) => return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::NodeNotFound))],
         Err(error) => {
-            warn!(error = %error, "Failed to retrieve canonical Spaces items");
+            warn!(node, error = %error, "Failed to retrieve Spaces node");
+            return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::NodeNotFound))];
+        }
+    }
+    match state
+        .deps
+        .protocol
+        .pubsub_storage
+        .get_items(&spaces_jid, node, max_items, item_ids)
+        .await
+    {
+        Ok(stored_items) => {
+            let items: Vec<_> = stored_items
+                .iter()
+                .map(|item| item.to_pubsub_item())
+                .collect();
+            vec![iq_to_xml(build_pubsub_items_result(iq, node, &items))]
+        }
+        Err(error) => {
+            warn!(node, error = %error, "Failed to retrieve Spaces items");
             vec![iq_to_xml(build_pubsub_error(iq, PubSubError::NodeNotFound))]
         }
     }
@@ -2863,15 +3017,34 @@ async fn handle_spaces_publish(
     iq: &xmpp_parsers::iq::Iq,
     state: &WebSocketState,
     muc_domain: &str,
+    spaces_domain: &str,
+    node: &str,
     item: PubSubItem,
     session: Option<&Session>,
 ) -> Vec<String> {
-    match channel_creation_allowed(state, session).await {
+    match spaces_node_mutation_allowed(state, session, node).await {
         Ok(true) => {}
         Ok(false) => return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))],
         Err(error) => {
-            warn!(error = %error, "Failed to authorize canonical Spaces publish");
+            warn!(node, error = %error, "Failed to authorize Spaces publish");
             return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))];
+        }
+    }
+    let Ok(spaces_jid) = spaces_service_bare_jid(spaces_domain) else {
+        return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::InvalidJid))];
+    };
+    match state
+        .deps
+        .protocol
+        .pubsub_storage
+        .get_node(&spaces_jid, node)
+        .await
+    {
+        Ok(Some(_)) => {}
+        Ok(None) => return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::NodeNotFound))],
+        Err(error) => {
+            warn!(node, error = %error, "Failed to resolve Spaces node for publish");
+            return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::NodeNotFound))];
         }
     }
 
@@ -2891,40 +3064,24 @@ async fn handle_spaces_publish(
     if bookmark.jid.domain().as_str() != muc_domain {
         return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::InvalidJid))];
     }
-    let Some(channel_id) = waddle_xmpp::parse_managed_room_jid(&bookmark.jid) else {
-        return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::InvalidJid))];
-    };
-    let name = bookmark.name.unwrap_or_else(|| channel_id.clone());
-    let now = chrono::Utc::now().to_rfc3339();
-    let actor = state.deps.app_state.db_pool.global_actor().clone();
-    match actor
-        .ask(DbExecute {
-            sql: r#"
-                INSERT INTO channels (id, name, description, channel_type, position, is_default, created_at, updated_at)
-                VALUES (?, ?, NULL, 'text', 0, 0, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                    name = excluded.name,
-                    updated_at = excluded.updated_at
-            "#
-            .to_string(),
-            params: vec![
-                channel_id.clone().into(),
-                name.into(),
-                now.clone().into(),
-                now.into(),
-            ],
-        })
+    if get_room_actor(state, &bookmark.jid).await.is_none() {
+        return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::ItemNotFound))];
+    }
+
+    match state
+        .deps
+        .protocol
+        .pubsub_storage
+        .publish_item(&spaces_jid, node, &item, None, false)
         .await
     {
-        Ok(_) => {
-            if let Err(error) = write_channel_membership_tuples(state, &channel_id, session).await {
-                warn!(item_id, error = %error, "Failed to persist channel permissions for canonical Spaces item");
-                return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))];
-            }
-            vec![iq_to_xml(build_pubsub_publish_result(iq, "space", item_id))]
-        }
+        Ok(result) => vec![iq_to_xml(build_pubsub_publish_result(
+            iq,
+            node,
+            &result.item_id,
+        ))],
         Err(error) => {
-            warn!(item_id, error = %error, "Failed to publish canonical Spaces item");
+            warn!(item_id, node, error = %error, "Failed to publish Spaces item");
             vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))]
         }
     }
@@ -2934,14 +3091,16 @@ async fn handle_spaces_retract(
     iq: &xmpp_parsers::iq::Iq,
     state: &WebSocketState,
     muc_domain: &str,
+    spaces_domain: &str,
+    node: &str,
     item_id: &str,
     session: Option<&Session>,
 ) -> Vec<String> {
-    match channel_creation_allowed(state, session).await {
+    match spaces_node_mutation_allowed(state, session, node).await {
         Ok(true) => {}
         Ok(false) => return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))],
         Err(error) => {
-            warn!(error = %error, "Failed to authorize canonical Spaces retract");
+            warn!(node, error = %error, "Failed to authorize Spaces retract");
             return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))];
         }
     }
@@ -2952,22 +3111,21 @@ async fn handle_spaces_retract(
     if room_jid.domain().as_str() != muc_domain {
         return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::InvalidJid))];
     }
-    let Some(channel_id) = waddle_xmpp::parse_managed_room_jid(&room_jid) else {
+    let Ok(spaces_jid) = spaces_service_bare_jid(spaces_domain) else {
         return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::InvalidJid))];
     };
-    let actor = state.deps.app_state.db_pool.global_actor().clone();
-    match actor
-        .ask(DbExecute {
-            sql: "DELETE FROM channels WHERE id = ?".to_string(),
-            params: vec![channel_id.into()],
-        })
+    match state
+        .deps
+        .protocol
+        .pubsub_storage
+        .retract_item(&spaces_jid, node, item_id)
         .await
     {
-        Ok(affected) if affected > 0 => vec![iq_to_xml(build_pubsub_success(iq))],
-        Ok(_) => vec![iq_to_xml(build_pubsub_error(iq, PubSubError::ItemNotFound))],
+        Ok(true) => vec![iq_to_xml(build_pubsub_success(iq))],
+        Ok(false) => vec![iq_to_xml(build_pubsub_error(iq, PubSubError::ItemNotFound))],
         Err(error) => {
-            warn!(item_id, error = %error, "Failed to retract canonical Spaces item");
-            vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))]
+            warn!(item_id, node, error = %error, "Failed to retract Spaces item");
+            vec![iq_to_xml(build_pubsub_error(iq, PubSubError::NodeNotFound))]
         }
     }
 }
@@ -2977,16 +3135,50 @@ async fn room_space_metadata_extensions(
     room_jid: &BareJid,
     domain: &str,
 ) -> Vec<Element> {
-    if get_managed_channel_for_room(state, room_jid)
+    let spaces_domain = format!("spaces.{domain}");
+    let Ok(spaces_jid) = spaces_service_bare_jid(&spaces_domain) else {
+        return vec![];
+    };
+    let Ok(nodes) = state
+        .deps
+        .protocol
+        .pubsub_storage
+        .list_nodes(&spaces_jid)
         .await
-        .ok()
-        .flatten()
-        .is_some()
-    {
-        vec![build_spaces_metadata_form(&canonical_space_details(domain))]
-    } else {
-        vec![]
+    else {
+        return vec![];
+    };
+    let room_item_id = room_jid.to_string();
+    for node in nodes {
+        let Ok(items) = state
+            .deps
+            .protocol
+            .pubsub_storage
+            .get_items(
+                &spaces_jid,
+                &node,
+                None,
+                std::slice::from_ref(&room_item_id),
+            )
+            .await
+        else {
+            continue;
+        };
+        if items.iter().any(|item| item.id == room_item_id) {
+            if let Ok(Some(space_node)) = state
+                .deps
+                .protocol
+                .pubsub_storage
+                .get_node(&spaces_jid, &node)
+                .await
+            {
+                return vec![build_spaces_metadata_form(&space_details_from_node(
+                    &space_node,
+                ))];
+            }
+        }
     }
+    vec![]
 }
 
 fn data_form_value(form: &Element, var: &str) -> Option<String> {
@@ -3009,7 +3201,7 @@ async fn apply_muc_owner_config(
     state: &WebSocketState,
     room_jid: &BareJid,
     iq: &xmpp_parsers::iq::Iq,
-    session: Option<&Session>,
+    _session: Option<&Session>,
 ) -> Result<(), String> {
     let room_actor = get_room_actor(state, room_jid)
         .await
@@ -3085,7 +3277,7 @@ async fn apply_muc_owner_config(
         .await
         .map_err(|error| format!("channel upsert failed: {error}"))?;
 
-    write_channel_membership_tuples(state, &channel_id, session).await
+    Ok(())
 }
 
 async fn handle_command_iq(

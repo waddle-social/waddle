@@ -45,7 +45,7 @@ function waddleColor(waddle: SpaceSummary): string {
 }
 
 function waddleKey(waddle: SpaceSummary): string {
-  return waddle.name.toLowerCase() || "space";
+  return waddle.id;
 }
 
 function waddleGlow(waddle: SpaceSummary): string {
@@ -85,26 +85,26 @@ function waddleGlow(waddle: SpaceSummary): string {
         v-for="waddle in waddles"
         :key="waddleKey(waddle)"
         class="type-control relative w-10 h-10 rounded-lg flex items-center justify-center transition-all duration-200 group flex-shrink-0"
-        :class="activeSpaceId
+        :class="activeSpaceId === waddle.id
           ? 'text-primary-foreground shadow-lg'
           : 'text-rail-foreground hover:text-rail-active hover:scale-105'"
-        :style="activeSpaceId
+        :style="activeSpaceId === waddle.id
           ? { backgroundColor: waddleColor(waddle), boxShadow: waddleGlow(waddle) }
           : { backgroundColor: 'var(--rail-hover)' }"
         :title="waddle.name"
         :aria-label="`Open ${waddle.name}`"
-        :aria-current="activeSpaceId ? 'page' : undefined"
+        :aria-current="activeSpaceId === waddle.id ? 'page' : undefined"
         type="button"
-        @click="emit('selectSpace', activeSpaceId ?? 'space')"
+        @click="emit('selectSpace', waddle.id)"
       >
         <span class="type-rail-initial">{{ waddleInitial(waddle) }}</span>
         <span
-          v-if="activeSpaceId && !horizontal"
+          v-if="activeSpaceId === waddle.id && !horizontal"
           class="chat-rail-indicator-vertical absolute -left-2 top-1/2 -translate-y-1/2 rounded-r-full"
           :style="{ backgroundColor: waddleColor(waddle) }"
         />
         <span
-          v-if="activeSpaceId && horizontal"
+          v-if="activeSpaceId === waddle.id && horizontal"
           class="chat-rail-indicator-horizontal absolute bottom-0 left-1/2 -translate-x-1/2 rounded-t-full"
           :style="{ backgroundColor: waddleColor(waddle) }"
         />

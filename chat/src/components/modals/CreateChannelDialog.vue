@@ -17,7 +17,7 @@ const open = defineModel<boolean>("open", { required: true });
 const props = defineProps<{
   form: CreateFormData;
   isSubmitting: boolean;
-  /** Available spaces for the "MUC in existing Space" intent (bare JID → display name). */
+  /** Available spaces for the "MUC in existing Space" intent (node id → display name). */
   spaces?: { jid: string; name: string }[];
 }>();
 
@@ -203,7 +203,7 @@ const dialogTitle = computed(() => {
       <!-- ── MUC in existing Space fields ── -->
       <template v-else-if="form.intent === 'space-muc'">
         <div class="chat-field-stack">
-          <label for="create-spacemuc-space" class="type-section-label text-muted-foreground">Target Space (JID)</label>
+          <label for="create-spacemuc-space" class="type-section-label text-muted-foreground">Target Space</label>
           <template v-if="spaces && spaces.length > 0">
             <select
               id="create-spacemuc-space"
@@ -220,10 +220,10 @@ const dialogTitle = computed(() => {
               id="create-spacemuc-space"
               :value="form.space_jid"
               class="chat-field-control type-field"
-              placeholder="space@conference.example.org"
+              placeholder="team-space"
               @input="$emit('update:form', { ...form, space_jid: ($event.target as HTMLInputElement).value })"
             />
-            <p class="type-caption text-muted-foreground">Enter the bare JID of the target space.</p>
+            <p class="type-caption text-muted-foreground">Enter an existing Spaces service node.</p>
           </template>
         </div>
         <div class="chat-field-stack">

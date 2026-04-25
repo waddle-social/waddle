@@ -103,6 +103,15 @@ function buildMucConfigFields(params: { name: string; description?: string; mucT
   return fields;
 }
 
+function slugifyNodeId(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    || "space";
+}
+
 /**
  * Returns a Promise that resolves when the agent emits a `muc:available`
  * presence matching the expected full JID (room + "/" + nick), or rejects
@@ -187,7 +196,7 @@ export async function createSpaceNode(
   spacesServiceJid: string,
   params: CreateSpaceNodeParams,
 ): Promise<CreateSpaceNodeResult> {
-  const nodeId = params.nodeId ?? "space";
+  const nodeId = params.nodeId ?? slugifyNodeId(params.name);
 
   const configFields: Array<{ name: string; value: string; type?: string }> = [
     { name: "FORM_TYPE", value: NS_PUBSUB_NODE_CONFIG, type: "hidden" },

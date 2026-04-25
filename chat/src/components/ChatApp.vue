@@ -351,6 +351,7 @@ function showFirstRunSetupIfNeeded() {
     connectionStore.appState !== "ready" ||
     ui.sidebarMode.value !== "channels" ||
     ui.activePage.value !== "chat" ||
+    !waddles.canManageChannels.value ||
     !waddles.isEmptyDeployment.value ||
     waddles.isLoadingStructure.value
   ) {
@@ -654,6 +655,15 @@ async function selectSpace(preferredChannelId?: string | null) {
   ui.activePage.value = "chat";
   ui.sidebarMode.value = "channels";
   dmConversations.closeDm();
+  if (preferredChannelId && waddles.waddles.value.some((space) => space.id === preferredChannelId)) {
+    const channelId = waddles.selectDiscoveredSpace(preferredChannelId);
+    if (channelId) {
+      messaging.clearMessages();
+      await messaging.loadMessages(preferredChannelId, channelId);
+    }
+    ui.showMobileNav.value = false;
+    return;
+  }
   const channelId = await waddles.loadStructure(preferredChannelId);
   if (channelId && waddles.activeSpaceId.value) {
     messaging.clearMessages();
@@ -1222,6 +1232,7 @@ onUnmounted(() => {
       v-model:open="ui.showCreateChannel.value"
       :form="waddles.createChannelForm.value"
       :is-submitting="waddles.isSubmitting.value"
+      :spaces="waddles.sortedSpaces.value.map((space) => ({ jid: space.id, name: space.name }))"
       @update:form="waddles.createChannelForm.value = $event"
       @submit="handleCreateChannel"
     />

@@ -233,5 +233,6 @@ export async function discoverTopology(
   return {
     spaces,
     rooms,
+    serverRole,
   };
 }

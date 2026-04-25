@@ -1,4 +1,5 @@
 export interface SpaceSummary {
+  id: string;
   name: string;
   description?: string | null;
   icon_url?: string | null;
@@ -12,6 +13,7 @@ export interface ChannelSummary {
   id: string;
   name: string;
   jid?: string;
+  spaceId?: string;
   description?: string | null;
   channel_type?: string;
   position?: number;
