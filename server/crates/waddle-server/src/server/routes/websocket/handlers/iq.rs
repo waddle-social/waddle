@@ -3072,7 +3072,7 @@ async fn handle_spaces_publish(
         Ok(Some(_)) => {}
         Ok(None) => return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::ItemNotFound))],
         Err(error) => {
-            warn!(channel_id, error = %error, "Failed to look up channel for Spaces bookmark");
+            warn!(channel_id = %channel_id, error = %error, "Failed to look up channel for Spaces bookmark");
             return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::ItemNotFound))];
         }
     }

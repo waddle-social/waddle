@@ -154,6 +154,11 @@ pub trait PubSubStorage: Send + Sync + 'static {
     /// given `item_id`, returning both the node name and the node metadata.
     ///
     /// Returns `Ok(None)` when no node contains the item.
+    ///
+    /// SQL-backed implementations should use an indexed join, e.g.:
+    /// `SELECT nodes.* FROM nodes JOIN items ON nodes.id = items.node_id
+    ///  WHERE nodes.owner = ? AND items.id = ?`
+    /// to avoid a full table scan.
     async fn find_node_for_item(
         &self,
         owner: &BareJid,
