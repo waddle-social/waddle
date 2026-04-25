@@ -29,7 +29,7 @@
 import type { DefinitionOptions } from "stanza/jxt";
 import { attribute, booleanAttribute, childText, integerAttribute } from "stanza/jxt";
 
-export const NS_WADDLE_INBOX_0 = "urn:waddle:inbox:0";
+const NS_WADDLE_INBOX_0 = "urn:waddle:inbox:0";
 
 export type InboxConversationKind = "direct" | "muc";
 
