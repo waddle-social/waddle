@@ -158,8 +158,8 @@ definition server {
   relation admin: user
   relation member: user
 
-  permission create_space = admin
-  permission create_muc = admin
+  permission create_space = owner + admin
+  permission create_muc = owner + admin
 }
 
 definition space {
@@ -169,12 +169,12 @@ definition space {
   relation member: user
 
   permission delete = owner
-  permission manage_settings = admin
-  permission manage_roles = admin
-  permission manage_members = moderator
-  permission create_channel = admin
+  permission manage_settings = owner + admin
+  permission manage_roles = owner + admin
+  permission manage_members = owner + admin + moderator
+  permission create_channel = owner + admin
   permission view = member
-  permission update = admin
+  permission update = owner + admin
 }
 
 definition channel {

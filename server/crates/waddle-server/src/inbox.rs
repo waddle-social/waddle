@@ -309,7 +309,7 @@ impl InboxStorage for DatabaseInboxStorage {
     ) -> Result<InboxEntry, InboxStorageError> {
         let increment = i64::from(u8::from(increment_unread));
         let thread_id = entry.thread_id.as_deref().unwrap_or("");
-        let is_thread = !thread_id.is_empty();
+        let is_thread = i64::from(u8::from(!thread_id.is_empty()));
         let sql = format!(
             r#"
             INSERT INTO inbox_entries (
@@ -327,13 +327,12 @@ impl InboxStorage for DatabaseInboxStorage {
                 END,
                 thread_title = COALESCE(excluded.thread_title, inbox_entries.thread_title),
                 reply_count = CASE
-                    WHEN {is_thread} THEN inbox_entries.reply_count + 1
+                    WHEN ? != 0 THEN inbox_entries.reply_count + 1
                     ELSE inbox_entries.reply_count
                 END,
                 author = COALESCE(excluded.author, inbox_entries.author)
             RETURNING {SELECT_COLS}
-            "#,
-            is_thread = if is_thread { "1" } else { "0" },
+            "#
         );
         let mut rows = self
             .query(
@@ -351,6 +350,7 @@ impl InboxStorage for DatabaseInboxStorage {
                     entry.reply_count as i64,
                     entry.author,
                     increment,
+                    is_thread,
                 ],
             )
             .await?;

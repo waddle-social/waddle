@@ -74,6 +74,7 @@ export function useWaddles(
       null
     );
   });
+  const currentSpaceRole = computed(() => currentSpace.value?.role ?? null);
 
   const sortedSpaces = computed(() =>
     [...waddles.value].sort((a, b) =>
@@ -99,11 +100,11 @@ export function useWaddles(
   });
 
   const canManageCommunity = computed(() =>
-    ["owner", "admin"].includes(currentRole.value ?? ""),
+    ["owner", "admin"].includes(currentSpaceRole.value ?? currentRole.value ?? ""),
   );
 
   const canManageChannels = computed(() =>
-    ["owner", "admin"].includes(currentRole.value ?? ""),
+    ["owner", "admin"].includes(currentSpaceRole.value ?? currentRole.value ?? ""),
   );
 
   const canManageMembers = computed(() =>

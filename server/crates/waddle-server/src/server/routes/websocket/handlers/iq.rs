@@ -65,6 +65,11 @@ use crate::auth::{NativeUserStore, Session};
 use crate::db::actor::{DbExecute, DbQuery, DbQueryOne, GetDatabase};
 use crate::db::blocking::DatabaseBlockingStorage;
 use crate::db::{row_value, Database, Value, ValueExt};
+use crate::permissions::{
+    CheckPermission, Object, ObjectType, Permission, PermissionError, Relation, Subject,
+    SubjectType, Tuple, WriteTuple,
+};
+use crate::server::bootstrap_membership::DEPLOYMENT_SERVER_ID;
 use crate::server::xmpp_state::{list_xmpp_channels, XmppChannelRecord};
 use crate::vcard::VCardStore;
 
@@ -661,7 +666,9 @@ pub async fn handle_iq_with_conn_state(
                 "not-authorized",
             )];
         };
-        match muc_owner_authorized(state, &room_jid, sender_jid).await {
+        match muc_owner_authorized(state, &room_jid, sender_jid, authenticated_session.as_ref())
+            .await
+        {
             Ok(true) => {}
             Ok(false) => {
                 return vec![build_iq_error_xml_with_addresses(
@@ -729,7 +736,9 @@ pub async fn handle_iq_with_conn_state(
             }
         }
 
-        if let Err(error) = apply_muc_owner_config(state, &room_jid, &iq).await {
+        if let Err(error) =
+            apply_muc_owner_config(state, &room_jid, &iq, authenticated_session.as_ref()).await
+        {
             warn!(
                 room = %room_jid,
                 error = %error,
@@ -1045,7 +1054,14 @@ pub async fn handle_iq_with_conn_state(
         match request {
             PubSubRequest::Publish { node, item } => {
                 if target_jid.to_string() == spaces_domain && node == "space" {
-                    return handle_spaces_publish(&iq, state, muc_domain, item).await;
+                    return handle_spaces_publish(
+                        &iq,
+                        state,
+                        muc_domain,
+                        item,
+                        authenticated_session.as_ref(),
+                    )
+                    .await;
                 }
 
                 let result = state
@@ -1117,7 +1133,14 @@ pub async fn handle_iq_with_conn_state(
                 notify: _,
             } => {
                 if target_jid.to_string() == spaces_domain && node == "space" {
-                    return handle_spaces_retract(&iq, state, muc_domain, &item_id).await;
+                    return handle_spaces_retract(
+                        &iq,
+                        state,
+                        muc_domain,
+                        &item_id,
+                        authenticated_session.as_ref(),
+                    )
+                    .await;
                 }
 
                 if target_jid != user_jid {
@@ -1154,8 +1177,19 @@ pub async fn handle_iq_with_conn_state(
             PubSubRequest::CreateNode { node } => {
                 if target_jid.to_string() == spaces_domain {
                     if node == "space" {
-                        let response = build_pubsub_success(&iq);
-                        return vec![iq_to_xml(response)];
+                        if server_permission_allowed(
+                            state,
+                            authenticated_session.as_ref(),
+                            Permission::CreateSpace,
+                        )
+                        .await
+                        .unwrap_or(false)
+                        {
+                            let response = build_pubsub_success(&iq);
+                            return vec![iq_to_xml(response)];
+                        }
+                        let error = build_pubsub_error(&iq, PubSubError::Forbidden);
+                        return vec![iq_to_xml(error)];
                     }
                     let error = build_pubsub_error(&iq, PubSubError::Forbidden);
                     return vec![iq_to_xml(error)];
@@ -1193,8 +1227,19 @@ pub async fn handle_iq_with_conn_state(
 
             PubSubRequest::ConfigureNode { node } => {
                 if target_jid.to_string() == spaces_domain && node == "space" {
-                    let response = build_pubsub_success(&iq);
-                    return vec![iq_to_xml(response)];
+                    if server_permission_allowed(
+                        state,
+                        authenticated_session.as_ref(),
+                        Permission::CreateSpace,
+                    )
+                    .await
+                    .unwrap_or(false)
+                    {
+                        let response = build_pubsub_success(&iq);
+                        return vec![iq_to_xml(response)];
+                    }
+                    let error = build_pubsub_error(&iq, PubSubError::Forbidden);
+                    return vec![iq_to_xml(error)];
                 }
 
                 let error = build_pubsub_error(&iq, PubSubError::Forbidden);
@@ -2566,10 +2611,115 @@ fn valid_push_endpoint(value: &str) -> bool {
     }
 }
 
+async fn permission_allowed(
+    state: &WebSocketState,
+    session: Option<&Session>,
+    object: Object,
+    permission: Permission,
+) -> Result<bool, String> {
+    let Some(session) = session else {
+        return Ok(false);
+    };
+    let response = state
+        .deps
+        .app_state
+        .permission_actor
+        .ask(CheckPermission {
+            subject: Subject::user(&session.user_id),
+            permission,
+            object,
+        })
+        .await
+        .map_err(|error| format!("permission check failed: {error}"))?;
+    Ok(response.allowed)
+}
+
+async fn server_permission_allowed(
+    state: &WebSocketState,
+    session: Option<&Session>,
+    permission: Permission,
+) -> Result<bool, String> {
+    permission_allowed(
+        state,
+        session,
+        Object::new(ObjectType::Server, DEPLOYMENT_SERVER_ID),
+        permission,
+    )
+    .await
+}
+
+async fn default_space_permission_allowed(
+    state: &WebSocketState,
+    session: Option<&Session>,
+    permission: Permission,
+) -> Result<bool, String> {
+    permission_allowed(
+        state,
+        session,
+        Object::new(ObjectType::Space, "space"),
+        permission,
+    )
+    .await
+}
+
+async fn channel_creation_allowed(
+    state: &WebSocketState,
+    session: Option<&Session>,
+) -> Result<bool, String> {
+    if default_space_permission_allowed(state, session, Permission::CreateChannel).await? {
+        return Ok(true);
+    }
+    server_permission_allowed(state, session, Permission::CreateMuc).await
+}
+
+async fn write_tuple_if_absent(state: &WebSocketState, tuple: Tuple) -> Result<(), String> {
+    match state
+        .deps
+        .app_state
+        .permission_actor
+        .ask(WriteTuple { tuple })
+        .await
+    {
+        Ok(()) => Ok(()),
+        Err(kameo::error::SendError::HandlerError(PermissionError::TupleAlreadyExists)) => Ok(()),
+        Err(error) => Err(format!("permission actor failed writing tuple: {error}")),
+    }
+}
+
+async fn write_channel_membership_tuples(
+    state: &WebSocketState,
+    channel_id: &str,
+    session: Option<&Session>,
+) -> Result<(), String> {
+    let Some(session) = session else {
+        return Ok(());
+    };
+    let channel = Object::new(ObjectType::Channel, channel_id);
+    write_tuple_if_absent(
+        state,
+        Tuple::new(
+            channel.clone(),
+            Relation::new("parent"),
+            Subject::userset(SubjectType::Space, "space", ""),
+        ),
+    )
+    .await?;
+    write_tuple_if_absent(
+        state,
+        Tuple::new(
+            channel,
+            Relation::new("owner"),
+            Subject::user(&session.user_id),
+        ),
+    )
+    .await
+}
+
 async fn muc_owner_authorized(
     state: &WebSocketState,
     room_jid: &BareJid,
     sender_jid: &FullJid,
+    session: Option<&Session>,
 ) -> Result<bool, String> {
     let room_actor = get_room_actor(state, room_jid)
         .await
@@ -2578,10 +2728,14 @@ async fn muc_owner_authorized(
         .ask(GetSnapshot)
         .await
         .map_err(|error| format!("snapshot failed: {error:?}"))?;
-    Ok(matches!(
+    if matches!(
         snapshot.room.get_affiliation(&sender_jid.to_bare()),
         Affiliation::Owner
-    ))
+    ) {
+        return Ok(true);
+    }
+
+    channel_creation_allowed(state, session).await
 }
 
 async fn build_muc_owner_config_response(
@@ -2710,7 +2864,17 @@ async fn handle_spaces_publish(
     state: &WebSocketState,
     muc_domain: &str,
     item: PubSubItem,
+    session: Option<&Session>,
 ) -> Vec<String> {
+    match channel_creation_allowed(state, session).await {
+        Ok(true) => {}
+        Ok(false) => return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))],
+        Err(error) => {
+            warn!(error = %error, "Failed to authorize canonical Spaces publish");
+            return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))];
+        }
+    }
+
     let Some(item_id) = item.id.as_deref() else {
         return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::InvalidJid))];
     };
@@ -2744,7 +2908,7 @@ async fn handle_spaces_publish(
             "#
             .to_string(),
             params: vec![
-                channel_id.into(),
+                channel_id.clone().into(),
                 name.into(),
                 now.clone().into(),
                 now.into(),
@@ -2752,7 +2916,13 @@ async fn handle_spaces_publish(
         })
         .await
     {
-        Ok(_) => vec![iq_to_xml(build_pubsub_publish_result(iq, "space", item_id))],
+        Ok(_) => {
+            if let Err(error) = write_channel_membership_tuples(state, &channel_id, session).await {
+                warn!(item_id, error = %error, "Failed to persist channel permissions for canonical Spaces item");
+                return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))];
+            }
+            vec![iq_to_xml(build_pubsub_publish_result(iq, "space", item_id))]
+        }
         Err(error) => {
             warn!(item_id, error = %error, "Failed to publish canonical Spaces item");
             vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))]
@@ -2765,7 +2935,17 @@ async fn handle_spaces_retract(
     state: &WebSocketState,
     muc_domain: &str,
     item_id: &str,
+    session: Option<&Session>,
 ) -> Vec<String> {
+    match channel_creation_allowed(state, session).await {
+        Ok(true) => {}
+        Ok(false) => return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))],
+        Err(error) => {
+            warn!(error = %error, "Failed to authorize canonical Spaces retract");
+            return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))];
+        }
+    }
+
     let Ok(room_jid) = item_id.parse::<BareJid>() else {
         return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::InvalidJid))];
     };
@@ -2829,6 +3009,7 @@ async fn apply_muc_owner_config(
     state: &WebSocketState,
     room_jid: &BareJid,
     iq: &xmpp_parsers::iq::Iq,
+    session: Option<&Session>,
 ) -> Result<(), String> {
     let room_actor = get_room_actor(state, room_jid)
         .await
@@ -2893,7 +3074,7 @@ async fn apply_muc_owner_config(
             "#
             .to_string(),
             params: vec![
-                channel_id.into(),
+                channel_id.clone().into(),
                 config.name.into(),
                 config.description.into(),
                 (if config.forum { "forum" } else { "text" }).into(),
@@ -2902,8 +3083,9 @@ async fn apply_muc_owner_config(
             ],
         })
         .await
-        .map(|_| ())
-        .map_err(|error| format!("channel upsert failed: {error}"))
+        .map_err(|error| format!("channel upsert failed: {error}"))?;
+
+    write_channel_membership_tuples(state, &channel_id, session).await
 }
 
 async fn handle_command_iq(

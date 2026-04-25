@@ -90,9 +90,13 @@ pub async fn provision_user_membership(
 ) -> Result<(), String> {
     let subject = Subject::user(user_id);
     if config.is_owner(xmpp_localpart) {
-        let object = Object::new(ObjectType::Server, config.server_id.as_str());
-        let tuple = Tuple::new(object, Relation::new("owner"), subject);
-        write_tuple_if_absent(permission_actor, tuple).await?;
+        for object in [
+            Object::new(ObjectType::Server, config.server_id.as_str()),
+            Object::new(ObjectType::Space, config.space_id.as_str()),
+        ] {
+            let tuple = Tuple::new(object, Relation::new("owner"), subject.clone());
+            write_tuple_if_absent(permission_actor, tuple).await?;
+        }
 
         debug!(
             user_id = %user_id,
@@ -273,9 +277,18 @@ mod tests {
             })
             .await
             .expect("member check");
+        let space_owner = actor
+            .ask(CheckPermission {
+                subject: Subject::user("user-owner"),
+                permission: Permission::Owner,
+                object: Object::new(ObjectType::Space, DEFAULT_SPACE_ID),
+            })
+            .await
+            .expect("space owner check");
 
         assert!(owner.allowed);
         assert!(member.allowed);
+        assert!(space_owner.allowed);
     }
 
     #[tokio::test]
