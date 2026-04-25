@@ -89,6 +89,9 @@ pub enum PubSubRequest {
     CreateNode {
         node: String,
     },
+    ConfigureNode {
+        node: String,
+    },
     DeleteNode {
         node: String,
     },
@@ -227,6 +230,12 @@ pub fn parse_pubsub_iq(iq: &Iq) -> CoreResult<PubSubRequest> {
     if let Some(create) = pubsub_elem.get_child("create", NS_PUBSUB) {
         return Ok(PubSubRequest::CreateNode {
             node: required_attr(create, "node")?,
+        });
+    }
+
+    if let Some(configure) = pubsub_elem.get_child("configure", NS_PUBSUB) {
+        return Ok(PubSubRequest::ConfigureNode {
+            node: required_attr(configure, "node")?,
         });
     }
 
@@ -414,6 +423,23 @@ mod tests {
                 assert_eq!(jid.to_string(), "romeo@example.com");
             }
             other => panic!("Expected subscribe request, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_configure_request() {
+        let xml = r#"<iq xmlns='jabber:client' type='set' from='user@example.com' id='cfg1'>
+            <pubsub xmlns='http://jabber.org/protocol/pubsub'>
+                <configure node='space'/>
+            </pubsub>
+        </iq>"#;
+
+        let iq = Iq::try_from(xml.parse::<Element>().expect("valid XML")).expect("valid IQ");
+        let request = parse_pubsub_iq(&iq).expect("should parse");
+
+        match request {
+            PubSubRequest::ConfigureNode { node } => assert_eq!(node, "space"),
+            other => panic!("Expected configure request, got {other:?}"),
         }
     }
 

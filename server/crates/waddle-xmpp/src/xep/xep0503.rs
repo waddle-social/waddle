@@ -1,25 +1,19 @@
 //! XEP-0503: Server-side Spaces
 //!
-//! Implements the read-only surface of XEP-0503 v0.2.0 for native XMPP
-//! community discovery. The canonical space is exposed as a pubsub node
-//! typed `urn:xmpp:spaces:0`, with channel items represented as XEP-0402
-//! `<conference>` bookmarks.
+//! Implements Waddle's XEP-0503 v0.2.0 surface for native XMPP community
+//! discovery. The canonical space is exposed as a pubsub node typed
+//! `urn:xmpp:spaces:0`, with channel items represented as XEP-0402
+//! `<conference>` bookmarks backed by the canonical channel catalog.
 //!
 //! The spaces service lives at `spaces.<domain>` and is advertised in
 //! `disco#items` alongside the existing MUC/upload/pubsub components.
 //!
-//! ## Phase A Scope (Read-Only)
-//!
 //! - `disco#info` on `spaces.<domain>`: returns spaces service identity + features
 //! - `disco#info` on `spaces.<domain>` with `node=<space_id>`: returns space node identity
 //! - `disco#items` on `spaces.<domain>`: returns the canonical space node
-//! - `disco#items` on `spaces.<domain>` with `node=<space_id>`: returns channel items
 //! - pubsub `<items>` on `spaces.<domain>` for `node=<space_id>`: returns XEP-0402 bookmark items
-//!
-//! **Note:** The full XEP-0503 feature set is advertised in `disco#info` even
-//! though write operations (create/delete spaces, publish/retract channels,
-//! subscribe) return `<service-unavailable/>`. This is acceptable for an
-//! Experimental XEP and will be implemented in Phase F.
+//! - pubsub `<publish/>` and `<retract/>` on the canonical space node update
+//!   channel bookmark membership.
 
 use minidom::Element;
 

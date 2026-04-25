@@ -32,16 +32,23 @@ describe("topology discovery", () => {
         };
       }
 
-      if (jid === "spaces.example.com" && node === "space-1") {
-        return {
-          items: [{ jid: "general@muc.example.com", name: "General" }],
-        };
-      }
-
       if (jid === "example.com" && node === "http://jabber.org/protocol/commands") {
         throw new Error("legacy command discovery should not be called");
       }
 
+      return { items: [] };
+    });
+    const getItems = mock(async (jid: string, node: string) => {
+      if (jid === "spaces.example.com" && node === "space-1") {
+        return {
+          items: [
+            {
+              id: "general@muc.example.com",
+              content: { itemType: "urn:xmpp:bookmarks:1", name: "General" },
+            },
+          ],
+        };
+      }
       return { items: [] };
     });
 
@@ -131,6 +138,7 @@ describe("topology discovery", () => {
     const topology = await discoverTopology({
       getDiscoItems,
       getDiscoInfo,
+      getItems,
     } as unknown as Agent, "alice@example.com/desktop");
 
     expect(topology.spaces).toEqual([
@@ -159,6 +167,7 @@ describe("topology discovery", () => {
       "example.com",
       "http://jabber.org/protocol/commands",
     ]);
+    expect(getItems.mock.calls).toEqual([["spaces.example.com", "space-1", { max: 500 }]]);
   });
 
   test("does not fall back to legacy command nodes when protocol support is absent", async () => {

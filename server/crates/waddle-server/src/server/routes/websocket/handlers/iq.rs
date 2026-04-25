@@ -46,11 +46,11 @@ use waddle_xmpp::{
         parse_mark_read,
     },
     xep::{
-        build_command_items, build_command_result, build_last_activity_response,
-        build_search_response, build_spaces_metadata_form, is_last_activity_query,
-        is_search_request, is_time_query, is_version_query, parse_command_from_iq,
-        parse_search_request, ChannelResult, Command, CommandStatus, Searchable, NODE_COMMANDS,
-        NS_CHANNEL_SEARCH,
+        build_channel_item, build_command_items, build_command_result,
+        build_last_activity_response, build_search_response, build_spaces_metadata_form,
+        is_last_activity_query, is_search_request, is_time_query, is_version_query,
+        parse_command_from_iq, parse_search_request, ChannelResult, Command, CommandStatus,
+        Searchable, NODE_COMMANDS, NS_CHANNEL_SEARCH,
     },
     Affiliation, SpaceDetails, Stanza, StanzaErrorCondition, StanzaErrorType, XmppError,
 };
@@ -58,14 +58,14 @@ use xmpp_parsers::minidom::Element;
 
 use super::super::{
     build_iq_error_xml, build_iq_error_xml_with_addresses, build_iq_result_xml, destroy_room_actor,
-    get_room_actor, iq_to_xml, is_muc_room_jid, list_room_jids, stanza_to_xml, WebSocketState,
+    get_room_actor, iq_to_xml, is_muc_room_jid, stanza_to_xml, WebSocketState,
 };
 use super::presence::get_managed_channel_for_room;
 use crate::auth::{NativeUserStore, Session};
 use crate::db::actor::{DbExecute, DbQuery, DbQueryOne, GetDatabase};
 use crate::db::blocking::DatabaseBlockingStorage;
 use crate::db::{row_value, Database, Value, ValueExt};
-use crate::server::xmpp_state::list_xmpp_channels;
+use crate::server::xmpp_state::{list_xmpp_channels, XmppChannelRecord};
 use crate::vcard::VCardStore;
 
 /// Only called from test helpers — suppress dead_code lint for binary crate.
@@ -553,20 +553,7 @@ pub async fn handle_iq_with_conn_state(
 
         if to.as_deref() == Some(muc_domain) {
             debug!("Disco items query on MUC service");
-            let mut rooms = list_room_jids(state).await;
-            rooms.sort_by_key(|room| room.to_string());
-
-            let items: Vec<DiscoItem> = rooms
-                .into_iter()
-                .map(|room_jid| {
-                    let room_jid_string = room_jid.to_string();
-                    let name = room_jid
-                        .node()
-                        .map(|n| n.to_string())
-                        .unwrap_or_else(|| room_jid_string.clone());
-                    DiscoItem::muc_room(&room_jid_string, &name)
-                })
-                .collect();
+            let items = canonical_channel_disco_items(state, muc_domain, 500).await;
 
             let response = build_disco_items_response(request_iq, &items, None);
             return vec![iq_to_xml(response)];
@@ -583,35 +570,12 @@ pub async fn handle_iq_with_conn_state(
         }
 
         if to.as_deref() == Some(spaces_domain.as_str()) {
-            let global_db_actor = state.deps.app_state.db_pool.global_actor().clone();
             let items: Vec<DiscoItem> = match query.node.as_deref() {
                 Some(node) => {
                     if node != "space" {
                         vec![]
                     } else {
-                        match list_xmpp_channels(global_db_actor.clone(), 200, 0).await {
-                            Ok(channels) => channels
-                                .into_iter()
-                                .filter_map(|channel| {
-                                    waddle_xmpp::managed_room_jid(&channel.id, muc_domain)
-                                        .ok()
-                                        .map(|room_jid| {
-                                            DiscoItem::muc_room(
-                                                &room_jid.to_string(),
-                                                &channel.name,
-                                            )
-                                        })
-                                })
-                                .collect(),
-                            Err(err) => {
-                                warn!(
-                                    node = %node,
-                                    error = %err,
-                                    "Failed to list channels for spaces node discovery"
-                                );
-                                vec![]
-                            }
-                        }
+                        vec![]
                     }
                 }
                 None => vec![DiscoItem::spaces_node(
@@ -1080,6 +1044,10 @@ pub async fn handle_iq_with_conn_state(
 
         match request {
             PubSubRequest::Publish { node, item } => {
+                if target_jid.to_string() == spaces_domain && node == "space" {
+                    return handle_spaces_publish(&iq, state, muc_domain, item).await;
+                }
+
                 let result = state
                     .deps
                     .protocol
@@ -1112,6 +1080,10 @@ pub async fn handle_iq_with_conn_state(
                 max_items,
                 item_ids,
             } => {
+                if target_jid.to_string() == spaces_domain && node == "space" {
+                    return handle_spaces_items(&iq, state, muc_domain, max_items, &item_ids).await;
+                }
+
                 let result = state
                     .deps
                     .protocol
@@ -1144,6 +1116,10 @@ pub async fn handle_iq_with_conn_state(
                 item_id,
                 notify: _,
             } => {
+                if target_jid.to_string() == spaces_domain && node == "space" {
+                    return handle_spaces_retract(&iq, state, muc_domain, &item_id).await;
+                }
+
                 if target_jid != user_jid {
                     let error = build_pubsub_error(&iq, PubSubError::Forbidden);
                     return vec![iq_to_xml(error)];
@@ -1176,6 +1152,15 @@ pub async fn handle_iq_with_conn_state(
             }
 
             PubSubRequest::CreateNode { node } => {
+                if target_jid.to_string() == spaces_domain {
+                    if node == "space" {
+                        let response = build_pubsub_success(&iq);
+                        return vec![iq_to_xml(response)];
+                    }
+                    let error = build_pubsub_error(&iq, PubSubError::Forbidden);
+                    return vec![iq_to_xml(error)];
+                }
+
                 if target_jid != user_jid {
                     let error = build_pubsub_error(&iq, PubSubError::Forbidden);
                     return vec![iq_to_xml(error)];
@@ -1204,6 +1189,16 @@ pub async fn handle_iq_with_conn_state(
                         return vec![iq_to_xml(error)];
                     }
                 }
+            }
+
+            PubSubRequest::ConfigureNode { node } => {
+                if target_jid.to_string() == spaces_domain && node == "space" {
+                    let response = build_pubsub_success(&iq);
+                    return vec![iq_to_xml(response)];
+                }
+
+                let error = build_pubsub_error(&iq, PubSubError::Forbidden);
+                return vec![iq_to_xml(error)];
             }
 
             PubSubRequest::DeleteNode { node } => {
@@ -2624,6 +2619,176 @@ fn canonical_space_details(domain: &str) -> SpaceDetails {
         icon_url: None,
         is_public: true,
         created_at: "1970-01-01T00:00:00Z".to_string(),
+    }
+}
+
+fn channels_to_disco_items(channels: Vec<XmppChannelRecord>, muc_domain: &str) -> Vec<DiscoItem> {
+    channels
+        .into_iter()
+        .filter_map(|channel| {
+            waddle_xmpp::managed_room_jid(&channel.id, muc_domain)
+                .ok()
+                .map(|room_jid| DiscoItem::muc_room(&room_jid.to_string(), &channel.name))
+        })
+        .collect()
+}
+
+async fn canonical_channel_disco_items(
+    state: &WebSocketState,
+    muc_domain: &str,
+    limit: usize,
+) -> Vec<DiscoItem> {
+    match list_xmpp_channels(
+        state.deps.app_state.db_pool.global_actor().clone(),
+        limit,
+        0,
+    )
+    .await
+    {
+        Ok(channels) => channels_to_disco_items(channels, muc_domain),
+        Err(error) => {
+            warn!(error = %error, "Failed to list canonical channels for MUC discovery");
+            Vec::new()
+        }
+    }
+}
+
+async fn canonical_space_pubsub_items(
+    state: &WebSocketState,
+    muc_domain: &str,
+    max_items: Option<u32>,
+    item_ids: &[String],
+) -> Result<Vec<PubSubItem>, String> {
+    let limit = max_items.unwrap_or(500).clamp(1, 500) as usize;
+    let channels = list_xmpp_channels(
+        state.deps.app_state.db_pool.global_actor().clone(),
+        limit,
+        0,
+    )
+    .await?;
+    let requested: std::collections::HashSet<&str> = item_ids.iter().map(String::as_str).collect();
+
+    channels
+        .into_iter()
+        .filter(|channel| {
+            if requested.is_empty() {
+                return true;
+            }
+            waddle_xmpp::managed_room_jid(&channel.id, muc_domain)
+                .map(|jid| requested.contains(jid.to_string().as_str()))
+                .unwrap_or(false)
+        })
+        .map(|channel| {
+            let channel = waddle_xmpp::ChannelInfo {
+                id: channel.id,
+                name: channel.name,
+                channel_type: channel.channel_type,
+            };
+            build_channel_item(&channel, muc_domain).map_err(|error| error.to_string())
+        })
+        .collect()
+}
+
+async fn handle_spaces_items(
+    iq: &xmpp_parsers::iq::Iq,
+    state: &WebSocketState,
+    muc_domain: &str,
+    max_items: Option<u32>,
+    item_ids: &[String],
+) -> Vec<String> {
+    match canonical_space_pubsub_items(state, muc_domain, max_items, item_ids).await {
+        Ok(items) => vec![iq_to_xml(build_pubsub_items_result(iq, "space", &items))],
+        Err(error) => {
+            warn!(error = %error, "Failed to retrieve canonical Spaces items");
+            vec![iq_to_xml(build_pubsub_error(iq, PubSubError::NodeNotFound))]
+        }
+    }
+}
+
+async fn handle_spaces_publish(
+    iq: &xmpp_parsers::iq::Iq,
+    state: &WebSocketState,
+    muc_domain: &str,
+    item: PubSubItem,
+) -> Vec<String> {
+    let Some(item_id) = item.id.as_deref() else {
+        return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::InvalidJid))];
+    };
+    let Some(payload) = item.payload.as_ref() else {
+        return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::InvalidJid))];
+    };
+    let bookmark = match waddle_xmpp::xep::xep0402::parse_bookmark(item_id, payload) {
+        Ok(bookmark) => bookmark,
+        Err(error) => {
+            warn!(item_id, error = %error, "Invalid XEP-0402 Spaces item");
+            return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::InvalidJid))];
+        }
+    };
+    if bookmark.jid.domain().as_str() != muc_domain {
+        return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::InvalidJid))];
+    }
+    let Some(channel_id) = waddle_xmpp::parse_managed_room_jid(&bookmark.jid) else {
+        return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::InvalidJid))];
+    };
+    let name = bookmark.name.unwrap_or_else(|| channel_id.clone());
+    let now = chrono::Utc::now().to_rfc3339();
+    let actor = state.deps.app_state.db_pool.global_actor().clone();
+    match actor
+        .ask(DbExecute {
+            sql: r#"
+                INSERT INTO channels (id, name, description, channel_type, position, is_default, created_at, updated_at)
+                VALUES (?, ?, NULL, 'text', 0, 0, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    name = excluded.name,
+                    updated_at = excluded.updated_at
+            "#
+            .to_string(),
+            params: vec![
+                channel_id.into(),
+                name.into(),
+                now.clone().into(),
+                now.into(),
+            ],
+        })
+        .await
+    {
+        Ok(_) => vec![iq_to_xml(build_pubsub_publish_result(iq, "space", item_id))],
+        Err(error) => {
+            warn!(item_id, error = %error, "Failed to publish canonical Spaces item");
+            vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))]
+        }
+    }
+}
+
+async fn handle_spaces_retract(
+    iq: &xmpp_parsers::iq::Iq,
+    state: &WebSocketState,
+    muc_domain: &str,
+    item_id: &str,
+) -> Vec<String> {
+    let Ok(room_jid) = item_id.parse::<BareJid>() else {
+        return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::InvalidJid))];
+    };
+    if room_jid.domain().as_str() != muc_domain {
+        return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::InvalidJid))];
+    }
+    let Some(channel_id) = waddle_xmpp::parse_managed_room_jid(&room_jid) else {
+        return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::InvalidJid))];
+    };
+    let actor = state.deps.app_state.db_pool.global_actor().clone();
+    match actor
+        .ask(DbExecute {
+            sql: "DELETE FROM channels WHERE id = ?".to_string(),
+            params: vec![channel_id.into()],
+        })
+        .await
+    {
+        Ok(affected) if affected > 0 => vec![iq_to_xml(build_pubsub_success(iq))],
+        Ok(_) => vec![iq_to_xml(build_pubsub_error(iq, PubSubError::ItemNotFound))],
+        Err(error) => {
+            warn!(item_id, error = %error, "Failed to retract canonical Spaces item");
+            vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))]
+        }
     }
 }
 

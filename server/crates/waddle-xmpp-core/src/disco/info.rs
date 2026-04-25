@@ -506,14 +506,11 @@ pub fn spaces_service_features() -> Vec<Feature> {
         Feature::pubsub_retrieve_items(),
         Feature::new("http://jabber.org/protocol/pubsub#subscribe"),
         Feature::new("http://jabber.org/protocol/pubsub#create-nodes"),
-        Feature::new("http://jabber.org/protocol/pubsub#delete-nodes"),
         Feature::new("http://jabber.org/protocol/pubsub#config-node"),
         Feature::new("http://jabber.org/protocol/pubsub#meta-data"),
-        Feature::new("http://jabber.org/protocol/pubsub#delete-items"),
         Feature::new("http://jabber.org/protocol/pubsub#retract-items"),
         Feature::new("http://jabber.org/protocol/pubsub#multi-items"),
         Feature::new("http://jabber.org/protocol/pubsub#item-ids"),
-        Feature::new("http://jabber.org/protocol/pubsub#manage-subscriptions"),
     ]
 }
 

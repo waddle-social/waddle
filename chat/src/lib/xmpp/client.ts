@@ -1739,10 +1739,11 @@ export class BrowserXmppClient {
           this.hatsHandler?.({ ...this.roomHats });
           this.roomPresence[nick] = parsePresenceShow(pres.show);
           this.presenceHandler?.({ ...this.roomPresence });
-          const item = (ext(pres).muc as { item?: { jid?: string } } | undefined)?.item;
-          if (item?.jid) {
-            this.roomMemberJids[nick] = barePeerJid(item.jid);
-            this.memberJidHandler?.(nick, barePeerJid(item.jid));
+          const muc = ext(pres).muc as { jid?: string } | undefined;
+          if (muc?.jid) {
+            const bareJid = barePeerJid(String(muc.jid));
+            this.roomMemberJids[nick] = bareJid;
+            this.memberJidHandler?.(nick, bareJid);
           }
         }
         if (room && !nick && typeof pres.vcardAvatar === "string" && pres.vcardAvatar)

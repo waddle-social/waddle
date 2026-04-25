@@ -4,13 +4,16 @@ import { discoverChannels } from "../src/lib/xmpp/discovery";
 
 function makeAgent() {
   const getDiscoItems = mock(async (_jid: string, node?: string) => ({
+    items: node === undefined ? [{ jid: "spaces.example.com", node: "space", name: "Example" }] : [],
+  }));
+  const getItems = mock(async (_jid: string, node: string) => ({
     items:
       node === "space"
         ? [
-            { jid: "general@muc.chat.example.com", name: "General" },
-            { jid: "roadmap@muc.chat.example.com", name: "Roadmap" },
+            { id: "general@muc.chat.example.com", content: { itemType: "urn:xmpp:bookmarks:1", name: "General" } },
+            { id: "roadmap@muc.chat.example.com", content: { itemType: "urn:xmpp:bookmarks:1", name: "Roadmap" } },
           ]
-        : [{ jid: "spaces.example.com", node: "space", name: "Example" }],
+        : [],
   }));
   const getDiscoInfo = mock(async (jid: string) => {
     if (jid === "roadmap@muc.chat.example.com") {
@@ -30,9 +33,11 @@ function makeAgent() {
   return {
     getDiscoItems,
     getDiscoInfo,
+    getItems,
     agent: {
       getDiscoItems,
       getDiscoInfo,
+      getItems,
     } as unknown as Agent,
   };
 }
@@ -52,16 +57,21 @@ describe("forum channel discovery", () => {
     ]);
     expect(xmpp.getDiscoItems.mock.calls).toEqual([
       ["spaces.example.com"],
-      ["spaces.example.com", "space"],
+    ]);
+    expect(xmpp.getItems.mock.calls).toEqual([
+      ["spaces.example.com", "space", { max: 500 }],
     ]);
   });
 
   test("treats muc#roomconfig_forum as forum capability when feature discovery is absent", async () => {
     const getDiscoItems = mock(async (_jid: string, node?: string) => ({
+      items: node === undefined ? [{ jid: "spaces.example.com", node: "space", name: "Example" }] : [],
+    }));
+    const getItems = mock(async (_jid: string, node: string) => ({
       items:
         node === "space"
-          ? [{ jid: "ideas@muc.chat.example.com", name: "Ideas" }]
-          : [{ jid: "spaces.example.com", node: "space", name: "Example" }],
+          ? [{ id: "ideas@muc.chat.example.com", content: { itemType: "urn:xmpp:bookmarks:1", name: "Ideas" } }]
+          : [],
     }));
     const getDiscoInfo = mock(async () => ({
       features: [],
@@ -75,6 +85,7 @@ describe("forum channel discovery", () => {
     const xmpp = {
       getDiscoItems,
       getDiscoInfo,
+      getItems,
     } as unknown as Agent;
 
     const channels = await discoverChannels(xmpp, "alice@example.com/desktop");

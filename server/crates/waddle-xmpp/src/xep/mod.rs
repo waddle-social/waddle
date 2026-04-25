@@ -122,7 +122,7 @@
 //!   mentions with notification decision logic.
 //! - **XEP-0508**: Forums - Forum-style threaded discussions with
 //!   thread-create and thread-reply elements for topic-based MUC.
-//! - **XEP-0503**: Server-side Spaces - Community discovery via pubsub (read-only Phase A).
+//! - **XEP-0503**: Server-side Spaces - Community discovery via pubsub.
 
 pub mod xep0004;
 pub mod xep0012;

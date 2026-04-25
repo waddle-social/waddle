@@ -6,8 +6,21 @@ import type { DiscoveredChannel, DiscoveredSpace, DiscoveredTopology } from "./t
 import { barePeerJid, jidDomain } from "./jid";
 
 const NS_FORUMS_0 = "urn:xmpp:forums:0";
+const NS_BOOKMARKS_1 = "urn:xmpp:bookmarks:1";
 const FIELD_FORUM_MODE = "muc#roomconfig_forum";
 type DiscoveryRole = "owner" | "admin" | "moderator" | "member" | null;
+type PubsubItem = {
+  id?: string;
+  content?: {
+    itemType?: string;
+    name?: string;
+    autojoin?: boolean;
+    autoJoin?: boolean;
+  };
+};
+type PubsubAgent = Agent & {
+  getItems(jid: string, node: string, opts?: { max?: number }): Promise<{ items?: PubsubItem[] }>;
+};
 
 function fieldStringValue(field: DataFormField | undefined): string | null {
   if (!field || field.value === undefined) return null;
@@ -82,6 +95,26 @@ function channelFromDiscoItem(
   };
 }
 
+function channelFromSpaceItem(
+  item: PubsubItem,
+  position: number,
+  extra: Partial<DiscoveredChannel> = {},
+): DiscoveredChannel | null {
+  const itemJid = item.id ?? "";
+  const channelId = barePeerJid(itemJid).split("@")[0] ?? "";
+  if (!channelId) return null;
+  const content = item.content;
+  if (content?.itemType && content.itemType !== NS_BOOKMARKS_1) return null;
+  return {
+    id: channelId,
+    name: content?.name ?? channelId,
+    jid: itemJid,
+    channelType: "text",
+    position,
+    ...extra,
+  };
+}
+
 async function hydrateChannelType(
   xmpp: Agent,
   channel: DiscoveredChannel,
@@ -108,9 +141,9 @@ export async function discoverChannels(
 
   if (!spaceNode) return [];
 
-  const response = await xmpp.getDiscoItems(spacesDomain, spaceNode);
+  const response = await (xmpp as PubsubAgent).getItems(spacesDomain, spaceNode, { max: 500 });
   const discovered = (response.items ?? [])
-    .map((item, position) => channelFromDiscoItem(item, position))
+    .map((item, position) => channelFromSpaceItem(item, position))
     .filter((channel): channel is DiscoveredChannel => !!channel);
 
   const hydrated = await Promise.all(discovered.map((channel) => hydrateChannelType(xmpp, channel)));
@@ -173,9 +206,9 @@ export async function discoverTopology(
       });
 
       if (!item.node) continue;
-      const response = await xmpp.getDiscoItems(spacesDomain, item.node);
+      const response = await (xmpp as PubsubAgent).getItems(spacesDomain, item.node, { max: 500 });
       (response.items ?? []).forEach((child, position) => {
-        const channel = channelFromDiscoItem(child, position, {
+        const channel = channelFromSpaceItem(child, position, {
           spaceId,
           standalone: false,
         });

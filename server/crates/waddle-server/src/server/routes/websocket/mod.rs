@@ -3616,10 +3616,16 @@ mod tests {
         let session = create_test_session(state.as_ref(), "alice").await;
 
         let authenticated_session = Some(session);
-        let authenticated_phase = authenticated_phase_for_session(
-            authenticated_session.as_ref().expect("session"),
-            "example.com",
-        );
+        let authenticated_jid: FullJid = format!(
+            "{}@example.com/web",
+            authenticated_session
+                .as_ref()
+                .expect("session")
+                .xmpp_localpart
+        )
+        .parse()
+        .expect("authenticated jid");
+        let authenticated_phase = ready_phase(&authenticated_jid);
         let query = disco_items_iq_frame("spaces-items", "spaces.example.com", None);
 
         let responses = handle_iq(
@@ -3644,7 +3650,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handle_iq_disco_items_spaces_node_lists_channels() {
+    async fn handle_iq_pubsub_items_spaces_node_lists_bookmarked_channels() {
         let state = create_test_websocket_state().await;
         let session = create_test_session(state.as_ref(), "alice").await;
 
@@ -3663,14 +3669,20 @@ mod tests {
         drop(conn);
 
         let authenticated_session = Some(session);
-        let authenticated_phase = authenticated_phase_for_session(
-            authenticated_session.as_ref().expect("session"),
-            "example.com",
-        );
-        let query = disco_items_iq_frame("space-node-items", "spaces.example.com", Some("space"));
+        let authenticated_jid: FullJid = format!(
+            "{}@example.com/web",
+            authenticated_session
+                .as_ref()
+                .expect("session")
+                .xmpp_localpart
+        )
+        .parse()
+        .expect("authenticated jid");
+        let authenticated_phase = ready_phase(&authenticated_jid);
+        let query = r#"<iq xmlns="jabber:client" id="space-node-items" type="get" to="spaces.example.com"><pubsub xmlns="http://jabber.org/protocol/pubsub"><items node="space"/></pubsub></iq>"#;
 
         let responses = handle_iq(
-            &query,
+            query,
             "example.com",
             "muc.example.com",
             state.as_ref(),
@@ -3678,15 +3690,21 @@ mod tests {
             &authenticated_phase,
         )
         .await;
-        let response = responses.first().expect("spaces node disco items response");
+        let response = responses
+            .first()
+            .expect("spaces node pubsub items response");
 
         assert!(
             response.contains("general@muc.example.com"),
-            "expected channel room JID in spaces node disco#items: {response}"
+            "expected channel room JID in spaces node pubsub items: {response}"
+        );
+        assert!(
+            response.contains("conference") && response.contains("urn:xmpp:bookmarks:1"),
+            "expected XEP-0402 conference item in spaces node pubsub items: {response}"
         );
         assert!(
             response.contains("General"),
-            "expected channel name in spaces node disco#items: {response}"
+            "expected channel name in spaces node pubsub items: {response}"
         );
     }
 
@@ -5089,6 +5107,12 @@ mod tests {
         assert_eq!(item.attr("jid"), Some("bob@example.com/phone"));
         assert_eq!(item.attr("affiliation"), Some("member"));
         assert_eq!(item.attr("role"), Some("participant"));
+        assert!(
+            user_x
+                .children()
+                .any(|child| child.name() == "status" && child.attr("code") == Some("100")),
+            "non-anonymous room presence must advertise status 100: {broadcast_xml}"
+        );
     }
 
     #[tokio::test]

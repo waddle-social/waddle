@@ -14,7 +14,9 @@ use waddle_xmpp::{
 };
 use xmpp_parsers::minidom::Element;
 
-use super::super::{element_to_xml, get_or_create_room_actor, get_room_actor, WebSocketState};
+use super::super::{
+    element_to_xml, get_or_create_room_actor, get_room_actor, stanza_to_xml, WebSocketState,
+};
 use crate::auth::Session;
 use crate::db::actor::GetDatabase;
 use crate::db::blocking::DatabaseBlockingStorage;
@@ -850,10 +852,13 @@ pub async fn handle_muc_leave(
                 .clone()
                 .with_resource_str(&outcome.nick)
                 .unwrap_or_else(|_| sender_jid.clone());
-            let mut presence =
-                xmpp_parsers::presence::Presence::new(xmpp_parsers::presence::Type::Unavailable);
-            presence.from = Some(jid::Jid::from(from_jid));
-            presence.to = Some(jid::Jid::from(occupant_jid.clone()));
+            let presence = waddle_xmpp::muc::build_leave_presence(
+                &from_jid,
+                occupant_jid,
+                Affiliation::Member,
+                false,
+                Some(sender_jid),
+            );
             let stanza = Stanza::Presence(presence);
             let _outcome = state
                 .deps
@@ -884,13 +889,19 @@ fn build_muc_join_presence_xml(
         .with_resource_str(nick)
         .unwrap_or_else(|_| to_jid.clone());
 
-    let mut user_payload = Element::builder("x", "http://jabber.org/protocol/muc#user").append(
-        Element::builder("item", "http://jabber.org/protocol/muc#user")
-            .attr("affiliation", affiliation)
-            .attr("role", role)
-            .attr("jid", real_jid.to_string())
-            .build(),
-    );
+    let mut user_payload = Element::builder("x", "http://jabber.org/protocol/muc#user")
+        .append(
+            Element::builder("item", "http://jabber.org/protocol/muc#user")
+                .attr("affiliation", affiliation)
+                .attr("role", role)
+                .attr("jid", real_jid.to_string())
+                .build(),
+        )
+        .append(
+            Element::builder("status", "http://jabber.org/protocol/muc#user")
+                .attr("code", "100")
+                .build(),
+        );
 
     if include_self_status {
         user_payload = user_payload.append(
@@ -981,28 +992,14 @@ fn build_muc_self_unavailable_xml(room_jid: &BareJid, nick: &str, sender_jid: &F
         .with_resource_str(nick)
         .unwrap_or_else(|_| sender_jid.clone());
 
-    element_to_xml(
-        Element::builder("presence", waddle_xmpp::ns::JABBER_CLIENT)
-            .attr("from", from_jid.to_string())
-            .attr("to", sender_jid.to_string())
-            .attr("type", "unavailable")
-            .append(
-                Element::builder("x", "http://jabber.org/protocol/muc#user")
-                    .append(
-                        Element::builder("item", "http://jabber.org/protocol/muc#user")
-                            .attr("affiliation", "member")
-                            .attr("role", "none")
-                            .build(),
-                    )
-                    .append(
-                        Element::builder("status", "http://jabber.org/protocol/muc#user")
-                            .attr("code", "110")
-                            .build(),
-                    )
-                    .build(),
-            )
-            .build(),
-    )
+    let presence = waddle_xmpp::muc::build_leave_presence(
+        &from_jid,
+        sender_jid,
+        Affiliation::Member,
+        true,
+        Some(sender_jid),
+    );
+    stanza_to_xml(&Stanza::Presence(presence))
 }
 
 /// Create a presence stanza for MUC
@@ -1019,22 +1016,14 @@ fn create_presence_stanza(
         .with_resource_str(nick)
         .unwrap_or_else(|_| real_jid.clone());
 
-    let mut presence = xmpp_parsers::presence::Presence::new(xmpp_parsers::presence::Type::None);
-    presence.from = Some(jid::Jid::from(from_jid));
-    presence.to = Some(jid::Jid::from(to_jid.clone()));
-    presence.payloads.push(
-        Element::builder("x", "http://jabber.org/protocol/muc#user")
-            .append(
-                Element::builder("item", "http://jabber.org/protocol/muc#user")
-                    .attr("affiliation", affiliation_str(affiliation))
-                    .attr("role", role_str(role))
-                    .attr("jid", real_jid.to_string())
-                    .build(),
-            )
-            .build(),
-    );
-
-    presence
+    waddle_xmpp::muc::build_occupant_presence(
+        &from_jid,
+        to_jid,
+        affiliation,
+        role,
+        false,
+        Some(real_jid),
+    )
 }
 
 /// Convert Affiliation to string
