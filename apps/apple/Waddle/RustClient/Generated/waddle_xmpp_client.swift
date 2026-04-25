@@ -1731,15 +1731,21 @@ public struct WaddlePresence {
     public var presenceType: String
     public var show: String?
     public var status: String?
+    public var hats: [WaddlePresenceHat]
+    public var mucAffiliation: WaddleMucAffiliation?
+    public var mucRole: WaddleMucRole?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(from: String?, to: String?, presenceType: String, show: String?, status: String?) {
+    public init(from: String?, to: String?, presenceType: String, show: String?, status: String?, hats: [WaddlePresenceHat], mucAffiliation: WaddleMucAffiliation?, mucRole: WaddleMucRole?) {
         self.from = from
         self.to = to
         self.presenceType = presenceType
         self.show = show
         self.status = status
+        self.hats = hats
+        self.mucAffiliation = mucAffiliation
+        self.mucRole = mucRole
     }
 }
 
@@ -1765,6 +1771,15 @@ extension WaddlePresence: Equatable, Hashable {
         if lhs.status != rhs.status {
             return false
         }
+        if lhs.hats != rhs.hats {
+            return false
+        }
+        if lhs.mucAffiliation != rhs.mucAffiliation {
+            return false
+        }
+        if lhs.mucRole != rhs.mucRole {
+            return false
+        }
         return true
     }
 
@@ -1774,6 +1789,9 @@ extension WaddlePresence: Equatable, Hashable {
         hasher.combine(presenceType)
         hasher.combine(show)
         hasher.combine(status)
+        hasher.combine(hats)
+        hasher.combine(mucAffiliation)
+        hasher.combine(mucRole)
     }
 }
 
@@ -1790,7 +1808,10 @@ public struct FfiConverterTypeWaddlePresence: FfiConverterRustBuffer {
                 to: FfiConverterOptionString.read(from: &buf), 
                 presenceType: FfiConverterString.read(from: &buf), 
                 show: FfiConverterOptionString.read(from: &buf), 
-                status: FfiConverterOptionString.read(from: &buf)
+                status: FfiConverterOptionString.read(from: &buf),
+                hats: FfiConverterSequenceTypeWaddlePresenceHat.read(from: &buf),
+                mucAffiliation: FfiConverterOptionTypeWaddleMucAffiliation.read(from: &buf),
+                mucRole: FfiConverterOptionTypeWaddleMucRole.read(from: &buf)
         )
     }
 
@@ -1800,6 +1821,9 @@ public struct FfiConverterTypeWaddlePresence: FfiConverterRustBuffer {
         FfiConverterString.write(value.presenceType, into: &buf)
         FfiConverterOptionString.write(value.show, into: &buf)
         FfiConverterOptionString.write(value.status, into: &buf)
+        FfiConverterSequenceTypeWaddlePresenceHat.write(value.hats, into: &buf)
+        FfiConverterOptionTypeWaddleMucAffiliation.write(value.mucAffiliation, into: &buf)
+        FfiConverterOptionTypeWaddleMucRole.write(value.mucRole, into: &buf)
     }
 }
 
@@ -1816,6 +1840,76 @@ public func FfiConverterTypeWaddlePresence_lift(_ buf: RustBuffer) throws -> Wad
 #endif
 public func FfiConverterTypeWaddlePresence_lower(_ value: WaddlePresence) -> RustBuffer {
     return FfiConverterTypeWaddlePresence.lower(value)
+}
+
+
+public struct WaddlePresenceHat {
+    public var uri: String
+    public var title: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(uri: String, title: String) {
+        self.uri = uri
+        self.title = title
+    }
+}
+
+#if compiler(>=6)
+extension WaddlePresenceHat: Sendable {}
+#endif
+
+
+extension WaddlePresenceHat: Equatable, Hashable {
+    public static func ==(lhs: WaddlePresenceHat, rhs: WaddlePresenceHat) -> Bool {
+        if lhs.uri != rhs.uri {
+            return false
+        }
+        if lhs.title != rhs.title {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(uri)
+        hasher.combine(title)
+    }
+}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddlePresenceHat: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddlePresenceHat {
+        return
+            try WaddlePresenceHat(
+                uri: FfiConverterString.read(from: &buf),
+                title: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddlePresenceHat, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.uri, into: &buf)
+        FfiConverterString.write(value.title, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddlePresenceHat_lift(_ buf: RustBuffer) throws -> WaddlePresenceHat {
+    return try FfiConverterTypeWaddlePresenceHat.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddlePresenceHat_lower(_ value: WaddlePresenceHat) -> RustBuffer {
+    return FfiConverterTypeWaddlePresenceHat.lower(value)
 }
 
 
@@ -2420,6 +2514,181 @@ public func FfiConverterTypeWaddleUploadSlot_lower(_ value: WaddleUploadSlot) ->
     return FfiConverterTypeWaddleUploadSlot.lower(value)
 }
 
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum WaddleMucAffiliation {
+
+    case owner
+    case admin
+    case member
+    case outcast
+    case none
+}
+
+
+#if compiler(>=6)
+extension WaddleMucAffiliation: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleMucAffiliation: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleMucAffiliation
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleMucAffiliation {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .owner
+
+        case 2: return .admin
+
+        case 3: return .member
+
+        case 4: return .outcast
+
+        case 5: return .none
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WaddleMucAffiliation, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .owner:
+            writeInt(&buf, Int32(1))
+
+
+        case .admin:
+            writeInt(&buf, Int32(2))
+
+
+        case .member:
+            writeInt(&buf, Int32(3))
+
+
+        case .outcast:
+            writeInt(&buf, Int32(4))
+
+
+        case .none:
+            writeInt(&buf, Int32(5))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleMucAffiliation_lift(_ buf: RustBuffer) throws -> WaddleMucAffiliation {
+    return try FfiConverterTypeWaddleMucAffiliation.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleMucAffiliation_lower(_ value: WaddleMucAffiliation) -> RustBuffer {
+    return FfiConverterTypeWaddleMucAffiliation.lower(value)
+}
+
+
+extension WaddleMucAffiliation: Equatable, Hashable {}
+
+
+
+
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum WaddleMucRole {
+
+    case moderator
+    case participant
+    case visitor
+    case none
+}
+
+
+#if compiler(>=6)
+extension WaddleMucRole: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleMucRole: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleMucRole
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleMucRole {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .moderator
+
+        case 2: return .participant
+
+        case 3: return .visitor
+
+        case 4: return .none
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WaddleMucRole, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .moderator:
+            writeInt(&buf, Int32(1))
+
+
+        case .participant:
+            writeInt(&buf, Int32(2))
+
+
+        case .visitor:
+            writeInt(&buf, Int32(3))
+
+
+        case .none:
+            writeInt(&buf, Int32(4))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleMucRole_lift(_ buf: RustBuffer) throws -> WaddleMucRole {
+    return try FfiConverterTypeWaddleMucRole.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleMucRole_lower(_ value: WaddleMucRole) -> RustBuffer {
+    return FfiConverterTypeWaddleMucRole.lower(value)
+}
+
+
+extension WaddleMucRole: Equatable, Hashable {}
+
+
+
+
+
+
 
 
 
@@ -2881,6 +3150,54 @@ fileprivate struct FfiConverterOptionTypeWaddleUploadSlot: FfiConverterRustBuffe
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeWaddleMucAffiliation: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleMucAffiliation?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeWaddleMucAffiliation.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeWaddleMucAffiliation.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeWaddleMucRole: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleMucRole?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeWaddleMucRole.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeWaddleMucRole.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceString: FfiConverterRustBuffer {
     typealias SwiftType = [String]
 
@@ -2923,6 +3240,31 @@ fileprivate struct FfiConverterSequenceTypeWaddleArchivedMessage: FfiConverterRu
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeWaddleArchivedMessage.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeWaddlePresenceHat: FfiConverterRustBuffer {
+    typealias SwiftType = [WaddlePresenceHat]
+
+    public static func write(_ value: [WaddlePresenceHat], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeWaddlePresenceHat.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [WaddlePresenceHat] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [WaddlePresenceHat]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeWaddlePresenceHat.read(from: &buf))
         }
         return seq
     }

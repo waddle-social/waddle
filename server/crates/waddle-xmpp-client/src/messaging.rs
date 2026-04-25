@@ -30,6 +30,7 @@ const NS_FILE_METADATA: &str = "urn:xmpp:file:metadata:0";
 const NS_URL_DATA: &str = "http://jabber.org/protocol/url-data";
 const NS_CLIENT: &str = "jabber:client";
 const NS_MUC: &str = "http://jabber.org/protocol/muc";
+const NS_MUC_USER: &str = "http://jabber.org/protocol/muc#user";
 const NS_STICKERS: &str = "urn:xmpp:stickers:0";
 
 // ─── Inbound types ────────────────────────────────────────────────────────
@@ -140,6 +141,67 @@ pub struct PresenceHat {
     pub title: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MucAffiliation {
+    Owner,
+    Admin,
+    Member,
+    Outcast,
+    None,
+}
+
+impl MucAffiliation {
+    pub fn from_attr(value: &str) -> Option<Self> {
+        match value {
+            "owner" => Some(Self::Owner),
+            "admin" => Some(Self::Admin),
+            "member" => Some(Self::Member),
+            "outcast" => Some(Self::Outcast),
+            "none" => Some(Self::None),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Owner => "owner",
+            Self::Admin => "admin",
+            Self::Member => "member",
+            Self::Outcast => "outcast",
+            Self::None => "none",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MucRole {
+    Moderator,
+    Participant,
+    Visitor,
+    None,
+}
+
+impl MucRole {
+    pub fn from_attr(value: &str) -> Option<Self> {
+        match value {
+            "moderator" => Some(Self::Moderator),
+            "participant" => Some(Self::Participant),
+            "visitor" => Some(Self::Visitor),
+            "none" => Some(Self::None),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Moderator => "moderator",
+            Self::Participant => "participant",
+            Self::Visitor => "visitor",
+            Self::None => "none",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct InboundPresence {
     pub from: Option<String>,
@@ -148,6 +210,8 @@ pub struct InboundPresence {
     pub status: Option<String>,
     pub show: Option<String>,
     pub hats: Vec<PresenceHat>,
+    pub muc_affiliation: Option<MucAffiliation>,
+    pub muc_role: Option<MucRole>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -539,6 +603,15 @@ fn parse_presence(el: &Element) -> InboundPresence {
                 .collect()
         })
         .unwrap_or_default();
+    let muc_item = el
+        .get_child("x", NS_MUC_USER)
+        .and_then(|x| x.get_child("item", NS_MUC_USER));
+    let muc_affiliation = muc_item
+        .and_then(|item| item.attr("affiliation"))
+        .and_then(MucAffiliation::from_attr);
+    let muc_role = muc_item
+        .and_then(|item| item.attr("role"))
+        .and_then(MucRole::from_attr);
 
     InboundPresence {
         from,
@@ -547,6 +620,8 @@ fn parse_presence(el: &Element) -> InboundPresence {
         status,
         show,
         hats,
+        muc_affiliation,
+        muc_role,
     }
 }
 
@@ -1006,6 +1081,22 @@ mod tests {
         assert_eq!(p.hats[0].uri, "urn:example:hats:admin");
         assert_eq!(p.hats[0].title, "Administrator");
         assert_eq!(p.hats[1].title, "Moderator");
+    }
+
+    #[test]
+    fn parse_presence_with_muc_affiliation_and_role() {
+        let e = el(
+            "<presence xmlns='jabber:client' from='room@muc.example/alice'>\
+             <x xmlns='http://jabber.org/protocol/muc#user'>\
+             <item affiliation='owner' role='moderator'/>\
+             </x>\
+             </presence>",
+        );
+        let MessagingEvent::Presence(p) = parse(&e).unwrap() else {
+            panic!("expected Presence");
+        };
+        assert_eq!(p.muc_affiliation, Some(MucAffiliation::Owner));
+        assert_eq!(p.muc_role, Some(MucRole::Moderator));
     }
 
     #[test]

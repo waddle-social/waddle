@@ -298,7 +298,9 @@ private final class _EventListener: WaddleEventListener {
             type: presence.presenceType,
             status: presence.status,
             show: presence.show,
-            hats: []
+            hats: presence.hats.map { XMPPPresenceHat(uri: $0.uri, title: $0.title) },
+            mucAffiliation: presence.mucAffiliation.map(makeMucAffiliation),
+            mucRole: presence.mucRole.map(makeMucRole)
         )
         continuation.yield(.presence(event))
     }
@@ -317,6 +319,25 @@ private final class _EventListener: WaddleEventListener {
 private func makeFallbackRange(_ start: UInt32?, _ end: UInt32?) -> Range<Int>? {
     guard let start, let end, end > start else { return nil }
     return Int(start)..<Int(end)
+}
+
+private func makeMucAffiliation(_ affiliation: WaddleMucAffiliation) -> XMPPMucAffiliation {
+    switch affiliation {
+    case .owner: return .owner
+    case .admin: return .admin
+    case .member: return .member
+    case .outcast: return .outcast
+    case .none: return .none
+    }
+}
+
+private func makeMucRole(_ role: WaddleMucRole) -> XMPPMucRole {
+    switch role {
+    case .moderator: return .moderator
+    case .participant: return .participant
+    case .visitor: return .visitor
+    case .none: return .none
+    }
 }
 
 private func parseRFC3339(_ string: String) -> Date? {

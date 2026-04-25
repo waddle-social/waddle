@@ -166,6 +166,21 @@ struct XMPPPresenceHat: Sendable, Equatable, Hashable {
     let title: String
 }
 
+enum XMPPMucAffiliation: Sendable, Equatable, Hashable {
+    case owner
+    case admin
+    case member
+    case outcast
+    case none
+}
+
+enum XMPPMucRole: Sendable, Equatable, Hashable {
+    case moderator
+    case participant
+    case visitor
+    case none
+}
+
 struct XMPPPresenceEvent: Sendable, Equatable {
     let from: String?
     let to: String?
@@ -173,6 +188,8 @@ struct XMPPPresenceEvent: Sendable, Equatable {
     let status: String?
     let show: String?
     let hats: [XMPPPresenceHat]
+    let mucAffiliation: XMPPMucAffiliation?
+    let mucRole: XMPPMucRole?
 }
 
 // MARK: - XEP-0430 Inbox

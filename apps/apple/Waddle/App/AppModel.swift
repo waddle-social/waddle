@@ -1739,10 +1739,12 @@ final class AppModel: ObservableObject {
         }
         presenceByRoomJID[roomJID] = roomPresence
 
-        if !event.hats.isEmpty {
+        let eventHats = mergedPresenceHats(from: event)
+        if !eventHats.isEmpty {
             var roomHats = hatsByRoomJID[roomJID] ?? [:]
-            roomHats[nick] = event.hats
+            roomHats[nick] = eventHats
             hatsByRoomJID[roomJID] = roomHats
+            refreshHatTitles(in: roomJID, for: nick)
         }
 
         dlog("presence: room=\(roomJID) nick=\(nick) type=\(event.type ?? "nil") sessionUser=\(session?.username ?? "nil") match=\(session?.username == nick)")
@@ -1772,6 +1774,36 @@ final class AppModel: ObservableObject {
 
         if roomJID == currentRoomJID {
             syncChatMembers()
+            syncChatMessages()
+        }
+    }
+
+    private func mergedPresenceHats(from event: XMPPPresenceEvent) -> [XMPPPresenceHat] {
+        var hats: [XMPPPresenceHat] = []
+        if event.mucAffiliation == .owner {
+            hats.append(XMPPPresenceHat(uri: "urn:xmpp:hats:owner", title: "Owner"))
+        } else if event.mucAffiliation == .admin {
+            hats.append(XMPPPresenceHat(uri: "urn:xmpp:hats:admin", title: "Admin"))
+        }
+        if event.mucRole == .moderator {
+            hats.append(XMPPPresenceHat(uri: "urn:xmpp:hats:moderator", title: "Moderator"))
+        }
+        for hat in event.hats where !hats.contains(where: { $0.uri == hat.uri }) {
+            hats.append(hat)
+        }
+        return hats
+    }
+
+    private func refreshHatTitles(in roomJID: String, for nick: String) {
+        guard let titles = hatsByRoomJID[roomJID]?[nick]?.map(\.title) else { return }
+        guard var messages = messagesByRoomJID[roomJID] else { return }
+        var changed = false
+        for index in messages.indices where messages[index].senderDisplayName == nick {
+            messages[index].hatTitles = titles
+            changed = true
+        }
+        if changed {
+            messagesByRoomJID[roomJID] = messages
         }
     }
 

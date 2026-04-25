@@ -44,6 +44,7 @@ import {
 import * as inboxApi from "./inbox";
 import * as pep from "./pep-publications";
 import { ReconnectCatchup } from "./reconnect-catchup";
+import { mergeOccupantHats, roleHatsForOccupant } from "./occupant-badges";
 
 // Cap MAM catch-up per conversation so a long offline period can't drown the
 // client. In practice, web clients reconnect within minutes; 200 is generous.
@@ -105,6 +106,14 @@ function parsePresenceHats(value: unknown): WaddleHat[] {
     .map((hat) => hat as Partial<WaddleHat>)
     .map((hat) => ({ title: hat.title ?? "", uri: hat.uri ?? "" }))
     .filter((hat) => hat.title && hat.uri);
+}
+
+function parseMucInfo(pres: ReceivedMUCPresence): { affiliation?: string; role?: string } {
+  const muc = ext(pres).muc as { affiliation?: string; role?: string } | undefined;
+  return {
+    affiliation: typeof muc?.affiliation === "string" ? muc.affiliation : undefined,
+    role: typeof muc?.role === "string" ? muc.role : undefined,
+  };
 }
 
 const OPTIONAL_XMPP_FEATURE_ERROR_CONDITIONS = new Set([
@@ -1803,7 +1812,11 @@ export class BrowserXmppClient {
       try {
         const [room, nick] = (pres.from ?? "").split("/");
         if (room === this.currentRoom && nick) {
-          this.roomHats[nick] = parsePresenceHats(ext(pres).hats ?? ext(pres).hat);
+          const mucInfo = parseMucInfo(pres);
+          this.roomHats[nick] = mergeOccupantHats(
+            roleHatsForOccupant(mucInfo.affiliation, mucInfo.role),
+            parsePresenceHats(ext(pres).hats ?? ext(pres).hat),
+          );
           this.hatsHandler?.({ ...this.roomHats });
           this.roomPresence[nick] = parsePresenceShow(pres.show);
           this.presenceHandler?.({ ...this.roomPresence });
@@ -1825,7 +1838,8 @@ export class BrowserXmppClient {
       try {
         const [room, nick] = (pres.from ?? "").split("/");
         if (room === this.currentRoom && nick) {
-          delete this.roomHats[nick];
+          const currentHats = this.roomHats[nick] ?? [];
+          if (currentHats.length === 0) delete this.roomHats[nick];
           this.hatsHandler?.({ ...this.roomHats });
           this.roomPresence[nick] = "offline";
           this.presenceHandler?.({ ...this.roomPresence });

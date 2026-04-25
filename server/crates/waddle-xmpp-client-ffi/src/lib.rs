@@ -91,12 +91,38 @@ pub struct WaddleMamPage {
 }
 
 #[derive(uniffi::Record, Clone)]
+pub struct WaddlePresenceHat {
+    pub uri: String,
+    pub title: String,
+}
+
+#[derive(uniffi::Enum, Clone)]
+pub enum WaddleMucAffiliation {
+    Owner,
+    Admin,
+    Member,
+    Outcast,
+    None,
+}
+
+#[derive(uniffi::Enum, Clone)]
+pub enum WaddleMucRole {
+    Moderator,
+    Participant,
+    Visitor,
+    None,
+}
+
+#[derive(uniffi::Record, Clone)]
 pub struct WaddlePresence {
     pub from: Option<String>,
     pub to: Option<String>,
     pub presence_type: String,
     pub show: Option<String>,
     pub status: Option<String>,
+    pub hats: Vec<WaddlePresenceHat>,
+    pub muc_affiliation: Option<WaddleMucAffiliation>,
+    pub muc_role: Option<WaddleMucRole>,
 }
 
 #[derive(uniffi::Record, Clone)]
@@ -658,6 +684,9 @@ fn dispatch_event(event: ClientEvent, listener: &dyn WaddleEventListener) {
                     .unwrap_or_else(|| "available".to_string()),
                 show: pres.show,
                 status: pres.status,
+                hats: pres.hats.into_iter().map(presence_hat_to_ffi).collect(),
+                muc_affiliation: pres.muc_affiliation.map(muc_affiliation_to_ffi),
+                muc_role: pres.muc_role.map(muc_role_to_ffi),
             });
         }
         ClientEvent::MamResult(archived) => {
@@ -704,6 +733,36 @@ fn upload_slot_to_ffi(slot: waddle_xmpp_client::discovery::UploadSlot) -> Waddle
             .into_iter()
             .map(|(name, value)| WaddleUploadHeader { name, value })
             .collect(),
+    }
+}
+
+fn presence_hat_to_ffi(hat: waddle_xmpp_client::messaging::PresenceHat) -> WaddlePresenceHat {
+    WaddlePresenceHat {
+        uri: hat.uri,
+        title: hat.title,
+    }
+}
+
+fn muc_affiliation_to_ffi(
+    affiliation: waddle_xmpp_client::messaging::MucAffiliation,
+) -> WaddleMucAffiliation {
+    use waddle_xmpp_client::messaging::MucAffiliation;
+    match affiliation {
+        MucAffiliation::Owner => WaddleMucAffiliation::Owner,
+        MucAffiliation::Admin => WaddleMucAffiliation::Admin,
+        MucAffiliation::Member => WaddleMucAffiliation::Member,
+        MucAffiliation::Outcast => WaddleMucAffiliation::Outcast,
+        MucAffiliation::None => WaddleMucAffiliation::None,
+    }
+}
+
+fn muc_role_to_ffi(role: waddle_xmpp_client::messaging::MucRole) -> WaddleMucRole {
+    use waddle_xmpp_client::messaging::MucRole;
+    match role {
+        MucRole::Moderator => WaddleMucRole::Moderator,
+        MucRole::Participant => WaddleMucRole::Participant,
+        MucRole::Visitor => WaddleMucRole::Visitor,
+        MucRole::None => WaddleMucRole::None,
     }
 }
 

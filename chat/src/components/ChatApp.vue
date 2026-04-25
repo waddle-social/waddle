@@ -13,6 +13,7 @@ import { useChannelUnread } from "@/composables/useChannelUnread";
 import { useVersion } from "@/composables/useVersion";
 import { buildDmPath, buildPath, buildSettingsPath, parseRoute, pushDmRoute, pushRoute, pushSettingsRoute, resolveChannel } from "@/composables/useRouting";
 import { barePeerJid, jidDomain, parseManagedRoomBareJid, roomBareJidFor } from "@/lib/xmpp-client";
+import { mergeRoomHats, roomHatsFromMembers } from "@/lib/xmpp/occupant-badges";
 import { connectionStore } from "@/lib/connection-store";
 import LandingState from "@/components/chat/LandingState.vue";
 import LoginScreen from "@/components/chat/LoginScreen.vue";
@@ -241,6 +242,9 @@ const membersWithAvatars = computed<MemberSummary[]>(() =>
     ...member,
     avatar_url: fetchedAvatarUrlByJid.value[member.jid] ?? member.avatar_url,
   })),
+);
+const authorHatsByNick = computed(() =>
+  mergeRoomHats(roomHatsFromMembers(waddles.members.value), messaging.roomHats.value),
 );
 
 watch(
@@ -1150,7 +1154,7 @@ onUnmounted(() => {
                :author-jid-by-nick="authorJidByNick"
               :tenor-api-key="tenorApiKey"
                :mention-candidates="mentionCandidates"
-              :room-hats="messaging.roomHats.value"
+              :room-hats="authorHatsByNick"
               :room-presence="messaging.roomPresence.value"
               :room-last-seen="messaging.roomLastSeen.value"
               :slow-mode-cooldown="messaging.slowModeCooldown.value"
@@ -1218,7 +1222,7 @@ onUnmounted(() => {
               :current-user="connectionStore.session?.username"
               :avatar-url-by-author="avatarUrlByAuthor"
                :author-jid-by-nick="authorJidByNick"
-              :room-hats="messaging.roomHats.value"
+              :room-hats="authorHatsByNick"
               :room-presence="messaging.roomPresence.value"
               :room-last-seen="messaging.roomLastSeen.value"
               :tenor-api-key="tenorApiKey"
@@ -1251,7 +1255,7 @@ onUnmounted(() => {
               :current-user="connectionStore.session?.username"
               :avatar-url-by-author="avatarUrlByAuthor"
                :author-jid-by-nick="authorJidByNick"
-              :room-hats="messaging.roomHats.value"
+              :room-hats="authorHatsByNick"
               :room-presence="messaging.roomPresence.value"
               :room-last-seen="messaging.roomLastSeen.value"
               :tenor-api-key="tenorApiKey"
