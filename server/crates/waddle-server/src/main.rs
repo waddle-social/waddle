@@ -9,6 +9,7 @@ mod db;
 mod inbox;
 mod messages;
 mod permissions;
+mod pubsub;
 mod server;
 pub(crate) mod storage;
 mod telemetry;

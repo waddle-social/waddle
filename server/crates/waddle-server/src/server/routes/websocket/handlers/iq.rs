@@ -1248,6 +1248,23 @@ pub async fn handle_iq_with_conn_state(
                             .await
                         {
                             Ok((_, true)) => {
+                                if let Err(error) = state
+                                    .deps
+                                    .protocol
+                                    .pubsub_storage
+                                    .update_node_config(
+                                        &spaces_jid,
+                                        &node,
+                                        &waddle_xmpp::pubsub::NodeConfig::spaces_public(),
+                                    )
+                                    .await
+                                {
+                                    warn!(node = %node, error = %error, "Failed to configure Spaces node");
+                                    return vec![iq_to_xml(build_pubsub_error(
+                                        &iq,
+                                        PubSubError::Forbidden,
+                                    ))];
+                                }
                                 if let Err(error) = write_space_owner_tuple(
                                     state,
                                     &node,
