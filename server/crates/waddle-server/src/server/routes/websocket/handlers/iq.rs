@@ -3108,9 +3108,7 @@ async fn handle_spaces_publish(
         .await
     {
         Ok(result) => {
-            if let Err(error) =
-                write_channel_parent_tuple(state, &channel_id, node).await
-            {
+            if let Err(error) = write_channel_parent_tuple(state, &channel_id, node).await {
                 warn!(
                     channel_id = %channel_id,
                     node,
