@@ -184,8 +184,14 @@ pub async fn handle_muc_join(
     // presence self-heals via the next MUC presence/probe round-trip.
     if !join_outcome.is_same_bare_multi_session_join {
         for existing in &join_outcome.existing_occupants {
-            let presence_stanza =
-                create_presence_stanza(room_jid, nick, sender_jid, &existing.jid, false);
+            let presence_stanza = create_presence_stanza(
+                room_jid,
+                nick,
+                sender_jid,
+                &existing.jid,
+                join_outcome.new_occupant_affiliation,
+                join_outcome.new_occupant_role,
+            );
             let stanza = Stanza::Presence(presence_stanza);
             let _outcome = state
                 .deps
@@ -391,7 +397,8 @@ fn create_presence_stanza(
     nick: &str,
     real_jid: &FullJid,
     to_jid: &FullJid,
-    _is_self: bool,
+    affiliation: Affiliation,
+    role: Role,
 ) -> xmpp_parsers::presence::Presence {
     let from_jid = room_jid
         .clone()
@@ -401,9 +408,17 @@ fn create_presence_stanza(
     let mut presence = xmpp_parsers::presence::Presence::new(xmpp_parsers::presence::Type::None);
     presence.from = Some(jid::Jid::from(from_jid));
     presence.to = Some(jid::Jid::from(to_jid.clone()));
-
-    // In a full implementation, we'd add the MUC user extension here
-    // For now, the XML generation handles it
+    presence.payloads.push(
+        Element::builder("x", "http://jabber.org/protocol/muc#user")
+            .append(
+                Element::builder("item", "http://jabber.org/protocol/muc#user")
+                    .attr("affiliation", affiliation_str(affiliation))
+                    .attr("role", role_str(role))
+                    .attr("jid", real_jid.to_string())
+                    .build(),
+            )
+            .build(),
+    );
 
     presence
 }

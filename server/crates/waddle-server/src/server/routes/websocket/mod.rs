@@ -5038,6 +5038,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn muc_join_broadcast_includes_real_occupant_jid() {
+        let state = create_test_websocket_state().await;
+        let room_jid: BareJid = "public-channel@muc.example.com".parse().expect("room");
+        let alice: FullJid = "alice@example.com/web".parse().expect("alice");
+        let bob: FullJid = "bob@example.com/phone".parse().expect("bob");
+
+        let (alice_tx, mut alice_rx) = mpsc::channel::<OutboundStanza>(4);
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .register(alice.clone(), alice_tx);
+
+        let _ = handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room_jid,
+            &alice,
+            "alice",
+            &None,
+        )
+        .await;
+        let _ = handle_muc_join(state.as_ref(), "example.com", &room_jid, &bob, "bob", &None).await;
+
+        let broadcast = alice_rx.try_recv().expect("bob join broadcast to alice");
+        let broadcast_xml = stanza_to_xml(&broadcast.stanza);
+        let presence = Element::from_str(&broadcast_xml).expect("broadcast presence XML");
+        let user_x = presence
+            .get_child("x", "http://jabber.org/protocol/muc#user")
+            .expect("muc user payload");
+        let item = user_x
+            .get_child("item", "http://jabber.org/protocol/muc#user")
+            .expect("muc user item");
+
+        let expected_from = format!("{room_jid}/bob");
+        let expected_to = alice.to_string();
+        assert_eq!(presence.attr("from"), Some(expected_from.as_str()));
+        assert_eq!(presence.attr("to"), Some(expected_to.as_str()));
+        assert_eq!(item.attr("jid"), Some("bob@example.com/phone"));
+        assert_eq!(item.attr("affiliation"), Some("member"));
+        assert_eq!(item.attr("role"), Some("participant"));
+    }
+
+    #[tokio::test]
     async fn muc_nick_collision_returns_conflict_presence() {
         // Two different users try to hold the same nick — second gets a
         // <presence type='error'/> with <conflict/>, and room state for
