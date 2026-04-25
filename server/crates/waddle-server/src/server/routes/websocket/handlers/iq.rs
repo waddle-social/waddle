@@ -67,8 +67,8 @@ use crate::db::actor::{DbExecute, DbQuery, DbQueryOne, GetDatabase};
 use crate::db::blocking::DatabaseBlockingStorage;
 use crate::db::{row_value, Database, Value, ValueExt};
 use crate::permissions::{
-    CheckPermission, Object, ObjectType, Permission, PermissionError, Relation, Subject, Tuple,
-    WriteTuple,
+    CheckPermission, Object, ObjectType, Permission, PermissionError, Relation, Subject,
+    SubjectType, Tuple, WriteTuple,
 };
 use crate::server::bootstrap_membership::DEPLOYMENT_SERVER_ID;
 use crate::server::xmpp_state::{get_xmpp_channel, list_xmpp_channels, XmppChannelRecord};
@@ -2869,6 +2869,26 @@ async fn write_space_owner_tuple(
     .await
 }
 
+/// Write `channel:<channel_id>#parent → space:<space_node>#` so that all members
+/// of the Space gain access to the channel via the permission arrow.
+/// Per XEP-0503 §4, a room bookmarked inside a Space node is considered part of
+/// that Space; this tuple propagates Space membership into channel access checks.
+async fn write_channel_parent_tuple(
+    state: &WebSocketState,
+    channel_id: &str,
+    space_node: &str,
+) -> Result<(), String> {
+    write_tuple_if_absent(
+        state,
+        Tuple::new(
+            Object::new(ObjectType::Channel, channel_id),
+            Relation::new("parent"),
+            Subject::userset(SubjectType::Space, space_node, ""),
+        ),
+    )
+    .await
+}
+
 async fn muc_owner_authorized(
     state: &WebSocketState,
     room_jid: &BareJid,
@@ -3073,7 +3093,10 @@ async fn handle_spaces_publish(
         Ok(None) => return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::ItemNotFound))],
         Err(error) => {
             warn!(channel_id = %channel_id, error = %error, "Failed to look up channel for Spaces bookmark");
-            return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::ItemNotFound))];
+            return vec![iq_to_xml(build_pubsub_error(
+                iq,
+                PubSubError::InternalServerError,
+            ))];
         }
     }
 
@@ -3084,14 +3107,33 @@ async fn handle_spaces_publish(
         .publish_item(&spaces_jid, node, &item, None, false)
         .await
     {
-        Ok(result) => vec![iq_to_xml(build_pubsub_publish_result(
-            iq,
-            node,
-            &result.item_id,
-        ))],
+        Ok(result) => {
+            if let Err(error) =
+                write_channel_parent_tuple(state, &channel_id, node).await
+            {
+                warn!(
+                    channel_id = %channel_id,
+                    node,
+                    error = %error,
+                    "Published Spaces item but failed to sync channel parent tuple"
+                );
+                return vec![iq_to_xml(build_pubsub_error(
+                    iq,
+                    PubSubError::InternalServerError,
+                ))];
+            }
+            vec![iq_to_xml(build_pubsub_publish_result(
+                iq,
+                node,
+                &result.item_id,
+            ))]
+        }
         Err(error) => {
             warn!(item_id, node, error = %error, "Failed to publish Spaces item");
-            vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))]
+            vec![iq_to_xml(build_pubsub_error(
+                iq,
+                PubSubError::InternalServerError,
+            ))]
         }
     }
 }
@@ -3134,7 +3176,10 @@ async fn handle_spaces_retract(
         Ok(false) => vec![iq_to_xml(build_pubsub_error(iq, PubSubError::ItemNotFound))],
         Err(error) => {
             warn!(item_id, node, error = %error, "Failed to retract Spaces item");
-            vec![iq_to_xml(build_pubsub_error(iq, PubSubError::NodeNotFound))]
+            vec![iq_to_xml(build_pubsub_error(
+                iq,
+                PubSubError::InternalServerError,
+            ))]
         }
     }
 }
@@ -3189,7 +3234,7 @@ async fn apply_muc_owner_config(
     state: &WebSocketState,
     room_jid: &BareJid,
     iq: &xmpp_parsers::iq::Iq,
-    _session: Option<&Session>,
+    session: Option<&Session>,
 ) -> Result<(), String> {
     let room_actor = get_room_actor(state, room_jid)
         .await
@@ -3264,6 +3309,21 @@ async fn apply_muc_owner_config(
         })
         .await
         .map_err(|error| format!("channel upsert failed: {error}"))?;
+
+    // Write channel#owner → session user so the creator can always rejoin the
+    // managed room after a server restart (before a Space bookmark is published).
+    if let Some(session) = session {
+        write_tuple_if_absent(
+            state,
+            Tuple::new(
+                Object::new(ObjectType::Channel, &channel_id),
+                Relation::new("owner"),
+                Subject::user(&session.user_id),
+            ),
+        )
+        .await
+        .map_err(|error| format!("channel owner tuple failed: {error}"))?;
+    }
 
     Ok(())
 }

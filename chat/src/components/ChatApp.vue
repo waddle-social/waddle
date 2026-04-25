@@ -651,20 +651,20 @@ async function handleLogout() {
   await connectionStore.logout();
 }
 
-async function selectSpace(preferredChannelId?: string | null) {
+async function selectSpace(preferredId?: string | null) {
   ui.activePage.value = "chat";
   ui.sidebarMode.value = "channels";
   dmConversations.closeDm();
-  if (preferredChannelId && waddles.waddles.value.some((space) => space.id === preferredChannelId)) {
-    const channelId = waddles.selectDiscoveredSpace(preferredChannelId);
+  if (preferredId && waddles.waddles.value.some((space) => space.id === preferredId)) {
+    const channelId = waddles.selectDiscoveredSpace(preferredId);
     if (channelId) {
       messaging.clearMessages();
-      await messaging.loadMessages(preferredChannelId, channelId);
+      await messaging.loadMessages(preferredId, channelId);
     }
     ui.showMobileNav.value = false;
     return;
   }
-  const channelId = await waddles.loadStructure(preferredChannelId);
+  const channelId = await waddles.loadStructure(preferredId);
   if (channelId && waddles.activeSpaceId.value) {
     messaging.clearMessages();
     await messaging.loadMessages(waddles.activeSpaceId.value, channelId);

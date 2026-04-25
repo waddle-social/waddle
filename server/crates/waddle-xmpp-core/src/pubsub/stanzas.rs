@@ -116,6 +116,9 @@ pub enum PubSubError {
     InvalidJid,
     PreconditionNotMet,
     NotSubscribed,
+    /// An unexpected backend/storage failure unrelated to the requested resource.
+    /// Maps to XEP-0060 §8.1.3 `<internal-server-error/>` (error type: wait).
+    InternalServerError,
 }
 
 /// Check if an IQ is a PubSub request.
@@ -345,6 +348,9 @@ pub fn build_pubsub_error(original_iq: &Iq, error: PubSubError) -> Iq {
         }
         PubSubError::InvalidJid => (ErrorType::Modify, DefinedCondition::BadRequest),
         PubSubError::NotSubscribed => (ErrorType::Cancel, DefinedCondition::UnexpectedRequest),
+        PubSubError::InternalServerError => {
+            (ErrorType::Wait, DefinedCondition::InternalServerError)
+        }
     };
 
     let stanza_error = StanzaError::new(error_type, defined_condition, "en", "");

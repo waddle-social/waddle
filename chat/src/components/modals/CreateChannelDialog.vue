@@ -64,7 +64,7 @@ function selectIntent(intent: CreateIntent) {
       emit("update:form", { intent: "muc", name: "", description: "", muc_type: "text" } satisfies CreateMucFormData);
       break;
     case "space-muc":
-      emit("update:form", { intent: "space-muc", space_jid: "", name: "", description: "", muc_type: "text" } satisfies CreateSpaceMucFormData);
+      emit("update:form", { intent: "space-muc", space_node: "", name: "", description: "", muc_type: "text" } satisfies CreateSpaceMucFormData);
       break;
     case "space-with-muc":
       emit("update:form", { intent: "space-with-muc", space_name: "", space_description: "", muc_name: "", muc_description: "", muc_type: "text" } satisfies CreateSpaceWithMucFormData);
@@ -98,7 +98,7 @@ const isSubmitDisabled = computed(() => {
   const f = props.form;
   if (f.intent === "space") return !f.name.trim();
   if (f.intent === "muc") return !f.name.trim();
-  if (f.intent === "space-muc") return !f.space_jid.trim() || !f.name.trim();
+  if (f.intent === "space-muc") return !f.space_node.trim() || !f.name.trim();
   if (f.intent === "space-with-muc") return !f.space_name.trim() || !f.muc_name.trim();
   return true;
 });
@@ -207,9 +207,9 @@ const dialogTitle = computed(() => {
           <template v-if="spaces && spaces.length > 0">
             <select
               id="create-spacemuc-space"
-              :value="form.space_jid"
+              :value="form.space_node"
               class="chat-field-control type-field"
-              @change="$emit('update:form', { ...form, space_jid: ($event.target as HTMLSelectElement).value })"
+              @change="$emit('update:form', { ...form, space_node: ($event.target as HTMLSelectElement).value })"
             >
               <option value="" disabled>Select a space…</option>
               <option v-for="s in spaces" :key="s.node" :value="s.node">{{ s.name }}</option>
@@ -218,10 +218,10 @@ const dialogTitle = computed(() => {
           <template v-else>
             <input
               id="create-spacemuc-space"
-              :value="form.space_jid"
+              :value="form.space_node"
               class="chat-field-control type-field"
               placeholder="team-space"
-              @input="$emit('update:form', { ...form, space_jid: ($event.target as HTMLInputElement).value })"
+              @input="$emit('update:form', { ...form, space_node: ($event.target as HTMLInputElement).value })"
             />
             <p class="type-caption text-muted-foreground">Enter an existing Spaces service node.</p>
           </template>

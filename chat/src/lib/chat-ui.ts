@@ -103,8 +103,8 @@ export interface CreateMucFormData {
 /** Create a MUC inside an existing Space. */
 export interface CreateSpaceMucFormData {
   intent: "space-muc";
-  /** Bare JID of the target Space. */
-  space_jid: string;
+  /** PubSub node id of the target Space (not a bare JID). */
+  space_node: string;
   name: string;
   description: string;
   muc_type: MucSubtype;

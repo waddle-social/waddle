@@ -333,9 +333,9 @@ export function useWaddles(
       }
 
       if (form.intent === "space-muc") {
-        if (!form.name.trim() || !form.space_jid.trim()) return undefined;
+        if (!form.name.trim() || !form.space_node.trim()) return undefined;
 
-        const spaceNode = form.space_jid;
+        const spaceNode = form.space_node;
         const { roomJid } = await createMucInSpace(xmppAgent, mucServiceJid, spacesServiceJid, {
           roomLocalpart: form.name.trim().toLowerCase().replace(/\s+/g, "-"),
           nick,
