@@ -1,6 +1,10 @@
 # waddle Development Guidelines
 
 - use jj when .jj exists, git otherwise
+- Before implementation work begins, create a branch and open a draft PR whose
+  title summarizes the intended work and whose description contains the plan.
+  Make this the first action for all non-trivial tasks unless explicitly told
+  not to.
 - XMPP Native, Never use out of band/XMPP APIs.
 - Always review your plan against the XEPS in ./xeps
     - If ./xeps doesn't exist, clone xsf/xeps into ./xeps
