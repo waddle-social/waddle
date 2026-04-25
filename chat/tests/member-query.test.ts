@@ -141,6 +141,16 @@ describe("BrowserXmppClient.fetchUserAvatar", () => {
     expect(getVCard).toHaveBeenCalledWith("carol@example.com");
   });
 
+  test("falls back to vCard external photo URLs", async () => {
+    const getItems = mock(async () => ({ items: [] }));
+    const getVCard = mock(async () => ({
+      records: [{ type: "photo", url: "https://avatars.example.com/dana.png" }],
+    }));
+    const client = clientWithXmpp({ getItems, getVCard });
+
+    await expect(client.fetchUserAvatar("dana@example.com")).resolves.toBe("https://avatars.example.com/dana.png");
+  });
+
   test("returns null when avatar sources are unsupported or empty", async () => {
     const getItems = mock(async () => ({ items: [] }));
     const getVCard = mock(async () => ({ records: [] }));

@@ -33,6 +33,7 @@ use waddle_xmpp::{
         build_pubsub_success, is_pubsub_iq, parse_pubsub_iq, PubSubError, PubSubItem,
         PubSubRequest,
     },
+    xep::xep0054::{build_vcard_element, VCard, VCardPhoto},
     xep::xep0357::{
         build_push_disable_result, build_push_enable_result, is_push_disable, is_push_enable,
         parse_push_disable, parse_push_enable,
@@ -59,7 +60,7 @@ use xmpp_parsers::minidom::Element;
 
 use super::super::{
     build_iq_error_xml, build_iq_error_xml_with_addresses, build_iq_result_xml, destroy_room_actor,
-    get_room_actor, iq_to_xml, is_muc_room_jid, stanza_to_xml, WebSocketState,
+    element_to_xml, get_room_actor, iq_to_xml, is_muc_room_jid, stanza_to_xml, WebSocketState,
 };
 use super::presence::get_managed_channel_for_room;
 use crate::auth::{NativeUserStore, Session};
@@ -2182,7 +2183,7 @@ async fn handle_vcard_iq(
             )];
         }
     };
-    let store = VCardStore::new(db);
+    let store = VCardStore::new(Arc::clone(&db));
 
     if waddle_xmpp::xep::xep0054::is_vcard_get(iq) {
         let target_jid = iq
@@ -2200,10 +2201,39 @@ async fn handle_vcard_iq(
                 },
                 Err(error) => {
                     warn!(target = %target_jid, error = %error, "Stored vCard XML is invalid");
-                    waddle_xmpp::xep::xep0054::build_empty_vcard_response(iq)
+                    return vec![build_iq_error_xml_with_addresses(
+                        &iq.id,
+                        response_from,
+                        response_to,
+                        "wait",
+                        "internal-server-error",
+                    )];
                 }
             },
-            Ok(None) => waddle_xmpp::xep::xep0054::build_empty_vcard_response(iq),
+            Ok(None) => {
+                match materialize_avatar_vcard(Arc::clone(&db), &store, &target_jid).await {
+                    Ok(Some(vcard)) => waddle_xmpp::xep::xep0054::build_vcard_response(iq, &vcard),
+                    Ok(None) => {
+                        return vec![build_iq_error_xml_with_addresses(
+                            &iq.id,
+                            response_from,
+                            response_to,
+                            "cancel",
+                            "service-unavailable",
+                        )];
+                    }
+                    Err(error) => {
+                        warn!(target = %target_jid, error = %error, "Failed to materialize avatar vCard");
+                        return vec![build_iq_error_xml_with_addresses(
+                            &iq.id,
+                            response_from,
+                            response_to,
+                            "wait",
+                            "internal-server-error",
+                        )];
+                    }
+                }
+            }
             Err(error) => {
                 warn!(target = %target_jid, error = %error, "Failed to load vCard");
                 return vec![build_iq_error_xml_with_addresses(
@@ -2419,6 +2449,44 @@ async fn handle_private_storage_iq(
         "modify",
         "bad-request",
     )]
+}
+
+async fn materialize_avatar_vcard(
+    db: Arc<Database>,
+    store: &VCardStore,
+    target_jid: &BareJid,
+) -> Result<Option<VCard>, String> {
+    let Some(localpart) = target_jid.node().map(|node| node.to_string()) else {
+        return Ok(None);
+    };
+
+    let conn = db.guard().await.map_err(|error| error.to_string())?;
+    let mut rows = conn
+        .query(
+            "SELECT avatar_url FROM users WHERE xmpp_localpart = ? LIMIT 1",
+            [localpart.as_str()],
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    let Some(row) = rows.next().await.map_err(|error| error.to_string())? else {
+        return Ok(None);
+    };
+    let avatar_url: Option<String> = row.get(0).map_err(|error| error.to_string())?;
+    let Some(avatar_url) = avatar_url.filter(|url| url.starts_with("https://")) else {
+        return Ok(None);
+    };
+
+    let vcard = VCard {
+        photo: Some(VCardPhoto::External { url: avatar_url }),
+        ..Default::default()
+    };
+    let vcard_xml = element_to_xml(build_vcard_element(&vcard));
+    store
+        .set(target_jid, &vcard_xml)
+        .await
+        .map_err(|error| error.to_string())?;
+
+    Ok(Some(vcard))
 }
 
 async fn handle_blocking_iq(

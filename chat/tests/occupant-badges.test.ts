@@ -9,7 +9,7 @@ import {
 
 describe("occupant badge derivation", () => {
   test("derives owner, admin, and moderator hats from MUC metadata", () => {
-    expect(roleHatsForOccupant("owner").map((hat) => hat.title)).toEqual(["Owner"]);
+    expect(roleHatsForOccupant("owner").map((hat) => hat.title)).toEqual(["Owner", "Moderator"]);
     expect(roleHatsForOccupant("admin", "moderator").map((hat) => hat.title)).toEqual(["Admin", "Moderator"]);
     expect(roleHatsForOccupant("member", "participant")).toEqual([]);
   });
@@ -25,6 +25,7 @@ describe("occupant badge derivation", () => {
       ),
     ).toEqual([
       { uri: "urn:xmpp:hats:owner", title: "Owner" },
+      { uri: "urn:xmpp:hats:moderator", title: "Moderator" },
       { uri: "urn:example:hats:founder", title: "Founder" },
     ]);
   });
@@ -41,6 +42,7 @@ describe("occupant badge derivation", () => {
     })).toEqual({
       Alice: [
         { uri: "urn:xmpp:hats:owner", title: "Owner" },
+        { uri: "urn:xmpp:hats:moderator", title: "Moderator" },
         { uri: "urn:example:hats:verified", title: "Verified" },
       ],
       Bob: [{ uri: "urn:xmpp:hats:moderator", title: "Moderator" }],

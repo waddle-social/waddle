@@ -943,13 +943,21 @@ fn build_muc_join_presence_xml(
         );
     }
 
-    element_to_xml(
-        Element::builder("presence", waddle_xmpp::ns::JABBER_CLIENT)
-            .attr("from", from_jid.to_string())
-            .attr("to", to_jid.to_string())
-            .append(user_payload.build())
-            .build(),
-    )
+    let mut hats = waddle_xmpp::xep::xep0317::hats_from_affiliation(affiliation);
+    if role == "moderator" && !hats.has_uri(waddle_xmpp::xep::xep0317::well_known::MODERATOR) {
+        hats = hats.with_hat(waddle_xmpp::xep::xep0317::Hat::moderator());
+    }
+
+    let mut presence = Element::builder("presence", waddle_xmpp::ns::JABBER_CLIENT)
+        .attr("from", from_jid.to_string())
+        .attr("to", to_jid.to_string())
+        .append(user_payload.build());
+
+    if !hats.is_empty() {
+        presence = presence.append(waddle_xmpp::xep::xep0317::build_hats_element(&hats));
+    }
+
+    element_to_xml(presence.build())
 }
 
 /// XEP-0045 §7.2.9 conflict presence: the requested nick is already in use
@@ -1112,6 +1120,40 @@ pub fn parse_room_jid_context(room_jid: &jid::BareJid) -> (String, String) {
         return ("space".to_string(), channel_id);
     }
     ("default".to_string(), "default".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn muc_join_presence_includes_owner_and_moderator_hats() {
+        let room_jid: BareJid = "chat@muc.example.com".parse().unwrap();
+        let to_jid: FullJid = "alice@example.com/web".parse().unwrap();
+        let real_jid: FullJid = "bob@example.com/mobile".parse().unwrap();
+
+        let xml = build_muc_join_presence_xml(
+            &room_jid,
+            "bob",
+            &to_jid,
+            "owner",
+            "moderator",
+            &real_jid,
+            false,
+        );
+
+        assert!(
+            xml.contains("xmlns=\"urn:xmpp:hats:0\"") || xml.contains("xmlns='urn:xmpp:hats:0'")
+        );
+        assert!(
+            xml.contains("uri=\"urn:xmpp:hats:owner\"")
+                || xml.contains("uri='urn:xmpp:hats:owner'")
+        );
+        assert!(
+            xml.contains("uri=\"urn:xmpp:hats:moderator\"")
+                || xml.contains("uri='urn:xmpp:hats:moderator'")
+        );
+    }
 }
 
 pub async fn get_managed_channel_for_room(

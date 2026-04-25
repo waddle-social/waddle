@@ -14,6 +14,10 @@ function normalizeRoleHat(value: string | null | undefined): BadgeRole | null {
   return null;
 }
 
+function moderatorRoleForAffiliation(affiliation: string | null | undefined): "moderator" | null {
+  return affiliation === "owner" || affiliation === "admin" ? "moderator" : null;
+}
+
 export function roleHatsForOccupant(
   affiliation?: string | null,
   role?: string | null,
@@ -21,7 +25,7 @@ export function roleHatsForOccupant(
   const hats: OccupantHat[] = [];
   const affiliationHat = normalizeRoleHat(affiliation);
   if (affiliationHat) hats.push(MUC_ROLE_HATS[affiliationHat]);
-  const roleHat = normalizeRoleHat(role);
+  const roleHat = normalizeRoleHat(role ?? moderatorRoleForAffiliation(affiliation));
   if (roleHat) hats.push(MUC_ROLE_HATS[roleHat]);
   return hats;
 }
