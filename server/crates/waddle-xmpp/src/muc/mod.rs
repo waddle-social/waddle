@@ -101,7 +101,7 @@ pub struct RoomConfig {
     pub max_occupants: u32,
     /// Whether to log messages (for MAM)
     pub enable_logging: bool,
-    /// Whether the room is in forum mode (XEP-0508)
+    /// Whether the room uses Waddle thread-oriented metadata.
     #[serde(default)]
     pub forum: bool,
     /// Federation permission policy retained for serialized room configs.

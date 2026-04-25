@@ -1,8 +1,8 @@
-/** XEP-0508: MUC Forums. */
+/** Private Waddle MUC thread metadata. */
 import type { DefinitionOptions } from "stanza/jxt";
 import { attribute } from "stanza/jxt";
 
-const NS_FORUMS_0 = "urn:xmpp:forums:0";
+const NS_WADDLE_FORUMS_0 = "urn:waddle:forums:0";
 
 export interface WaddleThreadCreate {
   title: string;
@@ -19,7 +19,7 @@ const definitions: DefinitionOptions[] = [
     fields: {
       title: attribute("title"),
     },
-    namespace: NS_FORUMS_0,
+    namespace: NS_WADDLE_FORUMS_0,
   },
   {
     aliases: [{ path: "message.threadReply", multiple: false }],
@@ -27,7 +27,7 @@ const definitions: DefinitionOptions[] = [
     fields: {
       threadId: attribute("thread-id"),
     },
-    namespace: NS_FORUMS_0,
+    namespace: NS_WADDLE_FORUMS_0,
   },
 ];
 
