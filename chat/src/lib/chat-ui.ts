@@ -31,8 +31,10 @@ export interface TimelineMessage {
   /** Equivalent wire-level ids (XEP-0359 stanza/origin ids, echoed ids). */
   wireIds?: string[];
   author: string;
-  /** Actual JID / occupant JID for the author when known. */
+  /** Actual bare JID when known; otherwise the room occupant JID. */
   authorJid?: string;
+  /** XEP-0313 MUC archive real JID from muc#user item@jid, when present. */
+  authorRealJid?: string;
   body: string;
   createdAt: string;
   isSelf: boolean;

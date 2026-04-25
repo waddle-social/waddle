@@ -96,6 +96,31 @@ describe("MAM history parsing", () => {
     expect(results[3].retractsId).toBe("msg-1");
   });
 
+  test("preserves real MUC author JID from archived muc#user item", async () => {
+    const xmpp = makeMamAgent([
+      {
+        id: "archive-msg-1",
+        item: {
+          delay: { timestamp: new Date("2024-01-01T00:00:00Z") },
+          message: {
+            id: "msg-1",
+            from: "room@muc.example.com/randax",
+            to: "room@muc.example.com",
+            type: "groupchat",
+            body: "hello",
+            muc: { item: { jid: "randax@example.com/mobile" } },
+          },
+        },
+      },
+    ]);
+
+    const results = await queryMam(xmpp, "room@muc.example.com", 20);
+
+    expect(results).toHaveLength(1);
+    expect(results[0].nick).toBe("randax");
+    expect(results[0].authorRealJid).toBe("randax@example.com");
+  });
+
   test("parses archived direct-message reactions, corrections, and retractions with original stanza IDs", async () => {
     const xmpp = makeMamAgent([
       {

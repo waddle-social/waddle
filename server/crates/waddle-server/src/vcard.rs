@@ -11,9 +11,10 @@
 
 use std::sync::Arc;
 
+use chrono::Utc;
 use tracing::debug;
 
-use crate::db::Database;
+use crate::db::{Database, Value};
 
 /// Error type for vCard operations.
 #[derive(Debug, thiserror::Error)]
@@ -84,16 +85,16 @@ impl VCardStore {
         debug!(jid = %jid_str, "Storing vCard");
 
         let conn = self.get_connection().await?;
+        let now = Utc::now().to_rfc3339();
 
         conn.execute(
-            r#"
-                INSERT INTO vcard_storage (jid, vcard_xml, created_at, updated_at)
-                VALUES (?, ?, datetime('now'), datetime('now'))
-                ON CONFLICT(jid) DO UPDATE SET
-                    vcard_xml = excluded.vcard_xml,
-                    updated_at = datetime('now')
-                "#,
-            (jid_str.as_str(), vcard_xml),
+            upsert_vcard_sql(),
+            vec![
+                Value::from(jid_str.as_str()),
+                Value::from(vcard_xml),
+                Value::from(now.as_str()),
+                Value::from(now.as_str()),
+            ],
         )
         .await
         .map_err(db_err)?;
@@ -128,6 +129,16 @@ impl VCardStore {
             Ok(false)
         }
     }
+}
+
+fn upsert_vcard_sql() -> &'static str {
+    r#"
+        INSERT INTO vcard_storage (jid, vcard_xml, created_at, updated_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(jid) DO UPDATE SET
+            vcard_xml = excluded.vcard_xml,
+            updated_at = excluded.updated_at
+        "#
 }
 
 /// Helper to convert database errors to VCardError.
@@ -207,6 +218,14 @@ mod tests {
         // Retrieve should return updated version
         let retrieved = store.get(&jid).await.expect("Failed to get vCard");
         assert_eq!(retrieved, Some(vcard_xml_v2.to_string()));
+    }
+
+    #[test]
+    fn test_vcard_store_set_sql_uses_bound_timestamps() {
+        let sql = upsert_vcard_sql();
+        assert!(!sql.contains("datetime("));
+        assert!(sql.contains("VALUES (?, ?, ?, ?)"));
+        assert!(sql.contains("updated_at = excluded.updated_at"));
     }
 
     #[tokio::test]

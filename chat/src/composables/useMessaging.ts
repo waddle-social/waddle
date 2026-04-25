@@ -48,11 +48,12 @@ export function fromLiveMessage(
   const tm: TimelineMessage = {
     id: msg.id,
     author: msg.nick,
-    authorJid: `${msg.roomJid}/${msg.nick}`,
+    authorJid: msg.authorRealJid ?? `${msg.roomJid}/${msg.nick}`,
     body: msg.body,
     createdAt: msg.createdAt,
     isSelf: msg.nick === session.username,
   };
+  if (msg.authorRealJid) tm.authorRealJid = msg.authorRealJid;
   if (msg.wireIds && msg.wireIds.length > 0) {
     tm.wireIds = msg.wireIds;
   }

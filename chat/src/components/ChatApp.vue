@@ -34,7 +34,7 @@ import MemberManagement from "@/components/modals/MemberManagement.vue";
 import ConfirmDialog from "@/components/ui/ConfirmDialog.vue";
 import type { MemberSummary } from "@/lib/chat-types";
 import type { MarkupSpan, MessageReference } from "@/lib/chat-ui";
-import { mentionAutocompleteCandidates, mentionMatchesUsername, mergeMentionMembers } from "@/lib/mentions";
+import { avatarLookupCandidates, mentionAutocompleteCandidates, mentionMatchesUsername, mergeMentionMembers } from "@/lib/mentions";
 
 const props = defineProps<{
   tenorApiKey?: string;
@@ -212,6 +212,14 @@ const computedChannelUnreadMap = computed(() => channelUnread.channelUnreadMap()
 const notifications = useNotifications();
 const appUpdate = useAppUpdate();
 const version = useVersion(xmppClient);
+const avatarCandidates = computed(() =>
+  avatarLookupCandidates({
+    members: mergedMentionMembers.value.members,
+    messages: messaging.messages.value,
+    authorJidByNick: authorJidByNick.value,
+    selfDomain: selfDomain.value,
+  }),
+);
 const avatarUrlByAuthor = computed<Record<string, string | null>>(() => {
   const avatars: Record<string, string | null> = {};
 
@@ -235,6 +243,14 @@ const avatarUrlByAuthor = computed<Record<string, string | null>>(() => {
     }
   }
 
+  for (const candidate of avatarCandidates.value) {
+    const fetched = fetchedAvatarUrlByJid.value[candidate.jid];
+    const avatar = fetched ?? candidate.avatar_url;
+    if (!(candidate.nick in avatars) || avatar) {
+      avatars[candidate.nick] = avatar;
+    }
+  }
+
   return avatars;
 });
 const membersWithAvatars = computed<MemberSummary[]>(() =>
@@ -248,12 +264,12 @@ const authorHatsByNick = computed(() =>
 );
 
 watch(
-  () => [xmppClient.value, mergedMentionMembers.value.members.map((member) => member.jid).join("\n")] as const,
+  () => [xmppClient.value, avatarCandidates.value.map((candidate) => candidate.jid).join("\n")] as const,
   ([client]) => {
     if (!client) return;
-    for (const member of mergedMentionMembers.value.members) {
-      const jid = member.jid;
-      if (!jid || member.avatar_url || avatarFetchStateByJid.value[jid]) continue;
+    for (const candidate of avatarCandidates.value) {
+      const jid = candidate.jid;
+      if (!jid || candidate.avatar_url || avatarFetchStateByJid.value[jid]) continue;
       avatarFetchStateByJid.value = { ...avatarFetchStateByJid.value, [jid]: "pending" };
       void client.fetchUserAvatar(jid)
         .then((avatarUrl) => {
