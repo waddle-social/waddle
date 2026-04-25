@@ -33,7 +33,7 @@ use waddle_xmpp::{
         build_pubsub_success, is_pubsub_iq, parse_pubsub_iq, PubSubError, PubSubItem,
         PubSubRequest,
     },
-    xep::xep0054::{build_vcard_element, VCard, VCardPhoto},
+    xep::xep0054::{VCard, VCardPhoto},
     xep::xep0357::{
         build_push_disable_result, build_push_enable_result, is_push_disable, is_push_enable,
         parse_push_disable, parse_push_enable,
@@ -60,7 +60,7 @@ use xmpp_parsers::minidom::Element;
 
 use super::super::{
     build_iq_error_xml, build_iq_error_xml_with_addresses, build_iq_result_xml, destroy_room_actor,
-    element_to_xml, get_room_actor, iq_to_xml, is_muc_room_jid, stanza_to_xml, WebSocketState,
+    get_room_actor, iq_to_xml, is_muc_room_jid, stanza_to_xml, WebSocketState,
 };
 use super::presence::get_managed_channel_for_room;
 use crate::auth::{NativeUserStore, Session};
@@ -2227,30 +2227,28 @@ async fn handle_vcard_iq(
                     )];
                 }
             },
-            Ok(None) => {
-                match materialize_avatar_vcard(Arc::clone(&db), &store, &target_jid).await {
-                    Ok(Some(vcard)) => waddle_xmpp::xep::xep0054::build_vcard_response(iq, &vcard),
-                    Ok(None) => {
-                        return vec![build_iq_error_xml_with_addresses(
-                            &iq.id,
-                            response_from,
-                            response_to,
-                            "cancel",
-                            "service-unavailable",
-                        )];
-                    }
-                    Err(error) => {
-                        warn!(target = %target_jid, error = %error, "Failed to materialize avatar vCard");
-                        return vec![build_iq_error_xml_with_addresses(
-                            &iq.id,
-                            response_from,
-                            response_to,
-                            "wait",
-                            "internal-server-error",
-                        )];
-                    }
+            Ok(None) => match avatar_vcard_from_user_profile(Arc::clone(&db), &target_jid).await {
+                Ok(Some(vcard)) => waddle_xmpp::xep::xep0054::build_vcard_response(iq, &vcard),
+                Ok(None) => {
+                    return vec![build_iq_error_xml_with_addresses(
+                        &iq.id,
+                        response_from,
+                        response_to,
+                        "cancel",
+                        "item-not-found",
+                    )];
                 }
-            }
+                Err(error) => {
+                    warn!(target = %target_jid, error = %error, "Failed to load avatar vCard fallback");
+                    return vec![build_iq_error_xml_with_addresses(
+                        &iq.id,
+                        response_from,
+                        response_to,
+                        "wait",
+                        "internal-server-error",
+                    )];
+                }
+            },
             Err(error) => {
                 warn!(target = %target_jid, error = %error, "Failed to load vCard");
                 return vec![build_iq_error_xml_with_addresses(
@@ -2468,9 +2466,8 @@ async fn handle_private_storage_iq(
     )]
 }
 
-async fn materialize_avatar_vcard(
+async fn avatar_vcard_from_user_profile(
     db: Arc<Database>,
-    store: &VCardStore,
     target_jid: &BareJid,
 ) -> Result<Option<VCard>, String> {
     let Some(localpart) = target_jid.node().map(|node| node.to_string()) else {
@@ -2497,13 +2494,95 @@ async fn materialize_avatar_vcard(
         photo: Some(VCardPhoto::External { url: avatar_url }),
         ..Default::default()
     };
-    let vcard_xml = element_to_xml(build_vcard_element(&vcard));
-    store
-        .set(target_jid, &vcard_xml)
-        .await
-        .map_err(|error| error.to_string())?;
 
     Ok(Some(vcard))
+}
+
+#[cfg(test)]
+mod vcard_fallback_tests {
+    use super::*;
+    use crate::db::MigrationRunner;
+    use waddle_xmpp::xep::xep0054::{VCardPhoto, NS_VCARD};
+
+    async fn test_db(name: &str) -> Arc<Database> {
+        let db = Arc::new(Database::in_memory(name).await.expect("database"));
+        MigrationRunner::global()
+            .run(&db)
+            .await
+            .expect("migrations");
+        db
+    }
+
+    #[tokio::test]
+    async fn vcard_get_fallback_returns_photo_extval_without_stored_vcard() {
+        let db = test_db("vcard-profile-fallback").await;
+        let conn = db.guard().await.expect("connection");
+        conn.execute(
+            "INSERT INTO users (id, username, xmpp_localpart, avatar_url, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+            vec![
+                Value::from("user-rawkode"),
+                Value::from("rawkode"),
+                Value::from("rawkode"),
+                Value::from("https://cdn.example.com/rawkode.png"),
+                Value::from("2026-04-25T00:00:00Z"),
+                Value::from("2026-04-25T00:00:00Z"),
+            ],
+        )
+        .await
+        .expect("insert user");
+
+        let target_jid: BareJid = "rawkode@example.com".parse().expect("jid");
+        let vcard = avatar_vcard_from_user_profile(Arc::clone(&db), &target_jid)
+            .await
+            .expect("fallback")
+            .expect("profile avatar");
+        assert!(matches!(
+            vcard.photo,
+            Some(VCardPhoto::External { ref url }) if url == "https://cdn.example.com/rawkode.png"
+        ));
+
+        let stored = VCardStore::new(db)
+            .get(&target_jid)
+            .await
+            .expect("stored lookup");
+        assert_eq!(stored, None, "GET fallback must not persist a vCard");
+    }
+
+    #[tokio::test]
+    async fn vcard_get_fallback_builds_typed_result_not_internal_server_error() {
+        let db = test_db("vcard-profile-response").await;
+        let conn = db.guard().await.expect("connection");
+        conn.execute(
+            "INSERT INTO users (id, username, xmpp_localpart, avatar_url, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+            vec![
+                Value::from("user-icepuma"),
+                Value::from("icepuma"),
+                Value::from("icepuma"),
+                Value::from("https://cdn.example.com/icepuma.jpg"),
+                Value::from("2026-04-25T00:00:00Z"),
+                Value::from("2026-04-25T00:00:00Z"),
+            ],
+        )
+        .await
+        .expect("insert user");
+
+        let target_jid: BareJid = "icepuma@example.com".parse().expect("jid");
+        let vcard = avatar_vcard_from_user_profile(db, &target_jid)
+            .await
+            .expect("fallback")
+            .expect("profile avatar");
+        let iq = xmpp_parsers::iq::Iq {
+            from: Some("rawkode@example.com/web".parse::<Jid>().expect("from")),
+            to: Some("icepuma@example.com".parse::<Jid>().expect("to")),
+            id: "vcard-get".to_string(),
+            payload: xmpp_parsers::iq::IqType::Get(Element::builder("vCard", NS_VCARD).build()),
+        };
+        let response = iq_to_xml(waddle_xmpp::xep::xep0054::build_vcard_response(&iq, &vcard));
+
+        assert!(response.contains("type=\"result\"") || response.contains("type='result'"));
+        assert!(response.contains("<EXTVAL>https://cdn.example.com/icepuma.jpg</EXTVAL>"));
+        assert!(!response.contains("internal-server-error"));
+    }
 }
 
 async fn handle_blocking_iq(

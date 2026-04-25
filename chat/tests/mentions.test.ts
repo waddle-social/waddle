@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  avatarLookupCandidates,
   mentionAutocompleteCandidates,
   mentionAutocompleteNames,
   mentionMatchesUsername,
@@ -140,6 +141,66 @@ describe("mention helpers", () => {
     expect(merged.members).toEqual([]);
     expect(merged.diagnostics).toEqual([
       "Presence invariant violated: room appears anonymous or omitted bare occupant JIDs for alice, bob.",
+    ]);
+  });
+
+  test("avatar lookup candidates include visible MAM authors missing from members", () => {
+    const candidates = avatarLookupCandidates({
+      members: [{ jid: "rawkode@waddle.social", username: "rawkode", avatar_url: null, role: "owner", joined_at: "" }],
+      messages: [
+        {
+          author: "randax",
+          authorJid: "chat@muc.waddle.social/randax",
+          authorRealJid: "randax@waddle.social/laptop",
+        },
+        {
+          author: "icepuma",
+          authorJid: "chat@muc.waddle.social/icepuma",
+        },
+      ],
+      authorJidByNick: {},
+      selfDomain: "waddle.social",
+    });
+
+    expect(candidates.map((candidate) => candidate.jid)).toEqual([
+      "rawkode@waddle.social",
+      "randax@waddle.social",
+      "icepuma@waddle.social",
+    ]);
+  });
+
+  test("avatar lookup candidates prefer member and presence JIDs over inferred JIDs", () => {
+    const candidates = avatarLookupCandidates({
+      members: [],
+      messages: [
+        { author: "Randax", authorJid: "chat@muc.waddle.social/Randax" },
+        { author: "icepuma", authorJid: "chat@muc.waddle.social/icepuma" },
+      ],
+      authorJidByNick: {
+        randax: "randax@waddle.social",
+        Icepuma: "icepuma@elsewhere.example",
+      },
+      selfDomain: "waddle.social",
+    });
+
+    expect(candidates.map((candidate) => candidate.jid)).toEqual([
+      "randax@waddle.social",
+      "icepuma@elsewhere.example",
+    ]);
+  });
+
+  test("avatar lookup candidates do not use MUC occupant JIDs directly", () => {
+    const candidates = avatarLookupCandidates({
+      members: [],
+      messages: [
+        { author: "randax", authorJid: "chat@muc.waddle.social/randax" },
+      ],
+      authorJidByNick: {},
+      selfDomain: "waddle.social",
+    });
+
+    expect(candidates).toEqual([
+      { nick: "randax", jid: "randax@waddle.social", avatar_url: null },
     ]);
   });
 });

@@ -92,6 +92,8 @@ export interface LiveRoomMessage {
   forumPostKind?: "topic" | "reply";
   forumTitle?: string;
   forumThreadTitle?: string;
+  /** XEP-0313 MUC archive real JID from muc#user item@jid, when present. */
+  authorRealJid?: string;
   _reactionTarget?: string;
   _reactionEmojis?: string[];
 }

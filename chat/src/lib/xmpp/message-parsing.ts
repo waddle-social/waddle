@@ -30,6 +30,13 @@ type MessageExtensionsTarget = Pick<
   | "forumThreadTitle"
 >;
 
+type MucUserPayload = {
+  jid?: unknown;
+  item?: { jid?: unknown };
+  items?: Array<{ jid?: unknown }>;
+  users?: Array<{ jid?: unknown }>;
+};
+
 /** Access custom JXT extension fields that TypeScript doesn't know about. */
 export function ext(msg: unknown): Record<string, unknown> {
   return msg as Record<string, unknown>;
@@ -64,6 +71,19 @@ interface StanzaIdPayload {
 function asArray<T>(value: T | T[] | undefined): T[] {
   if (!value) return [];
   return Array.isArray(value) ? value : [value];
+}
+
+function bareJid(value: unknown): string | undefined {
+  if (typeof value !== "string" || !value.includes("@")) return undefined;
+  return value.split("/")[0] || undefined;
+}
+
+function extractMucUserRealJid(msg: ReceivedMessage): string | undefined {
+  const muc = (ext(msg).muc ?? ext(msg).mucUser) as MucUserPayload | undefined;
+  return bareJid(muc?.jid)
+    ?? bareJid(muc?.item?.jid)
+    ?? bareJid(muc?.items?.find((item) => item.jid)?.jid)
+    ?? bareJid(muc?.users?.find((item) => item.jid)?.jid);
 }
 
 export function resolveMessageIds(
@@ -324,6 +344,8 @@ export function dispatchGroupchat(msg: ReceivedMessage, h: GroupchatHandlers): v
     createdAt: new Date().toISOString(),
     type: msg.body ? "message" : "subject",
   };
+  const authorRealJid = extractMucUserRealJid(msg);
+  if (authorRealJid) liveMsg.authorRealJid = authorRealJid;
   if (messageIds.wireIds?.length) liveMsg.wireIds = messageIds.wireIds;
   extractMessageExtensions(msg, liveMsg);
   h.onMessage?.(liveMsg);
