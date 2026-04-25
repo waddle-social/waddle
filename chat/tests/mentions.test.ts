@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  mentionAutocompleteCandidates,
   mentionAutocompleteNames,
   mentionMatchesUsername,
   mergeMentionMembers,
@@ -68,6 +69,39 @@ describe("mention helpers", () => {
 
     // Broadcasts lead, then member names in original order
     expect(names).toEqual(["everyone", "here", "alice", "bob"]);
+  });
+
+  test("autocomplete candidates include registered offline members once", () => {
+    const merged = mergeMentionMembers({
+      members: [
+        { jid: "alice@example.com", username: "alice", avatar_url: "https://example.com/alice.png", role: "owner", joined_at: "" },
+        { jid: "bob@example.com", username: "bob", avatar_url: null, role: "member", joined_at: "" },
+      ],
+      roomPresence: {},
+      memberJidsByNick: {},
+    });
+
+    const candidates = mentionAutocompleteCandidates(merged.members);
+
+    expect(candidates.map((candidate) => candidate.username)).toEqual(["everyone", "here", "alice", "bob"]);
+    expect(candidates.filter((candidate) => candidate.username === "everyone")).toHaveLength(1);
+    expect(candidates.find((candidate) => candidate.username === "alice")).toMatchObject({
+      jid: "alice@example.com",
+      avatar_url: "https://example.com/alice.png",
+      kind: "member",
+    });
+    expect(resolveMentionUri("bob", merged.authorJidByNick)).toBe("xmpp:bob@example.com");
+  });
+
+  test("autocomplete candidates exclude non-participating affiliations and broadcast collisions", () => {
+    const candidates = mentionAutocompleteCandidates([
+      { jid: "here@example.com", username: "here", avatar_url: null, role: "member", joined_at: "" },
+      { jid: "mallory@example.com", username: "mallory", avatar_url: null, role: "outcast", joined_at: "" },
+      { jid: "nobody@example.com", username: "nobody", avatar_url: null, role: "none", joined_at: "" },
+      { jid: "alice@example.com", username: "alice", avatar_url: null, role: "admin", joined_at: "" },
+    ]);
+
+    expect(candidates.map((candidate) => candidate.username)).toEqual(["everyone", "here", "alice"]);
   });
 
   test("resolveMentionUri resolves merged presence occupants via their bare JIDs", () => {

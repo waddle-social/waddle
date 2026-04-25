@@ -9,6 +9,7 @@ import { searchEmoji } from "@/lib/emoji";
 import { getComposerAutocompleteAction, getComposerEscapeAction } from "@/lib/reply-ux";
 import { tiptapToRichMessage } from "@/lib/rich-message";
 import { extractImagesFromClipboardEvent } from "@/lib/xmpp/file-upload";
+import type { MentionCandidate } from "@/lib/mentions";
 import {
   isAudioFile,
   isImageFile,
@@ -39,7 +40,7 @@ const props = defineProps<{
   isSending: boolean;
   disabled: boolean;
   tenorApiKey: string;
-  memberNames: string[];
+  mentionCandidates: MentionCandidate[];
   slowModeCooldown: number;
   uploadProgress: { uploading: boolean; progress: number; filename: string };
   replyingTo?: { id: string; author: string; preview?: string } | null;
@@ -143,16 +144,13 @@ function stripDiacritics(s: string): string {
   return s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
 }
 
-const BROADCAST_MENTIONS = ["everyone", "here"];
-
 const mentionResults = computed(() => {
   const q = mentionQuery.value.toLowerCase();
   const qNorm = stripDiacritics(mentionQuery.value);
-  const allNames = [...BROADCAST_MENTIONS, ...props.memberNames];
-  if (!q) return allNames.slice(0, 8);
-  return allNames.filter((n) => {
-    const lower = n.toLowerCase();
-    return lower.includes(q) || stripDiacritics(n).includes(qNorm);
+  if (!q) return props.mentionCandidates.slice(0, 8);
+  return props.mentionCandidates.filter((candidate) => {
+    const lower = candidate.username.toLowerCase();
+    return lower.includes(q) || stripDiacritics(candidate.username).includes(qNorm);
   }).slice(0, 8);
 });
 
@@ -255,11 +253,11 @@ function checkAutocompleteFromEditor() {
   clearAutocomplete();
 }
 
-function insertMention(username: string) {
+function insertMention(candidate: MentionCandidate) {
   const tiptapEditor = getTiptapEditor();
   if (!tiptapEditor || !triggerRange.value) return;
 
-  const replacement = `@${username} `;
+  const replacement = `@${candidate.username} `;
   tiptapEditor.chain()
     .focus()
     .insertContentAt(triggerRange.value, replacement)
@@ -575,15 +573,29 @@ watch(
     >
       <div class="flex flex-col gap-1">
         <button
-          v-for="(name, i) in mentionResults"
-          :key="name"
+          v-for="(candidate, i) in mentionResults"
+          :key="candidate.kind === 'broadcast' ? `broadcast:${candidate.username}` : candidate.jid ?? candidate.username"
           type="button"
           class="type-control w-full h-9 px-3 py-0 text-left hover:bg-muted transition-colors flex items-center gap-2 rounded-lg"
           :class="i === selectedIndex ? 'bg-muted' : ''"
-          @mousedown.prevent="insertMention(name)"
+          @mousedown.prevent="insertMention(candidate)"
         >
-          <span class="type-caption text-primary">@</span>
-          <span class="type-emphasis">{{ name }}</span>
+          <span
+            v-if="candidate.kind === 'broadcast'"
+            class="type-caption text-primary"
+          >@</span>
+          <img
+            v-else-if="candidate.avatar_url"
+            :src="candidate.avatar_url"
+            :alt="candidate.username"
+            class="h-5 w-5 rounded object-cover bg-muted"
+            loading="lazy"
+          />
+          <span
+            v-else
+            class="type-caption flex h-5 w-5 items-center justify-center rounded bg-muted text-muted-foreground"
+          >@</span>
+          <span class="type-emphasis">{{ candidate.username }}</span>
         </button>
       </div>
     </div>

@@ -4,6 +4,7 @@ import { X, CornerDownRight, MessageSquarePlus, ChevronRight, ChevronLeft } from
 import MessageCard from "@/components/chat/MessageCard.vue";
 import MessageComposer from "@/components/chat/MessageComposer.vue";
 import type { TimelineMessage, MarkupSpan, MessageReference } from "@/lib/chat-ui";
+import type { MentionCandidate } from "@/lib/mentions";
 import type { OccupantHat, OccupantPresence, RoomHats, RoomPresence } from "@/lib/xmpp-client";
 import type { ThreadEntry, ThreadIndex } from "@/composables/useThreads";
 import { useScrollDirection } from "@/composables/useScrollDirection";
@@ -25,7 +26,7 @@ const props = defineProps<{
   roomPresence: RoomPresence;
   roomLastSeen: Record<string, number>;
   tenorApiKey: string;
-  memberNames: string[];
+  mentionCandidates: MentionCandidate[];
   slowModeCooldown: number;
   isSending: boolean;
   uploadProgress: { uploading: boolean; progress: number; filename: string };
@@ -226,7 +227,7 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
         :is-sending="isSending"
         :disabled="false"
         :tenor-api-key="tenorApiKey"
-        :member-names="memberNames"
+        :mention-candidates="mentionCandidates"
         :slow-mode-cooldown="slowModeCooldown"
         :upload-progress="uploadProgress"
         :replying-to="replyingTo"
@@ -330,7 +331,7 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
         :is-sending="isSending"
         :disabled="false"
         :tenor-api-key="tenorApiKey"
-        :member-names="memberNames"
+        :mention-candidates="mentionCandidates"
         :slow-mode-cooldown="slowModeCooldown"
         :upload-progress="uploadProgress"
         :replying-to="replyingTo"

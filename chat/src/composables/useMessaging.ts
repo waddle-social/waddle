@@ -196,6 +196,7 @@ export function useMessaging(
   normalizeError: (v: unknown) => string,
   actionError: Ref<string>,
   clearActionError: () => void,
+  mentionJidsByNick?: Ref<Record<string, string>>,
 ) {
   const { mode: scrollDirection } = useScrollDirection();
   // xmppStatus is owned by $xmppStatus (written from XmppProvider, which is
@@ -947,6 +948,7 @@ export function useMessaging(
         ...(parentThreadId ? { parentThreadId } : {}),
         ...(threadCreate ? { threadCreate } : {}),
         ...(threadReply ? { threadReply } : {}),
+        ...(mentionJidsByNick ? { mentionJidsByNick: mentionJidsByNick.value } : {}),
       });
       const msgId = result?.id ?? null;
       const isStillCurrentChannel =

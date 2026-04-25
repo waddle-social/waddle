@@ -10,6 +10,7 @@ interface PersistedQueuedMessageBase {
   body: string;
   markup?: MarkupSpan[];
   references?: MessageReference[];
+  mentionJidsByNick?: Record<string, string>;
   files?: OutboundFileAttachment[];
   replyTo?: ReplyTarget;
   threadId?: string;

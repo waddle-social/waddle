@@ -1,7 +1,7 @@
 /** BrowserXmppClient — thin orchestrator that delegates to functional modules. */
 import { createClient } from "stanza";
 import type { Agent } from "stanza";
-import type { ReceivedMUCPresence, ReceivedMessage, ReceivedPresence } from "stanza/protocol";
+import type { AvatarData, ReceivedMUCPresence, ReceivedMessage, ReceivedPresence, VCardTemp } from "stanza/protocol";
 import type { WaddleSession } from "../server-auth";
 import type { MemberSummary, UserSearchResult } from "../chat-types";
 import type { WaddleHat } from "./extensions/hats";
@@ -146,6 +146,35 @@ function mapPresenceShow(pres: ReceivedPresence): PresenceUpdateEvent["show"] {
     default:
       return "available";
   }
+}
+
+function bufferLikeToBase64(value: unknown): string | null {
+  if (!value) return null;
+  if (typeof value === "string") return value;
+  if (value instanceof Uint8Array) {
+    let binary = "";
+    for (const byte of value) binary += String.fromCharCode(byte);
+    return btoa(binary);
+  }
+  const candidate = value as { toString?: (encoding?: string) => string };
+  if (typeof candidate.toString === "function") {
+    const encoded = candidate.toString("base64");
+    return encoded && encoded !== "[object Object]" ? encoded : null;
+  }
+  return null;
+}
+
+function avatarDataUrl(data: unknown, mediaType?: string | null): string | null {
+  const base64 = bufferLikeToBase64(data);
+  if (!base64) return null;
+  return `data:${mediaType || "image/png"};base64,${base64}`;
+}
+
+function vcardAvatarDataUrl(vcard: VCardTemp | undefined): string | null {
+  const photo = vcard?.records?.find((record) => record.type === "photo");
+  if (!photo || photo.type !== "photo") return null;
+  if (photo.url) return photo.url;
+  return avatarDataUrl(photo.data, photo.mediaType);
 }
 
 interface OutboundSendResult {
@@ -726,6 +755,7 @@ export class BrowserXmppClient {
       body,
       ...(opts.markup && opts.markup.length > 0 ? { markup: opts.markup } : {}),
       ...(opts.references && opts.references.length > 0 ? { references: opts.references } : {}),
+      ...(opts.mentionJidsByNick ? { mentionJidsByNick: opts.mentionJidsByNick } : {}),
       ...(opts.files && opts.files.length > 0 ? { files: opts.files } : {}),
       ...(opts.replyTo ? { replyTo: opts.replyTo } : {}),
       ...(opts.threadId ? { threadId: opts.threadId } : {}),
@@ -836,7 +866,7 @@ export class BrowserXmppClient {
         const messageId = messaging.sendGroupMessage(this.xmpp, roomJid, entry.body, {
           ...(entry.markup && entry.markup.length > 0 ? { markup: entry.markup } : {}),
           ...(entry.references && entry.references.length > 0 ? { references: entry.references } : {}),
-          mentionJidsByNick: this.roomMemberJids,
+          mentionJidsByNick: { ...(entry.mentionJidsByNick ?? {}), ...this.roomMemberJids },
           ...(entry.files && entry.files.length > 0 ? { files: entry.files } : {}),
           ...(entry.replyTo ? { replyTo: entry.replyTo } : {}),
           ...(entry.threadId ? { threadId: entry.threadId } : {}),
@@ -914,7 +944,7 @@ export class BrowserXmppClient {
     if (this.roomIsReady(roomJid) && this.xmpp) {
       const id = messaging.sendGroupMessage(this.xmpp, roomJid, body, {
         ...opts,
-        mentionJidsByNick: this.roomMemberJids,
+        mentionJidsByNick: { ...(opts.mentionJidsByNick ?? {}), ...this.roomMemberJids },
       });
       this.recordPendingSend(id, "room");
       return { id, state: "sending" };
@@ -1213,6 +1243,7 @@ export class BrowserXmppClient {
     }
     const affiliations = ["owner", "admin", "member", "outcast"] as const;
     const members: MemberSummary[] = [];
+    const failedAffiliations: string[] = [];
     for (const affiliation of affiliations) {
       try {
         const response = await muc.getRoomMembers(roomJid, { affiliation });
@@ -1241,8 +1272,16 @@ export class BrowserXmppClient {
         } else {
           detail = `affiliation query failed for ${affiliation} — ${roomJid}: ${condition}`;
         }
+        failedAffiliations.push(affiliation);
         this.emitError({ kind: "member-query", recoverable: true, detail, condition, cause: err });
       }
+    }
+    if (members.length === 0 && failedAffiliations.length > 0) {
+      const detail = options?.roomJid
+        ? `refusing to show Members 0 after failed affiliation queries for ${failedAffiliations.join(", ")} — ${roomJid}`
+        : `refusing to show Members 0 after failed affiliation queries for ${failedAffiliations.join(", ")} — reconstructed room JID may not match ${roomJid}`;
+      this.emitError({ kind: "member-query", recoverable: true, detail });
+      throw new Error("refusing to show Members 0");
     }
     return members;
   }
@@ -1279,6 +1318,43 @@ export class BrowserXmppClient {
         avatar_url: null,
       };
     }).filter((user) => user.jid);
+  }
+
+  async fetchUserAvatar(jid: string): Promise<string | null> {
+    await this.connect();
+    if (!this.xmpp || !jid) return null;
+    const bareJid = barePeerJid(jid);
+    const avatarAgent = this.xmpp as Agent & {
+      getItems?: Agent["getItems"];
+      getAvatar?: Agent["getAvatar"];
+      getVCard?: Agent["getVCard"];
+    };
+
+    try {
+      const metadata = await avatarAgent.getItems?.(bareJid, "urn:xmpp:avatar:metadata");
+      const content = metadata?.items?.[0]?.content as { versions?: Array<{ id?: string; mediaType?: string }> } | undefined;
+      const version = content?.versions?.find((candidate) => !!candidate.id);
+      if (version?.id && avatarAgent.getAvatar) {
+        const item = await avatarAgent.getAvatar(bareJid, version.id);
+        const avatar = item?.content as AvatarData | undefined;
+        const url = avatarDataUrl(avatar?.data, version.mediaType);
+        if (url) return url;
+      }
+    } catch (error) {
+      if (!isOptionalXmppFeatureError(error)) {
+        console.warn("Failed to fetch XEP-0084 avatar", bareJid, error);
+      }
+    }
+
+    try {
+      const vcard = await avatarAgent.getVCard?.(bareJid);
+      return vcardAvatarDataUrl(vcard);
+    } catch (error) {
+      if (!isOptionalXmppFeatureError(error)) {
+        console.warn("Failed to fetch vCard avatar", bareJid, error);
+      }
+      return null;
+    }
   }
 
   /**

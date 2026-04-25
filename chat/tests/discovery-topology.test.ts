@@ -215,7 +215,15 @@ describe("topology discovery", () => {
       getDiscoInfo,
     } as unknown as Agent, "alice@example.com/desktop");
 
-    expect(topology).toEqual({ spaces: [], rooms: [], serverRole: null });
+    expect(topology).toEqual({
+      spaces: [],
+      rooms: [],
+      serverRole: null,
+      services: {
+        muc: "muc.example.com",
+        spaces: "spaces.example.com",
+      },
+    });
     expect(getDiscoItems.mock.calls).not.toContainEqual([
       "example.com",
       "http://jabber.org/protocol/commands",

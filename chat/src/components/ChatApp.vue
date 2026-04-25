@@ -33,7 +33,7 @@ import MemberManagement from "@/components/modals/MemberManagement.vue";
 import ConfirmDialog from "@/components/ui/ConfirmDialog.vue";
 import type { MemberSummary } from "@/lib/chat-types";
 import type { MarkupSpan, MessageReference } from "@/lib/chat-ui";
-import { mentionAutocompleteNames, mentionMatchesUsername, mergeMentionMembers } from "@/lib/mentions";
+import { mentionAutocompleteCandidates, mentionMatchesUsername, mergeMentionMembers } from "@/lib/mentions";
 
 const props = defineProps<{
   tenorApiKey?: string;
@@ -56,6 +56,9 @@ const waddles = useWaddles(
   ui.clearActionError,
 );
 
+const memberJidByNick = ref<Record<string, string>>({});
+const mentionJidsByNickForSend = ref<Record<string, string>>({});
+
 const messaging = useMessaging(
   session,
   api,
@@ -66,6 +69,7 @@ const messaging = useMessaging(
   ui.normalizeError,
   ui.actionError,
   ui.clearActionError,
+  mentionJidsByNickForSend,
 );
 
 const dmConversations = useDmConversations(
@@ -152,7 +156,6 @@ const activeIsSearching = computed(() =>
 );
 
 const selfDomain = computed(() => (session.value ? jidDomain(session.value.jid) : ""));
-const memberJidByNick = ref<Record<string, string>>({});
 const members = useMembers(
   xmppClient,
   waddles.activeSpaceId,
@@ -174,8 +177,19 @@ const mergedMentionMembers = computed(() =>
   }),
 );
 const authorJidByNick = computed(() => mergedMentionMembers.value.authorJidByNick);
-const mentionNames = computed(() =>
-  mentionAutocompleteNames(mergedMentionMembers.value.members.map((member) => member.username)),
+watch(authorJidByNick, (value) => {
+  mentionJidsByNickForSend.value = value;
+}, { immediate: true });
+const fetchedAvatarUrlByJid = ref<Record<string, string | null>>({});
+const avatarFetchStateByJid = ref<Record<string, "pending" | "done">>({});
+const mentionCandidates = computed(() =>
+  mentionAutocompleteCandidates(mergedMentionMembers.value.members).map((candidate) => {
+    if (candidate.kind === "broadcast" || !candidate.jid) return candidate;
+    return {
+      ...candidate,
+      avatar_url: fetchedAvatarUrlByJid.value[candidate.jid] ?? candidate.avatar_url,
+    };
+  }),
 );
 const mentionSourceDiagnostic = computed(() =>
   mergedMentionMembers.value.diagnostics.join(" "),
@@ -205,13 +219,52 @@ const avatarUrlByAuthor = computed<Record<string, string | null>>(() => {
   }
 
   for (const member of waddles.members.value) {
-    if (!(member.username in avatars) || member.avatar_url) {
-      avatars[member.username] = member.avatar_url;
+    const fetched = fetchedAvatarUrlByJid.value[member.jid];
+    const avatar = fetched ?? member.avatar_url;
+    if (!(member.username in avatars) || avatar) {
+      avatars[member.username] = avatar;
+    }
+  }
+
+  for (const member of mergedMentionMembers.value.members) {
+    const fetched = fetchedAvatarUrlByJid.value[member.jid];
+    const avatar = fetched ?? member.avatar_url;
+    if (!(member.username in avatars) || avatar) {
+      avatars[member.username] = avatar;
     }
   }
 
   return avatars;
 });
+const membersWithAvatars = computed<MemberSummary[]>(() =>
+  waddles.sortedMembers.value.map((member) => ({
+    ...member,
+    avatar_url: fetchedAvatarUrlByJid.value[member.jid] ?? member.avatar_url,
+  })),
+);
+
+watch(
+  () => [xmppClient.value, mergedMentionMembers.value.members.map((member) => member.jid).join("\n")] as const,
+  ([client]) => {
+    if (!client) return;
+    for (const member of mergedMentionMembers.value.members) {
+      const jid = member.jid;
+      if (!jid || member.avatar_url || avatarFetchStateByJid.value[jid]) continue;
+      avatarFetchStateByJid.value = { ...avatarFetchStateByJid.value, [jid]: "pending" };
+      void client.fetchUserAvatar(jid)
+        .then((avatarUrl) => {
+          fetchedAvatarUrlByJid.value = { ...fetchedAvatarUrlByJid.value, [jid]: avatarUrl };
+        })
+        .catch(() => {
+          fetchedAvatarUrlByJid.value = { ...fetchedAvatarUrlByJid.value, [jid]: null };
+        })
+        .finally(() => {
+          avatarFetchStateByJid.value = { ...avatarFetchStateByJid.value, [jid]: "done" };
+        });
+    }
+  },
+  { immediate: true },
+);
 
 function resolveChannelNameFromJid(roomJid: string): string | null {
   const managedRoom = parseManagedRoomBareJid(roomJid);
@@ -1096,7 +1149,7 @@ onUnmounted(() => {
               :avatar-url-by-author="avatarUrlByAuthor"
                :author-jid-by-nick="authorJidByNick"
               :tenor-api-key="tenorApiKey"
-               :member-names="mentionNames"
+               :mention-candidates="mentionCandidates"
               :room-hats="messaging.roomHats.value"
               :room-presence="messaging.roomPresence.value"
               :room-last-seen="messaging.roomLastSeen.value"
@@ -1169,7 +1222,7 @@ onUnmounted(() => {
               :room-presence="messaging.roomPresence.value"
               :room-last-seen="messaging.roomLastSeen.value"
               :tenor-api-key="tenorApiKey"
-               :member-names="mentionNames"
+               :mention-candidates="mentionCandidates"
               :slow-mode-cooldown="messaging.slowModeCooldown.value"
               :is-sending="false"
               :upload-progress="{ uploading: false, progress: 0, filename: '' }"
@@ -1202,7 +1255,7 @@ onUnmounted(() => {
               :room-presence="messaging.roomPresence.value"
               :room-last-seen="messaging.roomLastSeen.value"
               :tenor-api-key="tenorApiKey"
-               :member-names="mentionNames"
+               :mention-candidates="mentionCandidates"
               :slow-mode-cooldown="messaging.slowModeCooldown.value"
               :is-sending="messaging.isSending.value"
               :upload-progress="messaging.uploadProgress.value"
@@ -1259,7 +1312,7 @@ onUnmounted(() => {
 
     <MemberManagement
       v-model:open="ui.showMembers.value"
-      :members="waddles.sortedMembers.value"
+      :members="membersWithAvatars"
       :member-query="members.memberQuery.value"
       :new-member-role="members.newMemberRole.value"
       :search-results="members.memberSearchResults.value"

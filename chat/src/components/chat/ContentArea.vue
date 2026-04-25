@@ -12,6 +12,7 @@ import {
 import { extractFilesFromEvent } from "@/lib/xmpp/file-upload";
 import type { ChannelSummary, SpaceSummary } from "@/lib/chat-types";
 import type { TimelineMessage, MarkupSpan, MessageReference } from "@/lib/chat-ui";
+import type { MentionCandidate } from "@/lib/mentions";
 import type { BrowserXmppClient, XmppStatusSnapshot, RoomHats, RoomPresence } from "@/lib/xmpp-client";
 import { useScrollDirection } from "@/composables/useScrollDirection";
 import type { ThreadIndex } from "@/composables/useThreads";
@@ -43,7 +44,7 @@ const props = defineProps<{
   avatarUrlByAuthor: Record<string, string | null>;
   authorJidByNick?: Record<string, string>;
   tenorApiKey: string;
-  memberNames: string[];
+  mentionCandidates: MentionCandidate[];
   roomHats: RoomHats;
   roomPresence: RoomPresence;
   roomLastSeen: Record<string, number>;
@@ -660,7 +661,7 @@ function showDividerAfter(messageId: string): boolean {
       :is-sending="isSending"
       :disabled="!canShowComposer"
       :tenor-api-key="tenorApiKey"
-      :member-names="memberNames"
+      :mention-candidates="mentionCandidates"
       :slow-mode-cooldown="slowModeCooldown"
       :upload-progress="uploadProgress"
       :replying-to="replyingTo"
@@ -801,7 +802,7 @@ function showDividerAfter(messageId: string): boolean {
       :is-sending="isSending"
       :disabled="!canShowComposer"
       :tenor-api-key="tenorApiKey"
-      :member-names="memberNames"
+      :mention-candidates="mentionCandidates"
       :slow-mode-cooldown="slowModeCooldown"
       :upload-progress="uploadProgress"
       :replying-to="replyingTo"

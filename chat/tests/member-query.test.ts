@@ -8,6 +8,9 @@ type TestXmpp = {
     room: string,
     opts: { affiliation: "owner" | "admin" | "member" | "outcast" },
   ) => Promise<{ muc?: { users?: Array<{ jid?: string; affiliation?: string }> } }>;
+  getItems?: (jid: string, node: string) => Promise<{ items?: Array<{ content?: unknown }> }>;
+  getAvatar?: (jid: string, id: string) => Promise<{ content?: unknown }>;
+  getVCard?: (jid: string) => Promise<{ records?: unknown[] }>;
 };
 
 function session(partial: Partial<WaddleSession> = {}): WaddleSession {
@@ -101,5 +104,48 @@ describe("BrowserXmppClient.listRoomMembers", () => {
 
     expect(getRoomMembers).toHaveBeenCalledTimes(4);
     expect(errors.some((event) => event.detail.includes("reconstructed room JID may not match"))).toBe(true);
+  });
+});
+
+describe("BrowserXmppClient.fetchUserAvatar", () => {
+  test("fetches XEP-0084 avatar data before vCard fallback", async () => {
+    const getItems = mock(async () => ({
+      items: [{ content: { versions: [{ id: "hash1", mediaType: "image/png" }] } }],
+    }));
+    const getAvatar = mock(async () => ({
+      content: { data: Buffer.from("avatar-bytes") },
+    }));
+    const getVCard = mock(async () => ({ records: [] }));
+    const client = clientWithXmpp({ getItems, getAvatar, getVCard });
+
+    await expect(client.fetchUserAvatar("bob@example.com/mobile")).resolves.toBe(
+      `data:image/png;base64,${Buffer.from("avatar-bytes").toString("base64")}`,
+    );
+    expect(getItems).toHaveBeenCalledWith("bob@example.com", "urn:xmpp:avatar:metadata");
+    expect(getAvatar).toHaveBeenCalledWith("bob@example.com", "hash1");
+    expect(getVCard).not.toHaveBeenCalled();
+  });
+
+  test("falls back to vCard photo when PEP avatar is unavailable", async () => {
+    const getItems = mock(async () => {
+      throw { condition: "item-not-found" };
+    });
+    const getVCard = mock(async () => ({
+      records: [{ type: "photo", mediaType: "image/jpeg", data: Buffer.from("vcard-photo") }],
+    }));
+    const client = clientWithXmpp({ getItems, getVCard });
+
+    await expect(client.fetchUserAvatar("carol@example.com")).resolves.toBe(
+      `data:image/jpeg;base64,${Buffer.from("vcard-photo").toString("base64")}`,
+    );
+    expect(getVCard).toHaveBeenCalledWith("carol@example.com");
+  });
+
+  test("returns null when avatar sources are unsupported or empty", async () => {
+    const getItems = mock(async () => ({ items: [] }));
+    const getVCard = mock(async () => ({ records: [] }));
+    const client = clientWithXmpp({ getItems, getVCard });
+
+    await expect(client.fetchUserAvatar("dana@example.com")).resolves.toBeNull();
   });
 });
