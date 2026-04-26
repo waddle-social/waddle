@@ -10,7 +10,6 @@
 //! ✅ Migrated to this module:
 //! - XEP-0199 ping — [`ping::PingHandler`]
 //! - RFC 3921 session — [`session::SessionHandler`]
-//! - RFC 6121 roster — [`roster::RosterHandler`] (stateless empty-roster ack)
 //! - XEP-0280 carbons enable/disable — [`carbons::CarbonsHandler`]
 //!   (ack only; per-connection toggle still pending)
 //! - XEP-0092 software version — [`version::VersionHandler`]
@@ -19,6 +18,7 @@
 //! ⏳ Staying in the legacy `websocket.rs` path until the two-phase async
 //! callback machinery lands:
 //! - XEP-0030 disco#info / disco#items (needs MUC registry + DB lookup)
+//! - RFC 6121 roster (needs durable roster storage + push fanout)
 //! - XEP-0363 HTTP upload (needs `create_upload_slot` async call)
 //! - XEP-0313 MAM query (needs MamStorage async call)
 //! - XEP-0045 muc#owner (needs MUC registry)
@@ -26,7 +26,6 @@
 
 pub mod carbons;
 pub mod ping;
-pub mod roster;
 pub mod session;
 pub mod time;
 pub mod version;
@@ -44,7 +43,6 @@ use xmpp_parsers::iq::{Iq, IqType};
 pub fn register_default_handlers(dispatcher: &mut StanzaDispatcher) {
     dispatcher.register_iq(Arc::new(ping::PingHandler));
     dispatcher.register_iq(Arc::new(session::SessionHandler));
-    dispatcher.register_iq(Arc::new(roster::RosterHandler));
     dispatcher.register_iq(Arc::new(carbons::CarbonsHandler));
     dispatcher.register_iq(Arc::new(version::VersionHandler));
     dispatcher.register_iq(Arc::new(time::TimeHandler));

@@ -38,7 +38,7 @@ impl DatabaseRosterStorage {
         user_jid: &BareJid,
     ) -> Result<Vec<RosterItemRow>, RosterStorageError> {
         let mut rows = self.query_with_persistent(
-            "SELECT contact_jid, name, subscription, ask, groups FROM roster_items WHERE user_jid = ?",
+            "SELECT contact_jid, name, subscription, ask, approved, groups FROM roster_items WHERE user_jid = ?",
             crate::db_params![user_jid.to_string()],
         ).await?;
 
@@ -56,7 +56,8 @@ impl DatabaseRosterStorage {
                 RosterStorageError::QueryFailed(format!("Failed to get subscription: {}", e))
             })?;
             let ask: Option<String> = row.get(3).ok();
-            let groups_json: Option<String> = row.get(4).ok();
+            let approved: bool = row.get(4).unwrap_or(false);
+            let groups_json: Option<String> = row.get(5).ok();
 
             let groups: Vec<String> = groups_json
                 .and_then(|json| serde_json::from_str(&json).ok())
@@ -67,6 +68,7 @@ impl DatabaseRosterStorage {
                 name,
                 subscription,
                 ask,
+                approved,
                 groups,
             });
         }
@@ -83,7 +85,7 @@ impl DatabaseRosterStorage {
         contact_jid: &BareJid,
     ) -> Result<Option<RosterItemRow>, RosterStorageError> {
         let mut rows = self.query_with_persistent(
-            "SELECT contact_jid, name, subscription, ask, groups FROM roster_items WHERE user_jid = ? AND contact_jid = ?",
+            "SELECT contact_jid, name, subscription, ask, approved, groups FROM roster_items WHERE user_jid = ? AND contact_jid = ?",
             crate::db_params![user_jid.to_string(), contact_jid.to_string()],
         ).await?;
 
@@ -101,7 +103,8 @@ impl DatabaseRosterStorage {
                     RosterStorageError::QueryFailed(format!("Failed to get subscription: {}", e))
                 })?;
                 let ask: Option<String> = row.get(3).ok();
-                let groups_json: Option<String> = row.get(4).ok();
+                let approved: bool = row.get(4).unwrap_or(false);
+                let groups_json: Option<String> = row.get(5).ok();
 
                 let groups: Vec<String> = groups_json
                     .and_then(|json| serde_json::from_str(&json).ok())
@@ -112,6 +115,7 @@ impl DatabaseRosterStorage {
                     name,
                     subscription,
                     ask,
+                    approved,
                     groups,
                 }))
             }
@@ -143,17 +147,19 @@ impl DatabaseRosterStorage {
         let name = item.name.clone();
         let subscription = item.subscription.clone();
         let ask = item.ask.clone();
+        let approved = item.approved;
         let groups_json_param = groups_json.clone();
 
         // Use INSERT OR REPLACE to upsert
         self.execute_with_retry(
             r#"
-            INSERT INTO roster_items (user_jid, contact_jid, name, subscription, ask, groups, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+            INSERT INTO roster_items (user_jid, contact_jid, name, subscription, ask, approved, groups, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
             ON CONFLICT(user_jid, contact_jid) DO UPDATE SET
                 name = excluded.name,
                 subscription = excluded.subscription,
                 ask = excluded.ask,
+                approved = excluded.approved,
                 groups = excluded.groups,
                 updated_at = datetime('now')
             "#,
@@ -164,6 +170,7 @@ impl DatabaseRosterStorage {
                     name.clone(),
                     subscription.clone(),
                     ask.clone(),
+                    approved,
                     groups_json_param.clone(),
                 ]
             },
@@ -240,6 +247,22 @@ impl DatabaseRosterStorage {
         }
     }
 
+    /// Get the current roster version, creating one for an otherwise empty roster.
+    #[instrument(skip(self), fields(user = %user_jid))]
+    pub async fn get_or_create_roster_version(
+        &self,
+        user_jid: &BareJid,
+    ) -> Result<String, RosterStorageError> {
+        if let Some(version) = self.get_roster_version(user_jid).await? {
+            return Ok(version);
+        }
+
+        self.increment_roster_version(user_jid).await?;
+        self.get_roster_version(user_jid).await?.ok_or_else(|| {
+            RosterStorageError::QueryFailed("Roster version missing after create".to_string())
+        })
+    }
+
     /// Check if a roster item exists.
     #[instrument(skip(self), fields(user = %user_jid, contact = %contact_jid))]
     pub async fn has_roster_item(
@@ -266,10 +289,7 @@ impl DatabaseRosterStorage {
     /// Update the subscription state for a roster item.
     ///
     /// Creates the roster item if it doesn't exist.
-    #[allow(
-        dead_code,
-        reason = "legacy waddle_xmpp AppState bridge and roster storage tests exercise this path"
-    )]
+    #[cfg(test)]
     #[instrument(skip(self), fields(user = %user_jid, contact = %contact_jid))]
     pub async fn update_subscription(
         &self,
@@ -278,7 +298,6 @@ impl DatabaseRosterStorage {
         subscription: &str,
         ask: Option<&str>,
     ) -> Result<RosterItemRow, RosterStorageError> {
-        // Upsert the roster item with the new subscription state
         let user_jid_s = user_jid.to_string();
         let contact_jid_s = contact_jid.to_string();
         let subscription_s = subscription.to_string();
@@ -286,11 +305,12 @@ impl DatabaseRosterStorage {
 
         self.execute_with_retry(
             r#"
-            INSERT INTO roster_items (user_jid, contact_jid, subscription, ask, groups, updated_at)
-            VALUES (?, ?, ?, ?, '[]', datetime('now'))
+            INSERT INTO roster_items (user_jid, contact_jid, subscription, ask, approved, groups, updated_at)
+            VALUES (?, ?, ?, ?, 0, '[]', datetime('now'))
             ON CONFLICT(user_jid, contact_jid) DO UPDATE SET
                 subscription = excluded.subscription,
                 ask = excluded.ask,
+                approved = excluded.approved,
                 updated_at = datetime('now')
             "#,
             || {
@@ -304,10 +324,8 @@ impl DatabaseRosterStorage {
         )
         .await?;
 
-        // Update roster version
         self.increment_roster_version(user_jid).await?;
 
-        // Return the updated item
         self.get_roster_item(user_jid, contact_jid)
             .await?
             .ok_or_else(|| {
@@ -347,10 +365,7 @@ impl DatabaseRosterStorage {
     /// Get all roster items where the user receives presence updates.
     ///
     /// Returns contacts with subscription=to or subscription=both.
-    #[allow(
-        dead_code,
-        reason = "legacy waddle_xmpp AppState bridge and roster storage tests exercise this path"
-    )]
+    #[cfg(test)]
     #[instrument(skip(self), fields(user = %user_jid))]
     pub async fn get_presence_subscriptions(
         &self,
@@ -485,6 +500,8 @@ pub struct RosterItemRow {
     pub subscription: String,
     /// Pending subscription request: 'subscribe' or None.
     pub ask: Option<String>,
+    /// Whether the contact is pre-approved for a future subscription request.
+    pub approved: bool,
     /// Groups this contact belongs to.
     pub groups: Vec<String>,
 }
@@ -532,6 +549,7 @@ mod tests {
             name: Some("Bob".to_string()),
             subscription: "none".to_string(),
             ask: None,
+            approved: false,
             groups: vec!["Friends".to_string()],
         };
         let is_new = storage.set_roster_item(&user_jid, &item).await.unwrap();
@@ -556,6 +574,7 @@ mod tests {
             name: Some("Robert".to_string()),
             subscription: "both".to_string(),
             ask: None,
+            approved: false,
             groups: vec!["Friends".to_string(), "Work".to_string()],
         };
         let is_new = storage
@@ -635,6 +654,7 @@ mod tests {
                 name: None,
                 subscription: subscription.to_string(),
                 ask: None,
+                approved: false,
                 groups: vec![],
             };
             storage.set_roster_item(&user_jid, &item).await.unwrap();
@@ -671,6 +691,7 @@ mod tests {
             name: None,
             subscription: "none".to_string(),
             ask: None,
+            approved: false,
             groups: vec![],
         };
         storage.set_roster_item(&user_jid, &item).await.unwrap();

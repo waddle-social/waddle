@@ -18,6 +18,10 @@ use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine};
 use futures::{Sink, SinkExt, StreamExt};
 use jid::{BareJid, FullJid};
 use kameo::actor::ActorRef;
+use quick_xml::{
+    events::{BytesEnd, BytesStart, BytesText, Event},
+    Writer,
+};
 use std::{str::FromStr, sync::Arc};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
@@ -41,8 +45,8 @@ use waddle_xmpp::{
     },
     registry::{ConnectionRegistry, OutboundStanza},
     stream_management::{
-        InMemorySmSessionRegistry, SmEnable, SmResume, SmSessionRegistry, SmStanza,
-        StreamManagementState, SM_NS,
+        InMemorySmSessionRegistry, SmClaimCompletion, SmEnable, SmResume, SmSessionRegistry,
+        SmStanza, StreamManagementState, SM_NS,
     },
     Stanza,
 };
@@ -108,7 +112,7 @@ pub struct ProtocolServices {
     /// Runtime extension manager for message embeds + feature advertisements.
     pub extension_manager: Arc<ExtensionManager>,
     /// Sans-I/O stanza dispatcher. Handlers migrated so far (ping, session,
-    /// roster, carbons) are routed through this before falling back to the
+    /// carbons) are routed through this before falling back to the
     /// legacy string-matching code paths below.
     pub dispatcher: Arc<StanzaDispatcher>,
     /// Shared PubSub/PEP storage (XEP-0060/XEP-0163).
@@ -147,6 +151,20 @@ struct WsConnState {
     /// sends `<enable/>` / `<disable/>` and restored from detached SM state
     /// on resume so re-registration preserves carbons behavior.
     carbons_enabled: bool,
+    /// Per-stream RFC 6121 roster-interest state restored only on true SM resume.
+    roster_interested: bool,
+    /// Presence availability restored from XEP-0198 detached state.
+    presence_available: bool,
+    presence_show: Option<xmpp_parsers::presence::Show>,
+    presence_status: Option<String>,
+    presence_priority: i8,
+    /// SM stream id restored by `<resume/>` but not yet removed from the
+    /// detached registry. The main loop clears it after live routing is
+    /// registered, closing the take-before-register fanout gap.
+    pending_resume_stream_id: Option<String>,
+    pending_resume_h: Option<u32>,
+    /// Ownership handle for the current connection-registry entry.
+    registry_owner: Option<Arc<std::sync::atomic::AtomicBool>>,
     /// One-shot flag: when set, the main loop must NOT push the current
     /// frame's responses into `sm_state.record_outbound`. The flag is
     /// raised by `handle_sm_resume` because the responses it returns are
@@ -164,6 +182,14 @@ impl WsConnState {
             authenticated_session: None,
             sm_state: StreamManagementState::new(),
             carbons_enabled: false,
+            roster_interested: false,
+            presence_available: false,
+            presence_show: None,
+            presence_status: None,
+            presence_priority: 0,
+            pending_resume_stream_id: None,
+            pending_resume_h: None,
+            registry_owner: None,
             suppress_sm_record_next_batch: false,
         }
     }
@@ -226,7 +252,7 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
                         debug!(len = text.len(), "Received XMPP WebSocket message");
 
                         // Handle XMPP framing (RFC 7395)
-                        let responses = handle_xmpp_frame(
+                        let mut responses = handle_xmpp_frame(
                             &text,
                             &domain,
                             &state,
@@ -235,13 +261,119 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
 
                         // Register connection after successful authentication AND resource binding
                         // This ensures the JID in ConnectionRegistry matches the JID stored in MUC room occupants
-                        if let Some(jid) = conn.phase.bound_jid() {
+                        if let Some(jid) = conn.phase.bound_jid().cloned() {
                             if let Some(tx) = pending_tx.take() {
-                                state.deps.protocol.connection_registry.register_with_carbons(
+                                let owner = state.deps.protocol.connection_registry.register_with_stream_state(
                                     jid.clone(),
                                     tx,
                                     conn.carbons_enabled,
+                                    conn.roster_interested,
                                 );
+                                conn.registry_owner = Some(owner.clone());
+                                if conn.presence_available {
+                                    state
+                                        .deps
+                                        .protocol
+                                        .connection_registry
+                                        .update_presence(&jid, true, 0);
+                                    state
+                                        .deps
+                                        .protocol
+                                        .connection_registry
+                                        .update_presence_state(
+                                            &jid,
+                                            conn.presence_show.as_ref().map(sm_show_name).map(str::to_string),
+                                            conn.presence_status.clone(),
+                                            conn.presence_priority,
+                                        );
+                                }
+                                if let Some(stream_id) = conn.pending_resume_stream_id.take() {
+                                    match state
+                                        .deps
+                                        .protocol
+                                        .sm_session_registry
+                                        .complete_claim(&stream_id)
+                                        .await
+                                    {
+                                        Ok(Some(SmClaimCompletion::Resumed(detached))) => {
+                                            if let Some(h) = conn.pending_resume_h.take() {
+                                                conn.sm_state.restore_from_session(&detached);
+                                                conn.sm_state.acknowledge(h);
+                                                responses = vec![
+                                                    waddle_xmpp::stream_management::SmResumed::new(
+                                                        stream_id.clone(),
+                                                        conn.sm_state.get_inbound_count(),
+                                                    )
+                                                    .to_xml(),
+                                                ];
+                                                responses
+                                                    .extend(conn.sm_state.get_stanzas_to_resend(h));
+                                            }
+                                        }
+                                        Ok(Some(SmClaimCompletion::Expired(detached))) => {
+                                            warn!(stream_id = %stream_id, jid = %jid, "SM resume claim expired before completion");
+                                            cleanup_invalidated_detached_session(
+                                                state.as_ref(),
+                                                detached,
+                                                Some(&owner),
+                                            )
+                                            .await;
+                                            let _ = state
+                                                .deps
+                                                .protocol
+                                                .connection_registry
+                                                .unregister_if_owner(&jid, &owner);
+                                            conn.registry_owner = None;
+                                            conn.phase = ConnectionPhase::closing(Some(jid.clone()));
+                                            responses = vec![waddle_xmpp::stream_management::SmFailed::with_condition("item-not-found").to_xml()];
+                                        }
+                                        Ok(None) => {
+                                            warn!(stream_id = %stream_id, jid = %jid, "SM resume claim disappeared before completion");
+                                            let _ = state
+                                                .deps
+                                                .protocol
+                                                .connection_registry
+                                                .unregister_if_owner(&jid, &owner);
+                                            conn.registry_owner = None;
+                                            conn.phase = ConnectionPhase::closing(Some(jid.clone()));
+                                            responses = vec![waddle_xmpp::stream_management::SmFailed::with_condition("item-not-found").to_xml()];
+                                        }
+                                        Err(error) => {
+                                            warn!(stream_id = %stream_id, jid = %jid, error = %error, "Failed to complete SM resume claim");
+                                            let _ = state
+                                                .deps
+                                                .protocol
+                                                .connection_registry
+                                                .unregister_if_owner(&jid, &owner);
+                                            conn.registry_owner = None;
+                                            conn.phase = ConnectionPhase::closing(Some(jid.clone()));
+                                            responses = vec![waddle_xmpp::stream_management::SmFailed::with_condition("internal-server-error").to_xml()];
+                                        }
+                                    }
+                                    state.deps.protocol.resumable_sessions.remove(&stream_id);
+                                } else if !conn.phase.is_resumed() {
+                                    match state
+                                        .deps
+                                        .protocol
+                                        .sm_session_registry
+                                        .invalidate_sessions_for_jid(&jid)
+                                        .await
+                                    {
+                                        Ok(removed) => {
+                                            for detached in removed {
+                                                cleanup_invalidated_detached_session(
+                                                    state.as_ref(),
+                                                    detached,
+                                                    Some(&owner),
+                                                )
+                                                .await;
+                                            }
+                                        }
+                                        Err(error) => {
+                                            warn!(jid = %jid, error = %error, "Failed to invalidate older detached SM sessions for fresh bind");
+                                        }
+                                    }
+                                }
                                 info!(
                                     jid = %jid,
                                     resumed = conn.phase.is_resumed(),
@@ -370,7 +502,7 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
     // Short-circuit when this task was superseded: the registry and MUC
     // occupant slots now belong to the newer connection for this FullJid,
     // and any cleanup we do here would clobber the newcomer.
-    cleanup_connection_shutdown(state.as_ref(), &conn, superseded).await;
+    cleanup_connection_shutdown(state.as_ref(), &mut outbound_rx, &mut conn, superseded).await;
 
     info!("XMPP WebSocket connection closed");
 }
@@ -421,7 +553,12 @@ pub async fn cleanup_muc_presence_for_jid(state: &WebSocketState, jid: &FullJid)
     cleanup_muc_presence(state, jid).await
 }
 
-async fn cleanup_connection_shutdown(state: &WebSocketState, conn: &WsConnState, superseded: bool) {
+async fn cleanup_connection_shutdown(
+    state: &WebSocketState,
+    outbound_rx: &mut mpsc::Receiver<OutboundStanza>,
+    conn: &mut WsConnState,
+    superseded: bool,
+) {
     // Short-circuit when this task was superseded: the registry and MUC
     // occupant slots now belong to the newer connection for this FullJid,
     // and any cleanup we do here would clobber the newcomer.
@@ -437,24 +574,73 @@ async fn cleanup_connection_shutdown(state: &WebSocketState, conn: &WsConnState,
         conn.sm_state.is_resumable() && !matches!(conn.phase, ConnectionPhase::Closing { .. });
 
     if should_detach_for_resume {
+        if conn.registry_owner.is_none() {
+            if let Some(stream_id) = conn.pending_resume_stream_id.take() {
+                if let Err(error) = state
+                    .deps
+                    .protocol
+                    .sm_session_registry
+                    .release_claim(&stream_id)
+                    .await
+                {
+                    warn!(stream_id = %stream_id, error = %error, "Failed to release pending SM resume claim during cleanup");
+                }
+                state.deps.protocol.resumable_sessions.remove(&stream_id);
+            }
+        }
+        let Some(owner) = conn.registry_owner.as_ref() else {
+            debug!(jid = %jid, "Skipped SM detach for connection without registry ownership");
+            return;
+        };
+        let presence_state = state
+            .deps
+            .protocol
+            .connection_registry
+            .get_presence_state(&jid);
+        let Some(entry) = state
+            .deps
+            .protocol
+            .connection_registry
+            .entry_if_owner(&jid, owner)
+        else {
+            debug!(jid = %jid, "Skipped SM detach for non-owned registry entry");
+            return;
+        };
+
         let carbons_enabled = conn.carbons_enabled;
+        let presence_available = entry.is_presence_available();
+        while let Ok(outbound_stanza) = outbound_rx.try_recv() {
+            let xml = stanza_to_xml(&outbound_stanza.stanza);
+            if conn.sm_state.enabled && is_countable_stanza(&xml) {
+                conn.sm_state.record_outbound(xml);
+            }
+        }
         let user_id = conn
             .authenticated_session
             .as_ref()
             .map(|session| session.user_id.to_string())
             .unwrap_or_else(|| jid.to_bare().to_string());
-        if let Some(detached) =
-            conn.sm_state
-                .to_detached_session(user_id, jid.clone(), carbons_enabled)
-        {
+        if let Some(detached) = conn.sm_state.to_detached_session(
+            waddle_xmpp::stream_management::DetachedSessionSnapshot {
+                user_id,
+                jid: jid.clone(),
+                carbons_enabled,
+                roster_interested: conn.roster_interested,
+                presence_available,
+                presence_show: presence_state
+                    .as_ref()
+                    .and_then(|state| state.show.as_deref())
+                    .and_then(sm_show_from_name),
+                presence_status: presence_state
+                    .as_ref()
+                    .and_then(|state| state.status.clone()),
+                presence_priority: presence_state
+                    .as_ref()
+                    .map(|state| state.priority)
+                    .unwrap_or_else(|| entry.presence_priority()),
+            },
+        ) {
             let stream_id = detached.stream_id.clone();
-            if let Some(session) = conn.authenticated_session.clone() {
-                state
-                    .deps
-                    .protocol
-                    .resumable_sessions
-                    .insert(stream_id.clone(), session);
-            }
             match state
                 .deps
                 .protocol
@@ -463,10 +649,46 @@ async fn cleanup_connection_shutdown(state: &WebSocketState, conn: &WsConnState,
                 .await
             {
                 Ok(()) => {
+                    if state
+                        .deps
+                        .protocol
+                        .connection_registry
+                        .unregister_if_owner(&jid, owner)
+                        .is_none()
+                    {
+                        debug!(jid = %jid, "Removed detached SM session after ownership moved");
+                        let _ = state
+                            .deps
+                            .protocol
+                            .sm_session_registry
+                            .remove_stored_session_if_unclaimed(&stream_id)
+                            .await;
+                        return;
+                    }
+                    outbound_rx.close();
+                    while let Ok(outbound_stanza) = outbound_rx.try_recv() {
+                        let xml = stanza_to_xml(&outbound_stanza.stanza);
+                        if conn.sm_state.enabled && is_countable_stanza(&xml) {
+                            conn.sm_state.record_outbound(xml.clone());
+                            let sequence = conn.sm_state.outbound_count;
+                            let _ = state
+                                .deps
+                                .protocol
+                                .sm_session_registry
+                                .record_outbound_for_detached_stream_at(&stream_id, sequence, xml)
+                                .await;
+                        }
+                    }
+                    if let Some(session) = conn.authenticated_session.clone() {
+                        state
+                            .deps
+                            .protocol
+                            .resumable_sessions
+                            .insert(stream_id.clone(), session);
+                    }
                     // Remove the routing entry only — the MUC occupant
                     // slot stays. On a successful resume we'll re-register
                     // the same FullJid and presence is preserved.
-                    state.deps.protocol.connection_registry.unregister(&jid);
                     info!(
                         jid = %jid,
                         stream_id = %stream_id,
@@ -476,7 +698,11 @@ async fn cleanup_connection_shutdown(state: &WebSocketState, conn: &WsConnState,
                 Err(err) => {
                     warn!(jid = %jid, error = %err, "Failed to detach SM session; falling back to full cleanup");
                     state.deps.protocol.resumable_sessions.remove(&stream_id);
-                    state.deps.protocol.connection_registry.unregister(&jid);
+                    let _ = state
+                        .deps
+                        .protocol
+                        .connection_registry
+                        .unregister_if_owner(&jid, owner);
                     cleanup_muc_presence(state, &jid).await;
                 }
             }
@@ -484,9 +710,20 @@ async fn cleanup_connection_shutdown(state: &WebSocketState, conn: &WsConnState,
         }
     }
 
-    state.deps.protocol.connection_registry.unregister(&jid);
-    info!(jid = %jid, "WebSocket connection unregistered");
-    cleanup_muc_presence(state, &jid).await;
+    let removed = conn.registry_owner.as_ref().is_some_and(|owner| {
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .unregister_if_owner(&jid, owner)
+            .is_some()
+    });
+    if removed {
+        info!(jid = %jid, "WebSocket connection unregistered");
+        cleanup_muc_presence(state, &jid).await;
+    } else {
+        debug!(jid = %jid, "Skipped websocket cleanup for non-owned registry entry");
+    }
 }
 
 async fn cleanup_muc_presence(state: &WebSocketState, jid: &FullJid) {
@@ -519,6 +756,41 @@ async fn cleanup_muc_presence(state: &WebSocketState, jid: &FullJid) {
             }
         }
     }
+}
+
+async fn cleanup_invalidated_detached_session(
+    state: &WebSocketState,
+    detached: waddle_xmpp::stream_management::DetachedSession,
+    replacement_owner: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
+) {
+    state
+        .deps
+        .protocol
+        .resumable_sessions
+        .remove(&detached.stream_id);
+    let replacement_is_current_owner = replacement_owner.is_some_and(|owner| {
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .entry_if_owner(&detached.jid, owner)
+            .is_some()
+    });
+    if !replacement_is_current_owner {
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .unregister(&detached.jid);
+    }
+    if detached.presence_available && !replacement_is_current_owner {
+        handlers::presence::broadcast_unavailable_for_expired_detached_session(
+            state,
+            &detached.jid,
+        )
+        .await;
+    }
+    cleanup_muc_presence(state, &detached.jid).await;
 }
 
 pub(crate) async fn get_room_actor(
@@ -716,10 +988,60 @@ pub(crate) fn build_iq_error_xml(id: &str, error_type: &str, condition: &str) ->
     build_iq_error_xml_with_addresses(id, None, None, error_type, condition)
 }
 
+fn build_handled_count_too_high_stream_error(acknowledged: u32, send_count: u32) -> String {
+    let mut writer = Writer::new(Vec::new());
+    let mut stream_error = BytesStart::new("stream:error");
+    stream_error.push_attribute(("xmlns:stream", waddle_xmpp::ns::STREAM));
+    writer
+        .write_event(Event::Start(stream_error))
+        .expect("serializing stream error should not fail");
+
+    let mut undefined = BytesStart::new("undefined-condition");
+    undefined.push_attribute(("xmlns", "urn:ietf:params:xml:ns:xmpp-streams"));
+    writer
+        .write_event(Event::Empty(undefined))
+        .expect("serializing undefined-condition should not fail");
+
+    let mut handled_count = BytesStart::new("handled-count-too-high");
+    let acknowledged = acknowledged.to_string();
+    let send_count = send_count.to_string();
+    handled_count.push_attribute(("xmlns", SM_NS));
+    handled_count.push_attribute(("h", acknowledged.as_str()));
+    handled_count.push_attribute(("send-count", send_count.as_str()));
+    writer
+        .write_event(Event::Empty(handled_count))
+        .expect("serializing handled-count-too-high should not fail");
+
+    let mut text = BytesStart::new("text");
+    text.push_attribute(("xmlns", "urn:ietf:params:xml:ns:xmpp-streams"));
+    text.push_attribute(("xml:lang", "en"));
+    writer
+        .write_event(Event::Start(text))
+        .expect("serializing stream error text should not fail");
+    writer
+        .write_event(Event::Text(BytesText::new(&format!(
+            "You acknowledged {acknowledged} stanzas, but I only sent you {send_count} so far."
+        ))))
+        .expect("serializing stream error text should not fail");
+    writer
+        .write_event(Event::End(BytesEnd::new("text")))
+        .expect("serializing stream error text end should not fail");
+    writer
+        .write_event(Event::End(BytesEnd::new("stream:error")))
+        .expect("serializing stream error end should not fail");
+    writer
+        .write_event(Event::End(BytesEnd::new("stream:stream")))
+        .expect("serializing stream close should not fail");
+    String::from_utf8(writer.into_inner()).expect("quick-xml serializes valid UTF-8")
+}
+
 fn build_stream_features_xml(authenticated: bool) -> String {
     let mut features = Element::builder("features", waddle_xmpp::ns::STREAM);
     if authenticated {
         features = features.append(Element::builder("bind", waddle_xmpp::ns::BIND).build());
+        features = features.append(Element::builder("ver", waddle_xmpp::ns::ROSTERVER).build());
+        features =
+            features.append(Element::builder("sub", "urn:xmpp:features:pre-approval").build());
         // XEP-0198: advertise stream management so clients can <enable/> it
         // after bind or <resume/> a detached session.
         features = features.append(Element::builder("sm", SM_NS).build());
@@ -784,6 +1106,25 @@ fn is_countable_stanza(frame: &str) -> bool {
     matches!(&after_lt[..name_end], "iq" | "message" | "presence")
 }
 
+fn sm_show_from_name(value: &str) -> Option<xmpp_parsers::presence::Show> {
+    match value {
+        "away" => Some(xmpp_parsers::presence::Show::Away),
+        "chat" => Some(xmpp_parsers::presence::Show::Chat),
+        "dnd" => Some(xmpp_parsers::presence::Show::Dnd),
+        "xa" => Some(xmpp_parsers::presence::Show::Xa),
+        _ => None,
+    }
+}
+
+fn sm_show_name(show: &xmpp_parsers::presence::Show) -> &'static str {
+    match show {
+        xmpp_parsers::presence::Show::Away => "away",
+        xmpp_parsers::presence::Show::Chat => "chat",
+        xmpp_parsers::presence::Show::Dnd => "dnd",
+        xmpp_parsers::presence::Show::Xa => "xa",
+    }
+}
+
 /// Bundle the session-level borrows that XEP-0198 control handlers mutate.
 /// Passed through `handle_sm_stanza` and its helpers so each signature stays
 /// below the clippy too-many-arguments threshold.
@@ -792,10 +1133,17 @@ struct SmCtx<'a> {
     sm_state: &'a mut StreamManagementState,
     authenticated_session: &'a mut Option<Session>,
     carbons_enabled: &'a mut bool,
+    presence_available: &'a mut bool,
+    presence_show: &'a mut Option<xmpp_parsers::presence::Show>,
+    presence_status: &'a mut Option<String>,
+    presence_priority: &'a mut i8,
+    pending_resume_stream_id: &'a mut Option<String>,
+    pending_resume_h: &'a mut Option<u32>,
     /// Set by `handle_sm_resume` so the main loop skips SM recording for
     /// the responses it returns — those are replay stanzas already tracked
     /// in the unacked queue.
     suppress_sm_record_next_batch: &'a mut bool,
+    roster_interested: &'a mut bool,
 }
 
 /// Dispatch an XEP-0198 control nonza. Isolated helper so the main frame
@@ -857,7 +1205,14 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
         sm_state,
         authenticated_session,
         carbons_enabled,
+        presence_available,
+        presence_show,
+        presence_status,
+        presence_priority,
+        pending_resume_stream_id,
+        pending_resume_h,
         suppress_sm_record_next_batch,
+        roster_interested,
     } = ctx;
 
     // Stream resumption is only legal before this transport has established a
@@ -870,7 +1225,7 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
         .deps
         .protocol
         .sm_session_registry
-        .peek_session(&resume.previd)
+        .claim_session(&resume.previd)
         .await
     {
         Ok(Some(session)) => session,
@@ -891,29 +1246,37 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
                 resumed_jid = %detached.jid,
                 "SM resume rejected due to authenticated identity mismatch"
             );
+            if let Err(error) = state
+                .deps
+                .protocol
+                .sm_session_registry
+                .release_claim(&resume.previd)
+                .await
+            {
+                warn!(stream_id = %resume.previd, error = %error, "Failed to release rejected SM resume claim");
+            }
             return vec![SmFailed::with_condition("not-authorized").to_xml()];
         }
     }
 
     let preserve_authenticated_session = matches!(phase, ConnectionPhase::Authenticated { .. });
 
-    let detached = match state
-        .deps
-        .protocol
-        .sm_session_registry
-        .take_session(&resume.previd)
-        .await
-    {
-        Ok(Some(session)) => session,
-        Ok(None) => {
-            info!(stream_id = %resume.previd, "SM resume rejected: session disappeared before take");
-            return vec![SmFailed::with_condition("item-not-found").to_xml()];
+    if resume.h > detached.outbound_count {
+        if let Err(error) = state
+            .deps
+            .protocol
+            .sm_session_registry
+            .release_claim(&resume.previd)
+            .await
+        {
+            warn!(stream_id = %resume.previd, error = %error, "Failed to release invalid SM resume claim");
         }
-        Err(e) => {
-            warn!(stream_id = %resume.previd, error = %e, "SM resume failed: registry error");
-            return vec![SmFailed::with_condition("internal-server-error").to_xml()];
-        }
-    };
+        *phase = ConnectionPhase::closing(None);
+        return vec![build_handled_count_too_high_stream_error(
+            resume.h,
+            detached.outbound_count,
+        )];
+    }
 
     // Restore SM counters + the unacked queue.
     sm_state.restore_from_session(&detached);
@@ -922,29 +1285,20 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
     sm_state.acknowledge(resume.h);
 
     // Restore authentication identity. If the detached sidecar has no
-    // matching Session (TTL expired / crash), a resume from Unauthenticated
-    // proceeds JID-only; a resume from Authenticated keeps the fresh
-    // transport's current Session context.
+    // matching Session (TTL expired / crash), the authenticated resume keeps
+    // the fresh transport's current Session context.
     let restored_session = state
         .deps
         .protocol
         .resumable_sessions
-        .remove(&resume.previd)
-        .map(|(_, s)| s);
-    if restored_session.is_none() {
-        if preserve_authenticated_session {
-            warn!(
-                stream_id = %resume.previd,
-                jid = %detached.jid,
-                "SM resumed without cached detached Session; preserving current authenticated Session"
-            );
-        } else {
-            warn!(
-                stream_id = %resume.previd,
-                jid = %detached.jid,
-                "SM resumed without cached Session; authorization context is thinner than expected"
-            );
-        }
+        .get(&resume.previd)
+        .map(|s| s.clone());
+    if restored_session.is_none() && preserve_authenticated_session {
+        warn!(
+            stream_id = %resume.previd,
+            jid = %detached.jid,
+            "SM resumed without cached detached Session; preserving current authenticated Session"
+        );
     }
 
     let resumed_session = restored_session.or_else(|| {
@@ -957,6 +1311,13 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
 
     *authenticated_session = resumed_session;
     *carbons_enabled = detached.carbons_enabled;
+    *roster_interested = detached.roster_interested;
+    *presence_available = detached.presence_available;
+    *presence_show = detached.presence_show.clone();
+    *presence_status = detached.presence_status.clone();
+    *presence_priority = detached.presence_priority;
+    *pending_resume_stream_id = Some(resume.previd.clone());
+    *pending_resume_h = Some(resume.h);
     *phase = ConnectionPhase::ready(detached.jid.clone(), true);
     // Responses below include replayed stanzas straight from the restored
     // unacked queue. They already carry their original sequence numbers —
@@ -997,7 +1358,15 @@ async fn handle_xmpp_frame(
         authenticated_session,
         sm_state,
         carbons_enabled,
+        presence_available,
+        presence_show,
+        presence_status,
+        presence_priority,
+        roster_interested,
+        pending_resume_stream_id,
+        pending_resume_h,
         suppress_sm_record_next_batch,
+        ..
     } = conn;
     let muc_domain = state.deps.service_domains.muc.clone();
 
@@ -1010,7 +1379,14 @@ async fn handle_xmpp_frame(
                 sm_state,
                 authenticated_session,
                 carbons_enabled,
+                presence_available,
+                presence_show,
+                presence_status,
+                presence_priority,
+                pending_resume_stream_id,
+                pending_resume_h,
                 suppress_sm_record_next_batch,
+                roster_interested,
             };
             return handle_sm_stanza(sm, state, ctx).await;
         }
@@ -1107,6 +1483,10 @@ async fn handle_xmpp_frame(
                     if is_bind {
                         return handle_resource_binding(&iq, domain, phase);
                     }
+                    let mut iq_conn_state = handlers::iq::IqConnState {
+                        carbons_enabled,
+                        roster_interested,
+                    };
                     handlers::iq::handle_iq_with_conn_state(
                         iq,
                         domain,
@@ -1114,7 +1494,7 @@ async fn handle_xmpp_frame(
                         state,
                         authenticated_session,
                         phase,
-                        carbons_enabled,
+                        &mut iq_conn_state,
                     )
                     .await
                 }
@@ -1710,7 +2090,7 @@ mod tests {
     use std::task::{Context, Poll};
     use tokio::sync::mpsc;
     // Handler functions moved to sub-modules but called directly in tests
-    use handlers::iq::{handle_iq, handle_iq_with_conn_state};
+    use handlers::iq::{handle_iq, handle_iq_with_conn_state, IqConnState};
     use handlers::message::handle_message;
     use handlers::presence::{handle_muc_join, handle_muc_leave, parse_room_jid_context};
     // Types moved out of mod.rs scope but used in tests
@@ -2808,6 +3188,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn handle_xmpp_frame_roster_get_marks_connection_interested_for_detach() {
+        let state = create_test_websocket_state().await;
+        let jid: FullJid = "alice@example.com/web".parse().expect("valid jid");
+        let mut conn = WsConnState::new();
+        conn.phase = ConnectionPhase::ready(jid, false);
+        let frame = r#"<iq xmlns="jabber:client" id="roster-interest" type="get"><query xmlns="jabber:iq:roster"/></iq>"#;
+
+        let responses = handle_xmpp_frame(frame, "example.com", state.as_ref(), &mut conn).await;
+
+        assert_eq!(responses.len(), 1);
+        assert!(
+            conn.roster_interested,
+            "roster get must persist interest on WsConnState for SM detach"
+        );
+    }
+
+    #[tokio::test]
     async fn handle_iq_roster_query_without_xmlns_survives_xmlns_like_attribute_value() {
         let state = create_test_websocket_state().await;
         let jid: FullJid = "alice@example.com/web".parse().expect("valid jid");
@@ -3609,7 +4006,12 @@ mod tests {
         let session = create_test_session(state.as_ref(), "alice").await;
         let pending_jid: FullJid = "alice@example.com/pending".parse().expect("pending jid");
         let mut carbons_enabled = false;
+        let mut roster_interested = false;
         let frame = r#"<iq xmlns="jabber:client" id="cmd-prebind-1" type="set" to="example.com"><command xmlns="http://jabber.org/protocol/commands" node="test:adhoc-command" action="execute"/></iq>"#;
+        let mut conn_state = IqConnState {
+            carbons_enabled: &mut carbons_enabled,
+            roster_interested: &mut roster_interested,
+        };
         let responses = handle_iq_with_conn_state(
             parse_iq_for_test(frame),
             "example.com",
@@ -3617,7 +4019,7 @@ mod tests {
             state.as_ref(),
             &Some(session),
             &ConnectionPhase::authenticated(&pending_jid),
-            &mut carbons_enabled,
+            &mut conn_state,
         )
         .await;
 
@@ -4713,7 +5115,12 @@ mod tests {
         let session = create_test_session(state.as_ref(), "bob").await;
         let pending_jid: FullJid = "bob@example.com/pending".parse().expect("pending jid");
         let mut carbons_enabled = false;
+        let mut roster_interested = false;
         let frame = r#"<iq xmlns='jabber:client' type='get' to='bob@example.com' id='inbox-prebind-1'><query xmlns='urn:waddle:inbox:0'/></iq>"#;
+        let mut conn_state = IqConnState {
+            carbons_enabled: &mut carbons_enabled,
+            roster_interested: &mut roster_interested,
+        };
         let responses = handle_iq_with_conn_state(
             parse_iq_for_test(frame),
             "example.com",
@@ -4721,7 +5128,7 @@ mod tests {
             state.as_ref(),
             &Some(session),
             &ConnectionPhase::authenticated(&pending_jid),
-            &mut carbons_enabled,
+            &mut conn_state,
         )
         .await;
 
@@ -5476,6 +5883,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn xep0237_features_advertise_roster_versioning() {
+        let features = build_stream_features_xml(true);
+        let el = Element::from_str(&features).expect("features xml");
+        assert!(
+            el.children()
+                .any(|child| { child.name() == "ver" && child.ns() == waddle_xmpp::ns::ROSTERVER }),
+            "post-auth features must advertise urn:xmpp:features:rosterver"
+        );
+    }
+
+    #[tokio::test]
+    async fn rfc6121_features_advertise_subscription_preapproval() {
+        let features = build_stream_features_xml(true);
+        let el = Element::from_str(&features).expect("features xml");
+        assert!(
+            el.children().any(|child| {
+                child.name() == "sub" && child.ns() == "urn:xmpp:features:pre-approval"
+            }),
+            "post-auth features must advertise RFC 6121 subscription pre-approval"
+        );
+    }
+
+    #[tokio::test]
     async fn sm_enable_requires_resource_binding() {
         let state = create_test_websocket_state().await;
         let mut conn = WsConnState::new();
@@ -5486,6 +5916,28 @@ mod tests {
         let el = Element::from_str(&responses[0]).expect("xml");
         assert_eq!(el.name(), "failed");
         assert!(!conn.sm_state.enabled);
+    }
+
+    #[tokio::test]
+    async fn sm_resume_requires_authentication() {
+        let state = create_test_websocket_state().await;
+        let mut conn = WsConnState::new();
+
+        let responses = handle_xmpp_frame(
+            "<resume xmlns='urn:xmpp:sm:3' previd='stream-xyz' h='0'/>",
+            "example.com",
+            state.as_ref(),
+            &mut conn,
+        )
+        .await;
+
+        assert_eq!(responses.len(), 1);
+        let el = Element::from_str(&responses[0]).expect("xml");
+        assert_eq!(el.name(), "failed");
+        assert!(el
+            .get_child("unexpected-request", "urn:ietf:params:xml:ns:xmpp-stanzas")
+            .is_some());
+        assert!(matches!(conn.phase, ConnectionPhase::Unauthenticated));
     }
 
     #[tokio::test]
@@ -5554,6 +6006,11 @@ mod tests {
             max_resume_time: Some(300),
             detached_at: std::time::Instant::now(),
             carbons_enabled: false,
+            roster_interested: false,
+            presence_available: false,
+            presence_show: None,
+            presence_status: None,
+            presence_priority: 0,
         };
         state
             .deps
@@ -5630,6 +6087,11 @@ mod tests {
                 max_resume_time: Some(300),
                 detached_at: std::time::Instant::now(),
                 carbons_enabled: true,
+                roster_interested: false,
+                presence_available: false,
+                presence_show: None,
+                presence_status: None,
+                presence_priority: 0,
             })
             .await
             .expect("store");
@@ -5702,6 +6164,11 @@ mod tests {
                 max_resume_time: Some(300),
                 detached_at: std::time::Instant::now(),
                 carbons_enabled: false,
+                roster_interested: false,
+                presence_available: false,
+                presence_show: None,
+                presence_status: None,
+                presence_priority: 0,
             })
             .await
             .expect("store");
@@ -5848,6 +6315,11 @@ mod tests {
             max_resume_time: Some(300),
             detached_at: std::time::Instant::now(),
             carbons_enabled: true,
+            roster_interested: false,
+            presence_available: false,
+            presence_show: None,
+            presence_status: None,
+            presence_priority: 0,
         };
         state
             .deps
@@ -5858,6 +6330,7 @@ mod tests {
             .expect("store");
 
         let mut conn = WsConnState::new();
+        conn.phase = ConnectionPhase::authenticated(&jid);
         // Client reports it has acked through 9, so only m10 needs replay.
         let frame = format!(
             "<resume xmlns='urn:xmpp:sm:3' previd='{}' h='9'/>",
@@ -5895,16 +6368,1174 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sm_resume_rejects_impossible_client_handled_count() {
+        use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+        let state = create_test_websocket_state().await;
+
+        let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+        state
+            .deps
+            .protocol
+            .sm_session_registry
+            .store_session(DetachedSession {
+                stream_id: "stream-too-far".to_string(),
+                user_id: "alice@example.com".to_string(),
+                jid: jid.clone(),
+                inbound_count: 4,
+                outbound_count: 2,
+                last_acked: 0,
+                unacked_stanzas: vec![(1, "<message id='m1'/>".to_string())],
+                max_resume_time: Some(300),
+                detached_at: std::time::Instant::now(),
+                carbons_enabled: false,
+                roster_interested: false,
+                presence_available: false,
+                presence_show: None,
+                presence_status: None,
+                presence_priority: 0,
+            })
+            .await
+            .expect("store");
+
+        let mut conn = WsConnState::new();
+        conn.phase = ConnectionPhase::authenticated(&jid);
+        let responses = handle_xmpp_frame(
+            "<resume xmlns='urn:xmpp:sm:3' previd='stream-too-far' h='3'/>",
+            "example.com",
+            state.as_ref(),
+            &mut conn,
+        )
+        .await;
+
+        assert_eq!(responses.len(), 1);
+        assert!(
+            responses[0].contains("stream:error")
+                && responses[0].contains("undefined-condition")
+                && responses[0].contains("handled-count-too-high")
+                && (responses[0].contains("h=\"3\"") || responses[0].contains("h='3'"))
+                && (responses[0].contains("send-count=\"2\"")
+                    || responses[0].contains("send-count='2'")),
+            "invalid resume count should be a handled-count-too-high stream error: {responses:?}"
+        );
+        assert!(
+            !conn.sm_state.enabled,
+            "rejected resume must not pollute the fresh stream SM state"
+        );
+        assert!(
+            !conn.sm_state.is_resumable(),
+            "rejected resume must not make the fresh stream resumable"
+        );
+        assert!(
+            state
+                .deps
+                .protocol
+                .sm_session_registry
+                .take_session("stream-too-far")
+                .await
+                .expect("lookup")
+                .is_some(),
+            "rejected resume must release the detached session for a valid retry"
+        );
+    }
+
+    #[tokio::test]
+    async fn sm_resume_replays_roster_push_recorded_while_detached() {
+        use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+        let state = create_test_websocket_state().await;
+
+        let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+        let stream_id = "stream-roster-replay".to_string();
+        state
+            .deps
+            .protocol
+            .sm_session_registry
+            .store_session(DetachedSession {
+                stream_id: stream_id.clone(),
+                user_id: "alice@example.com".to_string(),
+                jid: jid.clone(),
+                inbound_count: 0,
+                outbound_count: 0,
+                last_acked: 0,
+                unacked_stanzas: Vec::new(),
+                max_resume_time: Some(300),
+                detached_at: std::time::Instant::now(),
+                carbons_enabled: false,
+                roster_interested: true,
+                presence_available: false,
+                presence_show: None,
+                presence_status: None,
+                presence_priority: 0,
+            })
+            .await
+            .expect("store");
+
+        let recorded = state
+            .deps
+            .protocol
+            .sm_session_registry
+            .record_stanza_for_detached_resource(
+                &jid,
+                &Stanza::Iq(
+                    Element::from_str(
+                        "<iq xmlns='jabber:client' type='set' id='detached-roster-push'><query xmlns='jabber:iq:roster'/></iq>",
+                    )
+                    .expect("iq element")
+                    .try_into()
+                    .expect("iq stanza"),
+                ),
+            )
+            .await
+            .expect("record detached roster push");
+        assert!(recorded);
+
+        let mut conn = WsConnState::new();
+        conn.phase = ConnectionPhase::authenticated(&jid);
+        let frame = format!("<resume xmlns='urn:xmpp:sm:3' previd='{stream_id}' h='0'/>");
+        let responses = handle_xmpp_frame(&frame, "example.com", state.as_ref(), &mut conn).await;
+
+        assert_eq!(
+            responses.len(),
+            2,
+            "expected resumed plus replay: {responses:?}"
+        );
+        assert!(responses[0].contains("<resumed"));
+        assert!(
+            responses[1].contains("detached-roster-push"),
+            "detached roster push should replay after resume: {responses:?}"
+        );
+        assert!(conn.roster_interested);
+    }
+
+    #[tokio::test]
+    async fn direct_full_jid_message_records_for_detached_resource_replay() {
+        use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+        let state = create_test_websocket_state().await;
+
+        let bob_jid: FullJid = "bob@example.com/web".parse().expect("bob jid");
+        let alice_jid: FullJid = "alice@example.com/phone".parse().expect("alice jid");
+        let stream_id = "stream-detached-direct-message".to_string();
+        state
+            .deps
+            .protocol
+            .sm_session_registry
+            .store_session(DetachedSession {
+                stream_id: stream_id.clone(),
+                user_id: "alice@example.com".to_string(),
+                jid: alice_jid,
+                inbound_count: 0,
+                outbound_count: 0,
+                last_acked: 0,
+                unacked_stanzas: Vec::new(),
+                max_resume_time: Some(300),
+                detached_at: std::time::Instant::now(),
+                carbons_enabled: false,
+                roster_interested: false,
+                presence_available: false,
+                presence_show: None,
+                presence_status: None,
+                presence_priority: 0,
+            })
+            .await
+            .expect("store detached alice");
+
+        let mut bob = WsConnState::new();
+        bob.phase = ConnectionPhase::ready(bob_jid, false);
+        let responses = handle_xmpp_frame(
+            r#"<message xmlns="jabber:client" type="chat" to="alice@example.com/phone" id="detached-dm-1"><body>queued while detached</body></message>"#,
+            "example.com",
+            state.as_ref(),
+            &mut bob,
+        )
+        .await;
+        assert!(responses.is_empty());
+
+        let detached = state
+            .deps
+            .protocol
+            .sm_session_registry
+            .take_session(&stream_id)
+            .await
+            .expect("take detached")
+            .expect("detached session remains");
+        assert!(
+            detached
+                .unacked_stanzas
+                .iter()
+                .any(|(_, stanza)| stanza.contains("detached-dm-1")),
+            "full-JID direct message should be recorded for detached replay: {detached:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn bare_jid_message_records_for_detached_resource_replay() {
+        use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+        let state = create_test_websocket_state().await;
+
+        let bob_jid: FullJid = "bob@example.com/web".parse().expect("bob jid");
+        let alice_jid: FullJid = "alice@example.com/phone".parse().expect("alice jid");
+        let stream_id = "stream-detached-bare-message".to_string();
+        state
+            .deps
+            .protocol
+            .sm_session_registry
+            .store_session(DetachedSession {
+                stream_id: stream_id.clone(),
+                user_id: "alice@example.com".to_string(),
+                jid: alice_jid,
+                inbound_count: 0,
+                outbound_count: 0,
+                last_acked: 0,
+                unacked_stanzas: Vec::new(),
+                max_resume_time: Some(300),
+                detached_at: std::time::Instant::now(),
+                carbons_enabled: false,
+                roster_interested: false,
+                presence_available: false,
+                presence_show: None,
+                presence_status: None,
+                presence_priority: 0,
+            })
+            .await
+            .expect("store detached alice");
+
+        let mut bob = WsConnState::new();
+        bob.phase = ConnectionPhase::ready(bob_jid, false);
+        let responses = handle_xmpp_frame(
+            r#"<message xmlns="jabber:client" type="chat" to="alice@example.com" id="detached-bare-dm-1"><body>queued while detached</body></message>"#,
+            "example.com",
+            state.as_ref(),
+            &mut bob,
+        )
+        .await;
+        assert!(responses.is_empty());
+
+        let detached = state
+            .deps
+            .protocol
+            .sm_session_registry
+            .take_session(&stream_id)
+            .await
+            .expect("take detached")
+            .expect("detached session remains");
+        assert!(
+            detached
+                .unacked_stanzas
+                .iter()
+                .any(|(_, stanza)| stanza.contains("detached-bare-dm-1")
+                    && stanza.contains("to=\"alice@example.com/phone\"")),
+            "bare-JID direct message should be recorded for detached replay: {detached:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn message_carbons_record_for_detached_enabled_resources() {
+        use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+        let state = create_test_websocket_state().await;
+
+        let alice_phone: FullJid = "alice@example.com/phone".parse().expect("alice phone");
+        let alice_laptop: FullJid = "alice@example.com/laptop".parse().expect("alice laptop");
+        let bob_jid: FullJid = "bob@example.com/web".parse().expect("bob jid");
+        let sent_stream_id = "stream-detached-sent-carbon".to_string();
+        state
+            .deps
+            .protocol
+            .sm_session_registry
+            .store_session(DetachedSession {
+                stream_id: sent_stream_id.clone(),
+                user_id: "alice@example.com".to_string(),
+                jid: alice_laptop.clone(),
+                inbound_count: 0,
+                outbound_count: 0,
+                last_acked: 0,
+                unacked_stanzas: Vec::new(),
+                max_resume_time: Some(300),
+                detached_at: std::time::Instant::now(),
+                carbons_enabled: true,
+                roster_interested: false,
+                presence_available: false,
+                presence_show: None,
+                presence_status: None,
+                presence_priority: 0,
+            })
+            .await
+            .expect("store detached alice laptop");
+
+        let mut alice = WsConnState::new();
+        alice.phase = ConnectionPhase::ready(alice_phone.clone(), false);
+        let responses = handle_xmpp_frame(
+            r#"<message xmlns="jabber:client" type="chat" to="bob@example.com/web" id="detached-sent-carbon-source"><body>copy me</body></message>"#,
+            "example.com",
+            state.as_ref(),
+            &mut alice,
+        )
+        .await;
+        assert!(responses.is_empty());
+
+        let sent_detached = state
+            .deps
+            .protocol
+            .sm_session_registry
+            .take_session(&sent_stream_id)
+            .await
+            .expect("take sent detached")
+            .expect("sent detached session remains");
+        assert!(
+            sent_detached
+                .unacked_stanzas
+                .iter()
+                .any(|(_, stanza)| stanza.contains("<sent")
+                    && stanza.contains("urn:xmpp:carbons:2")
+                    && stanza.contains("detached-sent-carbon-source")),
+            "sent carbon should be recorded for detached opted-in resource: {sent_detached:?}"
+        );
+
+        let received_stream_id = "stream-detached-received-carbon".to_string();
+        state
+            .deps
+            .protocol
+            .sm_session_registry
+            .store_session(DetachedSession {
+                stream_id: received_stream_id.clone(),
+                user_id: "alice@example.com".to_string(),
+                jid: alice_laptop,
+                inbound_count: 0,
+                outbound_count: 0,
+                last_acked: 0,
+                unacked_stanzas: Vec::new(),
+                max_resume_time: Some(300),
+                detached_at: std::time::Instant::now(),
+                carbons_enabled: true,
+                roster_interested: false,
+                presence_available: false,
+                presence_show: None,
+                presence_status: None,
+                presence_priority: 0,
+            })
+            .await
+            .expect("store detached alice laptop again");
+        let (alice_phone_tx, _alice_phone_rx) = mpsc::channel::<OutboundStanza>(16);
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .register(alice_phone.clone(), alice_phone_tx);
+
+        let mut bob = WsConnState::new();
+        bob.phase = ConnectionPhase::ready(bob_jid, false);
+        let responses = handle_xmpp_frame(
+            r#"<message xmlns="jabber:client" type="chat" to="alice@example.com/phone" id="detached-received-carbon-source"><body>copy me too</body></message>"#,
+            "example.com",
+            state.as_ref(),
+            &mut bob,
+        )
+        .await;
+        assert!(responses.is_empty());
+
+        let received_detached = state
+            .deps
+            .protocol
+            .sm_session_registry
+            .take_session(&received_stream_id)
+            .await
+            .expect("take received detached")
+            .expect("received detached session remains");
+        assert!(
+            received_detached
+                .unacked_stanzas
+                .iter()
+                .any(|(_, stanza)| stanza.contains("<received")
+                    && stanza.contains("urn:xmpp:carbons:2")
+                    && stanza.contains("detached-received-carbon-source")),
+            "received carbon should be recorded for detached opted-in resource: {received_detached:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn duplicate_subscribe_ack_reaches_non_roster_interested_resource() {
+        let state = create_test_websocket_state().await;
+
+        let bob_jid: FullJid = "bob@example.com/web".parse().expect("bob jid");
+        let alice_jid: FullJid = "alice@example.com/phone".parse().expect("alice jid");
+        let (bob_tx, mut bob_rx) = mpsc::channel::<OutboundStanza>(16);
+        let (alice_tx, mut alice_rx) = mpsc::channel::<OutboundStanza>(16);
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .register(bob_jid.clone(), bob_tx);
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .register(alice_jid.clone(), alice_tx);
+
+        let mut alice = WsConnState::new();
+        alice.phase = ConnectionPhase::ready(alice_jid.clone(), false);
+        let _ = handle_xmpp_frame(
+            r#"<iq xmlns="jabber:client" type="get" id="alice-roster"><query xmlns="jabber:iq:roster"/></iq>"#,
+            "example.com",
+            state.as_ref(),
+            &mut alice,
+        )
+        .await;
+        let _ = handle_xmpp_frame(
+            r#"<presence xmlns="jabber:client"/>"#,
+            "example.com",
+            state.as_ref(),
+            &mut alice,
+        )
+        .await;
+        while alice_rx.try_recv().is_ok() {}
+
+        let mut bob = WsConnState::new();
+        bob.phase = ConnectionPhase::ready(bob_jid.clone(), false);
+        let _ = handle_xmpp_frame(
+            r#"<presence xmlns="jabber:client" type="subscribe" to="alice@example.com"/>"#,
+            "example.com",
+            state.as_ref(),
+            &mut bob,
+        )
+        .await;
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(250), alice_rx.recv())
+            .await
+            .expect("alice receives initial subscribe")
+            .expect("subscribe stanza");
+
+        let _ = handle_xmpp_frame(
+            r#"<presence xmlns="jabber:client" type="subscribed" to="bob@example.com"/>"#,
+            "example.com",
+            state.as_ref(),
+            &mut alice,
+        )
+        .await;
+        while bob_rx.try_recv().is_ok() {}
+
+        let _ = handle_xmpp_frame(
+            r#"<presence xmlns="jabber:client" type="subscribe" to="alice@example.com"/>"#,
+            "example.com",
+            state.as_ref(),
+            &mut bob,
+        )
+        .await;
+        let ack = tokio::time::timeout(std::time::Duration::from_millis(250), bob_rx.recv())
+            .await
+            .expect("duplicate subscribe ack")
+            .expect("ack stanza");
+        let frame = stanza_to_xml(&ack.stanza);
+        assert!(
+            frame.contains("from=\"alice@example.com\"")
+                && frame.contains("to=\"bob@example.com\"")
+                && frame.contains("type=\"subscribed\""),
+            "duplicate subscribe ack should reach a live resource even before roster get: {frame}"
+        );
+    }
+
+    #[tokio::test]
+    async fn roster_set_records_push_for_detached_interested_resource() {
+        use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+        let state = create_test_websocket_state().await;
+
+        let detached_jid: FullJid = "alice@example.com/web".parse().expect("detached jid");
+        let source_jid: FullJid = "alice@example.com/phone".parse().expect("source jid");
+        let stream_id = "stream-roster-fanout".to_string();
+        state
+            .deps
+            .protocol
+            .sm_session_registry
+            .store_session(DetachedSession {
+                stream_id: stream_id.clone(),
+                user_id: "alice@example.com".to_string(),
+                jid: detached_jid.clone(),
+                inbound_count: 0,
+                outbound_count: 0,
+                last_acked: 0,
+                unacked_stanzas: Vec::new(),
+                max_resume_time: Some(300),
+                detached_at: std::time::Instant::now(),
+                carbons_enabled: false,
+                roster_interested: true,
+                presence_available: false,
+                presence_show: None,
+                presence_status: None,
+                presence_priority: 0,
+            })
+            .await
+            .expect("store detached session");
+
+        let mut source = WsConnState::new();
+        source.phase = ConnectionPhase::ready(source_jid, false);
+        let responses = handle_xmpp_frame(
+            r#"<iq xmlns="jabber:client" type="set" id="roster-detached-fanout"><query xmlns="jabber:iq:roster"><item jid="bob@example.com" name="Bob"/></query></iq>"#,
+            "example.com",
+            state.as_ref(),
+            &mut source,
+        )
+        .await;
+        assert!(
+            responses
+                .iter()
+                .any(|frame| frame.contains("roster-detached-fanout")
+                    && frame.contains("type=\"result\"")),
+            "roster set should succeed: {responses:?}"
+        );
+
+        let mut resumed = WsConnState::new();
+        resumed.phase = ConnectionPhase::authenticated(&detached_jid);
+        let resume_frame = format!("<resume xmlns='urn:xmpp:sm:3' previd='{stream_id}' h='0'/>");
+        let replay =
+            handle_xmpp_frame(&resume_frame, "example.com", state.as_ref(), &mut resumed).await;
+        assert!(
+            replay.iter().any(
+                |frame| frame.contains("jabber:iq:roster") && frame.contains("bob@example.com")
+            ),
+            "detached interested resource should replay roster fanout push: {replay:?}"
+        );
+        assert!(resumed.roster_interested);
+    }
+
+    #[tokio::test]
+    async fn subscription_approval_replays_current_presence_from_detached_available_resource() {
+        use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+        let state = create_test_websocket_state().await;
+
+        let bob_jid: FullJid = "bob@example.com/web".parse().expect("bob jid");
+        let alice_web_jid: FullJid = "alice@example.com/web".parse().expect("alice web jid");
+        let alice_phone_jid: FullJid = "alice@example.com/phone".parse().expect("alice phone jid");
+        let (bob_tx, mut bob_rx) = mpsc::channel::<OutboundStanza>(16);
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .register(bob_jid.clone(), bob_tx);
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .mark_roster_interested(&bob_jid);
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .update_presence(&bob_jid, true, 0);
+
+        let mut bob = WsConnState::new();
+        bob.phase = ConnectionPhase::ready(bob_jid.clone(), false);
+        let _ = handle_xmpp_frame(
+            r#"<presence xmlns="jabber:client" type="subscribe" to="alice@example.com"/>"#,
+            "example.com",
+            state.as_ref(),
+            &mut bob,
+        )
+        .await;
+        while bob_rx.try_recv().is_ok() {}
+
+        let stream_id = "stream-detached-current-presence".to_string();
+        state
+            .deps
+            .protocol
+            .sm_session_registry
+            .store_session(DetachedSession {
+                stream_id,
+                user_id: "alice@example.com".to_string(),
+                jid: alice_web_jid.clone(),
+                inbound_count: 0,
+                outbound_count: 0,
+                last_acked: 0,
+                unacked_stanzas: Vec::new(),
+                max_resume_time: Some(300),
+                detached_at: std::time::Instant::now(),
+                carbons_enabled: false,
+                roster_interested: false,
+                presence_available: true,
+                presence_show: Some(xmpp_parsers::presence::Show::Chat),
+                presence_status: Some("ready from detach".to_string()),
+                presence_priority: 7,
+            })
+            .await
+            .expect("store detached alice web");
+
+        let mut alice_phone = WsConnState::new();
+        alice_phone.phase = ConnectionPhase::ready(alice_phone_jid, false);
+        let _ = handle_xmpp_frame(
+            r#"<presence xmlns="jabber:client" type="subscribed" to="bob@example.com"/>"#,
+            "example.com",
+            state.as_ref(),
+            &mut alice_phone,
+        )
+        .await;
+
+        let mut delivered = Vec::new();
+        for _ in 0..4 {
+            if let Ok(Some(outbound)) =
+                tokio::time::timeout(std::time::Duration::from_millis(250), bob_rx.recv()).await
+            {
+                delivered.push(stanza_to_xml(&outbound.stanza));
+            }
+        }
+        assert!(
+            delivered.iter().any(|frame| {
+                frame.contains("from=\"alice@example.com/web\"")
+                    && frame.contains("<show>chat</show>")
+                    && frame.contains("<status>ready from detach</status>")
+                    && frame.contains("<priority>7</priority>")
+            }),
+            "approval should deliver current rich presence from detached available resource: {delivered:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn presence_probe_returns_detached_available_resource_presence() {
+        use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+        let state = create_test_websocket_state().await;
+
+        let bob_jid: FullJid = "bob@example.com/web".parse().expect("bob jid");
+        let alice_jid: FullJid = "alice@example.com/phone".parse().expect("alice jid");
+        let (bob_tx, mut bob_rx) = mpsc::channel::<OutboundStanza>(16);
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .register(bob_jid.clone(), bob_tx);
+
+        let mut bob = WsConnState::new();
+        bob.phase = ConnectionPhase::ready(bob_jid.clone(), false);
+        let _ = handle_xmpp_frame(
+            r#"<presence xmlns="jabber:client" type="subscribe" to="alice@example.com"/>"#,
+            "example.com",
+            state.as_ref(),
+            &mut bob,
+        )
+        .await;
+        let mut alice = WsConnState::new();
+        alice.phase = ConnectionPhase::ready(alice_jid.clone(), false);
+        let _ = handle_xmpp_frame(
+            r#"<presence xmlns="jabber:client" type="subscribed" to="bob@example.com"/>"#,
+            "example.com",
+            state.as_ref(),
+            &mut alice,
+        )
+        .await;
+        while bob_rx.try_recv().is_ok() {}
+
+        state
+            .deps
+            .protocol
+            .sm_session_registry
+            .store_session(DetachedSession {
+                stream_id: "stream-detached-probe".to_string(),
+                user_id: "alice@example.com".to_string(),
+                jid: alice_jid,
+                inbound_count: 0,
+                outbound_count: 0,
+                last_acked: 0,
+                unacked_stanzas: Vec::new(),
+                max_resume_time: Some(300),
+                detached_at: std::time::Instant::now(),
+                carbons_enabled: false,
+                roster_interested: false,
+                presence_available: true,
+                presence_show: Some(xmpp_parsers::presence::Show::Away),
+                presence_status: Some("stepped away".to_string()),
+                presence_priority: 5,
+            })
+            .await
+            .expect("store detached alice");
+
+        bob.phase = ConnectionPhase::ready(bob_jid, false);
+        let responses = handle_xmpp_frame(
+            r#"<presence xmlns="jabber:client" type="probe" to="alice@example.com"/>"#,
+            "example.com",
+            state.as_ref(),
+            &mut bob,
+        )
+        .await;
+        assert!(responses.is_empty());
+
+        let outbound = tokio::time::timeout(std::time::Duration::from_millis(250), bob_rx.recv())
+            .await
+            .expect("probe response")
+            .expect("outbound stanza");
+        let frame = stanza_to_xml(&outbound.stanza);
+        assert!(
+            frame.contains("from=\"alice@example.com/phone\"")
+                && frame.contains("to=\"bob@example.com\"")
+                && frame.contains("<show>away</show>")
+                && frame.contains("<status>stepped away</status>")
+                && frame.contains("<priority>5</priority>"),
+            "probe should return rich presence from detached available resource: {frame}"
+        );
+    }
+
+    #[tokio::test]
+    async fn full_jid_presence_probe_returns_only_that_resources_availability() {
+        use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+        let state = create_test_websocket_state().await;
+
+        let bob_jid: FullJid = "bob@example.com/web".parse().expect("bob jid");
+        let alice_phone: FullJid = "alice@example.com/phone".parse().expect("alice phone");
+        let alice_tablet: FullJid = "alice@example.com/tablet".parse().expect("alice tablet");
+        let (bob_tx, mut bob_rx) = mpsc::channel::<OutboundStanza>(16);
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .register(bob_jid.clone(), bob_tx);
+
+        let mut bob = WsConnState::new();
+        bob.phase = ConnectionPhase::ready(bob_jid.clone(), false);
+        let _ = handle_xmpp_frame(
+            r#"<presence xmlns="jabber:client" type="subscribe" to="alice@example.com"/>"#,
+            "example.com",
+            state.as_ref(),
+            &mut bob,
+        )
+        .await;
+        let mut alice = WsConnState::new();
+        alice.phase = ConnectionPhase::ready(alice_phone.clone(), false);
+        let _ = handle_xmpp_frame(
+            r#"<presence xmlns="jabber:client" type="subscribed" to="bob@example.com"/>"#,
+            "example.com",
+            state.as_ref(),
+            &mut alice,
+        )
+        .await;
+        while bob_rx.try_recv().is_ok() {}
+
+        for (stream_id, jid, show, status) in [
+            (
+                "stream-probe-phone",
+                alice_phone.clone(),
+                xmpp_parsers::presence::Show::Away,
+                "phone detail",
+            ),
+            (
+                "stream-probe-tablet",
+                alice_tablet,
+                xmpp_parsers::presence::Show::Chat,
+                "tablet detail",
+            ),
+        ] {
+            state
+                .deps
+                .protocol
+                .sm_session_registry
+                .store_session(DetachedSession {
+                    stream_id: stream_id.to_string(),
+                    user_id: "alice@example.com".to_string(),
+                    jid,
+                    inbound_count: 0,
+                    outbound_count: 0,
+                    last_acked: 0,
+                    unacked_stanzas: Vec::new(),
+                    max_resume_time: Some(300),
+                    detached_at: std::time::Instant::now(),
+                    carbons_enabled: false,
+                    roster_interested: false,
+                    presence_available: true,
+                    presence_show: Some(show),
+                    presence_status: Some(status.to_string()),
+                    presence_priority: 5,
+                })
+                .await
+                .expect("store detached alice resource");
+        }
+
+        let responses = handle_xmpp_frame(
+            r#"<presence xmlns="jabber:client" type="probe" to="alice@example.com/phone"/>"#,
+            "example.com",
+            state.as_ref(),
+            &mut bob,
+        )
+        .await;
+        assert!(responses.is_empty());
+
+        let outbound = tokio::time::timeout(std::time::Duration::from_millis(250), bob_rx.recv())
+            .await
+            .expect("full-jid probe response")
+            .expect("outbound stanza");
+        let frame = stanza_to_xml(&outbound.stanza);
+        assert!(
+            frame.contains("from=\"alice@example.com/phone\"")
+                && frame.contains("to=\"bob@example.com\"")
+                && frame.contains("<show>away</show>")
+                && frame.contains("<status>phone detail</status>")
+                && frame.contains("<priority>5</priority>")
+                && !frame.contains("alice@example.com/tablet"),
+            "full-JID probe should return rich presence only for the requested resource: {frame}"
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), bob_rx.recv())
+                .await
+                .is_err(),
+            "full-JID probe must not return sibling resources"
+        );
+    }
+
+    #[tokio::test]
+    async fn presence_probe_without_subscription_does_not_reveal_detached_presence() {
+        use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+        let state = create_test_websocket_state().await;
+
+        let mallory_jid: FullJid = "mallory@example.com/web".parse().expect("mallory jid");
+        let alice_jid: FullJid = "alice@example.com/phone".parse().expect("alice jid");
+        let (mallory_tx, mut mallory_rx) = mpsc::channel::<OutboundStanza>(16);
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .register(mallory_jid.clone(), mallory_tx);
+        state
+            .deps
+            .protocol
+            .sm_session_registry
+            .store_session(DetachedSession {
+                stream_id: "stream-detached-probe-denied".to_string(),
+                user_id: "alice@example.com".to_string(),
+                jid: alice_jid,
+                inbound_count: 0,
+                outbound_count: 0,
+                last_acked: 0,
+                unacked_stanzas: Vec::new(),
+                max_resume_time: Some(300),
+                detached_at: std::time::Instant::now(),
+                carbons_enabled: false,
+                roster_interested: false,
+                presence_available: true,
+                presence_show: Some(xmpp_parsers::presence::Show::Away),
+                presence_status: Some("private".to_string()),
+                presence_priority: 5,
+            })
+            .await
+            .expect("store detached alice");
+
+        let mut mallory = WsConnState::new();
+        mallory.phase = ConnectionPhase::ready(mallory_jid, false);
+        let responses = handle_xmpp_frame(
+            r#"<presence xmlns="jabber:client" type="probe" to="alice@example.com"/>"#,
+            "example.com",
+            state.as_ref(),
+            &mut mallory,
+        )
+        .await;
+        assert!(responses.is_empty());
+        let outbound =
+            tokio::time::timeout(std::time::Duration::from_millis(250), mallory_rx.recv())
+                .await
+                .expect("unsubscribed probe response")
+                .expect("outbound stanza");
+        let frame = stanza_to_xml(&outbound.stanza);
+        assert!(
+            frame.contains("from=\"alice@example.com\"")
+                && frame.contains("to=\"mallory@example.com\"")
+                && frame.contains("type=\"unsubscribed\"")
+                && !frame.contains("alice@example.com/phone")
+                && !frame.contains("private"),
+            "unauthorized probe must return only an unsubscribed signal: {frame}"
+        );
+    }
+
+    #[tokio::test]
+    async fn expired_detached_available_session_broadcasts_unavailable_to_subscribers() {
+        let state = create_test_websocket_state().await;
+
+        let bob_jid: FullJid = "bob@example.com/web".parse().expect("bob jid");
+        let alice_jid: FullJid = "alice@example.com/phone".parse().expect("alice jid");
+        let alice_sibling_jid: FullJid = "alice@example.com/laptop".parse().expect("alice sibling");
+        let (bob_tx, mut bob_rx) = mpsc::channel::<OutboundStanza>(16);
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .register(bob_jid.clone(), bob_tx);
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .update_presence(&bob_jid, true, 0);
+        let (alice_sibling_tx, mut alice_sibling_rx) = mpsc::channel::<OutboundStanza>(16);
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .register(alice_sibling_jid.clone(), alice_sibling_tx);
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .update_presence(&alice_sibling_jid, true, 0);
+
+        let mut bob = WsConnState::new();
+        bob.phase = ConnectionPhase::ready(bob_jid, false);
+        let _ = handle_xmpp_frame(
+            r#"<presence xmlns="jabber:client" type="subscribe" to="alice@example.com"/>"#,
+            "example.com",
+            state.as_ref(),
+            &mut bob,
+        )
+        .await;
+        let mut alice = WsConnState::new();
+        alice.phase = ConnectionPhase::ready(alice_jid.clone(), false);
+        let _ = handle_xmpp_frame(
+            r#"<presence xmlns="jabber:client" type="subscribed" to="bob@example.com"/>"#,
+            "example.com",
+            state.as_ref(),
+            &mut alice,
+        )
+        .await;
+        while bob_rx.try_recv().is_ok() {}
+        while alice_sibling_rx.try_recv().is_ok() {}
+
+        handlers::presence::broadcast_unavailable_for_expired_detached_session(
+            state.as_ref(),
+            &alice_jid,
+        )
+        .await;
+
+        let outbound = tokio::time::timeout(std::time::Duration::from_millis(250), bob_rx.recv())
+            .await
+            .expect("unavailable broadcast")
+            .expect("outbound stanza");
+        let frame = stanza_to_xml(&outbound.stanza);
+        assert!(
+            frame.contains("from=\"alice@example.com/phone\"")
+                && frame.contains("to=\"bob@example.com\"")
+                && frame.contains("type=\"unavailable\""),
+            "expired detached session should broadcast unavailable presence: {frame}"
+        );
+        let sibling_outbound = tokio::time::timeout(
+            std::time::Duration::from_millis(250),
+            alice_sibling_rx.recv(),
+        )
+        .await
+        .expect("sibling unavailable broadcast")
+        .expect("outbound stanza");
+        let sibling_frame = stanza_to_xml(&sibling_outbound.stanza);
+        assert!(
+            sibling_frame.contains("from=\"alice@example.com/phone\"")
+                && sibling_frame.contains("to=\"alice@example.com\"")
+                && sibling_frame.contains("type=\"unavailable\""),
+            "expired detached session should notify sibling resources: {sibling_frame}"
+        );
+    }
+
+    #[tokio::test]
+    async fn subscription_approval_records_roster_push_for_detached_interested_resource() {
+        use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+        let state = create_test_websocket_state().await;
+
+        let bob_jid: FullJid = "bob@example.com/web".parse().expect("bob jid");
+        let alice_jid: FullJid = "alice@example.com/web".parse().expect("alice jid");
+        let mut bob = WsConnState::new();
+        bob.phase = ConnectionPhase::ready(bob_jid.clone(), false);
+        let _ = handle_xmpp_frame(
+            r#"<iq xmlns="jabber:client" type="get" id="bob-roster"><query xmlns="jabber:iq:roster"/></iq>"#,
+            "example.com",
+            state.as_ref(),
+            &mut bob,
+        )
+        .await;
+        let _ = handle_xmpp_frame(
+            r#"<presence xmlns="jabber:client" type="subscribe" to="alice@example.com"/>"#,
+            "example.com",
+            state.as_ref(),
+            &mut bob,
+        )
+        .await;
+
+        let stream_id = "stream-detached-subscription-roster-push".to_string();
+        state
+            .deps
+            .protocol
+            .sm_session_registry
+            .store_session(DetachedSession {
+                stream_id: stream_id.clone(),
+                user_id: "bob@example.com".to_string(),
+                jid: bob_jid.clone(),
+                inbound_count: 0,
+                outbound_count: 0,
+                last_acked: 0,
+                unacked_stanzas: Vec::new(),
+                max_resume_time: Some(300),
+                detached_at: std::time::Instant::now(),
+                carbons_enabled: false,
+                roster_interested: true,
+                presence_available: false,
+                presence_show: None,
+                presence_status: None,
+                presence_priority: 0,
+            })
+            .await
+            .expect("store detached bob");
+
+        let mut alice = WsConnState::new();
+        alice.phase = ConnectionPhase::ready(alice_jid, false);
+        let _ = handle_xmpp_frame(
+            r#"<presence xmlns="jabber:client" type="subscribed" to="bob@example.com"/>"#,
+            "example.com",
+            state.as_ref(),
+            &mut alice,
+        )
+        .await;
+
+        let mut resumed = WsConnState::new();
+        resumed.phase = ConnectionPhase::authenticated(&bob_jid);
+        let resume_frame = format!("<resume xmlns='urn:xmpp:sm:3' previd='{stream_id}' h='0'/>");
+        let replay =
+            handle_xmpp_frame(&resume_frame, "example.com", state.as_ref(), &mut resumed).await;
+        assert!(
+            replay.iter().any(|frame| {
+                frame.contains("jabber:iq:roster")
+                    && frame.contains("alice@example.com")
+                    && frame.contains("subscription=\"to\"")
+            }),
+            "detached interested resource should replay subscription roster push: {replay:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn subscribe_to_detached_available_resource_replays_on_resume() {
+        use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+        let state = create_test_websocket_state().await;
+
+        let alice_jid: FullJid = "alice@example.com/web".parse().expect("alice jid");
+        let bob_jid: FullJid = "bob@example.com/web".parse().expect("bob jid");
+        let stream_id = "stream-detached-subscribe-recipient".to_string();
+        state
+            .deps
+            .protocol
+            .sm_session_registry
+            .store_session(DetachedSession {
+                stream_id: stream_id.clone(),
+                user_id: "alice@example.com".to_string(),
+                jid: alice_jid.clone(),
+                inbound_count: 0,
+                outbound_count: 0,
+                last_acked: 0,
+                unacked_stanzas: Vec::new(),
+                max_resume_time: Some(300),
+                detached_at: std::time::Instant::now(),
+                carbons_enabled: false,
+                roster_interested: false,
+                presence_available: true,
+                presence_show: None,
+                presence_status: None,
+                presence_priority: 0,
+            })
+            .await
+            .expect("store detached alice");
+
+        let mut bob = WsConnState::new();
+        bob.phase = ConnectionPhase::ready(bob_jid, false);
+        let _ = handle_xmpp_frame(
+            r#"<presence xmlns="jabber:client" type="subscribe" to="alice@example.com"/>"#,
+            "example.com",
+            state.as_ref(),
+            &mut bob,
+        )
+        .await;
+
+        let mut resumed = WsConnState::new();
+        resumed.phase = ConnectionPhase::authenticated(&alice_jid);
+        let resume_frame = format!("<resume xmlns='urn:xmpp:sm:3' previd='{stream_id}' h='0'/>");
+        let replay =
+            handle_xmpp_frame(&resume_frame, "example.com", state.as_ref(), &mut resumed).await;
+        assert!(
+            replay.iter().any(|frame| {
+                frame.contains("type=\"subscribe\"") && frame.contains("from=\"bob@example.com\"")
+            }),
+            "detached available recipient should replay inbound subscribe: {replay:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn presence_broadcast_to_detached_available_subscriber_replays_on_resume() {
+        use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+        let state = create_test_websocket_state().await;
+
+        let bob_jid: FullJid = "bob@example.com/web".parse().expect("bob jid");
+        let alice_jid: FullJid = "alice@example.com/web".parse().expect("alice jid");
+
+        let mut bob = WsConnState::new();
+        bob.phase = ConnectionPhase::ready(bob_jid.clone(), false);
+        let _ = handle_xmpp_frame(
+            r#"<presence xmlns="jabber:client" type="subscribe" to="alice@example.com"/>"#,
+            "example.com",
+            state.as_ref(),
+            &mut bob,
+        )
+        .await;
+        let mut alice = WsConnState::new();
+        alice.phase = ConnectionPhase::ready(alice_jid.clone(), false);
+        let _ = handle_xmpp_frame(
+            r#"<presence xmlns="jabber:client" type="subscribed" to="bob@example.com"/>"#,
+            "example.com",
+            state.as_ref(),
+            &mut alice,
+        )
+        .await;
+
+        let stream_id = "stream-detached-presence-broadcast".to_string();
+        state
+            .deps
+            .protocol
+            .sm_session_registry
+            .store_session(DetachedSession {
+                stream_id: stream_id.clone(),
+                user_id: "bob@example.com".to_string(),
+                jid: bob_jid.clone(),
+                inbound_count: 0,
+                outbound_count: 0,
+                last_acked: 0,
+                unacked_stanzas: Vec::new(),
+                max_resume_time: Some(300),
+                detached_at: std::time::Instant::now(),
+                carbons_enabled: false,
+                roster_interested: false,
+                presence_available: true,
+                presence_show: None,
+                presence_status: None,
+                presence_priority: 0,
+            })
+            .await
+            .expect("store detached bob");
+
+        let _ = handle_xmpp_frame(
+            r#"<presence xmlns="jabber:client"><show>away</show><status>broadcast while detached</status><priority>5</priority></presence>"#,
+            "example.com",
+            state.as_ref(),
+            &mut alice,
+        )
+        .await;
+
+        let mut resumed = WsConnState::new();
+        resumed.phase = ConnectionPhase::authenticated(&bob_jid);
+        let resume_frame = format!("<resume xmlns='urn:xmpp:sm:3' previd='{stream_id}' h='0'/>");
+        let replay =
+            handle_xmpp_frame(&resume_frame, "example.com", state.as_ref(), &mut resumed).await;
+        assert!(
+            replay.iter().any(|frame| {
+                frame.contains("from=\"alice@example.com/web\"")
+                    && frame.contains("<show>away</show>")
+                    && frame.contains("<status>broadcast while detached</status>")
+                    && frame.contains("<priority>5</priority>")
+            }),
+            "detached available subscriber should replay presence broadcast: {replay:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn sm_resume_with_unknown_stream_id_fails() {
         let state = create_test_websocket_state().await;
         let mut conn = WsConnState::new();
+        let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+        conn.phase = ConnectionPhase::authenticated(&jid);
         let frame = "<resume xmlns='urn:xmpp:sm:3' previd='does-not-exist' h='0'/>";
         let responses = handle_xmpp_frame(frame, "example.com", state.as_ref(), &mut conn).await;
         assert_eq!(responses.len(), 1);
         let el = Element::from_str(&responses[0]).expect("xml");
         assert_eq!(el.name(), "failed");
-        // Must NOT mark the session as authenticated/bound.
-        assert!(!conn.phase.is_authenticated());
+        // Must NOT mark the session as bound/resumed.
+        assert!(conn.phase.is_authenticated());
         assert!(!conn.phase.is_ready());
         assert!(!conn.phase.is_resumed());
     }
@@ -5924,7 +7555,7 @@ mod tests {
         let detached = DetachedSession {
             stream_id: stream_id.clone(),
             user_id: "alice@example.com".to_string(),
-            jid,
+            jid: jid.clone(),
             inbound_count: 0,
             outbound_count: 2,
             last_acked: 0,
@@ -5935,6 +7566,11 @@ mod tests {
             max_resume_time: Some(300),
             detached_at: std::time::Instant::now(),
             carbons_enabled: false,
+            roster_interested: false,
+            presence_available: false,
+            presence_show: None,
+            presence_status: None,
+            presence_priority: 0,
         };
         state
             .deps
@@ -5945,6 +7581,7 @@ mod tests {
             .expect("store");
 
         let mut conn = WsConnState::new();
+        conn.phase = ConnectionPhase::authenticated(&jid);
         let frame = format!(
             "<resume xmlns='urn:xmpp:sm:3' previd='{}' h='0'/>",
             stream_id
@@ -5979,19 +7616,47 @@ mod tests {
             &Some(owner_session),
         )
         .await;
-        let (tx, _rx) = mpsc::channel::<OutboundStanza>(4);
-        state
+        let (tx, mut rx) = mpsc::channel::<OutboundStanza>(4);
+        let owner = state
             .deps
             .protocol
             .connection_registry
             .register(jid.clone(), tx);
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .update_presence(&jid, true, 0);
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .update_presence_state(
+                &jid,
+                Some("away".to_string()),
+                Some("stepped out".to_string()),
+                3,
+            );
 
         let mut conn = WsConnState::new();
         conn.phase = ConnectionPhase::ready(jid.clone(), false);
+        conn.registry_owner = Some(owner);
+        conn.roster_interested = true;
         conn.sm_state
             .enable("stream-detach".to_string(), true, Some(300));
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .send_to(
+                &jid,
+                Stanza::Presence(xmpp_parsers::presence::Presence::new(
+                    xmpp_parsers::presence::Type::None,
+                )),
+            )
+            .await;
 
-        cleanup_connection_shutdown(state.as_ref(), &conn, false).await;
+        cleanup_connection_shutdown(state.as_ref(), &mut rx, &mut conn, false).await;
 
         assert!(!state.deps.protocol.connection_registry.is_connected(&jid));
         let detached = state
@@ -6001,9 +7666,27 @@ mod tests {
             .take_session("stream-detach")
             .await
             .expect("registry lookup");
+        let detached = detached.expect("detached session");
         assert!(
-            detached.is_some(),
-            "resumable transport drop must detach SM state"
+            detached.roster_interested,
+            "detached session must preserve roster-interest state"
+        );
+        assert!(
+            detached.presence_available,
+            "detached session must preserve available-presence state"
+        );
+        assert_eq!(
+            detached.presence_show,
+            Some(xmpp_parsers::presence::Show::Away)
+        );
+        assert_eq!(detached.presence_status.as_deref(), Some("stepped out"));
+        assert_eq!(detached.presence_priority, 3);
+        assert!(
+            detached
+                .unacked_stanzas
+                .iter()
+                .any(|(_, stanza)| stanza.contains("<presence")),
+            "cleanup must record queued-but-unwritten outbound stanzas before detaching"
         );
         assert!(snapshot_room(state.as_ref(), &room_jid)
             .await
@@ -6028,8 +7711,8 @@ mod tests {
             &Some(owner_session),
         )
         .await;
-        let (tx, _rx) = mpsc::channel::<OutboundStanza>(4);
-        state
+        let (tx, mut rx) = mpsc::channel::<OutboundStanza>(4);
+        let owner = state
             .deps
             .protocol
             .connection_registry
@@ -6037,10 +7720,11 @@ mod tests {
 
         let mut conn = WsConnState::new();
         conn.phase = ConnectionPhase::ready(jid.clone(), false);
+        conn.registry_owner = Some(owner);
         conn.sm_state
             .enable("stream-close".to_string(), false, Some(300));
 
-        cleanup_connection_shutdown(state.as_ref(), &conn, false).await;
+        cleanup_connection_shutdown(state.as_ref(), &mut rx, &mut conn, false).await;
 
         assert!(!state.deps.protocol.connection_registry.is_connected(&jid));
         let detached = state
@@ -6059,6 +7743,45 @@ mod tests {
             .room
             .find_nick_by_real_jid(&jid)
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn cleanup_shutdown_does_not_unregister_replacement_session() {
+        let state = create_test_websocket_state().await;
+        let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+        let (old_tx, mut old_rx) = mpsc::channel::<OutboundStanza>(4);
+        let (new_tx, _new_rx) = mpsc::channel::<OutboundStanza>(4);
+
+        let old_owner = state
+            .deps
+            .protocol
+            .connection_registry
+            .register(jid.clone(), old_tx);
+        let new_owner = state
+            .deps
+            .protocol
+            .connection_registry
+            .register(jid.clone(), new_tx);
+
+        let mut old_conn = WsConnState::new();
+        old_conn.phase = ConnectionPhase::ready(jid.clone(), false);
+        old_conn.registry_owner = Some(old_owner);
+
+        cleanup_connection_shutdown(state.as_ref(), &mut old_rx, &mut old_conn, false).await;
+
+        assert!(
+            state.deps.protocol.connection_registry.is_connected(&jid),
+            "cleanup for a replaced connection must leave the replacement registered"
+        );
+        assert!(
+            state
+                .deps
+                .protocol
+                .connection_registry
+                .unregister_if_owner(&jid, &new_owner)
+                .is_some(),
+            "the remaining registry owner should be the replacement session"
+        );
     }
 
     #[tokio::test]
@@ -6105,6 +7828,11 @@ mod tests {
                 max_resume_time: Some(0), // already expired
                 detached_at: std::time::Instant::now(),
                 carbons_enabled: false,
+                roster_interested: false,
+                presence_available: false,
+                presence_show: None,
+                presence_status: None,
+                presence_priority: 0,
             })
             .await
             .expect("store");

@@ -50,7 +50,7 @@ pub mod storage;
 pub use storage::RosterStorage;
 pub use waddle_xmpp_core::roster::{AskType, RosterItem, Subscription, ROSTER_NS};
 
-use jid::BareJid;
+use jid::{BareJid, FullJid, Jid};
 use minidom::Element;
 use std::collections::HashSet;
 use tracing::debug;
@@ -178,10 +178,14 @@ pub fn parse_roster_set(iq: &Iq) -> Result<RosterQuery, XmppError> {
 
     let items = items?;
 
-    // Per RFC 6121, roster set should have exactly one item
     if items.is_empty() {
         return Err(XmppError::bad_request(Some(
-            "Roster set must contain at least one item".to_string(),
+            "Roster set must contain exactly one item".to_string(),
+        )));
+    }
+    if items.len() > 1 {
+        return Err(XmppError::bad_request(Some(
+            "Roster set must contain exactly one item".to_string(),
         )));
     }
 
@@ -241,6 +245,7 @@ fn parse_roster_set_item(elem: &Element) -> Result<RosterItem, XmppError> {
         name,
         subscription,
         ask: None,
+        approved: false,
         groups,
     })
 }
@@ -307,10 +312,11 @@ pub fn build_roster_result_empty(original_iq: &Iq) -> Iq {
 /// ```
 pub fn build_roster_push(
     push_id: &str,
-    to_jid: &str,
+    from_jid: &BareJid,
+    to_jid: &FullJid,
     item: &RosterItem,
     ver: Option<&str>,
-) -> Result<Iq, jid::Error> {
+) -> Iq {
     let mut query_builder = Element::builder("query", ROSTER_NS);
 
     if let Some(v) = ver {
@@ -321,12 +327,12 @@ pub fn build_roster_push(
 
     let query = query_builder.build();
 
-    Ok(Iq {
-        from: None, // Server to client, no from
-        to: Some(to_jid.parse()?),
+    Iq {
+        from: Some(Jid::from(from_jid.clone())),
+        to: Some(Jid::from(to_jid.clone())),
         id: push_id.to_string(),
         payload: xmpp_parsers::iq::IqType::Set(query),
-    })
+    }
 }
 
 /// Result of a roster set operation.
@@ -768,15 +774,16 @@ mod tests {
         let item = RosterItem::with_name("contact@example.com".parse().unwrap(), "Alice")
             .set_subscription(Subscription::Both);
 
-        let push = build_roster_push("push-1", "user@example.com/resource", &item, Some("ver456"))
-            .expect("valid JID should succeed");
+        let from_jid: BareJid = "user@example.com".parse().unwrap();
+        let to_jid: FullJid = "user@example.com/resource".parse().unwrap();
+        let push = build_roster_push("push-1", &from_jid, &to_jid, &item, Some("ver456"));
 
         assert_eq!(push.id, "push-1");
         assert_eq!(
             push.to.as_ref().unwrap().to_string(),
             "user@example.com/resource"
         );
-        assert!(push.from.is_none());
+        assert_eq!(push.from.as_ref().unwrap().to_string(), "user@example.com");
 
         if let xmpp_parsers::iq::IqType::Set(elem) = push.payload {
             assert_eq!(elem.name(), "query");
@@ -807,11 +814,27 @@ mod tests {
     }
 
     #[test]
-    fn test_build_roster_push_invalid_jid() {
-        let item = RosterItem::with_name("contact@example.com".parse().unwrap(), "Alice")
-            .set_subscription(Subscription::Both);
+    fn test_parse_roster_set_multiple_items_rejected() {
+        let query_elem = Element::builder("query", ROSTER_NS)
+            .append(
+                Element::builder("item", ROSTER_NS)
+                    .attr("jid", "contact1@example.com")
+                    .build(),
+            )
+            .append(
+                Element::builder("item", ROSTER_NS)
+                    .attr("jid", "contact2@example.com")
+                    .build(),
+            )
+            .build();
+        let iq = Iq {
+            from: Some("user@example.com".parse().unwrap()),
+            to: Some("example.com".parse().unwrap()),
+            id: "roster-1".to_string(),
+            payload: xmpp_parsers::iq::IqType::Set(query_elem),
+        };
 
-        let result = build_roster_push("push-1", "@", &item, None);
-        assert!(result.is_err(), "Empty-local JID should return Err");
+        let result = parse_roster_set(&iq);
+        assert!(result.is_err());
     }
 }

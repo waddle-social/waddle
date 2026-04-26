@@ -44,6 +44,7 @@ jid = { version = "0.11", features = ["serde"] }
 xmpp-parsers = "0.21"
 minidom = "0.16"
 rxml = "0.12"
+quick-xml = "0.37.5"
 dashmap = "6.0"
 
 tokio-tungstenite = { version = "0.24", features = ["native-tls"] }

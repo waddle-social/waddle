@@ -38,11 +38,13 @@ pub struct TestServer {
     process: Child,
     http_port: u16,
     port_file: std::path::PathBuf,
+    #[allow(dead_code)]
     fixed_account_password: String,
 }
 
 impl TestServer {
     /// Start a waddle-server with test configuration on dynamic ports.
+    #[allow(dead_code)]
     pub fn start() -> Self {
         Self::start_with_extra_accounts(&[])
     }
@@ -125,6 +127,7 @@ impl TestServer {
     }
 
     /// The password for the fixed test account (username: "admin").
+    #[allow(dead_code)]
     pub fn fixed_account_password(&self) -> &str {
         &self.fixed_account_password
     }
@@ -179,7 +182,7 @@ impl WsXmppClient {
         Err(last_err)
     }
 
-    async fn connect(url: &str) -> Result<Self, String> {
+    pub async fn connect(url: &str) -> Result<Self, String> {
         let request = tungstenite::http::Request::builder()
             .uri(url)
             .header("Sec-WebSocket-Protocol", "xmpp")
@@ -201,7 +204,7 @@ impl WsXmppClient {
         Ok(Self { ws, full_jid: None })
     }
 
-    async fn authenticate(
+    pub async fn authenticate(
         &mut self,
         domain: &str,
         username: &str,
@@ -293,7 +296,7 @@ impl WsXmppClient {
         Ok(())
     }
 
-    async fn bind(&mut self, resource: &str) -> Result<String, String> {
+    pub async fn bind(&mut self, resource: &str) -> Result<String, String> {
         let bind_id = format!("bind-{}", uuid::Uuid::new_v4());
         self.send(&format!(
             r#"<iq type="set" id="{bind_id}"><bind xmlns="urn:ietf:params:xml:ns:xmpp-bind"><resource>{resource}</resource></bind></iq>"#

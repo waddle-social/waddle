@@ -167,7 +167,7 @@ impl ConnectionPhase {
     }
 
     pub fn allows_stream_management_resume(&self) -> bool {
-        matches!(self, Self::Unauthenticated | Self::Authenticated { .. })
+        matches!(self, Self::Authenticated { .. })
     }
 
     pub fn is_closing(&self) -> bool {
@@ -238,10 +238,10 @@ mod tests {
     }
 
     #[test]
-    fn unauthenticated_phase_allows_initial_auth_and_resume() {
+    fn unauthenticated_phase_allows_initial_auth_only() {
         let phase = ConnectionPhase::new();
         assert!(phase.allows_sasl_auth());
-        assert!(phase.allows_stream_management_resume());
+        assert!(!phase.allows_stream_management_resume());
         assert!(!phase.allows_sasl_response());
         assert!(!phase.allows_resource_binding());
         assert!(!phase.allows_stream_management_enable());

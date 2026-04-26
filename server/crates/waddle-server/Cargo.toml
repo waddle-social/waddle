@@ -35,6 +35,7 @@ jid = { workspace = true }
 dashmap = { workspace = true }
 
 xmpp-parsers = { workspace = true }
+quick-xml = { workspace = true }
 
 # Object Storage
 bytes = { workspace = true }

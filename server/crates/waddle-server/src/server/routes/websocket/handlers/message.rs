@@ -291,12 +291,48 @@ pub async fn handle_message(
                     .deps
                     .protocol
                     .connection_registry
-                    .try_send_to(&outbound.to, stanza)
+                    .try_send_to(&outbound.to, stanza.clone())
                 {
                     BroadcastOutcome::Delivered => delivered += 1,
                     BroadcastOutcome::DroppedFull => dropped_full += 1,
-                    BroadcastOutcome::DroppedClosed => dropped_closed += 1,
-                    BroadcastOutcome::NotConnected => not_connected += 1,
+                    BroadcastOutcome::DroppedClosed => match state
+                        .deps
+                        .protocol
+                        .sm_session_registry
+                        .record_stanza_for_detached_bound_resource(&outbound.to, &stanza)
+                        .await
+                    {
+                        Ok(true) => delivered += 1,
+                        Ok(false) => dropped_closed += 1,
+                        Err(error) => {
+                            warn!(
+                                jid = %outbound.to,
+                                error = %error,
+                                "Failed to record groupchat stanza for detached resource after closed live send"
+                            );
+                            dropped_closed += 1;
+                        }
+                    },
+                    BroadcastOutcome::NotConnected => {
+                        match state
+                            .deps
+                            .protocol
+                            .sm_session_registry
+                            .record_stanza_for_detached_bound_resource(&outbound.to, &stanza)
+                            .await
+                        {
+                            Ok(true) => delivered += 1,
+                            Ok(false) => not_connected += 1,
+                            Err(error) => {
+                                warn!(
+                                    jid = %outbound.to,
+                                    error = %error,
+                                    "Failed to record groupchat stanza for detached resource"
+                                );
+                                not_connected += 1;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -458,11 +494,53 @@ pub async fn handle_message(
                     .deps
                     .protocol
                     .connection_registry
-                    .send_to(&to_full_jid, stanza)
+                    .send_to(&to_full_jid, stanza.clone())
                     .await
                 {
                     SendResult::Sent => Some(to_full_jid),
-                    SendResult::NotConnected | SendResult::ChannelClosed => None,
+                    SendResult::NotConnected => match state
+                        .deps
+                        .protocol
+                        .sm_session_registry
+                        .record_stanza_for_detached_bound_resource(&to_full_jid, &stanza)
+                        .await
+                    {
+                        Ok(true) => Some(to_full_jid),
+                        Ok(false) => state
+                            .deps
+                            .protocol
+                            .connection_registry
+                            .send_to(&to_full_jid, stanza)
+                            .await
+                            .is_sent()
+                            .then_some(to_full_jid),
+                        Err(error) => {
+                            warn!(
+                                jid = %to_full_jid,
+                                error = %error,
+                                "Failed to record direct stanza for detached resource"
+                            );
+                            None
+                        }
+                    },
+                    SendResult::ChannelClosed => match state
+                        .deps
+                        .protocol
+                        .sm_session_registry
+                        .record_stanza_for_detached_bound_resource(&to_full_jid, &stanza)
+                        .await
+                    {
+                        Ok(true) => Some(to_full_jid),
+                        Ok(false) => None,
+                        Err(error) => {
+                            warn!(
+                                jid = %to_full_jid,
+                                error = %error,
+                                "Failed to record direct stanza after closed live channel"
+                            );
+                            None
+                        }
+                    },
                 }
             } else {
                 let to_bare_jid = to_jid.to_bare();
@@ -471,7 +549,79 @@ pub async fn handle_message(
                     .protocol
                     .connection_registry
                     .get_resources_for_user(&to_bare_jid);
-                for resource_jid in resources {
+                let mut delivered_resources = Vec::new();
+                for resource_jid in &resources {
+                    let mut msg = prototype.clone();
+                    msg.to = Some(jid::Jid::from(resource_jid.clone()));
+                    let stanza = Stanza::Message(msg);
+                    if state
+                        .deps
+                        .protocol
+                        .connection_registry
+                        .send_to(resource_jid, stanza)
+                        .await
+                        .is_sent()
+                    {
+                        delivered_resources.push(resource_jid.clone());
+                    }
+                }
+                match state
+                    .deps
+                    .protocol
+                    .sm_session_registry
+                    .detached_resources_for_user(&to_bare_jid)
+                    .await
+                {
+                    Ok(detached_resources) => {
+                        for resource_jid in detached_resources {
+                            if delivered_resources.iter().any(|live| live == &resource_jid) {
+                                continue;
+                            }
+                            let mut msg = prototype.clone();
+                            msg.to = Some(jid::Jid::from(resource_jid.clone()));
+                            let stanza = Stanza::Message(msg);
+                            match state
+                                .deps
+                                .protocol
+                                .sm_session_registry
+                                .record_stanza_for_detached_bound_resource(&resource_jid, &stanza)
+                                .await
+                            {
+                                Ok(true) => delivered_resources.push(resource_jid.clone()),
+                                Ok(false) => {
+                                    if state
+                                        .deps
+                                        .protocol
+                                        .connection_registry
+                                        .send_to(&resource_jid, stanza)
+                                        .await
+                                        .is_sent()
+                                    {
+                                        delivered_resources.push(resource_jid.clone());
+                                    }
+                                }
+                                Err(error) => {
+                                    warn!(
+                                        jid = %resource_jid,
+                                        error = %error,
+                                        "Failed to record bare direct stanza for detached resource"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        warn!(recipient = %to_bare_jid, error = %error, "Failed to list detached resources for bare direct message");
+                    }
+                }
+                for resource_jid in state
+                    .deps
+                    .protocol
+                    .connection_registry
+                    .get_resources_for_user(&to_bare_jid)
+                    .into_iter()
+                    .filter(|resource| !delivered_resources.contains(resource))
+                {
                     let mut msg = prototype.clone();
                     msg.to = Some(jid::Jid::from(resource_jid.clone()));
                     let stanza = Stanza::Message(msg);
@@ -899,6 +1049,7 @@ async fn send_sent_carbons_to_websocket_resources(
         .connection_registry
         .get_other_carbon_resources_for_user(&sender_bare, sender_jid);
 
+    let mut delivered_resources = Vec::new();
     for resource_jid in resources {
         let carbon =
             match build_sent_carbon(message, &sender_bare.to_string(), &resource_jid.to_string()) {
@@ -908,12 +1059,74 @@ async fn send_sent_carbons_to_websocket_resources(
                     continue;
                 }
             };
-        let _ = state
+        if state
             .deps
             .protocol
             .connection_registry
             .send_to(&resource_jid, Stanza::Message(carbon))
-            .await;
+            .await
+            .is_sent()
+        {
+            delivered_resources.push(resource_jid);
+        }
+    }
+
+    match state
+        .deps
+        .protocol
+        .sm_session_registry
+        .detached_carbon_resources_for_user(&sender_bare, sender_jid)
+        .await
+    {
+        Ok(detached_resources) => {
+            for resource_jid in detached_resources
+                .into_iter()
+                .filter(|resource| !delivered_resources.contains(resource))
+            {
+                let carbon = match build_sent_carbon(
+                    message,
+                    &sender_bare.to_string(),
+                    &resource_jid.to_string(),
+                ) {
+                    Ok(carbon) => carbon,
+                    Err(error) => {
+                        warn!(error = %error, to = %resource_jid, "Failed to build detached sent carbon");
+                        continue;
+                    }
+                };
+                let stanza = Stanza::Message(carbon);
+                match state
+                    .deps
+                    .protocol
+                    .sm_session_registry
+                    .record_stanza_for_detached_bound_resource(&resource_jid, &stanza)
+                    .await
+                {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        if state
+                            .deps
+                            .protocol
+                            .connection_registry
+                            .is_carbons_enabled(&resource_jid)
+                        {
+                            let _ = state
+                                .deps
+                                .protocol
+                                .connection_registry
+                                .send_to(&resource_jid, stanza)
+                                .await;
+                        }
+                    }
+                    Err(error) => {
+                        warn!(jid = %resource_jid, error = %error, "Failed to record sent carbon for detached resource");
+                    }
+                }
+            }
+        }
+        Err(error) => {
+            warn!(jid = %sender_bare, error = %error, "Failed to list detached sent-carbon resources");
+        }
     }
 }
 
@@ -929,6 +1142,7 @@ async fn send_received_carbons_to_websocket_resources(
         .connection_registry
         .get_other_carbon_resources_for_user(&recipient_bare, recipient_jid);
 
+    let mut delivered_resources = Vec::new();
     for resource_jid in resources {
         let carbon = match build_received_carbon(
             message,
@@ -941,12 +1155,74 @@ async fn send_received_carbons_to_websocket_resources(
                 continue;
             }
         };
-        let _ = state
+        if state
             .deps
             .protocol
             .connection_registry
             .send_to(&resource_jid, Stanza::Message(carbon))
-            .await;
+            .await
+            .is_sent()
+        {
+            delivered_resources.push(resource_jid);
+        }
+    }
+
+    match state
+        .deps
+        .protocol
+        .sm_session_registry
+        .detached_carbon_resources_for_user(&recipient_bare, recipient_jid)
+        .await
+    {
+        Ok(detached_resources) => {
+            for resource_jid in detached_resources
+                .into_iter()
+                .filter(|resource| !delivered_resources.contains(resource))
+            {
+                let carbon = match build_received_carbon(
+                    message,
+                    &recipient_bare.to_string(),
+                    &resource_jid.to_string(),
+                ) {
+                    Ok(carbon) => carbon,
+                    Err(error) => {
+                        warn!(error = %error, to = %resource_jid, "Failed to build detached received carbon");
+                        continue;
+                    }
+                };
+                let stanza = Stanza::Message(carbon);
+                match state
+                    .deps
+                    .protocol
+                    .sm_session_registry
+                    .record_stanza_for_detached_bound_resource(&resource_jid, &stanza)
+                    .await
+                {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        if state
+                            .deps
+                            .protocol
+                            .connection_registry
+                            .is_carbons_enabled(&resource_jid)
+                        {
+                            let _ = state
+                                .deps
+                                .protocol
+                                .connection_registry
+                                .send_to(&resource_jid, stanza)
+                                .await;
+                        }
+                    }
+                    Err(error) => {
+                        warn!(jid = %resource_jid, error = %error, "Failed to record received carbon for detached resource");
+                    }
+                }
+            }
+        }
+        Err(error) => {
+            warn!(jid = %recipient_bare, error = %error, "Failed to list detached received-carbon resources");
+        }
     }
 }
 
