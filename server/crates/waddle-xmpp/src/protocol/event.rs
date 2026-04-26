@@ -165,18 +165,24 @@ pub enum OutboundEvent {
     // -------------------------------------------------------------------
     // Storage
     // -------------------------------------------------------------------
-    /// Persist a groupchat message to the MAM archive.
+    /// Persist a message to a personal MAM archive owned by `archive_owner`.
     ///
-    /// The interpreter's MAM storage layer owns ID generation and indexing.
-    ArchiveGroupchat {
-        room: BareJid,
-        sender: FullJid,
+    /// One archive flow per archive owner. For 1:1 messages this event is
+    /// emitted twice — once for the sender's archive and once for the
+    /// recipient's — each carrying a `message` that has already been
+    /// canonicalized for that archive's `by` (see
+    /// [`super::canonicalize::canonicalize`]). The interpreter trusts the
+    /// stamp and persists the typed `Message` as-is.
+    ArchivePersonalMessage {
+        archive_owner: BareJid,
         message: Box<Message>,
     },
-    /// Persist a one-to-one direct message to the MAM archive.
-    ArchiveDirect {
-        from: BareJid,
-        to: BareJid,
+    /// Persist a groupchat message to a room's MAM archive.
+    ///
+    /// The `message` MUST already be canonicalized with `by=$room` by the
+    /// emitter. The interpreter persists and does not re-stamp.
+    ArchiveRoomMessage {
+        room: BareJid,
         message: Box<Message>,
     },
 

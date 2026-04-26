@@ -118,19 +118,17 @@ pub async fn interpret(
                 let _entry = registry.unregister(&jid);
                 debug!(jid = %jid, "UnregisterConnection: removed from registry");
             }
-            OutboundEvent::ArchiveGroupchat { room, sender, .. } => {
+            OutboundEvent::ArchiveRoomMessage { room, .. } => {
                 warn!(
-                    variant = "ArchiveGroupchat",
+                    variant = "ArchiveRoomMessage",
                     room = %room,
-                    sender = %sender,
                     "OutboundEvent variant not yet wired in interpreter"
                 );
             }
-            OutboundEvent::ArchiveDirect { from, to, .. } => {
+            OutboundEvent::ArchivePersonalMessage { archive_owner, .. } => {
                 warn!(
-                    variant = "ArchiveDirect",
-                    from = %from,
-                    to = %to,
+                    variant = "ArchivePersonalMessage",
+                    archive_owner = %archive_owner,
                     "OutboundEvent variant not yet wired in interpreter"
                 );
             }
