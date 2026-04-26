@@ -2,7 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Error as AnyhowError, Result};
 use futures::future::join_all;
 use regex::Regex;
 use serde_json::Value;
@@ -60,14 +60,6 @@ impl ExtensionManager {
         let mut feature_namespaces = Vec::new();
 
         for module in &config.modules {
-            // Advertise the configured namespace unconditionally, even if the
-            // WASM component fails to load. This keeps disco#info deterministic
-            // across deployments and lets clients send payloads in the
-            // advertised namespace regardless of runtime load status.
-            if !module.namespace.is_empty() && !feature_namespaces.contains(&module.namespace) {
-                feature_namespaces.push(module.namespace.clone());
-            }
-
             let config_json = match effective_module_config_json(module) {
                 Ok(config_json) => config_json,
                 Err(error) => {
@@ -86,6 +78,7 @@ impl ExtensionManager {
                     warn!(
                         extension = %module.name,
                         %error,
+                        error_chain = %format_error_chain(&error),
                         "failed to resolve extension WASM path; skipping enrichment actor"
                     );
                     continue;
@@ -95,9 +88,13 @@ impl ExtensionManager {
             let loaded = match LoadedExtension::load(&runtime, &wasm_path) {
                 Ok(loaded) => loaded,
                 Err(error) => {
+                    if module.local_path.is_none() {
+                        remove_invalid_cached_extension(module, &wasm_path);
+                    }
                     warn!(
                         extension = %module.name,
                         %error,
+                        error_chain = %format_error_chain(&error),
                         "failed to compile extension component; skipping enrichment actor"
                     );
                     continue;
@@ -110,6 +107,7 @@ impl ExtensionManager {
                     warn!(
                         extension = %module.name,
                         %error,
+                        error_chain = %format_error_chain(&error),
                         "extension init() failed; skipping enrichment actor"
                     );
                     continue;
@@ -149,9 +147,6 @@ impl ExtensionManager {
     }
 
     pub async fn enrich_message(&self, msg: &mut Message) -> usize {
-        if self.actors.is_empty() {
-            return 0;
-        }
         if message_has_embed_for_namespaces(msg, &self.feature_namespaces) {
             return 0;
         }
@@ -170,39 +165,62 @@ impl ExtensionManager {
             return 0;
         }
 
-        let enrich_futures = self.actors.iter().map(|actor| {
-            let actor_name = actor.info().name;
-            let actor = Arc::clone(actor);
-            let body = body.clone();
-            let links = links.clone();
-            async move {
-                match timeout(EXTENSION_ENRICH_TIMEOUT, actor.enrich_message(body, links)).await {
-                    Ok(embeds) => embeds,
-                    Err(_) => {
-                        warn!(
-                            extension = %actor_name,
-                            timeout_secs = EXTENSION_ENRICH_TIMEOUT.as_secs(),
-                            "extension enrichment timed out; continuing fail-open"
-                        );
-                        Vec::new()
+        let mut count = 0usize;
+        if !self.actors.is_empty() {
+            let enrich_futures = self.actors.iter().map(|actor| {
+                let actor_name = actor.info().name;
+                let actor = Arc::clone(actor);
+                let body = body.clone();
+                let links = links.clone();
+                async move {
+                    match timeout(EXTENSION_ENRICH_TIMEOUT, actor.enrich_message(body, links)).await
+                    {
+                        Ok(embeds) => embeds,
+                        Err(_) => {
+                            warn!(
+                                extension = %actor_name,
+                                timeout_secs = EXTENSION_ENRICH_TIMEOUT.as_secs(),
+                                "extension enrichment timed out; continuing fail-open"
+                            );
+                            Vec::new()
+                        }
                     }
                 }
-            }
-        });
-        let results = join_all(enrich_futures).await;
+            });
+            let results = join_all(enrich_futures).await;
 
-        let mut count = 0usize;
-        for embeds in results {
-            for embed in embeds {
-                msg.payloads.push(embed.to_minidom());
-                count += 1;
+            for embeds in results {
+                for embed in embeds {
+                    msg.payloads.push(embed.to_minidom());
+                    count += 1;
+                }
+            }
+            if count > 0 {
+                debug!(embeds_added = count, "message enriched by extensions");
             }
         }
-        if count > 0 {
-            debug!(embeds_added = count, "message enriched by extensions");
-        }
-
         count
+    }
+}
+
+fn remove_invalid_cached_extension(module: &ExtensionModuleConfig, wasm_path: &Path) {
+    match std::fs::remove_file(wasm_path) {
+        Ok(()) => {
+            warn!(
+                extension = %module.name,
+                cache_path = %wasm_path.display(),
+                "removed cached extension after component load failure"
+            );
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            warn!(
+                extension = %module.name,
+                cache_path = %wasm_path.display(),
+                %error,
+                "failed to remove cached extension after component load failure"
+            );
+        }
     }
 }
 
@@ -296,6 +314,14 @@ fn detect_links(body: &str) -> Vec<DetectedLink> {
     }
 
     links
+}
+
+fn format_error_chain(error: &AnyhowError) -> String {
+    error
+        .chain()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(": ")
 }
 
 #[cfg(test)]
@@ -435,13 +461,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn from_config_skips_actor_when_secret_file_cannot_be_read() {
-        let mut config_secret_files = BTreeMap::new();
-        config_secret_files.insert(
-            "github_token".to_string(),
-            "/path/that/does/not/exist".to_string(),
-        );
-
+    async fn from_config_does_not_advertise_namespace_or_fallback_when_actor_cannot_load() {
         let config = ExtensionConfig {
             enabled: true,
             cache_dir: "/var/lib/waddle/extensions".to_string(),
@@ -451,21 +471,38 @@ mod tests {
                 tag: "latest".to_string(),
                 namespace: "urn:waddle:github:0".to_string(),
                 config: json!({}),
-                config_secret_files,
-                local_path: Some("missing-but-never-read.wasm".to_string()),
+                config_secret_files: Default::default(),
+                local_path: Some("missing-github-enricher-test.wasm".to_string()),
             }],
         };
 
         let manager = ExtensionManager::from_config(config)
             .await
             .expect("manager should stay fail-open");
-        assert_eq!(manager.feature_namespaces(), ["urn:waddle:github:0"]);
+        assert!(manager.feature_namespaces().is_empty());
 
         let mut msg = Message::new(None);
         msg.bodies.insert(
             String::new(),
             Body("https://github.com/waddle-social/waddle".to_string()),
         );
+        assert_eq!(manager.enrich_message(&mut msg).await, 0);
+        assert!(msg.payloads.is_empty());
+    }
+
+    #[tokio::test]
+    async fn enrich_message_does_not_fallback_without_loaded_actor() {
+        let manager = ExtensionManager {
+            actors: Vec::new(),
+            feature_namespaces: vec!["urn:waddle:github:0".to_string()],
+        };
+
+        let mut msg = Message::new(None);
+        msg.bodies.insert(
+            String::new(),
+            Body("https://github.com/waddle-social/waddle".to_string()),
+        );
+
         assert_eq!(manager.enrich_message(&mut msg).await, 0);
         assert!(msg.payloads.is_empty());
     }

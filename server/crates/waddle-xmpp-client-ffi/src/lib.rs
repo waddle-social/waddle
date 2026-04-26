@@ -673,7 +673,7 @@ fn dispatch_event(event: ClientEvent, listener: &dyn WaddleEventListener) {
     match event {
         ClientEvent::Lifecycle(LifecycleEvent::SessionReady(_)) => listener.on_connected(),
         ClientEvent::Messaging(MessagingEvent::Message(msg)) => {
-            listener.on_message(inbound_to_ffi(msg));
+            listener.on_message(inbound_to_ffi(*msg));
         }
         ClientEvent::Messaging(MessagingEvent::Presence(pres)) => {
             listener.on_presence(WaddlePresence {
@@ -700,7 +700,7 @@ fn dispatch_event(event: ClientEvent, listener: &dyn WaddleEventListener) {
 
 /// Extract the domain part from a JID like `user@domain` or `domain`.
 fn jid_domain(jid: &str) -> &str {
-    jid.split('@').last().unwrap_or(jid)
+    jid.split('@').next_back().unwrap_or(jid)
 }
 
 fn mam_page_to_ffi(page: waddle_xmpp_client::mam::MamPage) -> WaddleMamPage {

@@ -100,7 +100,7 @@ async fn correction_routes_and_replays_from_mam() {
         echo.contains("urn:xmpp:message-correct:0"),
         "missing replace: {echo}"
     );
-    assert!(echo.contains(&target), "missing correction target: {echo}");
+    assert!(echo.contains(target), "missing correction target: {echo}");
 
     client
         .send(&format!(
@@ -115,7 +115,7 @@ async fn correction_routes_and_replays_from_mam() {
     assert!(
         frames
             .iter()
-            .any(|frame| frame.contains("urn:xmpp:message-correct:0") && frame.contains(&target)),
+            .any(|frame| frame.contains("urn:xmpp:message-correct:0") && frame.contains(target)),
         "MAM did not replay correction: {frames:?}"
     );
 

@@ -23,6 +23,8 @@ pub struct OciExtensionPuller {
 const WASM_LAYER_MEDIA_TYPE: &str = "application/wasm";
 const EXTENSION_ARTIFACT_MEDIA_TYPE: &str = "application/vnd.waddle.extension.wasm.v1+wasm";
 const MAX_WASM_BYTES: usize = 50 * 1024 * 1024;
+const CORE_WASM_VERSION: [u8; 4] = [0x01, 0x00, 0x00, 0x00];
+const COMPONENT_WASM_VERSION: [u8; 4] = [0x0d, 0x00, 0x01, 0x00];
 
 impl OciExtensionPuller {
     pub fn new(cache_dir: impl Into<PathBuf>) -> Self {
@@ -184,7 +186,8 @@ fn validate_wasm_bytes(module_name: &str, bytes: &[u8]) -> Result<()> {
     if bytes[..4] != [0x00, 0x61, 0x73, 0x6d] {
         bail!("extension {module_name} payload is not a wasm binary");
     }
-    if bytes[4..8] != [0x01, 0x00, 0x00, 0x00] {
+    let version = [bytes[4], bytes[5], bytes[6], bytes[7]];
+    if version != CORE_WASM_VERSION && version != COMPONENT_WASM_VERSION {
         bail!("extension {module_name} uses unsupported wasm binary version");
     }
     Ok(())
@@ -317,12 +320,12 @@ mod tests {
     fn selects_single_wasm_layer() {
         let layers = vec![
             ImageLayer {
-                data: vec![0u8; 8].into(),
+                data: vec![0u8; 8],
                 media_type: "application/octet-stream".to_string(),
                 annotations: None,
             },
             ImageLayer {
-                data: vec![0, 97, 115, 109, 1, 0, 0, 0].into(),
+                data: vec![0, 97, 115, 109, 1, 0, 0, 0],
                 media_type: "application/wasm".to_string(),
                 annotations: None,
             },
@@ -352,13 +355,39 @@ mod tests {
     #[test]
     fn rejects_invalid_wasm_payload() {
         let layer = ImageLayer {
-            data: vec![1, 2, 3, 4, 0, 0, 0, 0].into(),
+            data: vec![1, 2, 3, 4, 0, 0, 0, 0],
             media_type: "application/wasm".to_string(),
             annotations: None,
         };
         let error = validate_wasm_layer("github-enricher", &layer)
             .expect_err("invalid payload should fail");
         assert!(error.to_string().contains("payload is not a wasm binary"));
+    }
+
+    #[test]
+    fn accepts_wasm_component_payload() {
+        let layer = ImageLayer {
+            data: vec![0, 97, 115, 109, 0x0d, 0, 1, 0],
+            media_type: "application/wasm".to_string(),
+            annotations: None,
+        };
+
+        validate_wasm_layer("github-enricher", &layer).expect("component payload should validate");
+    }
+
+    #[test]
+    fn rejects_unknown_wasm_binary_version() {
+        let layer = ImageLayer {
+            data: vec![0, 97, 115, 109, 2, 0, 0, 0],
+            media_type: "application/wasm".to_string(),
+            annotations: None,
+        };
+
+        let error = validate_wasm_layer("github-enricher", &layer)
+            .expect_err("unknown binary version should fail");
+        assert!(error
+            .to_string()
+            .contains("uses unsupported wasm binary version"));
     }
 
     #[test]

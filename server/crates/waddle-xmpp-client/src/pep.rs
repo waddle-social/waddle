@@ -256,19 +256,27 @@ pub fn build_pep_clear_iq(id: &str, node: &str) -> Element {
 // ── PepExt trait on ClientHandle ─────────────────────────────────────────────
 
 pub trait PepExt {
-    async fn publish_mood(&self, mood: &str, text: Option<&str>) -> ClientResult<()>;
-    async fn clear_mood(&self) -> ClientResult<()>;
-    async fn publish_activity(&self, activity: &str, text: Option<&str>) -> ClientResult<()>;
-    async fn clear_activity(&self) -> ClientResult<()>;
-    async fn publish_tune(
-        &self,
-        artist: Option<&str>,
-        title: Option<&str>,
-        source: Option<&str>,
+    fn publish_mood<'a>(
+        &'a self,
+        mood: &'a str,
+        text: Option<&'a str>,
+    ) -> impl std::future::Future<Output = ClientResult<()>> + Send + 'a;
+    fn clear_mood(&self) -> impl std::future::Future<Output = ClientResult<()>> + Send + '_;
+    fn publish_activity<'a>(
+        &'a self,
+        activity: &'a str,
+        text: Option<&'a str>,
+    ) -> impl std::future::Future<Output = ClientResult<()>> + Send + 'a;
+    fn clear_activity(&self) -> impl std::future::Future<Output = ClientResult<()>> + Send + '_;
+    fn publish_tune<'a>(
+        &'a self,
+        artist: Option<&'a str>,
+        title: Option<&'a str>,
+        source: Option<&'a str>,
         length: Option<u32>,
-        uri: Option<&str>,
-    ) -> ClientResult<()>;
-    async fn clear_tune(&self) -> ClientResult<()>;
+        uri: Option<&'a str>,
+    ) -> impl std::future::Future<Output = ClientResult<()>> + Send + 'a;
+    fn clear_tune(&self) -> impl std::future::Future<Output = ClientResult<()>> + Send + '_;
 }
 
 impl PepExt for ClientHandle {

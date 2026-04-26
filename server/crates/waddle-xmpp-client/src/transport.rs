@@ -228,7 +228,7 @@ impl WebSocketTransport for ConnectedWebSocketTransport {
             }
 
             let frame = encode_message(&message)?;
-            self.sink.send(Message::Text(frame.into())).await?;
+            self.sink.send(Message::Text(frame)).await?;
 
             if matches!(message, TransportMessage::Close(_)) {
                 self.queue_state_change(TransportState::Closing);
@@ -273,7 +273,7 @@ impl WebSocketTransport for ConnectedWebSocketTransport {
                     Some(Ok(_)) => {}
                     Some(Err(err)) => {
                         self.queue_state_change(TransportState::Failed);
-                        return Err(ClientError::WebSocket(err));
+                        return Err(err.into());
                     }
                     None => {
                         self.queue_closed();
@@ -293,7 +293,7 @@ impl WebSocketTransport for ConnectedWebSocketTransport {
             if self.state != TransportState::Closing {
                 self.queue_state_change(TransportState::Closing);
                 let frame = encode_message(&TransportMessage::Close(StreamClose))?;
-                self.sink.send(Message::Text(frame.into())).await?;
+                self.sink.send(Message::Text(frame)).await?;
                 self.pending_events.push_back(TransportEvent::MessageSent(
                     TransportMessage::Close(StreamClose),
                 ));
@@ -564,7 +564,7 @@ mod tests {
     use std::str::FromStr;
     use tokio::net::TcpListener;
     use tokio_tungstenite::accept_hdr_async;
-    use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
+    use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
     use url::Url;
 
     fn config() -> ClientConfig {
@@ -579,6 +579,27 @@ mod tests {
             .unwrap(),
         )
         .unwrap()
+    }
+
+    #[expect(
+        clippy::result_large_err,
+        reason = "tungstenite fixes the handshake callback error type as a large ErrorResponse"
+    )]
+    fn assert_xmpp_subprotocol(
+        request: &Request,
+        mut response: Response,
+    ) -> Result<Response, ErrorResponse> {
+        assert_eq!(
+            request
+                .headers()
+                .get("Sec-WebSocket-Protocol")
+                .and_then(|value| value.to_str().ok()),
+            Some("xmpp")
+        );
+        response
+            .headers_mut()
+            .insert("Sec-WebSocket-Protocol", "xmpp".parse().unwrap());
+        Ok(response)
     }
 
     #[test]
@@ -630,20 +651,7 @@ mod tests {
 
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            let mut websocket =
-                accept_hdr_async(stream, |request: &Request, mut response: Response| {
-                    assert_eq!(
-                        request
-                            .headers()
-                            .get("Sec-WebSocket-Protocol")
-                            .and_then(|value| value.to_str().ok()),
-                        Some("xmpp")
-                    );
-                    response
-                        .headers_mut()
-                        .insert("Sec-WebSocket-Protocol", "xmpp".parse().unwrap());
-                    Ok(response)
-                })
+            let mut websocket = accept_hdr_async(stream, assert_xmpp_subprotocol)
                 .await
                 .unwrap();
 
@@ -660,8 +668,7 @@ mod tests {
                 .send(
                     Message::Text(
                         r#"<open xmlns="urn:ietf:params:xml:ns:xmpp-framing" from="waddle.example" id="stream-1" version="1.0"/>"#
-                            .to_string()
-                            .into(),
+                            .to_string(),
                     ),
                 )
                 .await
@@ -669,16 +676,13 @@ mod tests {
             websocket
                 .send(Message::Text(
                     r#"<iq type="result" id="ping-1"><ping xmlns="urn:xmpp:ping"/></iq>"#
-                        .to_string()
-                        .into(),
+                        .to_string(),
                 ))
                 .await
                 .unwrap();
             websocket
                 .send(Message::Text(
-                    r#"<close xmlns="urn:ietf:params:xml:ns:xmpp-framing"/>"#
-                        .to_string()
-                        .into(),
+                    r#"<close xmlns="urn:ietf:params:xml:ns:xmpp-framing"/>"#.to_string(),
                 ))
                 .await
                 .unwrap();

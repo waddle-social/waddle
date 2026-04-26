@@ -126,15 +126,27 @@ pub(crate) async fn list_xmpp_channels(
 }
 
 #[derive(Clone)]
+#[allow(
+    dead_code,
+    reason = "legacy waddle_xmpp AppState bridge is retained for parity tests while websocket handlers are the runtime path"
+)]
 struct SpaceDbService {
     db_pool: Arc<DatabasePool>,
 }
 
 impl SpaceDbService {
+    #[allow(
+        dead_code,
+        reason = "legacy waddle_xmpp AppState bridge is retained for parity tests while websocket handlers are the runtime path"
+    )]
     fn new(db_pool: Arc<DatabasePool>) -> Self {
         Self { db_pool }
     }
 
+    #[allow(
+        dead_code,
+        reason = "legacy waddle_xmpp AppState bridge is retained for parity tests while websocket handlers are the runtime path"
+    )]
     fn actor(&self) -> ActorRef<DbActor> {
         self.db_pool.global_actor().clone()
     }
@@ -148,6 +160,10 @@ impl SpaceDbService {
 /// - `NativeUserStore` for XEP-0077 registration and SCRAM authentication
 /// - `VCardStore` for XEP-0054 vcard-temp storage
 /// - `Database` for upload slot storage (XEP-0363)
+#[allow(
+    dead_code,
+    reason = "legacy waddle_xmpp AppState bridge is retained for parity tests while websocket handlers are the runtime path"
+)]
 pub struct XmppAppState {
     /// The XMPP server domain (e.g., "waddle.social")
     domain: String,
@@ -175,6 +191,10 @@ impl XmppAppState {
     /// * `domain` - The XMPP server domain (e.g., "waddle.social")
     /// * `db` - The global database for session and permission storage
     /// * `encryption_key` - Optional encryption key for session token encryption
+    #[allow(
+        dead_code,
+        reason = "legacy waddle_xmpp AppState bridge is retained for parity tests while websocket handlers are the runtime path"
+    )]
     pub fn new(
         domain: String,
         db: Arc<Database>,
@@ -199,12 +219,20 @@ impl XmppAppState {
     }
 
     /// Set the database pool for canonical space data access.
+    #[allow(
+        dead_code,
+        reason = "legacy waddle_xmpp AppState bridge is retained for parity tests while websocket handlers are the runtime path"
+    )]
     pub fn with_db_pool(mut self, db_pool: Arc<DatabasePool>) -> Self {
         self.space_db_service = Some(SpaceDbService::new(db_pool));
         self
     }
 
     /// Set the shared inbox storage used by the live XMPP runtime.
+    #[allow(
+        dead_code,
+        reason = "legacy waddle_xmpp AppState bridge is retained for parity tests while websocket handlers are the runtime path"
+    )]
     pub fn with_inbox_storage(mut self, inbox_storage: Arc<dyn InboxStorage>) -> Self {
         self.inbox_storage = Some(inbox_storage);
         self
@@ -213,6 +241,10 @@ impl XmppAppState {
     /// Parse a resource string into an Object.
     ///
     /// Resource format: "space:{id}" or "channel:{id}"
+    #[allow(
+        dead_code,
+        reason = "legacy waddle_xmpp AppState bridge is retained for parity tests while websocket handlers are the runtime path"
+    )]
     fn parse_resource(resource: &str) -> Result<Object, XmppError> {
         Object::parse(resource).map_err(|e| {
             XmppError::internal(format!("Invalid resource format '{}': {}", resource, e))
@@ -222,12 +254,20 @@ impl XmppAppState {
     /// Parse a subject string into a Subject.
     ///
     /// Subject format: "user:{user_id}" or "space:{id}#member"
+    #[allow(
+        dead_code,
+        reason = "legacy waddle_xmpp AppState bridge is retained for parity tests while websocket handlers are the runtime path"
+    )]
     fn parse_subject(subject: &str) -> Result<Subject, XmppError> {
         Subject::parse(subject).map_err(|e| {
             XmppError::internal(format!("Invalid subject format '{}': {}", subject, e))
         })
     }
 
+    #[allow(
+        dead_code,
+        reason = "legacy waddle_xmpp AppState bridge is retained for parity tests while websocket handlers are the runtime path"
+    )]
     async fn global_database(&self) -> Result<Database, XmppError> {
         self.global_db_actor
             .ask(GetDatabase)
@@ -1535,6 +1575,10 @@ impl waddle_xmpp::AppState for XmppAppState {
 // =========================================================================
 
 /// Convert a database roster item row to a waddle_xmpp RosterItem.
+#[allow(
+    dead_code,
+    reason = "legacy waddle_xmpp AppState bridge maps roster rows only when that bridge is exercised"
+)]
 fn row_to_roster_item(
     row: &crate::db::roster::RosterItemRow,
 ) -> Result<waddle_xmpp::roster::RosterItem, String> {
@@ -1566,6 +1610,10 @@ fn row_to_roster_item(
 }
 
 /// Convert a waddle_xmpp RosterItem to a database roster item row.
+#[allow(
+    dead_code,
+    reason = "legacy waddle_xmpp AppState bridge maps roster rows only when that bridge is exercised"
+)]
 fn roster_item_to_row(item: &waddle_xmpp::roster::RosterItem) -> crate::db::roster::RosterItemRow {
     crate::db::roster::RosterItemRow {
         contact_jid: item.jid.to_string(),
@@ -1580,6 +1628,7 @@ fn roster_item_to_row(item: &waddle_xmpp::roster::RosterItem) -> crate::db::rost
 mod tests {
     use super::*;
     use crate::db::MigrationRunner;
+    use crate::db::{DatabaseConfig, PoolConfig};
     use crate::permissions::{ObjectType, PermissionActor};
     use waddle_xmpp::AppState;
 
@@ -1609,6 +1658,30 @@ mod tests {
         );
 
         assert_eq!(state.domain(), "waddle.social");
+    }
+
+    #[tokio::test]
+    async fn test_xmpp_state_optional_storage_builders() {
+        let (db, actor) = create_test_db().await;
+        let db_pool = Arc::new(
+            DatabasePool::new(DatabaseConfig::default(), PoolConfig::default())
+                .await
+                .expect("database pool"),
+        );
+        let inbox_storage = Arc::new(waddle_xmpp::inbox::storage::InMemoryInboxStorage::new());
+
+        let state = XmppAppState::new(
+            "waddle.social".to_string(),
+            Arc::clone(&db),
+            actor,
+            kameo::spawn(PermissionActor::new_for_tests(db)),
+            None,
+        )
+        .with_db_pool(db_pool)
+        .with_inbox_storage(inbox_storage);
+
+        assert!(state.space_db_service.is_some());
+        assert!(state.inbox_storage.is_some());
     }
 
     #[tokio::test]

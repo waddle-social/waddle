@@ -150,7 +150,10 @@ pub trait AvatarExt {
     /// Issues two IQ round-trips: one for metadata, one for the image bytes.
     /// Returns `Ok(None)` when the JID has not published a `urn:xmpp:avatar`
     /// metadata item. Any transport / protocol error surfaces as `Err`.
-    async fn request_avatar(&self, jid: &BareJid) -> ClientResult<Option<Avatar>>;
+    fn request_avatar<'a>(
+        &'a self,
+        jid: &'a BareJid,
+    ) -> impl std::future::Future<Output = ClientResult<Option<Avatar>>> + Send + 'a;
 }
 
 impl AvatarExt for ClientHandle {

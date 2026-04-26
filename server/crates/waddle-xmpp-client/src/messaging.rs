@@ -216,7 +216,7 @@ pub struct InboundPresence {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum MessagingEvent {
-    Message(InboundMessage),
+    Message(Box<InboundMessage>),
     Presence(InboundPresence),
 }
 
@@ -244,7 +244,7 @@ pub struct SendMessageOptions {
 /// element is not a `<message>` or `<presence>`.
 pub fn parse(element: &Element) -> Option<MessagingEvent> {
     match element.name() {
-        "message" => Some(MessagingEvent::Message(parse_message(element))),
+        "message" => Some(MessagingEvent::Message(Box::new(parse_message(element)))),
         "presence" => Some(MessagingEvent::Presence(parse_presence(element))),
         _ => None,
     }
@@ -347,10 +347,10 @@ fn parse_message(el: &Element) -> InboundMessage {
             Some("mention") => {
                 if let Some(uri) = child.attr("uri") {
                     let uri_str = uri.to_string();
-                    if uri_str.starts_with("xmpp:") {
-                        if uri_str.contains("@everyone") || uri_str.contains("@here") {
-                            broadcast_mention = Some(uri_str.clone());
-                        }
+                    if uri_str.starts_with("xmpp:")
+                        && (uri_str.contains("@everyone") || uri_str.contains("@here"))
+                    {
+                        broadcast_mention = Some(uri_str.clone());
                     }
                     mention_uris.push(uri_str);
                 }
@@ -628,35 +628,51 @@ fn parse_presence(el: &Element) -> InboundPresence {
 // ─── Outbound trait ───────────────────────────────────────────────────────
 
 pub trait MessagingExt {
-    async fn join_room(&self, room_jid: &str, nick: &str) -> ClientResult<()>;
-    async fn leave_room(&self, room_jid: &str, nick: &str) -> ClientResult<()>;
-    async fn send_groupchat_message(
-        &self,
-        room_jid: &str,
-        body: &str,
-        options: &SendMessageOptions,
-    ) -> ClientResult<()>;
-    async fn send_chat_message(
-        &self,
-        peer_jid: &str,
-        body: &str,
-        options: &SendMessageOptions,
-    ) -> ClientResult<()>;
-    async fn send_presence(&self, status: Option<&str>, show: Option<&str>) -> ClientResult<()>;
-    async fn send_chat_state(&self, jid: &str, state: &str, message_type: &str)
-        -> ClientResult<()>;
-    async fn send_displayed_marker(
-        &self,
-        jid: &str,
-        message_id: &str,
-        message_type: &str,
-    ) -> ClientResult<()>;
-    async fn retract_message(
-        &self,
-        jid: &str,
-        message_id: &str,
-        message_type: &str,
-    ) -> ClientResult<()>;
+    fn join_room<'a>(
+        &'a self,
+        room_jid: &'a str,
+        nick: &'a str,
+    ) -> impl std::future::Future<Output = ClientResult<()>> + Send + 'a;
+    fn leave_room<'a>(
+        &'a self,
+        room_jid: &'a str,
+        nick: &'a str,
+    ) -> impl std::future::Future<Output = ClientResult<()>> + Send + 'a;
+    fn send_groupchat_message<'a>(
+        &'a self,
+        room_jid: &'a str,
+        body: &'a str,
+        options: &'a SendMessageOptions,
+    ) -> impl std::future::Future<Output = ClientResult<()>> + Send + 'a;
+    fn send_chat_message<'a>(
+        &'a self,
+        peer_jid: &'a str,
+        body: &'a str,
+        options: &'a SendMessageOptions,
+    ) -> impl std::future::Future<Output = ClientResult<()>> + Send + 'a;
+    fn send_presence<'a>(
+        &'a self,
+        status: Option<&'a str>,
+        show: Option<&'a str>,
+    ) -> impl std::future::Future<Output = ClientResult<()>> + Send + 'a;
+    fn send_chat_state<'a>(
+        &'a self,
+        jid: &'a str,
+        state: &'a str,
+        message_type: &'a str,
+    ) -> impl std::future::Future<Output = ClientResult<()>> + Send + 'a;
+    fn send_displayed_marker<'a>(
+        &'a self,
+        jid: &'a str,
+        message_id: &'a str,
+        message_type: &'a str,
+    ) -> impl std::future::Future<Output = ClientResult<()>> + Send + 'a;
+    fn retract_message<'a>(
+        &'a self,
+        jid: &'a str,
+        message_id: &'a str,
+        message_type: &'a str,
+    ) -> impl std::future::Future<Output = ClientResult<()>> + Send + 'a;
 }
 
 impl MessagingExt for ClientHandle {

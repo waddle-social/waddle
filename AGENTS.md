@@ -52,6 +52,15 @@ bun test && bun run lint
   - CI runs `knip` via `cuenv` (task `lint` in `chat/env.cue`) before the
     Cloudflare preview upload on every pull request.
 
+- Clippy hard rule (server/):
+  - Local and CI clippy checks MUST run with `-D warnings`; warnings are
+    errors.
+  - Do not add `#[allow(...)]`, `#![allow(...)]`, or clippy-specific
+    suppressions unless absolutely necessary and explicitly justified in the
+    PR description.
+  - Prefer deleting dead code, wiring unused code into the exercised path, or
+    narrowing visibility over suppressing warnings.
+
 ## Code Style
 
 TypeScript 5.8.x; Bun 1.3.x: Follow standard conventions
