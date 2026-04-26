@@ -16,6 +16,7 @@ static TEST_SERIAL: Mutex<()> = Mutex::const_new(());
 
 const NS_PUBSUB: &str = "http://jabber.org/protocol/pubsub";
 const NS_PUBSUB_OWNER: &str = "http://jabber.org/protocol/pubsub#owner";
+const NS_PUBSUB_EVENT: &str = "http://jabber.org/protocol/pubsub#event";
 
 // ---------------------------------------------------------------------------
 // Helpers (mirror xep0060_pubsub_ws.rs; duplicated to keep suites independent)
@@ -373,4 +374,130 @@ async fn pep_owner_can_purge_self_node() {
         post_purge.contains(r#"type="result""#),
         "publish after purge must succeed (node still exists): {post_purge}"
     );
+}
+
+// ============================================================================
+// XEP-0163 §4.3 PEP fan-out (#238)
+// ============================================================================
+
+async fn wait_for_event_message(
+    client: &mut WsXmppClient,
+    node: &str,
+    dur: Duration,
+) -> Option<String> {
+    let deadline = std::time::Instant::now() + dur;
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return None;
+        }
+        match client.recv_timeout(remaining).await {
+            Ok(frame) => {
+                if frame.contains("<message")
+                    && frame.contains(NS_PUBSUB_EVENT)
+                    && (frame.contains(&format!(r#"node="{node}""#))
+                        || frame.contains(&format!(r#"node='{node}'"#)))
+                {
+                    return Some(frame);
+                }
+            }
+            Err(_) => return None,
+        }
+    }
+}
+
+#[tokio::test]
+async fn pep_publish_fans_event_with_owner_jid_as_from() {
+    let _serial = TEST_SERIAL.lock().await;
+    let bob_password = format!("ws-test-bob-{}", uuid::Uuid::new_v4());
+    let server = TestServer::start_with_extra_accounts(&[("bob", bob_password.as_str())]);
+    let mut admin = admin_client(&server, "pep-fanout-admin").await;
+    let admin_bare = format!("{ADMIN}@{DOMAIN}");
+    let bob_bare = format!("bob@{DOMAIN}");
+
+    // Auto-create the PEP node and configure access_model=open so bob can
+    // subscribe without presence subscription (presence-driven filtering
+    // is out of scope per #238).
+    let r1 = iq_set_to(
+        &mut admin,
+        "pep-fanout-create",
+        &admin_bare,
+        &format!(
+            r#"<pubsub xmlns="{NS_PUBSUB}"><publish node="urn:xmpp:bookmarks:1"><item id="seed"/></publish></pubsub>"#
+        ),
+    )
+    .await;
+    assert!(r1.contains(r#"type="result""#), "create: {r1}");
+
+    let cfg = iq_set_to(
+        &mut admin,
+        "pep-fanout-cfg",
+        &admin_bare,
+        &format!(
+            r#"<pubsub xmlns="{NS_PUBSUB_OWNER}"><configure node="urn:xmpp:bookmarks:1"><x xmlns="jabber:x:data" type="submit"><field var="pubsub#access_model"><value>open</value></field></x></configure></pubsub>"#
+        ),
+    )
+    .await;
+    assert!(cfg.contains(r#"type="result""#), "configure open: {cfg}");
+
+    let mut bob = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "bob",
+        &bob_password,
+        "pep-fanout-bob",
+    )
+    .await
+    .expect("bob connect");
+
+    let sub = iq_set_to(
+        &mut bob,
+        "pep-fanout-sub",
+        &admin_bare,
+        &format!(
+            r#"<pubsub xmlns="{NS_PUBSUB}"><subscribe node="urn:xmpp:bookmarks:1" jid="{bob_bare}"/></pubsub>"#
+        ),
+    )
+    .await;
+    assert!(sub.contains(r#"type="result""#), "subscribe: {sub}");
+
+    let pub_resp = iq_set_to(
+        &mut admin,
+        "pep-fanout-pub",
+        &admin_bare,
+        &format!(
+            r#"<pubsub xmlns="{NS_PUBSUB}"><publish node="urn:xmpp:bookmarks:1"><item id="bm-1"><conference xmlns="urn:xmpp:bookmarks:1" name="One"/></item></publish></pubsub>"#
+        ),
+    )
+    .await;
+    assert!(pub_resp.contains(r#"type="result""#), "publish: {pub_resp}");
+
+    let event = wait_for_event_message(&mut bob, "urn:xmpp:bookmarks:1", Duration::from_secs(2))
+        .await
+        .expect("bob must receive PEP event");
+
+    // XEP-0163 §4.3: PEP `from` is the bare account JID.
+    assert!(
+        event.contains(&format!(r#"from="{admin_bare}""#))
+            || event.contains(&format!(r#"from='{admin_bare}'"#)),
+        "from must be the PEP account bare JID: {event}"
+    );
+    // XEP-0163 §4.3 + XEP-0060 §12.18: PEP MUST be headline.
+    assert!(
+        event.contains(r#"type="headline""#) || event.contains(r#"type='headline'"#),
+        "PEP event must be type=headline: {event}"
+    );
+    assert!(
+        event.contains(r#"id="bm-1""#),
+        "item id must round-trip: {event}"
+    );
+    // §7.1.5: publisher == owner here (admin published to own PEP), so
+    // no publisher attribute should be emitted.
+    assert!(
+        !event.contains("publisher="),
+        "publisher attr must be omitted on PEP self-publish: {event}"
+    );
+
+    bob.close().await;
+    admin.close().await;
 }
