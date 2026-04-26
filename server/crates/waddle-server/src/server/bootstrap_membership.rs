@@ -46,6 +46,11 @@ impl BootstrapMembershipConfig {
                 .any(|owner| owner == &localpart)
         })
     }
+
+    /// All server-owner localparts (already normalized and deduplicated).
+    pub fn owner_localparts(&self) -> &[String] {
+        &self.owner_localparts
+    }
 }
 
 pub fn parse_owner_localparts(value: &str) -> Vec<String> {
