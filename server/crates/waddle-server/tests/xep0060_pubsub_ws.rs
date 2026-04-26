@@ -445,7 +445,8 @@ async fn purge_clears_items_keeps_node() {
 #[tokio::test]
 async fn outcast_subscriber_cannot_subscribe() {
     let _serial = TEST_SERIAL.lock().await;
-    let server = TestServer::start_with_extra_accounts(&[("bob", "bobpass")]);
+    let bob_password = format!("ws-test-bob-{}", uuid::Uuid::new_v4());
+    let server = TestServer::start_with_extra_accounts(&[("bob", bob_password.as_str())]);
     let mut admin = admin_client(&server, "xep0060-outcast-admin").await;
     let admin_bare = format!("{USERNAME}@{DOMAIN}");
 
@@ -493,7 +494,7 @@ async fn outcast_subscriber_cannot_subscribe() {
         &server.ws_url(),
         DOMAIN,
         "bob",
-        "bobpass",
+        &bob_password,
         "xep0060-outcast-bob",
     )
     .await

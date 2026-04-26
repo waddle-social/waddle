@@ -118,7 +118,8 @@ async fn pep_owner_can_publish_to_self_node_without_explicit_create() {
 #[tokio::test]
 async fn pep_other_user_cannot_publish_to_alice_pep_node() {
     let _serial = TEST_SERIAL.lock().await;
-    let server = TestServer::start_with_extra_accounts(&[("bob", "bobpass")]);
+    let bob_password = format!("ws-test-bob-{}", uuid::Uuid::new_v4());
+    let server = TestServer::start_with_extra_accounts(&[("bob", bob_password.as_str())]);
     let mut admin = admin_client(&server, "pep163-authz-admin").await;
     let admin_bare = format!("{ADMIN}@{DOMAIN}");
 
@@ -142,7 +143,7 @@ async fn pep_other_user_cannot_publish_to_alice_pep_node() {
         &server.ws_url(),
         DOMAIN,
         "bob",
-        "bobpass",
+        &bob_password,
         "pep163-authz-bob",
     )
     .await
