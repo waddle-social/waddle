@@ -4,9 +4,12 @@ use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use jid::BareJid;
+use jid::{BareJid, Jid};
 use tracing::info;
-use waddle_xmpp::pubsub::{NodeConfig, PubSubItem, PubSubNode, PubSubStorage, StoredItem};
+use waddle_xmpp::pubsub::{
+    Affiliation, NodeConfig, PubSubItem, PubSubNode, PubSubStorage, StoredItem, SubId,
+    Subscription, SubscriptionState,
+};
 use waddle_xmpp::XmppError;
 
 use crate::db::{Database, DatabaseConfig, DatabaseDriver, IntoParams};
@@ -684,6 +687,324 @@ impl PubSubStorage for DatabasePubSubStorage {
         }
         Ok(())
     }
+
+    async fn purge_node(&self, owner: &BareJid, node_name: &str) -> Result<u64, XmppError> {
+        let affected = self
+            .execute(
+                "DELETE FROM pubsub_items WHERE owner_jid = ? AND node_name = ?",
+                crate::db_params![owner.to_string(), node_name],
+            )
+            .await?;
+        Ok(affected)
+    }
+
+    async fn subscribe(
+        &self,
+        owner: &BareJid,
+        node_name: &str,
+        subscriber: &Jid,
+    ) -> Result<Subscription, XmppError> {
+        let subid = SubId::generate();
+        let now = crate::time::now_ms();
+        self.execute(
+            r#"
+            INSERT INTO pubsub_subscriptions (owner_jid, node_name, subid, subscriber_jid, state, created_at_ms)
+            VALUES (?, ?, ?, ?, 'subscribed', ?)
+            "#,
+            crate::db_params![
+                owner.to_string(),
+                node_name,
+                subid.as_str().to_string(),
+                subscriber.to_string(),
+                now,
+            ],
+        )
+        .await?;
+        Ok(Subscription {
+            subid,
+            subscriber: subscriber.clone(),
+            state: SubscriptionState::Subscribed,
+            created_at_ms: now,
+        })
+    }
+
+    async fn unsubscribe(
+        &self,
+        owner: &BareJid,
+        node_name: &str,
+        subscriber: &Jid,
+        subid: Option<&SubId>,
+    ) -> Result<bool, XmppError> {
+        let affected = match subid {
+            Some(subid) => {
+                self.execute(
+                    "DELETE FROM pubsub_subscriptions WHERE owner_jid = ? AND node_name = ? AND subid = ? AND subscriber_jid = ?",
+                    crate::db_params![
+                        owner.to_string(),
+                        node_name,
+                        subid.as_str().to_string(),
+                        subscriber.to_string(),
+                    ],
+                )
+                .await?
+            }
+            None => {
+                self.execute(
+                    "DELETE FROM pubsub_subscriptions WHERE owner_jid = ? AND node_name = ? AND subscriber_jid = ?",
+                    crate::db_params![
+                        owner.to_string(),
+                        node_name,
+                        subscriber.to_string(),
+                    ],
+                )
+                .await?
+            }
+        };
+        Ok(affected > 0)
+    }
+
+    async fn list_node_subscriptions(
+        &self,
+        owner: &BareJid,
+        node_name: &str,
+    ) -> Result<Vec<Subscription>, XmppError> {
+        let mut rows = self
+            .query(
+                "SELECT subid, subscriber_jid, state, created_at_ms FROM pubsub_subscriptions WHERE owner_jid = ? AND node_name = ? ORDER BY created_at_ms ASC",
+                crate::db_params![owner.to_string(), node_name],
+            )
+            .await?;
+        let mut out = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| XmppError::internal(e.to_string()))?
+        {
+            out.push(decode_subscription(&row)?);
+        }
+        Ok(out)
+    }
+
+    async fn list_subscriber_subscriptions(
+        &self,
+        owner: &BareJid,
+        subscriber: &Jid,
+    ) -> Result<Vec<(String, Subscription)>, XmppError> {
+        let mut rows = self
+            .query(
+                "SELECT node_name, subid, subscriber_jid, state, created_at_ms FROM pubsub_subscriptions WHERE owner_jid = ? AND subscriber_jid = ? ORDER BY node_name ASC, created_at_ms ASC",
+                crate::db_params![owner.to_string(), subscriber.to_string()],
+            )
+            .await?;
+        let mut out = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| XmppError::internal(e.to_string()))?
+        {
+            let node: String = row.get(0).map_err(|e| XmppError::internal(e.to_string()))?;
+            let sub = decode_subscription_offset(&row, 1)?;
+            out.push((node, sub));
+        }
+        Ok(out)
+    }
+
+    async fn get_subscription(
+        &self,
+        owner: &BareJid,
+        node_name: &str,
+        subid: &SubId,
+    ) -> Result<Option<Subscription>, XmppError> {
+        let mut rows = self
+            .query(
+                "SELECT subid, subscriber_jid, state, created_at_ms FROM pubsub_subscriptions WHERE owner_jid = ? AND node_name = ? AND subid = ?",
+                crate::db_params![owner.to_string(), node_name, subid.as_str().to_string()],
+            )
+            .await?;
+        let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| XmppError::internal(e.to_string()))?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(decode_subscription(&row)?))
+    }
+
+    async fn list_deliverable_subscribers(
+        &self,
+        owner: &BareJid,
+        node_name: &str,
+    ) -> Result<Vec<Subscription>, XmppError> {
+        let mut rows = self
+            .query(
+                r#"
+                SELECT s.subid, s.subscriber_jid, s.state, s.created_at_ms
+                FROM pubsub_subscriptions s
+                LEFT JOIN pubsub_affiliations a
+                  ON a.owner_jid = s.owner_jid
+                 AND a.node_name = s.node_name
+                 AND a.entity_jid = s.subscriber_jid
+                WHERE s.owner_jid = ?
+                  AND s.node_name = ?
+                  AND s.state = 'subscribed'
+                  AND (a.affiliation IS NULL OR a.affiliation <> 'outcast')
+                "#,
+                crate::db_params![owner.to_string(), node_name],
+            )
+            .await?;
+        let mut out = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| XmppError::internal(e.to_string()))?
+        {
+            out.push(decode_subscription(&row)?);
+        }
+        Ok(out)
+    }
+
+    async fn set_affiliation(
+        &self,
+        owner: &BareJid,
+        node_name: &str,
+        entity: &BareJid,
+        affiliation: Affiliation,
+    ) -> Result<Affiliation, XmppError> {
+        let prev = self.get_affiliation(owner, node_name, entity).await?;
+        if affiliation == Affiliation::None {
+            self.execute(
+                "DELETE FROM pubsub_affiliations WHERE owner_jid = ? AND node_name = ? AND entity_jid = ?",
+                crate::db_params![owner.to_string(), node_name, entity.to_string()],
+            )
+            .await?;
+            return Ok(prev);
+        }
+        self.execute(
+            r#"
+            INSERT INTO pubsub_affiliations (owner_jid, node_name, entity_jid, affiliation, updated_at_ms)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(owner_jid, node_name, entity_jid) DO UPDATE SET
+                affiliation = excluded.affiliation,
+                updated_at_ms = excluded.updated_at_ms
+            "#,
+            crate::db_params![
+                owner.to_string(),
+                node_name,
+                entity.to_string(),
+                affiliation.to_string(),
+                crate::time::now_ms(),
+            ],
+        )
+        .await?;
+        Ok(prev)
+    }
+
+    async fn get_affiliation(
+        &self,
+        owner: &BareJid,
+        node_name: &str,
+        entity: &BareJid,
+    ) -> Result<Affiliation, XmppError> {
+        let mut rows = self
+            .query(
+                "SELECT affiliation FROM pubsub_affiliations WHERE owner_jid = ? AND node_name = ? AND entity_jid = ?",
+                crate::db_params![owner.to_string(), node_name, entity.to_string()],
+            )
+            .await?;
+        let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| XmppError::internal(e.to_string()))?
+        else {
+            return Ok(Affiliation::None);
+        };
+        let raw: String = row.get(0).map_err(|e| XmppError::internal(e.to_string()))?;
+        Ok(raw.parse().unwrap_or(Affiliation::None))
+    }
+
+    async fn list_node_affiliations(
+        &self,
+        owner: &BareJid,
+        node_name: &str,
+    ) -> Result<Vec<(BareJid, Affiliation)>, XmppError> {
+        let mut rows = self
+            .query(
+                "SELECT entity_jid, affiliation FROM pubsub_affiliations WHERE owner_jid = ? AND node_name = ? ORDER BY entity_jid ASC",
+                crate::db_params![owner.to_string(), node_name],
+            )
+            .await?;
+        let mut out = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| XmppError::internal(e.to_string()))?
+        {
+            let entity_raw: String = row.get(0).map_err(|e| XmppError::internal(e.to_string()))?;
+            let entity = entity_raw
+                .parse::<BareJid>()
+                .map_err(|e| XmppError::internal(e.to_string()))?;
+            let aff_raw: String = row.get(1).map_err(|e| XmppError::internal(e.to_string()))?;
+            let aff: Affiliation = aff_raw.parse().unwrap_or(Affiliation::None);
+            out.push((entity, aff));
+        }
+        Ok(out)
+    }
+
+    async fn list_entity_affiliations(
+        &self,
+        owner: &BareJid,
+        entity: &BareJid,
+    ) -> Result<Vec<(String, Affiliation)>, XmppError> {
+        let mut rows = self
+            .query(
+                "SELECT node_name, affiliation FROM pubsub_affiliations WHERE owner_jid = ? AND entity_jid = ? ORDER BY node_name ASC",
+                crate::db_params![owner.to_string(), entity.to_string()],
+            )
+            .await?;
+        let mut out = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| XmppError::internal(e.to_string()))?
+        {
+            let node: String = row.get(0).map_err(|e| XmppError::internal(e.to_string()))?;
+            let aff_raw: String = row.get(1).map_err(|e| XmppError::internal(e.to_string()))?;
+            let aff: Affiliation = aff_raw.parse().unwrap_or(Affiliation::None);
+            out.push((node, aff));
+        }
+        Ok(out)
+    }
+}
+
+fn decode_subscription(row: &crate::db::Row) -> Result<Subscription, XmppError> {
+    decode_subscription_offset(row, 0)
+}
+
+fn decode_subscription_offset(
+    row: &crate::db::Row,
+    offset: usize,
+) -> Result<Subscription, XmppError> {
+    let subid_raw: String = row
+        .get(offset)
+        .map_err(|e| XmppError::internal(e.to_string()))?;
+    let subscriber_raw: String = row
+        .get(offset + 1)
+        .map_err(|e| XmppError::internal(e.to_string()))?;
+    let state_raw: String = row
+        .get(offset + 2)
+        .map_err(|e| XmppError::internal(e.to_string()))?;
+    let created_at_ms: i64 = row
+        .get(offset + 3)
+        .map_err(|e| XmppError::internal(e.to_string()))?;
+    Ok(Subscription {
+        subid: SubId::from_raw(subid_raw),
+        subscriber: subscriber_raw
+            .parse::<Jid>()
+            .map_err(|e| XmppError::internal(format!("invalid subscriber JID: {e}")))?,
+        state: state_raw.parse().unwrap_or(SubscriptionState::Subscribed),
+        created_at_ms,
+    })
 }
 
 pub async fn build_pubsub_storage(
@@ -831,5 +1152,147 @@ mod tests {
             .await
             .expect("items");
         assert_eq!(items.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn database_subscriptions_persist_across_reopen() {
+        let artifacts = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/test-artifacts");
+        std::fs::create_dir_all(&artifacts).expect("artifacts");
+        let path = artifacts.join(format!("pubsub-sub-{}.db", uuid::Uuid::new_v4()));
+        let url = format!("sqlite://{}", path.display());
+        let owner = jid("alice@example.com");
+        let alice: jid::Jid = "alice@example.com".parse().expect("jid");
+
+        let saved_subid = {
+            let storage = DatabasePubSubStorage::open(Some(&url))
+                .await
+                .expect("storage");
+            storage.get_or_create_node(&owner, "n").await.expect("node");
+            let sub = storage
+                .subscribe(&owner, "n", &alice)
+                .await
+                .expect("subscribe");
+            sub.subid
+        };
+
+        let reopened = DatabasePubSubStorage::open(Some(&url))
+            .await
+            .expect("reopen");
+        let listed = reopened
+            .list_node_subscriptions(&owner, "n")
+            .await
+            .expect("list");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].subid, saved_subid);
+
+        for cleanup in [
+            path.clone(),
+            PathBuf::from(format!("{}-shm", path.display())),
+            PathBuf::from(format!("{}-wal", path.display())),
+        ] {
+            let _ = std::fs::remove_file(cleanup);
+        }
+    }
+
+    #[tokio::test]
+    async fn database_affiliations_persist_across_reopen() {
+        let artifacts = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/test-artifacts");
+        std::fs::create_dir_all(&artifacts).expect("artifacts");
+        let path = artifacts.join(format!("pubsub-aff-{}.db", uuid::Uuid::new_v4()));
+        let url = format!("sqlite://{}", path.display());
+        let owner = jid("alice@example.com");
+        let bob = jid("bob@example.com");
+
+        {
+            let storage = DatabasePubSubStorage::open(Some(&url))
+                .await
+                .expect("storage");
+            storage.get_or_create_node(&owner, "n").await.expect("node");
+            let prev = storage
+                .set_affiliation(&owner, "n", &bob, Affiliation::Outcast)
+                .await
+                .expect("set");
+            assert_eq!(prev, Affiliation::None);
+        }
+
+        let reopened = DatabasePubSubStorage::open(Some(&url))
+            .await
+            .expect("reopen");
+        let aff = reopened
+            .get_affiliation(&owner, "n", &bob)
+            .await
+            .expect("get");
+        assert_eq!(aff, Affiliation::Outcast);
+
+        for cleanup in [
+            path.clone(),
+            PathBuf::from(format!("{}-shm", path.display())),
+            PathBuf::from(format!("{}-wal", path.display())),
+        ] {
+            let _ = std::fs::remove_file(cleanup);
+        }
+    }
+
+    #[tokio::test]
+    async fn database_purge_clears_items_keeps_node() {
+        let storage = DatabasePubSubStorage::open(Some("sqlite::memory:"))
+            .await
+            .expect("storage");
+        let owner = jid("alice@example.com");
+        storage.get_or_create_node(&owner, "n").await.expect("node");
+        // Use spaces config so max_items doesn't auto-trim our 3 items.
+        storage
+            .update_node_config(&owner, "n", &NodeConfig::spaces_public())
+            .await
+            .expect("config");
+        for i in 1..=3 {
+            let item = PubSubItem {
+                id: Some(format!("i{i}")),
+                payload: None,
+            };
+            storage
+                .publish_item(&owner, "n", &item, None, false)
+                .await
+                .expect("publish");
+        }
+        let purged = storage.purge_node(&owner, "n").await.expect("purge");
+        assert_eq!(purged, 3);
+        assert!(storage.get_node(&owner, "n").await.expect("get").is_some());
+        assert!(storage
+            .get_items(&owner, "n", None, &[])
+            .await
+            .expect("items")
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn database_deliverable_subscribers_excludes_outcast() {
+        let storage = DatabasePubSubStorage::open(Some("sqlite::memory:"))
+            .await
+            .expect("storage");
+        let owner = jid("alice@example.com");
+        storage.get_or_create_node(&owner, "n").await.expect("node");
+        let alice: jid::Jid = "alice@x.com".parse().expect("jid");
+        let bob: jid::Jid = "bob@x.com".parse().expect("jid");
+        storage
+            .subscribe(&owner, "n", &alice)
+            .await
+            .expect("subscribe");
+        storage
+            .subscribe(&owner, "n", &bob)
+            .await
+            .expect("subscribe");
+        let bob_bare = jid("bob@x.com");
+        storage
+            .set_affiliation(&owner, "n", &bob_bare, Affiliation::Outcast)
+            .await
+            .expect("set");
+
+        let listed = storage
+            .list_deliverable_subscribers(&owner, "n")
+            .await
+            .expect("list");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].subscriber.to_string(), "alice@x.com");
     }
 }
