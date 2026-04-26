@@ -3,6 +3,7 @@
 pub mod node;
 pub mod pep;
 pub mod stanzas;
+pub mod subscription;
 
 pub use node::{AccessModel, NodeConfig, PublishModel, SendLastPublishedItem};
 pub use pep::{build_pep_identity, is_pep_request, is_pep_request_to, pep_features, PepHandler};
@@ -12,3 +13,4 @@ pub use stanzas::{
     PubSubError, PubSubEvent, PubSubItem, PubSubRequest, NS_PUBSUB, NS_PUBSUB_ERRORS,
     NS_PUBSUB_EVENT, NS_PUBSUB_OWNER,
 };
+pub use subscription::{SubId, Subscription, SubscriptionState};
