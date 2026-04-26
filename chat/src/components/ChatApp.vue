@@ -11,6 +11,7 @@ import { useAppUpdate } from "@/composables/useAppUpdate";
 import { useNotifications } from "@/composables/useNotifications";
 import { useChannelUnread } from "@/composables/useChannelUnread";
 import { useVersion } from "@/composables/useVersion";
+import { useRosterContacts } from "@/composables/useRosterContacts";
 import { buildDmPath, buildPath, buildSettingsPath, parseRoute, pushDmRoute, pushRoute, pushSettingsRoute, resolveChannel, shouldLoadStructureForRoute } from "@/composables/useRouting";
 import { barePeerJid, jidDomain, parseManagedRoomBareJid, roomBareJidFor } from "@/lib/xmpp-client";
 import { mergeRoomHats, roomHatsFromMembers } from "@/lib/xmpp/occupant-badges";
@@ -19,6 +20,7 @@ import LandingState from "@/components/chat/LandingState.vue";
 import LoginScreen from "@/components/chat/LoginScreen.vue";
 import WaddlesSidebar from "@/components/chat/WaddlesSidebar.vue";
 import TopicsPanel from "@/components/chat/TopicsPanel.vue";
+import HomeDashboard from "@/components/chat/HomeDashboard.vue";
 import DmPanel from "@/components/chat/DmPanel.vue";
 import ContentArea from "@/components/chat/ContentArea.vue";
 import ThreadPanel from "@/components/chat/ThreadPanel.vue";
@@ -79,6 +81,7 @@ const dmConversations = useDmConversations(
 );
 
 const channelUnread = useChannelUnread(xmppClient);
+const rosterContacts = useRosterContacts(xmppClient);
 
 const dmMessaging = useDmMessaging(
   session,
@@ -288,7 +291,7 @@ watch(
 
 function resolveChannelNameFromJid(roomJid: string): string | null {
   const managedRoom = parseManagedRoomBareJid(roomJid);
-  if (!managedRoom || !waddles.activeSpaceId.value) return null;
+  if (!managedRoom) return null;
   return waddles.channels.value.find((c) => c.id === managedRoom.channelId)?.name ?? null;
 }
 
@@ -311,7 +314,7 @@ watch(() => messaging.lastMentionActivity.value, (event) => {
       onNavigate: (roomJid) => {
         const managedRoom = parseManagedRoomBareJid(roomJid);
         if (!managedRoom) return;
-        void selectSpace(managedRoom.channelId);
+        void selectChannel(managedRoom.channelId);
       },
     });
   }
@@ -341,7 +344,10 @@ watch(xmppClient, (client) => {
   client.setDmChatStateHandler(dmMessaging.onChatState);
   client.setDmDisplayedHandler(dmMessaging.onDisplayed);
   client.setDmReactionHandler(dmMessaging.onReaction);
-  client.setPresenceUpdateHandler(dmConversations.updatePresence);
+  client.setPresenceUpdateHandler((event) => {
+    dmConversations.updatePresence(event);
+    rosterContacts.updatePresence(event.bareJid, event.show);
+  });
   client.setMemberJidHandler((nick, bareJid) => {
     memberJidByNick.value = { ...memberJidByNick.value, [nick]: bareJid };
   });
@@ -494,7 +500,7 @@ async function onSelectThread(channelId: string, threadId: string) {
     await selectChannel(channelId);
   }
   // Mark thread as read
-  if (waddles.activeSpaceId.value && connectionStore.session) {
+  if (connectionStore.session) {
     const roomJid = roomBareJidFor(connectionStore.session, channelId);
     channelUnread.markThreadRead(roomJid, threadId);
   }
@@ -568,6 +574,10 @@ function updateUrl() {
     pushSettingsRoute("app");
     return;
   }
+  if (ui.activePage.value === "dashboard") {
+    pushRoute(null);
+    return;
+  }
   if (ui.sidebarMode.value === "dms" && activeDmPeer.value) {
     pushDmRoute(activeDmPeer.value.peerUsername);
   } else {
@@ -576,7 +586,7 @@ function updateUrl() {
 }
 
 watch(
-  [waddles.activeSpaceId, waddles.activeChannelId, ui.sidebarMode, () => dmConversations.activePeerJid.value],
+  [waddles.activeChannelId, ui.sidebarMode, () => dmConversations.activePeerJid.value],
   () => {
     // Channel / DM / mode changes close any open thread panel — the ids inside
     // the stack belong to the channel we just left.
@@ -604,7 +614,7 @@ function closeUserSettings() {
     window.history.back();
     return;
   }
-  ui.activePage.value = "chat";
+  ui.activePage.value = waddles.currentChannel.value || activeDmPeer.value ? "chat" : "dashboard";
   if (window.location.pathname + window.location.search !== currentChatPath.value) {
     if (ui.sidebarMode.value === "dms" && activeDmPeer.value) {
       pushDmRoute(activeDmPeer.value.peerUsername);
@@ -618,6 +628,14 @@ function onPopState() {
   const route = parseRoute(window.location.pathname, window.location.search);
   ui.activePage.value = route.page;
   if (route.page === "settings") {
+    activeThreadStack.value = [];
+    return;
+  }
+  if (route.page === "dashboard") {
+    ui.sidebarMode.value = "channels";
+    dmConversations.closeDm();
+    waddles.activeChannelId.value = null;
+    messaging.clearMessages();
     activeThreadStack.value = [];
     return;
   }
@@ -638,6 +656,17 @@ async function applyRouteTarget(route: ReturnType<typeof parseRoute>, requestId:
     activeThreadStack.value = [];
     return;
   }
+  if (route.page === "dashboard") {
+    ui.sidebarMode.value = "channels";
+    dmConversations.closeDm();
+    waddles.activeChannelId.value = null;
+    messaging.clearMessages();
+    activeThreadStack.value = [];
+    if (shouldLoadStructureForRoute(route, waddles.channels.value.length)) {
+      await waddles.loadStructure(null, { noChannelSelect: true });
+    }
+    return;
+  }
   if (route.dmUsername) {
     const username = route.dmUsername.replace(/^@/, "").trim();
     if (username) {
@@ -648,23 +677,25 @@ async function applyRouteTarget(route: ReturnType<typeof parseRoute>, requestId:
     return;
   }
 
-  if (shouldLoadStructureForRoute(route, waddles.activeSpaceId.value, waddles.channels.value.length)) {
+  if (shouldLoadStructureForRoute(route, waddles.channels.value.length)) {
     await waddles.loadStructure();
     if (requestId !== routeRequestId) return;
   }
 
-  if (route.channelSlug && waddles.activeSpaceId.value) {
+  if (route.channelSlug) {
     const ch = resolveChannel(route.channelSlug, waddles.channels.value);
-    const channelId = ch?.id ?? waddles.activeChannelId.value;
-    if (channelId) {
-      waddles.activeChannelId.value = channelId;
-      void waddles.reloadChannelMembers(channelId);
+    if (!ch) {
+      waddles.activeChannelId.value = null;
       messaging.clearMessages();
-      await messaging.loadMessages(waddles.activeSpaceId.value, channelId);
+      return;
     }
-  } else if (waddles.activeSpaceId.value && waddles.activeChannelId.value) {
+    waddles.activeChannelId.value = ch.id;
+    void waddles.reloadChannelMembers(ch.id);
     messaging.clearMessages();
-    await messaging.loadMessages(waddles.activeSpaceId.value, waddles.activeChannelId.value);
+    await messaging.loadMessages(ch.spaceId ?? "", ch.id);
+  } else if (waddles.activeChannelId.value) {
+    messaging.clearMessages();
+    await messaging.loadMessages(waddles.currentChannel.value?.spaceId ?? "", waddles.activeChannelId.value);
   }
 
   // Restore the thread panel from the URL. If the outermost thread root isn't
@@ -688,7 +719,11 @@ async function onConnectionReady() {
   isApplyingRoute.value = true;
 
   try {
-    await waddles.loadSpace({ loadStructure: !shouldLoadStructureForRoute(route, waddles.activeSpaceId.value, waddles.channels.value.length) });
+    if (route.page === "dashboard") {
+      await waddles.loadStructure(null, { noChannelSelect: true });
+    } else {
+      await waddles.loadSpace({ loadStructure: !shouldLoadStructureForRoute(route, waddles.channels.value.length) });
+    }
     if (requestId === routeRequestId) {
       await applyRouteTarget(route, requestId);
     }
@@ -702,6 +737,7 @@ async function onConnectionReady() {
 
   void dmConversations.hydrateFromInbox();
   void channelUnread.hydrateFromInbox();
+  void rosterContacts.loadRosterContacts();
 
   // Register service worker and sync push subscription (best-effort, non-blocking)
   void (async () => {
@@ -713,36 +749,16 @@ async function onConnectionReady() {
 // --- Actions ---
 
 async function handleLogout() {
-  ui.activePage.value = "chat";
+  ui.activePage.value = "dashboard";
   messaging.disconnect();
   dmMessaging.disconnect();
   waddles.clearData();
+  rosterContacts.clearRosterContacts();
   setupPromptShown = false;
   messaging.clearMessages();
   dmMessaging.clearMessages();
   pushRoute(null);
   await connectionStore.logout();
-}
-
-async function selectSpace(preferredId?: string | null) {
-  ui.activePage.value = "chat";
-  ui.sidebarMode.value = "channels";
-  dmConversations.closeDm();
-  if (preferredId && waddles.waddles.value.some((space) => space.id === preferredId)) {
-    const channelId = waddles.selectDiscoveredSpace(preferredId);
-    if (channelId) {
-      messaging.clearMessages();
-      await messaging.loadMessages(preferredId, channelId);
-    }
-    ui.showMobileNav.value = false;
-    return;
-  }
-  const channelId = await waddles.loadStructure(preferredId);
-  if (channelId && waddles.activeSpaceId.value) {
-    messaging.clearMessages();
-    await messaging.loadMessages(waddles.activeSpaceId.value, channelId);
-  }
-  ui.showMobileNav.value = false;
 }
 
 async function selectChannel(channelId: string) {
@@ -754,14 +770,12 @@ async function selectChannel(channelId: string) {
   void waddles.reloadChannelMembers(channelId);
   messaging.clearMessages();
   // XEP-0502: Clear activity indicator for this channel
-  if (waddles.activeSpaceId.value && connectionStore.session) {
+  if (connectionStore.session) {
     const roomJid = roomBareJidFor(connectionStore.session, channelId);
     messaging.clearChannelActivity(roomJid);
     channelUnread.markRead(roomJid);
   }
-  if (waddles.activeSpaceId.value) {
-    await messaging.loadMessages(waddles.activeSpaceId.value, channelId);
-  }
+  await messaging.loadMessages(waddles.currentChannel.value?.spaceId ?? "", channelId);
   ui.showMobileNav.value = false;
 }
 
@@ -794,10 +808,9 @@ async function handleCreateChannel() {
     return;
   }
   // MUC was created (muc / space-muc / space-with-muc): select and load messages.
-  if (waddles.activeSpaceId.value) {
-    messaging.clearMessages();
-    await messaging.loadMessages(waddles.activeSpaceId.value, created.channelId);
-  }
+  ui.activePage.value = "chat";
+  messaging.clearMessages();
+  await messaging.loadMessages(waddles.currentChannel.value?.spaceId ?? "", created.channelId);
 }
 
 async function handleUpdateChannel() {
@@ -813,9 +826,9 @@ async function confirmDeleteChannel() {
   ui.confirmDeleteChannel.value = false;
   await waddles.deleteChannel();
   ui.showEditChannel.value = false;
-  if (waddles.activeSpaceId.value && waddles.activeChannelId.value) {
+  if (waddles.activeChannelId.value) {
     messaging.clearMessages();
-    await messaging.loadMessages(waddles.activeSpaceId.value, waddles.activeChannelId.value);
+    await messaging.loadMessages(waddles.currentChannel.value?.spaceId ?? "", waddles.activeChannelId.value);
   }
 }
 
@@ -832,9 +845,9 @@ async function confirmDeleteWaddle() {
   ui.confirmDeleteWaddle.value = false;
   await waddles.deleteWaddle();
   ui.showWaddleSettings.value = false;
-  if (waddles.activeSpaceId.value && waddles.activeChannelId.value) {
+  if (waddles.activeChannelId.value) {
     messaging.clearMessages();
-    await messaging.loadMessages(waddles.activeSpaceId.value, waddles.activeChannelId.value);
+    await messaging.loadMessages(waddles.currentChannel.value?.spaceId ?? "", waddles.activeChannelId.value);
   }
 }
 
@@ -963,19 +976,19 @@ onUnmounted(() => {
       <div class="chat-mobile-nav-body">
         <div class="border-b border-border">
           <WaddlesSidebar
-            :waddles="waddles.sortedSpaces.value"
-            :active-space-id="waddles.activeSpaceId.value"
+            :waddles="[]"
+            :active-space-id="null"
             :active-sidebar-mode="ui.sidebarMode.value"
             :has-unread-dms="dmConversations.hasUnread.value"
             :session="null"
             horizontal
-            @select-space="selectSpace($event)"
             @toggle-dms="ui.sidebarMode.value = 'dms'"
           />
         </div>
         <TopicsPanel
           v-if="ui.sidebarMode.value === 'channels'"
           :waddle="waddles.currentSpace.value"
+          :spaces="waddles.sortedSpaces.value"
           :channels="waddles.sortedChannels.value"
           :active-channel-id="waddles.activeChannelId.value"
           :can-manage-channels="waddles.canManageChannels.value"
@@ -1055,8 +1068,8 @@ onUnmounted(() => {
       <!-- Icon rail: waddle switcher -->
       <div class="chat-desktop-rail-slot">
         <WaddlesSidebar
-          :waddles="waddles.sortedSpaces.value"
-          :active-space-id="waddles.activeSpaceId.value"
+          :waddles="[]"
+          :active-space-id="null"
           :active-sidebar-mode="ui.sidebarMode.value"
           :has-unread-dms="dmConversations.hasUnread.value"
           :session="connectionStore.session"
@@ -1067,7 +1080,6 @@ onUnmounted(() => {
           :web-commit-sha="version.webCommitSha.value"
           :server-version="version.serverVersion.value"
           @open-settings="openUserSettings"
-          @select-space="selectSpace($event)"
           @toggle-dms="ui.sidebarMode.value = 'dms'"
           @logout="handleLogout"
           @request-notifications="handleRequestNotifications"
@@ -1080,6 +1092,7 @@ onUnmounted(() => {
         <TopicsPanel
           v-if="ui.sidebarMode.value === 'channels'"
           :waddle="waddles.currentSpace.value"
+          :spaces="waddles.sortedSpaces.value"
           :channels="waddles.sortedChannels.value"
           :active-channel-id="waddles.activeChannelId.value"
           :can-manage-channels="waddles.canManageChannels.value"
@@ -1105,8 +1118,18 @@ onUnmounted(() => {
       </div>
 
       <!-- Main content -->
+      <HomeDashboard
+        v-if="ui.activePage.value === 'dashboard'"
+        :spaces="waddles.sortedSpaces.value"
+        :channels="waddles.sortedChannels.value"
+        :contacts="rosterContacts.contacts.value"
+        :is-loading="waddles.isLoadingStructure.value || rosterContacts.isLoadingContacts.value"
+        @select-channel="selectChannel"
+        @select-contact="handleOpenDm"
+        @open-nav="ui.showMobileNav.value = true"
+      />
       <UserSettingsPage
-        v-if="ui.activePage.value === 'settings' && connectionStore.session"
+        v-else-if="ui.activePage.value === 'settings' && connectionStore.session"
         :session="connectionStore.session"
         :xmpp-client="xmppClient"
         :web-commit-sha="version.webCommitSha.value"

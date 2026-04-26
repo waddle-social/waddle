@@ -4517,7 +4517,11 @@ mod tests {
         .await;
         let response = responses.first().expect("room disco response");
         assert!(response.contains("muc_nonanonymous"));
-        assert!(response.contains("pubsub#title") && response.contains("team"));
+        assert!(response.contains("urn:xmpp:spaces:0"));
+        assert!(response.contains("var=\"parent\""));
+        assert!(response.contains("xmpp:spaces.example.com?;node=team"));
+        assert!(response.contains("http://jabber.org/protocol/muc#roominfo"));
+        assert!(response.contains("muc#roominfo_pubsub"));
     }
 
     #[tokio::test]

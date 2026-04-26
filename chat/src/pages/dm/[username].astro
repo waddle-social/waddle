@@ -1,0 +1,11 @@
+---
+import { env } from "cloudflare:workers";
+import AppLayout from "@/layouts/AppLayout.astro";
+import ChatApp from "@/components/ChatApp.vue";
+
+const tenorApiKey = (env as unknown as Record<string, string>).GIPHY_API_KEY ?? "";
+---
+
+<AppLayout>
+  <ChatApp client:only="vue" tenorApiKey={tenorApiKey} />
+</AppLayout>

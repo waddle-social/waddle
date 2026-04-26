@@ -160,7 +160,8 @@ describe("topology discovery", () => {
         jid: "announcements@muc.example.com",
         channelType: "text",
         position: 1,
-        standalone: true,
+        spaceId: "space-1",
+        standalone: false,
       },
     ]);
     expect(getDiscoItems.mock.calls).not.toContainEqual([

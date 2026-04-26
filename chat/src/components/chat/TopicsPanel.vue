@@ -4,9 +4,11 @@ import { Hash, MessagesSquare, Plus, Settings, Users, ChevronDown, MessageCircle
 import { isForumChannel as detectForumChannel } from "@/lib/channel-types";
 import type { ChannelSummary, SpaceSummary } from "@/lib/chat-types";
 import type { ThreadInboxEntry } from "@/composables/useChannelUnread";
+import { groupChannelsBySpace } from "@/lib/channel-grouping";
 
 const props = defineProps<{
   waddle: SpaceSummary | null;
+  spaces: SpaceSummary[];
   channels: ChannelSummary[];
   activeChannelId: string | null;
   canManageChannels: boolean;
@@ -28,11 +30,14 @@ function hasActivity(channelId: string): boolean {
   return false;
 }
 
-const channelsWithUnread = computed(() =>
-  props.channels.map((channel) => ({
-    channel,
-    unread: props.channelUnreadMap?.[channel.id] ?? { unread: 0, mentions: 0 },
-  }))
+const channelGroups = computed(() =>
+  groupChannelsBySpace(props.spaces, props.channels).map((group) => ({
+    ...group,
+    channels: group.channels.map((channel) => ({
+      channel,
+      unread: props.channelUnreadMap?.[channel.id] ?? { unread: 0, mentions: 0 },
+    })),
+  })),
 );
 
 function channelIcon(channel: ChannelSummary) {
@@ -72,7 +77,7 @@ const emit = defineEmits<{
         class="flex items-center gap-1.5 min-w-0 hover:text-primary transition-colors duration-200 group"
         type="button"
       >
-        <span class="type-pane-title truncate text-sidebar-foreground">{{ waddle?.name ?? "…" }}</span>
+        <span class="type-pane-title truncate text-sidebar-foreground">{{ waddle?.name ?? "Channels" }}</span>
         <ChevronDown class="w-3 h-3 text-sidebar-muted flex-shrink-0 group-hover:text-primary transition-colors" />
       </button>
       <div class="flex gap-0.5 flex-shrink-0">
@@ -130,75 +135,80 @@ const emit = defineEmits<{
         </div>
 
         <div v-else class="chat-list-stack">
-          <template v-for="{ channel, unread } in channelsWithUnread" :key="channel.id">
-            <button
-              class="chat-list-row w-full min-h-10 flex items-center gap-2.5 px-3 py-2 text-left group"
-              :class="activeChannelId === channel.id
-                ? 'bg-sidebar-accent text-sidebar-foreground'
-                : 'text-sidebar-muted hover:bg-sidebar-accent/50 hover:text-sidebar-foreground'"
-              :aria-current="activeChannelId === channel.id ? 'page' : undefined"
-              type="button"
-              @click="emit('selectChannel', channel.id)"
-            >
-              <component
-                :is="channelIcon(channel)"
-                class="w-3.5 h-3.5 flex-shrink-0 transition-colors duration-200"
-                :class="activeChannelId === channel.id ? 'text-primary' : 'opacity-40 group-hover:opacity-70'"
-              />
-              <span
-                class="type-control truncate flex-1"
-                :class="[
-                  activeChannelId === channel.id ? 'type-emphasis' : '',
-                  (unread.unread > 0 || hasActivity(channel.id)) && activeChannelId !== channel.id ? 'type-strong text-sidebar-foreground' : '',
-                ]"
-              >{{ channel.name }}</span>
-              <span
-                v-if="detectForumChannel(channel)"
-                class="type-badge rounded-full border border-primary/12 px-1.5 py-0.5 text-primary/70"
+          <section v-for="group in channelGroups" :key="group.id" class="grid gap-1">
+            <span class="type-section-label px-2 pt-2 text-sidebar-muted">
+              {{ group.name }}
+            </span>
+            <template v-for="{ channel, unread } in group.channels" :key="channel.id">
+              <button
+                class="chat-list-row w-full min-h-10 flex items-center gap-2.5 px-3 py-2 text-left group"
+                :class="activeChannelId === channel.id
+                  ? 'bg-sidebar-accent text-sidebar-foreground'
+                  : 'text-sidebar-muted hover:bg-sidebar-accent/50 hover:text-sidebar-foreground'"
+                :aria-current="activeChannelId === channel.id ? 'page' : undefined"
+                type="button"
+                @click="emit('selectChannel', channel.id)"
               >
-                Forum
-              </span>
-              <span
-                v-if="unread.mentions > 0 && activeChannelId !== channel.id"
-                class="type-count-badge inline-flex min-w-[18px] h-[18px] px-1 items-center justify-center rounded-full bg-destructive text-destructive-foreground"
-                aria-hidden="true"
-              >{{ unread.mentions }}</span>
-              <span
-                v-else-if="unread.unread > 0 && activeChannelId !== channel.id"
-                class="type-count-badge inline-flex min-w-[18px] h-[18px] px-1 items-center justify-center rounded-full bg-primary text-primary-foreground"
-                aria-hidden="true"
-              >{{ unread.unread }}</span>
-              <span
-                v-else-if="hasActivity(channel.id) && activeChannelId !== channel.id"
-                class="w-2 h-2 bg-primary rounded-full flex-shrink-0 shadow-[0_0_6px_var(--glow-strong)]"
-                aria-hidden="true"
-              />
-            </button>
+                <component
+                  :is="channelIcon(channel)"
+                  class="w-3.5 h-3.5 flex-shrink-0 transition-colors duration-200"
+                  :class="activeChannelId === channel.id ? 'text-primary' : 'opacity-40 group-hover:opacity-70'"
+                />
+                <span
+                  class="type-control truncate flex-1"
+                  :class="[
+                    activeChannelId === channel.id ? 'type-emphasis' : '',
+                    (unread.unread > 0 || hasActivity(channel.id)) && activeChannelId !== channel.id ? 'type-strong text-sidebar-foreground' : '',
+                  ]"
+                >{{ channel.name }}</span>
+                <span
+                  v-if="detectForumChannel(channel)"
+                  class="type-badge rounded-full border border-primary/12 px-1.5 py-0.5 text-primary/70"
+                >
+                  Forum
+                </span>
+                <span
+                  v-if="unread.mentions > 0 && activeChannelId !== channel.id"
+                  class="type-count-badge inline-flex min-w-[18px] h-[18px] px-1 items-center justify-center rounded-full bg-destructive text-destructive-foreground"
+                  aria-hidden="true"
+                >{{ unread.mentions }}</span>
+                <span
+                  v-else-if="unread.unread > 0 && activeChannelId !== channel.id"
+                  class="type-count-badge inline-flex min-w-[18px] h-[18px] px-1 items-center justify-center rounded-full bg-primary text-primary-foreground"
+                  aria-hidden="true"
+                >{{ unread.unread }}</span>
+                <span
+                  v-else-if="hasActivity(channel.id) && activeChannelId !== channel.id"
+                  class="w-2 h-2 bg-primary rounded-full flex-shrink-0 shadow-[0_0_6px_var(--glow-strong)]"
+                  aria-hidden="true"
+                />
+              </button>
 
-            <!-- Active threads for this channel -->
-            <button
-              v-for="thread in channelThreads(channel.id)"
-              :key="thread.threadId"
-              class="chat-channel-thread-row chat-list-row flex items-center gap-2 px-2.5 py-2 text-left text-sidebar-muted hover:bg-sidebar-accent/50 hover:text-sidebar-foreground group"
-              type="button"
-              @click="emit('selectThread', channel.id, thread.threadId)"
-            >
-              <MessageCircle class="w-3 h-3 flex-shrink-0 opacity-40 group-hover:opacity-70" />
-              <span
-                class="type-caption truncate flex-1"
-                :class="thread.unread > 0 ? 'type-strong text-sidebar-foreground' : ''"
-              >{{ truncateTitle(thread.title) }}</span>
-              <span
-                v-if="thread.replyCount > 0"
-                class="type-meta type-numeric text-sidebar-muted"
-              >{{ thread.replyCount }}</span>
-              <span
-                v-if="thread.unread > 0"
-                class="type-count-badge inline-flex min-w-[16px] h-[16px] px-0.5 items-center justify-center rounded-full bg-primary text-primary-foreground"
-                aria-hidden="true"
-              >{{ thread.unread }}</span>
-            </button>
-          </template>
+              <!-- Active threads for this channel -->
+              <button
+                v-for="thread in channelThreads(channel.id)"
+                :key="thread.threadId"
+                class="chat-channel-thread-row chat-list-row flex items-center gap-2 px-2.5 py-2 text-left text-sidebar-muted hover:bg-sidebar-accent/50 hover:text-sidebar-foreground group"
+                type="button"
+                @click="emit('selectThread', channel.id, thread.threadId)"
+              >
+                <MessageCircle class="w-3 h-3 flex-shrink-0 opacity-40 group-hover:opacity-70" />
+                <span
+                  class="type-caption truncate flex-1"
+                  :class="thread.unread > 0 ? 'type-strong text-sidebar-foreground' : ''"
+                >{{ truncateTitle(thread.title) }}</span>
+                <span
+                  v-if="thread.replyCount > 0"
+                  class="type-meta type-numeric text-sidebar-muted"
+                >{{ thread.replyCount }}</span>
+                <span
+                  v-if="thread.unread > 0"
+                  class="type-count-badge inline-flex min-w-[16px] h-[16px] px-0.5 items-center justify-center rounded-full bg-primary text-primary-foreground"
+                  aria-hidden="true"
+                >{{ thread.unread }}</span>
+              </button>
+            </template>
+          </section>
         </div>
       </div>
     </div>

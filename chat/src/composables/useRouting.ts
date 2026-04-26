@@ -1,21 +1,14 @@
 import type { ChannelSummary } from "@/lib/chat-types";
 
 interface RouteState {
-  page: "chat" | "settings";
+  page: "dashboard" | "chat" | "settings";
   channelSlug: string | null;
   dmUsername: string | null;
   /** XEP-0201 thread stack from `?thread=rootId,childId,...`. Empty = panel closed. */
   threadStack: string[];
 }
 
-const SETTINGS_PATH = "/_settings";
-
-function slugify(name: string): string {
-  return name
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-|-$/g, "");
-}
+const SETTINGS_PATH = "/settings";
 
 function parseThreadStack(search: string | null | undefined): string[] {
   if (!search) return [];
@@ -45,17 +38,33 @@ function buildSearch(threadStack: string[] | undefined): string {
   return `?thread=${encoded}`;
 }
 
-// Parses /{channelSlug}[?thread=a,b,c] from URL.
+// Parses canonical Waddle app routes.
 export function parseRoute(pathname: string, search?: string): RouteState {
   const segments = pathname.split("/").filter(Boolean);
   const resolvedSearch = search ?? (typeof window !== "undefined" ? window.location.search : "");
   const threadStack = parseThreadStack(resolvedSearch);
+  if (pathname === "/" || segments.length === 0) {
+    return {
+      page: "dashboard",
+      channelSlug: null,
+      dmUsername: null,
+      threadStack: [],
+    };
+  }
   if (pathname === SETTINGS_PATH) {
     return {
       page: "settings",
       channelSlug: null,
       dmUsername: null,
       threadStack: [],
+    };
+  }
+  if (segments[0] === "r") {
+    return {
+      page: "chat",
+      channelSlug: segments[1] ? decodeURIComponent(segments[1]) : null,
+      dmUsername: null,
+      threadStack,
     };
   }
   if (segments[0] === "dm") {
@@ -67,28 +76,22 @@ export function parseRoute(pathname: string, search?: string): RouteState {
     };
   }
   return {
-    page: "chat",
-    channelSlug: segments[0] ? decodeURIComponent(segments[0]) : null,
+    page: "dashboard",
+    channelSlug: null,
     dmUsername: null,
-    threadStack,
+    threadStack: [],
   };
 }
 
 export function resolveChannel(slug: string, channels: ChannelSummary[]): ChannelSummary | undefined {
-  const lower = slug.toLowerCase();
-  return (
-    channels.find((c) => slugify(c.name) === lower) ??
-    channels.find((c) => c.name.toLowerCase() === lower) ??
-    channels.find((c) => c.id === slug)
-  );
+  return channels.find((c) => c.id === slug);
 }
 
 export function shouldLoadStructureForRoute(
   route: RouteState,
-  activeSpaceId: string | null,
   channelCount: number,
 ): boolean {
-  return route.page === "chat" && !route.dmUsername && (!activeSpaceId || channelCount === 0);
+  return (route.page === "dashboard" || (route.page === "chat" && !route.dmUsername)) && channelCount === 0;
 }
 
 export function buildPath(
@@ -96,12 +99,12 @@ export function buildPath(
   threadStack?: string[],
 ): string {
   const search = buildSearch(threadStack);
-  return channel ? `/${encodeURIComponent(slugify(channel.name))}${search}` : `/${search}`;
+  return channel ? `/r/${encodeURIComponent(channel.id)}${search}` : "/";
 }
 
 export function buildDmPath(username: string | null, threadStack?: string[]): string {
   const search = buildSearch(threadStack);
-  return username ? `/dm/${encodeURIComponent(slugify(username))}${search}` : `/${search}`;
+  return username ? `/dm/${encodeURIComponent(username)}${search}` : "/";
 }
 
 export function buildSettingsPath(): string {

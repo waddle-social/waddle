@@ -209,6 +209,15 @@ export interface PresenceUpdateEvent {
   status?: string;
 }
 
+export interface RosterContact {
+  jid: string;
+  name?: string;
+  username: string;
+  subscription: "none" | "to" | "from" | "both" | "remove";
+  groups: string[];
+  presenceShow?: PresenceUpdateEvent["show"];
+}
+
 export interface DiscoveredChannel {
   id: string;
   name: string;

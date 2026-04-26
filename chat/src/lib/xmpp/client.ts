@@ -9,7 +9,7 @@ import type {
   ChatStateEvent, ChatStateType, DiscoveredChannel, DisplayedEvent,
   DmChatStateEvent, DmDisplayedEvent, DmReactionEvent, ListRoomMembersOptions, LiveDmMessage, LiveRoomMessage,
   OccupantPresence, PresenceUpdateEvent, ReactionEvent, RoomActivityEvent,
-  RoomHats, RoomPresence, SessionLifecycleEvent, XmppErrorEvent, XmppStatusSnapshot,
+  RoomHats, RoomPresence, RosterContact, SessionLifecycleEvent, XmppErrorEvent, XmppStatusSnapshot,
 } from "./types";
 import { barePeerJid, jidDomain, roomBareJidFor } from "./jid";
 import { registerWaddleExtensions } from "./extensions";
@@ -1203,6 +1203,22 @@ export class BrowserXmppClient {
   async subscribeToPeerPresence(peerJid: string): Promise<void> {
     await this.connect();
     this.xmpp?.subscribe(barePeerJid(peerJid));
+  }
+
+  async listRosterContacts(): Promise<RosterContact[]> {
+    await this.connect();
+    if (!this.xmpp) return [];
+    const roster = await this.xmpp.getRoster();
+    return (roster.items ?? []).map((item) => {
+      const jid = barePeerJid(item.jid);
+      return {
+        jid,
+        name: item.name,
+        username: item.name?.trim() || jid.split("@")[0] || jid,
+        subscription: item.subscription,
+        groups: item.groups ?? [],
+      };
+    });
   }
   /**
    * XEP-0092 Software Version — ask the user's home server what it is running.
