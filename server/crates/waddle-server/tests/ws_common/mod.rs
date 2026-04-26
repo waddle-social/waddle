@@ -79,6 +79,7 @@ impl TestServer {
             .env("WADDLE_XMPP_DOMAIN", "localhost")
             .env("WADDLE_XMPP_MAM_DATABASE_URL", "sqlite::memory:")
             .env("WADDLE_XMPP_INBOX_DATABASE_URL", "sqlite::memory:")
+            .env("WADDLE_XMPP_PUBSUB_DATABASE_URL", "sqlite::memory:")
             .env("WADDLE_HTTP_PORT_FILE", &port_file)
             .stdout(Stdio::null())
             .stderr(Stdio::null())

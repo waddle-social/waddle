@@ -1009,8 +1009,16 @@ fn decode_subscription_offset(
 pub async fn build_pubsub_storage(
     database_url: Option<String>,
 ) -> Result<Arc<dyn PubSubStorage>, XmppError> {
-    Ok(Arc::new(
-        DatabasePubSubStorage::open(database_url.as_deref()).await?,
+    if let Some(url) = database_url {
+        return Ok(Arc::new(DatabasePubSubStorage::open(Some(&url)).await?));
+    }
+    if std::env::var("WADDLE_PUBSUB_INMEMORY").is_ok_and(|v| v == "1") {
+        return Ok(Arc::new(DatabasePubSubStorage::open(None).await?));
+    }
+    Err(XmppError::config(
+        "WADDLE_XMPP_PUBSUB_DATABASE_URL is required for production durability; \
+         set WADDLE_PUBSUB_INMEMORY=1 to opt into ephemeral storage for dev/test"
+            .to_string(),
     ))
 }
 
@@ -1262,6 +1270,27 @@ mod tests {
             .await
             .expect("items")
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn build_pubsub_storage_envvar_gating() {
+        let prior = std::env::var("WADDLE_PUBSUB_INMEMORY").ok();
+
+        std::env::remove_var("WADDLE_PUBSUB_INMEMORY");
+        let no_env = build_pubsub_storage(None).await;
+        assert!(
+            no_env.is_err(),
+            "expected error without URL and without env var"
+        );
+
+        std::env::set_var("WADDLE_PUBSUB_INMEMORY", "1");
+        let with_env = build_pubsub_storage(None).await;
+        assert!(with_env.is_ok(), "expected success with env var set");
+
+        match prior {
+            Some(value) => std::env::set_var("WADDLE_PUBSUB_INMEMORY", value),
+            None => std::env::remove_var("WADDLE_PUBSUB_INMEMORY"),
+        }
     }
 
     #[tokio::test]
