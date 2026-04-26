@@ -627,30 +627,16 @@ async fn validate_rich_message_targets(
         }
     }
 
-    if let Some(reactions) = extract_reactions_from_message(message) {
-        match lookup_rich_target_message(
-            state,
-            archive_jid_str.as_str(),
-            &reactions.message_id,
-            groupchat,
-        )
-        .await
-        {
-            Ok(Some(_)) => {}
-            Ok(None) => return Err(item_not_found_error("Reaction target not found.")),
-            Err(_) => return Err(internal_server_error_for_lookup()),
-        }
-    }
-
-    if let Some(reply) = parse_reply_from_message(message) {
-        match lookup_rich_target_message(state, archive_jid_str.as_str(), &reply.id, groupchat)
-            .await
-        {
-            Ok(Some(_)) => {}
-            Ok(None) => return Err(item_not_found_error("Reply target not found.")),
-            Err(_) => return Err(internal_server_error_for_lookup()),
-        }
-    }
+    // Reactions (XEP-0444) and replies (XEP-0461) intentionally skip
+    // target-existence validation. Both specs are silent on
+    // server-side target verification — XEP-0444 §"It is up to
+    // receiving entities" and XEP-0461 placing no obligation on the
+    // server — and rejecting on missing target would break legitimate
+    // cases the server cannot disambiguate: cross-server messages
+    // (s2s), replies to messages before archive retention, reactions
+    // to messages cached by the client but not by the server. The
+    // well-formedness check above (`has_malformed_rich_payload`)
+    // already rejects malformed payloads with `<bad-request/>`.
 
     Ok(())
 }
