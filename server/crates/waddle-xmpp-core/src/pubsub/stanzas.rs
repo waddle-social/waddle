@@ -3,7 +3,7 @@
 use jid::{BareJid, Jid};
 use minidom::Element;
 use xmpp_parsers::iq::{Iq, IqType};
-use xmpp_parsers::message::Message;
+use xmpp_parsers::message::{Message, MessageType};
 
 use crate::pubsub::{Affiliation, NodeConfig};
 use crate::{CoreError, CoreResult};
@@ -351,6 +351,11 @@ pub fn parse_pubsub_iq(iq: &Iq) -> CoreResult<PubSubRequest> {
 }
 
 /// Build a PubSub event notification message.
+///
+/// The message type is `headline` per XEP-0060 §12.18 (default
+/// `pubsub#notification_type`) and XEP-0163 §4.3 (PEP MUST be headline).
+/// Headline messages are not stored offline (RFC 6121 §8.5.2.1.4), which
+/// matches PubSub's catch-up-via-`<items/>` recovery model.
 pub fn build_pubsub_event(from: &Jid, to: &Jid, event: &PubSubEvent) -> Message {
     let mut items_elem = Element::builder("items", NS_PUBSUB_EVENT).attr("node", &event.node);
 
@@ -362,7 +367,7 @@ pub fn build_pubsub_event(from: &Jid, to: &Jid, event: &PubSubEvent) -> Message 
         .append(items_elem.build())
         .build();
 
-    let mut message = Message::new(Some(to.clone()));
+    let mut message = Message::new_with_type(MessageType::Headline, Some(to.clone()));
     message.from = Some(from.clone());
     message.payloads.push(event_elem);
     message
@@ -748,6 +753,11 @@ mod tests {
         let message = build_pubsub_event(&from, &to, &event);
 
         assert!(is_pubsub_event(&message));
+        assert_eq!(
+            message.type_,
+            MessageType::Headline,
+            "XEP-0060 §12.18 default and XEP-0163 §4.3 require headline"
+        );
 
         let parsed = parse_pubsub_event(&message).expect("event should parse");
         assert_eq!(parsed.node, "http://jabber.org/protocol/nick");
