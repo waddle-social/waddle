@@ -156,7 +156,7 @@ pub async fn handle_message(
         {
             apply_retraction_tombstones(
                 state,
-                &[room_jid.to_string()],
+                std::slice::from_ref(&room_jid),
                 &prototype,
                 &retraction.retracts_id,
                 Utc::now(),
@@ -399,10 +399,7 @@ pub async fn handle_message(
             if let Some(RetractionKind::Request(retraction)) =
                 extract_retraction_from_message(&prototype)
             {
-                let archives = [
-                    sender_jid.to_bare().to_string(),
-                    to_jid.to_bare().to_string(),
-                ];
+                let archives = [sender_jid.to_bare(), to_jid.to_bare()];
                 apply_retraction_tombstones(
                     state,
                     &archives,
@@ -583,12 +580,10 @@ async fn validate_rich_message_targets(
         ));
     }
 
-    let archive_jid_str = archive_jid.to_string();
-
     if let Some(correction) = extract_correction_from_message(message) {
         let original = match lookup_correction_target_message(
             state,
-            archive_jid_str.as_str(),
+            archive_jid,
             &correction.replaces_id,
             groupchat,
         )
@@ -611,7 +606,7 @@ async fn validate_rich_message_targets(
     if let Some(RetractionKind::Request(retraction)) = extract_retraction_from_message(message) {
         let original = match lookup_retraction_target_message(
             state,
-            archive_jid_str.as_str(),
+            archive_jid,
             &retraction.retracts_id,
             groupchat,
         )
@@ -650,7 +645,7 @@ async fn validate_rich_message_targets(
 /// is on archive distribution, not on the retraction itself).
 async fn apply_retraction_tombstones(
     state: &WebSocketState,
-    archive_jids: &[String],
+    archive_jids: &[BareJid],
     retraction_message: &xmpp_parsers::message::Message,
     target_id: &str,
     stamp: chrono::DateTime<chrono::Utc>,
@@ -664,7 +659,7 @@ async fn apply_retraction_tombstones(
     for archive_jid in archive_jids {
         let original = match lookup_retraction_target_message(
             state,
-            archive_jid.as_str(),
+            archive_jid,
             target_id,
             groupchat,
         )
@@ -804,7 +799,7 @@ fn internal_server_error_for_lookup() -> StanzaError {
 
 async fn lookup_correction_target_message(
     state: &WebSocketState,
-    archive_jid: &str,
+    archive_jid: &BareJid,
     target_id: &str,
     _groupchat: bool,
 ) -> Result<Option<ArchivedMessage>, waddle_xmpp::mam::MamStorageError> {
@@ -812,13 +807,13 @@ async fn lookup_correction_target_message(
         .deps
         .protocol
         .mam_storage
-        .get_message_by_message_id(archive_jid, target_id)
+        .get_message_by_message_id(&archive_jid.to_string(), target_id)
         .await
 }
 
 async fn lookup_retraction_target_message(
     state: &WebSocketState,
-    archive_jid: &str,
+    archive_jid: &BareJid,
     target_id: &str,
     groupchat: bool,
 ) -> Result<Option<ArchivedMessage>, waddle_xmpp::mam::MamStorageError> {
@@ -830,31 +825,32 @@ async fn lookup_retraction_target_message(
         .deps
         .protocol
         .mam_storage
-        .get_message_by_message_id(archive_jid, target_id)
+        .get_message_by_message_id(&archive_jid.to_string(), target_id)
         .await
 }
 
 async fn lookup_rich_target_message(
     state: &WebSocketState,
-    archive_jid: &str,
+    archive_jid: &BareJid,
     target_id: &str,
     groupchat: bool,
 ) -> Result<Option<ArchivedMessage>, waddle_xmpp::mam::MamStorageError> {
     if groupchat {
+        let archive_str = archive_jid.to_string();
         return state
             .deps
             .protocol
             .mam_storage
             .get_message(target_id)
             .await
-            .map(|message| message.filter(|message| message.to == archive_jid));
+            .map(|message| message.filter(|message| message.to == archive_str));
     }
 
     state
         .deps
         .protocol
         .mam_storage
-        .get_message_by_stanza_id(archive_jid, target_id)
+        .get_message_by_stanza_id(&archive_jid.to_string(), target_id)
         .await
 }
 

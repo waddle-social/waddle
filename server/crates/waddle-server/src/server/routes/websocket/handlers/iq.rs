@@ -922,7 +922,7 @@ pub async fn handle_iq_with_conn_state(
             moderated_by.parse::<Jid>(),
         ) {
             let archived = ArchivedMessage {
-                id: archive_id,
+                id: archive_id.clone(),
                 timestamp: chrono::Utc::now(),
                 from: room_jid.to_string(),
                 to: room_jid.to_string(),
@@ -970,11 +970,16 @@ pub async fn handle_iq_with_conn_state(
                 .await;
             match original_lookup {
                 Ok(Some(original)) if original.to == room_jid.to_string() => {
+                    // Use the moderation message's server-assigned
+                    // archive id (XEP-0359 stanza-id stamped via
+                    // `add_mam_stanza_id` above). That's the id
+                    // clients see on the live moderation broadcast
+                    // and need to correlate against the tombstone —
+                    // `moderation.id` is the client message-id
+                    // attribute, which would not match the archive
+                    // entry clients can resolve.
                     let tombstone = waddle_xmpp::mam::ArchivedTombstone {
-                        retraction_id: moderation
-                            .id
-                            .clone()
-                            .and_then(waddle_xmpp::mam::RichMessageId::new),
+                        retraction_id: waddle_xmpp::mam::RichMessageId::new(archive_id.clone()),
                         stamp: stamp_time,
                         moderation: Some(ArchivedModeration {
                             target_id: waddle_xmpp::mam::RichMessageId::new(

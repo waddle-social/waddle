@@ -168,11 +168,21 @@ pub struct MucRoom {
     /// Per-nickname occupancy generation, bumped each time a nickname
     /// transitions from absent to present (XEP-0308 §3 SHOULD #2: a
     /// full-JID leaving and rejoining should not be allowed to correct
-    /// messages from the previous occupancy). Generation is in-memory
-    /// only — server restart effectively closes the correction window
-    /// for all prior messages, which is consistent with §3 since a
-    /// restart is observationally identical to every occupant leaving.
+    /// messages from the previous occupancy). Each fresh nickname is
+    /// seeded from [`Self::generation_floor`] before the first bump so
+    /// post-restart generation values cannot collide with pre-restart
+    /// archived rows.
     nickname_generation: HashMap<String, u64>,
+    /// Lower bound for fresh nickname generations in this room actor's
+    /// lifetime. Initialised at room creation from the wall clock so
+    /// that every restart of the server (or recreation of the actor)
+    /// uses a higher floor than any prior archive row's generation,
+    /// which closes the §3 SHOULD #2 correction window across server
+    /// boundaries. Pre-restart rows recorded with generation N have
+    /// N < floor; post-restart fresh joins start at floor+1, so the
+    /// equality check in `verify_muc_occupancy_generation` cannot
+    /// match.
+    generation_floor: u64,
 }
 
 impl MucRoom {
@@ -192,6 +202,14 @@ impl MucRoom {
             occupant_sessions: HashMap::new(),
             affiliation_list: AffiliationList::new(),
             nickname_generation: HashMap::new(),
+            // Seed the floor from the wall clock in milliseconds. Any
+            // future restart will produce a higher floor than any
+            // generation values archived under the previous floor,
+            // since each fresh-nick generation is at most floor + (#
+            // distinct same-nickname rejoins observed in this actor's
+            // lifetime), which is bounded well below the millisecond
+            // tick rate.
+            generation_floor: u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0),
         }
     }
 
@@ -202,10 +220,11 @@ impl MucRoom {
     /// to disallow corrections across leave/rejoin cycles.
     pub fn add_occupant(&mut self, occupant: Occupant) {
         if !self.occupants.contains_key(&occupant.nick) {
+            let floor = self.generation_floor;
             let gen = self
                 .nickname_generation
                 .entry(occupant.nick.clone())
-                .or_insert(0);
+                .or_insert(floor);
             *gen += 1;
         }
         self.occupant_sessions
@@ -448,7 +467,11 @@ impl MucRoom {
             home_server,
         };
 
-        let gen = self.nickname_generation.entry(nick.clone()).or_insert(0);
+        let floor = self.generation_floor;
+        let gen = self
+            .nickname_generation
+            .entry(nick.clone())
+            .or_insert(floor);
         *gen += 1;
 
         self.occupant_sessions.insert(nick.clone(), vec![real_jid]);

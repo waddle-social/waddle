@@ -607,7 +607,7 @@ fn decode_sqlite_message_row(row: &SqliteRow) -> Result<ArchivedMessage, MamStor
         .with_timezone(&Utc);
 
     let rich_payload: Option<String> = row.try_get(13)?;
-    let nickname_generation: Option<i64> = row.try_get(14)?;
+    let nickname_generation = decode_nickname_generation(row.try_get::<Option<i64>, _>(14)?)?;
     Ok(ArchivedMessage {
         id: row.try_get(0)?,
         timestamp,
@@ -622,13 +622,13 @@ fn decode_sqlite_message_row(row: &SqliteRow) -> Result<ArchivedMessage, MamStor
         message_type: row.try_get(11)?,
         stanza_xml: row.try_get(12)?,
         rich: decode_rich_payload(rich_payload.as_deref())?,
-        nickname_generation: nickname_generation.map(|v| v as u64),
+        nickname_generation,
     })
 }
 
 fn decode_postgres_message_row(row: &PgRow) -> Result<ArchivedMessage, MamStorageError> {
     let rich_payload: Option<String> = row.try_get(13)?;
-    let nickname_generation: Option<i64> = row.try_get(14)?;
+    let nickname_generation = decode_nickname_generation(row.try_get::<Option<i64>, _>(14)?)?;
     Ok(ArchivedMessage {
         id: row.try_get(0)?,
         timestamp: row.try_get(2)?,
@@ -643,7 +643,7 @@ fn decode_postgres_message_row(row: &PgRow) -> Result<ArchivedMessage, MamStorag
         message_type: row.try_get(11)?,
         stanza_xml: row.try_get(12)?,
         rich: decode_rich_payload(rich_payload.as_deref())?,
-        nickname_generation: nickname_generation.map(|v| v as u64),
+        nickname_generation,
     })
 }
 
@@ -666,6 +666,29 @@ fn decode_rich_payload(
         .map_err(|error| MamStorageError::Serialization(error.to_string()))
 }
 
+/// Convert the database's signed `nickname_generation` column to the
+/// typed `u64`. Negative values would only appear from corruption,
+/// manual edits, or a write that bypassed `encode_nickname_generation`
+/// — refuse them rather than wrap silently with `as u64`.
+fn decode_nickname_generation(value: Option<i64>) -> Result<Option<u64>, MamStorageError> {
+    value.map(u64::try_from).transpose().map_err(|error| {
+        MamStorageError::Serialization(format!(
+            "negative nickname_generation column value rejected: {error}"
+        ))
+    })
+}
+
+/// Convert a typed `u64` generation to the SQL backend's signed `i64`,
+/// rejecting values outside `i64` range so the column never stores a
+/// negative wrapped value that would later round-trip incorrectly.
+fn encode_nickname_generation(value: Option<u64>) -> Result<Option<i64>, MamStorageError> {
+    value.map(i64::try_from).transpose().map_err(|error| {
+        MamStorageError::Serialization(format!(
+            "nickname_generation overflow on store ({error}) — exceeds i64::MAX"
+        ))
+    })
+}
+
 #[async_trait]
 impl MamStorage for SqlxMamStorage {
     #[instrument(skip(self, message), fields(archive = %archive_jid))]
@@ -685,7 +708,7 @@ impl MamStorage for SqlxMamStorage {
             message.message_type.as_str()
         };
         let rich_payload = encode_rich_payload(message)?;
-        let nickname_generation = message.nickname_generation.map(|v| v as i64);
+        let nickname_generation = encode_nickname_generation(message.nickname_generation)?;
 
         match &self.backend {
             MamDatabaseBackend::Sqlite(pool) => {
