@@ -165,6 +165,14 @@ pub struct MucRoom {
     occupant_sessions: HashMap<String, Vec<FullJid>>,
     /// Persistent affiliation list (synced with Zanzibar)
     affiliation_list: AffiliationList,
+    /// Per-nickname occupancy generation, bumped each time a nickname
+    /// transitions from absent to present (XEP-0308 §3 SHOULD #2: a
+    /// full-JID leaving and rejoining should not be allowed to correct
+    /// messages from the previous occupancy). Generation is in-memory
+    /// only — server restart effectively closes the correction window
+    /// for all prior messages, which is consistent with §3 since a
+    /// restart is observationally identical to every occupant leaving.
+    nickname_generation: HashMap<String, u64>,
 }
 
 impl MucRoom {
@@ -183,14 +191,32 @@ impl MucRoom {
             occupants: HashMap::new(),
             occupant_sessions: HashMap::new(),
             affiliation_list: AffiliationList::new(),
+            nickname_generation: HashMap::new(),
         }
     }
 
     /// Add an occupant to the room.
+    ///
+    /// When this is a fresh join (nickname not currently present), the
+    /// per-nickname occupancy generation is bumped — used by XEP-0308
+    /// to disallow corrections across leave/rejoin cycles.
     pub fn add_occupant(&mut self, occupant: Occupant) {
+        if !self.occupants.contains_key(&occupant.nick) {
+            let gen = self
+                .nickname_generation
+                .entry(occupant.nick.clone())
+                .or_insert(0);
+            *gen += 1;
+        }
         self.occupant_sessions
             .insert(occupant.nick.clone(), vec![occupant.real_jid.clone()]);
         self.occupants.insert(occupant.nick.clone(), occupant);
+    }
+
+    /// Current occupancy generation for `nick`, or `None` if the
+    /// nickname has never been observed since this actor was created.
+    pub fn current_nickname_generation(&self, nick: &str) -> Option<u64> {
+        self.nickname_generation.get(nick).copied()
     }
 
     /// Remove an occupant from the room.
@@ -421,6 +447,9 @@ impl MucRoom {
             is_remote,
             home_server,
         };
+
+        let gen = self.nickname_generation.entry(nick.clone()).or_insert(0);
+        *gen += 1;
 
         self.occupant_sessions.insert(nick.clone(), vec![real_jid]);
         self.occupants.insert(nick.clone(), occupant);

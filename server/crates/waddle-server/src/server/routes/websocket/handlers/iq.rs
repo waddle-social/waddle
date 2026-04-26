@@ -943,6 +943,7 @@ pub async fn handle_iq_with_conn_state(
                     references: Vec::new(),
                     mentions: Vec::new(),
                 }),
+                nickname_generation: None,
             };
             if let Err(error) = state
                 .deps

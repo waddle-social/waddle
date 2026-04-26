@@ -16,7 +16,7 @@ use waddle_xmpp::{
         ArchivedReference, ArchivedReply, ArchivedRetraction, ArchivedRichMessage,
         ArchivedRichPayload, RichMessageId, RichText, STANZA_ID_NS,
     },
-    muc::room_actor::BuildGroupchatBroadcast,
+    muc::room_actor::{BuildGroupchatBroadcast, GetNicknameGeneration, RoomActor},
     registry::{BroadcastOutcome, SendResult},
     xep::xep0430::build_inbox_push,
     xep::{
@@ -38,6 +38,7 @@ use crate::auth::Session;
 use crate::db::blocking::DatabaseBlockingStorage;
 use crate::permissions::{CheckPermission, Object, ObjectType, Permission, Subject};
 use crate::server::bootstrap_membership::DEPLOYMENT_SERVER_ID;
+use kameo::actor::ActorRef;
 use waddle_xmpp::protocol::ConnectionPhase;
 
 pub async fn handle_message(
@@ -124,6 +125,7 @@ pub async fn handle_message(
         let sender_nick = broadcast.sender_nick;
         let mut local_messages = broadcast.messages;
         let occupant_bare_jids = broadcast.occupant_bare_jids;
+        let sender_nickname_generation = broadcast.sender_nickname_generation;
 
         let from_room_jid = format!("{}/{}", room_jid, sender_nick);
         if let Ok(from_jid) = from_room_jid.parse::<FullJid>() {
@@ -134,7 +136,8 @@ pub async fn handle_message(
         prototype.to = None;
 
         if let Err(error) =
-            validate_rich_message_targets(state, &room_jid.to_string(), &prototype, true).await
+            validate_rich_message_targets(state, &room_jid, &prototype, true, Some(&room_actor))
+                .await
         {
             return vec![stanza_to_xml(&Stanza::Message(error_message(
                 &incoming,
@@ -145,7 +148,9 @@ pub async fn handle_message(
         }
 
         // Archive body-bearing and rich protocol room messages in XMPP MAM storage.
-        let archive_id = archive_groupchat_message(state, &room_jid, &mut prototype).await;
+        let archive_id =
+            archive_groupchat_message(state, &room_jid, &mut prototype, sender_nickname_generation)
+                .await;
 
         if should_project_message(&prototype) {
             let timestamp = Utc::now().timestamp();
@@ -357,13 +362,9 @@ pub async fn handle_message(
                 state.deps.protocol.extension_manager.feature_namespaces(),
             );
 
-            if let Err(error) = validate_rich_message_targets(
-                state,
-                &sender_jid.to_bare().to_string(),
-                &prototype,
-                false,
-            )
-            .await
+            if let Err(error) =
+                validate_rich_message_targets(state, &sender_jid.to_bare(), &prototype, false, None)
+                    .await
             {
                 return vec![stanza_to_xml(&Stanza::Message(error_message(
                     &incoming,
@@ -528,9 +529,10 @@ fn error_message(
 
 async fn validate_rich_message_targets(
     state: &WebSocketState,
-    archive_jid: &str,
+    archive_jid: &BareJid,
     message: &xmpp_parsers::message::Message,
     groupchat: bool,
+    room_actor: Option<&ActorRef<RoomActor>>,
 ) -> Result<(), StanzaError> {
     let Some(sender) = message.from.as_ref() else {
         return Ok(());
@@ -541,10 +543,12 @@ async fn validate_rich_message_targets(
         ));
     }
 
+    let archive_jid_str = archive_jid.to_string();
+
     if let Some(correction) = extract_correction_from_message(message) {
         let original = match lookup_correction_target_message(
             state,
-            archive_jid,
+            archive_jid_str.as_str(),
             &correction.replaces_id,
             groupchat,
         )
@@ -559,12 +563,15 @@ async fn validate_rich_message_targets(
                 "Only the original sender may correct a message.",
             ));
         }
+        if groupchat {
+            verify_muc_occupancy_generation(sender, &original, room_actor).await?;
+        }
     }
 
     if let Some(RetractionKind::Request(retraction)) = extract_retraction_from_message(message) {
         let original = match lookup_retraction_target_message(
             state,
-            archive_jid,
+            archive_jid_str.as_str(),
             &retraction.retracts_id,
             groupchat,
         )
@@ -582,7 +589,13 @@ async fn validate_rich_message_targets(
     }
 
     if let Some(reactions) = extract_reactions_from_message(message) {
-        match lookup_rich_target_message(state, archive_jid, &reactions.message_id, groupchat).await
+        match lookup_rich_target_message(
+            state,
+            archive_jid_str.as_str(),
+            &reactions.message_id,
+            groupchat,
+        )
+        .await
         {
             Ok(Some(_)) => {}
             Ok(None) => return Err(item_not_found_error("Reaction target not found.")),
@@ -591,11 +604,68 @@ async fn validate_rich_message_targets(
     }
 
     if let Some(reply) = parse_reply_from_message(message) {
-        match lookup_rich_target_message(state, archive_jid, &reply.id, groupchat).await {
+        match lookup_rich_target_message(state, archive_jid_str.as_str(), &reply.id, groupchat)
+            .await
+        {
             Ok(Some(_)) => {}
             Ok(None) => return Err(item_not_found_error("Reply target not found.")),
             Err(_) => return Err(internal_server_error_for_lookup()),
         }
+    }
+
+    Ok(())
+}
+
+/// Enforce XEP-0308 §3 SHOULD #2: a full-JID that left the room and
+/// rejoined under the same nickname MUST NOT be allowed to correct
+/// messages from the previous occupancy. Implemented by comparing the
+/// per-nickname occupancy generation captured in the archived row
+/// (set at archive-write time from
+/// [`super::super::super::super::muc::room_actor::GroupchatBroadcastResult::sender_nickname_generation`])
+/// against the room's current generation for the same nickname.
+async fn verify_muc_occupancy_generation(
+    sender: &jid::Jid,
+    original: &waddle_xmpp::mam::ArchivedMessage,
+    room_actor: Option<&ActorRef<RoomActor>>,
+) -> Result<(), StanzaError> {
+    let Some(actor) = room_actor else {
+        // No room actor available — the correction handler caller did
+        // not supply one. This is a wiring bug; refuse rather than
+        // silently allow.
+        return Err(forbidden_error(
+            "Room state unavailable for occupancy continuity check.",
+        ));
+    };
+
+    let Some(nick) = sender.resource().map(|r| r.to_string()) else {
+        // Sender JID has no nickname (resource) — should not happen for
+        // a server-stamped MUC reflection, but bail safely.
+        return Err(forbidden_error(
+            "Correction sender has no MUC nickname for occupancy check.",
+        ));
+    };
+
+    let Some(archived_generation) = original.nickname_generation else {
+        // The original archive row predates occupancy-generation
+        // tracking (or was written by a non-MUC path). Per XEP-0308
+        // §3, we cannot prove continuity, so refuse.
+        return Err(forbidden_error(
+            "Original message predates occupancy tracking; correction window has closed.",
+        ));
+    };
+
+    let current_generation = match actor
+        .ask(GetNicknameGeneration { nick: nick.clone() })
+        .await
+    {
+        Ok(value) => value,
+        Err(_) => return Err(internal_server_error_for_lookup()),
+    };
+
+    if current_generation != archived_generation {
+        return Err(forbidden_error(
+            "Occupancy generation has advanced; correction is no longer permitted across the leave/rejoin boundary.",
+        ));
     }
 
     Ok(())
@@ -817,6 +887,7 @@ async fn archive_groupchat_message(
     state: &WebSocketState,
     room_jid: &BareJid,
     message: &mut xmpp_parsers::message::Message,
+    sender_nickname_generation: u64,
 ) -> Option<String> {
     if !should_archive_groupchat_message(message) {
         return None;
@@ -851,6 +922,7 @@ async fn archive_groupchat_message(
         message_type: mam_message_type(&message.type_),
         stanza_xml: None,
         rich,
+        nickname_generation: Some(sender_nickname_generation),
     };
 
     let archive_jid = room_jid.to_string();
@@ -906,6 +978,7 @@ async fn archive_direct_message(
         message_type: mam_message_type(&message.type_),
         stanza_xml: None,
         rich,
+        nickname_generation: None,
     };
 
     // Store in sender's personal archive

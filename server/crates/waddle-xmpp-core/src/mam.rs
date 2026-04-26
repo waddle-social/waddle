@@ -162,6 +162,13 @@ pub struct ArchivedMessage {
     pub stanza_xml: Option<String>,
     /// Typed rich-message payload and annotations used to reconstruct XMPP payloads.
     pub rich: Option<ArchivedRichMessage>,
+    /// Per-XEP-0308 §3 occupancy generation for the sender's MUC nickname
+    /// at archive-write time. Only set for `groupchat` rows; `None`
+    /// otherwise. Used to disallow corrections across leave/rejoin
+    /// cycles — the correction handler refuses if the room's current
+    /// generation for the same nickname has advanced.
+    #[serde(default)]
+    pub nickname_generation: Option<u64>,
 }
 
 fn default_message_type() -> String {
@@ -184,6 +191,7 @@ impl Default for ArchivedMessage {
             message_type: default_message_type(),
             stanza_xml: None,
             rich: None,
+            nickname_generation: None,
         }
     }
 }

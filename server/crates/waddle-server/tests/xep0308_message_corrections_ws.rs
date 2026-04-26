@@ -194,6 +194,63 @@ async fn correction_without_target_id_returns_bad_request() {
 }
 
 #[tokio::test]
+async fn correction_after_leave_and_rejoin_under_same_nickname_is_forbidden() {
+    // XEP-0308 §3 SHOULD #2: a full-JID leaving the room and rejoining
+    // under the same nickname must not be allowed to correct messages
+    // from the previous occupancy. We enforce via per-nickname
+    // occupancy generations stored on the archived row.
+    let _guard = TEST_SERIAL.lock().await;
+    let (_server, mut client) = setup().await;
+    let room = format!("correct-rejoin-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
+
+    join_room(&mut client, &room).await;
+
+    client
+        .send(&format!(
+            r#"<message type="groupchat" to="{room}" id="orig-before-rejoin"><body>before rejoin</body></message>"#
+        ))
+        .await
+        .expect("send original");
+    client
+        .recv_matching(|frame| frame.contains("before rejoin"))
+        .await
+        .expect("original echo");
+
+    client
+        .send(&format!(
+            r#"<presence type="unavailable" to="{room}/{USERNAME}"/>"#
+        ))
+        .await
+        .expect("send leave");
+    client
+        .recv_matching(|frame| frame.contains("type=\"unavailable\""))
+        .await
+        .expect("self-unavailable echo");
+
+    join_room(&mut client, &room).await;
+
+    client
+        .send(&format!(
+            r#"<message type="groupchat" to="{room}" id="rejoin-correct">
+                <body>fixed after rejoin</body>
+                <replace xmlns="urn:xmpp:message-correct:0" id="orig-before-rejoin"/>
+            </message>"#
+        ))
+        .await
+        .expect("send correction after rejoin");
+    let error = client
+        .recv_matching(|frame| frame.contains("<forbidden"))
+        .await
+        .expect("forbidden error after rejoin");
+    assert!(
+        error.contains("type=\"error\""),
+        "not an error stanza: {error}"
+    );
+
+    client.close().await;
+}
+
+#[tokio::test]
 async fn correction_from_different_occupant_returns_forbidden() {
     let _guard = TEST_SERIAL.lock().await;
     let (_server, mut admin, mut bob) = setup_with_bob().await;
