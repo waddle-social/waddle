@@ -35,8 +35,8 @@ use waddle_xmpp::{
     pubsub::{
         build_pubsub_affiliations_result, build_pubsub_configure_form_result, build_pubsub_error,
         build_pubsub_items_result, build_pubsub_publish_result, build_pubsub_subscribe_result,
-        build_pubsub_success, is_pep_request_to, is_pubsub_iq, parse_pubsub_iq, PubSubError,
-        PubSubItem, PubSubRequest, SubId,
+        build_pubsub_success, is_pep_request, is_pep_request_to, is_pubsub_iq, parse_pubsub_iq,
+        PubSubError, PubSubItem, PubSubRequest, SubId,
     },
     registry::BroadcastOutcome,
     roster::{
@@ -1373,6 +1373,34 @@ pub async fn handle_iq_with_conn_state(
                         authenticated_session.as_ref(),
                     )
                     .await;
+                }
+
+                let is_pep = is_pep_request_to(&iq, &target_jid) || is_pep_request(&iq, &user_jid);
+                match crate::pubsub_authz::can_publish(
+                    &state.deps.protocol.pubsub_storage,
+                    &target_jid,
+                    &node,
+                    &user_jid,
+                    is_pep,
+                )
+                .await
+                {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        // For PEP, before the node exists, can_publish returns false because
+                        // get_node returns None. Allow PEP auto-create when the publisher is
+                        // the PEP owner (target == user) — this is the standard PEP semantics.
+                        if !(is_pep && target_jid == user_jid) {
+                            return vec![iq_to_xml(build_pubsub_error(
+                                &iq,
+                                PubSubError::Forbidden,
+                            ))];
+                        }
+                    }
+                    Err(e) => {
+                        warn!("PubSub publish authz check failed: {e}");
+                        return vec![iq_to_xml(build_pubsub_error(&iq, PubSubError::Forbidden))];
+                    }
                 }
 
                 let result = state
