@@ -222,6 +222,32 @@ describe("dispatchChat", () => {
     ]);
   });
 
+  test("dispatches body-less GitHub enrichment messages", () => {
+    const h = makeHandlers();
+    dispatchChat(
+      makeMsg({
+        id: "dm-github-only",
+        githubIssues: {
+          url: "https://github.com/waddle-social/waddle/issues/42",
+          owner: "waddle-social",
+          name: "waddle",
+        },
+      } as Partial<ReceivedMessage>),
+      h,
+    );
+
+    expect(h.messages).toHaveLength(1);
+    expect(h.messages[0].body).toBe("");
+    expect(h.messages[0].githubEmbeds).toEqual([
+      {
+        kind: "issue",
+        url: "https://github.com/waddle-social/waddle/issues/42",
+        owner: "waddle-social",
+        name: "waddle",
+      },
+    ]);
+  });
+
   test("ignores messages with no body/subject/replace", () => {
     const h = makeHandlers();
     dispatchChat(makeMsg({}), h);

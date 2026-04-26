@@ -26,6 +26,15 @@ export interface TimelineSharedFile {
   encrypted?: WaddleEncryptedFile;
 }
 
+export type GitHubEmbedKind = "repo" | "issue" | "pr";
+
+export interface GitHubEmbed {
+  kind: GitHubEmbedKind;
+  url: string;
+  owner: string;
+  name: string;
+}
+
 export interface TimelineMessage {
   id: string;
   /** Equivalent wire-level ids (XEP-0359 stanza/origin ids, echoed ids). */
@@ -56,6 +65,8 @@ export interface TimelineMessage {
   isSticker?: boolean;
   /** XEP-0446/0447: Shared files (zero or more attachments). */
   sharedFiles?: TimelineSharedFile[];
+  /** Waddle GitHub enrichment embeds. */
+  githubEmbeds?: GitHubEmbed[];
   /** XEP-0513: Broadcast mention (everyone/here). */
   broadcastMention?: "everyone" | "here";
   /** XEP-0394: Message Markup offset-based annotations. */
@@ -249,4 +260,34 @@ export function inferredFileDisposition(
     || isPdfFile(mediaType, url)
     ? "inline"
     : "attachment";
+}
+
+export function githubEmbedKindLabel(kind: GitHubEmbedKind): string {
+  switch (kind) {
+    case "issue":
+      return "Issue";
+    case "pr":
+      return "Pull request";
+    default:
+      return "Repository";
+  }
+}
+
+export function githubEmbedNumber(embed: GitHubEmbed): string | null {
+  const marker = embed.kind === "issue" ? "/issues/" : embed.kind === "pr" ? "/pull/" : "";
+  if (!marker) return null;
+  try {
+    const url = new URL(embed.url);
+    const value = url.pathname.split(marker)[1]?.split("/")[0];
+    return value && /^\d+$/.test(value) ? value : null;
+  } catch {
+    const value = embed.url.split(marker)[1]?.split(/[/?#]/)[0];
+    return value && /^\d+$/.test(value) ? value : null;
+  }
+}
+
+export function githubEmbedDisplayTitle(embed: GitHubEmbed): string {
+  const repo = `${embed.owner}/${embed.name}`;
+  const number = githubEmbedNumber(embed);
+  return number ? `${repo} #${number}` : repo;
 }

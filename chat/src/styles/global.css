@@ -1189,6 +1189,11 @@
   width: var(--chat-attachment-card-width);
 }
 
+.chat-github-card {
+  width: var(--chat-attachment-card-width);
+  max-width: 100%;
+}
+
 .chat-attachment-card,
 .chat-file-card {
   max-width: 100%;

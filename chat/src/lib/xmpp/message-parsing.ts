@@ -4,7 +4,7 @@ import type { WaddleEncryptedFile } from "./extensions/encrypted-file";
 import { splitMessageIds } from "@/lib/message-ids";
 import { stripMarkupRange } from "./extensions/markup";
 import { codePointLength, codePointToCodeUnitIndex } from "@/lib/text-offsets";
-import type { MessageReference } from "@/lib/chat-ui";
+import type { GitHubEmbed, GitHubEmbedKind, MessageReference } from "@/lib/chat-ui";
 import type {
   ChatStateEvent, ChatStateType, DisplayedEvent,
   LiveDmMessage, LiveRoomMessage, ReactionEvent, RoomActivityEvent, SharedFileInfo,
@@ -19,6 +19,7 @@ type MessageExtensionsTarget = Pick<
   | "references"
   | "broadcastMention"
   | "sharedFiles"
+  | "githubEmbeds"
   | "isSticker"
   | "replacesId"
   | "markup"
@@ -56,7 +57,7 @@ export function hasRenderableMessagePayload(msg: ReceivedMessage): boolean {
   const fileSharing = stanza.fileSharing;
   if (Array.isArray(fileSharing)) return fileSharing.length > 0;
   if (fileSharing) return true;
-  return !!stanza.sticker;
+  return !!stanza.sticker || hasGithubEmbeds(stanza);
 }
 
 interface OriginIdPayload {
@@ -115,6 +116,7 @@ export function extractMessageExtensions(
   extractReferences(msg, base);
   extractExplicitMentions(msg, base);
   extractFileSharing(msg, base);
+  extractGithubEmbeds(msg, base);
   extractMarkup(msg, base);
   extractReplyAndThread(msg, base);
   stripReplyFallback(msg, base);
@@ -122,6 +124,41 @@ export function extractMessageExtensions(
   if (ext(msg).sticker) {
     base.isSticker = true;
   }
+}
+
+interface GithubPayload {
+  url?: string;
+  owner?: string;
+  name?: string;
+}
+
+function hasGithubEmbeds(stanza: Record<string, unknown>): boolean {
+  return asArray(stanza.githubRepos as GithubPayload | GithubPayload[] | undefined).length > 0
+    || asArray(stanza.githubIssues as GithubPayload | GithubPayload[] | undefined).length > 0
+    || asArray(stanza.githubPullRequests as GithubPayload | GithubPayload[] | undefined).length > 0;
+}
+
+function parseGithubEmbed(kind: GitHubEmbedKind, payload: GithubPayload): GitHubEmbed | null {
+  if (!payload.url || !payload.owner || !payload.name) return null;
+  return {
+    kind,
+    url: payload.url,
+    owner: payload.owner,
+    name: payload.name,
+  };
+}
+
+function extractGithubEmbeds(msg: ReceivedMessage, base: MessageExtensionsTarget): void {
+  const stanza = ext(msg);
+  const embeds = [
+    ...asArray(stanza.githubRepos as GithubPayload | GithubPayload[] | undefined)
+      .flatMap((payload) => parseGithubEmbed("repo", payload) ?? []),
+    ...asArray(stanza.githubIssues as GithubPayload | GithubPayload[] | undefined)
+      .flatMap((payload) => parseGithubEmbed("issue", payload) ?? []),
+    ...asArray(stanza.githubPullRequests as GithubPayload | GithubPayload[] | undefined)
+      .flatMap((payload) => parseGithubEmbed("pr", payload) ?? []),
+  ];
+  if (embeds.length > 0) base.githubEmbeds = embeds;
 }
 
 /** XEP-0461 reply pointer + RFC 6121 / XEP-0201 thread id + parent. */

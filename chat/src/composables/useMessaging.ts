@@ -63,6 +63,9 @@ export function fromLiveMessage(
   if (msg.sharedFiles && msg.sharedFiles.length > 0) {
     tm.sharedFiles = msg.sharedFiles;
   }
+  if (msg.githubEmbeds && msg.githubEmbeds.length > 0) {
+    tm.githubEmbeds = msg.githubEmbeds;
+  }
   if (msg.isSticker) {
     tm.isSticker = true;
   }
@@ -309,7 +312,7 @@ export function useMessaging(
 
         // XEP-0308: Handle message corrections
         if (msg.replacesId) {
-          applyCorrection(msg.replacesId, msg.body, msg.markup, msg.references);
+          applyCorrection(msg.replacesId, msg.body, msg.markup, msg.references, msg.githubEmbeds);
           return;
         }
 
@@ -560,7 +563,13 @@ export function useMessaging(
     );
   }
 
-  function applyCorrection(replacesId: string, newBody: string, markup?: MarkupSpan[], references?: MessageReference[]) {
+  function applyCorrection(
+    replacesId: string,
+    newBody: string,
+    markup?: MarkupSpan[],
+    references?: MessageReference[],
+    githubEmbeds?: LiveRoomMessage["githubEmbeds"],
+  ) {
     const idx = messages.value.findIndex((m) => matchMessageId(m, replacesId));
     if (idx === -1) return;
     messages.value = messages.value.map((m) => {
@@ -575,6 +584,11 @@ export function useMessaging(
         updated.references = references;
       } else {
         delete updated.references;
+      }
+      if (githubEmbeds && githubEmbeds.length > 0) {
+        updated.githubEmbeds = githubEmbeds;
+      } else {
+        delete updated.githubEmbeds;
       }
       return updated;
     });
@@ -604,21 +618,24 @@ export function useMessaging(
     const existing = existingById ?? pendingSelfEcho ?? preservedSelfEcho;
     if (existing) {
       const wasPending = existing.id !== msg.id;
-      if (wasPending || (existing.deliveryStatus && existing.deliveryStatus !== "delivered")) {
-        // Reconcile the ID to the server-assigned one and mark delivered.
-        // A self-echo is authoritative evidence that the server accepted
-        // the stanza, so it supersedes any prior "sending" or "failed"
-        // optimistic state.
-        messages.value = messages.value.map((m) =>
-          m.id !== existing.id
-            ? m
-            : {
-                ...mergeMessageIds(m, msg.id, msg.wireIds),
-                deliveryStatus: "delivered" as DeliveryStatus,
-              },
-        );
-        messages.value = applyForumContext(messages.value);
-      }
+      // Reconcile the ID to the server-assigned one and merge authoritative
+      // server-side enrichment while preserving local-only UI state.
+      messages.value = messages.value.map((m) => {
+        if (m.id !== existing.id) return m;
+        const updated: TimelineMessage = {
+          ...m,
+          ...msg,
+          ...mergeMessageIds(m, msg.id, msg.wireIds),
+        };
+        if (m.isSelf && msg.isSelf) {
+          // A self-echo is authoritative evidence that the server accepted
+          // the stanza, so it supersedes any prior "sending" or "failed"
+          // optimistic state.
+          updated.deliveryStatus = "delivered" as DeliveryStatus;
+        }
+        return updated;
+      });
+      messages.value = applyForumContext(messages.value);
       if (wasPending) pendingEchoClientIds.delete(existing.id);
       return;
     }
@@ -745,7 +762,13 @@ export function useMessaging(
       const regularMessages: LiveRoomMessage[] = [];
       const reactionUpdates: { targetId: string; nick: string; emojis: string[] }[] = [];
       const retractionUpdates: string[] = [];
-      const correctionUpdates: { targetId: string; body: string; markup?: MarkupSpan[]; references?: MessageReference[] }[] = [];
+      const correctionUpdates: {
+        targetId: string;
+        body: string;
+        markup?: MarkupSpan[];
+        references?: MessageReference[];
+        githubEmbeds?: LiveRoomMessage["githubEmbeds"];
+      }[] = [];
 
       for (const msg of mamResults) {
         if (msg._reactionTarget && msg._reactionEmojis) {
@@ -762,8 +785,9 @@ export function useMessaging(
             body: msg.body,
             markup: msg.markup,
             references: msg.references,
+            githubEmbeds: msg.githubEmbeds,
           });
-        } else if (msg.body || (msg.sharedFiles && msg.sharedFiles.length > 0) || msg.isSticker) {
+        } else if (msg.body || (msg.sharedFiles && msg.sharedFiles.length > 0) || msg.isSticker || (msg.githubEmbeds && msg.githubEmbeds.length > 0)) {
           regularMessages.push(msg);
         }
       }
@@ -791,6 +815,11 @@ export function useMessaging(
           target.references = update.references;
         } else {
           delete target.references;
+        }
+        if (update.githubEmbeds && update.githubEmbeds.length > 0) {
+          target.githubEmbeds = update.githubEmbeds;
+        } else {
+          delete target.githubEmbeds;
         }
       }
 

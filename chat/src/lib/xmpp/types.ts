@@ -1,4 +1,5 @@
 import type { WaddleChannelType } from "@/lib/channel-types";
+import type { GitHubEmbed } from "@/lib/chat-ui";
 import type { WaddleEncryptedFile } from "./extensions/encrypted-file";
 
 /** Shared types for the XMPP client layer. */
@@ -79,6 +80,8 @@ export interface LiveRoomMessage {
   references?: import("@/lib/chat-ui").MessageReference[];
   /** XEP-0446/0447 — zero or more attachments. */
   sharedFiles?: SharedFileInfo[];
+  /** Waddle GitHub enrichment embeds. */
+  githubEmbeds?: GitHubEmbed[];
   /** XEP-0449 */
   isSticker?: boolean;
   /** XEP-0513 */
@@ -116,6 +119,7 @@ export interface LiveDmMessage {
   /** XEP-0372 */
   references?: import("@/lib/chat-ui").MessageReference[];
   sharedFiles?: SharedFileInfo[];
+  githubEmbeds?: GitHubEmbed[];
   isSticker?: boolean;
   /** XEP-0461 */
   replyTo?: ReplyPreview;

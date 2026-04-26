@@ -106,6 +106,69 @@ describe("groupchat reply + thread parsing", () => {
     ]);
   });
 
+  test("keeps body-less GitHub enrichment messages in the timeline", () => {
+    const h = makeHandlers();
+    dispatchGroupchat(
+      makeMsg({
+        id: "msg-github-only",
+        githubRepos: {
+          url: "https://github.com/waddle-social/waddle",
+          owner: "waddle-social",
+          name: "waddle",
+        },
+      }),
+      h,
+    );
+
+    expect(h.messages).toHaveLength(1);
+    expect(h.messages[0].body).toBe("");
+    expect(h.messages[0].githubEmbeds).toEqual([
+      {
+        kind: "repo",
+        url: "https://github.com/waddle-social/waddle",
+        owner: "waddle-social",
+        name: "waddle",
+      },
+    ]);
+  });
+
+  test("extracts GitHub issue and pull request enrichment payloads", () => {
+    const h = makeHandlers();
+    dispatchGroupchat(
+      makeMsg({
+        id: "msg-github",
+        body: "links",
+        githubIssues: [{
+          url: "https://github.com/waddle-social/waddle/issues/42",
+          owner: "waddle-social",
+          name: "waddle",
+        }],
+        githubPullRequests: [{
+          url: "https://github.com/waddle-social/waddle/pull/48",
+          owner: "waddle-social",
+          name: "waddle",
+        }],
+      }),
+      h,
+    );
+
+    expect(h.messages).toHaveLength(1);
+    expect(h.messages[0].githubEmbeds).toEqual([
+      {
+        kind: "issue",
+        url: "https://github.com/waddle-social/waddle/issues/42",
+        owner: "waddle-social",
+        name: "waddle",
+      },
+      {
+        kind: "pr",
+        url: "https://github.com/waddle-social/waddle/pull/48",
+        owner: "waddle-social",
+        name: "waddle",
+      },
+    ]);
+  });
+
   test("extracts thread id and parent thread id", () => {
     const h = makeHandlers();
     dispatchGroupchat(

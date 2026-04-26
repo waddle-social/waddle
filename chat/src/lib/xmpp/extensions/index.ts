@@ -15,6 +15,7 @@ import forums from "./forums";
 import inbox from "./inbox";
 import encryptedFile from "./encrypted-file";
 import stanzaIds from "./stanza-ids";
+import github from "./github";
 
 const allDefinitions = [
   ...hats,
@@ -32,6 +33,7 @@ const allDefinitions = [
   ...inbox,
   ...encryptedFile,
   ...stanzaIds,
+  ...github,
 ];
 
 export function registerWaddleExtensions(client: Agent): void {
