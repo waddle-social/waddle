@@ -31,6 +31,7 @@ use waddle_xmpp::{
 };
 use xmpp_parsers::message::MessageType as XmppMessageType;
 use xmpp_parsers::minidom::Element;
+use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
 use super::super::{get_room_actor, stanza_to_xml, WebSocketState};
 use crate::auth::Session;
@@ -132,14 +133,13 @@ pub async fn handle_message(
         }
         prototype.to = None;
 
-        if let Some(error) =
+        if let Err(error) =
             validate_rich_message_targets(state, &room_jid.to_string(), &prototype, true).await
         {
             return vec![stanza_to_xml(&Stanza::Message(error_message(
                 &incoming,
                 &jid::Jid::from(room_jid.clone()),
                 &jid::Jid::from(sender_jid.clone()),
-                "modify",
                 error,
             )))];
         }
@@ -357,7 +357,7 @@ pub async fn handle_message(
                 state.deps.protocol.extension_manager.feature_namespaces(),
             );
 
-            if let Some(error) = validate_rich_message_targets(
+            if let Err(error) = validate_rich_message_targets(
                 state,
                 &sender_jid.to_bare().to_string(),
                 &prototype,
@@ -369,7 +369,6 @@ pub async fn handle_message(
                     &incoming,
                     to_jid,
                     &jid::Jid::from(sender_jid.clone()),
-                    "modify",
                     error,
                 )))];
             }
@@ -504,8 +503,12 @@ fn forbidden_message_error(
         incoming,
         &jid::Jid::from(room_jid.clone()),
         &jid::Jid::from(sender_jid.clone()),
-        "auth",
-        "forbidden",
+        StanzaError::new(
+            ErrorType::Auth,
+            DefinedCondition::Forbidden,
+            "en",
+            "Sender is not permitted to address this resource.",
+        ),
     )
 }
 
@@ -513,19 +516,14 @@ fn error_message(
     incoming: &xmpp_parsers::message::Message,
     from: &jid::Jid,
     to: &jid::Jid,
-    error_type: &str,
-    condition: &str,
+    error: StanzaError,
 ) -> xmpp_parsers::message::Message {
-    let mut error = incoming.clone();
-    error.type_ = XmppMessageType::Error;
-    error.from = Some(from.clone());
-    error.to = Some(to.clone());
-    let stanza_error = Element::builder("error", "jabber:client")
-        .attr("type", error_type)
-        .append(Element::builder(condition, "urn:ietf:params:xml:ns:xmpp-stanzas").build())
-        .build();
-    error.payloads.push(stanza_error);
-    error
+    let mut reply = incoming.clone();
+    reply.type_ = XmppMessageType::Error;
+    reply.from = Some(from.clone());
+    reply.to = Some(to.clone());
+    reply.payloads.push(Element::from(error));
+    reply
 }
 
 async fn validate_rich_message_targets(
@@ -533,10 +531,14 @@ async fn validate_rich_message_targets(
     archive_jid: &str,
     message: &xmpp_parsers::message::Message,
     groupchat: bool,
-) -> Option<&'static str> {
-    let sender = message.from.as_ref()?;
+) -> Result<(), StanzaError> {
+    let Some(sender) = message.from.as_ref() else {
+        return Ok(());
+    };
     if has_malformed_rich_payload(message) {
-        return Some("bad-request");
+        return Err(bad_request_error(
+            "Rich-message payload is missing required identifier.",
+        ));
     }
 
     if let Some(correction) = extract_correction_from_message(message) {
@@ -549,11 +551,13 @@ async fn validate_rich_message_targets(
         .await
         {
             Ok(Some(original)) => original,
-            Ok(None) => return Some("item-not-found"),
-            Err(_) => return Some("internal-server-error"),
+            Ok(None) => return Err(item_not_found_error("Correction target not found.")),
+            Err(_) => return Err(internal_server_error_for_lookup()),
         };
         if !same_rich_sender(sender, &original.from, groupchat) {
-            return Some("forbidden");
+            return Err(forbidden_error(
+                "Only the original sender may correct a message.",
+            ));
         }
     }
 
@@ -567,11 +571,13 @@ async fn validate_rich_message_targets(
         .await
         {
             Ok(Some(original)) => original,
-            Ok(None) => return Some("item-not-found"),
-            Err(_) => return Some("internal-server-error"),
+            Ok(None) => return Err(item_not_found_error("Retraction target not found.")),
+            Err(_) => return Err(internal_server_error_for_lookup()),
         };
         if !same_rich_sender(sender, &original.from, groupchat) {
-            return Some("forbidden");
+            return Err(forbidden_error(
+                "Only the original sender may retract a message.",
+            ));
         }
     }
 
@@ -579,20 +585,46 @@ async fn validate_rich_message_targets(
         match lookup_rich_target_message(state, archive_jid, &reactions.message_id, groupchat).await
         {
             Ok(Some(_)) => {}
-            Ok(None) => return Some("item-not-found"),
-            Err(_) => return Some("internal-server-error"),
+            Ok(None) => return Err(item_not_found_error("Reaction target not found.")),
+            Err(_) => return Err(internal_server_error_for_lookup()),
         }
     }
 
     if let Some(reply) = parse_reply_from_message(message) {
         match lookup_rich_target_message(state, archive_jid, &reply.id, groupchat).await {
             Ok(Some(_)) => {}
-            Ok(None) => return Some("item-not-found"),
-            Err(_) => return Some("internal-server-error"),
+            Ok(None) => return Err(item_not_found_error("Reply target not found.")),
+            Err(_) => return Err(internal_server_error_for_lookup()),
         }
     }
 
-    None
+    Ok(())
+}
+
+fn bad_request_error(text: &str) -> StanzaError {
+    StanzaError::new(ErrorType::Modify, DefinedCondition::BadRequest, "en", text)
+}
+
+fn item_not_found_error(text: &str) -> StanzaError {
+    StanzaError::new(
+        ErrorType::Cancel,
+        DefinedCondition::ItemNotFound,
+        "en",
+        text,
+    )
+}
+
+fn forbidden_error(text: &str) -> StanzaError {
+    StanzaError::new(ErrorType::Auth, DefinedCondition::Forbidden, "en", text)
+}
+
+fn internal_server_error_for_lookup() -> StanzaError {
+    StanzaError::new(
+        ErrorType::Wait,
+        DefinedCondition::InternalServerError,
+        "en",
+        "Archive lookup failed while validating rich-message target.",
+    )
 }
 
 async fn lookup_correction_target_message(
