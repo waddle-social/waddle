@@ -1277,11 +1277,7 @@ mod tests {
             .await
             .unwrap();
 
-        let bodies: Vec<&str> = last_page
-            .messages
-            .iter()
-            .map(|m| m.body.as_str())
-            .collect();
+        let bodies: Vec<&str> = last_page.messages.iter().map(|m| m.body.as_str()).collect();
         assert_eq!(bodies, vec!["four", "five", "six"]);
         assert!(!last_page.complete);
     }
