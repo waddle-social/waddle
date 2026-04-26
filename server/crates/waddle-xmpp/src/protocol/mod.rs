@@ -23,6 +23,7 @@
 //! Only the middle layer — the state machine — lives here. The WebSocket C2S
 //! adapter and its async interpreter remain the caller's responsibility.
 
+pub mod canonicalize;
 pub mod dispatch;
 pub mod event;
 pub mod frame;
@@ -31,6 +32,7 @@ pub mod machine;
 pub mod phase;
 pub mod traits;
 
+pub use canonicalize::{canonicalize, canonicalize_with_id, should_archive, Canonicalized};
 pub use dispatch::StanzaDispatcher;
 pub use event::{CallbackId, InboundEvent, OutboundEvent, StanzaContext, TimerId};
 pub use frame::InboundFrame;
