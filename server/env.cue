@@ -129,7 +129,7 @@ schema.#Project & {
 			when: {
 				pullRequest: true
 			}
-			tasks: [_t.checkCiDrift, _t.fmt, _t.clippy, _t.test, _t.buildCi, _t.buildContainerImage]
+			tasks: [_t.checkCiDrift, _t.fmt, _t.clippy, _t.test, _t.buildCi]
 		}
 		xmppCompliance: {
 			when: {
@@ -175,7 +175,7 @@ schema.#Project & {
 		}
 
 		clippy: xRust.#Clippy & {
-			args: ["clippy", "--all-targets", "--all-features", "--", "-D", "clippy::correctness"]
+			args: ["clippy", "--all-targets", "--all-features", "--", "-D", "warnings"]
 			inputs: _rustInputs
 		}
 

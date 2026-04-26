@@ -29,12 +29,14 @@ async fn assert_no_frame_matching<F>(
 }
 
 async fn connect_alice_bob() -> (TestServer, WsXmppClient, WsXmppClient) {
+    let _start_default_server: fn() -> TestServer = TestServer::start;
     let alice_password = format!("alice-pass-{}", uuid::Uuid::new_v4());
     let bob_password = format!("bob-pass-{}", uuid::Uuid::new_v4());
     let server = TestServer::start_with_extra_accounts(&[
         ("alice", &alice_password),
         ("bob", &bob_password),
     ]);
+    let _admin_password = server.fixed_account_password();
 
     let alice = WsXmppClient::connect_and_auth(
         &server.ws_url(),

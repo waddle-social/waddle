@@ -180,19 +180,10 @@ impl fmt::Debug for AccessToken {
 }
 
 /// Session-scoped bootstrap flags owned by the client runtime.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct SessionConfig {
     pub stream_management: StreamManagementConfig,
     pub language: Option<String>,
-}
-
-impl Default for SessionConfig {
-    fn default() -> Self {
-        Self {
-            stream_management: StreamManagementConfig::default(),
-            language: None,
-        }
-    }
 }
 
 /// Stream management feature flags reserved for future parity slices.

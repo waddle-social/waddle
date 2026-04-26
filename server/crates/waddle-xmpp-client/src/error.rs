@@ -53,7 +53,7 @@ pub enum ClientError {
     #[error("websocket connection timed out after {timeout:?}")]
     WebSocketConnectTimeout { timeout: Duration },
     #[error("websocket transport failed")]
-    WebSocket(#[from] tokio_tungstenite::tungstenite::Error),
+    WebSocket(#[source] Box<tokio_tungstenite::tungstenite::Error>),
     #[error("websocket transport received an empty XMPP frame")]
     EmptyTransportFrame,
     #[error("websocket transport frame exceeds the maximum size of {max} bytes")]
@@ -74,6 +74,12 @@ pub enum ClientError {
     Disconnected,
     #[error("server returned a stanza error: {0}")]
     StanzaError(#[from] StanzaError),
+}
+
+impl From<tokio_tungstenite::tungstenite::Error> for ClientError {
+    fn from(error: tokio_tungstenite::tungstenite::Error) -> Self {
+        Self::WebSocket(Box::new(error))
+    }
 }
 
 /// XMPP stanza-level error as defined in RFC 6120 §8.3.

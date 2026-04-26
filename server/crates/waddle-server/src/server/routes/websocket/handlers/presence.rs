@@ -1122,6 +1122,17 @@ pub fn parse_room_jid_context(room_jid: &jid::BareJid) -> (String, String) {
     ("default".to_string(), "default".to_string())
 }
 
+pub async fn get_managed_channel_for_room(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+) -> Result<Option<XmppChannelRecord>, String> {
+    let Some(channel_id) = waddle_xmpp::parse_managed_room_jid(room_jid) else {
+        return Ok(None);
+    };
+    let actor = state.deps.app_state.db_pool.global_actor().clone();
+    get_xmpp_channel(actor, &channel_id).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1154,15 +1165,4 @@ mod tests {
                 || xml.contains("uri='urn:xmpp:hats:moderator'")
         );
     }
-}
-
-pub async fn get_managed_channel_for_room(
-    state: &WebSocketState,
-    room_jid: &BareJid,
-) -> Result<Option<XmppChannelRecord>, String> {
-    let Some(channel_id) = waddle_xmpp::parse_managed_room_jid(room_jid) else {
-        return Ok(None);
-    };
-    let actor = state.deps.app_state.db_pool.global_actor().clone();
-    get_xmpp_channel(actor, &channel_id).await
 }

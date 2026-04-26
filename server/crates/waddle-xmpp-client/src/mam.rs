@@ -61,20 +61,20 @@ pub struct RsmPageInfo {
 
 pub trait MamExt {
     /// Fetch archived messages for a MUC room.
-    async fn fetch_room_history(
-        &self,
-        room_jid: &str,
+    fn fetch_room_history<'a>(
+        &'a self,
+        room_jid: &'a str,
         max: u32,
-        before: Option<&str>,
-    ) -> ClientResult<MamPage>;
+        before: Option<&'a str>,
+    ) -> impl std::future::Future<Output = ClientResult<MamPage>> + Send + 'a;
 
     /// Fetch archived messages for a 1:1 DM conversation.
-    async fn fetch_dm_history(
-        &self,
-        peer_jid: &str,
+    fn fetch_dm_history<'a>(
+        &'a self,
+        peer_jid: &'a str,
         max: u32,
-        before: Option<&str>,
-    ) -> ClientResult<MamPage>;
+        before: Option<&'a str>,
+    ) -> impl std::future::Future<Output = ClientResult<MamPage>> + Send + 'a;
 }
 
 impl MamExt for ClientHandle {
@@ -268,7 +268,7 @@ fn parse_fin_from_iq_result(iq_result: &Element) -> (RsmPageInfo, bool) {
         iq_result.get_child("fin", MAM_NS)
     };
 
-    match fin.and_then(|f| parse_mam_fin(f)) {
+    match fin.and_then(parse_mam_fin) {
         Some((rsm, complete)) => (rsm, complete),
         None => (RsmPageInfo::default(), false),
     }

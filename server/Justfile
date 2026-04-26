@@ -26,4 +26,4 @@ test-all:
 # Lint and format check.
 lint:
     cargo fmt --all -- --check
-    cargo clippy --all-targets --all-features -- -D clippy::correctness
+    cargo clippy --all-targets --all-features -- -D warnings

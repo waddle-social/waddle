@@ -317,12 +317,12 @@ mod tests {
     fn selects_single_wasm_layer() {
         let layers = vec![
             ImageLayer {
-                data: vec![0u8; 8].into(),
+                data: vec![0u8; 8],
                 media_type: "application/octet-stream".to_string(),
                 annotations: None,
             },
             ImageLayer {
-                data: vec![0, 97, 115, 109, 1, 0, 0, 0].into(),
+                data: vec![0, 97, 115, 109, 1, 0, 0, 0],
                 media_type: "application/wasm".to_string(),
                 annotations: None,
             },
@@ -352,7 +352,7 @@ mod tests {
     #[test]
     fn rejects_invalid_wasm_payload() {
         let layer = ImageLayer {
-            data: vec![1, 2, 3, 4, 0, 0, 0, 0].into(),
+            data: vec![1, 2, 3, 4, 0, 0, 0, 0],
             media_type: "application/wasm".to_string(),
             annotations: None,
         };
