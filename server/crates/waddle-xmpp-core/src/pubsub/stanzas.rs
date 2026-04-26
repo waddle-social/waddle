@@ -5,6 +5,7 @@ use minidom::Element;
 use xmpp_parsers::iq::{Iq, IqType};
 use xmpp_parsers::message::Message;
 
+use crate::pubsub::{Affiliation, NodeConfig};
 use crate::{CoreError, CoreResult};
 
 /// Main PubSub namespace.
@@ -103,6 +104,24 @@ pub enum PubSubRequest {
         node: String,
         jid: Jid,
         subid: Option<String>,
+    },
+    /// XEP-0060 §8.5 `<purge node='...'/>` (owner-only).
+    PurgeNode {
+        node: String,
+    },
+    /// XEP-0060 §6.4 `<configure node='...'><x.../>` (owner-only, set form).
+    ConfigureNodeSet {
+        node: String,
+        config: NodeConfig,
+    },
+    /// XEP-0060 §8.9 `<affiliations node='...'/>` get on owner namespace.
+    AffiliationsGet {
+        node: String,
+    },
+    /// XEP-0060 §8.9.4 `<affiliations node='...'><affiliation jid='...' affiliation='...'/></affiliations>` set.
+    AffiliationsSet {
+        node: String,
+        changes: Vec<(jid::BareJid, Affiliation)>,
     },
 }
 
@@ -236,16 +255,51 @@ pub fn parse_pubsub_iq(iq: &Iq) -> CoreResult<PubSubRequest> {
         });
     }
 
-    if let Some(configure) = pubsub_elem.get_child("configure", NS_PUBSUB) {
-        return Ok(PubSubRequest::ConfigureNode {
-            node: required_attr(configure, "node")?,
-        });
-    }
-
     if let Some(delete) = pubsub_elem.get_child("delete", NS_PUBSUB_OWNER) {
         return Ok(PubSubRequest::DeleteNode {
             node: required_attr(delete, "node")?,
         });
+    }
+
+    if let Some(purge) = pubsub_elem.get_child("purge", NS_PUBSUB_OWNER) {
+        return Ok(PubSubRequest::PurgeNode {
+            node: required_attr(purge, "node")?,
+        });
+    }
+
+    if let Some(affs) = pubsub_elem.get_child("affiliations", NS_PUBSUB_OWNER) {
+        let node = required_attr(affs, "node")?;
+        let mut changes: Vec<(jid::BareJid, Affiliation)> = Vec::new();
+        for child in affs
+            .children()
+            .filter(|c| c.is("affiliation", NS_PUBSUB_OWNER))
+        {
+            let entity_raw = required_attr(child, "jid")?;
+            let entity: jid::BareJid = entity_raw
+                .parse()
+                .map_err(|e: jid::Error| CoreError::bad_request(Some(e.to_string())))?;
+            let aff_raw = required_attr(child, "affiliation")?;
+            let aff: Affiliation = aff_raw.parse().map_err(|_| {
+                CoreError::bad_request(Some(format!("invalid affiliation: {aff_raw}")))
+            })?;
+            changes.push((entity, aff));
+        }
+        if changes.is_empty() {
+            return Ok(PubSubRequest::AffiliationsGet { node });
+        }
+        return Ok(PubSubRequest::AffiliationsSet { node, changes });
+    }
+
+    // Some clients send <configure/> under NS_PUBSUB; XEP-0060 puts it under NS_PUBSUB_OWNER.
+    for ns in &[NS_PUBSUB_OWNER, NS_PUBSUB] {
+        if let Some(configure) = pubsub_elem.get_child("configure", *ns) {
+            let node = required_attr(configure, "node")?;
+            if let Some(form) = configure.get_child("x", "jabber:x:data") {
+                let config = parse_configure_form(form)?;
+                return Ok(PubSubRequest::ConfigureNodeSet { node, config });
+            }
+            return Ok(PubSubRequest::ConfigureNode { node });
+        }
     }
 
     if let Some(subscribe) = pubsub_elem.get_child("subscribe", NS_PUBSUB) {
@@ -378,6 +432,165 @@ fn required_attr(element: &Element, attr: &str) -> CoreResult<String> {
         .attr(attr)
         .map(str::to_owned)
         .ok_or_else(|| CoreError::bad_request(Some(format!("Missing {attr} attribute"))))
+}
+
+fn parse_configure_form(form: &Element) -> CoreResult<NodeConfig> {
+    use crate::pubsub::node::{AccessModel, PublishModel, SendLastPublishedItem};
+
+    let mut config = NodeConfig::default();
+    for field in form.children().filter(|c| c.is("field", "jabber:x:data")) {
+        let var = field.attr("var").unwrap_or("");
+        let value = field
+            .get_child("value", "jabber:x:data")
+            .map(|v| v.text())
+            .unwrap_or_default();
+        match var {
+            "pubsub#access_model" => {
+                config.access_model = value.parse().unwrap_or(AccessModel::Presence);
+            }
+            "pubsub#publish_model" => {
+                config.publish_model = value.parse().unwrap_or(PublishModel::Publishers);
+            }
+            "pubsub#max_items" => {
+                if let Ok(n) = value.parse::<u32>() {
+                    config.max_items = n;
+                }
+            }
+            "pubsub#persist_items" => {
+                config.persist_items = matches!(value.as_str(), "1" | "true");
+            }
+            "pubsub#deliver_payloads" => {
+                config.deliver_payloads = matches!(value.as_str(), "1" | "true");
+            }
+            "pubsub#notify_retract" => {
+                config.notify_retract = matches!(value.as_str(), "1" | "true");
+            }
+            "pubsub#notify_delete" => {
+                config.notify_delete = matches!(value.as_str(), "1" | "true");
+            }
+            "pubsub#send_last_published_item" => {
+                config.send_last_published_item = value
+                    .parse()
+                    .unwrap_or(SendLastPublishedItem::OnSubAndPresence);
+            }
+            _ => {} // Unknown fields ignored per XEP-0060.
+        }
+    }
+    Ok(config)
+}
+
+/// Build a `<subscribe/>` result IQ that carries `subscription` (XEP-0060 §6.1.6).
+pub fn build_pubsub_subscribe_result(
+    original_iq: &Iq,
+    node: &str,
+    subscriber: &jid::Jid,
+    subid: &crate::pubsub::SubId,
+) -> Iq {
+    let subscription = Element::builder("subscription", NS_PUBSUB)
+        .attr("node", node)
+        .attr("jid", subscriber.to_string())
+        .attr("subid", subid.to_string())
+        .attr("subscription", "subscribed")
+        .build();
+    let pubsub = Element::builder("pubsub", NS_PUBSUB)
+        .append(subscription)
+        .build();
+    Iq {
+        from: original_iq.to.clone(),
+        to: original_iq.from.clone(),
+        id: original_iq.id.clone(),
+        payload: IqType::Result(Some(pubsub)),
+    }
+}
+
+/// Build an `<affiliations/>` result IQ for `<affiliations node='...'/>` get.
+pub fn build_pubsub_affiliations_result(
+    original_iq: &Iq,
+    node: &str,
+    rows: &[(jid::BareJid, Affiliation)],
+) -> Iq {
+    let mut affs = Element::builder("affiliations", NS_PUBSUB_OWNER).attr("node", node);
+    for (entity, aff) in rows {
+        affs = affs.append(
+            Element::builder("affiliation", NS_PUBSUB_OWNER)
+                .attr("jid", entity.to_string())
+                .attr("affiliation", aff.to_string())
+                .build(),
+        );
+    }
+    let pubsub = Element::builder("pubsub", NS_PUBSUB_OWNER)
+        .append(affs.build())
+        .build();
+    Iq {
+        from: original_iq.to.clone(),
+        to: original_iq.from.clone(),
+        id: original_iq.id.clone(),
+        payload: IqType::Result(Some(pubsub)),
+    }
+}
+
+/// Build the result for a `<configure/>` get carrying current node config
+/// as a `<x type='form'/>` data form (XEP-0060 §6.4).
+pub fn build_pubsub_configure_form_result(original_iq: &Iq, node: &str, config: &NodeConfig) -> Iq {
+    fn field(var: &str, value: &str) -> Element {
+        Element::builder("field", "jabber:x:data")
+            .attr("var", var)
+            .append(
+                Element::builder("value", "jabber:x:data")
+                    .append(value)
+                    .build(),
+            )
+            .build()
+    }
+    let form = Element::builder("x", "jabber:x:data")
+        .attr("type", "form")
+        .append(field(
+            "FORM_TYPE",
+            "http://jabber.org/protocol/pubsub#node_config",
+        ))
+        .append(field(
+            "pubsub#access_model",
+            &config.access_model.to_string(),
+        ))
+        .append(field(
+            "pubsub#publish_model",
+            &config.publish_model.to_string(),
+        ))
+        .append(field("pubsub#max_items", &config.max_items.to_string()))
+        .append(field(
+            "pubsub#persist_items",
+            if config.persist_items { "1" } else { "0" },
+        ))
+        .append(field(
+            "pubsub#deliver_payloads",
+            if config.deliver_payloads { "1" } else { "0" },
+        ))
+        .append(field(
+            "pubsub#notify_retract",
+            if config.notify_retract { "1" } else { "0" },
+        ))
+        .append(field(
+            "pubsub#notify_delete",
+            if config.notify_delete { "1" } else { "0" },
+        ))
+        .append(field(
+            "pubsub#send_last_published_item",
+            &config.send_last_published_item.to_string(),
+        ))
+        .build();
+    let configure = Element::builder("configure", NS_PUBSUB_OWNER)
+        .attr("node", node)
+        .append(form)
+        .build();
+    let pubsub = Element::builder("pubsub", NS_PUBSUB_OWNER)
+        .append(configure)
+        .build();
+    Iq {
+        from: original_iq.to.clone(),
+        to: original_iq.from.clone(),
+        id: original_iq.id.clone(),
+        payload: IqType::Result(Some(pubsub)),
+    }
 }
 
 #[cfg(test)]

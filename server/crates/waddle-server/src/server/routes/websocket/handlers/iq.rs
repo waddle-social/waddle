@@ -1725,6 +1725,14 @@ pub async fn handle_iq_with_conn_state(
                 let response = build_pubsub_success(&iq);
                 return vec![iq_to_xml(response)];
             }
+            PubSubRequest::PurgeNode { .. }
+            | PubSubRequest::ConfigureNodeSet { .. }
+            | PubSubRequest::AffiliationsGet { .. }
+            | PubSubRequest::AffiliationsSet { .. } => {
+                // Wired in Tasks 12, 13, 14.
+                let error = build_pubsub_error(&iq, PubSubError::Forbidden);
+                return vec![iq_to_xml(error)];
+            }
         }
     }
 
