@@ -78,3 +78,34 @@ async fn references_route_and_replay_from_mam() {
 
     client.close().await;
 }
+
+#[tokio::test]
+async fn reference_without_required_attributes_returns_bad_request() {
+    // XEP-0372: '<reference/>' MUST contain a 'type' and a 'uri'.
+    // Server should reject malformed references with bad-request so
+    // misbehaving clients don't poison archives with junk payloads.
+    let _guard = TEST_SERIAL.lock().await;
+    let (_server, mut client) = setup().await;
+    let room = format!("reference-bad-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
+    join_room(&mut client, &room).await;
+
+    client
+        .send(&format!(
+            r#"<message type="groupchat" to="{room}" id="bad-reference">
+                <body>broken reference</body>
+                <reference xmlns="urn:xmpp:reference:0" begin="0" end="6"/>
+            </message>"#
+        ))
+        .await
+        .expect("send malformed reference");
+    let error = client
+        .recv_matching(|frame| frame.contains("<bad-request"))
+        .await
+        .expect("bad-request error");
+    assert!(
+        error.contains("type=\"error\""),
+        "not an error stanza: {error}"
+    );
+
+    client.close().await;
+}

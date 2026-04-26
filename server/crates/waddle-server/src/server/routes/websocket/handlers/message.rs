@@ -25,7 +25,8 @@ use waddle_xmpp::{
         is_moderation_request_message, is_moderation_result_message, is_reaction_message,
         is_retraction_message, is_sticker_message, message_has_direct_invite,
         parse_reply_from_message, remove_stanza_ids_by, should_skip_storage, RetractionKind,
-        NS_MESSAGE_CORRECT, NS_MESSAGE_RETRACT, NS_REACTIONS, NS_REPLY,
+        NS_EXPLICIT_MENTIONS, NS_MESSAGE_CORRECT, NS_MESSAGE_RETRACT, NS_REACTIONS, NS_REFERENCE,
+        NS_REPLY,
     },
     Stanza,
 };
@@ -868,6 +869,8 @@ fn same_rich_sender(sender: &jid::Jid, original_from: &str, groupchat: bool) -> 
 
 fn has_malformed_rich_payload(message: &xmpp_parsers::message::Message) -> bool {
     message.payloads.iter().any(|payload| {
+        // XEP-0308 / 0424 / 0444 / 0461: each requires a non-empty 'id'
+        // attribute on its top-level element.
         (payload.ns() == NS_MESSAGE_CORRECT
             && payload.name() == "replace"
             && payload.attr("id").is_none_or(str::is_empty))
@@ -880,6 +883,20 @@ fn has_malformed_rich_payload(message: &xmpp_parsers::message::Message) -> bool 
             || (payload.ns() == NS_REPLY
                 && payload.name() == "reply"
                 && payload.attr("id").is_none_or(str::is_empty))
+            // XEP-0372: '<reference/>' MUST contain 'type' and 'uri'.
+            || (payload.ns() == NS_REFERENCE
+                && payload.name() == "reference"
+                && (payload.attr("type").is_none_or(str::is_empty)
+                    || payload.attr("uri").is_none_or(str::is_empty)))
+            // XEP-0513: a '<mention/>' MUST carry at least one of
+            // 'jid', 'occupantid', or 'mentions' so the receiver can
+            // identify the target. Pure decorative mentions are not
+            // useful and are likely client bugs.
+            || (payload.ns() == NS_EXPLICIT_MENTIONS
+                && payload.name() == "mention"
+                && payload.attr("jid").is_none_or(str::is_empty)
+                && payload.attr("occupantid").is_none_or(str::is_empty)
+                && payload.attr("mentions").is_none_or(str::is_empty))
     })
 }
 

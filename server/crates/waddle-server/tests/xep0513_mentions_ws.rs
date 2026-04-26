@@ -78,3 +78,35 @@ async fn explicit_mentions_route_and_replay_from_mam() {
 
     client.close().await;
 }
+
+#[tokio::test]
+async fn mention_without_target_attribute_returns_bad_request() {
+    // XEP-0513: a '<mention/>' must identify its target via 'jid',
+    // 'occupantid', or 'mentions' (group). Decorative mentions with
+    // none of these are not interpretable by receivers and are
+    // rejected with bad-request.
+    let _guard = TEST_SERIAL.lock().await;
+    let (_server, mut client) = setup().await;
+    let room = format!("mention-bad-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
+    join_room(&mut client, &room).await;
+
+    client
+        .send(&format!(
+            r#"<message type="groupchat" to="{room}" id="bad-mention">
+                <body>broken mention</body>
+                <mention xmlns="urn:xmpp:mentions:0" begin="0" end="6"/>
+            </message>"#
+        ))
+        .await
+        .expect("send malformed mention");
+    let error = client
+        .recv_matching(|frame| frame.contains("<bad-request"))
+        .await
+        .expect("bad-request error");
+    assert!(
+        error.contains("type=\"error\""),
+        "not an error stanza: {error}"
+    );
+
+    client.close().await;
+}
