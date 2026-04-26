@@ -7,6 +7,7 @@ pub mod inbox;
 pub mod messages;
 pub mod permissions;
 pub mod pubsub;
+pub mod pubsub_authz;
 pub mod server;
 pub mod storage;
 pub mod telemetry;
