@@ -80,6 +80,20 @@ pub trait MamStorage: Send + Sync {
         archive_id: &str,
     ) -> Result<Option<ArchivedMessage>, MamStorageError>;
 
+    /// Replace an archived message with a XEP-0424 / XEP-0425 tombstone in
+    /// place. Clears `body`, `stanza_xml`, `thread_id`, `reply_to_id`,
+    /// `reply_to_jid`, and overwrites `rich_payload` with the typed
+    /// `ArchivedRichPayload::Tombstone(...)` value.
+    ///
+    /// Looks up the row by `archive_id` (the storage primary key). Returns
+    /// `Ok(true)` when a row was found and updated, `Ok(false)` when no row
+    /// matched, and `Err` on storage failure.
+    async fn replace_with_tombstone(
+        &self,
+        archive_id: &str,
+        tombstone: waddle_xmpp_core::mam::ArchivedTombstone,
+    ) -> Result<bool, MamStorageError>;
+
     /// Get a single message by its original message/stanza id inside an archive.
     async fn get_message_by_stanza_id(
         &self,
@@ -278,6 +292,39 @@ impl MamStorage for InMemoryMamStorage {
         entries.retain(|(jid, message)| !(jid == room_jid && message.timestamp < before));
         Ok((previous_len - entries.len()) as u64)
     }
+
+    async fn replace_with_tombstone(
+        &self,
+        archive_id: &str,
+        tombstone: waddle_xmpp_core::mam::ArchivedTombstone,
+    ) -> Result<bool, MamStorageError> {
+        let mut entries = self.entries.write().await;
+        for (_jid, message) in entries.iter_mut() {
+            if message.id == archive_id {
+                apply_tombstone(message, tombstone);
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+}
+
+fn apply_tombstone(
+    message: &mut ArchivedMessage,
+    tombstone: waddle_xmpp_core::mam::ArchivedTombstone,
+) {
+    use waddle_xmpp_core::mam::{ArchivedRichMessage, ArchivedRichPayload};
+    message.body.clear();
+    message.stanza_xml = None;
+    message.thread_id = None;
+    message.reply_to_id = None;
+    message.reply_to_jid = None;
+    message.rich = Some(ArchivedRichMessage {
+        payload: Some(ArchivedRichPayload::Tombstone(tombstone)),
+        reply: None,
+        references: Vec::new(),
+        mentions: Vec::new(),
+    });
 }
 
 #[derive(Clone)]
@@ -955,6 +1002,53 @@ impl MamStorage for SqlxMamStorage {
 
         debug!(archive = %room_jid, deleted, "Deleted old messages from MAM archive");
         Ok(deleted)
+    }
+
+    #[instrument(skip(self, tombstone))]
+    async fn replace_with_tombstone(
+        &self,
+        archive_id: &str,
+        tombstone: waddle_xmpp_core::mam::ArchivedTombstone,
+    ) -> Result<bool, MamStorageError> {
+        use waddle_xmpp_core::mam::{ArchivedRichMessage, ArchivedRichPayload};
+        let payload = ArchivedRichMessage {
+            payload: Some(ArchivedRichPayload::Tombstone(tombstone)),
+            reply: None,
+            references: Vec::new(),
+            mentions: Vec::new(),
+        };
+        let encoded = serde_json::to_string(&payload)
+            .map_err(|error| MamStorageError::Serialization(error.to_string()))?;
+
+        let rows = match &self.backend {
+            MamDatabaseBackend::Sqlite(pool) => {
+                let mut builder = QueryBuilder::<Sqlite>::new(
+                    "UPDATE mam_messages SET body = '', stanza_xml = NULL, thread_id = NULL, reply_to_id = NULL, reply_to_jid = NULL, rich_payload = ",
+                );
+                builder
+                    .push_bind(encoded.as_str())
+                    .push(" WHERE id = ")
+                    .push_bind(archive_id);
+                builder.build().execute(pool).await?.rows_affected()
+            }
+            MamDatabaseBackend::Postgres(pool) => {
+                let mut builder = QueryBuilder::<Postgres>::new(
+                    "UPDATE mam_messages SET body = '', stanza_xml = NULL, thread_id = NULL, reply_to_id = NULL, reply_to_jid = NULL, rich_payload = ",
+                );
+                builder
+                    .push_bind(encoded.as_str())
+                    .push(" WHERE id = ")
+                    .push_bind(archive_id);
+                builder.build().execute(pool).await?.rows_affected()
+            }
+        };
+
+        debug!(
+            archive_id = %archive_id,
+            rows_affected = rows,
+            "Replaced archived message with tombstone"
+        );
+        Ok(rows > 0)
     }
 }
 

@@ -147,6 +147,23 @@ pub async fn handle_message(
             )))];
         }
 
+        // XEP-0424 §"prevent further distribution… by replacing the
+        // original message with a tombstone": after authorization
+        // passes, mutate the room archive's original row in place.
+        if let Some(RetractionKind::Request(retraction)) =
+            extract_retraction_from_message(&prototype)
+        {
+            apply_retraction_tombstones(
+                state,
+                &[room_jid.to_string()],
+                &prototype,
+                &retraction.retracts_id,
+                Utc::now(),
+                true,
+            )
+            .await;
+        }
+
         // Archive body-bearing and rich protocol room messages in XMPP MAM storage.
         let archive_id =
             archive_groupchat_message(state, &room_jid, &mut prototype, sender_nickname_generation)
@@ -372,6 +389,28 @@ pub async fn handle_message(
                     &jid::Jid::from(sender_jid.clone()),
                     error,
                 )))];
+            }
+
+            // XEP-0424 §"prevent further distribution": when a DM is a
+            // retraction request, tombstone the original in BOTH
+            // archives that hold it (sender's and recipient's
+            // personal MAM).
+            if let Some(RetractionKind::Request(retraction)) =
+                extract_retraction_from_message(&prototype)
+            {
+                let archives = [
+                    sender_jid.to_bare().to_string(),
+                    to_jid.to_bare().to_string(),
+                ];
+                apply_retraction_tombstones(
+                    state,
+                    &archives,
+                    &prototype,
+                    &retraction.retracts_id,
+                    Utc::now(),
+                    false,
+                )
+                .await;
             }
 
             // Archive body-bearing DMs to both sender's and recipient's personal MAM.
@@ -614,6 +653,85 @@ async fn validate_rich_message_targets(
     }
 
     Ok(())
+}
+
+/// Replace the retraction-target row in each given archive with a
+/// XEP-0424 tombstone. Called after `validate_rich_message_targets`
+/// has confirmed sender authorization. Failures are logged but do not
+/// propagate — the retraction message is still archived and broadcast,
+/// matching the spec's "best effort" framing for tombstones (the SHOULD
+/// is on archive distribution, not on the retraction itself).
+async fn apply_retraction_tombstones(
+    state: &WebSocketState,
+    archive_jids: &[String],
+    retraction_message: &xmpp_parsers::message::Message,
+    target_id: &str,
+    stamp: chrono::DateTime<chrono::Utc>,
+    groupchat: bool,
+) {
+    let retraction_id = retraction_message
+        .id
+        .clone()
+        .and_then(waddle_xmpp::mam::RichMessageId::new);
+
+    for archive_jid in archive_jids {
+        let original = match lookup_retraction_target_message(
+            state,
+            archive_jid.as_str(),
+            target_id,
+            groupchat,
+        )
+        .await
+        {
+            Ok(Some(original)) => original,
+            Ok(None) => {
+                debug!(
+                    archive = %archive_jid,
+                    target = %target_id,
+                    "Retraction target not found in this archive; tombstone skipped"
+                );
+                continue;
+            }
+            Err(error) => {
+                warn!(
+                    archive = %archive_jid,
+                    target = %target_id,
+                    error = %error,
+                    "Failed to look up retraction target for tombstone"
+                );
+                continue;
+            }
+        };
+
+        let tombstone = waddle_xmpp::mam::ArchivedTombstone {
+            retraction_id: retraction_id.clone(),
+            stamp,
+            moderation: None,
+        };
+
+        match state
+            .deps
+            .protocol
+            .mam_storage
+            .replace_with_tombstone(&original.id, tombstone)
+            .await
+        {
+            Ok(true) => {
+                debug!(archive = %archive_jid, original_id = %original.id, "Replaced with tombstone")
+            }
+            Ok(false) => warn!(
+                archive = %archive_jid,
+                original_id = %original.id,
+                "Tombstone replacement found no row to update"
+            ),
+            Err(error) => warn!(
+                archive = %archive_jid,
+                original_id = %original.id,
+                error = %error,
+                "Tombstone replacement failed"
+            ),
+        }
+    }
 }
 
 /// Enforce XEP-0308 §3 SHOULD #2: a full-JID that left the room and

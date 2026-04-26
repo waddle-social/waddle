@@ -958,6 +958,61 @@ pub async fn handle_iq_with_conn_state(
             {
                 warn!(room = %room_jid, target = %request.target_id, error = %error, "Failed to archive moderation event");
             }
+
+            // XEP-0425 §"the archiving service MAY replace the
+            // retracted message with a tombstone": replace the
+            // original room archive row with a moderation tombstone
+            // whose `<retracted/>` carries `<moderated by/>` and the
+            // optional reason.
+            let original_lookup = state
+                .deps
+                .protocol
+                .mam_storage
+                .get_message(&request.target_id)
+                .await;
+            match original_lookup {
+                Ok(Some(original)) if original.to == room_jid.to_string() => {
+                    let tombstone = waddle_xmpp::mam::ArchivedTombstone {
+                        retraction_id: moderation
+                            .id
+                            .clone()
+                            .and_then(waddle_xmpp::mam::RichMessageId::new),
+                        stamp: stamp_time,
+                        moderation: Some(ArchivedModeration {
+                            target_id: waddle_xmpp::mam::RichMessageId::new(
+                                request.target_id.clone(),
+                            )
+                            .expect("target id is non-empty here"),
+                            moderated_by: moderated_by
+                                .parse::<Jid>()
+                                .expect("moderated_by parsed earlier"),
+                            stamp: Some(stamp_time),
+                            reason: request.reason.as_deref().and_then(RichText::new),
+                        }),
+                    };
+                    if let Err(error) = state
+                        .deps
+                        .protocol
+                        .mam_storage
+                        .replace_with_tombstone(&original.id, tombstone)
+                        .await
+                    {
+                        warn!(
+                            room = %room_jid,
+                            target = %request.target_id,
+                            error = %error,
+                            "Failed to replace original with moderation tombstone"
+                        );
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => warn!(
+                    room = %room_jid,
+                    target = %request.target_id,
+                    error = %error,
+                    "Failed to look up moderation target for tombstone"
+                ),
+            }
         }
 
         let mut frames = Vec::new();
