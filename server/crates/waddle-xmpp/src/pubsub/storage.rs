@@ -4,7 +4,7 @@
 
 use async_trait::async_trait;
 use jid::{BareJid, Jid};
-use waddle_xmpp_core::pubsub::{Affiliation, SubId, Subscription};
+use waddle_xmpp_core::pubsub::{Affiliation, SubId, Subscription, SubscriptionState};
 
 use super::node::NodeConfig;
 use super::stanzas::PubSubItem;
@@ -278,10 +278,14 @@ pub trait PubSubStorage: Send + Sync + 'static {
 /// and single-node deployments. For production multi-node setups, consider
 /// a database-backed implementation.
 pub struct InMemoryPubSubStorage {
-    /// Map of (owner_bare_jid, node_name) -> PubSubNode
+    /// (owner_bare_jid, node_name) -> PubSubNode
     nodes: dashmap::DashMap<(String, String), PubSubNode>,
-    /// Map of (owner_bare_jid, node_name) -> Vec<StoredItem>
+    /// (owner_bare_jid, node_name) -> Vec<StoredItem>
     items: dashmap::DashMap<(String, String), Vec<StoredItem>>,
+    /// (owner_bare_jid, node_name, subid) -> Subscription
+    subscriptions: dashmap::DashMap<(String, String, String), Subscription>,
+    /// (owner_bare_jid, node_name, entity_bare_jid) -> Affiliation
+    affiliations: dashmap::DashMap<(String, String, String), Affiliation>,
 }
 
 impl Default for InMemoryPubSubStorage {
@@ -291,20 +295,19 @@ impl Default for InMemoryPubSubStorage {
 }
 
 impl InMemoryPubSubStorage {
-    /// Create a new in-memory PubSub storage.
     pub fn new() -> Self {
         Self {
             nodes: dashmap::DashMap::new(),
             items: dashmap::DashMap::new(),
+            subscriptions: dashmap::DashMap::new(),
+            affiliations: dashmap::DashMap::new(),
         }
     }
 
-    /// Create a storage key from owner and node name.
     fn key(owner: &BareJid, node_name: &str) -> (String, String) {
         (owner.to_string(), node_name.to_string())
     }
 
-    /// Generate a unique item ID.
     fn generate_item_id() -> String {
         uuid::Uuid::new_v4().to_string()
     }
@@ -517,6 +520,221 @@ impl PubSubStorage for InMemoryPubSubStorage {
         node.config = config.clone();
 
         Ok(())
+    }
+
+    async fn purge_node(&self, owner: &BareJid, node_name: &str) -> Result<u64, XmppError> {
+        let key = Self::key(owner, node_name);
+        let removed = match self.items.get_mut(&key) {
+            Some(mut items) => {
+                let n = items.len() as u64;
+                items.clear();
+                n
+            }
+            None => 0,
+        };
+        Ok(removed)
+    }
+
+    async fn subscribe(
+        &self,
+        owner: &BareJid,
+        node_name: &str,
+        subscriber: &Jid,
+    ) -> Result<Subscription, XmppError> {
+        let subid = SubId::generate();
+        let sub = Subscription {
+            subid: subid.clone(),
+            subscriber: subscriber.clone(),
+            state: SubscriptionState::Subscribed,
+            created_at_ms: chrono::Utc::now().timestamp_millis(),
+        };
+        let key = (
+            owner.to_string(),
+            node_name.to_string(),
+            subid.as_str().to_string(),
+        );
+        self.subscriptions.insert(key, sub.clone());
+        Ok(sub)
+    }
+
+    async fn unsubscribe(
+        &self,
+        owner: &BareJid,
+        node_name: &str,
+        subscriber: &Jid,
+        subid: Option<&SubId>,
+    ) -> Result<bool, XmppError> {
+        let owner_str = owner.to_string();
+        let node_str = node_name.to_string();
+        let subscriber_str = subscriber.to_string();
+
+        if let Some(subid) = subid {
+            let key = (owner_str, node_str, subid.as_str().to_string());
+            return Ok(self
+                .subscriptions
+                .remove_if(&key, |_, sub| sub.subscriber.to_string() == subscriber_str)
+                .is_some());
+        }
+
+        let mut victim = None;
+        for entry in self.subscriptions.iter() {
+            let (k_owner, k_node, _) = entry.key();
+            if k_owner == &owner_str
+                && k_node == &node_str
+                && entry.value().subscriber.to_string() == subscriber_str
+            {
+                victim = Some(entry.key().clone());
+                break;
+            }
+        }
+        Ok(victim.and_then(|k| self.subscriptions.remove(&k)).is_some())
+    }
+
+    async fn list_node_subscriptions(
+        &self,
+        owner: &BareJid,
+        node_name: &str,
+    ) -> Result<Vec<Subscription>, XmppError> {
+        let owner_str = owner.to_string();
+        let node_str = node_name.to_string();
+        Ok(self
+            .subscriptions
+            .iter()
+            .filter(|e| e.key().0 == owner_str && e.key().1 == node_str)
+            .map(|e| e.value().clone())
+            .collect())
+    }
+
+    async fn list_subscriber_subscriptions(
+        &self,
+        owner: &BareJid,
+        subscriber: &Jid,
+    ) -> Result<Vec<(String, Subscription)>, XmppError> {
+        let owner_str = owner.to_string();
+        let subscriber_str = subscriber.to_string();
+        Ok(self
+            .subscriptions
+            .iter()
+            .filter(|e| {
+                e.key().0 == owner_str && e.value().subscriber.to_string() == subscriber_str
+            })
+            .map(|e| (e.key().1.clone(), e.value().clone()))
+            .collect())
+    }
+
+    async fn get_subscription(
+        &self,
+        owner: &BareJid,
+        node_name: &str,
+        subid: &SubId,
+    ) -> Result<Option<Subscription>, XmppError> {
+        let key = (
+            owner.to_string(),
+            node_name.to_string(),
+            subid.as_str().to_string(),
+        );
+        Ok(self.subscriptions.get(&key).map(|v| v.clone()))
+    }
+
+    async fn list_deliverable_subscribers(
+        &self,
+        owner: &BareJid,
+        node_name: &str,
+    ) -> Result<Vec<Subscription>, XmppError> {
+        let owner_str = owner.to_string();
+        let node_str = node_name.to_string();
+        let mut out = Vec::new();
+        for entry in self.subscriptions.iter() {
+            if entry.key().0 != owner_str || entry.key().1 != node_str {
+                continue;
+            }
+            let sub = entry.value();
+            if sub.state != SubscriptionState::Subscribed {
+                continue;
+            }
+            // Filter outcasts.
+            let entity_bare = sub.subscriber.to_bare();
+            let aff_key = (owner_str.clone(), node_str.clone(), entity_bare.to_string());
+            let outcast = self
+                .affiliations
+                .get(&aff_key)
+                .map(|v| v.is_outcast())
+                .unwrap_or(false);
+            if outcast {
+                continue;
+            }
+            out.push(sub.clone());
+        }
+        Ok(out)
+    }
+
+    async fn set_affiliation(
+        &self,
+        owner: &BareJid,
+        node_name: &str,
+        entity: &BareJid,
+        affiliation: Affiliation,
+    ) -> Result<Affiliation, XmppError> {
+        let key = (owner.to_string(), node_name.to_string(), entity.to_string());
+        if affiliation == Affiliation::None {
+            return Ok(self
+                .affiliations
+                .remove(&key)
+                .map(|(_, v)| v)
+                .unwrap_or(Affiliation::None));
+        }
+        let prev = self.affiliations.insert(key, affiliation);
+        Ok(prev.unwrap_or(Affiliation::None))
+    }
+
+    async fn get_affiliation(
+        &self,
+        owner: &BareJid,
+        node_name: &str,
+        entity: &BareJid,
+    ) -> Result<Affiliation, XmppError> {
+        let key = (owner.to_string(), node_name.to_string(), entity.to_string());
+        Ok(self
+            .affiliations
+            .get(&key)
+            .map(|v| *v)
+            .unwrap_or(Affiliation::None))
+    }
+
+    async fn list_node_affiliations(
+        &self,
+        owner: &BareJid,
+        node_name: &str,
+    ) -> Result<Vec<(BareJid, Affiliation)>, XmppError> {
+        let owner_str = owner.to_string();
+        let node_str = node_name.to_string();
+        let mut out = Vec::new();
+        for entry in self.affiliations.iter() {
+            if entry.key().0 == owner_str && entry.key().1 == node_str {
+                let entity = entry
+                    .key()
+                    .2
+                    .parse::<BareJid>()
+                    .map_err(|e| XmppError::internal(e.to_string()))?;
+                out.push((entity, *entry.value()));
+            }
+        }
+        Ok(out)
+    }
+
+    async fn list_entity_affiliations(
+        &self,
+        owner: &BareJid,
+        entity: &BareJid,
+    ) -> Result<Vec<(String, Affiliation)>, XmppError> {
+        let owner_str = owner.to_string();
+        let entity_str = entity.to_string();
+        Ok(self
+            .affiliations
+            .iter()
+            .filter(|e| e.key().0 == owner_str && e.key().2 == entity_str)
+            .map(|e| (e.key().1.clone(), *e.value()))
+            .collect())
     }
 }
 
@@ -736,5 +954,131 @@ mod tests {
         assert!(nodes.contains(&"node-1".to_string()));
         assert!(nodes.contains(&"node-2".to_string()));
         assert!(!nodes.contains(&"other-node".to_string()));
+    }
+
+    #[tokio::test]
+    async fn in_memory_subscribe_returns_unique_subids() {
+        let storage = InMemoryPubSubStorage::new();
+        let owner: BareJid = "u@x.com".parse().expect("bare jid");
+        let alice: Jid = "alice@x.com".parse().expect("jid");
+
+        let s1 = storage
+            .subscribe(&owner, "node", &alice)
+            .await
+            .expect("sub");
+        let s2 = storage
+            .subscribe(&owner, "node", &alice)
+            .await
+            .expect("sub");
+        assert_ne!(s1.subid, s2.subid);
+        assert_eq!(s1.state, SubscriptionState::Subscribed);
+    }
+
+    #[tokio::test]
+    async fn in_memory_unsubscribe_with_subid_targets_one_row() {
+        let storage = InMemoryPubSubStorage::new();
+        let owner: BareJid = "u@x.com".parse().expect("bare jid");
+        let alice: Jid = "alice@x.com".parse().expect("jid");
+
+        let s1 = storage
+            .subscribe(&owner, "node", &alice)
+            .await
+            .expect("sub");
+        let _s2 = storage
+            .subscribe(&owner, "node", &alice)
+            .await
+            .expect("sub");
+
+        let removed = storage
+            .unsubscribe(&owner, "node", &alice, Some(&s1.subid))
+            .await
+            .expect("unsubscribe");
+        assert!(removed);
+
+        let remaining = storage
+            .list_node_subscriptions(&owner, "node")
+            .await
+            .expect("list");
+        assert_eq!(remaining.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn in_memory_set_affiliation_none_deletes_row() {
+        let storage = InMemoryPubSubStorage::new();
+        let owner: BareJid = "u@x.com".parse().expect("bare jid");
+        let entity: BareJid = "bob@x.com".parse().expect("bare jid");
+
+        let prev = storage
+            .set_affiliation(&owner, "node", &entity, Affiliation::Outcast)
+            .await
+            .expect("set");
+        assert_eq!(prev, Affiliation::None);
+        assert_eq!(
+            storage
+                .get_affiliation(&owner, "node", &entity)
+                .await
+                .expect("get"),
+            Affiliation::Outcast
+        );
+
+        let prev = storage
+            .set_affiliation(&owner, "node", &entity, Affiliation::None)
+            .await
+            .expect("set");
+        assert_eq!(prev, Affiliation::Outcast);
+        assert_eq!(
+            storage
+                .get_affiliation(&owner, "node", &entity)
+                .await
+                .expect("get"),
+            Affiliation::None
+        );
+    }
+
+    #[tokio::test]
+    async fn in_memory_deliverable_subscribers_excludes_outcasts() {
+        let storage = InMemoryPubSubStorage::new();
+        let owner: BareJid = "u@x.com".parse().expect("bare jid");
+        let alice: Jid = "alice@x.com".parse().expect("jid");
+        let bob: Jid = "bob@x.com".parse().expect("jid");
+
+        storage
+            .subscribe(&owner, "node", &alice)
+            .await
+            .expect("sub");
+        storage.subscribe(&owner, "node", &bob).await.expect("sub");
+
+        let bob_bare: BareJid = "bob@x.com".parse().expect("bare jid");
+        storage
+            .set_affiliation(&owner, "node", &bob_bare, Affiliation::Outcast)
+            .await
+            .expect("set");
+
+        let deliverable = storage
+            .list_deliverable_subscribers(&owner, "node")
+            .await
+            .expect("list");
+        assert_eq!(deliverable.len(), 1);
+        assert_eq!(deliverable[0].subscriber.to_string(), "alice@x.com");
+    }
+
+    #[tokio::test]
+    async fn in_memory_purge_clears_items_keeps_node() {
+        let storage = InMemoryPubSubStorage::new();
+        let owner: BareJid = "u@x.com".parse().expect("bare jid");
+        for i in 1..=3 {
+            let item = PubSubItem::new(Some(format!("i{i}")), None);
+            storage
+                .publish_item(&owner, "n", &item, None, true)
+                .await
+                .expect("publish");
+        }
+        let _removed = storage.purge_node(&owner, "n").await.expect("purge");
+        let items = storage
+            .get_items(&owner, "n", None, &[])
+            .await
+            .expect("get");
+        assert!(items.is_empty());
+        assert!(storage.get_node(&owner, "n").await.expect("get").is_some());
     }
 }
