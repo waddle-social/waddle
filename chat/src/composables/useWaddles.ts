@@ -36,7 +36,6 @@ export function useWaddles(
   const mucServiceJid = ref<string | null>(null);
   const spacesServiceJid = ref<string | null>(null);
 
-  const activeSpaceId: Ref<string | null> = ref(null);
   const activeChannelId: Ref<string | null> = ref(null);
 
   const isLoadingStructure = ref(false);
@@ -60,6 +59,10 @@ export function useWaddles(
     position: 0,
   });
 
+  const currentChannel = computed(
+    () => channels.value.find((c) => c.id === activeChannelId.value) ?? null,
+  );
+  const activeSpaceId = computed(() => currentChannel.value?.spaceId ?? null);
   const currentSpace = computed(() =>
     activeSpaceId.value
       ? waddles.value.find((w) => w.id === activeSpaceId.value) ?? null
@@ -67,10 +70,6 @@ export function useWaddles(
   );
   const isEmptyDeployment = computed(() =>
     waddles.value.length === 0 && channels.value.length === 0 && !isLoadingStructure.value,
-  );
-
-  const currentChannel = computed(
-    () => channels.value.find((c) => c.id === activeChannelId.value) ?? null,
   );
 
   const currentRole = computed(() => {
@@ -91,7 +90,6 @@ export function useWaddles(
 
   const sortedChannels = computed(() =>
     [...channels.value]
-      .filter((channel) => !activeSpaceId.value || channel.spaceId === activeSpaceId.value)
       .sort(
       (a, b) =>
         (a.position ?? 0) - (b.position ?? 0) ||
@@ -169,7 +167,6 @@ export function useWaddles(
         role: space.role ?? null,
       }) satisfies SpaceSummary);
       waddles.value = discoveredSpaces;
-      activeSpaceId.value = topology.spaces[0]?.id ?? null;
 
       const channelList: ChannelSummary[] = topology.rooms.map((c) => ({
         id: c.id,
@@ -198,7 +195,6 @@ export function useWaddles(
 
       activeChannelId.value = nextChannelId;
       const nextChannel = channelList.find((channel) => channel.id === nextChannelId);
-      activeSpaceId.value = nextChannel?.spaceId ?? activeSpaceId.value;
       if (nextChannelId && xmppClient.value) {
         const memberReqId = ++memberRequestId;
         try {
@@ -263,7 +259,6 @@ export function useWaddles(
 
   function selectDiscoveredSpace(spaceId: string): string | null {
     if (!waddles.value.some((space) => space.id === spaceId)) return null;
-    activeSpaceId.value = spaceId;
     const nextChannelId = channels.value.find((channel) => channel.spaceId === spaceId)?.id ?? null;
     activeChannelId.value = nextChannelId;
     members.value = [];
@@ -418,7 +413,6 @@ export function useWaddles(
     channels.value = [];
     members.value = [];
     serverRole.value = null;
-    activeSpaceId.value = null;
     activeChannelId.value = null;
   }
 

@@ -58,11 +58,11 @@ use waddle_xmpp::{
     },
     xep::{
         build_command_items, build_command_result, build_last_activity_response,
-        build_moderation_result_message, build_search_response, build_server_role_form,
-        build_spaces_metadata_form, build_spaces_metadata_form_for_requester,
-        is_last_activity_query, is_search_request, is_time_query, is_version_query,
-        parse_command_from_iq, parse_moderation_iq, parse_search_request, ChannelResult, Command,
-        CommandStatus, Searchable, SpaceAffiliation, NODE_COMMANDS, NS_CHANNEL_SEARCH,
+        build_moderation_result_message, build_room_space_metadata_forms, build_search_response,
+        build_server_role_form, build_spaces_metadata_form_for_requester, is_last_activity_query,
+        is_search_request, is_time_query, is_version_query, parse_command_from_iq,
+        parse_moderation_iq, parse_search_request, ChannelResult, Command, CommandStatus,
+        Searchable, SpaceAffiliation, NODE_COMMANDS, NS_CHANNEL_SEARCH,
     },
     Affiliation, SpaceDetails, Stanza, StanzaErrorCondition, StanzaErrorType, XmppError,
 };
@@ -428,6 +428,9 @@ pub async fn handle_iq_with_conn_state(
                             .map(|ns| Feature::new(&ns)),
                     );
                     let extensions = room_space_metadata_extensions(state, &room_jid, domain).await;
+                    if !extensions.is_empty() {
+                        features.push(Feature::spaces());
+                    }
                     let response = if extensions.is_empty() {
                         build_disco_info_response(request_iq, &identities, &features, None)
                     } else {
@@ -463,6 +466,9 @@ pub async fn handle_iq_with_conn_state(
                         );
                         let extensions =
                             room_space_metadata_extensions(state, &room_jid, domain).await;
+                        if !extensions.is_empty() {
+                            features.push(Feature::spaces());
+                        }
                         let response = if extensions.is_empty() {
                             build_disco_info_response(request_iq, &identities, &features, None)
                         } else {
@@ -4437,9 +4443,7 @@ async fn room_space_metadata_extensions(
         .await
     {
         Ok(Some(space_node)) => {
-            vec![build_spaces_metadata_form(&space_details_from_node(
-                &space_node,
-            ))]
+            build_room_space_metadata_forms(&spaces_domain, &space_node.node_name)
         }
         Ok(None) => vec![],
         Err(error) => {

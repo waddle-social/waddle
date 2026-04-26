@@ -17,7 +17,7 @@ const BASE_TOPOLOGY = {
 
 function makeClient(overrides: {
   listRoomMembers?: (id: string, opts?: { roomJid?: string }) => Promise<MemberSummary[]>;
-  discoverTopology?: () => Promise<typeof BASE_TOPOLOGY>;
+  discoverTopology?: () => Promise<unknown>;
 } = {}): BrowserXmppClient {
   return {
     listRoomMembers: overrides.listRoomMembers ?? mock(async () => []),
@@ -83,6 +83,27 @@ describe("useWaddles.loadStructure", () => {
     expect(returned).toBe("general");
     expect(listRoomMembers.mock.calls[0]![0]).toBe("general");
     expect(w.activeChannelId.value).toBe("general");
+  });
+
+  test("keeps all channels visible and derives the active space from the selected channel", async () => {
+    const client = makeClient({
+      discoverTopology: mock(async () => ({
+        spaces: [
+          { id: "alpha", name: "Alpha" },
+          { id: "beta", name: "Beta" },
+        ],
+        rooms: [
+          { id: "general", name: "General", jid: "general@conference.example.com", channelType: "text" as const, position: 0, spaceId: "alpha" },
+          { id: "random", name: "Random", jid: "random@conference.example.com", channelType: "text" as const, position: 1, spaceId: "beta" },
+        ],
+      })),
+    });
+    const { w } = makeWaddles(client);
+
+    await w.loadStructure("random");
+
+    expect(w.sortedChannels.value.map((channel) => channel.id)).toEqual(["general", "random"]);
+    expect(w.currentSpace.value?.id).toBe("beta");
   });
 });
 

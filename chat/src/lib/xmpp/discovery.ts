@@ -55,6 +55,25 @@ function parseChannelType(infoResult: DiscoInfoResult) {
   return normalizeChannelType(hasForumFeature || forumField ? "forum" : "text");
 }
 
+function parseSpaceNodeIri(value: string | null): string | null {
+  if (!value) return null;
+  try {
+    const iri = new URL(value);
+    const node = iri.searchParams.get(";node") ?? iri.searchParams.get("node");
+    return node?.trim() || null;
+  } catch {
+    const match = /(?:^|[?&;])node=([^&;]+)/.exec(value);
+    return match?.[1] ? decodeURIComponent(match[1]).trim() || null : null;
+  }
+}
+
+function parseRoomParentSpaceId(infoResult: DiscoInfoResult): string | null {
+  return (
+    parseSpaceNodeIri(metadataField(infoResult, "parent")) ??
+    parseSpaceNodeIri(metadataField(infoResult, "muc#roominfo_pubsub"))
+  );
+}
+
 function parseDiscoveryRole(value: string | null): DiscoveryRole {
   switch (value) {
     case "owner":
@@ -162,9 +181,12 @@ async function hydrateChannelType(
   if (!channel.jid) return channel;
   try {
     const info = await xmpp.getDiscoInfo(channel.jid);
+    const parentSpaceId = parseRoomParentSpaceId(info);
     return {
       ...channel,
       channelType: parseChannelType(info),
+      spaceId: channel.spaceId ?? parentSpaceId ?? undefined,
+      standalone: channel.spaceId || parentSpaceId ? false : channel.standalone,
     };
   } catch {
     return channel;

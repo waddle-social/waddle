@@ -274,7 +274,7 @@ export function useMessaging(
   const pendingEchoClientIds = new Set<string>();
 
   const currentRoomJid = computed(() => {
-    if (!session.value || !activeSpaceId.value || !activeChannelId.value) return null;
+    if (!session.value || !activeChannelId.value) return null;
     return roomBareJidFor(session.value, activeChannelId.value);
   });
   const channelIsForum = computed(() => isForumChannel(currentChannel.value));
@@ -445,7 +445,7 @@ export function useMessaging(
     composingTimeout = setTimeout(() => {
       if (
         xmppClient.value !== client ||
-        activeSpaceId.value !== spaceId ||
+        (activeSpaceId.value ?? "") !== spaceId ||
         activeChannelId.value !== channelId
       )
         return;
@@ -527,9 +527,9 @@ export function useMessaging(
   }
 
   function markDisplayed(messageId: string) {
-    if (!xmppClient.value || !activeSpaceId.value || !activeChannelId.value) return;
+    if (!xmppClient.value || !activeChannelId.value) return;
     const targetId = findMessageById(messages.value, messageId)?.id ?? messageId;
-    void xmppClient.value.sendDisplayed(activeSpaceId.value, activeChannelId.value, targetId)
+    void xmppClient.value.sendDisplayed(activeSpaceId.value ?? "", activeChannelId.value, targetId)
       .catch(() => undefined);
   }
 
@@ -647,14 +647,13 @@ export function useMessaging(
       if (wasPending) pendingEchoClientIds.delete(existing.id);
       return;
     }
-    const spaceId = activeSpaceId.value;
     const channelId = activeChannelId.value;
     messages.value = applyForumContext([...messages.value, msg]);
     // mergeLiveMessage always snaps to the active edge, so last-seen should advance
     // in lockstep regardless of the user's prior scroll position — if we're
     // scrolling them to the message, by definition they can see it.
     void scrollToPinnedEdge();
-    if (spaceId && channelId && isFeedVisible(msg)) {
+    if (channelId && isFeedVisible(msg)) {
       persistLastSeen(channelId, msg.id);
     }
   }
@@ -706,7 +705,7 @@ export function useMessaging(
     if (event.type !== "fresh") return;
     const spaceId = activeSpaceId.value;
     const channelId = activeChannelId.value;
-    if (!spaceId || !channelId) return;
+    if (!channelId) return;
     // Only catch up if we had already loaded this channel; otherwise the
     // standard loadMessages call on channel-select handles it.
     if (messages.value.length === 0) return;
@@ -719,10 +718,10 @@ export function useMessaging(
         ),
     );
     void (async () => {
-      await loadMessages(spaceId, channelId);
+      await loadMessages(spaceId ?? "", channelId);
       if (
         preserved.length === 0 ||
-        activeSpaceId.value !== spaceId ||
+        (activeSpaceId.value ?? "") !== (spaceId ?? "") ||
         activeChannelId.value !== channelId
       )
         return;
@@ -760,7 +759,7 @@ export function useMessaging(
 
       if (
         requestId !== messageRequestId ||
-        activeSpaceId.value !== spaceId ||
+        (activeSpaceId.value ?? "") !== spaceId ||
         activeChannelId.value !== channelId
       ) {
         return;
@@ -910,11 +909,11 @@ export function useMessaging(
     const client = xmppClient.value;
     const spaceId = activeSpaceId.value;
     const channelId = activeChannelId.value;
-    if (!client || !spaceId || !channelId || !threadId || !session.value) return;
-    const results = await client.queryMamByThread(spaceId, channelId, threadId, 100);
+    if (!client || !channelId || !threadId || !session.value) return;
+    const results = await client.queryMamByThread(spaceId ?? "", channelId, threadId, 100);
     if (
       xmppClient.value !== client ||
-      activeSpaceId.value !== spaceId ||
+      (activeSpaceId.value ?? "") !== (spaceId ?? "") ||
       activeChannelId.value !== channelId
     ) {
       return;
@@ -1030,7 +1029,7 @@ export function useMessaging(
       const msgId = result?.id ?? null;
       const isStillCurrentChannel =
         xmppClient.value === client &&
-        activeSpaceId.value === spaceId &&
+        (activeSpaceId.value ?? "") === spaceId &&
         activeChannelId.value === channelId;
 
       if (msgId && session.value && isStillCurrentChannel) {
@@ -1107,7 +1106,7 @@ export function useMessaging(
   }
 
   async function toggleReaction(messageId: string, emoji: string) {
-    if (!xmppClient.value || !activeSpaceId.value || !activeChannelId.value || !session.value)
+    if (!xmppClient.value || !activeChannelId.value || !session.value)
       return;
 
     // Compute the new reaction set for this user
@@ -1131,7 +1130,7 @@ export function useMessaging(
 
     try {
       await xmppClient.value.sendReaction(
-        activeSpaceId.value,
+        activeSpaceId.value ?? "",
         activeChannelId.value,
         targetId,
         [...myEmojis],
@@ -1142,14 +1141,14 @@ export function useMessaging(
   }
 
   async function retractMessage(messageId: string) {
-    if (!xmppClient.value || !activeSpaceId.value || !activeChannelId.value) return;
+    if (!xmppClient.value || !activeChannelId.value) return;
     const targetId = findMessageById(messages.value, messageId)?.id ?? messageId;
 
     clearActionError();
 
     try {
       await xmppClient.value.sendRetraction(
-        activeSpaceId.value,
+        activeSpaceId.value ?? "",
         activeChannelId.value,
         targetId,
       );
@@ -1159,14 +1158,14 @@ export function useMessaging(
   }
 
   async function moderateMessage(messageId: string, reason?: string) {
-    if (!xmppClient.value || !activeSpaceId.value || !activeChannelId.value) return;
+    if (!xmppClient.value || !activeChannelId.value) return;
     const targetId = findMessageById(messages.value, messageId)?.id ?? messageId;
 
     clearActionError();
 
     try {
       await xmppClient.value.sendModeration(
-        activeSpaceId.value,
+        activeSpaceId.value ?? "",
         activeChannelId.value,
         targetId,
         reason,
@@ -1177,7 +1176,7 @@ export function useMessaging(
   }
 
   async function editMessage(messageId: string, newBody: string, markup?: MarkupSpan[], references?: MessageReference[]) {
-    if (!xmppClient.value || !activeSpaceId.value || !activeChannelId.value || !newBody.trim())
+    if (!xmppClient.value || !activeChannelId.value || !newBody.trim())
       return;
     const targetId = findMessageById(messages.value, messageId)?.id ?? messageId;
 
@@ -1185,7 +1184,7 @@ export function useMessaging(
 
     try {
       await xmppClient.value.sendCorrection(
-        activeSpaceId.value,
+        activeSpaceId.value ?? "",
         activeChannelId.value,
         newBody,
         targetId,
@@ -1219,9 +1218,9 @@ export function useMessaging(
 
   async function searchMessages(query: string) {
     const client = xmppClient.value;
-    const spaceId = activeSpaceId.value;
+    const spaceId = activeSpaceId.value ?? "";
     const channelId = activeChannelId.value;
-    if (!client || !spaceId || !channelId) return;
+    if (!client || !channelId) return;
     const requestId = ++searchRequestId;
     const trimmed = query.trim();
     searchQuery.value = trimmed;
@@ -1236,7 +1235,7 @@ export function useMessaging(
       if (
         requestId === searchRequestId &&
         xmppClient.value === client &&
-        activeSpaceId.value === spaceId &&
+        (activeSpaceId.value ?? "") === spaceId &&
         activeChannelId.value === channelId
       ) {
         searchResults.value = results;

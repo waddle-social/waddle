@@ -5,7 +5,7 @@ import type { WaddleSession } from "@/lib/server-auth";
 import type { ServerVersion } from "@/composables/useVersion";
 import ProfilePanel from "@/components/chat/ProfilePanel.vue";
 
-const props = defineProps<{
+defineProps<{
   waddles: SpaceSummary[];
   activeSpaceId: string | null;
   activeSidebarMode?: "channels" | "dms";
@@ -21,36 +21,12 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
-  selectSpace: [id: string];
   toggleDms: [];
   openSettings: [];
   logout: [];
   "request-notifications": [];
   "toggle-notifications": [];
 }>();
-
-function waddleInitial(waddle: SpaceSummary): string {
-  return (waddle.name[0] ?? "W").toUpperCase();
-}
-
-function waddleColor(waddle: SpaceSummary): string {
-  const colors = [
-    "oklch(0.78 0.14 184)", "oklch(0.68 0.19 28)", "oklch(0.72 0.15 158)", "oklch(0.78 0.15 78)",
-    "oklch(0.64 0.16 252)", "oklch(0.66 0.16 305)", "oklch(0.68 0.17 350)", "oklch(0.66 0.14 205)",
-    "oklch(0.72 0.17 54)", "oklch(0.64 0.15 286)",
-  ];
-  let hash = 0;
-  for (const char of waddle.name) hash = ((hash << 5) - hash + char.charCodeAt(0)) | 0;
-  return colors[Math.abs(hash) % colors.length];
-}
-
-function waddleKey(waddle: SpaceSummary): string {
-  return waddle.id;
-}
-
-function waddleGlow(waddle: SpaceSummary): string {
-  return `0 0 16px color-mix(in oklab, ${waddleColor(waddle)} 30%, transparent)`;
-}
 </script>
 
 <template>
@@ -74,50 +50,13 @@ function waddleGlow(waddle: SpaceSummary): string {
     <!-- Divider -->
     <div class="bg-border flex-shrink-0" :class="horizontal ? 'chat-rail-divider-horizontal' : 'chat-rail-divider-vertical'" />
 
-    <!-- Waddle icons -->
+    <!-- App spacer: room navigation lives in TopicsPanel as XEP-0503 groups. -->
     <div
       class="chat-pane-scroll chat-rail-list"
       :class="horizontal
         ? 'chat-rail-list-horizontal'
         : 'chat-rail-list-vertical'"
-    >
-      <button
-        v-for="waddle in waddles"
-        :key="waddleKey(waddle)"
-        class="type-control relative w-10 h-10 rounded-lg flex items-center justify-center transition-all duration-200 group flex-shrink-0"
-        :class="activeSpaceId === waddle.id
-          ? 'text-primary-foreground shadow-lg'
-          : 'text-rail-foreground hover:text-rail-active hover:scale-105'"
-        :style="activeSpaceId === waddle.id
-          ? { backgroundColor: waddleColor(waddle), boxShadow: waddleGlow(waddle) }
-          : { backgroundColor: 'var(--rail-hover)' }"
-        :title="waddle.name"
-        :aria-label="`Open ${waddle.name}`"
-        :aria-current="activeSpaceId === waddle.id ? 'page' : undefined"
-        type="button"
-        @click="emit('selectSpace', waddle.id)"
-      >
-        <span class="type-rail-initial">{{ waddleInitial(waddle) }}</span>
-        <span
-          v-if="activeSpaceId === waddle.id && !horizontal"
-          class="chat-rail-indicator-vertical absolute -left-2 top-1/2 -translate-y-1/2 rounded-r-full"
-          :style="{ backgroundColor: waddleColor(waddle) }"
-        />
-        <span
-          v-if="activeSpaceId === waddle.id && horizontal"
-          class="chat-rail-indicator-horizontal absolute bottom-0 left-1/2 -translate-x-1/2 rounded-t-full"
-          :style="{ backgroundColor: waddleColor(waddle) }"
-        />
-      </button>
-
-      <div
-        v-if="waddles.length === 0"
-        class="type-meta text-muted-foreground/30 text-center"
-        :class="horizontal ? 'flex-1 self-stretch flex items-center justify-center' : 'self-stretch px-2'"
-      >
-        No space
-      </div>
-    </div>
+    />
 
     <!-- Bottom actions -->
     <div class="chat-rail-actions" :class="horizontal ? 'chat-rail-actions-horizontal' : 'chat-rail-actions-vertical'">
