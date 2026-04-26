@@ -65,6 +65,11 @@ spec:
           secretKeyRef:
             name: postgresql-app
             key: uri
+      - name: WADDLE_XMPP_PUBSUB_DATABASE_URL
+        valueFrom:
+          secretKeyRef:
+            name: postgresql-app
+            key: uri
     xmpp:
       domain: waddle.social
       tls:
@@ -111,5 +116,6 @@ spec:
       databaseUrl: "postgresql://postgresql-rw:5432/waddle"
       xmppMamDatabaseUrl: "postgresql://postgresql-rw:5432/waddle"
       xmppInboxDatabaseUrl: "postgresql://postgresql-rw:5432/waddle"
+      xmppPubsubDatabaseUrl: "postgresql://postgresql-rw:5432/waddle"
       authProvidersJson: >-
         [{"id":"colony","display_name":"Colony","kind":"oidc","dynamic_client_registration":true,"client_id":"","token_endpoint_auth_method":"none","require_dpop":true,"issuer":"https://colony.waddle.social","scopes":["openid","profile","email"],"subject_claim":"sub","username_claim":"preferred_username","email_claim":"email"}]
