@@ -159,3 +159,83 @@ async fn moderation_broadcasts_and_replays_from_mam() {
 
     client.close().await;
 }
+
+#[tokio::test]
+async fn moderation_from_non_moderator_returns_forbidden() {
+    // XEP-0425 §"only moderators are allowed to moderate" plus
+    // XEP-0045 §5.1.2: runtime moderation privilege is role-bound.
+    // bob joins with no affiliation → role=visitor or participant; he
+    // attempts to moderate admin's message and must be refused with
+    // <forbidden/>.
+    let _guard = TEST_SERIAL.lock().await;
+    let bob_password = format!("ws-test-bob-password-{}", uuid::Uuid::new_v4());
+    let server = TestServer::start_with_extra_accounts(&[("bob", bob_password.as_str())]);
+    let admin_resource = format!("xep0425-admin-{}", uuid::Uuid::new_v4());
+    let admin_password = server.fixed_account_password().to_string();
+    let mut admin = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        USERNAME,
+        &admin_password,
+        &admin_resource,
+    )
+    .await
+    .expect("connect admin");
+    let bob_resource = format!("xep0425-bob-{}", uuid::Uuid::new_v4());
+    let mut bob = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "bob",
+        &bob_password,
+        &bob_resource,
+    )
+    .await
+    .expect("connect bob");
+
+    let room = format!("moderate-forbidden-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
+    join_room(&mut admin, &room).await;
+
+    bob.send(&format!(
+        r#"<presence to="{room}/bob"><x xmlns="http://jabber.org/protocol/muc"/></presence>"#
+    ))
+    .await
+    .expect("send bob join");
+    bob.recv_until(|frame| frame.contains("<subject"))
+        .await
+        .expect("bob join responses");
+
+    admin
+        .send(&format!(
+            r#"<message type="groupchat" to="{room}" id="orig-mod"><body>moderate me</body></message>"#
+        ))
+        .await
+        .expect("send original");
+    let echo = admin
+        .recv_matching(|frame| frame.contains("moderate me") && frame.contains("stanza-id"))
+        .await
+        .expect("original echo");
+    let target = stanza_id(&echo);
+
+    bob.send(&format!(
+        r#"<iq type="set" id="bob-mod" to="{room}">
+            <moderate id="{target}" xmlns="urn:xmpp:message-moderate:1">
+                <retract xmlns="urn:xmpp:message-retract:1"/>
+                <reason>nope</reason>
+            </moderate>
+        </iq>"#
+    ))
+    .await
+    .expect("send unauthorized moderation");
+
+    let error = bob
+        .recv_matching(|frame| frame.contains("bob-mod") && frame.contains("<forbidden"))
+        .await
+        .expect("forbidden error");
+    assert!(
+        error.contains("type=\"error\""),
+        "not an error stanza: {error}"
+    );
+
+    bob.close().await;
+    admin.close().await;
+}

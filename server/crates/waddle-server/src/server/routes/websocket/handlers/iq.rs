@@ -850,9 +850,13 @@ pub async fn handle_iq_with_conn_state(
                 )]
             }
         };
-        let is_moderator = matches!(context.affiliation, Affiliation::Owner | Affiliation::Admin)
-            || matches!(context.role, waddle_xmpp::Role::Moderator);
-        if !is_moderator {
+        // XEP-0425 §"only moderators are allowed to moderate" combined with
+        // XEP-0045 §5.1.2: runtime moderation privilege is role-bound, not
+        // affiliation-bound. Owner/Admin affiliations only matter to the
+        // extent that they cause the room to grant the Moderator *role* on
+        // entry; if an owner has explicitly taken a non-moderator role
+        // (e.g. visitor), that signal is intentional and must be honoured.
+        if !matches!(context.role, waddle_xmpp::Role::Moderator) {
             return vec![build_iq_error_xml_with_addresses(
                 &id,
                 response_from,
