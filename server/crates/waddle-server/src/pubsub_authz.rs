@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use jid::BareJid;
 use waddle_xmpp::pubsub::PubSubStorage;
-use waddle_xmpp::XmppError;
 use waddle_xmpp::pubsub::{AccessModel, Affiliation, PublishModel};
+use waddle_xmpp::XmppError;
 
 /// Owner-derivation rule for PEP nodes (XEP-0163 §1).
 ///
@@ -92,11 +92,14 @@ pub async fn can_publish(
         PublishModel::Open => Ok(true),
         PublishModel::Publishers => Ok(aff.can_publish_default()),
         PublishModel::Subscribers => {
-            // Treat any subscription record as publish-eligible.
-            let has_sub = !storage
+            // Only a subscription to the *requested* node grants publish rights
+            // (XEP-0060 §7.1.3). Subscriptions to other nodes under the same
+            // owner must not be treated as eligible.
+            let has_sub = storage
                 .list_subscriber_subscriptions(target, &jid::Jid::from(entity.clone()))
                 .await?
-                .is_empty();
+                .iter()
+                .any(|(n, _)| n == node);
             Ok(has_sub || aff.can_publish_default())
         }
     }
@@ -207,5 +210,60 @@ mod tests {
         assert!(can_publish(&storage, &alice, "n", &alice, true)
             .await
             .expect("can_publish"));
+    }
+
+    #[tokio::test]
+    async fn subscribers_model_scoped_to_requested_node() {
+        use waddle_xmpp::pubsub::PublishModel;
+
+        let storage: Arc<dyn PubSubStorage> = Arc::new(InMemoryPubSubStorage::new());
+        let alice = jid("alice@x.com");
+        let bob = jid("bob@x.com");
+
+        // Create two nodes for alice.
+        storage
+            .get_or_create_node(&alice, "node-a")
+            .await
+            .expect("node-a");
+        storage
+            .get_or_create_node(&alice, "node-b")
+            .await
+            .expect("node-b");
+
+        // Set both to publish_model = Subscribers.
+        let cfg = NodeConfig {
+            publish_model: PublishModel::Subscribers,
+            ..NodeConfig::default()
+        };
+        storage
+            .update_node_config(&alice, "node-a", &cfg)
+            .await
+            .expect("config node-a");
+        storage
+            .update_node_config(&alice, "node-b", &cfg)
+            .await
+            .expect("config node-b");
+
+        // Bob subscribes only to node-a.
+        storage
+            .subscribe(&alice, "node-a", &jid::Jid::from(bob.clone()))
+            .await
+            .expect("subscribe");
+
+        // Bob may publish to node-a (has subscription there).
+        assert!(
+            can_publish(&storage, &alice, "node-a", &bob, false)
+                .await
+                .expect("can_publish node-a"),
+            "subscriber on node-a should be allowed to publish to node-a"
+        );
+
+        // Bob must NOT publish to node-b (subscription is on a different node).
+        assert!(
+            !can_publish(&storage, &alice, "node-b", &bob, false)
+                .await
+                .expect("can_publish node-b"),
+            "subscription on node-a must not grant publish access to node-b"
+        );
     }
 }

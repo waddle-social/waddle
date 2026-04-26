@@ -435,8 +435,6 @@ fn required_attr(element: &Element, attr: &str) -> CoreResult<String> {
 }
 
 fn parse_configure_form(form: &Element) -> CoreResult<NodeConfig> {
-    use crate::pubsub::node::{AccessModel, PublishModel, SendLastPublishedItem};
-
     let mut config = NodeConfig::default();
     for field in form.children().filter(|c| c.is("field", "jabber:x:data")) {
         let var = field.attr("var").unwrap_or("");
@@ -446,32 +444,70 @@ fn parse_configure_form(form: &Element) -> CoreResult<NodeConfig> {
             .unwrap_or_default();
         match var {
             "pubsub#access_model" => {
-                config.access_model = value.parse().unwrap_or(AccessModel::Presence);
+                config.access_model = value.parse().map_err(|_| {
+                    CoreError::bad_request(Some(format!("invalid pubsub#access_model: {value}")))
+                })?;
             }
             "pubsub#publish_model" => {
-                config.publish_model = value.parse().unwrap_or(PublishModel::Publishers);
+                config.publish_model = value.parse().map_err(|_| {
+                    CoreError::bad_request(Some(format!("invalid pubsub#publish_model: {value}")))
+                })?;
             }
             "pubsub#max_items" => {
-                if let Ok(n) = value.parse::<u32>() {
-                    config.max_items = n;
-                }
+                config.max_items = value.parse::<u32>().map_err(|_| {
+                    CoreError::bad_request(Some(format!("invalid pubsub#max_items: {value}")))
+                })?;
             }
             "pubsub#persist_items" => {
-                config.persist_items = matches!(value.as_str(), "1" | "true");
+                config.persist_items = match value.as_str() {
+                    "0" | "false" => false,
+                    "1" | "true" => true,
+                    _ => {
+                        return Err(CoreError::bad_request(Some(format!(
+                            "invalid pubsub#persist_items: {value}"
+                        ))))
+                    }
+                };
             }
             "pubsub#deliver_payloads" => {
-                config.deliver_payloads = matches!(value.as_str(), "1" | "true");
+                config.deliver_payloads = match value.as_str() {
+                    "0" | "false" => false,
+                    "1" | "true" => true,
+                    _ => {
+                        return Err(CoreError::bad_request(Some(format!(
+                            "invalid pubsub#deliver_payloads: {value}"
+                        ))))
+                    }
+                };
             }
             "pubsub#notify_retract" => {
-                config.notify_retract = matches!(value.as_str(), "1" | "true");
+                config.notify_retract = match value.as_str() {
+                    "0" | "false" => false,
+                    "1" | "true" => true,
+                    _ => {
+                        return Err(CoreError::bad_request(Some(format!(
+                            "invalid pubsub#notify_retract: {value}"
+                        ))))
+                    }
+                };
             }
             "pubsub#notify_delete" => {
-                config.notify_delete = matches!(value.as_str(), "1" | "true");
+                config.notify_delete = match value.as_str() {
+                    "0" | "false" => false,
+                    "1" | "true" => true,
+                    _ => {
+                        return Err(CoreError::bad_request(Some(format!(
+                            "invalid pubsub#notify_delete: {value}"
+                        ))))
+                    }
+                };
             }
             "pubsub#send_last_published_item" => {
-                config.send_last_published_item = value
-                    .parse()
-                    .unwrap_or(SendLastPublishedItem::OnSubAndPresence);
+                config.send_last_published_item = value.parse().map_err(|_| {
+                    CoreError::bad_request(Some(format!(
+                        "invalid pubsub#send_last_published_item: {value}"
+                    )))
+                })?;
             }
             _ => {} // Unknown fields ignored per XEP-0060.
         }
@@ -542,9 +578,21 @@ pub fn build_pubsub_configure_form_result(original_iq: &Iq, node: &str, config: 
             )
             .build()
     }
+    /// Build a `type='hidden'` field per XEP-0004 §3.2.
+    fn hidden_field(var: &str, value: &str) -> Element {
+        Element::builder("field", "jabber:x:data")
+            .attr("var", var)
+            .attr("type", "hidden")
+            .append(
+                Element::builder("value", "jabber:x:data")
+                    .append(value)
+                    .build(),
+            )
+            .build()
+    }
     let form = Element::builder("x", "jabber:x:data")
         .attr("type", "form")
-        .append(field(
+        .append(hidden_field(
             "FORM_TYPE",
             "http://jabber.org/protocol/pubsub#node_config",
         ))

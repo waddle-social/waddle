@@ -1375,7 +1375,7 @@ pub async fn handle_iq_with_conn_state(
                     .await;
                 }
 
-                let is_pep = is_pep_request_to(&iq, &target_jid) || is_pep_request(&iq, &user_jid);
+                let is_pep = is_pep_self_or_to(&iq, &target_jid, &user_jid);
                 match crate::pubsub_authz::can_publish(
                     &state.deps.protocol.pubsub_storage,
                     &target_jid,
@@ -1390,11 +1390,26 @@ pub async fn handle_iq_with_conn_state(
                         // For PEP, before the node exists, can_publish returns false because
                         // get_node returns None. Allow PEP auto-create when the publisher is
                         // the PEP owner (target == user) — this is the standard PEP semantics.
-                        if !(is_pep && target_jid == user_jid) {
-                            return vec![iq_to_xml(build_pubsub_error(
-                                &iq,
-                                PubSubError::Forbidden,
-                            ))];
+                        if is_pep && target_jid == user_jid {
+                            // PEP self-publish: fall through to auto-create path.
+                        } else {
+                            // For non-PEP nodes, distinguish missing node (NodeNotFound,
+                            // XEP-0060 §7.1) from an existing node with access denied (Forbidden).
+                            let node_exists = state
+                                .deps
+                                .protocol
+                                .pubsub_storage
+                                .get_node(&target_jid, &node)
+                                .await
+                                .ok()
+                                .flatten()
+                                .is_some();
+                            let error = if node_exists {
+                                build_pubsub_error(&iq, PubSubError::Forbidden)
+                            } else {
+                                build_pubsub_error(&iq, PubSubError::NodeNotFound)
+                            };
+                            return vec![iq_to_xml(error)];
                         }
                     }
                     Err(e) => {
@@ -1627,7 +1642,7 @@ pub async fn handle_iq_with_conn_state(
             }
 
             PubSubRequest::ConfigureNode { node } => {
-                let is_pep = is_pep_request_to(&iq, &target_jid);
+                let is_pep = is_pep_self_or_to(&iq, &target_jid, &user_jid);
                 if !crate::pubsub_authz::can_administer(
                     &state.deps.protocol.pubsub_storage,
                     &target_jid,
@@ -1697,7 +1712,7 @@ pub async fn handle_iq_with_conn_state(
                     return vec![iq_to_xml(error)];
                 }
 
-                let is_pep = is_pep_request_to(&iq, &target_jid);
+                let is_pep = is_pep_self_or_to(&iq, &target_jid, &user_jid);
                 match crate::pubsub_authz::can_subscribe(
                     &state.deps.protocol.pubsub_storage,
                     &target_jid,
@@ -1709,7 +1724,22 @@ pub async fn handle_iq_with_conn_state(
                 {
                     Ok(true) => {}
                     Ok(false) => {
-                        let error = build_pubsub_error(&iq, PubSubError::Forbidden);
+                        // Distinguish missing node (XEP-0060 §6.1: item-not-found) from
+                        // access denial (forbidden).
+                        let node_exists = state
+                            .deps
+                            .protocol
+                            .pubsub_storage
+                            .get_node(&target_jid, &node)
+                            .await
+                            .ok()
+                            .flatten()
+                            .is_some();
+                        let error = if node_exists {
+                            build_pubsub_error(&iq, PubSubError::Forbidden)
+                        } else {
+                            build_pubsub_error(&iq, PubSubError::NodeNotFound)
+                        };
                         return vec![iq_to_xml(error)];
                     }
                     Err(e) => {
@@ -1768,7 +1798,7 @@ pub async fn handle_iq_with_conn_state(
                 }
             }
             PubSubRequest::PurgeNode { node } => {
-                let is_pep = is_pep_request_to(&iq, &target_jid);
+                let is_pep = is_pep_self_or_to(&iq, &target_jid, &user_jid);
                 match crate::pubsub_authz::can_administer(
                     &state.deps.protocol.pubsub_storage,
                     &target_jid,
@@ -1808,7 +1838,7 @@ pub async fn handle_iq_with_conn_state(
             }
 
             PubSubRequest::ConfigureNodeSet { node, config } => {
-                let is_pep = is_pep_request_to(&iq, &target_jid);
+                let is_pep = is_pep_self_or_to(&iq, &target_jid, &user_jid);
                 if !crate::pubsub_authz::can_administer(
                     &state.deps.protocol.pubsub_storage,
                     &target_jid,
@@ -1839,7 +1869,7 @@ pub async fn handle_iq_with_conn_state(
             }
 
             PubSubRequest::AffiliationsGet { node } => {
-                let is_pep = is_pep_request_to(&iq, &target_jid);
+                let is_pep = is_pep_self_or_to(&iq, &target_jid, &user_jid);
                 if !crate::pubsub_authz::can_administer(
                     &state.deps.protocol.pubsub_storage,
                     &target_jid,
@@ -1864,7 +1894,7 @@ pub async fn handle_iq_with_conn_state(
             }
 
             PubSubRequest::AffiliationsSet { node, changes } => {
-                let is_pep = is_pep_request_to(&iq, &target_jid);
+                let is_pep = is_pep_self_or_to(&iq, &target_jid, &user_jid);
                 if !crate::pubsub_authz::can_administer(
                     &state.deps.protocol.pubsub_storage,
                     &target_jid,
@@ -4108,6 +4138,16 @@ async fn build_muc_owner_config_response(
         response_to,
         Some(query),
     ))
+}
+
+/// PEP self-or-to check (XEP-0163 §3).
+///
+/// Returns `true` when the IQ is directed at `target_jid` (a PEP service) *or*
+/// when no `to=` attribute is present and `user_jid` is the implicit PEP owner.
+/// Use this in every pubsub IQ arm so that to-less self-targeted IQs receive
+/// the same owner-derived affiliation as explicitly addressed PEP requests.
+fn is_pep_self_or_to(iq: &xmpp_parsers::iq::Iq, target_jid: &BareJid, user_jid: &BareJid) -> bool {
+    is_pep_request_to(iq, target_jid) || is_pep_request(iq, user_jid)
 }
 
 fn spaces_service_bare_jid(spaces_domain: &str) -> Result<BareJid, String> {
