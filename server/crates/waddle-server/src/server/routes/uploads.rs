@@ -591,6 +591,7 @@ mod tests {
             blob_storage,
             Arc::new(waddle_xmpp::inbox::storage::InMemoryInboxStorage::new()),
             permission_actor,
+            Arc::from(Vec::<jid::BareJid>::new()),
         ));
 
         (Arc::new(UploadState::new(app_state)), upload_dir)

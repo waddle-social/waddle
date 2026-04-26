@@ -14,6 +14,7 @@ use axum::{
     Router,
 };
 use futures::StreamExt;
+use jid::BareJid;
 use kameo::actor::ActorRef;
 use opentelemetry::trace::TraceContextExt;
 use opentelemetry_http::HeaderExtractor;
@@ -70,6 +71,11 @@ pub struct AppState {
     pub inbox_storage: Arc<dyn InboxStorage>,
     /// Shared permission actor handle.
     pub permission_actor: ActorRef<PermissionActor>,
+    /// Bare JIDs of server owners (resolved from
+    /// `WADDLE_SERVER_OWNER_LOCALPARTS` + the XMPP user-bearing domain at
+    /// startup). Used to seed `Affiliation::Owner` rows on Spaces PubSub
+    /// nodes so XEP-0060 admin operations work for these accounts.
+    pub server_owner_jids: Arc<[BareJid]>,
 }
 
 impl AppState {
@@ -89,6 +95,7 @@ impl AppState {
             blob_storage,
             Arc::new(waddle_xmpp::inbox::storage::InMemoryInboxStorage::new()),
             permission_actor,
+            Arc::from(Vec::<BareJid>::new()),
         )
     }
 
@@ -97,14 +104,39 @@ impl AppState {
         blob_storage: Arc<dyn crate::storage::BlobStorage>,
         inbox_storage: Arc<dyn InboxStorage>,
         permission_actor: ActorRef<PermissionActor>,
+        server_owner_jids: Arc<[BareJid]>,
     ) -> Self {
         Self {
             db_pool,
             blob_storage,
             inbox_storage,
             permission_actor,
+            server_owner_jids,
         }
     }
+}
+
+/// Resolve `WADDLE_SERVER_OWNER_LOCALPARTS` localparts into bare JIDs against
+/// `xmpp_domain`. Bad localparts produce a `warn!` and are skipped; they do
+/// not block startup.
+pub fn resolve_server_owner_jids(
+    config: &bootstrap_membership::BootstrapMembershipConfig,
+    xmpp_domain: &str,
+) -> Arc<[BareJid]> {
+    let mut jids = Vec::new();
+    for localpart in config.owner_localparts() {
+        let raw = format!("{localpart}@{xmpp_domain}");
+        match raw.parse::<BareJid>() {
+            Ok(jid) => jids.push(jid),
+            Err(error) => warn!(
+                localpart = %localpart,
+                xmpp_domain = %xmpp_domain,
+                error = %error,
+                "skipping invalid server-owner localpart for spaces affiliation seeding",
+            ),
+        }
+    }
+    Arc::from(jids)
 }
 
 /// XMPP server configuration loaded from environment variables.
@@ -219,6 +251,11 @@ async fn bootstrap_fresh_xmpp_topology(
     pubsub_storage: Arc<dyn PubSubStorage>,
     services: &XmppServiceDomains,
 ) -> Result<()> {
+    let spaces_jid: jid::BareJid = services
+        .spaces
+        .parse()
+        .map_err(|error| anyhow::anyhow!("invalid spaces service JID: {error}"))?;
+
     let actor = state.db_pool.global_actor().clone();
     let row = actor
         .ask(DbQueryOne {
@@ -255,10 +292,30 @@ async fn bootstrap_fresh_xmpp_topology(
                     anyhow::anyhow!("failed to inspect announcements channel: {error}")
                 })?
                 .is_some());
-    if !should_seed_pubsub {
-        return Ok(());
+
+    if should_seed_pubsub {
+        seed_initial_xmpp_topology(
+            &actor,
+            &pubsub_storage,
+            services,
+            &spaces_jid,
+            should_seed_db,
+        )
+        .await?;
     }
 
+    seed_spaces_admin_affiliations(&pubsub_storage, &spaces_jid, &state.server_owner_jids).await;
+
+    Ok(())
+}
+
+async fn seed_initial_xmpp_topology(
+    actor: &kameo::actor::ActorRef<crate::db::actor::DbActor>,
+    pubsub_storage: &Arc<dyn PubSubStorage>,
+    services: &XmppServiceDomains,
+    spaces_jid: &BareJid,
+    should_seed_db: bool,
+) -> Result<()> {
     if should_seed_db {
         let now = chrono::Utc::now().to_rfc3339();
         for (id, name, description, position, is_default, channel_type) in [
@@ -296,16 +353,12 @@ async fn bootstrap_fresh_xmpp_topology(
         }
     }
 
-    let spaces_jid: jid::BareJid = services
-        .spaces
-        .parse()
-        .map_err(|error| anyhow::anyhow!("invalid spaces service JID: {error}"))?;
     pubsub_storage
-        .get_or_create_node(&spaces_jid, "general")
+        .get_or_create_node(spaces_jid, "general")
         .await
         .map_err(|error| anyhow::anyhow!("failed to create General space node: {error}"))?;
     pubsub_storage
-        .update_node_config(&spaces_jid, "general", &NodeConfig::spaces_public())
+        .update_node_config(spaces_jid, "general", &NodeConfig::spaces_public())
         .await
         .map_err(|error| anyhow::anyhow!("failed to configure General space node: {error}"))?;
 
@@ -320,7 +373,7 @@ async fn bootstrap_fresh_xmpp_topology(
             payload: Some(waddle_xmpp::xep::xep0402::build_bookmark_element(&bookmark)),
         };
         pubsub_storage
-            .publish_item(&spaces_jid, "general", &item, Some(&spaces_jid), false)
+            .publish_item(spaces_jid, "general", &item, Some(spaces_jid), false)
             .await
             .map_err(|error| anyhow::anyhow!("failed to publish {name} bookmark: {error}"))?;
     }
@@ -331,6 +384,41 @@ async fn bootstrap_fresh_xmpp_topology(
         "Seeded fresh XMPP General Space with Chat and Announcements MUCs"
     );
     Ok(())
+}
+
+/// Mirror server-owner permissions into `Affiliation::Owner` rows on every
+/// existing Spaces PubSub node so XEP-0060 admin operations
+/// (`<configure/>`, `<purge/>`, `<affiliations/>`) succeed for accounts in
+/// `WADDLE_SERVER_OWNER_LOCALPARTS`. Per-entity failures are logged and do
+/// not abort the batch.
+async fn seed_spaces_admin_affiliations(
+    pubsub_storage: &Arc<dyn PubSubStorage>,
+    spaces_jid: &BareJid,
+    server_owner_jids: &[BareJid],
+) {
+    if server_owner_jids.is_empty() {
+        return;
+    }
+    let nodes = match pubsub_storage.list_nodes(spaces_jid).await {
+        Ok(nodes) => nodes,
+        Err(error) => {
+            warn!(
+                spaces = %spaces_jid,
+                error = %error,
+                "failed to enumerate Spaces nodes for server-owner affiliation seed",
+            );
+            return;
+        }
+    };
+    for node in &nodes {
+        crate::spaces_pubsub_seed::seed_owners_on_node(
+            pubsub_storage,
+            spaces_jid,
+            node,
+            server_owner_jids,
+        )
+        .await;
+    }
 }
 
 fn start_acme_runtime(
@@ -490,11 +578,16 @@ pub async fn start_with_config(
     // Create HTTP state (shares db_pool via Arc)
     let blob_storage = crate::storage::build_blob_storage()
         .map_err(|e| anyhow::anyhow!("Failed to initialize blob storage: {}", e))?;
+    let server_owner_jids = resolve_server_owner_jids(
+        &bootstrap_membership::BootstrapMembershipConfig::from_env(),
+        &xmpp_config.domain,
+    );
     let state = Arc::new(AppState::new_with_deps(
         Arc::clone(&db_pool),
         blob_storage,
         Arc::clone(&inbox_storage),
         permission_actor.clone(),
+        server_owner_jids,
     ));
     let websocket_mam_storage =
         create_websocket_mam_storage(xmpp_config.mam_database_url.clone()).await?;

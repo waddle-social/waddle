@@ -9,6 +9,7 @@ pub mod permissions;
 pub mod pubsub;
 pub mod pubsub_authz;
 pub mod server;
+pub mod spaces_pubsub_seed;
 pub mod storage;
 pub mod telemetry;
 pub mod time;

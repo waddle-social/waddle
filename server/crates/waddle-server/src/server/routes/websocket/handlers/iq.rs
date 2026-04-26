@@ -1592,6 +1592,7 @@ pub async fn handle_iq_with_conn_state(
                                         PubSubError::Forbidden,
                                     ))];
                                 }
+                                seed_spaces_node_owners(state, &spaces_jid, &node, &user_jid).await;
                                 let response = build_pubsub_success(&iq);
                                 return vec![iq_to_xml(response)];
                             }
@@ -1674,7 +1675,17 @@ pub async fn handle_iq_with_conn_state(
             }
 
             PubSubRequest::DeleteNode { node } => {
-                if target_jid != user_jid {
+                let is_pep = is_pep_self_or_to(&iq, &target_jid, &user_jid);
+                if !crate::pubsub_authz::can_administer(
+                    &state.deps.protocol.pubsub_storage,
+                    &target_jid,
+                    &node,
+                    &user_jid,
+                    is_pep,
+                )
+                .await
+                .unwrap_or(false)
+                {
                     let error = build_pubsub_error(&iq, PubSubError::Forbidden);
                     return vec![iq_to_xml(error)];
                 }
@@ -4069,6 +4080,33 @@ async fn write_space_owner_tuple(
         ),
     )
     .await
+}
+
+/// Seed `Affiliation::Owner` rows on a freshly-created Spaces PubSub node
+/// for the creator and every configured server owner. Failures are logged
+/// but non-fatal — `<create>` still succeeds. The next reconcile pass at
+/// startup repairs any missed seeds.
+async fn seed_spaces_node_owners(
+    state: &WebSocketState,
+    spaces_jid: &BareJid,
+    node: &str,
+    creator: &BareJid,
+) {
+    let server_owner_jids = Arc::clone(&state.deps.app_state.server_owner_jids);
+    let mut owners: Vec<BareJid> = server_owner_jids.iter().cloned().collect();
+    if !owners.iter().any(|jid| jid == creator) {
+        owners.push(creator.clone());
+    }
+    if owners.is_empty() {
+        return;
+    }
+    crate::spaces_pubsub_seed::seed_owners_on_node(
+        &state.deps.protocol.pubsub_storage,
+        spaces_jid,
+        node,
+        &owners,
+    )
+    .await;
 }
 
 /// Write `channel:<channel_id>#parent → space:<space_node>#` so that all members
