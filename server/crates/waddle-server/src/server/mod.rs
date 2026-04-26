@@ -893,7 +893,6 @@ async fn create_router(
                 dispatcher: stanza_dispatcher,
                 pubsub_storage,
                 push_store,
-                pubsub_subscriptions: Arc::new(dashmap::DashSet::new()),
                 isr_token_store: waddle_xmpp::isr::create_shared_store(),
                 sm_session_registry,
                 resumable_sessions,

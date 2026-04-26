@@ -34,8 +34,8 @@ use waddle_xmpp::{
     protocol::{ConnectionPhase, StanzaContext as ProtocolStanzaContext},
     pubsub::{
         build_pubsub_error, build_pubsub_items_result, build_pubsub_publish_result,
-        build_pubsub_success, is_pubsub_iq, parse_pubsub_iq, PubSubError, PubSubItem,
-        PubSubRequest,
+        build_pubsub_subscribe_result, build_pubsub_success, is_pep_request_to, is_pubsub_iq,
+        parse_pubsub_iq, PubSubError, PubSubItem, PubSubRequest, SubId,
     },
     registry::BroadcastOutcome,
     roster::{
@@ -1680,50 +1680,76 @@ pub async fn handle_iq_with_conn_state(
                     let error = build_pubsub_error(&iq, PubSubError::Forbidden);
                     return vec![iq_to_xml(error)];
                 }
+
+                let is_pep = is_pep_request_to(&iq, &target_jid);
+                match crate::pubsub_authz::can_subscribe(
+                    &state.deps.protocol.pubsub_storage,
+                    &target_jid,
+                    &node,
+                    &subscription_jid,
+                    is_pep,
+                )
+                .await
+                {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        let error = build_pubsub_error(&iq, PubSubError::Forbidden);
+                        return vec![iq_to_xml(error)];
+                    }
+                    Err(e) => {
+                        warn!("PubSub access check failed: {e}");
+                        let error = build_pubsub_error(&iq, PubSubError::Forbidden);
+                        return vec![iq_to_xml(error)];
+                    }
+                }
+
                 match state
                     .deps
                     .protocol
                     .pubsub_storage
-                    .get_node(&target_jid, &node)
+                    .subscribe(&target_jid, &node, &jid)
                     .await
                 {
-                    Ok(Some(_)) => {}
-                    Ok(None) => {
-                        let error = build_pubsub_error(&iq, PubSubError::NodeNotFound);
-                        return vec![iq_to_xml(error)];
+                    Ok(sub) => {
+                        let response = build_pubsub_subscribe_result(&iq, &node, &jid, &sub.subid);
+                        return vec![iq_to_xml(response)];
                     }
                     Err(e) => {
-                        warn!("PubSub subscribe node lookup failed: {}", e);
-                        let error = build_pubsub_error(&iq, PubSubError::NodeNotFound);
+                        warn!("PubSub subscribe failed: {e}");
+                        let error = build_pubsub_error(&iq, PubSubError::Forbidden);
                         return vec![iq_to_xml(error)];
                     }
                 }
-                state.deps.protocol.pubsub_subscriptions.insert((
-                    target_jid.to_string(),
-                    node,
-                    subscription_jid.to_string(),
-                ));
-                let response = build_pubsub_success(&iq);
-                return vec![iq_to_xml(response)];
             }
 
-            PubSubRequest::Unsubscribe { node, jid, .. } => {
+            PubSubRequest::Unsubscribe { node, jid, subid } => {
                 let subscription_jid = jid.to_bare();
                 if subscription_jid != user_jid {
                     let error = build_pubsub_error(&iq, PubSubError::Forbidden);
                     return vec![iq_to_xml(error)];
                 }
-                let removed = state.deps.protocol.pubsub_subscriptions.remove(&(
-                    target_jid.to_string(),
-                    node,
-                    subscription_jid.to_string(),
-                ));
-                if removed.is_none() {
-                    let error = build_pubsub_error(&iq, PubSubError::NotSubscribed);
-                    return vec![iq_to_xml(error)];
+                let typed_subid = subid.as_deref().map(SubId::from_raw);
+                match state
+                    .deps
+                    .protocol
+                    .pubsub_storage
+                    .unsubscribe(&target_jid, &node, &jid, typed_subid.as_ref())
+                    .await
+                {
+                    Ok(true) => {
+                        let response = build_pubsub_success(&iq);
+                        return vec![iq_to_xml(response)];
+                    }
+                    Ok(false) => {
+                        let error = build_pubsub_error(&iq, PubSubError::NotSubscribed);
+                        return vec![iq_to_xml(error)];
+                    }
+                    Err(e) => {
+                        warn!("PubSub unsubscribe failed: {e}");
+                        let error = build_pubsub_error(&iq, PubSubError::NotSubscribed);
+                        return vec![iq_to_xml(error)];
+                    }
                 }
-                let response = build_pubsub_success(&iq);
-                return vec![iq_to_xml(response)];
             }
             PubSubRequest::PurgeNode { .. }
             | PubSubRequest::ConfigureNodeSet { .. }
