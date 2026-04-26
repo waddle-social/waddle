@@ -16,14 +16,17 @@
 //!
 //! # Current coverage
 //!
-//! Only a subset of variants have their interpreter wiring in place — the
-//! ones needed by handlers that have been migrated so far (ping, session).
-//! The remaining variants (`SendDirect`, `BroadcastToRoom`, `QueryMam`,
-//! `AskSfu`, `RequestEnrichment`, etc.) are defined in the event enum so
-//! future handlers can emit them, but land in the interpreter as later
-//! migration steps pull their XEP into the sans-I/O world.
+//! `SendStanza`, `SendDirect`, `Log`, `CloseTransport`,
+//! `UnregisterConnection`, `ArchivePersonalMessage`, and
+//! `ArchiveRoomMessage` are wired against the registry and MAM storage. The
+//! remaining variants (`BroadcastToRoom`, `RegisterConnection`, `QueryMam`,
+//! `AskSfu`, `RequestEnrichment`, the timer variants) are defined in the
+//! event enum so future handlers can emit them, but land here as warnings
+//! until later migration steps pull their XEP into the sans-I/O world.
 
+use std::sync::Arc;
 use tracing::{debug, error, info, warn};
+use waddle_xmpp::mam::{message_to_archived, MamStorage};
 use waddle_xmpp::parser::stanza_to_string;
 use waddle_xmpp::protocol::OutboundEvent;
 use waddle_xmpp::registry::ConnectionRegistry;
@@ -42,13 +45,15 @@ pub struct InterpretOutcome {
 
 /// Execute the side effects described by `events`.
 ///
-/// The function is `async` because future migration steps add variants
-/// that genuinely require `.await` (registry lookups, actor calls, MAM
-/// storage). The currently-supported variants are all synchronous, so this
-/// function will return immediately for the ping/session flow.
+/// The function is `async` because variants like `ArchivePersonalMessage`,
+/// `ArchiveRoomMessage`, and `SendDirect` perform real async work against
+/// MAM storage and the connection registry. Variants whose interpretation
+/// is still stubbed (`BroadcastToRoom`, the request/response callback
+/// pairs) return immediately.
 pub async fn interpret(
     events: Vec<OutboundEvent>,
     registry: &ConnectionRegistry,
+    mam_storage: &Arc<dyn MamStorage>,
 ) -> InterpretOutcome {
     let mut outcome = InterpretOutcome::default();
 
@@ -118,19 +123,61 @@ pub async fn interpret(
                 let _entry = registry.unregister(&jid);
                 debug!(jid = %jid, "UnregisterConnection: removed from registry");
             }
-            OutboundEvent::ArchiveRoomMessage { room, .. } => {
-                warn!(
-                    variant = "ArchiveRoomMessage",
-                    room = %room,
-                    "OutboundEvent variant not yet wired in interpreter"
-                );
+            OutboundEvent::ArchiveRoomMessage {
+                room,
+                archive_id,
+                message,
+            } => {
+                let archived =
+                    message_to_archived(&message, &room, &archive_id, chrono::Utc::now());
+                match mam_storage
+                    .store_message(&room.to_string(), &archived)
+                    .await
+                {
+                    Ok(_) => {
+                        debug!(
+                            archive = %room,
+                            archive_id = %archive_id,
+                            "ArchiveRoomMessage persisted"
+                        );
+                    }
+                    Err(err) => {
+                        error!(
+                            archive = %room,
+                            archive_id = %archive_id,
+                            error = %err,
+                            "ArchiveRoomMessage failed to persist"
+                        );
+                    }
+                }
             }
-            OutboundEvent::ArchivePersonalMessage { archive_owner, .. } => {
-                warn!(
-                    variant = "ArchivePersonalMessage",
-                    archive_owner = %archive_owner,
-                    "OutboundEvent variant not yet wired in interpreter"
-                );
+            OutboundEvent::ArchivePersonalMessage {
+                archive_owner,
+                archive_id,
+                message,
+            } => {
+                let archived =
+                    message_to_archived(&message, &archive_owner, &archive_id, chrono::Utc::now());
+                match mam_storage
+                    .store_message(&archive_owner.to_string(), &archived)
+                    .await
+                {
+                    Ok(_) => {
+                        debug!(
+                            archive = %archive_owner,
+                            archive_id = %archive_id,
+                            "ArchivePersonalMessage persisted"
+                        );
+                    }
+                    Err(err) => {
+                        error!(
+                            archive = %archive_owner,
+                            archive_id = %archive_id,
+                            error = %err,
+                            "ArchivePersonalMessage failed to persist"
+                        );
+                    }
+                }
             }
             OutboundEvent::RequestEnrichment { id, .. } => {
                 warn!(
@@ -210,12 +257,17 @@ impl ToElementString for waddle_xmpp::Stanza {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use waddle_xmpp::mam::InMemoryMamStorage;
     use waddle_xmpp::Stanza;
     use xmpp_parsers::iq::{Iq, IqType};
     use xmpp_parsers::minidom::Element;
 
     fn test_registry() -> ConnectionRegistry {
         ConnectionRegistry::new()
+    }
+
+    fn test_mam() -> Arc<dyn MamStorage> {
+        Arc::new(InMemoryMamStorage::new())
     }
 
     fn result_iq(id: &str) -> Iq {
@@ -232,7 +284,7 @@ mod tests {
         let events = vec![OutboundEvent::SendStanza(Box::new(Stanza::Iq(result_iq(
             "x",
         ))))];
-        let outcome = interpret(events, &test_registry()).await;
+        let outcome = interpret(events, &test_registry(), &test_mam()).await;
         assert_eq!(outcome.frames.len(), 1);
         assert!(outcome.frames[0].contains("type=\"result\""));
         assert!(outcome.frames[0].contains("id=\"x\""));
@@ -242,7 +294,7 @@ mod tests {
     #[tokio::test]
     async fn interprets_close_transport() {
         let events = vec![OutboundEvent::CloseTransport];
-        let outcome = interpret(events, &test_registry()).await;
+        let outcome = interpret(events, &test_registry(), &test_mam()).await;
         assert!(outcome.close);
         assert!(outcome.frames.is_empty());
     }
@@ -253,7 +305,7 @@ mod tests {
             level: tracing::Level::INFO,
             message: "hello".to_string(),
         }];
-        let outcome = interpret(events, &test_registry()).await;
+        let outcome = interpret(events, &test_registry(), &test_mam()).await;
         assert!(outcome.frames.is_empty());
         assert!(!outcome.close);
     }
@@ -268,9 +320,43 @@ mod tests {
             },
             OutboundEvent::SendStanza(Box::new(Stanza::Iq(result_iq("b")))),
         ];
-        let outcome = interpret(events, &test_registry()).await;
+        let outcome = interpret(events, &test_registry(), &test_mam()).await;
         assert_eq!(outcome.frames.len(), 2);
         assert!(outcome.frames[0].contains("id=\"a\""));
         assert!(outcome.frames[1].contains("id=\"b\""));
+    }
+
+    #[tokio::test]
+    async fn archive_personal_message_persists_to_mam() {
+        use chrono::Utc;
+        use jid::BareJid;
+        use waddle_xmpp::mam::MamQuery;
+        use xmpp_parsers::message::{Body, Message, MessageType};
+
+        let alice: BareJid = "alice@waddle.test".parse().unwrap();
+        let mam = test_mam();
+
+        let mut msg = Message::new(None);
+        msg.type_ = MessageType::Chat;
+        msg.bodies.insert(String::new(), Body("hello".into()));
+        waddle_xmpp::xep::xep0359::add_stanza_id(&mut msg, "uuid-1", &alice.to_string());
+
+        let events = vec![OutboundEvent::ArchivePersonalMessage {
+            archive_owner: alice.clone(),
+            archive_id: "uuid-1".to_string(),
+            message: Box::new(msg),
+        }];
+
+        let _ = interpret(events, &test_registry(), &mam).await;
+
+        let result = mam
+            .query_messages(&alice.to_string(), &MamQuery::default())
+            .await
+            .expect("query");
+        assert_eq!(result.messages.len(), 1);
+        assert_eq!(result.messages[0].id, "uuid-1");
+        let body = &result.messages[0].body;
+        assert_eq!(body, "hello");
+        let _ = Utc::now();
     }
 }

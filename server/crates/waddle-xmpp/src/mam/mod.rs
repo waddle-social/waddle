@@ -13,8 +13,10 @@
 //! `waddle-xmpp-core` so server and client crates can share typed history
 //! primitives without runtime coupling.
 
+pub mod sink;
 pub mod storage;
 
+pub use sink::message_to_archived;
 pub use storage::{InMemoryMamStorage, MamStorage, MamStorageError, SqlxMamStorage};
 pub use waddle_xmpp_core::mam::{
     add_stanza_id, build_fin_iq, build_result_messages, is_mam_query, parse_mam_query,

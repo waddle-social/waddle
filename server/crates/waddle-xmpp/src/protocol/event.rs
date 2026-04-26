@@ -169,20 +169,22 @@ pub enum OutboundEvent {
     ///
     /// One archive flow per archive owner. For 1:1 messages this event is
     /// emitted twice — once for the sender's archive and once for the
-    /// recipient's — each carrying a `message` that has already been
-    /// canonicalized for that archive's `by` (see
-    /// [`super::canonicalize::canonicalize`]). The interpreter trusts the
-    /// stamp and persists the typed `Message` as-is.
+    /// recipient's — each carrying a `message` already canonicalized for
+    /// that archive's `by` (see [`super::canonicalize::canonicalize`]) and
+    /// the matching `archive_id` (the stanza-id UUID that the canonicalizer
+    /// stamped). The interpreter trusts the stamp and persists as-is.
     ArchivePersonalMessage {
         archive_owner: BareJid,
+        archive_id: String,
         message: Box<Message>,
     },
     /// Persist a groupchat message to a room's MAM archive.
     ///
     /// The `message` MUST already be canonicalized with `by=$room` by the
-    /// emitter. The interpreter persists and does not re-stamp.
+    /// emitter, and `archive_id` is the matching stanza-id UUID.
     ArchiveRoomMessage {
         room: BareJid,
+        archive_id: String,
         message: Box<Message>,
     },
 
