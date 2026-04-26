@@ -33,9 +33,10 @@ use waddle_xmpp::{
     },
     protocol::{ConnectionPhase, StanzaContext as ProtocolStanzaContext},
     pubsub::{
-        build_pubsub_error, build_pubsub_items_result, build_pubsub_publish_result,
-        build_pubsub_subscribe_result, build_pubsub_success, is_pep_request_to, is_pubsub_iq,
-        parse_pubsub_iq, PubSubError, PubSubItem, PubSubRequest, SubId,
+        build_pubsub_affiliations_result, build_pubsub_configure_form_result, build_pubsub_error,
+        build_pubsub_items_result, build_pubsub_publish_result, build_pubsub_subscribe_result,
+        build_pubsub_success, is_pep_request_to, is_pubsub_iq, parse_pubsub_iq, PubSubError,
+        PubSubItem, PubSubRequest, SubId,
     },
     registry::BroadcastOutcome,
     roster::{
@@ -1598,48 +1599,35 @@ pub async fn handle_iq_with_conn_state(
             }
 
             PubSubRequest::ConfigureNode { node } => {
-                if target_jid.to_string() == spaces_domain {
-                    if spaces_node_mutation_allowed(state, authenticated_session.as_ref(), &node)
-                        .await
-                        .unwrap_or(false)
-                    {
-                        let Ok(spaces_jid) = spaces_service_bare_jid(&spaces_domain) else {
-                            return vec![iq_to_xml(build_pubsub_error(
-                                &iq,
-                                PubSubError::InvalidJid,
-                            ))];
-                        };
-                        match state
-                            .deps
-                            .protocol
-                            .pubsub_storage
-                            .get_node(&spaces_jid, &node)
-                            .await
-                        {
-                            Ok(Some(_)) => {}
-                            Ok(None) => {
-                                return vec![iq_to_xml(build_pubsub_error(
-                                    &iq,
-                                    PubSubError::NodeNotFound,
-                                ))];
-                            }
-                            Err(error) => {
-                                warn!(node = %node, error = %error, "Failed to configure Spaces node");
-                                return vec![iq_to_xml(build_pubsub_error(
-                                    &iq,
-                                    PubSubError::NodeNotFound,
-                                ))];
-                            }
-                        }
-                        let response = build_pubsub_success(&iq);
-                        return vec![iq_to_xml(response)];
-                    }
-                    let error = build_pubsub_error(&iq, PubSubError::Forbidden);
-                    return vec![iq_to_xml(error)];
+                let is_pep = is_pep_request_to(&iq, &target_jid);
+                if !crate::pubsub_authz::can_administer(
+                    &state.deps.protocol.pubsub_storage,
+                    &target_jid,
+                    &node,
+                    &user_jid,
+                    is_pep,
+                )
+                .await
+                .unwrap_or(false)
+                {
+                    return vec![iq_to_xml(build_pubsub_error(&iq, PubSubError::Forbidden))];
                 }
-
-                let error = build_pubsub_error(&iq, PubSubError::Forbidden);
-                return vec![iq_to_xml(error)];
+                let Some(node_meta) = state
+                    .deps
+                    .protocol
+                    .pubsub_storage
+                    .get_node(&target_jid, &node)
+                    .await
+                    .ok()
+                    .flatten()
+                else {
+                    return vec![iq_to_xml(build_pubsub_error(
+                        &iq,
+                        PubSubError::NodeNotFound,
+                    ))];
+                };
+                let response = build_pubsub_configure_form_result(&iq, &node, &node_meta.config);
+                return vec![iq_to_xml(response)];
             }
 
             PubSubRequest::DeleteNode { node } => {
@@ -1751,13 +1739,129 @@ pub async fn handle_iq_with_conn_state(
                     }
                 }
             }
-            PubSubRequest::PurgeNode { .. }
-            | PubSubRequest::ConfigureNodeSet { .. }
-            | PubSubRequest::AffiliationsGet { .. }
-            | PubSubRequest::AffiliationsSet { .. } => {
-                // Wired in Tasks 12, 13, 14.
-                let error = build_pubsub_error(&iq, PubSubError::Forbidden);
-                return vec![iq_to_xml(error)];
+            PubSubRequest::PurgeNode { node } => {
+                let is_pep = is_pep_request_to(&iq, &target_jid);
+                match crate::pubsub_authz::can_administer(
+                    &state.deps.protocol.pubsub_storage,
+                    &target_jid,
+                    &node,
+                    &user_jid,
+                    is_pep,
+                )
+                .await
+                {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        let error = build_pubsub_error(&iq, PubSubError::Forbidden);
+                        return vec![iq_to_xml(error)];
+                    }
+                    Err(e) => {
+                        warn!("PubSub purge authz failed: {e}");
+                        let error = build_pubsub_error(&iq, PubSubError::Forbidden);
+                        return vec![iq_to_xml(error)];
+                    }
+                }
+                match state
+                    .deps
+                    .protocol
+                    .pubsub_storage
+                    .purge_node(&target_jid, &node)
+                    .await
+                {
+                    Ok(_) => return vec![iq_to_xml(build_pubsub_success(&iq))],
+                    Err(e) => {
+                        warn!("PubSub purge failed: {e}");
+                        return vec![iq_to_xml(build_pubsub_error(
+                            &iq,
+                            PubSubError::NodeNotFound,
+                        ))];
+                    }
+                }
+            }
+
+            PubSubRequest::ConfigureNodeSet { node, config } => {
+                let is_pep = is_pep_request_to(&iq, &target_jid);
+                if !crate::pubsub_authz::can_administer(
+                    &state.deps.protocol.pubsub_storage,
+                    &target_jid,
+                    &node,
+                    &user_jid,
+                    is_pep,
+                )
+                .await
+                .unwrap_or(false)
+                {
+                    return vec![iq_to_xml(build_pubsub_error(&iq, PubSubError::Forbidden))];
+                }
+                match state
+                    .deps
+                    .protocol
+                    .pubsub_storage
+                    .update_node_config(&target_jid, &node, &config)
+                    .await
+                {
+                    Ok(_) => return vec![iq_to_xml(build_pubsub_success(&iq))],
+                    Err(_) => {
+                        return vec![iq_to_xml(build_pubsub_error(
+                            &iq,
+                            PubSubError::NodeNotFound,
+                        ))];
+                    }
+                }
+            }
+
+            PubSubRequest::AffiliationsGet { node } => {
+                let is_pep = is_pep_request_to(&iq, &target_jid);
+                if !crate::pubsub_authz::can_administer(
+                    &state.deps.protocol.pubsub_storage,
+                    &target_jid,
+                    &node,
+                    &user_jid,
+                    is_pep,
+                )
+                .await
+                .unwrap_or(false)
+                {
+                    return vec![iq_to_xml(build_pubsub_error(&iq, PubSubError::Forbidden))];
+                }
+                let rows = state
+                    .deps
+                    .protocol
+                    .pubsub_storage
+                    .list_node_affiliations(&target_jid, &node)
+                    .await
+                    .unwrap_or_default();
+                let response = build_pubsub_affiliations_result(&iq, &node, &rows);
+                return vec![iq_to_xml(response)];
+            }
+
+            PubSubRequest::AffiliationsSet { node, changes } => {
+                let is_pep = is_pep_request_to(&iq, &target_jid);
+                if !crate::pubsub_authz::can_administer(
+                    &state.deps.protocol.pubsub_storage,
+                    &target_jid,
+                    &node,
+                    &user_jid,
+                    is_pep,
+                )
+                .await
+                .unwrap_or(false)
+                {
+                    return vec![iq_to_xml(build_pubsub_error(&iq, PubSubError::Forbidden))];
+                }
+                for (entity, aff) in &changes {
+                    if let Err(e) = state
+                        .deps
+                        .protocol
+                        .pubsub_storage
+                        .set_affiliation(&target_jid, &node, entity, *aff)
+                        .await
+                    {
+                        warn!("set_affiliation failed: {e}");
+                        return vec![iq_to_xml(build_pubsub_error(&iq, PubSubError::Forbidden))];
+                    }
+                }
+                return vec![iq_to_xml(build_pubsub_success(&iq))];
             }
         }
     }
