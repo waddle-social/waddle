@@ -41,7 +41,7 @@ async fn main() -> Result<()> {
     );
     let db_config = db::DatabaseConfig::new(db_runtime.driver, db_runtime.database_url);
 
-    let pool_config = db::PoolConfig::default();
+    let pool_config = db::PoolConfig;
     let db_pool = db::DatabasePool::new(db_config, pool_config)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to initialize database: {}", e))?;

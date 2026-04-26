@@ -160,7 +160,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(messages2.len(), 5);
-        assert!(cursor2.is_none()); // No more messages
+        assert!(cursor2.is_none());
     }
 
     #[tokio::test]
@@ -168,17 +168,13 @@ mod tests {
         let db = Database::in_memory("test-messages-update").await.unwrap();
         let db = Arc::new(db);
 
-        // Run per-waddle migrations
         let runner = MigrationRunner::waddle();
         runner.run(&db).await.unwrap();
-
-        // Create the test channel first (required by foreign key constraint)
         create_test_channel(&db, "channel-123").await;
 
         let actor = kameo::spawn(DbActor::new((*db).clone()));
         let repo = MessageRepository::new(actor);
 
-        // Create a message
         let create = MessageCreate::new(
             "channel-123".to_string(),
             "user-alice".to_string(),
@@ -186,7 +182,6 @@ mod tests {
         );
         let message = repo.create(create).await.unwrap();
 
-        // Update the message
         let update = MessageUpdate {
             content: Some("Updated content".to_string()),
             flags: None,
@@ -201,17 +196,13 @@ mod tests {
         let db = Database::in_memory("test-messages-delete").await.unwrap();
         let db = Arc::new(db);
 
-        // Run per-waddle migrations
         let runner = MigrationRunner::waddle();
         runner.run(&db).await.unwrap();
-
-        // Create the test channel first (required by foreign key constraint)
         create_test_channel(&db, "channel-123").await;
 
         let actor = kameo::spawn(DbActor::new((*db).clone()));
         let repo = MessageRepository::new(actor);
 
-        // Create a message
         let create = MessageCreate::new(
             "channel-123".to_string(),
             "user-alice".to_string(),
@@ -219,10 +210,8 @@ mod tests {
         );
         let message = repo.create(create).await.unwrap();
 
-        // Delete the message
         repo.delete(&message.id).await.unwrap();
 
-        // Verify it's gone
         let retrieved = repo.get_by_id(&message.id).await.unwrap();
         assert!(retrieved.is_none());
     }
@@ -232,17 +221,13 @@ mod tests {
         let db = Database::in_memory("test-messages-reply").await.unwrap();
         let db = Arc::new(db);
 
-        // Run per-waddle migrations
         let runner = MigrationRunner::waddle();
         runner.run(&db).await.unwrap();
-
-        // Create the test channel first (required by foreign key constraint)
         create_test_channel(&db, "channel-123").await;
 
         let actor = kameo::spawn(DbActor::new((*db).clone()));
         let repo = MessageRepository::new(actor);
 
-        // Create a parent message
         let parent_create = MessageCreate::new(
             "channel-123".to_string(),
             "user-alice".to_string(),
@@ -250,7 +235,6 @@ mod tests {
         );
         let parent = repo.create(parent_create).await.unwrap();
 
-        // Create a reply
         let reply_create = MessageCreate::new(
             "channel-123".to_string(),
             "user-bob".to_string(),

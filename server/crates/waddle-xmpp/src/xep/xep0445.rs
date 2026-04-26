@@ -58,22 +58,23 @@ pub fn is_preauth_element(elem: &Element) -> bool {
 }
 
 /// Check if a registration query contains a preauth token.
-#[allow(clippy::redundant_closure)]
 pub fn has_preauth(query_elem: &Element) -> bool {
-    query_elem.children().any(|e| is_preauth_element(e))
+    query_elem.children().any(is_preauth_element)
 }
 
 // ── Extraction ───────────────────────────────────────────────────────
 
 /// Extract a preauth token from a registration query element.
-#[allow(clippy::redundant_closure)]
 pub fn extract_preauth(query_elem: &Element) -> Option<PreauthToken> {
     query_elem
         .children()
-        .find(|e| is_preauth_element(e))
-        .and_then(|e| e.attr("token"))
+        .find_map(|elem| {
+            is_preauth_element(elem)
+                .then(|| elem.attr("token"))
+                .flatten()
+        })
         .filter(|t| !t.is_empty())
-        .map(|t| PreauthToken::new(t))
+        .map(PreauthToken::new)
 }
 
 // ── Building ─────────────────────────────────────────────────────────

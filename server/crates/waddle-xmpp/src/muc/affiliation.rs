@@ -358,7 +358,7 @@ impl PermissionMapper {
     }
 
     /// Add a custom mapping override.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn with_mapping(mut self, relation: &str, affiliation: Affiliation) -> Self {
         self.custom_mappings
             .insert(relation.to_string(), affiliation);
@@ -530,16 +530,6 @@ impl AffiliationEntry {
             reason: None,
         }
     }
-
-    /// Create an affiliation entry with a reason.
-    #[allow(dead_code)]
-    pub fn with_reason(jid: BareJid, affiliation: Affiliation, reason: impl Into<String>) -> Self {
-        Self {
-            jid,
-            affiliation,
-            reason: Some(reason.into()),
-        }
-    }
 }
 
 /// Affiliation resolver that uses the AppState's check_permission method.
@@ -548,21 +538,12 @@ impl AffiliationEntry {
 /// AppState trait interface.
 pub struct AppStateAffiliationResolver<S> {
     app_state: Arc<S>,
-    /// Domain for JID construction (for future use)
-    #[allow(dead_code)]
-    domain: String,
 }
 
 impl<S> AppStateAffiliationResolver<S> {
     /// Create a new resolver with the given app state.
-    pub fn new(app_state: Arc<S>, domain: String) -> Self {
-        Self { app_state, domain }
-    }
-
-    /// Create a new resolver with a custom permission mapper.
-    #[allow(dead_code)]
-    pub fn with_mapper(app_state: Arc<S>, domain: String, _mapper: PermissionMapper) -> Self {
-        Self { app_state, domain }
+    pub fn new(app_state: Arc<S>, _domain: String) -> Self {
+        Self { app_state }
     }
 }
 
@@ -768,12 +749,6 @@ impl AffiliationChange {
     /// Check if this is an upgrade (higher privilege).
     pub fn is_upgrade(&self) -> bool {
         self.new_affiliation > self.old_affiliation
-    }
-
-    /// Check if this is a downgrade (lower privilege).
-    #[allow(dead_code)]
-    pub fn is_downgrade(&self) -> bool {
-        self.new_affiliation < self.old_affiliation
     }
 }
 

@@ -45,8 +45,6 @@ pub enum ProfileError {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BskyProfileResponse {
-    #[allow(dead_code)]
-    did: String,
     handle: String,
     display_name: Option<String>,
     description: Option<String>,

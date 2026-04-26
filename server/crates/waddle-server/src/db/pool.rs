@@ -8,20 +8,8 @@ use kameo::actor::ActorRef;
 use tracing::{info, instrument};
 
 /// Configuration for the database pool.
-#[derive(Debug, Clone)]
-pub struct PoolConfig {
-    /// Whether to run migrations on startup.
-    #[allow(dead_code)]
-    pub run_migrations: bool,
-}
-
-impl Default for PoolConfig {
-    fn default() -> Self {
-        Self {
-            run_migrations: true,
-        }
-    }
-}
+#[derive(Debug, Clone, Default)]
+pub struct PoolConfig;
 
 /// Database pool managing a single logical database.
 pub struct DatabasePool {
@@ -54,7 +42,7 @@ impl DatabasePool {
         &self.global_actor
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn loaded_waddle_count(&self) -> usize {
         1
     }
@@ -74,11 +62,6 @@ impl DatabasePool {
             waddle_dbs_healthy: global_healthy,
             loaded_waddle_count: 1,
         })
-    }
-
-    #[allow(dead_code)]
-    pub async fn sync_all(&self) -> Result<(), DatabaseError> {
-        Ok(())
     }
 }
 
@@ -102,7 +85,7 @@ mod tests {
     #[tokio::test]
     async fn test_pool_creation_in_memory() {
         let config = DatabaseConfig::default();
-        let pool_config = PoolConfig::default();
+        let pool_config = PoolConfig;
         let pool = DatabasePool::new(config, pool_config).await.unwrap();
 
         let health = pool.health_check().await.unwrap();
@@ -113,11 +96,10 @@ mod tests {
     #[tokio::test]
     async fn test_single_database_accessors() {
         let config = DatabaseConfig::default();
-        let pool = DatabasePool::new(config, PoolConfig::default())
-            .await
-            .unwrap();
+        let pool = DatabasePool::new(config, PoolConfig).await.unwrap();
 
         assert_eq!(pool.global().name(), "global");
-        assert_eq!(pool.loaded_waddle_count(), 1);
+        let health = pool.health_check().await.unwrap();
+        assert_eq!(health.loaded_waddle_count, 1);
     }
 }

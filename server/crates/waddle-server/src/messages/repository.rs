@@ -22,18 +22,14 @@ pub struct MessageRepository {
 }
 
 impl MessageRepository {
-    /// Create a new message repository
     pub fn new(actor: ActorRef<DbActor>) -> Self {
         Self { actor }
     }
 
-    /// Create a new message
     #[instrument(skip(self, create))]
     pub async fn create(&self, create: MessageCreate) -> Result<Message, MessageError> {
-        // Validate content
         create.validate()?;
 
-        // Generate UUID v7 for time-sortable IDs
         let id = Uuid::now_v7().to_string();
         let created_at = Utc::now();
 
@@ -88,7 +84,6 @@ impl MessageRepository {
         })
     }
 
-    /// Get a message by ID
     #[instrument(skip(self))]
     pub async fn get_by_id(&self, id: &str) -> Result<Option<Message>, MessageError> {
         let query = r#"
@@ -108,28 +103,11 @@ impl MessageRepository {
             .map_err(|e| MessageError::DatabaseError(format!("Failed to query message: {}", e)))?;
 
         match row {
-            Some(row) => {
-                let message = self.values_to_message(&row)?;
-                Ok(Some(message))
-            }
+            Some(row) => Ok(Some(self.values_to_message(&row)?)),
             None => Ok(None),
         }
     }
 
-    /// Get messages by channel with pagination
-    ///
-    /// Returns messages in reverse chronological order (newest first).
-    /// Uses cursor-based pagination for efficient retrieval.
-    ///
-    /// # Arguments
-    ///
-    /// * `channel_id` - The channel to get messages from
-    /// * `limit` - Maximum number of messages to return
-    /// * `before_cursor` - Optional cursor (message ID) to paginate before
-    ///
-    /// # Returns
-    ///
-    /// A tuple of (messages, next_cursor) where next_cursor is Some if there are more messages
     #[instrument(skip(self))]
     pub async fn get_by_channel(
         &self,
@@ -141,7 +119,6 @@ impl MessageRepository {
 
         let (query, params): (&str, Vec<crate::db::Value>) = match before_cursor {
             Some(cursor) => {
-                // Get the created_at of the cursor message for proper pagination
                 let cursor_query = "SELECT created_at FROM messages WHERE id = ?";
                 let cursor_created_at = match self
                     .actor
@@ -213,13 +190,11 @@ impl MessageRepository {
             messages.push(self.values_to_message(&row)?);
         }
 
-        // Check if there are more messages
         let has_more = messages.len() > limit;
         if has_more {
-            messages.pop(); // Remove the extra message we fetched
+            messages.pop();
         }
 
-        // Get the cursor for the next page
         let next_cursor = if has_more {
             messages.last().map(|m| m.id.clone())
         } else {
@@ -229,26 +204,21 @@ impl MessageRepository {
         Ok((messages, next_cursor))
     }
 
-    /// Update a message
     #[instrument(skip(self, update))]
     pub async fn update(&self, id: &str, update: MessageUpdate) -> Result<Message, MessageError> {
-        // Validate update
         update.validate()?;
 
-        // First, fetch the existing message
         let existing = self
             .get_by_id(id)
             .await?
             .ok_or_else(|| MessageError::NotFound(id.to_string()))?;
 
-        // Build update query dynamically
         let mut set_clauses = Vec::new();
         let mut params: Vec<crate::db::Value> = Vec::new();
 
         if let Some(ref content) = update.content {
             set_clauses.push("content = ?");
             params.push(content.clone().into());
-            // Also update edited_at
             set_clauses.push("edited_at = ?");
             params.push(Utc::now().to_rfc3339().into());
         }
@@ -259,11 +229,9 @@ impl MessageRepository {
         }
 
         if set_clauses.is_empty() {
-            // Nothing to update
             return Ok(existing);
         }
 
-        // Add the WHERE clause parameter
         params.push(id.into());
 
         let query = format!(
@@ -278,13 +246,11 @@ impl MessageRepository {
 
         debug!("Updated message: {}", id);
 
-        // Fetch and return the updated message
         self.get_by_id(id)
             .await?
             .ok_or_else(|| MessageError::NotFound(id.to_string()))
     }
 
-    /// Delete a message
     #[instrument(skip(self))]
     pub async fn delete(&self, id: &str) -> Result<(), MessageError> {
         let rows_affected = self
@@ -304,7 +270,6 @@ impl MessageRepository {
         Ok(())
     }
 
-    /// Convert a database row to a Message
     fn values_to_message(&self, row: &[crate::db::Value]) -> Result<Message, MessageError> {
         let id = row_value(row, 0)
             .and_then(ValueExt::as_string)

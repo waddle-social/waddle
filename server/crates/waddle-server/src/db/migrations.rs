@@ -710,7 +710,7 @@ impl MigrationRunner {
     }
 
     /// Get the current schema version
-    #[allow(dead_code)]
+    #[cfg(test)]
     #[instrument(skip_all, fields(db_name = %db.name()))]
     pub async fn current_version(&self, db: &Database) -> Result<Option<i64>, DatabaseError> {
         let conn = db.guard().await?;
@@ -719,7 +719,7 @@ impl MigrationRunner {
     }
 
     /// Internal method to get current version with a given connection
-    #[allow(dead_code)]
+    #[cfg(test)]
     async fn current_version_with_connection(
         &self,
         conn: &super::ConnectionGuard,
@@ -753,7 +753,7 @@ impl MigrationRunner {
     }
 
     /// Check if there are pending migrations
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub async fn has_pending(&self, db: &Database) -> Result<bool, DatabaseError> {
         let current = self.current_version(db).await?.unwrap_or(0);
         let latest = self.migrations.last().map(|m| m.version).unwrap_or(0);
