@@ -558,6 +558,71 @@ describe("XEP-0198 self-echo reconciliation (group chat)", () => {
       },
     ]);
   });
+
+  test("body-less room GitHub enrichment messages reach the timeline", async () => {
+    const currentSession = session();
+    const roomJid = roomBareJidFor(currentSession, "c1");
+    const queryMam = mock(async () => []);
+    let onMessage: ((msg: LiveRoomMessage) => void) | null = null;
+    const actionError = ref("");
+    const xmppClient = ref(null as never);
+    const messaging = useMessaging(
+      ref(currentSession),
+      ref(null),
+      xmppClient,
+      ref("w1"),
+      ref("c1"),
+      ref({ id: "c1", name: "general", channel_type: "text" }),
+      String,
+      actionError,
+      () => {
+        actionError.value = "";
+      },
+    );
+
+    xmppClient.value = {
+      queryMam,
+      setMessageHandler(handler: (msg: LiveRoomMessage) => void) {
+        onMessage = handler;
+      },
+      setStatusHandler() {},
+      setChatStateHandler() {},
+      setReactionHandler() {},
+      setDisplayedHandler() {},
+      setHatsHandler() {},
+      setPresenceHandler() {},
+      setLastSeenHandler() {},
+      setActivityHandler() {},
+      setRoomAvatarHandler() {},
+      setSlowModeHandler() {},
+    } as never;
+    await nextTick();
+
+    onMessage?.({
+      id: "server-github-only",
+      roomJid,
+      nick: "bob",
+      body: "",
+      createdAt: "2024-01-01T00:00:05Z",
+      type: "message",
+      githubEmbeds: [{
+        kind: "repo",
+        url: "https://github.com/waddle-social/waddle",
+        owner: "waddle-social",
+        name: "waddle",
+      }],
+    });
+
+    expect(messaging.messages.value).toHaveLength(1);
+    expect(messaging.messages.value[0].githubEmbeds).toEqual([
+      {
+        kind: "repo",
+        url: "https://github.com/waddle-social/waddle",
+        owner: "waddle-social",
+        name: "waddle",
+      },
+    ]);
+  });
 });
 
 test("fresh DM session self-echo reconciles preserved sending entries", async () => {

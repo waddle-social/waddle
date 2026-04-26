@@ -57,7 +57,7 @@ export function hasRenderableMessagePayload(msg: ReceivedMessage): boolean {
   const fileSharing = stanza.fileSharing;
   if (Array.isArray(fileSharing)) return fileSharing.length > 0;
   if (fileSharing) return true;
-  return !!stanza.sticker || hasGithubEmbeds(stanza);
+  return !!stanza.sticker || githubEmbedsFromStanza(stanza).length > 0;
 }
 
 interface OriginIdPayload {
@@ -132,14 +132,9 @@ interface GithubPayload {
   name?: string;
 }
 
-function hasGithubEmbeds(stanza: Record<string, unknown>): boolean {
-  return asArray(stanza.githubRepos as GithubPayload | GithubPayload[] | undefined).length > 0
-    || asArray(stanza.githubIssues as GithubPayload | GithubPayload[] | undefined).length > 0
-    || asArray(stanza.githubPullRequests as GithubPayload | GithubPayload[] | undefined).length > 0;
-}
-
 function parseGithubEmbed(kind: GitHubEmbedKind, payload: GithubPayload): GitHubEmbed | null {
   if (!payload.url || !payload.owner || !payload.name) return null;
+  if (!isValidGithubEmbedUrl(kind, payload.url, payload.owner, payload.name)) return null;
   return {
     kind,
     url: payload.url,
@@ -148,9 +143,33 @@ function parseGithubEmbed(kind: GitHubEmbedKind, payload: GithubPayload): GitHub
   };
 }
 
-function extractGithubEmbeds(msg: ReceivedMessage, base: MessageExtensionsTarget): void {
-  const stanza = ext(msg);
-  const embeds = [
+function isValidGithubEmbedUrl(
+  kind: GitHubEmbedKind,
+  rawUrl: string,
+  owner: string,
+  name: string,
+): boolean {
+  let url: URL;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    return false;
+  }
+
+  if (url.protocol !== "https:" || url.hostname !== "github.com") return false;
+  const parts = url.pathname.split("/").filter(Boolean);
+  if (parts[0] !== owner || parts[1] !== name) return false;
+
+  if (kind === "repo") {
+    return parts.length === 2;
+  }
+
+  const expectedSegment = kind === "issue" ? "issues" : "pull";
+  return parts[2] === expectedSegment && !!parts[3] && /^\d+$/.test(parts[3]) && parts.length === 4;
+}
+
+function githubEmbedsFromStanza(stanza: Record<string, unknown>): GitHubEmbed[] {
+  return [
     ...asArray(stanza.githubRepos as GithubPayload | GithubPayload[] | undefined)
       .flatMap((payload) => parseGithubEmbed("repo", payload) ?? []),
     ...asArray(stanza.githubIssues as GithubPayload | GithubPayload[] | undefined)
@@ -158,6 +177,18 @@ function extractGithubEmbeds(msg: ReceivedMessage, base: MessageExtensionsTarget
     ...asArray(stanza.githubPullRequests as GithubPayload | GithubPayload[] | undefined)
       .flatMap((payload) => parseGithubEmbed("pr", payload) ?? []),
   ];
+}
+
+function hasNonBodyMessagePayload(msg: ReceivedMessage): boolean {
+  const stanza = ext(msg);
+  const fileSharing = stanza.fileSharing;
+  return (Array.isArray(fileSharing) ? fileSharing.length > 0 : !!fileSharing)
+    || !!stanza.sticker
+    || githubEmbedsFromStanza(stanza).length > 0;
+}
+
+function extractGithubEmbeds(msg: ReceivedMessage, base: MessageExtensionsTarget): void {
+  const embeds = githubEmbedsFromStanza(ext(msg));
   if (embeds.length > 0) base.githubEmbeds = embeds;
 }
 
@@ -379,7 +410,7 @@ export function dispatchGroupchat(msg: ReceivedMessage, h: GroupchatHandlers): v
     id: messageIds.id, roomJid, nick,
     body: msg.body ?? msg.subject ?? "",
     createdAt: new Date().toISOString(),
-    type: msg.body ? "message" : "subject",
+    type: msg.body || hasNonBodyMessagePayload(msg) ? "message" : "subject",
   };
   const authorRealJid = extractMucUserRealJid(msg);
   if (authorRealJid) liveMsg.authorRealJid = authorRealJid;

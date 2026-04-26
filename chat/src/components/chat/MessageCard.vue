@@ -813,8 +813,8 @@ watch(
       <!-- GitHub enrichment cards -->
       <div v-if="githubEmbeds.length > 0" class="flex flex-col gap-2">
         <a
-          v-for="embed in githubEmbeds"
-          :key="`${embed.kind}:${embed.url}`"
+          v-for="(embed, index) in githubEmbeds"
+          :key="`${embed.kind}:${embed.url}:${index}`"
           :href="embed.url"
           target="_blank"
           rel="noopener noreferrer"

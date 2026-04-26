@@ -248,6 +248,38 @@ describe("dispatchChat", () => {
     ]);
   });
 
+  test("ignores malformed body-less GitHub enrichment payloads", () => {
+    const h = makeHandlers();
+    dispatchChat(
+      makeMsg({
+        id: "dm-github-malformed",
+        githubRepos: {
+          url: "https://github.com/waddle-social/waddle",
+        },
+      } as Partial<ReceivedMessage>),
+      h,
+    );
+
+    expect(h.messages).toHaveLength(0);
+  });
+
+  test("ignores GitHub enrichment payloads with unsafe URLs", () => {
+    const h = makeHandlers();
+    dispatchChat(
+      makeMsg({
+        id: "dm-github-unsafe",
+        githubRepos: {
+          url: "javascript:alert(1)",
+          owner: "waddle-social",
+          name: "waddle",
+        },
+      } as Partial<ReceivedMessage>),
+      h,
+    );
+
+    expect(h.messages).toHaveLength(0);
+  });
+
   test("ignores messages with no body/subject/replace", () => {
     const h = makeHandlers();
     dispatchChat(makeMsg({}), h);

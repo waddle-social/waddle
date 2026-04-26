@@ -122,6 +122,7 @@ describe("groupchat reply + thread parsing", () => {
 
     expect(h.messages).toHaveLength(1);
     expect(h.messages[0].body).toBe("");
+    expect(h.messages[0].type).toBe("message");
     expect(h.messages[0].githubEmbeds).toEqual([
       {
         kind: "repo",
@@ -130,6 +131,38 @@ describe("groupchat reply + thread parsing", () => {
         name: "waddle",
       },
     ]);
+  });
+
+  test("ignores malformed body-less GitHub enrichment payloads", () => {
+    const h = makeHandlers();
+    dispatchGroupchat(
+      makeMsg({
+        id: "msg-github-malformed",
+        githubRepos: {
+          url: "https://github.com/waddle-social/waddle",
+        },
+      }),
+      h,
+    );
+
+    expect(h.messages).toHaveLength(0);
+  });
+
+  test("ignores GitHub enrichment payloads with non-GitHub URLs", () => {
+    const h = makeHandlers();
+    dispatchGroupchat(
+      makeMsg({
+        id: "msg-github-spoof",
+        githubRepos: {
+          url: "https://evil.example/waddle-social/waddle",
+          owner: "waddle-social",
+          name: "waddle",
+        },
+      }),
+      h,
+    );
+
+    expect(h.messages).toHaveLength(0);
   });
 
   test("extracts GitHub issue and pull request enrichment payloads", () => {
