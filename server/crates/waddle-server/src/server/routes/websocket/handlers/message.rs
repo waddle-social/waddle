@@ -18,6 +18,7 @@ use waddle_xmpp::{
     muc::room_actor::{BuildGroupchatBroadcast, GetNicknameGeneration, RoomActor},
     parser::message_to_string,
     registry::{BroadcastOutcome, SendResult},
+    xep::xep0430::build_inbox_push,
     xep::{
         extract_correction_from_message, extract_explicit_mentions, extract_reactions_from_message,
         extract_references_from_message, extract_retraction_from_message, has_file_sharing,
@@ -990,9 +991,7 @@ fn should_archive_groupchat_message(msg: &xmpp_parsers::message::Message) -> boo
         || is_sticker_message(msg)
 }
 
-fn serialize_groupchat_stanza_xml(
-    message: &xmpp_parsers::message::Message,
-) -> Option<String> {
+fn serialize_groupchat_stanza_xml(message: &xmpp_parsers::message::Message) -> Option<String> {
     let mut msg = message.clone();
     msg.to = None;
     match message_to_string(&msg) {
