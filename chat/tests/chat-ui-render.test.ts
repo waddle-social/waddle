@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import {
   inferredFileDisposition,
+  githubEmbedDisplayTitle,
+  githubEmbedKindLabel,
+  githubEmbedNumber,
   isAudioFile,
   isImageFile,
   isPdfFile,
@@ -92,5 +95,27 @@ describe("renderStyledBody", () => {
     expect(isPdfFile(undefined, "notes.pdf")).toBe(true);
     expect(inferredFileDisposition("text/plain", "notes.txt")).toBe("attachment");
     expect(inferredFileDisposition("video/mp4", "clip.mp4")).toBe("inline");
+  });
+
+  test("formats GitHub embed card metadata", () => {
+    const issue = {
+      kind: "issue" as const,
+      url: "https://github.com/waddle-social/waddle/issues/42",
+      owner: "waddle-social",
+      name: "waddle",
+    };
+    const repo = {
+      kind: "repo" as const,
+      url: "https://github.com/waddle-social/waddle",
+      owner: "waddle-social",
+      name: "waddle",
+    };
+
+    expect(githubEmbedKindLabel(issue.kind)).toBe("Issue");
+    expect(githubEmbedNumber(issue)).toBe("42");
+    expect(githubEmbedDisplayTitle(issue)).toBe("waddle-social/waddle #42");
+    expect(githubEmbedKindLabel(repo.kind)).toBe("Repository");
+    expect(githubEmbedNumber(repo)).toBeNull();
+    expect(githubEmbedDisplayTitle(repo)).toBe("waddle-social/waddle");
   });
 });

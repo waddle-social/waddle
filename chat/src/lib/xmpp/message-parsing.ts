@@ -4,7 +4,7 @@ import type { WaddleEncryptedFile } from "./extensions/encrypted-file";
 import { splitMessageIds } from "@/lib/message-ids";
 import { stripMarkupRange } from "./extensions/markup";
 import { codePointLength, codePointToCodeUnitIndex } from "@/lib/text-offsets";
-import type { MessageReference } from "@/lib/chat-ui";
+import type { GitHubEmbed, GitHubEmbedKind, MessageReference } from "@/lib/chat-ui";
 import type {
   ChatStateEvent, ChatStateType, DisplayedEvent,
   LiveDmMessage, LiveRoomMessage, ReactionEvent, RoomActivityEvent, SharedFileInfo,
@@ -19,6 +19,7 @@ type MessageExtensionsTarget = Pick<
   | "references"
   | "broadcastMention"
   | "sharedFiles"
+  | "githubEmbeds"
   | "isSticker"
   | "replacesId"
   | "markup"
@@ -56,7 +57,7 @@ export function hasRenderableMessagePayload(msg: ReceivedMessage): boolean {
   const fileSharing = stanza.fileSharing;
   if (Array.isArray(fileSharing)) return fileSharing.length > 0;
   if (fileSharing) return true;
-  return !!stanza.sticker;
+  return !!stanza.sticker || githubEmbedsFromStanza(stanza).length > 0;
 }
 
 interface OriginIdPayload {
@@ -115,6 +116,7 @@ export function extractMessageExtensions(
   extractReferences(msg, base);
   extractExplicitMentions(msg, base);
   extractFileSharing(msg, base);
+  extractGithubEmbeds(msg, base);
   extractMarkup(msg, base);
   extractReplyAndThread(msg, base);
   stripReplyFallback(msg, base);
@@ -122,6 +124,72 @@ export function extractMessageExtensions(
   if (ext(msg).sticker) {
     base.isSticker = true;
   }
+}
+
+interface GithubPayload {
+  url?: string;
+  owner?: string;
+  name?: string;
+}
+
+function parseGithubEmbed(kind: GitHubEmbedKind, payload: GithubPayload): GitHubEmbed | null {
+  if (!payload.url || !payload.owner || !payload.name) return null;
+  if (!isValidGithubEmbedUrl(kind, payload.url, payload.owner, payload.name)) return null;
+  return {
+    kind,
+    url: payload.url,
+    owner: payload.owner,
+    name: payload.name,
+  };
+}
+
+function isValidGithubEmbedUrl(
+  kind: GitHubEmbedKind,
+  rawUrl: string,
+  owner: string,
+  name: string,
+): boolean {
+  let url: URL;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    return false;
+  }
+
+  if (url.protocol !== "https:" || url.hostname !== "github.com") return false;
+  const parts = url.pathname.split("/").filter(Boolean);
+  if (parts[0] !== owner || parts[1] !== name) return false;
+
+  if (kind === "repo") {
+    return parts.length === 2;
+  }
+
+  const expectedSegment = kind === "issue" ? "issues" : "pull";
+  return parts[2] === expectedSegment && !!parts[3] && /^\d+$/.test(parts[3]) && parts.length === 4;
+}
+
+function githubEmbedsFromStanza(stanza: Record<string, unknown>): GitHubEmbed[] {
+  return [
+    ...asArray(stanza.githubRepos as GithubPayload | GithubPayload[] | undefined)
+      .flatMap((payload) => parseGithubEmbed("repo", payload) ?? []),
+    ...asArray(stanza.githubIssues as GithubPayload | GithubPayload[] | undefined)
+      .flatMap((payload) => parseGithubEmbed("issue", payload) ?? []),
+    ...asArray(stanza.githubPullRequests as GithubPayload | GithubPayload[] | undefined)
+      .flatMap((payload) => parseGithubEmbed("pr", payload) ?? []),
+  ];
+}
+
+function hasNonBodyMessagePayload(msg: ReceivedMessage): boolean {
+  const stanza = ext(msg);
+  const fileSharing = stanza.fileSharing;
+  return (Array.isArray(fileSharing) ? fileSharing.length > 0 : !!fileSharing)
+    || !!stanza.sticker
+    || githubEmbedsFromStanza(stanza).length > 0;
+}
+
+function extractGithubEmbeds(msg: ReceivedMessage, base: MessageExtensionsTarget): void {
+  const embeds = githubEmbedsFromStanza(ext(msg));
+  if (embeds.length > 0) base.githubEmbeds = embeds;
 }
 
 /** XEP-0461 reply pointer + RFC 6121 / XEP-0201 thread id + parent. */
@@ -342,7 +410,7 @@ export function dispatchGroupchat(msg: ReceivedMessage, h: GroupchatHandlers): v
     id: messageIds.id, roomJid, nick,
     body: msg.body ?? msg.subject ?? "",
     createdAt: new Date().toISOString(),
-    type: msg.body ? "message" : "subject",
+    type: msg.body || hasNonBodyMessagePayload(msg) ? "message" : "subject",
   };
   const authorRealJid = extractMucUserRealJid(msg);
   if (authorRealJid) liveMsg.authorRealJid = authorRealJid;

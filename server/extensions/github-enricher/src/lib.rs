@@ -49,7 +49,7 @@ impl EnrichGuest for Extension {
             links
                 .into_iter()
                 .map(|link| link.url)
-                .filter(|url| url.contains("github.com/"))
+                .filter_map(|url| detect::normalize_github_url(&url))
                 .collect()
         };
 
@@ -66,12 +66,44 @@ export!(Extension);
 
 #[cfg(test)]
 mod tests {
-    use super::{Extension, LifecycleGuest};
+    use super::{EnrichGuest, Extension, LifecycleGuest, WitDetectedLink};
 
     #[test]
     fn init_accepts_empty_json() {
         let info = Extension::init("{}".to_string()).expect("init should succeed");
         assert_eq!(info.name, "github-enricher");
         assert_eq!(info.namespace, "urn:waddle:github:0");
+    }
+
+    #[test]
+    fn enrich_message_normalizes_detected_http_github_links() {
+        let result = Extension::enrich_message(
+            String::new(),
+            vec![WitDetectedLink {
+                url: "http://github.com/waddle-social/waddle".to_string(),
+                start_offset: 0,
+                end_offset: 37,
+            }],
+        );
+
+        assert_eq!(result.embeds.len(), 1);
+        assert_eq!(
+            result.embeds[0].attributes[0].1,
+            "https://github.com/waddle-social/waddle"
+        );
+    }
+
+    #[test]
+    fn enrich_message_rejects_non_github_detected_links() {
+        let result = Extension::enrich_message(
+            String::new(),
+            vec![WitDetectedLink {
+                url: "https://evil.example/github.com/waddle-social/waddle".to_string(),
+                start_offset: 0,
+                end_offset: 51,
+            }],
+        );
+
+        assert!(result.embeds.is_empty());
     }
 }

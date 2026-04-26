@@ -52,6 +52,7 @@ function fromLiveDmMessage(
   if (msg.markup?.length) tm.markup = msg.markup;
   if (msg.references?.length) tm.references = msg.references;
   if (msg.sharedFiles && msg.sharedFiles.length > 0) tm.sharedFiles = msg.sharedFiles;
+  if (msg.githubEmbeds && msg.githubEmbeds.length > 0) tm.githubEmbeds = msg.githubEmbeds;
   if (msg.isSticker) tm.isSticker = true;
   if (msg.replyTo) {
     const parent = parentLookup?.(msg.replyTo.id);
@@ -277,6 +278,7 @@ export function useDmMessaging(
     newBody: string,
     markup?: LiveDmMessage["markup"],
     references?: LiveDmMessage["references"],
+    githubEmbeds?: LiveDmMessage["githubEmbeds"],
   ) {
     messages.value = messages.value.map((m) => {
       if (!matchMessageId(m, replacesId)) return m;
@@ -290,6 +292,11 @@ export function useDmMessaging(
         updated.references = references;
       } else {
         delete updated.references;
+      }
+      if (githubEmbeds && githubEmbeds.length > 0) {
+        updated.githubEmbeds = githubEmbeds;
+      } else {
+        delete updated.githubEmbeds;
       }
       return updated;
     });
@@ -316,16 +323,18 @@ export function useDmMessaging(
     const existing = existingById ?? pendingSelfEcho ?? preservedSelfEcho;
     if (existing) {
       const wasPending = existing.id !== msg.id;
-      if (wasPending || (existing.deliveryStatus && existing.deliveryStatus !== "delivered")) {
-        messages.value = messages.value.map((m) =>
-          m.id !== existing.id
-            ? m
-            : {
-                ...mergeMessageIds(m, msg.id, msg.wireIds),
-                deliveryStatus: "delivered" as DeliveryStatus,
-              },
-        );
-      }
+      messages.value = messages.value.map((m) => {
+        if (m.id !== existing.id) return m;
+        const updated: TimelineMessage = {
+          ...m,
+          ...msg,
+          ...mergeMessageIds(m, msg.id, msg.wireIds),
+        };
+        if (m.isSelf && msg.isSelf) {
+          updated.deliveryStatus = "delivered" as DeliveryStatus;
+        }
+        return updated;
+      });
       if (wasPending) pendingEchoClientIds.delete(existing.id);
       return;
     }
@@ -403,7 +412,13 @@ export function useDmMessaging(
       const regular: LiveDmMessage[] = [];
       const reactionUpdates: { targetId: string; nick: string; emojis: string[] }[] = [];
       const retractionUpdates: string[] = [];
-      const correctionUpdates: { targetId: string; body: string; markup?: LiveDmMessage["markup"]; references?: LiveDmMessage["references"] }[] = [];
+      const correctionUpdates: {
+        targetId: string;
+        body: string;
+        markup?: LiveDmMessage["markup"];
+        references?: LiveDmMessage["references"];
+        githubEmbeds?: LiveDmMessage["githubEmbeds"];
+      }[] = [];
       for (const msg of mamResults) {
         if (msg._reactionTarget && msg._reactionEmojis) {
           reactionUpdates.push({
@@ -419,8 +434,9 @@ export function useDmMessaging(
             body: msg.body,
             markup: msg.markup,
             references: msg.references,
+            githubEmbeds: msg.githubEmbeds,
           });
-        } else if (msg.body || (msg.sharedFiles && msg.sharedFiles.length > 0) || msg.isSticker) {
+        } else if (msg.body || (msg.sharedFiles && msg.sharedFiles.length > 0) || msg.isSticker || (msg.githubEmbeds && msg.githubEmbeds.length > 0)) {
           regular.push(msg);
         }
       }
@@ -444,6 +460,11 @@ export function useDmMessaging(
           target.references = update.references;
         } else {
           delete target.references;
+        }
+        if (update.githubEmbeds && update.githubEmbeds.length > 0) {
+          target.githubEmbeds = update.githubEmbeds;
+        } else {
+          delete target.githubEmbeds;
         }
       }
       for (const retractsId of retractionUpdates) {
@@ -730,7 +751,7 @@ export function useDmMessaging(
       return;
     }
     if (msg.replacesId) {
-      applyCorrection(msg.replacesId, msg.body, msg.markup, msg.references);
+      applyCorrection(msg.replacesId, msg.body, msg.markup, msg.references, msg.githubEmbeds);
       return;
     }
     mergeLiveMessage(

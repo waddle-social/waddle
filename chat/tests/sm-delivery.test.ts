@@ -483,6 +483,146 @@ describe("XEP-0198 self-echo reconciliation (group chat)", () => {
     expect(messaging.messages.value[0].id).toBe("server-room");
     expect(messaging.messages.value[0].deliveryStatus).toBe("delivered");
   });
+
+  test("room self-echo merges GitHub enrichment after the SM ack marked delivered", async () => {
+    const currentSession = session();
+    const roomJid = roomBareJidFor(currentSession, "c1");
+    const queryMam = mock(async () => []);
+    const sendGroupMessage = mock(async () => ({ id: "client-room", state: "sending" as const }));
+    const sendChatState = mock(async () => undefined);
+    let onMessage: ((msg: LiveRoomMessage) => void) | null = null;
+    const actionError = ref("");
+    const xmppClient = ref(null as never);
+    const messaging = useMessaging(
+      ref(currentSession),
+      ref(null),
+      xmppClient,
+      ref("w1"),
+      ref("c1"),
+      ref({ id: "c1", name: "general", channel_type: "text" }),
+      String,
+      actionError,
+      () => {
+        actionError.value = "";
+      },
+    );
+
+    xmppClient.value = {
+      queryMam,
+      sendGroupMessage,
+      sendChatState,
+      setMessageHandler(handler: (msg: LiveRoomMessage) => void) {
+        onMessage = handler;
+      },
+      setStatusHandler() {},
+      setChatStateHandler() {},
+      setReactionHandler() {},
+      setDisplayedHandler() {},
+      setHatsHandler() {},
+      setPresenceHandler() {},
+      setLastSeenHandler() {},
+      setActivityHandler() {},
+      setRoomAvatarHandler() {},
+      setSlowModeHandler() {},
+    } as never;
+    await nextTick();
+
+    await messaging.sendMessage("https://github.com/waddle-social/waddle");
+    messaging.onMessageAck("client-room");
+    expect(messaging.messages.value[0].deliveryStatus).toBe("delivered");
+    expect(messaging.messages.value[0].githubEmbeds).toBeUndefined();
+
+    onMessage?.({
+      id: "client-room",
+      roomJid,
+      nick: "alice",
+      body: "https://github.com/waddle-social/waddle",
+      createdAt: "2024-01-01T00:00:03Z",
+      type: "message",
+      githubEmbeds: [{
+        kind: "repo",
+        url: "https://github.com/waddle-social/waddle",
+        owner: "waddle-social",
+        name: "waddle",
+      }],
+    });
+
+    expect(messaging.messages.value).toHaveLength(1);
+    expect(messaging.messages.value[0].deliveryStatus).toBe("delivered");
+    expect(messaging.messages.value[0].githubEmbeds).toEqual([
+      {
+        kind: "repo",
+        url: "https://github.com/waddle-social/waddle",
+        owner: "waddle-social",
+        name: "waddle",
+      },
+    ]);
+  });
+
+  test("body-less room GitHub enrichment messages reach the timeline", async () => {
+    const currentSession = session();
+    const roomJid = roomBareJidFor(currentSession, "c1");
+    const queryMam = mock(async () => []);
+    let onMessage: ((msg: LiveRoomMessage) => void) | null = null;
+    const actionError = ref("");
+    const xmppClient = ref(null as never);
+    const messaging = useMessaging(
+      ref(currentSession),
+      ref(null),
+      xmppClient,
+      ref("w1"),
+      ref("c1"),
+      ref({ id: "c1", name: "general", channel_type: "text" }),
+      String,
+      actionError,
+      () => {
+        actionError.value = "";
+      },
+    );
+
+    xmppClient.value = {
+      queryMam,
+      setMessageHandler(handler: (msg: LiveRoomMessage) => void) {
+        onMessage = handler;
+      },
+      setStatusHandler() {},
+      setChatStateHandler() {},
+      setReactionHandler() {},
+      setDisplayedHandler() {},
+      setHatsHandler() {},
+      setPresenceHandler() {},
+      setLastSeenHandler() {},
+      setActivityHandler() {},
+      setRoomAvatarHandler() {},
+      setSlowModeHandler() {},
+    } as never;
+    await nextTick();
+
+    onMessage?.({
+      id: "server-github-only",
+      roomJid,
+      nick: "bob",
+      body: "",
+      createdAt: "2024-01-01T00:00:05Z",
+      type: "message",
+      githubEmbeds: [{
+        kind: "repo",
+        url: "https://github.com/waddle-social/waddle",
+        owner: "waddle-social",
+        name: "waddle",
+      }],
+    });
+
+    expect(messaging.messages.value).toHaveLength(1);
+    expect(messaging.messages.value[0].githubEmbeds).toEqual([
+      {
+        kind: "repo",
+        url: "https://github.com/waddle-social/waddle",
+        owner: "waddle-social",
+        name: "waddle",
+      },
+    ]);
+  });
 });
 
 test("fresh DM session self-echo reconciles preserved sending entries", async () => {
@@ -521,4 +661,52 @@ test("fresh DM session self-echo reconciles preserved sending entries", async ()
   expect(dm.messages.value).toHaveLength(1);
   expect(dm.messages.value[0].id).toBe("server-dm");
   expect(dm.messages.value[0].deliveryStatus).toBe("delivered");
+});
+
+test("DM self-echo merges GitHub enrichment after the SM ack marked delivered", async () => {
+  const client = makeDmClient([]);
+  const { dm } = makeDmMessaging(client);
+
+  const sendDirectMessage = mock(async (_peer: string, _body: string) => ({
+    id: "client-dm",
+    state: "sending" as const,
+  }));
+  const sendDmChatState = mock(async () => undefined);
+  (client as unknown as { value: Record<string, unknown> }).value = {
+    ...(client as unknown as { value: Record<string, unknown> }).value,
+    sendDirectMessage,
+    sendDmChatState,
+  };
+
+  await dm.sendMessage("https://github.com/waddle-social/waddle/issues/42");
+  dm.onMessageAck("client-dm");
+  expect(dm.messages.value[0].deliveryStatus).toBe("delivered");
+  expect(dm.messages.value[0].githubEmbeds).toBeUndefined();
+
+  dm.onIncomingMessage({
+    id: "client-dm",
+    peerJid: "bob@example.com",
+    fromJid: "alice@example.com/desktop",
+    nick: "alice",
+    body: "https://github.com/waddle-social/waddle/issues/42",
+    createdAt: "2024-01-01T00:00:04Z",
+    type: "message",
+    githubEmbeds: [{
+      kind: "issue",
+      url: "https://github.com/waddle-social/waddle/issues/42",
+      owner: "waddle-social",
+      name: "waddle",
+    }],
+  });
+
+  expect(dm.messages.value).toHaveLength(1);
+  expect(dm.messages.value[0].deliveryStatus).toBe("delivered");
+  expect(dm.messages.value[0].githubEmbeds).toEqual([
+    {
+      kind: "issue",
+      url: "https://github.com/waddle-social/waddle/issues/42",
+      owner: "waddle-social",
+      name: "waddle",
+    },
+  ]);
 });

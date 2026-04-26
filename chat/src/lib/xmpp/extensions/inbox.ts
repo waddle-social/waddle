@@ -29,7 +29,7 @@
 import type { DefinitionOptions } from "stanza/jxt";
 import { attribute, booleanAttribute, childText, integerAttribute } from "stanza/jxt";
 
-const NS_WADDLE_INBOX_0 = "urn:waddle:inbox:0";
+export const NS_INBOX_0 = "urn:waddle:inbox:0";
 
 export type InboxConversationKind = "direct" | "muc";
 
@@ -57,7 +57,7 @@ const definitions: DefinitionOptions[] = [
       threads: booleanAttribute("threads"),
       totalUnread: integerAttribute("total-unread"),
     },
-    namespace: NS_WADDLE_INBOX_0,
+    namespace: NS_INBOX_0,
   },
   {
     aliases: [
@@ -71,13 +71,13 @@ const definitions: DefinitionOptions[] = [
       lastStanzaId: attribute("last-stanza-id"),
       lastUpdated: integerAttribute("last-updated"),
       unread: integerAttribute("unread"),
-      preview: childText(NS_WADDLE_INBOX_0, "preview"),
+      preview: childText(NS_INBOX_0, "preview"),
       thread: attribute("thread"),
       threadTitle: attribute("thread-title"),
       replyCount: integerAttribute("reply-count"),
       author: attribute("author"),
     },
-    namespace: NS_WADDLE_INBOX_0,
+    namespace: NS_INBOX_0,
   },
   {
     aliases: [{ path: "iq.inboxMarkRead", multiple: false }],
@@ -86,7 +86,7 @@ const definitions: DefinitionOptions[] = [
       partner: attribute("partner"),
       thread: attribute("thread"),
     },
-    namespace: NS_WADDLE_INBOX_0,
+    namespace: NS_INBOX_0,
   },
 ];
 

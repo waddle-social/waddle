@@ -11,6 +11,9 @@ import {
   CornerDownRight,
   MessageSquare,
   Lock,
+  Github,
+  GitPullRequest,
+  CircleDot,
 } from "lucide-vue-next";
 import type { JSONContent } from "@tiptap/core";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
@@ -20,6 +23,9 @@ import EmojiPicker from "@/components/chat/EmojiPicker.vue";
 import ImageLightbox from "@/components/ui/ImageLightbox.vue";
 import {
   renderStyledBody,
+  githubEmbedDisplayTitle,
+  githubEmbedKindLabel,
+  githubEmbedNumber,
   isAudioFile,
   isImageUrl,
   isImageFile,
@@ -112,6 +118,7 @@ const setStyledBodyRef = (el: HTMLDivElement | null) => {
   styledBodyRef.value = el;
 };
 const sharedFiles = computed(() => props.message.sharedFiles ?? []);
+const githubEmbeds = computed(() => props.message.githubEmbeds ?? []);
 const isGif = computed(() => sharedFiles.value.length === 0 && isImageUrl(props.message.body));
 
 const imageAttachments = computed(() =>
@@ -801,6 +808,33 @@ watch(
           class="chat-attachment-image rounded-lg border border-border object-contain"
           loading="lazy"
         />
+      </div>
+
+      <!-- GitHub enrichment cards -->
+      <div v-if="githubEmbeds.length > 0" class="flex flex-col gap-2">
+        <a
+          v-for="(embed, index) in githubEmbeds"
+          :key="`${embed.kind}:${embed.url}:${index}`"
+          :href="embed.url"
+          target="_blank"
+          rel="noopener noreferrer"
+          class="chat-github-card group/github flex min-w-0 items-center gap-3 rounded-lg border border-border bg-muted/30 p-3 text-left transition-colors hover:bg-muted/55 focus-visible:outline-2 focus-visible:outline-primary"
+          :title="embed.url"
+        >
+          <span class="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-md bg-background text-foreground ring-1 ring-border">
+            <Github v-if="embed.kind === 'repo'" class="h-4 w-4" aria-hidden="true" />
+            <CircleDot v-else-if="embed.kind === 'issue'" class="h-4 w-4 text-primary/80" aria-hidden="true" />
+            <GitPullRequest v-else class="h-4 w-4 text-success" aria-hidden="true" />
+          </span>
+          <span class="min-w-0 flex-1">
+            <span class="type-section-label block text-muted-foreground">
+              GitHub {{ githubEmbedKindLabel(embed.kind) }}<template v-if="githubEmbedNumber(embed)"> #{{ githubEmbedNumber(embed) }}</template>
+            </span>
+            <span class="type-control block truncate text-foreground">
+              {{ githubEmbedDisplayTitle(embed) }}
+            </span>
+          </span>
+        </a>
       </div>
 
       <!-- Image attachments gallery -->

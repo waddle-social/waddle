@@ -5,9 +5,15 @@
   title summarizes the intended work and whose description contains the plan.
   Make this the first action for all non-trivial tasks unless explicitly told
   not to.
-- XMPP Native, Never use out of band/XMPP APIs.
+- When creating or editing PR descriptions with `gh`, pass multiline Markdown
+  with real newlines, never escaped `\n` sequences, and verify the rendered body
+  with `gh pr view` before moving on.
 - Always review your plan against the XEPS in ./xeps
     - If ./xeps doesn't exist, clone xsf/xeps into ./xeps
+- Divide work up, use sub-agents and role specific agents to achieve our task.
+- After you are finished, use multiple adverserial personas subagents to review our changes; repeat until they find no real and actionable issues.
+- Our job doesn't stop after we push, we always monitor CI and fix it until all checks are green
+- XMPP Native, Never use out of band non-XMPP APIs.
 - XEP conformance hard rule:
   - Prefer conformant XEP/XMPP shapes at all times. Use custom `urn:waddle:*`
     namespaces only when no suitable XEP-defined shape exists.
@@ -77,8 +83,6 @@ TypeScript 5.8.x; Bun 1.3.x: Follow standard conventions
   - Any PR that adds or expands XEP behavior MUST add or update that XEP’s dedicated Rust tests in the same PR.
   - If a feature is advertised but lacks testable behavior, either implement behavior with tests or remove the advertisement.
 
-<!-- MANUAL ADDITIONS START -->
 - Breaking changes by default: do not add backwards compatibility layers, migration shims, or legacy aliases unless explicitly requested.
 - Assume no production servers/users/data for this project; prioritize clean design over compatibility.
 - Keep the codebase clean: remove dead compatibility code immediately instead of preserving legacy paths.
-<!-- MANUAL ADDITIONS END -->
