@@ -3,6 +3,7 @@ use jid::{BareJid, FullJid, Jid};
 use std::sync::Arc;
 use tracing::{debug, warn};
 use url::{Host, Url};
+use uuid::Uuid;
 use waddle_xmpp::{
     carbons::CARBONS_NS,
     commands::{CommandContext, CommandResult},
@@ -32,6 +33,11 @@ use waddle_xmpp::{
         build_pubsub_error, build_pubsub_items_result, build_pubsub_publish_result,
         build_pubsub_success, is_pubsub_iq, parse_pubsub_iq, PubSubError, PubSubItem,
         PubSubRequest,
+    },
+    roster::{
+        build_roster_push, build_roster_result, build_roster_result_empty, is_roster_get,
+        is_roster_set, parse_roster_get, parse_roster_set, AskType, RosterItem, RosterSetResult,
+        Subscription,
     },
     xep::xep0054::{VCard, VCardPhoto},
     xep::xep0357::{
@@ -66,6 +72,7 @@ use super::presence::get_managed_channel_for_room;
 use crate::auth::{NativeUserStore, Session};
 use crate::db::actor::{DbExecute, DbQuery, DbQueryOne, GetDatabase};
 use crate::db::blocking::DatabaseBlockingStorage;
+use crate::db::roster::{DatabaseRosterStorage, RosterItemRow};
 use crate::db::{row_value, Database, Value, ValueExt};
 use crate::permissions::{
     CheckPermission, Object, ObjectType, Permission, PermissionError, Relation, Subject,
@@ -175,6 +182,10 @@ pub async fn handle_iq_with_conn_state(
         }
     }
 
+    if is_roster_get(&iq) || is_roster_set(&iq) {
+        return handle_roster_iq(&iq, state, phase.bound_jid(), response_from, response_to).await;
+    }
+
     // Sans-I/O dispatch: if the IQ namespace has a registered handler in
     // the protocol dispatcher, route through it and translate the emitted
     // OutboundEvents into outbound XML frames via `interpret()`.
@@ -277,9 +288,6 @@ pub async fn handle_iq_with_conn_state(
         }
         return outcome.frames;
     }
-
-    // jabber:iq:roster is now served by protocol::handlers::roster::RosterHandler
-    // through the sans-I/O dispatcher short-circuit above.
 
     if waddle_xmpp::xep::xep0054::is_vcard_get(&iq) || waddle_xmpp::xep::xep0054::is_vcard_set(&iq)
     {
@@ -1468,6 +1476,244 @@ pub async fn handle_iq_with_conn_state(
         "cancel",
         "feature-not-implemented",
     )]
+}
+
+async fn roster_storage(state: &WebSocketState) -> Option<DatabaseRosterStorage> {
+    match state
+        .deps
+        .app_state
+        .db_pool
+        .global_actor()
+        .clone()
+        .ask(GetDatabase)
+        .await
+    {
+        Ok(db) => Some(DatabaseRosterStorage::new(db)),
+        Err(error) => {
+            warn!(error = %error, "Failed to access roster database for IQ");
+            None
+        }
+    }
+}
+
+async fn handle_roster_iq(
+    iq: &xmpp_parsers::iq::Iq,
+    state: &WebSocketState,
+    bound_jid: Option<&FullJid>,
+    response_from: Option<&str>,
+    response_to: Option<&str>,
+) -> Vec<String> {
+    let Some(full_jid) = bound_jid else {
+        return vec![build_iq_error_xml_with_addresses(
+            &iq.id,
+            response_from,
+            response_to,
+            "auth",
+            "not-authorized",
+        )];
+    };
+    let Some(storage) = roster_storage(state).await else {
+        return vec![build_iq_error_xml_with_addresses(
+            &iq.id,
+            response_from,
+            response_to,
+            "wait",
+            "internal-server-error",
+        )];
+    };
+    let user_bare = full_jid.to_bare();
+
+    if is_roster_get(iq) {
+        if parse_roster_get(iq).is_err() {
+            return vec![build_iq_error_xml_with_addresses(
+                &iq.id,
+                response_from,
+                response_to,
+                "modify",
+                "bad-request",
+            )];
+        }
+        let items = match storage.get_roster(&user_bare).await {
+            Ok(rows) => rows.into_iter().map(roster_row_to_item).collect::<Vec<_>>(),
+            Err(error) => {
+                warn!(error = %error, user = %user_bare, "Failed to load roster");
+                return vec![build_iq_error_xml_with_addresses(
+                    &iq.id,
+                    response_from,
+                    response_to,
+                    "wait",
+                    "internal-server-error",
+                )];
+            }
+        };
+        let version = storage.get_roster_version(&user_bare).await.ok().flatten();
+        let result = build_roster_result(iq, &items, version.as_deref());
+        return vec![stanza_to_xml(Stanza::Iq(result))];
+    }
+
+    let query = match parse_roster_set(iq) {
+        Ok(query) => query,
+        Err(_) => {
+            return vec![build_iq_error_xml_with_addresses(
+                &iq.id,
+                response_from,
+                response_to,
+                "modify",
+                "bad-request",
+            )];
+        }
+    };
+
+    // parse_roster_set guarantees at least one item per RFC 6121.
+    let requested_item = query.items[0].clone();
+    let set_result = if requested_item.subscription == Subscription::Remove {
+        match storage
+            .remove_roster_item(&user_bare, &requested_item.jid)
+            .await
+        {
+            Ok(true) => Some(RosterSetResult::Removed(requested_item.jid.clone())),
+            Ok(false) => None,
+            Err(error) => {
+                warn!(error = %error, user = %user_bare, contact = %requested_item.jid, "Failed to remove roster item");
+                return vec![build_iq_error_xml_with_addresses(
+                    &iq.id,
+                    response_from,
+                    response_to,
+                    "wait",
+                    "internal-server-error",
+                )];
+            }
+        }
+    } else {
+        let existing = match storage
+            .get_roster_item(&user_bare, &requested_item.jid)
+            .await
+        {
+            Ok(existing) => existing.map(roster_row_to_item),
+            Err(error) => {
+                warn!(error = %error, user = %user_bare, contact = %requested_item.jid, "Failed to load roster item");
+                return vec![build_iq_error_xml_with_addresses(
+                    &iq.id,
+                    response_from,
+                    response_to,
+                    "wait",
+                    "internal-server-error",
+                )];
+            }
+        };
+        let mut updated = existing
+            .clone()
+            .unwrap_or_else(|| RosterItem::new(requested_item.jid.clone()));
+        updated.name = requested_item.name.clone();
+        updated.groups = requested_item.groups.clone();
+        let row = roster_item_to_row(&updated);
+        match storage.set_roster_item(&user_bare, &row).await {
+            Ok(is_new) => {
+                if is_new {
+                    Some(RosterSetResult::Added(updated))
+                } else {
+                    Some(RosterSetResult::Updated(updated))
+                }
+            }
+            Err(error) => {
+                warn!(error = %error, user = %user_bare, contact = %requested_item.jid, "Failed to set roster item");
+                return vec![build_iq_error_xml_with_addresses(
+                    &iq.id,
+                    response_from,
+                    response_to,
+                    "wait",
+                    "internal-server-error",
+                )];
+            }
+        }
+    };
+
+    if let Some(change) = set_result {
+        let version = storage.get_roster_version(&user_bare).await.ok().flatten();
+        let push_item = change.to_push_item();
+        for resource in state
+            .deps
+            .protocol
+            .connection_registry
+            .get_resources_for_user(&user_bare)
+        {
+            let push_id = format!("roster-push-{}", Uuid::new_v4());
+            match build_roster_push(
+                &push_id,
+                &resource.to_string(),
+                &push_item,
+                version.as_deref(),
+            ) {
+                Ok(push_iq) => {
+                    let _ = state
+                        .deps
+                        .protocol
+                        .connection_registry
+                        .send_to(&resource, Stanza::Iq(push_iq))
+                        .await;
+                }
+                Err(error) => {
+                    warn!(error = %error, user = %user_bare, resource = %resource, "Failed to build roster push IQ");
+                }
+            }
+        }
+    }
+
+    let result = build_roster_result_empty(iq);
+    vec![stanza_to_xml(Stanza::Iq(result))]
+}
+
+fn roster_row_to_item(row: RosterItemRow) -> RosterItem {
+    RosterItem {
+        jid: row.contact_jid.parse().expect("stored roster JID is valid"),
+        name: row.name,
+        subscription: parse_subscription_state(&row.subscription),
+        ask: row.ask.as_deref().and_then(parse_ask_state),
+        groups: row.groups,
+    }
+}
+
+fn roster_item_to_row(item: &RosterItem) -> RosterItemRow {
+    RosterItemRow {
+        contact_jid: item.jid.to_string(),
+        name: item.name.clone(),
+        subscription: subscription_state_str(item.subscription).to_string(),
+        ask: item.ask.map(ask_state_str).map(ToOwned::to_owned),
+        groups: item.groups.clone(),
+    }
+}
+
+fn parse_subscription_state(value: &str) -> Subscription {
+    match value {
+        "to" => Subscription::To,
+        "from" => Subscription::From,
+        "both" => Subscription::Both,
+        "remove" => Subscription::Remove,
+        _ => Subscription::None,
+    }
+}
+
+fn subscription_state_str(value: Subscription) -> &'static str {
+    match value {
+        Subscription::None => "none",
+        Subscription::To => "to",
+        Subscription::From => "from",
+        Subscription::Both => "both",
+        Subscription::Remove => "remove",
+    }
+}
+
+fn parse_ask_state(value: &str) -> Option<AskType> {
+    match value {
+        "subscribe" => Some(AskType::Subscribe),
+        _ => None,
+    }
+}
+
+fn ask_state_str(value: AskType) -> &'static str {
+    match value {
+        AskType::Subscribe => "subscribe",
+    }
 }
 
 async fn handle_muc_self_ping_iq(
