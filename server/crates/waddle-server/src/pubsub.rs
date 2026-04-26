@@ -359,37 +359,44 @@ impl DatabasePubSubStorage {
         if max_items == 0 || max_items == u32::MAX {
             return Ok(());
         }
+        self.execute(
+            r#"
+            DELETE FROM pubsub_items
+            WHERE owner_jid = ? AND node_name = ?
+              AND seq NOT IN (
+                  SELECT seq FROM pubsub_items
+                  WHERE owner_jid = ? AND node_name = ?
+                  ORDER BY seq DESC
+                  LIMIT ?
+              )
+            "#,
+            crate::db_params![
+                owner.to_string(),
+                node_name,
+                owner.to_string(),
+                node_name,
+                max_items,
+            ],
+        )
+        .await?;
+        Ok(())
+    }
 
-        let mut rows = self
-            .query(
-                r#"
-                SELECT item_id FROM pubsub_items
-                WHERE owner_jid = ? AND node_name = ?
-                ORDER BY published_at_ms DESC, item_id DESC
-                "#,
-                crate::db_params![owner.to_string(), node_name],
-            )
-            .await?;
-        let mut seen = 0_u32;
-        let mut excess = Vec::new();
+    async fn run_select_items(
+        &self,
+        sql: &str,
+        params: Vec<crate::db::Value>,
+    ) -> Result<Vec<StoredItem>, XmppError> {
+        let mut rows = self.query(sql, params).await?;
+        let mut items = Vec::new();
         while let Some(row) = rows
             .next()
             .await
             .map_err(|error| XmppError::internal(error.to_string()))?
         {
-            let item_id: String = row
-                .get(0)
-                .map_err(|error| XmppError::internal(error.to_string()))?;
-            seen += 1;
-            if seen > max_items {
-                excess.push(item_id);
-            }
+            items.push(Self::decode_item(&row)?);
         }
-
-        for item_id in excess {
-            self.retract_item(owner, node_name, &item_id).await?;
-        }
-        Ok(())
+        Ok(items)
     }
 }
 
@@ -513,35 +520,61 @@ impl PubSubStorage for DatabasePubSubStorage {
         max_items: Option<u32>,
         item_ids: &[String],
     ) -> Result<Vec<StoredItem>, XmppError> {
-        let mut rows = self
-            .query(
+        if !item_ids.is_empty() {
+            // Build IN (?, ?, ...) clause inline. item_ids comes from a parsed
+            // IQ payload and is bounded by the request size. Use placeholders;
+            // never string-format the values.
+            let placeholders = std::iter::repeat("?")
+                .take(item_ids.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
                 r#"
                 SELECT item_id, payload_xml, publisher_jid, published_at_ms
                 FROM pubsub_items
+                WHERE owner_jid = ? AND node_name = ? AND item_id IN ({placeholders})
+                ORDER BY seq ASC
+                "#
+            );
+            let mut params: Vec<crate::db::Value> = Vec::with_capacity(2 + item_ids.len());
+            params.push(crate::db::Value::from(owner.to_string()));
+            params.push(crate::db::Value::from(node_name));
+            for id in item_ids {
+                params.push(crate::db::Value::from(id.clone()));
+            }
+            return self.run_select_items(&sql, params).await;
+        }
+
+        let limit_sql = match max_items {
+            Some(n) if n > 0 => format!(
+                r#"
+                SELECT item_id, payload_xml, publisher_jid, published_at_ms FROM (
+                    SELECT item_id, payload_xml, publisher_jid, published_at_ms, seq
+                    FROM pubsub_items
+                    WHERE owner_jid = ? AND node_name = ?
+                    ORDER BY seq DESC
+                    LIMIT {n}
+                ) t
+                ORDER BY seq ASC
+                "#
+            ),
+            _ => r#"
+                SELECT item_id, payload_xml, publisher_jid, published_at_ms
+                FROM pubsub_items
                 WHERE owner_jid = ? AND node_name = ?
-                ORDER BY published_at_ms ASC, item_id ASC
-                "#,
-                crate::db_params![owner.to_string(), node_name],
-            )
-            .await?;
-        let mut items = Vec::new();
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|error| XmppError::internal(error.to_string()))?
-        {
-            let item = Self::decode_item(&row)?;
-            if item_ids.is_empty() || item_ids.contains(&item.id) {
-                items.push(item);
-            }
-        }
-        if let Some(max_items) = max_items {
-            let max_items = max_items as usize;
-            if max_items > 0 && items.len() > max_items {
-                items = items[items.len() - max_items..].to_vec();
-            }
-        }
-        Ok(items)
+                ORDER BY seq ASC
+                "#
+            .to_string(),
+        };
+
+        self.run_select_items(
+            &limit_sql,
+            vec![
+                crate::db::Value::from(owner.to_string()),
+                crate::db::Value::from(node_name),
+            ],
+        )
+        .await
     }
 
     async fn retract_item(
