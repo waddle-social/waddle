@@ -1714,11 +1714,13 @@ mod tests {
     use handlers::message::handle_message;
     use handlers::presence::{handle_muc_join, handle_muc_leave, parse_room_jid_context};
     // Types moved out of mod.rs scope but used in tests
+    use waddle_extensions::{ExtensionConfig, ExtensionModuleConfig};
     use waddle_xmpp::commands::{CommandContext, CommandResult};
     use waddle_xmpp::muc::room_actor::{ChangeAffiliation, GetSnapshot, JoinWithAffiliation};
     use waddle_xmpp::registry::BroadcastOutcome;
     use waddle_xmpp::Affiliation;
     use xmpp_parsers::iq::{Iq, IqType};
+    use xmpp_parsers::message::MessageType as XmppMessageType;
 
     #[derive(Default)]
     struct TestSink {
@@ -1774,6 +1776,17 @@ mod tests {
     }
 
     async fn create_test_websocket_state() -> Arc<WebSocketState> {
+        create_test_websocket_state_with_extension_manager(Arc::new(
+            ExtensionManager::from_env()
+                .await
+                .expect("extension manager"),
+        ))
+        .await
+    }
+
+    async fn create_test_websocket_state_with_extension_manager(
+        extension_manager: Arc<ExtensionManager>,
+    ) -> Arc<WebSocketState> {
         let config = DatabaseConfig::default();
         let pool_config = PoolConfig::default();
         let db_pool = DatabasePool::new(config, pool_config)
@@ -1814,11 +1827,7 @@ mod tests {
                         waddle_xmpp::inbox::storage::InMemoryInboxStorage::new(),
                     ),
                     command_registry: Arc::new(CommandRegistry::new()),
-                    extension_manager: Arc::new(
-                        ExtensionManager::from_env()
-                            .await
-                            .expect("extension manager"),
-                    ),
+                    extension_manager,
                     dispatcher: Arc::new(dispatcher),
                     pubsub_storage: Arc::new(waddle_xmpp::pubsub::InMemoryPubSubStorage::new()),
                     push_store: Arc::new(waddle_xmpp::push::InMemoryPushStore::new()),
@@ -1829,6 +1838,30 @@ mod tests {
                 },
             },
         })
+    }
+
+    async fn github_fail_open_extension_manager() -> Arc<ExtensionManager> {
+        let missing_wasm = std::env::temp_dir().join(format!(
+            "missing-github-enricher-test-{}.wasm",
+            uuid::Uuid::new_v4()
+        ));
+        Arc::new(
+            ExtensionManager::from_config(ExtensionConfig {
+                enabled: true,
+                cache_dir: "/var/lib/waddle/extensions".to_string(),
+                modules: vec![ExtensionModuleConfig {
+                    name: "github-enricher".to_string(),
+                    registry: "ghcr.io/waddle-social/waddle/extensions/github-enricher".to_string(),
+                    tag: "latest".to_string(),
+                    namespace: "urn:waddle:github:0".to_string(),
+                    config: serde_json::Value::Object(Default::default()),
+                    config_secret_files: Default::default(),
+                    local_path: Some(missing_wasm.display().to_string()),
+                }],
+            })
+            .await
+            .expect("github fail-open extension manager"),
+        )
     }
 
     async fn create_test_session(state: &WebSocketState, username: &str) -> Session {
@@ -1960,6 +1993,18 @@ mod tests {
             },
             _ => panic!("expected message stanza"),
         }
+    }
+
+    fn assert_github_payload(xml: &str, element_name: &str, url: &str, owner: &str, name: &str) {
+        let parsed = parse_message_for_test(xml);
+        let payload = parsed
+            .payloads
+            .iter()
+            .find(|payload| payload.name() == element_name && payload.ns() == "urn:waddle:github:0")
+            .unwrap_or_else(|| panic!("missing {element_name} GitHub payload in {xml}"));
+        assert_eq!(payload.attr("url"), Some(url));
+        assert_eq!(payload.attr("owner"), Some(owner));
+        assert_eq!(payload.attr("name"), Some(name));
     }
 
     fn parse_iq_for_test(xml: &str) -> xmpp_parsers::iq::Iq {
@@ -4152,17 +4197,24 @@ mod tests {
             .connection_registry
             .register(recipient_jid.clone(), recipient_tx);
 
-        let frame = format!(
-            "<message xmlns='jabber:client' to='{}' type='chat' id='dm-github-1'>\
-                <body>Repo payload already attached</body>\
-                <repo xmlns='urn:waddle:github:0' owner='rust-lang' name='rust' \
-                      url='https://github.com/rust-lang/rust'/>\
-             </message>",
-            recipient_jid
+        let mut message =
+            xmpp_parsers::message::Message::new(Some(jid::Jid::from(recipient_jid.clone())));
+        message.id = Some("dm-github-1".to_string());
+        message.type_ = XmppMessageType::Chat;
+        message.bodies.insert(
+            String::new(),
+            xmpp_parsers::message::Body("Repo payload already attached".to_string()),
+        );
+        message.payloads.push(
+            Element::builder("repo", "urn:waddle:github:0")
+                .attr("owner", "rust-lang")
+                .attr("name", "rust")
+                .attr("url", "https://github.com/rust-lang/rust")
+                .build(),
         );
 
         let responses = handle_message(
-            parse_message_for_test(&frame),
+            message,
             "muc.example.com",
             state.as_ref(),
             &ConnectionPhase::ready(sender_jid.clone(), false),
@@ -4181,6 +4233,13 @@ mod tests {
             sender_echo.contains("urn:waddle:github:0"),
             "sender echo should include GitHub payload: {sender_echo}"
         );
+        assert_github_payload(
+            sender_echo,
+            "repo",
+            "https://github.com/rust-lang/rust",
+            "rust-lang",
+            "rust",
+        );
 
         // Recipient may receive an inbox push headline before the routed
         // chat message.  Drain until we find the chat stanza.
@@ -4197,11 +4256,205 @@ mod tests {
                     routed_xml.contains("urn:waddle:github:0"),
                     "routed stanza should preserve GitHub payload: {routed_xml}"
                 );
+                assert_github_payload(
+                    &routed_xml,
+                    "repo",
+                    "https://github.com/rust-lang/rust",
+                    "rust-lang",
+                    "rust",
+                );
                 found_chat = true;
                 break;
             }
         }
         assert!(found_chat, "recipient should receive the chat message");
+    }
+
+    #[tokio::test]
+    async fn handle_message_direct_with_github_link_injects_embed() {
+        let sender_jid: FullJid = "alice@example.com/web".parse().expect("sender jid");
+        let recipient_jid: FullJid = "bob@example.com/mobile".parse().expect("recipient jid");
+        let state = create_test_websocket_state_with_extension_manager(
+            github_fail_open_extension_manager().await,
+        )
+        .await;
+
+        let (recipient_tx, mut recipient_rx) = mpsc::channel(8);
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .register(recipient_jid.clone(), recipient_tx);
+
+        let mut message =
+            xmpp_parsers::message::Message::new(Some(jid::Jid::from(recipient_jid.clone())));
+        message.id = Some("dm-github-2".to_string());
+        message.type_ = XmppMessageType::Chat;
+        message.bodies.insert(
+            String::new(),
+            xmpp_parsers::message::Body("https://github.com/waddle-social/waddle".to_string()),
+        );
+
+        let responses = handle_message(
+            message,
+            "muc.example.com",
+            state.as_ref(),
+            &ConnectionPhase::ready(sender_jid.clone(), false),
+            &None,
+        )
+        .await;
+
+        assert_eq!(responses.len(), 1, "sender should get an echo response");
+        let sender_echo = &responses[0];
+        assert!(
+            sender_echo.contains("<repo")
+                && sender_echo.contains("urn:waddle:github:0")
+                && sender_echo.contains("url=\"https://github.com/waddle-social/waddle\""),
+            "sender echo should include injected GitHub payload: {sender_echo}"
+        );
+        assert_github_payload(
+            sender_echo,
+            "repo",
+            "https://github.com/waddle-social/waddle",
+            "waddle-social",
+            "waddle",
+        );
+
+        let mut found_chat = false;
+        while let Ok(routed) = recipient_rx.try_recv() {
+            let routed_xml = stanza_to_xml(&routed.stanza);
+            if routed_xml.contains("type=\"chat\"") || routed_xml.contains("type='chat'") {
+                assert!(
+                    routed_xml.contains("<repo")
+                        && routed_xml.contains("urn:waddle:github:0")
+                        && routed_xml.contains("url=\"https://github.com/waddle-social/waddle\""),
+                    "routed stanza should include injected GitHub payload: {routed_xml}"
+                );
+                assert_github_payload(
+                    &routed_xml,
+                    "repo",
+                    "https://github.com/waddle-social/waddle",
+                    "waddle-social",
+                    "waddle",
+                );
+                found_chat = true;
+                break;
+            }
+        }
+        assert!(found_chat, "recipient should receive the chat message");
+    }
+
+    #[tokio::test]
+    async fn handle_xmpp_frame_direct_with_github_link_injects_embed() {
+        let sender_jid: FullJid = "alice@example.com/web".parse().expect("sender jid");
+        let recipient_jid: FullJid = "bob@example.com/mobile".parse().expect("recipient jid");
+        let state = create_test_websocket_state_with_extension_manager(
+            github_fail_open_extension_manager().await,
+        )
+        .await;
+
+        let (recipient_tx, mut recipient_rx) = mpsc::channel(8);
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .register(recipient_jid, recipient_tx);
+
+        let mut conn = WsConnState::new();
+        conn.phase = ConnectionPhase::ready(sender_jid, false);
+        let frame = r#"<message xmlns="jabber:client" id="raw-github-1" to="bob@example.com/mobile" type="chat"><origin-id xmlns="urn:xmpp:sid:0" id="raw-github-1"/><body>https://github.com/getagentseal/codeburn</body><request xmlns="urn:xmpp:receipts"/><markable xmlns="urn:xmpp:chat-markers:0"/><store xmlns="urn:xmpp:hints"/><reference xmlns="urn:xmpp:reference:0" type="data" uri="https://github.com/getagentseal/codeburn" begin="0" end="40"/></message>"#;
+
+        let responses = handle_xmpp_frame(frame, "example.com", state.as_ref(), &mut conn).await;
+
+        assert_eq!(responses.len(), 1, "sender should get an echo response");
+        assert_github_payload(
+            &responses[0],
+            "repo",
+            "https://github.com/getagentseal/codeburn",
+            "getagentseal",
+            "codeburn",
+        );
+
+        let mut found_chat = false;
+        while let Ok(routed) = recipient_rx.try_recv() {
+            let routed_xml = stanza_to_xml(&routed.stanza);
+            if routed_xml.contains("type=\"chat\"") || routed_xml.contains("type='chat'") {
+                assert_github_payload(
+                    &routed_xml,
+                    "repo",
+                    "https://github.com/getagentseal/codeburn",
+                    "getagentseal",
+                    "codeburn",
+                );
+                found_chat = true;
+                break;
+            }
+        }
+        assert!(found_chat, "recipient should receive the chat message");
+    }
+
+    #[tokio::test]
+    async fn handle_message_groupchat_with_github_link_injects_embed() {
+        let state = create_test_websocket_state_with_extension_manager(
+            github_fail_open_extension_manager().await,
+        )
+        .await;
+        let room_jid: BareJid = "github-room@muc.example.com".parse().expect("room jid");
+        let sender_jid: FullJid = "alice@example.com/web".parse().expect("sender jid");
+        let room_actor = get_or_create_room_actor(
+            state.as_ref(),
+            &room_jid,
+            RoomConfig::default(),
+            "waddle-alpha".to_string(),
+            "github-room".to_string(),
+        )
+        .await
+        .expect("create room");
+        room_actor
+            .ask(JoinWithAffiliation {
+                sender_jid: sender_jid.clone(),
+                nick: "alice".to_string(),
+                effective_affiliation: Affiliation::Member,
+                local_domain: "example.com".to_string(),
+            })
+            .await
+            .expect("join room");
+
+        let mut message =
+            xmpp_parsers::message::Message::new(Some(jid::Jid::from(room_jid.clone())));
+        message.id = Some("muc-github-1".to_string());
+        message.type_ = XmppMessageType::Groupchat;
+        message.bodies.insert(
+            String::new(),
+            xmpp_parsers::message::Body(
+                "https://github.com/waddle-social/waddle/issues/42".to_string(),
+            ),
+        );
+
+        let responses = handle_message(
+            message,
+            "muc.example.com",
+            state.as_ref(),
+            &ConnectionPhase::ready(sender_jid.clone(), false),
+            &None,
+        )
+        .await;
+
+        assert_eq!(responses.len(), 1, "sender should receive reflected echo");
+        let echo = &responses[0];
+        assert!(
+            echo.contains("<issue")
+                && echo.contains("urn:waddle:github:0")
+                && echo.contains("url=\"https://github.com/waddle-social/waddle/issues/42\""),
+            "groupchat echo should include injected GitHub issue payload: {echo}"
+        );
+        assert_github_payload(
+            echo,
+            "issue",
+            "https://github.com/waddle-social/waddle/issues/42",
+            "waddle-social",
+            "waddle",
+        );
     }
 
     #[tokio::test]

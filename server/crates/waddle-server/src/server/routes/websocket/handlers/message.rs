@@ -1,7 +1,7 @@
 use chrono::Utc;
 use jid::{BareJid, FullJid};
 use tracing::{debug, info, warn};
-use waddle_extensions::message_has_embed_for_namespaces;
+use waddle_extensions::message_has_valid_github_embed;
 use waddle_xmpp::{
     carbons::{build_received_carbon, build_sent_carbon, should_copy_message},
     inbox::{
@@ -352,10 +352,7 @@ pub async fn handle_message(
                 .extension_manager
                 .enrich_message(&mut prototype)
                 .await;
-            let has_github_embed = message_has_embed_for_namespaces(
-                &prototype,
-                state.deps.protocol.extension_manager.feature_namespaces(),
-            );
+            let has_github_embed = message_has_valid_github_embed(&prototype);
 
             if let Some(error) = validate_rich_message_targets(
                 state,
