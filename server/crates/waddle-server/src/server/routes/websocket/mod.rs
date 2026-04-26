@@ -2001,7 +2001,7 @@ mod tests {
             .payloads
             .iter()
             .find(|payload| payload.name() == element_name && payload.ns() == "urn:waddle:github:0")
-            .unwrap_or_else(|| panic!("missing {element_name} GitHub payload in {xml}"));
+            .unwrap_or_else(|| panic!("missing {element_name} GitHub payload"));
         assert_eq!(payload.attr("url"), Some(url));
         assert_eq!(payload.attr("owner"), Some(owner));
         assert_eq!(payload.attr("name"), Some(name));
