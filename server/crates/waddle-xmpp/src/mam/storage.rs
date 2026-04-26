@@ -575,10 +575,13 @@ async fn ensure_sqlite_column(
 }
 
 fn uses_backward_pagination(query: &MamQuery) -> bool {
-    query
-        .before_id
-        .as_deref()
-        .is_some_and(|before_id| !before_id.is_empty())
+    // XEP-0059 §2.5: an empty <before/> element requests the last page of
+    // results. We treat any present `before_id` — including `Some("")` — as a
+    // backward-pagination signal so the SQL emits ORDER BY id DESC and
+    // `finalize_result` reverses back to chronological order. The downstream
+    // `id < ?` predicate is still skipped for the empty case, so no rows are
+    // filtered out.
+    query.before_id.is_some()
 }
 
 fn finalize_result(mut messages: Vec<ArchivedMessage>, query: &MamQuery) -> MamResult {
@@ -1239,5 +1242,47 @@ mod tests {
         ] {
             let _ = std::fs::remove_file(cleanup);
         }
+    }
+
+    // XEP-0059 §2.5: an empty <before/> element requests the last page of
+    // results. Regression test for a bug where `before_id = Some("")` was
+    // collapsed to "no pagination" and the query returned the *first* page
+    // (oldest N) instead of the last page (newest N).
+    #[tokio::test]
+    async fn test_empty_before_returns_last_page() {
+        let storage = create_test_storage().await;
+        let archive = "room@conference.example.com";
+
+        for body in ["one", "two", "three", "four", "five", "six"] {
+            let msg = ArchivedMessage {
+                id: String::new(),
+                timestamp: Utc::now(),
+                from: "user@example.com/device".to_string(),
+                to: archive.to_string(),
+                body: body.to_string(),
+                ..Default::default()
+            };
+            storage.store_message(archive, &msg).await.unwrap();
+        }
+
+        let last_page = storage
+            .query_messages(
+                archive,
+                &MamQuery {
+                    max: Some(3),
+                    before_id: Some(String::new()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let bodies: Vec<&str> = last_page
+            .messages
+            .iter()
+            .map(|m| m.body.as_str())
+            .collect();
+        assert_eq!(bodies, vec!["four", "five", "six"]);
+        assert!(!last_page.complete);
     }
 }
