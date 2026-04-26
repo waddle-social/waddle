@@ -2173,7 +2173,7 @@ mod tests {
         extension_manager: Arc<ExtensionManager>,
     ) -> Arc<WebSocketState> {
         let config = DatabaseConfig::default();
-        let pool_config = PoolConfig::default();
+        let pool_config = PoolConfig;
         let db_pool = DatabasePool::new(config, pool_config)
             .await
             .expect("db pool");

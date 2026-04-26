@@ -256,20 +256,6 @@ impl SessionManager {
         Ok(session)
     }
 
-    #[allow(dead_code)]
-    pub async fn cleanup_expired_sessions(&self) -> Result<usize, AuthError> {
-        let now = Utc::now().to_rfc3339();
-        let deleted = self
-            .actor
-            .ask(DbExecute {
-                sql: "DELETE FROM sessions WHERE expires_at IS NOT NULL AND expires_at < ?"
-                    .to_string(),
-                params: vec![crate::db::Value::from(now)],
-            })
-            .await
-            .map_err(Self::ask_err)?;
-        Ok(deleted as usize)
-    }
 }
 
 #[cfg(test)]

@@ -568,7 +568,7 @@ mod tests {
 
     async fn create_test_upload_state() -> (Arc<UploadState>, std::path::PathBuf) {
         let config = DatabaseConfig::default();
-        let pool_config = PoolConfig::default();
+        let pool_config = PoolConfig;
         let db_pool = DatabasePool::new(config, pool_config).await.unwrap();
 
         // Run migrations

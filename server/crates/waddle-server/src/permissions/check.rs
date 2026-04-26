@@ -35,7 +35,7 @@ pub struct CheckRequest {
 
 impl CheckRequest {
     /// Create a new check request
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn new(subject: Subject, permission: impl Into<String>, object: Object) -> Self {
         Self {
             subject,
@@ -88,23 +88,6 @@ impl PermissionChecker {
             ))),
         }
     }
-
-    /// Create a new permission checker with custom cache size
-    #[allow(dead_code)]
-    pub fn with_cache_size(
-        actor: ActorRef<DbActor>,
-        schema: PermissionSchema,
-        cache_size: usize,
-    ) -> Self {
-        Self {
-            tuple_store: TupleStore::new(actor),
-            schema,
-            cache: Arc::new(Mutex::new(LruCache::new(
-                std::num::NonZeroUsize::new(cache_size.max(1)).unwrap(),
-            ))),
-        }
-    }
-
     /// Check a permission
     #[instrument(skip(self), fields(subject = %request.subject, permission = %request.permission, object = %request.object))]
     pub async fn check(&self, request: CheckRequest) -> Result<CheckResponse, PermissionError> {
@@ -361,19 +344,7 @@ impl PermissionChecker {
             }
         })
     }
-
-    /// Invalidate cache entries for a specific object
-    #[allow(dead_code)]
-    pub async fn invalidate_object(&self, object: &Object) {
-        let mut cache = self.cache.lock().await;
-        // Note: LruCache doesn't support partial key matching, so we clear all
-        // In a production system, you'd want a more sophisticated cache
-        cache.clear();
-        debug!("Invalidated cache for object: {}", object);
-    }
-
     /// Clear the entire cache
-    #[allow(dead_code)]
     pub async fn clear_cache(&self) {
         let mut cache = self.cache.lock().await;
         cache.clear();

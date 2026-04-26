@@ -1000,7 +1000,7 @@ mod tests {
         server_config: &ServerConfig,
     ) -> (Arc<AuthState>, kameo::actor::ActorRef<DbActor>) {
         let config = DatabaseConfig::default();
-        let pool_config = PoolConfig::default();
+        let pool_config = PoolConfig;
         let db_pool = DatabasePool::new(config, pool_config).await.unwrap();
         MigrationRunner::global()
             .run(db_pool.global())

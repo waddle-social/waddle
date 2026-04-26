@@ -28,10 +28,6 @@ impl DatabaseRosterStorage {
     }
 
     /// Get all roster items for a user.
-    #[allow(
-        dead_code,
-        reason = "legacy waddle_xmpp AppState bridge and roster storage tests exercise this path"
-    )]
     #[instrument(skip(self), fields(user = %user_jid))]
     pub async fn get_roster(
         &self,
@@ -187,10 +183,6 @@ impl DatabaseRosterStorage {
     /// Remove a roster item.
     ///
     /// Returns `true` if an item was removed, `false` if it didn't exist.
-    #[allow(
-        dead_code,
-        reason = "legacy waddle_xmpp AppState bridge and roster storage tests exercise this path"
-    )]
     #[instrument(skip(self), fields(user = %user_jid, contact = %contact_jid))]
     pub async fn remove_roster_item(
         &self,
@@ -216,10 +208,6 @@ impl DatabaseRosterStorage {
     }
 
     /// Get the current roster version for a user.
-    #[allow(
-        dead_code,
-        reason = "legacy waddle_xmpp AppState bridge and roster storage tests exercise this path"
-    )]
     #[instrument(skip(self), fields(user = %user_jid))]
     pub async fn get_roster_version(
         &self,

@@ -195,7 +195,6 @@ pub struct Subject {
 
 impl Subject {
     /// Create a new direct user subject
-    #[allow(dead_code)]
     pub fn user(user_id: impl Into<String>) -> Self {
         Self {
             subject_type: SubjectType::User,
@@ -205,7 +204,6 @@ impl Subject {
     }
 
     /// Create a userset subject (e.g., all members of a space)
-    #[allow(dead_code)]
     pub fn userset(
         subject_type: SubjectType,
         id: impl Into<String>,
@@ -599,44 +597,6 @@ impl TupleStore {
         }
 
         Ok(subjects)
-    }
-
-    /// Get all tuples where the subject matches (for expanding usersets)
-    #[allow(dead_code)]
-    #[instrument(skip(self))]
-    pub async fn get_tuples_for_subject(
-        &self,
-        subject_type: SubjectType,
-        subject_id: &str,
-        subject_relation: Option<&str>,
-    ) -> Result<Vec<Tuple>, PermissionError> {
-        let rows = self
-            .actor
-            .ask(DbQuery {
-                sql: r#"
-                    SELECT id, object_type, object_id, relation, subject_type, subject_id, subject_relation, created_at
-                    FROM permission_tuples
-                    WHERE subject_type = ? AND subject_id = ?
-                    AND (subject_relation = ? OR (subject_relation IS NULL AND ? IS NULL))
-                "#
-                .to_string(),
-                params: vec![
-                    subject_type.to_string().into(),
-                    subject_id.into(),
-                    match subject_relation {
-                        Some(relation) => relation.into(),
-                        None => crate::db::Value::Null,
-                    },
-                    match subject_relation {
-                        Some(relation) => relation.into(),
-                        None => crate::db::Value::Null,
-                    },
-                ],
-            })
-            .await
-            .map_err(|e| PermissionError::DatabaseError(e.to_string()))?;
-
-        self.rows_to_tuples(rows)
     }
 
     /// Get all tuples for an object (optionally filtered by relation)

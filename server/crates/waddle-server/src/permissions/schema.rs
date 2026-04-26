@@ -111,13 +111,13 @@ impl PermissionSchema {
     }
 
     /// Get the schema for an object type
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn get_schema(&self, object_type: ObjectType) -> Option<&ObjectTypeSchema> {
         self.schemas.get(&object_type)
     }
 
     /// Check if a relation is valid for an object type
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn is_valid_relation(&self, object_type: ObjectType, relation: &str) -> bool {
         self.schemas
             .get(&object_type)

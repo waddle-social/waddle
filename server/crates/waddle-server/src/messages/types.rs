@@ -13,63 +13,44 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-/// Maximum content length for messages (4000 characters)
 pub const MAX_CONTENT_LENGTH: usize = 4000;
 
-/// Message flags bitfield
-///
-/// Represents various message properties as bit flags, matching
-/// the specification in docs/specs/message-schema.md
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct MessageFlags(u32);
 
 impl MessageFlags {
-    /// Message is pinned to the channel
     pub const PINNED: MessageFlags = MessageFlags(1 << 0);
-    /// Suppress automatic link embeds
     pub const SUPPRESS_EMBEDS: MessageFlags = MessageFlags(1 << 1);
-    /// Message is ephemeral (only visible to recipient)
     pub const EPHEMERAL: MessageFlags = MessageFlags(1 << 2);
-    /// Message is urgent (highlighted notification)
     pub const URGENT: MessageFlags = MessageFlags(1 << 3);
-    /// Silent message (no notification)
     pub const SILENT: MessageFlags = MessageFlags(1 << 4);
-    /// System-generated message
     pub const SYSTEM: MessageFlags = MessageFlags(1 << 5);
-    /// Announcement crosspost
     pub const CROSSPOST: MessageFlags = MessageFlags(1 << 6);
 
-    /// Create empty flags
     pub const fn empty() -> Self {
         MessageFlags(0)
     }
 
-    /// Create flags from raw bits
     pub const fn from_bits(bits: u32) -> Self {
         MessageFlags(bits)
     }
 
-    /// Get raw bits value
     pub const fn bits(&self) -> u32 {
         self.0
     }
 
-    /// Check if a flag is set
     pub const fn contains(&self, other: MessageFlags) -> bool {
         (self.0 & other.0) == other.0
     }
 
-    /// Set a flag
     pub fn insert(&mut self, other: MessageFlags) {
         self.0 |= other.0;
     }
 
-    /// Remove a flag
     pub fn remove(&mut self, other: MessageFlags) {
         self.0 &= !other.0;
     }
 
-    /// Check if no flags are set
     pub const fn is_empty(&self) -> bool {
         self.0 == 0
     }
@@ -117,78 +98,50 @@ impl From<i64> for MessageFlags {
     }
 }
 
-/// Represents a message in a channel
 #[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
-    /// Unique message identifier (UUID v7, time-sortable)
     pub id: String,
-
-    /// Channel this message belongs to
     pub channel_id: String,
-
-    /// Author user ID
     pub author_user_id: String,
-
-    /// Message text content (max 4000 characters)
     pub content: Option<String>,
-
-    /// ID of the message this is a reply to
     pub reply_to_id: Option<String>,
-
-    /// ID of the thread root message
     pub thread_id: Option<String>,
-
-    /// Message flags bitfield
     pub flags: MessageFlags,
-
-    /// When the message was last edited
     pub edited_at: Option<DateTime<Utc>>,
-
-    /// When the message was created
     pub created_at: DateTime<Utc>,
-
-    /// When the message expires (for TTL)
     pub expires_at: Option<DateTime<Utc>>,
 }
 
 impl Message {
-    /// Check if the message is pinned
     pub fn is_pinned(&self) -> bool {
         self.flags.contains(MessageFlags::PINNED)
     }
 
-    /// Check if the message is a system message
     pub fn is_system(&self) -> bool {
         self.flags.contains(MessageFlags::SYSTEM)
     }
 
-    /// Check if the message is ephemeral
     pub fn is_ephemeral(&self) -> bool {
         self.flags.contains(MessageFlags::EPHEMERAL)
     }
 
-    /// Check if the message is silent (no notification)
     pub fn is_silent(&self) -> bool {
         self.flags.contains(MessageFlags::SILENT)
     }
 
-    /// Check if the message has been edited
     pub fn is_edited(&self) -> bool {
         self.edited_at.is_some()
     }
 
-    /// Check if the message is a reply
     pub fn is_reply(&self) -> bool {
         self.reply_to_id.is_some()
     }
 
-    /// Check if the message is part of a thread
     pub fn is_in_thread(&self) -> bool {
         self.thread_id.is_some()
     }
 
-    /// Check if the message has expired
     pub fn is_expired(&self) -> bool {
         match self.expires_at {
             Some(expires) => Utc::now() >= expires,
@@ -197,34 +150,19 @@ impl Message {
     }
 }
 
-/// Data transfer object for creating a new message
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct MessageCreate {
-    /// Channel to post the message in
     pub channel_id: String,
-
-    /// Author user ID
     pub author_user_id: String,
-
-    /// Message text content
     pub content: String,
-
-    /// ID of the message to reply to
     pub reply_to_id: Option<String>,
-
-    /// ID of the thread root message
     pub thread_id: Option<String>,
-
-    /// Message flags
     pub flags: MessageFlags,
-
-    /// When the message should expire
     pub expires_at: Option<DateTime<Utc>>,
 }
 
 impl MessageCreate {
-    /// Create a new MessageCreate with required fields
     pub fn new(channel_id: String, author_user_id: String, content: String) -> Self {
         Self {
             channel_id,
@@ -237,31 +175,26 @@ impl MessageCreate {
         }
     }
 
-    /// Set the message this is a reply to
     pub fn with_reply_to(mut self, reply_to_id: String) -> Self {
         self.reply_to_id = Some(reply_to_id);
         self
     }
 
-    /// Set the thread root message
     pub fn with_thread_id(mut self, thread_id: String) -> Self {
         self.thread_id = Some(thread_id);
         self
     }
 
-    /// Set message flags
     pub fn with_flags(mut self, flags: MessageFlags) -> Self {
         self.flags = flags;
         self
     }
 
-    /// Set expiration time
     pub fn with_expiration(mut self, expires_at: DateTime<Utc>) -> Self {
         self.expires_at = Some(expires_at);
         self
     }
 
-    /// Validate the message content
     pub fn validate(&self) -> Result<(), super::MessageError> {
         if self.content.len() > MAX_CONTENT_LENGTH {
             return Err(super::MessageError::ContentTooLong {
@@ -273,36 +206,28 @@ impl MessageCreate {
     }
 }
 
-/// Data transfer object for updating an existing message
 #[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 pub struct MessageUpdate {
-    /// New content (if being updated)
     pub content: Option<String>,
-
-    /// New flags (if being updated)
     pub flags: Option<MessageFlags>,
 }
 
 impl MessageUpdate {
-    /// Create a new empty update
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Set new content
     pub fn with_content(mut self, content: String) -> Self {
         self.content = Some(content);
         self
     }
 
-    /// Set new flags
     pub fn with_flags(mut self, flags: MessageFlags) -> Self {
         self.flags = Some(flags);
         self
     }
 
-    /// Validate the update
     pub fn validate(&self) -> Result<(), super::MessageError> {
         if let Some(ref content) = self.content {
             if content.len() > MAX_CONTENT_LENGTH {
@@ -315,7 +240,6 @@ impl MessageUpdate {
         Ok(())
     }
 
-    /// Check if any fields are being updated
     pub fn has_changes(&self) -> bool {
         self.content.is_some() || self.flags.is_some()
     }
@@ -379,7 +303,6 @@ mod tests {
         );
         assert!(create.validate().is_ok());
 
-        // Test content too long
         let long_content = "x".repeat(MAX_CONTENT_LENGTH + 1);
         let create_long = MessageCreate::new(
             "channel-123".to_string(),
@@ -417,7 +340,6 @@ mod tests {
         let empty_update = MessageUpdate::new();
         assert!(!empty_update.has_changes());
 
-        // Test content too long
         let long_content = "x".repeat(MAX_CONTENT_LENGTH + 1);
         let update_long = MessageUpdate::new().with_content(long_content);
         assert!(matches!(

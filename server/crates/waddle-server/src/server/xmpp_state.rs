@@ -173,10 +173,6 @@ impl XmppAppState {
     /// * `domain` - The XMPP server domain (e.g., "waddle.social")
     /// * `db` - The global database for session and permission storage
     /// * `encryption_key` - Optional encryption key for session token encryption
-    #[allow(
-        dead_code,
-        reason = "legacy waddle_xmpp AppState bridge is retained for parity tests while websocket handlers are the runtime path"
-    )]
     pub fn new(
         domain: String,
         db: Arc<Database>,
@@ -203,10 +199,6 @@ impl XmppAppState {
     /// Parse a resource string into an Object.
     ///
     /// Resource format: "space:{id}" or "channel:{id}"
-    #[allow(
-        dead_code,
-        reason = "legacy waddle_xmpp AppState bridge is retained for parity tests while websocket handlers are the runtime path"
-    )]
     fn parse_resource(resource: &str) -> Result<Object, XmppError> {
         Object::parse(resource).map_err(|e| {
             XmppError::internal(format!("Invalid resource format '{}': {}", resource, e))
@@ -216,20 +208,12 @@ impl XmppAppState {
     /// Parse a subject string into a Subject.
     ///
     /// Subject format: "user:{user_id}" or "space:{id}#member"
-    #[allow(
-        dead_code,
-        reason = "legacy waddle_xmpp AppState bridge is retained for parity tests while websocket handlers are the runtime path"
-    )]
     fn parse_subject(subject: &str) -> Result<Subject, XmppError> {
         Subject::parse(subject).map_err(|e| {
             XmppError::internal(format!("Invalid subject format '{}': {}", subject, e))
         })
     }
 
-    #[allow(
-        dead_code,
-        reason = "legacy waddle_xmpp AppState bridge is retained for parity tests while websocket handlers are the runtime path"
-    )]
     async fn global_database(&self) -> Result<Database, XmppError> {
         self.global_db_actor
             .ask(GetDatabase)
