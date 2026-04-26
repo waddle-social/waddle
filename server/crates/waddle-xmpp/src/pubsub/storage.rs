@@ -3,7 +3,8 @@
 //! Defines the storage interface for PubSub nodes and items.
 
 use async_trait::async_trait;
-use jid::BareJid;
+use jid::{BareJid, Jid};
+use waddle_xmpp_core::pubsub::{Affiliation, SubId, Subscription};
 
 use super::node::NodeConfig;
 use super::stanzas::PubSubItem;
@@ -172,6 +173,103 @@ pub trait PubSubStorage: Send + Sync + 'static {
         node_name: &str,
         config: &NodeConfig,
     ) -> Result<(), XmppError>;
+
+    /// Purge all items from a node without deleting the node (XEP-0060 §8.5).
+    /// Returns the number of items removed.
+    async fn purge_node(&self, owner: &BareJid, node_name: &str) -> Result<u64, XmppError>;
+
+    // ----- subscriptions -----
+
+    /// Create a new subscription. Always inserts a new row (multi-sub-per-jid
+    /// allowed by XEP-0060 §6.1). Returns the generated subid + state.
+    async fn subscribe(
+        &self,
+        owner: &BareJid,
+        node_name: &str,
+        subscriber: &Jid,
+    ) -> Result<Subscription, XmppError>;
+
+    /// Remove a subscription. If `subid` is `Some`, target that exact row;
+    /// if `None`, the caller must have already established that there is
+    /// exactly one subscription for `subscriber` (see XEP-0060 §6.2.3.2).
+    /// Returns true if a row was deleted.
+    async fn unsubscribe(
+        &self,
+        owner: &BareJid,
+        node_name: &str,
+        subscriber: &Jid,
+        subid: Option<&SubId>,
+    ) -> Result<bool, XmppError>;
+
+    /// List all subscriptions for a node.
+    async fn list_node_subscriptions(
+        &self,
+        owner: &BareJid,
+        node_name: &str,
+    ) -> Result<Vec<Subscription>, XmppError>;
+
+    /// List all subscriptions held by a specific subscriber across all nodes
+    /// owned by `owner`. Used to answer `<subscriptions/>` requests.
+    async fn list_subscriber_subscriptions(
+        &self,
+        owner: &BareJid,
+        subscriber: &Jid,
+    ) -> Result<Vec<(String, Subscription)>, XmppError>;
+
+    /// Look up a single subscription by `(owner, node, subid)`.
+    async fn get_subscription(
+        &self,
+        owner: &BareJid,
+        node_name: &str,
+        subid: &SubId,
+    ) -> Result<Option<Subscription>, XmppError>;
+
+    /// Hot-path query for publish fan-out. Returns subscribers with state
+    /// `Subscribed` whose entity is *not* `Outcast`. The exact return
+    /// semantics: each row is a `Subscription`, already filtered.
+    async fn list_deliverable_subscribers(
+        &self,
+        owner: &BareJid,
+        node_name: &str,
+    ) -> Result<Vec<Subscription>, XmppError>;
+
+    // ----- affiliations -----
+
+    /// Set or remove an affiliation. Setting `Affiliation::None` deletes
+    /// the row. Returns the previous affiliation (`Affiliation::None` if
+    /// no row existed).
+    async fn set_affiliation(
+        &self,
+        owner: &BareJid,
+        node_name: &str,
+        entity: &BareJid,
+        affiliation: Affiliation,
+    ) -> Result<Affiliation, XmppError>;
+
+    /// Read the explicit affiliation row for `(owner, node, entity)`.
+    /// Returns `Affiliation::None` if no row exists. Owner-derivation for
+    /// PEP nodes happens in `pubsub_authz`, *not* here.
+    async fn get_affiliation(
+        &self,
+        owner: &BareJid,
+        node_name: &str,
+        entity: &BareJid,
+    ) -> Result<Affiliation, XmppError>;
+
+    /// List all explicit affiliation rows for a node.
+    async fn list_node_affiliations(
+        &self,
+        owner: &BareJid,
+        node_name: &str,
+    ) -> Result<Vec<(BareJid, Affiliation)>, XmppError>;
+
+    /// List all explicit affiliation rows held by a single entity across
+    /// all nodes owned by `owner`.
+    async fn list_entity_affiliations(
+        &self,
+        owner: &BareJid,
+        entity: &BareJid,
+    ) -> Result<Vec<(String, Affiliation)>, XmppError>;
 }
 
 /// In-memory implementation of PubSub storage.

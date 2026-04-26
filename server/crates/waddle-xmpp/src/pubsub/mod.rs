@@ -18,3 +18,6 @@ pub use stanzas::{
     NS_PUBSUB_EVENT, NS_PUBSUB_OWNER,
 };
 pub use storage::{InMemoryPubSubStorage, PubSubNode, PubSubStorage, PublishResult, StoredItem};
+
+// Re-export typed payloads from core for convenience.
+pub use waddle_xmpp_core::pubsub::{Affiliation, SubId, Subscription, SubscriptionState};
