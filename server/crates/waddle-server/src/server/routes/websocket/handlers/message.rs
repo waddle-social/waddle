@@ -995,11 +995,23 @@ fn serialize_groupchat_stanza_xml(
 ) -> Option<String> {
     let mut msg = message.clone();
     msg.to = None;
-    message_to_string(&msg).ok()
+    match message_to_string(&msg) {
+        Ok(xml) => Some(xml),
+        Err(error) => {
+            warn!(error = %error, "Failed to serialize groupchat stanza XML for MAM archive");
+            None
+        }
+    }
 }
 
 fn serialize_direct_stanza_xml(message: &xmpp_parsers::message::Message) -> Option<String> {
-    message_to_string(message).ok()
+    match message_to_string(message) {
+        Ok(xml) => Some(xml),
+        Err(error) => {
+            warn!(error = %error, "Failed to serialize direct message stanza XML for MAM archive");
+            None
+        }
+    }
 }
 
 async fn archive_groupchat_message(

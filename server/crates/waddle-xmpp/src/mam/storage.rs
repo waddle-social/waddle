@@ -391,11 +391,15 @@ impl SqlxMamStorage {
             MamDatabaseBackend::Sqlite(pool) => {
                 execute_sqlite_batch(pool, SQLITE_MAM_SCHEMA).await?;
                 ensure_sqlite_column(pool, "rich_payload", "TEXT").await?;
+                ensure_sqlite_column(pool, "stanza_xml", "TEXT").await?;
                 ensure_sqlite_column(pool, "nickname_generation", "INTEGER").await
             }
             MamDatabaseBackend::Postgres(pool) => {
                 execute_postgres_batch(pool, POSTGRES_MAM_SCHEMA).await?;
                 sqlx::query("ALTER TABLE mam_messages ADD COLUMN IF NOT EXISTS rich_payload TEXT")
+                    .execute(pool)
+                    .await?;
+                sqlx::query("ALTER TABLE mam_messages ADD COLUMN IF NOT EXISTS stanza_xml TEXT")
                     .execute(pool)
                     .await?;
                 sqlx::query(

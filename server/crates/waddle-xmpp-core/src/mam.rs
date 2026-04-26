@@ -456,7 +456,7 @@ fn archived_inner_message(archived: &ArchivedMessage) -> Element {
 }
 
 fn normalize_archived_inner_message(element: Element, archived: &ArchivedMessage) -> Element {
-    if archived.message_type != "groupchat" || element.attr("to").is_none() {
+    if archived.message_type != "groupchat" {
         return element;
     }
 
@@ -465,7 +465,22 @@ fn normalize_archived_inner_message(element: Element, archived: &ArchivedMessage
         return Element::from(message);
     }
 
-    element
+    if element.attr("to").is_none() {
+        return element;
+    }
+
+    let ns = element.ns().to_string();
+    let name = element.name().to_string();
+    let mut builder = Element::builder(name, &ns);
+    for (key, value) in element.attrs() {
+        if key != "to" {
+            builder = builder.attr(key, value);
+        }
+    }
+    for child in element.children().cloned() {
+        builder = builder.append(child);
+    }
+    builder.build()
 }
 
 fn build_typed_inner_message(archived: &ArchivedMessage, rich: &ArchivedRichMessage) -> Element {
@@ -1099,6 +1114,42 @@ mod tests {
         assert!(
             inner_msg.attr("to").is_none(),
             "groupchat MAM replay should not have a 'to' attribute, got: {:?}",
+            inner_msg.attr("to")
+        );
+    }
+
+    #[test]
+    fn stanza_xml_strips_to_for_groupchat_on_raw_element_fallback() {
+        let stanza_xml = "<message xmlns='jabber:client' from='room@conf.example.com/alice' to='room@conf.example.com' type='groupchat' id='msg-x'><body>test</body><custom xmlns='urn:example:unknown'/></message>";
+        let archived = ArchivedMessage {
+            id: "msg-strip-raw".to_string(),
+            timestamp: Utc::now(),
+            from: "room@conf.example.com/alice".to_string(),
+            to: "room@conf.example.com".to_string(),
+            body: "test".to_string(),
+            message_type: "groupchat".to_string(),
+            stanza_xml: Some(stanza_xml.to_string()),
+            ..Default::default()
+        };
+
+        let msg = build_result_messages("query-strip-raw", "user@example.com", &[archived]);
+        let result = msg[0]
+            .payloads
+            .iter()
+            .find(|p| p.name() == "result" && p.ns() == MAM_NS)
+            .expect("result payload");
+        let forwarded = result
+            .children()
+            .find(|c| c.name() == "forwarded" && c.ns() == FORWARD_NS)
+            .expect("forwarded element");
+        let inner_msg = forwarded
+            .children()
+            .find(|c| c.name() == "message" && c.ns() == CLIENT_NS)
+            .expect("inner message");
+
+        assert!(
+            inner_msg.attr("to").is_none(),
+            "groupchat MAM replay via raw element fallback should not have a 'to' attribute, got: {:?}",
             inner_msg.attr("to")
         );
     }
