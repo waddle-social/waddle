@@ -538,22 +538,20 @@ pub async fn handle_iq_with_conn_state(
             return vec![iq_to_xml(response)];
         }
 
-        // Disco info on server
+        // Disco info on server. Source the canonical feature catalogue
+        // from `waddle-xmpp-core::disco::info::server_features()` so the
+        // rich-message XEPs (corrections, retractions, reactions,
+        // references, stanza-ids, etc.) declared there stay discoverable
+        // here without drift between the two lists. Server-instance
+        // additions (Spaces, jabber:iq:search, ISR) are appended below,
+        // and dynamic extension namespaces extend further still.
         let identities = vec![Identity::server(Some("Waddle"))];
-        let mut features = vec![
-            Feature::ping(),
-            Feature::replies(),
-            Feature::disco_info(),
-            Feature::disco_items(),
-            Feature::commands(),
+        let mut features = waddle_xmpp::disco::info::server_features();
+        features.extend([
             Feature::spaces(),
-            Feature::last_activity(),
-            Feature::software_version(),
-            Feature::entity_time(),
-            Feature::blocking(),
             Feature::new("jabber:iq:search"),
             Feature::new(ISR_NS),
-        ];
+        ]);
         features.extend(
             state
                 .deps
