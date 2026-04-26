@@ -401,6 +401,7 @@
   }
 }
 
+@layer components {
 /* Glass panel utility */
 .glass-panel {
   background: var(--card);
@@ -1659,4 +1660,5 @@
 .rich-mention {
   color: var(--primary);
   font-weight: 650;
+}
 }
