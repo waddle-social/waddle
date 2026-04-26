@@ -9,7 +9,7 @@ use waddle_xmpp::{
         build_available_presence, build_subscription_presence, build_unavailable_presence,
         parse_subscription_presence, PresenceAction, SubscriptionStateMachine, SubscriptionType,
     },
-    roster::{AskType, RosterItem, Subscription},
+    roster::{build_roster_push, AskType, RosterItem, Subscription},
     Affiliation, Role, Stanza,
 };
 use xmpp_parsers::minidom::Element;
@@ -82,8 +82,20 @@ pub async fn handle_presence(
         Ok(PresenceAction::Subscription(request)) => {
             handle_subscription_presence(state, request).await;
         }
-        Ok(PresenceAction::Probe { from, to, .. }) => {
-            handle_presence_probe(state, from, to).await;
+        Ok(PresenceAction::Probe {
+            from,
+            to,
+            to_was_full,
+        }) => {
+            let to_full = if to_was_full {
+                presence
+                    .to
+                    .as_ref()
+                    .and_then(|jid| jid.clone().try_into_full().ok())
+            } else {
+                None
+            };
+            handle_presence_probe(state, from, to, to_full).await;
         }
         Ok(PresenceAction::PresenceUpdate(presence_update)) => {
             handle_regular_presence_update(state, sender_jid, presence_update).await;
@@ -168,11 +180,56 @@ async fn handle_subscription_presence(
         debug!(from = %request.from, to = %request.to, "Dropping subscription presence blocked by recipient");
         return;
     }
+    if request.subscription_type == SubscriptionType::Unsubscribe {
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .remove_pending_subscribe(&request.to, &request.from);
+    }
+    if matches!(
+        request.subscription_type,
+        SubscriptionType::Subscribed | SubscriptionType::Unsubscribed
+    ) {
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .remove_pending_subscribe(&request.from, &request.to);
+    }
 
-    if let Some(storage) = roster_storage(state).await {
-        if let Err(error) = update_subscription_roster_state(&storage, &request).await {
-            warn!(error = %error, from = %request.from, to = %request.to, "Failed to update roster subscription state");
+    let Some(storage) = roster_storage(state).await else {
+        return;
+    };
+    let update = match update_subscription_roster_state(state, &storage, &request).await {
+        Ok(Some(update)) => update,
+        Ok(None) => {
+            debug!(from = %request.from, to = %request.to, kind = ?request.subscription_type, "Ignoring invalid subscription transition");
+            return;
         }
+        Err(error) => {
+            warn!(error = %error, from = %request.from, to = %request.to, "Failed to update roster subscription state");
+            return;
+        }
+    };
+
+    if update.auto_approve_subscribe {
+        send_subscription_roster_pushes(state, update).await;
+        send_existing_subscription_ack(
+            state,
+            &request.to,
+            &request.from,
+            request.status.as_deref(),
+            &request.payloads,
+        )
+        .await;
+        send_current_presence_from_user_to_user(state, &request.to, &request.from).await;
+        return;
+    }
+
+    if !update.forward_subscription_stanza {
+        send_subscription_roster_pushes(state, update).await;
+        return;
     }
 
     let stanza = Stanza::Presence(build_subscription_presence(
@@ -182,26 +239,526 @@ async fn handle_subscription_presence(
         request.status.as_deref(),
         &request.payloads,
     ));
-    let resources = state
-        .deps
-        .protocol
-        .connection_registry
-        .get_resources_for_user(&request.to);
-    if resources.is_empty() {
+    if request.subscription_type == SubscriptionType::Subscribe {
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .queue_pending_subscription_stanza(&request.to, stanza.clone());
+    }
+    if request.subscription_type == SubscriptionType::Unsubscribed
+        && update.send_unavailable_before_unsubscribed
+    {
+        send_unavailable_presence_from_user_to_user(state, &request.from, &request.to).await;
+    }
+    send_subscription_roster_pushes(state, update).await;
+
+    let resources = subscription_presence_recipients(state, &request);
+    let mut delivered = 0usize;
+    let mut delivered_resources = Vec::new();
+    if resources.is_empty() && request.subscription_type == SubscriptionType::Subscribe {
+        let _recorded = record_stanza_for_detached_available_resources(
+            state,
+            &request.to,
+            &stanza,
+            "subscription presence",
+        )
+        .await;
         state
             .deps
             .protocol
             .connection_registry
             .queue_pending_subscription_stanza(&request.to, stanza);
-        return;
+    } else {
+        for resource in &resources {
+            if state
+                .deps
+                .protocol
+                .connection_registry
+                .send_to(resource, stanza.clone())
+                .await
+                .is_sent()
+            {
+                delivered += 1;
+                delivered_resources.push(resource.clone());
+            }
+        }
+        delivered += record_subscription_stanza_for_detached_resources_excluding(
+            state,
+            &request,
+            &stanza,
+            &delivered_resources,
+        )
+        .await;
+        if delivered == 0 && request.subscription_type == SubscriptionType::Subscribe {
+            state
+                .deps
+                .protocol
+                .connection_registry
+                .queue_pending_subscription_stanza(&request.to, stanza);
+        }
     }
-    for resource in resources {
+
+    send_subscription_presence_side_effects(state, &request).await;
+}
+
+async fn send_subscription_presence_side_effects(
+    state: &WebSocketState,
+    request: &waddle_xmpp::presence::subscription::PresenceSubscriptionRequest,
+) {
+    match request.subscription_type {
+        SubscriptionType::Subscribed => {
+            send_current_presence_from_user_to_user(state, &request.from, &request.to).await;
+        }
+        SubscriptionType::Unsubscribe => {
+            send_unavailable_presence_from_user_to_user(state, &request.to, &request.from).await;
+        }
+        SubscriptionType::Subscribe | SubscriptionType::Unsubscribed => {}
+    }
+}
+
+async fn send_existing_subscription_ack(
+    state: &WebSocketState,
+    contact: &BareJid,
+    requester: &BareJid,
+    status: Option<&str>,
+    payloads: &[Element],
+) {
+    let stanza = Stanza::Presence(build_subscription_presence(
+        SubscriptionType::Subscribed,
+        contact,
+        requester,
+        status,
+        payloads,
+    ));
+    let live_resources = state
+        .deps
+        .protocol
+        .connection_registry
+        .get_resources_for_user(requester);
+    for resource in &live_resources {
+        let _ = state
+            .deps
+            .protocol
+            .connection_registry
+            .send_to(resource, stanza.clone())
+            .await;
+    }
+    let detached = match state
+        .deps
+        .protocol
+        .sm_session_registry
+        .interested_detached_resources_for_user(requester)
+        .await
+    {
+        Ok(resources) => resources,
+        Err(error) => {
+            warn!(error = %error, user = %requester, "Failed to list detached interested resources");
+            return;
+        }
+    };
+    for resource in detached
+        .into_iter()
+        .filter(|resource| !live_resources.contains(resource))
+    {
+        match state
+            .deps
+            .protocol
+            .sm_session_registry
+            .record_stanza_for_detached_resource(&resource, &stanza)
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                let _ = state
+                    .deps
+                    .protocol
+                    .connection_registry
+                    .send_to(&resource, stanza.clone())
+                    .await;
+            }
+            Err(error) => {
+                warn!(error = %error, resource = %resource, "Failed to record detached subscription acknowledgement");
+            }
+        }
+    }
+}
+
+async fn send_current_presence_from_user_to_user(
+    state: &WebSocketState,
+    from: &BareJid,
+    to: &BareJid,
+) {
+    for resource in available_live_and_detached_resources_for_user(state, from).await {
+        let presence_state = presence_state_for_available_resource(state, &resource).await;
+        let stanza = Stanza::Presence(build_available_presence(
+            &resource,
+            to,
+            presence_state
+                .as_ref()
+                .and_then(|state| state.show.as_ref())
+                .map(show_name),
+            presence_state
+                .as_ref()
+                .and_then(|state| state.status.as_deref()),
+            presence_state
+                .as_ref()
+                .map(|state| state.priority)
+                .unwrap_or(0),
+        ));
+        send_stanza_to_available_user_resources_and_detached_available(
+            state,
+            to,
+            &stanza,
+            "current presence",
+        )
+        .await;
+    }
+}
+
+async fn send_unavailable_presence_from_user_to_user(
+    state: &WebSocketState,
+    from: &BareJid,
+    to: &BareJid,
+) {
+    for resource in available_live_and_detached_resources_for_user(state, from).await {
+        let mut presence =
+            xmpp_parsers::presence::Presence::new(xmpp_parsers::presence::Type::Unavailable);
+        presence.from = Some(Jid::from(resource));
+        presence.to = Some(Jid::from(to.clone()));
+        let stanza = Stanza::Presence(presence);
+        send_stanza_to_available_user_resources_and_detached_available(
+            state,
+            to,
+            &stanza,
+            "unavailable presence",
+        )
+        .await;
+    }
+}
+
+pub async fn broadcast_unavailable_for_expired_detached_session(
+    state: &WebSocketState,
+    from: &FullJid,
+) {
+    let Some(storage) = roster_storage(state).await else {
+        return;
+    };
+    let from_bare = from.to_bare();
+    let subscribers = match storage.get_presence_subscribers(&from_bare).await {
+        Ok(subscribers) => subscribers,
+        Err(error) => {
+            warn!(error = %error, from = %from, "Failed to load presence subscribers for expired detached session");
+            return;
+        }
+    };
+
+    for subscriber in subscribers {
+        let Ok(subscriber) = subscriber.parse::<BareJid>() else {
+            warn!(
+                subscriber,
+                "Skipping invalid stored presence subscriber JID"
+            );
+            continue;
+        };
+        let mut presence =
+            xmpp_parsers::presence::Presence::new(xmpp_parsers::presence::Type::Unavailable);
+        presence.from = Some(Jid::from(from.clone()));
+        presence.to = Some(Jid::from(subscriber.clone()));
+        let stanza = Stanza::Presence(presence);
+        send_stanza_to_available_user_resources_and_detached_available(
+            state,
+            &subscriber,
+            &stanza,
+            "expired detached unavailable presence",
+        )
+        .await;
+    }
+
+    let mut presence =
+        xmpp_parsers::presence::Presence::new(xmpp_parsers::presence::Type::Unavailable);
+    presence.from = Some(Jid::from(from.clone()));
+    presence.to = Some(Jid::from(from_bare.clone()));
+    let stanza = Stanza::Presence(presence);
+    send_stanza_to_available_user_resources_and_detached_available(
+        state,
+        &from_bare,
+        &stanza,
+        "expired detached unavailable presence to siblings",
+    )
+    .await;
+}
+
+async fn available_live_and_detached_resources_for_user(
+    state: &WebSocketState,
+    user: &BareJid,
+) -> Vec<FullJid> {
+    let mut resources: Vec<FullJid> = state
+        .deps
+        .protocol
+        .connection_registry
+        .get_available_resources_for_user(user)
+        .into_iter()
+        .map(|(jid, _)| jid)
+        .collect();
+    match state
+        .deps
+        .protocol
+        .sm_session_registry
+        .available_detached_resources_for_user(user)
+        .await
+    {
+        Ok(detached) => {
+            for resource in detached {
+                if !resources.contains(&resource) {
+                    resources.push(resource);
+                }
+            }
+        }
+        Err(error) => {
+            warn!(error = %error, user = %user, "Failed to list detached available resources");
+        }
+    }
+    resources
+}
+
+async fn presence_state_for_available_resource(
+    state: &WebSocketState,
+    resource: &FullJid,
+) -> Option<PresenceStateSnapshot> {
+    if let Some(state) = state
+        .deps
+        .protocol
+        .connection_registry
+        .get_presence_state(resource)
+    {
+        return Some(PresenceStateSnapshot {
+            show: state.show.as_deref().and_then(show_from_name),
+            status: state.status,
+            priority: state.priority,
+        });
+    }
+    match state
+        .deps
+        .protocol
+        .sm_session_registry
+        .detached_presence_state(resource)
+        .await
+    {
+        Ok(Some((show, status, priority))) => Some(PresenceStateSnapshot {
+            show,
+            status,
+            priority,
+        }),
+        Ok(None) => None,
+        Err(error) => {
+            warn!(error = %error, resource = %resource, "Failed to read detached presence state");
+            None
+        }
+    }
+}
+
+struct PresenceStateSnapshot {
+    show: Option<xmpp_parsers::presence::Show>,
+    status: Option<String>,
+    priority: i8,
+}
+
+async fn send_stanza_to_available_user_resources_and_detached_available(
+    state: &WebSocketState,
+    user: &BareJid,
+    stanza: &Stanza,
+    context: &'static str,
+) {
+    let live_resources: Vec<FullJid> = state
+        .deps
+        .protocol
+        .connection_registry
+        .get_available_resources_for_user(user)
+        .into_iter()
+        .map(|(jid, _)| jid)
+        .collect();
+    let mut delivered_resources = Vec::new();
+    for resource in &live_resources {
+        if state
+            .deps
+            .protocol
+            .connection_registry
+            .send_to(resource, stanza.clone())
+            .await
+            .is_sent()
+        {
+            delivered_resources.push(resource.clone());
+        }
+    }
+    let recorded_resources = record_stanza_for_detached_available_resources_excluding(
+        state,
+        user,
+        stanza,
+        context,
+        &delivered_resources,
+    )
+    .await;
+    delivered_resources.extend(recorded_resources);
+    for resource in state
+        .deps
+        .protocol
+        .connection_registry
+        .get_available_resources_for_user(user)
+        .into_iter()
+        .map(|(jid, _)| jid)
+        .filter(|resource| !delivered_resources.contains(resource))
+    {
         let _ = state
             .deps
             .protocol
             .connection_registry
             .send_to(&resource, stanza.clone())
             .await;
+    }
+}
+
+async fn record_stanza_for_detached_available_resources(
+    state: &WebSocketState,
+    user: &BareJid,
+    stanza: &Stanza,
+    context: &'static str,
+) -> Vec<FullJid> {
+    record_stanza_for_detached_available_resources_excluding(state, user, stanza, context, &[])
+        .await
+}
+
+async fn record_stanza_for_detached_available_resources_excluding(
+    state: &WebSocketState,
+    user: &BareJid,
+    stanza: &Stanza,
+    context: &'static str,
+    excluded_resources: &[FullJid],
+) -> Vec<FullJid> {
+    let detached = match state
+        .deps
+        .protocol
+        .sm_session_registry
+        .available_detached_resources_for_user(user)
+        .await
+    {
+        Ok(resources) => resources,
+        Err(error) => {
+            warn!(error = %error, user = %user, context, "Failed to list detached available resources");
+            return Vec::new();
+        }
+    };
+
+    let mut recorded = Vec::new();
+    for resource in detached
+        .into_iter()
+        .filter(|resource| !excluded_resources.contains(resource))
+    {
+        match state
+            .deps
+            .protocol
+            .sm_session_registry
+            .record_stanza_for_detached_available_resource(&resource, stanza)
+            .await
+        {
+            Ok(true) => recorded.push(resource.clone()),
+            Ok(false) => {
+                let _ = state
+                    .deps
+                    .protocol
+                    .connection_registry
+                    .send_to(&resource, stanza.clone())
+                    .await;
+            }
+            Err(error) => {
+                warn!(error = %error, resource = %resource, context, "Failed to record detached available stanza");
+            }
+        }
+    }
+    recorded
+}
+
+async fn record_subscription_stanza_for_detached_resources_excluding(
+    state: &WebSocketState,
+    request: &waddle_xmpp::presence::subscription::PresenceSubscriptionRequest,
+    stanza: &Stanza,
+    excluded_resources: &[FullJid],
+) -> usize {
+    if request.subscription_type == SubscriptionType::Subscribe {
+        return record_stanza_for_detached_available_resources_excluding(
+            state,
+            &request.to,
+            stanza,
+            "subscription presence",
+            excluded_resources,
+        )
+        .await
+        .len();
+    }
+
+    let detached = match state
+        .deps
+        .protocol
+        .sm_session_registry
+        .interested_detached_resources_for_user(&request.to)
+        .await
+    {
+        Ok(resources) => resources,
+        Err(error) => {
+            warn!(error = %error, user = %request.to, "Failed to list detached interested resources");
+            return 0;
+        }
+    };
+
+    let mut recorded = 0;
+    for resource in detached
+        .into_iter()
+        .filter(|resource| !excluded_resources.contains(resource))
+    {
+        match state
+            .deps
+            .protocol
+            .sm_session_registry
+            .record_stanza_for_detached_resource(&resource, stanza)
+            .await
+        {
+            Ok(true) => recorded += 1,
+            Ok(false) => {
+                let _ = state
+                    .deps
+                    .protocol
+                    .connection_registry
+                    .send_to(&resource, stanza.clone())
+                    .await;
+            }
+            Err(error) => {
+                warn!(error = %error, resource = %resource, "Failed to record detached subscription stanza");
+            }
+        }
+    }
+    recorded
+}
+
+fn subscription_presence_recipients(
+    state: &WebSocketState,
+    request: &waddle_xmpp::presence::subscription::PresenceSubscriptionRequest,
+) -> Vec<FullJid> {
+    match request.subscription_type {
+        SubscriptionType::Subscribe => state
+            .deps
+            .protocol
+            .connection_registry
+            .get_available_resources_for_user(&request.to)
+            .into_iter()
+            .map(|(jid, _)| jid)
+            .collect(),
+        SubscriptionType::Subscribed
+        | SubscriptionType::Unsubscribe
+        | SubscriptionType::Unsubscribed => state
+            .deps
+            .protocol
+            .connection_registry
+            .get_roster_interested_resources_for_user(&request.to),
     }
 }
 
@@ -247,46 +804,288 @@ async fn handle_directed_presence(
 }
 
 async fn update_subscription_roster_state(
+    state: &WebSocketState,
     storage: &DatabaseRosterStorage,
     request: &waddle_xmpp::presence::subscription::PresenceSubscriptionRequest,
-) -> Result<(), crate::db::roster::RosterStorageError> {
-    let mut from_item = load_roster_item(storage, &request.from, &request.to).await?;
-    let mut to_item = load_roster_item(storage, &request.to, &request.from).await?;
+) -> Result<Option<SubscriptionRosterUpdate>, crate::db::roster::RosterStorageError> {
+    let existing_from_item = load_existing_roster_item(storage, &request.from, &request.to).await?;
+    let mut store_from_item = true;
+    let mut send_unavailable_before_unsubscribed = false;
+    let mut auto_approve_subscribe = false;
+    let mut forward_subscription_stanza = true;
+    let mut from_item = existing_from_item
+        .clone()
+        .unwrap_or_else(|| RosterItem::new(request.to.clone()));
+    let mut to_item = load_existing_roster_item(storage, &request.to, &request.from).await?;
+
     match request.subscription_type {
         SubscriptionType::Subscribe => {
-            SubscriptionStateMachine::apply_outbound_subscribe(&mut from_item);
+            if matches!(
+                from_item.subscription,
+                Subscription::To | Subscription::Both
+            ) {
+                send_existing_subscription_ack(
+                    state,
+                    &request.to,
+                    &request.from,
+                    request.status.as_deref(),
+                    &request.payloads,
+                )
+                .await;
+                return Ok(None);
+            }
+            if to_item.as_ref().is_some_and(|item| {
+                item.approved
+                    || matches!(item.subscription, Subscription::From | Subscription::Both)
+            }) {
+                SubscriptionStateMachine::apply_inbound_subscribed(&mut from_item);
+                if let Some(to_item) = to_item.as_mut() {
+                    SubscriptionStateMachine::apply_outbound_subscribed(to_item);
+                    to_item.approved = false;
+                }
+                auto_approve_subscribe = true;
+            } else {
+                SubscriptionStateMachine::apply_outbound_subscribe(&mut from_item);
+                to_item = None;
+            }
         }
         SubscriptionType::Subscribed => {
-            SubscriptionStateMachine::apply_outbound_subscribed(&mut from_item);
-            SubscriptionStateMachine::apply_inbound_subscribed(&mut to_item);
+            if let Some(to_item) = to_item
+                .as_mut()
+                .filter(|item| item.ask == Some(AskType::Subscribe))
+            {
+                SubscriptionStateMachine::apply_outbound_subscribed(&mut from_item);
+                from_item.approved = false;
+                SubscriptionStateMachine::apply_inbound_subscribed(to_item);
+            } else {
+                if from_item.subscription == Subscription::Remove {
+                    from_item.subscription = Subscription::None;
+                }
+                from_item.ask = None;
+                from_item.approved = true;
+                to_item = None;
+                forward_subscription_stanza = false;
+            }
         }
         SubscriptionType::Unsubscribe => {
+            if !matches!(
+                from_item.subscription,
+                Subscription::To | Subscription::Both
+            ) && from_item.ask != Some(AskType::Subscribe)
+            {
+                return Ok(None);
+            }
             SubscriptionStateMachine::apply_outbound_unsubscribe(&mut from_item);
-            SubscriptionStateMachine::apply_inbound_unsubscribed(&mut to_item);
+            if let Some(to_item) = to_item.as_mut() {
+                SubscriptionStateMachine::apply_outbound_unsubscribed(to_item);
+            }
         }
         SubscriptionType::Unsubscribed => {
-            SubscriptionStateMachine::apply_outbound_unsubscribed(&mut from_item);
-            SubscriptionStateMachine::apply_inbound_unsubscribed(&mut to_item);
+            let valid_recipient = to_item.as_ref().is_some_and(|item| {
+                item.ask == Some(AskType::Subscribe)
+                    || matches!(item.subscription, Subscription::To | Subscription::Both)
+            });
+            let valid_sender = matches!(
+                from_item.subscription,
+                Subscription::From | Subscription::Both
+            );
+            let cancel_preapproval = from_item.approved;
+            send_unavailable_before_unsubscribed = valid_sender;
+            if !valid_recipient && !valid_sender && !cancel_preapproval {
+                return Ok(None);
+            }
+            if valid_sender {
+                SubscriptionStateMachine::apply_outbound_unsubscribed(&mut from_item);
+            } else if cancel_preapproval {
+                from_item.approved = false;
+            } else if existing_from_item.is_none() {
+                store_from_item = false;
+            }
+            if let Some(to_item) = to_item.as_mut().filter(|_| valid_recipient) {
+                SubscriptionStateMachine::apply_inbound_unsubscribed(to_item);
+            }
         }
     }
-    storage
-        .set_roster_item(&request.from, &roster_item_to_row(&from_item))
-        .await?;
-    storage
-        .set_roster_item(&request.to, &roster_item_to_row(&to_item))
-        .await?;
-    Ok(())
+    if store_from_item {
+        storage
+            .set_roster_item(&request.from, &roster_item_to_row(&from_item))
+            .await?;
+    }
+    if let Some(to_item) = to_item.as_ref() {
+        storage
+            .set_roster_item(&request.to, &roster_item_to_row(to_item))
+            .await?;
+    }
+
+    Ok(Some(SubscriptionRosterUpdate {
+        from_push: if store_from_item {
+            Some(SubscriptionRosterPush {
+                user: request.from.clone(),
+                item: from_item,
+                version: storage.get_or_create_roster_version(&request.from).await?,
+            })
+        } else {
+            None
+        },
+        to_push: match to_item {
+            Some(to_item) => Some(SubscriptionRosterPush {
+                user: request.to.clone(),
+                item: to_item,
+                version: storage.get_or_create_roster_version(&request.to).await?,
+            }),
+            None => None,
+        },
+        send_unavailable_before_unsubscribed,
+        auto_approve_subscribe,
+        forward_subscription_stanza,
+    }))
 }
 
-async fn load_roster_item(
+struct SubscriptionRosterUpdate {
+    from_push: Option<SubscriptionRosterPush>,
+    to_push: Option<SubscriptionRosterPush>,
+    send_unavailable_before_unsubscribed: bool,
+    auto_approve_subscribe: bool,
+    forward_subscription_stanza: bool,
+}
+
+struct SubscriptionRosterPush {
+    user: BareJid,
+    item: RosterItem,
+    version: String,
+}
+
+async fn send_subscription_roster_pushes(state: &WebSocketState, update: SubscriptionRosterUpdate) {
+    if let Some(from_push) = update.from_push {
+        send_roster_push_to_resources(state, &from_push.user, &from_push.item, &from_push.version)
+            .await;
+    }
+    if let Some(to_push) = update.to_push {
+        send_roster_push_to_resources(state, &to_push.user, &to_push.item, &to_push.version).await;
+    }
+}
+
+async fn send_roster_push_to_resources(
+    state: &WebSocketState,
+    user_jid: &BareJid,
+    item: &RosterItem,
+    version: &str,
+) {
+    let live_resources = state
+        .deps
+        .protocol
+        .connection_registry
+        .get_roster_interested_resources_for_user(user_jid);
+    let mut delivered_resources = Vec::new();
+    for resource in &live_resources {
+        let push = build_roster_push(
+            &format!("roster-push-{}", uuid::Uuid::new_v4()),
+            user_jid,
+            resource,
+            item,
+            Some(version),
+        );
+        if state
+            .deps
+            .protocol
+            .connection_registry
+            .send_to(resource, Stanza::Iq(push))
+            .await
+            .is_sent()
+        {
+            delivered_resources.push(resource.clone());
+        }
+    }
+    let detached = match state
+        .deps
+        .protocol
+        .sm_session_registry
+        .interested_detached_resources_for_user(user_jid)
+        .await
+    {
+        Ok(resources) => resources,
+        Err(error) => {
+            warn!(error = %error, user = %user_jid, "Failed to list detached roster-interested resources");
+            return;
+        }
+    };
+    let detached: Vec<_> = detached
+        .into_iter()
+        .filter(|resource| !delivered_resources.contains(resource))
+        .collect();
+    for resource in detached {
+        let push = build_roster_push(
+            &format!("roster-push-{}", uuid::Uuid::new_v4()),
+            user_jid,
+            &resource,
+            item,
+            Some(version),
+        );
+        let stanza = Stanza::Iq(push);
+        match state
+            .deps
+            .protocol
+            .sm_session_registry
+            .record_stanza_for_detached_resource(&resource, &stanza)
+            .await
+        {
+            Ok(true) => delivered_resources.push(resource.clone()),
+            Ok(false) => {
+                let is_interested = state
+                    .deps
+                    .protocol
+                    .connection_registry
+                    .is_roster_interested(&resource);
+                if is_interested
+                    && state
+                        .deps
+                        .protocol
+                        .connection_registry
+                        .send_to(&resource, stanza)
+                        .await
+                        .is_sent()
+                {
+                    delivered_resources.push(resource.clone());
+                }
+            }
+            Err(error) => {
+                warn!(error = %error, resource = %resource, "Failed to record detached roster push");
+            }
+        }
+    }
+    for resource in state
+        .deps
+        .protocol
+        .connection_registry
+        .get_roster_interested_resources_for_user(user_jid)
+        .into_iter()
+        .filter(|resource| !delivered_resources.contains(resource))
+    {
+        let push = build_roster_push(
+            &format!("roster-push-{}", uuid::Uuid::new_v4()),
+            user_jid,
+            &resource,
+            item,
+            Some(version),
+        );
+        let _ = state
+            .deps
+            .protocol
+            .connection_registry
+            .send_to(&resource, Stanza::Iq(push))
+            .await;
+    }
+}
+
+async fn load_existing_roster_item(
     storage: &DatabaseRosterStorage,
     user: &BareJid,
     contact: &BareJid,
-) -> Result<RosterItem, crate::db::roster::RosterStorageError> {
-    Ok(match storage.get_roster_item(user, contact).await? {
-        Some(row) => roster_row_to_item(row),
-        None => RosterItem::new(contact.clone()),
-    })
+) -> Result<Option<RosterItem>, crate::db::roster::RosterStorageError> {
+    Ok(storage
+        .get_roster_item(user, contact)
+        .await?
+        .map(roster_row_to_item))
 }
 
 fn roster_row_to_item(row: RosterItemRow) -> RosterItem {
@@ -295,6 +1094,7 @@ fn roster_row_to_item(row: RosterItemRow) -> RosterItem {
         name: row.name,
         subscription: parse_subscription_state(&row.subscription),
         ask: row.ask.as_deref().and_then(parse_ask_state),
+        approved: row.approved,
         groups: row.groups,
     }
 }
@@ -305,6 +1105,7 @@ fn roster_item_to_row(item: &RosterItem) -> RosterItemRow {
         name: item.name.clone(),
         subscription: subscription_state_str(item.subscription).to_string(),
         ask: item.ask.map(ask_state_str).map(ToOwned::to_owned),
+        approved: item.approved,
         groups: item.groups.clone(),
     }
 }
@@ -342,18 +1143,58 @@ fn ask_state_str(value: AskType) -> &'static str {
     }
 }
 
-async fn handle_presence_probe(state: &WebSocketState, from: BareJid, to: BareJid) {
+async fn handle_presence_probe(
+    state: &WebSocketState,
+    from: BareJid,
+    to: BareJid,
+    to_full: Option<FullJid>,
+) {
     if recipient_blocks_sender(state, &to, &from).await {
         info!(requester = %from, target = %to, "Blocked presence probe");
         return;
     }
-    let available = state
+    if !presence_probe_authorized(state, &from, &to).await {
+        info!(requester = %from, target = %to, "Unauthorized presence probe");
+        send_unsubscribed_probe_response(state, &to, &from).await;
+        return;
+    }
+    let mut available = state
         .deps
         .protocol
         .connection_registry
         .get_available_resources_for_user(&to);
-    if available.is_empty() {
-        let unavailable = Stanza::Presence(build_unavailable_presence(&to, &from));
+    let mut detached_available = match state
+        .deps
+        .protocol
+        .sm_session_registry
+        .available_detached_presence_states_for_user(&to)
+        .await
+    {
+        Ok(resources) => resources,
+        Err(error) => {
+            warn!(error = %error, target = %to, "Failed to list detached resources for presence probe");
+            Vec::new()
+        }
+    };
+    if let Some(to_full) = &to_full {
+        available.retain(|(resource, _)| resource == to_full);
+        detached_available.retain(|(resource, _, _, _)| resource == to_full);
+    }
+    detached_available.retain(|(resource, _, _, _)| {
+        !available
+            .iter()
+            .any(|(live_resource, _)| live_resource == resource)
+    });
+    if available.is_empty() && detached_available.is_empty() {
+        let unavailable = Stanza::Presence(if let Some(to_full) = &to_full {
+            let mut presence =
+                xmpp_parsers::presence::Presence::new(xmpp_parsers::presence::Type::Unavailable);
+            presence.from = Some(Jid::from(to_full.clone()));
+            presence.to = Some(Jid::from(from.clone()));
+            presence
+        } else {
+            build_unavailable_presence(&to, &from)
+        });
         for resource in state
             .deps
             .protocol
@@ -374,6 +1215,23 @@ async fn handle_presence_probe(state: &WebSocketState, from: BareJid, to: BareJi
         .protocol
         .connection_registry
         .get_resources_for_user(&from);
+    for (resource, show, status, priority) in detached_available {
+        let presence = Stanza::Presence(build_available_presence(
+            &resource,
+            &from,
+            show.as_ref().map(show_name),
+            status.as_deref(),
+            priority,
+        ));
+        for requester_resource in &requester_resources {
+            let _ = state
+                .deps
+                .protocol
+                .connection_registry
+                .send_to(requester_resource, presence.clone())
+                .await;
+        }
+    }
     for (resource, _priority) in available {
         let presence_state = state
             .deps
@@ -401,6 +1259,48 @@ async fn handle_presence_probe(state: &WebSocketState, from: BareJid, to: BareJi
                 .connection_registry
                 .send_to(requester_resource, presence.clone())
                 .await;
+        }
+    }
+}
+
+async fn send_unsubscribed_probe_response(state: &WebSocketState, from: &BareJid, to: &BareJid) {
+    let stanza = Stanza::Presence(build_subscription_presence(
+        SubscriptionType::Unsubscribed,
+        from,
+        to,
+        None,
+        &[],
+    ));
+    for resource in state
+        .deps
+        .protocol
+        .connection_registry
+        .get_resources_for_user(to)
+    {
+        let _ = state
+            .deps
+            .protocol
+            .connection_registry
+            .send_to(&resource, stanza.clone())
+            .await;
+    }
+}
+
+async fn presence_probe_authorized(state: &WebSocketState, from: &BareJid, to: &BareJid) -> bool {
+    if from == to {
+        return true;
+    }
+    let Some(storage) = roster_storage(state).await else {
+        return false;
+    };
+    match storage.get_roster_item(from, to).await {
+        Ok(Some(row)) => SubscriptionStateMachine::should_receive_presence(
+            parse_subscription_state(&row.subscription),
+        ),
+        Ok(None) => false,
+        Err(error) => {
+            warn!(error = %error, requester = %from, target = %to, "Failed to authorize presence probe");
+            false
         }
     }
 }
@@ -440,7 +1340,7 @@ async fn handle_regular_presence_update(
             .deps
             .protocol
             .connection_registry
-            .drain_pending_subscription_stanzas(&sender_jid.to_bare())
+            .pending_subscription_stanzas(&sender_jid.to_bare())
         {
             let _ = state
                 .deps
@@ -508,24 +1408,39 @@ async fn broadcast_presence_to_subscribers(
                 presence.priority,
             ))
         } else {
-            Stanza::Presence(build_unavailable_presence(
-                &sender_jid.to_bare(),
-                &subscriber_bare,
-            ))
+            let mut unavailable = presence.clone();
+            unavailable.from = Some(Jid::from(sender_jid.clone()));
+            unavailable.to = Some(Jid::from(subscriber_bare.clone()));
+            Stanza::Presence(unavailable)
         };
+        let mut delivered_resources = Vec::new();
         for resource in state
             .deps
             .protocol
             .connection_registry
-            .get_resources_for_user(&subscriber_bare)
+            .get_available_resources_for_user(&subscriber_bare)
+            .into_iter()
+            .map(|(jid, _)| jid)
         {
-            let _ = state
+            if state
                 .deps
                 .protocol
                 .connection_registry
                 .send_to(&resource, stanza.clone())
-                .await;
+                .await
+                .is_sent()
+            {
+                delivered_resources.push(resource);
+            }
         }
+        record_stanza_for_detached_available_resources_excluding(
+            state,
+            &subscriber_bare,
+            &stanza,
+            "presence broadcast",
+            &delivered_resources,
+        )
+        .await;
     }
 }
 
@@ -535,6 +1450,16 @@ fn show_name(show: &xmpp_parsers::presence::Show) -> &'static str {
         xmpp_parsers::presence::Show::Chat => "chat",
         xmpp_parsers::presence::Show::Dnd => "dnd",
         xmpp_parsers::presence::Show::Xa => "xa",
+    }
+}
+
+fn show_from_name(value: &str) -> Option<xmpp_parsers::presence::Show> {
+    match value {
+        "away" => Some(xmpp_parsers::presence::Show::Away),
+        "chat" => Some(xmpp_parsers::presence::Show::Chat),
+        "dnd" => Some(xmpp_parsers::presence::Show::Dnd),
+        "xa" => Some(xmpp_parsers::presence::Show::Xa),
+        _ => None,
     }
 }
 

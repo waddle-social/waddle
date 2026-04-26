@@ -38,7 +38,7 @@ impl OutboundStanza {
 ///
 /// Contains the outbound sender and shared state that can be queried
 /// by the registry (like carbons_enabled status for XEP-0280).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ConnectionEntry {
     /// Channel to send stanzas to this connection
     pub sender: mpsc::Sender<OutboundStanza>,
@@ -48,6 +48,8 @@ pub struct ConnectionEntry {
     pub presence_available: Arc<AtomicBool>,
     /// Last advertised priority for this resource (-128..127)
     pub presence_priority: Arc<std::sync::atomic::AtomicI8>,
+    /// Whether this stream requested its roster during the current session.
+    pub roster_interested: Arc<AtomicBool>,
 }
 
 impl ConnectionEntry {
@@ -58,6 +60,7 @@ impl ConnectionEntry {
             carbons_enabled: Arc::new(AtomicBool::new(false)),
             presence_available: Arc::new(AtomicBool::new(false)),
             presence_priority: Arc::new(std::sync::atomic::AtomicI8::new(0)),
+            roster_interested: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -94,6 +97,13 @@ pub enum SendResult {
     NotConnected,
     /// The channel to the recipient is closed
     ChannelClosed,
+}
+
+impl SendResult {
+    /// True when the stanza was queued for delivery.
+    pub fn is_sent(&self) -> bool {
+        matches!(self, SendResult::Sent)
+    }
 }
 
 /// Outcome of a non-blocking fan-out send via `try_send_to`.
@@ -220,9 +230,24 @@ impl ConnectionRegistry {
         sender: mpsc::Sender<OutboundStanza>,
         carbons_enabled: bool,
     ) -> Arc<AtomicBool> {
+        self.register_with_stream_state(jid, sender, carbons_enabled, false)
+    }
+
+    /// Register a connection and seed per-stream feature state.
+    #[instrument(skip(self, sender), fields(jid = %jid, carbons = carbons_enabled, roster_interested = roster_interested))]
+    pub fn register_with_stream_state(
+        &self,
+        jid: FullJid,
+        sender: mpsc::Sender<OutboundStanza>,
+        carbons_enabled: bool,
+        roster_interested: bool,
+    ) -> Arc<AtomicBool> {
         let entry = ConnectionEntry::new(sender);
         if carbons_enabled {
             entry.carbons_enabled.store(true, Ordering::Relaxed);
+        }
+        if roster_interested {
+            entry.roster_interested.store(true, Ordering::Relaxed);
         }
         let carbons_handle = entry.carbons_handle();
         let existing = self.connections.insert(jid.clone(), entry);
@@ -272,6 +297,21 @@ impl ConnectionRegistry {
         removed.map(|(_, entry)| entry)
     }
 
+    /// Return the current entry only if it still belongs to the provided owner.
+    pub fn entry_if_owner(
+        &self,
+        jid: &FullJid,
+        carbons_handle: &Arc<AtomicBool>,
+    ) -> Option<ConnectionEntry> {
+        self.connections.get(jid).and_then(|entry| {
+            if Arc::ptr_eq(&entry.carbons_enabled, carbons_handle) {
+                Some(entry.clone())
+            } else {
+                None
+            }
+        })
+    }
+
     /// Check if a JID is currently connected.
     pub fn is_connected(&self, jid: &FullJid) -> bool {
         self.connections.contains_key(jid)
@@ -297,7 +337,7 @@ impl ConnectionRegistry {
             }
         };
 
-        let outbound = OutboundStanza::new(stanza);
+        let outbound = OutboundStanza::new(stanza.clone());
 
         match sender.send(outbound).await {
             Ok(()) => {
@@ -306,7 +346,24 @@ impl ConnectionRegistry {
             }
             Err(_) => {
                 debug!("Outbound channel closed, connection may have dropped");
-                self.unregister(jid);
+                self.remove_if_sender_closed_owner(jid, &sender);
+                if let Some(entry) = self.connections.get(jid) {
+                    let current = entry.value().sender.clone();
+                    drop(entry);
+                    if !current.same_channel(&sender) {
+                        let outbound = OutboundStanza::new(stanza);
+                        return match current.send(outbound).await {
+                            Ok(()) => {
+                                debug!("Stanza queued for replacement connection");
+                                SendResult::Sent
+                            }
+                            Err(_) => {
+                                self.remove_if_sender_closed_owner(jid, &current);
+                                SendResult::ChannelClosed
+                            }
+                        };
+                    }
+                }
                 SendResult::ChannelClosed
             }
         }
@@ -381,6 +438,57 @@ impl ConnectionRegistry {
             self.presence_states.remove(jid);
             debug!(jid = %jid, "Evicted stale closed connection entry");
         }
+    }
+
+    /// Race-safe eviction for an awaited send failure.
+    ///
+    /// The async send path clones the sender before awaiting channel capacity.
+    /// If another session replaces the same FullJid while the await is in
+    /// progress, a failed send on the old channel must not unregister the new
+    /// session. Match both closed state and channel identity.
+    fn remove_if_sender_closed_owner(&self, jid: &FullJid, sender: &mpsc::Sender<OutboundStanza>) {
+        let removed = self.connections.remove_if(jid, |_, entry| {
+            entry.sender.is_closed() && entry.sender.same_channel(sender)
+        });
+        if removed.is_some() {
+            prometheus::decrement_connected_users();
+            self.presence_states.remove(jid);
+            debug!(jid = %jid, "Evicted stale owned closed connection entry");
+        }
+    }
+
+    /// Mark a connected resource as interested in roster pushes.
+    ///
+    /// RFC 6121 defines interested resources as those that requested the
+    /// roster during this session. Roster pushes are sent only to these
+    /// resources.
+    pub fn mark_roster_interested(&self, jid: &FullJid) {
+        if let Some(entry) = self.connections.get(jid) {
+            entry
+                .value()
+                .roster_interested
+                .store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// Check whether a connected resource is interested in roster pushes.
+    pub fn is_roster_interested(&self, jid: &FullJid) -> bool {
+        self.connections
+            .get(jid)
+            .map(|entry| entry.value().roster_interested.load(Ordering::Relaxed))
+            .unwrap_or(false)
+    }
+
+    /// Get all connected interested resources for a bare JID.
+    pub fn get_roster_interested_resources_for_user(&self, bare_jid: &BareJid) -> Vec<FullJid> {
+        self.connections
+            .iter()
+            .filter(|entry| {
+                entry.key().to_bare() == *bare_jid
+                    && entry.value().roster_interested.load(Ordering::Relaxed)
+            })
+            .map(|entry| entry.key().clone())
+            .collect()
     }
 
     /// Send a stanza to multiple recipients.
@@ -497,10 +605,48 @@ impl ConnectionRegistry {
     ///
     /// These stanzas are delivered when the user next becomes available.
     pub fn queue_pending_subscription_stanza(&self, bare_jid: &BareJid, stanza: Stanza) {
-        self.pending_subscription_stanzas
+        let mut pending = self
+            .pending_subscription_stanzas
             .entry(bare_jid.clone())
-            .or_default()
-            .push(stanza);
+            .or_default();
+        if let Stanza::Presence(presence) = &stanza {
+            if presence.type_ == xmpp_parsers::presence::Type::Subscribe {
+                if let Some(requester) = presence.from.as_ref().map(|from| from.to_bare()) {
+                    pending.retain(|queued| {
+                        !matches!(
+                            queued,
+                            Stanza::Presence(queued_presence)
+                                if queued_presence.type_ == xmpp_parsers::presence::Type::Subscribe
+                                    && queued_presence
+                                        .from
+                                        .as_ref()
+                                        .is_some_and(|from| from.to_bare() == requester)
+                        )
+                    });
+                }
+            }
+        }
+        pending.push(stanza);
+    }
+
+    /// Remove queued inbound subscribe stanzas from `requester` to `recipient`.
+    pub fn remove_pending_subscribe(&self, recipient: &BareJid, requester: &BareJid) -> usize {
+        let Some(mut entry) = self.pending_subscription_stanzas.get_mut(recipient) else {
+            return 0;
+        };
+        let before = entry.len();
+        entry.retain(|stanza| {
+            !matches!(
+                stanza,
+                Stanza::Presence(presence)
+                    if presence.type_ == xmpp_parsers::presence::Type::Subscribe
+                        && presence
+                            .from
+                            .as_ref()
+                            .is_some_and(|from| from.to_bare() == *requester)
+            )
+        });
+        before - entry.len()
     }
 
     /// Drain and return all pending subscription stanzas for a bare JID.
@@ -508,6 +654,16 @@ impl ConnectionRegistry {
         self.pending_subscription_stanzas
             .remove(bare_jid)
             .map(|(_, stanzas)| stanzas)
+            .unwrap_or_default()
+    }
+
+    /// Return queued subscription stanzas for a bare JID without removing
+    /// them. RFC 6121 pending inbound subscribe requests are re-delivered
+    /// whenever the contact becomes available until approval or denial.
+    pub fn pending_subscription_stanzas(&self, bare_jid: &BareJid) -> Vec<Stanza> {
+        self.pending_subscription_stanzas
+            .get(bare_jid)
+            .map(|stanzas| stanzas.clone())
             .unwrap_or_default()
     }
 
@@ -691,6 +847,26 @@ mod tests {
     }
 
     #[test]
+    fn test_register_replacement_does_not_inherit_roster_interest() {
+        let registry = ConnectionRegistry::new();
+        let jid: FullJid = "user@example.com/web".parse().unwrap();
+        let bare = jid.to_bare();
+
+        let (tx1, _rx1) = mpsc::channel(16);
+        let (tx2, _rx2) = mpsc::channel(16);
+
+        registry.register(jid.clone(), tx1);
+        registry.mark_roster_interested(&jid);
+        assert!(registry.is_roster_interested(&jid));
+
+        registry.register(jid.clone(), tx2);
+        assert!(!registry.is_roster_interested(&jid));
+        assert!(registry
+            .get_roster_interested_resources_for_user(&bare)
+            .is_empty());
+    }
+
+    #[test]
     fn test_unregister_connection() {
         let registry = ConnectionRegistry::new();
         let jid = test_jid("user1");
@@ -764,6 +940,51 @@ mod tests {
 
         // Connection should have been removed
         assert!(!registry.is_connected(&jid));
+    }
+
+    #[tokio::test]
+    async fn test_send_to_closed_channel_does_not_remove_replacement() {
+        let registry = ConnectionRegistry::new();
+        let jid = test_jid("user1");
+        let (old_tx, old_rx) = mpsc::channel(1);
+        let (new_tx, mut new_rx) = mpsc::channel(16);
+
+        registry.register(jid.clone(), old_tx);
+        assert!(matches!(
+            registry
+                .send_to(
+                    &jid,
+                    Stanza::Message(make_test_message("user1@example.com"))
+                )
+                .await,
+            SendResult::Sent
+        ));
+
+        let send = registry.send_to(
+            &jid,
+            Stanza::Message(make_test_message("user1@example.com")),
+        );
+        tokio::pin!(send);
+        assert!(tokio::time::timeout(Duration::from_millis(50), &mut send)
+            .await
+            .is_err());
+
+        registry.register(jid.clone(), new_tx);
+        drop(old_rx);
+
+        assert!(matches!(send.await, SendResult::Sent));
+        assert!(new_rx.recv().await.is_some());
+        assert!(registry.is_connected(&jid));
+        assert!(matches!(
+            registry
+                .send_to(
+                    &jid,
+                    Stanza::Message(make_test_message("user1@example.com"))
+                )
+                .await,
+            SendResult::Sent
+        ));
+        assert!(new_rx.recv().await.is_some());
     }
 
     #[tokio::test]
@@ -940,6 +1161,26 @@ mod tests {
         assert!(registry
             .drain_pending_subscription_stanzas(&bare)
             .is_empty());
+    }
+
+    #[test]
+    fn test_pending_subscribe_is_deduplicated_and_not_drained_by_read() {
+        let registry = ConnectionRegistry::new();
+        let recipient: BareJid = "alice@example.com".parse().unwrap();
+        let requester: BareJid = "bob@example.com".parse().unwrap();
+
+        for _ in 0..2 {
+            let mut subscribe =
+                xmpp_parsers::presence::Presence::new(xmpp_parsers::presence::Type::Subscribe);
+            subscribe.from = Some(jid::Jid::from(requester.clone()));
+            subscribe.to = Some(jid::Jid::from(recipient.clone()));
+            registry.queue_pending_subscription_stanza(&recipient, Stanza::Presence(subscribe));
+        }
+
+        assert_eq!(registry.pending_subscription_stanzas(&recipient).len(), 1);
+        assert_eq!(registry.pending_subscription_stanzas(&recipient).len(), 1);
+        assert_eq!(registry.remove_pending_subscribe(&recipient, &requester), 1);
+        assert!(registry.pending_subscription_stanzas(&recipient).is_empty());
     }
 
     #[test]

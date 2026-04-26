@@ -31,10 +31,7 @@ pub fn localpart_to_jid(localpart: &str, domain: &str) -> Result<String, AuthErr
 }
 
 /// Parse a JID string and return localpart.
-#[allow(
-    dead_code,
-    reason = "legacy waddle_xmpp AppState bridge uses this in test-only coverage while websocket auth uses direct localparts"
-)]
+#[cfg(test)]
 pub fn jid_to_localpart(jid: &str) -> Result<String, AuthError> {
     let localpart = jid
         .split_once('@')

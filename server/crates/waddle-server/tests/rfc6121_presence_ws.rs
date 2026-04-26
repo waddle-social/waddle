@@ -60,6 +60,54 @@ async fn connect_alice_bob() -> (TestServer, WsXmppClient, WsXmppClient) {
     (server, alice, bob)
 }
 
+async fn send_roster_get(client: &mut WsXmppClient, id: &str) {
+    client
+        .send(&format!(
+            r#"<iq xmlns="jabber:client" type="get" id="{id}"><query xmlns="jabber:iq:roster"/></iq>"#
+        ))
+        .await
+        .expect("send roster get");
+    let _ = client
+        .recv_matching(|frame| frame.contains(id))
+        .await
+        .expect("roster get result");
+}
+
+async fn establish_subscription_to_alice(alice: &mut WsXmppClient, bob: &mut WsXmppClient) {
+    send_roster_get(alice, "alice-subscription-roster").await;
+    send_roster_get(bob, "bob-subscription-roster").await;
+    alice
+        .send(r#"<presence xmlns="jabber:client"/>"#)
+        .await
+        .expect("alice is available for subscription request delivery");
+    bob.send(r#"<presence xmlns="jabber:client" type="subscribe" to="alice@localhost"/>"#)
+        .await
+        .expect("bob subscribes to alice");
+    let subscribe = alice
+        .recv_matching(|frame| frame.contains("type=\"subscribe\""))
+        .await
+        .expect("alice receives subscribe");
+    assert!(
+        subscribe.contains("from=\"bob@localhost\""),
+        "expected bob subscribe: {subscribe}"
+    );
+    alice
+        .send(r#"<presence xmlns="jabber:client" type="subscribed" to="bob@localhost"/>"#)
+        .await
+        .expect("alice approves bob");
+    let subscribed = bob
+        .recv_matching(|frame| frame.contains("type=\"subscribed\""))
+        .await
+        .expect("bob receives approval");
+    assert!(
+        subscribed.contains("from=\"alice@localhost\""),
+        "expected alice approval: {subscribed}"
+    );
+    bob.send(r#"<presence xmlns="jabber:client"/>"#)
+        .await
+        .expect("bob is available for presence broadcasts");
+}
+
 #[tokio::test]
 async fn websocket_directed_presence_routes_to_target_resource() {
     let (_server, mut alice, mut bob) = connect_alice_bob().await;
@@ -78,6 +126,42 @@ async fn websocket_directed_presence_routes_to_target_resource() {
     assert!(
         delivered.contains("from=\"bob@localhost/") && delivered.contains("to=\"alice@localhost/"),
         "expected directed presence routed with full JIDs, got: {delivered}"
+    );
+
+    bob.close().await;
+    alice.close().await;
+}
+
+#[tokio::test]
+async fn websocket_full_jid_probe_returns_rich_resource_presence() {
+    let (_server, mut alice, mut bob) = connect_alice_bob().await;
+    let alice_jid = alice.full_jid.clone().expect("alice full jid");
+
+    establish_subscription_to_alice(&mut alice, &mut bob).await;
+    alice
+        .send(
+            r#"<presence xmlns="jabber:client"><show>away</show><status>debugging</status><priority>7</priority></presence>"#,
+        )
+        .await
+        .expect("alice sends rich presence");
+    bob.recv_matching(|frame| frame.contains("debugging"))
+        .await
+        .expect("bob receives broadcast rich presence");
+
+    bob.send(&format!(
+        r#"<presence xmlns="jabber:client" type="probe" to="{alice_jid}"/>"#
+    ))
+    .await
+    .expect("bob probes alice full jid");
+    let probe = bob
+        .recv_matching(|frame| frame.contains("from=\"alice@localhost/"))
+        .await
+        .expect("probe response");
+    assert!(
+        probe.contains("<show>away</show>")
+            && probe.contains("<status>debugging</status>")
+            && probe.contains("<priority>7</priority>"),
+        "full-JID probe must preserve rich resource presence: {probe}"
     );
 
     bob.close().await;
@@ -121,6 +205,12 @@ async fn websocket_blocking_prevents_presence_probe_response() {
 #[tokio::test]
 async fn websocket_blocking_filters_presence_broadcast_to_subscriber() {
     let (_server, mut alice, mut bob) = connect_alice_bob().await;
+
+    send_roster_get(&mut bob, "bob-presence-roster").await;
+    alice
+        .send(r#"<presence xmlns="jabber:client"/>"#)
+        .await
+        .expect("alice available");
 
     bob.send(r#"<presence xmlns="jabber:client" type="subscribe" to="alice@localhost"/>"#)
         .await

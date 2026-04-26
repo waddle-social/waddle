@@ -12,9 +12,12 @@ use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use jid::FullJid;
+use jid::{BareJid, FullJid};
 use thiserror::Error;
 use tracing::debug;
+use xmpp_parsers::presence::Show;
+
+use crate::Stanza;
 
 /// Default session timeout (5 minutes)
 pub const DEFAULT_SESSION_TIMEOUT_SECS: u64 = 300;
@@ -67,6 +70,22 @@ pub struct DetachedSession {
     /// per-stream add-ons the client previously enabled (here: carbons) must
     /// survive resumption without requiring the client to re-negotiate them.
     pub carbons_enabled: bool,
+    /// RFC 6121 roster-interest state at detach time.
+    ///
+    /// XEP-0198 resumption continues the same stream, so an already
+    /// interested resource remains interested after a successful resume.
+    pub roster_interested: bool,
+    /// Whether the resource had sent available presence at detach time.
+    ///
+    /// Presence side effects required by RFC 6121 still apply to detached
+    /// XEP-0198 streams that were available when the transport dropped.
+    pub presence_available: bool,
+    /// Last advertised show value while available.
+    pub presence_show: Option<Show>,
+    /// Last advertised status text while available.
+    pub presence_status: Option<String>,
+    /// Last advertised priority while available.
+    pub presence_priority: i8,
 }
 
 impl DetachedSession {
@@ -104,6 +123,32 @@ impl DetachedSession {
             .filter(|(seq, _)| sequence_gt(*seq, client_h))
             .map(|(_, xml)| xml.clone())
             .collect()
+    }
+
+    /// Record an outbound stanza while this stream is detached.
+    pub fn record_detached_outbound(&mut self, stanza_xml: String) {
+        self.outbound_count = self.outbound_count.wrapping_add(1);
+        if self.unacked_stanzas.len() >= super::DEFAULT_MAX_UNACKED_QUEUE_SIZE {
+            self.unacked_stanzas.remove(0);
+        }
+        self.unacked_stanzas.push((self.outbound_count, stanza_xml));
+    }
+
+    pub fn record_detached_outbound_at(&mut self, sequence: u32, stanza_xml: String) {
+        self.outbound_count = self.outbound_count.max(sequence);
+        if self
+            .unacked_stanzas
+            .iter()
+            .any(|(existing_sequence, _)| *existing_sequence == sequence)
+        {
+            return;
+        }
+        if self.unacked_stanzas.len() >= super::DEFAULT_MAX_UNACKED_QUEUE_SIZE {
+            self.unacked_stanzas.remove(0);
+        }
+        self.unacked_stanzas.push((sequence, stanza_xml));
+        self.unacked_stanzas
+            .sort_by_key(|(existing_sequence, _)| *existing_sequence);
     }
 }
 
@@ -144,6 +189,12 @@ pub trait SmSessionRegistry: Send + Sync {
     async fn session_count(&self) -> usize;
 }
 
+#[derive(Debug, Clone)]
+pub enum SmClaimCompletion {
+    Resumed(DetachedSession),
+    Expired(DetachedSession),
+}
+
 /// In-memory implementation of the SM session registry.
 ///
 /// Suitable for single-node deployments. For clustered deployments,
@@ -151,6 +202,7 @@ pub trait SmSessionRegistry: Send + Sync {
 #[derive(Debug)]
 pub struct InMemorySmSessionRegistry {
     sessions: RwLock<HashMap<String, DetachedSession>>,
+    claimed_sessions: RwLock<HashMap<String, DetachedSession>>,
     max_sessions: usize,
 }
 
@@ -165,6 +217,7 @@ impl InMemorySmSessionRegistry {
     pub fn new() -> Self {
         Self {
             sessions: RwLock::new(HashMap::new()),
+            claimed_sessions: RwLock::new(HashMap::new()),
             max_sessions: DEFAULT_MAX_SESSIONS,
         }
     }
@@ -173,6 +226,7 @@ impl InMemorySmSessionRegistry {
     pub fn with_capacity(max_sessions: usize) -> Self {
         Self {
             sessions: RwLock::new(HashMap::with_capacity(max_sessions.min(10000))),
+            claimed_sessions: RwLock::new(HashMap::new()),
             max_sessions,
         }
     }
@@ -186,12 +240,19 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
             .write()
             .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
 
-        // Clean up expired sessions if at capacity
-        if sessions.len() >= self.max_sessions {
-            let _ = drain_expired_internal(&mut sessions);
-        }
+        let stream_id = session.stream_id.clone();
+        let jid = session.jid.clone();
+        let mut claimed = self
+            .claimed_sessions
+            .write()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+        sessions.retain(|existing_stream_id, existing| {
+            existing_stream_id == &stream_id || existing.jid != jid
+        });
+        claimed.retain(|existing_stream_id, existing| {
+            existing_stream_id != &stream_id && existing.jid != jid
+        });
 
-        // Still at capacity after cleanup?
         if sessions.len() >= self.max_sessions {
             // Remove oldest session
             if let Some(oldest_key) = sessions
@@ -204,10 +265,12 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
             }
         }
 
-        let stream_id = session.stream_id.clone();
         sessions.insert(stream_id.clone(), session);
+        let count = sessions.len();
+        drop(claimed);
+        drop(sessions);
 
-        debug!(stream_id = %stream_id, count = sessions.len(), "Stored detached SM session");
+        debug!(stream_id = %stream_id, count = count, "Stored detached SM session");
         Ok(())
     }
 
@@ -220,21 +283,27 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
             .write()
             .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
 
-        match sessions.remove(stream_id) {
+        let removed = match sessions.remove(stream_id) {
             Some(session) => {
                 if session.is_expired() {
                     debug!(stream_id = %stream_id, "SM session found but expired");
-                    Ok(None)
+                    None
                 } else {
                     debug!(stream_id = %stream_id, "Retrieved and removed SM session");
-                    Ok(Some(session))
+                    Some(session)
                 }
             }
             None => {
                 debug!(stream_id = %stream_id, "SM session not found");
-                Ok(None)
+                None
             }
-        }
+        };
+        drop(sessions);
+        self.claimed_sessions
+            .write()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
+            .remove(stream_id);
+        Ok(removed)
     }
 
     async fn peek_session(
@@ -273,6 +342,15 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
 }
 
 impl InMemorySmSessionRegistry {
+    fn stanza_to_replay_xml(stanza: &Stanza) -> String {
+        let element = stanza.to_element();
+        let mut buffer = Vec::new();
+        element
+            .write_to(&mut buffer)
+            .expect("serializing typed stanza should not fail");
+        String::from_utf8(buffer).expect("serialized typed stanza is UTF-8")
+    }
+
     /// Remove every expired session and return the detached state in full.
     ///
     /// Callers (notably the server-side janitor) need the JID and stream id
@@ -287,6 +365,554 @@ impl InMemorySmSessionRegistry {
             .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
 
         Ok(drain_expired_internal(&mut sessions))
+    }
+
+    /// Atomically claim a resumable session for a single resume attempt.
+    ///
+    /// Claimed sessions stay writable by detached fanout so stanzas routed
+    /// during the claim-to-registration handoff can be merged into the final
+    /// replay batch before the claim is completed.
+    pub async fn claim_session(
+        &self,
+        stream_id: &str,
+    ) -> Result<Option<DetachedSession>, SmRegistryError> {
+        let mut sessions = self
+            .sessions
+            .write()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+        let Some(session) = sessions.remove(stream_id) else {
+            return Ok(None);
+        };
+        if session.is_expired() {
+            return Ok(None);
+        }
+        let mut claimed = self
+            .claimed_sessions
+            .write()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+        if claimed.contains_key(stream_id) {
+            sessions.insert(stream_id.to_string(), session);
+            return Ok(None);
+        }
+        claimed.insert(stream_id.to_string(), session.clone());
+        Ok(Some(session))
+    }
+
+    /// Release a previously claimed session without consuming it.
+    pub async fn release_claim(&self, stream_id: &str) -> Result<(), SmRegistryError> {
+        let mut sessions = self
+            .sessions
+            .write()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+        let mut claimed = self
+            .claimed_sessions
+            .write()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+        let session = claimed.remove(stream_id);
+        if let Some(session) = session {
+            if !session.is_expired() {
+                sessions.insert(stream_id.to_string(), session);
+            }
+        }
+        Ok(())
+    }
+
+    /// Complete a previously claimed session, returning the claimed copy with
+    /// any stanzas recorded during the handoff and removing detached replay
+    /// eligibility from the registry.
+    pub async fn complete_claim(
+        &self,
+        stream_id: &str,
+    ) -> Result<Option<SmClaimCompletion>, SmRegistryError> {
+        Ok(self
+            .claimed_sessions
+            .write()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
+            .remove(stream_id)
+            .map(|session| {
+                if session.is_expired() {
+                    SmClaimCompletion::Expired(session)
+                } else {
+                    SmClaimCompletion::Resumed(session)
+                }
+            }))
+    }
+
+    /// Remove a stored detached session only if it has not been claimed by a
+    /// resume attempt.
+    pub async fn remove_stored_session_if_unclaimed(
+        &self,
+        stream_id: &str,
+    ) -> Result<Option<DetachedSession>, SmRegistryError> {
+        let mut sessions = self
+            .sessions
+            .write()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+        if self
+            .claimed_sessions
+            .read()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
+            .contains_key(stream_id)
+        {
+            return Ok(None);
+        }
+        Ok(sessions.remove(stream_id))
+    }
+
+    /// Invalidate detached sessions for a FullJID after a fresh bind has
+    /// replaced that stream identity.
+    pub async fn invalidate_sessions_for_jid(
+        &self,
+        jid: &FullJid,
+    ) -> Result<Vec<DetachedSession>, SmRegistryError> {
+        let mut removed = Vec::new();
+        let mut sessions = self
+            .sessions
+            .write()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+        let matching_streams: Vec<_> = sessions
+            .iter()
+            .filter(|(_, session)| session.jid == *jid)
+            .map(|(stream_id, _)| stream_id.clone())
+            .collect();
+        for stream_id in matching_streams {
+            if let Some(session) = sessions.remove(&stream_id) {
+                removed.push(session);
+            }
+        }
+        drop(sessions);
+        let mut claimed = self
+            .claimed_sessions
+            .write()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+        let matching_streams: Vec<_> = claimed
+            .iter()
+            .filter(|(_, session)| session.jid == *jid)
+            .map(|(stream_id, _)| stream_id.clone())
+            .collect();
+        for stream_id in matching_streams {
+            if let Some(session) = claimed.remove(&stream_id) {
+                removed.push(session);
+            }
+        }
+        Ok(removed)
+    }
+
+    /// List detached resources for `bare_jid` that had requested the roster.
+    pub async fn interested_detached_resources_for_user(
+        &self,
+        bare_jid: &BareJid,
+    ) -> Result<Vec<FullJid>, SmRegistryError> {
+        let sessions = self
+            .sessions
+            .read()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+
+        let mut resources: Vec<FullJid> = sessions
+            .values()
+            .filter(|session| {
+                !session.is_expired()
+                    && session.roster_interested
+                    && session.jid.to_bare() == *bare_jid
+            })
+            .map(|session| session.jid.clone())
+            .collect();
+        drop(sessions);
+        let claimed = self
+            .claimed_sessions
+            .read()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+        resources.extend(
+            claimed
+                .values()
+                .filter(|session| {
+                    !session.is_expired()
+                        && session.roster_interested
+                        && session.jid.to_bare() == *bare_jid
+                })
+                .map(|session| session.jid.clone()),
+        );
+        Ok(resources)
+    }
+
+    /// Record a stanza for one detached interested resource.
+    async fn record_outbound_for_detached_resource(
+        &self,
+        jid: &FullJid,
+        stanza_xml: String,
+    ) -> Result<bool, SmRegistryError> {
+        let mut sessions = self
+            .sessions
+            .write()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+        for session in sessions.values_mut() {
+            if !session.is_expired() && session.roster_interested && session.jid == *jid {
+                session.record_detached_outbound(stanza_xml);
+                return Ok(true);
+            }
+        }
+        drop(sessions);
+        let mut claimed = self
+            .claimed_sessions
+            .write()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+        for session in claimed.values_mut() {
+            if !session.is_expired() && session.roster_interested && session.jid == *jid {
+                session.record_detached_outbound(stanza_xml);
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Record a typed stanza for one detached interested resource.
+    pub async fn record_stanza_for_detached_resource(
+        &self,
+        jid: &FullJid,
+        stanza: &Stanza,
+    ) -> Result<bool, SmRegistryError> {
+        self.record_outbound_for_detached_resource(jid, Self::stanza_to_replay_xml(stanza))
+            .await
+    }
+
+    /// Record a typed stanza for one detached resource by exact FullJID,
+    /// regardless of roster-interest or presence-availability flags.
+    pub async fn record_stanza_for_detached_bound_resource(
+        &self,
+        jid: &FullJid,
+        stanza: &Stanza,
+    ) -> Result<bool, SmRegistryError> {
+        let stanza_xml = Self::stanza_to_replay_xml(stanza);
+        let mut sessions = self
+            .sessions
+            .write()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+        for session in sessions.values_mut() {
+            if !session.is_expired() && session.jid == *jid {
+                session.record_detached_outbound(stanza_xml);
+                return Ok(true);
+            }
+        }
+        drop(sessions);
+        let mut claimed = self
+            .claimed_sessions
+            .write()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+        for session in claimed.values_mut() {
+            if !session.is_expired() && session.jid == *jid {
+                session.record_detached_outbound(stanza_xml);
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Record a stanza directly against a detached stream id, regardless of
+    /// roster-interest or presence-availability flags.
+    pub async fn record_outbound_for_detached_stream(
+        &self,
+        stream_id: &str,
+        stanza_xml: String,
+    ) -> Result<bool, SmRegistryError> {
+        let mut sessions = self
+            .sessions
+            .write()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+        if let Some(session) = sessions.get_mut(stream_id) {
+            if !session.is_expired() {
+                session.record_detached_outbound(stanza_xml);
+                return Ok(true);
+            }
+            return Ok(false);
+        }
+        drop(sessions);
+        let mut claimed = self
+            .claimed_sessions
+            .write()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+        if let Some(session) = claimed.get_mut(stream_id) {
+            if !session.is_expired() {
+                session.record_detached_outbound(stanza_xml);
+                return Ok(true);
+            }
+            return Ok(false);
+        }
+        Ok(false)
+    }
+
+    pub async fn record_outbound_for_detached_stream_at(
+        &self,
+        stream_id: &str,
+        sequence: u32,
+        stanza_xml: String,
+    ) -> Result<bool, SmRegistryError> {
+        let mut sessions = self
+            .sessions
+            .write()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+
+        if let Some(session) = sessions.get_mut(stream_id) {
+            if !session.is_expired() {
+                session.record_detached_outbound_at(sequence, stanza_xml);
+                return Ok(true);
+            }
+            return Ok(false);
+        }
+        drop(sessions);
+        let mut claimed = self
+            .claimed_sessions
+            .write()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+        if let Some(session) = claimed.get_mut(stream_id) {
+            if !session.is_expired() {
+                session.record_detached_outbound_at(sequence, stanza_xml);
+                return Ok(true);
+            }
+            return Ok(false);
+        }
+        Ok(false)
+    }
+
+    /// List all detached resources for a bare JID, including resources that
+    /// were not available at detach time.
+    pub async fn detached_resources_for_user(
+        &self,
+        bare_jid: &BareJid,
+    ) -> Result<Vec<FullJid>, SmRegistryError> {
+        let sessions = self
+            .sessions
+            .read()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+
+        let mut resources: Vec<FullJid> = sessions
+            .values()
+            .filter(|session| !session.is_expired() && session.jid.to_bare() == *bare_jid)
+            .map(|session| session.jid.clone())
+            .collect();
+        drop(sessions);
+
+        let claimed = self
+            .claimed_sessions
+            .read()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+        resources.extend(
+            claimed
+                .values()
+                .filter(|session| !session.is_expired() && session.jid.to_bare() == *bare_jid)
+                .map(|session| session.jid.clone()),
+        );
+        Ok(resources)
+    }
+
+    /// List detached resources for a bare JID that had XEP-0280 carbons enabled.
+    pub async fn detached_carbon_resources_for_user(
+        &self,
+        bare_jid: &BareJid,
+        except: &FullJid,
+    ) -> Result<Vec<FullJid>, SmRegistryError> {
+        let sessions = self
+            .sessions
+            .read()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+
+        let mut resources: Vec<FullJid> = sessions
+            .values()
+            .filter(|session| {
+                session.carbons_enabled
+                    && !session.is_expired()
+                    && session.jid.to_bare() == *bare_jid
+                    && session.jid != *except
+            })
+            .map(|session| session.jid.clone())
+            .collect();
+        drop(sessions);
+
+        let claimed = self
+            .claimed_sessions
+            .read()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+        resources.extend(
+            claimed
+                .values()
+                .filter(|session| {
+                    session.carbons_enabled
+                        && !session.is_expired()
+                        && session.jid.to_bare() == *bare_jid
+                        && session.jid != *except
+                })
+                .map(|session| session.jid.clone()),
+        );
+        Ok(resources)
+    }
+
+    /// List detached resources for `bare_jid` that were available at detach.
+    pub async fn available_detached_resources_for_user(
+        &self,
+        bare_jid: &BareJid,
+    ) -> Result<Vec<FullJid>, SmRegistryError> {
+        let sessions = self
+            .sessions
+            .read()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+
+        let mut resources: Vec<FullJid> = sessions
+            .values()
+            .filter(|session| {
+                !session.is_expired()
+                    && session.presence_available
+                    && session.jid.to_bare() == *bare_jid
+            })
+            .map(|session| session.jid.clone())
+            .collect();
+        drop(sessions);
+        let claimed = self
+            .claimed_sessions
+            .read()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+        resources.extend(
+            claimed
+                .values()
+                .filter(|session| {
+                    !session.is_expired()
+                        && session.presence_available
+                        && session.jid.to_bare() == *bare_jid
+                })
+                .map(|session| session.jid.clone()),
+        );
+        Ok(resources)
+    }
+
+    /// Record a stanza for one detached resource that was available at detach.
+    async fn record_outbound_for_detached_available_resource(
+        &self,
+        jid: &FullJid,
+        stanza_xml: String,
+    ) -> Result<bool, SmRegistryError> {
+        let mut sessions = self
+            .sessions
+            .write()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+        for session in sessions.values_mut() {
+            if !session.is_expired() && session.presence_available && session.jid == *jid {
+                session.record_detached_outbound(stanza_xml);
+                return Ok(true);
+            }
+        }
+        drop(sessions);
+        let mut claimed = self
+            .claimed_sessions
+            .write()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+        for session in claimed.values_mut() {
+            if !session.is_expired() && session.presence_available && session.jid == *jid {
+                session.record_detached_outbound(stanza_xml);
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Record a typed stanza for one detached resource that was available at detach.
+    pub async fn record_stanza_for_detached_available_resource(
+        &self,
+        jid: &FullJid,
+        stanza: &Stanza,
+    ) -> Result<bool, SmRegistryError> {
+        self.record_outbound_for_detached_available_resource(
+            jid,
+            Self::stanza_to_replay_xml(stanza),
+        )
+        .await
+    }
+
+    /// Return last known rich presence state for a detached available resource.
+    pub async fn detached_presence_state(
+        &self,
+        jid: &FullJid,
+    ) -> Result<Option<(Option<Show>, Option<String>, i8)>, SmRegistryError> {
+        let sessions = self
+            .sessions
+            .read()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+        if let Some(session) = sessions.values().find(|session| {
+            !session.is_expired() && session.presence_available && session.jid == *jid
+        }) {
+            return Ok(Some((
+                session.presence_show.clone(),
+                session.presence_status.clone(),
+                session.presence_priority,
+            )));
+        }
+        drop(sessions);
+        let claimed = self
+            .claimed_sessions
+            .read()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+        Ok(claimed
+            .values()
+            .find(|session| {
+                !session.is_expired() && session.presence_available && session.jid == *jid
+            })
+            .map(|session| {
+                (
+                    session.presence_show.clone(),
+                    session.presence_status.clone(),
+                    session.presence_priority,
+                )
+            }))
+    }
+
+    /// Return last known rich presence state for every detached available
+    /// resource owned by `bare_jid`.
+    pub async fn available_detached_presence_states_for_user(
+        &self,
+        bare_jid: &BareJid,
+    ) -> Result<Vec<(FullJid, Option<Show>, Option<String>, i8)>, SmRegistryError> {
+        let sessions = self
+            .sessions
+            .read()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+
+        let mut states: Vec<(FullJid, Option<Show>, Option<String>, i8)> = sessions
+            .values()
+            .filter(|session| {
+                !session.is_expired()
+                    && session.presence_available
+                    && session.jid.to_bare() == *bare_jid
+            })
+            .map(|session| {
+                (
+                    session.jid.clone(),
+                    session.presence_show.clone(),
+                    session.presence_status.clone(),
+                    session.presence_priority,
+                )
+            })
+            .collect();
+        drop(sessions);
+
+        let claimed = self
+            .claimed_sessions
+            .read()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+        states.extend(
+            claimed
+                .values()
+                .filter(|session| {
+                    !session.is_expired()
+                        && session.presence_available
+                        && session.jid.to_bare() == *bare_jid
+                })
+                .map(|session| {
+                    (
+                        session.jid.clone(),
+                        session.presence_show.clone(),
+                        session.presence_status.clone(),
+                        session.presence_priority,
+                    )
+                }),
+        );
+        Ok(states)
     }
 }
 
@@ -339,10 +965,14 @@ mod tests {
     }
 
     fn make_test_session(stream_id: &str) -> DetachedSession {
+        make_test_session_for_jid(stream_id, make_test_jid())
+    }
+
+    fn make_test_session_for_jid(stream_id: &str, jid: FullJid) -> DetachedSession {
         DetachedSession {
             stream_id: stream_id.to_string(),
             user_id: "user@example.com".to_string(),
-            jid: make_test_jid(),
+            jid,
             inbound_count: 10,
             outbound_count: 15,
             last_acked: 12,
@@ -354,6 +984,11 @@ mod tests {
             max_resume_time: Some(300),
             detached_at: Instant::now(),
             carbons_enabled: false,
+            roster_interested: false,
+            presence_available: false,
+            presence_show: None,
+            presence_status: None,
+            presence_priority: 0,
         }
     }
 
@@ -380,6 +1015,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_store_session_replaces_existing_session_for_same_full_jid() {
+        let registry = InMemorySmSessionRegistry::new();
+        let mut first = make_test_session("stream-old");
+        first.roster_interested = true;
+        let mut second = make_test_session("stream-new");
+        second.roster_interested = true;
+
+        registry.store_session(first).await.unwrap();
+        registry.store_session(second).await.unwrap();
+
+        assert!(registry.take_session("stream-old").await.unwrap().is_none());
+        let current = registry
+            .take_session("stream-new")
+            .await
+            .unwrap()
+            .expect("newer detached session should remain");
+        assert_eq!(current.stream_id, "stream-new");
+    }
+
+    #[tokio::test]
     async fn test_peek_session() {
         let registry = InMemorySmSessionRegistry::new();
 
@@ -394,6 +1049,61 @@ mod tests {
         // Peek again
         let peeked2 = registry.peek_session("stream-456").await.unwrap();
         assert!(peeked2.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_claimed_session_remains_writable_for_handoff_fanout() {
+        let registry = InMemorySmSessionRegistry::new();
+
+        let mut session = make_test_session("stream-claimed");
+        session.roster_interested = true;
+        let jid = session.jid.clone();
+        registry.store_session(session).await.unwrap();
+
+        let claimed = registry
+            .claim_session("stream-claimed")
+            .await
+            .unwrap()
+            .expect("claim");
+        assert_eq!(claimed.stream_id, "stream-claimed");
+        assert_eq!(
+            registry.session_count().await,
+            0,
+            "claimed sessions must move out of the normal detached map"
+        );
+
+        assert!(
+            registry
+                .record_stanza_for_detached_resource(&jid, &{
+                    let mut presence =
+                        xmpp_parsers::presence::Presence::new(xmpp_parsers::presence::Type::None);
+                    presence
+                        .statuses
+                        .insert(String::new(), "during-claim".to_string());
+                    Stanza::Presence(presence)
+                })
+                .await
+                .unwrap(),
+            "fanout during resume handoff must write to the claimed session"
+        );
+
+        let completed = registry
+            .complete_claim("stream-claimed")
+            .await
+            .unwrap()
+            .expect("completed claim");
+        match completed {
+            SmClaimCompletion::Resumed(completed) => {
+                assert!(
+                    completed
+                        .unacked_stanzas
+                        .iter()
+                        .any(|(_, stanza)| stanza.contains("during-claim")),
+                    "completed claim must include fanout recorded during handoff"
+                );
+            }
+            SmClaimCompletion::Expired(_) => panic!("claim should still be resumable"),
+        }
     }
 
     #[tokio::test]
@@ -420,6 +1130,7 @@ mod tests {
         // Should return None because expired
         let result = registry.take_session("stream-expired").await.unwrap();
         assert!(result.is_none());
+        assert_eq!(registry.session_count().await, 0);
     }
 
     #[tokio::test]
@@ -431,7 +1142,8 @@ mod tests {
         expired.max_resume_time = Some(0);
         registry.store_session(expired).await.unwrap();
 
-        let valid = make_test_session("stream-valid");
+        let valid =
+            make_test_session_for_jid("stream-valid", "user@example.com/valid".parse().unwrap());
         registry.store_session(valid).await.unwrap();
 
         // Wait for expiration
@@ -453,14 +1165,20 @@ mod tests {
 
         // Store 3 sessions
         for i in 0..3 {
-            let session = make_test_session(&format!("stream-{}", i));
+            let session = make_test_session_for_jid(
+                &format!("stream-{}", i),
+                format!("user@example.com/resource-{i}").parse().unwrap(),
+            );
             registry.store_session(session).await.unwrap();
         }
 
         assert_eq!(registry.session_count().await, 3);
 
         // Store a 4th - should evict oldest
-        let session = make_test_session("stream-new");
+        let session = make_test_session_for_jid(
+            "stream-new",
+            "user@example.com/resource-new".parse().unwrap(),
+        );
         registry.store_session(session).await.unwrap();
 
         assert_eq!(registry.session_count().await, 3);

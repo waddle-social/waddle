@@ -26,6 +26,8 @@ pub struct RosterItem {
     pub subscription: Subscription,
     /// Pending subscription request (only "subscribe" is valid per RFC 6121).
     pub ask: Option<AskType>,
+    /// Contact has been pre-approved for a future subscription request.
+    pub approved: bool,
     /// Groups this contact belongs to.
     pub groups: Vec<String>,
 }
@@ -38,6 +40,7 @@ impl RosterItem {
             name: None,
             subscription: Subscription::None,
             ask: None,
+            approved: false,
             groups: Vec::new(),
         }
     }
@@ -49,6 +52,7 @@ impl RosterItem {
             name: Some(name.into()),
             subscription: Subscription::None,
             ask: None,
+            approved: false,
             groups: Vec::new(),
         }
     }
@@ -90,6 +94,7 @@ impl RosterItem {
             .unwrap_or(Subscription::None);
 
         let ask = elem.attr("ask").map(str::parse::<AskType>).transpose()?;
+        let approved = matches!(elem.attr("approved"), Some("true") | Some("1"));
 
         let mut groups = Vec::new();
         let mut seen_groups = HashSet::new();
@@ -116,6 +121,7 @@ impl RosterItem {
             name,
             subscription,
             ask,
+            approved,
             groups,
         })
     }
@@ -132,6 +138,10 @@ impl RosterItem {
 
         if let Some(ref ask) = self.ask {
             builder = builder.attr("ask", ask.as_str());
+        }
+
+        if self.approved {
+            builder = builder.attr("approved", "true");
         }
 
         for group in &self.groups {

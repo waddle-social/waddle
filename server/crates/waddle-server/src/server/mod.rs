@@ -938,6 +938,13 @@ async fn create_router(
                     "SM janitor: cleaning up expired detached sessions"
                 );
                 for session in drained {
+                    if session.presence_available {
+                        routes::websocket::handlers::presence::broadcast_unavailable_for_expired_detached_session(
+                            &state,
+                            &session.jid,
+                        )
+                        .await;
+                    }
                     state
                         .deps
                         .protocol

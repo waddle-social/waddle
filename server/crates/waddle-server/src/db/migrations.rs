@@ -167,6 +167,7 @@ CREATE TABLE roster_items (
     name TEXT,
     subscription TEXT NOT NULL DEFAULT 'none',
     ask TEXT,
+    approved BOOLEAN NOT NULL DEFAULT 0,
     groups TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -334,6 +335,7 @@ CREATE TABLE roster_items (
     name TEXT,
     subscription TEXT NOT NULL DEFAULT 'none',
     ask TEXT,
+    approved BOOLEAN NOT NULL DEFAULT FALSE,
     groups TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP::TEXT,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP::TEXT,
@@ -375,7 +377,7 @@ CREATE TABLE private_xml_storage (
     pub fn all() -> Vec<Migration> {
         vec![Migration {
             version: 1,
-            description: "Hard-cut auth broker schema (issuer+subject identity key)".to_string(),
+            description: "Hard-cut auth broker schema with roster pre-approval".to_string(),
             sql_sqlite: V0001_AUTH_BROKER_SCHEMA,
             sql_postgres: V0001_AUTH_BROKER_SCHEMA_POSTGRES,
         }]
@@ -886,6 +888,67 @@ mod tests {
 
         let version = runner.current_version(&db).await.unwrap();
         assert_eq!(version, Some(1001));
+    }
+
+    #[tokio::test]
+    async fn test_incompatible_history_recreates_existing_owned_tables() {
+        let db = Database::in_memory("test-incompatible-existing-tables")
+            .await
+            .unwrap();
+        let conn = db.guard().await.unwrap();
+
+        conn.execute(
+            r#"
+            CREATE TABLE IF NOT EXISTS _migrations (
+                version INTEGER PRIMARY KEY,
+                description TEXT NOT NULL,
+                applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+            "#,
+            (),
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO _migrations (version, description) VALUES (1, 'legacy initial schema')",
+            (),
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            r#"
+            CREATE TABLE roster_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_jid TEXT NOT NULL,
+                contact_jid TEXT NOT NULL,
+                subscription TEXT NOT NULL DEFAULT 'none'
+            )
+            "#,
+            (),
+        )
+        .await
+        .unwrap();
+        drop(conn);
+
+        let runner = MigrationRunner::global();
+        let applied = runner.run(&db).await.unwrap();
+        assert_eq!(applied, vec![1, 1001]);
+
+        let conn = db.guard().await.unwrap();
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT COUNT(*)
+                FROM pragma_table_info('roster_items')
+                WHERE name = 'approved'
+                "#,
+                (),
+            )
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        let has_approved: i64 = row.get(0).unwrap();
+        assert_eq!(has_approved, 1);
     }
 
     // --- Postgres dialect validation (no live DB required) ---

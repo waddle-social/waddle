@@ -28,7 +28,8 @@ mod session_registry;
 mod unacked_queue;
 
 pub use session_registry::{
-    DetachedSession, InMemorySmSessionRegistry, SmRegistryError, SmSessionRegistry,
+    DetachedSession, InMemorySmSessionRegistry, SmClaimCompletion, SmRegistryError,
+    SmSessionRegistry,
 };
 pub use unacked_queue::{UnackedPushResult, UnackedQueue, UnackedStanza};
 
@@ -42,6 +43,19 @@ use crate::prometheus;
 
 /// XEP-0198 Stream Management namespace (version 3)
 pub const SM_NS: &str = "urn:xmpp:sm:3";
+
+/// Per-stream state that must survive XEP-0198 detachment.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DetachedSessionSnapshot {
+    pub user_id: String,
+    pub jid: jid::FullJid,
+    pub carbons_enabled: bool,
+    pub roster_interested: bool,
+    pub presence_available: bool,
+    pub presence_show: Option<xmpp_parsers::presence::Show>,
+    pub presence_status: Option<String>,
+    pub presence_priority: i8,
+}
 
 /// Namespace for XMPP stanza error conditions, used as the `<failed/>` child.
 const STANZA_ERROR_NS: &str = "urn:ietf:params:xml:ns:xmpp-stanzas";
@@ -513,9 +527,7 @@ impl StreamManagementState {
     /// it — storing it on the detached session is what makes that possible.
     pub fn to_detached_session(
         &self,
-        user_id: String,
-        jid: jid::FullJid,
-        carbons_enabled: bool,
+        snapshot: DetachedSessionSnapshot,
     ) -> Option<DetachedSession> {
         if !self.is_resumable() {
             return None;
@@ -523,15 +535,20 @@ impl StreamManagementState {
 
         Some(DetachedSession {
             stream_id: self.stream_id.clone()?,
-            user_id,
-            jid,
+            user_id: snapshot.user_id,
+            jid: snapshot.jid,
             inbound_count: self.inbound_count,
             outbound_count: self.outbound_count,
             last_acked: self.last_acked,
             unacked_stanzas: self.unacked_queue.get_all_unacked(),
             max_resume_time: self.max_resume_time,
             detached_at: Instant::now(),
-            carbons_enabled,
+            carbons_enabled: snapshot.carbons_enabled,
+            roster_interested: snapshot.roster_interested,
+            presence_available: snapshot.presence_available,
+            presence_show: snapshot.presence_show,
+            presence_status: snapshot.presence_status,
+            presence_priority: snapshot.presence_priority,
         })
     }
 
@@ -887,15 +904,37 @@ mod tests {
         let jid: jid::FullJid = "user@example.com/resource".parse().unwrap();
 
         let detached_off = state
-            .to_detached_session("user@example.com".to_string(), jid.clone(), false)
+            .to_detached_session(DetachedSessionSnapshot {
+                user_id: "user@example.com".to_string(),
+                jid: jid.clone(),
+                carbons_enabled: false,
+                roster_interested: true,
+                presence_available: true,
+                presence_show: Some(xmpp_parsers::presence::Show::Chat),
+                presence_status: Some("ready".to_string()),
+                presence_priority: 7,
+            })
             .expect("resumable state must produce detached session");
         assert!(
             !detached_off.carbons_enabled,
             "carbons_enabled=false must round-trip through DetachedSession"
         );
+        assert!(
+            detached_off.roster_interested,
+            "roster_interested=true must round-trip through DetachedSession"
+        );
 
         let detached_on = state
-            .to_detached_session("user@example.com".to_string(), jid, true)
+            .to_detached_session(DetachedSessionSnapshot {
+                user_id: "user@example.com".to_string(),
+                jid,
+                carbons_enabled: true,
+                roster_interested: false,
+                presence_available: false,
+                presence_show: None,
+                presence_status: None,
+                presence_priority: 0,
+            })
             .expect("resumable state must produce detached session");
         assert!(
             detached_on.carbons_enabled,
