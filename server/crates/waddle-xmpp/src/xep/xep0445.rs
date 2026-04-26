@@ -68,7 +68,11 @@ pub fn has_preauth(query_elem: &Element) -> bool {
 pub fn extract_preauth(query_elem: &Element) -> Option<PreauthToken> {
     query_elem
         .children()
-        .find_map(|elem| is_preauth_element(elem).then(|| elem.attr("token")).flatten())
+        .find_map(|elem| {
+            is_preauth_element(elem)
+                .then(|| elem.attr("token"))
+                .flatten()
+        })
         .filter(|t| !t.is_empty())
         .map(PreauthToken::new)
 }

@@ -255,7 +255,6 @@ impl SessionManager {
         self.touch_session(session_id).await?;
         Ok(session)
     }
-
 }
 
 #[cfg(test)]

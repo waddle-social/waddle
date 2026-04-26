@@ -96,9 +96,7 @@ mod tests {
     #[tokio::test]
     async fn test_single_database_accessors() {
         let config = DatabaseConfig::default();
-        let pool = DatabasePool::new(config, PoolConfig)
-            .await
-            .unwrap();
+        let pool = DatabasePool::new(config, PoolConfig).await.unwrap();
 
         assert_eq!(pool.global().name(), "global");
         let health = pool.health_check().await.unwrap();
