@@ -96,6 +96,10 @@ impl Feature {
         Self::new("urn:xmpp:mam:2")
     }
 
+    pub fn stanza_id() -> Self {
+        Self::new("urn:xmpp:sid:0")
+    }
+
     pub fn replies() -> Self {
         Self::new("urn:xmpp:reply:0")
     }
@@ -441,6 +445,7 @@ pub fn server_features() -> Vec<Feature> {
         Feature::caps(),
         Feature::roster_versioning(),
         Feature::mam(),
+        Feature::stanza_id(),
         Feature::replies(),
         Feature::fallback_indication(),
         Feature::threads(),
@@ -535,6 +540,7 @@ pub fn muc_room_features(
         Feature::disco_info(),
         Feature::muc(),
         Feature::mam(),
+        Feature::stanza_id(),
         Feature::replies(),
         Feature::fallback_indication(),
         Feature::threads(),

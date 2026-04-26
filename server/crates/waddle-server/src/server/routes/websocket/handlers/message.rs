@@ -11,8 +11,9 @@ use waddle_xmpp::{
         },
         InboxEntry,
     },
-    mam::{add_stanza_id as add_mam_stanza_id, ArchivedMessage, STANZA_ID_NS},
+    mam::{add_stanza_id as add_mam_stanza_id, message_to_archived, ArchivedMessage, STANZA_ID_NS},
     muc::room_actor::BuildGroupchatBroadcast,
+    protocol::canonicalize::{canonicalize, Canonicalized},
     registry::{BroadcastOutcome, SendResult},
     xep::xep0430::build_inbox_push,
     xep::{
@@ -344,8 +345,22 @@ pub async fn handle_message(
                 state.deps.protocol.extension_manager.feature_namespaces(),
             );
 
-            // Archive body-bearing DMs to both sender's and recipient's personal MAM.
-            archive_direct_message(state, sender_jid, to_jid, &prototype).await;
+            // Archive body-bearing DMs to both sender's and recipient's
+            // personal MAM. Each archive write stamps a per-archive
+            // `<stanza-id by=$archive_owner/>` (XEP-0359 §"the assigning
+            // entity is the account") and the same canonicalized message
+            // — sender-stamped or recipient-stamped — is what we deliver
+            // on the wire and over carbons.
+            let archive_outcome =
+                archive_direct_message(state, sender_jid, to_jid, &prototype).await;
+            let prototype_for_recipient = archive_outcome
+                .as_ref()
+                .map(|o| o.recipient_canonical.clone())
+                .unwrap_or_else(|| prototype.clone());
+            let prototype_for_sender_carbons = archive_outcome
+                .as_ref()
+                .map(|o| o.sender_canonical.clone())
+                .unwrap_or_else(|| prototype.clone());
 
             if should_project_message(&prototype) {
                 let timestamp = Utc::now().timestamp();
@@ -386,9 +401,9 @@ pub async fn handle_message(
                 }
             }
 
-            // Route the enriched message
+            // Route the enriched, recipient-stamped message
             let delivered_full_jid = if let Ok(to_full_jid) = to_jid.clone().try_into_full() {
-                let mut msg = prototype.clone();
+                let mut msg = prototype_for_recipient.clone();
                 msg.to = Some(jid::Jid::from(to_full_jid.clone()));
                 let stanza = Stanza::Message(msg);
                 match state
@@ -409,7 +424,7 @@ pub async fn handle_message(
                     .connection_registry
                     .get_resources_for_user(&to_bare_jid);
                 for resource_jid in resources {
-                    let mut msg = prototype.clone();
+                    let mut msg = prototype_for_recipient.clone();
                     msg.to = Some(jid::Jid::from(resource_jid.clone()));
                     let stanza = Stanza::Message(msg);
                     let _ = state
@@ -427,15 +442,20 @@ pub async fn handle_message(
                     send_received_carbons_to_websocket_resources(
                         state,
                         recipient_full_jid,
-                        &prototype,
+                        &prototype_for_recipient,
                     )
                     .await;
                 }
-                send_sent_carbons_to_websocket_resources(state, sender_jid, &prototype).await;
+                send_sent_carbons_to_websocket_resources(
+                    state,
+                    sender_jid,
+                    &prototype_for_sender_carbons,
+                )
+                .await;
             }
 
             if has_github_embed {
-                let echo = prototype.clone();
+                let echo = prototype_for_sender_carbons.clone();
                 return vec![stanza_to_xml(&Stanza::Message(echo))];
             }
         } else {
@@ -641,46 +661,87 @@ async fn archive_groupchat_message(
     }
 }
 
-/// Archive a direct (type="chat") message to both the sender's and recipient's
-/// personal MAM archives.  Only messages with a `<body>` are stored.
+/// Outcome of archiving a direct message to both archives.
+///
+/// The two `Message` values are the same logical stanza canonicalized
+/// twice — once with `<stanza-id by=$sender_bare/>` for the sender's MAM
+/// (and any sent-carbons reaching the sender's other devices), and once
+/// with `<stanza-id by=$recipient_bare/>` for the recipient's MAM (the
+/// outbound wire stanza and any received-carbons).
+#[derive(Debug, Clone)]
+struct DirectArchiveOutcome {
+    sender_canonical: xmpp_parsers::message::Message,
+    recipient_canonical: xmpp_parsers::message::Message,
+}
+
+/// Archive a direct (type="chat") message to both the sender's and
+/// recipient's personal MAM archives, stamping each archive's row with a
+/// `<stanza-id>` whose `by` is the archive owner's bare JID per
+/// XEP-0359 §"the assigning entity is the account". Returns the two
+/// canonicalized messages so the caller can use them on the wire and on
+/// carbons; the same stanza-id is what clients see on delivery and what
+/// they can target for retraction/correction/reactions.
+///
+/// Only messages with a non-empty `<body>` are stored. When skipped,
+/// returns `None` and the caller falls back to delivering the un-stamped
+/// prototype.
 async fn archive_direct_message(
     state: &WebSocketState,
     sender_jid: &FullJid,
     to_jid: &jid::Jid,
     message: &xmpp_parsers::message::Message,
-) {
-    let Some(body) = prototype_body(message)
+) -> Option<DirectArchiveOutcome> {
+    let _ = prototype_body(message)
         .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
+        .filter(|value| !value.is_empty())?;
+
+    let sender_bare = sender_jid.to_bare();
+    let recipient_bare = to_jid.to_bare();
+
+    let Canonicalized {
+        message: sender_canonical,
+        stanza_id: sender_archive_id,
+    } = canonicalize(message.clone(), &sender_bare);
+    let Canonicalized {
+        message: recipient_canonical,
+        stanza_id: recipient_archive_id,
+    } = canonicalize(message.clone(), &recipient_bare);
+
+    // The canonicalizer produced a stanza-id iff the message is of an
+    // archivable type; chat messages always pass that check, so for the
+    // body-having direct-chat case both ids are present. Anything else
+    // is a logic bug.
+    let (Some(sender_archive_id), Some(recipient_archive_id)) =
+        (sender_archive_id, recipient_archive_id)
     else {
-        return;
+        warn!(
+            from = %sender_jid,
+            to = %to_jid,
+            "DM canonicalization unexpectedly skipped stamping; archive aborted"
+        );
+        return None;
     };
 
-    let (reply_to_id, reply_to_jid) = extract_reply_reference(message);
-    let origin_id = extract_origin_id(message);
+    let timestamp = Utc::now();
+    let sender_archived = message_to_archived(
+        &sender_canonical,
+        &sender_bare,
+        &sender_archive_id,
+        timestamp,
+    );
+    let recipient_archived = message_to_archived(
+        &recipient_canonical,
+        &recipient_bare,
+        &recipient_archive_id,
+        timestamp,
+    );
 
-    let archived = ArchivedMessage {
-        id: String::new(),
-        timestamp: Utc::now(),
-        from: sender_jid.to_bare().to_string(),
-        to: to_jid.to_bare().to_string(),
-        body,
-        stanza_id: message.id.clone(),
-        thread_id: message.thread.as_ref().map(|thread| thread.0.clone()),
-        reply_to_id,
-        reply_to_jid,
-        origin_id,
-        message_type: mam_message_type(&message.type_),
-        stanza_xml: Some(archived_stanza_xml(message)),
-    };
-
-    // Store in sender's personal archive
-    let sender_bare = sender_jid.to_bare().to_string();
+    let sender_archive_jid = sender_bare.to_string();
     if let Err(err) = state
         .deps
         .protocol
         .mam_storage
-        .store_message(sender_bare.as_str(), &archived)
+        .store_message(sender_archive_jid.as_str(), &sender_archived)
         .await
     {
         warn!(
@@ -691,13 +752,12 @@ async fn archive_direct_message(
         );
     }
 
-    // Store in recipient's personal archive
-    let recipient_bare = to_jid.to_bare().to_string();
+    let recipient_archive_jid = recipient_bare.to_string();
     if let Err(err) = state
         .deps
         .protocol
         .mam_storage
-        .store_message(recipient_bare.as_str(), &archived)
+        .store_message(recipient_archive_jid.as_str(), &recipient_archived)
         .await
     {
         warn!(
@@ -707,6 +767,11 @@ async fn archive_direct_message(
             "Failed to archive DM to recipient's personal MAM"
         );
     }
+
+    Some(DirectArchiveOutcome {
+        sender_canonical,
+        recipient_canonical,
+    })
 }
 
 fn mam_message_type(message_type: &XmppMessageType) -> String {

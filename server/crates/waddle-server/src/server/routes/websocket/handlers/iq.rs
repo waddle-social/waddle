@@ -540,6 +540,7 @@ pub async fn handle_iq_with_conn_state(
         let mut features = vec![
             Feature::ping(),
             Feature::replies(),
+            Feature::stanza_id(),
             Feature::disco_info(),
             Feature::disco_items(),
             Feature::commands(),
