@@ -527,8 +527,7 @@ impl PubSubStorage for DatabasePubSubStorage {
             // Build IN (?, ?, ...) clause inline. item_ids comes from a parsed
             // IQ payload and is bounded by the request size. Use placeholders;
             // never string-format the values.
-            let placeholders = std::iter::repeat("?")
-                .take(item_ids.len())
+            let placeholders = std::iter::repeat_n("?", item_ids.len())
                 .collect::<Vec<_>>()
                 .join(",");
             let sql = format!(
