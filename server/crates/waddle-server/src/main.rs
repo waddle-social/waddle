@@ -1,21 +1,6 @@
-#![recursion_limit = "256"]
-
 use anyhow::Result;
 use tracing::info;
-
-mod auth;
-mod config;
-mod db;
-mod inbox;
-mod messages;
-mod permissions;
-mod pubsub;
-mod server;
-pub(crate) mod storage;
-mod telemetry;
-mod vcard;
-
-pub use config::{ServerConfig, ServerMode};
+use waddle_server::{config, config::ServerConfig, db, server, telemetry};
 
 #[tokio::main]
 async fn main() -> Result<()> {
