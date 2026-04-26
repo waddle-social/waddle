@@ -100,6 +100,30 @@ impl Feature {
         Self::new("urn:xmpp:reply:0")
     }
 
+    pub fn stanza_ids() -> Self {
+        Self::new("urn:xmpp:sid:0")
+    }
+
+    pub fn message_correction() -> Self {
+        Self::new("urn:xmpp:message-correct:0")
+    }
+
+    pub fn message_retraction() -> Self {
+        Self::new("urn:xmpp:message-retract:1")
+    }
+
+    pub fn message_moderation() -> Self {
+        Self::new("urn:xmpp:message-moderate:1")
+    }
+
+    pub fn reactions() -> Self {
+        Self::new("urn:xmpp:reactions:0")
+    }
+
+    pub fn references() -> Self {
+        Self::new("urn:xmpp:reference:0")
+    }
+
     pub fn fallback_indication() -> Self {
         Self::new("urn:xmpp:fallback:0")
     }
@@ -441,7 +465,12 @@ pub fn server_features() -> Vec<Feature> {
         Feature::caps(),
         Feature::roster_versioning(),
         Feature::mam(),
+        Feature::stanza_ids(),
         Feature::replies(),
+        Feature::message_correction(),
+        Feature::message_retraction(),
+        Feature::reactions(),
+        Feature::references(),
         Feature::fallback_indication(),
         Feature::threads(),
         Feature::stream_management(),
@@ -535,7 +564,13 @@ pub fn muc_room_features(
         Feature::disco_info(),
         Feature::muc(),
         Feature::mam(),
+        Feature::stanza_ids(),
         Feature::replies(),
+        Feature::message_correction(),
+        Feature::message_retraction(),
+        Feature::message_moderation(),
+        Feature::reactions(),
+        Feature::references(),
         Feature::fallback_indication(),
         Feature::threads(),
         Feature::vcard(),

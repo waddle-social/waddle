@@ -11,14 +11,21 @@ use waddle_xmpp::{
         },
         InboxEntry,
     },
-    mam::{add_stanza_id as add_mam_stanza_id, ArchivedMessage, STANZA_ID_NS},
+    mam::{
+        add_stanza_id as add_mam_stanza_id, ArchivedMention, ArchivedMessage, ArchivedReactionSet,
+        ArchivedReference, ArchivedReply, ArchivedRetraction, ArchivedRichMessage,
+        ArchivedRichPayload, RichMessageId, RichText, STANZA_ID_NS,
+    },
     muc::room_actor::BuildGroupchatBroadcast,
     registry::{BroadcastOutcome, SendResult},
     xep::xep0430::build_inbox_push,
     xep::{
-        has_file_sharing, is_moderation_request_message, is_moderation_result_message,
-        is_reaction_message, is_retraction_message, is_sticker_message, message_has_direct_invite,
-        should_skip_storage, NS_REPLY,
+        extract_correction_from_message, extract_explicit_mentions, extract_reactions_from_message,
+        extract_references_from_message, extract_retraction_from_message, has_file_sharing,
+        is_moderation_request_message, is_moderation_result_message, is_reaction_message,
+        is_retraction_message, is_sticker_message, message_has_direct_invite,
+        parse_reply_from_message, remove_stanza_ids_by, should_skip_storage, RetractionKind,
+        NS_MESSAGE_CORRECT, NS_MESSAGE_RETRACT, NS_REACTIONS, NS_REPLY,
     },
     Stanza,
 };
@@ -31,10 +38,6 @@ use crate::db::blocking::DatabaseBlockingStorage;
 use crate::permissions::{CheckPermission, Object, ObjectType, Permission, Subject};
 use crate::server::bootstrap_membership::DEPLOYMENT_SERVER_ID;
 use waddle_xmpp::protocol::ConnectionPhase;
-
-fn archived_stanza_xml(message: &xmpp_parsers::message::Message) -> String {
-    stanza_to_xml(&Stanza::Message(message.clone()))
-}
 
 pub async fn handle_message(
     mut incoming: xmpp_parsers::message::Message,
@@ -89,6 +92,7 @@ pub async fn handle_message(
             .clone()
             .or_else(|| Some(uuid::Uuid::new_v4().to_string()));
         prototype.type_ = XmppMessageType::Groupchat;
+        remove_stanza_ids_by(&mut prototype, &room_jid.to_string());
 
         // Enrich: detect GitHub links and append embed XML elements (fail-open)
         let _embeds_added = state
@@ -128,11 +132,20 @@ pub async fn handle_message(
         }
         prototype.to = None;
 
-        // Archive body-bearing room messages in XMPP MAM storage.
-        let archive_id = archive_groupchat_message(state, &room_jid, &prototype).await;
-        if let Some(ref archive_id) = archive_id {
-            add_mam_stanza_id(&mut prototype, archive_id.as_str(), &room_jid.to_string());
+        if let Some(error) =
+            validate_rich_message_targets(state, &room_jid.to_string(), &prototype, true).await
+        {
+            return vec![stanza_to_xml(&Stanza::Message(error_message(
+                &incoming,
+                &jid::Jid::from(room_jid.clone()),
+                &jid::Jid::from(sender_jid.clone()),
+                "modify",
+                error,
+            )))];
         }
+
+        // Archive body-bearing and rich protocol room messages in XMPP MAM storage.
+        let archive_id = archive_groupchat_message(state, &room_jid, &mut prototype).await;
 
         if should_project_message(&prototype) {
             let timestamp = Utc::now().timestamp();
@@ -344,6 +357,23 @@ pub async fn handle_message(
                 state.deps.protocol.extension_manager.feature_namespaces(),
             );
 
+            if let Some(error) = validate_rich_message_targets(
+                state,
+                &sender_jid.to_bare().to_string(),
+                &prototype,
+                false,
+            )
+            .await
+            {
+                return vec![stanza_to_xml(&Stanza::Message(error_message(
+                    &incoming,
+                    to_jid,
+                    &jid::Jid::from(sender_jid.clone()),
+                    "modify",
+                    error,
+                )))];
+            }
+
             // Archive body-bearing DMs to both sender's and recipient's personal MAM.
             archive_direct_message(state, sender_jid, to_jid, &prototype).await;
 
@@ -470,16 +500,181 @@ fn forbidden_message_error(
     room_jid: &BareJid,
     sender_jid: &FullJid,
 ) -> xmpp_parsers::message::Message {
+    error_message(
+        incoming,
+        &jid::Jid::from(room_jid.clone()),
+        &jid::Jid::from(sender_jid.clone()),
+        "auth",
+        "forbidden",
+    )
+}
+
+fn error_message(
+    incoming: &xmpp_parsers::message::Message,
+    from: &jid::Jid,
+    to: &jid::Jid,
+    error_type: &str,
+    condition: &str,
+) -> xmpp_parsers::message::Message {
     let mut error = incoming.clone();
     error.type_ = XmppMessageType::Error;
-    error.from = Some(jid::Jid::from(room_jid.clone()));
-    error.to = Some(jid::Jid::from(sender_jid.clone()));
+    error.from = Some(from.clone());
+    error.to = Some(to.clone());
     let stanza_error = Element::builder("error", "jabber:client")
-        .attr("type", "auth")
-        .append(Element::builder("forbidden", "urn:ietf:params:xml:ns:xmpp-stanzas").build())
+        .attr("type", error_type)
+        .append(Element::builder(condition, "urn:ietf:params:xml:ns:xmpp-stanzas").build())
         .build();
     error.payloads.push(stanza_error);
     error
+}
+
+async fn validate_rich_message_targets(
+    state: &WebSocketState,
+    archive_jid: &str,
+    message: &xmpp_parsers::message::Message,
+    groupchat: bool,
+) -> Option<&'static str> {
+    let sender = message.from.as_ref()?;
+    if has_malformed_rich_payload(message) {
+        return Some("bad-request");
+    }
+
+    if let Some(correction) = extract_correction_from_message(message) {
+        let original = match lookup_correction_target_message(
+            state,
+            archive_jid,
+            &correction.replaces_id,
+            groupchat,
+        )
+        .await
+        {
+            Ok(Some(original)) => original,
+            Ok(None) => return Some("item-not-found"),
+            Err(_) => return Some("internal-server-error"),
+        };
+        if !same_rich_sender(sender, &original.from, groupchat) {
+            return Some("forbidden");
+        }
+    }
+
+    if let Some(RetractionKind::Request(retraction)) = extract_retraction_from_message(message) {
+        let original = match lookup_retraction_target_message(
+            state,
+            archive_jid,
+            &retraction.retracts_id,
+            groupchat,
+        )
+        .await
+        {
+            Ok(Some(original)) => original,
+            Ok(None) => return Some("item-not-found"),
+            Err(_) => return Some("internal-server-error"),
+        };
+        if !same_rich_sender(sender, &original.from, groupchat) {
+            return Some("forbidden");
+        }
+    }
+
+    if let Some(reactions) = extract_reactions_from_message(message) {
+        match lookup_rich_target_message(state, archive_jid, &reactions.message_id, groupchat).await
+        {
+            Ok(Some(_)) => {}
+            Ok(None) => return Some("item-not-found"),
+            Err(_) => return Some("internal-server-error"),
+        }
+    }
+
+    if let Some(reply) = parse_reply_from_message(message) {
+        match lookup_rich_target_message(state, archive_jid, &reply.id, groupchat).await {
+            Ok(Some(_)) => {}
+            Ok(None) => return Some("item-not-found"),
+            Err(_) => return Some("internal-server-error"),
+        }
+    }
+
+    None
+}
+
+async fn lookup_correction_target_message(
+    state: &WebSocketState,
+    archive_jid: &str,
+    target_id: &str,
+    _groupchat: bool,
+) -> Result<Option<ArchivedMessage>, waddle_xmpp::mam::MamStorageError> {
+    state
+        .deps
+        .protocol
+        .mam_storage
+        .get_message_by_message_id(archive_jid, target_id)
+        .await
+}
+
+async fn lookup_retraction_target_message(
+    state: &WebSocketState,
+    archive_jid: &str,
+    target_id: &str,
+    groupchat: bool,
+) -> Result<Option<ArchivedMessage>, waddle_xmpp::mam::MamStorageError> {
+    if groupchat {
+        return lookup_rich_target_message(state, archive_jid, target_id, true).await;
+    }
+
+    state
+        .deps
+        .protocol
+        .mam_storage
+        .get_message_by_message_id(archive_jid, target_id)
+        .await
+}
+
+async fn lookup_rich_target_message(
+    state: &WebSocketState,
+    archive_jid: &str,
+    target_id: &str,
+    groupchat: bool,
+) -> Result<Option<ArchivedMessage>, waddle_xmpp::mam::MamStorageError> {
+    if groupchat {
+        return state
+            .deps
+            .protocol
+            .mam_storage
+            .get_message(target_id)
+            .await
+            .map(|message| message.filter(|message| message.to == archive_jid));
+    }
+
+    state
+        .deps
+        .protocol
+        .mam_storage
+        .get_message_by_stanza_id(archive_jid, target_id)
+        .await
+}
+
+fn same_rich_sender(sender: &jid::Jid, original_from: &str, groupchat: bool) -> bool {
+    if groupchat {
+        return sender.to_string() == original_from;
+    }
+    original_from
+        .parse::<jid::Jid>()
+        .is_ok_and(|original| original.to_bare() == sender.to_bare())
+}
+
+fn has_malformed_rich_payload(message: &xmpp_parsers::message::Message) -> bool {
+    message.payloads.iter().any(|payload| {
+        (payload.ns() == NS_MESSAGE_CORRECT
+            && payload.name() == "replace"
+            && payload.attr("id").is_none_or(str::is_empty))
+            || (payload.ns() == NS_MESSAGE_RETRACT
+                && payload.name() == "retract"
+                && payload.attr("id").is_none_or(str::is_empty))
+            || (payload.ns() == NS_REACTIONS
+                && payload.name() == "reactions"
+                && payload.attr("id").is_none_or(str::is_empty))
+            || (payload.ns() == NS_REPLY
+                && payload.name() == "reply"
+                && payload.attr("id").is_none_or(str::is_empty))
+    })
 }
 
 async fn send_sent_carbons_to_websocket_resources(
@@ -589,11 +784,14 @@ fn should_archive_groupchat_message(msg: &xmpp_parsers::message::Message) -> boo
 async fn archive_groupchat_message(
     state: &WebSocketState,
     room_jid: &BareJid,
-    message: &xmpp_parsers::message::Message,
+    message: &mut xmpp_parsers::message::Message,
 ) -> Option<String> {
     if !should_archive_groupchat_message(message) {
         return None;
     }
+
+    let archive_id = uuid::Uuid::now_v7().to_string();
+    add_mam_stanza_id(message, archive_id.as_str(), &room_jid.to_string());
 
     let body = prototype_body(message)
         .map(|value| value.trim().to_string())
@@ -601,9 +799,10 @@ async fn archive_groupchat_message(
 
     let (reply_to_id, reply_to_jid) = extract_reply_reference(message);
     let origin_id = extract_origin_id(message);
+    let rich = rich_archive_payload(message);
 
     let archived = ArchivedMessage {
-        id: String::new(),
+        id: archive_id,
         timestamp: Utc::now(),
         from: message
             .from
@@ -618,7 +817,8 @@ async fn archive_groupchat_message(
         reply_to_jid,
         origin_id,
         message_type: mam_message_type(&message.type_),
-        stanza_xml: Some(archived_stanza_xml(message)),
+        stanza_xml: None,
+        rich,
     };
 
     let archive_jid = room_jid.to_string();
@@ -649,12 +849,13 @@ async fn archive_direct_message(
     to_jid: &jid::Jid,
     message: &xmpp_parsers::message::Message,
 ) {
-    let Some(body) = prototype_body(message)
+    let body = prototype_body(message)
         .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-    else {
+        .unwrap_or_default();
+    let rich = rich_archive_payload(message);
+    if body.is_empty() && rich.is_none() {
         return;
-    };
+    }
 
     let (reply_to_id, reply_to_jid) = extract_reply_reference(message);
     let origin_id = extract_origin_id(message);
@@ -671,7 +872,8 @@ async fn archive_direct_message(
         reply_to_jid,
         origin_id,
         message_type: mam_message_type(&message.type_),
-        stanza_xml: Some(archived_stanza_xml(message)),
+        stanza_xml: None,
+        rich,
     };
 
     // Store in sender's personal archive
@@ -734,6 +936,102 @@ fn extract_reply_reference(
         reply.attr("id").map(ToOwned::to_owned),
         reply.attr("to").map(ToOwned::to_owned),
     )
+}
+
+fn rich_archive_payload(message: &xmpp_parsers::message::Message) -> Option<ArchivedRichMessage> {
+    let payload = extract_correction_from_message(message)
+        .and_then(|correction| {
+            RichMessageId::new(correction.replaces_id)
+                .map(|replaces_id| ArchivedRichPayload::Correction { replaces_id })
+        })
+        .or_else(|| {
+            extract_retraction_from_message(message).and_then(|kind| match kind {
+                RetractionKind::Request(retraction) => RichMessageId::new(retraction.retracts_id)
+                    .map(|target_id| {
+                        ArchivedRichPayload::Retraction(ArchivedRetraction {
+                            target_id,
+                            stamp: None,
+                            retraction_id: message.id.clone().and_then(RichMessageId::new),
+                        })
+                    }),
+                RetractionKind::Tombstone(retracted) => message.id.clone().and_then(|id| {
+                    RichMessageId::new(id).map(|target_id| {
+                        ArchivedRichPayload::Retraction(ArchivedRetraction {
+                            target_id,
+                            stamp: chrono::DateTime::parse_from_rfc3339(&retracted.stamp)
+                                .ok()
+                                .map(|stamp| stamp.with_timezone(&Utc)),
+                            retraction_id: None,
+                        })
+                    })
+                }),
+            })
+        })
+        .or_else(|| {
+            extract_reactions_from_message(message).and_then(|reactions| {
+                RichMessageId::new(reactions.message_id).map(|target_id| {
+                    ArchivedRichPayload::Reactions(ArchivedReactionSet {
+                        target_id,
+                        emojis: reactions
+                            .emojis
+                            .into_iter()
+                            .filter_map(RichText::new)
+                            .collect(),
+                    })
+                })
+            })
+        });
+
+    let reply = parse_reply_from_message(message).and_then(|reply| {
+        RichMessageId::new(reply.id).map(|id| ArchivedReply {
+            id,
+            to: reply.to.and_then(|to| to.parse().ok()),
+        })
+    });
+
+    let references = extract_references_from_message(message)
+        .into_iter()
+        .filter_map(|reference| {
+            let ref_type = RichText::new(reference.ref_type.as_str())?;
+            Some(ArchivedReference {
+                ref_type,
+                begin: reference.begin.and_then(|value| value.try_into().ok()),
+                end: reference.end.and_then(|value| value.try_into().ok()),
+                uri: reference.uri.and_then(RichText::new),
+                anchor: reference.anchor.and_then(RichText::new),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let mentions = extract_explicit_mentions(message)
+        .map(|mentions| {
+            mentions
+                .mentions
+                .into_iter()
+                .map(|mention| ArchivedMention {
+                    begin: mention.begin,
+                    end: mention.end,
+                    jid: mention.jid,
+                    occupant_id: mention.occupant_id.and_then(RichText::new),
+                    mentions: mention.mentions.and_then(RichText::new),
+                    uri: mention.uri.and_then(RichText::new),
+                    active: mention.active,
+                    noping: mention.noping,
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    if payload.is_none() && reply.is_none() && references.is_empty() && mentions.is_empty() {
+        None
+    } else {
+        Some(ArchivedRichMessage {
+            payload,
+            reply,
+            references,
+            mentions,
+        })
+    }
 }
 
 fn extract_origin_id(message: &xmpp_parsers::message::Message) -> Option<String> {

@@ -88,6 +88,7 @@ pub struct PresenceUpdateOutcome {
 pub struct AdminContext {
     pub affiliation: Affiliation,
     pub role: Role,
+    pub nick: Option<String>,
 }
 
 #[derive(Debug, Clone, Error)]
@@ -693,6 +694,7 @@ impl kameo::message::Message<GetAdminContext> for RoomActor {
         Ok(AdminContext {
             affiliation: sender_affiliation,
             role: sender_role,
+            nick: sender_occupant.map(|occupant| occupant.nick.clone()),
         })
     }
 }
