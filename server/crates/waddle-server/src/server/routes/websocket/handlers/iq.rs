@@ -1439,6 +1439,15 @@ pub async fn handle_iq_with_conn_state(
                             created = publish_result.node_created,
                             "PubSub item published via WebSocket"
                         );
+                        super::pubsub_fanout::fan_out_publish(
+                            state,
+                            &target_jid,
+                            &node,
+                            &item,
+                            &publish_result.item_id,
+                            Some(&user_jid),
+                        )
+                        .await;
                         let response =
                             build_pubsub_publish_result(&iq, &node, &publish_result.item_id);
                         return vec![iq_to_xml(response)];
@@ -4401,6 +4410,18 @@ async fn handle_spaces_publish(
                     PubSubError::InternalServerError,
                 ))];
             }
+            // Fan-out only after the parent-tuple write succeeds: the
+            // compensating-retract path above must NOT emit events for
+            // a publish that gets rolled back.
+            super::pubsub_fanout::fan_out_publish(
+                state,
+                &spaces_jid,
+                node,
+                &item,
+                &result.item_id,
+                None,
+            )
+            .await;
             vec![iq_to_xml(build_pubsub_publish_result(
                 iq,
                 node,
