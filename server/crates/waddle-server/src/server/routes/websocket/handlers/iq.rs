@@ -33,9 +33,10 @@ use waddle_xmpp::{
     },
     protocol::{ConnectionPhase, StanzaContext as ProtocolStanzaContext},
     pubsub::{
-        build_pubsub_error, build_pubsub_items_result, build_pubsub_publish_result,
-        build_pubsub_success, is_pubsub_iq, parse_pubsub_iq, PubSubError, PubSubItem,
-        PubSubRequest,
+        build_pubsub_affiliations_result, build_pubsub_configure_form_result, build_pubsub_error,
+        build_pubsub_items_result, build_pubsub_publish_result, build_pubsub_subscribe_result,
+        build_pubsub_success, is_pep_request, is_pep_request_to, is_pubsub_iq, parse_pubsub_iq,
+        PubSubError, PubSubItem, PubSubRequest, SubId,
     },
     registry::BroadcastOutcome,
     roster::{
@@ -1374,6 +1375,49 @@ pub async fn handle_iq_with_conn_state(
                     .await;
                 }
 
+                let is_pep = is_pep_self_or_to(&iq, &target_jid, &user_jid);
+                match crate::pubsub_authz::can_publish(
+                    &state.deps.protocol.pubsub_storage,
+                    &target_jid,
+                    &node,
+                    &user_jid,
+                    is_pep,
+                )
+                .await
+                {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        // For PEP, before the node exists, can_publish returns false because
+                        // get_node returns None. Allow PEP auto-create when the publisher is
+                        // the PEP owner (target == user) — this is the standard PEP semantics.
+                        if is_pep && target_jid == user_jid {
+                            // PEP self-publish: fall through to auto-create path.
+                        } else {
+                            // For non-PEP nodes, distinguish missing node (NodeNotFound,
+                            // XEP-0060 §7.1) from an existing node with access denied (Forbidden).
+                            let node_exists = state
+                                .deps
+                                .protocol
+                                .pubsub_storage
+                                .get_node(&target_jid, &node)
+                                .await
+                                .ok()
+                                .flatten()
+                                .is_some();
+                            let error = if node_exists {
+                                build_pubsub_error(&iq, PubSubError::Forbidden)
+                            } else {
+                                build_pubsub_error(&iq, PubSubError::NodeNotFound)
+                            };
+                            return vec![iq_to_xml(error)];
+                        }
+                    }
+                    Err(e) => {
+                        warn!("PubSub publish authz check failed: {e}");
+                        return vec![iq_to_xml(build_pubsub_error(&iq, PubSubError::Forbidden))];
+                    }
+                }
+
                 let result = state
                     .deps
                     .protocol
@@ -1598,48 +1642,35 @@ pub async fn handle_iq_with_conn_state(
             }
 
             PubSubRequest::ConfigureNode { node } => {
-                if target_jid.to_string() == spaces_domain {
-                    if spaces_node_mutation_allowed(state, authenticated_session.as_ref(), &node)
-                        .await
-                        .unwrap_or(false)
-                    {
-                        let Ok(spaces_jid) = spaces_service_bare_jid(&spaces_domain) else {
-                            return vec![iq_to_xml(build_pubsub_error(
-                                &iq,
-                                PubSubError::InvalidJid,
-                            ))];
-                        };
-                        match state
-                            .deps
-                            .protocol
-                            .pubsub_storage
-                            .get_node(&spaces_jid, &node)
-                            .await
-                        {
-                            Ok(Some(_)) => {}
-                            Ok(None) => {
-                                return vec![iq_to_xml(build_pubsub_error(
-                                    &iq,
-                                    PubSubError::NodeNotFound,
-                                ))];
-                            }
-                            Err(error) => {
-                                warn!(node = %node, error = %error, "Failed to configure Spaces node");
-                                return vec![iq_to_xml(build_pubsub_error(
-                                    &iq,
-                                    PubSubError::NodeNotFound,
-                                ))];
-                            }
-                        }
-                        let response = build_pubsub_success(&iq);
-                        return vec![iq_to_xml(response)];
-                    }
-                    let error = build_pubsub_error(&iq, PubSubError::Forbidden);
-                    return vec![iq_to_xml(error)];
+                let is_pep = is_pep_self_or_to(&iq, &target_jid, &user_jid);
+                if !crate::pubsub_authz::can_administer(
+                    &state.deps.protocol.pubsub_storage,
+                    &target_jid,
+                    &node,
+                    &user_jid,
+                    is_pep,
+                )
+                .await
+                .unwrap_or(false)
+                {
+                    return vec![iq_to_xml(build_pubsub_error(&iq, PubSubError::Forbidden))];
                 }
-
-                let error = build_pubsub_error(&iq, PubSubError::Forbidden);
-                return vec![iq_to_xml(error)];
+                let Some(node_meta) = state
+                    .deps
+                    .protocol
+                    .pubsub_storage
+                    .get_node(&target_jid, &node)
+                    .await
+                    .ok()
+                    .flatten()
+                else {
+                    return vec![iq_to_xml(build_pubsub_error(
+                        &iq,
+                        PubSubError::NodeNotFound,
+                    ))];
+                };
+                let response = build_pubsub_configure_form_result(&iq, &node, &node_meta.config);
+                return vec![iq_to_xml(response)];
             }
 
             PubSubRequest::DeleteNode { node } => {
@@ -1680,50 +1711,215 @@ pub async fn handle_iq_with_conn_state(
                     let error = build_pubsub_error(&iq, PubSubError::Forbidden);
                     return vec![iq_to_xml(error)];
                 }
+
+                let is_pep = is_pep_self_or_to(&iq, &target_jid, &user_jid);
+                match crate::pubsub_authz::can_subscribe(
+                    &state.deps.protocol.pubsub_storage,
+                    &target_jid,
+                    &node,
+                    &subscription_jid,
+                    is_pep,
+                )
+                .await
+                {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        // Distinguish missing node (XEP-0060 §6.1: item-not-found) from
+                        // access denial (forbidden).
+                        let node_exists = state
+                            .deps
+                            .protocol
+                            .pubsub_storage
+                            .get_node(&target_jid, &node)
+                            .await
+                            .ok()
+                            .flatten()
+                            .is_some();
+                        let error = if node_exists {
+                            build_pubsub_error(&iq, PubSubError::Forbidden)
+                        } else {
+                            build_pubsub_error(&iq, PubSubError::NodeNotFound)
+                        };
+                        return vec![iq_to_xml(error)];
+                    }
+                    Err(e) => {
+                        warn!("PubSub access check failed: {e}");
+                        let error = build_pubsub_error(&iq, PubSubError::Forbidden);
+                        return vec![iq_to_xml(error)];
+                    }
+                }
+
                 match state
                     .deps
                     .protocol
                     .pubsub_storage
-                    .get_node(&target_jid, &node)
+                    .subscribe(&target_jid, &node, &jid)
                     .await
                 {
-                    Ok(Some(_)) => {}
-                    Ok(None) => {
-                        let error = build_pubsub_error(&iq, PubSubError::NodeNotFound);
-                        return vec![iq_to_xml(error)];
+                    Ok(sub) => {
+                        let response = build_pubsub_subscribe_result(&iq, &node, &jid, &sub.subid);
+                        return vec![iq_to_xml(response)];
                     }
                     Err(e) => {
-                        warn!("PubSub subscribe node lookup failed: {}", e);
-                        let error = build_pubsub_error(&iq, PubSubError::NodeNotFound);
+                        warn!("PubSub subscribe failed: {e}");
+                        let error = build_pubsub_error(&iq, PubSubError::Forbidden);
                         return vec![iq_to_xml(error)];
                     }
                 }
-                state.deps.protocol.pubsub_subscriptions.insert((
-                    target_jid.to_string(),
-                    node,
-                    subscription_jid.to_string(),
-                ));
-                let response = build_pubsub_success(&iq);
-                return vec![iq_to_xml(response)];
             }
 
-            PubSubRequest::Unsubscribe { node, jid, .. } => {
+            PubSubRequest::Unsubscribe { node, jid, subid } => {
                 let subscription_jid = jid.to_bare();
                 if subscription_jid != user_jid {
                     let error = build_pubsub_error(&iq, PubSubError::Forbidden);
                     return vec![iq_to_xml(error)];
                 }
-                let removed = state.deps.protocol.pubsub_subscriptions.remove(&(
-                    target_jid.to_string(),
-                    node,
-                    subscription_jid.to_string(),
-                ));
-                if removed.is_none() {
-                    let error = build_pubsub_error(&iq, PubSubError::NotSubscribed);
-                    return vec![iq_to_xml(error)];
+                let typed_subid = subid.as_deref().map(SubId::from_raw);
+                match state
+                    .deps
+                    .protocol
+                    .pubsub_storage
+                    .unsubscribe(&target_jid, &node, &jid, typed_subid.as_ref())
+                    .await
+                {
+                    Ok(true) => {
+                        let response = build_pubsub_success(&iq);
+                        return vec![iq_to_xml(response)];
+                    }
+                    Ok(false) => {
+                        let error = build_pubsub_error(&iq, PubSubError::NotSubscribed);
+                        return vec![iq_to_xml(error)];
+                    }
+                    Err(e) => {
+                        warn!("PubSub unsubscribe failed: {e}");
+                        let error = build_pubsub_error(&iq, PubSubError::NotSubscribed);
+                        return vec![iq_to_xml(error)];
+                    }
                 }
-                let response = build_pubsub_success(&iq);
+            }
+            PubSubRequest::PurgeNode { node } => {
+                let is_pep = is_pep_self_or_to(&iq, &target_jid, &user_jid);
+                match crate::pubsub_authz::can_administer(
+                    &state.deps.protocol.pubsub_storage,
+                    &target_jid,
+                    &node,
+                    &user_jid,
+                    is_pep,
+                )
+                .await
+                {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        let error = build_pubsub_error(&iq, PubSubError::Forbidden);
+                        return vec![iq_to_xml(error)];
+                    }
+                    Err(e) => {
+                        warn!("PubSub purge authz failed: {e}");
+                        let error = build_pubsub_error(&iq, PubSubError::Forbidden);
+                        return vec![iq_to_xml(error)];
+                    }
+                }
+                match state
+                    .deps
+                    .protocol
+                    .pubsub_storage
+                    .purge_node(&target_jid, &node)
+                    .await
+                {
+                    Ok(_) => return vec![iq_to_xml(build_pubsub_success(&iq))],
+                    Err(e) => {
+                        warn!("PubSub purge failed: {e}");
+                        return vec![iq_to_xml(build_pubsub_error(
+                            &iq,
+                            PubSubError::NodeNotFound,
+                        ))];
+                    }
+                }
+            }
+
+            PubSubRequest::ConfigureNodeSet { node, config } => {
+                let is_pep = is_pep_self_or_to(&iq, &target_jid, &user_jid);
+                if !crate::pubsub_authz::can_administer(
+                    &state.deps.protocol.pubsub_storage,
+                    &target_jid,
+                    &node,
+                    &user_jid,
+                    is_pep,
+                )
+                .await
+                .unwrap_or(false)
+                {
+                    return vec![iq_to_xml(build_pubsub_error(&iq, PubSubError::Forbidden))];
+                }
+                match state
+                    .deps
+                    .protocol
+                    .pubsub_storage
+                    .update_node_config(&target_jid, &node, &config)
+                    .await
+                {
+                    Ok(_) => return vec![iq_to_xml(build_pubsub_success(&iq))],
+                    Err(_) => {
+                        return vec![iq_to_xml(build_pubsub_error(
+                            &iq,
+                            PubSubError::NodeNotFound,
+                        ))];
+                    }
+                }
+            }
+
+            PubSubRequest::AffiliationsGet { node } => {
+                let is_pep = is_pep_self_or_to(&iq, &target_jid, &user_jid);
+                if !crate::pubsub_authz::can_administer(
+                    &state.deps.protocol.pubsub_storage,
+                    &target_jid,
+                    &node,
+                    &user_jid,
+                    is_pep,
+                )
+                .await
+                .unwrap_or(false)
+                {
+                    return vec![iq_to_xml(build_pubsub_error(&iq, PubSubError::Forbidden))];
+                }
+                let rows = state
+                    .deps
+                    .protocol
+                    .pubsub_storage
+                    .list_node_affiliations(&target_jid, &node)
+                    .await
+                    .unwrap_or_default();
+                let response = build_pubsub_affiliations_result(&iq, &node, &rows);
                 return vec![iq_to_xml(response)];
+            }
+
+            PubSubRequest::AffiliationsSet { node, changes } => {
+                let is_pep = is_pep_self_or_to(&iq, &target_jid, &user_jid);
+                if !crate::pubsub_authz::can_administer(
+                    &state.deps.protocol.pubsub_storage,
+                    &target_jid,
+                    &node,
+                    &user_jid,
+                    is_pep,
+                )
+                .await
+                .unwrap_or(false)
+                {
+                    return vec![iq_to_xml(build_pubsub_error(&iq, PubSubError::Forbidden))];
+                }
+                for (entity, aff) in &changes {
+                    if let Err(e) = state
+                        .deps
+                        .protocol
+                        .pubsub_storage
+                        .set_affiliation(&target_jid, &node, entity, *aff)
+                        .await
+                    {
+                        warn!("set_affiliation failed: {e}");
+                        return vec![iq_to_xml(build_pubsub_error(&iq, PubSubError::Forbidden))];
+                    }
+                }
+                return vec![iq_to_xml(build_pubsub_success(&iq))];
             }
         }
     }
@@ -3942,6 +4138,16 @@ async fn build_muc_owner_config_response(
         response_to,
         Some(query),
     ))
+}
+
+/// PEP self-or-to check (XEP-0163 §3).
+///
+/// Returns `true` when the IQ is directed at `target_jid` (a PEP service) *or*
+/// when no `to=` attribute is present and `user_jid` is the implicit PEP owner.
+/// Use this in every pubsub IQ arm so that to-less self-targeted IQs receive
+/// the same owner-derived affiliation as explicitly addressed PEP requests.
+fn is_pep_self_or_to(iq: &xmpp_parsers::iq::Iq, target_jid: &BareJid, user_jid: &BareJid) -> bool {
+    is_pep_request_to(iq, target_jid) || is_pep_request(iq, user_jid)
 }
 
 fn spaces_service_bare_jid(spaces_domain: &str) -> Result<BareJid, String> {

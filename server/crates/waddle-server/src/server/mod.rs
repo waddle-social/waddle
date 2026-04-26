@@ -591,7 +591,7 @@ async fn start_http_server(deps: HttpServerDeps) -> Result<()> {
         mam_storage,
         acme_http01_challenge_service,
     )
-    .await;
+    .await?;
 
     let addr = listener.local_addr()?;
     info!("Starting Axum HTTP server on {}", addr);
@@ -814,7 +814,7 @@ async fn create_router(
     xmpp_config: XmppConfig,
     mam_storage: Arc<dyn MamStorage>,
     acme_http01_challenge_service: Option<TowerHttp01ChallengeService>,
-) -> Router {
+) -> Result<Router> {
     // Create auth broker state
     let encryption_key = server_config.session_key.clone();
 
@@ -859,9 +859,7 @@ async fn create_router(
     let stanza_dispatcher = Arc::new(stanza_dispatcher);
 
     // Shared durable PubSub/PEP storage for the WebSocket transport (XEP-0060/0163).
-    let pubsub_storage = build_pubsub_storage(xmpp_config.pubsub_database_url.clone())
-        .await
-        .unwrap_or_else(|error| panic!("Failed to initialize PubSub storage: {error}"));
+    let pubsub_storage = build_pubsub_storage(xmpp_config.pubsub_database_url.clone()).await?;
     if let Err(error) =
         bootstrap_fresh_xmpp_topology(&state, Arc::clone(&pubsub_storage), &service_domains).await
     {
@@ -893,7 +891,6 @@ async fn create_router(
                 dispatcher: stanza_dispatcher,
                 pubsub_storage,
                 push_store,
-                pubsub_subscriptions: Arc::new(dashmap::DashSet::new()),
                 isr_token_store: waddle_xmpp::isr::create_shared_store(),
                 sm_session_registry,
                 resumable_sessions,
@@ -1001,7 +998,7 @@ async fn create_router(
         .merge(auth_page_router);
 
     // Always merge common routes required by XMPP, auth, upload, and operations.
-    router
+    let router = router
         // Merge XMPP over WebSocket endpoint
         .merge(websocket_router)
         // Merge well-known endpoints for XMPP service discovery
@@ -1014,7 +1011,8 @@ async fn create_router(
                 .on_response(DefaultOnResponse::new().level(Level::INFO)),
         )
         .layer(CompressionLayer::new())
-        .layer(configure_cors())
+        .layer(configure_cors());
+    Ok(router)
 }
 
 /// Build the per-request `tracing` span and attach the inbound W3C
@@ -1249,6 +1247,14 @@ mod tests {
             .expect("env mutex")
     }
 
+    /// XmppConfig for unit tests: uses in-memory SQLite for all storage backends.
+    fn test_xmpp_config() -> XmppConfig {
+        XmppConfig {
+            pubsub_database_url: Some("sqlite::memory:".to_string()),
+            ..XmppConfig::default()
+        }
+    }
+
     async fn create_test_state() -> Arc<AppState> {
         let config = DatabaseConfig::default();
         let pool_config = PoolConfig::default();
@@ -1326,14 +1332,9 @@ mod tests {
         let state = create_test_state().await;
         let server_config = ServerConfig::test_homeserver();
         let mam_storage = create_websocket_mam_storage(None).await.unwrap();
-        let app = create_router(
-            state,
-            server_config,
-            XmppConfig::default(),
-            mam_storage,
-            None,
-        )
-        .await;
+        let app = create_router(state, server_config, test_xmpp_config(), mam_storage, None)
+            .await
+            .unwrap();
 
         let response = app
             .oneshot(
@@ -1360,14 +1361,9 @@ mod tests {
         let state = create_test_state().await;
         let server_config = ServerConfig::test_homeserver();
         let mam_storage = create_websocket_mam_storage(None).await.unwrap();
-        let app = create_router(
-            state,
-            server_config,
-            XmppConfig::default(),
-            mam_storage,
-            None,
-        )
-        .await;
+        let app = create_router(state, server_config, test_xmpp_config(), mam_storage, None)
+            .await
+            .unwrap();
 
         let response = app
             .oneshot(
@@ -1387,14 +1383,9 @@ mod tests {
         let state = create_test_state().await;
         let server_config = ServerConfig::test_homeserver();
         let mam_storage = create_websocket_mam_storage(None).await.unwrap();
-        let app = create_router(
-            state,
-            server_config,
-            XmppConfig::default(),
-            mam_storage,
-            None,
-        )
-        .await;
+        let app = create_router(state, server_config, test_xmpp_config(), mam_storage, None)
+            .await
+            .unwrap();
 
         let response = app
             .oneshot(
@@ -1422,14 +1413,9 @@ mod tests {
         let state = create_test_state().await;
         let server_config = ServerConfig::test_homeserver();
         let mam_storage = create_websocket_mam_storage(None).await.unwrap();
-        let app = create_router(
-            state,
-            server_config,
-            XmppConfig::default(),
-            mam_storage,
-            None,
-        )
-        .await;
+        let app = create_router(state, server_config, test_xmpp_config(), mam_storage, None)
+            .await
+            .unwrap();
 
         let response = app
             .oneshot(
@@ -1454,14 +1440,9 @@ mod tests {
         let state = create_test_state().await;
         let server_config = ServerConfig::test_homeserver();
         let mam_storage = create_websocket_mam_storage(None).await.unwrap();
-        let app = create_router(
-            state,
-            server_config,
-            XmppConfig::default(),
-            mam_storage,
-            None,
-        )
-        .await;
+        let app = create_router(state, server_config, test_xmpp_config(), mam_storage, None)
+            .await
+            .unwrap();
 
         let response = app
             .oneshot(
@@ -1481,14 +1462,9 @@ mod tests {
         let state = create_test_state().await;
         let server_config = ServerConfig::test_homeserver();
         let mam_storage = create_websocket_mam_storage(None).await.unwrap();
-        let app = create_router(
-            state,
-            server_config,
-            XmppConfig::default(),
-            mam_storage,
-            None,
-        )
-        .await;
+        let app = create_router(state, server_config, test_xmpp_config(), mam_storage, None)
+            .await
+            .unwrap();
 
         let response = app
             .oneshot(
