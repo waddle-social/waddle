@@ -226,8 +226,8 @@ interface FallbackPayload {
  * body so the `> quoted` prefix doesn't double-render on top of the reply chip.
  */
 function stripReplyFallback(msg: ReceivedMessage, base: MessageExtensionsTarget): void {
-  const fallbacks = ext(msg).fallbacks as FallbackPayload[] | undefined;
-  if (!fallbacks?.length || !base.body) return;
+  const fallbacks = asArray(ext(msg).fallbacks as FallbackPayload | FallbackPayload[] | undefined);
+  if (!fallbacks.length || !base.body) return;
   const range = fallbacks.find((f) => f.for === "urn:xmpp:reply:0")?.body;
   if (!range) return;
   const rawStart = range.start ?? 0;

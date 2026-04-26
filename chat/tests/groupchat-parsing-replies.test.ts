@@ -368,4 +368,21 @@ describe("groupchat reply + thread parsing", () => {
       },
     ]);
   });
+
+  test("strips fallback when fallbacks is a singleton object instead of array", () => {
+    const h = makeHandlers();
+    const prefix = "> quoted\n\n";
+    dispatchGroupchat(
+      makeMsg({
+        id: "msg-singleton-fb",
+        body: `${prefix}reply text`,
+        reply: { to: "general@muc.waddle.social/bob", id: "msg-1" },
+        fallbacks: { for: "urn:xmpp:reply:0", body: { start: 0, end: prefix.length } },
+      }),
+      h,
+    );
+    expect(h.messages).toHaveLength(1);
+    expect(h.messages[0].body).toBe("reply text");
+    expect(h.messages[0].replyTo?.id).toBe("msg-1");
+  });
 });

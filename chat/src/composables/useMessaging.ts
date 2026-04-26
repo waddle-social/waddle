@@ -587,6 +587,14 @@ export function useMessaging(
       }
       if (githubEmbeds && githubEmbeds.length > 0) {
         updated.githubEmbeds = githubEmbeds;
+      } else if (m.githubEmbeds?.length) {
+        const newBodyText = newBody.trim();
+        const surviving = m.githubEmbeds.filter((e) => newBodyText.includes(e.url));
+        if (surviving.length > 0) {
+          updated.githubEmbeds = surviving;
+        } else {
+          delete updated.githubEmbeds;
+        }
       } else {
         delete updated.githubEmbeds;
       }
@@ -818,6 +826,13 @@ export function useMessaging(
         }
         if (update.githubEmbeds && update.githubEmbeds.length > 0) {
           target.githubEmbeds = update.githubEmbeds;
+        } else if (target.githubEmbeds?.length) {
+          const surviving = target.githubEmbeds.filter((e) => update.body.includes(e.url));
+          if (surviving.length > 0) {
+            target.githubEmbeds = surviving;
+          } else {
+            delete target.githubEmbeds;
+          }
         } else {
           delete target.githubEmbeds;
         }
