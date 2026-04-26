@@ -165,6 +165,24 @@ pub struct MucRoom {
     occupant_sessions: HashMap<String, Vec<FullJid>>,
     /// Persistent affiliation list (synced with Zanzibar)
     affiliation_list: AffiliationList,
+    /// Per-nickname occupancy generation, bumped each time a nickname
+    /// transitions from absent to present (XEP-0308 §3 SHOULD #2: a
+    /// full-JID leaving and rejoining should not be allowed to correct
+    /// messages from the previous occupancy). Each fresh nickname is
+    /// seeded from [`Self::generation_floor`] before the first bump so
+    /// post-restart generation values cannot collide with pre-restart
+    /// archived rows.
+    nickname_generation: HashMap<String, u64>,
+    /// Lower bound for fresh nickname generations in this room actor's
+    /// lifetime. Initialised at room creation from the wall clock so
+    /// that every restart of the server (or recreation of the actor)
+    /// uses a higher floor than any prior archive row's generation,
+    /// which closes the §3 SHOULD #2 correction window across server
+    /// boundaries. Pre-restart rows recorded with generation N have
+    /// N < floor; post-restart fresh joins start at floor+1, so the
+    /// equality check in `verify_muc_occupancy_generation` cannot
+    /// match.
+    generation_floor: u64,
 }
 
 impl MucRoom {
@@ -183,14 +201,41 @@ impl MucRoom {
             occupants: HashMap::new(),
             occupant_sessions: HashMap::new(),
             affiliation_list: AffiliationList::new(),
+            nickname_generation: HashMap::new(),
+            // Seed the floor from the wall clock in milliseconds. Any
+            // future restart will produce a higher floor than any
+            // generation values archived under the previous floor,
+            // since each fresh-nick generation is at most floor + (#
+            // distinct same-nickname rejoins observed in this actor's
+            // lifetime), which is bounded well below the millisecond
+            // tick rate.
+            generation_floor: u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0),
         }
     }
 
     /// Add an occupant to the room.
+    ///
+    /// When this is a fresh join (nickname not currently present), the
+    /// per-nickname occupancy generation is bumped — used by XEP-0308
+    /// to disallow corrections across leave/rejoin cycles.
     pub fn add_occupant(&mut self, occupant: Occupant) {
+        if !self.occupants.contains_key(&occupant.nick) {
+            let floor = self.generation_floor;
+            let gen = self
+                .nickname_generation
+                .entry(occupant.nick.clone())
+                .or_insert(floor);
+            *gen += 1;
+        }
         self.occupant_sessions
             .insert(occupant.nick.clone(), vec![occupant.real_jid.clone()]);
         self.occupants.insert(occupant.nick.clone(), occupant);
+    }
+
+    /// Current occupancy generation for `nick`, or `None` if the
+    /// nickname has never been observed since this actor was created.
+    pub fn current_nickname_generation(&self, nick: &str) -> Option<u64> {
+        self.nickname_generation.get(nick).copied()
     }
 
     /// Remove an occupant from the room.
@@ -421,6 +466,13 @@ impl MucRoom {
             is_remote,
             home_server,
         };
+
+        let floor = self.generation_floor;
+        let gen = self
+            .nickname_generation
+            .entry(nick.clone())
+            .or_insert(floor);
+        *gen += 1;
 
         self.occupant_sessions.insert(nick.clone(), vec![real_jid]);
         self.occupants.insert(nick.clone(), occupant);

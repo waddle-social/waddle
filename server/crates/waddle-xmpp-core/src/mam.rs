@@ -116,12 +116,41 @@ pub struct ArchivedModeration {
     pub reason: Option<RichText>,
 }
 
+/// A XEP-0424 tombstone replacing a retracted message in the archive.
+///
+/// When the optional `moderation` is `Some`, this is a XEP-0425
+/// moderation tombstone whose `<retracted/>` element wraps a
+/// `<moderated by/>` annotation; otherwise it is a plain XEP-0424
+/// sender-initiated retraction tombstone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArchivedTombstone {
+    /// Stanza-id of the retraction message that produced the
+    /// tombstone (for clients to correlate the tombstone to the
+    /// retraction event that caused it). May be `None` for
+    /// IQ-driven moderation tombstones whose request is not itself
+    /// archived as a separate row.
+    pub retraction_id: Option<RichMessageId>,
+    /// XEP-0424 §"`<retracted/>` SHOULD include a 'stamp' attribute
+    /// indicating the time at which the retraction took place."
+    pub stamp: DateTime<Utc>,
+    /// When set, this tombstone is the result of XEP-0425 moderation
+    /// rather than a sender-initiated XEP-0424 retraction.
+    pub moderation: Option<ArchivedModeration>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ArchivedRichPayload {
-    Correction { replaces_id: RichMessageId },
+    Correction {
+        replaces_id: RichMessageId,
+    },
     Retraction(ArchivedRetraction),
     Moderation(ArchivedModeration),
     Reactions(ArchivedReactionSet),
+    /// In-place tombstone produced by XEP-0424 retraction or
+    /// XEP-0425 moderation. The original row's `body` and
+    /// leak-prone fields (`thread_id`, `reply_to_id`, mentions, ...)
+    /// are cleared when this variant is set.
+    Tombstone(ArchivedTombstone),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -162,6 +191,13 @@ pub struct ArchivedMessage {
     pub stanza_xml: Option<String>,
     /// Typed rich-message payload and annotations used to reconstruct XMPP payloads.
     pub rich: Option<ArchivedRichMessage>,
+    /// Per-XEP-0308 §3 occupancy generation for the sender's MUC nickname
+    /// at archive-write time. Only set for `groupchat` rows; `None`
+    /// otherwise. Used to disallow corrections across leave/rejoin
+    /// cycles — the correction handler refuses if the room's current
+    /// generation for the same nickname has advanced.
+    #[serde(default)]
+    pub nickname_generation: Option<u64>,
 }
 
 fn default_message_type() -> String {
@@ -184,6 +220,7 @@ impl Default for ArchivedMessage {
             message_type: default_message_type(),
             stanza_xml: None,
             rich: None,
+            nickname_generation: None,
         }
     }
 }
@@ -571,6 +608,27 @@ fn build_typed_inner_message(archived: &ArchivedMessage, rich: &ArchivedRichMess
                 );
             }
             builder = builder.append(reactions_elem);
+        }
+        Some(ArchivedRichPayload::Tombstone(tombstone)) => {
+            let mut retracted = Element::builder("retracted", MESSAGE_RETRACT_NS)
+                .attr("stamp", tombstone.stamp.to_rfc3339());
+            if let Some(retraction_id) = tombstone.retraction_id.as_ref() {
+                retracted = retracted.attr("id", retraction_id.as_str());
+            }
+            if let Some(moderation) = tombstone.moderation.as_ref() {
+                let moderated = Element::builder("moderated", MESSAGE_MODERATE_NS)
+                    .attr("by", moderation.moderated_by.to_string())
+                    .build();
+                retracted = retracted.append(moderated);
+                if let Some(reason) = moderation.reason.as_ref() {
+                    retracted = retracted.append(
+                        Element::builder("reason", MESSAGE_RETRACT_NS)
+                            .append(reason.as_str())
+                            .build(),
+                    );
+                }
+            }
+            builder = builder.append(retracted.build());
         }
         None => {}
     }

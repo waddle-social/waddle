@@ -538,22 +538,20 @@ pub async fn handle_iq_with_conn_state(
             return vec![iq_to_xml(response)];
         }
 
-        // Disco info on server
+        // Disco info on server. Source the canonical feature catalogue
+        // from `waddle-xmpp-core::disco::info::server_features()` so the
+        // rich-message XEPs (corrections, retractions, reactions,
+        // references, stanza-ids, etc.) declared there stay discoverable
+        // here without drift between the two lists. Server-instance
+        // additions (Spaces, jabber:iq:search, ISR) are appended below,
+        // and dynamic extension namespaces extend further still.
         let identities = vec![Identity::server(Some("Waddle"))];
-        let mut features = vec![
-            Feature::ping(),
-            Feature::replies(),
-            Feature::disco_info(),
-            Feature::disco_items(),
-            Feature::commands(),
+        let mut features = waddle_xmpp::disco::info::server_features();
+        features.extend([
             Feature::spaces(),
-            Feature::last_activity(),
-            Feature::software_version(),
-            Feature::entity_time(),
-            Feature::blocking(),
             Feature::new("jabber:iq:search"),
             Feature::new(ISR_NS),
-        ];
+        ]);
         features.extend(
             state
                 .deps
@@ -850,9 +848,13 @@ pub async fn handle_iq_with_conn_state(
                 )]
             }
         };
-        let is_moderator = matches!(context.affiliation, Affiliation::Owner | Affiliation::Admin)
-            || matches!(context.role, waddle_xmpp::Role::Moderator);
-        if !is_moderator {
+        // XEP-0425 §"only moderators are allowed to moderate" combined with
+        // XEP-0045 §5.1.2: runtime moderation privilege is role-bound, not
+        // affiliation-bound. Owner/Admin affiliations only matter to the
+        // extent that they cause the room to grant the Moderator *role* on
+        // entry; if an owner has explicitly taken a non-moderator role
+        // (e.g. visitor), that signal is intentional and must be honoured.
+        if !matches!(context.role, waddle_xmpp::Role::Moderator) {
             return vec![build_iq_error_xml_with_addresses(
                 &id,
                 response_from,
@@ -920,7 +922,7 @@ pub async fn handle_iq_with_conn_state(
             moderated_by.parse::<Jid>(),
         ) {
             let archived = ArchivedMessage {
-                id: archive_id,
+                id: archive_id.clone(),
                 timestamp: chrono::Utc::now(),
                 from: room_jid.to_string(),
                 to: room_jid.to_string(),
@@ -943,6 +945,7 @@ pub async fn handle_iq_with_conn_state(
                     references: Vec::new(),
                     mentions: Vec::new(),
                 }),
+                nickname_generation: None,
             };
             if let Err(error) = state
                 .deps
@@ -952,6 +955,66 @@ pub async fn handle_iq_with_conn_state(
                 .await
             {
                 warn!(room = %room_jid, target = %request.target_id, error = %error, "Failed to archive moderation event");
+            }
+
+            // XEP-0425 §"the archiving service MAY replace the
+            // retracted message with a tombstone": replace the
+            // original room archive row with a moderation tombstone
+            // whose `<retracted/>` carries `<moderated by/>` and the
+            // optional reason.
+            let original_lookup = state
+                .deps
+                .protocol
+                .mam_storage
+                .get_message(&request.target_id)
+                .await;
+            match original_lookup {
+                Ok(Some(original)) if original.to == room_jid.to_string() => {
+                    // Use the moderation message's server-assigned
+                    // archive id (XEP-0359 stanza-id stamped via
+                    // `add_mam_stanza_id` above). That's the id
+                    // clients see on the live moderation broadcast
+                    // and need to correlate against the tombstone —
+                    // `moderation.id` is the client message-id
+                    // attribute, which would not match the archive
+                    // entry clients can resolve.
+                    let tombstone = waddle_xmpp::mam::ArchivedTombstone {
+                        retraction_id: waddle_xmpp::mam::RichMessageId::new(archive_id.clone()),
+                        stamp: stamp_time,
+                        moderation: Some(ArchivedModeration {
+                            target_id: waddle_xmpp::mam::RichMessageId::new(
+                                request.target_id.clone(),
+                            )
+                            .expect("target id is non-empty here"),
+                            moderated_by: moderated_by
+                                .parse::<Jid>()
+                                .expect("moderated_by parsed earlier"),
+                            stamp: Some(stamp_time),
+                            reason: request.reason.as_deref().and_then(RichText::new),
+                        }),
+                    };
+                    if let Err(error) = state
+                        .deps
+                        .protocol
+                        .mam_storage
+                        .replace_with_tombstone(&original.id, tombstone)
+                        .await
+                    {
+                        warn!(
+                            room = %room_jid,
+                            target = %request.target_id,
+                            error = %error,
+                            "Failed to replace original with moderation tombstone"
+                        );
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => warn!(
+                    room = %room_jid,
+                    target = %request.target_id,
+                    error = %error,
+                    "Failed to look up moderation target for tombstone"
+                ),
             }
         }
 

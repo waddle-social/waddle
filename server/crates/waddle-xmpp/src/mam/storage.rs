@@ -80,6 +80,20 @@ pub trait MamStorage: Send + Sync {
         archive_id: &str,
     ) -> Result<Option<ArchivedMessage>, MamStorageError>;
 
+    /// Replace an archived message with a XEP-0424 / XEP-0425 tombstone in
+    /// place. Clears `body`, `stanza_xml`, `thread_id`, `reply_to_id`,
+    /// `reply_to_jid`, and overwrites `rich_payload` with the typed
+    /// `ArchivedRichPayload::Tombstone(...)` value.
+    ///
+    /// Looks up the row by `archive_id` (the storage primary key). Returns
+    /// `Ok(true)` when a row was found and updated, `Ok(false)` when no row
+    /// matched, and `Err` on storage failure.
+    async fn replace_with_tombstone(
+        &self,
+        archive_id: &str,
+        tombstone: waddle_xmpp_core::mam::ArchivedTombstone,
+    ) -> Result<bool, MamStorageError>;
+
     /// Get a single message by its original message/stanza id inside an archive.
     async fn get_message_by_stanza_id(
         &self,
@@ -278,6 +292,39 @@ impl MamStorage for InMemoryMamStorage {
         entries.retain(|(jid, message)| !(jid == room_jid && message.timestamp < before));
         Ok((previous_len - entries.len()) as u64)
     }
+
+    async fn replace_with_tombstone(
+        &self,
+        archive_id: &str,
+        tombstone: waddle_xmpp_core::mam::ArchivedTombstone,
+    ) -> Result<bool, MamStorageError> {
+        let mut entries = self.entries.write().await;
+        for (_jid, message) in entries.iter_mut() {
+            if message.id == archive_id {
+                apply_tombstone(message, tombstone);
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+}
+
+fn apply_tombstone(
+    message: &mut ArchivedMessage,
+    tombstone: waddle_xmpp_core::mam::ArchivedTombstone,
+) {
+    use waddle_xmpp_core::mam::{ArchivedRichMessage, ArchivedRichPayload};
+    message.body.clear();
+    message.stanza_xml = None;
+    message.thread_id = None;
+    message.reply_to_id = None;
+    message.reply_to_jid = None;
+    message.rich = Some(ArchivedRichMessage {
+        payload: Some(ArchivedRichPayload::Tombstone(tombstone)),
+        reply: None,
+        references: Vec::new(),
+        mentions: Vec::new(),
+    });
 }
 
 #[derive(Clone)]
@@ -343,13 +390,19 @@ impl SqlxMamStorage {
         match &self.backend {
             MamDatabaseBackend::Sqlite(pool) => {
                 execute_sqlite_batch(pool, SQLITE_MAM_SCHEMA).await?;
-                ensure_sqlite_rich_payload_column(pool).await
+                ensure_sqlite_column(pool, "rich_payload", "TEXT").await?;
+                ensure_sqlite_column(pool, "nickname_generation", "INTEGER").await
             }
             MamDatabaseBackend::Postgres(pool) => {
                 execute_postgres_batch(pool, POSTGRES_MAM_SCHEMA).await?;
                 sqlx::query("ALTER TABLE mam_messages ADD COLUMN IF NOT EXISTS rich_payload TEXT")
                     .execute(pool)
                     .await?;
+                sqlx::query(
+                    "ALTER TABLE mam_messages ADD COLUMN IF NOT EXISTS nickname_generation BIGINT",
+                )
+                .execute(pool)
+                .await?;
                 Ok(())
             }
         }
@@ -361,7 +414,7 @@ impl SqlxMamStorage {
 }
 
 const SELECT_COLUMNS: &str =
-    "id, room_jid, timestamp, from_jid, to_jid, body, stanza_id, thread_id, reply_to_id, reply_to_jid, origin_id, message_type, stanza_xml, rich_payload";
+    "id, room_jid, timestamp, from_jid, to_jid, body, stanza_id, thread_id, reply_to_id, reply_to_jid, origin_id, message_type, stanza_xml, rich_payload, nickname_generation";
 
 const SQLITE_MAM_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS mam_messages (
@@ -379,6 +432,7 @@ CREATE TABLE IF NOT EXISTS mam_messages (
     message_type TEXT NOT NULL DEFAULT 'chat',
     stanza_xml TEXT,
     rich_payload TEXT,
+    nickname_generation INTEGER,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_mam_room_timestamp
@@ -409,6 +463,7 @@ CREATE TABLE IF NOT EXISTS mam_messages (
     message_type TEXT NOT NULL DEFAULT 'chat',
     stanza_xml TEXT,
     rich_payload TEXT,
+    nickname_generation BIGINT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_mam_room_timestamp
@@ -496,18 +551,21 @@ async fn execute_postgres_batch(pool: &PgPool, sql: &str) -> Result<(), MamStora
     Ok(())
 }
 
-async fn ensure_sqlite_rich_payload_column(pool: &SqlitePool) -> Result<(), MamStorageError> {
+async fn ensure_sqlite_column(
+    pool: &SqlitePool,
+    column: &str,
+    column_type: &str,
+) -> Result<(), MamStorageError> {
     let columns = sqlx::query("PRAGMA table_info(mam_messages)")
         .fetch_all(pool)
         .await?;
     let exists = columns.iter().any(|row| {
         row.try_get::<String, _>("name")
-            .is_ok_and(|name| name == "rich_payload")
+            .is_ok_and(|name| name == column)
     });
     if !exists {
-        sqlx::query("ALTER TABLE mam_messages ADD COLUMN rich_payload TEXT")
-            .execute(pool)
-            .await?;
+        let sql = format!("ALTER TABLE mam_messages ADD COLUMN {column} {column_type}");
+        sqlx::query(&sql).execute(pool).await?;
     }
     Ok(())
 }
@@ -549,6 +607,7 @@ fn decode_sqlite_message_row(row: &SqliteRow) -> Result<ArchivedMessage, MamStor
         .with_timezone(&Utc);
 
     let rich_payload: Option<String> = row.try_get(13)?;
+    let nickname_generation = decode_nickname_generation(row.try_get::<Option<i64>, _>(14)?)?;
     Ok(ArchivedMessage {
         id: row.try_get(0)?,
         timestamp,
@@ -563,11 +622,13 @@ fn decode_sqlite_message_row(row: &SqliteRow) -> Result<ArchivedMessage, MamStor
         message_type: row.try_get(11)?,
         stanza_xml: row.try_get(12)?,
         rich: decode_rich_payload(rich_payload.as_deref())?,
+        nickname_generation,
     })
 }
 
 fn decode_postgres_message_row(row: &PgRow) -> Result<ArchivedMessage, MamStorageError> {
     let rich_payload: Option<String> = row.try_get(13)?;
+    let nickname_generation = decode_nickname_generation(row.try_get::<Option<i64>, _>(14)?)?;
     Ok(ArchivedMessage {
         id: row.try_get(0)?,
         timestamp: row.try_get(2)?,
@@ -582,6 +643,7 @@ fn decode_postgres_message_row(row: &PgRow) -> Result<ArchivedMessage, MamStorag
         message_type: row.try_get(11)?,
         stanza_xml: row.try_get(12)?,
         rich: decode_rich_payload(rich_payload.as_deref())?,
+        nickname_generation,
     })
 }
 
@@ -604,6 +666,29 @@ fn decode_rich_payload(
         .map_err(|error| MamStorageError::Serialization(error.to_string()))
 }
 
+/// Convert the database's signed `nickname_generation` column to the
+/// typed `u64`. Negative values would only appear from corruption,
+/// manual edits, or a write that bypassed `encode_nickname_generation`
+/// — refuse them rather than wrap silently with `as u64`.
+fn decode_nickname_generation(value: Option<i64>) -> Result<Option<u64>, MamStorageError> {
+    value.map(u64::try_from).transpose().map_err(|error| {
+        MamStorageError::Serialization(format!(
+            "negative nickname_generation column value rejected: {error}"
+        ))
+    })
+}
+
+/// Convert a typed `u64` generation to the SQL backend's signed `i64`,
+/// rejecting values outside `i64` range so the column never stores a
+/// negative wrapped value that would later round-trip incorrectly.
+fn encode_nickname_generation(value: Option<u64>) -> Result<Option<i64>, MamStorageError> {
+    value.map(i64::try_from).transpose().map_err(|error| {
+        MamStorageError::Serialization(format!(
+            "nickname_generation overflow on store ({error}) — exceeds i64::MAX"
+        ))
+    })
+}
+
 #[async_trait]
 impl MamStorage for SqlxMamStorage {
     #[instrument(skip(self, message), fields(archive = %archive_jid))]
@@ -623,11 +708,12 @@ impl MamStorage for SqlxMamStorage {
             message.message_type.as_str()
         };
         let rich_payload = encode_rich_payload(message)?;
+        let nickname_generation = encode_nickname_generation(message.nickname_generation)?;
 
         match &self.backend {
             MamDatabaseBackend::Sqlite(pool) => {
                 let mut query = QueryBuilder::<Sqlite>::new(
-                    "INSERT INTO mam_messages (id, room_jid, timestamp, from_jid, to_jid, body, stanza_id, thread_id, reply_to_id, reply_to_jid, origin_id, message_type, stanza_xml, rich_payload) ",
+                    "INSERT INTO mam_messages (id, room_jid, timestamp, from_jid, to_jid, body, stanza_id, thread_id, reply_to_id, reply_to_jid, origin_id, message_type, stanza_xml, rich_payload, nickname_generation) ",
                 );
                 query.push_values(std::iter::once(()), |mut builder, _| {
                     builder
@@ -644,13 +730,14 @@ impl MamStorage for SqlxMamStorage {
                         .push_bind(message.origin_id.as_deref())
                         .push_bind(message_type)
                         .push_bind(message.stanza_xml.as_deref())
-                        .push_bind(rich_payload.as_deref());
+                        .push_bind(rich_payload.as_deref())
+                        .push_bind(nickname_generation);
                 });
                 query.build().execute(pool).await?;
             }
             MamDatabaseBackend::Postgres(pool) => {
                 let mut query = QueryBuilder::<Postgres>::new(
-                    "INSERT INTO mam_messages (id, room_jid, timestamp, from_jid, to_jid, body, stanza_id, thread_id, reply_to_id, reply_to_jid, origin_id, message_type, stanza_xml, rich_payload) ",
+                    "INSERT INTO mam_messages (id, room_jid, timestamp, from_jid, to_jid, body, stanza_id, thread_id, reply_to_id, reply_to_jid, origin_id, message_type, stanza_xml, rich_payload, nickname_generation) ",
                 );
                 query.push_values(std::iter::once(()), |mut builder, _| {
                     builder
@@ -667,7 +754,8 @@ impl MamStorage for SqlxMamStorage {
                         .push_bind(message.origin_id.as_deref())
                         .push_bind(message_type)
                         .push_bind(message.stanza_xml.as_deref())
-                        .push_bind(rich_payload.as_deref());
+                        .push_bind(rich_payload.as_deref())
+                        .push_bind(nickname_generation);
                 });
                 query.build().execute(pool).await?;
             }
@@ -938,6 +1026,53 @@ impl MamStorage for SqlxMamStorage {
         debug!(archive = %room_jid, deleted, "Deleted old messages from MAM archive");
         Ok(deleted)
     }
+
+    #[instrument(skip(self, tombstone))]
+    async fn replace_with_tombstone(
+        &self,
+        archive_id: &str,
+        tombstone: waddle_xmpp_core::mam::ArchivedTombstone,
+    ) -> Result<bool, MamStorageError> {
+        use waddle_xmpp_core::mam::{ArchivedRichMessage, ArchivedRichPayload};
+        let payload = ArchivedRichMessage {
+            payload: Some(ArchivedRichPayload::Tombstone(tombstone)),
+            reply: None,
+            references: Vec::new(),
+            mentions: Vec::new(),
+        };
+        let encoded = serde_json::to_string(&payload)
+            .map_err(|error| MamStorageError::Serialization(error.to_string()))?;
+
+        let rows = match &self.backend {
+            MamDatabaseBackend::Sqlite(pool) => {
+                let mut builder = QueryBuilder::<Sqlite>::new(
+                    "UPDATE mam_messages SET body = '', stanza_xml = NULL, thread_id = NULL, reply_to_id = NULL, reply_to_jid = NULL, rich_payload = ",
+                );
+                builder
+                    .push_bind(encoded.as_str())
+                    .push(" WHERE id = ")
+                    .push_bind(archive_id);
+                builder.build().execute(pool).await?.rows_affected()
+            }
+            MamDatabaseBackend::Postgres(pool) => {
+                let mut builder = QueryBuilder::<Postgres>::new(
+                    "UPDATE mam_messages SET body = '', stanza_xml = NULL, thread_id = NULL, reply_to_id = NULL, reply_to_jid = NULL, rich_payload = ",
+                );
+                builder
+                    .push_bind(encoded.as_str())
+                    .push(" WHERE id = ")
+                    .push_bind(archive_id);
+                builder.build().execute(pool).await?.rows_affected()
+            }
+        };
+
+        debug!(
+            archive_id = %archive_id,
+            rows_affected = rows,
+            "Replaced archived message with tombstone"
+        );
+        Ok(rows > 0)
+    }
 }
 
 #[cfg(test)]
@@ -998,6 +1133,7 @@ mod tests {
                 "<message xmlns='jabber:client' from='room@conference.example.com/alice' to='room@conference.example.com' type='groupchat' id='archive-stanza-1'><body>Reply body</body></message>".to_string(),
             ),
             rich: None,
+            nickname_generation: None,
         };
 
         let archive_id = storage

@@ -91,3 +91,42 @@ async fn reply_routes_and_replays_from_mam() {
 
     client.close().await;
 }
+
+#[tokio::test]
+async fn reply_to_unknown_target_routes_without_error() {
+    // XEP-0461 imposes no server-side target-existence requirement
+    // ("It is up to receiving entities…"). The previous implementation
+    // returned `<item-not-found/>` when the server hadn't archived the
+    // referenced message, which would reject legitimate cross-server
+    // replies, replies to messages before retention, or replies to
+    // client-cached history we never saw. Verify that a well-formed
+    // reply to an unknown id is routed normally.
+    let _guard = TEST_SERIAL.lock().await;
+    let (_server, mut client) = setup().await;
+    let room = format!("reply-unknown-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
+    join_room(&mut client, &room).await;
+
+    client
+        .send(&format!(
+            r#"<message type="groupchat" to="{room}" id="reply-orphan">
+                <body>orphan reply</body>
+                <reply xmlns="urn:xmpp:reply:0" to="{room}/{USERNAME}" id="never-archived-id"/>
+            </message>"#
+        ))
+        .await
+        .expect("send reply to unknown target");
+    let echo = client
+        .recv_matching(|frame| frame.contains("orphan reply"))
+        .await
+        .expect("reply echo");
+    assert!(
+        echo.contains("urn:xmpp:reply:0"),
+        "reply payload missing: {echo}"
+    );
+    assert!(
+        !echo.contains("<item-not-found"),
+        "spec-non-conformant rejection: {echo}"
+    );
+
+    client.close().await;
+}

@@ -15,7 +15,7 @@ use waddle_xmpp::{
         ArchivedReference, ArchivedReply, ArchivedRetraction, ArchivedRichMessage,
         ArchivedRichPayload, RichMessageId, RichText, STANZA_ID_NS,
     },
-    muc::room_actor::BuildGroupchatBroadcast,
+    muc::room_actor::{BuildGroupchatBroadcast, GetNicknameGeneration, RoomActor},
     registry::{BroadcastOutcome, SendResult},
     xep::xep0430::build_inbox_push,
     xep::{
@@ -24,18 +24,21 @@ use waddle_xmpp::{
         is_moderation_request_message, is_moderation_result_message, is_reaction_message,
         is_retraction_message, is_sticker_message, message_has_direct_invite,
         parse_reply_from_message, remove_stanza_ids_by, should_skip_storage, RetractionKind,
-        NS_MESSAGE_CORRECT, NS_MESSAGE_RETRACT, NS_REACTIONS, NS_REPLY,
+        NS_EXPLICIT_MENTIONS, NS_MESSAGE_CORRECT, NS_MESSAGE_RETRACT, NS_REACTIONS, NS_REFERENCE,
+        NS_REPLY,
     },
     Stanza,
 };
 use xmpp_parsers::message::MessageType as XmppMessageType;
 use xmpp_parsers::minidom::Element;
+use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
 use super::super::{get_room_actor, stanza_to_xml, WebSocketState};
 use crate::auth::Session;
 use crate::db::blocking::DatabaseBlockingStorage;
 use crate::permissions::{CheckPermission, Object, ObjectType, Permission, Subject};
 use crate::server::bootstrap_membership::DEPLOYMENT_SERVER_ID;
+use kameo::actor::ActorRef;
 use waddle_xmpp::protocol::ConnectionPhase;
 
 pub async fn handle_message(
@@ -122,6 +125,7 @@ pub async fn handle_message(
         let sender_nick = broadcast.sender_nick;
         let mut local_messages = broadcast.messages;
         let occupant_bare_jids = broadcast.occupant_bare_jids;
+        let sender_nickname_generation = broadcast.sender_nickname_generation;
 
         let from_room_jid = format!("{}/{}", room_jid, sender_nick);
         if let Ok(from_jid) = from_room_jid.parse::<FullJid>() {
@@ -131,20 +135,39 @@ pub async fn handle_message(
         }
         prototype.to = None;
 
-        if let Some(error) =
-            validate_rich_message_targets(state, &room_jid.to_string(), &prototype, true).await
+        if let Err(error) =
+            validate_rich_message_targets(state, &room_jid, &prototype, true, Some(&room_actor))
+                .await
         {
             return vec![stanza_to_xml(&Stanza::Message(error_message(
                 &incoming,
                 &jid::Jid::from(room_jid.clone()),
                 &jid::Jid::from(sender_jid.clone()),
-                "modify",
                 error,
             )))];
         }
 
+        // XEP-0424 §"prevent further distribution… by replacing the
+        // original message with a tombstone": after authorization
+        // passes, mutate the room archive's original row in place.
+        if let Some(RetractionKind::Request(retraction)) =
+            extract_retraction_from_message(&prototype)
+        {
+            apply_retraction_tombstones(
+                state,
+                std::slice::from_ref(&room_jid),
+                &prototype,
+                &retraction.retracts_id,
+                Utc::now(),
+                true,
+            )
+            .await;
+        }
+
         // Archive body-bearing and rich protocol room messages in XMPP MAM storage.
-        let archive_id = archive_groupchat_message(state, &room_jid, &mut prototype).await;
+        let archive_id =
+            archive_groupchat_message(state, &room_jid, &mut prototype, sender_nickname_generation)
+                .await;
 
         if should_project_message(&prototype) {
             let timestamp = Utc::now().timestamp();
@@ -352,21 +375,35 @@ pub async fn handle_message(
                 .enrich_message(&mut prototype)
                 .await;
 
-            if let Some(error) = validate_rich_message_targets(
-                state,
-                &sender_jid.to_bare().to_string(),
-                &prototype,
-                false,
-            )
-            .await
+            if let Err(error) =
+                validate_rich_message_targets(state, &sender_jid.to_bare(), &prototype, false, None)
+                    .await
             {
                 return vec![stanza_to_xml(&Stanza::Message(error_message(
                     &incoming,
                     to_jid,
                     &jid::Jid::from(sender_jid.clone()),
-                    "modify",
                     error,
                 )))];
+            }
+
+            // XEP-0424 §"prevent further distribution": when a DM is a
+            // retraction request, tombstone the original in BOTH
+            // archives that hold it (sender's and recipient's
+            // personal MAM).
+            if let Some(RetractionKind::Request(retraction)) =
+                extract_retraction_from_message(&prototype)
+            {
+                let archives = [sender_jid.to_bare(), to_jid.to_bare()];
+                apply_retraction_tombstones(
+                    state,
+                    &archives,
+                    &prototype,
+                    &retraction.retracts_id,
+                    Utc::now(),
+                    false,
+                )
+                .await;
             }
 
             // Archive body-bearing DMs to both sender's and recipient's personal MAM.
@@ -494,8 +531,12 @@ fn forbidden_message_error(
         incoming,
         &jid::Jid::from(room_jid.clone()),
         &jid::Jid::from(sender_jid.clone()),
-        "auth",
-        "forbidden",
+        StanzaError::new(
+            ErrorType::Auth,
+            DefinedCondition::Forbidden,
+            "en",
+            "Sender is not permitted to address this resource.",
+        ),
     )
 }
 
@@ -503,30 +544,30 @@ fn error_message(
     incoming: &xmpp_parsers::message::Message,
     from: &jid::Jid,
     to: &jid::Jid,
-    error_type: &str,
-    condition: &str,
+    error: StanzaError,
 ) -> xmpp_parsers::message::Message {
-    let mut error = incoming.clone();
-    error.type_ = XmppMessageType::Error;
-    error.from = Some(from.clone());
-    error.to = Some(to.clone());
-    let stanza_error = Element::builder("error", "jabber:client")
-        .attr("type", error_type)
-        .append(Element::builder(condition, "urn:ietf:params:xml:ns:xmpp-stanzas").build())
-        .build();
-    error.payloads.push(stanza_error);
-    error
+    let mut reply = incoming.clone();
+    reply.type_ = XmppMessageType::Error;
+    reply.from = Some(from.clone());
+    reply.to = Some(to.clone());
+    reply.payloads.push(Element::from(error));
+    reply
 }
 
 async fn validate_rich_message_targets(
     state: &WebSocketState,
-    archive_jid: &str,
+    archive_jid: &BareJid,
     message: &xmpp_parsers::message::Message,
     groupchat: bool,
-) -> Option<&'static str> {
-    let sender = message.from.as_ref()?;
+    room_actor: Option<&ActorRef<RoomActor>>,
+) -> Result<(), StanzaError> {
+    let Some(sender) = message.from.as_ref() else {
+        return Ok(());
+    };
     if has_malformed_rich_payload(message) {
-        return Some("bad-request");
+        return Err(bad_request_error(
+            "Rich-message payload is missing required identifier.",
+        ));
     }
 
     if let Some(correction) = extract_correction_from_message(message) {
@@ -539,11 +580,16 @@ async fn validate_rich_message_targets(
         .await
         {
             Ok(Some(original)) => original,
-            Ok(None) => return Some("item-not-found"),
-            Err(_) => return Some("internal-server-error"),
+            Ok(None) => return Err(item_not_found_error("Correction target not found.")),
+            Err(_) => return Err(internal_server_error_for_lookup()),
         };
         if !same_rich_sender(sender, &original.from, groupchat) {
-            return Some("forbidden");
+            return Err(forbidden_error(
+                "Only the original sender may correct a message.",
+            ));
+        }
+        if groupchat {
+            verify_muc_occupancy_generation(sender, &original, room_actor).await?;
         }
     }
 
@@ -557,37 +603,193 @@ async fn validate_rich_message_targets(
         .await
         {
             Ok(Some(original)) => original,
-            Ok(None) => return Some("item-not-found"),
-            Err(_) => return Some("internal-server-error"),
+            Ok(None) => return Err(item_not_found_error("Retraction target not found.")),
+            Err(_) => return Err(internal_server_error_for_lookup()),
         };
         if !same_rich_sender(sender, &original.from, groupchat) {
-            return Some("forbidden");
+            return Err(forbidden_error(
+                "Only the original sender may retract a message.",
+            ));
         }
     }
 
-    if let Some(reactions) = extract_reactions_from_message(message) {
-        match lookup_rich_target_message(state, archive_jid, &reactions.message_id, groupchat).await
+    // Reactions (XEP-0444) and replies (XEP-0461) intentionally skip
+    // target-existence validation. Both specs are silent on
+    // server-side target verification — XEP-0444 §"It is up to
+    // receiving entities" and XEP-0461 placing no obligation on the
+    // server — and rejecting on missing target would break legitimate
+    // cases the server cannot disambiguate: cross-server messages
+    // (s2s), replies to messages before archive retention, reactions
+    // to messages cached by the client but not by the server. The
+    // well-formedness check above (`has_malformed_rich_payload`)
+    // already rejects malformed payloads with `<bad-request/>`.
+
+    Ok(())
+}
+
+/// Replace the retraction-target row in each given archive with a
+/// XEP-0424 tombstone. Called after `validate_rich_message_targets`
+/// has confirmed sender authorization. Failures are logged but do not
+/// propagate — the retraction message is still archived and broadcast,
+/// matching the spec's "best effort" framing for tombstones (the SHOULD
+/// is on archive distribution, not on the retraction itself).
+async fn apply_retraction_tombstones(
+    state: &WebSocketState,
+    archive_jids: &[BareJid],
+    retraction_message: &xmpp_parsers::message::Message,
+    target_id: &str,
+    stamp: chrono::DateTime<chrono::Utc>,
+    groupchat: bool,
+) {
+    let retraction_id = retraction_message
+        .id
+        .clone()
+        .and_then(waddle_xmpp::mam::RichMessageId::new);
+
+    for archive_jid in archive_jids {
+        let original = match lookup_retraction_target_message(
+            state,
+            archive_jid,
+            target_id,
+            groupchat,
+        )
+        .await
         {
-            Ok(Some(_)) => {}
-            Ok(None) => return Some("item-not-found"),
-            Err(_) => return Some("internal-server-error"),
+            Ok(Some(original)) => original,
+            Ok(None) => {
+                debug!(
+                    archive = %archive_jid,
+                    target = %target_id,
+                    "Retraction target not found in this archive; tombstone skipped"
+                );
+                continue;
+            }
+            Err(error) => {
+                warn!(
+                    archive = %archive_jid,
+                    target = %target_id,
+                    error = %error,
+                    "Failed to look up retraction target for tombstone"
+                );
+                continue;
+            }
+        };
+
+        let tombstone = waddle_xmpp::mam::ArchivedTombstone {
+            retraction_id: retraction_id.clone(),
+            stamp,
+            moderation: None,
+        };
+
+        match state
+            .deps
+            .protocol
+            .mam_storage
+            .replace_with_tombstone(&original.id, tombstone)
+            .await
+        {
+            Ok(true) => {
+                debug!(archive = %archive_jid, original_id = %original.id, "Replaced with tombstone")
+            }
+            Ok(false) => warn!(
+                archive = %archive_jid,
+                original_id = %original.id,
+                "Tombstone replacement found no row to update"
+            ),
+            Err(error) => warn!(
+                archive = %archive_jid,
+                original_id = %original.id,
+                error = %error,
+                "Tombstone replacement failed"
+            ),
         }
     }
+}
 
-    if let Some(reply) = parse_reply_from_message(message) {
-        match lookup_rich_target_message(state, archive_jid, &reply.id, groupchat).await {
-            Ok(Some(_)) => {}
-            Ok(None) => return Some("item-not-found"),
-            Err(_) => return Some("internal-server-error"),
-        }
+/// Enforce XEP-0308 §3 SHOULD #2: a full-JID that left the room and
+/// rejoined under the same nickname MUST NOT be allowed to correct
+/// messages from the previous occupancy. Implemented by comparing the
+/// per-nickname occupancy generation captured in the archived row
+/// (set at archive-write time from
+/// [`super::super::super::super::muc::room_actor::GroupchatBroadcastResult::sender_nickname_generation`])
+/// against the room's current generation for the same nickname.
+async fn verify_muc_occupancy_generation(
+    sender: &jid::Jid,
+    original: &waddle_xmpp::mam::ArchivedMessage,
+    room_actor: Option<&ActorRef<RoomActor>>,
+) -> Result<(), StanzaError> {
+    let Some(actor) = room_actor else {
+        // No room actor available — the correction handler caller did
+        // not supply one. This is a wiring bug; refuse rather than
+        // silently allow.
+        return Err(forbidden_error(
+            "Room state unavailable for occupancy continuity check.",
+        ));
+    };
+
+    let Some(nick) = sender.resource().map(|r| r.to_string()) else {
+        // Sender JID has no nickname (resource) — should not happen for
+        // a server-stamped MUC reflection, but bail safely.
+        return Err(forbidden_error(
+            "Correction sender has no MUC nickname for occupancy check.",
+        ));
+    };
+
+    let Some(archived_generation) = original.nickname_generation else {
+        // The original archive row predates occupancy-generation
+        // tracking (or was written by a non-MUC path). Per XEP-0308
+        // §3, we cannot prove continuity, so refuse.
+        return Err(forbidden_error(
+            "Original message predates occupancy tracking; correction window has closed.",
+        ));
+    };
+
+    let current_generation = match actor
+        .ask(GetNicknameGeneration { nick: nick.clone() })
+        .await
+    {
+        Ok(value) => value,
+        Err(_) => return Err(internal_server_error_for_lookup()),
+    };
+
+    if current_generation != archived_generation {
+        return Err(forbidden_error(
+            "Occupancy generation has advanced; correction is no longer permitted across the leave/rejoin boundary.",
+        ));
     }
 
-    None
+    Ok(())
+}
+
+fn bad_request_error(text: &str) -> StanzaError {
+    StanzaError::new(ErrorType::Modify, DefinedCondition::BadRequest, "en", text)
+}
+
+fn item_not_found_error(text: &str) -> StanzaError {
+    StanzaError::new(
+        ErrorType::Cancel,
+        DefinedCondition::ItemNotFound,
+        "en",
+        text,
+    )
+}
+
+fn forbidden_error(text: &str) -> StanzaError {
+    StanzaError::new(ErrorType::Auth, DefinedCondition::Forbidden, "en", text)
+}
+
+fn internal_server_error_for_lookup() -> StanzaError {
+    StanzaError::new(
+        ErrorType::Wait,
+        DefinedCondition::InternalServerError,
+        "en",
+        "Archive lookup failed while validating rich-message target.",
+    )
 }
 
 async fn lookup_correction_target_message(
     state: &WebSocketState,
-    archive_jid: &str,
+    archive_jid: &BareJid,
     target_id: &str,
     _groupchat: bool,
 ) -> Result<Option<ArchivedMessage>, waddle_xmpp::mam::MamStorageError> {
@@ -595,13 +797,13 @@ async fn lookup_correction_target_message(
         .deps
         .protocol
         .mam_storage
-        .get_message_by_message_id(archive_jid, target_id)
+        .get_message_by_message_id(&archive_jid.to_string(), target_id)
         .await
 }
 
 async fn lookup_retraction_target_message(
     state: &WebSocketState,
-    archive_jid: &str,
+    archive_jid: &BareJid,
     target_id: &str,
     groupchat: bool,
 ) -> Result<Option<ArchivedMessage>, waddle_xmpp::mam::MamStorageError> {
@@ -613,31 +815,32 @@ async fn lookup_retraction_target_message(
         .deps
         .protocol
         .mam_storage
-        .get_message_by_message_id(archive_jid, target_id)
+        .get_message_by_message_id(&archive_jid.to_string(), target_id)
         .await
 }
 
 async fn lookup_rich_target_message(
     state: &WebSocketState,
-    archive_jid: &str,
+    archive_jid: &BareJid,
     target_id: &str,
     groupchat: bool,
 ) -> Result<Option<ArchivedMessage>, waddle_xmpp::mam::MamStorageError> {
     if groupchat {
+        let archive_str = archive_jid.to_string();
         return state
             .deps
             .protocol
             .mam_storage
             .get_message(target_id)
             .await
-            .map(|message| message.filter(|message| message.to == archive_jid));
+            .map(|message| message.filter(|message| message.to == archive_str));
     }
 
     state
         .deps
         .protocol
         .mam_storage
-        .get_message_by_stanza_id(archive_jid, target_id)
+        .get_message_by_stanza_id(&archive_jid.to_string(), target_id)
         .await
 }
 
@@ -652,6 +855,8 @@ fn same_rich_sender(sender: &jid::Jid, original_from: &str, groupchat: bool) -> 
 
 fn has_malformed_rich_payload(message: &xmpp_parsers::message::Message) -> bool {
     message.payloads.iter().any(|payload| {
+        // XEP-0308 / 0424 / 0444 / 0461: each requires a non-empty 'id'
+        // attribute on its top-level element.
         (payload.ns() == NS_MESSAGE_CORRECT
             && payload.name() == "replace"
             && payload.attr("id").is_none_or(str::is_empty))
@@ -664,6 +869,20 @@ fn has_malformed_rich_payload(message: &xmpp_parsers::message::Message) -> bool 
             || (payload.ns() == NS_REPLY
                 && payload.name() == "reply"
                 && payload.attr("id").is_none_or(str::is_empty))
+            // XEP-0372: '<reference/>' MUST contain 'type' and 'uri'.
+            || (payload.ns() == NS_REFERENCE
+                && payload.name() == "reference"
+                && (payload.attr("type").is_none_or(str::is_empty)
+                    || payload.attr("uri").is_none_or(str::is_empty)))
+            // XEP-0513: a '<mention/>' MUST carry at least one of
+            // 'jid', 'occupantid', or 'mentions' so the receiver can
+            // identify the target. Pure decorative mentions are not
+            // useful and are likely client bugs.
+            || (payload.ns() == NS_EXPLICIT_MENTIONS
+                && payload.name() == "mention"
+                && payload.attr("jid").is_none_or(str::is_empty)
+                && payload.attr("occupantid").is_none_or(str::is_empty)
+                && payload.attr("mentions").is_none_or(str::is_empty))
     })
 }
 
@@ -775,6 +994,7 @@ async fn archive_groupchat_message(
     state: &WebSocketState,
     room_jid: &BareJid,
     message: &mut xmpp_parsers::message::Message,
+    sender_nickname_generation: u64,
 ) -> Option<String> {
     if !should_archive_groupchat_message(message) {
         return None;
@@ -809,6 +1029,7 @@ async fn archive_groupchat_message(
         message_type: mam_message_type(&message.type_),
         stanza_xml: None,
         rich,
+        nickname_generation: Some(sender_nickname_generation),
     };
 
     let archive_jid = room_jid.to_string();
@@ -864,6 +1085,7 @@ async fn archive_direct_message(
         message_type: mam_message_type(&message.type_),
         stanza_xml: None,
         rich,
+        nickname_generation: None,
     };
 
     // Store in sender's personal archive

@@ -151,11 +151,131 @@ async fn moderation_broadcasts_and_replays_from_mam() {
         .recv_until(|frame| frame.contains("mam-moderate") && frame.contains("<fin"))
         .await
         .expect("MAM frames");
-    let replay = frames
+
+    // The room archive now contains TWO rows for this moderation:
+    // 1. the original message replaced in place with a `<retracted>`
+    //    tombstone wrapping the moderator annotation, and
+    // 2. the moderation result message itself with a live `<retract>`
+    //    payload — which clients can use as the "moderation event"
+    //    timeline entry.
+    let live = frames
         .iter()
-        .find(|frame| frame.contains("urn:xmpp:message-moderate:1"))
-        .unwrap_or_else(|| panic!("MAM did not replay moderation: {frames:?}"));
-    assert_moderation_shape(replay, &target);
+        .find(|frame| {
+            frame.contains("<retract ")
+                && !frame.contains("<retracted ")
+                && frame.contains("urn:xmpp:message-moderate:1")
+        })
+        .unwrap_or_else(|| panic!("MAM did not replay live moderation event: {frames:?}"));
+    assert_moderation_shape(live, &target);
+
+    let tombstone = frames
+        .iter()
+        .find(|frame| {
+            frame.contains("<retracted ") && frame.contains("urn:xmpp:message-moderate:1")
+        })
+        .unwrap_or_else(|| panic!("MAM did not replay moderation tombstone: {frames:?}"));
+    let tombstone_element = tombstone.parse::<Element>().expect("valid tombstone XML");
+    let retracted = find_descendant(
+        &tombstone_element,
+        "retracted",
+        "urn:xmpp:message-retract:1",
+    )
+    .expect("retracted element");
+    let moderated = retracted
+        .get_child("moderated", "urn:xmpp:message-moderate:1")
+        .expect("moderated child on tombstone");
+    assert!(
+        moderated.attr("by").is_some_and(|by| by.contains("/admin")),
+        "tombstone moderated by missing admin nick: {tombstone}"
+    );
+    assert!(
+        retracted.attr("stamp").is_some(),
+        "tombstone must include stamp: {tombstone}"
+    );
+    assert!(
+        !tombstone.contains("<body>moderate me</body>"),
+        "tombstoned row must not leak the original body: {tombstone}"
+    );
 
     client.close().await;
+}
+
+#[tokio::test]
+async fn moderation_from_non_moderator_returns_forbidden() {
+    // XEP-0425 §"only moderators are allowed to moderate" plus
+    // XEP-0045 §5.1.2: runtime moderation privilege is role-bound.
+    // bob joins with no affiliation → role=visitor or participant; he
+    // attempts to moderate admin's message and must be refused with
+    // <forbidden/>.
+    let _guard = TEST_SERIAL.lock().await;
+    let bob_password = format!("ws-test-bob-password-{}", uuid::Uuid::new_v4());
+    let server = TestServer::start_with_extra_accounts(&[("bob", bob_password.as_str())]);
+    let admin_resource = format!("xep0425-admin-{}", uuid::Uuid::new_v4());
+    let admin_password = server.fixed_account_password().to_string();
+    let mut admin = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        USERNAME,
+        &admin_password,
+        &admin_resource,
+    )
+    .await
+    .expect("connect admin");
+    let bob_resource = format!("xep0425-bob-{}", uuid::Uuid::new_v4());
+    let mut bob = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "bob",
+        &bob_password,
+        &bob_resource,
+    )
+    .await
+    .expect("connect bob");
+
+    let room = format!("moderate-forbidden-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
+    join_room(&mut admin, &room).await;
+
+    bob.send(&format!(
+        r#"<presence to="{room}/bob"><x xmlns="http://jabber.org/protocol/muc"/></presence>"#
+    ))
+    .await
+    .expect("send bob join");
+    bob.recv_until(|frame| frame.contains("<subject"))
+        .await
+        .expect("bob join responses");
+
+    admin
+        .send(&format!(
+            r#"<message type="groupchat" to="{room}" id="orig-mod"><body>moderate me</body></message>"#
+        ))
+        .await
+        .expect("send original");
+    let echo = admin
+        .recv_matching(|frame| frame.contains("moderate me") && frame.contains("stanza-id"))
+        .await
+        .expect("original echo");
+    let target = stanza_id(&echo);
+
+    bob.send(&format!(
+        r#"<iq type="set" id="bob-mod" to="{room}">
+            <moderate id="{target}" xmlns="urn:xmpp:message-moderate:1">
+                <retract xmlns="urn:xmpp:message-retract:1"/>
+                <reason>nope</reason>
+            </moderate>
+        </iq>"#
+    ))
+    .await
+    .expect("send unauthorized moderation");
+
+    let error = bob
+        .recv_matching(|frame| frame.contains("bob-mod") && frame.contains("<forbidden"))
+        .await
+        .expect("forbidden error");
+    assert!(
+        error.contains("type=\"error\""),
+        "not an error stanza: {error}"
+    );
+
+    bob.close().await;
+    admin.close().await;
 }

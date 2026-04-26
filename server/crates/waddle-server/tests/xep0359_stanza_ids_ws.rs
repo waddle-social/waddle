@@ -3,7 +3,7 @@
 mod ws_common;
 
 use tokio::sync::Mutex;
-use ws_common::{TestServer, WsXmppClient};
+use ws_common::{disco_info_query, TestServer, WsXmppClient};
 
 const DOMAIN: &str = "localhost";
 const USERNAME: &str = "admin";
@@ -62,6 +62,39 @@ async fn room_replaces_spoofed_room_stanza_id_and_preserves_origin_id() {
         "spoofed room stanza-id leaked: {echo}"
     );
     assert!(echo.contains(&format!("by=\"{room}\"")) || echo.contains(&format!("by='{room}'")));
+
+    client.close().await;
+}
+
+#[tokio::test]
+async fn server_disco_advertises_rich_message_features() {
+    // The shared `server_features()` catalogue from `waddle-xmpp-core`
+    // must be reflected by the live server-disco IQ path so clients
+    // can discover XEP support. Without this, advertised behaviour
+    // is invisible to clients (the inverse of the project's
+    // "no advertise without behaviour" rule — equally bad).
+    let _guard = TEST_SERIAL.lock().await;
+    let (_server, mut client) = setup().await;
+
+    let response = disco_info_query(&mut client, DOMAIN, "rich-disco-1")
+        .await
+        .expect("disco#info response");
+
+    for ns in [
+        "urn:xmpp:sid:0",
+        "urn:xmpp:reply:0",
+        "urn:xmpp:message-correct:0",
+        "urn:xmpp:message-retract:1",
+        "urn:xmpp:reactions:0",
+        "urn:xmpp:reference:0",
+        "urn:xmpp:fallback:0",
+        "urn:xmpp:threads:0",
+    ] {
+        assert!(
+            response.contains(ns),
+            "server disco#info missing feature {ns}: {response}"
+        );
+    }
 
     client.close().await;
 }

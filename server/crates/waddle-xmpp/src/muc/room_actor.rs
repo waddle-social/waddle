@@ -44,6 +44,12 @@ pub struct GroupchatBroadcastResult {
     pub sender_nick: String,
     pub messages: Vec<OutboundMucMessage>,
     pub occupant_bare_jids: Vec<String>,
+    /// Per-XEP-0308 §3 occupancy generation for the sender's nickname
+    /// at the moment this broadcast was built. Stored alongside the
+    /// archive row so that later corrections can verify the sender is
+    /// still in the same occupancy session (i.e. the nickname has not
+    /// been left and re-claimed in the meantime).
+    pub sender_nickname_generation: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -443,11 +449,39 @@ impl kameo::message::Message<BuildGroupchatBroadcast> for RoomActor {
             .map(|jid| jid.to_bare().to_string())
             .collect();
 
+        let sender_nickname_generation = self
+            .room
+            .current_nickname_generation(&sender_nick)
+            .unwrap_or(0);
+
         Ok(GroupchatBroadcastResult {
             sender_nick,
             messages,
             occupant_bare_jids,
+            sender_nickname_generation,
         })
+    }
+}
+
+/// Query the current per-nickname occupancy generation. Returns 0 when
+/// the nickname has never been observed by this actor (e.g. after
+/// server restart, which closes the correction window for prior
+/// archive entries per XEP-0308 §3).
+pub struct GetNicknameGeneration {
+    pub nick: String,
+}
+
+impl kameo::message::Message<GetNicknameGeneration> for RoomActor {
+    type Reply = u64;
+
+    async fn handle(
+        &mut self,
+        msg: GetNicknameGeneration,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.room
+            .current_nickname_generation(&msg.nick)
+            .unwrap_or(0)
     }
 }
 
