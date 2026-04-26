@@ -180,6 +180,34 @@ async fn newly_created_space_is_administrable_by_creator() {
 }
 
 #[tokio::test]
+async fn server_owner_can_delete_a_spaces_node() {
+    let _serial = TEST_SERIAL.lock().await;
+    let server = TestServer::start();
+    let mut admin = admin_client(&server, "spaces-delete-1").await;
+    let node = format!("delete-{}", uuid::Uuid::new_v4());
+
+    // Create the node, then delete it via the owner namespace.
+    let create = iq_set_to(
+        &mut admin,
+        "spaces-delete-create",
+        SPACES_JID,
+        &format!(r#"<pubsub xmlns="{NS_PUBSUB}"><create node="{node}"/></pubsub>"#),
+    )
+    .await;
+    assert!(is_result(&create), "expected create result, got: {create}");
+
+    let resp = iq_set_to(
+        &mut admin,
+        "spaces-delete",
+        SPACES_JID,
+        &format!(r#"<pubsub xmlns="{NS_PUBSUB_OWNER}"><delete node="{node}"/></pubsub>"#),
+    )
+    .await;
+    assert!(is_result(&resp), "expected delete result, got: {resp}");
+    admin.close().await;
+}
+
+#[tokio::test]
 async fn non_owner_cannot_configure_general_space() {
     let _serial = TEST_SERIAL.lock().await;
     let alice_password = format!("alice-pass-{}", uuid::Uuid::new_v4());

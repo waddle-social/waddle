@@ -1675,7 +1675,17 @@ pub async fn handle_iq_with_conn_state(
             }
 
             PubSubRequest::DeleteNode { node } => {
-                if target_jid != user_jid {
+                let is_pep = is_pep_self_or_to(&iq, &target_jid, &user_jid);
+                if !crate::pubsub_authz::can_administer(
+                    &state.deps.protocol.pubsub_storage,
+                    &target_jid,
+                    &node,
+                    &user_jid,
+                    is_pep,
+                )
+                .await
+                .unwrap_or(false)
+                {
                     let error = build_pubsub_error(&iq, PubSubError::Forbidden);
                     return vec![iq_to_xml(error)];
                 }
@@ -4090,21 +4100,13 @@ async fn seed_spaces_node_owners(
     if owners.is_empty() {
         return;
     }
-    if let Err(error) = crate::spaces_pubsub_seed::seed_owners_on_node(
+    crate::spaces_pubsub_seed::seed_owners_on_node(
         &state.deps.protocol.pubsub_storage,
         spaces_jid,
         node,
         &owners,
     )
-    .await
-    {
-        warn!(
-            spaces = %spaces_jid,
-            node = %node,
-            error = %error,
-            "failed to seed Owner affiliations for newly-created Spaces node",
-        );
-    }
+    .await;
 }
 
 /// Write `channel:<channel_id>#parent → space:<space_node>#` so that all members

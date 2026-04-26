@@ -19,38 +19,33 @@ use waddle_xmpp::XmppError;
 /// `(spaces_jid, node)`. Idempotent: re-running over an existing Owner row
 /// is a no-op; an existing weaker affiliation is upgraded to Owner.
 ///
-/// Per-entity write failures are logged with `warn!` and do not abort the
-/// batch — the seed is a cache of a permission decision and can be repaired
-/// by the next reconcile pass.
+/// Existing `Outcast` rows are preserved — XEP-0060 §4.1 lists `outcast` as
+/// the explicit-deny affiliation, and the seed must not silently undo an
+/// administrator's manual ban.
+///
+/// Per-entity read/write failures are logged with `warn!` and do not abort
+/// the batch — the seed is a cache of a permission decision and can be
+/// repaired by the next reconcile pass.
 pub async fn seed_owners_on_node(
     storage: &Arc<dyn PubSubStorage>,
     spaces_jid: &BareJid,
     node: &str,
     entities: &[BareJid],
-) -> Result<(), XmppError> {
+) {
     for entity in entities {
-        if let Err(error) = storage
-            .set_affiliation(spaces_jid, node, entity, Affiliation::Owner)
-            .await
-        {
-            warn!(
-                spaces = %spaces_jid,
-                node = %node,
-                entity = %entity,
-                error = %error,
-                "failed to seed Owner affiliation on Spaces node",
-            );
-        }
+        seed_owner_one(storage, spaces_jid, node, entity).await;
     }
-    Ok(())
 }
 
 /// Write `Affiliation::Owner` for `entity` against every node owned by
 /// `spaces_jid`. Used at startup to mirror server-owner permissions across
 /// all existing Spaces nodes.
 ///
-/// Per-node write failures are logged with `warn!` and do not abort the
-/// batch.
+/// Existing `Outcast` rows are preserved (see [`seed_owners_on_node`]).
+///
+/// Per-node read/write failures are logged with `warn!` and do not abort
+/// the batch. A failure to enumerate nodes propagates as `Err` because the
+/// caller cannot proceed without the node list.
 pub async fn seed_owner_on_all_nodes(
     storage: &Arc<dyn PubSubStorage>,
     spaces_jid: &BareJid,
@@ -58,20 +53,51 @@ pub async fn seed_owner_on_all_nodes(
 ) -> Result<(), XmppError> {
     let nodes = storage.list_nodes(spaces_jid).await?;
     for node in &nodes {
-        if let Err(error) = storage
-            .set_affiliation(spaces_jid, node, entity, Affiliation::Owner)
-            .await
-        {
+        seed_owner_one(storage, spaces_jid, node, entity).await;
+    }
+    Ok(())
+}
+
+async fn seed_owner_one(
+    storage: &Arc<dyn PubSubStorage>,
+    spaces_jid: &BareJid,
+    node: &str,
+    entity: &BareJid,
+) {
+    match storage.get_affiliation(spaces_jid, node, entity).await {
+        Ok(Affiliation::Outcast) => {
+            warn!(
+                spaces = %spaces_jid,
+                node = %node,
+                entity = %entity,
+                "preserving existing outcast affiliation; not seeding Owner",
+            );
+            return;
+        }
+        Ok(_) => {}
+        Err(error) => {
             warn!(
                 spaces = %spaces_jid,
                 node = %node,
                 entity = %entity,
                 error = %error,
-                "failed to seed Owner affiliation on Spaces node",
+                "failed to read existing affiliation; skipping seed for this entity",
             );
+            return;
         }
     }
-    Ok(())
+    if let Err(error) = storage
+        .set_affiliation(spaces_jid, node, entity, Affiliation::Owner)
+        .await
+    {
+        warn!(
+            spaces = %spaces_jid,
+            node = %node,
+            entity = %entity,
+            error = %error,
+            "failed to seed Owner affiliation on Spaces node",
+        );
+    }
 }
 
 #[cfg(test)]
@@ -97,9 +123,7 @@ mod tests {
             .expect("create node");
         let owners = vec![jid("alice"), jid("bob")];
 
-        seed_owners_on_node(&storage, &spaces, "general", &owners)
-            .await
-            .expect("seed");
+        seed_owners_on_node(&storage, &spaces, "general", &owners).await;
 
         let alice_aff = storage
             .get_affiliation(&spaces, "general", &jid("alice"))
@@ -123,12 +147,8 @@ mod tests {
             .expect("create node");
         let owners = vec![jid("alice")];
 
-        seed_owners_on_node(&storage, &spaces, "general", &owners)
-            .await
-            .expect("seed first");
-        seed_owners_on_node(&storage, &spaces, "general", &owners)
-            .await
-            .expect("seed second");
+        seed_owners_on_node(&storage, &spaces, "general", &owners).await;
+        seed_owners_on_node(&storage, &spaces, "general", &owners).await;
 
         let aff = storage
             .get_affiliation(&spaces, "general", &jid("alice"))
@@ -155,15 +175,70 @@ mod tests {
             .await
             .expect("seed member");
 
-        seed_owners_on_node(&storage, &spaces, "general", &[jid("alice")])
-            .await
-            .expect("upgrade");
+        seed_owners_on_node(&storage, &spaces, "general", &[jid("alice")]).await;
 
         let aff = storage
             .get_affiliation(&spaces, "general", &jid("alice"))
             .await
             .expect("get aff");
         assert_eq!(aff, Affiliation::Owner);
+    }
+
+    #[tokio::test]
+    async fn seed_owners_on_node_preserves_existing_outcast() {
+        let storage: Arc<dyn PubSubStorage> = Arc::new(InMemoryPubSubStorage::new());
+        let spaces = spaces_jid();
+        storage
+            .get_or_create_node(&spaces, "general")
+            .await
+            .expect("create node");
+        storage
+            .set_affiliation(&spaces, "general", &jid("evil"), Affiliation::Outcast)
+            .await
+            .expect("set outcast");
+
+        seed_owners_on_node(&storage, &spaces, "general", &[jid("evil")]).await;
+
+        let aff = storage
+            .get_affiliation(&spaces, "general", &jid("evil"))
+            .await
+            .expect("get aff");
+        assert_eq!(
+            aff,
+            Affiliation::Outcast,
+            "outcast must not be silently upgraded to Owner",
+        );
+    }
+
+    #[tokio::test]
+    async fn seed_owner_on_all_nodes_preserves_existing_outcast() {
+        let storage: Arc<dyn PubSubStorage> = Arc::new(InMemoryPubSubStorage::new());
+        let spaces = spaces_jid();
+        for node in ["general", "engineering"] {
+            storage
+                .get_or_create_node(&spaces, node)
+                .await
+                .expect("create node");
+        }
+        storage
+            .set_affiliation(&spaces, "engineering", &jid("evil"), Affiliation::Outcast)
+            .await
+            .expect("set outcast");
+
+        seed_owner_on_all_nodes(&storage, &spaces, &jid("evil"))
+            .await
+            .expect("seed all");
+
+        let general_aff = storage
+            .get_affiliation(&spaces, "general", &jid("evil"))
+            .await
+            .expect("get general aff");
+        assert_eq!(general_aff, Affiliation::Owner);
+        let engineering_aff = storage
+            .get_affiliation(&spaces, "engineering", &jid("evil"))
+            .await
+            .expect("get engineering aff");
+        assert_eq!(engineering_aff, Affiliation::Outcast);
     }
 
     #[tokio::test]
@@ -191,6 +266,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn seed_owner_on_all_nodes_back_fills_pre_existing_node() {
+        // Models the regression #241 cares about: a Spaces node already exists
+        // (e.g. created before WADDLE_SERVER_OWNER_LOCALPARTS gained a new
+        // localpart) and the new owner needs an affiliation row back-filled.
+        let storage: Arc<dyn PubSubStorage> = Arc::new(InMemoryPubSubStorage::new());
+        let spaces = spaces_jid();
+        storage
+            .get_or_create_node(&spaces, "preexisting")
+            .await
+            .expect("create node");
+
+        seed_owner_on_all_nodes(&storage, &spaces, &jid("late-admin"))
+            .await
+            .expect("back-fill seed");
+
+        let aff = storage
+            .get_affiliation(&spaces, "preexisting", &jid("late-admin"))
+            .await
+            .expect("get aff");
+        assert_eq!(aff, Affiliation::Owner);
+    }
+
+    #[tokio::test]
     async fn seed_owner_on_all_nodes_with_no_nodes_is_noop() {
         let storage: Arc<dyn PubSubStorage> = Arc::new(InMemoryPubSubStorage::new());
         let spaces = spaces_jid();
@@ -209,9 +307,7 @@ mod tests {
             .await
             .expect("create node");
 
-        seed_owners_on_node(&storage, &spaces, "general", &[])
-            .await
-            .expect("seed empty");
+        seed_owners_on_node(&storage, &spaces, "general", &[]).await;
 
         let rows = storage
             .list_node_affiliations(&spaces, "general")
