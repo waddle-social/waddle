@@ -5,6 +5,9 @@
   title summarizes the intended work and whose description contains the plan.
   Make this the first action for all non-trivial tasks unless explicitly told
   not to.
+- When creating or editing PR descriptions with `gh`, pass multiline Markdown
+  with real newlines, never escaped `\n` sequences, and verify the rendered body
+  with `gh pr view` before moving on.
 - Always review your plan against the XEPS in ./xeps
     - If ./xeps doesn't exist, clone xsf/xeps into ./xeps
 - Divide work up, use sub-agents and role specific agents to achieve our task.
@@ -83,4 +86,3 @@ TypeScript 5.8.x; Bun 1.3.x: Follow standard conventions
 - Breaking changes by default: do not add backwards compatibility layers, migration shims, or legacy aliases unless explicitly requested.
 - Assume no production servers/users/data for this project; prioritize clean design over compatibility.
 - Keep the codebase clean: remove dead compatibility code immediately instead of preserving legacy paths.
-
