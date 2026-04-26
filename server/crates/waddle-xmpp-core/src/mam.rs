@@ -33,6 +33,104 @@ pub const DELAY_NS: &str = "urn:xmpp:delay";
 
 const CLIENT_NS: &str = "jabber:client";
 const REPLY_NS: &str = "urn:xmpp:reply:0";
+const MESSAGE_CORRECT_NS: &str = "urn:xmpp:message-correct:0";
+const MESSAGE_RETRACT_NS: &str = "urn:xmpp:message-retract:1";
+const MESSAGE_MODERATE_NS: &str = "urn:xmpp:message-moderate:1";
+const REACTIONS_NS: &str = "urn:xmpp:reactions:0";
+const REFERENCE_NS: &str = "urn:xmpp:reference:0";
+const MENTIONS_NS: &str = "urn:xmpp:mentions:0";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RichMessageId(pub String);
+
+impl RichMessageId {
+    pub fn new(value: impl Into<String>) -> Option<Self> {
+        let value = value.into();
+        (!value.trim().is_empty()).then_some(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RichText(pub String);
+
+impl RichText {
+    pub fn new(value: impl Into<String>) -> Option<Self> {
+        let value = value.into();
+        (!value.trim().is_empty()).then_some(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArchivedReply {
+    pub id: RichMessageId,
+    pub to: Option<Jid>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArchivedReference {
+    pub ref_type: RichText,
+    pub begin: Option<u32>,
+    pub end: Option<u32>,
+    pub uri: Option<RichText>,
+    pub anchor: Option<RichText>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArchivedMention {
+    pub begin: Option<u32>,
+    pub end: Option<u32>,
+    pub jid: Option<BareJid>,
+    pub occupant_id: Option<RichText>,
+    pub mentions: Option<RichText>,
+    pub uri: Option<RichText>,
+    pub active: bool,
+    pub noping: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArchivedReactionSet {
+    pub target_id: RichMessageId,
+    pub emojis: Vec<RichText>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArchivedRetraction {
+    pub target_id: RichMessageId,
+    pub stamp: Option<DateTime<Utc>>,
+    pub retraction_id: Option<RichMessageId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArchivedModeration {
+    pub target_id: RichMessageId,
+    pub moderated_by: Jid,
+    pub stamp: Option<DateTime<Utc>>,
+    pub reason: Option<RichText>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ArchivedRichPayload {
+    Correction { replaces_id: RichMessageId },
+    Retraction(ArchivedRetraction),
+    Moderation(ArchivedModeration),
+    Reactions(ArchivedReactionSet),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ArchivedRichMessage {
+    pub payload: Option<ArchivedRichPayload>,
+    pub reply: Option<ArchivedReply>,
+    pub references: Vec<ArchivedReference>,
+    pub mentions: Vec<ArchivedMention>,
+}
 
 /// Archived message metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,6 +160,8 @@ pub struct ArchivedMessage {
     pub message_type: String,
     /// Preserved full stanza XML for faithful replay of archived timeline events.
     pub stanza_xml: Option<String>,
+    /// Typed rich-message payload and annotations used to reconstruct XMPP payloads.
+    pub rich: Option<ArchivedRichMessage>,
 }
 
 fn default_message_type() -> String {
@@ -83,6 +183,7 @@ impl Default for ArchivedMessage {
             origin_id: None,
             message_type: default_message_type(),
             stanza_xml: None,
+            rich: None,
         }
     }
 }
@@ -297,9 +398,13 @@ fn parse_message_jid(to_jid: &str) -> Jid {
 }
 
 fn archived_inner_message(archived: &ArchivedMessage) -> Element {
+    if let Some(rich) = archived.rich.as_ref() {
+        return build_typed_inner_message(archived, rich);
+    }
+
     if let Some(stanza_xml) = archived.stanza_xml.as_deref() {
         match stanza_xml.parse::<Element>() {
-            Ok(element) => return element,
+            Ok(element) => return normalize_archived_inner_message(element, archived),
             Err(error) => {
                 warn!(
                     archive_id = %archived.id,
@@ -313,6 +418,166 @@ fn archived_inner_message(archived: &ArchivedMessage) -> Element {
     build_legacy_inner_message(archived)
 }
 
+fn normalize_archived_inner_message(element: Element, archived: &ArchivedMessage) -> Element {
+    if archived.message_type != "groupchat" || element.attr("to").is_none() {
+        return element;
+    }
+
+    if let Ok(mut message) = Message::try_from(element.clone()) {
+        message.to = None;
+        return Element::from(message);
+    }
+
+    element
+}
+
+fn build_typed_inner_message(archived: &ArchivedMessage, rich: &ArchivedRichMessage) -> Element {
+    let msg_type = if archived.message_type.is_empty() {
+        "chat"
+    } else {
+        archived.message_type.as_str()
+    };
+
+    let mut builder = Element::builder("message", CLIENT_NS)
+        .attr("from", &archived.from)
+        .attr("type", msg_type);
+    if msg_type != "groupchat" {
+        builder = builder.attr("to", &archived.to);
+    }
+
+    if let Some(stanza_id) = archived.stanza_id.as_deref() {
+        builder = builder.attr("id", stanza_id);
+    }
+    if !archived.body.is_empty() {
+        builder = builder.append(
+            Element::builder("body", CLIENT_NS)
+                .append(archived.body.clone())
+                .build(),
+        );
+    }
+    if let Some(thread_id) = archived.thread_id.as_deref() {
+        builder = builder.append(
+            Element::builder("thread", CLIENT_NS)
+                .append(thread_id)
+                .build(),
+        );
+    }
+    if let Some(origin_id) = archived.origin_id.as_deref() {
+        builder = builder.append(
+            Element::builder("origin-id", STANZA_ID_NS)
+                .attr("id", origin_id)
+                .build(),
+        );
+    }
+    if msg_type == "groupchat" && !archived.id.is_empty() && !archived.to.is_empty() {
+        builder = builder.append(
+            Element::builder("stanza-id", STANZA_ID_NS)
+                .attr("id", &archived.id)
+                .attr("by", &archived.to)
+                .build(),
+        );
+    }
+    if let Some(reply) = rich.reply.as_ref() {
+        let mut reply_builder = Element::builder("reply", REPLY_NS).attr("id", reply.id.as_str());
+        if let Some(to) = reply.to.as_ref() {
+            reply_builder = reply_builder.attr("to", to.to_string());
+        }
+        builder = builder.append(reply_builder.build());
+    }
+    for reference in &rich.references {
+        let mut reference_builder =
+            Element::builder("reference", REFERENCE_NS).attr("type", reference.ref_type.as_str());
+        if let Some(begin) = reference.begin {
+            reference_builder = reference_builder.attr("begin", begin.to_string());
+        }
+        if let Some(end) = reference.end {
+            reference_builder = reference_builder.attr("end", end.to_string());
+        }
+        if let Some(uri) = reference.uri.as_ref() {
+            reference_builder = reference_builder.attr("uri", uri.as_str());
+        }
+        if let Some(anchor) = reference.anchor.as_ref() {
+            reference_builder = reference_builder.attr("anchor", anchor.as_str());
+        }
+        builder = builder.append(reference_builder.build());
+    }
+    for mention in &rich.mentions {
+        let mut mention_elem = Element::builder("mention", MENTIONS_NS).build();
+        if let Some(begin) = mention.begin {
+            mention_elem.set_attr("begin", begin.to_string());
+        }
+        if let Some(end) = mention.end {
+            mention_elem.set_attr("end", end.to_string());
+        }
+        if let Some(jid) = mention.jid.as_ref() {
+            mention_elem.set_attr("jid", jid.to_string());
+        }
+        if let Some(occupant_id) = mention.occupant_id.as_ref() {
+            mention_elem.set_attr("occupantid", occupant_id.as_str());
+        }
+        if let Some(mentions) = mention.mentions.as_ref() {
+            mention_elem.set_attr("mentions", mentions.as_str());
+        }
+        if let Some(uri) = mention.uri.as_ref() {
+            mention_elem.set_attr("uri", uri.as_str());
+        }
+        if mention.active {
+            mention_elem.append_child(Element::builder("active", MENTIONS_NS).build());
+        }
+        if mention.noping {
+            mention_elem.append_child(Element::builder("noping", MENTIONS_NS).build());
+        }
+        builder = builder.append(mention_elem);
+    }
+
+    match rich.payload.as_ref() {
+        Some(ArchivedRichPayload::Correction { replaces_id }) => {
+            builder = builder.append(
+                Element::builder("replace", MESSAGE_CORRECT_NS)
+                    .attr("id", replaces_id.as_str())
+                    .build(),
+            );
+        }
+        Some(ArchivedRichPayload::Retraction(retraction)) => {
+            let retract_builder = Element::builder("retract", MESSAGE_RETRACT_NS)
+                .attr("id", retraction.target_id.as_str());
+            builder = builder.append(retract_builder.build());
+        }
+        Some(ArchivedRichPayload::Moderation(moderation)) => {
+            let moderated = Element::builder("moderated", MESSAGE_MODERATE_NS)
+                .attr("by", moderation.moderated_by.to_string())
+                .build();
+            let mut retract = Element::builder("retract", MESSAGE_RETRACT_NS)
+                .attr("id", moderation.target_id.as_str())
+                .append(moderated);
+            if let Some(reason) = moderation.reason.as_ref() {
+                retract = retract.append(
+                    Element::builder("reason", MESSAGE_RETRACT_NS)
+                        .append(reason.as_str())
+                        .build(),
+                );
+            }
+            builder = builder.append(retract.build());
+        }
+        Some(ArchivedRichPayload::Reactions(reactions)) => {
+            let mut reactions_elem = Element::builder("reactions", REACTIONS_NS)
+                .attr("id", reactions.target_id.as_str())
+                .build();
+            for emoji in &reactions.emojis {
+                reactions_elem.append_child(
+                    Element::builder("reaction", REACTIONS_NS)
+                        .append(emoji.as_str())
+                        .build(),
+                );
+            }
+            builder = builder.append(reactions_elem);
+        }
+        None => {}
+    }
+
+    builder.build()
+}
+
 fn build_legacy_inner_message(archived: &ArchivedMessage) -> Element {
     let msg_type = if archived.message_type.is_empty() {
         "chat"
@@ -322,8 +587,10 @@ fn build_legacy_inner_message(archived: &ArchivedMessage) -> Element {
 
     let mut builder = Element::builder("message", CLIENT_NS)
         .attr("from", &archived.from)
-        .attr("to", &archived.to)
         .attr("type", msg_type);
+    if msg_type != "groupchat" {
+        builder = builder.attr("to", &archived.to);
+    }
 
     if let Some(stanza_id) = archived.stanza_id.as_deref() {
         builder = builder.attr("id", stanza_id);
@@ -353,6 +620,14 @@ fn build_legacy_inner_message(archived: &ArchivedMessage) -> Element {
         builder = builder.append(
             Element::builder("origin-id", STANZA_ID_NS)
                 .attr("id", origin_id)
+                .build(),
+        );
+    }
+    if msg_type == "groupchat" && !archived.id.is_empty() && !archived.to.is_empty() {
+        builder = builder.append(
+            Element::builder("stanza-id", STANZA_ID_NS)
+                .attr("id", &archived.id)
+                .attr("by", &archived.to)
                 .build(),
         );
     }

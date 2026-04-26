@@ -14,7 +14,11 @@ use waddle_xmpp::{
     },
     inbox::runtime::filter_query,
     isr::{build_isr_token_error, build_isr_token_result, is_isr_token_request, IsrToken, ISR_NS},
-    mam::{build_fin_iq, build_result_messages, is_mam_query, parse_mam_query},
+    mam::{
+        add_stanza_id as add_mam_stanza_id, build_fin_iq, build_result_messages, is_mam_query,
+        parse_mam_query, ArchivedMessage, ArchivedModeration, ArchivedRichMessage,
+        ArchivedRichPayload, RichMessageId, RichText,
+    },
     muc::{
         admin::{
             build_admin_result, build_admin_set_result, build_role_result, is_muc_admin_iq,
@@ -48,11 +52,11 @@ use waddle_xmpp::{
     },
     xep::{
         build_command_items, build_command_result, build_last_activity_response,
-        build_search_response, build_server_role_form, build_spaces_metadata_form,
-        build_spaces_metadata_form_for_requester, is_last_activity_query, is_search_request,
-        is_time_query, is_version_query, parse_command_from_iq, parse_search_request,
-        ChannelResult, Command, CommandStatus, Searchable, SpaceAffiliation, NODE_COMMANDS,
-        NS_CHANNEL_SEARCH,
+        build_moderation_result_message, build_search_response, build_server_role_form,
+        build_spaces_metadata_form, build_spaces_metadata_form_for_requester,
+        is_last_activity_query, is_search_request, is_time_query, is_version_query,
+        parse_command_from_iq, parse_moderation_iq, parse_search_request, ChannelResult, Command,
+        CommandStatus, Searchable, SpaceAffiliation, NODE_COMMANDS, NS_CHANNEL_SEARCH,
     },
     Affiliation, SpaceDetails, Stanza, StanzaErrorCondition, StanzaErrorType, XmppError,
 };
@@ -799,6 +803,179 @@ pub async fn handle_iq_with_conn_state(
             response_to,
             None,
         )];
+    }
+
+    if let Some(request) = parse_moderation_iq(&iq) {
+        let Some(sender_jid) = phase.bound_jid() else {
+            return vec![build_iq_error_xml_with_addresses(
+                &id,
+                response_from,
+                response_to,
+                "auth",
+                "not-authorized",
+            )];
+        };
+        let Some(room_jid) = iq.to.as_ref().map(|jid| jid.to_bare()) else {
+            return vec![build_iq_error_xml_with_addresses(
+                &id,
+                response_from,
+                response_to,
+                "modify",
+                "bad-request",
+            )];
+        };
+        let Some(room_actor) = get_room_actor(state, &room_jid).await else {
+            return vec![build_iq_error_xml_with_addresses(
+                &id,
+                response_from,
+                response_to,
+                "cancel",
+                "item-not-found",
+            )];
+        };
+        let context = match room_actor
+            .ask(GetAdminContext {
+                sender_jid: sender_jid.clone(),
+            })
+            .await
+        {
+            Ok(context) => context,
+            Err(_) => {
+                return vec![build_iq_error_xml_with_addresses(
+                    &id,
+                    response_from,
+                    response_to,
+                    "wait",
+                    "internal-server-error",
+                )]
+            }
+        };
+        let is_moderator = matches!(context.affiliation, Affiliation::Owner | Affiliation::Admin)
+            || matches!(context.role, waddle_xmpp::Role::Moderator);
+        if !is_moderator {
+            return vec![build_iq_error_xml_with_addresses(
+                &id,
+                response_from,
+                response_to,
+                "auth",
+                "forbidden",
+            )];
+        }
+        match state
+            .deps
+            .protocol
+            .mam_storage
+            .get_message(&request.target_id)
+            .await
+        {
+            Ok(Some(message)) if message.to == room_jid.to_string() => {}
+            Ok(Some(_)) => {
+                return vec![build_iq_error_xml_with_addresses(
+                    &id,
+                    response_from,
+                    response_to,
+                    "cancel",
+                    "item-not-found",
+                )]
+            }
+            Ok(None) => {
+                return vec![build_iq_error_xml_with_addresses(
+                    &id,
+                    response_from,
+                    response_to,
+                    "cancel",
+                    "item-not-found",
+                )]
+            }
+            Err(error) => {
+                warn!(room = %room_jid, target = %request.target_id, error = %error, "Failed to look up moderation target");
+                return vec![build_iq_error_xml_with_addresses(
+                    &id,
+                    response_from,
+                    response_to,
+                    "wait",
+                    "internal-server-error",
+                )];
+            }
+        }
+
+        let moderator_nick = context
+            .nick
+            .unwrap_or_else(|| sender_jid.resource().to_string());
+        let moderated_by = format!("{room_jid}/{moderator_nick}");
+        let stamp_time = chrono::Utc::now();
+        let stamp = stamp_time.to_rfc3339();
+        let mut moderation = build_moderation_result_message(
+            Some(jid::Jid::from(room_jid.clone())),
+            &request.target_id,
+            &moderated_by,
+            &stamp,
+            request.reason.as_deref(),
+        );
+        let archive_id = uuid::Uuid::now_v7().to_string();
+        add_mam_stanza_id(&mut moderation, archive_id.as_str(), &room_jid.to_string());
+
+        if let (Some(target_id), Ok(moderator_jid)) = (
+            RichMessageId::new(request.target_id.clone()),
+            moderated_by.parse::<Jid>(),
+        ) {
+            let archived = ArchivedMessage {
+                id: archive_id,
+                timestamp: chrono::Utc::now(),
+                from: room_jid.to_string(),
+                to: room_jid.to_string(),
+                body: String::new(),
+                stanza_id: moderation.id.clone(),
+                thread_id: None,
+                reply_to_id: None,
+                reply_to_jid: None,
+                origin_id: None,
+                message_type: "groupchat".to_string(),
+                stanza_xml: None,
+                rich: Some(ArchivedRichMessage {
+                    payload: Some(ArchivedRichPayload::Moderation(ArchivedModeration {
+                        target_id,
+                        moderated_by: moderator_jid,
+                        stamp: Some(stamp_time),
+                        reason: request.reason.as_deref().and_then(RichText::new),
+                    })),
+                    reply: None,
+                    references: Vec::new(),
+                    mentions: Vec::new(),
+                }),
+            };
+            if let Err(error) = state
+                .deps
+                .protocol
+                .mam_storage
+                .store_message(&room_jid.to_string(), &archived)
+                .await
+            {
+                warn!(room = %room_jid, target = %request.target_id, error = %error, "Failed to archive moderation event");
+            }
+        }
+
+        let mut frames = Vec::new();
+        if let Ok(snapshot) = room_actor.ask(GetSnapshot).await {
+            for occupant in snapshot.room.occupants.values() {
+                for occupant_jid in snapshot.room.get_occupant_sessions(&occupant.nick) {
+                    let mut outbound = moderation.clone();
+                    outbound.to = Some(jid::Jid::from(occupant_jid.clone()));
+                    if occupant_jid == *sender_jid {
+                        frames.push(stanza_to_xml(&Stanza::Message(outbound)));
+                        continue;
+                    }
+                    let _ = state
+                        .deps
+                        .protocol
+                        .connection_registry
+                        .try_send_to(&occupant_jid, Stanza::Message(outbound));
+                }
+            }
+        }
+
+        frames.push(build_iq_result_xml(&id, response_from, response_to, None));
+        return frames;
     }
 
     // MAM (Message Archive Management) query

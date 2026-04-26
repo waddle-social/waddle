@@ -39,6 +39,7 @@
 //! - Broadcast to all occupants
 
 use minidom::Element;
+use xmpp_parsers::iq::{Iq, IqType};
 use xmpp_parsers::message::Message;
 
 /// Namespace for XEP-0425 Message Moderation.
@@ -57,6 +58,29 @@ pub struct ModerationRequest {
     pub target_id: String,
     /// Optional reason for the moderation action.
     pub reason: Option<String>,
+}
+
+/// Parse a current XEP-0425 IQ moderation request:
+/// `<iq type='set'><moderate id='stanza-id'><retract/><reason/></moderate></iq>`.
+pub fn parse_moderation_iq(iq: &Iq) -> Option<ModerationRequest> {
+    let moderate = match &iq.payload {
+        IqType::Set(elem) if elem.name() == "moderate" && elem.ns() == NS_MESSAGE_MODERATE => elem,
+        _ => return None,
+    };
+    let target_id = moderate.attr("id").filter(|value| !value.is_empty())?;
+    moderate
+        .children()
+        .find(|child| child.name() == "retract" && child.ns() == NS_RETRACT)?;
+    let reason = moderate
+        .children()
+        .find(|child| child.name() == "reason" && child.ns() == NS_MESSAGE_MODERATE)
+        .map(|child| child.text())
+        .filter(|value| !value.trim().is_empty());
+
+    Some(ModerationRequest {
+        target_id: target_id.to_owned(),
+        reason,
+    })
 }
 
 impl ModerationRequest {
@@ -137,120 +161,40 @@ pub fn is_moderation_result_message(msg: &Message) -> bool {
 // ── Extraction ───────────────────────────────────────────────────────
 
 /// Extract a moderation request from a message.
-pub fn extract_moderation_request(msg: &Message) -> Option<ModerationRequest> {
-    let apply_to = msg
-        .payloads
-        .iter()
-        .find(|e| e.name() == "apply-to" && e.ns() == NS_FASTEN)?;
-
-    let target_id = apply_to.attr("id").filter(|s| !s.is_empty())?.to_owned();
-
-    let moderate = apply_to
-        .children()
-        .find(|c| c.name() == "moderate" && c.ns() == NS_MESSAGE_MODERATE)?;
-
-    let reason = moderate
-        .children()
-        .find(|c| c.name() == "reason")
-        .map(|c| c.text())
-        .filter(|t| !t.is_empty());
-
-    Some(ModerationRequest { target_id, reason })
+pub fn extract_moderation_request(_msg: &Message) -> Option<ModerationRequest> {
+    None
 }
 
 /// Extract a moderation result from a message.
 pub fn extract_moderation_result(msg: &Message) -> Option<ModerationResult> {
-    let apply_to = msg
+    if let Some(retract) = msg
         .payloads
         .iter()
-        .find(|e| e.name() == "apply-to" && e.ns() == NS_FASTEN)?;
+        .find(|e| e.name() == "retract" && e.ns() == NS_RETRACT)
+    {
+        let target_id = retract.attr("id").filter(|s| !s.is_empty())?.to_owned();
+        let moderated = retract
+            .children()
+            .find(|c| c.name() == "moderated" && c.ns() == NS_MESSAGE_MODERATE)?;
+        let moderated_by = moderated.attr("by").filter(|s| !s.is_empty())?.to_owned();
+        let reason = retract
+            .children()
+            .find(|c| c.name() == "reason" && c.ns() == NS_RETRACT)
+            .map(|c| c.text())
+            .filter(|t| !t.is_empty());
 
-    let target_id = apply_to.attr("id").filter(|s| !s.is_empty())?.to_owned();
+        return Some(ModerationResult {
+            target_id,
+            moderated_by,
+            stamp: String::new(),
+            reason,
+        });
+    }
 
-    let moderated = apply_to
-        .children()
-        .find(|c| c.name() == "moderated" && c.ns() == NS_MESSAGE_MODERATE)?;
-
-    let moderated_by = moderated.attr("by").filter(|s| !s.is_empty())?.to_owned();
-
-    let stamp = moderated
-        .children()
-        .find(|c| c.name() == "retracted" && c.ns() == NS_RETRACT)
-        .and_then(|c| c.attr("stamp"))
-        .unwrap_or("")
-        .to_owned();
-
-    let reason = moderated
-        .children()
-        .find(|c| c.name() == "reason")
-        .map(|c| c.text())
-        .filter(|t| !t.is_empty());
-
-    Some(ModerationResult {
-        target_id,
-        moderated_by,
-        stamp,
-        reason,
-    })
+    None
 }
 
 // ── Building ─────────────────────────────────────────────────────────
-
-/// Build a moderation request message.
-pub fn build_moderation_request(
-    to: impl Into<Option<jid::Jid>>,
-    request: &ModerationRequest,
-) -> Message {
-    let mut msg = Message::new(to.into());
-    msg.type_ = xmpp_parsers::message::MessageType::Groupchat;
-    msg.id = Some(uuid::Uuid::new_v4().to_string());
-    msg.payloads.push(build_moderation_request_element(request));
-    msg
-}
-
-/// Build the `<apply-to>/<moderate>` element for a moderation request.
-pub fn build_moderation_request_element(request: &ModerationRequest) -> Element {
-    let mut moderate = Element::builder("moderate", NS_MESSAGE_MODERATE).build();
-    moderate.append_child(Element::builder("retract", NS_RETRACT).build());
-    if let Some(ref reason) = request.reason {
-        let mut reason_elem = Element::builder("reason", NS_MESSAGE_MODERATE).build();
-        reason_elem.append_text_node(reason);
-        moderate.append_child(reason_elem);
-    }
-
-    Element::builder("apply-to", NS_FASTEN)
-        .attr("id", request.target_id.as_str())
-        .append(moderate)
-        .build()
-}
-
-/// Build the `<apply-to>/<moderated>` element for a moderation result (server broadcast).
-pub fn build_moderation_result_element(
-    target_id: &str,
-    moderated_by: &str,
-    stamp: &str,
-    reason: Option<&str>,
-) -> Element {
-    let retracted = Element::builder("retracted", NS_RETRACT)
-        .attr("stamp", stamp)
-        .build();
-
-    let mut moderated = Element::builder("moderated", NS_MESSAGE_MODERATE)
-        .attr("by", moderated_by)
-        .build();
-    moderated.append_child(retracted);
-
-    if let Some(reason_text) = reason {
-        let mut reason_elem = Element::builder("reason", NS_MESSAGE_MODERATE).build();
-        reason_elem.append_text_node(reason_text);
-        moderated.append_child(reason_elem);
-    }
-
-    Element::builder("apply-to", NS_FASTEN)
-        .attr("id", target_id)
-        .append(moderated)
-        .build()
-}
 
 /// Build a complete moderation result message for broadcasting.
 pub fn build_moderation_result_message(
@@ -264,7 +208,7 @@ pub fn build_moderation_result_message(
     msg.from = from_room.into();
     msg.type_ = xmpp_parsers::message::MessageType::Groupchat;
     msg.id = Some(uuid::Uuid::new_v4().to_string());
-    msg.payloads.push(build_moderation_result_element(
+    msg.payloads.push(build_moderated_retract_element(
         target_id,
         moderated_by,
         stamp,
@@ -273,42 +217,63 @@ pub fn build_moderation_result_message(
     msg
 }
 
+/// Build the current XEP-0425 broadcast payload:
+/// `<retract id='target'><moderated by='moderator'/><reason>...</reason></retract>`.
+pub fn build_moderated_retract_element(
+    target_id: &str,
+    moderated_by: &str,
+    stamp: &str,
+    reason: Option<&str>,
+) -> Element {
+    let moderated = Element::builder("moderated", NS_MESSAGE_MODERATE)
+        .attr("by", moderated_by)
+        .build();
+    let mut retract = Element::builder("retract", NS_RETRACT)
+        .attr("id", target_id)
+        .append(moderated);
+    if let Some(reason_text) = reason {
+        retract = retract.append(
+            Element::builder("reason", NS_RETRACT)
+                .append(reason_text)
+                .build(),
+        );
+    }
+
+    let _ = stamp;
+    retract.build()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use xmpp_parsers::iq::Iq;
     use xmpp_parsers::message::{Message, MessageType};
 
     #[test]
     fn test_parse_moderation_request() {
-        let xml = "<message xmlns='jabber:client' type='groupchat'>\
-                    <apply-to xmlns='urn:xmpp:fasten:0' id='target-1'>\
-                      <moderate xmlns='urn:xmpp:message-moderate:1'>\
-                        <retract xmlns='urn:xmpp:message-retract:1'/>\
-                        <reason>Spam</reason>\
-                      </moderate>\
-                    </apply-to>\
-                    </message>";
-        let msg =
-            Message::try_from(xml.parse::<Element>().expect("valid xml")).expect("valid message");
+        let xml = "<iq xmlns='jabber:client' type='set' id='mod-1'>\
+                    <moderate xmlns='urn:xmpp:message-moderate:1' id='target-1'>\
+                      <retract xmlns='urn:xmpp:message-retract:1'/>\
+                      <reason>Spam</reason>\
+                    </moderate>\
+                   </iq>";
+        let iq = Iq::try_from(xml.parse::<Element>().expect("valid xml")).expect("valid iq");
 
-        let req = extract_moderation_request(&msg).expect("has request");
+        let req = parse_moderation_iq(&iq).expect("has request");
         assert_eq!(req.target_id, "target-1");
         assert_eq!(req.reason.as_deref(), Some("Spam"));
     }
 
     #[test]
     fn test_parse_moderation_request_no_reason() {
-        let xml = "<message xmlns='jabber:client' type='groupchat'>\
-                    <apply-to xmlns='urn:xmpp:fasten:0' id='target-2'>\
-                      <moderate xmlns='urn:xmpp:message-moderate:1'>\
-                        <retract xmlns='urn:xmpp:message-retract:1'/>\
-                      </moderate>\
-                    </apply-to>\
-                    </message>";
-        let msg =
-            Message::try_from(xml.parse::<Element>().expect("valid xml")).expect("valid message");
+        let xml = "<iq xmlns='jabber:client' type='set' id='mod-2'>\
+                    <moderate xmlns='urn:xmpp:message-moderate:1' id='target-2'>\
+                      <retract xmlns='urn:xmpp:message-retract:1'/>\
+                    </moderate>\
+                   </iq>";
+        let iq = Iq::try_from(xml.parse::<Element>().expect("valid xml")).expect("valid iq");
 
-        let req = extract_moderation_request(&msg).expect("has request");
+        let req = parse_moderation_iq(&iq).expect("has request");
         assert_eq!(req.target_id, "target-2");
         assert_eq!(req.reason, None);
     }
@@ -316,12 +281,10 @@ mod tests {
     #[test]
     fn test_parse_moderation_result() {
         let xml = "<message xmlns='jabber:client' type='groupchat'>\
-                    <apply-to xmlns='urn:xmpp:fasten:0' id='target-1'>\
-                      <moderated xmlns='urn:xmpp:message-moderate:1' by='room@muc.example.com/modnick'>\
-                        <retracted xmlns='urn:xmpp:message-retract:1' stamp='2024-06-01T12:00:00Z'/>\
-                        <reason>Spam</reason>\
-                      </moderated>\
-                    </apply-to>\
+                    <retract xmlns='urn:xmpp:message-retract:1' id='target-1'>\
+                      <moderated xmlns='urn:xmpp:message-moderate:1' by='room@muc.example.com/modnick'/>\
+                      <reason>Spam</reason>\
+                    </retract>\
                     </message>";
         let msg =
             Message::try_from(xml.parse::<Element>().expect("valid xml")).expect("valid message");
@@ -329,7 +292,7 @@ mod tests {
         let result = extract_moderation_result(&msg).expect("has result");
         assert_eq!(result.target_id, "target-1");
         assert_eq!(result.moderated_by, "room@muc.example.com/modnick");
-        assert_eq!(result.stamp, "2024-06-01T12:00:00Z");
+        assert_eq!(result.stamp, "");
         assert_eq!(result.reason.as_deref(), Some("Spam"));
     }
 
@@ -341,19 +304,8 @@ mod tests {
     }
 
     #[test]
-    fn test_build_moderation_request() {
-        let req = ModerationRequest::new("msg-42").with_reason("Off-topic");
-        let msg = build_moderation_request("room@muc.example.com".parse::<jid::Jid>().ok(), &req);
-
-        assert_eq!(msg.type_, MessageType::Groupchat);
-        let parsed = extract_moderation_request(&msg).expect("parseable");
-        assert_eq!(parsed.target_id, "msg-42");
-        assert_eq!(parsed.reason.as_deref(), Some("Off-topic"));
-    }
-
-    #[test]
     fn test_build_moderation_result() {
-        let elem = build_moderation_result_element(
+        let elem = build_moderated_retract_element(
             "msg-42",
             "room@muc.example.com/admin",
             "2024-06-01T12:00:00Z",
@@ -398,19 +350,17 @@ mod tests {
         let msg =
             Message::try_from(xml.parse::<Element>().expect("valid xml")).expect("valid message");
 
-        assert!(msg.is_moderation_request());
+        assert!(!msg.is_moderation_request());
         assert!(!msg.is_moderation_result());
-        assert!(msg.has_moderation());
+        assert!(!msg.has_moderation());
     }
 
     #[test]
     fn test_moderation_carrier_trait_result() {
         let xml = "<message xmlns='jabber:client' type='groupchat'>\
-                    <apply-to xmlns='urn:xmpp:fasten:0' id='t-1'>\
-                      <moderated xmlns='urn:xmpp:message-moderate:1' by='mod@room'>\
-                        <retracted xmlns='urn:xmpp:message-retract:1' stamp='2024-01-01T00:00:00Z'/>\
-                      </moderated>\
-                    </apply-to>\
+                    <retract xmlns='urn:xmpp:message-retract:1' id='t-1'>\
+                      <moderated xmlns='urn:xmpp:message-moderate:1' by='mod@room'/>\
+                    </retract>\
                     </message>";
         let msg =
             Message::try_from(xml.parse::<Element>().expect("valid xml")).expect("valid message");

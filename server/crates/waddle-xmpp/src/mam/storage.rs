@@ -80,6 +80,27 @@ pub trait MamStorage: Send + Sync {
         archive_id: &str,
     ) -> Result<Option<ArchivedMessage>, MamStorageError>;
 
+    /// Get a single message by its original message/stanza id inside an archive.
+    async fn get_message_by_stanza_id(
+        &self,
+        archive_jid: &str,
+        stanza_id: &str,
+    ) -> Result<Option<ArchivedMessage>, MamStorageError>;
+
+    /// Get a message by its wire message id inside an archive.
+    async fn get_message_by_message_id(
+        &self,
+        archive_jid: &str,
+        message_id: &str,
+    ) -> Result<Option<ArchivedMessage>, MamStorageError>;
+
+    /// Get a message by server archive id or stanza id, excluding client origin-id.
+    async fn get_message_by_archive_or_stanza_id(
+        &self,
+        archive_jid: &str,
+        stanza_id: &str,
+    ) -> Result<Option<ArchivedMessage>, MamStorageError>;
+
     /// Get the total count of messages in an archive (for RSM).
     async fn count_messages(&self, room_jid: &str) -> Result<u32, MamStorageError>;
 
@@ -197,6 +218,51 @@ impl MamStorage for InMemoryMamStorage {
             .map(|(_, message)| message.clone()))
     }
 
+    async fn get_message_by_stanza_id(
+        &self,
+        archive_jid: &str,
+        stanza_id: &str,
+    ) -> Result<Option<ArchivedMessage>, MamStorageError> {
+        let entries = self.entries.read().await;
+        Ok(entries
+            .iter()
+            .find(|(jid, message)| {
+                jid == archive_jid
+                    && (message.stanza_id.as_deref() == Some(stanza_id)
+                        || message.origin_id.as_deref() == Some(stanza_id))
+            })
+            .map(|(_, message)| message.clone()))
+    }
+
+    async fn get_message_by_message_id(
+        &self,
+        archive_jid: &str,
+        message_id: &str,
+    ) -> Result<Option<ArchivedMessage>, MamStorageError> {
+        let entries = self.entries.read().await;
+        Ok(entries
+            .iter()
+            .find(|(jid, message)| {
+                jid == archive_jid && message.stanza_id.as_deref() == Some(message_id)
+            })
+            .map(|(_, message)| message.clone()))
+    }
+
+    async fn get_message_by_archive_or_stanza_id(
+        &self,
+        archive_jid: &str,
+        stanza_id: &str,
+    ) -> Result<Option<ArchivedMessage>, MamStorageError> {
+        let entries = self.entries.read().await;
+        Ok(entries
+            .iter()
+            .find(|(jid, message)| {
+                jid == archive_jid
+                    && (message.id == stanza_id || message.stanza_id.as_deref() == Some(stanza_id))
+            })
+            .map(|(_, message)| message.clone()))
+    }
+
     async fn count_messages(&self, room_jid: &str) -> Result<u32, MamStorageError> {
         let entries = self.entries.read().await;
         Ok(entries.iter().filter(|(jid, _)| jid == room_jid).count() as u32)
@@ -275,9 +341,16 @@ impl SqlxMamStorage {
 
     async fn initialize(&self) -> Result<(), MamStorageError> {
         match &self.backend {
-            MamDatabaseBackend::Sqlite(pool) => execute_sqlite_batch(pool, SQLITE_MAM_SCHEMA).await,
+            MamDatabaseBackend::Sqlite(pool) => {
+                execute_sqlite_batch(pool, SQLITE_MAM_SCHEMA).await?;
+                ensure_sqlite_rich_payload_column(pool).await
+            }
             MamDatabaseBackend::Postgres(pool) => {
-                execute_postgres_batch(pool, POSTGRES_MAM_SCHEMA).await
+                execute_postgres_batch(pool, POSTGRES_MAM_SCHEMA).await?;
+                sqlx::query("ALTER TABLE mam_messages ADD COLUMN IF NOT EXISTS rich_payload TEXT")
+                    .execute(pool)
+                    .await?;
+                Ok(())
             }
         }
     }
@@ -288,7 +361,7 @@ impl SqlxMamStorage {
 }
 
 const SELECT_COLUMNS: &str =
-    "id, room_jid, timestamp, from_jid, to_jid, body, stanza_id, thread_id, reply_to_id, reply_to_jid, origin_id, message_type, stanza_xml";
+    "id, room_jid, timestamp, from_jid, to_jid, body, stanza_id, thread_id, reply_to_id, reply_to_jid, origin_id, message_type, stanza_xml, rich_payload";
 
 const SQLITE_MAM_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS mam_messages (
@@ -305,6 +378,7 @@ CREATE TABLE IF NOT EXISTS mam_messages (
     origin_id TEXT,
     message_type TEXT NOT NULL DEFAULT 'chat',
     stanza_xml TEXT,
+    rich_payload TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_mam_room_timestamp
@@ -334,6 +408,7 @@ CREATE TABLE IF NOT EXISTS mam_messages (
     origin_id TEXT,
     message_type TEXT NOT NULL DEFAULT 'chat',
     stanza_xml TEXT,
+    rich_payload TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_mam_room_timestamp
@@ -421,6 +496,22 @@ async fn execute_postgres_batch(pool: &PgPool, sql: &str) -> Result<(), MamStora
     Ok(())
 }
 
+async fn ensure_sqlite_rich_payload_column(pool: &SqlitePool) -> Result<(), MamStorageError> {
+    let columns = sqlx::query("PRAGMA table_info(mam_messages)")
+        .fetch_all(pool)
+        .await?;
+    let exists = columns.iter().any(|row| {
+        row.try_get::<String, _>("name")
+            .is_ok_and(|name| name == "rich_payload")
+    });
+    if !exists {
+        sqlx::query("ALTER TABLE mam_messages ADD COLUMN rich_payload TEXT")
+            .execute(pool)
+            .await?;
+    }
+    Ok(())
+}
+
 fn uses_backward_pagination(query: &MamQuery) -> bool {
     query
         .before_id
@@ -457,6 +548,7 @@ fn decode_sqlite_message_row(row: &SqliteRow) -> Result<ArchivedMessage, MamStor
         .map_err(|error| MamStorageError::Serialization(format!("Invalid timestamp: {error}")))?
         .with_timezone(&Utc);
 
+    let rich_payload: Option<String> = row.try_get(13)?;
     Ok(ArchivedMessage {
         id: row.try_get(0)?,
         timestamp,
@@ -470,10 +562,12 @@ fn decode_sqlite_message_row(row: &SqliteRow) -> Result<ArchivedMessage, MamStor
         origin_id: row.try_get(10)?,
         message_type: row.try_get(11)?,
         stanza_xml: row.try_get(12)?,
+        rich: decode_rich_payload(rich_payload.as_deref())?,
     })
 }
 
 fn decode_postgres_message_row(row: &PgRow) -> Result<ArchivedMessage, MamStorageError> {
+    let rich_payload: Option<String> = row.try_get(13)?;
     Ok(ArchivedMessage {
         id: row.try_get(0)?,
         timestamp: row.try_get(2)?,
@@ -487,7 +581,27 @@ fn decode_postgres_message_row(row: &PgRow) -> Result<ArchivedMessage, MamStorag
         origin_id: row.try_get(10)?,
         message_type: row.try_get(11)?,
         stanza_xml: row.try_get(12)?,
+        rich: decode_rich_payload(rich_payload.as_deref())?,
     })
+}
+
+fn encode_rich_payload(message: &ArchivedMessage) -> Result<Option<String>, MamStorageError> {
+    message
+        .rich
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|error| MamStorageError::Serialization(error.to_string()))
+}
+
+fn decode_rich_payload(
+    value: Option<&str>,
+) -> Result<Option<waddle_xmpp_core::mam::ArchivedRichMessage>, MamStorageError> {
+    value
+        .filter(|value| !value.trim().is_empty())
+        .map(serde_json::from_str)
+        .transpose()
+        .map_err(|error| MamStorageError::Serialization(error.to_string()))
 }
 
 #[async_trait]
@@ -508,11 +622,12 @@ impl MamStorage for SqlxMamStorage {
         } else {
             message.message_type.as_str()
         };
+        let rich_payload = encode_rich_payload(message)?;
 
         match &self.backend {
             MamDatabaseBackend::Sqlite(pool) => {
                 let mut query = QueryBuilder::<Sqlite>::new(
-                    "INSERT INTO mam_messages (id, room_jid, timestamp, from_jid, to_jid, body, stanza_id, thread_id, reply_to_id, reply_to_jid, origin_id, message_type, stanza_xml) ",
+                    "INSERT INTO mam_messages (id, room_jid, timestamp, from_jid, to_jid, body, stanza_id, thread_id, reply_to_id, reply_to_jid, origin_id, message_type, stanza_xml, rich_payload) ",
                 );
                 query.push_values(std::iter::once(()), |mut builder, _| {
                     builder
@@ -528,13 +643,14 @@ impl MamStorage for SqlxMamStorage {
                         .push_bind(message.reply_to_jid.as_deref())
                         .push_bind(message.origin_id.as_deref())
                         .push_bind(message_type)
-                        .push_bind(message.stanza_xml.as_deref());
+                        .push_bind(message.stanza_xml.as_deref())
+                        .push_bind(rich_payload.as_deref());
                 });
                 query.build().execute(pool).await?;
             }
             MamDatabaseBackend::Postgres(pool) => {
                 let mut query = QueryBuilder::<Postgres>::new(
-                    "INSERT INTO mam_messages (id, room_jid, timestamp, from_jid, to_jid, body, stanza_id, thread_id, reply_to_id, reply_to_jid, origin_id, message_type, stanza_xml) ",
+                    "INSERT INTO mam_messages (id, room_jid, timestamp, from_jid, to_jid, body, stanza_id, thread_id, reply_to_id, reply_to_jid, origin_id, message_type, stanza_xml, rich_payload) ",
                 );
                 query.push_values(std::iter::once(()), |mut builder, _| {
                     builder
@@ -550,7 +666,8 @@ impl MamStorage for SqlxMamStorage {
                         .push_bind(message.reply_to_jid.as_deref())
                         .push_bind(message.origin_id.as_deref())
                         .push_bind(message_type)
-                        .push_bind(message.stanza_xml.as_deref());
+                        .push_bind(message.stanza_xml.as_deref())
+                        .push_bind(rich_payload.as_deref());
                 });
                 query.build().execute(pool).await?;
             }
@@ -680,6 +797,95 @@ impl MamStorage for SqlxMamStorage {
         }
     }
 
+    async fn get_message_by_stanza_id(
+        &self,
+        archive_jid: &str,
+        stanza_id: &str,
+    ) -> Result<Option<ArchivedMessage>, MamStorageError> {
+        match &self.backend {
+            MamDatabaseBackend::Sqlite(pool) => {
+                let row = sqlx::query(&format!(
+                    "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE room_jid = ? AND (stanza_id = ? OR origin_id = ?) ORDER BY timestamp DESC LIMIT 1"
+                ))
+                .bind(archive_jid)
+                .bind(stanza_id)
+                .bind(stanza_id)
+                .fetch_optional(pool)
+                .await?;
+                row.as_ref().map(decode_sqlite_message_row).transpose()
+            }
+            MamDatabaseBackend::Postgres(pool) => {
+                let row = sqlx::query(&format!(
+                    "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE room_jid = $1 AND (stanza_id = $2 OR origin_id = $2) ORDER BY timestamp DESC LIMIT 1"
+                ))
+                .bind(archive_jid)
+                .bind(stanza_id)
+                .fetch_optional(pool)
+                .await?;
+                row.as_ref().map(decode_postgres_message_row).transpose()
+            }
+        }
+    }
+
+    async fn get_message_by_message_id(
+        &self,
+        archive_jid: &str,
+        message_id: &str,
+    ) -> Result<Option<ArchivedMessage>, MamStorageError> {
+        match &self.backend {
+            MamDatabaseBackend::Sqlite(pool) => {
+                let row = sqlx::query(&format!(
+                    "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE room_jid = ? AND stanza_id = ? ORDER BY timestamp DESC LIMIT 1"
+                ))
+                .bind(archive_jid)
+                .bind(message_id)
+                .fetch_optional(pool)
+                .await?;
+                row.as_ref().map(decode_sqlite_message_row).transpose()
+            }
+            MamDatabaseBackend::Postgres(pool) => {
+                let row = sqlx::query(&format!(
+                    "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE room_jid = $1 AND stanza_id = $2 ORDER BY timestamp DESC LIMIT 1"
+                ))
+                .bind(archive_jid)
+                .bind(message_id)
+                .fetch_optional(pool)
+                .await?;
+                row.as_ref().map(decode_postgres_message_row).transpose()
+            }
+        }
+    }
+
+    async fn get_message_by_archive_or_stanza_id(
+        &self,
+        archive_jid: &str,
+        stanza_id: &str,
+    ) -> Result<Option<ArchivedMessage>, MamStorageError> {
+        match &self.backend {
+            MamDatabaseBackend::Sqlite(pool) => {
+                let row = sqlx::query(&format!(
+                    "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE room_jid = ? AND (id = ? OR stanza_id = ?) ORDER BY timestamp DESC LIMIT 1"
+                ))
+                .bind(archive_jid)
+                .bind(stanza_id)
+                .bind(stanza_id)
+                .fetch_optional(pool)
+                .await?;
+                row.as_ref().map(decode_sqlite_message_row).transpose()
+            }
+            MamDatabaseBackend::Postgres(pool) => {
+                let row = sqlx::query(&format!(
+                    "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE room_jid = $1 AND (id = $2 OR stanza_id = $2) ORDER BY timestamp DESC LIMIT 1"
+                ))
+                .bind(archive_jid)
+                .bind(stanza_id)
+                .fetch_optional(pool)
+                .await?;
+                row.as_ref().map(decode_postgres_message_row).transpose()
+            }
+        }
+    }
+
     #[instrument(skip(self))]
     async fn count_messages(&self, room_jid: &str) -> Result<u32, MamStorageError> {
         let count = match &self.backend {
@@ -791,6 +997,7 @@ mod tests {
             stanza_xml: Some(
                 "<message xmlns='jabber:client' from='room@conference.example.com/alice' to='room@conference.example.com' type='groupchat' id='archive-stanza-1'><body>Reply body</body></message>".to_string(),
             ),
+            rich: None,
         };
 
         let archive_id = storage

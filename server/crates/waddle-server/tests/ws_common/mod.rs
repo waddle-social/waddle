@@ -457,3 +457,20 @@ pub fn extract_element_text(xml: &str, tag: &str) -> Option<String> {
     let end_idx = content.find(&close)?;
     Some(content[..end_idx].trim().to_string())
 }
+
+#[allow(dead_code)]
+pub fn extract_attr_after(xml: &str, marker: &str, attr: &str) -> Option<String> {
+    let start = xml.find(marker)?;
+    let tail = &xml[start..];
+    let double = format!("{attr}=\"");
+    if let Some(attr_start) = tail.find(&double).map(|idx| idx + double.len()) {
+        let rest = &tail[attr_start..];
+        return rest.find('"').map(|end| rest[..end].to_string());
+    }
+    let single = format!("{attr}='");
+    if let Some(attr_start) = tail.find(&single).map(|idx| idx + single.len()) {
+        let rest = &tail[attr_start..];
+        return rest.find('\'').map(|end| rest[..end].to_string());
+    }
+    None
+}

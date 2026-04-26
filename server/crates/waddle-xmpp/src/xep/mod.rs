@@ -430,10 +430,10 @@ pub use xep0424::{
 };
 
 pub use xep0425::{
-    build_moderation_request, build_moderation_request_element, build_moderation_result_element,
-    build_moderation_result_message, extract_moderation_request, extract_moderation_result,
-    is_moderation_request_message, is_moderation_result_message, ModerationCarrier,
-    ModerationRequest, ModerationResult, NS_FASTEN, NS_MESSAGE_MODERATE,
+    build_moderated_retract_element, build_moderation_result_message, extract_moderation_request,
+    extract_moderation_result, is_moderation_request_message, is_moderation_result_message,
+    parse_moderation_iq, ModerationCarrier, ModerationRequest, ModerationResult,
+    NS_MESSAGE_MODERATE,
 };
 
 pub use xep0444::{

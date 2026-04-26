@@ -18,5 +18,7 @@ pub mod storage;
 pub use storage::{InMemoryMamStorage, MamStorage, MamStorageError, SqlxMamStorage};
 pub use waddle_xmpp_core::mam::{
     add_stanza_id, build_fin_iq, build_result_messages, is_mam_query, parse_mam_query,
-    ArchivedMessage, MamQuery, MamResult, MAM_NS, RSM_NS, STANZA_ID_NS,
+    ArchivedMention, ArchivedMessage, ArchivedModeration, ArchivedReactionSet, ArchivedReference,
+    ArchivedReply, ArchivedRetraction, ArchivedRichMessage, ArchivedRichPayload, MamQuery,
+    MamResult, RichMessageId, RichText, MAM_NS, RSM_NS, STANZA_ID_NS,
 };
