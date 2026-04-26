@@ -16,8 +16,8 @@ use waddle_xmpp::{
         ArchivedRichPayload, RichMessageId, RichText, STANZA_ID_NS,
     },
     muc::room_actor::{BuildGroupchatBroadcast, GetNicknameGeneration, RoomActor},
+    parser::message_to_string,
     registry::{BroadcastOutcome, SendResult},
-    xep::xep0430::build_inbox_push,
     xep::{
         extract_correction_from_message, extract_explicit_mentions, extract_reactions_from_message,
         extract_references_from_message, extract_retraction_from_message, has_file_sharing,
@@ -990,6 +990,18 @@ fn should_archive_groupchat_message(msg: &xmpp_parsers::message::Message) -> boo
         || is_sticker_message(msg)
 }
 
+fn serialize_groupchat_stanza_xml(
+    message: &xmpp_parsers::message::Message,
+) -> Option<String> {
+    let mut msg = message.clone();
+    msg.to = None;
+    message_to_string(&msg).ok()
+}
+
+fn serialize_direct_stanza_xml(message: &xmpp_parsers::message::Message) -> Option<String> {
+    message_to_string(message).ok()
+}
+
 async fn archive_groupchat_message(
     state: &WebSocketState,
     room_jid: &BareJid,
@@ -1011,6 +1023,8 @@ async fn archive_groupchat_message(
     let origin_id = extract_origin_id(message);
     let rich = rich_archive_payload(message);
 
+    let stanza_xml = serialize_groupchat_stanza_xml(message);
+
     let archived = ArchivedMessage {
         id: archive_id,
         timestamp: Utc::now(),
@@ -1027,7 +1041,7 @@ async fn archive_groupchat_message(
         reply_to_jid,
         origin_id,
         message_type: mam_message_type(&message.type_),
-        stanza_xml: None,
+        stanza_xml,
         rich,
         nickname_generation: Some(sender_nickname_generation),
     };
@@ -1068,6 +1082,8 @@ async fn archive_direct_message(
         return;
     }
 
+    let stanza_xml = serialize_direct_stanza_xml(message);
+
     let (reply_to_id, reply_to_jid) = extract_reply_reference(message);
     let origin_id = extract_origin_id(message);
 
@@ -1083,7 +1099,7 @@ async fn archive_direct_message(
         reply_to_jid,
         origin_id,
         message_type: mam_message_type(&message.type_),
-        stanza_xml: None,
+        stanza_xml,
         rich,
         nickname_generation: None,
     };

@@ -531,4 +531,109 @@ describe("MAM history application", () => {
     expect(messaging.messages.value[0].id).toBe("stable-msg-1");
     expect(messaging.messages.value[0].reactions).toEqual({ "🔥": ["bob"] });
   });
+
+  test("preserves GitHub embeds when a correction omits them but URLs still in body", async () => {
+    const session = ref({
+      username: "alice",
+      jid: "alice@example.com/desktop",
+      domain: "example.com",
+    } as never);
+    const xmppClient = ref({
+      ...handlerStubs(),
+      queryMam: mock(async () => [
+        {
+          id: "msg-1",
+          roomJid: "general@muc.example.com",
+          nick: "bob",
+          body: "check https://github.com/waddle-social/waddle",
+          createdAt: "2024-01-01T00:00:00Z",
+          type: "message",
+          githubEmbeds: [
+            { kind: "repo", url: "https://github.com/waddle-social/waddle", owner: "waddle-social", name: "waddle" },
+          ],
+        },
+        {
+          id: "edit-1",
+          roomJid: "general@muc.example.com",
+          nick: "bob",
+          body: "check https://github.com/waddle-social/waddle out!",
+          createdAt: "2024-01-01T00:01:00Z",
+          type: "message",
+          replacesId: "msg-1",
+        },
+      ]),
+    } as never);
+    const actionError = ref("");
+    const messaging = useMessaging(
+      session,
+      ref(null),
+      xmppClient,
+      ref("w1"),
+      ref("c1"),
+      ref({ id: "c1", name: "general", channel_type: "text" }),
+      String,
+      actionError,
+      () => { actionError.value = ""; },
+    );
+
+    await messaging.loadMessages("w1", "c1");
+
+    expect(messaging.messages.value).toHaveLength(1);
+    expect(messaging.messages.value[0].id).toBe("msg-1");
+    expect(messaging.messages.value[0].isEdited).toBe(true);
+    expect(messaging.messages.value[0].body).toBe("check https://github.com/waddle-social/waddle out!");
+    expect(messaging.messages.value[0].githubEmbeds).toEqual([
+      { kind: "repo", url: "https://github.com/waddle-social/waddle", owner: "waddle-social", name: "waddle" },
+    ]);
+  });
+
+  test("drops GitHub embeds when a correction removes the URL from body", async () => {
+    const session = ref({
+      username: "alice",
+      jid: "alice@example.com/desktop",
+      domain: "example.com",
+    } as never);
+    const xmppClient = ref({
+      ...handlerStubs(),
+      queryMam: mock(async () => [
+        {
+          id: "msg-1",
+          roomJid: "general@muc.example.com",
+          nick: "bob",
+          body: "check https://github.com/waddle-social/waddle",
+          createdAt: "2024-01-01T00:00:00Z",
+          type: "message",
+          githubEmbeds: [
+            { kind: "repo", url: "https://github.com/waddle-social/waddle", owner: "waddle-social", name: "waddle" },
+          ],
+        },
+        {
+          id: "edit-1",
+          roomJid: "general@muc.example.com",
+          nick: "bob",
+          body: "never mind",
+          createdAt: "2024-01-01T00:01:00Z",
+          type: "message",
+          replacesId: "msg-1",
+        },
+      ]),
+    } as never);
+    const actionError = ref("");
+    const messaging = useMessaging(
+      session,
+      ref(null),
+      xmppClient,
+      ref("w1"),
+      ref("c1"),
+      ref({ id: "c1", name: "general", channel_type: "text" }),
+      String,
+      actionError,
+      () => { actionError.value = ""; },
+    );
+
+    await messaging.loadMessages("w1", "c1");
+
+    expect(messaging.messages.value).toHaveLength(1);
+    expect(messaging.messages.value[0].githubEmbeds).toBeUndefined();
+  });
 });

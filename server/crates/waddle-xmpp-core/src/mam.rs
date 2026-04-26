@@ -435,10 +435,6 @@ fn parse_message_jid(to_jid: &str) -> Jid {
 }
 
 fn archived_inner_message(archived: &ArchivedMessage) -> Element {
-    if let Some(rich) = archived.rich.as_ref() {
-        return build_typed_inner_message(archived, rich);
-    }
-
     if let Some(stanza_xml) = archived.stanza_xml.as_deref() {
         match stanza_xml.parse::<Element>() {
             Ok(element) => return normalize_archived_inner_message(element, archived),
@@ -446,10 +442,14 @@ fn archived_inner_message(archived: &ArchivedMessage) -> Element {
                 warn!(
                     archive_id = %archived.id,
                     error = %error,
-                    "Failed to parse archived stanza XML"
+                    "Failed to parse archived stanza XML, falling back to typed reconstruction"
                 );
             }
         }
+    }
+
+    if let Some(rich) = archived.rich.as_ref() {
+        return build_typed_inner_message(archived, rich);
     }
 
     build_legacy_inner_message(archived)
@@ -957,5 +957,149 @@ mod tests {
             .expect("stanza-id payload");
         assert_eq!(stanza_id.attr("id"), Some("archive-1"));
         assert_eq!(stanza_id.attr("by"), Some("room@example.com"));
+    }
+
+    #[test]
+    fn stanza_xml_preferred_over_rich_payload() {
+        let archived = ArchivedMessage {
+            id: "msg-priority".to_string(),
+            timestamp: Utc::now(),
+            from: "room@conference.example.com/alice".to_string(),
+            to: "room@conference.example.com".to_string(),
+            body: "typed body".to_string(),
+            message_type: "groupchat".to_string(),
+            stanza_xml: Some(
+                "<message xmlns='jabber:client' from='room@conference.example.com/alice' type='groupchat' id='live-1'><body>live body with embeds</body><github xmlns='urn:waddle:github:0'><repo url='https://github.com/example/project'><owner>example</owner><name>project</name></repo></github></message>".to_string(),
+            ),
+            rich: Some(ArchivedRichMessage {
+                payload: None,
+                reply: None,
+                references: vec![],
+                mentions: vec![],
+            }),
+            ..Default::default()
+        };
+
+        let msg = build_result_messages("query-priority", "user@example.com", &[archived]);
+        let result = msg[0]
+            .payloads
+            .iter()
+            .find(|p| p.name() == "result" && p.ns() == MAM_NS)
+            .expect("result payload");
+        let forwarded = result
+            .children()
+            .find(|c| c.name() == "forwarded" && c.ns() == FORWARD_NS)
+            .expect("forwarded element");
+        let inner_msg = forwarded
+            .children()
+            .find(|c| c.name() == "message" && c.ns() == CLIENT_NS)
+            .expect("inner message");
+
+        let body = inner_msg
+            .get_child("body", CLIENT_NS)
+            .expect("body element");
+        assert_eq!(body.text(), "live body with embeds");
+
+        let github = inner_msg
+            .children()
+            .find(|c| c.name() == "github" && c.ns() == "urn:waddle:github:0")
+            .expect("github embed payload");
+        assert!(github.children().any(|c| c.name() == "repo"));
+    }
+
+    #[test]
+    fn stanza_xml_preserves_reply_fallback() {
+        let archived = ArchivedMessage {
+            id: "msg-fallback".to_string(),
+            timestamp: Utc::now(),
+            from: "room@conference.example.com/bob".to_string(),
+            to: "room@conference.example.com".to_string(),
+            body: "> Alice wrote:\n> Hello!\nI agree!".to_string(),
+            message_type: "groupchat".to_string(),
+            stanza_xml: Some(
+                "<message xmlns='jabber:client' from='room@conference.example.com/bob' type='groupchat' id='reply-1'><body>&gt; Alice wrote:\n&gt; Hello!\nI agree!</body><reply xmlns='urn:xmpp:reply:0' id='orig-1' to='room@conference.example.com/alice'/><fallback xmlns='urn:xmpp:fallback:0' for='urn:xmpp:reply:0'><body start='0' end='22'/></fallback></message>".to_string(),
+            ),
+            reply_to_id: Some("orig-1".to_string()),
+            reply_to_jid: Some("room@conference.example.com/alice".to_string()),
+            rich: Some(ArchivedRichMessage {
+                payload: None,
+                reply: Some(ArchivedReply {
+                    id: RichMessageId("orig-1".to_string()),
+                    to: Some("room@conference.example.com/alice".parse().unwrap()),
+                }),
+                references: vec![],
+                mentions: vec![],
+            }),
+            ..Default::default()
+        };
+
+        let msg = build_result_messages("query-fallback", "user@example.com", &[archived]);
+        let result = msg[0]
+            .payloads
+            .iter()
+            .find(|p| p.name() == "result" && p.ns() == MAM_NS)
+            .expect("result payload");
+        let forwarded = result
+            .children()
+            .find(|c| c.name() == "forwarded" && c.ns() == FORWARD_NS)
+            .expect("forwarded element");
+        let inner_msg = forwarded
+            .children()
+            .find(|c| c.name() == "message" && c.ns() == CLIENT_NS)
+            .expect("inner message");
+
+        let reply = inner_msg
+            .children()
+            .find(|c| c.name() == "reply" && c.ns() == "urn:xmpp:reply:0")
+            .expect("reply element");
+        assert_eq!(reply.attr("id"), Some("orig-1"));
+
+        let fallback = inner_msg
+            .children()
+            .find(|c| c.name() == "fallback" && c.ns() == "urn:xmpp:fallback:0")
+            .expect("fallback element");
+        assert_eq!(fallback.attr("for"), Some("urn:xmpp:reply:0"));
+        let fallback_body = fallback
+            .get_child("body", "urn:xmpp:fallback:0")
+            .expect("fallback body element");
+        assert_eq!(fallback_body.attr("start"), Some("0"));
+        assert_eq!(fallback_body.attr("end"), Some("22"));
+    }
+
+    #[test]
+    fn stanza_xml_strips_to_for_groupchat() {
+        let archived = ArchivedMessage {
+            id: "msg-strip-to".to_string(),
+            timestamp: Utc::now(),
+            from: "room@conference.example.com/alice".to_string(),
+            to: "room@conference.example.com".to_string(),
+            body: "Hello!".to_string(),
+            message_type: "groupchat".to_string(),
+            stanza_xml: Some(
+                "<message xmlns='jabber:client' from='room@conference.example.com/alice' to='room@conference.example.com' type='groupchat' id='msg-1'><body>Hello!</body></message>".to_string(),
+            ),
+            ..Default::default()
+        };
+
+        let msg = build_result_messages("query-strip-to", "user@example.com", &[archived]);
+        let result = msg[0]
+            .payloads
+            .iter()
+            .find(|p| p.name() == "result" && p.ns() == MAM_NS)
+            .expect("result payload");
+        let forwarded = result
+            .children()
+            .find(|c| c.name() == "forwarded" && c.ns() == FORWARD_NS)
+            .expect("forwarded element");
+        let inner_msg = forwarded
+            .children()
+            .find(|c| c.name() == "message" && c.ns() == CLIENT_NS)
+            .expect("inner message");
+
+        assert!(
+            inner_msg.attr("to").is_none(),
+            "groupchat MAM replay should not have a 'to' attribute, got: {:?}",
+            inner_msg.attr("to")
+        );
     }
 }

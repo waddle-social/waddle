@@ -130,3 +130,74 @@ async fn reply_to_unknown_target_routes_without_error() {
 
     client.close().await;
 }
+
+#[tokio::test]
+async fn reply_with_fallback_replays_from_mam() {
+    let _guard = TEST_SERIAL.lock().await;
+    let (_server, mut client) = setup().await;
+    let room = format!("reply-fb-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
+    join_room(&mut client, &room).await;
+
+    client
+        .send(&format!(
+            r#"<message type="groupchat" to="{room}" id="orig-1"><body>original message</body></message>"#
+        ))
+        .await
+        .expect("send original");
+    let target = stanza_id(
+        &client
+            .recv_matching(|frame| frame.contains("original message"))
+            .await
+            .expect("original echo"),
+    );
+
+    client
+        .send(&format!(
+            r#"<message type="groupchat" to="{room}" id="reply-fb-1">
+                <body>&gt; original message\nmy reply</body>
+                <reply xmlns="urn:xmpp:reply:0" to="{room}/{USERNAME}" id="{target}"/>
+                <fallback xmlns="urn:xmpp:fallback:0" for="urn:xmpp:reply:0">
+                    <body start="0" end="20"/>
+                </fallback>
+            </message>"#
+        ))
+        .await
+        .expect("send reply with fallback");
+    let echo = client
+        .recv_matching(|frame| frame.contains("urn:xmpp:fallback:0"))
+        .await
+        .expect("reply fallback echo");
+    assert!(
+        echo.contains("urn:xmpp:reply:0"),
+        "reply echo missing reply element: {echo}"
+    );
+    assert!(
+        echo.contains("urn:xmpp:fallback:0"),
+        "reply echo missing fallback element: {echo}"
+    );
+
+    client
+        .send(&format!(
+            r#"<iq type="set" id="mam-reply-fb" to="{room}"><query xmlns="urn:xmpp:mam:2"/></iq>"#
+        ))
+        .await
+        .expect("send MAM");
+    let frames = client
+        .recv_until(|frame| frame.contains("mam-reply-fb") && frame.contains("<fin"))
+        .await
+        .expect("MAM frames");
+    let reply_mam_frame = frames
+        .iter()
+        .find(|frame| frame.contains("urn:xmpp:reply:0"))
+        .expect("MAM should replay the reply message");
+    assert!(
+        reply_mam_frame.contains("urn:xmpp:fallback:0"),
+        "MAM replay should preserve fallback element: {reply_mam_frame}"
+    );
+    assert!(
+        reply_mam_frame.contains("for=\"urn:xmpp:reply:0\""),
+        "MAM replay should preserve fallback 'for' attribute: {reply_mam_frame}"
+    );
+
+    client.close().await;
+}
