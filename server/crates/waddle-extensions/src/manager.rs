@@ -2,9 +2,8 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Error as AnyhowError, Result};
 use futures::future::join_all;
-use minidom::Element;
 use regex::Regex;
 use serde_json::Value;
 use std::collections::HashSet;
@@ -17,11 +16,10 @@ use crate::actor::WasmExtensionActor;
 use crate::config::{ExtensionConfig, ExtensionModuleConfig};
 use crate::oci::OciExtensionPuller;
 use crate::runtime::{LoadedExtension, WasmRuntime};
-use crate::types::{message_has_embed_for_namespaces, DetectedLink, EmbedElement};
+use crate::types::{message_has_embed_for_namespaces, DetectedLink};
 
 const MAX_DETECTED_LINKS: usize = 3;
 const EXTENSION_ENRICH_TIMEOUT: Duration = Duration::from_secs(5);
-const GITHUB_NAMESPACE: &str = "urn:waddle:github:0";
 
 #[derive(Debug, Error)]
 enum EffectiveModuleConfigError {
@@ -41,7 +39,6 @@ enum EffectiveModuleConfigError {
 pub struct ExtensionManager {
     actors: Vec<Arc<WasmExtensionActor>>,
     feature_namespaces: Vec<String>,
-    actor_namespaces: HashSet<String>,
 }
 
 impl ExtensionManager {
@@ -54,7 +51,6 @@ impl ExtensionManager {
             return Ok(Self {
                 actors: Vec::new(),
                 feature_namespaces: Vec::new(),
-                actor_namespaces: HashSet::new(),
             });
         }
 
@@ -62,17 +58,8 @@ impl ExtensionManager {
         let puller = OciExtensionPuller::new(&config.cache_dir);
         let mut actors = Vec::new();
         let mut feature_namespaces = Vec::new();
-        let mut actor_namespaces = HashSet::new();
 
         for module in &config.modules {
-            // Advertise the configured namespace unconditionally, even if the
-            // WASM component fails to load. This keeps disco#info deterministic
-            // across deployments and lets clients send payloads in the
-            // advertised namespace regardless of runtime load status.
-            if !module.namespace.is_empty() && !feature_namespaces.contains(&module.namespace) {
-                feature_namespaces.push(module.namespace.clone());
-            }
-
             let config_json = match effective_module_config_json(module) {
                 Ok(config_json) => config_json,
                 Err(error) => {
@@ -91,6 +78,7 @@ impl ExtensionManager {
                     warn!(
                         extension = %module.name,
                         %error,
+                        error_chain = %format_error_chain(&error),
                         "failed to resolve extension WASM path; skipping enrichment actor"
                     );
                     continue;
@@ -100,9 +88,13 @@ impl ExtensionManager {
             let loaded = match LoadedExtension::load(&runtime, &wasm_path) {
                 Ok(loaded) => loaded,
                 Err(error) => {
+                    if module.local_path.is_none() {
+                        remove_invalid_cached_extension(module, &wasm_path);
+                    }
                     warn!(
                         extension = %module.name,
                         %error,
+                        error_chain = %format_error_chain(&error),
                         "failed to compile extension component; skipping enrichment actor"
                     );
                     continue;
@@ -115,6 +107,7 @@ impl ExtensionManager {
                     warn!(
                         extension = %module.name,
                         %error,
+                        error_chain = %format_error_chain(&error),
                         "extension init() failed; skipping enrichment actor"
                     );
                     continue;
@@ -125,14 +118,10 @@ impl ExtensionManager {
             if !info.namespace.is_empty() && !feature_namespaces.contains(&info.namespace) {
                 feature_namespaces.push(info.namespace.clone());
             }
-            if !info.namespace.is_empty() {
-                actor_namespaces.insert(info.namespace.clone());
-            }
             for feature in &info.features {
                 if !feature_namespaces.contains(&feature.namespace) {
                     feature_namespaces.push(feature.namespace.clone());
                 }
-                actor_namespaces.insert(feature.namespace.clone());
             }
 
             actors.push(Arc::new(actor));
@@ -141,7 +130,6 @@ impl ExtensionManager {
         Ok(Self {
             actors,
             feature_namespaces,
-            actor_namespaces,
         })
     }
 
@@ -159,14 +147,6 @@ impl ExtensionManager {
     }
 
     pub async fn enrich_message(&self, msg: &mut Message) -> usize {
-        if self
-            .feature_namespaces
-            .iter()
-            .any(|namespace| namespace == GITHUB_NAMESPACE)
-        {
-            retain_valid_github_payloads(msg);
-        }
-
         if message_has_embed_for_namespaces(msg, &self.feature_namespaces) {
             return 0;
         }
@@ -218,142 +198,30 @@ impl ExtensionManager {
             if count > 0 {
                 debug!(embeds_added = count, "message enriched by extensions");
             }
-            if self.actor_namespaces.contains(GITHUB_NAMESPACE)
-                && message_has_valid_github_embed(msg)
-            {
-                return count;
-            }
-        }
-
-        if self
-            .feature_namespaces
-            .iter()
-            .any(|namespace| namespace == GITHUB_NAMESPACE)
-        {
-            for embed in github_embeds_from_links(&links) {
-                msg.payloads.push(embed.to_minidom());
-                count += 1;
-            }
-        }
-        if count > 0 {
-            debug!(
-                embeds_added = count,
-                namespace = GITHUB_NAMESPACE,
-                "message enriched by built-in GitHub fallback"
-            );
         }
         count
     }
 }
 
-pub fn message_has_valid_github_embed(msg: &Message) -> bool {
-    msg.payloads.iter().any(is_valid_github_payload)
-}
-
-fn retain_valid_github_payloads(msg: &mut Message) {
-    msg.payloads
-        .retain(|payload| payload.ns() != GITHUB_NAMESPACE || is_valid_github_payload(payload));
-}
-
-fn is_valid_github_payload(payload: &Element) -> bool {
-    if payload.ns() != GITHUB_NAMESPACE {
-        return false;
+fn remove_invalid_cached_extension(module: &ExtensionModuleConfig, wasm_path: &Path) {
+    match std::fs::remove_file(wasm_path) {
+        Ok(()) => {
+            warn!(
+                extension = %module.name,
+                cache_path = %wasm_path.display(),
+                "removed cached extension after component load failure"
+            );
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            warn!(
+                extension = %module.name,
+                cache_path = %wasm_path.display(),
+                %error,
+                "failed to remove cached extension after component load failure"
+            );
+        }
     }
-
-    let Some(url) = payload.attr("url") else {
-        return false;
-    };
-    let Some(embed) = github_embed_from_url(url) else {
-        return false;
-    };
-
-    payload.name() == embed.element_name
-        && github_attribute_matches(payload, &embed, "url")
-        && github_attribute_matches(payload, &embed, "owner")
-        && github_attribute_matches(payload, &embed, "name")
-}
-
-fn github_attribute_matches(payload: &Element, embed: &EmbedElement, name: &str) -> bool {
-    let Some(expected) = embed
-        .attributes
-        .iter()
-        .find_map(|(key, value)| (key == name).then_some(value.as_str()))
-    else {
-        return false;
-    };
-    payload.attr(name) == Some(expected)
-}
-
-fn github_embeds_from_links(links: &[DetectedLink]) -> Vec<EmbedElement> {
-    let mut seen = HashSet::new();
-    links
-        .iter()
-        .filter_map(|link| {
-            let url = normalize_github_url(&link.url)?;
-            if !seen.insert(url.clone()) {
-                return None;
-            }
-            github_embed_from_normalized_url(url)
-        })
-        .collect()
-}
-
-fn github_embed_from_url(raw_url: &str) -> Option<EmbedElement> {
-    let url = normalize_github_url(raw_url)?;
-    github_embed_from_normalized_url(url)
-}
-
-fn github_embed_from_normalized_url(url: String) -> Option<EmbedElement> {
-    let path = url.strip_prefix("https://github.com/")?;
-    let parts: Vec<&str> = path.split('/').collect();
-    if parts.len() != 2 && parts.len() != 4 {
-        return None;
-    }
-
-    let owner = parts[0];
-    let name = parts[1];
-    if owner.is_empty() || name.is_empty() {
-        return None;
-    }
-
-    let element_name = match parts.as_slice() {
-        [_, _] => "repo",
-        [_, _, "issues", number] if is_decimal(number) => "issue",
-        [_, _, "pull", number] if is_decimal(number) => "pr",
-        _ => return None,
-    };
-
-    Some(EmbedElement {
-        element_name: element_name.to_string(),
-        namespace: GITHUB_NAMESPACE.to_string(),
-        attributes: vec![
-            ("url".to_string(), url.clone()),
-            ("owner".to_string(), owner.to_string()),
-            ("name".to_string(), name.to_string()),
-        ],
-        children: Vec::new(),
-    })
-}
-
-fn normalize_github_url(raw_url: &str) -> Option<String> {
-    static RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
-    let re = RE.get_or_init(|| {
-        Regex::new(r"^https?://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:/(issues|pull)/\d+)?$")
-            .expect("valid regex")
-    });
-
-    if !re.is_match(raw_url) {
-        return None;
-    }
-
-    Some(match raw_url.strip_prefix("http://") {
-        Some(path) => format!("https://{path}"),
-        None => raw_url.to_string(),
-    })
-}
-
-fn is_decimal(value: &str) -> bool {
-    !value.is_empty() && value.as_bytes().iter().all(u8::is_ascii_digit)
 }
 
 fn effective_module_config_json(
@@ -448,21 +316,27 @@ fn detect_links(body: &str) -> Vec<DetectedLink> {
     links
 }
 
+fn format_error_chain(error: &AnyhowError) -> String {
+    error
+        .chain()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(": ")
+}
+
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeMap, HashSet};
+    use std::collections::BTreeMap;
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use minidom::Element;
     use serde_json::json;
     use xmpp_parsers::message::{Body, Message};
 
     use super::{
         detect_links, effective_module_config_json, effective_module_config_with_reader,
-        github_embed_from_url, EffectiveModuleConfigError, ExtensionManager, GITHUB_NAMESPACE,
-        MAX_DETECTED_LINKS,
+        EffectiveModuleConfigError, ExtensionManager, MAX_DETECTED_LINKS,
     };
     use crate::config::{ExtensionConfig, ExtensionModuleConfig};
 
@@ -587,13 +461,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn from_config_uses_github_fallback_when_actor_cannot_load() {
-        let mut config_secret_files = BTreeMap::new();
-        config_secret_files.insert(
-            "github_token".to_string(),
-            "/path/that/does/not/exist".to_string(),
-        );
-
+    async fn from_config_does_not_advertise_namespace_or_fallback_when_actor_cannot_load() {
         let config = ExtensionConfig {
             enabled: true,
             cache_dir: "/var/lib/waddle/extensions".to_string(),
@@ -603,36 +471,30 @@ mod tests {
                 tag: "latest".to_string(),
                 namespace: "urn:waddle:github:0".to_string(),
                 config: json!({}),
-                config_secret_files,
-                local_path: Some("missing-but-never-read.wasm".to_string()),
+                config_secret_files: Default::default(),
+                local_path: Some("missing-github-enricher-test.wasm".to_string()),
             }],
         };
 
         let manager = ExtensionManager::from_config(config)
             .await
             .expect("manager should stay fail-open");
-        assert_eq!(manager.feature_namespaces(), [GITHUB_NAMESPACE]);
+        assert!(manager.feature_namespaces().is_empty());
 
         let mut msg = Message::new(None);
         msg.bodies.insert(
             String::new(),
             Body("https://github.com/waddle-social/waddle".to_string()),
         );
-        assert_eq!(manager.enrich_message(&mut msg).await, 1);
-        assert_eq!(msg.payloads[0].name(), "repo");
-        assert_eq!(msg.payloads[0].ns(), GITHUB_NAMESPACE);
-        assert_eq!(
-            msg.payloads[0].attr("url"),
-            Some("https://github.com/waddle-social/waddle")
-        );
+        assert_eq!(manager.enrich_message(&mut msg).await, 0);
+        assert!(msg.payloads.is_empty());
     }
 
     #[tokio::test]
-    async fn enrich_message_does_not_fallback_without_github_namespace() {
+    async fn enrich_message_does_not_fallback_without_loaded_actor() {
         let manager = ExtensionManager {
             actors: Vec::new(),
-            feature_namespaces: Vec::new(),
-            actor_namespaces: HashSet::new(),
+            feature_namespaces: vec!["urn:waddle:github:0".to_string()],
         };
 
         let mut msg = Message::new(None);
@@ -643,122 +505,6 @@ mod tests {
 
         assert_eq!(manager.enrich_message(&mut msg).await, 0);
         assert!(msg.payloads.is_empty());
-    }
-
-    #[tokio::test]
-    async fn github_fallback_deduplicates_after_url_normalization() {
-        let manager = ExtensionManager {
-            actors: Vec::new(),
-            feature_namespaces: vec![GITHUB_NAMESPACE.to_string()],
-            actor_namespaces: HashSet::new(),
-        };
-
-        let mut msg = Message::new(None);
-        msg.bodies.insert(
-            String::new(),
-            Body(
-                "http://github.com/waddle-social/waddle https://github.com/waddle-social/waddle"
-                    .to_string(),
-            ),
-        );
-
-        assert_eq!(manager.enrich_message(&mut msg).await, 1);
-        assert_eq!(
-            msg.payloads[0].attr("url"),
-            Some("https://github.com/waddle-social/waddle")
-        );
-    }
-
-    #[tokio::test]
-    async fn github_fallback_removes_invalid_client_supplied_payloads() {
-        let manager = ExtensionManager {
-            actors: Vec::new(),
-            feature_namespaces: vec![GITHUB_NAMESPACE.to_string()],
-            actor_namespaces: HashSet::new(),
-        };
-
-        let mut msg = Message::new(None);
-        msg.bodies.insert(
-            String::new(),
-            Body("https://github.com/waddle-social/waddle".to_string()),
-        );
-        msg.payloads.push(
-            Element::builder("repo", GITHUB_NAMESPACE)
-                .attr("url", "javascript:alert(1)")
-                .attr("owner", "waddle-social")
-                .attr("name", "waddle")
-                .build(),
-        );
-
-        assert_eq!(manager.enrich_message(&mut msg).await, 1);
-        assert_eq!(msg.payloads.len(), 1);
-        assert_eq!(
-            msg.payloads[0].attr("url"),
-            Some("https://github.com/waddle-social/waddle")
-        );
-    }
-
-    #[tokio::test]
-    async fn github_fallback_preserves_valid_client_supplied_payloads() {
-        let manager = ExtensionManager {
-            actors: Vec::new(),
-            feature_namespaces: vec![GITHUB_NAMESPACE.to_string()],
-            actor_namespaces: HashSet::new(),
-        };
-
-        let mut msg = Message::new(None);
-        msg.bodies.insert(
-            String::new(),
-            Body("https://github.com/waddle-social/waddle".to_string()),
-        );
-        msg.payloads.push(
-            Element::builder("repo", GITHUB_NAMESPACE)
-                .attr("url", "https://github.com/waddle-social/waddle")
-                .attr("owner", "waddle-social")
-                .attr("name", "waddle")
-                .build(),
-        );
-
-        assert_eq!(manager.enrich_message(&mut msg).await, 0);
-        assert_eq!(msg.payloads.len(), 1);
-    }
-
-    #[test]
-    fn github_fallback_builds_repo_issue_and_pr_embeds() {
-        let repo = github_embed_from_url("https://github.com/waddle-social/waddle")
-            .expect("repo should parse");
-        let issue = github_embed_from_url("https://github.com/waddle-social/waddle/issues/42")
-            .expect("issue should parse");
-        let pr = github_embed_from_url("http://github.com/waddle-social/waddle/pull/48")
-            .expect("pull request should parse");
-
-        assert_eq!(repo.element_name, "repo");
-        assert_eq!(issue.element_name, "issue");
-        assert_eq!(pr.element_name, "pr");
-        assert_eq!(
-            pr.attributes[0],
-            (
-                "url".to_string(),
-                "https://github.com/waddle-social/waddle/pull/48".to_string()
-            )
-        );
-    }
-
-    #[test]
-    fn github_fallback_rejects_spoofed_or_malformed_urls() {
-        assert!(
-            github_embed_from_url("https://github.com.evil.test/waddle-social/waddle").is_none()
-        );
-        assert!(github_embed_from_url("https://evil.test/waddle-social/waddle").is_none());
-        assert!(github_embed_from_url("javascript:alert(1)").is_none());
-        assert!(
-            github_embed_from_url("https://github.com/waddle-social/waddle?tab=readme").is_none()
-        );
-        assert!(github_embed_from_url("https://github.com/waddle-social/waddle#readme").is_none());
-        assert!(
-            github_embed_from_url("https://github.com/waddle-social/waddle/pull/not-a-number")
-                .is_none()
-        );
     }
 
     struct TestArtifacts {

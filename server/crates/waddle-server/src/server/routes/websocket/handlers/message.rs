@@ -1,7 +1,6 @@
 use chrono::Utc;
 use jid::{BareJid, FullJid};
 use tracing::{debug, info, warn};
-use waddle_extensions::message_has_valid_github_embed;
 use waddle_xmpp::{
     carbons::{build_received_carbon, build_sent_carbon, should_copy_message},
     inbox::{
@@ -94,7 +93,7 @@ pub async fn handle_message(
         prototype.type_ = XmppMessageType::Groupchat;
         remove_stanza_ids_by(&mut prototype, &room_jid.to_string());
 
-        // Enrich: detect GitHub links and append embed XML elements (fail-open)
+        // Enrich links with extension-provided XML elements (fail-open).
         let _embeds_added = state
             .deps
             .protocol
@@ -345,14 +344,13 @@ pub async fn handle_message(
                 }
             }
 
-            // Enrich: detect GitHub links and append embed XML elements
+            // Enrich links with extension-provided XML elements.
             let _embeds_added = state
                 .deps
                 .protocol
                 .extension_manager
                 .enrich_message(&mut prototype)
                 .await;
-            let has_github_embed = message_has_valid_github_embed(&prototype);
 
             if let Some(error) = validate_rich_message_targets(
                 state,
@@ -459,11 +457,6 @@ pub async fn handle_message(
                     .await;
                 }
                 send_sent_carbons_to_websocket_resources(state, sender_jid, &prototype).await;
-            }
-
-            if has_github_embed {
-                let echo = prototype.clone();
-                return vec![stanza_to_xml(&Stanza::Message(echo))];
             }
         } else {
             warn!("Direct chat message without 'to' attribute");

@@ -1776,12 +1776,19 @@ mod tests {
     }
 
     async fn create_test_websocket_state() -> Arc<WebSocketState> {
-        create_test_websocket_state_with_extension_manager(Arc::new(
-            ExtensionManager::from_env()
-                .await
-                .expect("extension manager"),
-        ))
-        .await
+        create_test_websocket_state_with_extension_manager(empty_extension_manager().await).await
+    }
+
+    async fn empty_extension_manager() -> Arc<ExtensionManager> {
+        Arc::new(
+            ExtensionManager::from_config(ExtensionConfig {
+                enabled: false,
+                cache_dir: String::new(),
+                modules: Vec::new(),
+            })
+            .await
+            .expect("empty extension manager"),
+        )
     }
 
     async fn create_test_websocket_state_with_extension_manager(
@@ -1840,7 +1847,7 @@ mod tests {
         })
     }
 
-    async fn github_fail_open_extension_manager() -> Arc<ExtensionManager> {
+    async fn github_unavailable_extension_manager() -> Arc<ExtensionManager> {
         let missing_wasm = std::env::temp_dir().join(format!(
             "missing-github-enricher-test-{}.wasm",
             uuid::Uuid::new_v4()
@@ -1860,7 +1867,7 @@ mod tests {
                 }],
             })
             .await
-            .expect("github fail-open extension manager"),
+            .expect("github unavailable extension manager"),
         )
     }
 
@@ -3643,7 +3650,7 @@ mod tests {
         .await;
         let server_response = server_responses.first().expect("server disco response");
         assert!(server_response.contains("urn:xmpp:reply:0"));
-        assert!(server_response.contains("urn:waddle:github:0"));
+        assert!(!server_response.contains("urn:waddle:github:0"));
 
         let muc_query = disco_info_iq_frame("muc1", "muc.example.com", None);
         let muc_responses = handle_iq(
@@ -3657,7 +3664,7 @@ mod tests {
         .await;
         let muc_response = muc_responses.first().expect("muc disco response");
         assert!(muc_response.contains("urn:xmpp:reply:0"));
-        assert!(muc_response.contains("urn:waddle:github:0"));
+        assert!(!muc_response.contains("urn:waddle:github:0"));
 
         let room_query = disco_info_iq_frame("room1", "room@muc.example.com", None);
         let room_responses = handle_iq(
@@ -3672,7 +3679,7 @@ mod tests {
         let room_response = room_responses.first().expect("room disco response");
         assert!(room_response.contains("urn:xmpp:mam:2"));
         assert!(room_response.contains("urn:xmpp:reply:0"));
-        assert!(room_response.contains("urn:waddle:github:0"));
+        assert!(!room_response.contains("urn:waddle:github:0"));
     }
 
     #[tokio::test]
@@ -4185,7 +4192,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handle_message_direct_with_github_embed_returns_sender_echo() {
+    async fn handle_message_direct_with_github_embed_preserves_payload_for_recipient() {
         let sender_jid: FullJid = "alice@example.com/web".parse().expect("sender jid");
         let recipient_jid: FullJid = "bob@example.com/mobile".parse().expect("recipient jid");
         let state = create_test_websocket_state().await;
@@ -4222,23 +4229,9 @@ mod tests {
         )
         .await;
 
-        assert_eq!(responses.len(), 1, "sender should get an echo response");
-        let sender_echo = &responses[0];
         assert!(
-            sender_echo.contains("to=\"bob@example.com/mobile\"")
-                || sender_echo.contains("to='bob@example.com/mobile'"),
-            "sender echo should preserve original recipient JID: {sender_echo}"
-        );
-        assert!(
-            sender_echo.contains("urn:waddle:github:0"),
-            "sender echo should include GitHub payload: {sender_echo}"
-        );
-        assert_github_payload(
-            sender_echo,
-            "repo",
-            "https://github.com/rust-lang/rust",
-            "rust-lang",
-            "rust",
+            responses.is_empty(),
+            "direct messages should not get a special GitHub echo"
         );
 
         // Recipient may receive an inbox push headline before the routed
@@ -4271,11 +4264,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handle_message_direct_with_github_link_injects_embed() {
+    async fn handle_message_direct_with_unavailable_github_actor_does_not_inject_embed() {
         let sender_jid: FullJid = "alice@example.com/web".parse().expect("sender jid");
         let recipient_jid: FullJid = "bob@example.com/mobile".parse().expect("recipient jid");
         let state = create_test_websocket_state_with_extension_manager(
-            github_fail_open_extension_manager().await,
+            github_unavailable_extension_manager().await,
         )
         .await;
 
@@ -4304,20 +4297,9 @@ mod tests {
         )
         .await;
 
-        assert_eq!(responses.len(), 1, "sender should get an echo response");
-        let sender_echo = &responses[0];
         assert!(
-            sender_echo.contains("<repo")
-                && sender_echo.contains("urn:waddle:github:0")
-                && sender_echo.contains("url=\"https://github.com/waddle-social/waddle\""),
-            "sender echo should include injected GitHub payload: {sender_echo}"
-        );
-        assert_github_payload(
-            sender_echo,
-            "repo",
-            "https://github.com/waddle-social/waddle",
-            "waddle-social",
-            "waddle",
+            responses.is_empty(),
+            "direct messages should not get a special GitHub echo"
         );
 
         let mut found_chat = false;
@@ -4325,17 +4307,8 @@ mod tests {
             let routed_xml = stanza_to_xml(&routed.stanza);
             if routed_xml.contains("type=\"chat\"") || routed_xml.contains("type='chat'") {
                 assert!(
-                    routed_xml.contains("<repo")
-                        && routed_xml.contains("urn:waddle:github:0")
-                        && routed_xml.contains("url=\"https://github.com/waddle-social/waddle\""),
-                    "routed stanza should include injected GitHub payload: {routed_xml}"
-                );
-                assert_github_payload(
-                    &routed_xml,
-                    "repo",
-                    "https://github.com/waddle-social/waddle",
-                    "waddle-social",
-                    "waddle",
+                    !routed_xml.contains("urn:waddle:github:0"),
+                    "unavailable actor must not inject a GitHub payload: {routed_xml}"
                 );
                 found_chat = true;
                 break;
@@ -4345,11 +4318,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handle_xmpp_frame_direct_with_github_link_injects_embed() {
+    async fn handle_xmpp_frame_direct_with_unavailable_github_actor_does_not_inject_embed() {
         let sender_jid: FullJid = "alice@example.com/web".parse().expect("sender jid");
         let recipient_jid: FullJid = "bob@example.com/mobile".parse().expect("recipient jid");
         let state = create_test_websocket_state_with_extension_manager(
-            github_fail_open_extension_manager().await,
+            github_unavailable_extension_manager().await,
         )
         .await;
 
@@ -4366,25 +4339,20 @@ mod tests {
 
         let responses = handle_xmpp_frame(frame, "example.com", state.as_ref(), &mut conn).await;
 
-        assert_eq!(responses.len(), 1, "sender should get an echo response");
-        assert_github_payload(
-            &responses[0],
-            "repo",
-            "https://github.com/getagentseal/codeburn",
-            "getagentseal",
-            "codeburn",
+        assert!(
+            responses
+                .iter()
+                .all(|response| !response.contains("urn:waddle:github:0")),
+            "unavailable actor must not create GitHub payload responses: {responses:?}"
         );
 
         let mut found_chat = false;
         while let Ok(routed) = recipient_rx.try_recv() {
             let routed_xml = stanza_to_xml(&routed.stanza);
             if routed_xml.contains("type=\"chat\"") || routed_xml.contains("type='chat'") {
-                assert_github_payload(
-                    &routed_xml,
-                    "repo",
-                    "https://github.com/getagentseal/codeburn",
-                    "getagentseal",
-                    "codeburn",
+                assert!(
+                    !routed_xml.contains("urn:waddle:github:0"),
+                    "unavailable actor must not inject a GitHub payload: {routed_xml}"
                 );
                 found_chat = true;
                 break;
@@ -4394,9 +4362,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handle_message_groupchat_with_github_link_injects_embed() {
+    async fn handle_message_groupchat_with_unavailable_github_actor_does_not_inject_embed() {
         let state = create_test_websocket_state_with_extension_manager(
-            github_fail_open_extension_manager().await,
+            github_unavailable_extension_manager().await,
         )
         .await;
         let room_jid: BareJid = "github-room@muc.example.com".parse().expect("room jid");
@@ -4443,17 +4411,8 @@ mod tests {
         assert_eq!(responses.len(), 1, "sender should receive reflected echo");
         let echo = &responses[0];
         assert!(
-            echo.contains("<issue")
-                && echo.contains("urn:waddle:github:0")
-                && echo.contains("url=\"https://github.com/waddle-social/waddle/issues/42\""),
-            "groupchat echo should include injected GitHub issue payload: {echo}"
-        );
-        assert_github_payload(
-            echo,
-            "issue",
-            "https://github.com/waddle-social/waddle/issues/42",
-            "waddle-social",
-            "waddle",
+            !echo.contains("urn:waddle:github:0"),
+            "unavailable actor must not inject a GitHub issue payload: {echo}"
         );
     }
 
