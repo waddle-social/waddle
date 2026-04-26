@@ -9,6 +9,7 @@ use waddle_xmpp::{
         build_available_presence, build_subscription_presence, build_unavailable_presence,
         parse_subscription_presence, PresenceAction, SubscriptionStateMachine, SubscriptionType,
     },
+    registry::BroadcastOutcome,
     roster::{build_roster_push, AskType, RosterItem, Subscription},
     Affiliation, Role, Stanza,
 };
@@ -20,7 +21,7 @@ use super::super::{
 use crate::auth::Session;
 use crate::db::actor::GetDatabase;
 use crate::db::blocking::DatabaseBlockingStorage;
-use crate::db::roster::{DatabaseRosterStorage, RosterItemRow};
+use crate::db::roster::{DatabaseRosterStorage, RosterItemRow, RosterStorageError};
 use crate::permissions::{CheckPermission, Object, ObjectType, Permission, Subject};
 use crate::server::bootstrap_membership::DEPLOYMENT_SERVER_ID;
 use crate::server::xmpp_state::{get_xmpp_channel, XmppChannelRecord};
@@ -989,9 +990,8 @@ async fn send_roster_push_to_resources(
             .deps
             .protocol
             .connection_registry
-            .send_to(resource, Stanza::Iq(push))
-            .await
-            .is_sent()
+            .try_send_to(resource, Stanza::Iq(push))
+            == BroadcastOutcome::Delivered
         {
             delivered_resources.push(resource.clone());
         }
@@ -1041,9 +1041,8 @@ async fn send_roster_push_to_resources(
                         .deps
                         .protocol
                         .connection_registry
-                        .send_to(&resource, stanza)
-                        .await
-                        .is_sent()
+                        .try_send_to(&resource, stanza)
+                        == BroadcastOutcome::Delivered
                 {
                     delivered_resources.push(resource.clone());
                 }
@@ -1072,8 +1071,7 @@ async fn send_roster_push_to_resources(
             .deps
             .protocol
             .connection_registry
-            .send_to(&resource, Stanza::Iq(push))
-            .await;
+            .try_send_to(&resource, Stanza::Iq(push));
     }
 }
 
@@ -1081,22 +1079,57 @@ async fn load_existing_roster_item(
     storage: &DatabaseRosterStorage,
     user: &BareJid,
     contact: &BareJid,
-) -> Result<Option<RosterItem>, crate::db::roster::RosterStorageError> {
-    Ok(storage
-        .get_roster_item(user, contact)
-        .await?
-        .map(roster_row_to_item))
+) -> Result<Option<RosterItem>, RosterStorageError> {
+    match storage.get_roster_item(user, contact).await {
+        Ok(Some(row)) => match roster_row_to_item(row) {
+            Ok(item) => Ok(Some(item)),
+            Err(error) => {
+                warn!(user = %user, contact = %contact, error = %error, "Failed to convert roster row");
+                Ok(None)
+            }
+        },
+        Ok(None) => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
-fn roster_row_to_item(row: RosterItemRow) -> RosterItem {
-    RosterItem {
-        jid: row.contact_jid.parse().expect("stored roster JID is valid"),
+#[derive(Debug, thiserror::Error)]
+enum RosterConvertError {
+    #[error("invalid stored roster jid '{jid}': {error}")]
+    Jid { jid: String, error: String },
+    #[error("invalid stored roster subscription: {0}")]
+    Subscription(String),
+    #[error("invalid stored roster ask: {0}")]
+    Ask(String),
+}
+
+fn roster_row_to_item(row: RosterItemRow) -> Result<RosterItem, RosterConvertError> {
+    let jid = row
+        .contact_jid
+        .parse::<BareJid>()
+        .map_err(|error| RosterConvertError::Jid {
+            jid: row.contact_jid.clone(),
+            error: error.to_string(),
+        })?;
+    let subscription = row
+        .subscription
+        .parse::<Subscription>()
+        .map_err(|error| RosterConvertError::Subscription(error.to_string()))?;
+    let ask = row
+        .ask
+        .as_deref()
+        .map(str::parse::<AskType>)
+        .transpose()
+        .map_err(|error| RosterConvertError::Ask(error.to_string()))?;
+
+    Ok(RosterItem {
+        jid,
         name: row.name,
-        subscription: parse_subscription_state(&row.subscription),
-        ask: row.ask.as_deref().and_then(parse_ask_state),
+        subscription,
+        ask,
         approved: row.approved,
         groups: row.groups,
-    }
+    })
 }
 
 fn roster_item_to_row(item: &RosterItem) -> RosterItemRow {
@@ -1127,13 +1160,6 @@ fn subscription_state_str(value: Subscription) -> &'static str {
         Subscription::From => "from",
         Subscription::Both => "both",
         Subscription::Remove => "remove",
-    }
-}
-
-fn parse_ask_state(value: &str) -> Option<AskType> {
-    match value {
-        "subscribe" => Some(AskType::Subscribe),
-        _ => None,
     }
 }
 

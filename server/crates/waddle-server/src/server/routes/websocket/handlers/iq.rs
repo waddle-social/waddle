@@ -31,18 +31,16 @@ use waddle_xmpp::{
     presence::subscription::{
         build_subscription_presence, SubscriptionStateMachine, SubscriptionType,
     },
-    protocol::{
-        frame::{parse_frame, InboundFrame},
-        ConnectionPhase, StanzaContext as ProtocolStanzaContext,
-    },
+    protocol::{ConnectionPhase, StanzaContext as ProtocolStanzaContext},
     pubsub::{
         build_pubsub_error, build_pubsub_items_result, build_pubsub_publish_result,
         build_pubsub_success, is_pubsub_iq, parse_pubsub_iq, PubSubError, PubSubItem,
         PubSubRequest,
     },
+    registry::BroadcastOutcome,
     roster::{
         build_roster_push, build_roster_result, build_roster_result_empty, parse_roster_get,
-        parse_roster_set, RosterItem, RosterSetResult, Subscription, ROSTER_NS,
+        parse_roster_set, AskType, RosterItem, RosterSetResult, Subscription, ROSTER_NS,
     },
     xep::xep0054::{VCard, VCardPhoto},
     xep::xep0357::{
@@ -69,6 +67,9 @@ use waddle_xmpp::{
 };
 use xmpp_parsers::minidom::Element;
 
+#[cfg(test)]
+use waddle_xmpp::protocol::frame::{parse_frame, InboundFrame};
+
 use super::super::{
     build_iq_error_xml, build_iq_error_xml_with_addresses, build_iq_result_xml, destroy_room_actor,
     get_room_actor, iq_to_xml, is_muc_room_jid, stanza_to_xml, WebSocketState,
@@ -77,7 +78,7 @@ use super::presence::get_managed_channel_for_room;
 use crate::auth::{NativeUserStore, Session};
 use crate::db::actor::{DbExecute, DbQuery, DbQueryOne, GetDatabase};
 use crate::db::blocking::DatabaseBlockingStorage;
-use crate::db::roster::{DatabaseRosterStorage, RosterItemRow};
+use crate::db::roster::{DatabaseRosterStorage, RosterItemRow, RosterStorageError};
 use crate::db::{row_value, Database, Value, ValueExt};
 use crate::permissions::{
     CheckPermission, Object, ObjectType, Permission, PermissionError, Relation, Subject,
@@ -133,12 +134,6 @@ pub async fn handle_iq(
 pub struct IqConnState<'a> {
     pub carbons_enabled: &'a mut bool,
     pub roster_interested: &'a mut bool,
-}
-
-#[derive(Clone, Copy)]
-struct IqResponseAddresses<'a> {
-    from: Option<&'a str>,
-    to: Option<&'a str>,
 }
 
 pub async fn handle_iq_with_conn_state(
@@ -200,8 +195,6 @@ pub async fn handle_iq_with_conn_state(
             state,
             phase.bound_jid(),
             conn_state.roster_interested,
-            response_from,
-            response_to,
         )
         .await;
     }
@@ -2408,79 +2401,39 @@ async fn handle_roster_iq(
     state: &WebSocketState,
     bound_jid: Option<&FullJid>,
     roster_interested: &mut bool,
-    response_from: Option<&str>,
-    response_to: Option<&str>,
 ) -> Vec<String> {
     let Some(full_jid) = bound_jid else {
-        return vec![build_iq_error_xml_with_addresses(
-            &iq.id,
-            response_from,
-            response_to,
-            "auth",
-            "not-authorized",
+        return vec![build_xmpp_error_response(
+            iq,
+            XmppError::not_authorized(Some("Authenticated session required".to_string())),
         )];
     };
     let user_jid = full_jid.to_bare();
 
     if !roster_target_allowed(iq, domain, &user_jid) {
-        return vec![build_iq_error_xml_with_addresses(
-            &iq.id,
-            response_from,
-            response_to,
-            "auth",
-            "forbidden",
-        )];
+        return vec![build_xmpp_error_response(iq, XmppError::forbidden(None))];
     }
 
     let storage = match roster_storage_for_state(state).await {
         Ok(storage) => storage,
         Err(error) => {
             warn!(error = %error, "Failed to access roster storage");
-            return vec![build_iq_error_xml_with_addresses(
-                &iq.id,
-                response_from,
-                response_to,
-                "wait",
-                "internal-server-error",
+            return vec![build_xmpp_error_response(
+                iq,
+                XmppError::internal_server_error(None),
             )];
         }
     };
 
     if waddle_xmpp::roster::is_roster_get(iq) {
-        return handle_roster_get(
-            iq,
-            &storage,
-            state,
-            &user_jid,
-            full_jid,
-            roster_interested,
-            IqResponseAddresses {
-                from: response_from,
-                to: response_to,
-            },
-        )
-        .await;
+        return handle_roster_get(iq, &storage, state, &user_jid, full_jid, roster_interested)
+            .await;
     }
     if waddle_xmpp::roster::is_roster_set(iq) {
-        return handle_roster_set(
-            iq,
-            &storage,
-            state,
-            &user_jid,
-            full_jid,
-            response_from,
-            response_to,
-        )
-        .await;
+        return handle_roster_set(iq, &storage, state, &user_jid, full_jid).await;
     }
 
-    vec![build_iq_error_xml_with_addresses(
-        &iq.id,
-        response_from,
-        response_to,
-        "modify",
-        "bad-request",
-    )]
+    vec![build_xmpp_error_response(iq, XmppError::bad_request(None))]
 }
 
 async fn handle_roster_get(
@@ -2490,7 +2443,6 @@ async fn handle_roster_get(
     user_jid: &BareJid,
     full_jid: &FullJid,
     roster_interested: &mut bool,
-    response_addresses: IqResponseAddresses<'_>,
 ) -> Vec<String> {
     let query = match parse_roster_get(iq) {
         Ok(query) => query,
@@ -2501,12 +2453,9 @@ async fn handle_roster_get(
         Ok(rows) => rows,
         Err(error) => {
             warn!(user = %user_jid, error = %error, "Failed to read roster");
-            return vec![build_iq_error_xml_with_addresses(
-                &iq.id,
-                response_addresses.from,
-                response_addresses.to,
-                "wait",
-                "internal-server-error",
+            return vec![build_xmpp_error_response(
+                iq,
+                XmppError::internal_server_error(None),
             )];
         }
     };
@@ -2514,12 +2463,9 @@ async fn handle_roster_get(
         Ok(items) => items,
         Err(error) => {
             warn!(user = %user_jid, error = %error, "Failed to convert roster rows");
-            return vec![build_iq_error_xml_with_addresses(
-                &iq.id,
-                response_addresses.from,
-                response_addresses.to,
-                "wait",
-                "internal-server-error",
+            return vec![build_xmpp_error_response(
+                iq,
+                XmppError::internal_server_error(None),
             )];
         }
     };
@@ -2527,12 +2473,9 @@ async fn handle_roster_get(
         Ok(version) => version,
         Err(error) => {
             warn!(user = %user_jid, error = %error, "Failed to read roster version");
-            return vec![build_iq_error_xml_with_addresses(
-                &iq.id,
-                response_addresses.from,
-                response_addresses.to,
-                "wait",
-                "internal-server-error",
+            return vec![build_xmpp_error_response(
+                iq,
+                XmppError::internal_server_error(None),
             )];
         }
     };
@@ -2555,8 +2498,6 @@ async fn handle_roster_set(
     state: &WebSocketState,
     user_jid: &BareJid,
     full_jid: &FullJid,
-    response_from: Option<&str>,
-    response_to: Option<&str>,
 ) -> Vec<String> {
     let query = match parse_roster_set(iq) {
         Ok(query) => query,
@@ -2574,46 +2515,34 @@ async fn handle_roster_set(
                 Ok(item) => Some(item),
                 Err(error) => {
                     warn!(user = %user_jid, contact = %requested.jid, error = %error, "Failed to convert removed roster item");
-                    return vec![build_iq_error_xml_with_addresses(
-                        &iq.id,
-                        response_from,
-                        response_to,
-                        "wait",
-                        "internal-server-error",
+                    return vec![build_xmpp_error_response(
+                        iq,
+                        XmppError::internal_server_error(None),
                     )];
                 }
             },
             Ok(None) => None,
             Err(error) => {
                 warn!(user = %user_jid, contact = %requested.jid, error = %error, "Failed to load roster item before remove");
-                return vec![build_iq_error_xml_with_addresses(
-                    &iq.id,
-                    response_from,
-                    response_to,
-                    "wait",
-                    "internal-server-error",
+                return vec![build_xmpp_error_response(
+                    iq,
+                    XmppError::internal_server_error(None),
                 )];
             }
         };
         match storage.remove_roster_item(user_jid, &requested.jid).await {
             Ok(true) => RosterSetResult::Removed(requested.jid.clone()),
             Ok(false) => {
-                return vec![build_iq_error_xml_with_addresses(
-                    &iq.id,
-                    response_from,
-                    response_to,
-                    "cancel",
-                    "item-not-found",
+                return vec![build_xmpp_error_response(
+                    iq,
+                    XmppError::item_not_found(None),
                 )];
             }
             Err(error) => {
                 warn!(user = %user_jid, contact = %requested.jid, error = %error, "Failed to remove roster item");
-                return vec![build_iq_error_xml_with_addresses(
-                    &iq.id,
-                    response_from,
-                    response_to,
-                    "wait",
-                    "internal-server-error",
+                return vec![build_xmpp_error_response(
+                    iq,
+                    XmppError::internal_server_error(None),
                 )];
             }
         }
@@ -2623,24 +2552,18 @@ async fn handle_roster_set(
                 Ok(item) => item,
                 Err(error) => {
                     warn!(user = %user_jid, contact = %requested.jid, error = %error, "Failed to convert roster item");
-                    return vec![build_iq_error_xml_with_addresses(
-                        &iq.id,
-                        response_from,
-                        response_to,
-                        "wait",
-                        "internal-server-error",
+                    return vec![build_xmpp_error_response(
+                        iq,
+                        XmppError::internal_server_error(None),
                     )];
                 }
             },
             Ok(None) => RosterItem::new(requested.jid.clone()),
             Err(error) => {
                 warn!(user = %user_jid, contact = %requested.jid, error = %error, "Failed to load roster item");
-                return vec![build_iq_error_xml_with_addresses(
-                    &iq.id,
-                    response_from,
-                    response_to,
-                    "wait",
-                    "internal-server-error",
+                return vec![build_xmpp_error_response(
+                    iq,
+                    XmppError::internal_server_error(None),
                 )];
             }
         };
@@ -2655,12 +2578,9 @@ async fn handle_roster_set(
             Ok(is_new) => is_new,
             Err(error) => {
                 warn!(user = %user_jid, contact = %item.jid, error = %error, "Failed to store roster item");
-                return vec![build_iq_error_xml_with_addresses(
-                    &iq.id,
-                    response_from,
-                    response_to,
-                    "wait",
-                    "internal-server-error",
+                return vec![build_xmpp_error_response(
+                    iq,
+                    XmppError::internal_server_error(None),
                 )];
             }
         };
@@ -2675,12 +2595,9 @@ async fn handle_roster_set(
         Ok(version) => version,
         Err(error) => {
             warn!(user = %user_jid, error = %error, "Failed to read roster version after set");
-            return vec![build_iq_error_xml_with_addresses(
-                &iq.id,
-                response_from,
-                response_to,
-                "wait",
-                "internal-server-error",
+            return vec![build_xmpp_error_response(
+                iq,
+                XmppError::internal_server_error(None),
             )];
         }
     };
@@ -2796,9 +2713,8 @@ async fn send_roster_remove_subscription_stanza(
             .deps
             .protocol
             .connection_registry
-            .send_to(resource, stanza.clone())
-            .await
-            .is_sent()
+            .try_send_to(resource, stanza.clone())
+            == BroadcastOutcome::Delivered
         {
             delivered_resources.push(resource.clone());
         }
@@ -2835,8 +2751,7 @@ async fn send_roster_remove_subscription_stanza(
                     .deps
                     .protocol
                     .connection_registry
-                    .send_to(&resource, stanza.clone())
-                    .await;
+                    .try_send_to(&resource, stanza.clone());
             }
             Err(error) => {
                 warn!(error = %error, resource = %resource, "Failed to record roster removal subscription side effect");
@@ -2869,9 +2784,8 @@ async fn send_roster_push_to_all_resources(
             .deps
             .protocol
             .connection_registry
-            .send_to(resource, Stanza::Iq(push))
-            .await
-            .is_sent()
+            .try_send_to(resource, Stanza::Iq(push))
+            == BroadcastOutcome::Delivered
         {
             delivered_resources.push(resource.clone());
         }
@@ -2915,9 +2829,8 @@ async fn send_roster_push_to_all_resources(
                     .deps
                     .protocol
                     .connection_registry
-                    .send_to(&resource, stanza)
-                    .await
-                    .is_sent()
+                    .try_send_to(&resource, stanza)
+                    == BroadcastOutcome::Delivered
                 {
                     delivered_resources.push(resource.clone());
                 }
@@ -2946,8 +2859,7 @@ async fn send_roster_push_to_all_resources(
             .deps
             .protocol
             .connection_registry
-            .send_to(&resource, Stanza::Iq(push))
-            .await;
+            .try_send_to(&resource, Stanza::Iq(push));
     }
 }
 
@@ -2979,9 +2891,8 @@ async fn send_roster_push_to_sibling_resources(
             .deps
             .protocol
             .connection_registry
-            .send_to(resource, Stanza::Iq(push))
-            .await
-            .is_sent()
+            .try_send_to(resource, Stanza::Iq(push))
+            == BroadcastOutcome::Delivered
         {
             delivered_resources.push(resource.clone());
         }
@@ -3032,9 +2943,8 @@ async fn send_roster_push_to_sibling_resources(
                         .deps
                         .protocol
                         .connection_registry
-                        .send_to(&resource, stanza)
-                        .await
-                        .is_sent()
+                        .try_send_to(&resource, stanza)
+                        == BroadcastOutcome::Delivered
                 {
                     delivered_resources.push(resource.clone());
                 }
@@ -3064,8 +2974,7 @@ async fn send_roster_push_to_sibling_resources(
             .deps
             .protocol
             .connection_registry
-            .send_to(&resource, Stanza::Iq(push))
-            .await;
+            .try_send_to(&resource, Stanza::Iq(push));
     }
 }
 
@@ -3078,30 +2987,45 @@ fn roster_target_allowed(iq: &xmpp_parsers::iq::Iq, domain: &str, user_jid: &Bar
     }
 }
 
-async fn roster_storage_for_state(state: &WebSocketState) -> Result<DatabaseRosterStorage, String> {
+#[derive(Debug, thiserror::Error)]
+enum RosterConvertError {
+    #[error("invalid stored roster jid '{jid}': {error}")]
+    Jid { jid: String, error: String },
+    #[error("invalid stored roster subscription: {0}")]
+    Subscription(String),
+    #[error("invalid stored roster ask: {0}")]
+    Ask(String),
+}
+
+async fn roster_storage_for_state(
+    state: &WebSocketState,
+) -> Result<DatabaseRosterStorage, RosterStorageError> {
     let db = global_database(state).await?;
     Ok(DatabaseRosterStorage::new(db))
 }
 
-fn roster_rows_to_items(rows: Vec<RosterItemRow>) -> Result<Vec<RosterItem>, String> {
+fn roster_rows_to_items(rows: Vec<RosterItemRow>) -> Result<Vec<RosterItem>, RosterConvertError> {
     rows.into_iter().map(roster_row_to_item).collect()
 }
 
-fn roster_row_to_item(row: RosterItemRow) -> Result<RosterItem, String> {
+fn roster_row_to_item(row: RosterItemRow) -> Result<RosterItem, RosterConvertError> {
     let jid = row
         .contact_jid
-        .parse()
-        .map_err(|error| format!("invalid stored roster jid '{}': {error}", row.contact_jid))?;
+        .parse::<BareJid>()
+        .map_err(|error: jid::Error| RosterConvertError::Jid {
+            jid: row.contact_jid.clone(),
+            error: error.to_string(),
+        })?;
     let subscription = row
         .subscription
-        .parse()
-        .map_err(|error| format!("invalid stored roster subscription: {error}"))?;
+        .parse::<Subscription>()
+        .map_err(|error| RosterConvertError::Subscription(error.to_string()))?;
     let ask = row
         .ask
         .as_deref()
-        .map(str::parse)
+        .map(str::parse::<AskType>)
         .transpose()
-        .map_err(|error| format!("invalid stored roster ask: {error}"))?;
+        .map_err(|error| RosterConvertError::Ask(error.to_string()))?;
 
     Ok(RosterItem {
         jid,
@@ -3157,7 +3081,7 @@ fn build_xmpp_error_response(request_iq: &xmpp_parsers::iq::Iq, err: XmppError) 
     }
 }
 
-async fn global_database(state: &WebSocketState) -> Result<Database, String> {
+async fn global_database(state: &WebSocketState) -> Result<Database, RosterStorageError> {
     state
         .deps
         .app_state
@@ -3166,7 +3090,7 @@ async fn global_database(state: &WebSocketState) -> Result<Database, String> {
         .clone()
         .ask(GetDatabase)
         .await
-        .map_err(|error| error.to_string())
+        .map_err(|error| RosterStorageError::ConnectionFailed(error.to_string()))
 }
 
 async fn handle_vcard_iq(

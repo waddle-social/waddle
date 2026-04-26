@@ -136,7 +136,6 @@ pub(crate) async fn list_xmpp_channels(
     rows.iter().map(parse_channel_record).collect()
 }
 
-
 /// XMPP application state that bridges to waddle-server services.
 ///
 /// This struct implements `waddle_xmpp::AppState` by delegating to:
@@ -200,7 +199,6 @@ impl XmppAppState {
             inbox_storage: None,
         }
     }
-
 
     /// Parse a resource string into an Object.
     ///
