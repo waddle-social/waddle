@@ -1188,6 +1188,7 @@ mod tests {
 
             let item = PubSubItem {
                 id: Some("room@muc.example.com".to_string()),
+                publisher: None,
                 payload: None,
             };
             storage
@@ -1233,6 +1234,7 @@ mod tests {
         for id in ["one@muc.example.com", "two@muc.example.com"] {
             let item = PubSubItem {
                 id: Some(id.to_string()),
+                publisher: None,
                 payload: None,
             };
             storage
@@ -1342,6 +1344,7 @@ mod tests {
         for i in 1..=3 {
             let item = PubSubItem {
                 id: Some(format!("i{i}")),
+                publisher: None,
                 payload: None,
             };
             storage

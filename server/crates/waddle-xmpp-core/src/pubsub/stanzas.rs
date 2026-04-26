@@ -1,6 +1,6 @@
 //! Shared PubSub stanza parsing and building helpers.
 
-use jid::Jid;
+use jid::{BareJid, Jid};
 use minidom::Element;
 use xmpp_parsers::iq::{Iq, IqType};
 use xmpp_parsers::message::Message;
@@ -20,21 +20,40 @@ pub const NS_PUBSUB_OWNER: &str = "http://jabber.org/protocol/pubsub#owner";
 /// PubSub errors namespace.
 pub const NS_PUBSUB_ERRORS: &str = "http://jabber.org/protocol/pubsub#errors";
 
-/// A typed PubSub item with an optional ID and payload element.
+/// A typed PubSub item with an optional ID, publisher, and payload element.
+///
+/// `publisher` is meaningful for `<event>` notifications (XEP-0060 §7.1.5)
+/// and `<items>` results (§6.5.4). On inbound `<publish>` requests the
+/// attribute, if present, is parsed but the publish handler MUST derive the
+/// authoritative publisher from the IQ `from` — never trust the item.
 #[derive(Debug, Clone)]
 pub struct PubSubItem {
     pub id: Option<String>,
+    pub publisher: Option<BareJid>,
     pub payload: Option<Element>,
 }
 
 impl PubSubItem {
     pub fn new(id: Option<String>, payload: Option<Element>) -> Self {
-        Self { id, payload }
+        Self {
+            id,
+            publisher: None,
+            payload,
+        }
+    }
+
+    pub fn with_publisher(mut self, publisher: Option<BareJid>) -> Self {
+        self.publisher = publisher;
+        self
     }
 
     pub fn from_element(elem: &Element) -> Self {
+        let publisher = elem
+            .attr("publisher")
+            .and_then(|raw| raw.parse::<BareJid>().ok());
         Self {
             id: elem.attr("id").map(str::to_owned),
+            publisher,
             payload: elem.children().next().cloned(),
         }
     }
@@ -44,6 +63,10 @@ impl PubSubItem {
 
         if let Some(ref id) = self.id {
             builder = builder.attr("id", id);
+        }
+
+        if let Some(ref publisher) = self.publisher {
+            builder = builder.attr("publisher", publisher.to_string());
         }
 
         if let Some(ref payload) = self.payload {
@@ -743,6 +766,29 @@ mod tests {
 
         assert_eq!(parsed.id.as_deref(), Some("item-1"));
         assert!(parsed.payload.is_some());
+        assert!(parsed.publisher.is_none());
+    }
+
+    #[test]
+    fn pubsub_item_publisher_attribute_round_trips() {
+        let publisher: BareJid = "alice@example.com".parse().expect("valid bare");
+        let item = PubSubItem::new(Some("e1".to_string()), None).with_publisher(Some(publisher));
+
+        let elem = item.to_element(NS_PUBSUB_EVENT);
+        assert_eq!(elem.attr("publisher"), Some("alice@example.com"));
+
+        let parsed = PubSubItem::from_element(&elem);
+        assert_eq!(
+            parsed.publisher.as_ref().map(BareJid::to_string).as_deref(),
+            Some("alice@example.com")
+        );
+    }
+
+    #[test]
+    fn pubsub_item_omits_publisher_when_unset() {
+        let item = PubSubItem::new(Some("e2".to_string()), None);
+        let elem = item.to_element(NS_PUBSUB_EVENT);
+        assert!(elem.attr("publisher").is_none());
     }
 
     #[test]
