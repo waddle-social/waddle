@@ -399,18 +399,25 @@ async fn seed_spaces_admin_affiliations(
     if server_owner_jids.is_empty() {
         return;
     }
-    for owner in server_owner_jids {
-        if let Err(error) =
-            crate::spaces_pubsub_seed::seed_owner_on_all_nodes(pubsub_storage, spaces_jid, owner)
-                .await
-        {
+    let nodes = match pubsub_storage.list_nodes(spaces_jid).await {
+        Ok(nodes) => nodes,
+        Err(error) => {
             warn!(
                 spaces = %spaces_jid,
-                owner = %owner,
                 error = %error,
-                "failed to seed server-owner affiliations across Spaces nodes",
+                "failed to enumerate Spaces nodes for server-owner affiliation seed",
             );
+            return;
         }
+    };
+    for node in &nodes {
+        crate::spaces_pubsub_seed::seed_owners_on_node(
+            pubsub_storage,
+            spaces_jid,
+            node,
+            server_owner_jids,
+        )
+        .await;
     }
 }
 
