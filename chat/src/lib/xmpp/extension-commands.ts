@@ -365,7 +365,7 @@ async function discoverExtensionCommandService(xmpp: Agent, userJid: string): Pr
     for (const candidate of [domain, fallback, ...candidates.filter((jid) => jid !== fallback && jid !== domain)]) {
       try {
         const info = await (xmpp as unknown as { getDiscoInfo?: (jid: string) => Promise<{ features?: string[] }> }).getDiscoInfo?.(candidate);
-        if (info?.features?.includes(NS_ADHOC_COMMANDS)) return candidate;
+        if (info?.features?.some((feature) => feature === NS_ADHOC_COMMANDS)) return candidate;
       } catch {
         // Try the next discovered component.
       }
