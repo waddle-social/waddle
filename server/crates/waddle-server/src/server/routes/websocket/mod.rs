@@ -4595,6 +4595,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn handle_message_direct_rejects_client_authored_extension_envelope() {
+        let sender_jid: FullJid = "alice@example.com/web".parse().expect("sender jid");
+        let recipient_jid: FullJid = "bob@example.com/mobile".parse().expect("recipient jid");
+        let state = create_test_websocket_state().await;
+
+        let mut message =
+            xmpp_parsers::message::Message::new(Some(jid::Jid::from(recipient_jid.clone())));
+        message.id = Some("dm-extension-spoof-1".to_string());
+        message.type_ = XmppMessageType::Chat;
+        message.bodies.insert(
+            String::new(),
+            xmpp_parsers::message::Body("spoofed extension".to_string()),
+        );
+        message
+            .payloads
+            .push(Element::builder("extensions", "urn:waddle:extension:1").build());
+
+        let responses = handle_message(
+            message,
+            "muc.example.com",
+            state.as_ref(),
+            &ConnectionPhase::ready(sender_jid.clone(), false),
+            &None,
+        )
+        .await;
+
+        assert_eq!(responses.len(), 1);
+        assert!(
+            responses[0].contains("bad-request"),
+            "response was {}",
+            responses[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_message_groupchat_rejects_client_authored_extension_envelope() {
+        let sender_jid: FullJid = "alice@example.com/web".parse().expect("sender jid");
+        let room_jid: BareJid = "general@muc.example.com".parse().expect("room jid");
+        let state = create_test_websocket_state().await;
+
+        let mut message =
+            xmpp_parsers::message::Message::new(Some(jid::Jid::from(room_jid.clone())));
+        message.id = Some("muc-extension-spoof-1".to_string());
+        message.type_ = XmppMessageType::Groupchat;
+        message.bodies.insert(
+            String::new(),
+            xmpp_parsers::message::Body("spoofed extension".to_string()),
+        );
+        message
+            .payloads
+            .push(Element::builder("extensions", "urn:waddle:extension:1").build());
+
+        let responses = handle_message(
+            message,
+            "muc.example.com",
+            state.as_ref(),
+            &ConnectionPhase::ready(sender_jid.clone(), false),
+            &None,
+        )
+        .await;
+
+        assert_eq!(responses.len(), 1);
+        assert!(
+            responses[0].contains("bad-request"),
+            "response was {}",
+            responses[0]
+        );
+    }
+
+    #[tokio::test]
     async fn handle_message_direct_with_github_embed_preserves_payload_for_recipient() {
         let sender_jid: FullJid = "alice@example.com/web".parse().expect("sender jid");
         let recipient_jid: FullJid = "bob@example.com/mobile".parse().expect("recipient jid");

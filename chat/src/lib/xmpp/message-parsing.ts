@@ -231,6 +231,18 @@ interface ExtensionFrameworkPayload {
   assistantAnswers?: unknown[] | unknown;
   canvases?: unknown[] | unknown;
   polls?: unknown[] | unknown;
+  views?: ExtensionViewPayload | ExtensionViewPayload[];
+}
+
+interface ExtensionViewPayload {
+  id?: string;
+  title?: string;
+  textBlocks?: ExtensionTextBlockPayload | ExtensionTextBlockPayload[];
+}
+
+interface ExtensionTextBlockPayload {
+  text?: string;
+  style?: string;
 }
 
 interface ExtensionLaunchPayload {
@@ -283,13 +295,15 @@ function extensionAnnotationsFromStanza(stanza: Record<string, unknown>): Extens
 
 function parseExtensionEnrichment(payload: ExtensionEnrichmentPayload): ExtensionAnnotation | null {
   if (!payload.id || !payload.plugin) return null;
+  const surfaceKind = inferSurfaceKind(payload);
+  if (!surfaceKind) return null;
   const actions = asArray(payload.launches)
     .filter((launch): launch is Required<Pick<ExtensionLaunchPayload, "id" | "label">> & ExtensionLaunchPayload => !!launch.id && !!launch.label)
     .map((launch) => ({ route: launch.id, label: launch.label }));
   return {
     extensionId: payload.plugin,
     annotationId: payload.id,
-    surfaceKind: inferSurfaceKind(payload),
+    surfaceKind,
     title: extensionTitle(payload),
     ...(payload.payloadNamespace ? { summary: payload.payloadNamespace } : {}),
     fields: {
@@ -300,11 +314,13 @@ function parseExtensionEnrichment(payload: ExtensionEnrichmentPayload): Extensio
   };
 }
 
-function inferSurfaceKind(payload: ExtensionEnrichmentPayload): ExtensionSurfaceKind {
+function inferSurfaceKind(payload: ExtensionEnrichmentPayload): ExtensionSurfaceKind | null {
   if (hasPayloadItems(payload.payload?.links)) return "board";
   if (hasPayloadItems(payload.payload?.quizQuestions)) return "game";
   if (hasPayloadItems(payload.payload?.assistantAnswers)) return "chat-bot";
   if (hasPayloadItems(payload.payload?.canvases)) return "dynamic-canvas";
+  if (hasPayloadItems(payload.payload?.polls)) return "utility-panel";
+  if (hasPayloadItems(payload.payload?.views)) return "message-card";
   switch (payload.payloadNamespace) {
     case "urn:waddle:links-task-board:1":
       return "board";
@@ -314,8 +330,10 @@ function inferSurfaceKind(payload: ExtensionEnrichmentPayload): ExtensionSurface
       return "chat-bot";
     case "urn:waddle:ai-assistant-canvas:1":
       return "dynamic-canvas";
+    case "urn:waddle:decision-polls:1":
+      return "utility-panel";
     default:
-      return "message-card";
+      return null;
   }
 }
 
@@ -324,6 +342,10 @@ function hasPayloadItems(value: unknown[] | unknown | undefined): boolean {
 }
 
 function extensionTitle(payload: ExtensionEnrichmentPayload): string {
+  const view = asArray(payload.payload?.views).find((candidate) => candidate?.title || hasPayloadItems(candidate?.textBlocks));
+  if (view?.title) return view.title;
+  const textBlock = view ? asArray(view.textBlocks).find((candidate) => typeof candidate?.text === "string" && candidate.text.trim().length > 0) : undefined;
+  if (textBlock?.text) return textBlock.text;
   switch (payload.payloadNamespace) {
     case "urn:waddle:links-task-board:1":
       return "Links task board";

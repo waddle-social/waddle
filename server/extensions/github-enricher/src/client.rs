@@ -33,7 +33,6 @@ pub fn build_repo_embed(url: &str) -> EmbedElement {
             ("owner".to_string(), owner),
             ("name".to_string(), name),
         ],
-        children: Vec::new(),
     }
 }
 

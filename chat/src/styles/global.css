@@ -1195,6 +1195,11 @@
   max-width: 100%;
 }
 
+.chat-extension-card {
+  width: var(--chat-attachment-card-width);
+  max-width: 100%;
+}
+
 .chat-attachment-card,
 .chat-file-card {
   max-width: 100%;

@@ -1329,8 +1329,6 @@ pub struct EmbedElement {
     pub namespace: String,
     #[serde(default)]
     pub attributes: Vec<(String, String)>,
-    #[serde(default)]
-    pub children: Vec<String>,
 }
 
 impl EmbedElement {
@@ -1338,10 +1336,6 @@ impl EmbedElement {
         let mut builder = Element::builder(self.element_name.as_str(), self.namespace.as_str());
         for (key, value) in &self.attributes {
             builder = builder.attr(key.as_str(), value.as_str());
-        }
-
-        for child in &self.children {
-            builder = builder.append(child.clone());
         }
 
         builder.build()
@@ -1374,7 +1368,7 @@ pub fn message_has_framework_envelope(msg: &Message) -> bool {
         .any(|payload| payload.name() == "extensions" && payload.ns() == FRAMEWORK_NAMESPACE)
 }
 
-fn is_official_namespace(value: &str) -> bool {
+pub fn is_official_namespace(value: &str) -> bool {
     value.starts_with("urn:xmpp:")
         || value.starts_with("jabber:")
         || value.starts_with("http://jabber.org/")

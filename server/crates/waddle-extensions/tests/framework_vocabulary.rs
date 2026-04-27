@@ -359,20 +359,3 @@ fn framework_envelope_detection_is_exact() {
         .push(Element::builder("extensions", "urn:xmpp:sid:0").build());
     assert!(!message_has_framework_envelope(&official_message));
 }
-
-#[test]
-fn legacy_embed_children_are_text_not_xml() {
-    let embed = EmbedElement {
-        element_name: "extensions".to_string(),
-        namespace: FRAMEWORK_NAMESPACE.to_string(),
-        attributes: Vec::new(),
-        children: vec!["<poll xmlns='urn:waddle:decision-polls:1'/>".to_string()],
-    };
-
-    let element = embed.to_minidom();
-    assert_eq!(element.children().count(), 0);
-    assert_eq!(
-        element.text(),
-        "<poll xmlns='urn:waddle:decision-polls:1'/>"
-    );
-}

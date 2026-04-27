@@ -96,6 +96,7 @@ schema.#Project & {
 				defaultBranch: true
 				manual:        true
 			}
+			derivePaths: false
 			provider: github: {
 				permissions: packages: "write"
 				runners: arch: {
@@ -106,6 +107,7 @@ schema.#Project & {
 				_t.fmt,
 				_t.clippy,
 				_t.test,
+				_t.pinGithubEnricherDigest,
 				_t.publishContainerImage,
 			]
 		}
@@ -150,8 +152,8 @@ schema.#Project & {
 				defaultBranch: true
 				manual:        true
 			}
-			derivePaths: true
-			tasks: [_t.buildGithubEnricher, _t.pushGithubEnricherOci, _t.pinGithubEnricherDigest, _t.pushGithubEnricherGitops]
+			derivePaths: false
+			tasks: [_t.buildGithubEnricher, _t.pushGithubEnricherOci]
 		}
 		githubEnricherPullRequest: {
 			when: {
@@ -188,7 +190,7 @@ schema.#Project & {
 			args: ["build", "--profile", "ci", "--locked", "--package", "waddle-server"]
 			inputs: _rustInputs
 			outputs: ["target/ci/waddle-server"]
-			dependsOn: [tasks.fmt, tasks.clippy, tasks.test]
+			dependsOn: [tasks.fmt, tasks.clippy, tasks.test, tasks.pinGithubEnricherDigest]
 		}
 
 		buildRelease: xRust.#Build & {
@@ -279,10 +281,10 @@ schema.#Project & {
 				  --path=../infrastructure/waddle.cloud/gitops/waddle-server \
 				  --source="$(git config --get remote.origin.url)" \
 				  --revision="${SHORT_SHA}"
-				"""#]
+			"""#]
 			inputs: list.Concat([_nixInputs, ["charts/**"]])
 			outputs: ["target/digests/**"]
-			dependsOn: [tasks.fmt, tasks.clippy, tasks.test]
+			dependsOn: [tasks.fmt, tasks.clippy, tasks.test, tasks.pinGithubEnricherDigest]
 		}
 
 		flakehubPublished: schema.#Task & {
@@ -352,7 +354,7 @@ schema.#Project & {
 			command: "bash"
 			env: {
 				GITHUB_TOKEN: schema.#EnvPassthrough
-				GITHUB_ACTOR: schema.#EnvPassthrough
+				GITHUB_ACTOR: "${{ github.actor }}"
 			}
 			args: ["-c", #"""
 					set -euo pipefail
@@ -377,7 +379,7 @@ schema.#Project & {
 			command: "bash"
 			env: {
 				GITHUB_TOKEN: schema.#EnvPassthrough
-				GITHUB_ACTOR: schema.#EnvPassthrough
+				GITHUB_ACTOR: "${{ github.actor }}"
 			}
 			args: ["-c", #"""
 					set -euo pipefail
@@ -397,24 +399,6 @@ schema.#Project & {
 					yq -e ".spec.values.extensions.modules[] | select(.name == \"github-enricher\") | .digest == \"${DIGEST}\"" ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml > /dev/null
 				"""#]
 			dependsOn: [tasks.pushGithubEnricherOci]
-		}
-
-		pushGithubEnricherGitops: schema.#Task & {
-			command: "bash"
-			env: {
-				GITHUB_TOKEN: schema.#EnvPassthrough
-				GITHUB_ACTOR: schema.#EnvPassthrough
-			}
-			args: ["-c", #"""
-				set -euo pipefail
-					echo "${GITHUB_TOKEN}" | docker login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
-					flux push artifact \
-					  oci://ghcr.io/waddle-social/waddle/gitops-waddle-server:latest \
-					  --path=../infrastructure/waddle.cloud/gitops/waddle-server \
-					  --source="$(git config --get remote.origin.url)" \
-					  --revision="$(git rev-parse --short HEAD)"
-				"""#]
-			dependsOn: [tasks.pinGithubEnricherDigest]
 		}
 	}
 

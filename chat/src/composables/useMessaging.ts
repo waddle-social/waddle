@@ -315,7 +315,7 @@ export function useMessaging(
 
         // XEP-0308: Handle message corrections
         if (msg.replacesId) {
-          applyCorrection(msg.replacesId, msg.body, msg.markup, msg.references, msg.githubEmbeds);
+          applyCorrection(msg.replacesId, msg.body, msg.markup, msg.references, msg.githubEmbeds, msg.extensionAnnotations);
           return;
         }
 
@@ -572,6 +572,7 @@ export function useMessaging(
     markup?: MarkupSpan[],
     references?: MessageReference[],
     githubEmbeds?: LiveRoomMessage["githubEmbeds"],
+    extensionAnnotations?: LiveRoomMessage["extensionAnnotations"],
   ) {
     const idx = messages.value.findIndex((m) => matchMessageId(m, replacesId));
     if (idx === -1) return;
@@ -600,6 +601,11 @@ export function useMessaging(
         }
       } else {
         delete updated.githubEmbeds;
+      }
+      if (extensionAnnotations && extensionAnnotations.length > 0) {
+        updated.extensionAnnotations = extensionAnnotations;
+      } else {
+        delete updated.extensionAnnotations;
       }
       return updated;
     });
@@ -779,6 +785,7 @@ export function useMessaging(
         markup?: MarkupSpan[];
         references?: MessageReference[];
         githubEmbeds?: LiveRoomMessage["githubEmbeds"];
+        extensionAnnotations?: LiveRoomMessage["extensionAnnotations"];
       }[] = [];
 
       for (const msg of mamResults) {
@@ -797,6 +804,7 @@ export function useMessaging(
             markup: msg.markup,
             references: msg.references,
             githubEmbeds: msg.githubEmbeds,
+            extensionAnnotations: msg.extensionAnnotations,
           });
         } else if (msg.body || (msg.sharedFiles && msg.sharedFiles.length > 0) || msg.isSticker || (msg.githubEmbeds && msg.githubEmbeds.length > 0) || (msg.extensionAnnotations && msg.extensionAnnotations.length > 0)) {
           regularMessages.push(msg);
@@ -838,6 +846,11 @@ export function useMessaging(
           }
         } else {
           delete target.githubEmbeds;
+        }
+        if (update.extensionAnnotations && update.extensionAnnotations.length > 0) {
+          target.extensionAnnotations = update.extensionAnnotations;
+        } else {
+          delete target.extensionAnnotations;
         }
       }
 

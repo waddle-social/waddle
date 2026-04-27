@@ -17,10 +17,10 @@ use crate::config::{ExtensionConfig, ExtensionModuleConfig};
 use crate::oci::OciExtensionPuller;
 use crate::runtime::{LoadedExtension, WasmRuntime};
 use crate::types::{
-    message_has_embed_for_namespaces, message_has_framework_envelope, DetectedLink, DisplayText,
-    EmbedElement, EnrichmentId, ExtensionCapability, ExtensionEnvelope, FrameworkPayload,
-    MessageEnrichment, PayloadNamespace, PluginId, TextBlock, TextStyle, Timestamp, UiView,
-    UiViewId,
+    is_official_namespace, message_has_embed_for_namespaces, message_has_framework_envelope,
+    DetectedLink, DisplayText, EmbedElement, EnrichmentId, ExtensionCapability, ExtensionEnvelope,
+    FrameworkPayload, MessageEnrichment, PayloadNamespace, PluginId, TextBlock, TextStyle,
+    Timestamp, UiView, UiViewId,
 };
 
 const MAX_DETECTED_LINKS: usize = 3;
@@ -52,13 +52,13 @@ impl ExtensionManager {
     /// Failures to load an individual extension are logged (fail-open) and do not
     /// prevent the remaining extensions from loading.
     pub async fn from_config(config: ExtensionConfig) -> Result<Self> {
-        config.validate().map_err(anyhow::Error::msg)?;
         if !config.enabled {
             return Ok(Self {
                 actors: Vec::new(),
                 feature_namespaces: Vec::new(),
             });
         }
+        config.validate().map_err(anyhow::Error::msg)?;
 
         let runtime = WasmRuntime::new()?;
         let puller = OciExtensionPuller::new(&config.cache_dir);
@@ -121,13 +121,9 @@ impl ExtensionManager {
             };
 
             let info = actor.info();
-            if !info.namespace.is_empty() && !feature_namespaces.contains(&info.namespace) {
-                feature_namespaces.push(info.namespace.clone());
-            }
+            push_feature_namespace(module, &mut feature_namespaces, &info.namespace);
             for feature in &info.features {
-                if !feature_namespaces.contains(&feature.namespace) {
-                    feature_namespaces.push(feature.namespace.clone());
-                }
+                push_feature_namespace(module, &mut feature_namespaces, &feature.namespace);
             }
 
             actors.push(Arc::new(actor));
@@ -217,6 +213,35 @@ impl ExtensionManager {
             }
         }
         count
+    }
+}
+
+fn push_feature_namespace(
+    module: &ExtensionModuleConfig,
+    feature_namespaces: &mut Vec<String>,
+    namespace: &str,
+) {
+    if namespace.trim().is_empty() {
+        return;
+    }
+    if is_official_namespace(namespace) {
+        warn!(
+            extension = %module.name,
+            namespace,
+            "extension attempted to advertise an official XMPP namespace; ignoring"
+        );
+        return;
+    }
+    if !namespace.starts_with("urn:waddle:") {
+        warn!(
+            extension = %module.name,
+            namespace,
+            "extension attempted to advertise a non-Waddle namespace; ignoring"
+        );
+        return;
+    }
+    if !feature_namespaces.iter().any(|value| value == namespace) {
+        feature_namespaces.push(namespace.to_string());
     }
 }
 
@@ -570,6 +595,50 @@ mod tests {
         );
         assert_eq!(manager.enrich_message(&mut msg).await, 0);
         assert!(msg.payloads.is_empty());
+    }
+
+    #[tokio::test]
+    async fn disabled_config_does_not_require_cache_dir() {
+        let manager = ExtensionManager::from_config(ExtensionConfig {
+            enabled: false,
+            cache_dir: String::new(),
+            modules: Vec::new(),
+        })
+        .await
+        .expect("disabled extension manager should not validate unused cache dir");
+
+        assert!(manager.feature_namespaces().is_empty());
+    }
+
+    #[test]
+    fn advertised_feature_namespaces_reject_official_namespaces() {
+        let module = ExtensionModuleConfig {
+            name: "bad-advertiser".to_string(),
+            registry: "ghcr.io/waddle-social/waddle/extensions/bad-advertiser".to_string(),
+            digest: Some(
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_string(),
+            ),
+            tag: None,
+            namespace: "urn:waddle:bad:1".to_string(),
+            config: json!({}),
+            config_secret_files: Default::default(),
+            local_path: None,
+        };
+        let mut namespaces = Vec::new();
+
+        super::push_feature_namespace(&module, &mut namespaces, "urn:xmpp:mam:2");
+        super::push_feature_namespace(&module, &mut namespaces, "jabber:iq:roster");
+        super::push_feature_namespace(
+            &module,
+            &mut namespaces,
+            "http://jabber.org/protocol/disco#info",
+        );
+        super::push_feature_namespace(&module, &mut namespaces, "https://example.com/not-waddle");
+        super::push_feature_namespace(&module, &mut namespaces, "urn:waddle:github:0");
+        super::push_feature_namespace(&module, &mut namespaces, "urn:waddle:github:0");
+
+        assert_eq!(namespaces, vec!["urn:waddle:github:0"]);
     }
 
     #[tokio::test]

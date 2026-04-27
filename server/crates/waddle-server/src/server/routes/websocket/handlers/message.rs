@@ -40,6 +40,7 @@ use crate::db::blocking::DatabaseBlockingStorage;
 use crate::permissions::{CheckPermission, Object, ObjectType, Permission, Subject};
 use crate::server::bootstrap_membership::DEPLOYMENT_SERVER_ID;
 use kameo::actor::ActorRef;
+use waddle_extensions::types::message_has_framework_envelope;
 use waddle_xmpp::protocol::ConnectionPhase;
 
 pub async fn handle_message(
@@ -74,6 +75,15 @@ pub async fn handle_message(
         let room_jid = to_jid.to_bare();
 
         debug!(room = %room_jid, sender = %sender_jid, "Groupchat message");
+
+        if message_has_framework_envelope(&incoming) {
+            return vec![stanza_to_xml(&Stanza::Message(error_message(
+                &incoming,
+                &jid::Jid::from(room_jid.clone()),
+                &jid::Jid::from(sender_jid.clone()),
+                bad_request_error("Client-authored Waddle extension envelopes are not allowed."),
+            )))];
+        }
 
         if waddle_xmpp::parse_managed_room_jid(&room_jid).as_deref() == Some("announcements")
             && !session_is_server_owner(state, authenticated_session).await
@@ -376,6 +386,17 @@ pub async fn handle_message(
     {
         if let Some(to_jid) = incoming.to.as_ref() {
             debug!(to = %to_jid, from = %sender_jid, "Direct chat message");
+
+            if message_has_framework_envelope(&incoming) {
+                return vec![stanza_to_xml(&Stanza::Message(error_message(
+                    &incoming,
+                    to_jid,
+                    &jid::Jid::from(sender_jid.clone()),
+                    bad_request_error(
+                        "Client-authored Waddle extension envelopes are not allowed.",
+                    ),
+                )))];
+            }
 
             // Build a prototype message and enrich it with embeds before routing.
             // Enrichment is fail-open: errors are logged but never block delivery.
