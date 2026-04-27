@@ -147,29 +147,36 @@ function updateCurrentDayMarker() {
     return;
   }
 
-  const messageEls = [...container.querySelectorAll<HTMLElement>("[data-message-created-at]")];
-  if (messageEls.length === 0) {
+  const markerEls = [
+    ...container.querySelectorAll<HTMLElement>("[data-day-marker-created-at], [data-message-created-at]"),
+  ];
+  if (markerEls.length === 0) {
     currentDayMarkerLabel.value = "";
     return;
   }
 
   const containerTop = container.getBoundingClientRect().top;
   const probeTop = containerTop + 1;
-  let current = messageEls[0];
-  for (const el of messageEls) {
+  let current = markerEls[0];
+  for (const el of markerEls) {
     const rect = el.getBoundingClientRect();
     if (rect.bottom < probeTop) {
       current = el;
       continue;
     }
-    if (rect.top <= probeTop || current === messageEls[0]) {
+    if (rect.top <= probeTop || current === markerEls[0]) {
       current = el;
     }
     break;
   }
 
-  const createdAt = current.dataset.messageCreatedAt;
+  const createdAt = current.dataset.dayMarkerCreatedAt ?? current.dataset.messageCreatedAt;
   currentDayMarkerLabel.value = createdAt ? formatDayDivider(createdAt) : "";
+}
+
+function setScrollContainerRef(el: HTMLElement | null) {
+  scrollContainerRef.value = el;
+  void nextTick(updateCurrentDayMarker);
 }
 
 // Switching threads resets composer state and scrolls to the pinned edge.
@@ -185,6 +192,10 @@ watch(
     void scrollToPinnedEdge();
   },
 );
+
+watch(scrollDirectionMode, () => {
+  void scrollToPinnedEdge();
+});
 
 watch(
   [activeEntry, orderedChildren],
@@ -334,7 +345,7 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
     </div>
 
     <div
-      ref="scrollContainerRef"
+      :ref="setScrollContainerRef"
       class="chat-pane-scroll flex-1 min-h-0 overflow-auto px-3 py-4 lg:px-4"
       @scroll="updateCurrentDayMarker"
     >
@@ -364,6 +375,7 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
           <div
             v-if="showDayDividerBefore(child.id)"
             class="chat-day-divider type-section-label"
+            :data-day-marker-created-at="child.createdAt"
             role="separator"
             :aria-label="dayDividerLabel(child.createdAt)"
           >
