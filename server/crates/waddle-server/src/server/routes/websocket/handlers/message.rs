@@ -11,9 +11,9 @@ use waddle_xmpp::{
         InboxEntry,
     },
     mam::{
-        add_stanza_id as add_mam_stanza_id, ArchivedMention, ArchivedMessage, ArchivedReactionSet,
-        ArchivedReference, ArchivedReply, ArchivedRetraction, ArchivedRichMessage,
-        ArchivedRichPayload, RichMessageId, RichText,
+        add_stanza_id as add_mam_stanza_id, ArchiveId, ArchivedMention, ArchivedMessage,
+        ArchivedReactionSet, ArchivedReference, ArchivedReply, ArchivedRetraction,
+        ArchivedRichMessage, ArchivedRichPayload, RichMessageId, RichText,
     },
     muc::room_actor::{BuildGroupchatBroadcast, GetNicknameGeneration, RoomActor},
     parser::message_to_string,
@@ -25,8 +25,9 @@ use waddle_xmpp::{
         extract_retraction_from_message, has_file_sharing, is_moderation_request_message,
         is_moderation_result_message, is_reaction_message, is_retraction_message,
         is_sticker_message, message_has_direct_invite, parse_reply_from_message,
-        remove_stanza_ids_by, should_skip_storage, RetractionKind, NS_EXPLICIT_MENTIONS,
-        NS_MESSAGE_CORRECT, NS_MESSAGE_RETRACT, NS_REACTIONS, NS_REFERENCE, NS_REPLY,
+        remove_stanza_ids_by, should_skip_storage, RetractionKind, Xep0359OriginId as OriginId,
+        Xep0359StanzaId as StanzaId, NS_EXPLICIT_MENTIONS, NS_MESSAGE_CORRECT, NS_MESSAGE_RETRACT,
+        NS_REACTIONS, NS_REFERENCE, NS_REPLY,
     },
     Stanza,
 };
@@ -278,7 +279,7 @@ pub async fn handle_message(
         let intended = local_messages.len();
         for mut outbound in local_messages.drain(..) {
             if let Some(ref archive_id) = archive_id {
-                add_mam_stanza_id(&mut outbound.message, archive_id, &room_jid);
+                add_mam_stanza_id(&mut outbound.message, archive_id.as_str(), &room_jid);
             }
 
             if outbound.to == *sender_jid {
@@ -944,11 +945,14 @@ async fn lookup_correction_target_message(
     target_id: &str,
     _groupchat: bool,
 ) -> Result<Option<ArchivedMessage>, waddle_xmpp::mam::MamStorageError> {
+    let Some(target) = RichMessageId::new(target_id.to_owned()) else {
+        return Ok(None);
+    };
     state
         .deps
         .protocol
         .mam_storage
-        .get_message_by_message_id(&archive_jid.to_string(), target_id)
+        .get_message_by_message_id(archive_jid, &target)
         .await
 }
 
@@ -962,11 +966,14 @@ async fn lookup_retraction_target_message(
         return lookup_rich_target_message(state, archive_jid, target_id, true).await;
     }
 
+    let Some(target) = RichMessageId::new(target_id.to_owned()) else {
+        return Ok(None);
+    };
     state
         .deps
         .protocol
         .mam_storage
-        .get_message_by_message_id(&archive_jid.to_string(), target_id)
+        .get_message_by_message_id(archive_jid, &target)
         .await
 }
 
@@ -977,31 +984,35 @@ async fn lookup_rich_target_message(
     groupchat: bool,
 ) -> Result<Option<ArchivedMessage>, waddle_xmpp::mam::MamStorageError> {
     if groupchat {
-        let archive_str = archive_jid.to_string();
+        let Some(archive_id) = ArchiveId::new(target_id.to_owned()) else {
+            return Ok(None);
+        };
+        let archive_owner = archive_jid.clone();
         return state
             .deps
             .protocol
             .mam_storage
-            .get_message(target_id)
+            .get_message(&archive_id)
             .await
-            .map(|message| message.filter(|message| message.to == archive_str));
+            .map(|message| message.filter(|message| message.to == archive_owner));
     }
 
+    let Some(target) = RichMessageId::new(target_id.to_owned()) else {
+        return Ok(None);
+    };
     state
         .deps
         .protocol
         .mam_storage
-        .get_message_by_stanza_id(&archive_jid.to_string(), target_id)
+        .get_message_by_stanza_id(archive_jid, &target)
         .await
 }
 
-fn same_rich_sender(sender: &jid::Jid, original_from: &str, groupchat: bool) -> bool {
+fn same_rich_sender(sender: &jid::Jid, original_from: &jid::Jid, groupchat: bool) -> bool {
     if groupchat {
-        return sender.to_string() == original_from;
+        return sender == original_from;
     }
-    original_from
-        .parse::<jid::Jid>()
-        .is_ok_and(|original| original.to_bare() == sender.to_bare())
+    original_from.to_bare() == sender.to_bare()
 }
 
 fn has_malformed_rich_payload(message: &xmpp_parsers::message::Message) -> bool {
@@ -1294,51 +1305,53 @@ async fn archive_groupchat_message(
     room_jid: &BareJid,
     message: &mut xmpp_parsers::message::Message,
     sender_nickname_generation: u64,
-) -> Option<String> {
+) -> Option<ArchiveId> {
     if !should_archive_groupchat_message(message) {
         return None;
     }
 
-    let archive_id = uuid::Uuid::now_v7().to_string();
+    let archive_id = ArchiveId::new(uuid::Uuid::now_v7().to_string()).expect("UUID is non-empty");
     add_mam_stanza_id(message, archive_id.as_str(), room_jid);
 
     let body = prototype_body(message)
         .map(|value| value.trim().to_string())
-        .unwrap_or_default();
+        .and_then(RichText::new);
 
-    let (reply_to_id, reply_to_jid) = extract_reply_reference(message);
-    let origin_id = extract_origin_id_str(message);
+    let origin_id = extract_origin_id_str(message).and_then(OriginId::new);
     let rich = rich_archive_payload(message);
 
     let stanza_xml = serialize_groupchat_stanza_xml(message);
 
+    let from_jid = match message.from.as_ref() {
+        Some(jid) => jid.clone(),
+        None => return None,
+    };
+
+    let stanza_id = message
+        .id
+        .clone()
+        .map(|id| StanzaId::new(id, room_jid.clone()));
+
     let archived = ArchivedMessage {
         id: archive_id,
         timestamp: Utc::now(),
-        from: message
-            .from
-            .as_ref()
-            .map(|jid| jid.to_string())
-            .unwrap_or_default(),
-        to: room_jid.to_string(),
+        from: from_jid,
+        to: room_jid.clone(),
         body,
-        stanza_id: message.id.clone(),
-        thread_id: message.thread.as_ref().map(|thread| thread.0.clone()),
-        reply_to_id,
-        reply_to_jid,
+        stanza_id,
+        thread: message.thread.clone(),
         origin_id,
-        message_type: mam_message_type(&message.type_),
+        message_type: message.type_.clone(),
         stanza_xml,
         rich,
         nickname_generation: Some(sender_nickname_generation),
     };
 
-    let archive_jid = room_jid.to_string();
     match state
         .deps
         .protocol
         .mam_storage
-        .store_message(archive_jid.as_str(), &archived)
+        .store_message(room_jid, &archived)
         .await
     {
         Ok(archive_id) => Some(archive_id),
@@ -1363,41 +1376,44 @@ async fn archive_direct_message(
 ) {
     let body = prototype_body(message)
         .map(|value| value.trim().to_string())
-        .unwrap_or_default();
+        .and_then(RichText::new);
     let rich = rich_archive_payload(message);
-    if body.is_empty() && rich.is_none() {
+    if body.is_none() && rich.is_none() {
         return;
     }
 
     let stanza_xml = serialize_direct_stanza_xml(message);
+    let origin_id = extract_origin_id_str(message).and_then(OriginId::new);
 
-    let (reply_to_id, reply_to_jid) = extract_reply_reference(message);
-    let origin_id = extract_origin_id_str(message);
+    let sender_bare = sender_jid.to_bare();
+    let recipient_bare = to_jid.to_bare();
 
-    let archived = ArchivedMessage {
-        id: String::new(),
+    // The personal archive stamps the row's `<stanza-id by/>` with the
+    // archive owner's JID; we re-stamp per archive below.
+    let make_archived = |archive_owner: &BareJid| ArchivedMessage {
+        id: ArchiveId::new(uuid::Uuid::now_v7().to_string()).expect("UUID is non-empty"),
         timestamp: Utc::now(),
-        from: sender_jid.to_bare().to_string(),
-        to: to_jid.to_bare().to_string(),
-        body,
-        stanza_id: message.id.clone(),
-        thread_id: message.thread.as_ref().map(|thread| thread.0.clone()),
-        reply_to_id,
-        reply_to_jid,
-        origin_id,
-        message_type: mam_message_type(&message.type_),
-        stanza_xml,
-        rich,
+        from: jid::Jid::from(sender_bare.clone()),
+        to: archive_owner.clone(),
+        body: body.clone(),
+        stanza_id: message
+            .id
+            .clone()
+            .map(|id| StanzaId::new(id, archive_owner.clone())),
+        thread: message.thread.clone(),
+        origin_id: origin_id.clone(),
+        message_type: message.type_.clone(),
+        stanza_xml: stanza_xml.clone(),
+        rich: rich.clone(),
         nickname_generation: None,
     };
 
-    // Store in sender's personal archive
-    let sender_bare = sender_jid.to_bare().to_string();
+    let sender_archived = make_archived(&sender_bare);
     if let Err(err) = state
         .deps
         .protocol
         .mam_storage
-        .store_message(sender_bare.as_str(), &archived)
+        .store_message(&sender_bare, &sender_archived)
         .await
     {
         warn!(
@@ -1408,13 +1424,12 @@ async fn archive_direct_message(
         );
     }
 
-    // Store in recipient's personal archive
-    let recipient_bare = to_jid.to_bare().to_string();
+    let recipient_archived = make_archived(&recipient_bare);
     if let Err(err) = state
         .deps
         .protocol
         .mam_storage
-        .store_message(recipient_bare.as_str(), &archived)
+        .store_message(&recipient_bare, &recipient_archived)
         .await
     {
         warn!(
@@ -1424,33 +1439,6 @@ async fn archive_direct_message(
             "Failed to archive DM to recipient's personal MAM"
         );
     }
-}
-
-fn mam_message_type(message_type: &XmppMessageType) -> String {
-    match message_type {
-        XmppMessageType::Chat => "chat".to_string(),
-        XmppMessageType::Error => "error".to_string(),
-        XmppMessageType::Groupchat => "groupchat".to_string(),
-        XmppMessageType::Headline => "headline".to_string(),
-        XmppMessageType::Normal => "normal".to_string(),
-    }
-}
-
-fn extract_reply_reference(
-    message: &xmpp_parsers::message::Message,
-) -> (Option<String>, Option<String>) {
-    let Some(reply) = message
-        .payloads
-        .iter()
-        .find(|payload| payload.name() == "reply" && payload.ns() == NS_REPLY)
-    else {
-        return (None, None);
-    };
-
-    (
-        reply.attr("id").map(ToOwned::to_owned),
-        reply.attr("to").map(ToOwned::to_owned),
-    )
 }
 
 fn rich_archive_payload(message: &xmpp_parsers::message::Message) -> Option<ArchivedRichMessage> {

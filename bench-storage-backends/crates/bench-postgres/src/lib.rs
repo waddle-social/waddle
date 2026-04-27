@@ -15,11 +15,9 @@ const MAM_SCHEMA_STATEMENTS: &[&str] = &[
         timestamp TIMESTAMPTZ NOT NULL,
         from_jid TEXT NOT NULL,
         to_jid TEXT NOT NULL,
-        body TEXT NOT NULL,
+        body TEXT,
         stanza_id TEXT,
         thread_id TEXT,
-        reply_to_id TEXT,
-        reply_to_jid TEXT,
         origin_id TEXT,
         message_type TEXT NOT NULL DEFAULT 'chat',
         stanza_xml TEXT,
@@ -55,11 +53,9 @@ struct PgArchivedMessageRow {
     timestamp: chrono::DateTime<chrono::Utc>,
     from_jid: String,
     to_jid: String,
-    body: String,
+    body: Option<String>,
     stanza_id: Option<String>,
     thread_id: Option<String>,
-    reply_to_id: Option<String>,
-    reply_to_jid: Option<String>,
     origin_id: Option<String>,
     message_type: String,
     stanza_xml: Option<String>,
@@ -76,8 +72,6 @@ impl From<PgArchivedMessageRow> for ArchivedMessage {
             body: value.body,
             stanza_id: value.stanza_id,
             thread_id: value.thread_id,
-            reply_to_id: value.reply_to_id,
-            reply_to_jid: value.reply_to_jid,
             origin_id: value.origin_id,
             message_type: value.message_type,
             stanza_xml: value.stanza_xml,
@@ -101,8 +95,8 @@ impl StanzaStore for PostgresStore {
         sqlx::query(
             r#"INSERT INTO mam_messages
                (id, room_jid, timestamp, from_jid, to_jid, body, stanza_id,
-                thread_id, reply_to_id, reply_to_jid, origin_id, message_type, stanza_xml)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)"#,
+                thread_id, origin_id, message_type, stanza_xml)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"#,
         )
         .bind(&m.id)
         .bind(&m.room_jid)
@@ -112,8 +106,6 @@ impl StanzaStore for PostgresStore {
         .bind(&m.body)
         .bind(&m.stanza_id)
         .bind(&m.thread_id)
-        .bind(&m.reply_to_id)
-        .bind(&m.reply_to_jid)
         .bind(&m.origin_id)
         .bind(&m.message_type)
         .bind(&m.stanza_xml)
@@ -126,7 +118,7 @@ impl StanzaStore for PostgresStore {
     async fn query_messages(&self, q: &MamQuery) -> Result<Vec<ArchivedMessage>, StoreError> {
         let mut qb = QueryBuilder::new(
             "SELECT id, room_jid, timestamp, from_jid, to_jid, body, stanza_id, thread_id, \
-             reply_to_id, reply_to_jid, origin_id, message_type, stanza_xml \
+             origin_id, message_type, stanza_xml \
              FROM mam_messages WHERE room_jid = ",
         );
         qb.push_bind(&q.room_jid);

@@ -30,11 +30,9 @@ struct ClickHouseMessageRow {
     timestamp_ms: i64,
     from_jid: String,
     to_jid: String,
-    body: String,
+    body: Option<String>,
     stanza_id: Option<String>,
     thread_id: Option<String>,
-    reply_to_id: Option<String>,
-    reply_to_jid: Option<String>,
     origin_id: Option<String>,
     message_type: String,
     stanza_xml: Option<String>,
@@ -64,8 +62,6 @@ impl From<ClickHouseMessageRow> for ArchivedMessage {
             body: value.body,
             stanza_id: value.stanza_id,
             thread_id: value.thread_id,
-            reply_to_id: value.reply_to_id,
-            reply_to_jid: value.reply_to_jid,
             origin_id: value.origin_id,
             message_type: value.message_type,
             stanza_xml: value.stanza_xml,
@@ -84,11 +80,9 @@ impl StanzaStore for ClickHouseStore {
                     timestamp_ms Int64,
                     from_jid String,
                     to_jid String,
-                    body String,
+                    body Nullable(String),
                     stanza_id Nullable(String),
                     thread_id Nullable(String),
-                    reply_to_id Nullable(String),
-                    reply_to_jid Nullable(String),
                     origin_id Nullable(String),
                     message_type String,
                     stanza_xml Nullable(String),
@@ -107,8 +101,8 @@ impl StanzaStore for ClickHouseStore {
             .query(
                 "INSERT INTO mam_messages
                 (id, room_jid, timestamp_ms, from_jid, to_jid, body, stanza_id, thread_id,
-                 reply_to_id, reply_to_jid, origin_id, message_type, stanza_xml)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                 origin_id, message_type, stanza_xml)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&m.id)
             .bind(&m.room_jid)
@@ -118,8 +112,6 @@ impl StanzaStore for ClickHouseStore {
             .bind(&m.body)
             .bind(&m.stanza_id)
             .bind(&m.thread_id)
-            .bind(&m.reply_to_id)
-            .bind(&m.reply_to_jid)
             .bind(&m.origin_id)
             .bind(&m.message_type)
             .bind(&m.stanza_xml)
@@ -132,7 +124,7 @@ impl StanzaStore for ClickHouseStore {
     async fn query_messages(&self, q: &MamQuery) -> Result<Vec<ArchivedMessage>, StoreError> {
         let mut sql = String::from(
             "SELECT id, room_jid, timestamp_ms, from_jid, to_jid, body, stanza_id, thread_id, \
-             reply_to_id, reply_to_jid, origin_id, message_type, stanza_xml \
+             origin_id, message_type, stanza_xml \
              FROM mam_messages WHERE room_jid = ?",
         );
         if q.start.is_some() {

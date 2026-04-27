@@ -42,11 +42,9 @@ CREATE TABLE IF NOT EXISTS mam_messages (
     timestamp TEXT NOT NULL,
     from_jid TEXT NOT NULL,
     to_jid TEXT NOT NULL,
-    body TEXT NOT NULL,
+    body TEXT,
     stanza_id TEXT,
     thread_id TEXT,
-    reply_to_id TEXT,
-    reply_to_jid TEXT,
     origin_id TEXT,
     message_type TEXT NOT NULL DEFAULT 'chat',
     stanza_xml TEXT,
@@ -357,8 +355,8 @@ fn writer_loop(
 
     const INSERT_SQL: &str = r#"INSERT INTO mam_messages
             (id, room_jid, timestamp, from_jid, to_jid, body, stanza_id,
-             thread_id, reply_to_id, reply_to_jid, origin_id, message_type, stanza_xml)
-           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)"#;
+             thread_id, origin_id, message_type, stanza_xml)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"#;
 
     while let Ok(job) = rx.recv() {
         let qw = job.enqueued_at.elapsed();
@@ -381,8 +379,6 @@ fn writer_loop(
                     m.body,
                     m.stanza_id,
                     m.thread_id,
-                    m.reply_to_id,
-                    m.reply_to_jid,
                     m.origin_id,
                     m.message_type,
                     m.stanza_xml,
@@ -577,7 +573,7 @@ fn run_query(pool: &Pool<UriManager>, q: &MamQuery) -> Result<Vec<ArchivedMessag
     let conn = pool.get().map_err(StoreError::backend)?;
     let mut sql = String::from(
         "SELECT id, room_jid, timestamp, from_jid, to_jid, body, stanza_id, thread_id, \
-         reply_to_id, reply_to_jid, origin_id, message_type, stanza_xml \
+         origin_id, message_type, stanza_xml \
          FROM mam_messages WHERE room_jid = ?1",
     );
     let mut params_dyn: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(q.room_jid.clone())];
@@ -640,11 +636,9 @@ fn row_to_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<ArchivedMessage> 
         body: row.get(5)?,
         stanza_id: row.get(6)?,
         thread_id: row.get(7)?,
-        reply_to_id: row.get(8)?,
-        reply_to_jid: row.get(9)?,
-        origin_id: row.get(10)?,
-        message_type: row.get(11)?,
-        stanza_xml: row.get(12)?,
+        origin_id: row.get(8)?,
+        message_type: row.get(9)?,
+        stanza_xml: row.get(10)?,
     })
 }
 

@@ -1,5 +1,6 @@
 use chrono;
 use jid::{BareJid, FullJid, Jid};
+use std::str::FromStr;
 use std::sync::Arc;
 use tracing::{debug, warn};
 use url::{Host, Url};
@@ -16,7 +17,7 @@ use waddle_xmpp::{
     isr::{build_isr_token_error, build_isr_token_result, is_isr_token_request, IsrToken, ISR_NS},
     mam::{
         add_stanza_id as add_mam_stanza_id, build_fin_iq, build_result_messages, is_mam_query,
-        parse_mam_query, ArchivedMessage, ArchivedModeration, ArchivedRichMessage,
+        parse_mam_query, ArchiveId, ArchivedMessage, ArchivedModeration, ArchivedRichMessage,
         ArchivedRichPayload, RichMessageId, RichText,
     },
     muc::{
@@ -62,7 +63,8 @@ use waddle_xmpp::{
         build_server_role_form, build_spaces_metadata_form_for_requester, is_last_activity_query,
         is_search_request, is_time_query, is_version_query, parse_command_from_iq,
         parse_moderation_iq, parse_search_request, ChannelResult, Command, CommandStatus,
-        Searchable, SpaceAffiliation, NODE_COMMANDS, NS_CHANNEL_SEARCH,
+        Searchable, SpaceAffiliation, Xep0359StanzaId as StanzaId, NODE_COMMANDS,
+        NS_CHANNEL_SEARCH,
     },
     Affiliation, SpaceDetails, Stanza, StanzaErrorCondition, StanzaErrorType, XmppError,
 };
@@ -900,14 +902,26 @@ pub async fn handle_iq_with_conn_state(
                 "forbidden",
             )];
         }
+        let target_archive_id = match ArchiveId::new(request.target_id.clone()) {
+            Some(id) => id,
+            None => {
+                return vec![build_iq_error_xml_with_addresses(
+                    &id,
+                    response_from,
+                    response_to,
+                    "modify",
+                    "bad-request",
+                )];
+            }
+        };
         match state
             .deps
             .protocol
             .mam_storage
-            .get_message(&request.target_id)
+            .get_message(&target_archive_id)
             .await
         {
-            Ok(Some(message)) if message.to == room_jid.to_string() => {}
+            Ok(Some(message)) if message.to == room_jid => {}
             Ok(Some(_)) => {
                 return vec![build_iq_error_xml_with_addresses(
                     &id,
@@ -951,25 +965,28 @@ pub async fn handle_iq_with_conn_state(
             &stamp,
             request.reason.as_deref(),
         );
-        let archive_id = uuid::Uuid::now_v7().to_string();
+        let archive_id =
+            ArchiveId::new(uuid::Uuid::now_v7().to_string()).expect("UUID is non-empty");
         add_mam_stanza_id(&mut moderation, archive_id.as_str(), &room_jid);
 
         if let (Some(target_id), Ok(moderator_jid)) = (
             RichMessageId::new(request.target_id.clone()),
             moderated_by.parse::<Jid>(),
         ) {
+            let stanza_id = moderation
+                .id
+                .clone()
+                .map(|id| StanzaId::new(id, room_jid.clone()));
             let archived = ArchivedMessage {
                 id: archive_id.clone(),
                 timestamp: chrono::Utc::now(),
-                from: room_jid.to_string(),
-                to: room_jid.to_string(),
-                body: String::new(),
-                stanza_id: moderation.id.clone(),
-                thread_id: None,
-                reply_to_id: None,
-                reply_to_jid: None,
+                from: jid::Jid::from(room_jid.clone()),
+                to: room_jid.clone(),
+                body: None,
+                stanza_id,
+                thread: None,
                 origin_id: None,
-                message_type: "groupchat".to_string(),
+                message_type: xmpp_parsers::message::MessageType::Groupchat,
                 stanza_xml: None,
                 rich: Some(ArchivedRichMessage {
                     payload: Some(ArchivedRichPayload::Moderation(ArchivedModeration {
@@ -988,7 +1005,7 @@ pub async fn handle_iq_with_conn_state(
                 .deps
                 .protocol
                 .mam_storage
-                .store_message(&room_jid.to_string(), &archived)
+                .store_message(&room_jid, &archived)
                 .await
             {
                 warn!(room = %room_jid, target = %request.target_id, error = %error, "Failed to archive moderation event");
@@ -1003,10 +1020,10 @@ pub async fn handle_iq_with_conn_state(
                 .deps
                 .protocol
                 .mam_storage
-                .get_message(&request.target_id)
+                .get_message(&target_archive_id)
                 .await;
             match original_lookup {
-                Ok(Some(original)) if original.to == room_jid.to_string() => {
+                Ok(Some(original)) if original.to == room_jid => {
                     // Use the moderation message's server-assigned
                     // archive id (XEP-0359 stanza-id stamped via
                     // `add_mam_stanza_id` above). That's the id
@@ -1016,7 +1033,9 @@ pub async fn handle_iq_with_conn_state(
                     // attribute, which would not match the archive
                     // entry clients can resolve.
                     let tombstone = waddle_xmpp::mam::ArchivedTombstone {
-                        retraction_id: waddle_xmpp::mam::RichMessageId::new(archive_id.clone()),
+                        retraction_id: waddle_xmpp::mam::RichMessageId::new(
+                            archive_id.as_str().to_owned(),
+                        ),
                         stamp: stamp_time,
                         moderation: Some(ArchivedModeration {
                             target_id: waddle_xmpp::mam::RichMessageId::new(
@@ -1111,12 +1130,11 @@ pub async fn handle_iq_with_conn_state(
             }
         };
 
-        let archive_jid = target_bare.to_string();
         let mut result = match state
             .deps
             .protocol
             .mam_storage
-            .query_messages(archive_jid.as_str(), &query)
+            .query_messages(&target_bare, &query)
             .await
         {
             Ok(result) => result,
@@ -1130,19 +1148,20 @@ pub async fn handle_iq_with_conn_state(
             .deps
             .protocol
             .mam_storage
-            .count_messages(archive_jid.as_str())
+            .count_messages(&target_bare)
             .await
             .ok();
 
         let recipient_jid = request_iq
             .from
-            .as_ref()
-            .map(|jid| jid.to_string())
-            .or_else(|| phase.bound_jid().map(ToString::to_string))
-            .unwrap_or_else(|| "unknown@localhost".to_string());
+            .clone()
+            .or_else(|| phase.bound_jid().cloned().map(jid::Jid::from))
+            .unwrap_or_else(|| {
+                jid::Jid::from(BareJid::from_str("unknown@localhost").expect("static valid jid"))
+            });
 
         let mut responses: Vec<String> =
-            build_result_messages(&query_id, recipient_jid.as_str(), &result.messages)
+            build_result_messages(&query_id, &recipient_jid, &result.messages)
                 .into_iter()
                 .map(|message| stanza_to_xml(&Stanza::Message(message)))
                 .collect();

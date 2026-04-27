@@ -18,15 +18,12 @@ pub struct ArchivedMessage {
     pub from: String,
     /// Recipient JID (room JID for MUC).
     pub to: String,
-    pub body: String,
+    /// `<body/>` is optional per RFC 6121 §5.2.2 — `None` when absent.
+    pub body: Option<String>,
     /// XEP-0359 stanza id (if supplied by client).
     pub stanza_id: Option<String>,
     /// RFC 6121 thread identifier.
     pub thread_id: Option<String>,
-    /// XEP-0461 reply target message id.
-    pub reply_to_id: Option<String>,
-    /// XEP-0461 optional original sender JID.
-    pub reply_to_jid: Option<String>,
     /// XEP-0359 origin id.
     pub origin_id: Option<String>,
     /// "chat" | "groupchat" | ...
@@ -44,11 +41,9 @@ impl ArchivedMessage {
             timestamp: Utc::now(),
             from: from.to_string(),
             to: to.to_string(),
-            body: body.to_string(),
+            body: Some(body.to_string()),
             stanza_id: None,
             thread_id: None,
-            reply_to_id: None,
-            reply_to_jid: None,
             origin_id: None,
             message_type: MessageType::Chat.as_str().to_string(),
             stanza_xml: None,
