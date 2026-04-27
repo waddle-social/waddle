@@ -13,20 +13,20 @@ use waddle_xmpp::{
     mam::{
         add_stanza_id as add_mam_stanza_id, ArchivedMention, ArchivedMessage, ArchivedReactionSet,
         ArchivedReference, ArchivedReply, ArchivedRetraction, ArchivedRichMessage,
-        ArchivedRichPayload, RichMessageId, RichText, STANZA_ID_NS,
+        ArchivedRichPayload, RichMessageId, RichText,
     },
     muc::room_actor::{BuildGroupchatBroadcast, GetNicknameGeneration, RoomActor},
     parser::message_to_string,
     registry::{BroadcastOutcome, SendResult},
     xep::xep0430::build_inbox_push,
     xep::{
-        extract_correction_from_message, extract_explicit_mentions, extract_reactions_from_message,
-        extract_references_from_message, extract_retraction_from_message, has_file_sharing,
-        is_moderation_request_message, is_moderation_result_message, is_reaction_message,
-        is_retraction_message, is_sticker_message, message_has_direct_invite,
-        parse_reply_from_message, remove_stanza_ids_by, should_skip_storage, RetractionKind,
-        NS_EXPLICIT_MENTIONS, NS_MESSAGE_CORRECT, NS_MESSAGE_RETRACT, NS_REACTIONS, NS_REFERENCE,
-        NS_REPLY,
+        extract_correction_from_message, extract_explicit_mentions, extract_origin_id_str,
+        extract_reactions_from_message, extract_references_from_message,
+        extract_retraction_from_message, has_file_sharing, is_moderation_request_message,
+        is_moderation_result_message, is_reaction_message, is_retraction_message,
+        is_sticker_message, message_has_direct_invite, parse_reply_from_message,
+        remove_stanza_ids_by, should_skip_storage, RetractionKind, NS_EXPLICIT_MENTIONS,
+        NS_MESSAGE_CORRECT, NS_MESSAGE_RETRACT, NS_REACTIONS, NS_REFERENCE, NS_REPLY,
     },
     Stanza,
 };
@@ -381,7 +381,7 @@ pub async fn handle_message(
             // Enrichment is fail-open: errors are logged but never block delivery.
             let mut prototype = incoming.clone();
             if prototype.id.is_none() {
-                prototype.id = extract_origin_id(&prototype)
+                prototype.id = extract_origin_id_str(&prototype)
                     .or_else(|| Some(uuid::Uuid::new_v4().to_string()));
             }
             prototype.from = Some(jid::Jid::from(sender_jid.clone()));
@@ -1307,7 +1307,7 @@ async fn archive_groupchat_message(
         .unwrap_or_default();
 
     let (reply_to_id, reply_to_jid) = extract_reply_reference(message);
-    let origin_id = extract_origin_id(message);
+    let origin_id = extract_origin_id_str(message);
     let rich = rich_archive_payload(message);
 
     let stanza_xml = serialize_groupchat_stanza_xml(message);
@@ -1372,7 +1372,7 @@ async fn archive_direct_message(
     let stanza_xml = serialize_direct_stanza_xml(message);
 
     let (reply_to_id, reply_to_jid) = extract_reply_reference(message);
-    let origin_id = extract_origin_id(message);
+    let origin_id = extract_origin_id_str(message);
 
     let archived = ArchivedMessage {
         id: String::new(),
@@ -1547,14 +1547,6 @@ fn rich_archive_payload(message: &xmpp_parsers::message::Message) -> Option<Arch
             mentions,
         })
     }
-}
-
-fn extract_origin_id(message: &xmpp_parsers::message::Message) -> Option<String> {
-    message
-        .payloads
-        .iter()
-        .find(|payload| payload.name() == "origin-id" && payload.ns() == STANZA_ID_NS)
-        .and_then(|origin| origin.attr("id").map(ToOwned::to_owned))
 }
 
 fn prototype_body(message: &xmpp_parsers::message::Message) -> Option<String> {
