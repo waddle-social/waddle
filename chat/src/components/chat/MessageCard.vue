@@ -614,6 +614,7 @@ watch(
   <div
     v-if="message.isRetracted"
     :data-message-id="message.id"
+    :data-message-created-at="message.createdAt"
     class="chat-message-grid opacity-35 animate-message-in"
     :class="grouped ? 'chat-message-grouped' : ''"
   >
@@ -645,6 +646,7 @@ watch(
     v-else
     ref="bubbleEl"
     :data-message-id="message.id"
+    :data-message-created-at="message.createdAt"
     :data-sheet-open="sheetOpen ? 'true' : 'false'"
     class="chat-message-grid group relative ring-1 ring-transparent transition-colors duration-150 animate-message-in"
     :class="[

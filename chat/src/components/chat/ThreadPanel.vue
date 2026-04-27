@@ -118,6 +118,7 @@ const isTopPinned = computed(() =>
 );
 
 const scrollContainerRef = ref<HTMLElement | null>(null);
+const currentDayMarkerLabel = ref("");
 const draft = ref("");
 const replyingTo = ref<{ id: string; author: string; body?: string } | null>(null);
 
@@ -136,6 +137,46 @@ async function scrollToPinnedEdge() {
   const el = scrollContainerRef.value;
   if (!el) return;
   el.scrollTop = getPinnedScrollTop(el, scrollDirectionMode.value);
+  updateCurrentDayMarker();
+}
+
+function updateCurrentDayMarker() {
+  const container = scrollContainerRef.value;
+  if (!container) {
+    currentDayMarkerLabel.value = "";
+    return;
+  }
+
+  const markerEls = [
+    ...container.querySelectorAll<HTMLElement>("[data-day-marker-created-at], [data-message-created-at]"),
+  ];
+  if (markerEls.length === 0) {
+    currentDayMarkerLabel.value = "";
+    return;
+  }
+
+  const containerTop = container.getBoundingClientRect().top;
+  const probeTop = containerTop + 1;
+  let current = markerEls[0];
+  for (const el of markerEls) {
+    const rect = el.getBoundingClientRect();
+    if (rect.bottom < probeTop) {
+      current = el;
+      continue;
+    }
+    if (rect.top <= probeTop || current === markerEls[0]) {
+      current = el;
+    }
+    break;
+  }
+
+  const createdAt = current.dataset.dayMarkerCreatedAt ?? current.dataset.messageCreatedAt;
+  currentDayMarkerLabel.value = createdAt ? formatDayDivider(createdAt) : "";
+}
+
+function setScrollContainerRef(el: HTMLElement | null) {
+  scrollContainerRef.value = el;
+  void nextTick(updateCurrentDayMarker);
 }
 
 // Switching threads resets composer state and scrolls to the pinned edge.
@@ -150,6 +191,18 @@ watch(
   () => {
     void scrollToPinnedEdge();
   },
+);
+
+watch(scrollDirectionMode, () => {
+  void scrollToPinnedEdge();
+});
+
+watch(
+  [activeEntry, orderedChildren],
+  () => {
+    void nextTick(updateCurrentDayMarker);
+  },
+  { flush: "post" },
 );
 
 const breadcrumbLabels = computed(() =>
@@ -280,7 +333,22 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
     </div>
 
     <!-- Messages scroll area -->
-    <div ref="scrollContainerRef" class="chat-pane-scroll flex-1 min-h-0 overflow-auto px-3 py-4 lg:px-4">
+    <div
+      v-if="currentDayMarkerLabel"
+      class="chat-current-day-marker type-section-label"
+      role="status"
+      aria-live="polite"
+    >
+      <div class="chat-current-day-marker__lane">
+        <span class="chat-current-day-marker__label">{{ currentDayMarkerLabel }}</span>
+      </div>
+    </div>
+
+    <div
+      :ref="setScrollContainerRef"
+      class="chat-pane-scroll flex-1 min-h-0 overflow-auto px-3 py-4 lg:px-4"
+      @scroll="updateCurrentDayMarker"
+    >
       <div v-if="activeEntry" class="chat-panel-stack">
         <div v-if="!activeEntry.root" class="type-caption rounded-lg bg-muted/40 px-3 py-2 text-muted-foreground">
           Thread root isn't in the loaded history. Scroll the main channel or reload to backfill.
@@ -307,6 +375,7 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
           <div
             v-if="showDayDividerBefore(child.id)"
             class="chat-day-divider type-section-label"
+            :data-day-marker-created-at="child.createdAt"
             role="separator"
             :aria-label="dayDividerLabel(child.createdAt)"
           >

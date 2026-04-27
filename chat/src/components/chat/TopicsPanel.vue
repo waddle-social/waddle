@@ -107,10 +107,6 @@ const emit = defineEmits<{
     <!-- Channel list -->
     <div class="chat-pane-scroll chat-sidebar-scroll">
       <div class="chat-panel-stack">
-        <span class="type-section-label px-2 text-sidebar-muted">
-          Channels
-        </span>
-
         <div v-if="isLoading" class="type-caption text-center py-10 text-sidebar-muted">
           <div class="flex items-center justify-center gap-1">
             <span class="typing-dot" />
