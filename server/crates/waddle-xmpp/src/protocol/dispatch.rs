@@ -1,24 +1,56 @@
 //! Stanza dispatcher: O(1) lookup of IQ handlers by namespace, and
 //! pipelined dispatch of message and presence handlers.
 //!
-//! This module is the inverse of the old `if frame.contains(ns) { … }`
-//! chain. IQ handlers self-register under the namespace they own, and
-//! dispatch is a single `HashMap::get`. Message and presence handlers
-//! register into ordered pipelines: every registered handler sees every
-//! stanza and independently decides whether to emit events.
+//! IQ handlers self-register under the namespace they own; dispatch is a
+//! single `HashMap::get`. Message and presence handlers register into
+//! ordered pipelines — each handler runs until it returns
+//! [`HandlerOutcome::Halt`] / [`HandlerOutcome::AwaitCallback`]
+//! (messages) or the pipeline ends (presence).
 //!
 //! Exhaustiveness for IQ is enforced socially: if a new IQ namespace
 //! arrives with no registered handler the dispatcher emits a `WARN` log
 //! event, which surfaces in tests.
 
 use super::event::{OutboundEvent, StanzaContext};
-use super::traits::{IqHandler, MessageHandler, PresenceHandler};
+use super::message_context::MessageContext;
+use super::traits::{HandlerId, HandlerOutcome, IqHandler, MessageHandler, PresenceHandler};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::Level;
 use xmpp_parsers::iq::{Iq, IqType};
 use xmpp_parsers::message::Message;
 use xmpp_parsers::presence::Presence;
+
+/// Why a message-pipeline run terminated.
+///
+/// Carried alongside the emitted events in [`MessageDispatchOutcome`] so
+/// the state machine can decide whether to register a pending op (for
+/// [`MessageDispatchTermination::Awaiting`]) or simply hand the events to
+/// the interpreter.
+#[derive(Debug, PartialEq, Eq)]
+pub enum MessageDispatchTermination {
+    /// Every registered message handler ran to completion without
+    /// halting or pausing.
+    Completed,
+    /// A handler returned [`HandlerOutcome::Halt`]; later handlers did
+    /// not see the message.
+    Halted { halted_at: HandlerId },
+    /// A handler returned [`HandlerOutcome::AwaitCallback`]; the state
+    /// machine is expected to register a pending op and resume dispatch
+    /// at the handler immediately after `resume_after` when the matching
+    /// callback arrives.
+    Awaiting { resume_after: HandlerId },
+}
+
+/// Result of running the message pipeline once.
+#[derive(Debug)]
+pub struct MessageDispatchOutcome {
+    /// Events emitted by handlers, in registration order. Includes events
+    /// emitted by the halting / pausing handler itself.
+    pub events: Vec<OutboundEvent>,
+    /// Why the pipeline stopped.
+    pub termination: MessageDispatchTermination,
+}
 
 /// Routes stanzas to the handlers registered for them.
 ///
@@ -49,15 +81,23 @@ impl StanzaDispatcher {
     }
 
     /// Append a message handler to the pipeline. Handlers run in
-    /// registration order.
-    pub fn register_message(&mut self, handler: Arc<dyn MessageHandler>) {
+    /// registration order. Returns the [`HandlerId`] assigned to this
+    /// handler — useful for tests asserting on `resume_after` semantics.
+    pub fn register_message(&mut self, handler: Arc<dyn MessageHandler>) -> HandlerId {
+        let id = HandlerId(self.message_handlers.len());
         self.message_handlers.push(handler);
+        id
     }
 
     /// Append a presence handler to the pipeline. Handlers run in
     /// registration order.
     pub fn register_presence(&mut self, handler: Arc<dyn PresenceHandler>) {
         self.presence_handlers.push(handler);
+    }
+
+    /// Number of registered message handlers.
+    pub fn message_handler_count(&self) -> usize {
+        self.message_handlers.len()
     }
 
     /// Dispatch an IQ stanza.
@@ -84,17 +124,96 @@ impl StanzaDispatcher {
         }
     }
 
-    /// Run every registered message handler against this stanza in
-    /// registration order; concatenate their emitted events.
+    /// Run the message pipeline against `message`.
+    ///
+    /// Handlers run in registration order until one returns
+    /// [`HandlerOutcome::Halt`] or [`HandlerOutcome::AwaitCallback`]. The
+    /// returned [`MessageDispatchOutcome`] carries every emitted event in
+    /// order plus a discriminator for *why* the pipeline ended, so the
+    /// state machine can wire pause-resume on awaiting outcomes.
     pub fn dispatch_message(
         &self,
         message: &Message,
-        ctx: &StanzaContext<'_>,
-    ) -> Vec<OutboundEvent> {
-        self.message_handlers
-            .iter()
-            .flat_map(|h| h.handle(message, ctx))
-            .collect()
+        ctx: &MessageContext<'_>,
+    ) -> MessageDispatchOutcome {
+        let mut events = Vec::new();
+        for (idx, handler) in self.message_handlers.iter().enumerate() {
+            let id = HandlerId(idx);
+            match handler.handle(message, ctx) {
+                HandlerOutcome::Continue(more) => events.extend(more),
+                HandlerOutcome::Halt(more) => {
+                    events.extend(more);
+                    return MessageDispatchOutcome {
+                        events,
+                        termination: MessageDispatchTermination::Halted { halted_at: id },
+                    };
+                }
+                HandlerOutcome::AwaitCallback {
+                    events: more,
+                    resume_after,
+                } => {
+                    events.extend(more);
+                    return MessageDispatchOutcome {
+                        events,
+                        termination: MessageDispatchTermination::Awaiting { resume_after },
+                    };
+                }
+            }
+        }
+        MessageDispatchOutcome {
+            events,
+            termination: MessageDispatchTermination::Completed,
+        }
+    }
+
+    /// Resume a paused message pipeline at the handler immediately after
+    /// `resume_after`.
+    ///
+    /// Used by the state machine when an
+    /// [`super::event::InboundEvent`] callback arrives that matches a
+    /// previously-emitted [`HandlerOutcome::AwaitCallback`]. The handlers
+    /// up to and including `resume_after` do **not** re-run.
+    ///
+    /// PR1 ships the dispatcher entry point only; concrete callback
+    /// wiring on the state machine arrives with the first
+    /// `AwaitCallback`-emitting handler in PR2.
+    pub fn resume_message(
+        &self,
+        message: &Message,
+        ctx: &MessageContext<'_>,
+        resume_after: HandlerId,
+    ) -> MessageDispatchOutcome {
+        let mut events = Vec::new();
+        let start = resume_after.0.saturating_add(1);
+        for (idx, handler) in self.message_handlers.iter().enumerate().skip(start) {
+            let id = HandlerId(idx);
+            match handler.handle(message, ctx) {
+                HandlerOutcome::Continue(more) => events.extend(more),
+                HandlerOutcome::Halt(more) => {
+                    events.extend(more);
+                    return MessageDispatchOutcome {
+                        events,
+                        termination: MessageDispatchTermination::Halted { halted_at: id },
+                    };
+                }
+                HandlerOutcome::AwaitCallback {
+                    events: more,
+                    resume_after: next_resume,
+                } => {
+                    events.extend(more);
+                    return MessageDispatchOutcome {
+                        events,
+                        termination: MessageDispatchTermination::Awaiting {
+                            resume_after: next_resume,
+                        },
+                    };
+                }
+            }
+        }
+        MessageDispatchOutcome {
+            events,
+            termination: MessageDispatchTermination::Completed,
+        }
     }
 
     /// Run every registered presence handler against this stanza in

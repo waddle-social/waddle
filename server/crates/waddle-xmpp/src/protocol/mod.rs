@@ -27,13 +27,25 @@ pub mod dispatch;
 pub mod event;
 pub mod frame;
 pub mod handlers;
+pub mod id_gen;
 pub mod machine;
+pub mod message_context;
 pub mod phase;
+pub mod session_state;
 pub mod traits;
 
-pub use dispatch::StanzaDispatcher;
-pub use event::{CallbackId, InboundEvent, OutboundEvent, StanzaContext, TimerId};
+#[cfg(test)]
+mod dispatch_message_tests;
+
+pub use dispatch::{MessageDispatchOutcome, MessageDispatchTermination, StanzaDispatcher};
+pub use event::{
+    ArchivedMessage, CallbackId, CarbonKind, InboundEvent, MessageRef, OutboundEvent,
+    StanzaContext, StanzaIdRef, TimerId,
+};
 pub use frame::InboundFrame;
+pub use id_gen::{CounterIdGenerator, FixedIdGenerator, IdGenerator, UuidV4Generator};
 pub use machine::XmppStateMachine;
+pub use message_context::{MessageContext, MessageContextEnv};
 pub use phase::{ConnectionPhase, ScramPendingState};
-pub use traits::{IqHandler, MessageHandler, PresenceHandler};
+pub use session_state::{Blocklist, CarbonsState, Locality, MucOccupancy, OccupancyEntry};
+pub use traits::{HandlerId, HandlerOutcome, IqHandler, MessageHandler, PresenceHandler};
