@@ -370,6 +370,7 @@ async fn seed_initial_xmpp_topology(
             .with_autojoin(id == "chat");
         let item = PubSubItem {
             id: Some(bookmark.jid.to_string()),
+            publisher: None,
             payload: Some(waddle_xmpp::xep::xep0402::build_bookmark_element(&bookmark)),
         };
         pubsub_storage

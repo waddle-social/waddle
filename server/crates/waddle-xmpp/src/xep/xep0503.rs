@@ -77,6 +77,7 @@ pub fn build_channel_item(
 
     Ok(PubSubItem {
         id: Some(bookmark.jid.to_string()),
+        publisher: None,
         payload: Some(payload),
     })
 }

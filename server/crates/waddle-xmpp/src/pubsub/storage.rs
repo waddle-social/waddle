@@ -65,6 +65,7 @@ impl StoredItem {
 
         PubSubItem {
             id: Some(self.id.clone()),
+            publisher: self.publisher.clone(),
             payload,
         }
     }

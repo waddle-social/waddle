@@ -6,6 +6,7 @@
 
 mod ws_common;
 
+use std::time::Duration;
 use tokio::sync::Mutex;
 use ws_common::{TestServer, WsXmppClient};
 
@@ -13,7 +14,9 @@ const DOMAIN: &str = "localhost";
 const ADMIN: &str = "admin";
 const NS_PUBSUB: &str = "http://jabber.org/protocol/pubsub";
 const NS_PUBSUB_OWNER: &str = "http://jabber.org/protocol/pubsub#owner";
+const NS_PUBSUB_EVENT: &str = "http://jabber.org/protocol/pubsub#event";
 const SPACES_JID: &str = "spaces.localhost";
+const MUC_DOMAIN: &str = "muc.localhost";
 
 static TEST_SERIAL: Mutex<()> = Mutex::const_new(());
 
@@ -239,4 +242,94 @@ async fn non_owner_cannot_configure_general_space() {
         "expected <forbidden/> condition, got: {resp}"
     );
     alice.close().await;
+}
+
+// ============================================================================
+// XEP-0060 §7.1 Spaces publish-time fan-out (#238)
+// ============================================================================
+
+async fn wait_for_event_message(
+    client: &mut WsXmppClient,
+    node: &str,
+    dur: Duration,
+) -> Option<String> {
+    let deadline = std::time::Instant::now() + dur;
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return None;
+        }
+        match client.recv_timeout(remaining).await {
+            Ok(frame) => {
+                if frame.contains("<message")
+                    && frame.contains(NS_PUBSUB_EVENT)
+                    && (frame.contains(&format!(r#"node="{node}""#))
+                        || frame.contains(&format!(r#"node='{node}'"#)))
+                {
+                    return Some(frame);
+                }
+            }
+            Err(_) => return None,
+        }
+    }
+}
+
+#[tokio::test]
+async fn spaces_publish_fans_event_to_subscriber() {
+    let _serial = TEST_SERIAL.lock().await;
+    let server = TestServer::start();
+    let mut admin = admin_client(&server, "spaces-fanout-1").await;
+    let admin_bare = format!("{ADMIN}@{DOMAIN}");
+
+    // Subscribe admin to the seeded `general` Spaces node (XEP-0503).
+    let sub = iq_set_to(
+        &mut admin,
+        "spaces-fanout-sub",
+        SPACES_JID,
+        &format!(
+            r#"<pubsub xmlns="{NS_PUBSUB}"><subscribe node="general" jid="{admin_bare}"/></pubsub>"#
+        ),
+    )
+    .await;
+    assert!(is_result(&sub), "subscribe to spaces.general: {sub}");
+
+    // Publish a bookmark item pointing at the seeded `chat@muc.localhost`
+    // managed room — this is the only way the Spaces publish path admits
+    // a bookmark, since `handle_spaces_publish` enforces that the bookmark
+    // JID resolves to an existing managed channel (XEP-0503 §4).
+    let chat_room = format!("chat@{MUC_DOMAIN}");
+    let pub_resp = iq_set_to(
+        &mut admin,
+        "spaces-fanout-pub",
+        SPACES_JID,
+        &format!(
+            r#"<pubsub xmlns="{NS_PUBSUB}"><publish node="general"><item id="{chat_room}"><conference xmlns="urn:xmpp:bookmarks:1" name="Chat"/></item></publish></pubsub>"#
+        ),
+    )
+    .await;
+    assert!(
+        is_result(&pub_resp),
+        "Spaces publish via handle_spaces_publish: {pub_resp}"
+    );
+
+    let event = wait_for_event_message(&mut admin, "general", Duration::from_secs(2))
+        .await
+        .expect("Spaces subscriber must receive §7.1 event (acceptance criterion of #238)");
+
+    assert!(
+        event.contains(r#"type="headline""#) || event.contains(r#"type='headline'"#),
+        "Spaces event must be headline (XEP-0060 §12.18): {event}"
+    );
+    assert!(
+        event.contains(&format!(r#"from="{SPACES_JID}""#))
+            || event.contains(&format!(r#"from='{SPACES_JID}'"#)),
+        "from must be the spaces service JID: {event}"
+    );
+    assert!(
+        event.contains(&format!(r#"id="{chat_room}""#))
+            || event.contains(&format!(r#"id='{chat_room}'"#)),
+        "event must carry the published bookmark item id: {event}"
+    );
+
+    admin.close().await;
 }
