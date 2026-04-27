@@ -4,6 +4,7 @@ import type { Agent } from "stanza";
 import type { AvatarData, ReceivedMUCPresence, ReceivedMessage, ReceivedPresence, VCardTemp } from "stanza/protocol";
 import type { WaddleSession } from "../server-auth";
 import type { MemberSummary, UserSearchResult } from "../chat-types";
+import type { ExtensionLaunchDescriptor } from "../chat-ui";
 import type { WaddleHat } from "./extensions/hats";
 import type {
   ChatStateEvent, ChatStateType, DiscoveredChannel, DisplayedEvent,
@@ -43,6 +44,15 @@ import {
 } from "../outbound-queue-store";
 import * as inboxApi from "./inbox";
 import * as pep from "./pep-publications";
+import {
+  discoverExtensionCommands,
+  invokeExtensionCommand,
+  invokeExtensionLaunch,
+  submitExtensionCommandForm,
+  type DiscoveredExtensionCommand,
+  type ExtensionCommandFormField,
+  type ExtensionCommandResult,
+} from "./extension-commands";
 import { ReconnectCatchup } from "./reconnect-catchup";
 import { mergeOccupantHats, roleHatsForOccupant } from "./occupant-badges";
 
@@ -1072,6 +1082,30 @@ export class BrowserXmppClient {
   async sendDmReaction(peerJid: string, messageId: string, emojis: string[]): Promise<void> {
     const xmpp = await this.requireConnectedXmpp();
     dmMessaging.sendDmReaction(xmpp, barePeerJid(peerJid), messageId, emojis);
+  }
+
+  async invokeExtensionLaunch(launch: ExtensionLaunchDescriptor): Promise<ExtensionCommandResult> {
+    const xmpp = await this.requireConnectedXmpp();
+    return invokeExtensionLaunch(xmpp, this.session.jid, launch);
+  }
+
+  async discoverExtensionCommands(): Promise<DiscoveredExtensionCommand[]> {
+    const xmpp = await this.requireConnectedXmpp();
+    return discoverExtensionCommands(xmpp, this.session.jid);
+  }
+
+  async invokeExtensionCommand(command: DiscoveredExtensionCommand): Promise<ExtensionCommandResult> {
+    const xmpp = await this.requireConnectedXmpp();
+    return invokeExtensionCommand(xmpp, this.session.jid, command);
+  }
+
+  async submitExtensionCommandForm(
+    command: DiscoveredExtensionCommand,
+    sessionId: string,
+    fields: ExtensionCommandFormField[],
+  ): Promise<ExtensionCommandResult> {
+    const xmpp = await this.requireConnectedXmpp();
+    return submitExtensionCommandForm(xmpp, command, sessionId, fields);
   }
 
   async enablePushNotifications(opts: {

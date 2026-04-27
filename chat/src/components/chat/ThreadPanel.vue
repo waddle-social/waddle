@@ -3,7 +3,7 @@ import { computed, nextTick, ref, watch } from "vue";
 import { X, CornerDownRight, MessageSquarePlus, ChevronRight, ChevronLeft } from "lucide-vue-next";
 import MessageCard from "@/components/chat/MessageCard.vue";
 import MessageComposer from "@/components/chat/MessageComposer.vue";
-import type { TimelineMessage, MarkupSpan, MessageReference } from "@/lib/chat-ui";
+import type { ExtensionAnnotationAction, TimelineMessage, MarkupSpan, MessageReference } from "@/lib/chat-ui";
 import type { MentionCandidate } from "@/lib/mentions";
 import type { OccupantHat, OccupantPresence, RoomHats, RoomPresence } from "@/lib/xmpp-client";
 import type { ThreadEntry, ThreadIndex } from "@/composables/useThreads";
@@ -37,6 +37,7 @@ const props = defineProps<{
    * Used to render the parent context pane in the accordion layout.
    */
   hideComposer?: boolean;
+  invokeExtensionAction?: (action: ExtensionAnnotationAction) => Promise<unknown>;
 }>();
 
 const emit = defineEmits<{
@@ -296,6 +297,7 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
           :author-jid="authorJidByNick?.[activeEntry.root.author]"
           :thread-reply-count="activeEntry.count"
           hide-thread-chip
+          :invoke-extension-action="props.invokeExtensionAction"
           @edit="(id, body, m, r) => emit('editMessage', id, body, m, r)"
           @retract="(id) => emit('retractMessage', id)"
           @react="(id, emoji) => emit('reactMessage', id, emoji)"
@@ -326,6 +328,7 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
               :thread-reply-count="threadIndex.get(child.id)?.count ?? 0"
               :grouped="isGroupedFollowUp(child.id)"
               hide-thread-chip
+              :invoke-extension-action="props.invokeExtensionAction"
               @edit="(id, body, m, r) => emit('editMessage', id, body, m, r)"
               @retract="(id) => emit('retractMessage', id)"
               @react="(id, emoji) => emit('reactMessage', id, emoji)"

@@ -10,7 +10,10 @@ description = "Waddle Wasm extension runtime and OCI loader"
 [dependencies]
 anyhow = { workspace = true }
 async-trait = "0.1"
+chrono = { workspace = true }
 futures = { workspace = true }
+hmac = { workspace = true }
+hex = { workspace = true }
 minidom = { workspace = true }
 oci-client = { version = "0.15", default-features = false, features = ["rustls-tls"] }
 regex = { workspace = true }

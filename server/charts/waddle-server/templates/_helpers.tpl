@@ -41,6 +41,19 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- end -}}
 
 {{/*
+Container image reference.
+*/}}
+{{- define "waddle-server.image" -}}
+{{- $repository := required "image.repository is required" .Values.image.repository -}}
+{{- $digest := default "" .Values.image.digest -}}
+{{- if $digest -}}
+{{- printf "%s@%s" $repository $digest -}}
+{{- else -}}
+{{- printf "%s:%s" $repository (default .Chart.AppVersion .Values.image.tag) -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
 Selector labels.
 */}}
 {{- define "waddle-server.selectorLabels" -}}

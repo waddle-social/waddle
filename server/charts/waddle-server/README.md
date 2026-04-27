@@ -12,6 +12,12 @@ Optional:
 - A Kubernetes TLS secret for XMPP listener certificates
 - An ingress controller (if enabling ingress)
 
+## Image pinning
+
+Set `image.digest` to render the Deployment image as `repository@sha256:...`.
+When `image.digest` is empty, the chart falls back to `image.tag` or
+`Chart.appVersion`.
+
 ## Install
 
 ```bash
@@ -85,7 +91,6 @@ The chart supports an app secret containing:
 - `WADDLE_DATABASE_URL` (optional; preferred location for DB DSN with credentials)
 - `WADDLE_XMPP_MAM_DATABASE_URL` (optional MAM DSN override)
 - `WADDLE_XMPP_INBOX_DATABASE_URL` (optional inbox DSN override)
-- `GITHUB_TOKEN` (optional, for GitHub link enrichment)
 
 Provider JSON may also be set in `config.authProvidersJson`, but `secret.authProvidersJson`
 is recommended because provider definitions usually include client secrets.
@@ -140,6 +145,16 @@ helm upgrade --install waddle ./charts/waddle-server \
   --set xmpp.domain=waddle.social \
   --set-json secret.authProvidersJson='[{"id":"colony","display_name":"Colony","kind":"oidc","dynamic_client_registration":true,"client_id":"","token_endpoint_auth_method":"none","require_dpop":true,"issuer":"https://colony.waddle.social","scopes":["openid","profile","email"],"subject_claim":"sub","username_claim":"preferred_username","email_claim":"email"}]'
 ```
+
+## Extensions
+
+`extensions.modules` renders into `WADDLE_EXTENSIONS_JSON`. OCI modules must set
+`registry` without a tag and a separate `sha256:<64 hex>` `digest`; chart
+rendering fails for mutable tags, missing digests, all-zero placeholder
+digests, duplicate names, or official XMPP namespaces used as Waddle-specific
+extension namespaces. The chart defaults to no extension modules; release
+automation enables and digest-pins the five sample modules after publishing
+their WASM OCI artifacts.
 
 ## Env overrides
 

@@ -112,7 +112,11 @@ pub async fn handle_message(
             .deps
             .protocol
             .extension_manager
-            .enrich_message(&mut prototype)
+            .enrich_message_for_waddle(
+                &mut prototype,
+                waddle_extensions::WaddleId::new(room_jid.to_string())
+                    .expect("bare room JID is a non-empty Waddle conversation id"),
+            )
             .await;
 
         let broadcast = match room_actor
@@ -430,7 +434,11 @@ pub async fn handle_message(
                 .deps
                 .protocol
                 .extension_manager
-                .enrich_message(&mut prototype)
+                .enrich_message_for_waddle(
+                    &mut prototype,
+                    waddle_extensions::WaddleId::new(to_jid.to_bare().to_string())
+                        .expect("bare recipient JID is a non-empty Waddle conversation id"),
+                )
                 .await;
 
             if let Err(error) =

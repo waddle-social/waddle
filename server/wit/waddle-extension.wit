@@ -7,27 +7,6 @@ interface types {
         end-offset: u32,
     }
 
-    record embed-element {
-        element-name: string,
-        namespace: string,
-        attributes: list<tuple<string, string>>,
-    }
-
-    record enrichment-result {
-        embeds: list<embed-element>,
-    }
-
-    record feature-advertisement {
-        namespace: string,
-    }
-
-    record extension-info {
-        name: string,
-        namespace: string,
-        version: string,
-        features: list<feature-advertisement>,
-    }
-
     record action-id {
         value: string,
     }
@@ -36,27 +15,11 @@ interface types {
         value: string,
     }
 
-    record board-card-id {
-        value: string,
-    }
-
-    record board-column-id {
-        value: string,
-    }
-
-    record board-id {
-        value: string,
-    }
-
-    record canvas-id {
-        value: string,
-    }
-
-    record collection-id {
-        value: string,
-    }
-
     record command-node {
+        value: string,
+    }
+
+    record command-session-id {
         value: string,
     }
 
@@ -65,10 +28,6 @@ interface types {
     }
 
     record enrichment-id {
-        value: string,
-    }
-
-    record game-id {
         value: string,
     }
 
@@ -88,10 +47,6 @@ interface types {
         value: string,
     }
 
-    record option-id {
-        value: string,
-    }
-
     record payload-namespace {
         value: string,
     }
@@ -104,27 +59,11 @@ interface types {
         value: string,
     }
 
-    record profile-id {
-        value: string,
-    }
-
     record pubsub-item-id {
         value: string,
     }
 
     record pubsub-node {
-        value: string,
-    }
-
-    record question-id {
-        value: string,
-    }
-
-    record render-id {
-        value: string,
-    }
-
-    record run-id {
         value: string,
     }
 
@@ -172,34 +111,41 @@ interface types {
         message-observe,
         commands,
         launch,
-        bot-respond,
-        pubsub-read,
         pubsub-publish,
         artifact-reference,
-        ai-invoke,
         ui-declarative,
     }
 
-    enum sample-plugin {
-        links-task-board,
-        pub-quiz,
-        ai-chatbot,
-        ai-assistant-canvas,
-        decision-polls,
+    record payload-root {
+        namespace: payload-namespace,
+        local-name: string,
     }
 
-    record bot-identity {
-        localpart: plugin-id,
+    enum payload-surface {
+        message-enrichment,
+        launch-payload,
+        pubsub-item,
+    }
+
+    record payload-rule {
+        surface: payload-surface,
+        root: payload-root,
     }
 
     record extension-manifest {
         id: plugin-id,
         name: display-text,
         version: plugin-version,
-        payload-namespace: payload-namespace,
+        payloads: list<payload-rule>,
         capabilities: list<extension-capability>,
+        commands: list<command-descriptor>,
+        pubsub-nodes: list<pubsub-node>,
         artifact: option<artifact-reference>,
-        bot: option<bot-identity>,
+    }
+
+    record command-descriptor {
+        node: command-node,
+        name: display-text,
     }
 
     enum text-style {
@@ -224,10 +170,57 @@ interface types {
         label: display-text,
     }
 
+    record form-field-option {
+        label: option<display-text>,
+        value: data-form-value,
+    }
+
+    enum form-field-type {
+        boolean,
+        fixed,
+        hidden,
+        jid-multi,
+        jid-single,
+        list-multi,
+        list-single,
+        text-multi,
+        text-private,
+        text-single,
+    }
+
+    record data-form-field {
+        name: ui-action-id,
+        field-type: form-field-type,
+        label: option<display-text>,
+        required: bool,
+        values: list<data-form-value>,
+        options: list<form-field-option>,
+    }
+
+    record data-form-value {
+        value: string,
+    }
+
+    enum data-form-type {
+        form,
+        submit,
+        cancel,
+        result-form,
+    }
+
+    record data-form {
+        form-type: data-form-type,
+        title: option<display-text>,
+        instructions: list<display-text>,
+        fields: list<data-form-field>,
+    }
+
     variant ui-block {
         text(text-block),
         image(image-block),
         action(action-block),
+        form(data-form),
+        list-block(list-view),
     }
 
     record ui-view {
@@ -250,133 +243,28 @@ interface types {
         items: list<list-item>,
     }
 
-    record board-card {
-        id: board-card-id,
-        title: display-text,
-        body: option<display-text>,
-        labels: list<display-text>,
-        launch-id: option<launch-id>,
+    record xml-attribute {
+        namespace: option<payload-namespace>,
+        local-name: string,
+        value: string,
     }
 
-    record board-column {
-        id: board-column-id,
-        title: display-text,
-        cards: list<board-card>,
+    record xml-element {
+        namespace: payload-namespace,
+        local-name: string,
+        attributes: list<xml-attribute>,
     }
 
-    record board-view {
-        id: board-id,
-        title: option<display-text>,
-        columns: list<board-column>,
+    variant xml-token {
+        start-element(xml-element),
+        end-element,
+        text(string),
     }
 
-    record link-preview {
-        url: url,
-        title: option<display-text>,
-        site: option<display-text>,
-        image: option<artifact-reference>,
-    }
-
-    record quiz-choice {
-        id: option-id,
-        label: display-text,
-    }
-
-    record quiz-question {
-        game-id: game-id,
-        question-id: question-id,
-        prompt: display-text,
-        choices: list<quiz-choice>,
-        closes-at: option<timestamp>,
-    }
-
-    enum assistant-context-source {
-        message,
-        reply,
-        mam,
-        direct,
-    }
-
-    record assistant-answer {
-        run-id: run-id,
-        profile: profile-id,
-        context-source: assistant-context-source,
-        summary: option<display-text>,
-    }
-
-    record canvas-render {
-        canvas-id: canvas-id,
-        render-id: render-id,
-        artifact: artifact-reference,
-    }
-
-    enum poll-mode {
-        single,
-        multiple,
-    }
-
-    record poll-option {
-        id: option-id,
-        label: display-text,
-    }
-
-    record decision-poll {
-        poll-id: option-id,
-        mode: poll-mode,
-        question: display-text,
-        options: list<poll-option>,
-        closes-at: option<timestamp>,
-    }
-
-    variant framework-payload {
-        declarative-ui(ui-view),
-        list-view(list-view),
-        board(board-view),
-        link-preview(link-preview),
-        quiz-question(quiz-question),
-        assistant-answer(assistant-answer),
-        canvas-render(canvas-render),
-        decision-poll(decision-poll),
-    }
-
-    record save-link-request {
-        url: url,
-        collection-id: option<collection-id>,
-    }
-
-    record quiz-answer-request {
-        game-id: game-id,
-        question-id: question-id,
-        choice-id: option-id,
-    }
-
-    record chat-followup-request {
-        run-id: option<run-id>,
-        question: option<display-text>,
-    }
-
-    record canvas-remix-request {
-        canvas-id: canvas-id,
-        render-id: render-id,
-    }
-
-    record poll-vote-request {
-        poll-id: option-id,
-        option-id: option-id,
-    }
-
-    record ui-action-request {
-        view-id: ui-view-id,
-        action-id: ui-action-id,
-    }
-
-    variant launch-payload {
-        save-link(save-link-request),
-        quiz-answer(quiz-answer-request),
-        ask-followup(chat-followup-request),
-        canvas-remix(canvas-remix-request),
-        poll-vote(poll-vote-request),
-        ui-action(ui-action-request),
+    record extension-payload {
+        namespace: payload-namespace,
+        root: payload-root,
+        tokens: list<xml-token>,
     }
 
     record launch-context {
@@ -391,7 +279,8 @@ interface types {
         command-node: command-node,
         label: display-text,
         context: launch-context,
-        payload: option<launch-payload>,
+        payloads: list<extension-payload>,
+        fallback: option<ui-view>,
         expires-at: option<timestamp>,
     }
 
@@ -407,7 +296,8 @@ interface types {
         payload-namespace: payload-namespace,
         created-at: timestamp,
         source: option<message-source>,
-        payloads: list<framework-payload>,
+        ui: list<ui-view>,
+        payloads: list<extension-payload>,
         launches: list<launch-descriptor>,
     }
 
@@ -434,51 +324,51 @@ interface types {
 
     record form-field-value {
         name: ui-action-id,
-        values: list<display-text>,
+        values: list<data-form-value>,
+    }
+
+    enum command-action {
+        execute,
+        next,
+        prev,
+        complete,
+        cancel,
     }
 
     record command-invocation {
         waddle-id: waddle-id,
         command-node: command-node,
+        session-id: option<command-session-id>,
+        action: option<command-action>,
+        form: option<data-form>,
         fields: list<form-field-value>,
     }
 
     record launch-invocation {
         context: launch-context,
+        requester: waddle-id,
         launch-id: launch-id,
-        payload: option<launch-payload>,
+        session-id: option<command-session-id>,
+        action: option<command-action>,
+        form: option<data-form>,
         fields: list<form-field-value>,
-    }
-
-    record pubsub-notification {
-        node: pubsub-node,
-        item-id: pubsub-item-id,
-        payload: framework-payload,
     }
 
     variant extension-event {
         message-hook(message-hook),
         command(command-invocation),
         launch(launch-invocation),
-        pubsub(pubsub-notification),
     }
 
     record pubsub-publish {
         node: pubsub-node,
-        item-id: pubsub-item-id,
-        payload: framework-payload,
-    }
-
-    record bot-message {
-        body: display-text,
-        payloads: list<framework-payload>,
-        launches: list<launch-descriptor>,
+        item-id: option<pubsub-item-id>,
+        payload: extension-payload,
     }
 
     variant extension-effect {
         enrich-message(extension-envelope),
         publish-pubsub(pubsub-publish),
-        send-bot-message(bot-message),
         reference-artifact(artifact-reference),
         noop,
     }
@@ -500,19 +390,14 @@ interface types {
     }
 }
 
-interface enrich {
-    use types.{detected-link, enrichment-result};
-    enrich-message: func(body: string, links: list<detected-link>) -> enrichment-result;
-}
-
 interface framework {
     use types.{extension-error, extension-event, extension-response};
     handle-event: func(event: extension-event) -> result<extension-response, extension-error>;
 }
 
 interface lifecycle {
-    use types.{extension-info};
-    init: func(config: string) -> result<extension-info, string>;
+    use types.{extension-manifest};
+    init: func(config: string) -> result<extension-manifest, string>;
 }
 
 world waddle-extension {
@@ -520,6 +405,5 @@ world waddle-extension {
     import wasi:clocks/monotonic-clock@0.2.0;
 
     export lifecycle;
-    export enrich;
     export framework;
 }

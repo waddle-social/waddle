@@ -6,9 +6,10 @@ import { stripMarkupRange } from "./extensions/markup";
 import { codePointLength, codePointToCodeUnitIndex } from "@/lib/text-offsets";
 import type {
   ExtensionAnnotation,
+  ExtensionEnvelopeSource,
+  ExtensionLaunchDescriptor,
+  ExtensionPayloadElement,
   ExtensionSurfaceKind,
-  GitHubEmbed,
-  GitHubEmbedKind,
   MessageReference,
 } from "@/lib/chat-ui";
 import type {
@@ -25,7 +26,6 @@ type MessageExtensionsTarget = Pick<
   | "references"
   | "broadcastMention"
   | "sharedFiles"
-  | "githubEmbeds"
   | "extensionAnnotations"
   | "isSticker"
   | "replacesId"
@@ -64,7 +64,7 @@ export function hasRenderableMessagePayload(msg: ReceivedMessage): boolean {
   const fileSharing = stanza.fileSharing;
   if (Array.isArray(fileSharing)) return fileSharing.length > 0;
   if (fileSharing) return true;
-  return !!stanza.sticker || githubEmbedsFromStanza(stanza).length > 0 || extensionAnnotationsFromStanza(stanza).length > 0;
+  return !!stanza.sticker || extensionAnnotationsFromStanza(stanza).length > 0;
 }
 
 interface OriginIdPayload {
@@ -123,7 +123,6 @@ export function extractMessageExtensions(
   extractReferences(msg, base);
   extractExplicitMentions(msg, base);
   extractFileSharing(msg, base);
-  extractGithubEmbeds(msg, base);
   extractExtensionAnnotations(msg, base);
   extractMarkup(msg, base);
   extractReplyAndThread(msg, base);
@@ -132,59 +131,6 @@ export function extractMessageExtensions(
   if (ext(msg).sticker) {
     base.isSticker = true;
   }
-}
-
-interface GithubPayload {
-  url?: string;
-  owner?: string;
-  name?: string;
-}
-
-function parseGithubEmbed(kind: GitHubEmbedKind, payload: GithubPayload): GitHubEmbed | null {
-  if (!payload.url || !payload.owner || !payload.name) return null;
-  if (!isValidGithubEmbedUrl(kind, payload.url, payload.owner, payload.name)) return null;
-  return {
-    kind,
-    url: payload.url,
-    owner: payload.owner,
-    name: payload.name,
-  };
-}
-
-function isValidGithubEmbedUrl(
-  kind: GitHubEmbedKind,
-  rawUrl: string,
-  owner: string,
-  name: string,
-): boolean {
-  let url: URL;
-  try {
-    url = new URL(rawUrl);
-  } catch {
-    return false;
-  }
-
-  if (url.protocol !== "https:" || url.hostname !== "github.com") return false;
-  const parts = url.pathname.split("/").filter(Boolean);
-  if (parts[0] !== owner || parts[1] !== name) return false;
-
-  if (kind === "repo") {
-    return parts.length === 2;
-  }
-
-  const expectedSegment = kind === "issue" ? "issues" : "pull";
-  return parts[2] === expectedSegment && !!parts[3] && /^\d+$/.test(parts[3]) && parts.length === 4;
-}
-
-function githubEmbedsFromStanza(stanza: Record<string, unknown>): GitHubEmbed[] {
-  return [
-    ...asArray(stanza.githubRepos as GithubPayload | GithubPayload[] | undefined)
-      .flatMap((payload) => parseGithubEmbed("repo", payload) ?? []),
-    ...asArray(stanza.githubIssues as GithubPayload | GithubPayload[] | undefined)
-      .flatMap((payload) => parseGithubEmbed("issue", payload) ?? []),
-    ...asArray(stanza.githubPullRequests as GithubPayload | GithubPayload[] | undefined)
-      .flatMap((payload) => parseGithubEmbed("pr", payload) ?? []),
-  ];
 }
 
 interface ExtensionEnvelopePayload {
@@ -221,17 +167,18 @@ interface ExtensionEnrichmentPayload {
   plugin?: string;
   capability?: string;
   payloadNamespace?: string;
-  payload?: ExtensionFrameworkPayload;
-  launches?: ExtensionLaunchPayload | ExtensionLaunchPayload[];
+  surface?: string;
+  payloadSurface?: string;
+  uiSurface?: string;
+  payload?: ExtensionFallbackPayload;
+  launches?: ExtensionLaunchDescriptorPayload | ExtensionLaunchDescriptorPayload[];
+  source?: ExtensionSourcePayload;
 }
 
-interface ExtensionFrameworkPayload {
-  links?: unknown[] | unknown;
-  quizQuestions?: unknown[] | unknown;
-  assistantAnswers?: unknown[] | unknown;
-  canvases?: unknown[] | unknown;
-  polls?: unknown[] | unknown;
+interface ExtensionFallbackPayload {
+  surface?: string;
   views?: ExtensionViewPayload | ExtensionViewPayload[];
+  elements?: ExtensionRawElementPayload[];
 }
 
 interface ExtensionViewPayload {
@@ -245,11 +192,38 @@ interface ExtensionTextBlockPayload {
   style?: string;
 }
 
-interface ExtensionLaunchPayload {
+interface ExtensionLaunchDescriptorPayload {
   id?: string;
+  plugin?: string;
   action?: string;
   commandNode?: string;
+  token?: string;
+  launchToken?: string;
   label?: string;
+  context?: ExtensionLaunchContextPayload;
+  expiresAt?: string;
+  payload?: ExtensionFallbackPayload;
+}
+
+interface ExtensionSourcePayload {
+  stanzaId?: string;
+  by?: string;
+  bodyStart?: string | number;
+  bodyEnd?: string | number;
+}
+
+interface ExtensionLaunchContextPayload {
+  waddleId?: string;
+  room?: string;
+  roomJid?: string;
+  stanzaId?: string;
+  sourceStanzaId?: string;
+}
+
+interface ExtensionRawElementPayload {
+  name?: string;
+  attributes?: Record<string, unknown>;
+  children?: Array<ExtensionRawElementPayload | string>;
 }
 
 const ALLOWED_EXTENSION_SURFACES = new Set<ExtensionSurfaceKind>([
@@ -260,6 +234,8 @@ const ALLOWED_EXTENSION_SURFACES = new Set<ExtensionSurfaceKind>([
   "dynamic-canvas",
   "utility-panel",
 ]);
+
+const FRAMEWORK_NAMESPACE = "urn:waddle:extension:1";
 
 function parseExtensionAnnotation(payload: ExtensionAnnotationPayload): ExtensionAnnotation | null {
   if (!payload.extension || !payload.id || !payload.card?.title) return null;
@@ -295,71 +271,181 @@ function extensionAnnotationsFromStanza(stanza: Record<string, unknown>): Extens
 
 function parseExtensionEnrichment(payload: ExtensionEnrichmentPayload): ExtensionAnnotation | null {
   if (!payload.id || !payload.plugin) return null;
-  const surfaceKind = inferSurfaceKind(payload);
+  const plugin = payload.plugin;
+  const payloads = parsePayloadElements(payload.payload, payload.payloadNamespace);
+  const source = parseExtensionSource(payload.source);
+  const surfaceKind = inferSurfaceKind(payload, payloads);
   if (!surfaceKind) return null;
+  const launches = asArray(payload.launches).flatMap((launch) =>
+    parseExtensionLaunch(launch, plugin, source) ?? [],
+  );
   const actions = asArray(payload.launches)
-    .filter((launch): launch is Required<Pick<ExtensionLaunchPayload, "id" | "label">> & ExtensionLaunchPayload => !!launch.id && !!launch.label)
-    .map((launch) => ({ route: launch.id, label: launch.label }));
+    .flatMap((launch) => {
+      const parsed = launches.find((candidate) => candidate.id === launch.id);
+      if (!parsed) return [];
+      return [{ route: parsed.id, label: parsed.label, launch: parsed }];
+    });
   return {
     extensionId: payload.plugin,
     annotationId: payload.id,
     surfaceKind,
-    title: extensionTitle(payload),
+    title: extensionTitle(payload, payloads),
     ...(payload.payloadNamespace ? { summary: payload.payloadNamespace } : {}),
+    ...(source ? { source } : {}),
+    ...(payload.payloadNamespace ? { payloadNamespace: payload.payloadNamespace } : {}),
+    ...(payloads.length > 0 ? { payloads } : {}),
     fields: {
       ...(payload.capability ? { capability: payload.capability } : {}),
       ...(payload.payloadNamespace ? { payloadNamespace: payload.payloadNamespace } : {}),
+      ...(payload.surface ? { surface: payload.surface } : {}),
+      ...(payload.payloadSurface ? { payloadSurface: payload.payloadSurface } : {}),
+      ...(payload.uiSurface ? { uiSurface: payload.uiSurface } : {}),
     },
     actions,
   };
 }
 
-function inferSurfaceKind(payload: ExtensionEnrichmentPayload): ExtensionSurfaceKind | null {
-  if (hasPayloadItems(payload.payload?.links)) return "board";
-  if (hasPayloadItems(payload.payload?.quizQuestions)) return "game";
-  if (hasPayloadItems(payload.payload?.assistantAnswers)) return "chat-bot";
-  if (hasPayloadItems(payload.payload?.canvases)) return "dynamic-canvas";
-  if (hasPayloadItems(payload.payload?.polls)) return "utility-panel";
+function inferSurfaceKind(
+  payload: ExtensionEnrichmentPayload,
+  payloads: ExtensionPayloadElement[],
+): ExtensionSurfaceKind | null {
+  const explicitSurface = parseExtensionSurfaceKind(payload.surface)
+    ?? parseExtensionSurfaceKind(payload.uiSurface)
+    ?? parseExtensionSurfaceKind(payload.payloadSurface)
+    ?? parseExtensionSurfaceKind(payload.payload?.surface)
+    ?? payloads
+      .map((element) => parseExtensionSurfaceKind(
+        element.attributes.surface
+          ?? element.attributes["ui-surface"]
+          ?? element.attributes["payload-surface"],
+      ))
+      .find((surface): surface is ExtensionSurfaceKind => !!surface);
+  if (explicitSurface) return explicitSurface;
   if (hasPayloadItems(payload.payload?.views)) return "message-card";
-  switch (payload.payloadNamespace) {
-    case "urn:waddle:links-task-board:1":
-      return "board";
-    case "urn:waddle:pub-quiz:1":
-      return "game";
-    case "urn:waddle:ai-chatbot:1":
-      return "chat-bot";
-    case "urn:waddle:ai-assistant-canvas:1":
-      return "dynamic-canvas";
-    case "urn:waddle:decision-polls:1":
-      return "utility-panel";
-    default:
-      return null;
+  if (payloads.length > 0) return "message-card";
+  return null;
+}
+
+function parseExtensionSurfaceKind(value: unknown): ExtensionSurfaceKind | null {
+  if (typeof value !== "string") return null;
+  const surface = value.trim();
+  if (ALLOWED_EXTENSION_SURFACES.has(surface as ExtensionSurfaceKind)) return surface as ExtensionSurfaceKind;
+  if (surface === "message-enrichment" || surface === "pubsub-item") {
+    return "message-card";
   }
+  return null;
 }
 
 function hasPayloadItems(value: unknown[] | unknown | undefined): boolean {
   return Array.isArray(value) ? value.length > 0 : value !== undefined && value !== null;
 }
 
-function extensionTitle(payload: ExtensionEnrichmentPayload): string {
+function extensionTitle(payload: ExtensionEnrichmentPayload, payloads: ExtensionPayloadElement[]): string {
   const view = asArray(payload.payload?.views).find((candidate) => candidate?.title || hasPayloadItems(candidate?.textBlocks));
   if (view?.title) return view.title;
   const textBlock = view ? asArray(view.textBlocks).find((candidate) => typeof candidate?.text === "string" && candidate.text.trim().length > 0) : undefined;
   if (textBlock?.text) return textBlock.text;
-  switch (payload.payloadNamespace) {
-    case "urn:waddle:links-task-board:1":
-      return "Links task board";
-    case "urn:waddle:pub-quiz:1":
-      return "Pub quiz";
-    case "urn:waddle:ai-chatbot:1":
-      return "AI chatbot";
-    case "urn:waddle:ai-assistant-canvas:1":
-      return "AI assistant canvas";
-    case "urn:waddle:decision-polls:1":
-      return "Decision poll";
-    default:
-      return payload.plugin ?? "Extension";
+  const payloadTitle = payloads
+    .map((element) => readablePayloadTitle(element))
+    .find((value) => value.length > 0);
+  if (payloadTitle) return payloadTitle;
+  return humanizeExtensionName(payload.plugin ?? "Extension");
+}
+
+function parseExtensionLaunch(
+  payload: ExtensionLaunchDescriptorPayload,
+  fallbackPluginId: string,
+  source?: ExtensionEnvelopeSource,
+): ExtensionLaunchDescriptor | null {
+  if (!payload.id || !payload.label || !payload.commandNode) return null;
+  const pluginId = payload.plugin ?? fallbackPluginId;
+  const actionId = payload.action ?? payload.id;
+  const context = payload.context ?? {};
+  return {
+    id: payload.id,
+    pluginId,
+    actionId,
+    commandNode: payload.commandNode,
+    ...(payload.launchToken ?? payload.token ? { launchToken: payload.launchToken ?? payload.token } : {}),
+    label: payload.label,
+    context: {
+      ...(context.waddleId ? { waddleId: context.waddleId } : {}),
+      ...(context.room ?? context.roomJid ? { roomJid: context.room ?? context.roomJid } : {}),
+      ...(context.stanzaId ?? context.sourceStanzaId ? { stanzaId: context.stanzaId ?? context.sourceStanzaId } : {}),
+    },
+    ...(payload.expiresAt ? { expiresAt: payload.expiresAt } : {}),
+    ...(source ? { source } : {}),
+    payloads: parsePayloadElements(payload.payload),
+  };
+}
+
+function parseExtensionSource(payload: ExtensionSourcePayload | undefined): ExtensionEnvelopeSource | undefined {
+  if (!payload?.stanzaId) return undefined;
+  const bodyStart = parseReferenceOffset(payload.bodyStart);
+  const bodyEnd = parseReferenceOffset(payload.bodyEnd);
+  return {
+    stanzaId: payload.stanzaId,
+    ...(payload.by ? { by: payload.by } : {}),
+    ...(bodyStart !== undefined ? { bodyStart } : {}),
+    ...(bodyEnd !== undefined ? { bodyEnd } : {}),
+  };
+}
+
+function parsePayloadElements(
+  payload: ExtensionFallbackPayload | undefined,
+  fallbackNamespace?: string,
+): ExtensionPayloadElement[] {
+  return asArray(payload?.elements)
+    .flatMap((element) => normalizePayloadElement(element, fallbackNamespace) ?? [])
+    .filter((element) => element.namespace !== FRAMEWORK_NAMESPACE);
+}
+
+function normalizePayloadElement(
+  payload: ExtensionRawElementPayload,
+  fallbackNamespace = "",
+): ExtensionPayloadElement | null {
+  if (!payload?.name) return null;
+  const rawAttributes = payload.attributes ?? {};
+  const attributes = Object.fromEntries(
+    Object.entries(rawAttributes)
+      .filter(([, value]) => typeof value === "string" || typeof value === "number" || typeof value === "boolean")
+      .map(([key, value]) => [key, String(value)]),
+  );
+  const namespace = attributes.xmlns ?? fallbackNamespace;
+  const text = (payload.children ?? [])
+    .filter((child): child is string => typeof child === "string")
+    .join("")
+    .trim();
+  const children = (payload.children ?? [])
+    .flatMap((child) => typeof child === "string" ? [] : normalizePayloadElement(child, namespace) ?? []);
+  return {
+    namespace,
+    name: payload.name,
+    attributes,
+    ...(text ? { text } : {}),
+    children,
+  };
+}
+
+function readablePayloadTitle(element: ExtensionPayloadElement): string {
+  for (const key of ["title", "label", "name", "question", "prompt"]) {
+    const value = element.attributes[key]?.trim();
+    if (value) return value;
   }
+  for (const child of element.children) {
+    const text = child.text?.trim();
+    if (text) return text;
+  }
+  return humanizeExtensionName(element.name);
+}
+
+function humanizeExtensionName(value: string): string {
+  return value
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/[-_:#]+/g, " ")
+    .trim()
+    .replace(/\s+/g, " ")
+    .replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
 function hasNonBodyMessagePayload(msg: ReceivedMessage): boolean {
@@ -367,13 +453,7 @@ function hasNonBodyMessagePayload(msg: ReceivedMessage): boolean {
   const fileSharing = stanza.fileSharing;
   return (Array.isArray(fileSharing) ? fileSharing.length > 0 : !!fileSharing)
     || !!stanza.sticker
-    || githubEmbedsFromStanza(stanza).length > 0
     || extensionAnnotationsFromStanza(stanza).length > 0;
-}
-
-function extractGithubEmbeds(msg: ReceivedMessage, base: MessageExtensionsTarget): void {
-  const embeds = githubEmbedsFromStanza(ext(msg));
-  if (embeds.length > 0) base.githubEmbeds = embeds;
 }
 
 function extractExtensionAnnotations(msg: ReceivedMessage, base: MessageExtensionsTarget): void {

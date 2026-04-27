@@ -33,7 +33,7 @@ import NewDmDialog from "@/components/modals/NewDmDialog.vue";
 import MemberManagement from "@/components/modals/MemberManagement.vue";
 import ConfirmDialog from "@/components/ui/ConfirmDialog.vue";
 import type { MemberSummary } from "@/lib/chat-types";
-import type { MarkupSpan, MessageReference } from "@/lib/chat-ui";
+import type { ExtensionAnnotationAction, MarkupSpan, MessageReference } from "@/lib/chat-ui";
 import { avatarLookupCandidates, mentionAutocompleteCandidates, mentionMatchesUsername, mergeMentionMembers } from "@/lib/mentions";
 
 const props = defineProps<{
@@ -550,6 +550,10 @@ function reactActiveMessage(messageId: string, emoji: string) {
 
 function markActiveDisplayed(messageId: string) {
   activeTarget.value.markDisplayed(messageId);
+}
+
+async function invokeActiveExtensionAction(action: ExtensionAnnotationAction) {
+  await activeTarget.value.invokeExtensionAction(action);
 }
 
 function searchActiveMessages(query: string) {
@@ -1187,6 +1191,7 @@ onUnmounted(() => {
               @open-details="ui.showMobileDetails.value = true"
               @open-dm="handleOpenDm"
               @open-thread="openThread"
+              :invoke-extension-action="invokeActiveExtensionAction"
               @refresh-update="refreshAppUpdate"
             />
           </div>
@@ -1251,6 +1256,7 @@ onUnmounted(() => {
               @edit-message="editActiveMessage"
               @retract-message="retractActiveMessage"
               @react-message="reactActiveMessage"
+              :invoke-extension-action="invokeActiveExtensionAction"
               @displayed="markActiveDisplayed"
             />
           </div>
@@ -1284,6 +1290,7 @@ onUnmounted(() => {
               @edit-message="editActiveMessage"
               @retract-message="retractActiveMessage"
               @react-message="reactActiveMessage"
+              :invoke-extension-action="invokeActiveExtensionAction"
               @displayed="markActiveDisplayed"
               @select-gif="sendGif"
               @typing="notifyActiveComposing"

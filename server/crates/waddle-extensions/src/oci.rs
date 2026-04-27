@@ -349,14 +349,14 @@ mod tests {
         let cache_dir = std::env::temp_dir().join("waddle-test");
         let puller = OciExtensionPuller::new(cache_dir);
         let module = ExtensionModuleConfig {
-            name: "github-enricher".to_string(),
-            registry: "ghcr.io/waddle-social/waddle/extensions/github-enricher".to_string(),
+            name: "example-extension".to_string(),
+            registry: "ghcr.io/waddle-social/waddle/extensions/example-extension".to_string(),
             digest: Some(
                 "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                     .to_string(),
             ),
             tag: None,
-            namespace: "urn:waddle:github:0".to_string(),
+            namespace: "urn:example:extension:1".to_string(),
             config: serde_json::Value::Object(Default::default()),
             config_secret_files: Default::default(),
             local_path: None,
@@ -366,7 +366,7 @@ mod tests {
             .reference_for(&module)
             .expect("reference should parse");
         let expected: Reference =
-            "ghcr.io/waddle-social/waddle/extensions/github-enricher@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            "ghcr.io/waddle-social/waddle/extensions/example-extension@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                 .parse()
                 .expect("reference should parse");
         assert_eq!(reference.registry(), expected.registry());
@@ -379,14 +379,15 @@ mod tests {
         let cache_dir = std::env::temp_dir().join("waddle-test");
         let puller = OciExtensionPuller::new(cache_dir);
         let module = ExtensionModuleConfig {
-            name: "github-enricher".to_string(),
-            registry: "ghcr.io/waddle-social/waddle/extensions/github-enricher:latest".to_string(),
+            name: "example-extension".to_string(),
+            registry: "ghcr.io/waddle-social/waddle/extensions/example-extension:latest"
+                .to_string(),
             digest: Some(
                 "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                     .to_string(),
             ),
             tag: None,
-            namespace: "urn:waddle:github:0".to_string(),
+            namespace: "urn:example:extension:1".to_string(),
             config: serde_json::Value::Object(Default::default()),
             config_secret_files: Default::default(),
             local_path: None,
@@ -403,14 +404,14 @@ mod tests {
         let cache_dir = std::env::temp_dir().join("waddle-test");
         let puller = OciExtensionPuller::new(cache_dir);
         let module = ExtensionModuleConfig {
-            name: "github-enricher".to_string(),
-            registry: "ghcr.io/waddle-social/waddle/extensions/github-enricher".to_string(),
+            name: "example-extension".to_string(),
+            registry: "ghcr.io/waddle-social/waddle/extensions/example-extension".to_string(),
             digest: Some(
                 "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                     .to_string(),
             ),
             tag: Some("latest".to_string()),
-            namespace: "urn:waddle:github:0".to_string(),
+            namespace: "urn:example:extension:1".to_string(),
             config: serde_json::Value::Object(Default::default()),
             config_secret_files: Default::default(),
             local_path: None,
@@ -456,7 +457,7 @@ mod tests {
         ];
 
         let layer =
-            select_wasm_layer("github-enricher", &layers, &descriptors).expect("wasm selected");
+            select_wasm_layer("example-extension", &layers, &descriptors).expect("wasm selected");
         assert_eq!(layer.data[..4], [0, 97, 115, 109]);
     }
 
@@ -467,7 +468,7 @@ mod tests {
             media_type: "application/wasm".to_string(),
             annotations: None,
         };
-        let error = validate_wasm_layer("github-enricher", &layer)
+        let error = validate_wasm_layer("example-extension", &layer)
             .expect_err("invalid payload should fail");
         assert!(error.to_string().contains("payload is not a wasm binary"));
     }
@@ -480,7 +481,8 @@ mod tests {
             annotations: None,
         };
 
-        validate_wasm_layer("github-enricher", &layer).expect("component payload should validate");
+        validate_wasm_layer("example-extension", &layer)
+            .expect("component payload should validate");
     }
 
     #[test]
@@ -491,7 +493,7 @@ mod tests {
             annotations: None,
         };
 
-        let error = validate_wasm_layer("github-enricher", &layer)
+        let error = validate_wasm_layer("example-extension", &layer)
             .expect_err("unknown binary version should fail");
         assert!(error
             .to_string()
@@ -503,13 +505,13 @@ mod tests {
         let puller = OciExtensionPuller::new(std::env::temp_dir().join("waddle-test"));
         let module = ExtensionModuleConfig {
             name: "../bad".to_string(),
-            registry: "ghcr.io/waddle-social/waddle/extensions/github-enricher".to_string(),
+            registry: "ghcr.io/waddle-social/waddle/extensions/example-extension".to_string(),
             digest: Some(
                 "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                     .to_string(),
             ),
             tag: None,
-            namespace: "urn:waddle:github:0".to_string(),
+            namespace: "urn:example:extension:1".to_string(),
             config: serde_json::Value::Object(Default::default()),
             config_secret_files: Default::default(),
             local_path: None,
@@ -527,14 +529,14 @@ mod tests {
     fn cache_path_uses_sanitized_digest() {
         let puller = OciExtensionPuller::new(std::env::temp_dir().join("waddle-test"));
         let module = ExtensionModuleConfig {
-            name: "github-enricher".to_string(),
-            registry: "ghcr.io/waddle-social/waddle/extensions/github-enricher".to_string(),
+            name: "example-extension".to_string(),
+            registry: "ghcr.io/waddle-social/waddle/extensions/example-extension".to_string(),
             digest: Some(
                 "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                     .to_string(),
             ),
             tag: None,
-            namespace: "urn:waddle:github:0".to_string(),
+            namespace: "urn:example:extension:1".to_string(),
             config: serde_json::Value::Object(Default::default()),
             config_secret_files: Default::default(),
             local_path: None,
@@ -544,7 +546,7 @@ mod tests {
             .cached_wasm_path(&module)
             .expect("cache path should be valid");
         assert!(path.ends_with(
-            "github-enricher/sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.wasm"
+            "example-extension/sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.wasm"
         ));
     }
 
@@ -555,11 +557,11 @@ mod tests {
             std::process::id()
         ));
         std::fs::create_dir_all(&root).expect("cache test dir");
-        let wasm_path = root.join("github-enricher.wasm");
+        let wasm_path = root.join("example-extension.wasm");
         let wasm = [0, 97, 115, 109, 0x0d, 0, 1, 0];
         std::fs::write(&wasm_path, wasm).expect("wasm fixture");
 
-        let missing = validate_cached_wasm_file("github-enricher", &wasm_path)
+        let missing = validate_cached_wasm_file("example-extension", &wasm_path)
             .expect_err("cache without digest sidecar should be rejected");
         assert!(missing
             .to_string()
@@ -570,12 +572,12 @@ mod tests {
             "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n",
         )
         .expect("digest sidecar");
-        let mismatch = validate_cached_wasm_file("github-enricher", &wasm_path)
+        let mismatch = validate_cached_wasm_file("example-extension", &wasm_path)
             .expect_err("cache with wrong digest sidecar should be rejected");
         assert!(mismatch.to_string().contains("wasm digest mismatch"));
 
         write_cached_wasm_digest(&wasm_path, &wasm).expect("valid digest sidecar");
-        validate_cached_wasm_file("github-enricher", &wasm_path)
+        validate_cached_wasm_file("example-extension", &wasm_path)
             .expect("cache with matching digest sidecar should validate");
 
         let _ = std::fs::remove_dir_all(root);

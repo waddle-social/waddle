@@ -8,11 +8,15 @@ on:
     - .github/workflows/waddle-server-pullrequest.yml
     - cue.mod/**
     - server/**/env.cue
+    - infrastructure/waddle.cloud/gitops/waddle-server/**
+    - infrastructure/waddle.cloud/gitops/waddle-server-source.yaml
+    - infrastructure/waddle.cloud/gitops/kustomization-infra-waddle-server.yaml
     - server/Cargo.lock
     - server/Cargo.toml
+    - server/charts/waddle-server/**
     - server/crates/**
     - server/env.cue
-    - server/extensions/github-enricher/**
+    - server/extensions/**
     - server/schema/**
     - server/wit/**
 concurrency:

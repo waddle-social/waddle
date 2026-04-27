@@ -1,14 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import {
+  extensionCardDetails,
   inferredFileDisposition,
-  githubEmbedDisplayTitle,
-  githubEmbedKindLabel,
-  githubEmbedNumber,
   isAudioFile,
   isImageFile,
   isPdfFile,
   isVideoFile,
   renderStyledBody,
+  type ExtensionAnnotation,
   type MarkupSpan,
   type MessageReference,
 } from "../src/lib/chat-ui";
@@ -97,25 +96,54 @@ describe("renderStyledBody", () => {
     expect(inferredFileDisposition("video/mp4", "clip.mp4")).toBe("inline");
   });
 
-  test("formats GitHub embed card metadata", () => {
-    const issue = {
-      kind: "issue" as const,
-      url: "https://github.com/waddle-social/waddle/issues/42",
-      owner: "waddle-social",
-      name: "waddle",
-    };
-    const repo = {
-      kind: "repo" as const,
-      url: "https://github.com/waddle-social/waddle",
-      owner: "waddle-social",
-      name: "waddle",
+  test("summarizes generic extension payload cards without sample-specific types", () => {
+    const annotation: ExtensionAnnotation = {
+      extensionId: "decision-polls",
+      annotationId: "poll-1",
+      surfaceKind: "utility-panel",
+      title: "Ship the extension framework this week?",
+      summary: "urn:waddle:decision-polls:1",
+      payloadNamespace: "urn:waddle:decision-polls:1",
+      fields: {
+        capability: "launch",
+        payloadNamespace: "urn:waddle:decision-polls:1",
+      },
+      payloads: [{
+        namespace: "urn:waddle:decision-polls:1",
+        name: "poll",
+        attributes: {
+          xmlns: "urn:waddle:decision-polls:1",
+          "poll-id": "poll-1",
+          mode: "single",
+          "closes-at": "2026-04-27T11:00:00Z",
+        },
+        children: [
+          {
+            namespace: "urn:waddle:decision-polls:1",
+            name: "question",
+            attributes: {},
+            text: "Ship the extension framework this week?",
+            children: [],
+          },
+          {
+            namespace: "urn:waddle:decision-polls:1",
+            name: "option",
+            attributes: { id: "yes" },
+            text: "Yes",
+            children: [],
+          },
+        ],
+      }],
+      actions: [],
     };
 
-    expect(githubEmbedKindLabel(issue.kind)).toBe("Issue");
-    expect(githubEmbedNumber(issue)).toBe("42");
-    expect(githubEmbedDisplayTitle(issue)).toBe("waddle-social/waddle #42");
-    expect(githubEmbedKindLabel(repo.kind)).toBe("Repository");
-    expect(githubEmbedNumber(repo)).toBeNull();
-    expect(githubEmbedDisplayTitle(repo)).toBe("waddle-social/waddle");
+    expect(extensionCardDetails(annotation)).toEqual([
+      { label: "Capability", value: "launch" },
+      { label: "Poll Id", value: "poll-1" },
+      { label: "Mode", value: "single" },
+      { label: "Closes At", value: "2026-04-27T11:00:00Z" },
+      { label: "Question", value: "Ship the extension framework this week?" },
+      { label: "Option", value: "Yes" },
+    ]);
   });
 });

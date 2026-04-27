@@ -18,6 +18,7 @@ import { $xmppStatus } from "@/stores/xmpp-status";
 import {
   inferredFileDisposition,
   type DeliveryStatus,
+  type ExtensionAnnotationAction,
   type MarkupSpan,
   type MessageReference,
   type TimelineMessage,
@@ -62,9 +63,6 @@ export function fromLiveMessage(
   }
   if (msg.sharedFiles && msg.sharedFiles.length > 0) {
     tm.sharedFiles = msg.sharedFiles;
-  }
-  if (msg.githubEmbeds && msg.githubEmbeds.length > 0) {
-    tm.githubEmbeds = msg.githubEmbeds;
   }
   if (msg.extensionAnnotations && msg.extensionAnnotations.length > 0) {
     tm.extensionAnnotations = msg.extensionAnnotations;
@@ -315,7 +313,7 @@ export function useMessaging(
 
         // XEP-0308: Handle message corrections
         if (msg.replacesId) {
-          applyCorrection(msg.replacesId, msg.body, msg.markup, msg.references, msg.githubEmbeds, msg.extensionAnnotations);
+          applyCorrection(msg.replacesId, msg.body, msg.markup, msg.references, msg.extensionAnnotations);
           return;
         }
 
@@ -571,7 +569,6 @@ export function useMessaging(
     newBody: string,
     markup?: MarkupSpan[],
     references?: MessageReference[],
-    githubEmbeds?: LiveRoomMessage["githubEmbeds"],
     extensionAnnotations?: LiveRoomMessage["extensionAnnotations"],
   ) {
     const idx = messages.value.findIndex((m) => matchMessageId(m, replacesId));
@@ -588,19 +585,6 @@ export function useMessaging(
         updated.references = references;
       } else {
         delete updated.references;
-      }
-      if (githubEmbeds && githubEmbeds.length > 0) {
-        updated.githubEmbeds = githubEmbeds;
-      } else if (m.githubEmbeds?.length) {
-        const newBodyText = newBody.trim();
-        const surviving = m.githubEmbeds.filter((e) => newBodyText.includes(e.url));
-        if (surviving.length > 0) {
-          updated.githubEmbeds = surviving;
-        } else {
-          delete updated.githubEmbeds;
-        }
-      } else {
-        delete updated.githubEmbeds;
       }
       if (extensionAnnotations && extensionAnnotations.length > 0) {
         updated.extensionAnnotations = extensionAnnotations;
@@ -784,7 +768,6 @@ export function useMessaging(
         body: string;
         markup?: MarkupSpan[];
         references?: MessageReference[];
-        githubEmbeds?: LiveRoomMessage["githubEmbeds"];
         extensionAnnotations?: LiveRoomMessage["extensionAnnotations"];
       }[] = [];
 
@@ -803,10 +786,9 @@ export function useMessaging(
             body: msg.body,
             markup: msg.markup,
             references: msg.references,
-            githubEmbeds: msg.githubEmbeds,
             extensionAnnotations: msg.extensionAnnotations,
           });
-        } else if (msg.body || (msg.sharedFiles && msg.sharedFiles.length > 0) || msg.isSticker || (msg.githubEmbeds && msg.githubEmbeds.length > 0) || (msg.extensionAnnotations && msg.extensionAnnotations.length > 0)) {
+        } else if (msg.body || (msg.sharedFiles && msg.sharedFiles.length > 0) || msg.isSticker || (msg.extensionAnnotations && msg.extensionAnnotations.length > 0)) {
           regularMessages.push(msg);
         }
       }
@@ -834,18 +816,6 @@ export function useMessaging(
           target.references = update.references;
         } else {
           delete target.references;
-        }
-        if (update.githubEmbeds && update.githubEmbeds.length > 0) {
-          target.githubEmbeds = update.githubEmbeds;
-        } else if (target.githubEmbeds?.length) {
-          const surviving = target.githubEmbeds.filter((e) => update.body.includes(e.url));
-          if (surviving.length > 0) {
-            target.githubEmbeds = surviving;
-          } else {
-            delete target.githubEmbeds;
-          }
-        } else {
-          delete target.githubEmbeds;
         }
         if (update.extensionAnnotations && update.extensionAnnotations.length > 0) {
           target.extensionAnnotations = update.extensionAnnotations;
@@ -1192,6 +1162,27 @@ export function useMessaging(
     }
   }
 
+  async function invokeExtensionAction(action: ExtensionAnnotationAction) {
+    const client = xmppClient.value;
+    if (!client) {
+      const error = new Error("XMPP session is not ready.");
+      actionError.value = normalizeError(error);
+      throw error;
+    }
+    if (!action.launch) {
+      const error = new Error("This extension action is missing launch metadata.");
+      actionError.value = normalizeError(error);
+      throw error;
+    }
+    clearActionError();
+    try {
+      return await client.invokeExtensionLaunch(action.launch);
+    } catch (e) {
+      actionError.value = normalizeError(e);
+      throw e;
+    }
+  }
+
   async function editMessage(messageId: string, newBody: string, markup?: MarkupSpan[], references?: MessageReference[]) {
     if (!xmppClient.value || !activeSpaceId.value || !activeChannelId.value || !newBody.trim())
       return;
@@ -1308,6 +1299,7 @@ export function useMessaging(
     editMessage,
     retractMessage,
     moderateMessage,
+    invokeExtensionAction,
     toggleReaction,
     markDisplayed,
     notifyComposing,

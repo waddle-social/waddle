@@ -217,15 +217,15 @@ mod tests {
                 "enabled": true,
                 "cacheDir": "/srv/waddle/extensions",
                 "modules": [{
-                    "name": "github-enricher",
-                    "registry": "ghcr.io/waddle-social/waddle/extensions/github-enricher",
+                    "name": "example-extension",
+                    "registry": "ghcr.io/waddle-social/waddle/extensions/example-extension",
                     "artifactDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                    "namespace": "urn:waddle:github:0",
+                    "namespace": "urn:example:extension:1",
                     "config": {"log_level": "debug"},
                     "configSecretFiles": {
                         "github_token": "/var/run/secrets/github-token"
                     },
-                    "localPath": "/srv/waddle/extensions/github-enricher.wasm"
+                    "localPath": "/srv/waddle/extensions/example-extension.wasm"
                 }]
             }"#,
         );
@@ -241,7 +241,7 @@ mod tests {
         );
         assert_eq!(
             config.modules[0].local_path.as_deref(),
-            Some("/srv/waddle/extensions/github-enricher.wasm")
+            Some("/srv/waddle/extensions/example-extension.wasm")
         );
 
         if let Some(previous) = previous {
@@ -262,8 +262,8 @@ mod tests {
                 "enabled": true,
                 "cacheDir": "/srv/waddle/extensions",
                 "modules": [{
-                    "name": "github-enricher",
-                    "registry": "ghcr.io/waddle-social/waddle/extensions/github-enricher",
+                    "name": "example-extension",
+                    "registry": "ghcr.io/waddle-social/waddle/extensions/example-extension",
                     "tag": "latest"
                 }]
             }"#,
@@ -290,10 +290,10 @@ mod tests {
                 "enabled": true,
                 "cacheDir": "/srv/waddle/extensions",
                 "modules": [{
-                    "name": "github-enricher",
-                    "registry": "ghcr.io/waddle-social/waddle/extensions/github-enricher",
+                    "name": "example-extension",
+                    "registry": "ghcr.io/waddle-social/waddle/extensions/example-extension",
                     "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                    "namespace": "urn:waddle:github:0"
+                    "namespace": "urn:example:extension:1"
                 }]
             }"#,
         );
@@ -313,11 +313,11 @@ mod tests {
     #[test]
     fn validate_rejects_missing_digest_for_oci_module() {
         let module = ExtensionModuleConfig {
-            name: "github-enricher".to_string(),
-            registry: "ghcr.io/waddle-social/waddle/extensions/github-enricher".to_string(),
+            name: "example-extension".to_string(),
+            registry: "ghcr.io/waddle-social/waddle/extensions/example-extension".to_string(),
             digest: None,
             tag: None,
-            namespace: "urn:waddle:github:0".to_string(),
+            namespace: "urn:example:extension:1".to_string(),
             config: Value::Object(Default::default()),
             config_secret_files: Default::default(),
             local_path: None,
@@ -332,11 +332,12 @@ mod tests {
     #[test]
     fn validate_rejects_registry_with_embedded_tag() {
         let module = ExtensionModuleConfig {
-            name: "github-enricher".to_string(),
-            registry: "ghcr.io/waddle-social/waddle/extensions/github-enricher:latest".to_string(),
+            name: "example-extension".to_string(),
+            registry: "ghcr.io/waddle-social/waddle/extensions/example-extension:latest"
+                .to_string(),
             digest: Some(TEST_DIGEST.to_string()),
             tag: None,
-            namespace: "urn:waddle:github:0".to_string(),
+            namespace: "urn:example:extension:1".to_string(),
             config: Value::Object(Default::default()),
             config_secret_files: Default::default(),
             local_path: None,
@@ -351,14 +352,14 @@ mod tests {
     #[test]
     fn validate_preserves_local_path_without_oci_reference() {
         let module = ExtensionModuleConfig {
-            name: "github-enricher".to_string(),
+            name: "example-extension".to_string(),
             registry: String::new(),
             digest: None,
             tag: None,
-            namespace: "urn:waddle:github:0".to_string(),
+            namespace: "urn:example:extension:1".to_string(),
             config: Value::Object(Default::default()),
             config_secret_files: Default::default(),
-            local_path: Some("/srv/waddle/extensions/github-enricher.wasm".to_string()),
+            local_path: Some("/srv/waddle/extensions/example-extension.wasm".to_string()),
         };
 
         module
@@ -377,8 +378,8 @@ mod tests {
                 "enabled": true,
                 "cacheDir": "/srv/waddle/extensions",
                 "modules": [{
-                    "name": "github-enricher",
-                    "localPath": "/srv/waddle/extensions/github-enricher.wasm"
+                    "name": "example-extension",
+                    "localPath": "/srv/waddle/extensions/example-extension.wasm"
                 }]
             }"#,
         );
@@ -387,7 +388,7 @@ mod tests {
         assert_eq!(config.modules[0].registry, "");
         assert_eq!(
             config.modules[0].local_path.as_deref(),
-            Some("/srv/waddle/extensions/github-enricher.wasm")
+            Some("/srv/waddle/extensions/example-extension.wasm")
         );
 
         if let Some(previous) = previous {

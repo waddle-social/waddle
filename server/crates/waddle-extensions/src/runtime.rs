@@ -6,7 +6,18 @@ use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
 use wasmtime::{Config, Engine, Store};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
-use crate::types::{DetectedLink, EmbedElement, ExtensionInfo, FeatureAdvertisement};
+use crate::types::{
+    ActionBlock, ActionId, ArtifactReference, BodyRange, CommandAction, CommandDescriptor,
+    CommandInvocation, CommandNode, CommandSessionId, DataForm, DataFormField, DataFormType,
+    DataFormValue, DisplayText, EnrichmentId, ExtensionCapability, ExtensionEffect,
+    ExtensionEnvelope, ExtensionEvent, ExtensionManifest, ExtensionPayload, ExtensionResponse,
+    FormFieldOption, FormFieldType, FormFieldValue, ImageBlock, LaunchContext, LaunchDescriptor,
+    LaunchId, LaunchInvocation, LinkTarget, ListId, ListItem, ListItemId, ListView, MediaType,
+    MessageContext, MessageEnrichment, MessageHook, MessageSource, PayloadNamespace, PayloadRoot,
+    PayloadRule, PayloadSurface, PluginId, PluginVersion, PubSubItemId, PubSubNode, PubSubPublish,
+    Sha256Digest, StanzaId, TextBlock, TextStyle, Timestamp, UiActionId, UiBlock, UiView, UiViewId,
+    Url, WaddleId, XmlAttribute, XmlElement, XmlNode,
+};
 
 wasmtime::component::bindgen!({
     path: "../../wit",
@@ -140,7 +151,7 @@ impl LoadedExtension {
         })
     }
 
-    pub async fn call_init(&self, config: &str) -> Result<ExtensionInfo> {
+    pub async fn call_init(&self, config: &str) -> Result<ExtensionManifest> {
         let mut store = Store::new(&self.engine, HostState::new());
         let bindings: WaddleExtension =
             WaddleExtension::instantiate_async(&mut store, &self.component, &self.linker)
@@ -148,24 +159,21 @@ impl LoadedExtension {
                 .map_err(anyhow::Error::from)
                 .context("failed to instantiate WASM component")?;
 
-        let result: std::result::Result<wit_exports::lifecycle::ExtensionInfo, String> = bindings
-            .waddle_extension_lifecycle()
-            .call_init(&mut store, config)
-            .await
-            .map_err(anyhow::Error::from)
-            .context("wasm init() call trapped")?;
+        let result: std::result::Result<wit_exports::lifecycle::ExtensionManifest, String> =
+            bindings
+                .waddle_extension_lifecycle()
+                .call_init(&mut store, config)
+                .await
+                .map_err(anyhow::Error::from)
+                .context("wasm init() call trapped")?;
 
         match result {
-            Ok(info) => Ok(ExtensionInfo::from(info)),
+            Ok(manifest) => manifest.try_into(),
             Err(message) => Err(anyhow::anyhow!("extension init failed: {message}")),
         }
     }
 
-    pub async fn call_enrich_message(
-        &self,
-        body: String,
-        links: Vec<DetectedLink>,
-    ) -> Result<Vec<EmbedElement>> {
+    pub async fn call_handle_event(&self, event: ExtensionEvent) -> Result<ExtensionResponse> {
         let mut store = Store::new(&self.engine, HostState::new());
         let bindings: WaddleExtension =
             WaddleExtension::instantiate_async(&mut store, &self.component, &self.linker)
@@ -173,54 +181,851 @@ impl LoadedExtension {
                 .map_err(anyhow::Error::from)
                 .context("failed to instantiate WASM component")?;
 
-        let wit_links: Vec<wit_types::DetectedLink> = links.into_iter().map(Into::into).collect();
-
-        let result: wit_exports::enrich::EnrichmentResult = bindings
-            .waddle_extension_enrich()
-            .call_enrich_message(&mut store, &body, &wit_links)
+        let result = bindings
+            .waddle_extension_framework()
+            .call_handle_event(&mut store, &event.into())
             .await
             .map_err(anyhow::Error::from)
-            .context("wasm enrich-message() call trapped")?;
+            .context("wasm handle-event() call trapped")?;
 
-        Ok(result.embeds.into_iter().map(EmbedElement::from).collect())
+        match result {
+            Ok(response) => response.try_into(),
+            Err(error) => Err(anyhow::anyhow!(
+                "extension handle-event failed: {:?}: {}",
+                error.code,
+                error.message.value
+            )),
+        }
     }
 }
 
 // ---- type conversions between WIT-generated types and domain types ----
 
-impl From<DetectedLink> for wit_types::DetectedLink {
-    fn from(value: DetectedLink) -> Self {
-        Self {
-            url: value.url,
-            start_offset: value.start_offset,
-            end_offset: value.end_offset,
+macro_rules! domain_newtype_to_wit {
+    ($value:expr, $wit:ident) => {
+        wit_types::$wit {
+            value: $value.as_str().to_string(),
         }
-    }
+    };
 }
 
-impl From<wit_types::EmbedElement> for EmbedElement {
-    fn from(value: wit_types::EmbedElement) -> Self {
-        Self {
-            element_name: value.element_name,
-            namespace: value.namespace,
-            attributes: value.attributes,
-        }
-    }
+macro_rules! wit_newtype_to_domain {
+    ($value:expr, $domain:ty) => {
+        <$domain>::new($value.value).map_err(anyhow::Error::from)
+    };
 }
 
-impl From<wit_exports::lifecycle::ExtensionInfo> for ExtensionInfo {
-    fn from(value: wit_exports::lifecycle::ExtensionInfo) -> Self {
-        Self {
-            name: value.name,
-            namespace: value.namespace,
-            version: value.version,
-            features: value
-                .features
+impl TryFrom<wit_exports::lifecycle::ExtensionManifest> for ExtensionManifest {
+    type Error = anyhow::Error;
+
+    fn try_from(value: wit_exports::lifecycle::ExtensionManifest) -> Result<Self> {
+        Ok(Self {
+            id: wit_newtype_to_domain!(value.id, PluginId)?,
+            name: wit_newtype_to_domain!(value.name, DisplayText)?,
+            version: wit_newtype_to_domain!(value.version, PluginVersion)?,
+            payloads: value
+                .payloads
                 .into_iter()
-                .map(|feat| FeatureAdvertisement {
-                    namespace: feat.namespace,
-                })
-                .collect(),
+                .map(TryInto::try_into)
+                .collect::<Result<Vec<_>>>()?,
+            capabilities: value.capabilities.into_iter().map(Into::into).collect(),
+            commands: value
+                .commands
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<Vec<_>>>()?,
+            pubsub_nodes: value
+                .pubsub_nodes
+                .into_iter()
+                .map(|node| wit_newtype_to_domain!(node, PubSubNode))
+                .collect::<Result<Vec<_>>>()?,
+            artifact: value.artifact.map(TryInto::try_into).transpose()?,
+        })
+    }
+}
+
+impl TryFrom<wit_types::CommandDescriptor> for CommandDescriptor {
+    type Error = anyhow::Error;
+
+    fn try_from(value: wit_types::CommandDescriptor) -> Result<Self> {
+        Ok(Self {
+            node: wit_newtype_to_domain!(value.node, CommandNode)?,
+            name: wit_newtype_to_domain!(value.name, DisplayText)?,
+        })
+    }
+}
+
+impl TryFrom<wit_types::PayloadRule> for PayloadRule {
+    type Error = anyhow::Error;
+
+    fn try_from(value: wit_types::PayloadRule) -> Result<Self> {
+        Ok(Self {
+            surface: value.surface.into(),
+            root: value.root.try_into()?,
+        })
+    }
+}
+
+impl From<wit_types::PayloadSurface> for PayloadSurface {
+    fn from(value: wit_types::PayloadSurface) -> Self {
+        match value {
+            wit_types::PayloadSurface::MessageEnrichment => Self::MessageEnrichment,
+            wit_types::PayloadSurface::LaunchPayload => Self::LaunchPayload,
+            wit_types::PayloadSurface::PubsubItem => Self::PubSubItem,
         }
+    }
+}
+
+impl From<ExtensionEvent> for wit_types::ExtensionEvent {
+    fn from(value: ExtensionEvent) -> Self {
+        match value {
+            ExtensionEvent::MessageHook(event) => Self::MessageHook(event.into()),
+            ExtensionEvent::Command(event) => Self::Command(event.into()),
+            ExtensionEvent::Launch(event) => Self::Launch(event.into()),
+        }
+    }
+}
+
+impl From<MessageHook> for wit_types::MessageHook {
+    fn from(value: MessageHook) -> Self {
+        Self {
+            context: value.context.into(),
+            body: value.body.into(),
+            links: value.links.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<MessageContext> for wit_types::MessageContext {
+    fn from(value: MessageContext) -> Self {
+        Self {
+            waddle_id: value.waddle_id.into(),
+            stanza_id: value.stanza_id.map(Into::into),
+        }
+    }
+}
+
+impl From<LinkTarget> for wit_types::LinkTarget {
+    fn from(value: LinkTarget) -> Self {
+        Self {
+            url: value.url.into(),
+            range: wit_types::BodyRange {
+                start: value.range.start,
+                end: value.range.end,
+            },
+        }
+    }
+}
+
+impl From<CommandInvocation> for wit_types::CommandInvocation {
+    fn from(value: CommandInvocation) -> Self {
+        Self {
+            waddle_id: value.waddle_id.into(),
+            command_node: value.command_node.into(),
+            session_id: value.session_id.map(Into::into),
+            action: value.action.map(Into::into),
+            form: value.form.map(Into::into),
+            fields: value.fields.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<LaunchInvocation> for wit_types::LaunchInvocation {
+    fn from(value: LaunchInvocation) -> Self {
+        Self {
+            context: value.context.into(),
+            requester: value.requester.into(),
+            launch_id: value.launch_id.into(),
+            session_id: value.session_id.map(Into::into),
+            action: value.action.map(Into::into),
+            form: value.form.map(Into::into),
+            fields: value.fields.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<FormFieldValue> for wit_types::FormFieldValue {
+    fn from(value: FormFieldValue) -> Self {
+        Self {
+            name: value.name.into(),
+            values: value.values.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<CommandAction> for wit_types::CommandAction {
+    fn from(value: CommandAction) -> Self {
+        match value {
+            CommandAction::Execute => Self::Execute,
+            CommandAction::Next => Self::Next,
+            CommandAction::Prev => Self::Prev,
+            CommandAction::Complete => Self::Complete,
+            CommandAction::Cancel => Self::Cancel,
+        }
+    }
+}
+
+impl From<LaunchContext> for wit_types::LaunchContext {
+    fn from(value: LaunchContext) -> Self {
+        Self {
+            waddle_id: value.waddle_id.into(),
+            source_stanza_id: value.source_stanza_id.map(Into::into),
+        }
+    }
+}
+
+impl From<DataForm> for wit_types::DataForm {
+    fn from(value: DataForm) -> Self {
+        Self {
+            form_type: value.form_type.into(),
+            title: value.title.map(Into::into),
+            instructions: value.instructions.into_iter().map(Into::into).collect(),
+            fields: value.fields.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<DataFormType> for wit_types::DataFormType {
+    fn from(value: DataFormType) -> Self {
+        match value {
+            DataFormType::Form => Self::Form,
+            DataFormType::Submit => Self::Submit,
+            DataFormType::Cancel => Self::Cancel,
+            DataFormType::Result => Self::ResultForm,
+        }
+    }
+}
+
+impl From<FormFieldType> for wit_types::FormFieldType {
+    fn from(value: FormFieldType) -> Self {
+        match value {
+            FormFieldType::Boolean => Self::Boolean,
+            FormFieldType::Fixed => Self::Fixed,
+            FormFieldType::Hidden => Self::Hidden,
+            FormFieldType::JidMulti => Self::JidMulti,
+            FormFieldType::JidSingle => Self::JidSingle,
+            FormFieldType::ListMulti => Self::ListMulti,
+            FormFieldType::ListSingle => Self::ListSingle,
+            FormFieldType::TextMulti => Self::TextMulti,
+            FormFieldType::TextPrivate => Self::TextPrivate,
+            FormFieldType::TextSingle => Self::TextSingle,
+        }
+    }
+}
+
+impl From<DataFormField> for wit_types::DataFormField {
+    fn from(value: DataFormField) -> Self {
+        Self {
+            name: value.name.into(),
+            field_type: value.field_type.into(),
+            label: value.label.map(Into::into),
+            required: value.required,
+            values: value.values.into_iter().map(Into::into).collect(),
+            options: value.options.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<FormFieldOption> for wit_types::FormFieldOption {
+    fn from(value: FormFieldOption) -> Self {
+        Self {
+            label: value.label.map(Into::into),
+            value: value.value.into(),
+        }
+    }
+}
+
+impl From<DataFormValue> for wit_types::DataFormValue {
+    fn from(value: DataFormValue) -> Self {
+        Self {
+            value: value.into_string(),
+        }
+    }
+}
+
+impl From<ExtensionPayload> for wit_types::ExtensionPayload {
+    fn from(value: ExtensionPayload) -> Self {
+        let mut tokens = Vec::new();
+        push_xml_tokens(&value.root, &mut tokens);
+        Self {
+            namespace: value.namespace.into(),
+            root: PayloadRoot {
+                namespace: value.root.namespace.clone(),
+                local_name: value.root.local_name.clone(),
+            }
+            .into(),
+            tokens,
+        }
+    }
+}
+
+impl From<XmlElement> for wit_types::XmlElement {
+    fn from(value: XmlElement) -> Self {
+        Self {
+            namespace: value.namespace.into(),
+            local_name: value.local_name,
+            attributes: value.attributes.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<XmlAttribute> for wit_types::XmlAttribute {
+    fn from(value: XmlAttribute) -> Self {
+        Self {
+            namespace: value.namespace.map(Into::into),
+            local_name: value.local_name,
+            value: value.value,
+        }
+    }
+}
+
+impl From<PayloadRoot> for wit_types::PayloadRoot {
+    fn from(value: PayloadRoot) -> Self {
+        Self {
+            namespace: value.namespace.into(),
+            local_name: value.local_name,
+        }
+    }
+}
+
+impl TryFrom<wit_types::PayloadRoot> for PayloadRoot {
+    type Error = anyhow::Error;
+
+    fn try_from(value: wit_types::PayloadRoot) -> Result<Self> {
+        PayloadRoot::new(
+            wit_newtype_to_domain!(value.namespace, PayloadNamespace)?,
+            value.local_name,
+        )
+        .map_err(anyhow::Error::from)
+    }
+}
+
+fn push_xml_tokens(element: &XmlElement, tokens: &mut Vec<wit_types::XmlToken>) {
+    tokens.push(wit_types::XmlToken::StartElement(wit_types::XmlElement {
+        namespace: element.namespace.clone().into(),
+        local_name: element.local_name.clone(),
+        attributes: element
+            .attributes
+            .clone()
+            .into_iter()
+            .map(Into::into)
+            .collect(),
+    }));
+    for child in &element.children {
+        match child {
+            XmlNode::Element(child) => push_xml_tokens(child, tokens),
+            XmlNode::Text(text) => tokens.push(wit_types::XmlToken::Text(text.clone())),
+        }
+    }
+    tokens.push(wit_types::XmlToken::EndElement);
+}
+
+macro_rules! impl_domain_newtype_to_wit {
+    ($domain:ty, $wit:ident) => {
+        impl From<$domain> for wit_types::$wit {
+            fn from(value: $domain) -> Self {
+                domain_newtype_to_wit!(value, $wit)
+            }
+        }
+    };
+}
+
+impl_domain_newtype_to_wit!(ActionId, ActionId);
+impl_domain_newtype_to_wit!(CommandNode, CommandNode);
+impl_domain_newtype_to_wit!(CommandSessionId, CommandSessionId);
+impl_domain_newtype_to_wit!(DisplayText, DisplayText);
+impl_domain_newtype_to_wit!(EnrichmentId, EnrichmentId);
+impl_domain_newtype_to_wit!(LaunchId, LaunchId);
+impl_domain_newtype_to_wit!(ListId, ListId);
+impl_domain_newtype_to_wit!(ListItemId, ListItemId);
+impl_domain_newtype_to_wit!(MediaType, MediaType);
+impl_domain_newtype_to_wit!(PayloadNamespace, PayloadNamespace);
+impl_domain_newtype_to_wit!(PluginId, PluginId);
+impl_domain_newtype_to_wit!(PubSubItemId, PubsubItemId);
+impl_domain_newtype_to_wit!(PubSubNode, PubsubNode);
+impl_domain_newtype_to_wit!(Sha256Digest, Sha256Digest);
+impl_domain_newtype_to_wit!(StanzaId, StanzaId);
+impl_domain_newtype_to_wit!(Timestamp, Timestamp);
+impl_domain_newtype_to_wit!(UiActionId, UiActionId);
+impl_domain_newtype_to_wit!(UiViewId, UiViewId);
+impl_domain_newtype_to_wit!(Url, Url);
+impl_domain_newtype_to_wit!(WaddleId, WaddleId);
+
+impl TryFrom<wit_types::ExtensionResponse> for ExtensionResponse {
+    type Error = anyhow::Error;
+
+    fn try_from(value: wit_types::ExtensionResponse) -> Result<Self> {
+        Ok(Self {
+            effects: value
+                .effects
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<Vec<_>>>()?,
+        })
+    }
+}
+
+impl TryFrom<wit_types::ExtensionEffect> for ExtensionEffect {
+    type Error = anyhow::Error;
+
+    fn try_from(value: wit_types::ExtensionEffect) -> Result<Self> {
+        Ok(match value {
+            wit_types::ExtensionEffect::EnrichMessage(envelope) => {
+                Self::EnrichMessage(envelope.try_into()?)
+            }
+            wit_types::ExtensionEffect::PublishPubsub(publish) => {
+                Self::PublishPubSub(publish.try_into()?)
+            }
+            wit_types::ExtensionEffect::ReferenceArtifact(artifact) => {
+                Self::ReferenceArtifact(artifact.try_into()?)
+            }
+            wit_types::ExtensionEffect::Noop => Self::Noop,
+        })
+    }
+}
+
+impl TryFrom<wit_types::ExtensionEnvelope> for ExtensionEnvelope {
+    type Error = anyhow::Error;
+
+    fn try_from(value: wit_types::ExtensionEnvelope) -> Result<Self> {
+        Ok(Self {
+            version: value.version,
+            enrichments: value
+                .enrichments
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<Vec<_>>>()?,
+        })
+    }
+}
+
+impl TryFrom<wit_types::MessageEnrichment> for MessageEnrichment {
+    type Error = anyhow::Error;
+
+    fn try_from(value: wit_types::MessageEnrichment) -> Result<Self> {
+        Ok(Self {
+            id: wit_newtype_to_domain!(value.id, EnrichmentId)?,
+            plugin: wit_newtype_to_domain!(value.plugin, PluginId)?,
+            capability: value.capability.into(),
+            payload_namespace: wit_newtype_to_domain!(value.payload_namespace, PayloadNamespace)?,
+            created_at: wit_newtype_to_domain!(value.created_at, Timestamp)?,
+            source: value.source.map(TryInto::try_into).transpose()?,
+            ui: value
+                .ui
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<Vec<_>>>()?,
+            payloads: value
+                .payloads
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<Vec<_>>>()?,
+            launches: value
+                .launches
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<Vec<_>>>()?,
+        })
+    }
+}
+
+impl From<wit_types::ExtensionCapability> for ExtensionCapability {
+    fn from(value: wit_types::ExtensionCapability) -> Self {
+        match value {
+            wit_types::ExtensionCapability::MessageEnrich => Self::MessageEnrich,
+            wit_types::ExtensionCapability::MessageObserve => Self::MessageObserve,
+            wit_types::ExtensionCapability::Commands => Self::Commands,
+            wit_types::ExtensionCapability::Launch => Self::Launch,
+            wit_types::ExtensionCapability::PubsubPublish => Self::PubSubPublish,
+            wit_types::ExtensionCapability::ArtifactReference => Self::ArtifactReference,
+            wit_types::ExtensionCapability::UiDeclarative => Self::UiDeclarative,
+        }
+    }
+}
+
+impl TryFrom<wit_types::MessageSource> for MessageSource {
+    type Error = anyhow::Error;
+
+    fn try_from(value: wit_types::MessageSource) -> Result<Self> {
+        Ok(Self {
+            stanza_id: wit_newtype_to_domain!(value.stanza_id, StanzaId)?,
+            body_range: value
+                .body_range
+                .map(|range| BodyRange::new(range.start, range.end))
+                .transpose()?,
+        })
+    }
+}
+
+impl TryFrom<wit_types::LaunchDescriptor> for LaunchDescriptor {
+    type Error = anyhow::Error;
+
+    fn try_from(value: wit_types::LaunchDescriptor) -> Result<Self> {
+        Ok(Self {
+            id: wit_newtype_to_domain!(value.id, LaunchId)?,
+            plugin: wit_newtype_to_domain!(value.plugin, PluginId)?,
+            action: wit_newtype_to_domain!(value.action, ActionId)?,
+            command_node: wit_newtype_to_domain!(value.command_node, CommandNode)?,
+            label: wit_newtype_to_domain!(value.label, DisplayText)?,
+            context: value.context.try_into()?,
+            payloads: value
+                .payloads
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<Vec<_>>>()?,
+            fallback: value.fallback.map(TryInto::try_into).transpose()?,
+            expires_at: value
+                .expires_at
+                .map(|expires_at| wit_newtype_to_domain!(expires_at, Timestamp))
+                .transpose()?,
+            token: None,
+        })
+    }
+}
+
+impl TryFrom<wit_types::LaunchContext> for LaunchContext {
+    type Error = anyhow::Error;
+
+    fn try_from(value: wit_types::LaunchContext) -> Result<Self> {
+        Ok(Self {
+            waddle_id: wit_newtype_to_domain!(value.waddle_id, WaddleId)?,
+            source_stanza_id: value
+                .source_stanza_id
+                .map(|stanza_id| wit_newtype_to_domain!(stanza_id, StanzaId))
+                .transpose()?,
+        })
+    }
+}
+
+impl TryFrom<wit_types::UiView> for UiView {
+    type Error = anyhow::Error;
+
+    fn try_from(value: wit_types::UiView) -> Result<Self> {
+        Ok(Self {
+            id: wit_newtype_to_domain!(value.id, UiViewId)?,
+            title: value
+                .title
+                .map(|title| wit_newtype_to_domain!(title, DisplayText))
+                .transpose()?,
+            blocks: value
+                .blocks
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<Vec<_>>>()?,
+        })
+    }
+}
+
+impl TryFrom<wit_types::UiBlock> for UiBlock {
+    type Error = anyhow::Error;
+
+    fn try_from(value: wit_types::UiBlock) -> Result<Self> {
+        Ok(match value {
+            wit_types::UiBlock::Text(block) => Self::Text(block.try_into()?),
+            wit_types::UiBlock::Image(block) => Self::Image(block.try_into()?),
+            wit_types::UiBlock::Action(block) => Self::Action(block.try_into()?),
+            wit_types::UiBlock::Form(form) => Self::Form(form.try_into()?),
+            wit_types::UiBlock::ListBlock(list) => Self::List(list.try_into()?),
+        })
+    }
+}
+
+impl TryFrom<wit_types::TextBlock> for TextBlock {
+    type Error = anyhow::Error;
+
+    fn try_from(value: wit_types::TextBlock) -> Result<Self> {
+        Ok(Self {
+            text: wit_newtype_to_domain!(value.text, DisplayText)?,
+            style: value.style.into(),
+        })
+    }
+}
+
+impl From<wit_types::TextStyle> for TextStyle {
+    fn from(value: wit_types::TextStyle) -> Self {
+        match value {
+            wit_types::TextStyle::Body => Self::Body,
+            wit_types::TextStyle::Heading => Self::Heading,
+            wit_types::TextStyle::Muted => Self::Muted,
+            wit_types::TextStyle::Code => Self::Code,
+        }
+    }
+}
+
+impl TryFrom<wit_types::ImageBlock> for ImageBlock {
+    type Error = anyhow::Error;
+
+    fn try_from(value: wit_types::ImageBlock) -> Result<Self> {
+        Ok(Self {
+            artifact: value.artifact.try_into()?,
+            alt: wit_newtype_to_domain!(value.alt, DisplayText)?,
+        })
+    }
+}
+
+impl TryFrom<wit_types::ActionBlock> for ActionBlock {
+    type Error = anyhow::Error;
+
+    fn try_from(value: wit_types::ActionBlock) -> Result<Self> {
+        Ok(Self {
+            launch_id: wit_newtype_to_domain!(value.launch_id, LaunchId)?,
+            label: wit_newtype_to_domain!(value.label, DisplayText)?,
+        })
+    }
+}
+
+impl TryFrom<wit_types::DataForm> for DataForm {
+    type Error = anyhow::Error;
+
+    fn try_from(value: wit_types::DataForm) -> Result<Self> {
+        Ok(Self {
+            form_type: value.form_type.into(),
+            title: value
+                .title
+                .map(|title| wit_newtype_to_domain!(title, DisplayText))
+                .transpose()?,
+            instructions: value
+                .instructions
+                .into_iter()
+                .map(|instruction| wit_newtype_to_domain!(instruction, DisplayText))
+                .collect::<Result<Vec<_>>>()?,
+            fields: value
+                .fields
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<Vec<_>>>()?,
+        })
+    }
+}
+
+impl From<wit_types::DataFormType> for DataFormType {
+    fn from(value: wit_types::DataFormType) -> Self {
+        match value {
+            wit_types::DataFormType::Form => Self::Form,
+            wit_types::DataFormType::Submit => Self::Submit,
+            wit_types::DataFormType::Cancel => Self::Cancel,
+            wit_types::DataFormType::ResultForm => Self::Result,
+        }
+    }
+}
+
+impl TryFrom<wit_types::DataFormField> for DataFormField {
+    type Error = anyhow::Error;
+
+    fn try_from(value: wit_types::DataFormField) -> Result<Self> {
+        Ok(Self {
+            name: wit_newtype_to_domain!(value.name, UiActionId)?,
+            field_type: value.field_type.into(),
+            label: value
+                .label
+                .map(|label| wit_newtype_to_domain!(label, DisplayText))
+                .transpose()?,
+            required: value.required,
+            values: value
+                .values
+                .into_iter()
+                .map(|value| DataFormValue::new(value.value))
+                .collect(),
+            options: value
+                .options
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<Vec<_>>>()?,
+        })
+    }
+}
+
+impl From<wit_types::FormFieldType> for FormFieldType {
+    fn from(value: wit_types::FormFieldType) -> Self {
+        match value {
+            wit_types::FormFieldType::Boolean => Self::Boolean,
+            wit_types::FormFieldType::Fixed => Self::Fixed,
+            wit_types::FormFieldType::Hidden => Self::Hidden,
+            wit_types::FormFieldType::JidMulti => Self::JidMulti,
+            wit_types::FormFieldType::JidSingle => Self::JidSingle,
+            wit_types::FormFieldType::ListMulti => Self::ListMulti,
+            wit_types::FormFieldType::ListSingle => Self::ListSingle,
+            wit_types::FormFieldType::TextMulti => Self::TextMulti,
+            wit_types::FormFieldType::TextPrivate => Self::TextPrivate,
+            wit_types::FormFieldType::TextSingle => Self::TextSingle,
+        }
+    }
+}
+
+impl TryFrom<wit_types::FormFieldOption> for FormFieldOption {
+    type Error = anyhow::Error;
+
+    fn try_from(value: wit_types::FormFieldOption) -> Result<Self> {
+        Ok(Self {
+            label: value
+                .label
+                .map(|label| wit_newtype_to_domain!(label, DisplayText))
+                .transpose()?,
+            value: DataFormValue::new(value.value.value),
+        })
+    }
+}
+
+impl TryFrom<wit_types::ListView> for ListView {
+    type Error = anyhow::Error;
+
+    fn try_from(value: wit_types::ListView) -> Result<Self> {
+        Ok(Self {
+            id: wit_newtype_to_domain!(value.id, ListId)?,
+            title: value
+                .title
+                .map(|title| wit_newtype_to_domain!(title, DisplayText))
+                .transpose()?,
+            items: value
+                .items
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<Vec<_>>>()?,
+        })
+    }
+}
+
+impl TryFrom<wit_types::ListItem> for ListItem {
+    type Error = anyhow::Error;
+
+    fn try_from(value: wit_types::ListItem) -> Result<Self> {
+        Ok(Self {
+            id: wit_newtype_to_domain!(value.id, ListItemId)?,
+            label: wit_newtype_to_domain!(value.label, DisplayText)?,
+            description: value
+                .description
+                .map(|description| wit_newtype_to_domain!(description, DisplayText))
+                .transpose()?,
+            image: value.image.map(TryInto::try_into).transpose()?,
+            launch_id: value
+                .launch_id
+                .map(|launch_id| wit_newtype_to_domain!(launch_id, LaunchId))
+                .transpose()?,
+        })
+    }
+}
+
+impl TryFrom<wit_types::ArtifactReference> for ArtifactReference {
+    type Error = anyhow::Error;
+
+    fn try_from(value: wit_types::ArtifactReference) -> Result<Self> {
+        ArtifactReference::new(
+            value.uri.value,
+            value.sha256.value,
+            value
+                .media_type
+                .map(|media_type| wit_newtype_to_domain!(media_type, MediaType))
+                .transpose()?,
+        )
+        .map_err(anyhow::Error::from)
+    }
+}
+
+impl TryFrom<wit_types::ExtensionPayload> for ExtensionPayload {
+    type Error = anyhow::Error;
+
+    fn try_from(value: wit_types::ExtensionPayload) -> Result<Self> {
+        ExtensionPayload::new(
+            wit_newtype_to_domain!(value.namespace, PayloadNamespace)?,
+            xml_element_from_tokens(value.root, value.tokens)?,
+        )
+        .map_err(anyhow::Error::from)
+    }
+}
+
+fn xml_element_from_tokens(
+    root: wit_types::PayloadRoot,
+    tokens: Vec<wit_types::XmlToken>,
+) -> Result<XmlElement> {
+    let expected_namespace = wit_newtype_to_domain!(root.namespace, PayloadNamespace)?;
+    let expected_local_name = root.local_name;
+    let mut stack: Vec<XmlElement> = Vec::new();
+    let mut root_element = None;
+
+    for token in tokens {
+        match token {
+            wit_types::XmlToken::StartElement(element) => {
+                stack.push(element.try_into()?);
+            }
+            wit_types::XmlToken::Text(text) => {
+                let Some(parent) = stack.last_mut() else {
+                    return Err(anyhow::anyhow!("XML text token without open element"));
+                };
+                parent.children.push(XmlNode::Text(text));
+            }
+            wit_types::XmlToken::EndElement => {
+                let Some(element) = stack.pop() else {
+                    return Err(anyhow::anyhow!(
+                        "XML end-element token without open element"
+                    ));
+                };
+                if let Some(parent) = stack.last_mut() {
+                    parent.children.push(XmlNode::Element(element));
+                } else if root_element.replace(element).is_some() {
+                    return Err(anyhow::anyhow!("XML token stream has multiple roots"));
+                }
+            }
+        }
+    }
+
+    if !stack.is_empty() {
+        return Err(anyhow::anyhow!("XML token stream ended with open elements"));
+    }
+    let Some(element) = root_element else {
+        return Err(anyhow::anyhow!("XML token stream has no root"));
+    };
+    if element.namespace != expected_namespace || element.local_name != expected_local_name {
+        return Err(anyhow::anyhow!(
+            "XML token stream root does not match declared root"
+        ));
+    }
+    Ok(element)
+}
+
+impl TryFrom<wit_types::XmlElement> for XmlElement {
+    type Error = anyhow::Error;
+
+    fn try_from(value: wit_types::XmlElement) -> Result<Self> {
+        XmlElement::new(
+            wit_newtype_to_domain!(value.namespace, PayloadNamespace)?,
+            value.local_name,
+            value
+                .attributes
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<Vec<_>>>()?,
+            Vec::new(),
+        )
+        .map_err(anyhow::Error::from)
+    }
+}
+
+impl TryFrom<wit_types::XmlAttribute> for XmlAttribute {
+    type Error = anyhow::Error;
+
+    fn try_from(value: wit_types::XmlAttribute) -> Result<Self> {
+        Ok(Self {
+            namespace: value
+                .namespace
+                .map(|namespace| wit_newtype_to_domain!(namespace, PayloadNamespace))
+                .transpose()?,
+            local_name: value.local_name,
+            value: value.value,
+        })
+    }
+}
+
+impl TryFrom<wit_types::PubsubPublish> for PubSubPublish {
+    type Error = anyhow::Error;
+
+    fn try_from(value: wit_types::PubsubPublish) -> Result<Self> {
+        Ok(Self {
+            node: wit_newtype_to_domain!(value.node, PubSubNode)?,
+            item_id: value
+                .item_id
+                .map(|item_id| wit_newtype_to_domain!(item_id, PubSubItemId))
+                .transpose()?,
+            payload: value.payload.try_into()?,
+        })
     }
 }

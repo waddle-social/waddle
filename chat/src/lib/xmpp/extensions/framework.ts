@@ -1,18 +1,63 @@
 /** Waddle unified extension framework envelope. */
-import type { DefinitionOptions } from "stanza/jxt";
+import type { DefinitionOptions, FieldDefinition, JSONElement } from "stanza/jxt";
 import { attribute, childText, text } from "stanza/jxt";
 
 const NS_WADDLE_EXTENSION_1 = "urn:waddle:extension:1";
-const NS_LINKS_TASK_BOARD_1 = "urn:waddle:links-task-board:1";
-const NS_PUB_QUIZ_1 = "urn:waddle:pub-quiz:1";
-const NS_AI_CHATBOT_1 = "urn:waddle:ai-chatbot:1";
-const NS_AI_ASSISTANT_CANVAS_1 = "urn:waddle:ai-assistant-canvas:1";
-const NS_DECISION_POLLS_1 = "urn:waddle:decision-polls:1";
+
+type RawXmlElement = {
+  getNamespace: () => string;
+  getName: () => string;
+  attributes: Record<string, unknown>;
+  children: unknown[];
+};
+
+function isRawXmlElement(value: unknown): value is RawXmlElement {
+  return !!value
+    && typeof value === "object"
+    && typeof (value as RawXmlElement).getNamespace === "function"
+    && typeof (value as RawXmlElement).getName === "function"
+    && Array.isArray((value as RawXmlElement).children);
+}
+
+function rawElementJson(xml: RawXmlElement): JSONElement {
+  const namespace = xml.getNamespace();
+  const attributes: JSONElement["attributes"] = {};
+  for (const [key, value] of Object.entries(xml.attributes)) {
+    if (typeof value === "string") attributes[key] = value;
+  }
+  if (namespace && attributes.xmlns !== namespace) {
+    attributes.xmlns = namespace;
+  }
+  const children: JSONElement["children"] = [];
+  for (const child of xml.children) {
+    if (typeof child === "string") children.push(child);
+    else if (isRawXmlElement(child)) children.push(rawElementJson(child));
+  }
+  return {
+    name: xml.getName(),
+    attributes,
+    children,
+  };
+}
+
+function rawChildElements(): FieldDefinition<JSONElement[]> {
+  return {
+    importer(xml) {
+      return xml.children.flatMap((child) => isRawXmlElement(child) ? [rawElementJson(child)] : []);
+    },
+    exporter() {
+      return undefined;
+    },
+  };
+}
 
 const definitions: DefinitionOptions[] = [
   {
     aliases: [{ path: "message.waddleExtensions", multiple: false }],
     element: "extensions",
+    fields: {
+      version: attribute("version"),
+    },
     namespace: NS_WADDLE_EXTENSION_1,
   },
   {
@@ -23,60 +68,31 @@ const definitions: DefinitionOptions[] = [
       plugin: attribute("plugin"),
       capability: attribute("capability"),
       payloadNamespace: attribute("payload-ns"),
+      surface: attribute("surface"),
+      payloadSurface: attribute("payload-surface"),
+      uiSurface: attribute("ui-surface"),
       created: attribute("created"),
+    },
+    namespace: NS_WADDLE_EXTENSION_1,
+  },
+  {
+    aliases: [{ path: "message.waddleExtensions.enrichments.source", multiple: false }],
+    element: "source",
+    fields: {
+      stanzaId: attribute("stanza-id"),
+      by: attribute("by"),
+      bodyStart: attribute("body-start"),
+      bodyEnd: attribute("body-end"),
     },
     namespace: NS_WADDLE_EXTENSION_1,
   },
   {
     aliases: [{ path: "message.waddleExtensions.enrichments.payload", multiple: false }],
     element: "payload",
+    fields: {
+      elements: rawChildElements(),
+    },
     namespace: NS_WADDLE_EXTENSION_1,
-  },
-  {
-    aliases: [{ path: "message.waddleExtensions.enrichments.payload.links", multiple: true }],
-    element: "link",
-    fields: {
-      url: attribute("url"),
-      title: attribute("title"),
-      site: attribute("site"),
-    },
-    namespace: NS_LINKS_TASK_BOARD_1,
-  },
-  {
-    aliases: [{ path: "message.waddleExtensions.enrichments.payload.quizQuestions", multiple: true }],
-    element: "quiz-question",
-    fields: {
-      gameId: attribute("game-id"),
-      questionId: attribute("question-id"),
-    },
-    namespace: NS_PUB_QUIZ_1,
-  },
-  {
-    aliases: [{ path: "message.waddleExtensions.enrichments.payload.assistantAnswers", multiple: true }],
-    element: "assistant-answer",
-    fields: {
-      runId: attribute("run-id"),
-      profile: attribute("profile"),
-    },
-    namespace: NS_AI_CHATBOT_1,
-  },
-  {
-    aliases: [{ path: "message.waddleExtensions.enrichments.payload.canvases", multiple: true }],
-    element: "canvas",
-    fields: {
-      canvasId: attribute("canvas-id"),
-      renderId: attribute("render-id"),
-    },
-    namespace: NS_AI_ASSISTANT_CANVAS_1,
-  },
-  {
-    aliases: [{ path: "message.waddleExtensions.enrichments.payload.polls", multiple: true }],
-    element: "poll",
-    fields: {
-      pollId: attribute("poll-id"),
-      mode: attribute("mode"),
-    },
-    namespace: NS_DECISION_POLLS_1,
   },
   {
     aliases: [{ path: "message.waddleExtensions.enrichments.payload.views", multiple: true }],
@@ -104,8 +120,29 @@ const definitions: DefinitionOptions[] = [
       plugin: attribute("plugin"),
       action: attribute("action"),
       commandNode: attribute("command-node"),
+      token: attribute("token"),
       label: attribute("label"),
       expiresAt: attribute("expires-at"),
+    },
+    namespace: NS_WADDLE_EXTENSION_1,
+  },
+  {
+    aliases: [{ path: "message.waddleExtensions.enrichments.launches.context", multiple: false }],
+    element: "context",
+    fields: {
+      waddleId: attribute("waddle-id"),
+      room: attribute("room"),
+      roomJid: attribute("room-jid"),
+      stanzaId: attribute("stanza-id"),
+      sourceStanzaId: attribute("source-stanza-id"),
+    },
+    namespace: NS_WADDLE_EXTENSION_1,
+  },
+  {
+    aliases: [{ path: "message.waddleExtensions.enrichments.launches.payload", multiple: false }],
+    element: "payload",
+    fields: {
+      elements: rawChildElements(),
     },
     namespace: NS_WADDLE_EXTENSION_1,
   },

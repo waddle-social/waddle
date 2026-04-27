@@ -2227,9 +2227,9 @@ mod tests {
         })
     }
 
-    async fn github_unavailable_extension_manager() -> Arc<ExtensionManager> {
+    async fn unavailable_extension_manager() -> Arc<ExtensionManager> {
         let missing_wasm = std::env::temp_dir().join(format!(
-            "missing-github-enricher-test-{}.wasm",
+            "missing-extension-test-{}.wasm",
             uuid::Uuid::new_v4()
         ));
         Arc::new(
@@ -2237,18 +2237,18 @@ mod tests {
                 enabled: true,
                 cache_dir: "/var/lib/waddle/extensions".to_string(),
                 modules: vec![ExtensionModuleConfig {
-                    name: "github-enricher".to_string(),
-                    registry: "ghcr.io/waddle-social/waddle/extensions/github-enricher".to_string(),
+                    name: "task-widget".to_string(),
+                    registry: "ghcr.io/example/extensions/task-widget".to_string(),
                     digest: None,
                     tag: Some("latest".to_string()),
-                    namespace: "urn:waddle:github:0".to_string(),
+                    namespace: "urn:example:task-widget:1".to_string(),
                     config: serde_json::Value::Object(Default::default()),
                     config_secret_files: Default::default(),
                     local_path: Some(missing_wasm.display().to_string()),
                 }],
             })
             .await
-            .expect("github unavailable extension manager"),
+            .expect("unavailable extension manager"),
         )
     }
 
@@ -2383,16 +2383,21 @@ mod tests {
         }
     }
 
-    fn assert_github_payload(xml: &str, element_name: &str, url: &str, owner: &str, name: &str) {
+    fn assert_extension_payload(
+        xml: &str,
+        element_name: &str,
+        namespace: &str,
+        attrs: &[(&str, &str)],
+    ) {
         let parsed = parse_message_for_test(xml);
         let payload = parsed
             .payloads
             .iter()
-            .find(|payload| payload.name() == element_name && payload.ns() == "urn:waddle:github:0")
-            .unwrap_or_else(|| panic!("missing {element_name} GitHub payload"));
-        assert_eq!(payload.attr("url"), Some(url));
-        assert_eq!(payload.attr("owner"), Some(owner));
-        assert_eq!(payload.attr("name"), Some(name));
+            .find(|payload| payload.name() == element_name && payload.ns() == namespace)
+            .unwrap_or_else(|| panic!("missing {element_name} extension payload"));
+        for (name, value) in attrs {
+            assert_eq!(payload.attr(name), Some(*value));
+        }
     }
 
     fn parse_iq_for_test(xml: &str) -> xmpp_parsers::iq::Iq {
@@ -4053,7 +4058,7 @@ mod tests {
         .await;
         let server_response = server_responses.first().expect("server disco response");
         assert!(server_response.contains("urn:xmpp:reply:0"));
-        assert!(!server_response.contains("urn:waddle:github:0"));
+        assert!(!server_response.contains("urn:example:task-widget:1"));
 
         let muc_query = disco_info_iq_frame("muc1", "muc.example.com", None);
         let muc_responses = handle_iq(
@@ -4067,7 +4072,7 @@ mod tests {
         .await;
         let muc_response = muc_responses.first().expect("muc disco response");
         assert!(muc_response.contains("urn:xmpp:reply:0"));
-        assert!(!muc_response.contains("urn:waddle:github:0"));
+        assert!(!muc_response.contains("urn:example:task-widget:1"));
 
         let room_query = disco_info_iq_frame("room1", "room@muc.example.com", None);
         let room_responses = handle_iq(
@@ -4082,7 +4087,7 @@ mod tests {
         let room_response = room_responses.first().expect("room disco response");
         assert!(room_response.contains("urn:xmpp:mam:2"));
         assert!(room_response.contains("urn:xmpp:reply:0"));
-        assert!(!room_response.contains("urn:waddle:github:0"));
+        assert!(!room_response.contains("urn:example:task-widget:1"));
     }
 
     #[tokio::test]
@@ -4665,7 +4670,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handle_message_direct_with_github_embed_preserves_payload_for_recipient() {
+    async fn handle_message_direct_with_extension_payload_preserves_payload_for_recipient() {
         let sender_jid: FullJid = "alice@example.com/web".parse().expect("sender jid");
         let recipient_jid: FullJid = "bob@example.com/mobile".parse().expect("recipient jid");
         let state = create_test_websocket_state().await;
@@ -4679,17 +4684,16 @@ mod tests {
 
         let mut message =
             xmpp_parsers::message::Message::new(Some(jid::Jid::from(recipient_jid.clone())));
-        message.id = Some("dm-github-1".to_string());
+        message.id = Some("dm-extension-1".to_string());
         message.type_ = XmppMessageType::Chat;
         message.bodies.insert(
             String::new(),
-            xmpp_parsers::message::Body("Repo payload already attached".to_string()),
+            xmpp_parsers::message::Body("Extension payload already attached".to_string()),
         );
         message.payloads.push(
-            Element::builder("repo", "urn:waddle:github:0")
-                .attr("owner", "rust-lang")
-                .attr("name", "rust")
-                .attr("url", "https://github.com/rust-lang/rust")
+            Element::builder("item", "urn:example:task-widget:1")
+                .attr("id", "task-123")
+                .attr("status", "open")
                 .build(),
         );
 
@@ -4704,7 +4708,7 @@ mod tests {
 
         assert!(
             responses.is_empty(),
-            "direct messages should not get a special GitHub echo"
+            "direct messages should not get a special extension echo"
         );
 
         // Recipient may receive an inbox push headline before the routed
@@ -4719,15 +4723,14 @@ mod tests {
                     "routed stanza should target recipient resource: {routed_xml}"
                 );
                 assert!(
-                    routed_xml.contains("urn:waddle:github:0"),
-                    "routed stanza should preserve GitHub payload: {routed_xml}"
+                    routed_xml.contains("urn:example:task-widget:1"),
+                    "routed stanza should preserve extension payload: {routed_xml}"
                 );
-                assert_github_payload(
+                assert_extension_payload(
                     &routed_xml,
-                    "repo",
-                    "https://github.com/rust-lang/rust",
-                    "rust-lang",
-                    "rust",
+                    "item",
+                    "urn:example:task-widget:1",
+                    &[("id", "task-123"), ("status", "open")],
                 );
                 found_chat = true;
                 break;
@@ -4737,11 +4740,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handle_message_direct_with_unavailable_github_actor_does_not_inject_embed() {
+    async fn handle_message_direct_with_unavailable_extension_does_not_inject_payload() {
         let sender_jid: FullJid = "alice@example.com/web".parse().expect("sender jid");
         let recipient_jid: FullJid = "bob@example.com/mobile".parse().expect("recipient jid");
         let state = create_test_websocket_state_with_extension_manager(
-            github_unavailable_extension_manager().await,
+            unavailable_extension_manager().await,
         )
         .await;
 
@@ -4754,11 +4757,11 @@ mod tests {
 
         let mut message =
             xmpp_parsers::message::Message::new(Some(jid::Jid::from(recipient_jid.clone())));
-        message.id = Some("dm-github-2".to_string());
+        message.id = Some("dm-extension-2".to_string());
         message.type_ = XmppMessageType::Chat;
         message.bodies.insert(
             String::new(),
-            xmpp_parsers::message::Body("https://github.com/waddle-social/waddle".to_string()),
+            xmpp_parsers::message::Body("https://example.org/task/123".to_string()),
         );
 
         let responses = handle_message(
@@ -4772,7 +4775,7 @@ mod tests {
 
         assert!(
             responses.is_empty(),
-            "direct messages should not get a special GitHub echo"
+            "direct messages should not get a special extension echo"
         );
 
         let mut found_chat = false;
@@ -4780,8 +4783,8 @@ mod tests {
             let routed_xml = stanza_to_xml(&routed.stanza);
             if routed_xml.contains("type=\"chat\"") || routed_xml.contains("type='chat'") {
                 assert!(
-                    !routed_xml.contains("urn:waddle:github:0"),
-                    "unavailable actor must not inject a GitHub payload: {routed_xml}"
+                    !routed_xml.contains("urn:example:task-widget:1"),
+                    "unavailable extension must not inject a payload: {routed_xml}"
                 );
                 found_chat = true;
                 break;
@@ -4791,11 +4794,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handle_xmpp_frame_direct_with_unavailable_github_actor_does_not_inject_embed() {
+    async fn handle_xmpp_frame_direct_with_unavailable_extension_does_not_inject_payload() {
         let sender_jid: FullJid = "alice@example.com/web".parse().expect("sender jid");
         let recipient_jid: FullJid = "bob@example.com/mobile".parse().expect("recipient jid");
         let state = create_test_websocket_state_with_extension_manager(
-            github_unavailable_extension_manager().await,
+            unavailable_extension_manager().await,
         )
         .await;
 
@@ -4808,15 +4811,15 @@ mod tests {
 
         let mut conn = WsConnState::new();
         conn.phase = ConnectionPhase::ready(sender_jid, false);
-        let frame = r#"<message xmlns="jabber:client" id="raw-github-1" to="bob@example.com/mobile" type="chat"><origin-id xmlns="urn:xmpp:sid:0" id="raw-github-1"/><body>https://github.com/getagentseal/codeburn</body><request xmlns="urn:xmpp:receipts"/><markable xmlns="urn:xmpp:chat-markers:0"/><store xmlns="urn:xmpp:hints"/><reference xmlns="urn:xmpp:reference:0" type="data" uri="https://github.com/getagentseal/codeburn" begin="0" end="40"/></message>"#;
+        let frame = r#"<message xmlns="jabber:client" id="raw-extension-1" to="bob@example.com/mobile" type="chat"><origin-id xmlns="urn:xmpp:sid:0" id="raw-extension-1"/><body>https://example.org/task/123</body><request xmlns="urn:xmpp:receipts"/><markable xmlns="urn:xmpp:chat-markers:0"/><store xmlns="urn:xmpp:hints"/><reference xmlns="urn:xmpp:reference:0" type="data" uri="https://example.org/task/123" begin="0" end="28"/></message>"#;
 
         let responses = handle_xmpp_frame(frame, "example.com", state.as_ref(), &mut conn).await;
 
         assert!(
             responses
                 .iter()
-                .all(|response| !response.contains("urn:waddle:github:0")),
-            "unavailable actor must not create GitHub payload responses: {responses:?}"
+                .all(|response| !response.contains("urn:example:task-widget:1")),
+            "unavailable extension must not create payload responses: {responses:?}"
         );
 
         let mut found_chat = false;
@@ -4824,8 +4827,8 @@ mod tests {
             let routed_xml = stanza_to_xml(&routed.stanza);
             if routed_xml.contains("type=\"chat\"") || routed_xml.contains("type='chat'") {
                 assert!(
-                    !routed_xml.contains("urn:waddle:github:0"),
-                    "unavailable actor must not inject a GitHub payload: {routed_xml}"
+                    !routed_xml.contains("urn:example:task-widget:1"),
+                    "unavailable extension must not inject a payload: {routed_xml}"
                 );
                 found_chat = true;
                 break;
@@ -4835,19 +4838,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handle_message_groupchat_with_unavailable_github_actor_does_not_inject_embed() {
+    async fn handle_message_groupchat_with_unavailable_extension_does_not_inject_payload() {
         let state = create_test_websocket_state_with_extension_manager(
-            github_unavailable_extension_manager().await,
+            unavailable_extension_manager().await,
         )
         .await;
-        let room_jid: BareJid = "github-room@muc.example.com".parse().expect("room jid");
+        let room_jid: BareJid = "extension-room@muc.example.com".parse().expect("room jid");
         let sender_jid: FullJid = "alice@example.com/web".parse().expect("sender jid");
         let room_actor = get_or_create_room_actor(
             state.as_ref(),
             &room_jid,
             RoomConfig::default(),
             "waddle-alpha".to_string(),
-            "github-room".to_string(),
+            "extension-room".to_string(),
         )
         .await
         .expect("create room");
@@ -4863,13 +4866,11 @@ mod tests {
 
         let mut message =
             xmpp_parsers::message::Message::new(Some(jid::Jid::from(room_jid.clone())));
-        message.id = Some("muc-github-1".to_string());
+        message.id = Some("muc-extension-1".to_string());
         message.type_ = XmppMessageType::Groupchat;
         message.bodies.insert(
             String::new(),
-            xmpp_parsers::message::Body(
-                "https://github.com/waddle-social/waddle/issues/42".to_string(),
-            ),
+            xmpp_parsers::message::Body("https://example.org/task/123".to_string()),
         );
 
         let responses = handle_message(
@@ -4884,8 +4885,8 @@ mod tests {
         assert_eq!(responses.len(), 1, "sender should receive reflected echo");
         let echo = &responses[0];
         assert!(
-            !echo.contains("urn:waddle:github:0"),
-            "unavailable actor must not inject a GitHub issue payload: {echo}"
+            !echo.contains("urn:example:task-widget:1"),
+            "unavailable extension must not inject a payload: {echo}"
         );
     }
 
@@ -5491,10 +5492,10 @@ mod tests {
         msg.bodies
             .insert(String::new(), xmpp_parsers::message::Body("Hello".into()));
 
-        // Add a payload element (simulating a GitHub embed)
-        let embed = xmpp_parsers::minidom::Element::builder("repo", "urn:waddle:github:0")
-            .attr("owner", "cuenv")
-            .attr("name", "cuenv")
+        // Add an arbitrary extension-owned payload element.
+        let embed = xmpp_parsers::minidom::Element::builder("item", "urn:example:task-widget:1")
+            .attr("id", "task-123")
+            .attr("status", "open")
             .build();
         msg.payloads.push(embed);
 
@@ -5502,11 +5503,11 @@ mod tests {
 
         assert!(xml.contains("<body>Hello</body>"), "body must be present");
         assert!(
-            xml.contains("urn:waddle:github:0"),
+            xml.contains("urn:example:task-widget:1"),
             "payload namespace must be serialized: {xml}"
         );
         assert!(
-            xml.contains("cuenv"),
+            xml.contains("task-123"),
             "payload attributes must be serialized: {xml}"
         );
         // Must not contain XML declaration inside the message
