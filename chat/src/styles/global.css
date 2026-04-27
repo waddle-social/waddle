@@ -1079,27 +1079,72 @@
   white-space: nowrap;
 }
 
-/* Sticky day banner above the first message of each calendar day. Mirrors
- * the existing "New messages" divider but in muted tone and with a blurred
- * backdrop so it stays legible while pinning at the top of the viewport. */
+.chat-current-day-marker {
+  flex-shrink: 0;
+  padding: var(--space-xs) var(--chat-content-inline) 0;
+  color: var(--muted-foreground);
+}
+
+.chat-current-day-marker__lane {
+  display: flex;
+  width: min(100%, var(--chat-message-lane));
+  margin-inline: auto;
+  align-items: center;
+  gap: var(--space-sm);
+  justify-content: center;
+  background: color-mix(in oklab, var(--background) 82%, transparent);
+  padding-block: 0 0.375rem;
+}
+
+.chat-current-day-marker__lane::before,
+.chat-current-day-marker__lane::after {
+  content: "";
+  height: 1px;
+  flex: 1;
+}
+
+.chat-current-day-marker__lane::before {
+  background: linear-gradient(
+    to right,
+    transparent,
+    color-mix(in oklab, var(--border) 58%, transparent) 18%,
+    color-mix(in oklab, var(--border) 58%, transparent) 100%
+  );
+}
+
+.chat-current-day-marker__lane::after {
+  background: linear-gradient(
+    to left,
+    transparent,
+    color-mix(in oklab, var(--border) 58%, transparent) 18%,
+    color-mix(in oklab, var(--border) 58%, transparent) 100%
+  );
+}
+
+.chat-current-day-marker__label {
+  border: 1px solid color-mix(in oklab, var(--border) 76%, transparent);
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--background) 76%, transparent);
+  box-shadow: 0 1px 2px color-mix(in oklab, var(--foreground) 8%, transparent);
+  padding: 0.25rem 0.625rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 0.6875rem;
+  line-height: 1;
+}
+
 .chat-day-divider {
-  position: sticky;
-  top: 0;
-  z-index: 1;
   display: flex;
   align-items: center;
   gap: var(--space-sm);
-  padding-block: var(--space-xs);
+  padding-block: var(--space-md) var(--space-sm);
   color: var(--muted-foreground);
-  background: color-mix(in oklab, var(--background) 80%, transparent);
-  backdrop-filter: blur(6px);
-  -webkit-backdrop-filter: blur(6px);
 }
 
 .chat-day-divider__rule {
   flex: 1;
   height: 1px;
-  background: color-mix(in oklab, var(--border) 70%, transparent);
+  background: color-mix(in oklab, var(--border) 55%, transparent);
 }
 
 .chat-day-divider__label {

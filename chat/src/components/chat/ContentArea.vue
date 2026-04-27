@@ -211,7 +211,9 @@ function onSelectGif(url: string) {
 const messagesContainer = ref<HTMLDivElement | null>(null);
 const setMessagesContainer = (el: HTMLDivElement | null) => {
   messagesContainer.value = el;
+  void nextTick(updateCurrentDayMarker);
 };
+const currentDayMarkerLabel = ref("");
 const composerRef = ref<MessageComposerHandle | null>(null);
 const setComposerRef = (instance: MessageComposerHandle | null) => {
   composerRef.value = instance;
@@ -439,6 +441,46 @@ function showDividerAfter(messageId: string): boolean {
   return props.firstUnseenId === messageId && newMessagesDividerPlacement.value === "after";
 }
 
+function updateCurrentDayMarker() {
+  const container = messagesContainer.value;
+  if (!container) {
+    currentDayMarkerLabel.value = "";
+    return;
+  }
+
+  const messageEls = [...container.querySelectorAll<HTMLElement>("[data-message-created-at]")];
+  if (messageEls.length === 0) {
+    currentDayMarkerLabel.value = "";
+    return;
+  }
+
+  const containerTop = container.getBoundingClientRect().top;
+  const probeTop = containerTop + 1;
+  let current = messageEls[0];
+  for (const el of messageEls) {
+    const rect = el.getBoundingClientRect();
+    if (rect.bottom < probeTop) {
+      current = el;
+      continue;
+    }
+    if (rect.top <= probeTop || current === messageEls[0]) {
+      current = el;
+    }
+    break;
+  }
+
+  const createdAt = current.dataset.messageCreatedAt;
+  currentDayMarkerLabel.value = createdAt ? formatDayDivider(createdAt) : "";
+}
+
+watch(
+  [orderedFeedMessages, () => props.isLoadingMessages, conversationScope],
+  () => {
+    void nextTick(updateCurrentDayMarker);
+  },
+  { flush: "post" },
+);
+
 // Burst window: same author + < 5 min apart + same day, with no
 // intervening other-author message in the rendered order.
 const BURST_WINDOW_MS = 5 * 60 * 1000;
@@ -451,10 +493,7 @@ const messageDisplayMeta = computed(() => {
     const cur = list[i];
     if (!cur) continue;
     const prev = i > 0 ? list[i - 1] : null;
-    if (!prev) {
-      dayDivider.add(cur.id);
-      continue;
-    }
+    if (!prev) continue;
     const sameDay = isSameDay(prev.createdAt, cur.createdAt);
     if (!sameDay) dayDivider.add(cur.id);
     if (
@@ -689,8 +728,23 @@ function dayDividerLabel(createdAt: string): string {
       </div>
     </div>
 
+    <div
+      v-if="currentDayMarkerLabel"
+      class="chat-current-day-marker type-section-label"
+      role="status"
+      aria-live="polite"
+    >
+      <div class="chat-current-day-marker__lane">
+        <span class="chat-current-day-marker__label">{{ currentDayMarkerLabel }}</span>
+      </div>
+    </div>
+
     <!-- Messages -->
-    <div :ref="setMessagesContainer" class="chat-pane-scroll chat-message-scroll flex-1 min-h-0 overflow-auto px-[var(--chat-content-inline)]">
+    <div
+      :ref="setMessagesContainer"
+      class="chat-pane-scroll chat-message-scroll flex-1 min-h-0 overflow-auto px-[var(--chat-content-inline)]"
+      @scroll="updateCurrentDayMarker"
+    >
       <div v-if="isLoadingMessages" class="type-caption flex flex-col items-center justify-center gap-3 py-16 text-center text-muted-foreground">
         <div class="flex items-center justify-center gap-1.5">
           <span class="typing-dot" />

@@ -203,23 +203,21 @@ const DAY_DIVIDER_FORMATTER = new Intl.DateTimeFormat("en", {
   day: "numeric",
 });
 
-function startOfDay(date: Date): number {
-  return new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
+function localDayOrdinal(date: Date): number {
+  return Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()) / (24 * 60 * 60 * 1000);
 }
 
-export function formatDayDivider(value: string) {
+export function formatDayDivider(value: string, now = new Date()) {
   const date = new Date(value);
-  const today = startOfDay(new Date());
-  const target = startOfDay(date);
-  const oneDay = 24 * 60 * 60 * 1000;
-  if (target === today) return "Today";
-  if (target === today - oneDay) return "Yesterday";
+  const dayOffset = localDayOrdinal(now) - localDayOrdinal(date);
+  if (dayOffset === 0) return "Today";
+  if (dayOffset === 1) return "Yesterday";
   // Older messages get a full weekday + month + day banner.
   return DAY_DIVIDER_FORMATTER.format(date);
 }
 
 export function isSameDay(a: string, b: string): boolean {
-  return startOfDay(new Date(a)) === startOfDay(new Date(b));
+  return localDayOrdinal(new Date(a)) === localDayOrdinal(new Date(b));
 }
 
 export function useMessaging(
