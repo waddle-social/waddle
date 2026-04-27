@@ -14,6 +14,11 @@ import {
   Github,
   GitPullRequest,
   CircleDot,
+  Bot,
+  ClipboardList,
+  Gamepad2,
+  LayoutDashboard,
+  Sparkles,
 } from "lucide-vue-next";
 import type { JSONContent } from "@tiptap/core";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
@@ -26,6 +31,7 @@ import {
   githubEmbedDisplayTitle,
   githubEmbedKindLabel,
   githubEmbedNumber,
+  extensionSurfaceLabel,
   isAudioFile,
   isImageUrl,
   isImageFile,
@@ -119,6 +125,7 @@ const setStyledBodyRef = (el: HTMLDivElement | null) => {
 };
 const sharedFiles = computed(() => props.message.sharedFiles ?? []);
 const githubEmbeds = computed(() => props.message.githubEmbeds ?? []);
+const extensionAnnotations = computed(() => props.message.extensionAnnotations ?? []);
 const isGif = computed(() => sharedFiles.value.length === 0 && isImageUrl(props.message.body));
 
 const imageAttachments = computed(() =>
@@ -835,6 +842,43 @@ watch(
             </span>
           </span>
         </a>
+      </div>
+
+      <!-- Waddle extension annotations -->
+      <div v-if="extensionAnnotations.length > 0" class="flex flex-col gap-2">
+        <div
+          v-for="annotation in extensionAnnotations"
+          :key="`${annotation.extensionId}:${annotation.annotationId}`"
+          class="chat-extension-card flex min-w-0 items-start gap-3 rounded-lg border border-border bg-muted/25 p-3 text-left"
+        >
+          <span class="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-md bg-background text-foreground ring-1 ring-border">
+            <ClipboardList v-if="annotation.surfaceKind === 'board'" class="h-4 w-4 text-primary/80" aria-hidden="true" />
+            <Gamepad2 v-else-if="annotation.surfaceKind === 'game'" class="h-4 w-4 text-success" aria-hidden="true" />
+            <Bot v-else-if="annotation.surfaceKind === 'chat-bot'" class="h-4 w-4 text-primary/80" aria-hidden="true" />
+            <Sparkles v-else-if="annotation.surfaceKind === 'dynamic-canvas'" class="h-4 w-4 text-warning" aria-hidden="true" />
+            <LayoutDashboard v-else class="h-4 w-4" aria-hidden="true" />
+          </span>
+          <span class="min-w-0 flex-1">
+            <span class="type-section-label block text-muted-foreground">
+              {{ extensionSurfaceLabel(annotation.surfaceKind) }}
+            </span>
+            <span class="type-control block truncate text-foreground">
+              {{ annotation.title }}
+            </span>
+            <span v-if="annotation.summary" class="type-caption mt-1 block text-muted-foreground">
+              {{ annotation.summary }}
+            </span>
+            <span v-if="annotation.actions.length > 0" class="mt-2 flex flex-wrap gap-2">
+              <span
+                v-for="action in annotation.actions"
+                :key="`${annotation.annotationId}:${action.route}:${action.label}`"
+                class="type-caption rounded-md border border-border bg-background px-2 py-1 text-foreground"
+              >
+                {{ action.label }}
+              </span>
+            </span>
+          </span>
+        </div>
       </div>
 
       <!-- Image attachments gallery -->

@@ -16,6 +16,7 @@ import inbox from "./inbox";
 import encryptedFile from "./encrypted-file";
 import stanzaIds from "./stanza-ids";
 import github from "./github";
+import framework from "./framework";
 
 const allDefinitions = [
   ...hats,
@@ -33,6 +34,7 @@ const allDefinitions = [
   ...inbox,
   ...encryptedFile,
   ...stanzaIds,
+  ...framework,
   ...github,
 ];
 

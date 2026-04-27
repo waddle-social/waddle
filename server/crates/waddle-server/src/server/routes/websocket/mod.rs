@@ -2161,7 +2161,10 @@ mod tests {
         Arc::new(
             ExtensionManager::from_config(ExtensionConfig {
                 enabled: false,
-                cache_dir: String::new(),
+                cache_dir: std::env::temp_dir()
+                    .join("waddle-extension-test-cache")
+                    .display()
+                    .to_string(),
                 modules: Vec::new(),
             })
             .await
@@ -2236,7 +2239,8 @@ mod tests {
                 modules: vec![ExtensionModuleConfig {
                     name: "github-enricher".to_string(),
                     registry: "ghcr.io/waddle-social/waddle/extensions/github-enricher".to_string(),
-                    tag: "latest".to_string(),
+                    digest: None,
+                    tag: Some("latest".to_string()),
                     namespace: "urn:waddle:github:0".to_string(),
                     config: serde_json::Value::Object(Default::default()),
                     config_secret_files: Default::default(),

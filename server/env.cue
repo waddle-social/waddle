@@ -151,7 +151,7 @@ schema.#Project & {
 				manual:        true
 			}
 			derivePaths: true
-			tasks: [_t.buildGithubEnricher, _t.pushGithubEnricherOci, _t.pinGithubEnricherTag, _t.pushGithubEnricherGitops]
+			tasks: [_t.buildGithubEnricher, _t.pushGithubEnricherOci, _t.pinGithubEnricherDigest, _t.pushGithubEnricherGitops]
 		}
 		githubEnricherPullRequest: {
 			when: {
@@ -373,13 +373,28 @@ schema.#Project & {
 			dependsOn: [tasks.buildGithubEnricher]
 		}
 
-		pinGithubEnricherTag: schema.#Task & {
+		pinGithubEnricherDigest: schema.#Task & {
 			command: "bash"
+			env: {
+				GITHUB_TOKEN: schema.#EnvPassthrough
+				GITHUB_ACTOR: schema.#EnvPassthrough
+			}
 			args: ["-c", #"""
 					set -euo pipefail
 					FULL_SHA="$(git rev-parse HEAD)"
-					yq -i "(.spec.values.extensions.modules[] | select(.name == \"github-enricher\") | .tag) = \"sha-${FULL_SHA}\"" ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml
-					yq -e ".spec.values.extensions.modules[] | select(.name == \"github-enricher\") | .tag == \"sha-${FULL_SHA}\"" ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml > /dev/null
+					IMAGE="ghcr.io/waddle-social/waddle/extensions/github-enricher"
+					echo "${GITHUB_TOKEN}" | oras login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+					DIGEST="$(oras resolve "${IMAGE}:sha-${FULL_SHA}")"
+					export IMAGE DIGEST
+					yq -i '.spec.values.extensions.modules = ((.spec.values.extensions.modules // []) | map(select(.name != "github-enricher")) + [{
+					  "name": "github-enricher",
+					  "registry": strenv(IMAGE),
+					  "digest": strenv(DIGEST),
+					  "namespace": "urn:waddle:github:0",
+					  "config": {},
+					  "config_secret_files": {"github_token": "/etc/waddle/secrets/github-app/private-key"}
+					}])' ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml
+					yq -e ".spec.values.extensions.modules[] | select(.name == \"github-enricher\") | .digest == \"${DIGEST}\"" ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml > /dev/null
 				"""#]
 			dependsOn: [tasks.pushGithubEnricherOci]
 		}
@@ -399,7 +414,7 @@ schema.#Project & {
 					  --source="$(git config --get remote.origin.url)" \
 					  --revision="$(git rev-parse --short HEAD)"
 				"""#]
-			dependsOn: [tasks.pinGithubEnricherTag]
+			dependsOn: [tasks.pinGithubEnricherDigest]
 		}
 	}
 

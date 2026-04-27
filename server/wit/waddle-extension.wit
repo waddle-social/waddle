@@ -1,4 +1,4 @@
-package waddle:extension@0.1.0;
+package waddle:extension@1.0.0;
 
 interface types {
     record detected-link {
@@ -28,11 +28,487 @@ interface types {
         version: string,
         features: list<feature-advertisement>,
     }
+
+    record action-id {
+        value: string,
+    }
+
+    record artifact-uri {
+        value: string,
+    }
+
+    record board-card-id {
+        value: string,
+    }
+
+    record board-column-id {
+        value: string,
+    }
+
+    record board-id {
+        value: string,
+    }
+
+    record canvas-id {
+        value: string,
+    }
+
+    record collection-id {
+        value: string,
+    }
+
+    record command-node {
+        value: string,
+    }
+
+    record display-text {
+        value: string,
+    }
+
+    record enrichment-id {
+        value: string,
+    }
+
+    record game-id {
+        value: string,
+    }
+
+    record list-id {
+        value: string,
+    }
+
+    record list-item-id {
+        value: string,
+    }
+
+    record launch-id {
+        value: string,
+    }
+
+    record media-type {
+        value: string,
+    }
+
+    record option-id {
+        value: string,
+    }
+
+    record payload-namespace {
+        value: string,
+    }
+
+    record plugin-id {
+        value: string,
+    }
+
+    record plugin-version {
+        value: string,
+    }
+
+    record profile-id {
+        value: string,
+    }
+
+    record pubsub-item-id {
+        value: string,
+    }
+
+    record pubsub-node {
+        value: string,
+    }
+
+    record question-id {
+        value: string,
+    }
+
+    record render-id {
+        value: string,
+    }
+
+    record run-id {
+        value: string,
+    }
+
+    record sha256-digest {
+        value: string,
+    }
+
+    record stanza-id {
+        value: string,
+    }
+
+    record timestamp {
+        value: string,
+    }
+
+    record ui-action-id {
+        value: string,
+    }
+
+    record ui-view-id {
+        value: string,
+    }
+
+    record url {
+        value: string,
+    }
+
+    record waddle-id {
+        value: string,
+    }
+
+    record body-range {
+        start: u32,
+        end: u32,
+    }
+
+    record artifact-reference {
+        uri: artifact-uri,
+        sha256: sha256-digest,
+        media-type: option<media-type>,
+    }
+
+    enum extension-capability {
+        message-enrich,
+        message-observe,
+        commands,
+        launch,
+        bot-respond,
+        pubsub-read,
+        pubsub-publish,
+        artifact-reference,
+        ai-invoke,
+        ui-declarative,
+    }
+
+    enum sample-plugin {
+        links-task-board,
+        pub-quiz,
+        ai-chatbot,
+        ai-assistant-canvas,
+        decision-polls,
+    }
+
+    record bot-identity {
+        localpart: plugin-id,
+    }
+
+    record extension-manifest {
+        id: plugin-id,
+        name: display-text,
+        version: plugin-version,
+        payload-namespace: payload-namespace,
+        capabilities: list<extension-capability>,
+        artifact: option<artifact-reference>,
+        bot: option<bot-identity>,
+    }
+
+    enum text-style {
+        body,
+        heading,
+        muted,
+        code,
+    }
+
+    record text-block {
+        text: display-text,
+        style: text-style,
+    }
+
+    record image-block {
+        artifact: artifact-reference,
+        alt: display-text,
+    }
+
+    record action-block {
+        launch-id: launch-id,
+        label: display-text,
+    }
+
+    variant ui-block {
+        text(text-block),
+        image(image-block),
+        action(action-block),
+    }
+
+    record ui-view {
+        id: ui-view-id,
+        title: option<display-text>,
+        blocks: list<ui-block>,
+    }
+
+    record list-item {
+        id: list-item-id,
+        label: display-text,
+        description: option<display-text>,
+        image: option<artifact-reference>,
+        launch-id: option<launch-id>,
+    }
+
+    record list-view {
+        id: list-id,
+        title: option<display-text>,
+        items: list<list-item>,
+    }
+
+    record board-card {
+        id: board-card-id,
+        title: display-text,
+        body: option<display-text>,
+        labels: list<display-text>,
+        launch-id: option<launch-id>,
+    }
+
+    record board-column {
+        id: board-column-id,
+        title: display-text,
+        cards: list<board-card>,
+    }
+
+    record board-view {
+        id: board-id,
+        title: option<display-text>,
+        columns: list<board-column>,
+    }
+
+    record link-preview {
+        url: url,
+        title: option<display-text>,
+        site: option<display-text>,
+        image: option<artifact-reference>,
+    }
+
+    record quiz-choice {
+        id: option-id,
+        label: display-text,
+    }
+
+    record quiz-question {
+        game-id: game-id,
+        question-id: question-id,
+        prompt: display-text,
+        choices: list<quiz-choice>,
+        closes-at: option<timestamp>,
+    }
+
+    enum assistant-context-source {
+        message,
+        reply,
+        mam,
+        direct,
+    }
+
+    record assistant-answer {
+        run-id: run-id,
+        profile: profile-id,
+        context-source: assistant-context-source,
+        summary: option<display-text>,
+    }
+
+    record canvas-render {
+        canvas-id: canvas-id,
+        render-id: render-id,
+        artifact: artifact-reference,
+    }
+
+    enum poll-mode {
+        single,
+        multiple,
+    }
+
+    record poll-option {
+        id: option-id,
+        label: display-text,
+    }
+
+    record decision-poll {
+        poll-id: option-id,
+        mode: poll-mode,
+        question: display-text,
+        options: list<poll-option>,
+        closes-at: option<timestamp>,
+    }
+
+    variant framework-payload {
+        declarative-ui(ui-view),
+        list-view(list-view),
+        board(board-view),
+        link-preview(link-preview),
+        quiz-question(quiz-question),
+        assistant-answer(assistant-answer),
+        canvas-render(canvas-render),
+        decision-poll(decision-poll),
+    }
+
+    record save-link-request {
+        url: url,
+        collection-id: option<collection-id>,
+    }
+
+    record quiz-answer-request {
+        game-id: game-id,
+        question-id: question-id,
+        choice-id: option-id,
+    }
+
+    record chat-followup-request {
+        run-id: option<run-id>,
+        question: option<display-text>,
+    }
+
+    record canvas-remix-request {
+        canvas-id: canvas-id,
+        render-id: render-id,
+    }
+
+    record poll-vote-request {
+        poll-id: option-id,
+        option-id: option-id,
+    }
+
+    record ui-action-request {
+        view-id: ui-view-id,
+        action-id: ui-action-id,
+    }
+
+    variant launch-payload {
+        save-link(save-link-request),
+        quiz-answer(quiz-answer-request),
+        ask-followup(chat-followup-request),
+        canvas-remix(canvas-remix-request),
+        poll-vote(poll-vote-request),
+        ui-action(ui-action-request),
+    }
+
+    record launch-context {
+        waddle-id: waddle-id,
+        source-stanza-id: option<stanza-id>,
+    }
+
+    record launch-descriptor {
+        id: launch-id,
+        plugin: plugin-id,
+        action: action-id,
+        command-node: command-node,
+        label: display-text,
+        context: launch-context,
+        payload: option<launch-payload>,
+        expires-at: option<timestamp>,
+    }
+
+    record message-source {
+        stanza-id: stanza-id,
+        body-range: option<body-range>,
+    }
+
+    record message-enrichment {
+        id: enrichment-id,
+        plugin: plugin-id,
+        capability: extension-capability,
+        payload-namespace: payload-namespace,
+        created-at: timestamp,
+        source: option<message-source>,
+        payloads: list<framework-payload>,
+        launches: list<launch-descriptor>,
+    }
+
+    record extension-envelope {
+        version: u32,
+        enrichments: list<message-enrichment>,
+    }
+
+    record message-context {
+        waddle-id: waddle-id,
+        stanza-id: option<stanza-id>,
+    }
+
+    record link-target {
+        url: url,
+        range: body-range,
+    }
+
+    record message-hook {
+        context: message-context,
+        body: display-text,
+        links: list<link-target>,
+    }
+
+    record form-field-value {
+        name: ui-action-id,
+        values: list<display-text>,
+    }
+
+    record command-invocation {
+        waddle-id: waddle-id,
+        command-node: command-node,
+        fields: list<form-field-value>,
+    }
+
+    record launch-invocation {
+        context: launch-context,
+        launch-id: launch-id,
+        payload: option<launch-payload>,
+        fields: list<form-field-value>,
+    }
+
+    record pubsub-notification {
+        node: pubsub-node,
+        item-id: pubsub-item-id,
+        payload: framework-payload,
+    }
+
+    variant extension-event {
+        message-hook(message-hook),
+        command(command-invocation),
+        launch(launch-invocation),
+        pubsub(pubsub-notification),
+    }
+
+    record pubsub-publish {
+        node: pubsub-node,
+        item-id: pubsub-item-id,
+        payload: framework-payload,
+    }
+
+    record bot-message {
+        body: display-text,
+        payloads: list<framework-payload>,
+        launches: list<launch-descriptor>,
+    }
+
+    variant extension-effect {
+        enrich-message(extension-envelope),
+        publish-pubsub(pubsub-publish),
+        send-bot-message(bot-message),
+        reference-artifact(artifact-reference),
+        noop,
+    }
+
+    record extension-response {
+        effects: list<extension-effect>,
+    }
+
+    enum extension-error-code {
+        unsupported-event,
+        invalid-request,
+        denied,
+        temporary-failure,
+    }
+
+    record extension-error {
+        code: extension-error-code,
+        message: display-text,
+    }
 }
 
 interface enrich {
     use types.{detected-link, enrichment-result};
     enrich-message: func(body: string, links: list<detected-link>) -> enrichment-result;
+}
+
+interface framework {
+    use types.{extension-error, extension-event, extension-response};
+    handle-event: func(event: extension-event) -> result<extension-response, extension-error>;
 }
 
 interface lifecycle {
@@ -46,4 +522,5 @@ world waddle-extension {
 
     export lifecycle;
     export enrich;
+    export framework;
 }

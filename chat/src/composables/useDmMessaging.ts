@@ -53,6 +53,7 @@ function fromLiveDmMessage(
   if (msg.references?.length) tm.references = msg.references;
   if (msg.sharedFiles && msg.sharedFiles.length > 0) tm.sharedFiles = msg.sharedFiles;
   if (msg.githubEmbeds && msg.githubEmbeds.length > 0) tm.githubEmbeds = msg.githubEmbeds;
+  if (msg.extensionAnnotations && msg.extensionAnnotations.length > 0) tm.extensionAnnotations = msg.extensionAnnotations;
   if (msg.isSticker) tm.isSticker = true;
   if (msg.replyTo) {
     const parent = parentLookup?.(msg.replyTo.id);
@@ -444,7 +445,7 @@ export function useDmMessaging(
             references: msg.references,
             githubEmbeds: msg.githubEmbeds,
           });
-        } else if (msg.body || (msg.sharedFiles && msg.sharedFiles.length > 0) || msg.isSticker || (msg.githubEmbeds && msg.githubEmbeds.length > 0)) {
+        } else if (msg.body || (msg.sharedFiles && msg.sharedFiles.length > 0) || msg.isSticker || (msg.githubEmbeds && msg.githubEmbeds.length > 0) || (msg.extensionAnnotations && msg.extensionAnnotations.length > 0)) {
           regular.push(msg);
         }
       }

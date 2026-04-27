@@ -66,6 +66,9 @@ export function fromLiveMessage(
   if (msg.githubEmbeds && msg.githubEmbeds.length > 0) {
     tm.githubEmbeds = msg.githubEmbeds;
   }
+  if (msg.extensionAnnotations && msg.extensionAnnotations.length > 0) {
+    tm.extensionAnnotations = msg.extensionAnnotations;
+  }
   if (msg.isSticker) {
     tm.isSticker = true;
   }
@@ -795,7 +798,7 @@ export function useMessaging(
             references: msg.references,
             githubEmbeds: msg.githubEmbeds,
           });
-        } else if (msg.body || (msg.sharedFiles && msg.sharedFiles.length > 0) || msg.isSticker || (msg.githubEmbeds && msg.githubEmbeds.length > 0)) {
+        } else if (msg.body || (msg.sharedFiles && msg.sharedFiles.length > 0) || msg.isSticker || (msg.githubEmbeds && msg.githubEmbeds.length > 0) || (msg.extensionAnnotations && msg.extensionAnnotations.length > 0)) {
           regularMessages.push(msg);
         }
       }

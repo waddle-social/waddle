@@ -16,10 +16,15 @@ use crate::actor::WasmExtensionActor;
 use crate::config::{ExtensionConfig, ExtensionModuleConfig};
 use crate::oci::OciExtensionPuller;
 use crate::runtime::{LoadedExtension, WasmRuntime};
-use crate::types::{message_has_embed_for_namespaces, DetectedLink};
+use crate::types::{
+    message_has_embed_for_namespaces, message_has_framework_envelope, DetectedLink, DisplayText,
+    EmbedElement, EnrichmentId, ExtensionCapability, ExtensionEnvelope, FrameworkPayload,
+    MessageEnrichment, PayloadNamespace, PluginId, TextBlock, TextStyle, Timestamp, UiView,
+    UiViewId,
+};
 
 const MAX_DETECTED_LINKS: usize = 3;
-const EXTENSION_ENRICH_TIMEOUT: Duration = Duration::from_secs(5);
+const EXTENSION_ENRICH_TIMEOUT: Duration = Duration::from_millis(750);
 
 #[derive(Debug, Error)]
 enum EffectiveModuleConfigError {
@@ -47,6 +52,7 @@ impl ExtensionManager {
     /// Failures to load an individual extension are logged (fail-open) and do not
     /// prevent the remaining extensions from loading.
     pub async fn from_config(config: ExtensionConfig) -> Result<Self> {
+        config.validate().map_err(anyhow::Error::msg)?;
         if !config.enabled {
             return Ok(Self {
                 actors: Vec::new(),
@@ -147,7 +153,9 @@ impl ExtensionManager {
     }
 
     pub async fn enrich_message(&self, msg: &mut Message) -> usize {
-        if message_has_embed_for_namespaces(msg, &self.feature_namespaces) {
+        if message_has_framework_envelope(msg)
+            || message_has_embed_for_namespaces(msg, &self.feature_namespaces)
+        {
             return 0;
         }
 
@@ -168,38 +176,99 @@ impl ExtensionManager {
         let mut count = 0usize;
         if !self.actors.is_empty() {
             let enrich_futures = self.actors.iter().map(|actor| {
-                let actor_name = actor.info().name;
+                let actor_name = actor.info().name.to_string();
                 let actor = Arc::clone(actor);
                 let body = body.clone();
                 let links = links.clone();
                 async move {
                     match timeout(EXTENSION_ENRICH_TIMEOUT, actor.enrich_message(body, links)).await
                     {
-                        Ok(embeds) => embeds,
+                        Ok(embeds) => (actor_name, embeds),
                         Err(_) => {
                             warn!(
                                 extension = %actor_name,
                                 timeout_secs = EXTENSION_ENRICH_TIMEOUT.as_secs(),
                                 "extension enrichment timed out; continuing fail-open"
                             );
-                            Vec::new()
+                            (actor_name, Vec::new())
                         }
                     }
                 }
             });
             let results = join_all(enrich_futures).await;
 
-            for embeds in results {
-                for embed in embeds {
-                    msg.payloads.push(embed.to_minidom());
-                    count += 1;
+            let mut enrichments = Vec::new();
+            for (actor_name, embeds) in results {
+                for (index, embed) in embeds.into_iter().enumerate() {
+                    if let Some(enrichment) =
+                        legacy_embed_to_framework_enrichment(&actor_name, index, &embed)
+                    {
+                        enrichments.push(enrichment);
+                    }
                 }
+            }
+            count = enrichments.len();
+            if !enrichments.is_empty() {
+                msg.payloads
+                    .push(ExtensionEnvelope::new(enrichments).to_minidom());
             }
             if count > 0 {
                 debug!(embeds_added = count, "message enriched by extensions");
             }
         }
         count
+    }
+}
+
+fn legacy_embed_to_framework_enrichment(
+    actor_name: &str,
+    index: usize,
+    embed: &EmbedElement,
+) -> Option<MessageEnrichment> {
+    let plugin = PluginId::new(actor_name.to_string()).ok()?;
+    let title = legacy_embed_title(embed);
+    Some(MessageEnrichment {
+        id: EnrichmentId::new(format!("{actor_name}-{index}")).ok()?,
+        plugin: plugin.clone(),
+        capability: ExtensionCapability::MessageEnrich,
+        payload_namespace: PayloadNamespace::framework(),
+        created_at: Timestamp::new("1970-01-01T00:00:00Z").ok()?,
+        source: None,
+        payloads: vec![FrameworkPayload::DeclarativeUi(UiView {
+            id: UiViewId::new(format!("{actor_name}-{index}-view")).ok()?,
+            title: Some(DisplayText::new(title.clone()).ok()?),
+            blocks: vec![crate::types::UiBlock::Text(TextBlock {
+                text: DisplayText::new(title).ok()?,
+                style: TextStyle::Body,
+            })],
+        })],
+        launches: Vec::new(),
+    })
+}
+
+fn legacy_embed_title(embed: &EmbedElement) -> String {
+    let url = embed
+        .attributes
+        .iter()
+        .find(|(key, _)| key == "url")
+        .map(|(_, value)| value.as_str());
+    let owner = embed
+        .attributes
+        .iter()
+        .find(|(key, _)| key == "owner")
+        .map(|(_, value)| value.as_str());
+    let name = embed
+        .attributes
+        .iter()
+        .find(|(key, _)| key == "name")
+        .map(|(_, value)| value.as_str());
+
+    match (owner, name, url) {
+        (Some(owner), Some(name), _) if !owner.is_empty() && !name.is_empty() => {
+            format!("{owner}/{name}")
+        }
+        (_, _, Some(url)) if !url.is_empty() => url.to_string(),
+        _ => embed.element_name.clone(),
     }
 }
 
@@ -380,7 +449,11 @@ mod tests {
         let module = ExtensionModuleConfig {
             name: "github-enricher".to_string(),
             registry: "ghcr.io/waddle-social/waddle/extensions/github-enricher".to_string(),
-            tag: "latest".to_string(),
+            digest: Some(
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_string(),
+            ),
+            tag: None,
             namespace: "urn:waddle:github:0".to_string(),
             config: json!({
                 "github_token": "from-config",
@@ -418,7 +491,11 @@ mod tests {
         let module = ExtensionModuleConfig {
             name: "github-enricher".to_string(),
             registry: "ghcr.io/waddle-social/waddle/extensions/github-enricher".to_string(),
-            tag: "latest".to_string(),
+            digest: Some(
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_string(),
+            ),
+            tag: None,
             namespace: "urn:waddle:github:0".to_string(),
             config: json!(["not", "an", "object"]),
             config_secret_files,
@@ -448,7 +525,11 @@ mod tests {
         let module = ExtensionModuleConfig {
             name: "github-enricher".to_string(),
             registry: "ghcr.io/waddle-social/waddle/extensions/github-enricher".to_string(),
-            tag: "latest".to_string(),
+            digest: Some(
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_string(),
+            ),
+            tag: None,
             namespace: "urn:waddle:github:0".to_string(),
             config: json!({}),
             config_secret_files,
@@ -468,7 +549,8 @@ mod tests {
             modules: vec![ExtensionModuleConfig {
                 name: "github-enricher".to_string(),
                 registry: "ghcr.io/waddle-social/waddle/extensions/github-enricher".to_string(),
-                tag: "latest".to_string(),
+                digest: None,
+                tag: Some("latest".to_string()),
                 namespace: "urn:waddle:github:0".to_string(),
                 config: json!({}),
                 config_secret_files: Default::default(),
