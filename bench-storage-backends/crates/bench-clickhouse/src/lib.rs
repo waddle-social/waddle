@@ -31,7 +31,7 @@ struct ClickHouseMessageRow {
     from_jid: String,
     to_jid: String,
     body: Option<String>,
-    stanza_id: Option<String>,
+    message_id: Option<String>,
     thread_id: Option<String>,
     origin_id: Option<String>,
     message_type: String,
@@ -60,7 +60,7 @@ impl From<ClickHouseMessageRow> for ArchivedMessage {
             from: value.from_jid,
             to: value.to_jid,
             body: value.body,
-            stanza_id: value.stanza_id,
+            message_id: value.message_id,
             thread_id: value.thread_id,
             origin_id: value.origin_id,
             message_type: value.message_type,
@@ -81,7 +81,7 @@ impl StanzaStore for ClickHouseStore {
                     from_jid String,
                     to_jid String,
                     body Nullable(String),
-                    stanza_id Nullable(String),
+                    message_id Nullable(String),
                     thread_id Nullable(String),
                     origin_id Nullable(String),
                     message_type String,
@@ -100,7 +100,7 @@ impl StanzaStore for ClickHouseStore {
         self.client
             .query(
                 "INSERT INTO mam_messages
-                (id, room_jid, timestamp_ms, from_jid, to_jid, body, stanza_id, thread_id,
+                (id, room_jid, timestamp_ms, from_jid, to_jid, body, message_id, thread_id,
                  origin_id, message_type, stanza_xml)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
@@ -110,7 +110,7 @@ impl StanzaStore for ClickHouseStore {
             .bind(&m.from)
             .bind(&m.to)
             .bind(&m.body)
-            .bind(&m.stanza_id)
+            .bind(&m.message_id)
             .bind(&m.thread_id)
             .bind(&m.origin_id)
             .bind(&m.message_type)
@@ -123,7 +123,7 @@ impl StanzaStore for ClickHouseStore {
 
     async fn query_messages(&self, q: &MamQuery) -> Result<Vec<ArchivedMessage>, StoreError> {
         let mut sql = String::from(
-            "SELECT id, room_jid, timestamp_ms, from_jid, to_jid, body, stanza_id, thread_id, \
+            "SELECT id, room_jid, timestamp_ms, from_jid, to_jid, body, message_id, thread_id, \
              origin_id, message_type, stanza_xml \
              FROM mam_messages WHERE room_jid = ?",
         );

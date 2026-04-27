@@ -63,8 +63,7 @@ use waddle_xmpp::{
         build_server_role_form, build_spaces_metadata_form_for_requester, is_last_activity_query,
         is_search_request, is_time_query, is_version_query, parse_command_from_iq,
         parse_moderation_iq, parse_search_request, ChannelResult, Command, CommandStatus,
-        Searchable, SpaceAffiliation, Xep0359StanzaId as StanzaId, NODE_COMMANDS,
-        NS_CHANNEL_SEARCH,
+        Searchable, SpaceAffiliation, NODE_COMMANDS, NS_CHANNEL_SEARCH,
     },
     Affiliation, SpaceDetails, Stanza, StanzaErrorCondition, StanzaErrorType, XmppError,
 };
@@ -973,17 +972,14 @@ pub async fn handle_iq_with_conn_state(
             RichMessageId::new(request.target_id.clone()),
             moderated_by.parse::<Jid>(),
         ) {
-            let stanza_id = moderation
-                .id
-                .clone()
-                .map(|id| StanzaId::new(id, room_jid.clone()));
+            let message_id = moderation.id.clone().and_then(RichMessageId::new);
             let archived = ArchivedMessage {
                 id: archive_id.clone(),
                 timestamp: chrono::Utc::now(),
                 from: jid::Jid::from(room_jid.clone()),
                 to: room_jid.clone(),
                 body: None,
-                stanza_id,
+                message_id,
                 thread: None,
                 origin_id: None,
                 message_type: xmpp_parsers::message::MessageType::Groupchat,

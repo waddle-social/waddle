@@ -377,7 +377,7 @@ fn build_message(room: u64, user: u64, tag: &str) -> ArchivedMessage {
         &format!("hello from user {user} in {tag}"),
     );
     m.thread_id = Some(format!("thr-{}", room));
-    m.stanza_id = Some(m.id.clone());
+    m.message_id = Some(m.id.clone());
     m.origin_id = Some(m.id.clone());
     m.message_type = "groupchat".to_string();
     m

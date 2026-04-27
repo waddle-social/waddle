@@ -43,7 +43,7 @@ CREATE TABLE IF NOT EXISTS mam_messages (
     from_jid TEXT NOT NULL,
     to_jid TEXT NOT NULL,
     body TEXT,
-    stanza_id TEXT,
+    message_id TEXT,
     thread_id TEXT,
     origin_id TEXT,
     message_type TEXT NOT NULL DEFAULT 'chat',
@@ -377,7 +377,7 @@ fn writer_loop(
                     m.from,
                     m.to,
                     m.body,
-                    m.stanza_id,
+                    m.message_id,
                     m.thread_id,
                     m.origin_id,
                     m.message_type,
@@ -572,7 +572,7 @@ impl StanzaStore for SqliteStore {
 fn run_query(pool: &Pool<UriManager>, q: &MamQuery) -> Result<Vec<ArchivedMessage>, StoreError> {
     let conn = pool.get().map_err(StoreError::backend)?;
     let mut sql = String::from(
-        "SELECT id, room_jid, timestamp, from_jid, to_jid, body, stanza_id, thread_id, \
+        "SELECT id, room_jid, timestamp, from_jid, to_jid, body, message_id, thread_id, \
          origin_id, message_type, stanza_xml \
          FROM mam_messages WHERE room_jid = ?1",
     );
@@ -634,7 +634,7 @@ fn row_to_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<ArchivedMessage> 
         from: row.get(3)?,
         to: row.get(4)?,
         body: row.get(5)?,
-        stanza_id: row.get(6)?,
+        message_id: row.get(6)?,
         thread_id: row.get(7)?,
         origin_id: row.get(8)?,
         message_type: row.get(9)?,

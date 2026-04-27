@@ -20,8 +20,8 @@ pub struct ArchivedMessage {
     pub to: String,
     /// `<body/>` is optional per RFC 6121 §5.2.2 — `None` when absent.
     pub body: Option<String>,
-    /// XEP-0359 stanza id (if supplied by client).
-    pub stanza_id: Option<String>,
+    /// RFC 6121 `<message id='...'>` attribute (wire stanza identifier).
+    pub message_id: Option<String>,
     /// RFC 6121 thread identifier.
     pub thread_id: Option<String>,
     /// XEP-0359 origin id.
@@ -42,7 +42,7 @@ impl ArchivedMessage {
             from: from.to_string(),
             to: to.to_string(),
             body: Some(body.to_string()),
-            stanza_id: None,
+            message_id: None,
             thread_id: None,
             origin_id: None,
             message_type: MessageType::Chat.as_str().to_string(),

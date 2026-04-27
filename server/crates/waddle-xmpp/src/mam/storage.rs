@@ -24,7 +24,7 @@ use xmpp_parsers::message::{MessageType, Thread};
 
 use super::{ArchivedMessage, MamQuery, MamResult, RichMessageId, RichText};
 use waddle_xmpp_core::mam::{ArchiveId, ArchivedRichMessage, ArchivedTombstone};
-use waddle_xmpp_core::xep::xep0359::{OriginId, StanzaId};
+use waddle_xmpp_core::xep::xep0359::OriginId;
 
 /// Errors that can occur during MAM storage operations.
 #[derive(Error, Debug)]
@@ -176,10 +176,18 @@ impl MamStorage for InMemoryMamStorage {
             messages.retain(|message| message.timestamp <= end);
         }
         if let Some(with) = query.with.as_ref() {
-            let with_str = with.to_string();
+            // XEP-0313 §4.1.2: equality match, plus full-JID-of-bare match
+            // when the filter itself is bare. See `WithMatch` for rationale.
+            let exact = with.to_string();
+            let bare_resource_prefix = with.is_bare().then(|| format!("{exact}/"));
             messages.retain(|message| {
-                message.from.to_string().starts_with(&with_str)
-                    || message.to.to_string().starts_with(&with_str)
+                let from = message.from.to_string();
+                let to = message.to.to_string();
+                let exact_match = from == exact || to == exact;
+                let resource_match = bare_resource_prefix
+                    .as_deref()
+                    .is_some_and(|prefix| from.starts_with(prefix) || to.starts_with(prefix));
+                exact_match || resource_match
             });
         }
         if let Some(before_id) = query.before_id.as_ref() {
@@ -238,7 +246,7 @@ impl MamStorage for InMemoryMamStorage {
             .iter()
             .find(|(jid, message)| {
                 jid == archive_jid
-                    && (message.stanza_id.as_ref().map(|sid| sid.id.as_str())
+                    && (message.message_id.as_ref().map(RichMessageId::as_str)
                         == Some(stanza_id.as_str())
                         || message.origin_id.as_ref().map(OriginId::as_str)
                             == Some(stanza_id.as_str()))
@@ -256,7 +264,7 @@ impl MamStorage for InMemoryMamStorage {
             .iter()
             .find(|(jid, message)| {
                 jid == archive_jid
-                    && message.stanza_id.as_ref().map(|sid| sid.id.as_str())
+                    && message.message_id.as_ref().map(RichMessageId::as_str)
                         == Some(message_id.as_str())
             })
             .map(|(_, message)| message.clone()))
@@ -273,7 +281,7 @@ impl MamStorage for InMemoryMamStorage {
             .find(|(jid, message)| {
                 jid == archive_jid
                     && (message.id.as_str() == stanza_id.as_str()
-                        || message.stanza_id.as_ref().map(|sid| sid.id.as_str())
+                        || message.message_id.as_ref().map(RichMessageId::as_str)
                             == Some(stanza_id.as_str()))
             })
             .map(|(_, message)| message.clone()))
@@ -411,8 +419,18 @@ impl SqlxMamStorage {
 }
 
 const SELECT_COLUMNS: &str =
-    "id, room_jid, timestamp, from_jid, to_jid, body, stanza_id, thread_id, origin_id, message_type, stanza_xml, rich_payload, nickname_generation";
+    "id, room_jid, timestamp, from_jid, to_jid, body, message_id, thread_id, origin_id, message_type, stanza_xml, rich_payload, nickname_generation";
 
+// `body` is nullable per RFC 6121 §5.2.2 (`<body/>` is optional).
+// `message_id` stores the wire `<message id='...'>` attribute (RFC 6121 §8.1.3),
+// distinct from XEP-0359 stanza-ids — the archive's own stanza-id is the row's
+// primary key column `id`, and `<stanza-id by/>` is reconstructed at read time.
+//
+// Existing dev databases created against pre-#228 PR B schemas (`body NOT NULL`,
+// column named `stanza_id`) will not be silently rewritten — `CREATE TABLE IF
+// NOT EXISTS` is a no-op when the table is present. Per CLAUDE.md "no production
+// data; breaking changes by default", operators carrying old dev databases must
+// drop them before reopening with this build. We do not add migration tooling.
 const SQLITE_MAM_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS mam_messages (
     id TEXT PRIMARY KEY,
@@ -421,7 +439,7 @@ CREATE TABLE IF NOT EXISTS mam_messages (
     from_jid TEXT NOT NULL,
     to_jid TEXT NOT NULL,
     body TEXT,
-    stanza_id TEXT,
+    message_id TEXT,
     thread_id TEXT,
     origin_id TEXT,
     message_type TEXT NOT NULL DEFAULT 'chat',
@@ -448,7 +466,7 @@ CREATE TABLE IF NOT EXISTS mam_messages (
     from_jid TEXT NOT NULL,
     to_jid TEXT NOT NULL,
     body TEXT,
-    stanza_id TEXT,
+    message_id TEXT,
     thread_id TEXT,
     origin_id TEXT,
     message_type TEXT NOT NULL DEFAULT 'chat',
@@ -559,6 +577,54 @@ async fn ensure_sqlite_column(
     Ok(())
 }
 
+/// XEP-0313 §4.1.2 `<with/>` filter.
+///
+/// A bare JID matches the bare itself (1:1 archive owner ↔ peer bare) or any
+/// full JID resource of that bare (room@/nick form in MUC). A full JID matches
+/// only itself. Built with explicit equality predicates so a `juliet@host`
+/// filter cannot accidentally match `juliet@host.evil` — the previous prefix
+/// `LIKE 'juliet@host%'` shape was XEP-non-conformant.
+struct WithMatch {
+    exact: String,
+    /// `Some(prefix)` when the filter is bare and we should also match
+    /// stored full JIDs whose bare equals this filter, via
+    /// `from_jid LIKE prefix || '%'` where `prefix = "{bare}/"`.
+    bare_resource_prefix: Option<String>,
+}
+
+impl WithMatch {
+    fn from_jid(jid: &Jid) -> Self {
+        let exact = jid.to_string();
+        // `Jid::is_bare()` is true when no resource is present.
+        let bare_resource_prefix = jid.is_bare().then(|| format!("{exact}/"));
+        Self {
+            exact,
+            bare_resource_prefix,
+        }
+    }
+}
+
+fn push_with_filter<'a, DB>(builder: &mut QueryBuilder<'a, DB>, with: &'a WithMatch)
+where
+    DB: sqlx::Database,
+    String: sqlx::Encode<'a, DB> + sqlx::Type<DB>,
+{
+    builder
+        .push(" AND (from_jid = ")
+        .push_bind(with.exact.clone())
+        .push(" OR to_jid = ")
+        .push_bind(with.exact.clone());
+    if let Some(prefix) = with.bare_resource_prefix.as_ref() {
+        let pattern = format!("{prefix}%");
+        builder
+            .push(" OR from_jid LIKE ")
+            .push_bind(pattern.clone())
+            .push(" OR to_jid LIKE ")
+            .push_bind(pattern);
+    }
+    builder.push(")");
+}
+
 fn uses_backward_pagination(query: &MamQuery) -> bool {
     // XEP-0059 §2.5: an empty <before/> element requests the last page of
     // results, signalled by `last_page = true`. A `<before/>` with a cursor
@@ -594,30 +660,28 @@ fn finalize_result(mut messages: Vec<ArchivedMessage>, query: &MamQuery) -> MamR
 }
 
 /// Column indices match `SELECT_COLUMNS`:
-/// `id, room_jid, timestamp, from_jid, to_jid, body, stanza_id, thread_id, origin_id, message_type, stanza_xml, rich_payload, nickname_generation`.
+/// `id, room_jid, timestamp, from_jid, to_jid, body, message_id, thread_id, origin_id, message_type, stanza_xml, rich_payload, nickname_generation`.
 fn decode_sqlite_message_row(row: &SqliteRow) -> Result<ArchivedMessage, MamStorageError> {
     let timestamp = DateTime::parse_from_rfc3339(&row.try_get::<String, _>(2)?)
         .map_err(|error| MamStorageError::Serialization(format!("Invalid timestamp: {error}")))?
         .with_timezone(&Utc);
 
-    let room_jid: String = row.try_get(1)?;
-    let stanza_id: Option<String> = row.try_get(6)?;
+    let message_id: Option<String> = row.try_get(6)?;
     let thread_id: Option<String> = row.try_get(7)?;
     let origin_id: Option<String> = row.try_get(8)?;
     let message_type_str: String = row.try_get(9)?;
     let rich_payload: Option<String> = row.try_get(11)?;
     let nickname_generation = decode_nickname_generation(row.try_get::<Option<i64>, _>(12)?)?;
 
-    let archive_owner = decode_archive_jid(&room_jid)?;
     Ok(ArchivedMessage {
         id: decode_archive_id(row.try_get(0)?, "id")?,
         timestamp,
         from: decode_jid(row.try_get(3)?, "from_jid")?,
-        to: decode_archive_jid(&row.try_get::<String, _>(4)?)?,
+        to: decode_bare_jid(&row.try_get::<String, _>(4)?, "to_jid")?,
         body: decode_body(row.try_get(5)?),
-        stanza_id: decode_stanza_id(stanza_id, &archive_owner),
+        message_id: decode_message_id(message_id)?,
         thread: thread_id.map(Thread),
-        origin_id: origin_id.and_then(OriginId::new),
+        origin_id: decode_origin_id(origin_id)?,
         message_type: decode_message_type(&message_type_str)?,
         stanza_xml: row.try_get(10)?,
         rich: decode_rich_payload(rich_payload.as_deref())?,
@@ -626,24 +690,22 @@ fn decode_sqlite_message_row(row: &SqliteRow) -> Result<ArchivedMessage, MamStor
 }
 
 fn decode_postgres_message_row(row: &PgRow) -> Result<ArchivedMessage, MamStorageError> {
-    let room_jid: String = row.try_get(1)?;
-    let stanza_id: Option<String> = row.try_get(6)?;
+    let message_id: Option<String> = row.try_get(6)?;
     let thread_id: Option<String> = row.try_get(7)?;
     let origin_id: Option<String> = row.try_get(8)?;
     let message_type_str: String = row.try_get(9)?;
     let rich_payload: Option<String> = row.try_get(11)?;
     let nickname_generation = decode_nickname_generation(row.try_get::<Option<i64>, _>(12)?)?;
 
-    let archive_owner = decode_archive_jid(&room_jid)?;
     Ok(ArchivedMessage {
         id: decode_archive_id(row.try_get(0)?, "id")?,
         timestamp: row.try_get(2)?,
         from: decode_jid(row.try_get(3)?, "from_jid")?,
-        to: decode_archive_jid(&row.try_get::<String, _>(4)?)?,
+        to: decode_bare_jid(&row.try_get::<String, _>(4)?, "to_jid")?,
         body: decode_body(row.try_get(5)?),
-        stanza_id: decode_stanza_id(stanza_id, &archive_owner),
+        message_id: decode_message_id(message_id)?,
         thread: thread_id.map(Thread),
-        origin_id: origin_id.and_then(OriginId::new),
+        origin_id: decode_origin_id(origin_id)?,
         message_type: decode_message_type(&message_type_str)?,
         stanza_xml: row.try_get(10)?,
         rich: decode_rich_payload(rich_payload.as_deref())?,
@@ -665,9 +727,9 @@ fn decode_jid(raw: String, column: &str) -> Result<Jid, MamStorageError> {
     })
 }
 
-fn decode_archive_jid(raw: &str) -> Result<BareJid, MamStorageError> {
+fn decode_bare_jid(raw: &str, column: &str) -> Result<BareJid, MamStorageError> {
     BareJid::from_str(raw).map_err(|error| {
-        MamStorageError::Serialization(format!("Invalid `room_jid` column JID: {error}"))
+        MamStorageError::Serialization(format!("Invalid `{column}` column JID: {error}"))
     })
 }
 
@@ -675,11 +737,32 @@ fn decode_body(raw: Option<String>) -> Option<RichText> {
     raw.and_then(RichText::new)
 }
 
-/// Per Q4 of #228 the `<stanza-id by='...'>` is reconstructed from the row's
-/// archive owner — the archive IS the assigning entity per XEP-0359 §4.
-fn decode_stanza_id(raw: Option<String>, archive_owner: &BareJid) -> Option<StanzaId> {
-    raw.filter(|value| !value.is_empty())
-        .map(|id| StanzaId::new(id, archive_owner.clone()))
+/// Decode the wire `<message id='...'>` attribute from storage. Whitespace-only
+/// or empty present values are rejected as malformed rather than silently
+/// mapped to `None` — a stored present-but-blank id is corruption per the
+/// fail-loud invariant in #228 Q11.
+fn decode_message_id(raw: Option<String>) -> Result<Option<RichMessageId>, MamStorageError> {
+    match raw {
+        None => Ok(None),
+        Some(value) => RichMessageId::new(value).map(Some).ok_or_else(|| {
+            MamStorageError::Serialization(
+                "empty or whitespace-only `message_id` column value rejected".to_string(),
+            )
+        }),
+    }
+}
+
+/// Decode the XEP-0359 `<origin-id id='...'>` value from storage. Whitespace-
+/// only or empty present values are rejected as malformed.
+fn decode_origin_id(raw: Option<String>) -> Result<Option<OriginId>, MamStorageError> {
+    match raw {
+        None => Ok(None),
+        Some(value) => OriginId::new(value).map(Some).ok_or_else(|| {
+            MamStorageError::Serialization(
+                "empty or whitespace-only `origin_id` column value rejected (XEP-0359 §3 requires non-empty)".to_string(),
+            )
+        }),
+    }
 }
 
 fn decode_message_type(raw: &str) -> Result<MessageType, MamStorageError> {
@@ -762,7 +845,7 @@ impl MamStorage for SqlxMamStorage {
         let archive_jid_str = archive_jid.to_string();
         let from_jid_str = message.from.to_string();
         let to_jid_str = message.to.to_string();
-        let stanza_id_str = message.stanza_id.as_ref().map(|sid| sid.id.clone());
+        let message_id_str = message.message_id.as_ref().map(|m| m.as_str().to_owned());
         let thread_id_str = message.thread.as_ref().map(|t| t.0.clone());
         let origin_id_str = message
             .origin_id
@@ -773,7 +856,7 @@ impl MamStorage for SqlxMamStorage {
         match &self.backend {
             MamDatabaseBackend::Sqlite(pool) => {
                 let mut query = QueryBuilder::<Sqlite>::new(
-                    "INSERT INTO mam_messages (id, room_jid, timestamp, from_jid, to_jid, body, stanza_id, thread_id, origin_id, message_type, stanza_xml, rich_payload, nickname_generation) ",
+                    "INSERT INTO mam_messages (id, room_jid, timestamp, from_jid, to_jid, body, message_id, thread_id, origin_id, message_type, stanza_xml, rich_payload, nickname_generation) ",
                 );
                 query.push_values(std::iter::once(()), |mut builder, _| {
                     builder
@@ -783,7 +866,7 @@ impl MamStorage for SqlxMamStorage {
                         .push_bind(&from_jid_str)
                         .push_bind(&to_jid_str)
                         .push_bind(body_str.as_deref())
-                        .push_bind(stanza_id_str.as_deref())
+                        .push_bind(message_id_str.as_deref())
                         .push_bind(thread_id_str.as_deref())
                         .push_bind(origin_id_str.as_deref())
                         .push_bind(message_type)
@@ -795,7 +878,7 @@ impl MamStorage for SqlxMamStorage {
             }
             MamDatabaseBackend::Postgres(pool) => {
                 let mut query = QueryBuilder::<Postgres>::new(
-                    "INSERT INTO mam_messages (id, room_jid, timestamp, from_jid, to_jid, body, stanza_id, thread_id, origin_id, message_type, stanza_xml, rich_payload, nickname_generation) ",
+                    "INSERT INTO mam_messages (id, room_jid, timestamp, from_jid, to_jid, body, message_id, thread_id, origin_id, message_type, stanza_xml, rich_payload, nickname_generation) ",
                 );
                 query.push_values(std::iter::once(()), |mut builder, _| {
                     builder
@@ -805,7 +888,7 @@ impl MamStorage for SqlxMamStorage {
                         .push_bind(&from_jid_str)
                         .push_bind(&to_jid_str)
                         .push_bind(body_str.as_deref())
-                        .push_bind(stanza_id_str.as_deref())
+                        .push_bind(message_id_str.as_deref())
                         .push_bind(thread_id_str.as_deref())
                         .push_bind(origin_id_str.as_deref())
                         .push_bind(message_type)
@@ -828,8 +911,12 @@ impl MamStorage for SqlxMamStorage {
         query: &MamQuery,
     ) -> Result<MamResult, MamStorageError> {
         let limit = i64::from(query.max.unwrap_or(100).min(500)) + 1;
-        let with_filter = query.with.as_ref().map(|with| format!("{with}%"));
         let archive_jid_str = archive_jid.to_string();
+        // XEP-0313 §4.1.2: `<with/>` matches messages where the counterpart
+        // JID equals (full match) or, for bare-JID filters, equals OR is a
+        // resource of the bare JID. Prefix `LIKE` was vulnerable to spoofing
+        // (e.g. `juliet@example.com` matching `juliet@example.com.evil`).
+        let with_match: Option<WithMatch> = query.with.as_ref().map(WithMatch::from_jid);
 
         match &self.backend {
             MamDatabaseBackend::Sqlite(pool) => {
@@ -847,13 +934,8 @@ impl MamStorage for SqlxMamStorage {
                         .push(" AND timestamp <= ")
                         .push_bind(end.to_rfc3339());
                 }
-                if let Some(with) = with_filter.as_deref() {
-                    builder
-                        .push(" AND (from_jid LIKE ")
-                        .push_bind(with)
-                        .push(" OR to_jid LIKE ")
-                        .push_bind(with)
-                        .push(")");
+                if let Some(with) = with_match.as_ref() {
+                    push_with_filter::<Sqlite>(&mut builder, with);
                 }
                 if let Some(before_id) = query.before_id.as_ref() {
                     builder.push(" AND id < ").push_bind(before_id.as_str());
@@ -886,13 +968,8 @@ impl MamStorage for SqlxMamStorage {
                 if let Some(end) = query.end {
                     builder.push(" AND timestamp <= ").push_bind(end);
                 }
-                if let Some(with) = with_filter.as_deref() {
-                    builder
-                        .push(" AND (from_jid LIKE ")
-                        .push_bind(with)
-                        .push(" OR to_jid LIKE ")
-                        .push_bind(with)
-                        .push(")");
+                if let Some(with) = with_match.as_ref() {
+                    push_with_filter::<Postgres>(&mut builder, with);
                 }
                 if let Some(before_id) = query.before_id.as_ref() {
                     builder.push(" AND id < ").push_bind(before_id.as_str());
@@ -951,7 +1028,7 @@ impl MamStorage for SqlxMamStorage {
         match &self.backend {
             MamDatabaseBackend::Sqlite(pool) => {
                 let row = sqlx::query(&format!(
-                    "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE room_jid = ? AND (stanza_id = ? OR origin_id = ?) ORDER BY timestamp DESC LIMIT 1"
+                    "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE room_jid = ? AND (message_id = ? OR origin_id = ?) ORDER BY timestamp DESC LIMIT 1"
                 ))
                 .bind(&archive_jid_str)
                 .bind(stanza_id.as_str())
@@ -962,7 +1039,7 @@ impl MamStorage for SqlxMamStorage {
             }
             MamDatabaseBackend::Postgres(pool) => {
                 let row = sqlx::query(&format!(
-                    "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE room_jid = $1 AND (stanza_id = $2 OR origin_id = $2) ORDER BY timestamp DESC LIMIT 1"
+                    "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE room_jid = $1 AND (message_id = $2 OR origin_id = $2) ORDER BY timestamp DESC LIMIT 1"
                 ))
                 .bind(&archive_jid_str)
                 .bind(stanza_id.as_str())
@@ -982,7 +1059,7 @@ impl MamStorage for SqlxMamStorage {
         match &self.backend {
             MamDatabaseBackend::Sqlite(pool) => {
                 let row = sqlx::query(&format!(
-                    "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE room_jid = ? AND stanza_id = ? ORDER BY timestamp DESC LIMIT 1"
+                    "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE room_jid = ? AND message_id = ? ORDER BY timestamp DESC LIMIT 1"
                 ))
                 .bind(&archive_jid_str)
                 .bind(message_id.as_str())
@@ -992,7 +1069,7 @@ impl MamStorage for SqlxMamStorage {
             }
             MamDatabaseBackend::Postgres(pool) => {
                 let row = sqlx::query(&format!(
-                    "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE room_jid = $1 AND stanza_id = $2 ORDER BY timestamp DESC LIMIT 1"
+                    "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE room_jid = $1 AND message_id = $2 ORDER BY timestamp DESC LIMIT 1"
                 ))
                 .bind(&archive_jid_str)
                 .bind(message_id.as_str())
@@ -1012,7 +1089,7 @@ impl MamStorage for SqlxMamStorage {
         match &self.backend {
             MamDatabaseBackend::Sqlite(pool) => {
                 let row = sqlx::query(&format!(
-                    "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE room_jid = ? AND (id = ? OR stanza_id = ?) ORDER BY timestamp DESC LIMIT 1"
+                    "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE room_jid = ? AND (id = ? OR message_id = ?) ORDER BY timestamp DESC LIMIT 1"
                 ))
                 .bind(&archive_jid_str)
                 .bind(stanza_id.as_str())
@@ -1023,7 +1100,7 @@ impl MamStorage for SqlxMamStorage {
             }
             MamDatabaseBackend::Postgres(pool) => {
                 let row = sqlx::query(&format!(
-                    "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE room_jid = $1 AND (id = $2 OR stanza_id = $2) ORDER BY timestamp DESC LIMIT 1"
+                    "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE room_jid = $1 AND (id = $2 OR message_id = $2) ORDER BY timestamp DESC LIMIT 1"
                 ))
                 .bind(&archive_jid_str)
                 .bind(stanza_id.as_str())
@@ -1166,7 +1243,7 @@ mod tests {
             from: jid(from),
             to: archive.clone(),
             body: RichText::new(body),
-            stanza_id: None,
+            message_id: None,
             thread: None,
             origin_id: None,
             message_type: MessageType::Groupchat,
@@ -1182,7 +1259,7 @@ mod tests {
         let archive = bare("room@conference.example.com");
 
         let mut msg = fixture_message(&archive, "user@example.com/nick", "Hello, world!");
-        msg.stanza_id = Some(StanzaId::new("abc123", archive.clone()));
+        msg.message_id = RichMessageId::new("abc123");
 
         let archive_id = storage.store_message(&archive, &msg).await.unwrap();
         assert!(!archive_id.as_str().is_empty());
@@ -1198,7 +1275,7 @@ mod tests {
             Some("Hello, world!")
         );
         assert_eq!(
-            retrieved.stanza_id.as_ref().map(|sid| sid.id.as_str()),
+            retrieved.message_id.as_ref().map(RichMessageId::as_str),
             Some("abc123")
         );
     }
@@ -1214,7 +1291,7 @@ mod tests {
             from: jid("room@conference.example.com/alice"),
             to: archive.clone(),
             body: RichText::new("Reply body"),
-            stanza_id: Some(StanzaId::new("archive-stanza-1", archive.clone())),
+            message_id: RichMessageId::new("archive-stanza-1"),
             thread: Some(Thread("thread-root-1".to_owned())),
             origin_id: OriginId::new("origin-abc"),
             message_type: MessageType::Groupchat,

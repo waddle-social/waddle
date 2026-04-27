@@ -16,7 +16,7 @@ const MAM_SCHEMA_STATEMENTS: &[&str] = &[
         from_jid TEXT NOT NULL,
         to_jid TEXT NOT NULL,
         body TEXT,
-        stanza_id TEXT,
+        message_id TEXT,
         thread_id TEXT,
         origin_id TEXT,
         message_type TEXT NOT NULL DEFAULT 'chat',
@@ -54,7 +54,7 @@ struct PgArchivedMessageRow {
     from_jid: String,
     to_jid: String,
     body: Option<String>,
-    stanza_id: Option<String>,
+    message_id: Option<String>,
     thread_id: Option<String>,
     origin_id: Option<String>,
     message_type: String,
@@ -70,7 +70,7 @@ impl From<PgArchivedMessageRow> for ArchivedMessage {
             from: value.from_jid,
             to: value.to_jid,
             body: value.body,
-            stanza_id: value.stanza_id,
+            message_id: value.message_id,
             thread_id: value.thread_id,
             origin_id: value.origin_id,
             message_type: value.message_type,
@@ -104,7 +104,7 @@ impl StanzaStore for PostgresStore {
         .bind(&m.from)
         .bind(&m.to)
         .bind(&m.body)
-        .bind(&m.stanza_id)
+        .bind(&m.message_id)
         .bind(&m.thread_id)
         .bind(&m.origin_id)
         .bind(&m.message_type)
@@ -117,7 +117,7 @@ impl StanzaStore for PostgresStore {
 
     async fn query_messages(&self, q: &MamQuery) -> Result<Vec<ArchivedMessage>, StoreError> {
         let mut qb = QueryBuilder::new(
-            "SELECT id, room_jid, timestamp, from_jid, to_jid, body, stanza_id, thread_id, \
+            "SELECT id, room_jid, timestamp, from_jid, to_jid, body, message_id, thread_id, \
              origin_id, message_type, stanza_xml \
              FROM mam_messages WHERE room_jid = ",
         );

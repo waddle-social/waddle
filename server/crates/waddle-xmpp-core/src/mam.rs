@@ -13,7 +13,7 @@ use uuid::Uuid;
 use xmpp_parsers::iq::{Iq, IqType};
 use xmpp_parsers::message::{Message, MessageType, Thread};
 
-use crate::xep::xep0359::{build_origin_id_element, build_stanza_id_element, OriginId, StanzaId};
+use crate::xep::xep0359::{build_origin_id_element, build_stanza_id_element, OriginId};
 use crate::{CoreError, CoreResult};
 
 /// MAM XML namespace (XEP-0313 v2).
@@ -215,10 +215,12 @@ pub struct ArchivedMessage {
     /// Message body. `None` when absent on the wire (RFC 6121 §5.2.2 makes
     /// `<body/>` optional); always non-empty when present.
     pub body: Option<RichText>,
-    /// XEP-0359 stanza-id stamped on the incoming message (if any). The
-    /// `by` half is reconstructed from the archive owner's JID at read
-    /// time — the archive is the assigning entity per XEP-0359 §4.
-    pub stanza_id: Option<StanzaId>,
+    /// RFC 6121 `<message id='...'>` attribute as supplied by the
+    /// originating client (the wire stanza identifier). Distinct from
+    /// XEP-0359 stanza-ids: the latter are server-assigned values that
+    /// flow through the archive primary key (`id`) and are reconstructed
+    /// in replay via `build_stanza_id_element(archived.id, archived.to)`.
+    pub message_id: Option<RichMessageId>,
     /// RFC 6121 / XEP-0201 thread identifier. The optional `parent`
     /// attribute on `<thread/>` is currently dropped (tracked in #250).
     pub thread: Option<Thread>,
@@ -523,8 +525,8 @@ fn build_typed_inner_message(archived: &ArchivedMessage, rich: &ArchivedRichMess
         builder = builder.attr("to", archived.to.to_string());
     }
 
-    if let Some(stanza_id) = archived.stanza_id.as_ref() {
-        builder = builder.attr("id", stanza_id.id.as_str());
+    if let Some(message_id) = archived.message_id.as_ref() {
+        builder = builder.attr("id", message_id.as_str());
     }
     if let Some(body) = archived.body.as_ref() {
         builder = builder.append(
@@ -840,7 +842,7 @@ mod tests {
             from: jid("user@example.com/nick"),
             to: bare_jid("room@conference.example.com"),
             body: Some(rich_text("Hello, world!")),
-            stanza_id: None,
+            message_id: None,
             thread: Some(Thread("thread-1".to_owned())),
             origin_id: OriginId::new("origin-1"),
             message_type: MessageType::Chat,
@@ -890,7 +892,7 @@ mod tests {
             from: jid("room@conference.example.com/alice"),
             to: bare_jid("room@conference.example.com"),
             body: None,
-            stanza_id: None,
+            message_id: None,
             thread: None,
             origin_id: None,
             message_type: MessageType::Groupchat,
@@ -992,7 +994,7 @@ mod tests {
             from: jid("room@conference.example.com/alice"),
             to: bare_jid("room@conference.example.com"),
             body: Some(rich_text("typed body")),
-            stanza_id: None,
+            message_id: None,
             thread: None,
             origin_id: None,
             message_type: MessageType::Groupchat,
@@ -1044,7 +1046,7 @@ mod tests {
             from: jid("room@conference.example.com/bob"),
             to: bare_jid("room@conference.example.com"),
             body: Some(rich_text("> Alice wrote:\n> Hello!\nI agree!")),
-            stanza_id: None,
+            message_id: None,
             thread: None,
             origin_id: None,
             message_type: MessageType::Groupchat,
@@ -1105,7 +1107,7 @@ mod tests {
             from: jid("room@conference.example.com/alice"),
             to: bare_jid("room@conference.example.com"),
             body: Some(rich_text("Hello!")),
-            stanza_id: None,
+            message_id: None,
             thread: None,
             origin_id: None,
             message_type: MessageType::Groupchat,
@@ -1148,7 +1150,7 @@ mod tests {
             from: jid("room@conf.example.com/alice"),
             to: bare_jid("room@conf.example.com"),
             body: Some(rich_text("test")),
-            stanza_id: None,
+            message_id: None,
             thread: None,
             origin_id: None,
             message_type: MessageType::Groupchat,

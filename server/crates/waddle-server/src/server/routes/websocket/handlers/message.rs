@@ -26,8 +26,8 @@ use waddle_xmpp::{
         is_moderation_result_message, is_reaction_message, is_retraction_message,
         is_sticker_message, message_has_direct_invite, parse_reply_from_message,
         remove_stanza_ids_by, should_skip_storage, RetractionKind, Xep0359OriginId as OriginId,
-        Xep0359StanzaId as StanzaId, NS_EXPLICIT_MENTIONS, NS_MESSAGE_CORRECT, NS_MESSAGE_RETRACT,
-        NS_REACTIONS, NS_REFERENCE, NS_REPLY,
+        NS_EXPLICIT_MENTIONS, NS_MESSAGE_CORRECT, NS_MESSAGE_RETRACT, NS_REACTIONS, NS_REFERENCE,
+        NS_REPLY,
     },
     Stanza,
 };
@@ -1332,10 +1332,7 @@ async fn archive_groupchat_message(
 
     let stanza_xml = serialize_groupchat_stanza_xml(message);
 
-    let stanza_id = message
-        .id
-        .clone()
-        .map(|id| StanzaId::new(id, room_jid.clone()));
+    let message_id = message.id.clone().and_then(RichMessageId::new);
 
     let archived = ArchivedMessage {
         id: archive_id,
@@ -1343,7 +1340,7 @@ async fn archive_groupchat_message(
         from: from_jid,
         to: room_jid.clone(),
         body,
-        stanza_id,
+        message_id,
         thread: message.thread.clone(),
         origin_id,
         message_type: message.type_.clone(),
@@ -1392,19 +1389,20 @@ async fn archive_direct_message(
 
     let sender_bare = sender_jid.to_bare();
     let recipient_bare = to_jid.to_bare();
+    let message_id = message.id.clone().and_then(RichMessageId::new);
 
-    // The personal archive stamps the row's `<stanza-id by/>` with the
-    // archive owner's JID; we re-stamp per archive below.
-    let make_archived = |archive_owner: &BareJid| ArchivedMessage {
+    // Wire `from`/`to` are preserved across both archive copies — the
+    // archive owner is the row's `room_jid` (passed to `store_message`),
+    // not the `to` field. Archiving with `to = archive_owner` would
+    // collapse `from == to == self` in the sender's archive and break
+    // both `<with/>` peer filtering and replay-fallback `to=` rendering.
+    let make_archived = || ArchivedMessage {
         id: ArchiveId::new(uuid::Uuid::now_v7().to_string()).expect("UUID is non-empty"),
         timestamp: Utc::now(),
         from: jid::Jid::from(sender_bare.clone()),
-        to: archive_owner.clone(),
+        to: recipient_bare.clone(),
         body: body.clone(),
-        stanza_id: message
-            .id
-            .clone()
-            .map(|id| StanzaId::new(id, archive_owner.clone())),
+        message_id: message_id.clone(),
         thread: message.thread.clone(),
         origin_id: origin_id.clone(),
         message_type: message.type_.clone(),
@@ -1413,7 +1411,7 @@ async fn archive_direct_message(
         nickname_generation: None,
     };
 
-    let sender_archived = make_archived(&sender_bare);
+    let sender_archived = make_archived();
     if let Err(err) = state
         .deps
         .protocol
@@ -1429,7 +1427,7 @@ async fn archive_direct_message(
         );
     }
 
-    let recipient_archived = make_archived(&recipient_bare);
+    let recipient_archived = make_archived();
     if let Err(err) = state
         .deps
         .protocol
