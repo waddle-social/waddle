@@ -277,27 +277,42 @@ pub enum OutboundEvent {
     // -------------------------------------------------------------------
     /// Route a stanza to another local connection's state machine.
     ///
-    /// **Migration status (issue #229 PR1)**: the variant is renamed from
-    /// `SendDirect` and the *protocol-level intent* is described below,
-    /// but the live `waddle-server` interpreter still implements the
-    /// legacy "write directly to the peer's outbound channel" behaviour
-    /// to keep the existing integration tests green during the staged
-    /// migration. The semantic change to "feed the destination's state
-    /// machine via [`InboundEvent::StanzaFromPeer`]" lands alongside the
-    /// recipient-pass handlers in PR4, when the recipient pipeline
-    /// (XEP-0191 incoming block, XEP-0359 recipient stamp, XEP-0313
-    /// archive, XEP-0280 received-carbons, inbox projection) is in place.
+    /// `jid` is a typed [`jid::Jid`] — full when the handler can pin a
+    /// specific resource, bare when it cannot. The interpreter performs
+    /// resource selection against `ConnectionRegistry` (RFC 6121 §8.5
+    /// delivery semantics: bare delivers to highest-priority resources;
+    /// full delivers to that exact resource).
     ///
-    /// **Intended semantic (PR4 onward)**: the interpreter resolves `jid`
-    /// against `ConnectionRegistry` and feeds the stanza into the
-    /// destination connection's machine as
-    /// [`InboundEvent::StanzaFromPeer`]. The destination's recipient-pass
-    /// pipeline runs and ultimately emits [`OutboundEvent::SendStanza`]
-    /// to the destination's wire.
+    /// Carrying a typed `Jid` instead of a `FullJid` keeps the
+    /// typed-payloads hard rule honest — the prior shape forced
+    /// handlers to synthesize a fake full JID via
+    /// `format!("{}/", bare)` + `parse`, which violates the rule and
+    /// produces an invalid resource.
+    ///
+    /// **Migration status (issue #229 PR1)**: the variant is renamed
+    /// from `SendDirect` and the protocol-level intent is described
+    /// below, but the live `waddle-server` interpreter still implements
+    /// the legacy "write directly to the peer's outbound channel"
+    /// behaviour to keep the existing integration tests green during
+    /// the staged migration. The semantic change to "feed the
+    /// destination's state machine via
+    /// [`InboundEvent::StanzaFromPeer`]" lands in PR5 alongside the
+    /// `message.rs` cutover, at which point the recipient pipeline
+    /// (XEP-0191 incoming block, XEP-0359 recipient stamp, XEP-0313
+    /// archive, XEP-0280 received-carbons, inbox projection) starts
+    /// running on the destination side.
+    ///
+    /// **Intended semantic (PR5 onward)**: the interpreter resolves
+    /// `jid` against `ConnectionRegistry` and feeds the stanza into
+    /// the destination connection's machine as
+    /// [`InboundEvent::StanzaFromPeer`]. The destination's
+    /// recipient-pass pipeline runs and ultimately emits
+    /// [`OutboundEvent::SendStanza`] to the destination's wire.
     ///
     /// If the target is offline the event is logged and dropped (XMPP
-    /// offline-delivery semantics are archive-based, not routing-based).
-    RouteToConnection { jid: FullJid, stanza: Box<Stanza> },
+    /// offline-delivery semantics are archive-based, not
+    /// routing-based).
+    RouteToConnection { jid: jid::Jid, stanza: Box<Stanza> },
     /// Hand a `<message type='groupchat'>` to the room handler chain
     /// (Option C — issue #229 Q7) for occupancy validation,
     /// XEP-0359/XEP-0421 stamping, XEP-0313 §5.1.3 archiving, and

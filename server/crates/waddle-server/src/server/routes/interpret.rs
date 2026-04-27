@@ -91,21 +91,39 @@ pub async fn interpret(
             // -------------------------------------------------------
             OutboundEvent::RouteToConnection { jid, stanza } => {
                 // Until the per-connection state-machine routing for
-                // `StanzaFromPeer` lands (issue #229 PR4), preserve the
+                // `StanzaFromPeer` lands (issue #229 PR5), preserve the
                 // legacy "write to peer's outbound channel" behaviour so
                 // existing integration tests stay green. The semantic
                 // change to "feed StanzaFromPeer into the destination
-                // machine" is wired in alongside the first handler that
-                // emits this event in PR4.
-                match registry.send_to(&jid, *stanza).await {
-                    waddle_xmpp::registry::SendResult::Sent => {
-                        debug!(jid = %jid, "RouteToConnection delivered");
-                    }
-                    waddle_xmpp::registry::SendResult::NotConnected => {
-                        debug!(jid = %jid, "RouteToConnection: target offline, dropping");
-                    }
-                    waddle_xmpp::registry::SendResult::ChannelClosed => {
-                        warn!(jid = %jid, "RouteToConnection: target channel closed, dropping");
+                // machine" is wired alongside the message.rs cutover
+                // in PR5.
+                //
+                // `jid` is now a typed `Jid` (full or bare); the
+                // current legacy registry only supports full-JID
+                // delivery, so bare-JID targets are logged and
+                // deferred to PR5's resource-selection logic. This
+                // is a *temporary* gap during the staged migration;
+                // it does not regress existing behaviour because no
+                // production handler emits `RouteToConnection` with a
+                // bare JID until PR5 cuts over.
+                match jid.clone().try_into_full() {
+                    Ok(full) => match registry.send_to(&full, *stanza).await {
+                        waddle_xmpp::registry::SendResult::Sent => {
+                            debug!(jid = %full, "RouteToConnection delivered");
+                        }
+                        waddle_xmpp::registry::SendResult::NotConnected => {
+                            debug!(jid = %full, "RouteToConnection: target offline, dropping");
+                        }
+                        waddle_xmpp::registry::SendResult::ChannelClosed => {
+                            warn!(jid = %full, "RouteToConnection: target channel closed, dropping");
+                        }
+                    },
+                    Err(bare) => {
+                        warn!(
+                            bare_jid = %bare,
+                            "RouteToConnection: bare-JID resource selection lands in PR5; \
+                             dropping this event for now"
+                        );
                     }
                 }
             }

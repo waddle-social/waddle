@@ -69,37 +69,26 @@ impl MessageHandler for RouteHandler {
                     message: Box::new(message.clone()),
                 }])
             }
-            // Sender pass, 1:1 chat / normal — route to the recipient
-            // connection.
+            // Sender pass, 1:1 chat / normal / headline — route to
+            // the recipient connection. Headline is included so
+            // server-originated notifications (e.g. PEP, MUC
+            // invitations forwarded as headlines) keep flowing under
+            // the cutover.
             (Locality::Sender, MessageType::Chat)
             | (Locality::Sender, MessageType::Normal)
+            | (Locality::Sender, MessageType::Headline)
             | (Locality::Both, MessageType::Chat)
-            | (Locality::Both, MessageType::Normal) => {
+            | (Locality::Both, MessageType::Normal)
+            | (Locality::Both, MessageType::Headline) => {
                 let Some(jid) = message.to.as_ref() else {
                     return HandlerOutcome::Continue(Vec::new());
                 };
-                // Try to resolve to a full JID; if the `to` is a bare
-                // JID, the interpreter handles resource selection.
-                let full_jid = match jid.clone().try_into_full() {
-                    Ok(full) => full,
-                    Err(bare) => {
-                        // For bare-targeted messages we can't pin a
-                        // single resource here; convert to a domain-
-                        // resource form that the interpreter
-                        // understands as "any resource of this user."
-                        // The current `RouteToConnection` shape
-                        // requires a `FullJid`; promote with an empty
-                        // resource sentinel. PR5 may revisit this
-                        // when bare-target routing gets first-class
-                        // support.
-                        match format!("{}/", bare).parse() {
-                            Ok(full) => full,
-                            Err(_) => return HandlerOutcome::Continue(Vec::new()),
-                        }
-                    }
-                };
+                // Pass the typed Jid through verbatim — full or bare.
+                // The interpreter performs resource selection per
+                // RFC 6121 §8.5 (bare → highest-priority resources;
+                // full → exact resource). No string synthesis.
                 HandlerOutcome::Continue(vec![OutboundEvent::RouteToConnection {
-                    jid: full_jid,
+                    jid: jid.clone(),
                     stanza: Box::new(Stanza::Message(message.clone())),
                 }])
             }
@@ -180,6 +169,43 @@ mod tests {
         match extract_event(&outcome) {
             OutboundEvent::RouteToConnection { jid, .. } => {
                 assert_eq!(jid.to_string(), "bob@example.com/desk");
+            }
+            other => panic!("expected RouteToConnection, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn route_sender_pass_chat_to_bare_jid_emits_route_to_connection_with_bare_jid() {
+        // Bare-targeted messages keep the typed bare JID — the
+        // interpreter performs resource selection. Earlier drafts
+        // synthesized a fake full JID via `format!("{}/", bare)`;
+        // that violated the typed-payloads rule and produced an
+        // invalid resource that ConnectionRegistry::send_to dropped.
+        let local = full("alice@example.com/web");
+        let occ = MucOccupancy::empty();
+        let mut msg = chat_with_body("alice@example.com/web", "bob@example.com", "hi");
+        let outcome = run(&local, &occ, &mut msg);
+        match extract_event(&outcome) {
+            OutboundEvent::RouteToConnection { jid, .. } => {
+                assert_eq!(jid.to_string(), "bob@example.com");
+                assert!(jid.resource().is_none(), "bare JID preserved as bare");
+            }
+            other => panic!("expected RouteToConnection, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn route_sender_pass_headline_to_full_jid_emits_route_to_connection() {
+        // Server-originated notifications use Headline; legacy
+        // message.rs treats Headline as a deliverable 1:1 type.
+        let local = full("server@example.com/notify");
+        let occ = MucOccupancy::empty();
+        let mut msg = chat_with_body("server@example.com/notify", "alice@example.com/web", "ping");
+        msg.type_ = MessageType::Headline;
+        let outcome = run(&local, &occ, &mut msg);
+        match extract_event(&outcome) {
+            OutboundEvent::RouteToConnection { jid, .. } => {
+                assert_eq!(jid.to_string(), "alice@example.com/web");
             }
             other => panic!("expected RouteToConnection, got {other:?}"),
         }

@@ -30,14 +30,14 @@
 //!   inbox just as it suppresses archive — the same privacy hint
 //!   applies.
 
+use crate::inbox::runtime::should_project_message;
 use crate::protocol::event::{OutboundEvent, StanzaIdRef, StanzaIdValue};
 use crate::protocol::message_context::MessageContext;
 use crate::protocol::session_state::Locality;
 use crate::protocol::traits::{HandlerOutcome, MessageHandler};
-use crate::xep::xep0334::HintCarrier;
 use crate::xep::xep0359::extract_stanza_id_by;
 use jid::BareJid;
-use xmpp_parsers::message::{Body, Message, MessageType};
+use xmpp_parsers::message::{Message, MessageType};
 
 /// Inbox projection handler.
 #[derive(Debug, Default, Clone, Copy)]
@@ -54,7 +54,16 @@ impl MessageHandler for InboxHandler {
         }
 
         let owner = ctx.full_jid.to_bare();
-        let local_archive_id = extract_stanza_id_by(message, &owner.to_string());
+        // Skip projection if CanonicalizeHandler hasn't stamped under
+        // the local archive — an empty XEP-0359 stanza-id is not a
+        // meaningful reference and would create inbox rows clients
+        // cannot pivot to via MAM. The Q2(a) order guarantees
+        // CanonicalizeHandler runs before InboxHandler for chat/normal,
+        // but a misconfigured dispatcher (e.g. tests building a custom
+        // chain) shouldn't silently produce malformed projections.
+        let Some(local_archive_id) = extract_stanza_id_by(message, &owner.to_string()) else {
+            return HandlerOutcome::Continue(Vec::new());
+        };
         let from_bare = message.from.as_ref().map(|j| j.to_bare());
         let to_bare = message.to.as_ref().map(|j| j.to_bare());
 
@@ -85,7 +94,7 @@ fn build(
     owner: BareJid,
     peer: BareJid,
     message: &Message,
-    local_archive_id: &Option<String>,
+    local_archive_id: &str,
 ) -> OutboundEvent {
     OutboundEvent::ProjectInbox {
         owner: owner.clone(),
@@ -93,27 +102,28 @@ fn build(
         message: Box::new(message.clone()),
         archive_ref: StanzaIdRef {
             by: owner,
-            id: StanzaIdValue::new(local_archive_id.clone().unwrap_or_default()),
+            id: StanzaIdValue::new(local_archive_id),
         },
     }
 }
 
+/// Eligibility for inbox projection.
+///
+/// Mirrors [`crate::inbox::runtime::should_project_message`] so the
+/// handler-driven projection matches the legacy runtime path bit-for-bit
+/// — bodyless-but-meaningful messages (XEP-0444 reactions,
+/// XEP-0424 retractions, XEP-0425 moderation, XEP-0447 file sharing,
+/// XEP-0510 stickers, encrypted SFS) keep projecting and no
+/// integration-test coverage regresses on cutover.
+///
+/// Type guards: skip groupchat (room chain owns it in PR6), skip
+/// error, skip headline (pure notification, not conversational).
 fn is_eligible(message: &Message) -> bool {
     match message.type_ {
         MessageType::Chat | MessageType::Normal => {}
         MessageType::Groupchat | MessageType::Error | MessageType::Headline => return false,
     }
-    if message.should_skip_archive() {
-        return false;
-    }
-    has_substantive_body(message)
-}
-
-fn has_substantive_body(message: &Message) -> bool {
-    message
-        .bodies
-        .values()
-        .any(|Body(text)| !text.trim().is_empty())
+    should_project_message(message)
 }
 
 #[cfg(test)]
@@ -229,6 +239,8 @@ mod tests {
         // with owner == peer.
         let local = full("alice@example.com/web");
         let mut msg = chat_with_body("alice@example.com/web", "alice@example.com/web", "echo");
+        msg.payloads
+            .push(build_stanza_id_element("alice-self", "alice@example.com"));
         let outcome = run(&local, &mut msg);
         let inbox = extract_inbox(&outcome);
         assert_eq!(inbox.len(), 1);
@@ -280,16 +292,35 @@ mod tests {
     }
 
     #[test]
-    fn inbox_archive_ref_empty_when_canonicalize_did_not_stamp() {
-        // Defensive case: if the canonicalize handler is somehow not
-        // registered, inbox still emits — with an empty archive_ref id.
-        // The interpreter can decide what to do with that (likely
-        // fall back to message.id).
+    fn inbox_skips_projection_when_canonicalize_did_not_stamp() {
+        // An empty XEP-0359 stanza-id is not a meaningful reference;
+        // skip projection rather than emit a malformed event. The
+        // dispatcher's Q2(a) order guarantees CanonicalizeHandler runs
+        // first in production — this test guards against test
+        // fixtures or misconfigured chains producing garbage rows.
         let local = full("alice@example.com/web");
         let mut msg = chat_with_body("alice@example.com/web", "bob@example.com", "hi");
         let outcome = run(&local, &mut msg);
+        assert!(extract_inbox(&outcome).is_empty());
+    }
+
+    #[test]
+    fn inbox_projects_bodyless_retraction_when_stamped() {
+        // Bodyless-but-meaningful: a XEP-0424 retraction has no body
+        // but updates the conversation summary. The legacy
+        // `inbox::runtime::should_project_message` includes this
+        // case; this handler must too.
+        let local = full("alice@example.com/web");
+        let mut msg = Message::new(Some("bob@example.com".parse().expect("jid")));
+        msg.from = Some("alice@example.com/web".parse().expect("jid"));
+        msg.type_ = MessageType::Chat;
+        msg.payloads
+            .push(crate::xep::xep0424::build_retract_element("stanza-X"));
+        msg.payloads
+            .push(build_stanza_id_element("alice-A1", "alice@example.com"));
+        let outcome = run(&local, &mut msg);
         let inbox = extract_inbox(&outcome);
         assert_eq!(inbox.len(), 1);
-        assert_eq!(inbox[0].2, "");
+        assert_eq!(inbox[0].2, "alice-A1");
     }
 }

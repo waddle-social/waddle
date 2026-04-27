@@ -24,15 +24,18 @@
 //!   self-message is redundant under the §6 rules.
 //! - **Neither** → no-op.
 //!
-//! `ctx.carbons` must be `Enabled` for the local connection — when
-//! carbons are off, the handler is a no-op even for §6-eligible
-//! messages. The interpreter is responsible for picking the
-//! per-connection enabled state of *other* resources during fan-out.
+//! `ctx.carbons` is intentionally **not** consulted here. XEP-0280
+//! enable/disable is per *receiving* resource: a message originating
+//! from a desktop with carbons disabled should still be carboned to a
+//! mobile that has them enabled. The handler therefore unconditionally
+//! emits [`SendCarbons`] for §6-eligible messages and lets the
+//! interpreter consult per-target enable flags at fan-out time
+//! (mirrors the legacy `waddle-server` behaviour).
 
 use crate::carbons::should_copy_message;
 use crate::protocol::event::{CarbonKind, OutboundEvent};
 use crate::protocol::message_context::MessageContext;
-use crate::protocol::session_state::{CarbonsState, Locality};
+use crate::protocol::session_state::Locality;
 use crate::protocol::traits::{HandlerOutcome, MessageHandler};
 use xmpp_parsers::message::Message;
 
@@ -46,12 +49,10 @@ impl MessageHandler for CarbonsMessageHandler {
     }
 
     fn handle(&self, message: &mut Message, ctx: &MessageContext<'_>) -> HandlerOutcome {
-        // Fast-skip if carbons are not enabled for the local connection
-        // — we only carbon for the local user's own other resources.
-        if !matches!(ctx.carbons, CarbonsState::Enabled) {
-            return HandlerOutcome::Continue(Vec::new());
-        }
         // §6 suppression — single chokepoint via the shared helper.
+        // Per-target enable/disable filtering is the interpreter's job;
+        // we don't gate on `ctx.carbons` because carbons enable is a
+        // *receiver* property, not a *sender* property.
         if !should_copy_message(message) {
             return HandlerOutcome::Continue(Vec::new());
         }
@@ -82,7 +83,7 @@ mod tests {
     use super::*;
     use crate::protocol::id_gen::FixedIdGenerator;
     use crate::protocol::message_context::MessageContextEnv;
-    use crate::protocol::session_state::{Blocklist, MucOccupancy};
+    use crate::protocol::session_state::{Blocklist, CarbonsState, MucOccupancy};
     use crate::xep::xep0334::Hint;
     use jid::{BareJid, FullJid};
     use minidom::Element;
@@ -134,15 +135,23 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Carbons disabled — no fan-out
+    // ctx.carbons is per-receiver, not per-sender — handler emits
+    // regardless of the originating connection's flag
     // -----------------------------------------------------------------
 
     #[test]
-    fn xep_0280_handler_is_noop_when_carbons_disabled() {
+    fn xep_0280_handler_emits_even_when_originating_connection_carbons_disabled() {
+        // The originating connection's carbons-enable flag does not
+        // gate fan-out — XEP-0280 enable/disable is per *receiving*
+        // resource. Desktop with carbons off may still want carbons
+        // delivered to mobile with carbons on. The interpreter
+        // filters per-target at fan-out time.
         let local = full("alice@example.com/web");
         let mut msg = chat_with_body("alice@example.com/web", "bob@example.com", "hi");
         let outcome = run(&local, CarbonsState::Disabled, &mut msg);
-        assert!(extract_carbons(&outcome).is_empty());
+        let carbons = extract_carbons(&outcome);
+        assert_eq!(carbons.len(), 1);
+        assert_eq!(carbons[0].1, CarbonKind::Sent);
     }
 
     // -----------------------------------------------------------------
