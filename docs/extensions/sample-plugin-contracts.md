@@ -3,7 +3,9 @@
 This is the implementation companion to
 `docs/superpowers/plans/2026-04-27-waddle-extension-xmpp-protocol.md`.
 It intentionally defines exactly five sample plugins for the first extension
-framework slice.
+framework slice. The deployed `github-enricher` module is a legacy
+compatibility bridge for GitHub link enrichment, not one of these sample
+plugins.
 
 ## Shared Contract
 
@@ -36,9 +38,12 @@ Every sample plugin fixture should include these manifest fields:
 }
 ```
 
-The installer must reject mutable tags, missing digests, digest mismatches,
-unknown capabilities, unknown permissions, and payload namespaces outside the
-five entries below.
+For these sample plugin fixtures, the installer must reject mutable tags,
+missing digests, digest mismatches, unknown capabilities, unknown permissions,
+and payload namespaces outside the five entries below. The legacy
+`github-enricher` compatibility module remains separately deployable by
+digest-pinned GitOps configuration until these sample plugins have published
+artifacts.
 
 ## Plugin Matrix
 

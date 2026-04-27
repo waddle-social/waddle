@@ -204,7 +204,6 @@ impl From<wit_types::EmbedElement> for EmbedElement {
             element_name: value.element_name,
             namespace: value.namespace,
             attributes: value.attributes,
-            children: value.children,
         }
     }
 }

@@ -11,7 +11,6 @@ interface types {
         element-name: string,
         namespace: string,
         attributes: list<tuple<string, string>>,
-        children: list<string>,
     }
 
     record enrichment-result {

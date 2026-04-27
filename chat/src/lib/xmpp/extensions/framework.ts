@@ -79,6 +79,24 @@ const definitions: DefinitionOptions[] = [
     namespace: NS_DECISION_POLLS_1,
   },
   {
+    aliases: [{ path: "message.waddleExtensions.enrichments.payload.views", multiple: true }],
+    element: "view",
+    fields: {
+      id: attribute("id"),
+      title: attribute("title"),
+    },
+    namespace: NS_WADDLE_EXTENSION_1,
+  },
+  {
+    aliases: [{ path: "message.waddleExtensions.enrichments.payload.views.textBlocks", multiple: true }],
+    element: "text",
+    fields: {
+      style: attribute("style"),
+      text: text(),
+    },
+    namespace: NS_WADDLE_EXTENSION_1,
+  },
+  {
     aliases: [{ path: "message.waddleExtensions.enrichments.launches", multiple: true }],
     element: "launch",
     fields: {

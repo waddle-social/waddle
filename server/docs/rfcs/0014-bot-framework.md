@@ -1,5 +1,11 @@
 # RFC-0014: Bot/Assistant Framework
 
+> Status note: the authoritative extension framework wire shapes, sample plugin
+> names, namespaces, and capability strings now live in
+> `docs/superpowers/plans/2026-04-27-waddle-extension-xmpp-protocol.md` and
+> `docs/extensions/sample-plugin-contracts.md`. Any older sample identifiers in
+> this RFC are historical design notes and must not be used for implementation.
+
 ## Summary
 
 The bot framework enables third-party bots and AI assistants to participate in Waddles, providing automation, integrations, and interactive experiences.

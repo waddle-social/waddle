@@ -288,6 +288,7 @@ export function useDmMessaging(
     markup?: LiveDmMessage["markup"],
     references?: LiveDmMessage["references"],
     githubEmbeds?: LiveDmMessage["githubEmbeds"],
+    extensionAnnotations?: LiveDmMessage["extensionAnnotations"],
   ) {
     messages.value = messages.value.map((m) => {
       if (!matchMessageId(m, replacesId) || !isSameDmCorrectionSender(m, correctionFromJid)) return m;
@@ -315,6 +316,11 @@ export function useDmMessaging(
       } else {
         delete updated.githubEmbeds;
       }
+      if (extensionAnnotations && extensionAnnotations.length > 0) {
+        updated.extensionAnnotations = extensionAnnotations;
+      } else {
+        delete updated.extensionAnnotations;
+      }
       return updated;
     });
   }
@@ -333,6 +339,7 @@ export function useDmMessaging(
       markup?: LiveDmMessage["markup"];
       references?: LiveDmMessage["references"];
       githubEmbeds?: LiveDmMessage["githubEmbeds"];
+      extensionAnnotations?: LiveDmMessage["extensionAnnotations"];
     }[] = [];
     for (const msg of mamResults) {
       if (msg._reactionTarget && msg._reactionEmojis) {
@@ -347,6 +354,7 @@ export function useDmMessaging(
           markup: msg.markup,
           references: msg.references,
           githubEmbeds: msg.githubEmbeds,
+          extensionAnnotations: msg.extensionAnnotations,
         });
       } else if (
         msg.body
@@ -384,6 +392,11 @@ export function useDmMessaging(
         else delete target.githubEmbeds;
       } else {
         delete target.githubEmbeds;
+      }
+      if (update.extensionAnnotations && update.extensionAnnotations.length > 0) {
+        target.extensionAnnotations = update.extensionAnnotations;
+      } else {
+        delete target.extensionAnnotations;
       }
     }
     for (const retractsId of retractionUpdates) {
@@ -831,7 +844,15 @@ export function useDmMessaging(
       return;
     }
     if (msg.replacesId) {
-      applyCorrection(msg.replacesId, msg.body, msg.fromJid, msg.markup, msg.references, msg.githubEmbeds);
+      applyCorrection(
+        msg.replacesId,
+        msg.body,
+        msg.fromJid,
+        msg.markup,
+        msg.references,
+        msg.githubEmbeds,
+        msg.extensionAnnotations,
+      );
       return;
     }
     mergeLiveMessage(

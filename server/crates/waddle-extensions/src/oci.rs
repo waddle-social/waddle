@@ -7,6 +7,7 @@ use oci_client::client::{Client, ClientConfig, ClientProtocol, ImageLayer};
 use oci_client::manifest::OciDescriptor;
 use oci_client::secrets::RegistryAuth;
 use oci_client::Reference;
+use sha2::{Digest, Sha256};
 use tracing::{info, warn};
 
 use crate::config::ExtensionModuleConfig;
@@ -64,6 +65,7 @@ impl OciExtensionPuller {
                             cached.display()
                         )
                     })?;
+                    let _ = std::fs::remove_file(cached_wasm_digest_path(&cached));
                 }
             }
         }
@@ -132,6 +134,8 @@ impl OciExtensionPuller {
         validate_wasm_layer(&module.name, layer)?;
         write_wasm_atomically(&cached, &layer.data)
             .with_context(|| format!("failed to write cached extension {}", cached.display()))?;
+        write_cached_wasm_digest(&cached, layer.data.as_ref())?;
+        validate_cached_wasm_file(&module.name, &cached)?;
 
         info!(
             extension = %module.name,
@@ -205,7 +209,38 @@ fn validate_wasm_bytes(module_name: &str, bytes: &[u8]) -> Result<()> {
 fn validate_cached_wasm_file(module_name: &str, path: &Path) -> Result<()> {
     let bytes = std::fs::read(path)
         .with_context(|| format!("failed to read cached extension {}", path.display()))?;
-    validate_wasm_bytes(module_name, &bytes)
+    validate_wasm_bytes(module_name, &bytes)?;
+    validate_cached_wasm_digest(module_name, path, &bytes)
+}
+
+fn validate_cached_wasm_digest(module_name: &str, path: &Path, bytes: &[u8]) -> Result<()> {
+    let digest_path = cached_wasm_digest_path(path);
+    let expected = std::fs::read_to_string(&digest_path).with_context(|| {
+        format!(
+            "failed to read cached extension digest {}",
+            digest_path.display()
+        )
+    })?;
+    let actual = format!("sha256:{:x}", Sha256::digest(bytes));
+    if actual != expected.trim() {
+        bail!("extension {module_name} wasm digest mismatch: expected {expected}, got {actual}");
+    }
+    Ok(())
+}
+
+fn write_cached_wasm_digest(path: &Path, bytes: &[u8]) -> Result<()> {
+    let digest_path = cached_wasm_digest_path(path);
+    let digest = format!("sha256:{:x}\n", Sha256::digest(bytes));
+    std::fs::write(&digest_path, digest).with_context(|| {
+        format!(
+            "failed to write cached extension digest {}",
+            digest_path.display()
+        )
+    })
+}
+
+fn cached_wasm_digest_path(path: &Path) -> PathBuf {
+    path.with_extension("wasm.sha256")
 }
 
 fn validate_cache_component<'a>(field: &str, value: &'a str) -> Result<&'a str> {
@@ -511,5 +546,38 @@ mod tests {
         assert!(path.ends_with(
             "github-enricher/sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.wasm"
         ));
+    }
+
+    #[test]
+    fn cached_wasm_requires_matching_sidecar_digest() {
+        let root = std::env::temp_dir().join(format!(
+            "waddle-extension-cache-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).expect("cache test dir");
+        let wasm_path = root.join("github-enricher.wasm");
+        let wasm = [0, 97, 115, 109, 0x0d, 0, 1, 0];
+        std::fs::write(&wasm_path, wasm).expect("wasm fixture");
+
+        let missing = validate_cached_wasm_file("github-enricher", &wasm_path)
+            .expect_err("cache without digest sidecar should be rejected");
+        assert!(missing
+            .to_string()
+            .contains("failed to read cached extension digest"));
+
+        std::fs::write(
+            cached_wasm_digest_path(&wasm_path),
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n",
+        )
+        .expect("digest sidecar");
+        let mismatch = validate_cached_wasm_file("github-enricher", &wasm_path)
+            .expect_err("cache with wrong digest sidecar should be rejected");
+        assert!(mismatch.to_string().contains("wasm digest mismatch"));
+
+        write_cached_wasm_digest(&wasm_path, &wasm).expect("valid digest sidecar");
+        validate_cached_wasm_file("github-enricher", &wasm_path)
+            .expect("cache with matching digest sidecar should validate");
+
+        let _ = std::fs::remove_dir_all(root);
     }
 }
