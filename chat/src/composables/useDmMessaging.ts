@@ -2,6 +2,7 @@ import { computed, nextTick, ref, watch, type Ref } from "vue";
 import {
   inferredFileDisposition,
   type DeliveryStatus,
+  type ExtensionAnnotationAction,
   type MarkupSpan,
   type MessageReference,
   type TimelineMessage,
@@ -54,7 +55,6 @@ function fromLiveDmMessage(
   if (msg.markup?.length) tm.markup = msg.markup;
   if (msg.references?.length) tm.references = msg.references;
   if (msg.sharedFiles && msg.sharedFiles.length > 0) tm.sharedFiles = msg.sharedFiles;
-  if (msg.githubEmbeds && msg.githubEmbeds.length > 0) tm.githubEmbeds = msg.githubEmbeds;
   if (msg.extensionAnnotations && msg.extensionAnnotations.length > 0) tm.extensionAnnotations = msg.extensionAnnotations;
   if (msg.isSticker) tm.isSticker = true;
   if (msg.replyTo) {
@@ -287,7 +287,6 @@ export function useDmMessaging(
     correctionFromJid: string,
     markup?: LiveDmMessage["markup"],
     references?: LiveDmMessage["references"],
-    githubEmbeds?: LiveDmMessage["githubEmbeds"],
     extensionAnnotations?: LiveDmMessage["extensionAnnotations"],
   ) {
     messages.value = messages.value.map((m) => {
@@ -302,19 +301,6 @@ export function useDmMessaging(
         updated.references = references;
       } else {
         delete updated.references;
-      }
-      if (githubEmbeds && githubEmbeds.length > 0) {
-        updated.githubEmbeds = githubEmbeds;
-      } else if (m.githubEmbeds?.length) {
-        const newBodyText = newBody.trim();
-        const surviving = m.githubEmbeds.filter((e) => newBodyText.includes(e.url));
-        if (surviving.length > 0) {
-          updated.githubEmbeds = surviving;
-        } else {
-          delete updated.githubEmbeds;
-        }
-      } else {
-        delete updated.githubEmbeds;
       }
       if (extensionAnnotations && extensionAnnotations.length > 0) {
         updated.extensionAnnotations = extensionAnnotations;
@@ -743,6 +729,27 @@ export function useDmMessaging(
     }
   }
 
+  async function invokeExtensionAction(action: ExtensionAnnotationAction) {
+    const client = xmppClient.value;
+    if (!client) {
+      const error = new Error("XMPP session is not ready.");
+      actionError.value = normalizeError(error);
+      throw error;
+    }
+    if (!action.launch) {
+      const error = new Error("This extension action is missing launch metadata.");
+      actionError.value = normalizeError(error);
+      throw error;
+    }
+    clearActionError();
+    try {
+      return await client.invokeExtensionLaunch(action.launch);
+    } catch (e) {
+      actionError.value = normalizeError(e);
+      throw e;
+    }
+  }
+
   async function editMessage(messageId: string, newBody: string, markup?: MarkupSpan[], references?: MessageReference[]) {
     if (!xmppClient.value || !activePeerJid.value || !newBody.trim()) return;
     const message = findMessageById(messages.value, messageId);
@@ -922,6 +929,7 @@ export function useDmMessaging(
     uploadProgress,
     editMessage,
     retractMessage,
+    invokeExtensionAction,
     toggleReaction,
     markDisplayed,
     notifyComposing,

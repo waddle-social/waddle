@@ -6,12 +6,13 @@ use thiserror::Error;
 use xmpp_parsers::message::Message;
 
 pub const FRAMEWORK_NAMESPACE: &str = "urn:waddle:extension:1";
-pub const LINKS_TASK_BOARD_NAMESPACE: &str = "urn:waddle:links-task-board:1";
-pub const PUB_QUIZ_NAMESPACE: &str = "urn:waddle:pub-quiz:1";
-pub const AI_CHATBOT_NAMESPACE: &str = "urn:waddle:ai-chatbot:1";
-pub const AI_ASSISTANT_CANVAS_NAMESPACE: &str = "urn:waddle:ai-assistant-canvas:1";
-pub const DECISION_POLLS_NAMESPACE: &str = "urn:waddle:decision-polls:1";
 pub const INVOKE_COMMAND_NODE: &str = "urn:waddle:extension:1:invoke";
+
+const MAX_XML_DEPTH: usize = 16;
+const MAX_XML_ATTRIBUTES: usize = 64;
+const MAX_XML_CHILDREN: usize = 256;
+const MAX_XML_TEXT_BYTES: usize = 16 * 1024;
+const MAX_XML_SERIALIZED_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum FrameworkTypeError {
@@ -19,10 +20,12 @@ pub enum FrameworkTypeError {
     Empty { field: &'static str },
     #[error("plugin id {0:?} must use lowercase ASCII letters, digits, and hyphens")]
     InvalidPluginId(String),
-    #[error("namespace {0:?} must be Waddle-owned and start with urn:waddle:")]
-    NonWaddleNamespace(String),
+    #[error("namespace {0:?} must be an absolute non-official namespace URI/URN")]
+    InvalidPayloadNamespace(String),
     #[error("official XMPP namespace {0:?} cannot carry Waddle extension semantics")]
     OfficialNamespace(String),
+    #[error("framework namespace {0:?} is reserved for Waddle control payloads")]
+    ReservedFrameworkNamespace(String),
     #[error("command node {0:?} must be under urn:waddle:extension:1")]
     InvalidCommandNode(String),
     #[error("sha256 digest {0:?} must be exactly 64 hexadecimal characters")]
@@ -33,6 +36,17 @@ pub enum FrameworkTypeError {
     ArtifactDigestMismatch { uri: String, sha256: String },
     #[error("body range end {end} must be greater than start {start}")]
     InvalidBodyRange { start: u32, end: u32 },
+    #[error("XML local name {0:?} is invalid")]
+    InvalidXmlName(String),
+    #[error("XML element has duplicate attribute {namespace:?}:{local_name}")]
+    DuplicateXmlAttribute {
+        namespace: Option<String>,
+        local_name: String,
+    },
+    #[error("XML namespaced attributes are not supported by the framework serializer")]
+    NamespacedXmlAttributeUnsupported,
+    #[error("XML payload exceeds {limit}")]
+    XmlLimitExceeded { limit: &'static str },
 }
 
 macro_rules! typed_non_empty_string {
@@ -74,26 +88,17 @@ macro_rules! typed_non_empty_string {
 }
 
 typed_non_empty_string!(ActionId, "action id");
-typed_non_empty_string!(BoardCardId, "board card id");
-typed_non_empty_string!(BoardColumnId, "board column id");
-typed_non_empty_string!(BoardId, "board id");
-typed_non_empty_string!(CanvasId, "canvas id");
-typed_non_empty_string!(CollectionId, "collection id");
+typed_non_empty_string!(CommandSessionId, "command session id");
 typed_non_empty_string!(DisplayText, "display text");
 typed_non_empty_string!(EnrichmentId, "enrichment id");
-typed_non_empty_string!(GameId, "game id");
 typed_non_empty_string!(ListId, "list id");
 typed_non_empty_string!(ListItemId, "list item id");
 typed_non_empty_string!(LaunchId, "launch id");
+typed_non_empty_string!(LaunchToken, "launch token");
 typed_non_empty_string!(MediaType, "media type");
-typed_non_empty_string!(OptionId, "option id");
 typed_non_empty_string!(PluginVersion, "plugin version");
-typed_non_empty_string!(ProfileId, "profile id");
 typed_non_empty_string!(PubSubItemId, "pubsub item id");
 typed_non_empty_string!(PubSubNode, "pubsub node");
-typed_non_empty_string!(QuestionId, "question id");
-typed_non_empty_string!(RenderId, "render id");
-typed_non_empty_string!(RunId, "run id");
 typed_non_empty_string!(StanzaId, "stanza id");
 typed_non_empty_string!(Timestamp, "timestamp");
 typed_non_empty_string!(UiActionId, "ui action id");
@@ -131,6 +136,10 @@ impl PluginId {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    pub fn into_string(self) -> String {
+        self.0
+    }
 }
 
 impl AsRef<str> for PluginId {
@@ -154,10 +163,13 @@ impl PayloadNamespace {
         if is_official_namespace(&value) {
             return Err(FrameworkTypeError::OfficialNamespace(value));
         }
-        if value.starts_with("urn:waddle:") {
+        if value == FRAMEWORK_NAMESPACE {
+            return Err(FrameworkTypeError::ReservedFrameworkNamespace(value));
+        }
+        if value.starts_with("urn:") || value.starts_with("https://") {
             Ok(Self(value))
         } else {
-            Err(FrameworkTypeError::NonWaddleNamespace(value))
+            Err(FrameworkTypeError::InvalidPayloadNamespace(value))
         }
     }
 
@@ -165,28 +177,12 @@ impl PayloadNamespace {
         Self(FRAMEWORK_NAMESPACE.to_string())
     }
 
-    pub fn links_task_board() -> Self {
-        Self(LINKS_TASK_BOARD_NAMESPACE.to_string())
-    }
-
-    pub fn pub_quiz() -> Self {
-        Self(PUB_QUIZ_NAMESPACE.to_string())
-    }
-
-    pub fn ai_chatbot() -> Self {
-        Self(AI_CHATBOT_NAMESPACE.to_string())
-    }
-
-    pub fn ai_assistant_canvas() -> Self {
-        Self(AI_ASSISTANT_CANVAS_NAMESPACE.to_string())
-    }
-
-    pub fn decision_polls() -> Self {
-        Self(DECISION_POLLS_NAMESPACE.to_string())
-    }
-
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    pub fn into_string(self) -> String {
+        self.0
     }
 }
 
@@ -225,6 +221,10 @@ impl CommandNode {
 
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    pub fn into_string(self) -> String {
+        self.0
     }
 }
 
@@ -340,89 +340,6 @@ impl BodyRange {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
-pub enum SamplePlugin {
-    LinksTaskBoard,
-    PubQuiz,
-    AiChatbot,
-    AiAssistantCanvas,
-    DecisionPolls,
-}
-
-impl SamplePlugin {
-    pub const ALL: [Self; 5] = [
-        Self::LinksTaskBoard,
-        Self::PubQuiz,
-        Self::AiChatbot,
-        Self::AiAssistantCanvas,
-        Self::DecisionPolls,
-    ];
-
-    pub fn id(self) -> PluginId {
-        PluginId::new(match self {
-            Self::LinksTaskBoard => "links-task-board",
-            Self::PubQuiz => "pub-quiz",
-            Self::AiChatbot => "ai-chatbot",
-            Self::AiAssistantCanvas => "ai-assistant-canvas",
-            Self::DecisionPolls => "decision-polls",
-        })
-        .expect("sample plugin ids are valid")
-    }
-
-    pub fn payload_namespace(self) -> PayloadNamespace {
-        match self {
-            Self::LinksTaskBoard => PayloadNamespace::links_task_board(),
-            Self::PubQuiz => PayloadNamespace::pub_quiz(),
-            Self::AiChatbot => PayloadNamespace::ai_chatbot(),
-            Self::AiAssistantCanvas => PayloadNamespace::ai_assistant_canvas(),
-            Self::DecisionPolls => PayloadNamespace::decision_polls(),
-        }
-    }
-
-    pub fn capabilities(self) -> Vec<ExtensionCapability> {
-        match self {
-            Self::LinksTaskBoard => vec![
-                ExtensionCapability::MessageEnrich,
-                ExtensionCapability::Launch,
-                ExtensionCapability::Commands,
-                ExtensionCapability::PubSubPublish,
-                ExtensionCapability::ArtifactReference,
-                ExtensionCapability::UiDeclarative,
-            ],
-            Self::PubQuiz => vec![
-                ExtensionCapability::Commands,
-                ExtensionCapability::Launch,
-                ExtensionCapability::BotRespond,
-                ExtensionCapability::PubSubPublish,
-                ExtensionCapability::UiDeclarative,
-            ],
-            Self::AiChatbot => vec![
-                ExtensionCapability::Commands,
-                ExtensionCapability::Launch,
-                ExtensionCapability::BotRespond,
-                ExtensionCapability::MessageObserve,
-                ExtensionCapability::AiInvoke,
-            ],
-            Self::AiAssistantCanvas => vec![
-                ExtensionCapability::Commands,
-                ExtensionCapability::Launch,
-                ExtensionCapability::BotRespond,
-                ExtensionCapability::ArtifactReference,
-                ExtensionCapability::AiInvoke,
-                ExtensionCapability::PubSubPublish,
-                ExtensionCapability::UiDeclarative,
-            ],
-            Self::DecisionPolls => vec![
-                ExtensionCapability::Commands,
-                ExtensionCapability::Launch,
-                ExtensionCapability::BotRespond,
-                ExtensionCapability::PubSubPublish,
-                ExtensionCapability::UiDeclarative,
-            ],
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum ExtensionCapability {
     #[serde(rename = "message.enrich")]
     MessageEnrich,
@@ -432,16 +349,10 @@ pub enum ExtensionCapability {
     Commands,
     #[serde(rename = "launch")]
     Launch,
-    #[serde(rename = "bot.respond")]
-    BotRespond,
-    #[serde(rename = "pubsub.read")]
-    PubSubRead,
     #[serde(rename = "pubsub.publish")]
     PubSubPublish,
     #[serde(rename = "artifact.reference")]
     ArtifactReference,
-    #[serde(rename = "ai.invoke")]
-    AiInvoke,
     #[serde(rename = "ui.declarative")]
     UiDeclarative,
 }
@@ -453,11 +364,8 @@ impl ExtensionCapability {
             Self::MessageObserve => "message.observe",
             Self::Commands => "commands",
             Self::Launch => "launch",
-            Self::BotRespond => "bot.respond",
-            Self::PubSubRead => "pubsub.read",
             Self::PubSubPublish => "pubsub.publish",
             Self::ArtifactReference => "artifact.reference",
-            Self::AiInvoke => "ai.invoke",
             Self::UiDeclarative => "ui.declarative",
         }
     }
@@ -468,15 +376,90 @@ pub struct ExtensionManifest {
     pub id: PluginId,
     pub name: DisplayText,
     pub version: PluginVersion,
-    pub payload_namespace: PayloadNamespace,
+    pub payloads: Vec<PayloadRule>,
     pub capabilities: Vec<ExtensionCapability>,
+    pub commands: Vec<CommandDescriptor>,
+    pub pubsub_nodes: Vec<PubSubNode>,
     pub artifact: Option<ArtifactReference>,
-    pub bot: Option<BotIdentity>,
+}
+
+impl ExtensionManifest {
+    pub fn declares_capability(&self, capability: ExtensionCapability) -> bool {
+        self.capabilities.contains(&capability)
+    }
+
+    pub fn declares_payload(&self, surface: PayloadSurface, payload: &ExtensionPayload) -> bool {
+        self.payloads.iter().any(|rule| {
+            rule.surface == surface
+                && rule.root.namespace == payload.namespace
+                && rule.root.namespace == payload.root.namespace
+                && rule.root.local_name == payload.root.local_name
+        })
+    }
+
+    pub fn declares_command(&self, node: &CommandNode) -> bool {
+        self.commands.iter().any(|command| command.node == *node)
+    }
+
+    pub fn declares_pubsub_node(&self, node: &PubSubNode) -> bool {
+        self.pubsub_nodes
+            .iter()
+            .any(|declared| pubsub_node_pattern_matches(declared.as_str(), node.as_str()))
+    }
+}
+
+fn pubsub_node_pattern_matches(pattern: &str, candidate: &str) -> bool {
+    if pattern == candidate {
+        return true;
+    }
+    let pattern_parts: Vec<_> = pattern.split(':').collect();
+    let candidate_parts: Vec<_> = candidate.split(':').collect();
+    pattern_parts.len() == candidate_parts.len()
+        && pattern_parts
+            .iter()
+            .zip(candidate_parts)
+            .all(|(pattern, candidate)| {
+                (pattern.starts_with('{') && pattern.ends_with('}') && !candidate.is_empty())
+                    || *pattern == candidate
+            })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct BotIdentity {
-    pub localpart: PluginId,
+pub struct CommandDescriptor {
+    pub node: CommandNode,
+    pub name: DisplayText,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum PayloadSurface {
+    MessageEnrichment,
+    LaunchPayload,
+    PubSubItem,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct PayloadRoot {
+    pub namespace: PayloadNamespace,
+    pub local_name: String,
+}
+
+impl PayloadRoot {
+    pub fn new(
+        namespace: PayloadNamespace,
+        local_name: impl Into<String>,
+    ) -> Result<Self, FrameworkTypeError> {
+        let local_name = validate_xml_local_name(local_name.into())?;
+        Ok(Self {
+            namespace,
+            local_name,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct PayloadRule {
+    pub surface: PayloadSurface,
+    pub root: PayloadRoot,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -511,20 +494,16 @@ pub struct MessageEnrichment {
     pub payload_namespace: PayloadNamespace,
     pub created_at: Timestamp,
     pub source: Option<MessageSource>,
-    pub payloads: Vec<FrameworkPayload>,
+    pub ui: Vec<UiView>,
+    pub payloads: Vec<ExtensionPayload>,
     pub launches: Vec<LaunchDescriptor>,
 }
 
 impl MessageEnrichment {
     pub fn payloads_match_declared_namespace(&self) -> bool {
         self.payloads.iter().all(|payload| {
-            let namespace = payload.payload_namespace();
-            namespace == FRAMEWORK_NAMESPACE || namespace == self.payload_namespace.as_str()
-        }) && self.launches.iter().all(|launch| {
-            launch.payload.as_ref().is_none_or(|payload| {
-                let namespace = payload.payload_namespace();
-                namespace == FRAMEWORK_NAMESPACE || namespace == self.payload_namespace.as_str()
-            })
+            payload.namespace == self.payload_namespace
+                && payload.root.namespace == payload.namespace
         })
     }
 
@@ -540,8 +519,17 @@ impl MessageEnrichment {
         }
         if !self.payloads.is_empty() {
             let mut payload_builder = Element::builder("payload", FRAMEWORK_NAMESPACE);
+            for view in &self.ui {
+                payload_builder = payload_builder.append(view.to_minidom());
+            }
             for payload in &self.payloads {
                 payload_builder = payload_builder.append(payload.to_minidom());
+            }
+            builder = builder.append(payload_builder.build());
+        } else if !self.ui.is_empty() {
+            let mut payload_builder = Element::builder("payload", FRAMEWORK_NAMESPACE);
+            for view in &self.ui {
+                payload_builder = payload_builder.append(view.to_minidom());
             }
             builder = builder.append(payload_builder.build());
         }
@@ -596,8 +584,10 @@ pub struct LaunchDescriptor {
     pub command_node: CommandNode,
     pub label: DisplayText,
     pub context: LaunchContext,
-    pub payload: Option<LaunchPayload>,
+    pub payloads: Vec<ExtensionPayload>,
+    pub fallback: Option<UiView>,
     pub expires_at: Option<Timestamp>,
+    pub token: Option<LaunchToken>,
 }
 
 impl LaunchDescriptor {
@@ -609,89 +599,27 @@ impl LaunchDescriptor {
             .attr("command-node", self.command_node.as_str())
             .attr("label", self.label.as_str())
             .append(self.context.to_minidom());
+        if !self.payloads.is_empty() {
+            let payloads = self.payloads.iter().fold(
+                Element::builder("payload", FRAMEWORK_NAMESPACE),
+                |builder, payload| builder.append(payload.to_minidom()),
+            );
+            builder = builder.append(payloads.build());
+        }
         if let Some(expires_at) = &self.expires_at {
             builder = builder.attr("expires-at", expires_at.as_str());
         }
-        if let Some(payload) = &self.payload {
+        if let Some(token) = &self.token {
+            builder = builder.attr("token", token.as_str());
+        }
+        if let Some(fallback) = &self.fallback {
             builder = builder.append(
-                Element::builder("payload", FRAMEWORK_NAMESPACE)
-                    .append(payload.to_minidom())
+                Element::builder("fallback", FRAMEWORK_NAMESPACE)
+                    .append(fallback.to_minidom())
                     .build(),
             );
         }
         builder.build()
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub enum FrameworkPayload {
-    DeclarativeUi(UiView),
-    List(ListView),
-    Board(BoardView),
-    LinkPreview(LinkPreview),
-    QuizQuestion(QuizQuestion),
-    AssistantAnswer(AssistantAnswer),
-    CanvasRender(CanvasRender),
-    DecisionPoll(DecisionPoll),
-}
-
-impl FrameworkPayload {
-    pub fn payload_namespace(&self) -> &'static str {
-        match self {
-            Self::DeclarativeUi(_) | Self::List(_) | Self::Board(_) => FRAMEWORK_NAMESPACE,
-            Self::LinkPreview(_) => LINKS_TASK_BOARD_NAMESPACE,
-            Self::QuizQuestion(_) => PUB_QUIZ_NAMESPACE,
-            Self::AssistantAnswer(_) => AI_CHATBOT_NAMESPACE,
-            Self::CanvasRender(_) => AI_ASSISTANT_CANVAS_NAMESPACE,
-            Self::DecisionPoll(_) => DECISION_POLLS_NAMESPACE,
-        }
-    }
-
-    pub fn to_minidom(&self) -> Element {
-        match self {
-            Self::DeclarativeUi(view) => view.to_minidom(),
-            Self::List(list) => list.to_minidom(),
-            Self::Board(board) => board.to_minidom(),
-            Self::LinkPreview(link) => link.to_minidom(),
-            Self::QuizQuestion(question) => question.to_minidom(),
-            Self::AssistantAnswer(answer) => answer.to_minidom(),
-            Self::CanvasRender(canvas) => canvas.to_minidom(),
-            Self::DecisionPoll(poll) => poll.to_minidom(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub enum LaunchPayload {
-    SaveLink(SaveLinkRequest),
-    QuizAnswer(QuizAnswerRequest),
-    AskFollowup(ChatFollowupRequest),
-    CanvasRemix(CanvasRemixRequest),
-    PollVote(PollVoteRequest),
-    UiAction(UiActionRequest),
-}
-
-impl LaunchPayload {
-    pub fn payload_namespace(&self) -> &'static str {
-        match self {
-            Self::SaveLink(_) => LINKS_TASK_BOARD_NAMESPACE,
-            Self::QuizAnswer(_) => PUB_QUIZ_NAMESPACE,
-            Self::AskFollowup(_) => AI_CHATBOT_NAMESPACE,
-            Self::CanvasRemix(_) => AI_ASSISTANT_CANVAS_NAMESPACE,
-            Self::PollVote(_) => DECISION_POLLS_NAMESPACE,
-            Self::UiAction(_) => FRAMEWORK_NAMESPACE,
-        }
-    }
-
-    pub fn to_minidom(&self) -> Element {
-        match self {
-            Self::SaveLink(request) => request.to_minidom(),
-            Self::QuizAnswer(request) => request.to_minidom(),
-            Self::AskFollowup(request) => request.to_minidom(),
-            Self::CanvasRemix(request) => request.to_minidom(),
-            Self::PollVote(request) => request.to_minidom(),
-            Self::UiAction(request) => request.to_minidom(),
-        }
     }
 }
 
@@ -721,6 +649,8 @@ pub enum UiBlock {
     Text(TextBlock),
     Image(ImageBlock),
     Action(ActionBlock),
+    Form(DataForm),
+    List(ListView),
 }
 
 impl UiBlock {
@@ -729,6 +659,8 @@ impl UiBlock {
             Self::Text(block) => block.to_minidom(),
             Self::Image(block) => block.to_minidom(),
             Self::Action(block) => block.to_minidom(),
+            Self::Form(form) => form.to_minidom(),
+            Self::List(list) => list.to_minidom(),
         }
     }
 }
@@ -799,6 +731,152 @@ impl ActionBlock {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "kebab-case")]
+pub enum DataFormType {
+    Form,
+    Submit,
+    Cancel,
+    Result,
+}
+
+impl DataFormType {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Form => "form",
+            Self::Submit => "submit",
+            Self::Cancel => "cancel",
+            Self::Result => "result",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "kebab-case")]
+pub enum FormFieldType {
+    Boolean,
+    Fixed,
+    Hidden,
+    JidMulti,
+    JidSingle,
+    ListMulti,
+    ListSingle,
+    TextMulti,
+    TextPrivate,
+    TextSingle,
+}
+
+impl FormFieldType {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Boolean => "boolean",
+            Self::Fixed => "fixed",
+            Self::Hidden => "hidden",
+            Self::JidMulti => "jid-multi",
+            Self::JidSingle => "jid-single",
+            Self::ListMulti => "list-multi",
+            Self::ListSingle => "list-single",
+            Self::TextMulti => "text-multi",
+            Self::TextPrivate => "text-private",
+            Self::TextSingle => "text-single",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FormFieldOption {
+    pub label: Option<DisplayText>,
+    pub value: DataFormValue,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DataFormField {
+    pub name: UiActionId,
+    pub field_type: FormFieldType,
+    pub label: Option<DisplayText>,
+    pub required: bool,
+    pub values: Vec<DataFormValue>,
+    pub options: Vec<FormFieldOption>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DataFormValue(String);
+
+impl DataFormValue {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DataForm {
+    pub form_type: DataFormType,
+    pub title: Option<DisplayText>,
+    pub instructions: Vec<DisplayText>,
+    pub fields: Vec<DataFormField>,
+}
+
+impl DataForm {
+    fn to_minidom(&self) -> Element {
+        let mut builder =
+            Element::builder("form", FRAMEWORK_NAMESPACE).attr("type", self.form_type.as_str());
+        if let Some(title) = &self.title {
+            builder = builder.attr("title", title.as_str());
+        }
+        for instruction in &self.instructions {
+            builder = builder.append(
+                Element::builder("instructions", FRAMEWORK_NAMESPACE)
+                    .append(instruction.as_str().to_string())
+                    .build(),
+            );
+        }
+        for field in &self.fields {
+            let mut field_builder = Element::builder("field", FRAMEWORK_NAMESPACE)
+                .attr("var", field.name.as_str())
+                .attr("type", field.field_type.as_str());
+            if let Some(label) = &field.label {
+                field_builder = field_builder.attr("label", label.as_str());
+            }
+            if field.required {
+                field_builder =
+                    field_builder.append(Element::builder("required", FRAMEWORK_NAMESPACE).build());
+            }
+            for value in &field.values {
+                field_builder = field_builder.append(
+                    Element::builder("value", FRAMEWORK_NAMESPACE)
+                        .append(value.as_str().to_string())
+                        .build(),
+                );
+            }
+            for option in &field.options {
+                let mut option_builder = Element::builder("option", FRAMEWORK_NAMESPACE);
+                if let Some(label) = &option.label {
+                    option_builder = option_builder.attr("label", label.as_str());
+                }
+                field_builder = field_builder.append(
+                    option_builder
+                        .append(
+                            Element::builder("value", FRAMEWORK_NAMESPACE)
+                                .append(option.value.as_str().to_string())
+                                .build(),
+                        )
+                        .build(),
+                );
+            }
+            builder = builder.append(field_builder.build());
+        }
+        builder.build()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ListView {
     pub id: ListId,
@@ -848,377 +926,160 @@ impl ListItem {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct BoardView {
-    pub id: BoardId,
-    pub title: Option<DisplayText>,
-    pub columns: Vec<BoardColumn>,
-}
-
-impl BoardView {
-    fn to_minidom(&self) -> Element {
-        let mut builder =
-            Element::builder("board", FRAMEWORK_NAMESPACE).attr("id", self.id.as_str());
-        if let Some(title) = &self.title {
-            builder = builder.attr("title", title.as_str());
-        }
-        for column in &self.columns {
-            builder = builder.append(column.to_minidom());
-        }
-        builder.build()
-    }
+pub struct XmlAttribute {
+    pub namespace: Option<PayloadNamespace>,
+    pub local_name: String,
+    pub value: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct BoardColumn {
-    pub id: BoardColumnId,
-    pub title: DisplayText,
-    pub cards: Vec<BoardCard>,
-}
-
-impl BoardColumn {
-    fn to_minidom(&self) -> Element {
-        let mut builder = Element::builder("column", FRAMEWORK_NAMESPACE)
-            .attr("id", self.id.as_str())
-            .attr("title", self.title.as_str());
-        for card in &self.cards {
-            builder = builder.append(card.to_minidom());
-        }
-        builder.build()
-    }
+pub enum XmlNode {
+    Element(XmlElement),
+    Text(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct BoardCard {
-    pub id: BoardCardId,
-    pub title: DisplayText,
-    pub body: Option<DisplayText>,
-    pub labels: Vec<DisplayText>,
-    pub launch_id: Option<LaunchId>,
+pub struct XmlElement {
+    pub namespace: PayloadNamespace,
+    pub local_name: String,
+    pub attributes: Vec<XmlAttribute>,
+    pub children: Vec<XmlNode>,
 }
 
-impl BoardCard {
-    fn to_minidom(&self) -> Element {
-        let mut builder = Element::builder("card", FRAMEWORK_NAMESPACE)
-            .attr("id", self.id.as_str())
-            .attr("title", self.title.as_str());
-        if let Some(body) = &self.body {
-            builder = builder.append(
-                Element::builder("body", FRAMEWORK_NAMESPACE)
-                    .append(body.as_str().to_string())
-                    .build(),
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExtensionPayload {
+    pub namespace: PayloadNamespace,
+    pub root: XmlElement,
+}
+
+impl ExtensionPayload {
+    pub fn new(namespace: PayloadNamespace, root: XmlElement) -> Result<Self, FrameworkTypeError> {
+        if root.namespace != namespace {
+            return Err(FrameworkTypeError::InvalidPayloadNamespace(
+                root.namespace.as_str().to_string(),
+            ));
+        }
+        root.validate(0)?;
+        let payload = Self { namespace, root };
+        if payload.serialized_len() > MAX_XML_SERIALIZED_BYTES {
+            return Err(FrameworkTypeError::XmlLimitExceeded {
+                limit: "serialized payload bytes",
+            });
+        }
+        Ok(payload)
+    }
+
+    pub fn to_minidom(&self) -> Element {
+        self.root.to_minidom()
+    }
+
+    fn serialized_len(&self) -> usize {
+        self.root.serialized_len()
+    }
+}
+
+impl XmlElement {
+    pub fn new(
+        namespace: PayloadNamespace,
+        local_name: impl Into<String>,
+        attributes: Vec<XmlAttribute>,
+        children: Vec<XmlNode>,
+    ) -> Result<Self, FrameworkTypeError> {
+        let element = Self {
+            namespace,
+            local_name: validate_xml_local_name(local_name.into())?,
+            attributes,
+            children,
+        };
+        element.validate(0)?;
+        Ok(element)
+    }
+
+    fn validate(&self, depth: usize) -> Result<(), FrameworkTypeError> {
+        if depth > MAX_XML_DEPTH {
+            return Err(FrameworkTypeError::XmlLimitExceeded { limit: "depth" });
+        }
+        validate_xml_local_name(self.local_name.clone())?;
+        if self.attributes.len() > MAX_XML_ATTRIBUTES {
+            return Err(FrameworkTypeError::XmlLimitExceeded {
+                limit: "attributes per element",
+            });
+        }
+        if self.children.len() > MAX_XML_CHILDREN {
+            return Err(FrameworkTypeError::XmlLimitExceeded {
+                limit: "children per element",
+            });
+        }
+        let mut seen = std::collections::HashSet::new();
+        for attr in &self.attributes {
+            validate_xml_local_name(attr.local_name.clone())?;
+            if attr.namespace.is_some() {
+                return Err(FrameworkTypeError::NamespacedXmlAttributeUnsupported);
+            }
+            let key = (
+                attr.namespace.as_ref().map(|ns| ns.as_str().to_string()),
+                attr.local_name.clone(),
             );
-        }
-        if let Some(launch_id) = &self.launch_id {
-            builder = builder.attr("launch-id", launch_id.as_str());
-        }
-        for label in &self.labels {
-            builder = builder.append(
-                Element::builder("label", FRAMEWORK_NAMESPACE)
-                    .append(label.as_str().to_string())
-                    .build(),
-            );
-        }
-        builder.build()
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct LinkPreview {
-    pub url: Url,
-    pub title: Option<DisplayText>,
-    pub site: Option<DisplayText>,
-    pub image: Option<ArtifactReference>,
-}
-
-impl LinkPreview {
-    fn to_minidom(&self) -> Element {
-        let mut builder =
-            Element::builder("link", LINKS_TASK_BOARD_NAMESPACE).attr("url", self.url.as_str());
-        if let Some(title) = &self.title {
-            builder = builder.attr("title", title.as_str());
-        }
-        if let Some(site) = &self.site {
-            builder = builder.attr("site", site.as_str());
-        }
-        if let Some(image) = &self.image {
-            builder = builder
-                .attr("image", image.uri.as_str())
-                .attr("image-sha256", image.sha256.as_str());
-            if let Some(media_type) = &image.media_type {
-                builder = builder.attr("media-type", media_type.as_str());
+            if !seen.insert(key.clone()) {
+                return Err(FrameworkTypeError::DuplicateXmlAttribute {
+                    namespace: key.0,
+                    local_name: key.1,
+                });
             }
         }
-        builder.build()
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct QuizQuestion {
-    pub game_id: GameId,
-    pub question_id: QuestionId,
-    pub prompt: DisplayText,
-    pub choices: Vec<QuizChoice>,
-    pub closes_at: Option<Timestamp>,
-}
-
-impl QuizQuestion {
-    fn to_minidom(&self) -> Element {
-        let mut builder = Element::builder("quiz-question", PUB_QUIZ_NAMESPACE)
-            .attr("game-id", self.game_id.as_str())
-            .attr("question-id", self.question_id.as_str());
-        if let Some(closes_at) = &self.closes_at {
-            builder = builder.attr("closes-at", closes_at.as_str());
+        for child in &self.children {
+            match child {
+                XmlNode::Element(element) => element.validate(depth + 1)?,
+                XmlNode::Text(text) if text.len() > MAX_XML_TEXT_BYTES => {
+                    return Err(FrameworkTypeError::XmlLimitExceeded {
+                        limit: "text node bytes",
+                    });
+                }
+                XmlNode::Text(_) => {}
+            }
         }
-        builder = builder.append(
-            Element::builder("prompt", PUB_QUIZ_NAMESPACE)
-                .append(self.prompt.as_str().to_string())
-                .build(),
-        );
-        for choice in &self.choices {
-            builder = builder.append(choice.to_minidom());
+        Ok(())
+    }
+
+    fn to_minidom(&self) -> Element {
+        let mut builder = Element::builder(self.local_name.as_str(), self.namespace.as_str());
+        for attr in &self.attributes {
+            debug_assert!(attr.namespace.is_none());
+            builder = builder.attr(attr.local_name.as_str(), attr.value.as_str());
+        }
+        for child in &self.children {
+            builder = match child {
+                XmlNode::Element(element) => builder.append(element.to_minidom()),
+                XmlNode::Text(text) => builder.append(text.clone()),
+            };
         }
         builder.build()
     }
-}
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct QuizChoice {
-    pub id: OptionId,
-    pub label: DisplayText,
-}
-
-impl QuizChoice {
-    fn to_minidom(&self) -> Element {
-        Element::builder("choice", PUB_QUIZ_NAMESPACE)
-            .attr("id", self.id.as_str())
-            .append(self.label.as_str().to_string())
-            .build()
-    }
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[serde(rename_all = "kebab-case")]
-pub enum AssistantContextSource {
-    Message,
-    Reply,
-    Mam,
-    Direct,
-}
-
-impl AssistantContextSource {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Message => "message",
-            Self::Reply => "reply",
-            Self::Mam => "mam",
-            Self::Direct => "direct",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AssistantAnswer {
-    pub run_id: RunId,
-    pub profile: ProfileId,
-    pub context_source: AssistantContextSource,
-    pub summary: Option<DisplayText>,
-}
-
-impl AssistantAnswer {
-    fn to_minidom(&self) -> Element {
-        let mut builder = Element::builder("assistant-answer", AI_CHATBOT_NAMESPACE)
-            .attr("run-id", self.run_id.as_str())
-            .attr("profile", self.profile.as_str())
-            .attr("context-source", self.context_source.as_str());
-        if let Some(summary) = &self.summary {
-            builder = builder.append(
-                Element::builder("summary", AI_CHATBOT_NAMESPACE)
-                    .append(summary.as_str().to_string())
-                    .build(),
-            );
-        }
-        builder.build()
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct CanvasRender {
-    pub canvas_id: CanvasId,
-    pub render_id: RenderId,
-    pub artifact: ArtifactReference,
-}
-
-impl CanvasRender {
-    fn to_minidom(&self) -> Element {
-        self.artifact
-            .add_attrs(
-                Element::builder("canvas", AI_ASSISTANT_CANVAS_NAMESPACE)
-                    .attr("canvas-id", self.canvas_id.as_str())
-                    .attr("render-id", self.render_id.as_str()),
-            )
-            .build()
-    }
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[serde(rename_all = "kebab-case")]
-pub enum PollMode {
-    Single,
-    Multiple,
-}
-
-impl PollMode {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Single => "single",
-            Self::Multiple => "multiple",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct DecisionPoll {
-    pub poll_id: OptionId,
-    pub mode: PollMode,
-    pub question: DisplayText,
-    pub options: Vec<PollOption>,
-    pub closes_at: Option<Timestamp>,
-}
-
-impl DecisionPoll {
-    fn to_minidom(&self) -> Element {
-        let mut builder = Element::builder("poll", DECISION_POLLS_NAMESPACE)
-            .attr("poll-id", self.poll_id.as_str())
-            .attr("mode", self.mode.as_str());
-        if let Some(closes_at) = &self.closes_at {
-            builder = builder.attr("closes-at", closes_at.as_str());
-        }
-        builder = builder.append(
-            Element::builder("question", DECISION_POLLS_NAMESPACE)
-                .append(self.question.as_str().to_string())
-                .build(),
-        );
-        for option in &self.options {
-            builder = builder.append(option.to_minidom());
-        }
-        builder.build()
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PollOption {
-    pub id: OptionId,
-    pub label: DisplayText,
-}
-
-impl PollOption {
-    fn to_minidom(&self) -> Element {
-        Element::builder("option", DECISION_POLLS_NAMESPACE)
-            .attr("id", self.id.as_str())
-            .append(self.label.as_str().to_string())
-            .build()
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SaveLinkRequest {
-    pub url: Url,
-    pub collection_id: Option<CollectionId>,
-}
-
-impl SaveLinkRequest {
-    fn to_minidom(&self) -> Element {
-        let mut builder = Element::builder("save-link", LINKS_TASK_BOARD_NAMESPACE)
-            .attr("url", self.url.as_str());
-        if let Some(collection_id) = &self.collection_id {
-            builder = builder.attr("collection-id", collection_id.as_str());
-        }
-        builder.build()
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct QuizAnswerRequest {
-    pub game_id: GameId,
-    pub question_id: QuestionId,
-    pub choice_id: OptionId,
-}
-
-impl QuizAnswerRequest {
-    fn to_minidom(&self) -> Element {
-        Element::builder("answer-request", PUB_QUIZ_NAMESPACE)
-            .attr("game-id", self.game_id.as_str())
-            .attr("question-id", self.question_id.as_str())
-            .attr("choice-id", self.choice_id.as_str())
-            .build()
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ChatFollowupRequest {
-    pub run_id: Option<RunId>,
-    pub question: Option<DisplayText>,
-}
-
-impl ChatFollowupRequest {
-    fn to_minidom(&self) -> Element {
-        let mut builder = Element::builder("followup-request", AI_CHATBOT_NAMESPACE);
-        if let Some(run_id) = &self.run_id {
-            builder = builder.attr("run-id", run_id.as_str());
-        }
-        if let Some(question) = &self.question {
-            builder = builder.append(
-                Element::builder("question", AI_CHATBOT_NAMESPACE)
-                    .append(question.as_str().to_string())
-                    .build(),
-            );
-        }
-        builder.build()
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct CanvasRemixRequest {
-    pub canvas_id: CanvasId,
-    pub render_id: RenderId,
-}
-
-impl CanvasRemixRequest {
-    fn to_minidom(&self) -> Element {
-        Element::builder("remix-source", AI_ASSISTANT_CANVAS_NAMESPACE)
-            .attr("canvas-id", self.canvas_id.as_str())
-            .attr("render-id", self.render_id.as_str())
-            .build()
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PollVoteRequest {
-    pub poll_id: OptionId,
-    pub option_id: OptionId,
-}
-
-impl PollVoteRequest {
-    fn to_minidom(&self) -> Element {
-        Element::builder("vote-request", DECISION_POLLS_NAMESPACE)
-            .attr("poll-id", self.poll_id.as_str())
-            .attr("option-id", self.option_id.as_str())
-            .build()
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct UiActionRequest {
-    pub view_id: UiViewId,
-    pub action_id: UiActionId,
-}
-
-impl UiActionRequest {
-    fn to_minidom(&self) -> Element {
-        Element::builder("ui-action", FRAMEWORK_NAMESPACE)
-            .attr("view-id", self.view_id.as_str())
-            .attr("action-id", self.action_id.as_str())
-            .build()
+    fn serialized_len(&self) -> usize {
+        self.local_name.len()
+            + self.namespace.as_str().len()
+            + self
+                .attributes
+                .iter()
+                .map(|attr| {
+                    attr.local_name.len()
+                        + attr.value.len()
+                        + attr
+                            .namespace
+                            .as_ref()
+                            .map(|ns| ns.as_str().len())
+                            .unwrap_or(0)
+                })
+                .sum::<usize>()
+            + self
+                .children
+                .iter()
+                .map(|child| match child {
+                    XmlNode::Element(element) => element.serialized_len(),
+                    XmlNode::Text(text) => text.len(),
+                })
+                .sum::<usize>()
     }
 }
 
@@ -1227,7 +1088,6 @@ pub enum ExtensionEvent {
     MessageHook(MessageHook),
     Command(CommandInvocation),
     Launch(LaunchInvocation),
-    PubSub(PubSubNotification),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1264,28 +1124,49 @@ impl TryFrom<DetectedLink> for LinkTarget {
 pub struct CommandInvocation {
     pub waddle_id: WaddleId,
     pub command_node: CommandNode,
+    pub session_id: Option<CommandSessionId>,
+    pub action: Option<CommandAction>,
+    pub form: Option<DataForm>,
     pub fields: Vec<FormFieldValue>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FormFieldValue {
     pub name: UiActionId,
-    pub values: Vec<DisplayText>,
+    pub values: Vec<DataFormValue>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "kebab-case")]
+pub enum CommandAction {
+    Execute,
+    Next,
+    Prev,
+    Complete,
+    Cancel,
+}
+
+impl CommandAction {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Execute => "execute",
+            Self::Next => "next",
+            Self::Prev => "prev",
+            Self::Complete => "complete",
+            Self::Cancel => "cancel",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LaunchInvocation {
     pub context: LaunchContext,
+    pub requester: WaddleId,
     pub launch_id: LaunchId,
-    pub payload: Option<LaunchPayload>,
+    pub session_id: Option<CommandSessionId>,
+    pub action: Option<CommandAction>,
+    pub form: Option<DataForm>,
     pub fields: Vec<FormFieldValue>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PubSubNotification {
-    pub node: PubSubNode,
-    pub item_id: PubSubItemId,
-    pub payload: FrameworkPayload,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1297,23 +1178,54 @@ pub struct ExtensionResponse {
 pub enum ExtensionEffect {
     EnrichMessage(ExtensionEnvelope),
     PublishPubSub(PubSubPublish),
-    SendBotMessage(BotMessage),
     ReferenceArtifact(ArtifactReference),
+    HostWarning(DisplayText),
     Noop,
+}
+
+impl ExtensionEffect {
+    pub fn validate_for_manifest(&self, manifest: &ExtensionManifest) -> bool {
+        match self {
+            Self::EnrichMessage(envelope) => envelope.enrichments.iter().all(|enrichment| {
+                enrichment.plugin == manifest.id
+                    && enrichment.capability == ExtensionCapability::MessageEnrich
+                    && manifest.declares_capability(ExtensionCapability::MessageEnrich)
+                    && enrichment.payloads_match_declared_namespace()
+                    && enrichment.payloads.iter().all(|payload| {
+                        manifest.declares_payload(PayloadSurface::MessageEnrichment, payload)
+                    })
+                    && enrichment.launches.iter().all(|launch| {
+                        launch.plugin == manifest.id
+                            && manifest.declares_capability(ExtensionCapability::Launch)
+                            && launch.payloads.iter().all(|payload| {
+                                payload.namespace == payload.root.namespace
+                                    && manifest
+                                        .declares_payload(PayloadSurface::LaunchPayload, payload)
+                            })
+                            && (launch.command_node == CommandNode::invoke()
+                                || manifest.declares_command(&launch.command_node))
+                    })
+            }),
+            Self::PublishPubSub(publish) => {
+                manifest.declares_capability(ExtensionCapability::PubSubPublish)
+                    && manifest.declares_pubsub_node(&publish.node)
+                    && publish.payload.namespace == publish.payload.root.namespace
+                    && manifest.declares_payload(PayloadSurface::PubSubItem, &publish.payload)
+            }
+            Self::ReferenceArtifact(_) => {
+                manifest.declares_capability(ExtensionCapability::ArtifactReference)
+            }
+            Self::HostWarning(_) => true,
+            Self::Noop => true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PubSubPublish {
     pub node: PubSubNode,
-    pub item_id: PubSubItemId,
-    pub payload: FrameworkPayload,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct BotMessage {
-    pub body: DisplayText,
-    pub payloads: Vec<FrameworkPayload>,
-    pub launches: Vec<LaunchDescriptor>,
+    pub item_id: Option<PubSubItemId>,
+    pub payload: ExtensionPayload,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1321,45 +1233,6 @@ pub struct DetectedLink {
     pub url: String,
     pub start_offset: u32,
     pub end_offset: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct EmbedElement {
-    pub element_name: String,
-    pub namespace: String,
-    #[serde(default)]
-    pub attributes: Vec<(String, String)>,
-}
-
-impl EmbedElement {
-    pub fn to_minidom(&self) -> Element {
-        let mut builder = Element::builder(self.element_name.as_str(), self.namespace.as_str());
-        for (key, value) in &self.attributes {
-            builder = builder.attr(key.as_str(), value.as_str());
-        }
-
-        builder.build()
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct FeatureAdvertisement {
-    pub namespace: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ExtensionInfo {
-    pub name: String,
-    pub namespace: String,
-    pub version: String,
-    #[serde(default)]
-    pub features: Vec<FeatureAdvertisement>,
-}
-
-pub fn message_has_embed_for_namespaces(msg: &Message, namespaces: &[String]) -> bool {
-    msg.payloads
-        .iter()
-        .any(|payload| namespaces.iter().any(|ns| payload.ns() == ns.as_str()))
 }
 
 pub fn message_has_framework_envelope(msg: &Message) -> bool {
@@ -1372,4 +1245,19 @@ pub fn is_official_namespace(value: &str) -> bool {
     value.starts_with("urn:xmpp:")
         || value.starts_with("jabber:")
         || value.starts_with("http://jabber.org/")
+}
+
+fn validate_xml_local_name(value: String) -> Result<String, FrameworkTypeError> {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return Err(FrameworkTypeError::InvalidXmlName(value));
+    };
+    let valid_start = first == '_' || first.is_ascii_alphabetic();
+    let valid_rest =
+        chars.all(|ch| ch == '_' || ch == '-' || ch == '.' || ch.is_ascii_alphanumeric());
+    if valid_start && valid_rest && !value.contains(':') && !value.starts_with("xml") {
+        Ok(value)
+    } else {
+        Err(FrameworkTypeError::InvalidXmlName(value))
+    }
 }

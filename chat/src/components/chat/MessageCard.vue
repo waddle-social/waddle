@@ -11,13 +11,13 @@ import {
   CornerDownRight,
   MessageSquare,
   Lock,
-  Github,
-  GitPullRequest,
-  CircleDot,
+  AlertCircle,
   Bot,
+  CheckCircle2,
   ClipboardList,
   Gamepad2,
   LayoutDashboard,
+  LoaderCircle,
   Sparkles,
 } from "lucide-vue-next";
 import type { JSONContent } from "@tiptap/core";
@@ -27,10 +27,8 @@ import EditorBubbleToolbar from "@/components/chat/EditorBubbleToolbar.vue";
 import EmojiPicker from "@/components/chat/EmojiPicker.vue";
 import ImageLightbox from "@/components/ui/ImageLightbox.vue";
 import {
+  extensionCardDetails,
   renderStyledBody,
-  githubEmbedDisplayTitle,
-  githubEmbedKindLabel,
-  githubEmbedNumber,
   extensionSurfaceLabel,
   isAudioFile,
   isImageUrl,
@@ -38,6 +36,7 @@ import {
   isPdfFile,
   isVideoFile,
   type TimelineMessage,
+  type ExtensionAnnotationAction,
   type MarkupSpan,
   type MessageReference,
   type TimelineSharedFile,
@@ -46,6 +45,7 @@ import { mentionMatchesUsername } from "@/lib/mentions";
 import { richMessageToTiptap, tiptapToRichMessage } from "@/lib/rich-message";
 import { applyShikiToCodeBlocks } from "@/lib/shiki";
 import { decryptEncryptedAttachment, encryptedAttachmentKey, hasEncryptedAttachmentMetadata } from "@/lib/xmpp/encrypted-attachments";
+import { extensionCommandOutcome } from "@/lib/xmpp/extension-commands";
 import type { OccupantHat, OccupantPresence } from "@/lib/xmpp-client";
 import { formatTimeOfDay } from "@/composables/useMessaging";
 import { useLongPress } from "@/composables/useLongPress";
@@ -92,6 +92,7 @@ const props = defineProps<{
   hideThreadChip?: boolean;
   grouped?: boolean;
   reactionModeSelected?: boolean;
+  invokeExtensionAction?: (action: ExtensionAnnotationAction) => Promise<unknown>;
 }>();
 
 const emit = defineEmits<{
@@ -126,9 +127,53 @@ const setStyledBodyRef = (el: HTMLDivElement | null) => {
   styledBodyRef.value = el;
 };
 const sharedFiles = computed(() => props.message.sharedFiles ?? []);
-const githubEmbeds = computed(() => props.message.githubEmbeds ?? []);
 const extensionAnnotations = computed(() => props.message.extensionAnnotations ?? []);
 const isGif = computed(() => sharedFiles.value.length === 0 && isImageUrl(props.message.body));
+type ExtensionInvokeState = "loading" | "success" | "warning" | "error";
+const extensionInvokeStates = ref<Record<string, { state: ExtensionInvokeState; detail?: string }>>({});
+
+function extensionActionKey(annotationId: string, action: ExtensionAnnotationAction): string {
+  return `${annotationId}:${action.launch?.id ?? action.route}:${action.label}`;
+}
+
+function extensionActionState(annotationId: string, action: ExtensionAnnotationAction) {
+  return extensionInvokeStates.value[extensionActionKey(annotationId, action)];
+}
+
+function setExtensionActionState(
+  annotationId: string,
+  action: ExtensionAnnotationAction,
+  state?: { state: ExtensionInvokeState; detail?: string },
+) {
+  const next = { ...extensionInvokeStates.value };
+  const key = extensionActionKey(annotationId, action);
+  if (state) next[key] = state;
+  else delete next[key];
+  extensionInvokeStates.value = next;
+}
+
+async function invokeExtension(annotationId: string, action: ExtensionAnnotationAction) {
+  if (!props.invokeExtensionAction || !action.launch) {
+    setExtensionActionState(annotationId, action, { state: "error", detail: "This action cannot be invoked." });
+    return;
+  }
+  setExtensionActionState(annotationId, action, { state: "loading" });
+  try {
+    const result = await props.invokeExtensionAction(action);
+    const outcome = extensionCommandOutcome(result);
+    setExtensionActionState(annotationId, action, outcome);
+    setTimeout(() => {
+      if (extensionActionState(annotationId, action)?.state === "success") {
+        setExtensionActionState(annotationId, action);
+      }
+    }, 2500);
+  } catch (error) {
+    setExtensionActionState(annotationId, action, {
+      state: "error",
+      detail: error instanceof Error ? error.message : "Action failed.",
+    });
+  }
+}
 
 const imageAttachments = computed(() =>
   sharedFiles.value.filter((f) =>
@@ -822,33 +867,6 @@ watch(
         />
       </div>
 
-      <!-- GitHub enrichment cards -->
-      <div v-if="githubEmbeds.length > 0" class="flex flex-col gap-2">
-        <a
-          v-for="(embed, index) in githubEmbeds"
-          :key="`${embed.kind}:${embed.url}:${index}`"
-          :href="embed.url"
-          target="_blank"
-          rel="noopener noreferrer"
-          class="chat-github-card group/github flex min-w-0 items-center gap-3 rounded-lg border border-border bg-muted/30 p-3 text-left transition-colors hover:bg-muted/55 focus-visible:outline-2 focus-visible:outline-primary"
-          :title="embed.url"
-        >
-          <span class="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-md bg-background text-foreground ring-1 ring-border">
-            <Github v-if="embed.kind === 'repo'" class="h-4 w-4" aria-hidden="true" />
-            <CircleDot v-else-if="embed.kind === 'issue'" class="h-4 w-4 text-primary/80" aria-hidden="true" />
-            <GitPullRequest v-else class="h-4 w-4 text-success" aria-hidden="true" />
-          </span>
-          <span class="min-w-0 flex-1">
-            <span class="type-section-label block text-muted-foreground">
-              GitHub {{ githubEmbedKindLabel(embed.kind) }}<template v-if="githubEmbedNumber(embed)"> #{{ githubEmbedNumber(embed) }}</template>
-            </span>
-            <span class="type-control block truncate text-foreground">
-              {{ githubEmbedDisplayTitle(embed) }}
-            </span>
-          </span>
-        </a>
-      </div>
-
       <!-- Waddle extension annotations -->
       <div v-if="extensionAnnotations.length > 0" class="flex flex-col gap-2">
         <div
@@ -873,14 +891,59 @@ watch(
             <span v-if="annotation.summary" class="type-caption mt-1 block text-muted-foreground">
               {{ annotation.summary }}
             </span>
+            <dl
+              v-if="extensionCardDetails(annotation).length > 0"
+              class="mt-2 grid min-w-0 grid-cols-[max-content_minmax(0,1fr)] gap-x-2 gap-y-1"
+            >
+              <template
+                v-for="detail in extensionCardDetails(annotation)"
+                :key="`${annotation.annotationId}:${detail.label}:${detail.value}`"
+              >
+                <dt class="type-meta text-muted-foreground/70">{{ detail.label }}</dt>
+                <dd class="type-caption min-w-0 truncate text-foreground/85" :title="detail.value">{{ detail.value }}</dd>
+              </template>
+            </dl>
             <span v-if="annotation.actions.length > 0" class="mt-2 flex flex-wrap gap-2">
-              <span
+              <button
                 v-for="action in annotation.actions"
                 :key="`${annotation.annotationId}:${action.route}:${action.label}`"
-                class="type-caption rounded-md border border-border bg-background px-2 py-1 text-foreground"
+                type="button"
+                class="type-caption inline-flex min-h-7 items-center gap-1.5 rounded-md border border-border bg-background px-2 py-1 text-foreground transition-colors hover:bg-muted disabled:cursor-not-allowed disabled:opacity-60"
+                :disabled="extensionActionState(annotation.annotationId, action)?.state === 'loading' || !action.launch"
+                :title="extensionActionState(annotation.annotationId, action)?.detail ?? action.launch?.commandNode ?? action.label"
+                @click.stop="invokeExtension(annotation.annotationId, action)"
               >
+                <LoaderCircle
+                  v-if="extensionActionState(annotation.annotationId, action)?.state === 'loading'"
+                  class="h-3.5 w-3.5 animate-spin text-primary/80"
+                  aria-hidden="true"
+                />
+                <CheckCircle2
+                  v-else-if="extensionActionState(annotation.annotationId, action)?.state === 'success'"
+                  class="h-3.5 w-3.5 text-success"
+                  aria-hidden="true"
+                />
+                <AlertCircle
+                  v-else-if="extensionActionState(annotation.annotationId, action)?.state === 'warning'"
+                  class="h-3.5 w-3.5 text-warning"
+                  aria-hidden="true"
+                />
+                <AlertCircle
+                  v-else-if="extensionActionState(annotation.annotationId, action)?.state === 'error'"
+                  class="h-3.5 w-3.5 text-destructive"
+                  aria-hidden="true"
+                />
                 {{ action.label }}
-              </span>
+              </button>
+            </span>
+            <span
+              v-for="action in annotation.actions"
+              :key="`${annotation.annotationId}:${action.route}:state`"
+              v-show="extensionActionState(annotation.annotationId, action)?.detail && extensionActionState(annotation.annotationId, action)?.state !== 'success'"
+              class="type-caption mt-1 block"
+              :class="extensionActionState(annotation.annotationId, action)?.state === 'error' ? 'text-destructive' : 'text-warning'"
+            >
+              {{ extensionActionState(annotation.annotationId, action)?.detail }}
             </span>
           </span>
         </div>

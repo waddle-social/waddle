@@ -20,6 +20,7 @@ spec:
     image:
       repository: ghcr.io/waddle-social/waddle
       tag: main
+      digest: ""
     config:
       baseUrl: https://xmpp.waddle.social
       corsOrigins: https://waddle.chat,http://localhost:4321
@@ -78,38 +79,12 @@ spec:
       storageClassName: openebs-mayastor
     service:
       type: ClusterIP
-    # Extension modules: non-sensitive fields only.
-    # Sensitive credentials (e.g. GitHub App private key) are delivered as
-    # file mounts and referenced below via config_secret_files.
+    # Extension modules are enabled by release automation only after their OCI
+    # WASM artifacts have been pushed and digest-pinned.
     extensions:
-      enabled: true
+      enabled: false
       cacheDir: /var/lib/waddle/extensions
-      modules:
-        - name: github-enricher
-          registry: ghcr.io/waddle-social/waddle/extensions/github-enricher
-          digest: sha256:dd6d041972b9924bf06cf264453f36b2bdc1571b2bd7196cb954b853635ff488
-          namespace: urn:waddle:github:0
-          config: {}
-          # Maps extension config key -> absolute path of the mounted secret file.
-          # The server reads each file at startup and injects its content into the
-          # module config under the corresponding key (see ExtensionModuleConfig).
-          config_secret_files:
-            github_token: /etc/waddle/secrets/github-app/private-key
-
-    # CSI-style secret file mount: the ExternalSecret "waddle-github-app-credentials"
-    # syncs the GitHub App private key from 1Password into a Kubernetes Secret.
-    # Mounting it as a read-only file avoids injecting the key as a plain env var.
-    extraVolumes:
-      - name: github-app-credentials
-        secret:
-          secretName: waddle-github-app-credentials
-          # Group-readable for fsGroup 1000; still read-only and least-privilege.
-          defaultMode: 0440
-
-    extraVolumeMounts:
-      - name: github-app-credentials
-        mountPath: /etc/waddle/secrets/github-app
-        readOnly: true
+      modules: []
 
     secret:
       create: true

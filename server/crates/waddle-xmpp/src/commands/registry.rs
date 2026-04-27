@@ -204,10 +204,21 @@ impl CommandRegistry {
         };
 
         // Handle session creation/retrieval
-        let action = ctx.command.action.unwrap_or(Action::Execute);
+        let action = ctx.command.action.unwrap_or_else(|| {
+            if ctx.command.session_id.is_some() {
+                Action::Next
+            } else {
+                Action::Execute
+            }
+        });
         let mut created_session_id = None;
         match action {
             Action::Execute => {
+                if ctx.command.session_id.is_some() {
+                    return CommandResult::Error(XmppError::bad_request(Some(
+                        "execute must not include an existing sessionid".to_string(),
+                    )));
+                }
                 // Create a new session
                 let session_id = Uuid::new_v4().to_string();
                 let session = CommandSession::new(session_id.clone(), node.clone(), from.clone());
@@ -227,6 +238,12 @@ impl CommandRegistry {
             Action::Cancel => {
                 // Cancel and clean up session
                 if let Some(ref session_id) = ctx.command.session_id {
+                    let session = self.sessions.read().await.get(session_id).cloned();
+                    if !session_matches_request(session.as_ref(), node, from) {
+                        return CommandResult::Error(XmppError::bad_request(Some(
+                            "Session not found, expired, or owned by another requester".to_string(),
+                        )));
+                    }
                     self.sessions.write().await.remove(session_id);
                     debug!(
                         node = %node,
@@ -237,9 +254,21 @@ impl CommandRegistry {
                 return CommandResult::Canceled { notes: vec![] };
             }
             Action::Complete | Action::Next | Action::Prev => {
+                if ctx.command.session_id.is_none() {
+                    return CommandResult::Error(XmppError::bad_request(Some(
+                        "Command sessionid is required for next, prev, and complete actions"
+                            .to_string(),
+                    )));
+                }
                 // Touch the session to update last_accessed
                 if let Some(ref session_id) = ctx.command.session_id {
                     if let Some(session) = self.sessions.write().await.get_mut(session_id) {
+                        if !session_matches_request(Some(session), node, from) {
+                            return CommandResult::Error(XmppError::bad_request(Some(
+                                "Session not found, expired, or owned by another requester"
+                                    .to_string(),
+                            )));
+                        }
                         session.touch();
                     } else {
                         return CommandResult::Error(XmppError::bad_request(Some(
@@ -250,8 +279,10 @@ impl CommandRegistry {
             }
         }
 
+        let active_session_id = ctx.command.session_id.clone();
+
         // Call the handler
-        match (created_session_id, handler(ctx).await) {
+        let result = match (created_session_id, handler(ctx).await) {
             (
                 Some(session_id),
                 CommandResult::Executing {
@@ -265,7 +296,20 @@ impl CommandRegistry {
                 notes,
             },
             (_, result) => result,
+        };
+
+        match &result {
+            CommandResult::Executing { .. } => {}
+            CommandResult::Completed { .. }
+            | CommandResult::Canceled { .. }
+            | CommandResult::Error(_) => {
+                if let Some(session_id) = active_session_id {
+                    self.sessions.write().await.remove(&session_id);
+                }
+            }
         }
+
+        result
     }
 
     /// Get a command session by ID.
@@ -308,6 +352,12 @@ impl CommandRegistry {
             debug!(session_id = %id, "Cleaned up expired command session");
         }
     }
+}
+
+fn session_matches_request(session: Option<&CommandSession>, node: &str, from: &Jid) -> bool {
+    session
+        .filter(|session| !session.is_expired())
+        .is_some_and(|session| session.node == node && session.from == *from)
 }
 
 impl Default for CommandRegistry {

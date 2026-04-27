@@ -4,7 +4,7 @@ import { X, CornerDownRight, MessageSquarePlus, ChevronRight, ChevronLeft } from
 import MessageCard from "@/components/chat/MessageCard.vue";
 import MessageComposer from "@/components/chat/MessageComposer.vue";
 import VirtualTimeline from "@/components/chat/VirtualTimeline.vue";
-import type { TimelineMessage, MarkupSpan, MessageReference } from "@/lib/chat-ui";
+import type { ExtensionAnnotationAction, TimelineMessage, MarkupSpan, MessageReference } from "@/lib/chat-ui";
 import type { MentionCandidate } from "@/lib/mentions";
 import type { OccupantHat, OccupantPresence, RoomHats, RoomPresence } from "@/lib/xmpp-client";
 import type { ThreadEntry, ThreadIndex } from "@/composables/useThreads";
@@ -46,6 +46,7 @@ const props = defineProps<{
    * Used to render the parent context pane in the accordion layout.
    */
   hideComposer?: boolean;
+  invokeExtensionAction?: (action: ExtensionAnnotationAction) => Promise<unknown>;
 }>();
 
 const emit = defineEmits<{
@@ -483,6 +484,7 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
           :thread-reply-count="activeEntry.count"
           hide-thread-chip
           :reaction-mode-selected="reactionMode?.selectedMessageId === message.id"
+          :invoke-extension-action="props.invokeExtensionAction"
           @edit="(id, body, m, r) => emit('editMessage', id, body, m, r)"
           @retract="(id) => emit('retractMessage', id)"
           @react="(id, emoji) => emit('reactMessage', id, emoji)"
@@ -514,6 +516,7 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
               :grouped="isGroupedFollowUp(message.id)"
               hide-thread-chip
               :reaction-mode-selected="reactionMode?.selectedMessageId === message.id"
+              :invoke-extension-action="props.invokeExtensionAction"
               @edit="(id, body, m, r) => emit('editMessage', id, body, m, r)"
               @retract="(id) => emit('retractMessage', id)"
               @react="(id, emoji) => emit('reactMessage', id, emoji)"

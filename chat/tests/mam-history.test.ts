@@ -1,11 +1,13 @@
 import { describe, expect, mock, test } from "bun:test";
-import { ref } from "vue";
+import { nextTick, ref } from "vue";
 import type { Agent } from "stanza";
+import type { ExtensionAnnotation } from "../src/lib/chat-ui";
 import { queryPersonalMam, queryPersonalMamPage } from "../src/lib/xmpp/dm-history";
 import { queryMam, queryMamPage, queryMamThreadPage } from "../src/lib/xmpp/history";
 import { useDmMessaging } from "../src/composables/useDmMessaging";
 import { useMessaging } from "../src/composables/useMessaging";
 import { handlerStubs } from "./helpers/xmpp-client-mock";
+import type { LiveRoomMessage } from "../src/lib/xmpp/types";
 
 function makeMamAgent(results: unknown[]) {
   return {
@@ -20,6 +22,17 @@ function makeMamPageAgent(page: { results?: unknown[]; paging?: unknown; complet
     searchHistory: mock(async () => page),
   } as unknown as Agent & {
     searchHistory: ReturnType<typeof mock>;
+  };
+}
+
+function extensionAnnotation(id = "poll-enrichment"): ExtensionAnnotation {
+  return {
+    extensionId: "decision-polls",
+    annotationId: id,
+    surfaceKind: "utility-panel",
+    title: "Release vote",
+    fields: { capability: "launch" },
+    actions: [],
   };
 }
 
@@ -376,6 +389,7 @@ describe("MAM history application", () => {
           createdAt: "2024-01-01T00:00:00Z",
           type: "message",
           reactionTargetId: "msg-1",
+          extensionAnnotations: [extensionAnnotation()],
         },
         {
           id: "edit-1",
@@ -430,6 +444,7 @@ describe("MAM history application", () => {
     expect(messaging.messages.value[0].isEdited).toBe(true);
     expect(messaging.messages.value[0].isRetracted).toBe(true);
     expect(messaging.messages.value[0].reactions).toEqual({ "👍": ["alice"] });
+    expect(messaging.messages.value[0].extensionAnnotations).toBeUndefined();
   });
 
   test("ignores archived room reactions that target an alternate wire id", async () => {
@@ -500,6 +515,7 @@ describe("MAM history application", () => {
           body: "hey",
           createdAt: "2024-01-01T00:00:00Z",
           type: "message",
+          extensionAnnotations: [extensionAnnotation()],
         },
         {
           id: "edit-1",
@@ -554,6 +570,106 @@ describe("MAM history application", () => {
     expect(messaging.messages.value[0].isEdited).toBe(true);
     expect(messaging.messages.value[0].isRetracted).toBe(true);
     expect(messaging.messages.value[0].reactions).toEqual({ "🔥": ["bob"] });
+    expect(messaging.messages.value[0].extensionAnnotations).toBeUndefined();
+  });
+
+  test("clears room extension annotations when a live correction omits them", async () => {
+    const session = ref({
+      username: "alice",
+      jid: "alice@example.com/desktop",
+      domain: "example.com",
+    } as never);
+    let onMessage: ((msg: LiveRoomMessage) => void) | null = null;
+    const xmppClient = ref(null as never);
+    const actionError = ref("");
+    const messaging = useMessaging(
+      session,
+      ref(null),
+      xmppClient,
+      ref("w1"),
+      ref("c1"),
+      ref({ id: "c1", name: "general", channel_type: "text" }),
+      String,
+      actionError,
+      () => {
+        actionError.value = "";
+      },
+    );
+
+    xmppClient.value = {
+      ...handlerStubs(),
+      queryMam: mock(async () => []),
+      setMessageHandler(handler: (msg: LiveRoomMessage) => void) {
+        onMessage = handler;
+      },
+    } as never;
+    await nextTick();
+
+    messaging.messages.value = [{
+      id: "msg-1",
+      author: "bob",
+      body: "hello",
+      createdAt: "2024-01-01T00:00:00Z",
+      isSelf: false,
+      extensionAnnotations: [extensionAnnotation()],
+    }];
+
+    onMessage?.({
+      id: "edit-1",
+      roomJid: "c1@muc.example.com",
+      nick: "bob",
+      body: "hello, edited",
+      createdAt: "2024-01-01T00:01:00Z",
+      type: "message",
+      replacesId: "msg-1",
+    });
+
+    expect(messaging.messages.value[0].body).toBe("hello, edited");
+    expect(messaging.messages.value[0].isEdited).toBe(true);
+    expect(messaging.messages.value[0].extensionAnnotations).toBeUndefined();
+  });
+
+  test("clears DM extension annotations when a live correction omits them", () => {
+    const session = ref({
+      username: "alice",
+      jid: "alice@example.com/desktop",
+    } as never);
+    const actionError = ref("");
+    const messaging = useDmMessaging(
+      session,
+      ref({ queryPersonalMam: mock(async () => []) } as never),
+      ref("bob@example.com"),
+      String,
+      actionError,
+      () => {
+        actionError.value = "";
+      },
+    );
+
+    messaging.messages.value = [{
+      id: "msg-1",
+      author: "bob",
+      authorJid: "bob@example.com/web",
+      body: "hey",
+      createdAt: "2024-01-01T00:00:00Z",
+      isSelf: false,
+      extensionAnnotations: [extensionAnnotation()],
+    }];
+
+    messaging.onIncomingMessage({
+      id: "edit-1",
+      peerJid: "bob@example.com",
+      fromJid: "bob@example.com/web",
+      nick: "bob",
+      body: "hey there",
+      createdAt: "2024-01-01T00:01:00Z",
+      type: "message",
+      replacesId: "msg-1",
+    });
+
+    expect(messaging.messages.value[0].body).toBe("hey there");
+    expect(messaging.messages.value[0].isEdited).toBe(true);
+    expect(messaging.messages.value[0].extensionAnnotations).toBeUndefined();
   });
 
   test("applies archived DM updates when reactions target an alternate wire id", async () => {
@@ -605,108 +721,4 @@ describe("MAM history application", () => {
     expect(messaging.messages.value[0].reactions).toEqual({ "🔥": ["bob"] });
   });
 
-  test("preserves GitHub embeds when a correction omits them but URLs still in body", async () => {
-    const session = ref({
-      username: "alice",
-      jid: "alice@example.com/desktop",
-      domain: "example.com",
-    } as never);
-    const xmppClient = ref({
-      ...handlerStubs(),
-      queryMam: mock(async () => [
-        {
-          id: "msg-1",
-          roomJid: "general@muc.example.com",
-          nick: "bob",
-          body: "check https://github.com/waddle-social/waddle",
-          createdAt: "2024-01-01T00:00:00Z",
-          type: "message",
-          githubEmbeds: [
-            { kind: "repo", url: "https://github.com/waddle-social/waddle", owner: "waddle-social", name: "waddle" },
-          ],
-        },
-        {
-          id: "edit-1",
-          roomJid: "general@muc.example.com",
-          nick: "bob",
-          body: "check https://github.com/waddle-social/waddle out!",
-          createdAt: "2024-01-01T00:01:00Z",
-          type: "message",
-          replacesId: "msg-1",
-        },
-      ]),
-    } as never);
-    const actionError = ref("");
-    const messaging = useMessaging(
-      session,
-      ref(null),
-      xmppClient,
-      ref("w1"),
-      ref("c1"),
-      ref({ id: "c1", name: "general", channel_type: "text" }),
-      String,
-      actionError,
-      () => { actionError.value = ""; },
-    );
-
-    await messaging.loadMessages("w1", "c1");
-
-    expect(messaging.messages.value).toHaveLength(1);
-    expect(messaging.messages.value[0].id).toBe("msg-1");
-    expect(messaging.messages.value[0].isEdited).toBe(true);
-    expect(messaging.messages.value[0].body).toBe("check https://github.com/waddle-social/waddle out!");
-    expect(messaging.messages.value[0].githubEmbeds).toEqual([
-      { kind: "repo", url: "https://github.com/waddle-social/waddle", owner: "waddle-social", name: "waddle" },
-    ]);
-  });
-
-  test("drops GitHub embeds when a correction removes the URL from body", async () => {
-    const session = ref({
-      username: "alice",
-      jid: "alice@example.com/desktop",
-      domain: "example.com",
-    } as never);
-    const xmppClient = ref({
-      ...handlerStubs(),
-      queryMam: mock(async () => [
-        {
-          id: "msg-1",
-          roomJid: "general@muc.example.com",
-          nick: "bob",
-          body: "check https://github.com/waddle-social/waddle",
-          createdAt: "2024-01-01T00:00:00Z",
-          type: "message",
-          githubEmbeds: [
-            { kind: "repo", url: "https://github.com/waddle-social/waddle", owner: "waddle-social", name: "waddle" },
-          ],
-        },
-        {
-          id: "edit-1",
-          roomJid: "general@muc.example.com",
-          nick: "bob",
-          body: "never mind",
-          createdAt: "2024-01-01T00:01:00Z",
-          type: "message",
-          replacesId: "msg-1",
-        },
-      ]),
-    } as never);
-    const actionError = ref("");
-    const messaging = useMessaging(
-      session,
-      ref(null),
-      xmppClient,
-      ref("w1"),
-      ref("c1"),
-      ref({ id: "c1", name: "general", channel_type: "text" }),
-      String,
-      actionError,
-      () => { actionError.value = ""; },
-    );
-
-    await messaging.loadMessages("w1", "c1");
-
-    expect(messaging.messages.value).toHaveLength(1);
-    expect(messaging.messages.value[0].githubEmbeds).toBeUndefined();
-  });
 });

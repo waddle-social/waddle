@@ -8,6 +8,11 @@ members = [
     "crates/waddle-xmpp-core",
     "crates/waddle-xmpp-client",
     "crates/waddle-xmpp-client-ffi",
+    "extensions/ai-assistant-canvas",
+    "extensions/ai-chatbot",
+    "extensions/decision-polls",
+    "extensions/links-task-board",
+    "extensions/pub-quiz",
 ]
 
 [workspace.package]

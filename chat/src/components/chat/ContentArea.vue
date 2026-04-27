@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch, type ComponentPublicInstance } from "vue";
-import { AlertCircle, CheckCircle2, Hash, MessageCircle, MessagesSquare, RefreshCw, Search, Upload, WifiOff, X } from "lucide-vue-next";
+import { AlertCircle, CheckCircle2, Hash, LoaderCircle, MessageCircle, MessagesSquare, RefreshCw, Search, Upload, WifiOff, X } from "lucide-vue-next";
 import { isForumChannel as detectForumChannel } from "@/lib/channel-types";
 import { getConnectionNoticeCopy } from "@/lib/connection-notice";
 import { findMessageElementById } from "@/lib/message-targeting";
@@ -13,9 +13,16 @@ import {
 } from "@/lib/scroll-direction";
 import { extractFilesFromEvent } from "@/lib/xmpp/file-upload";
 import type { ChannelSummary, SpaceSummary } from "@/lib/chat-types";
-import type { TimelineMessage, MarkupSpan, MessageReference } from "@/lib/chat-ui";
+import type { ExtensionAnnotationAction, TimelineMessage, MarkupSpan, MessageReference } from "@/lib/chat-ui";
 import type { MentionCandidate } from "@/lib/mentions";
 import type { BrowserXmppClient, XmppStatusSnapshot, RoomHats, RoomPresence } from "@/lib/xmpp-client";
+import {
+  extensionCommandOutcome,
+  parseExtensionCommandLaunches,
+  parseExtensionCommandForm,
+  type DiscoveredExtensionCommand,
+  type ExtensionCommandFormField,
+} from "@/lib/xmpp/extension-commands";
 import { useScrollDirection } from "@/composables/useScrollDirection";
 import type { ThreadIndex } from "@/composables/useThreads";
 import { formatStamp, formatDayDivider, isSameDay } from "@/composables/useMessaging";
@@ -62,6 +69,7 @@ const props = defineProps<{
   threadIndex: ThreadIndex;
   xmppClient?: BrowserXmppClient | null;
   reactionMode?: { selectedMessageId: string | null } | null;
+  invokeExtensionAction?: (action: ExtensionAnnotationAction) => Promise<unknown>;
 }>();
 
 const emit = defineEmits<{
@@ -103,6 +111,13 @@ const newMessagesDividerPlacement = computed(() =>
 const olderSentinelPosition = computed(() => scrollDirection.value === "social" ? "end" : "start");
 
 const replyingTo = ref<{ id: string; author: string; body?: string; preview?: string } | null>(null);
+const extensionLauncherOpen = ref(false);
+const extensionCommands = ref<DiscoveredExtensionCommand[]>([]);
+const extensionLauncherState = ref<"idle" | "loading" | "error">("idle");
+const extensionLauncherDetail = ref("");
+const extensionCommandStates = ref<Record<string, { state: "loading" | "success" | "warning" | "error"; detail?: string }>>({});
+const extensionCommandForms = ref<Record<string, { sessionId: string; fields: ExtensionCommandFormField[] }>>({});
+const extensionCommandActions = ref<Record<string, ExtensionAnnotationAction[]>>({});
 
 type MessageComposerHandle = {
   addAttachments: (files: Array<File | Blob>) => void;
@@ -113,6 +128,102 @@ function focusComposer() {
   // Wait for the reply chip/state update so the editor focus wins over the
   // message action button that was just clicked.
   void nextTick(() => composerRef.value?.focus());
+}
+
+async function openExtensionLauncher() {
+  extensionLauncherOpen.value = !extensionLauncherOpen.value;
+  if (!extensionLauncherOpen.value || extensionCommands.value.length > 0) return;
+  if (!props.xmppClient) {
+    extensionLauncherState.value = "error";
+    extensionLauncherDetail.value = "Extensions are unavailable while XMPP is disconnected.";
+    return;
+  }
+  extensionLauncherState.value = "loading";
+  extensionLauncherDetail.value = "";
+  try {
+    extensionCommands.value = await props.xmppClient.discoverExtensionCommands();
+    extensionLauncherState.value = "idle";
+    if (extensionCommands.value.length === 0) {
+      extensionLauncherDetail.value = "No extension commands discovered.";
+    }
+  } catch (error) {
+    extensionLauncherState.value = "error";
+    extensionLauncherDetail.value = error instanceof Error ? error.message : "Could not discover extension commands.";
+  }
+}
+
+async function invokeExtensionCommand(command: DiscoveredExtensionCommand) {
+  if (!props.xmppClient) return;
+  const key = command.node;
+  extensionCommandStates.value = { ...extensionCommandStates.value, [key]: { state: "loading" } };
+  try {
+    const result = await props.xmppClient.invokeExtensionCommand(command);
+    const outcome = extensionCommandOutcome(result);
+    if (result.sessionId && result.form) {
+      const fields = parseExtensionCommandForm(result.form);
+      if (fields.length > 0) {
+        extensionCommandForms.value = {
+          ...extensionCommandForms.value,
+          [key]: { sessionId: result.sessionId, fields },
+        };
+      }
+    }
+    if (result.form) {
+      const actions = parseExtensionCommandLaunches(result.form);
+      if (actions.length > 0) {
+        extensionCommandActions.value = { ...extensionCommandActions.value, [key]: actions };
+      }
+    }
+    extensionCommandStates.value = { ...extensionCommandStates.value, [key]: outcome };
+  } catch (error) {
+    extensionCommandStates.value = {
+      ...extensionCommandStates.value,
+      [key]: { state: "error", detail: error instanceof Error ? error.message : "Extension command failed." },
+    };
+  }
+}
+
+async function submitExtensionCommandForm(command: DiscoveredExtensionCommand) {
+  if (!props.xmppClient) return;
+  const key = command.node;
+  const form = extensionCommandForms.value[key];
+  if (!form) return;
+  extensionCommandStates.value = { ...extensionCommandStates.value, [key]: { state: "loading" } };
+  try {
+    const result = await props.xmppClient.submitExtensionCommandForm(command, form.sessionId, form.fields);
+    const outcome = extensionCommandOutcome(result);
+    if (result.form) {
+      const actions = parseExtensionCommandLaunches(result.form);
+      if (actions.length > 0) {
+        extensionCommandActions.value = { ...extensionCommandActions.value, [key]: actions };
+      }
+    }
+    const nextForms = { ...extensionCommandForms.value };
+    delete nextForms[key];
+    extensionCommandForms.value = nextForms;
+    extensionCommandStates.value = { ...extensionCommandStates.value, [key]: outcome };
+  } catch (error) {
+    extensionCommandStates.value = {
+      ...extensionCommandStates.value,
+      [key]: { state: "error", detail: error instanceof Error ? error.message : "Extension form submission failed." },
+    };
+  }
+}
+
+async function invokeCommandResultAction(command: DiscoveredExtensionCommand, action: ExtensionAnnotationAction) {
+  if (!props.invokeExtensionAction) return;
+  const key = command.node;
+  extensionCommandStates.value = { ...extensionCommandStates.value, [key]: { state: "loading" } };
+  try {
+    const result = await props.invokeExtensionAction(action);
+    const outcome = extensionCommandOutcome(result);
+    extensionCommandStates.value = { ...extensionCommandStates.value, [key]: outcome };
+  } catch (error) {
+    extensionCommandStates.value = {
+      ...extensionCommandStates.value,
+      [key]: { state: "error", detail: error instanceof Error ? error.message : "Extension action failed." },
+    };
+  }
 }
 
 function beginReply(message: TimelineMessage) {
@@ -729,7 +840,96 @@ function dayDividerLabel(createdAt: string): string {
       @cancel-reply="cancelReply"
       @typing="emit('typing')"
       @select-gif="onSelectGif"
+      @open-extensions="openExtensionLauncher"
     />
+
+    <div
+      v-if="extensionLauncherOpen && isTopPinned"
+      class="chat-message-lane border-b border-border bg-background/95 px-[var(--chat-content-inline)] py-3"
+    >
+      <div class="flex flex-wrap items-center gap-2">
+        <span v-if="extensionLauncherState === 'loading'" class="type-caption inline-flex items-center gap-2 text-muted-foreground">
+          <LoaderCircle class="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+          Loading extensions
+        </span>
+        <button
+          v-for="command in extensionCommands"
+          :key="command.node"
+          type="button"
+          class="type-caption inline-flex min-h-8 items-center gap-1.5 rounded-md border border-border bg-muted px-2.5 py-1.5 text-foreground hover:bg-muted/70 disabled:opacity-60"
+          :disabled="extensionCommandStates[command.node]?.state === 'loading'"
+          @click="invokeExtensionCommand(command)"
+        >
+          <LoaderCircle
+            v-if="extensionCommandStates[command.node]?.state === 'loading'"
+            class="h-3.5 w-3.5 animate-spin"
+            aria-hidden="true"
+          />
+          <CheckCircle2
+            v-else-if="extensionCommandStates[command.node]?.state === 'success'"
+            class="h-3.5 w-3.5 text-success"
+            aria-hidden="true"
+          />
+          <AlertCircle
+            v-else-if="extensionCommandStates[command.node]?.state === 'warning' || extensionCommandStates[command.node]?.state === 'error'"
+            class="h-3.5 w-3.5"
+            :class="extensionCommandStates[command.node]?.state === 'error' ? 'text-destructive' : 'text-warning'"
+            aria-hidden="true"
+          />
+          {{ command.name }}
+        </button>
+      </div>
+      <p
+        v-if="extensionLauncherDetail || Object.values(extensionCommandStates).some((state) => state.detail)"
+        class="type-caption mt-2 text-muted-foreground"
+      >
+        {{ extensionLauncherDetail || Object.values(extensionCommandStates).find((state) => state.detail)?.detail }}
+      </p>
+      <div
+        v-for="command in extensionCommands.filter((item) => extensionCommandForms[item.node])"
+        :key="`form:${command.node}`"
+        class="mt-3 grid gap-2 rounded-md border border-border bg-muted/30 p-3"
+      >
+        <label
+          v-for="field in extensionCommandForms[command.node].fields"
+          :key="`${command.node}:${field.name}`"
+          class="type-caption grid gap-1 text-muted-foreground"
+        >
+          <span>{{ field.label }}</span>
+          <input
+            v-model="field.value"
+            class="min-h-8 rounded-md border border-border bg-background px-2 text-foreground"
+            :type="field.type === 'text-private' ? 'password' : 'text'"
+            :required="field.required"
+            @input="field.values = [field.value]"
+          />
+        </label>
+        <button
+          type="button"
+          class="type-caption justify-self-start rounded-md bg-primary px-3 py-1.5 text-primary-foreground disabled:opacity-60"
+          :disabled="extensionCommandStates[command.node]?.state === 'loading'"
+          @click="submitExtensionCommandForm(command)"
+        >
+          Submit
+        </button>
+      </div>
+      <div
+        v-for="command in extensionCommands.filter((item) => extensionCommandActions[item.node]?.length)"
+        :key="`actions:${command.node}`"
+        class="mt-3 flex flex-wrap gap-2"
+      >
+        <button
+          v-for="action in extensionCommandActions[command.node]"
+          :key="`${command.node}:${action.route}`"
+          type="button"
+          class="type-caption inline-flex min-h-8 items-center gap-1.5 rounded-md border border-border bg-background px-2.5 py-1.5 text-foreground hover:bg-muted disabled:opacity-60"
+          :disabled="extensionCommandStates[command.node]?.state === 'loading'"
+          @click="invokeCommandResultAction(command, action)"
+        >
+          {{ action.label }}
+        </button>
+      </div>
+    </div>
 
     <!-- Typing indicator (social / top-pinned mode) -->
     <div
@@ -851,6 +1051,7 @@ function dayDividerLabel(createdAt: string): string {
             :thread-reply-count="threadIndex.get(msg.id)?.count ?? 0"
             :grouped="isGroupedFollowUp(msg.id)"
             :reaction-mode-selected="reactionMode?.selectedMessageId === msg.id"
+            :invoke-extension-action="props.invokeExtensionAction"
             @edit="(id, body, m, r) => emit('editMessage', id, body, m, r)"
             @retract="(id) => emit('retractMessage', id)"
             @react="(id, emoji) => emit('reactMessage', id, emoji)"
@@ -909,7 +1110,95 @@ function dayDividerLabel(createdAt: string): string {
       @cancel-reply="cancelReply"
       @typing="emit('typing')"
       @select-gif="onSelectGif"
+      @open-extensions="openExtensionLauncher"
     />
+    <div
+      v-if="extensionLauncherOpen && !isTopPinned"
+      class="border-t border-border bg-background/95 px-[var(--chat-content-inline)] py-3"
+    >
+      <div class="flex flex-wrap items-center gap-2">
+        <span v-if="extensionLauncherState === 'loading'" class="type-caption inline-flex items-center gap-2 text-muted-foreground">
+          <LoaderCircle class="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+          Loading extensions
+        </span>
+        <button
+          v-for="command in extensionCommands"
+          :key="command.node"
+          type="button"
+          class="type-caption inline-flex min-h-8 items-center gap-1.5 rounded-md border border-border bg-muted px-2.5 py-1.5 text-foreground hover:bg-muted/70 disabled:opacity-60"
+          :disabled="extensionCommandStates[command.node]?.state === 'loading'"
+          @click="invokeExtensionCommand(command)"
+        >
+          <LoaderCircle
+            v-if="extensionCommandStates[command.node]?.state === 'loading'"
+            class="h-3.5 w-3.5 animate-spin"
+            aria-hidden="true"
+          />
+          <CheckCircle2
+            v-else-if="extensionCommandStates[command.node]?.state === 'success'"
+            class="h-3.5 w-3.5 text-success"
+            aria-hidden="true"
+          />
+          <AlertCircle
+            v-else-if="extensionCommandStates[command.node]?.state === 'warning' || extensionCommandStates[command.node]?.state === 'error'"
+            class="h-3.5 w-3.5"
+            :class="extensionCommandStates[command.node]?.state === 'error' ? 'text-destructive' : 'text-warning'"
+            aria-hidden="true"
+          />
+          {{ command.name }}
+        </button>
+      </div>
+      <p
+        v-if="extensionLauncherDetail || Object.values(extensionCommandStates).some((state) => state.detail)"
+        class="type-caption mt-2 text-muted-foreground"
+      >
+        {{ extensionLauncherDetail || Object.values(extensionCommandStates).find((state) => state.detail)?.detail }}
+      </p>
+      <div
+        v-for="command in extensionCommands.filter((item) => extensionCommandForms[item.node])"
+        :key="`form:${command.node}`"
+        class="mt-3 grid gap-2 rounded-md border border-border bg-muted/30 p-3"
+      >
+        <label
+          v-for="field in extensionCommandForms[command.node].fields"
+          :key="`${command.node}:${field.name}`"
+          class="type-caption grid gap-1 text-muted-foreground"
+        >
+          <span>{{ field.label }}</span>
+          <input
+            v-model="field.value"
+            class="min-h-8 rounded-md border border-border bg-background px-2 text-foreground"
+            :type="field.type === 'text-private' ? 'password' : 'text'"
+            :required="field.required"
+            @input="field.values = [field.value]"
+          />
+        </label>
+        <button
+          type="button"
+          class="type-caption justify-self-start rounded-md bg-primary px-3 py-1.5 text-primary-foreground disabled:opacity-60"
+          :disabled="extensionCommandStates[command.node]?.state === 'loading'"
+          @click="submitExtensionCommandForm(command)"
+        >
+          Submit
+        </button>
+      </div>
+      <div
+        v-for="command in extensionCommands.filter((item) => extensionCommandActions[item.node]?.length)"
+        :key="`actions:${command.node}`"
+        class="mt-3 flex flex-wrap gap-2"
+      >
+        <button
+          v-for="action in extensionCommandActions[command.node]"
+          :key="`${command.node}:${action.route}`"
+          type="button"
+          class="type-caption inline-flex min-h-8 items-center gap-1.5 rounded-md border border-border bg-background px-2.5 py-1.5 text-foreground hover:bg-muted disabled:opacity-60"
+          :disabled="extensionCommandStates[command.node]?.state === 'loading'"
+          @click="invokeCommandResultAction(command, action)"
+        >
+          {{ action.label }}
+        </button>
+      </div>
+    </div>
     <UserProfileDrawer
       v-model:open="profileDrawerOpen"
       :username="popoverAuthor?.username ?? ''"

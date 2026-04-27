@@ -3,9 +3,9 @@
 This is the implementation companion to
 `docs/superpowers/plans/2026-04-27-waddle-extension-xmpp-protocol.md`.
 It intentionally defines exactly five sample plugins for the first extension
-framework slice. The deployed `github-enricher` module is a legacy
-compatibility bridge for GitHub link enrichment, not one of these sample
-plugins.
+framework slice. Each sample uses the typed `urn:waddle:extension:1`
+framework path directly; there is no compatibility bridge or legacy plugin
+contract.
 
 ## Shared Contract
 
@@ -40,10 +40,7 @@ Every sample plugin fixture should include these manifest fields:
 
 For these sample plugin fixtures, the installer must reject mutable tags,
 missing digests, digest mismatches, unknown capabilities, unknown permissions,
-and payload namespaces outside the five entries below. The legacy
-`github-enricher` compatibility module remains separately deployable by
-digest-pinned GitOps configuration until these sample plugins have published
-artifacts.
+and payload namespaces outside the entries declared by each plugin manifest.
 
 ## Plugin Matrix
 
@@ -51,8 +48,8 @@ artifacts.
 | --- | --- | --- | --- |
 | Links Task Board | `links-task-board` | `urn:waddle:links-task-board:1` | Declarative task board with OpenGraph link enrichment. |
 | Pub Quiz | `pub-quiz` | `urn:waddle:pub-quiz:1` | Host-led quiz rounds with launchable answer buttons. |
-| Standard AI Chatbot | `ai-chatbot` | `urn:waddle:ai-chatbot:1` | Plain assistant bot using bounded MAM context. |
-| AI Assistant Dynamic Canvas | `ai-assistant-canvas` | `urn:waddle:ai-assistant-canvas:1` | Server-owned AI canvas generation and immutable render artifacts. |
+| Standard AI Chatbot | `ai-chatbot` | `urn:waddle:ai-chatbot:1` | Assistant-style typed enrichment with launchable follow-ups. |
+| AI Assistant Dynamic Canvas | `ai-assistant-canvas` | `urn:waddle:ai-assistant-canvas:1` | Deterministic canvas artifact references and immutable render metadata. |
 | Decision Polls | `decision-polls` | `urn:waddle:decision-polls:1` | Fifth useful example: lightweight decisions with private votes and public aggregates. |
 
 ## Links Task Board
@@ -64,10 +61,10 @@ Capabilities:
 Permissions:
 `message.enrich`, `pubsub.publish`, `net.fetch.opengraph`.
 
-Routes:
+Visible output:
 
-- `board`: reads boards, links, tasks, and OpenGraph cache PubSub nodes.
-- `link-detail`: reads one link item and offers save/create-task actions.
+- Link previews are message enrichments; save/create-task launches persist
+  extension-owned PubSub items.
 
 Actions:
 
@@ -85,10 +82,10 @@ Tests:
 ## Pub Quiz
 
 Capabilities:
-`commands`, `launch`, `bot.respond`, `pubsub.publish`, `ui.declarative`.
+`commands`, `launch`, `message.enrich`, `pubsub.publish`, `ui.declarative`.
 
 Permissions:
-`bot.send.message`, `pubsub.publish`.
+`pubsub.publish`.
 
 Routes:
 
@@ -103,41 +100,43 @@ Actions:
 
 Tests:
 
-- `/quiz start` sends a normal XMPP groupchat bot message.
+- `/quiz start` returns a visible typed message enrichment.
 - Answer launch writes admin-only submission state.
 - Member leaderboard omits answer secrets until a question closes.
 
 ## Standard AI Chatbot
 
 Capabilities:
-`commands`, `launch`, `bot.respond`, `message.observe`, `ai.invoke`.
+`commands`, `launch`, `message.enrich`, `message.observe`.
 
 Permissions:
-`message.observe`, `mam.read.context`, `bot.send.message`, `ai.invoke`.
+`message.observe`.
 
-Routes:
+Visible output:
 
-- `chat`: optional transcript/config view backed by PubSub run summaries.
+- Assistant answers are message enrichments; follow-up launches return another
+  visible command result.
 
 Actions:
 
 - `ask`: command action behind `/ai`.
-- `ask-followup`: launch action from a bot answer.
+- `ask-followup`: launch action from an assistant answer enrichment.
 
 Tests:
 
-- Mention, DM, reply, and `/ai` trigger the bot.
+- Mention, DM, reply, and `/ai` trigger an assistant answer enrichment.
 - Unrelated room messages do not trigger a passive answer.
-- AI profile selection is a server profile id, not a credential.
+- No provider credential or model configuration is exposed through the sample
+  extension API.
 
 ## AI Assistant Dynamic Canvas
 
 Capabilities:
-`commands`, `launch`, `bot.respond`, `artifact.reference`, `ai.invoke`,
+`commands`, `launch`, `message.enrich`, `artifact.reference`,
 `pubsub.publish`, `ui.declarative`.
 
 Permissions:
-`bot.send.message`, `pubsub.publish`, `artifact.write`, `ai.invoke`.
+`pubsub.publish`, `artifact.write`.
 
 Routes:
 
@@ -152,7 +151,9 @@ Actions:
 Tests:
 
 - User prompt/style enters through XEP-0050 only.
-- WASM calls server `ai.invoke`; it cannot call provider HTTP directly.
+- The sample emits a deterministic artifact reference; provider-backed AI
+  generation requires a future host capability and is intentionally not exposed
+  by this PR.
 - Render output is written to immutable artifact storage by digest.
 - No client or user secret appears in message payloads, PubSub items, route
   descriptors, or static artifacts.
@@ -160,10 +161,10 @@ Tests:
 ## Decision Polls
 
 Capabilities:
-`commands`, `launch`, `bot.respond`, `pubsub.publish`, `ui.declarative`.
+`commands`, `launch`, `message.enrich`, `pubsub.publish`, `ui.declarative`.
 
 Permissions:
-`bot.send.message`, `pubsub.publish`.
+`pubsub.publish`.
 
 Routes:
 

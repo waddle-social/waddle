@@ -984,7 +984,7 @@ mod tests {
             body: "typed body".to_string(),
             message_type: "groupchat".to_string(),
             stanza_xml: Some(
-                "<message xmlns='jabber:client' from='room@conference.example.com/alice' type='groupchat' id='live-1'><body>live body with embeds</body><github xmlns='urn:waddle:github:0'><repo url='https://github.com/example/project'><owner>example</owner><name>project</name></repo></github></message>".to_string(),
+                "<message xmlns='jabber:client' from='room@conference.example.com/alice' type='groupchat' id='live-1'><body>live body with extension payload</body><item xmlns='urn:example:task-widget:1' id='task-123' status='open'/></message>".to_string(),
             ),
             rich: Some(ArchivedRichMessage {
                 payload: None,
@@ -1013,13 +1013,13 @@ mod tests {
         let body = inner_msg
             .get_child("body", CLIENT_NS)
             .expect("body element");
-        assert_eq!(body.text(), "live body with embeds");
+        assert_eq!(body.text(), "live body with extension payload");
 
-        let github = inner_msg
+        let extension_payload = inner_msg
             .children()
-            .find(|c| c.name() == "github" && c.ns() == "urn:waddle:github:0")
-            .expect("github embed payload");
-        assert!(github.children().any(|c| c.name() == "repo"));
+            .find(|c| c.name() == "item" && c.ns() == "urn:example:task-widget:1")
+            .expect("extension payload");
+        assert_eq!(extension_payload.attr("id"), Some("task-123"));
     }
 
     #[test]
