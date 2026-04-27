@@ -876,6 +876,9 @@ async fn create_router(
         Arc::new(waddle_xmpp::stream_management::InMemorySmSessionRegistry::new());
     let resumable_sessions: Arc<dashmap::DashMap<String, crate::auth::Session>> =
         Arc::new(dashmap::DashMap::new());
+    let media_gateway = Arc::new(crate::media::MediaGateway::new(
+        server_config.livekit.clone(),
+    ));
 
     // XMPP over WebSocket (RFC 7395) with registries for message routing
     let websocket_state = Arc::new(WebSocketState {
@@ -889,6 +892,7 @@ async fn create_router(
                 mam_storage,
                 inbox_storage: Arc::clone(&state.inbox_storage),
                 command_registry: websocket_command_registry,
+                connection_lifecycle_gate: Arc::new(tokio::sync::Mutex::new(())),
                 extension_manager,
                 dispatcher: stanza_dispatcher,
                 pubsub_storage,
@@ -897,6 +901,7 @@ async fn create_router(
                 isr_token_store: waddle_xmpp::isr::create_shared_store(),
                 sm_session_registry,
                 resumable_sessions,
+                media_gateway,
             },
         },
     });
@@ -917,39 +922,46 @@ async fn create_router(
                 let Some(state) = weak_state.upgrade() else {
                     break;
                 };
-                let drained: Vec<waddle_xmpp::stream_management::DetachedSession> = match state
-                    .deps
-                    .protocol
-                    .sm_session_registry
-                    .drain_expired()
-                    .await
+                let cleaned = match routes::websocket::cleanup_expired_detached_sessions(
+                    state.as_ref(),
+                )
+                .await
                 {
-                    Ok(sessions) => sessions,
+                    Ok(count) => count,
                     Err(err) => {
                         warn!(error = %err, "SM janitor: drain_expired failed");
                         continue;
                     }
                 };
-                if drained.is_empty() {
+                if cleaned == 0 {
                     continue;
                 }
                 info!(
-                    count = drained.len(),
+                    count = cleaned,
                     "SM janitor: cleaning up expired detached sessions"
                 );
-                for session in drained {
-                    state
-                        .deps
-                        .protocol
-                        .resumable_sessions
-                        .remove(&session.stream_id);
-                    state
-                        .deps
-                        .protocol
-                        .connection_registry
-                        .unregister(&session.jid);
-                    routes::websocket::cleanup_muc_presence_for_jid(&state, &session.jid).await;
+            }
+        });
+    }
+    // Media-session janitor. Invite sessions that never progress to Jingle
+    // and ended sessions are retained briefly for lifecycle references, then
+    // swept so gateway state cannot grow without bound when no new invites
+    // arrive to trigger opportunistic cleanup.
+    {
+        let weak_state = Arc::downgrade(&websocket_state);
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(60));
+            ticker.tick().await;
+            loop {
+                ticker.tick().await;
+                let Some(state) = weak_state.upgrade() else {
+                    break;
+                };
+                let cleaned = state.deps.protocol.media_gateway.cleanup_expired_sessions();
+                if cleaned == 0 {
+                    continue;
                 }
+                info!(count = cleaned, "Media janitor: cleaned expired sessions");
             }
         });
     }

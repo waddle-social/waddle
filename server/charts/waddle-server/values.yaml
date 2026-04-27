@@ -129,6 +129,17 @@ spicedb:
   endpoint: ""
   insecure: false
 
+livekit:
+  enabled: false
+  credentialsSecretRef: ""
+  wsUrl: ""
+  roomPrefix: waddle
+  tokenTtlSeconds: 600
+  turn:
+    host: ""
+    udpPort: 3478
+    tcpPort: ""
+
 # Additional Kubernetes Secrets to inject as env vars (e.g. R2 credentials from ExternalSecrets).
 extraSecretRefs: []
 
@@ -152,6 +163,9 @@ secret:
   xmppInboxDatabaseUrl: ""
   githubToken: ""
   spicedbPresharedKey: ""
+  livekitApiKey: ""
+  livekitApiSecret: ""
+  livekitTurnSharedSecret: ""
 
 probes:
   liveness:

@@ -23,6 +23,11 @@ let _nixInputs = [
 	"wit/**",
 ]
 
+let _chartInputs = [
+	"charts/waddle-server/**",
+	"../infrastructure/waddle.cloud/gitops/**",
+]
+
 schema.#Project & {
 	name: "waddle-server"
 
@@ -106,6 +111,7 @@ schema.#Project & {
 				_t.fmt,
 				_t.clippy,
 				_t.test,
+				_t.helmValidate,
 				_t.publishContainerImage,
 			]
 		}
@@ -129,7 +135,7 @@ schema.#Project & {
 			when: {
 				pullRequest: true
 			}
-			tasks: [_t.checkCiDrift, _t.fmt, _t.clippy, _t.test, _t.buildCi]
+			tasks: [_t.checkCiDrift, _t.fmt, _t.clippy, _t.test, _t.helmValidate, _t.buildCi]
 		}
 		xmppCompliance: {
 			when: {
@@ -184,11 +190,73 @@ schema.#Project & {
 			inputs: _rustInputs
 		}
 
+		helmValidate: schema.#Task & {
+			command: "bash"
+			args: ["-c", #"""
+				set -euo pipefail
+				tmpdir="$(mktemp -d)"
+
+				helm lint charts/waddle-server --set spicedb.enabled=false
+
+				helm template livekit-ref charts/waddle-server \
+				  --set spicedb.enabled=false \
+				  --set livekit.enabled=true \
+				  --set livekit.wsUrl=wss://sfu.example.test \
+				  --set livekit.credentialsSecretRef=waddle-livekit-credentials \
+				  --set livekit.turn.host=turn.example.test \
+				  --set livekit.turn.udpPort=3478 \
+				  --set livekit.turn.tcpPort=443 \
+				  > "${tmpdir}/livekit-ref.yaml"
+				grep -q "WADDLE_LIVEKIT_TURN_HOST" "${tmpdir}/livekit-ref.yaml"
+				grep -q "waddle-livekit-credentials" "${tmpdir}/livekit-ref.yaml"
+
+				helm template livekit-inline charts/waddle-server \
+				  --set spicedb.enabled=false \
+				  --set livekit.enabled=true \
+				  --set livekit.wsUrl=wss://sfu.example.test \
+				  --set secret.livekitApiKey=devkey \
+				  --set secret.livekitApiSecret=devsecret \
+				  --set secret.livekitTurnSharedSecret=turnsecret \
+				  --set livekit.turn.host=turn.example.test \
+				  > "${tmpdir}/livekit-inline.yaml"
+				grep -q "WADDLE_LIVEKIT_TURN_SHARED_SECRET" "${tmpdir}/livekit-inline.yaml"
+
+				if helm template livekit-missing-creds charts/waddle-server \
+				  --set spicedb.enabled=false \
+				  --set livekit.enabled=true \
+				  --set livekit.wsUrl=wss://sfu.example.test \
+				  --set secret.create=false \
+				  > "${tmpdir}/missing-creds.out" 2>&1; then
+				  echo "expected livekit render without credentials to fail" >&2
+				  exit 1
+				fi
+				grep -q "livekit requires" "${tmpdir}/missing-creds.out"
+
+				if helm template livekit-missing-turn-secret charts/waddle-server \
+				  --set spicedb.enabled=false \
+				  --set livekit.enabled=true \
+				  --set livekit.wsUrl=wss://sfu.example.test \
+				  --set secret.livekitApiKey=devkey \
+				  --set secret.livekitApiSecret=devsecret \
+				  --set livekit.turn.host=turn.example.test \
+				  > "${tmpdir}/missing-turn-secret.out" 2>&1; then
+				  echo "expected livekit TURN render without shared secret to fail" >&2
+				  exit 1
+				fi
+				grep -q "livekit.turn.host requires" "${tmpdir}/missing-turn-secret.out"
+
+				kubectl kustomize ../infrastructure/waddle.cloud/gitops/waddle-server > "${tmpdir}/waddle-server-kustomize.yaml"
+				kubectl kustomize ../infrastructure/waddle.cloud/gitops/livekit-sfu > "${tmpdir}/livekit-sfu-kustomize.yaml"
+				kubectl kustomize ../infrastructure/waddle.cloud/gitops/reloader > "${tmpdir}/reloader-kustomize.yaml"
+			"""#]
+			inputs: _chartInputs
+		}
+
 		buildCi: xRust.#Build & {
 			args: ["build", "--profile", "ci", "--locked", "--package", "waddle-server"]
 			inputs: _rustInputs
 			outputs: ["target/ci/waddle-server"]
-			dependsOn: [tasks.fmt, tasks.clippy, tasks.test]
+			dependsOn: [tasks.fmt, tasks.clippy, tasks.test, tasks.helmValidate]
 		}
 
 		buildRelease: xRust.#Build & {
@@ -280,9 +348,9 @@ schema.#Project & {
 				  --source="$(git config --get remote.origin.url)" \
 				  --revision="${SHORT_SHA}"
 				"""#]
-			inputs: list.Concat([_nixInputs, ["charts/**"]])
+			inputs: list.Concat([_nixInputs, _chartInputs])
 			outputs: ["target/digests/**"]
-			dependsOn: [tasks.fmt, tasks.clippy, tasks.test]
+			dependsOn: [tasks.fmt, tasks.clippy, tasks.test, tasks.helmValidate]
 		}
 
 		flakehubPublished: schema.#Task & {

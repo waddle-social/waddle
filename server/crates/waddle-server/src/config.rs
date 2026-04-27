@@ -2,6 +2,7 @@
 
 use crate::auth::providers::AuthProviderConfig;
 use crate::db::DatabaseDriver;
+use crate::media::LiveKitConfig;
 use serde::{Deserialize, Serialize};
 use std::{fmt, str::FromStr};
 use tracing::info;
@@ -133,6 +134,8 @@ pub struct ServerConfig {
     /// SpiceDB backend configuration.
     /// Runtime startup requires this to be set.
     pub spicedb: Option<SpiceDbConfig>,
+    /// LiveKit-backed XMPP media gateway configuration.
+    pub livekit: LiveKitConfig,
 }
 
 impl Default for ServerConfig {
@@ -144,6 +147,7 @@ impl Default for ServerConfig {
             auth: AuthConfig::default(),
             extensions: ExtensionConfig::default(),
             spicedb: None,
+            livekit: LiveKitConfig::disabled(),
         }
     }
 }
@@ -162,6 +166,7 @@ impl ServerConfig {
         let extensions =
             ExtensionConfig::from_env().map_err(|e| format!("invalid extension config: {e}"))?;
         let spicedb = SpiceDbConfig::from_env()?;
+        let livekit = LiveKitConfig::from_env()?;
 
         Ok(Self {
             mode,
@@ -170,6 +175,7 @@ impl ServerConfig {
             auth,
             extensions,
             spicedb,
+            livekit,
         })
     }
 
@@ -200,6 +206,7 @@ impl ServerConfig {
             auth: AuthConfig::default(),
             extensions: ExtensionConfig::default(),
             spicedb: None,
+            livekit: LiveKitConfig::disabled(),
         }
     }
 
@@ -212,6 +219,7 @@ impl ServerConfig {
             auth: AuthConfig::default(),
             extensions: ExtensionConfig::default(),
             spicedb: None,
+            livekit: LiveKitConfig::disabled(),
         }
     }
 }

@@ -1,8 +1,9 @@
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::Utc;
 use jid::{BareJid, FullJid};
 use tracing::{debug, info, warn};
 use waddle_xmpp::{
-    carbons::{build_received_carbon, build_sent_carbon, should_copy_message},
+    carbons::{build_received_carbon, build_sent_carbon, should_copy_message, CARBONS_NS},
     inbox::{
         runtime::{
             direct_message_entry, groupchat_entry, groupchat_thread_entry, preview_text,
@@ -15,18 +16,22 @@ use waddle_xmpp::{
         ArchivedReference, ArchivedReply, ArchivedRetraction, ArchivedRichMessage,
         ArchivedRichPayload, RichMessageId, RichText, STANZA_ID_NS,
     },
-    muc::room_actor::{BuildGroupchatBroadcast, GetNicknameGeneration, RoomActor},
+    muc::room_actor::{BuildGroupchatBroadcast, GetNicknameGeneration, GetSnapshot, RoomActor},
     parser::message_to_string,
     registry::{BroadcastOutcome, SendResult},
     xep::xep0430::build_inbox_push,
+    xep::xep0482::{
+        has_call_invite_payload, try_extract_call_invite_payload, CallInvite, CallInvitePayload,
+        JoinMethod,
+    },
     xep::{
         extract_correction_from_message, extract_explicit_mentions, extract_reactions_from_message,
         extract_references_from_message, extract_retraction_from_message, has_file_sharing,
         is_moderation_request_message, is_moderation_result_message, is_reaction_message,
         is_retraction_message, is_sticker_message, message_has_direct_invite,
-        parse_reply_from_message, remove_stanza_ids_by, should_skip_storage, RetractionKind,
-        NS_EXPLICIT_MENTIONS, NS_MESSAGE_CORRECT, NS_MESSAGE_RETRACT, NS_REACTIONS, NS_REFERENCE,
-        NS_REPLY,
+        parse_reply_from_message, remove_stanza_ids_by, should_skip_carbons, should_skip_storage,
+        RetractionKind, NS_EXPLICIT_MENTIONS, NS_MESSAGE_CORRECT, NS_MESSAGE_RETRACT, NS_REACTIONS,
+        NS_REFERENCE, NS_REPLY,
     },
     Stanza,
 };
@@ -37,6 +42,7 @@ use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 use super::super::{get_room_actor, stanza_to_xml, WebSocketState};
 use crate::auth::Session;
 use crate::db::blocking::DatabaseBlockingStorage;
+use crate::media::{MediaGatewayError, MediaSessionId, MediaSessionScope};
 use crate::permissions::{CheckPermission, Object, ObjectType, Permission, Subject};
 use crate::server::bootstrap_membership::DEPLOYMENT_SERVER_ID;
 use kameo::actor::ActorRef;
@@ -96,6 +102,26 @@ pub async fn handle_message(
             .or_else(|| Some(uuid::Uuid::new_v4().to_string()));
         prototype.type_ = XmppMessageType::Groupchat;
         remove_stanza_ids_by(&mut prototype, &room_jid.to_string());
+
+        let prepared_call_payload = match prepare_groupchat_call_payload(
+            state,
+            &prototype,
+            &room_jid,
+            sender_jid,
+            authenticated_session,
+        )
+        .await
+        {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                return vec![stanza_to_xml(&Stanza::Message(error_message(
+                    &incoming,
+                    &jid::Jid::from(room_jid.clone()),
+                    &jid::Jid::from(sender_jid.clone()),
+                    error,
+                )))];
+            }
+        };
 
         // Enrich links with extension-provided XML elements (fail-open).
         let _embeds_added = state
@@ -165,10 +191,94 @@ pub async fn handle_message(
             .await;
         }
 
+        let created_call_session_id =
+            if matches!(prepared_call_payload, PreparedCallPayload::GatewayInvite) {
+                if should_skip_storage(&prototype) {
+                    return vec![stanza_to_xml(&Stanza::Message(error_message(
+                        &incoming,
+                        &jid::Jid::from(room_jid.clone()),
+                        &jid::Jid::from(sender_jid.clone()),
+                        bad_request_error("MUC call invites require an archived stanza id."),
+                    )))];
+                }
+                match ensure_muc_call_invite_session(state, &mut prototype, &room_jid, sender_jid) {
+                    Ok(Some(session_id)) => {
+                        for outbound in &mut local_messages {
+                            outbound.message.payloads = prototype.payloads.clone();
+                        }
+                        Some(session_id)
+                    }
+                    Ok(None) => {
+                        return vec![stanza_to_xml(&Stanza::Message(error_message(
+                            &incoming,
+                            &jid::Jid::from(room_jid.clone()),
+                            &jid::Jid::from(sender_jid.clone()),
+                            bad_request_error("Call invite did not create a media session."),
+                        )))];
+                    }
+                    Err(error) => {
+                        return vec![stanza_to_xml(&Stanza::Message(error_message(
+                            &incoming,
+                            &jid::Jid::from(room_jid.clone()),
+                            &jid::Jid::from(sender_jid.clone()),
+                            media_gateway_stanza_error(error),
+                        )))];
+                    }
+                }
+            } else {
+                None
+            };
+
         // Archive body-bearing and rich protocol room messages in XMPP MAM storage.
         let archive_id =
             archive_groupchat_message(state, &room_jid, &mut prototype, sender_nickname_generation)
                 .await;
+        match (
+            &prepared_call_payload,
+            created_call_session_id.as_ref(),
+            archive_id.as_ref(),
+        ) {
+            (PreparedCallPayload::GatewayInvite, Some(session_id), Some(archive_id)) => {
+                if let Err(error) = bind_call_invite_reference(
+                    state,
+                    session_id,
+                    muc_call_conversation_key(&room_jid),
+                    archive_id,
+                ) {
+                    state
+                        .deps
+                        .protocol
+                        .media_gateway
+                        .discard_session(session_id);
+                    return vec![stanza_to_xml(&Stanza::Message(error_message(
+                        &incoming,
+                        &jid::Jid::from(room_jid.clone()),
+                        &jid::Jid::from(sender_jid.clone()),
+                        media_gateway_stanza_error(error),
+                    )))];
+                }
+            }
+            (PreparedCallPayload::GatewayInvite, Some(session_id), None) => {
+                state
+                    .deps
+                    .protocol
+                    .media_gateway
+                    .discard_session(session_id);
+                return vec![stanza_to_xml(&Stanza::Message(error_message(
+                    &incoming,
+                    &jid::Jid::from(room_jid.clone()),
+                    &jid::Jid::from(sender_jid.clone()),
+                    internal_server_error("Call invite could not be archived."),
+                )))];
+            }
+            (PreparedCallPayload::GatewayLifecycle, _, _) => observe_call_lifecycle(
+                state,
+                &prototype,
+                muc_call_conversation_key(&room_jid),
+                sender_jid,
+            ),
+            _ => {}
+        }
 
         if should_project_message(&prototype) {
             let timestamp = Utc::now().timestamp();
@@ -349,8 +459,6 @@ pub async fn handle_message(
                     .or_else(|| Some(uuid::Uuid::new_v4().to_string()));
             }
             prototype.from = Some(jid::Jid::from(sender_jid.clone()));
-            let should_carbon =
-                prototype.type_ == XmppMessageType::Chat && should_copy_message(&prototype);
             let blocking =
                 DatabaseBlockingStorage::new(state.deps.app_state.db_pool.global().clone());
             match blocking
@@ -368,6 +476,25 @@ pub async fn handle_message(
                 }
             }
 
+            let prepared_call_payload = match prepare_direct_call_payload(
+                state,
+                &prototype,
+                sender_jid,
+                to_jid,
+                authenticated_session,
+            )
+            .await
+            {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    return vec![stanza_to_xml(&Stanza::Message(error_message(
+                        &incoming,
+                        to_jid,
+                        &jid::Jid::from(sender_jid.clone()),
+                        error,
+                    )))];
+                }
+            };
             // Enrich links with extension-provided XML elements.
             let _embeds_added = state
                 .deps
@@ -405,6 +532,65 @@ pub async fn handle_message(
                     false,
                 )
                 .await;
+            }
+
+            let direct_call_binding =
+                if matches!(prepared_call_payload, PreparedCallPayload::GatewayInvite) {
+                    let Some(invite_id) = direct_call_invite_reference_id(&prototype) else {
+                        return vec![stanza_to_xml(&Stanza::Message(error_message(
+                            &incoming,
+                            to_jid,
+                            &jid::Jid::from(sender_jid.clone()),
+                            bad_request_error("Call invite is missing a reference id."),
+                        )))];
+                    };
+                    match ensure_direct_call_invite_session(
+                        state,
+                        &mut prototype,
+                        sender_jid,
+                        to_jid,
+                    ) {
+                        Ok(Some(session_id)) => Some((session_id, invite_id)),
+                        Ok(None) => {
+                            return vec![stanza_to_xml(&Stanza::Message(error_message(
+                                &incoming,
+                                to_jid,
+                                &jid::Jid::from(sender_jid.clone()),
+                                bad_request_error("Call invite did not create a media session."),
+                            )))];
+                        }
+                        Err(error) => {
+                            return vec![stanza_to_xml(&Stanza::Message(error_message(
+                                &incoming,
+                                to_jid,
+                                &jid::Jid::from(sender_jid.clone()),
+                                media_gateway_stanza_error(error),
+                            )))];
+                        }
+                    }
+                } else {
+                    None
+                };
+
+            if let Some((session_id, invite_id)) = direct_call_binding {
+                if let Err(error) = bind_call_invite_reference(
+                    state,
+                    &session_id,
+                    direct_call_conversation_key(sender_jid, to_jid),
+                    &invite_id,
+                ) {
+                    state
+                        .deps
+                        .protocol
+                        .media_gateway
+                        .discard_session(&session_id);
+                    return vec![stanza_to_xml(&Stanza::Message(error_message(
+                        &incoming,
+                        to_jid,
+                        &jid::Jid::from(sender_jid.clone()),
+                        media_gateway_stanza_error(error),
+                    )))];
+                }
             }
 
             // Archive body-bearing DMs to both sender's and recipient's personal MAM.
@@ -485,6 +671,7 @@ pub async fn handle_message(
                 None
             };
 
+            let should_carbon = should_send_direct_carbon(&prototype);
             if should_carbon {
                 if let Some(ref recipient_full_jid) = delivered_full_jid {
                     send_received_carbons_to_websocket_resources(
@@ -495,6 +682,14 @@ pub async fn handle_message(
                     .await;
                 }
                 send_sent_carbons_to_websocket_resources(state, sender_jid, &prototype).await;
+            }
+            if matches!(prepared_call_payload, PreparedCallPayload::GatewayLifecycle) {
+                observe_call_lifecycle(
+                    state,
+                    &prototype,
+                    direct_call_conversation_key(sender_jid, to_jid),
+                    sender_jid,
+                );
             }
         } else {
             warn!("Direct chat message without 'to' attribute");
@@ -521,6 +716,488 @@ async fn session_is_server_owner(state: &WebSocketState, session: &Option<Sessio
         })
         .await
         .is_ok_and(|response| response.allowed)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PreparedCallPayload {
+    None,
+    GatewayInvite,
+    GatewayLifecycle,
+    Passthrough,
+}
+
+async fn prepare_groupchat_call_payload(
+    state: &WebSocketState,
+    message: &xmpp_parsers::message::Message,
+    room_jid: &BareJid,
+    sender_jid: &FullJid,
+    authenticated_session: &Option<Session>,
+) -> Result<PreparedCallPayload, StanzaError> {
+    let Some(payload) = try_extract_call_invite_payload(message)
+        .map_err(|_| bad_request_error("Invalid call invite payload."))?
+    else {
+        return Ok(PreparedCallPayload::None);
+    };
+    if has_multiple_call_invite_payloads(message) {
+        return Err(bad_request_error(
+            "Only one call invite payload is permitted.",
+        ));
+    }
+
+    match payload {
+        CallInvitePayload::Invite(invite) => {
+            if !is_gateway_call_invite(&invite, &state.deps.service_domains.media) {
+                return Ok(PreparedCallPayload::Passthrough);
+            }
+            if !muc_call_start_authorized(state, room_jid, sender_jid, authenticated_session).await
+            {
+                return Err(forbidden_error("Sender is not permitted to start calls."));
+            }
+            Ok(PreparedCallPayload::GatewayInvite)
+        }
+        _ => {
+            match groupchat_call_lifecycle_authorized(
+                state,
+                room_jid,
+                sender_jid,
+                authenticated_session,
+                &payload,
+            )
+            .await?
+            {
+                CallLifecycleAuthorization::Gateway => Ok(PreparedCallPayload::GatewayLifecycle),
+                CallLifecycleAuthorization::Passthrough => Ok(PreparedCallPayload::Passthrough),
+                CallLifecycleAuthorization::Forbidden => Err(forbidden_error(
+                    "Sender is not permitted to update this call.",
+                )),
+            }
+        }
+    }
+}
+
+async fn prepare_direct_call_payload(
+    state: &WebSocketState,
+    message: &xmpp_parsers::message::Message,
+    sender_jid: &FullJid,
+    to_jid: &jid::Jid,
+    authenticated_session: &Option<Session>,
+) -> Result<PreparedCallPayload, StanzaError> {
+    let Some(payload) = try_extract_call_invite_payload(message)
+        .map_err(|_| bad_request_error("Invalid call invite payload."))?
+    else {
+        return Ok(PreparedCallPayload::None);
+    };
+    if has_multiple_call_invite_payloads(message) {
+        return Err(bad_request_error(
+            "Only one call invite payload is permitted.",
+        ));
+    }
+
+    match payload {
+        CallInvitePayload::Invite(invite) => {
+            if !is_gateway_call_invite(&invite, &state.deps.service_domains.media) {
+                return Ok(PreparedCallPayload::Passthrough);
+            }
+            if !direct_call_start_authorized(state, sender_jid, to_jid, authenticated_session).await
+            {
+                return Err(forbidden_error(
+                    "Sender is not permitted to start direct calls.",
+                ));
+            }
+            Ok(PreparedCallPayload::GatewayInvite)
+        }
+        _ => match direct_call_lifecycle_authorized(state, sender_jid, to_jid, &payload).await? {
+            CallLifecycleAuthorization::Gateway => Ok(PreparedCallPayload::GatewayLifecycle),
+            CallLifecycleAuthorization::Passthrough => Ok(PreparedCallPayload::Passthrough),
+            CallLifecycleAuthorization::Forbidden => Err(forbidden_error(
+                "Sender is not permitted to update this call.",
+            )),
+        },
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CallLifecycleAuthorization {
+    Gateway,
+    Passthrough,
+    Forbidden,
+}
+
+fn is_gateway_call_invite(invite: &CallInvite, media_domain: &str) -> bool {
+    invite
+        .methods
+        .iter()
+        .any(|method| is_waddle_jingle_join_method(method, media_domain))
+}
+
+fn is_waddle_jingle_join_method(method: &JoinMethod, media_domain: &str) -> bool {
+    matches!(
+        method,
+        JoinMethod::Jingle {
+            sid,
+            jid: Some(jid),
+        } if gateway_jingle_jid_matches(jid, media_domain, sid.as_str())
+    )
+}
+
+fn gateway_jingle_jid_matches(jid: &jid::Jid, media_domain: &str, sid: &str) -> bool {
+    jid.clone().try_into_full().ok().is_some_and(|full| {
+        full.to_bare().as_str() == media_domain && full.resource().to_string() == sid
+    })
+}
+
+fn has_multiple_call_invite_payloads(message: &xmpp_parsers::message::Message) -> bool {
+    message
+        .payloads
+        .iter()
+        .filter(|payload| waddle_xmpp::xep::xep0482::is_call_invite_element(payload))
+        .count()
+        > 1
+}
+
+fn observe_call_lifecycle(
+    state: &WebSocketState,
+    message: &xmpp_parsers::message::Message,
+    conversation: crate::media::CallInviteConversationKey,
+    sender_jid: &FullJid,
+) {
+    state
+        .deps
+        .protocol
+        .media_gateway
+        .observe_call_lifecycle(message, conversation, sender_jid);
+}
+
+fn ensure_muc_call_invite_session(
+    state: &WebSocketState,
+    message: &mut xmpp_parsers::message::Message,
+    room_jid: &BareJid,
+    sender_jid: &FullJid,
+) -> Result<Option<MediaSessionId>, MediaGatewayError> {
+    state.deps.protocol.media_gateway.ensure_invite_session(
+        message,
+        MediaSessionScope::Muc,
+        jid::Jid::from(room_jid.clone()),
+        sender_jid,
+        &state.deps.service_domains.media,
+    )
+}
+
+fn ensure_direct_call_invite_session(
+    state: &WebSocketState,
+    message: &mut xmpp_parsers::message::Message,
+    sender_jid: &FullJid,
+    to_jid: &jid::Jid,
+) -> Result<Option<MediaSessionId>, MediaGatewayError> {
+    state.deps.protocol.media_gateway.ensure_invite_session(
+        message,
+        MediaSessionScope::Direct,
+        jid::Jid::from(to_jid.to_bare()),
+        sender_jid,
+        &state.deps.service_domains.media,
+    )
+}
+
+fn bind_call_invite_reference(
+    state: &WebSocketState,
+    session_id: &MediaSessionId,
+    conversation: crate::media::CallInviteConversationKey,
+    invite_id: &str,
+) -> Result<(), MediaGatewayError> {
+    state
+        .deps
+        .protocol
+        .media_gateway
+        .bind_invite_reference(session_id, conversation, invite_id)
+}
+
+fn muc_call_conversation_key(room_jid: &BareJid) -> crate::media::CallInviteConversationKey {
+    crate::media::CallInviteConversationKey::muc(room_jid.clone())
+}
+
+fn direct_call_conversation_key(
+    sender_jid: &FullJid,
+    to_jid: &jid::Jid,
+) -> crate::media::CallInviteConversationKey {
+    crate::media::CallInviteConversationKey::direct(sender_jid.to_bare(), to_jid.to_bare())
+}
+
+fn direct_call_invite_reference_id(message: &xmpp_parsers::message::Message) -> Option<String> {
+    extract_origin_id(message).or_else(|| message.id.clone())
+}
+
+fn should_send_direct_carbon(message: &xmpp_parsers::message::Message) -> bool {
+    if should_skip_carbons(message) || has_private_carbon(message) {
+        return false;
+    }
+    message.type_ == XmppMessageType::Chat
+        && (should_copy_message(message) || has_call_invite_payload(message))
+}
+
+fn has_private_carbon(message: &xmpp_parsers::message::Message) -> bool {
+    message
+        .payloads
+        .iter()
+        .any(|payload| payload.name() == "private" && payload.ns() == CARBONS_NS)
+}
+
+async fn groupchat_call_lifecycle_authorized(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    sender_jid: &FullJid,
+    authenticated_session: &Option<Session>,
+    payload: &CallInvitePayload,
+) -> Result<CallLifecycleAuthorization, StanzaError> {
+    let Some(reference_id) = payload.reference_id() else {
+        return Ok(CallLifecycleAuthorization::Forbidden);
+    };
+    let Some(session) = state
+        .deps
+        .protocol
+        .media_gateway
+        .get_session_for_invite_reference(
+            muc_call_conversation_key(room_jid),
+            reference_id.as_str(),
+        )
+        .map_err(media_gateway_stanza_error)?
+    else {
+        return Ok(CallLifecycleAuthorization::Passthrough);
+    };
+    if session.scope != MediaSessionScope::Muc || session.anchor_jid.to_bare() != *room_jid {
+        return Ok(CallLifecycleAuthorization::Forbidden);
+    }
+    if !muc_occupant_present(state, room_jid, sender_jid).await {
+        return Ok(CallLifecycleAuthorization::Forbidden);
+    }
+
+    match payload {
+        CallInvitePayload::Retract(_) => {
+            if session.creator_jid == *sender_jid {
+                return Ok(CallLifecycleAuthorization::Gateway);
+            }
+            if muc_call_permission_authorized(
+                state,
+                room_jid,
+                authenticated_session,
+                Permission::ManageCall,
+            )
+            .await
+            {
+                Ok(CallLifecycleAuthorization::Gateway)
+            } else {
+                Ok(CallLifecycleAuthorization::Forbidden)
+            }
+        }
+        CallInvitePayload::Accept { method, .. } => {
+            if !gateway_accept_method_matches_session(state, &session, method) {
+                return Ok(CallLifecycleAuthorization::Forbidden);
+            }
+            if muc_call_permission_authorized(
+                state,
+                room_jid,
+                authenticated_session,
+                Permission::JoinCall,
+            )
+            .await
+            {
+                Ok(CallLifecycleAuthorization::Gateway)
+            } else {
+                Ok(CallLifecycleAuthorization::Forbidden)
+            }
+        }
+        CallInvitePayload::Reject(_) | CallInvitePayload::Left(_) => {
+            Ok(CallLifecycleAuthorization::Gateway)
+        }
+        CallInvitePayload::Invite(_) => Ok(CallLifecycleAuthorization::Forbidden),
+    }
+}
+
+async fn direct_call_lifecycle_authorized(
+    state: &WebSocketState,
+    sender_jid: &FullJid,
+    to_jid: &jid::Jid,
+    payload: &CallInvitePayload,
+) -> Result<CallLifecycleAuthorization, StanzaError> {
+    let Some(reference_id) = payload.reference_id() else {
+        return Ok(CallLifecycleAuthorization::Forbidden);
+    };
+    let Some(session) = state
+        .deps
+        .protocol
+        .media_gateway
+        .get_session_for_invite_reference(
+            direct_call_conversation_key(sender_jid, to_jid),
+            reference_id.as_str(),
+        )
+        .map_err(media_gateway_stanza_error)?
+    else {
+        return Ok(CallLifecycleAuthorization::Passthrough);
+    };
+    if session.scope != MediaSessionScope::Direct {
+        return Ok(CallLifecycleAuthorization::Forbidden);
+    }
+
+    let creator = session.creator_jid.to_bare();
+    let invitee = session.anchor_jid.to_bare();
+    let sender = sender_jid.to_bare();
+    let recipient = to_jid.to_bare();
+    let sender_is_party = sender == creator || sender == invitee;
+    let recipient_is_party = recipient == creator || recipient == invitee;
+    if !sender_is_party || !recipient_is_party || sender == recipient {
+        return Ok(CallLifecycleAuthorization::Forbidden);
+    }
+
+    let authorized = match payload {
+        CallInvitePayload::Retract(_) => sender == creator,
+        CallInvitePayload::Accept { method, .. } => {
+            sender == invitee && gateway_accept_method_matches_session(state, &session, method)
+        }
+        CallInvitePayload::Reject(_) => sender == invitee,
+        CallInvitePayload::Left(_) => true,
+        CallInvitePayload::Invite(_) => false,
+    };
+    if authorized {
+        Ok(CallLifecycleAuthorization::Gateway)
+    } else {
+        Ok(CallLifecycleAuthorization::Forbidden)
+    }
+}
+
+fn gateway_accept_method_matches_session(
+    state: &WebSocketState,
+    session: &crate::media::MediaSession,
+    method: &JoinMethod,
+) -> bool {
+    let JoinMethod::Jingle { sid, jid } = method else {
+        return false;
+    };
+    sid.as_str() == session.id.as_str()
+        && jid.as_ref().is_some_and(|jid| {
+            gateway_jingle_jid_matches(jid, &state.deps.service_domains.media, session.id.as_str())
+        })
+}
+
+async fn muc_call_start_authorized(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    sender_jid: &FullJid,
+    authenticated_session: &Option<Session>,
+) -> bool {
+    if !muc_occupant_present(state, room_jid, sender_jid).await {
+        return false;
+    }
+    muc_call_permission_authorized(
+        state,
+        room_jid,
+        authenticated_session,
+        Permission::StartCall,
+    )
+    .await
+}
+
+async fn muc_call_permission_authorized(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    authenticated_session: &Option<Session>,
+    permission: Permission,
+) -> bool {
+    let Some(channel_id) = waddle_xmpp::parse_managed_room_jid(room_jid) else {
+        return permission != Permission::ManageCall;
+    };
+    let Some(session) = authenticated_session.as_ref() else {
+        return false;
+    };
+    state
+        .deps
+        .app_state
+        .permission_actor
+        .ask(CheckPermission {
+            object: Object::new(ObjectType::Channel, &channel_id),
+            subject: Subject::user(&session.user_id),
+            permission,
+        })
+        .await
+        .is_ok_and(|response| response.allowed)
+}
+
+async fn muc_occupant_present(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    sender_jid: &FullJid,
+) -> bool {
+    let Some(room_actor) = get_room_actor(state, room_jid).await else {
+        return false;
+    };
+    room_actor.ask(GetSnapshot).await.is_ok_and(|snapshot| {
+        snapshot
+            .room
+            .find_occupant_by_real_jid(sender_jid)
+            .is_some()
+    })
+}
+
+async fn direct_call_start_authorized(
+    state: &WebSocketState,
+    sender_jid: &FullJid,
+    to_jid: &jid::Jid,
+    authenticated_session: &Option<Session>,
+) -> bool {
+    if sender_jid.to_bare() == to_jid.to_bare() {
+        return false;
+    }
+    let Some(session) = authenticated_session.as_ref() else {
+        return false;
+    };
+    state
+        .deps
+        .app_state
+        .permission_actor
+        .ask(CheckPermission {
+            object: Object::new(
+                ObjectType::Dm,
+                direct_message_permission_object_id(&sender_jid.to_bare(), &to_jid.to_bare()),
+            ),
+            subject: Subject::user(&session.user_id),
+            permission: Permission::Send,
+        })
+        .await
+        .is_ok_and(|response| response.allowed)
+}
+
+pub(crate) fn direct_message_permission_object_id(
+    first_jid: &BareJid,
+    second_jid: &BareJid,
+) -> String {
+    let mut participants = [first_jid.to_string(), second_jid.to_string()];
+    participants.sort_unstable();
+    let raw = format!("{}\0{}", participants[0], participants[1]);
+    format!("dm_{}", URL_SAFE_NO_PAD.encode(raw.as_bytes()))
+}
+
+fn media_gateway_stanza_error(error: MediaGatewayError) -> StanzaError {
+    match error {
+        MediaGatewayError::Disabled
+        | MediaGatewayError::LiveKitUnavailable
+        | MediaGatewayError::JingleBridgeUnavailable
+        | MediaGatewayError::CapacityExceeded => StanzaError::new(
+            ErrorType::Cancel,
+            DefinedCondition::ServiceUnavailable,
+            "en",
+            "Media gateway is unavailable.",
+        ),
+        MediaGatewayError::Forbidden => {
+            forbidden_error("Sender is not permitted to use this call.")
+        }
+        MediaGatewayError::UnknownSession
+        | MediaGatewayError::MissingSessionId
+        | MediaGatewayError::MissingInviteReference
+        | MediaGatewayError::SessionEnded => item_not_found_error("Call session not found."),
+        MediaGatewayError::UnsupportedInviteMethod => {
+            bad_request_error("Unsupported call invite join method.")
+        }
+        MediaGatewayError::InvalidSessionId => bad_request_error("Invalid call session id."),
+        _ => bad_request_error("Invalid call invite payload."),
+    }
 }
 
 fn forbidden_message_error(
@@ -780,11 +1457,15 @@ fn forbidden_error(text: &str) -> StanzaError {
 }
 
 fn internal_server_error_for_lookup() -> StanzaError {
+    internal_server_error("Archive lookup failed while validating rich-message target.")
+}
+
+fn internal_server_error(text: &str) -> StanzaError {
     StanzaError::new(
         ErrorType::Wait,
         DefinedCondition::InternalServerError,
         "en",
-        "Archive lookup failed while validating rich-message target.",
+        text,
     )
 }
 
@@ -989,6 +1670,7 @@ fn should_archive_groupchat_message(msg: &xmpp_parsers::message::Message) -> boo
         || is_moderation_result_message(msg)
         || has_file_sharing(msg)
         || is_sticker_message(msg)
+        || has_call_invite_payload(msg)
 }
 
 fn serialize_groupchat_stanza_xml(message: &xmpp_parsers::message::Message) -> Option<String> {
@@ -1077,8 +1759,9 @@ async fn archive_groupchat_message(
     }
 }
 
-/// Archive a direct (type="chat") message to both the sender's and recipient's
-/// personal MAM archives.  Only messages with a `<body>` are stored.
+/// Archive a direct message to both the sender's and recipient's personal MAM
+/// archives. Body-less rich protocol events, including call invites, are kept
+/// so XMPP lifecycle replay does not lose call state.
 async fn archive_direct_message(
     state: &WebSocketState,
     sender_jid: &FullJid,
@@ -1089,7 +1772,10 @@ async fn archive_direct_message(
         .map(|value| value.trim().to_string())
         .unwrap_or_default();
     let rich = rich_archive_payload(message);
-    if body.is_empty() && rich.is_none() {
+    if should_skip_storage(message) {
+        return;
+    }
+    if body.is_empty() && rich.is_none() && !has_call_invite_payload(message) {
         return;
     }
 
@@ -1287,4 +1973,151 @@ fn prototype_body(message: &xmpp_parsers::message::Message) -> Option<String> {
         .get("")
         .or_else(|| message.bodies.values().next())
         .map(|body| body.0.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use waddle_xmpp::xep::{
+        xep0334::{build_hint_element, Hint},
+        xep0359::build_origin_id_element,
+        xep0482::{build_accept_element, CallInvite, CallInviteId, JingleSessionId, JoinMethod},
+    };
+
+    fn accept_element(invite_id: &CallInviteId) -> xmpp_parsers::minidom::Element {
+        build_accept_element(
+            invite_id,
+            &JoinMethod::Jingle {
+                sid: JingleSessionId::new("sid-a").expect("sid"),
+                jid: Some("media.example.test/sid-a".parse().expect("jid")),
+            },
+        )
+    }
+
+    #[test]
+    fn direct_call_invite_reference_prefers_origin_id() {
+        let mut message = xmpp_parsers::message::Message::new(None);
+        message.type_ = XmppMessageType::Chat;
+        message.id = Some("message-id".to_string());
+        message.payloads.push(build_origin_id_element("origin-id"));
+
+        assert_eq!(
+            direct_call_invite_reference_id(&message).as_deref(),
+            Some("origin-id")
+        );
+    }
+
+    #[test]
+    fn bodyless_call_invite_lifecycle_is_carbon_eligible() {
+        let mut message = xmpp_parsers::message::Message::new(None);
+        message.type_ = XmppMessageType::Chat;
+        let invite_id = CallInviteId::new("origin-id").expect("id");
+        message.payloads.push(accept_element(&invite_id));
+
+        assert!(should_send_direct_carbon(&message));
+    }
+
+    #[test]
+    fn no_copy_suppresses_bodyless_call_invite_lifecycle_carbon() {
+        let mut message = xmpp_parsers::message::Message::new(None);
+        message.type_ = XmppMessageType::Chat;
+        let invite_id = CallInviteId::new("origin-id").expect("id");
+        message.payloads.push(accept_element(&invite_id));
+        message.payloads.push(build_hint_element(Hint::NoCopy));
+
+        assert!(!should_send_direct_carbon(&message));
+    }
+
+    #[test]
+    fn private_suppresses_bodyless_call_invite_lifecycle_carbon() {
+        let mut message = xmpp_parsers::message::Message::new(None);
+        message.type_ = XmppMessageType::Chat;
+        let invite_id = CallInviteId::new("origin-id").expect("id");
+        message.payloads.push(accept_element(&invite_id));
+        message
+            .payloads
+            .push(Element::builder("private", CARBONS_NS).build());
+
+        assert!(!should_send_direct_carbon(&message));
+    }
+
+    #[test]
+    fn multiple_call_invite_payloads_are_rejected() {
+        let mut message = xmpp_parsers::message::Message::new(None);
+        let invite_id = CallInviteId::new("origin-id").expect("id");
+        message.payloads.push(accept_element(&invite_id));
+        message.payloads.push(accept_element(&invite_id));
+
+        assert!(has_multiple_call_invite_payloads(&message));
+    }
+
+    #[test]
+    fn bodyless_plain_message_is_not_carbon_eligible() {
+        let mut message = xmpp_parsers::message::Message::new(None);
+        message.type_ = XmppMessageType::Chat;
+
+        assert!(!should_send_direct_carbon(&message));
+    }
+
+    #[test]
+    fn gateway_call_invite_detects_waddle_jingle_method() {
+        let unaddressed = CallInvite::new().with_method(JoinMethod::Jingle {
+            sid: JingleSessionId::new("sid-a").expect("sid"),
+            jid: None,
+        });
+        assert!(!is_gateway_call_invite(&unaddressed, "media.example.test"));
+
+        let addressed = CallInvite::new().with_method(JoinMethod::Jingle {
+            sid: JingleSessionId::new("sid-a").expect("sid"),
+            jid: Some("media.example.test/sid-a".parse().expect("jid")),
+        });
+        assert!(is_gateway_call_invite(&addressed, "media.example.test"));
+
+        let external = CallInvite::new().with_method(JoinMethod::External {
+            uri: "https://calls.example.test/room".parse().expect("uri"),
+        });
+        assert!(!is_gateway_call_invite(&external, "media.example.test"));
+
+        let addressed_with_external = CallInvite::new()
+            .with_method(JoinMethod::External {
+                uri: "https://calls.example.test/room".parse().expect("uri"),
+            })
+            .with_method(JoinMethod::Jingle {
+                sid: JingleSessionId::new("sid-a").expect("sid"),
+                jid: Some("media.example.test/sid-a".parse().expect("jid")),
+            });
+        assert!(is_gateway_call_invite(
+            &addressed_with_external,
+            "media.example.test"
+        ));
+
+        let duplicate_waddle_methods = CallInvite::new()
+            .with_method(JoinMethod::Jingle {
+                sid: JingleSessionId::new("sid-a").expect("sid"),
+                jid: Some("media.example.test/sid-a".parse().expect("jid")),
+            })
+            .with_method(JoinMethod::Jingle {
+                sid: JingleSessionId::new("sid-b").expect("sid"),
+                jid: Some("media.example.test/sid-b".parse().expect("jid")),
+            });
+        assert!(is_gateway_call_invite(
+            &duplicate_waddle_methods,
+            "media.example.test"
+        ));
+
+        let other_jingle = CallInvite::new().with_method(JoinMethod::Jingle {
+            sid: JingleSessionId::new("sid-a").expect("sid"),
+            jid: Some("elsewhere.example.test/sid-a".parse().expect("jid")),
+        });
+        assert!(!is_gateway_call_invite(&other_jingle, "media.example.test"));
+
+        let addressed_with_node = CallInvite::new().with_method(JoinMethod::Jingle {
+            sid: JingleSessionId::new("sid-a").expect("sid"),
+            jid: Some("node@media.example.test/sid-a".parse().expect("jid")),
+        });
+        assert!(!is_gateway_call_invite(
+            &addressed_with_node,
+            "media.example.test"
+        ));
+    }
 }

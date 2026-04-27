@@ -59,6 +59,8 @@ DROP TABLE IF EXISTS roster_items;
 DROP TABLE IF EXISTS roster_versions;
 DROP TABLE IF EXISTS blocking_list;
 DROP TABLE IF EXISTS private_xml_storage;
+DROP TABLE IF EXISTS media_session_participants;
+DROP TABLE IF EXISTS media_sessions;
 
 CREATE TABLE users (
     id TEXT PRIMARY KEY,
@@ -203,6 +205,37 @@ CREATE TABLE private_xml_storage (
     PRIMARY KEY (jid, namespace)
 );
 
+CREATE TABLE media_sessions (
+    id TEXT PRIMARY KEY,
+    scope TEXT NOT NULL,
+    anchor_jid TEXT NOT NULL,
+    livekit_room_name TEXT NOT NULL UNIQUE,
+    creator_jid TEXT NOT NULL,
+    status TEXT NOT NULL,
+    media_audio INTEGER NOT NULL DEFAULT 1,
+    media_video INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    ended_at TEXT
+);
+
+CREATE INDEX idx_media_sessions_anchor ON media_sessions(scope, anchor_jid);
+CREATE INDEX idx_media_sessions_status ON media_sessions(status);
+
+CREATE TABLE media_session_participants (
+    session_id TEXT NOT NULL,
+    participant_jid TEXT NOT NULL,
+    livekit_identity TEXT NOT NULL,
+    role TEXT NOT NULL,
+    state TEXT NOT NULL,
+    joined_at TEXT NOT NULL DEFAULT (datetime('now')),
+    left_at TEXT,
+    PRIMARY KEY (session_id, participant_jid),
+    FOREIGN KEY (session_id) REFERENCES media_sessions(id) ON DELETE CASCADE
+);
+
+CREATE INDEX idx_media_participants_jid ON media_session_participants(participant_jid);
+
 PRAGMA foreign_keys = ON;
 "#;
 
@@ -226,6 +259,8 @@ DROP TABLE IF EXISTS roster_items CASCADE;
 DROP TABLE IF EXISTS roster_versions CASCADE;
 DROP TABLE IF EXISTS blocking_list CASCADE;
 DROP TABLE IF EXISTS private_xml_storage CASCADE;
+DROP TABLE IF EXISTS media_session_participants CASCADE;
+DROP TABLE IF EXISTS media_sessions CASCADE;
 
 CREATE TABLE users (
     id TEXT PRIMARY KEY,
@@ -369,6 +404,37 @@ CREATE TABLE private_xml_storage (
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP::TEXT,
     PRIMARY KEY (jid, namespace)
 );
+
+CREATE TABLE media_sessions (
+    id TEXT PRIMARY KEY,
+    scope TEXT NOT NULL,
+    anchor_jid TEXT NOT NULL,
+    livekit_room_name TEXT NOT NULL UNIQUE,
+    creator_jid TEXT NOT NULL,
+    status TEXT NOT NULL,
+    media_audio INTEGER NOT NULL DEFAULT 1,
+    media_video INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP::TEXT,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP::TEXT,
+    ended_at TEXT
+);
+
+CREATE INDEX idx_media_sessions_anchor ON media_sessions(scope, anchor_jid);
+CREATE INDEX idx_media_sessions_status ON media_sessions(status);
+
+CREATE TABLE media_session_participants (
+    session_id TEXT NOT NULL,
+    participant_jid TEXT NOT NULL,
+    livekit_identity TEXT NOT NULL,
+    role TEXT NOT NULL,
+    state TEXT NOT NULL,
+    joined_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP::TEXT,
+    left_at TEXT,
+    PRIMARY KEY (session_id, participant_jid),
+    FOREIGN KEY (session_id) REFERENCES media_sessions(id) ON DELETE CASCADE
+);
+
+CREATE INDEX idx_media_participants_jid ON media_session_participants(participant_jid);
 "#;
 
     /// Get all global migrations in order

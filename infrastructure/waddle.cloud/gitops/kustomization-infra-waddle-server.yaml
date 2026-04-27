@@ -8,6 +8,7 @@ spec:
     - name: infra-cloudnative-pg
     - name: infra-external-dns
     - name: infra-onepassword-connect
+    - name: infra-reloader
     - name: infra-spicedb-operator
     - name: infra-waddle-namespace
   interval: 10m

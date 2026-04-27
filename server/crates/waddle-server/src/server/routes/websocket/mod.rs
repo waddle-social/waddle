@@ -18,8 +18,11 @@ use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine};
 use futures::{Sink, SinkExt, StreamExt};
 use jid::{BareJid, FullJid};
 use kameo::actor::ActorRef;
-use std::{str::FromStr, sync::Arc};
-use tokio::sync::mpsc;
+use std::{
+    str::FromStr,
+    sync::{atomic::AtomicBool, Arc},
+};
+use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, error, info, warn};
 use waddle_xmpp::{
     auth::{parse_oauthbearer, OAuthBearerResult},
@@ -41,8 +44,8 @@ use waddle_xmpp::{
     },
     registry::{ConnectionRegistry, OutboundStanza},
     stream_management::{
-        InMemorySmSessionRegistry, SmEnable, SmResume, SmSessionRegistry, SmStanza,
-        StreamManagementState, SM_NS,
+        DetachedSession, InMemorySmSessionRegistry, SmEnable, SmResume, SmSessionRegistry,
+        SmStanza, StreamManagementState, SM_NS,
     },
     Stanza,
 };
@@ -66,6 +69,7 @@ pub struct XmppServiceDomains {
     pub muc: String,
     pub spaces: String,
     pub upload: String,
+    pub media: String,
 }
 
 impl XmppServiceDomains {
@@ -74,6 +78,7 @@ impl XmppServiceDomains {
             muc: format!("muc.{component_parent_domain}"),
             spaces: format!("spaces.{component_parent_domain}"),
             upload: format!("upload.{xmpp_domain}"),
+            media: format!("media.{component_parent_domain}"),
         }
     }
 }
@@ -97,6 +102,10 @@ pub struct WebSocketDeps {
 pub struct ProtocolServices {
     /// Registry for tracking active connections by JID.
     pub connection_registry: Arc<ConnectionRegistry>,
+    /// Serializes FullJID registration and cleanup so a reconnect using the
+    /// same resource cannot join rooms while stale state for that resource is
+    /// being removed.
+    pub connection_lifecycle_gate: Arc<Mutex<()>>,
     /// Actor-backed registry for MUC rooms.
     pub room_registry: ActorRef<RoomRegistryActor>,
     /// Shared XMPP MAM storage for archived message history.
@@ -128,6 +137,8 @@ pub struct ProtocolServices {
     /// populated on detach and removed on take/resume (or swept when the
     /// corresponding SM session expires).
     pub resumable_sessions: Arc<dashmap::DashMap<String, Session>>,
+    /// XMPP-native media gateway backed by LiveKit for SFU/media transport.
+    pub media_gateway: crate::media::SharedMediaGateway,
 }
 
 /// Per-connection mutable state for a single WebSocket XMPP transport.
@@ -147,6 +158,10 @@ struct WsConnState {
     /// sends `<enable/>` / `<disable/>` and restored from detached SM state
     /// on resume so re-registration preserves carbons behavior.
     carbons_enabled: bool,
+    /// Owner handle returned by `ConnectionRegistry` for this task's current
+    /// registered slot. Cleanup uses it to avoid touching a replacement
+    /// connection that reused the same FullJID.
+    registry_owner: Option<Arc<AtomicBool>>,
     /// One-shot flag: when set, the main loop must NOT push the current
     /// frame's responses into `sm_state.record_outbound`. The flag is
     /// raised by `handle_sm_resume` because the responses it returns are
@@ -164,6 +179,7 @@ impl WsConnState {
             authenticated_session: None,
             sm_state: StreamManagementState::new(),
             carbons_enabled: false,
+            registry_owner: None,
             suppress_sm_record_next_batch: false,
         }
     }
@@ -224,6 +240,11 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
                         debug!(len = text.len(), "Received XMPP WebSocket message");
+                        if !connection_still_owns_registry(&state, &conn) {
+                            info!("Ignoring inbound frame from superseded WebSocket session");
+                            superseded = true;
+                            break;
+                        }
 
                         // Handle XMPP framing (RFC 7395)
                         let responses = handle_xmpp_frame(
@@ -235,19 +256,9 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
 
                         // Register connection after successful authentication AND resource binding
                         // This ensures the JID in ConnectionRegistry matches the JID stored in MUC room occupants
-                        if let Some(jid) = conn.phase.bound_jid() {
+                        if let Some(jid) = conn.phase.bound_jid().cloned() {
                             if let Some(tx) = pending_tx.take() {
-                                state.deps.protocol.connection_registry.register_with_carbons(
-                                    jid.clone(),
-                                    tx,
-                                    conn.carbons_enabled,
-                                );
-                                info!(
-                                    jid = %jid,
-                                    resumed = conn.phase.is_resumed(),
-                                    carbons_enabled = conn.carbons_enabled,
-                                    "WebSocket connection registered"
-                                );
+                                register_bound_connection(&state, &mut conn, jid, tx).await;
                             }
                         }
 
@@ -375,6 +386,16 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
     info!("XMPP WebSocket connection closed");
 }
 
+fn connection_still_owns_registry(state: &WebSocketState, conn: &WsConnState) -> bool {
+    let Some(jid) = conn.phase.bound_jid() else {
+        return true;
+    };
+    let Some(owner) = conn.registry_owner.as_ref() else {
+        return true;
+    };
+    state.deps.protocol.connection_registry.is_owner(jid, owner)
+}
+
 async fn send_ws_text_frames<S, E, I>(
     sender: &mut S,
     frames: I,
@@ -395,6 +416,81 @@ where
     true
 }
 
+async fn register_bound_connection(
+    state: &WebSocketState,
+    conn: &mut WsConnState,
+    jid: FullJid,
+    tx: mpsc::Sender<OutboundStanza>,
+) {
+    let _lifecycle_guard = state.deps.protocol.connection_lifecycle_gate.lock().await;
+
+    if !conn.phase.is_resumed() {
+        cleanup_detached_sessions_for_fresh_bind(state, &jid).await;
+    }
+
+    let registry_owner = state
+        .deps
+        .protocol
+        .connection_registry
+        .register_with_carbons(jid.clone(), tx, conn.carbons_enabled);
+    conn.registry_owner = Some(registry_owner);
+    info!(
+        jid = %jid,
+        resumed = conn.phase.is_resumed(),
+        carbons_enabled = conn.carbons_enabled,
+        "WebSocket connection registered"
+    );
+}
+
+async fn cleanup_detached_sessions_for_fresh_bind(state: &WebSocketState, jid: &FullJid) {
+    let detached_sessions = match state
+        .deps
+        .protocol
+        .sm_session_registry
+        .drain_for_jid(jid)
+        .await
+    {
+        Ok(sessions) => sessions,
+        Err(error) => {
+            warn!(
+                jid = %jid,
+                error = %error,
+                "Failed to drain detached SM sessions before fresh bind"
+            );
+            return;
+        }
+    };
+
+    if detached_sessions.is_empty() {
+        return;
+    }
+
+    let has_current_owner = state.deps.protocol.connection_registry.is_connected(jid);
+    for session in detached_sessions {
+        state
+            .deps
+            .protocol
+            .resumable_sessions
+            .remove(&session.stream_id);
+
+        if has_current_owner {
+            debug!(
+                jid = %jid,
+                stream_id = %session.stream_id,
+                "Dropped stale detached SM session without touching active same-FullJID owner"
+            );
+            continue;
+        }
+
+        state
+            .deps
+            .protocol
+            .media_gateway
+            .mark_participant_disconnected(&session.jid);
+        cleanup_muc_presence(state, &session.jid).await;
+    }
+}
+
 async fn send_ws_message<S, E>(
     sender: &mut S,
     message: Message,
@@ -411,14 +507,6 @@ where
             false
         }
     }
-}
-
-/// Clean up MUC room presence when a connection disconnects
-/// Public alias for the MUC-presence cleanup used by the SM expired-session
-/// janitor in `server::mod`. Thin passthrough so the janitor doesn't need
-/// to reimplement the room traversal.
-pub async fn cleanup_muc_presence_for_jid(state: &WebSocketState, jid: &FullJid) {
-    cleanup_muc_presence(state, jid).await
 }
 
 async fn cleanup_connection_shutdown(state: &WebSocketState, conn: &WsConnState, superseded: bool) {
@@ -448,7 +536,9 @@ async fn cleanup_connection_shutdown(state: &WebSocketState, conn: &WsConnState,
                 .to_detached_session(user_id, jid.clone(), carbons_enabled)
         {
             let stream_id = detached.stream_id.clone();
-            if let Some(session) = conn.authenticated_session.clone() {
+            let detached_auth_session = conn.authenticated_session.clone();
+            let _lifecycle_guard = state.deps.protocol.connection_lifecycle_gate.lock().await;
+            if let Some(session) = detached_auth_session {
                 state
                     .deps
                     .protocol
@@ -462,31 +552,126 @@ async fn cleanup_connection_shutdown(state: &WebSocketState, conn: &WsConnState,
                 .store_session(detached)
                 .await
             {
-                Ok(()) => {
+                Ok(outcome) => {
+                    for evicted in outcome.evicted_sessions {
+                        cleanup_expired_detached_session_under_lifecycle_gate(state, evicted).await;
+                    }
                     // Remove the routing entry only — the MUC occupant
                     // slot stays. On a successful resume we'll re-register
                     // the same FullJid and presence is preserved.
-                    state.deps.protocol.connection_registry.unregister(&jid);
-                    info!(
-                        jid = %jid,
-                        stream_id = %stream_id,
-                        "SM session detached; awaiting resume"
-                    );
+                    if unregister_connection_owner(state, &jid, conn.registry_owner.as_ref()) {
+                        info!(
+                            jid = %jid,
+                            stream_id = %stream_id,
+                            "SM session detached; awaiting resume"
+                        );
+                    } else {
+                        state.deps.protocol.resumable_sessions.remove(&stream_id);
+                        let _ = state
+                            .deps
+                            .protocol
+                            .sm_session_registry
+                            .take_session(&stream_id)
+                            .await;
+                    }
                 }
                 Err(err) => {
                     warn!(jid = %jid, error = %err, "Failed to detach SM session; falling back to full cleanup");
                     state.deps.protocol.resumable_sessions.remove(&stream_id);
-                    state.deps.protocol.connection_registry.unregister(&jid);
-                    cleanup_muc_presence(state, &jid).await;
+                    if unregister_connection_owner(state, &jid, conn.registry_owner.as_ref()) {
+                        state
+                            .deps
+                            .protocol
+                            .media_gateway
+                            .mark_participant_disconnected(&jid);
+                        cleanup_muc_presence(state, &jid).await;
+                    }
                 }
             }
             return;
         }
     }
 
-    state.deps.protocol.connection_registry.unregister(&jid);
-    info!(jid = %jid, "WebSocket connection unregistered");
-    cleanup_muc_presence(state, &jid).await;
+    let _lifecycle_guard = state.deps.protocol.connection_lifecycle_gate.lock().await;
+    if unregister_connection_owner(state, &jid, conn.registry_owner.as_ref()) {
+        info!(jid = %jid, "WebSocket connection unregistered");
+        state
+            .deps
+            .protocol
+            .media_gateway
+            .mark_participant_disconnected(&jid);
+        cleanup_muc_presence(state, &jid).await;
+    }
+}
+
+pub(crate) async fn cleanup_expired_detached_sessions(
+    state: &WebSocketState,
+) -> Result<usize, waddle_xmpp::stream_management::SmRegistryError> {
+    let _lifecycle_guard = state.deps.protocol.connection_lifecycle_gate.lock().await;
+    let sessions = state
+        .deps
+        .protocol
+        .sm_session_registry
+        .drain_expired()
+        .await?;
+    let count = sessions.len();
+    for session in sessions {
+        cleanup_expired_detached_session_under_lifecycle_gate(state, session).await;
+    }
+    Ok(count)
+}
+
+async fn cleanup_expired_detached_session_under_lifecycle_gate(
+    state: &WebSocketState,
+    session: DetachedSession,
+) {
+    state
+        .deps
+        .protocol
+        .resumable_sessions
+        .remove(&session.stream_id);
+
+    if state
+        .deps
+        .protocol
+        .connection_registry
+        .is_connected(&session.jid)
+    {
+        debug!(
+            jid = %session.jid,
+            stream_id = %session.stream_id,
+            "Skipped expired SM cleanup because the FullJID is connected"
+        );
+        return;
+    }
+
+    state
+        .deps
+        .protocol
+        .media_gateway
+        .mark_participant_disconnected(&session.jid);
+    cleanup_muc_presence(state, &session.jid).await;
+}
+
+fn unregister_connection_owner(
+    state: &WebSocketState,
+    jid: &FullJid,
+    registry_owner: Option<&Arc<AtomicBool>>,
+) -> bool {
+    match registry_owner {
+        Some(owner) => state
+            .deps
+            .protocol
+            .connection_registry
+            .unregister_if_owner(jid, owner)
+            .is_some(),
+        None => state
+            .deps
+            .protocol
+            .connection_registry
+            .unregister(jid)
+            .is_some(),
+    }
 }
 
 async fn cleanup_muc_presence(state: &WebSocketState, jid: &FullJid) {
@@ -501,6 +686,11 @@ async fn cleanup_muc_presence(state: &WebSocketState, jid: &FullJid) {
             .await
         {
             Ok(Some(outcome)) => {
+                state
+                    .deps
+                    .protocol
+                    .media_gateway
+                    .mark_muc_participant_left(&room_jid, jid);
                 debug!(
                     room = %room_jid,
                     nick = %outcome.nick,
@@ -997,6 +1187,7 @@ async fn handle_xmpp_frame(
         authenticated_session,
         sm_state,
         carbons_enabled,
+        registry_owner,
         suppress_sm_record_next_batch,
     } = conn;
     let muc_domain = state.deps.service_domains.muc.clone();
@@ -1112,9 +1303,12 @@ async fn handle_xmpp_frame(
                         domain,
                         &muc_domain,
                         state,
-                        authenticated_session,
-                        phase,
-                        carbons_enabled,
+                        handlers::iq::IqConnCtx {
+                            authenticated_session,
+                            phase,
+                            carbons_enabled,
+                            registry_owner: registry_owner.as_ref(),
+                        },
                     )
                     .await
                 }
@@ -1779,6 +1973,16 @@ mod tests {
         create_test_websocket_state_with_extension_manager(empty_extension_manager().await).await
     }
 
+    async fn create_test_websocket_state_with_media_gateway(
+        media_gateway: crate::media::SharedMediaGateway,
+    ) -> Arc<WebSocketState> {
+        create_test_websocket_state_with_extension_manager_and_media_gateway(
+            empty_extension_manager().await,
+            media_gateway,
+        )
+        .await
+    }
+
     async fn empty_extension_manager() -> Arc<ExtensionManager> {
         Arc::new(
             ExtensionManager::from_config(ExtensionConfig {
@@ -1793,6 +1997,19 @@ mod tests {
 
     async fn create_test_websocket_state_with_extension_manager(
         extension_manager: Arc<ExtensionManager>,
+    ) -> Arc<WebSocketState> {
+        create_test_websocket_state_with_extension_manager_and_media_gateway(
+            extension_manager,
+            Arc::new(crate::media::MediaGateway::new(
+                crate::media::LiveKitConfig::disabled(),
+            )),
+        )
+        .await
+    }
+
+    async fn create_test_websocket_state_with_extension_manager_and_media_gateway(
+        extension_manager: Arc<ExtensionManager>,
+        media_gateway: crate::media::SharedMediaGateway,
     ) -> Arc<WebSocketState> {
         let config = DatabaseConfig::default();
         let pool_config = PoolConfig::default();
@@ -1823,9 +2040,11 @@ mod tests {
                     muc: "muc.example.com".to_string(),
                     spaces: "spaces.example.com".to_string(),
                     upload: "upload.example.com".to_string(),
+                    media: "media.example.com".to_string(),
                 },
                 protocol: ProtocolServices {
                     connection_registry: Arc::new(ConnectionRegistry::new()),
+                    connection_lifecycle_gate: Arc::new(Mutex::new(())),
                     room_registry: kameo::spawn(RoomRegistryActor::new(
                         "muc.example.com".to_string(),
                     )),
@@ -1842,6 +2061,7 @@ mod tests {
                     isr_token_store: waddle_xmpp::isr::create_shared_store(),
                     sm_session_registry: Arc::new(InMemorySmSessionRegistry::new()),
                     resumable_sessions: Arc::new(dashmap::DashMap::new()),
+                    media_gateway,
                 },
             },
         })
@@ -2000,6 +2220,26 @@ mod tests {
             },
             _ => panic!("expected message stanza"),
         }
+    }
+
+    fn direct_gateway_call_invite_message(
+        sid: &str,
+        to: &jid::Jid,
+    ) -> xmpp_parsers::message::Message {
+        let mut message = xmpp_parsers::message::Message::new(Some(to.clone()));
+        message.id = Some(format!("msg-{sid}"));
+        message.type_ = XmppMessageType::Chat;
+        message
+            .payloads
+            .push(waddle_xmpp::xep::xep0482::build_invite_element(
+                &waddle_xmpp::xep::xep0482::CallInvite::new().with_method(
+                    waddle_xmpp::xep::xep0482::JoinMethod::Jingle {
+                        sid: waddle_xmpp::xep::xep0482::JingleSessionId::new(sid).expect("sid"),
+                        jid: Some(format!("media.example.com/{sid}").parse().expect("jid")),
+                    },
+                ),
+            ));
+        message
     }
 
     fn assert_github_payload(xml: &str, element_name: &str, url: &str, owner: &str, name: &str) {
@@ -3608,6 +3848,8 @@ mod tests {
 
         let session = create_test_session(state.as_ref(), "alice").await;
         let pending_jid: FullJid = "alice@example.com/pending".parse().expect("pending jid");
+        let authenticated_session = Some(session);
+        let phase = ConnectionPhase::authenticated(&pending_jid);
         let mut carbons_enabled = false;
         let frame = r#"<iq xmlns="jabber:client" id="cmd-prebind-1" type="set" to="example.com"><command xmlns="http://jabber.org/protocol/commands" node="test:adhoc-command" action="execute"/></iq>"#;
         let responses = handle_iq_with_conn_state(
@@ -3615,9 +3857,12 @@ mod tests {
             "example.com",
             "muc.example.com",
             state.as_ref(),
-            &Some(session),
-            &ConnectionPhase::authenticated(&pending_jid),
-            &mut carbons_enabled,
+            handlers::iq::IqConnCtx {
+                authenticated_session: &authenticated_session,
+                phase: &phase,
+                carbons_enabled: &mut carbons_enabled,
+                registry_owner: None,
+            },
         )
         .await;
 
@@ -3705,6 +3950,95 @@ mod tests {
         assert!(
             response.contains("spaces.example.com"),
             "expected spaces service in server disco#items: {response}"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_iq_disco_unknown_media_resource_returns_item_not_found() {
+        let mut livekit = crate::media::LiveKitConfig::disabled();
+        livekit.enabled = true;
+        let state = create_test_websocket_state_with_media_gateway(Arc::new(
+            crate::media::MediaGateway::new(livekit),
+        ))
+        .await;
+        let query = disco_info_iq_frame("media-resource-info", "media.example.com/s1", None);
+
+        let responses = handle_iq(
+            &query,
+            "example.com",
+            "muc.example.com",
+            state.as_ref(),
+            &None,
+            &ConnectionPhase::Unauthenticated,
+        )
+        .await;
+        let response = responses.first().expect("media resource disco response");
+
+        assert!(
+            response.contains("item-not-found"),
+            "media resource disco must not fall through to server features: {response}"
+        );
+        assert!(
+            !response.contains("Waddle</identity>"),
+            "media resource disco leaked server identity: {response}"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_iq_disco_known_media_resource_returns_jingle_features() {
+        let media_gateway = Arc::new(crate::media::MediaGateway::new(
+            crate::media::LiveKitConfig::enabled_for_tests(),
+        ));
+        let mut invite = xmpp_parsers::message::Message::new(None);
+        invite
+            .payloads
+            .push(waddle_xmpp::xep::xep0482::build_invite_element(
+                &waddle_xmpp::xep::xep0482::CallInvite::new().with_method(
+                    waddle_xmpp::xep::xep0482::JoinMethod::Jingle {
+                        sid: waddle_xmpp::xep::xep0482::JingleSessionId::new("s1").expect("sid"),
+                        jid: Some("media.example.com/s1".parse().expect("media jid")),
+                    },
+                ),
+            ));
+        let creator: FullJid = "alice@example.com/phone".parse().expect("jid");
+        media_gateway
+            .ensure_invite_session(
+                &mut invite,
+                crate::media::MediaSessionScope::Muc,
+                "room@muc.example.com".parse().expect("jid"),
+                &creator,
+                "media.example.com",
+            )
+            .expect("session");
+        let state = create_test_websocket_state_with_media_gateway(media_gateway).await;
+        let query = disco_info_iq_frame("media-resource-info", "media.example.com/s1", None);
+
+        let responses = handle_iq(
+            &query,
+            "example.com",
+            "muc.example.com",
+            state.as_ref(),
+            &None,
+            &ConnectionPhase::Unauthenticated,
+        )
+        .await;
+        let response = responses.first().expect("media resource disco response");
+
+        assert!(
+            response.contains("Waddle Media Session"),
+            "known media resource should expose a media identity: {response}"
+        );
+        assert!(
+            response.contains(waddle_xmpp::xep::xep0166::NS_JINGLE),
+            "known media resource should advertise Jingle: {response}"
+        );
+        assert!(
+            response.contains(waddle_xmpp::xep::xep0176::NS_JINGLE_ICE_UDP),
+            "known media resource should advertise ICE-UDP: {response}"
+        );
+        assert!(
+            !response.contains("item-not-found"),
+            "known media resource must not be reported unknown: {response}"
         );
     }
 
@@ -4318,6 +4652,151 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn direct_gateway_call_invite_requires_dm_send_permission() {
+        let media_gateway = Arc::new(crate::media::MediaGateway::new(
+            crate::media::LiveKitConfig::enabled_for_tests(),
+        ));
+        let state = create_test_websocket_state_with_media_gateway(media_gateway.clone()).await;
+        let alice_session = create_test_session(state.as_ref(), "alice").await;
+        let _bob_session = create_test_session(state.as_ref(), "bob").await;
+        let alice_jid: FullJid = "alice@example.com/web".parse().expect("alice jid");
+        let bob_jid: jid::Jid = "bob@example.com".parse().expect("bob jid");
+
+        let denied = handle_message(
+            direct_gateway_call_invite_message("direct-denied", &bob_jid),
+            "muc.example.com",
+            state.as_ref(),
+            &ConnectionPhase::ready(alice_jid.clone(), false),
+            &Some(alice_session.clone()),
+        )
+        .await;
+        let denied_xml = denied.first().expect("forbidden response");
+        assert!(
+            denied_xml.contains("forbidden"),
+            "direct call without direct_message#send must be rejected: {denied_xml}"
+        );
+        assert!(media_gateway
+            .get_session(&crate::media::MediaSessionId::new("direct-denied").expect("sid"))
+            .is_none());
+
+        let dm_object_id = handlers::message::direct_message_permission_object_id(
+            &alice_jid.to_bare(),
+            &bob_jid.to_bare(),
+        );
+        state
+            .deps
+            .app_state
+            .permission_actor
+            .ask(WriteTuple {
+                tuple: Tuple::new(
+                    Object::new(ObjectType::Dm, dm_object_id),
+                    Relation::new("participant"),
+                    Subject::user(&alice_session.user_id),
+                ),
+            })
+            .await
+            .expect("direct message permission tuple");
+
+        let allowed = handle_message(
+            direct_gateway_call_invite_message("direct-allowed", &bob_jid),
+            "muc.example.com",
+            state.as_ref(),
+            &ConnectionPhase::ready(alice_jid, false),
+            &Some(alice_session),
+        )
+        .await;
+        assert!(
+            allowed.is_empty(),
+            "authorized direct call invite should route without sender error: {allowed:?}"
+        );
+        assert!(media_gateway
+            .get_session(&crate::media::MediaSessionId::new("direct-allowed").expect("sid"))
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn direct_media_jingle_join_rechecks_dm_send_permission() {
+        let media_gateway = Arc::new(crate::media::MediaGateway::new(
+            crate::media::LiveKitConfig::enabled_for_tests(),
+        ));
+        let state = create_test_websocket_state_with_media_gateway(media_gateway.clone()).await;
+        let alice_session = create_test_session(state.as_ref(), "alice").await;
+        let _bob_session = create_test_session(state.as_ref(), "bob").await;
+        let alice_jid: FullJid = "alice@example.com/web".parse().expect("alice jid");
+        let bob_jid: jid::Jid = "bob@example.com".parse().expect("bob jid");
+        let mut invite = direct_gateway_call_invite_message("direct-jingle-authz", &bob_jid);
+        media_gateway
+            .ensure_invite_session(
+                &mut invite,
+                crate::media::MediaSessionScope::Direct,
+                bob_jid.clone(),
+                &alice_jid,
+                "media.example.com",
+            )
+            .expect("session");
+        let iq = Iq {
+            from: Some(jid::Jid::from(alice_jid.clone())),
+            to: Some("media.example.com/direct-jingle-authz".parse().expect("jid")),
+            id: "direct-jingle-join".to_string(),
+            payload: IqType::Set(
+                Element::builder("jingle", waddle_xmpp::xep::xep0166::NS_JINGLE)
+                    .attr("action", "session-terminate")
+                    .attr("sid", "direct-jingle-authz")
+                    .build(),
+            ),
+        };
+        let iq_frame = iq_to_xml(iq);
+
+        let denied = handle_iq(
+            &iq_frame,
+            "example.com",
+            "muc.example.com",
+            state.as_ref(),
+            &Some(alice_session.clone()),
+            &ConnectionPhase::ready(alice_jid.clone(), false),
+        )
+        .await;
+        let denied_xml = denied.first().expect("forbidden response");
+        assert!(
+            denied_xml.contains("forbidden"),
+            "direct Jingle join without direct_message#send must be rejected: {denied_xml}"
+        );
+
+        let dm_object_id = handlers::message::direct_message_permission_object_id(
+            &alice_jid.to_bare(),
+            &bob_jid.to_bare(),
+        );
+        state
+            .deps
+            .app_state
+            .permission_actor
+            .ask(WriteTuple {
+                tuple: Tuple::new(
+                    Object::new(ObjectType::Dm, dm_object_id),
+                    Relation::new("participant"),
+                    Subject::user(&alice_session.user_id),
+                ),
+            })
+            .await
+            .expect("direct message permission tuple");
+
+        let allowed = handle_iq(
+            &iq_frame,
+            "example.com",
+            "muc.example.com",
+            state.as_ref(),
+            &Some(alice_session),
+            &ConnectionPhase::ready(alice_jid, false),
+        )
+        .await;
+        let allowed_xml = allowed.first().expect("authorized response");
+        assert!(
+            allowed_xml.contains("type=\"result\"") || allowed_xml.contains("type='result'"),
+            "authorized direct Jingle termination should ack: {allowed_xml}"
+        );
+    }
+
+    #[tokio::test]
     async fn handle_xmpp_frame_direct_with_unavailable_github_actor_does_not_inject_embed() {
         let sender_jid: FullJid = "alice@example.com/web".parse().expect("sender jid");
         let recipient_jid: FullJid = "bob@example.com/mobile".parse().expect("recipient jid");
@@ -4712,6 +5191,8 @@ mod tests {
         let state = create_test_websocket_state().await;
         let session = create_test_session(state.as_ref(), "bob").await;
         let pending_jid: FullJid = "bob@example.com/pending".parse().expect("pending jid");
+        let authenticated_session = Some(session);
+        let phase = ConnectionPhase::authenticated(&pending_jid);
         let mut carbons_enabled = false;
         let frame = r#"<iq xmlns='jabber:client' type='get' to='bob@example.com' id='inbox-prebind-1'><query xmlns='urn:waddle:inbox:0'/></iq>"#;
         let responses = handle_iq_with_conn_state(
@@ -4719,9 +5200,12 @@ mod tests {
             "example.com",
             "muc.example.com",
             state.as_ref(),
-            &Some(session),
-            &ConnectionPhase::authenticated(&pending_jid),
-            &mut carbons_enabled,
+            handlers::iq::IqConnCtx {
+                authenticated_session: &authenticated_session,
+                phase: &phase,
+                carbons_enabled: &mut carbons_enabled,
+                registry_owner: None,
+            },
         )
         .await;
 
@@ -6013,6 +6497,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cleanup_shutdown_does_not_touch_replacement_connection() {
+        let state = create_test_websocket_state().await;
+        let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+        let room_jid: BareJid = "replacement-channel@muc.example.com".parse().expect("room");
+        let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+
+        let _ = handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room_jid,
+            &jid,
+            "alice",
+            &Some(owner_session),
+        )
+        .await;
+        let (old_tx, _old_rx) = mpsc::channel::<OutboundStanza>(4);
+        let old_owner = state
+            .deps
+            .protocol
+            .connection_registry
+            .register(jid.clone(), old_tx);
+        let (new_tx, _new_rx) = mpsc::channel::<OutboundStanza>(4);
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .register(jid.clone(), new_tx);
+
+        let mut old_conn = WsConnState::new();
+        old_conn.phase = ConnectionPhase::ready(jid.clone(), false);
+        old_conn.registry_owner = Some(old_owner);
+
+        cleanup_connection_shutdown(state.as_ref(), &old_conn, false).await;
+
+        assert!(state.deps.protocol.connection_registry.is_connected(&jid));
+        assert!(snapshot_room(state.as_ref(), &room_jid)
+            .await
+            .room
+            .find_nick_by_real_jid(&jid)
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn inbound_owner_check_rejects_replaced_full_jid_task() {
+        let state = create_test_websocket_state().await;
+        let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+
+        let (old_tx, _old_rx) = mpsc::channel::<OutboundStanza>(4);
+        let old_owner = state
+            .deps
+            .protocol
+            .connection_registry
+            .register(jid.clone(), old_tx);
+        let mut old_conn = WsConnState::new();
+        old_conn.phase = ConnectionPhase::ready(jid.clone(), false);
+        old_conn.registry_owner = Some(old_owner);
+
+        assert!(connection_still_owns_registry(state.as_ref(), &old_conn));
+
+        let (new_tx, _new_rx) = mpsc::channel::<OutboundStanza>(4);
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .register(jid, new_tx);
+
+        assert!(
+            !connection_still_owns_registry(state.as_ref(), &old_conn),
+            "a stale task must stop processing inbound frames after replacement"
+        );
+    }
+
+    #[tokio::test]
     async fn cleanup_shutdown_does_not_detach_explicit_close() {
         let state = create_test_websocket_state().await;
         let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
@@ -6062,10 +6619,91 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sm_janitor_helper_drains_expired_and_cleans_muc() {
+    async fn fresh_bind_cleans_stale_detached_state_for_same_full_jid() {
+        use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+
+        let state = create_test_websocket_state().await;
+        let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+        let room_jid: BareJid = "fresh-reconnect-channel@muc.example.com"
+            .parse()
+            .expect("room");
+        let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+
+        let _ = handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room_jid,
+            &jid,
+            "alice",
+            &Some(owner_session),
+        )
+        .await;
+        assert!(snapshot_room(state.as_ref(), &room_jid)
+            .await
+            .room
+            .find_nick_by_real_jid(&jid)
+            .is_some());
+
+        let stream_id = "stale-detached-before-fresh-bind".to_string();
+        state
+            .deps
+            .protocol
+            .sm_session_registry
+            .store_session(DetachedSession {
+                stream_id: stream_id.clone(),
+                user_id: "alice@example.com".to_string(),
+                jid: jid.clone(),
+                inbound_count: 0,
+                outbound_count: 0,
+                last_acked: 0,
+                unacked_stanzas: Vec::new(),
+                max_resume_time: Some(300),
+                detached_at: std::time::Instant::now(),
+                carbons_enabled: false,
+            })
+            .await
+            .expect("store");
+        state
+            .deps
+            .protocol
+            .resumable_sessions
+            .insert(stream_id.clone(), Session::new("uid", "alice", "alice"));
+
+        let (tx, _rx) = mpsc::channel(1);
+        let mut conn = WsConnState::new();
+        conn.phase = ConnectionPhase::ready(jid.clone(), false);
+
+        register_bound_connection(state.as_ref(), &mut conn, jid.clone(), tx).await;
+
+        assert!(state.deps.protocol.connection_registry.is_connected(&jid));
+        assert!(!state
+            .deps
+            .protocol
+            .resumable_sessions
+            .contains_key(&stream_id));
+        assert!(state
+            .deps
+            .protocol
+            .sm_session_registry
+            .take_session(&stream_id)
+            .await
+            .expect("take")
+            .is_none());
+        assert!(
+            snapshot_room(state.as_ref(), &room_jid)
+                .await
+                .room
+                .find_nick_by_real_jid(&jid)
+                .is_none(),
+            "fresh bind must not inherit stale detached MUC presence"
+        );
+    }
+
+    #[tokio::test]
+    async fn sm_janitor_helper_cleans_expired_detached_presence() {
         // Exercise the pieces the janitor composes: drain_expired() returns
-        // the removed sessions, and cleanup_muc_presence_for_jid removes the
-        // occupant that was held while the session was detached.
+        // the removed sessions, then expired detached cleanup drops sidecar,
+        // media, and MUC state while holding the connection lifecycle gate.
         use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
         let state = create_test_websocket_state().await;
         let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
@@ -6117,24 +6755,10 @@ mod tests {
         // Wait a hair so the 0-second TTL is definitely in the past.
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
-        let drained = state
-            .deps
-            .protocol
-            .sm_session_registry
-            .drain_expired()
+        let cleaned = cleanup_expired_detached_sessions(state.as_ref())
             .await
-            .expect("drain");
-        assert_eq!(drained.len(), 1);
-        assert_eq!(drained[0].stream_id, stream_id);
-
-        // The janitor body: remove sidecar + MUC occupant + any routing slot.
-        state.deps.protocol.resumable_sessions.remove(&stream_id);
-        state
-            .deps
-            .protocol
-            .connection_registry
-            .unregister(&drained[0].jid);
-        cleanup_muc_presence_for_jid(state.as_ref(), &drained[0].jid).await;
+            .expect("cleanup");
+        assert_eq!(cleaned, 1);
 
         assert!(!state
             .deps
@@ -6147,7 +6771,73 @@ mod tests {
                 .room
                 .find_nick_by_real_jid(&jid)
                 .is_none(),
-            "MUC occupant must be gone after janitor sweep"
+            "expired SM janitor must remove stale detached MUC presence"
+        );
+    }
+
+    #[tokio::test]
+    async fn sm_janitor_helper_preserves_reconnected_same_full_jid() {
+        use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+        let state = create_test_websocket_state().await;
+        let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+        let room_jid: BareJid = "reconnected-channel@muc.example.com".parse().expect("room");
+        let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+
+        let _ = handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room_jid,
+            &jid,
+            "alice",
+            &Some(owner_session),
+        )
+        .await;
+
+        let stream_id = "expired-but-reconnected".to_string();
+        state
+            .deps
+            .protocol
+            .sm_session_registry
+            .store_session(DetachedSession {
+                stream_id: stream_id.clone(),
+                user_id: "alice@example.com".to_string(),
+                jid: jid.clone(),
+                inbound_count: 0,
+                outbound_count: 0,
+                last_acked: 0,
+                unacked_stanzas: Vec::new(),
+                max_resume_time: Some(0),
+                detached_at: std::time::Instant::now(),
+                carbons_enabled: false,
+            })
+            .await
+            .expect("store");
+        state
+            .deps
+            .protocol
+            .resumable_sessions
+            .insert(stream_id.clone(), Session::new("uid", "alice", "alice"));
+        let (tx, _rx) = mpsc::channel(1);
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .register(jid.clone(), tx);
+
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        let cleaned = cleanup_expired_detached_sessions(state.as_ref())
+            .await
+            .expect("cleanup");
+        assert_eq!(cleaned, 1);
+
+        assert!(state.deps.protocol.connection_registry.is_connected(&jid));
+        assert!(
+            snapshot_room(state.as_ref(), &room_jid)
+                .await
+                .room
+                .find_nick_by_real_jid(&jid)
+                .is_some(),
+            "current same-FullJID connection must keep its MUC occupant"
         );
     }
 }

@@ -71,6 +71,7 @@ tracing-opentelemetry = { workspace = true }
 rustls = { workspace = true, features = ["ring"] }
 rustls-acme = { workspace = true }
 hmac = { workspace = true }
+sha1 = { workspace = true }
 sha2 = { workspace = true }
 p256 = { workspace = true }
 elliptic-curve = { workspace = true }

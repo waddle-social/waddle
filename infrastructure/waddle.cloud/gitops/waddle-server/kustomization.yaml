@@ -8,6 +8,7 @@ resources:
   - spicedb-cluster.yaml
   - xmpp-certificate.yaml
   - external-secret.yaml
+  - livekit-external-secret.yaml
   - github-app-secret.yaml
   - spicedb-external-secret.yaml
   - helmrepository.yaml

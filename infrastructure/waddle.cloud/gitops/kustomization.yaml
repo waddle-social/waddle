@@ -5,6 +5,7 @@ resources:
   - kustomization-openebs-postinstall.yaml
   - kustomization-infra-external-secrets.yaml
   - kustomization-infra-onepassword-connect.yaml
+  - kustomization-infra-reloader.yaml
   - kustomization-infra-cert-manager.yaml
   - kustomization-infra-external-dns.yaml
   - kustomization-infra-grafana-alloy.yaml

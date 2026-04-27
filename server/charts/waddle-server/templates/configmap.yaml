@@ -36,6 +36,19 @@ data:
   WADDLE_SPICEDB_ENDPOINT: {{ .Values.spicedb.endpoint | quote }}
   WADDLE_SPICEDB_INSECURE: {{ .Values.spicedb.insecure | toString | quote }}
   {{- end }}
+  WADDLE_LIVEKIT_ENABLED: {{ .Values.livekit.enabled | toString | quote }}
+  {{- if .Values.livekit.wsUrl }}
+  WADDLE_LIVEKIT_WS_URL: {{ .Values.livekit.wsUrl | quote }}
+  {{- end }}
+  WADDLE_LIVEKIT_ROOM_PREFIX: {{ .Values.livekit.roomPrefix | quote }}
+  WADDLE_LIVEKIT_TOKEN_TTL_SECONDS: {{ .Values.livekit.tokenTtlSeconds | toString | quote }}
+  {{- if .Values.livekit.turn.host }}
+  WADDLE_LIVEKIT_TURN_HOST: {{ .Values.livekit.turn.host | quote }}
+  WADDLE_LIVEKIT_TURN_UDP_PORT: {{ .Values.livekit.turn.udpPort | toString | quote }}
+  {{- if .Values.livekit.turn.tcpPort }}
+  WADDLE_LIVEKIT_TURN_TCP_PORT: {{ .Values.livekit.turn.tcpPort | toString | quote }}
+  {{- end }}
+  {{- end }}
   {{- if .Values.telemetry.otlpEndpoint }}
   OTEL_EXPORTER_OTLP_ENDPOINT: {{ .Values.telemetry.otlpEndpoint | quote }}
   {{- end }}

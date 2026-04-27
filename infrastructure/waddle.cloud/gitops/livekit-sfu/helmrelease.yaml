@@ -22,6 +22,8 @@ spec:
       tag: v1.11.0
     apiKeys:
       existingSecret: livekit-sfu-api-keys
+    podAnnotations:
+      reloader.stakater.com/auto: "true"
     livekit:
       log_level: info
       rtc:

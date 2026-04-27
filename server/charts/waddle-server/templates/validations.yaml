@@ -18,3 +18,24 @@
 {{- fail "spicedb requires either secret.spicedbPresharedKey, secret.existingSecret, or extraSecretRefs providing WADDLE_SPICEDB_PRESHARED_KEY" -}}
 {{- end -}}
 {{- end -}}
+
+{{- if .Values.livekit.enabled -}}
+{{- if not .Values.livekit.wsUrl -}}
+{{- fail "livekit.wsUrl is required when livekit.enabled is true" -}}
+{{- end -}}
+{{- $livekitKey := coalesce .Values.secret.livekitApiKey "" -}}
+{{- $livekitSecret := coalesce .Values.secret.livekitApiSecret "" -}}
+{{- $managedSecretCreated := and .Values.secret.create (eq .Values.secret.existingSecret "") -}}
+{{- $livekitInlineCreds := and $managedSecretCreated $livekitKey $livekitSecret -}}
+{{- $livekitCredsFromSecretRef := or (ne .Values.secret.existingSecret "") (ne .Values.livekit.credentialsSecretRef "") -}}
+{{- if not (or $livekitInlineCreds $livekitCredsFromSecretRef) -}}
+{{- fail "livekit requires secret.create=true with secret.livekitApiKey plus secret.livekitApiSecret, secret.existingSecret, or livekit.credentialsSecretRef providing WADDLE_LIVEKIT_API_KEY and WADDLE_LIVEKIT_API_SECRET" -}}
+{{- end -}}
+{{- if .Values.livekit.turn.host -}}
+{{- $livekitTurnSecret := coalesce .Values.secret.livekitTurnSharedSecret "" -}}
+{{- $livekitInlineTurnSecret := and $managedSecretCreated $livekitTurnSecret -}}
+{{- if not (or $livekitInlineTurnSecret (ne .Values.secret.existingSecret "") (ne .Values.livekit.credentialsSecretRef "")) -}}
+{{- fail "livekit.turn.host requires secret.create=true with secret.livekitTurnSharedSecret, secret.existingSecret, or livekit.credentialsSecretRef providing WADDLE_LIVEKIT_TURN_SHARED_SECRET" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}

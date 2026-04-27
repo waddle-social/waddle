@@ -20,6 +20,8 @@ spec:
     image:
       repository: ghcr.io/waddle-social/waddle
       tag: main
+    podAnnotations:
+      reloader.stakater.com/auto: "true"
     config:
       baseUrl: https://xmpp.waddle.social
       corsOrigins: https://waddle.chat,http://localhost:4321
@@ -35,6 +37,16 @@ spec:
       enabled: true
       endpoint: http://spicedb:50051
       insecure: true
+    livekit:
+      enabled: true
+      credentialsSecretRef: waddle-livekit-credentials
+      wsUrl: wss://sfu.waddle.social
+      roomPrefix: waddle
+      tokenTtlSeconds: 600
+      turn:
+        host: turn.waddle.social
+        udpPort: 30478
+        tcpPort: 443
     extraSecretRefs:
       - waddle-r2-credentials
       - waddle-spicedb
@@ -67,6 +79,7 @@ spec:
             key: uri
     xmpp:
       domain: waddle.social
+      componentDomain: waddle.social
       tls:
         secretName: waddle-xmpp-tls
     persistence:

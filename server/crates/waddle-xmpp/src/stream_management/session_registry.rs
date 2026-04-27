@@ -69,6 +69,16 @@ pub struct DetachedSession {
     pub carbons_enabled: bool,
 }
 
+/// Result of storing a detached stream-management session.
+#[derive(Debug, Clone, Default)]
+pub struct StoreSessionOutcome {
+    /// Sessions removed while making room for the newly stored session.
+    ///
+    /// Callers must clean any sidecar state that is keyed by these stream ids
+    /// or JIDs, such as cached auth sessions and preserved MUC presence.
+    pub evicted_sessions: Vec<DetachedSession>,
+}
+
 impl DetachedSession {
     /// Check if the session has expired.
     pub fn is_expired(&self) -> bool {
@@ -116,7 +126,10 @@ pub trait SmSessionRegistry: Send + Sync {
     /// Store a detached session.
     ///
     /// The session can be retrieved later using `take_session` with the stream_id.
-    async fn store_session(&self, session: DetachedSession) -> Result<(), SmRegistryError>;
+    async fn store_session(
+        &self,
+        session: DetachedSession,
+    ) -> Result<StoreSessionOutcome, SmRegistryError>;
 
     /// Take (retrieve and remove) a session by stream ID.
     ///
@@ -180,15 +193,20 @@ impl InMemorySmSessionRegistry {
 
 #[async_trait]
 impl SmSessionRegistry for InMemorySmSessionRegistry {
-    async fn store_session(&self, session: DetachedSession) -> Result<(), SmRegistryError> {
+    async fn store_session(
+        &self,
+        session: DetachedSession,
+    ) -> Result<StoreSessionOutcome, SmRegistryError> {
         let mut sessions = self
             .sessions
             .write()
             .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
 
+        let mut evicted_sessions = Vec::new();
+
         // Clean up expired sessions if at capacity
         if sessions.len() >= self.max_sessions {
-            let _ = drain_expired_internal(&mut sessions);
+            evicted_sessions.extend(drain_expired_internal(&mut sessions));
         }
 
         // Still at capacity after cleanup?
@@ -199,7 +217,9 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
                 .min_by_key(|(_, s)| s.detached_at)
                 .map(|(k, _)| k.clone())
             {
-                sessions.remove(&oldest_key);
+                if let Some(evicted) = sessions.remove(&oldest_key) {
+                    evicted_sessions.push(evicted);
+                }
                 debug!(stream_id = %oldest_key, "Evicted oldest SM session to make room");
             }
         }
@@ -208,7 +228,7 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
         sessions.insert(stream_id.clone(), session);
 
         debug!(stream_id = %stream_id, count = sessions.len(), "Stored detached SM session");
-        Ok(())
+        Ok(StoreSessionOutcome { evicted_sessions })
     }
 
     async fn take_session(
@@ -288,6 +308,23 @@ impl InMemorySmSessionRegistry {
 
         Ok(drain_expired_internal(&mut sessions))
     }
+
+    /// Remove all detached sessions for a FullJID and return their state.
+    ///
+    /// A fresh bind with the same FullJID is not an XEP-0198 resume. The
+    /// server must discard any preserved detached stream state for that JID
+    /// before accepting the fresh resource as the current owner.
+    pub async fn drain_for_jid(
+        &self,
+        jid: &FullJid,
+    ) -> Result<Vec<DetachedSession>, SmRegistryError> {
+        let mut sessions = self
+            .sessions
+            .write()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+
+        Ok(drain_for_jid_internal(&mut sessions, jid))
+    }
 }
 
 /// Internal helper: remove expired sessions and return them.
@@ -315,6 +352,40 @@ fn drain_expired_internal(sessions: &mut HashMap<String, DetachedSession>) -> Ve
             removed = drained.len(),
             remaining = sessions.len(),
             "Cleaned up expired SM sessions"
+        );
+    }
+
+    drained
+}
+
+fn drain_for_jid_internal(
+    sessions: &mut HashMap<String, DetachedSession>,
+    jid: &FullJid,
+) -> Vec<DetachedSession> {
+    let stream_ids: Vec<String> = sessions
+        .iter()
+        .filter_map(|(stream_id, session)| {
+            if session.jid == *jid {
+                Some(stream_id.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let mut drained = Vec::with_capacity(stream_ids.len());
+    for stream_id in stream_ids {
+        if let Some(session) = sessions.remove(&stream_id) {
+            drained.push(session);
+        }
+    }
+
+    if !drained.is_empty() {
+        debug!(
+            jid = %jid,
+            removed = drained.len(),
+            remaining = sessions.len(),
+            "Drained detached SM sessions for fresh bind"
         );
     }
 
@@ -448,6 +519,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_drain_for_jid_removes_only_matching_sessions() {
+        let registry = InMemorySmSessionRegistry::new();
+
+        registry
+            .store_session(make_test_session("stream-one"))
+            .await
+            .unwrap();
+        registry
+            .store_session(make_test_session("stream-two"))
+            .await
+            .unwrap();
+
+        let mut other = make_test_session("stream-other");
+        other.jid = "other@example.com/resource".parse().unwrap();
+        registry.store_session(other).await.unwrap();
+
+        let drained = registry.drain_for_jid(&make_test_jid()).await.unwrap();
+        let mut stream_ids: Vec<&str> = drained
+            .iter()
+            .map(|session| session.stream_id.as_str())
+            .collect();
+        stream_ids.sort_unstable();
+        assert_eq!(stream_ids, vec!["stream-one", "stream-two"]);
+        assert_eq!(registry.session_count().await, 1);
+        assert!(registry
+            .take_session("stream-other")
+            .await
+            .unwrap()
+            .is_some());
+    }
+
+    #[tokio::test]
     async fn test_capacity_limit() {
         let registry = InMemorySmSessionRegistry::with_capacity(3);
 
@@ -461,7 +564,9 @@ mod tests {
 
         // Store a 4th - should evict oldest
         let session = make_test_session("stream-new");
-        registry.store_session(session).await.unwrap();
+        let outcome = registry.store_session(session).await.unwrap();
+        assert_eq!(outcome.evicted_sessions.len(), 1);
+        assert_eq!(outcome.evicted_sessions[0].stream_id, "stream-0");
 
         assert_eq!(registry.session_count().await, 3);
 

@@ -194,6 +194,10 @@ definition channel {
   permission send_message = owner + admin + member + writer + moderator + manager + parent->view
   permission read = owner + admin + member + viewer + writer + moderator + manager + parent->view
   permission view = owner + admin + member + viewer + writer + moderator + manager + parent->view
+  permission join_call = view
+  permission publish_call_media = send_message
+  permission start_call = send_message
+  permission manage_call = moderate
 }
 
 definition message {
@@ -402,6 +406,54 @@ fn channel_schema() -> ObjectTypeSchema {
                 ComputedPermission::direct("moderator"),
                 ComputedPermission::direct("manager"),
                 ComputedPermission::arrow("parent", "view"),
+            ]),
+        )
+        .with_permission(
+            "join_call",
+            ComputedPermission::union(vec![
+                ComputedPermission::direct("owner"),
+                ComputedPermission::direct("admin"),
+                ComputedPermission::direct("member"),
+                ComputedPermission::direct("viewer"),
+                ComputedPermission::direct("writer"),
+                ComputedPermission::direct("moderator"),
+                ComputedPermission::direct("manager"),
+                ComputedPermission::arrow("parent", "view"),
+            ]),
+        )
+        .with_permission(
+            "publish_call_media",
+            ComputedPermission::union(vec![
+                ComputedPermission::direct("owner"),
+                ComputedPermission::direct("admin"),
+                ComputedPermission::direct("member"),
+                ComputedPermission::direct("writer"),
+                ComputedPermission::direct("moderator"),
+                ComputedPermission::direct("manager"),
+                ComputedPermission::arrow("parent", "view"),
+            ]),
+        )
+        .with_permission(
+            "start_call",
+            ComputedPermission::union(vec![
+                ComputedPermission::direct("owner"),
+                ComputedPermission::direct("admin"),
+                ComputedPermission::direct("member"),
+                ComputedPermission::direct("writer"),
+                ComputedPermission::direct("moderator"),
+                ComputedPermission::direct("manager"),
+                ComputedPermission::arrow("parent", "view"),
+            ]),
+        )
+        .with_permission(
+            "manage_call",
+            ComputedPermission::union(vec![
+                ComputedPermission::direct("owner"),
+                ComputedPermission::direct("admin"),
+                ComputedPermission::direct("moderator"),
+                ComputedPermission::direct("manager"),
+                ComputedPermission::arrow("parent", "moderator"),
+                ComputedPermission::arrow("parent", "admin"),
             ]),
         )
 }

@@ -54,6 +54,10 @@ spec:
             - secretRef:
                 name: {{ . }}
             {{- end }}
+            {{- if .Values.livekit.credentialsSecretRef }}
+            - secretRef:
+                name: {{ .Values.livekit.credentialsSecretRef }}
+            {{- end }}
           env:
             - name: WADDLE_UPLOAD_DIR
               value: {{ printf "%s/%s" .Values.persistence.mountPath .Values.persistence.uploadSubPath | quote }}

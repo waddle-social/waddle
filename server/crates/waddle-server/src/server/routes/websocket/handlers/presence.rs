@@ -876,6 +876,12 @@ pub async fn handle_muc_leave(
         }
     };
 
+    state
+        .deps
+        .protocol
+        .media_gateway
+        .mark_muc_participant_left(room_jid, sender_jid);
+
     // Broadcast unavailable presence to remaining occupants (non-blocking).
     // Drop accounting is handled inside `try_send_to`.
     if outcome.removed_last_session {

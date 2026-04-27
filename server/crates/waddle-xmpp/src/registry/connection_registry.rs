@@ -272,6 +272,19 @@ impl ConnectionRegistry {
         removed.map(|(_, entry)| entry)
     }
 
+    /// Check whether the current registry entry for `jid` still belongs to
+    /// the provided owner handle.
+    ///
+    /// WebSocket tasks use this before accepting inbound frames after resource
+    /// binding. A same-FullJID replacement drops the old sender, but there can
+    /// still be a pending inbound frame on the stale socket; this check keeps
+    /// that stale task from acting as the replacement resource.
+    pub fn is_owner(&self, jid: &FullJid, carbons_handle: &Arc<AtomicBool>) -> bool {
+        self.connections
+            .get(jid)
+            .is_some_and(|entry| Arc::ptr_eq(&entry.value().carbons_enabled, carbons_handle))
+    }
+
     /// Check if a JID is currently connected.
     pub fn is_connected(&self, jid: &FullJid) -> bool {
         self.connections.contains_key(jid)
@@ -286,7 +299,8 @@ impl ConnectionRegistry {
     ///
     /// This waits for outbound channel capacity instead of dropping stanzas when
     /// a connection is temporarily backpressured. Closed channels are treated as
-    /// stale connections and removed from the registry.
+    /// stale connections and removed from the registry if the failed sender
+    /// still owns the slot.
     #[instrument(skip(self, stanza), fields(to = %jid))]
     pub async fn send_to(&self, jid: &FullJid, stanza: Stanza) -> SendResult {
         let sender = match self.connections.get(jid) {
@@ -306,7 +320,7 @@ impl ConnectionRegistry {
             }
             Err(_) => {
                 debug!("Outbound channel closed, connection may have dropped");
-                self.unregister(jid);
+                self.remove_if_sender(jid, &sender);
                 SendResult::ChannelClosed
             }
         }
@@ -318,7 +332,7 @@ impl ConnectionRegistry {
     /// Intended for fan-out paths (MUC broadcasts) where a slow or zombied
     /// consumer must never stall the producer task. On `Closed` the stale
     /// entry is evicted, but only if the current registry entry's sender is
-    /// still closed — a concurrent `register` for the same FullJid may have
+    /// still the same sender — a concurrent `register` for the same FullJid may have
     /// installed a fresh, live sender between our `get` and `try_send`, and
     /// we must not wipe the newcomer. On `Full` the stanza is dropped
     /// without touching the registry (the consumer may just be catching up).
@@ -358,28 +372,28 @@ impl ConnectionRegistry {
             }
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
                 prometheus::increment_broadcast_dropped_closed();
-                self.remove_if_sender_closed(jid);
+                self.remove_if_sender(jid, &sender);
                 BroadcastOutcome::DroppedClosed
             }
         }
     }
 
-    /// Race-safe eviction of a stale entry whose outbound channel is closed.
+    /// Race-safe eviction of a stale entry whose outbound sender failed.
     ///
-    /// Used on the non-blocking broadcast path to clean up zombies without
-    /// risking the deletion of a live registration that happened to take
-    /// over the slot between the caller's `get` and its `try_send`. If the
-    /// currently-registered sender is still closed, the entry is removed
-    /// and the connected-users metric and presence state are updated;
-    /// otherwise this is a no-op.
-    fn remove_if_sender_closed(&self, jid: &FullJid) {
+    /// Used on blocking and non-blocking send paths to clean up zombies without
+    /// risking the deletion of a replacement registration that happened to take
+    /// over the slot between the caller's `get` and its send failure. If the
+    /// currently-registered sender is the same channel observed by the caller,
+    /// the entry is removed and the connected-users metric and presence state
+    /// are updated; otherwise this is a no-op.
+    fn remove_if_sender(&self, jid: &FullJid, sender: &mpsc::Sender<OutboundStanza>) {
         let removed = self
             .connections
-            .remove_if(jid, |_, entry| entry.sender.is_closed());
+            .remove_if(jid, |_, entry| entry.sender.same_channel(sender));
         if removed.is_some() {
             prometheus::decrement_connected_users();
             self.presence_states.remove(jid);
-            debug!(jid = %jid, "Evicted stale closed connection entry");
+            debug!(jid = %jid, "Evicted stale connection entry");
         }
     }
 
@@ -479,6 +493,26 @@ impl ConnectionRegistry {
         } else {
             false
         }
+    }
+
+    /// Update the XEP-0280 carbons flag only if the caller still owns the
+    /// current registry slot for this FullJID.
+    pub fn set_carbons_enabled_if_owner(
+        &self,
+        jid: &FullJid,
+        carbons_handle: &Arc<AtomicBool>,
+        enabled: bool,
+    ) -> bool {
+        if let Some(entry) = self.connections.get(jid) {
+            if Arc::ptr_eq(&entry.value().carbons_enabled, carbons_handle) {
+                entry
+                    .value()
+                    .carbons_enabled
+                    .store(enabled, Ordering::Relaxed);
+                return true;
+            }
+        }
+        false
     }
 
     /// Get all connected resources for a bare JID.
@@ -1034,6 +1068,39 @@ mod tests {
     }
 
     #[test]
+    fn test_owner_checks_track_replacement_registration() {
+        let registry = ConnectionRegistry::new();
+        let jid = test_jid("owner");
+
+        let (old_tx, _old_rx) = mpsc::channel(1);
+        let old_owner = registry.register(jid.clone(), old_tx);
+        assert!(registry.is_owner(&jid, &old_owner));
+
+        let (new_tx, _new_rx) = mpsc::channel(1);
+        let new_owner = registry.register(jid.clone(), new_tx);
+
+        assert!(!registry.is_owner(&jid, &old_owner));
+        assert!(registry.is_owner(&jid, &new_owner));
+    }
+
+    #[test]
+    fn test_set_carbons_enabled_if_owner_does_not_mutate_replacement() {
+        let registry = ConnectionRegistry::new();
+        let jid = test_jid("carbons-owner");
+
+        let (old_tx, _old_rx) = mpsc::channel(1);
+        let old_owner = registry.register(jid.clone(), old_tx);
+        let (new_tx, _new_rx) = mpsc::channel(1);
+        let new_owner = registry.register(jid.clone(), new_tx);
+
+        assert!(!registry.set_carbons_enabled_if_owner(&jid, &old_owner, true));
+        assert!(!registry.is_carbons_enabled(&jid));
+
+        assert!(registry.set_carbons_enabled_if_owner(&jid, &new_owner, true));
+        assert!(registry.is_carbons_enabled(&jid));
+    }
+
+    #[test]
     fn test_try_send_to_dropped_full_keeps_connection_registered() {
         let registry = ConnectionRegistry::new();
         let jid = test_jid("full");
@@ -1074,22 +1141,39 @@ mod tests {
     }
 
     #[test]
-    fn test_remove_if_sender_closed_keeps_new_live_registration() {
+    fn test_remove_if_sender_evicts_matching_registration() {
+        let registry = ConnectionRegistry::new();
+        let jid = test_jid("closed");
+
+        let (tx_closed, rx_closed) = mpsc::channel(1);
+        registry.register(jid.clone(), tx_closed.clone());
+        drop(rx_closed);
+
+        registry.remove_if_sender(&jid, &tx_closed);
+
+        assert!(
+            !registry.is_connected(&jid),
+            "stale cleanup should remove the sender that owns the current slot"
+        );
+    }
+
+    #[test]
+    fn test_remove_if_sender_keeps_replacement_registration() {
         let registry = ConnectionRegistry::new();
         let jid = test_jid("racy");
 
         let (tx_closed, rx_closed) = mpsc::channel(1);
-        registry.register(jid.clone(), tx_closed);
+        registry.register(jid.clone(), tx_closed.clone());
         drop(rx_closed);
 
         let (tx_live, _rx_live) = mpsc::channel(1);
         registry.register(jid.clone(), tx_live);
 
-        registry.remove_if_sender_closed(&jid);
+        registry.remove_if_sender(&jid, &tx_closed);
 
         assert!(
             registry.is_connected(&jid),
-            "race-safe stale cleanup must not remove a newly registered live sender"
+            "race-safe stale cleanup must not remove a replacement sender"
         );
     }
 

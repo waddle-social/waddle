@@ -1,6 +1,6 @@
 use chrono;
 use jid::{BareJid, FullJid, Jid};
-use std::sync::Arc;
+use std::sync::{atomic::AtomicBool, Arc};
 use tracing::{debug, warn};
 use url::{Host, Url};
 use waddle_xmpp::{
@@ -38,6 +38,11 @@ use waddle_xmpp::{
         PubSubRequest,
     },
     xep::xep0054::{VCard, VCardPhoto},
+    xep::xep0166::is_jingle_iq,
+    xep::xep0215::{
+        build_credentials_result, build_services_result, is_extdisco_iq, parse_extdisco_request,
+        ExtDiscoRequest,
+    },
     xep::xep0357::{
         build_push_disable_result, build_push_enable_result, is_push_disable, is_push_enable,
         parse_push_disable, parse_push_enable,
@@ -66,11 +71,13 @@ use super::super::{
     build_iq_error_xml, build_iq_error_xml_with_addresses, build_iq_result_xml, destroy_room_actor,
     get_room_actor, iq_to_xml, is_muc_room_jid, stanza_to_xml, WebSocketState,
 };
+use super::message::direct_message_permission_object_id;
 use super::presence::get_managed_channel_for_room;
 use crate::auth::{NativeUserStore, Session};
 use crate::db::actor::{DbExecute, DbQuery, DbQueryOne, GetDatabase};
 use crate::db::blocking::DatabaseBlockingStorage;
 use crate::db::{row_value, Database, Value, ValueExt};
+use crate::media::{MediaGatewayError, MediaSession, MediaSessionId, MediaSessionScope};
 use crate::permissions::{
     CheckPermission, Object, ObjectType, Permission, PermissionError, Relation, Subject,
     SubjectType, Tuple, WriteTuple,
@@ -78,6 +85,13 @@ use crate::permissions::{
 use crate::server::bootstrap_membership::DEPLOYMENT_SERVER_ID;
 use crate::server::xmpp_state::{get_xmpp_channel, list_xmpp_channels, XmppChannelRecord};
 use crate::vcard::VCardStore;
+
+pub struct IqConnCtx<'a> {
+    pub authenticated_session: &'a Option<Session>,
+    pub phase: &'a ConnectionPhase,
+    pub carbons_enabled: &'a mut bool,
+    pub registry_owner: Option<&'a Arc<AtomicBool>>,
+}
 
 /// Only called from test helpers — suppress dead_code lint for binary crate.
 #[allow(dead_code)]
@@ -110,9 +124,12 @@ pub async fn handle_iq(
         domain,
         muc_domain,
         state,
-        authenticated_session,
-        phase,
-        &mut carbons_enabled,
+        IqConnCtx {
+            authenticated_session,
+            phase,
+            carbons_enabled: &mut carbons_enabled,
+            registry_owner: None,
+        },
     )
     .await
 }
@@ -122,12 +139,17 @@ pub async fn handle_iq_with_conn_state(
     domain: &str,
     muc_domain: &str,
     state: &WebSocketState,
-    authenticated_session: &Option<Session>,
-    phase: &ConnectionPhase,
-    carbons_enabled: &mut bool,
+    ctx: IqConnCtx<'_>,
 ) -> Vec<String> {
+    let IqConnCtx {
+        authenticated_session,
+        phase,
+        carbons_enabled,
+        registry_owner,
+    } = ctx;
     let spaces_domain = state.deps.service_domains.spaces.clone();
     let upload_domain = state.deps.service_domains.upload.clone();
+    let media_domain = state.deps.service_domains.media.clone();
 
     let id = iq.id.clone();
     let to = iq.to.as_ref().map(|jid| jid.to_string());
@@ -177,6 +199,28 @@ pub async fn handle_iq_with_conn_state(
         if target.domain().as_str() == domain {
             return route_full_jid_iq(iq, state, phase.bound_jid(), target, response_from).await;
         }
+    }
+
+    if is_jingle_iq(&iq)
+        && iq
+            .to
+            .as_ref()
+            .is_some_and(|target| is_media_component_jid(target, &media_domain))
+    {
+        return handle_media_jingle_iq(&iq, state, phase.bound_jid(), authenticated_session).await;
+    }
+
+    if is_extdisco_iq(&iq) && state.deps.protocol.media_gateway.enabled() {
+        if extdisco_target_allowed(&iq, domain, &media_domain) {
+            return handle_extdisco_iq(&iq, state, phase.bound_jid(), response_from, response_to);
+        }
+        return vec![build_iq_error_xml_with_addresses(
+            &iq.id,
+            Some(domain),
+            response_to,
+            "cancel",
+            "service-unavailable",
+        )];
     }
 
     // Sans-I/O dispatch: if the IQ namespace has a registered handler in
@@ -259,11 +303,24 @@ pub async fn handle_iq_with_conn_state(
         };
         if let Some(enabled) = carbons_toggle {
             *carbons_enabled = enabled;
-            let _ = state
-                .deps
-                .protocol
-                .connection_registry
-                .set_carbons_enabled(full_jid, enabled);
+            let updated = match registry_owner {
+                Some(owner) => state
+                    .deps
+                    .protocol
+                    .connection_registry
+                    .set_carbons_enabled_if_owner(full_jid, owner, enabled),
+                None => state
+                    .deps
+                    .protocol
+                    .connection_registry
+                    .set_carbons_enabled(full_jid, enabled),
+            };
+            if !updated {
+                debug!(
+                    jid = %full_jid,
+                    "Skipped carbons toggle because registry ownership moved"
+                );
+            }
         }
         let ctx = ProtocolStanzaContext { domain, full_jid };
         let events = state.deps.protocol.dispatcher.dispatch_iq(&iq, &ctx);
@@ -538,6 +595,45 @@ pub async fn handle_iq_with_conn_state(
             return vec![iq_to_xml(response)];
         }
 
+        // Disco info on media gateway service.
+        if to.as_deref() == Some(media_domain.as_str())
+            && state.deps.protocol.media_gateway.enabled()
+        {
+            let identities = vec![Identity::new("conference", "media", Some("Waddle Media"))];
+            let features = state.deps.protocol.media_gateway.service_features();
+            let response = build_disco_info_response(request_iq, &identities, &features, None);
+            return vec![iq_to_xml(response)];
+        }
+
+        if iq_targets_media_component_resource(&iq, &media_domain)
+            && state.deps.protocol.media_gateway.enabled()
+        {
+            if let Ok(session_id) = media_session_id_from_iq(&iq, &media_domain) {
+                if let Some(features) = state
+                    .deps
+                    .protocol
+                    .media_gateway
+                    .session_features(&session_id)
+                {
+                    let identities = vec![Identity::new(
+                        "conference",
+                        "media",
+                        Some("Waddle Media Session"),
+                    )];
+                    let response =
+                        build_disco_info_response(request_iq, &identities, &features, None);
+                    return vec![iq_to_xml(response)];
+                }
+            }
+            return vec![build_iq_error_xml_with_addresses(
+                &id,
+                response_from,
+                response_to,
+                "cancel",
+                "item-not-found",
+            )];
+        }
+
         // Disco info on server. Source the canonical feature catalogue
         // from `waddle-xmpp-core::disco::info::server_features()` so the
         // rich-message XEPs (corrections, retractions, reactions,
@@ -552,6 +648,7 @@ pub async fn handle_iq_with_conn_state(
             Feature::new("jabber:iq:search"),
             Feature::new(ISR_NS),
         ]);
+        features.extend(state.deps.protocol.media_gateway.server_features());
         features.extend(
             state
                 .deps
@@ -635,12 +732,47 @@ pub async fn handle_iq_with_conn_state(
             return vec![iq_to_xml(response)];
         }
 
+        if to.as_deref() == Some(media_domain.as_str())
+            && state.deps.protocol.media_gateway.enabled()
+        {
+            let response = build_disco_items_response(request_iq, &[], query.node.as_deref());
+            return vec![iq_to_xml(response)];
+        }
+
+        if iq_targets_media_component_resource(&iq, &media_domain)
+            && state.deps.protocol.media_gateway.enabled()
+        {
+            if let Ok(session_id) = media_session_id_from_iq(&iq, &media_domain) {
+                if state
+                    .deps
+                    .protocol
+                    .media_gateway
+                    .session_features(&session_id)
+                    .is_some()
+                {
+                    let response =
+                        build_disco_items_response(request_iq, &[], query.node.as_deref());
+                    return vec![iq_to_xml(response)];
+                }
+            }
+            return vec![build_iq_error_xml_with_addresses(
+                &id,
+                response_from,
+                response_to,
+                "cancel",
+                "item-not-found",
+            )];
+        }
+
         debug!("Disco items query on server");
-        let items = vec![
+        let mut items = vec![
             DiscoItem::muc_service(muc_domain, Some("Chatrooms")),
             DiscoItem::upload_service(&upload_domain, Some("HTTP File Upload")),
             DiscoItem::spaces_service(&spaces_domain, Some("Spaces")),
         ];
+        if state.deps.protocol.media_gateway.enabled() {
+            items.push(DiscoItem::new(&media_domain, Some("Media Gateway"), None));
+        }
         let response = build_disco_items_response(request_iq, &items, None);
         return vec![iq_to_xml(response)];
     }
@@ -1798,6 +1930,212 @@ async fn handle_isr_token_request_iq(
         .isr_token_store
         .create_token(session.user_id.to_string(), sender_jid.to_bare());
     vec![iq_to_xml(build_isr_token_result(iq, &token))]
+}
+
+fn handle_extdisco_iq(
+    iq: &xmpp_parsers::iq::Iq,
+    state: &WebSocketState,
+    sender_jid: Option<&FullJid>,
+    response_from: Option<&str>,
+    response_to: Option<&str>,
+) -> Vec<String> {
+    let Some(sender_jid) = sender_jid else {
+        return vec![build_iq_error_xml_with_addresses(
+            &iq.id,
+            response_from,
+            response_to,
+            "auth",
+            "not-authorized",
+        )];
+    };
+
+    let request = match parse_extdisco_request(iq) {
+        Ok(request) => request,
+        Err(_) => {
+            return vec![build_iq_error_xml_with_addresses(
+                &iq.id,
+                response_from,
+                response_to,
+                "modify",
+                "bad-request",
+            )]
+        }
+    };
+
+    let services = state
+        .deps
+        .protocol
+        .media_gateway
+        .services_for_request(&request, Some(sender_jid));
+    let response = match &request {
+        ExtDiscoRequest::Services { service_type } => {
+            build_services_result(iq, service_type.as_ref(), &services)
+        }
+        ExtDiscoRequest::Credentials { .. } if services.is_empty() => {
+            return vec![build_iq_error_xml_with_addresses(
+                &iq.id,
+                response_from,
+                response_to,
+                "cancel",
+                "item-not-found",
+            )]
+        }
+        ExtDiscoRequest::Credentials { .. } => build_credentials_result(iq, &services),
+    };
+    vec![iq_to_xml(response)]
+}
+
+fn extdisco_target_allowed(iq: &xmpp_parsers::iq::Iq, domain: &str, media_domain: &str) -> bool {
+    iq.to.as_ref().is_none_or(|target| {
+        let target = target.to_string();
+        target == domain || target == media_domain
+    })
+}
+
+async fn handle_media_jingle_iq(
+    iq: &xmpp_parsers::iq::Iq,
+    state: &WebSocketState,
+    sender_jid: Option<&FullJid>,
+    authenticated_session: &Option<Session>,
+) -> Vec<String> {
+    let gateway = &state.deps.protocol.media_gateway;
+    let Some(sender_jid) = sender_jid else {
+        return vec![iq_to_xml(
+            gateway.build_jingle_error(iq, MediaGatewayError::Forbidden),
+        )];
+    };
+
+    let session_id = match media_session_id_from_iq(iq, &state.deps.service_domains.media) {
+        Ok(session_id) => session_id,
+        Err(error) => return vec![iq_to_xml(gateway.build_jingle_error(iq, error))],
+    };
+    let Some(session) = gateway.get_session(&session_id) else {
+        return vec![iq_to_xml(
+            gateway.build_jingle_error(iq, MediaGatewayError::UnknownSession),
+        )];
+    };
+
+    if !media_session_join_authorized(state, &session, sender_jid, authenticated_session).await {
+        return vec![iq_to_xml(
+            gateway.build_jingle_error(iq, MediaGatewayError::Forbidden),
+        )];
+    }
+
+    match gateway.handle_jingle_iq(iq, sender_jid) {
+        Ok(response) => vec![iq_to_xml(response)],
+        Err(error) => vec![iq_to_xml(gateway.build_jingle_error(iq, error))],
+    }
+}
+
+fn media_session_id_from_iq(
+    iq: &xmpp_parsers::iq::Iq,
+    media_domain: &str,
+) -> Result<MediaSessionId, MediaGatewayError> {
+    let target = iq
+        .to
+        .as_ref()
+        .and_then(|jid| jid.clone().try_into_full().ok())
+        .filter(|jid| jid.to_bare().as_str() == media_domain)
+        .ok_or(MediaGatewayError::MissingSessionId)?;
+    MediaSessionId::new(target.resource().to_string())
+}
+
+fn is_media_component_jid(jid: &jid::Jid, media_domain: &str) -> bool {
+    jid.clone()
+        .try_into_full()
+        .ok()
+        .is_some_and(|full| full.to_bare().as_str() == media_domain)
+}
+
+fn iq_targets_media_component_resource(iq: &xmpp_parsers::iq::Iq, media_domain: &str) -> bool {
+    iq.to
+        .as_ref()
+        .is_some_and(|target| is_media_component_jid(target, media_domain))
+}
+
+async fn media_session_join_authorized(
+    state: &WebSocketState,
+    session: &MediaSession,
+    sender_jid: &FullJid,
+    authenticated_session: &Option<Session>,
+) -> bool {
+    match session.scope {
+        MediaSessionScope::Muc => {
+            let room_jid = session.anchor_jid.to_bare();
+            let Some(room_actor) = get_room_actor(state, &room_jid).await else {
+                return false;
+            };
+            let present = room_actor.ask(GetSnapshot).await.is_ok_and(|snapshot| {
+                snapshot
+                    .room
+                    .find_occupant_by_real_jid(sender_jid)
+                    .is_some()
+            });
+            if !present {
+                return false;
+            }
+            let Some(channel_id) = waddle_xmpp::parse_managed_room_jid(&room_jid) else {
+                return true;
+            };
+            let Some(session) = authenticated_session.as_ref() else {
+                return false;
+            };
+            state
+                .deps
+                .app_state
+                .permission_actor
+                .ask(CheckPermission {
+                    object: Object::new(ObjectType::Channel, &channel_id),
+                    subject: Subject::user(&session.user_id),
+                    permission: Permission::JoinCall,
+                })
+                .await
+                .is_ok_and(|response| response.allowed)
+        }
+        MediaSessionScope::Direct => {
+            let sender_bare = sender_jid.to_bare();
+            let creator_bare = session.creator_jid.to_bare();
+            let invitee_bare = session.anchor_jid.to_bare();
+            let peer_bare = if sender_bare == creator_bare {
+                invitee_bare
+            } else if sender_bare == invitee_bare {
+                creator_bare
+            } else {
+                return false;
+            };
+            let Some(authenticated_session) = authenticated_session.as_ref() else {
+                return false;
+            };
+            let blocking = DatabaseBlockingStorage::new(state.deps.app_state.db_pool.global().clone());
+            match blocking.is_blocked(&peer_bare, &sender_bare).await {
+                Ok(false) => {}
+                Ok(true) => return false,
+                Err(error) => {
+                    warn!(
+                        error = %error,
+                        sender = %sender_jid,
+                        peer = %peer_bare,
+                        "Failed to check blocklist before authorizing direct media join"
+                    );
+                    return false;
+                }
+            }
+            state
+                .deps
+                .app_state
+                .permission_actor
+                .ask(CheckPermission {
+                    object: Object::new(
+                        ObjectType::Dm,
+                        direct_message_permission_object_id(&sender_bare, &peer_bare),
+                    ),
+                    subject: Subject::user(&authenticated_session.user_id),
+                    permission: Permission::Send,
+                })
+                .await
+                .is_ok_and(|response| response.allowed)
+        }
+    }
 }
 
 async fn route_full_jid_iq(
@@ -3758,6 +4096,98 @@ async fn handle_command_iq(
         request_iq,
         &response_command,
     ))]
+}
+
+#[cfg(test)]
+mod media_gateway_iq_tests {
+    use super::*;
+    use waddle_xmpp::xep::xep0166;
+
+    #[test]
+    fn media_component_jid_requires_exact_bare_component_and_resource() {
+        let component: Jid = "media.example.test/s1".parse().expect("jid");
+        assert!(is_media_component_jid(&component, "media.example.test"));
+
+        let node: Jid = "node@media.example.test/s1".parse().expect("jid");
+        assert!(!is_media_component_jid(&node, "media.example.test"));
+
+        let bare: Jid = "media.example.test".parse().expect("jid");
+        assert!(!is_media_component_jid(&bare, "media.example.test"));
+    }
+
+    #[test]
+    fn disco_resource_target_detects_media_component_endpoint() {
+        let iq = xmpp_parsers::iq::Iq {
+            from: Some("alice@example.test/phone".parse().expect("jid")),
+            to: Some("media.example.test/s1".parse().expect("jid")),
+            id: "disco-1".to_string(),
+            payload: xmpp_parsers::iq::IqType::Get(
+                Element::builder("query", "http://jabber.org/protocol/disco#info").build(),
+            ),
+        };
+
+        assert!(iq_targets_media_component_resource(
+            &iq,
+            "media.example.test"
+        ));
+    }
+
+    #[test]
+    fn media_session_id_requires_exact_media_component_target() {
+        let iq = xmpp_parsers::iq::Iq {
+            from: Some("alice@example.test/phone".parse().expect("jid")),
+            to: Some("media.example.test/s1".parse().expect("jid")),
+            id: "jingle-1".to_string(),
+            payload: xmpp_parsers::iq::IqType::Set(
+                Element::builder("jingle", xep0166::NS_JINGLE)
+                    .attr("action", "session-info")
+                    .attr("sid", "s1")
+                    .build(),
+            ),
+        };
+        assert_eq!(
+            media_session_id_from_iq(&iq, "media.example.test").map(|sid| sid.to_string()),
+            Ok("s1".to_string())
+        );
+
+        let mut node_iq = iq;
+        node_iq.to = Some("node@media.example.test/s1".parse().expect("jid"));
+        assert_eq!(
+            media_session_id_from_iq(&node_iq, "media.example.test"),
+            Err(MediaGatewayError::MissingSessionId)
+        );
+    }
+
+    #[test]
+    fn extdisco_target_rejects_media_component_resource() {
+        let mut iq = xmpp_parsers::iq::Iq {
+            from: Some("alice@example.test/phone".parse().expect("jid")),
+            to: None,
+            id: "extdisco-1".to_string(),
+            payload: xmpp_parsers::iq::IqType::Get(
+                Element::builder("services", waddle_xmpp::xep::xep0215::NS_EXTDISCO).build(),
+            ),
+        };
+        assert!(extdisco_target_allowed(
+            &iq,
+            "example.test",
+            "media.example.test"
+        ));
+
+        iq.to = Some("media.example.test".parse().expect("jid"));
+        assert!(extdisco_target_allowed(
+            &iq,
+            "example.test",
+            "media.example.test"
+        ));
+
+        iq.to = Some("media.example.test/s1".parse().expect("jid"));
+        assert!(!extdisco_target_allowed(
+            &iq,
+            "example.test",
+            "media.example.test"
+        ));
+    }
 }
 
 #[cfg(test)]

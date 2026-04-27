@@ -7,6 +7,7 @@ mod auth;
 mod config;
 mod db;
 mod inbox;
+mod media;
 mod messages;
 mod permissions;
 mod pubsub;

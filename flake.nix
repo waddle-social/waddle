@@ -117,6 +117,8 @@
               pkgs.protobuf
               pkgs.oras
               pkgs.fluxcd
+              pkgs.kubectl
+              pkgs.kubernetes-helm
               pkgs.yq-go
             ];
 
