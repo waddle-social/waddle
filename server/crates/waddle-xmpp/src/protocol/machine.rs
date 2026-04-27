@@ -905,9 +905,7 @@ mod tests {
     // pipeline resumes and runs to completion.
     // ----------------------------------------------------------------
 
-    use crate::protocol::event::{
-        ArchivedMessage, CallbackResult, MessageRef, OriginIdValue, StanzaIdRef, StanzaIdValue,
-    };
+    use crate::protocol::event::{ArchivedMessage, StanzaIdRef, StanzaIdValue};
     use crate::protocol::handlers::canonicalize::CanonicalizeHandler;
     use crate::protocol::handlers::enrichment_dispatch::EnrichmentDispatchHandler;
     use crate::protocol::handlers::rich_target_validation::RichTargetValidationHandler;
@@ -1299,14 +1297,6 @@ mod tests {
     #[test]
     fn enrichment_complete_with_unknown_callback_id_logs_warn() {
         let mut sm = test_support::ready_machine("example.com", alice(), StanzaDispatcher::new());
-        // Construct a MessageRef so the unused import lints quiet —
-        // this also guards against API drift. (No assertion required;
-        // the test below exercises the WARN path.)
-        let _ = MessageRef::OriginId {
-            sender: "alice@example.com".parse().expect("bare"),
-            origin_id: OriginIdValue::new("dummy"),
-        };
-        let _ = CallbackResult::Ok { stanza: None };
         let events = sm.handle(InboundEvent::EnrichmentComplete {
             id: CallbackId(99999),
             message: Box::new(chat_with_body(
