@@ -22,6 +22,63 @@ use tracing::Level;
 use xmpp_parsers::iq::Iq;
 use xmpp_parsers::message::Message;
 
+/// XEP-0359 stamped stanza-id value.
+///
+/// Newtype around the opaque id value so a stanza-id cannot be silently
+/// swapped for an origin-id, message id, or any other XMPP identifier
+/// crossing event boundaries. Per XEP-0359 §6 the value itself is
+/// opaque (no internal structure), but the *kind* is type-significant
+/// — typed-payloads hard rule (CLAUDE.md).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct StanzaIdValue(String);
+
+impl StanzaIdValue {
+    /// Wrap an opaque id value coming from an [`super::id_gen::IdGenerator`]
+    /// or from a parsed XEP-0359 `<stanza-id/>` element.
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    /// Borrow the underlying value.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for StanzaIdValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// XEP-0359 client-supplied origin-id value.
+///
+/// Newtype companion to [`StanzaIdValue`] for the same reasons; an
+/// origin-id is owned by the originating client and is a different
+/// identity space from the server-stamped stanza-id, so it must not be
+/// confused at handler/storage boundaries.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct OriginIdValue(String);
+
+impl OriginIdValue {
+    /// Wrap an origin-id value parsed from a XEP-0359 `<origin-id/>`
+    /// element.
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    /// Borrow the underlying value.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for OriginIdValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// Reference to a previously-archived message.
 ///
 /// Used by [`OutboundEvent::LookupArchivedMessage`] (issue #229 PR3 — rich
@@ -42,15 +99,17 @@ pub enum MessageRef {
         /// `by=` of the stamping archive (user bare JID for 1:1, room JID
         /// for groupchat).
         by: BareJid,
-        /// The stamped opaque id value.
-        id: String,
+        /// The stamped opaque id value (typed via [`StanzaIdValue`] so
+        /// it cannot be confused with an origin-id at call boundaries).
+        id: StanzaIdValue,
     },
     /// XEP-0359 origin-id, scoped to the original sender.
     OriginId {
         /// Bare JID of the original sender.
         sender: BareJid,
-        /// The client-supplied opaque origin-id value.
-        origin_id: String,
+        /// The client-supplied opaque origin-id value (typed via
+        /// [`OriginIdValue`]).
+        origin_id: OriginIdValue,
     },
 }
 
@@ -75,8 +134,10 @@ pub enum CarbonKind {
 pub struct StanzaIdRef {
     /// `by=` of the stamping archive.
     pub by: BareJid,
-    /// The stamped opaque id value.
-    pub id: String,
+    /// The stamped opaque id value, typed via [`StanzaIdValue`] so it
+    /// cannot be confused with an origin-id at handler / storage
+    /// boundaries.
+    pub id: StanzaIdValue,
 }
 
 /// Placeholder for the typed archived-message payload from issue #228.
@@ -216,21 +277,26 @@ pub enum OutboundEvent {
     // -------------------------------------------------------------------
     /// Route a stanza to another local connection's state machine.
     ///
-    /// The interpreter resolves `jid` against `ConnectionRegistry` and
-    /// feeds the stanza into the destination connection's machine as
+    /// **Migration status (issue #229 PR1)**: the variant is renamed from
+    /// `SendDirect` and the *protocol-level intent* is described below,
+    /// but the live `waddle-server` interpreter still implements the
+    /// legacy "write directly to the peer's outbound channel" behaviour
+    /// to keep the existing integration tests green during the staged
+    /// migration. The semantic change to "feed the destination's state
+    /// machine via [`InboundEvent::StanzaFromPeer`]" lands alongside the
+    /// recipient-pass handlers in PR4, when the recipient pipeline
+    /// (XEP-0191 incoming block, XEP-0359 recipient stamp, XEP-0313
+    /// archive, XEP-0280 received-carbons, inbox projection) is in place.
+    ///
+    /// **Intended semantic (PR4 onward)**: the interpreter resolves `jid`
+    /// against `ConnectionRegistry` and feeds the stanza into the
+    /// destination connection's machine as
     /// [`InboundEvent::StanzaFromPeer`]. The destination's recipient-pass
-    /// pipeline runs (XEP-0359 stamping under the recipient's archive,
-    /// XEP-0191 incoming-block check, XEP-0313 archive write,
-    /// XEP-0280 received-carbons fan-out, inbox projection) and ultimately
-    /// emits [`OutboundEvent::SendStanza`] to the destination's wire.
+    /// pipeline runs and ultimately emits [`OutboundEvent::SendStanza`]
+    /// to the destination's wire.
     ///
-    /// If the target is offline the event is logged and dropped
-    /// (XMPP offline-delivery semantics are archive-based, not
-    /// routing-based).
-    ///
-    /// Renamed from `SendDirect` in #229 PR1 to reflect the new semantic:
-    /// this no longer writes directly to the peer's outbound channel; it
-    /// dispatches into the peer's pipeline.
+    /// If the target is offline the event is logged and dropped (XMPP
+    /// offline-delivery semantics are archive-based, not routing-based).
     RouteToConnection { jid: FullJid, stanza: Box<Stanza> },
     /// Hand a `<message type='groupchat'>` to the room handler chain
     /// (Option C — issue #229 Q7) for occupancy validation,

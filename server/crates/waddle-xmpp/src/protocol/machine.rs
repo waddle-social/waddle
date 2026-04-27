@@ -298,10 +298,12 @@ impl XmppStateMachine {
                     id_gen: self.id_gen.as_ref(),
                 };
                 let mctx = MessageContext::derive(env, &message);
-                // PR1 ships the dispatcher's typed outcome but does not
-                // yet wire pause-resume on the state machine — the first
-                // `AwaitCallback`-emitting handler arrives in PR2 and
-                // this `_termination` is what registers the pending op.
+                // PR1 exposes the dispatcher's typed outcome
+                // (`MessageDispatchOutcome`), but the state machine
+                // currently consumes only emitted events. Pause/resume
+                // and any pending-op registration based on
+                // `outcome.termination` are wired alongside the first
+                // `AwaitCallback`-emitting handler in PR2.
                 let outcome = self.dispatcher.dispatch_message(&message, &mctx);
                 outcome.events
             }

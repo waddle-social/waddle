@@ -39,8 +39,8 @@ mod dispatch_message_tests;
 
 pub use dispatch::{MessageDispatchOutcome, MessageDispatchTermination, StanzaDispatcher};
 pub use event::{
-    ArchivedMessage, CallbackId, CarbonKind, InboundEvent, MessageRef, OutboundEvent,
-    StanzaContext, StanzaIdRef, TimerId,
+    ArchivedMessage, CallbackId, CarbonKind, InboundEvent, MessageRef, OriginIdValue,
+    OutboundEvent, StanzaContext, StanzaIdRef, StanzaIdValue, TimerId,
 };
 pub use frame::InboundFrame;
 pub use id_gen::{CounterIdGenerator, FixedIdGenerator, IdGenerator, UuidV4Generator};

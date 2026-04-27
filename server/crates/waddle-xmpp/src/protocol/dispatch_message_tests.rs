@@ -85,16 +85,11 @@ impl Fixture {
 struct ContinueProbe {
     name: &'static str,
     call_order: Arc<AtomicUsize>,
-    ticket: Arc<AtomicUsize>,
 }
 
 impl ContinueProbe {
     fn new(name: &'static str, call_order: Arc<AtomicUsize>) -> Arc<Self> {
-        Arc::new(Self {
-            name,
-            call_order,
-            ticket: Arc::new(AtomicUsize::new(usize::MAX)),
-        })
+        Arc::new(Self { name, call_order })
     }
 }
 
@@ -104,8 +99,7 @@ impl MessageHandler for ContinueProbe {
     }
 
     fn handle(&self, _message: &Message, _ctx: &MessageContext<'_>) -> HandlerOutcome {
-        let n = self.call_order.fetch_add(1, Ordering::SeqCst);
-        self.ticket.store(n, Ordering::SeqCst);
+        self.call_order.fetch_add(1, Ordering::SeqCst);
         HandlerOutcome::Continue(vec![OutboundEvent::Log {
             level: Level::DEBUG,
             message: format!("{}-ran", self.name),
@@ -332,4 +326,76 @@ fn handler_outcome_noop_helper_is_an_empty_continue() {
         HandlerOutcome::Continue(events) => assert!(events.is_empty()),
         other => panic!("expected Continue([]), got {other:?}"),
     }
+}
+
+/// Probe that returns an `AwaitCallback` with a caller-supplied
+/// `resume_after` — used to drive bounds-check tests.
+struct OutOfRangeAwaitProbe {
+    resume_after: HandlerId,
+}
+
+impl MessageHandler for OutOfRangeAwaitProbe {
+    fn name(&self) -> &'static str {
+        "out-of-range-await"
+    }
+
+    fn handle(&self, _message: &Message, _ctx: &MessageContext<'_>) -> HandlerOutcome {
+        HandlerOutcome::AwaitCallback {
+            events: Vec::new(),
+            resume_after: self.resume_after,
+        }
+    }
+}
+
+#[test]
+fn dispatch_message_rejects_handler_supplied_resume_after_past_own_position() {
+    // A buggy handler at idx 0 asks to resume_after a future handler.
+    // Without a bounds check this would silently skip the bounds-checking
+    // pipeline stages in resume_message and bypass any later handlers
+    // (e.g. blocking, archive). The dispatcher must halt with an ERROR
+    // log instead.
+    let mut dispatcher = StanzaDispatcher::new();
+    dispatcher.register_message(Arc::new(OutOfRangeAwaitProbe {
+        resume_after: HandlerId(99),
+    }));
+    let counter = Arc::new(AtomicUsize::new(0));
+    dispatcher.register_message(ContinueProbe::new("never-runs", counter.clone()));
+
+    let fx = Fixture::new();
+    let msg = chat_message();
+    let outcome = dispatcher.dispatch_message(&msg, &fx.ctx(&msg));
+
+    assert!(matches!(
+        outcome.termination,
+        MessageDispatchTermination::Halted { .. }
+    ));
+    // Counter must not have ticked — second handler did not run.
+    assert_eq!(counter.load(Ordering::SeqCst), 0);
+    // ERROR log present in events.
+    assert!(outcome.events.iter().any(|e| matches!(
+        e,
+        OutboundEvent::Log { level, .. } if *level == Level::ERROR
+    )));
+}
+
+#[test]
+fn resume_message_rejects_out_of_range_resume_after() {
+    let mut dispatcher = StanzaDispatcher::new();
+    let counter = Arc::new(AtomicUsize::new(0));
+    dispatcher.register_message(ContinueProbe::new("h0", counter.clone()));
+
+    let fx = Fixture::new();
+    let msg = chat_message();
+    // resume_after points past the only registered handler.
+    let outcome = dispatcher.resume_message(&msg, &fx.ctx(&msg), HandlerId(99));
+
+    assert!(matches!(
+        outcome.termination,
+        MessageDispatchTermination::Halted { .. }
+    ));
+    assert_eq!(counter.load(Ordering::SeqCst), 0);
+    assert!(outcome.events.iter().any(|e| matches!(
+        e,
+        OutboundEvent::Log { level, .. } if *level == Level::ERROR
+    )));
 }

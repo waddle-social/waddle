@@ -16,9 +16,33 @@
 //! it is derived once at dispatch start from the connection's bound JID
 //! and the inbound message's `from`/`to`.
 
-use jid::{BareJid, FullJid};
+use jid::{BareJid, FullJid, Jid};
 use std::collections::{BTreeSet, HashMap};
 use xmpp_parsers::message::Message;
+
+/// True when `candidate` denotes the same full JID as `local` — i.e. it
+/// is itself a full JID and equal to `local`.
+fn jid_equals_full(candidate: &Jid, local: &FullJid) -> bool {
+    candidate
+        .resource()
+        .map(|_| {
+            // Full JID: exact equality.
+            candidate.to_string() == local.to_string()
+        })
+        .unwrap_or(false)
+}
+
+/// True when `to` addresses `local`: a full `to` requires exact match;
+/// a bare `to` matches any resource of `local`'s bare JID.
+fn jid_addresses_full(to: &Jid, local: &FullJid) -> bool {
+    if to.resource().is_some() {
+        // Full JID: must exactly select this resource.
+        to.to_string() == local.to_string()
+    } else {
+        // Bare JID: server may deliver to any of the user's resources.
+        to.to_bare() == local.to_bare()
+    }
+}
 
 /// XEP-0191 blocklist for the connection's bound user.
 ///
@@ -154,17 +178,34 @@ pub enum Locality {
 
 impl Locality {
     /// Classify the message against the local connection's bound JID.
+    ///
+    /// Matching is **asymmetric** by design:
+    ///
+    /// - `from` MUST match the local full JID exactly. After
+    ///   authentication every outbound stanza carries the originating
+    ///   resource in `from`, so a bare-only match would mis-classify a
+    ///   stanza coming from `alice@x/phone` as "sender" on
+    ///   `alice@x/web`'s connection — duplicating sender-side side
+    ///   effects across resources.
+    /// - `to` matches a bare JID by bare equality (the typical XMPP
+    ///   recipient address) and a full JID by full equality. This
+    ///   ensures `alice/web -> alice/phone` is **only** Recipient on
+    ///   alice/phone's connection, not on alice/web's.
+    ///
+    /// Without this asymmetry, a self-multi-resource flow would be
+    /// classified `Locality::Both` on every connection, and PR2's
+    /// blocking / archive / inbox / carbons handlers would fire
+    /// duplicated side effects across resources.
     pub fn derive(local: &FullJid, message: &Message) -> Self {
-        let local_bare = local.to_bare();
         let from_matches = message
             .from
             .as_ref()
-            .map(|j| j.to_bare() == local_bare)
+            .map(|j| jid_equals_full(j, local))
             .unwrap_or(false);
         let to_matches = message
             .to
             .as_ref()
-            .map(|j| j.to_bare() == local_bare)
+            .map(|j| jid_addresses_full(j, local))
             .unwrap_or(false);
 
         match (from_matches, to_matches) {
@@ -252,13 +293,59 @@ mod tests {
     }
 
     #[test]
-    fn locality_derive_both_when_self_message() {
-        let local = full("alice@example.com/web");
-        let m = msg_from_to(
+    fn locality_derive_both_only_when_self_message_targets_same_full_jid() {
+        // Sending alice/phone -> alice/web: on alice/web the local
+        // user is *only* recipient (the sender resource is different).
+        // Bare-only matching would classify this as Both and duplicate
+        // sender-side side effects on alice/web — which is the bug
+        // the asymmetric derive fixes.
+        let alice_web = full("alice@example.com/web");
+        let cross_resource = msg_from_to(
             Some("alice@example.com/phone"),
             Some("alice@example.com/web"),
         );
-        assert_eq!(Locality::derive(&local, &m), Locality::Both);
+        assert_eq!(
+            Locality::derive(&alice_web, &cross_resource),
+            Locality::Recipient
+        );
+
+        // True self-loop where from and to are both `alice/web`: this is
+        // the only legitimate `Both` case at the wire level.
+        let true_self_loop =
+            msg_from_to(Some("alice@example.com/web"), Some("alice@example.com/web"));
+        assert_eq!(
+            Locality::derive(&alice_web, &true_self_loop),
+            Locality::Both
+        );
+    }
+
+    #[test]
+    fn locality_derive_recipient_when_to_is_bare_jid_of_local_user() {
+        // Typical case: `alice/web -> bob` with `to` as a bare JID;
+        // bob/desk's connection delivers via bare-match.
+        let bob_desk = full("bob@example.com/desk");
+        let m = msg_from_to(Some("alice@example.com/web"), Some("bob@example.com"));
+        assert_eq!(Locality::derive(&bob_desk, &m), Locality::Recipient);
+    }
+
+    #[test]
+    fn locality_derive_recipient_only_for_addressed_resource_when_to_is_full() {
+        // alice -> bob/desk: only bob/desk is the recipient; bob/web
+        // and bob/laptop are NOT.
+        let bob_desk = full("bob@example.com/desk");
+        let bob_web = full("bob@example.com/web");
+        let m = msg_from_to(Some("alice@example.com/web"), Some("bob@example.com/desk"));
+        assert_eq!(Locality::derive(&bob_desk, &m), Locality::Recipient);
+        assert_eq!(Locality::derive(&bob_web, &m), Locality::Neither);
+    }
+
+    #[test]
+    fn locality_derive_sender_requires_full_jid_match_on_from() {
+        // alice/phone -> bob: on alice/web's connection, this is NOT
+        // the sender (different resource) — it's Neither.
+        let alice_web = full("alice@example.com/web");
+        let m = msg_from_to(Some("alice@example.com/phone"), Some("bob@example.com"));
+        assert_eq!(Locality::derive(&alice_web, &m), Locality::Neither);
     }
 
     #[test]
