@@ -53,7 +53,7 @@ use crate::protocol::message_context::MessageContext;
 use crate::protocol::traits::{HandlerOutcome, MessageHandler};
 use crate::xep::{xep0308, xep0424, xep0461};
 use jid::BareJid;
-use xmpp_parsers::message::Message;
+use xmpp_parsers::message::{Message, MessageType};
 
 /// Sentinel callback id used by handlers that emit
 /// `LookupArchivedMessage`. The state machine swaps the sentinel for a
@@ -106,6 +106,16 @@ impl MessageHandler for RichTargetValidationHandler {
         if !ctx.locality.is_sender() {
             return HandlerOutcome::Continue(Vec::new());
         }
+        // Groupchat rich-targets reference messages in the **room's**
+        // archive, not the user's. Validating them against
+        // `ctx.full_jid.to_bare()` would systematically miss every
+        // legitimate MUC retraction / correction / reply and respond
+        // with `<item-not-found/>`. The room handler chain in PR5
+        // owns groupchat rich-target validation against the room's
+        // archive (XEP-0313 §5.1.3).
+        if matches!(message.type_, MessageType::Groupchat) {
+            return HandlerOutcome::Continue(Vec::new());
+        }
         let Some(detected) = detect(message, ctx) else {
             return HandlerOutcome::Continue(Vec::new());
         };
@@ -130,15 +140,21 @@ impl RichTargetValidationHandler {
         author: &BareJid,
     ) -> HandlerOutcome {
         let Some(archived) = result else {
-            // XEP-0424 §3.4 / XEP-0461 §3.3: target not found.
-            let reply = item_not_found_reply(
-                original,
-                match kind {
-                    RichTargetKind::Correction => "Correction target message not found.",
-                    RichTargetKind::Retraction => "Retraction target message not found.",
-                    RichTargetKind::Reply => "Reply target message not found.",
-                },
-            );
+            let reply = match kind {
+                // XEP-0308: a correction must reference an existing
+                // message; without one, the request is invalid.
+                RichTargetKind::Correction => {
+                    item_not_found_reply(original, "Correction target message not found.")
+                }
+                // XEP-0424 §3.4: target not found.
+                RichTargetKind::Retraction => {
+                    item_not_found_reply(original, "Retraction target message not found.")
+                }
+                // XEP-0461 §3.3: target not found.
+                RichTargetKind::Reply => {
+                    item_not_found_reply(original, "Reply target message not found.")
+                }
+            };
             return HandlerOutcome::Halt(vec![send_message_error(reply)]);
         };
 
@@ -428,6 +444,25 @@ mod tests {
         msg.payloads.push(build_replace_element("orig-msg-1"));
         let outcome = run(&local, &mut msg);
         // Validation is the sender's job — recipient pass does nothing.
+        assert!(matches!(outcome, HandlerOutcome::Continue(ref e) if e.is_empty()));
+    }
+
+    #[test]
+    fn groupchat_rich_target_is_skipped_user_side() {
+        // Groupchat rich-targets reference messages in the room's
+        // archive, not the user's. The user-side handler must not
+        // validate against ctx.full_jid.to_bare() — that would miss
+        // every legitimate MUC retraction. The room chain (PR5) owns
+        // this validation against the room's archive.
+        let local = full("alice@example.com/web");
+        let mut msg = chat_with_body(
+            "alice@example.com/web",
+            "room@conf.example.com",
+            "I take that back",
+        );
+        msg.type_ = MessageType::Groupchat;
+        msg.payloads.push(build_retract_element("stanza-X"));
+        let outcome = run(&local, &mut msg);
         assert!(matches!(outcome, HandlerOutcome::Continue(ref e) if e.is_empty()));
     }
 

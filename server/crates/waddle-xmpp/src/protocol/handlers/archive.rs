@@ -31,9 +31,9 @@
 
 use crate::protocol::event::OutboundEvent;
 use crate::protocol::message_context::MessageContext;
+use crate::protocol::session_state::Locality;
 use crate::protocol::traits::{HandlerOutcome, MessageHandler};
 use crate::xep::xep0334::HintCarrier;
-use jid::BareJid;
 use xmpp_parsers::message::{Body, Message, MessageType};
 
 /// XEP-0313 archive handler for the user-side message pipeline.
@@ -58,7 +58,10 @@ impl MessageHandler for ArchiveHandler {
         // Sender-side write — keyed under the local user's archive when
         // the local user is the sender. Use the message's `from`/`to`
         // for the canonical (from, to) tuple; fall back to `local_bare`
-        // if the message lacks an explicit address.
+        // if the message lacks an explicit address. Also covers the
+        // `Locality::Both` true self-loop (alice/web -> alice/web), in
+        // which case the recipient-side branch below is skipped to
+        // avoid double-stamping the same archive.
         if ctx.locality.is_sender() {
             if let Some(to) = to_bare.clone() {
                 events.push(OutboundEvent::ArchiveDirect {
@@ -69,12 +72,15 @@ impl MessageHandler for ArchiveHandler {
             }
         }
 
-        // Recipient-side write — keyed under the local user's archive
-        // when the local user is the recipient. Distinct entry from
-        // the sender-side write (different `by=` archive in XEP-0359
-        // terms).
-        if ctx.locality.is_recipient() && !is_self_loop(&from_bare, &to_bare) {
-            if let Some(from) = from_bare.clone() {
+        // Recipient-side write — fires on `Locality::Recipient` (which
+        // includes cross-resource self-chat like alice/web -> alice/phone
+        // on alice/phone's connection, where alice's archive captures the
+        // incoming copy distinct from the sender-side outgoing copy).
+        // Suppressed for `Locality::Both` because the sender branch
+        // above already wrote the single event for that degenerate
+        // self-loop case.
+        if matches!(ctx.locality, Locality::Recipient) {
+            if let Some(from) = from_bare {
                 events.push(OutboundEvent::ArchiveDirect {
                     from,
                     to: to_bare.unwrap_or_else(|| local_bare.clone()),
@@ -85,19 +91,6 @@ impl MessageHandler for ArchiveHandler {
 
         HandlerOutcome::Continue(events)
     }
-}
-
-/// True when `from.bare() == to.bare()` AND both are present.
-///
-/// Used to suppress duplicate sender+recipient archive writes for true
-/// self-loops — `Locality::Both` would otherwise stamp the same entry
-/// twice. Cross-resource self-messages (alice/web → alice/phone)
-/// produce `Locality::Recipient` on alice/phone (per the asymmetric
-/// `Locality::derive` in PR1) and `Locality::Sender` on alice/web, so
-/// they correctly produce one entry per locus and don't trip this
-/// guard.
-fn is_self_loop(from: &Option<BareJid>, to: &Option<BareJid>) -> bool {
-    matches!((from, to), (Some(f), Some(t)) if f == t)
 }
 
 /// XEP-0313 §5.1.3 archive-eligibility heuristic.
@@ -115,16 +108,17 @@ pub fn is_archivable(message: &Message) -> bool {
     if message.should_skip_archive() {
         return false;
     }
+    let has_body = has_substantive_body(message);
     // Skip subject-only messages — XEP-0313 §5.1.3 lists these as
     // non-archivable since they're typically MUC subject changes that
     // the room would handle.
-    if !message.subjects.is_empty() && !has_substantive_body(message) {
+    if !message.subjects.is_empty() && !has_body {
         return false;
     }
     // Require either a non-empty body or a substantive payload (e.g.
     // a XEP-0424 retraction, XEP-0308 correction). Pure presence-like
     // messages with no body and no archivable payload are dropped.
-    has_substantive_body(message) || has_archivable_payload(message)
+    has_body || has_archivable_payload(message)
 }
 
 fn has_substantive_body(message: &Message) -> bool {
@@ -148,7 +142,7 @@ mod tests {
     use crate::protocol::message_context::MessageContextEnv;
     use crate::protocol::session_state::{Blocklist, CarbonsState, MucOccupancy};
     use crate::xep::xep0334::Hint;
-    use jid::FullJid;
+    use jid::{BareJid, FullJid};
     use minidom::Element;
     use xmpp_parsers::message::{Body, Message, MessageType, Subject};
 
@@ -234,15 +228,37 @@ mod tests {
     }
 
     #[test]
-    fn xep_0313_self_loop_to_same_resource_emits_single_archive_not_double() {
+    fn xep_0313_true_self_loop_same_resource_emits_single_archive_not_double() {
         // alice/web -> alice/web. Locality::Both; sender-side fires;
-        // recipient-side suppressed by the self-loop guard so we get
-        // one archive entry, not two.
+        // recipient-side branch skipped because Both already covered
+        // by sender-side. One archive entry, not two.
         let local = full("alice@example.com/web");
         let mut msg = chat_with_body("alice@example.com/web", "alice@example.com/web", "echo");
         let outcome = run(&local, &mut msg);
         let archives = extract_archive_events(&outcome);
         assert_eq!(archives.len(), 1);
+    }
+
+    #[test]
+    fn xep_0313_cross_resource_self_chat_emits_recipient_side_archive() {
+        // alice/web -> alice/phone, observed from alice/phone's
+        // connection. Locality::Recipient (the asymmetric derive in
+        // PR1 ensures cross-resource self-chat is NOT classified as
+        // Both). The recipient-side write must fire so alice's
+        // archive captures the incoming copy on alice/phone — earlier
+        // versions of this handler suppressed the write whenever the
+        // bare JIDs matched, losing the entry.
+        let local = full("alice@example.com/phone");
+        let mut msg = chat_with_body(
+            "alice@example.com/web",
+            "alice@example.com/phone",
+            "ping yourself",
+        );
+        let outcome = run(&local, &mut msg);
+        let archives = extract_archive_events(&outcome);
+        assert_eq!(archives.len(), 1);
+        assert_eq!(archives[0].0, bare("alice@example.com"));
+        assert_eq!(archives[0].1, bare("alice@example.com"));
     }
 
     // -----------------------------------------------------------------
