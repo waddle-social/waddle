@@ -94,6 +94,24 @@ pub enum PendingOp {
     },
 }
 
+/// Frozen snapshot of session-bounded state at message-dispatch start.
+///
+/// Per #229 Q5, [`MessageContext`] is frozen for the duration of one
+/// logical dispatch — even when the pipeline parks via
+/// [`HandlerOutcome::AwaitCallback`] and re-enters via a callback, the
+/// resumed handlers see the same view of blocklist / carbons /
+/// occupancy as the initial dispatch did.
+///
+/// Threaded through every pause/resume hop so a long pipeline (e.g.
+/// rich-target lookup followed by enrichment) preserves that contract
+/// across multiple parks.
+#[derive(Debug, Clone)]
+struct SessionStateSnapshot {
+    blocklist: Blocklist,
+    carbons: CarbonsState,
+    muc_occupancy: MucOccupancy,
+}
+
 /// Discriminator for the kind of completion the state machine should
 /// run when an [`InboundEvent`] arrives matching a
 /// [`PendingOp::MessageDispatchResume`].
@@ -268,9 +286,11 @@ impl XmppStateMachine {
                 rewritten,
                 resume_after,
                 full_jid,
-                blocklist,
-                carbons,
-                muc_occupancy,
+                SessionStateSnapshot {
+                    blocklist,
+                    carbons,
+                    muc_occupancy,
+                },
             ),
             PendingOp::MessageDispatchResume { kind, .. } => vec![OutboundEvent::Log {
                 level: Level::ERROR,
@@ -322,9 +342,11 @@ impl XmppStateMachine {
                             *message,
                             resume_after,
                             full_jid,
-                            blocklist,
-                            carbons,
-                            muc_occupancy,
+                            SessionStateSnapshot {
+                                blocklist,
+                                carbons,
+                                muc_occupancy,
+                            },
                         );
                         all.extend(resumed);
                         all
@@ -464,19 +486,27 @@ impl XmppStateMachine {
         match stanza {
             Stanza::Iq(iq) => self.dispatcher.dispatch_iq(&iq, &ctx),
             Stanza::Message(mut message) => {
+                // Snapshot session state once at dispatch start —
+                // every subsequent pause/resume hop reuses this same
+                // view to honour Q5's "frozen at dispatch start" rule.
+                let snapshot = SessionStateSnapshot {
+                    blocklist: self.blocklist.clone(),
+                    carbons: self.carbons,
+                    muc_occupancy: self.muc_occupancy.clone(),
+                };
                 let outcome = {
                     let env = MessageContextEnv {
                         domain: &self.domain,
                         full_jid: &full_jid,
-                        blocklist: &self.blocklist,
-                        carbons: self.carbons,
-                        muc_occupancy: &self.muc_occupancy,
+                        blocklist: &snapshot.blocklist,
+                        carbons: snapshot.carbons,
+                        muc_occupancy: &snapshot.muc_occupancy,
                         id_gen: self.id_gen.as_ref(),
                     };
                     let mctx = MessageContext::derive(env, &message);
                     self.dispatcher.dispatch_message(&mut message, &mctx)
                 };
-                self.handle_message_outcome(outcome, message, &full_jid)
+                self.handle_message_outcome(outcome, message, &full_jid, &snapshot)
             }
             Stanza::Presence(presence) => self.dispatcher.dispatch_presence(&presence, &ctx),
         }
@@ -490,11 +520,21 @@ impl XmppStateMachine {
     /// handler-supplied [`CallbackId`] sentinels in the emitted events,
     /// and register a [`PendingOp::MessageDispatchResume`] that the
     /// matching `InboundEvent` callback will resume.
+    ///
+    /// `snapshot` is the *original* dispatch-start view of session
+    /// state — Q5's "frozen at dispatch start" rule. The same snapshot
+    /// is threaded through every re-park so a long pipeline (e.g.
+    /// rich-target lookup followed by enrichment) sees the same
+    /// `MessageContext` for each pause; without this, a second park
+    /// would capture potentially-mutated `self.*` state and the
+    /// resumed handlers would observe a different view than the
+    /// initial dispatch did.
     fn handle_message_outcome(
         &mut self,
         outcome: MessageDispatchOutcome,
         message: xmpp_parsers::message::Message,
         full_jid: &jid::FullJid,
+        snapshot: &SessionStateSnapshot,
     ) -> Vec<OutboundEvent> {
         let MessageDispatchOutcome {
             mut events,
@@ -532,9 +572,9 @@ impl XmppStateMachine {
                         message: Box::new(message),
                         kind: resume_kind,
                         full_jid: full_jid.clone(),
-                        blocklist: self.blocklist.clone(),
-                        carbons: self.carbons,
-                        muc_occupancy: self.muc_occupancy.clone(),
+                        blocklist: snapshot.blocklist.clone(),
+                        carbons: snapshot.carbons,
+                        muc_occupancy: snapshot.muc_occupancy.clone(),
                     },
                 );
                 events
@@ -545,46 +585,32 @@ impl XmppStateMachine {
     /// Resume a paused message-pipeline run with the (possibly
     /// rewritten) message. Recursively chains through further `Awaiting`
     /// terminations — a long pipeline can park multiple times (e.g.
-    /// rich-target lookup followed by enrichment).
+    /// rich-target lookup followed by enrichment). The `snapshot`
+    /// parameter carries the original dispatch-start session state
+    /// forward to any re-park, preserving the Q5 "frozen at dispatch
+    /// start" contract across the entire dispatch.
     fn resume_message_dispatch(
         &mut self,
         message: xmpp_parsers::message::Message,
         resume_after: HandlerId,
         full_jid: jid::FullJid,
-        blocklist: Blocklist,
-        carbons: CarbonsState,
-        muc_occupancy: MucOccupancy,
+        snapshot: SessionStateSnapshot,
     ) -> Vec<OutboundEvent> {
         let mut message = message;
         let outcome = {
             let env = MessageContextEnv {
                 domain: &self.domain,
                 full_jid: &full_jid,
-                blocklist: &blocklist,
-                carbons,
-                muc_occupancy: &muc_occupancy,
+                blocklist: &snapshot.blocklist,
+                carbons: snapshot.carbons,
+                muc_occupancy: &snapshot.muc_occupancy,
                 id_gen: self.id_gen.as_ref(),
             };
             let mctx = MessageContext::derive(env, &message);
             self.dispatcher
                 .resume_message(&mut message, &mctx, resume_after)
         };
-        // Rebuilding session state for a possible second pause uses
-        // the same snapshot — Q5's "frozen at dispatch start" rule.
-        // Restoring it on each handle_message_outcome path keeps the
-        // pause-resume contract consistent across multiple parks.
-        let saved_blocklist = blocklist.clone();
-        let saved_occupancy = muc_occupancy.clone();
-        // The blocklist / occupancy used to build the next pending op
-        // come from the same snapshot via self.* — which we don't
-        // mutate during dispatch. So the resume's own pause registers
-        // a fresh PendingOp with the live `self.*` (the original
-        // snapshot semantically equals it for this dispatch). We
-        // honour the snapshot by feeding the resume snapshot into
-        // `handle_message_outcome` — implemented inline because the
-        // generic helper reads from `self.*`.
-        let _ = (saved_blocklist, saved_occupancy);
-        self.handle_message_outcome(outcome, message, &full_jid)
+        self.handle_message_outcome(outcome, message, &full_jid, &snapshot)
     }
 
     fn on_peer_stanza(&mut self, stanza: Stanza) -> Vec<OutboundEvent> {
@@ -1144,6 +1170,130 @@ mod tests {
             _ => false,
         });
         assert!(has_error_reply);
+    }
+
+    #[test]
+    fn snapshot_is_frozen_across_re_park_does_not_leak_mutated_state() {
+        // Regression test for the PR5 snapshot-drift bug. A long
+        // pipeline can park twice (rich-target lookup, then enrichment
+        // on resume). The original dispatch-start snapshot of session
+        // state must be threaded through to the second park; without
+        // the fix, the second `PendingOp::MessageDispatchResume` would
+        // capture `self.*` mutated between the two parks and the
+        // resumed handlers would see a different view than the initial
+        // dispatch.
+        use std::sync::Mutex;
+        let captured: Arc<Mutex<Vec<Blocklist>>> = Arc::new(Mutex::new(Vec::new()));
+
+        struct SnapshotProbe {
+            captured: Arc<Mutex<Vec<Blocklist>>>,
+        }
+        impl MessageHandler for SnapshotProbe {
+            fn name(&self) -> &'static str {
+                "test-snapshot-probe"
+            }
+            fn handle(&self, _message: &mut Message, ctx: &MessageContext<'_>) -> HandlerOutcome {
+                self.captured
+                    .lock()
+                    .expect("mutex")
+                    .push(ctx.blocklist.clone());
+                HandlerOutcome::Continue(Vec::new())
+            }
+        }
+
+        let mut dispatcher = StanzaDispatcher::new();
+        // Order: rich-target → canonicalize → enrichment → snapshot probe.
+        dispatcher.register_message(Arc::new(RichTargetValidationHandler));
+        dispatcher.register_message(Arc::new(CanonicalizeHandler));
+        dispatcher.register_message(Arc::new(EnrichmentDispatchHandler));
+        dispatcher.register_message(Arc::new(SnapshotProbe {
+            captured: captured.clone(),
+        }));
+
+        let mut sm = test_support::ready_machine("example.com", alice(), dispatcher);
+        let original: jid::BareJid = "original@example.com".parse().expect("bare");
+        sm.blocklist = Blocklist::new([original.clone()]);
+
+        // Correction message with URL body — both handlers will fire
+        // (rich-target first, then enrichment after resume).
+        let mut msg = chat_with_body(
+            "alice@example.com/web",
+            "bob@example.com",
+            "https://example.com/page",
+        );
+        msg.payloads
+            .push(crate::xep::xep0308::build_replace_element("orig-msg-1"));
+        let events = sm.handle(InboundEvent::FrameReceived(InboundFrame::Stanza(Box::new(
+            Stanza::Message(msg),
+        ))));
+        let cb_rich = events
+            .iter()
+            .find_map(|e| match e {
+                OutboundEvent::LookupArchivedMessage { id, .. } => Some(*id),
+                _ => None,
+            })
+            .expect("rich-target parked");
+
+        // Mutate session state between the two parks. The fix
+        // requires the resumed dispatch (and its own re-park) to
+        // ignore this mutation.
+        let mutated: jid::BareJid = "mutated@example.com".parse().expect("bare");
+        sm.blocklist = Blocklist::new([mutated.clone()]);
+
+        // Provide rich-target completion → pipeline resumes → hits
+        // EnrichmentDispatchHandler → parks again.
+        let mut archived_msg = chat_with_body("alice@example.com/web", "bob@example.com", "orig");
+        archived_msg.id = Some("orig-msg-1".to_string());
+        let archived = ArchivedMessage {
+            stanza_id: StanzaIdRef {
+                by: "alice@example.com".parse().expect("bare"),
+                id: StanzaIdValue::new("A1"),
+            },
+            message: Box::new(archived_msg),
+            tombstoned: false,
+        };
+        let events2 = sm.handle(InboundEvent::ArchivedMessageLoaded {
+            id: cb_rich,
+            result: Some(Box::new(archived)),
+        });
+        let cb_enrich = events2
+            .iter()
+            .find_map(|e| match e {
+                OutboundEvent::RequestEnrichment { id, .. } => Some(*id),
+                _ => None,
+            })
+            .expect("enrichment parked on resume");
+
+        // Mutate again before the final completion — must still not
+        // leak through to the SnapshotProbe.
+        let doubly: jid::BareJid = "doubly@example.com".parse().expect("bare");
+        sm.blocklist = Blocklist::new([doubly]);
+
+        // Final completion. The resumed pipeline runs through to the
+        // SnapshotProbe; the probe's `ctx.blocklist` must reflect the
+        // ORIGINAL snapshot, not either mutation.
+        let rewritten = chat_with_body(
+            "alice@example.com/web",
+            "bob@example.com",
+            "https://example.com/page",
+        );
+        sm.handle(InboundEvent::EnrichmentComplete {
+            id: cb_enrich,
+            message: Box::new(rewritten),
+        });
+
+        let captured_blocklists = captured.lock().expect("mutex").clone();
+        assert_eq!(
+            captured_blocklists.len(),
+            1,
+            "probe should run exactly once on the final resume"
+        );
+        let entries: Vec<_> = captured_blocklists[0].iter().cloned().collect();
+        assert_eq!(
+            entries,
+            vec![original],
+            "snapshot must be frozen at dispatch start across both pause/resume hops"
+        );
     }
 
     #[test]
