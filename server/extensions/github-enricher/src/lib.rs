@@ -10,6 +10,9 @@ wit_bindgen::generate!({
 use exports::waddle::extension::enrich::{
     DetectedLink as WitDetectedLink, EnrichmentResult, Guest as EnrichGuest,
 };
+use exports::waddle::extension::framework::{
+    ExtensionError, ExtensionEvent, ExtensionResponse, Guest as FrameworkGuest,
+};
 use exports::waddle::extension::lifecycle::{ExtensionInfo, Guest as LifecycleGuest};
 use serde::{Deserialize, Serialize};
 
@@ -62,11 +65,22 @@ impl EnrichGuest for Extension {
     }
 }
 
+impl FrameworkGuest for Extension {
+    fn handle_event(_event: ExtensionEvent) -> Result<ExtensionResponse, ExtensionError> {
+        Ok(ExtensionResponse {
+            effects: Vec::new(),
+        })
+    }
+}
+
 export!(Extension);
 
 #[cfg(test)]
 mod tests {
-    use super::{EnrichGuest, Extension, LifecycleGuest, WitDetectedLink};
+    use super::{EnrichGuest, Extension, FrameworkGuest, LifecycleGuest, WitDetectedLink};
+    use crate::waddle::extension::types::{
+        DisplayText, ExtensionEvent, MessageContext, MessageHook, WaddleId,
+    };
 
     #[test]
     fn init_accepts_empty_json() {
@@ -105,5 +119,24 @@ mod tests {
         );
 
         assert!(result.embeds.is_empty());
+    }
+
+    #[test]
+    fn framework_event_export_is_available() {
+        let result = Extension::handle_event(ExtensionEvent::MessageHook(MessageHook {
+            context: MessageContext {
+                waddle_id: WaddleId {
+                    value: "waddle-1".to_string(),
+                },
+                stanza_id: None,
+            },
+            body: DisplayText {
+                value: "hello".to_string(),
+            },
+            links: Vec::new(),
+        }))
+        .expect("framework handler should be implemented");
+
+        assert!(result.effects.is_empty());
     }
 }

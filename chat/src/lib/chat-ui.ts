@@ -35,6 +35,30 @@ export interface GitHubEmbed {
   name: string;
 }
 
+export type ExtensionSurfaceKind =
+  | "message-card"
+  | "board"
+  | "game"
+  | "chat-bot"
+  | "dynamic-canvas"
+  | "utility-panel";
+
+export interface ExtensionAnnotationAction {
+  label: string;
+  route: string;
+}
+
+export interface ExtensionAnnotation {
+  extensionId: string;
+  annotationId: string;
+  surfaceKind: ExtensionSurfaceKind;
+  title: string;
+  summary?: string;
+  imageUrl?: string;
+  fields: Record<string, string>;
+  actions: ExtensionAnnotationAction[];
+}
+
 export interface TimelineMessage {
   id: string;
   /** Equivalent wire-level ids (XEP-0359 stanza/origin ids, echoed ids). */
@@ -73,6 +97,8 @@ export interface TimelineMessage {
   sharedFiles?: TimelineSharedFile[];
   /** Waddle GitHub enrichment embeds. */
   githubEmbeds?: GitHubEmbed[];
+  /** Waddle unified extension framework annotations. */
+  extensionAnnotations?: ExtensionAnnotation[];
   /** XEP-0513: Broadcast mention (everyone/here). */
   broadcastMention?: "everyone" | "here";
   /** XEP-0394: Message Markup offset-based annotations. */
@@ -311,4 +337,21 @@ export function githubEmbedDisplayTitle(embed: GitHubEmbed): string {
   const repo = `${embed.owner}/${embed.name}`;
   const number = githubEmbedNumber(embed);
   return number ? `${repo} #${number}` : repo;
+}
+
+export function extensionSurfaceLabel(kind: ExtensionSurfaceKind): string {
+  switch (kind) {
+    case "board":
+      return "Board";
+    case "game":
+      return "Game";
+    case "chat-bot":
+      return "AI bot";
+    case "dynamic-canvas":
+      return "Dynamic canvas";
+    case "utility-panel":
+      return "Utility";
+    default:
+      return "Extension";
+  }
 }

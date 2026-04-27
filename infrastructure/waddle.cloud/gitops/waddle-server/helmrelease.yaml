@@ -84,17 +84,7 @@ spec:
     extensions:
       enabled: true
       cacheDir: /var/lib/waddle/extensions
-      modules:
-        - name: github-enricher
-          registry: ghcr.io/waddle-social/waddle/extensions/github-enricher
-          tag: latest
-          namespace: urn:waddle:github:0
-          config: {}
-          # Maps extension config key -> absolute path of the mounted secret file.
-          # The server reads each file at startup and injects its content into the
-          # module config under the corresponding key (see ExtensionModuleConfig).
-          config_secret_files:
-            github_token: /etc/waddle/secrets/github-app/private-key
+      modules: []
 
     # CSI-style secret file mount: the ExternalSecret "waddle-github-app-credentials"
     # syncs the GitHub App private key from 1Password into a Kubernetes Secret.

@@ -75,8 +75,14 @@ impl OciExtensionPuller {
 
     fn cached_wasm_path(&self, module: &ExtensionModuleConfig) -> Result<PathBuf> {
         let module_name = validate_cache_component("name", &module.name)?;
-        let tag = validate_cache_component("tag", &module.tag)?;
-        Ok(self.cache_dir.join(module_name).join(format!("{tag}.wasm")))
+        let (_registry, digest) = module
+            .oci_registry_and_digest()
+            .map_err(anyhow::Error::msg)?;
+        let digest = cache_digest_component(digest)?;
+        Ok(self
+            .cache_dir
+            .join(module_name)
+            .join(format!("{digest}.wasm")))
     }
 
     pub async fn pull_module(&self, module: &ExtensionModuleConfig) -> Result<PathBuf> {
@@ -129,8 +135,8 @@ impl OciExtensionPuller {
 
         info!(
             extension = %module.name,
-            registry = %module.registry,
-            tag = %module.tag,
+            registry = %reference.registry(),
+            digest = %reference.digest().unwrap_or("<missing>"),
             cache_path = %cached.display(),
             "pulled extension OCI artifact"
         );
@@ -142,7 +148,10 @@ impl OciExtensionPuller {
     }
 
     fn reference_for(&self, module: &ExtensionModuleConfig) -> Result<Reference> {
-        let target = format!("{}:{}", module.registry, module.tag);
+        let (registry, digest) = module
+            .oci_registry_and_digest()
+            .map_err(anyhow::Error::msg)?;
+        let target = format!("{registry}@{digest}");
         target
             .parse()
             .with_context(|| format!("invalid OCI reference {target}"))
@@ -216,6 +225,16 @@ fn validate_cache_component<'a>(field: &str, value: &'a str) -> Result<&'a str> 
         bail!("extension {field} contains unsupported characters");
     }
     Ok(value)
+}
+
+fn cache_digest_component(digest: &str) -> Result<String> {
+    let Some(hex) = digest.strip_prefix("sha256:") else {
+        bail!("extension digest must use sha256:<64 hex>");
+    };
+    if hex.len() != 64 || !hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        bail!("extension digest must use sha256:<64 hex>");
+    }
+    Ok(format!("sha256-{hex}"))
 }
 
 fn write_wasm_atomically(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -297,7 +316,11 @@ mod tests {
         let module = ExtensionModuleConfig {
             name: "github-enricher".to_string(),
             registry: "ghcr.io/waddle-social/waddle/extensions/github-enricher".to_string(),
-            tag: "sha-abc123".to_string(),
+            digest: Some(
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_string(),
+            ),
+            tag: None,
             namespace: "urn:waddle:github:0".to_string(),
             config: serde_json::Value::Object(Default::default()),
             config_secret_files: Default::default(),
@@ -308,12 +331,62 @@ mod tests {
             .reference_for(&module)
             .expect("reference should parse");
         let expected: Reference =
-            "ghcr.io/waddle-social/waddle/extensions/github-enricher:sha-abc123"
+            "ghcr.io/waddle-social/waddle/extensions/github-enricher@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                 .parse()
                 .expect("reference should parse");
         assert_eq!(reference.registry(), expected.registry());
         assert_eq!(reference.repository(), expected.repository());
-        assert_eq!(reference.tag(), expected.tag());
+        assert_eq!(reference.digest(), expected.digest());
+    }
+
+    #[test]
+    fn rejects_reference_with_mutable_registry_tag() {
+        let cache_dir = std::env::temp_dir().join("waddle-test");
+        let puller = OciExtensionPuller::new(cache_dir);
+        let module = ExtensionModuleConfig {
+            name: "github-enricher".to_string(),
+            registry: "ghcr.io/waddle-social/waddle/extensions/github-enricher:latest".to_string(),
+            digest: Some(
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_string(),
+            ),
+            tag: None,
+            namespace: "urn:waddle:github:0".to_string(),
+            config: serde_json::Value::Object(Default::default()),
+            config_secret_files: Default::default(),
+            local_path: None,
+        };
+
+        let error = puller
+            .reference_for(&module)
+            .expect_err("mutable registry tags should be rejected");
+        assert!(error.to_string().contains("must not include a mutable tag"));
+    }
+
+    #[test]
+    fn rejects_oci_module_tag_field_even_when_digest_is_set() {
+        let cache_dir = std::env::temp_dir().join("waddle-test");
+        let puller = OciExtensionPuller::new(cache_dir);
+        let module = ExtensionModuleConfig {
+            name: "github-enricher".to_string(),
+            registry: "ghcr.io/waddle-social/waddle/extensions/github-enricher".to_string(),
+            digest: Some(
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_string(),
+            ),
+            tag: Some("latest".to_string()),
+            namespace: "urn:waddle:github:0".to_string(),
+            config: serde_json::Value::Object(Default::default()),
+            config_secret_files: Default::default(),
+            local_path: None,
+        };
+
+        let error = puller
+            .reference_for(&module)
+            .expect_err("tag field should be rejected for OCI modules");
+        assert!(error
+            .to_string()
+            .contains("must use an immutable digest instead of tag"));
     }
 
     #[test]
@@ -396,7 +469,11 @@ mod tests {
         let module = ExtensionModuleConfig {
             name: "../bad".to_string(),
             registry: "ghcr.io/waddle-social/waddle/extensions/github-enricher".to_string(),
-            tag: "sha-abc123".to_string(),
+            digest: Some(
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_string(),
+            ),
+            tag: None,
             namespace: "urn:waddle:github:0".to_string(),
             config: serde_json::Value::Object(Default::default()),
             config_secret_files: Default::default(),
@@ -409,5 +486,30 @@ mod tests {
         assert!(error
             .to_string()
             .contains("must not include path separators"));
+    }
+
+    #[test]
+    fn cache_path_uses_sanitized_digest() {
+        let puller = OciExtensionPuller::new(std::env::temp_dir().join("waddle-test"));
+        let module = ExtensionModuleConfig {
+            name: "github-enricher".to_string(),
+            registry: "ghcr.io/waddle-social/waddle/extensions/github-enricher".to_string(),
+            digest: Some(
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_string(),
+            ),
+            tag: None,
+            namespace: "urn:waddle:github:0".to_string(),
+            config: serde_json::Value::Object(Default::default()),
+            config_secret_files: Default::default(),
+            local_path: None,
+        };
+
+        let path = puller
+            .cached_wasm_path(&module)
+            .expect("cache path should be valid");
+        assert!(path.ends_with(
+            "github-enricher/sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.wasm"
+        ));
     }
 }

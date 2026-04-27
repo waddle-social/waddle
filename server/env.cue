@@ -149,7 +149,7 @@ schema.#Project & {
 				"id-token": "write"
 			}
 			derivePaths: true
-			tasks: [_t.pushGithubEnricherOci, _t.pushGithubEnricherGitops]
+			tasks: [_t.buildGithubEnricher, _t.pushGithubEnricherOci, _t.pinGithubEnricherDigest, _t.pushGithubEnricherGitops]
 		}
 		githubEnricherPullRequest: {
 			mode: "expanded"
@@ -429,6 +429,33 @@ schema.#Project & {
 					  "${WASM_FILE}:application/wasm"
 				'
 				"""#]
+			dependsOn: [tasks.buildGithubEnricher]
+		}
+
+		pinGithubEnricherDigest: schema.#Task & {
+			command: "bash"
+			env: {
+				GITHUB_TOKEN: schema.#EnvPassthrough
+				GITHUB_ACTOR: schema.#EnvPassthrough
+			}
+			args: ["-c", #"""
+					set -euo pipefail
+					FULL_SHA="$(git rev-parse HEAD)"
+					IMAGE="ghcr.io/waddle-social/waddle/extensions/github-enricher"
+					echo "${GITHUB_TOKEN}" | oras login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+					DIGEST="$(oras resolve "${IMAGE}:sha-${FULL_SHA}")"
+					export IMAGE DIGEST
+					yq -i '.spec.values.extensions.modules = ((.spec.values.extensions.modules // []) | map(select(.name != "github-enricher")) + [{
+					  "name": "github-enricher",
+					  "registry": strenv(IMAGE),
+					  "digest": strenv(DIGEST),
+					  "namespace": "urn:waddle:github:0",
+					  "config": {},
+					  "config_secret_files": {"github_token": "/etc/waddle/secrets/github-app/private-key"}
+					}])' ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml
+					yq -e ".spec.values.extensions.modules[] | select(.name == \"github-enricher\") | .digest == \"${DIGEST}\"" ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml > /dev/null
+				"""#]
+			dependsOn: [tasks.pushGithubEnricherOci]
 		}
 
 		pushGithubEnricherGitops: schema.#Task & {
@@ -451,7 +478,7 @@ schema.#Project & {
 					  --revision="$(git rev-parse --short HEAD)"
 				'
 				"""#]
-			dependsOn: [tasks.pushGithubEnricherOci]
+			dependsOn: [tasks.pinGithubEnricherDigest]
 		}
 	}
 

@@ -4,7 +4,13 @@ import type { WaddleEncryptedFile } from "./extensions/encrypted-file";
 import { splitMessageIds } from "@/lib/message-ids";
 import { stripMarkupRange } from "./extensions/markup";
 import { codePointLength, codePointToCodeUnitIndex } from "@/lib/text-offsets";
-import type { GitHubEmbed, GitHubEmbedKind, MessageReference } from "@/lib/chat-ui";
+import type {
+  ExtensionAnnotation,
+  ExtensionSurfaceKind,
+  GitHubEmbed,
+  GitHubEmbedKind,
+  MessageReference,
+} from "@/lib/chat-ui";
 import type {
   ChatStateEvent, ChatStateType, DisplayedEvent,
   LiveDmMessage, LiveRoomMessage, ReactionEvent, RoomActivityEvent, SharedFileInfo,
@@ -21,6 +27,7 @@ type MessageExtensionsTarget = Pick<
   | "broadcastMention"
   | "sharedFiles"
   | "githubEmbeds"
+  | "extensionAnnotations"
   | "isSticker"
   | "replacesId"
   | "markup"
@@ -58,7 +65,7 @@ export function hasRenderableMessagePayload(msg: ReceivedMessage): boolean {
   const fileSharing = stanza.fileSharing;
   if (Array.isArray(fileSharing)) return fileSharing.length > 0;
   if (fileSharing) return true;
-  return !!stanza.sticker || githubEmbedsFromStanza(stanza).length > 0;
+  return !!stanza.sticker || githubEmbedsFromStanza(stanza).length > 0 || extensionAnnotationsFromStanza(stanza).length > 0;
 }
 
 interface OriginIdPayload {
@@ -122,6 +129,7 @@ export function extractMessageExtensions(
   extractExplicitMentions(msg, base);
   extractFileSharing(msg, base);
   extractGithubEmbeds(msg, base);
+  extractExtensionAnnotations(msg, base);
   extractMarkup(msg, base);
   extractReplyAndThread(msg, base);
   stripReplyFallback(msg, base);
@@ -184,17 +192,176 @@ function githubEmbedsFromStanza(stanza: Record<string, unknown>): GitHubEmbed[] 
   ];
 }
 
+interface ExtensionEnvelopePayload {
+  annotations?: ExtensionAnnotationPayload | ExtensionAnnotationPayload[];
+  enrichments?: ExtensionEnrichmentPayload | ExtensionEnrichmentPayload[];
+}
+
+interface ExtensionAnnotationPayload {
+  extension?: string;
+  id?: string;
+  card?: ExtensionCardPayload;
+}
+
+interface ExtensionCardPayload {
+  title?: string;
+  summary?: string;
+  image?: string;
+  fields?: ExtensionFieldPayload | ExtensionFieldPayload[];
+  actions?: ExtensionActionPayload | ExtensionActionPayload[];
+}
+
+interface ExtensionFieldPayload {
+  name?: string;
+  value?: string;
+}
+
+interface ExtensionActionPayload {
+  route?: string;
+  label?: string;
+}
+
+interface ExtensionEnrichmentPayload {
+  id?: string;
+  plugin?: string;
+  capability?: string;
+  payloadNamespace?: string;
+  payload?: ExtensionFrameworkPayload;
+  launches?: ExtensionLaunchPayload | ExtensionLaunchPayload[];
+}
+
+interface ExtensionFrameworkPayload {
+  links?: unknown[] | unknown;
+  quizQuestions?: unknown[] | unknown;
+  assistantAnswers?: unknown[] | unknown;
+  canvases?: unknown[] | unknown;
+  polls?: unknown[] | unknown;
+}
+
+interface ExtensionLaunchPayload {
+  id?: string;
+  action?: string;
+  commandNode?: string;
+  label?: string;
+}
+
+const ALLOWED_EXTENSION_SURFACES = new Set<ExtensionSurfaceKind>([
+  "message-card",
+  "board",
+  "game",
+  "chat-bot",
+  "dynamic-canvas",
+  "utility-panel",
+]);
+
+function parseExtensionAnnotation(payload: ExtensionAnnotationPayload): ExtensionAnnotation | null {
+  if (!payload.extension || !payload.id || !payload.card?.title) return null;
+  const fields = Object.fromEntries(
+    asArray(payload.card.fields)
+      .filter((field): field is Required<ExtensionFieldPayload> => !!field.name && typeof field.value === "string")
+      .map((field) => [field.name, field.value]),
+  );
+  const surfaceKind = ALLOWED_EXTENSION_SURFACES.has(fields.surface as ExtensionSurfaceKind)
+    ? fields.surface as ExtensionSurfaceKind
+    : "message-card";
+  return {
+    extensionId: payload.extension,
+    annotationId: payload.id,
+    surfaceKind,
+    title: payload.card.title,
+    ...(payload.card.summary ? { summary: payload.card.summary } : {}),
+    ...(payload.card.image ? { imageUrl: payload.card.image } : {}),
+    fields,
+    actions: asArray(payload.card.actions)
+      .filter((action): action is Required<ExtensionActionPayload> => !!action.route && !!action.label)
+      .map((action) => ({ route: action.route, label: action.label })),
+  };
+}
+
+function extensionAnnotationsFromStanza(stanza: Record<string, unknown>): ExtensionAnnotation[] {
+  const envelope = stanza.waddleExtensions as ExtensionEnvelopePayload | undefined;
+  return [
+    ...asArray(envelope?.annotations).flatMap((payload) => parseExtensionAnnotation(payload) ?? []),
+    ...asArray(envelope?.enrichments).flatMap((payload) => parseExtensionEnrichment(payload) ?? []),
+  ];
+}
+
+function parseExtensionEnrichment(payload: ExtensionEnrichmentPayload): ExtensionAnnotation | null {
+  if (!payload.id || !payload.plugin) return null;
+  const actions = asArray(payload.launches)
+    .filter((launch): launch is Required<Pick<ExtensionLaunchPayload, "id" | "label">> & ExtensionLaunchPayload => !!launch.id && !!launch.label)
+    .map((launch) => ({ route: launch.id, label: launch.label }));
+  return {
+    extensionId: payload.plugin,
+    annotationId: payload.id,
+    surfaceKind: inferSurfaceKind(payload),
+    title: extensionTitle(payload),
+    ...(payload.payloadNamespace ? { summary: payload.payloadNamespace } : {}),
+    fields: {
+      ...(payload.capability ? { capability: payload.capability } : {}),
+      ...(payload.payloadNamespace ? { payloadNamespace: payload.payloadNamespace } : {}),
+    },
+    actions,
+  };
+}
+
+function inferSurfaceKind(payload: ExtensionEnrichmentPayload): ExtensionSurfaceKind {
+  if (hasPayloadItems(payload.payload?.links)) return "board";
+  if (hasPayloadItems(payload.payload?.quizQuestions)) return "game";
+  if (hasPayloadItems(payload.payload?.assistantAnswers)) return "chat-bot";
+  if (hasPayloadItems(payload.payload?.canvases)) return "dynamic-canvas";
+  switch (payload.payloadNamespace) {
+    case "urn:waddle:links-task-board:1":
+      return "board";
+    case "urn:waddle:pub-quiz:1":
+      return "game";
+    case "urn:waddle:ai-chatbot:1":
+      return "chat-bot";
+    case "urn:waddle:ai-assistant-canvas:1":
+      return "dynamic-canvas";
+    default:
+      return "message-card";
+  }
+}
+
+function hasPayloadItems(value: unknown[] | unknown | undefined): boolean {
+  return Array.isArray(value) ? value.length > 0 : value !== undefined && value !== null;
+}
+
+function extensionTitle(payload: ExtensionEnrichmentPayload): string {
+  switch (payload.payloadNamespace) {
+    case "urn:waddle:links-task-board:1":
+      return "Links task board";
+    case "urn:waddle:pub-quiz:1":
+      return "Pub quiz";
+    case "urn:waddle:ai-chatbot:1":
+      return "AI chatbot";
+    case "urn:waddle:ai-assistant-canvas:1":
+      return "AI assistant canvas";
+    case "urn:waddle:decision-polls:1":
+      return "Decision poll";
+    default:
+      return payload.plugin ?? "Extension";
+  }
+}
+
 function hasNonBodyMessagePayload(msg: ReceivedMessage): boolean {
   const stanza = ext(msg);
   const fileSharing = stanza.fileSharing;
   return (Array.isArray(fileSharing) ? fileSharing.length > 0 : !!fileSharing)
     || !!stanza.sticker
-    || githubEmbedsFromStanza(stanza).length > 0;
+    || githubEmbedsFromStanza(stanza).length > 0
+    || extensionAnnotationsFromStanza(stanza).length > 0;
 }
 
 function extractGithubEmbeds(msg: ReceivedMessage, base: MessageExtensionsTarget): void {
   const embeds = githubEmbedsFromStanza(ext(msg));
   if (embeds.length > 0) base.githubEmbeds = embeds;
+}
+
+function extractExtensionAnnotations(msg: ReceivedMessage, base: MessageExtensionsTarget): void {
+  const annotations = extensionAnnotationsFromStanza(ext(msg));
+  if (annotations.length > 0) base.extensionAnnotations = annotations;
 }
 
 /** XEP-0461 reply pointer + RFC 6121 / XEP-0201 thread id + parent. */
