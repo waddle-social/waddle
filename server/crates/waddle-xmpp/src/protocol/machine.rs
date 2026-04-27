@@ -300,9 +300,15 @@ impl XmppStateMachine {
                 let mctx = MessageContext::derive(env, &message);
                 // The dispatcher exposes a typed `MessageDispatchOutcome`,
                 // but the state machine currently consumes only emitted
-                // events. Pause/resume and any pending-op registration
-                // based on `outcome.termination` are wired alongside the
-                // first `AwaitCallback`-emitting handler (PR2 in #229).
+                // events; `outcome.termination` is intentionally
+                // dropped here. The `AwaitCallback`-emitting handlers
+                // landed in PR2 (`EnrichmentDispatchHandler`) but are
+                // not yet *registered* in the live dispatcher — that
+                // happens in PR4 along with `message.rs`'s cutover, and
+                // pending-op registration based on `Awaiting`
+                // terminations is wired up at the same time. Until
+                // then, no production handler can produce an
+                // `Awaiting` outcome here.
                 let outcome = self.dispatcher.dispatch_message(&mut message, &mctx);
                 outcome.events
             }

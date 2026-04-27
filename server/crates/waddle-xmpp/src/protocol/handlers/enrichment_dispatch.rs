@@ -69,27 +69,63 @@ impl MessageHandler for EnrichmentDispatchHandler {
 /// `ctx`. Pulled out as a free function so the L1 test suite can
 /// exercise the eligibility table without going through the
 /// dispatcher.
+///
+/// Returns `false` (no parking) when:
+///
+/// - the local user is not the sender, or
+/// - the type is not `Chat` / `Normal` (groupchat is the room chain's
+///   job in PR5; error replies and headlines are never enriched), or
+/// - the body has no `http(s)://` URL — without one, the enricher has
+///   nothing to do and parking the pipeline burns latency on a
+///   guaranteed no-op, or
+/// - the message already carries `<reference xmlns='urn:xmpp:reference:0'/>`
+///   payloads from an earlier enrichment pass; re-enriching would
+///   double-stamp.
+///
+/// The URL detection here is intentionally a coarse pre-filter
+/// (substring match on `"http://"` / `"https://"`); the canonical
+/// link-extraction logic (with code-fence skipping, deduplication,
+/// trailing-punctuation trimming) lives in
+/// `waddle-extensions::detect_links` and runs in the interpreter
+/// once the handler parks.
 pub fn is_eligible(message: &Message, ctx: &MessageContext<'_>) -> bool {
     // Sender-side only.
     if !ctx.locality.is_sender() {
         return false;
     }
     // Type must be Chat or Normal — Groupchat is the room chain's job;
-    // Error replies are not enriched.
+    // Error replies and headlines are never enriched.
     match message.type_ {
         MessageType::Chat | MessageType::Normal => {}
         MessageType::Groupchat | MessageType::Error | MessageType::Headline => return false,
     }
-    // Must have a non-empty body.
-    has_body(message)
+    // Avoid double-enrichment if a previous pass already attached
+    // `<reference/>` (XEP-0372) payloads.
+    if has_existing_reference(message) {
+        return false;
+    }
+    // Pre-filter on URL presence so plain-text chats like "hi" don't
+    // park the pipeline waiting for a no-op enrichment callback.
+    body_with_url(message)
 }
 
-fn has_body(message: &Message) -> bool {
-    let any_non_empty = message
+fn body_with_url(message: &Message) -> bool {
+    message
         .bodies
         .values()
-        .any(|Body(text)| !text.trim().is_empty());
-    any_non_empty
+        .any(|Body(text)| text.contains("http://") || text.contains("https://"))
+}
+
+/// XEP-0372 references namespace — used by the enricher to attach
+/// link-preview anchors. Presence indicates an earlier enrichment pass
+/// already ran.
+const NS_REFERENCE: &str = "urn:xmpp:reference:0";
+
+fn has_existing_reference(message: &Message) -> bool {
+    message
+        .payloads
+        .iter()
+        .any(|p| p.is("reference", NS_REFERENCE))
 }
 
 #[cfg(test)]
@@ -99,6 +135,7 @@ mod tests {
     use crate::protocol::message_context::MessageContextEnv;
     use crate::protocol::session_state::{Blocklist, CarbonsState, MucOccupancy};
     use jid::FullJid;
+    use minidom;
     use xmpp_parsers::message::{Body, Message, MessageType};
 
     fn full(s: &str) -> FullJid {
@@ -172,6 +209,48 @@ mod tests {
         let mut msg = chat_with_body("alice@example.com/web", "bob@example.com", "   \n\t ");
         let outcome = run(&local, &mut msg);
         assert!(matches!(outcome, HandlerOutcome::Continue(ref e) if e.is_empty()));
+    }
+
+    #[test]
+    fn plain_text_body_without_url_continues_without_enrichment() {
+        // Plain-text "hi" must NOT park the pipeline waiting for a
+        // no-op enrichment callback — that's pure latency for every
+        // chat message.
+        let local = full("alice@example.com/web");
+        let mut msg = chat_with_body("alice@example.com/web", "bob@example.com", "hi");
+        let outcome = run(&local, &mut msg);
+        assert!(matches!(outcome, HandlerOutcome::Continue(ref e) if e.is_empty()));
+    }
+
+    #[test]
+    fn already_enriched_message_continues_without_re_enriching() {
+        // Body has a URL but the message already carries an XEP-0372
+        // <reference/> from a prior enrichment pass — re-enriching
+        // would double-stamp the link preview.
+        let local = full("alice@example.com/web");
+        let mut msg = chat_with_body(
+            "alice@example.com/web",
+            "bob@example.com",
+            "see https://example.com",
+        );
+        msg.payloads
+            .push(minidom::Element::builder("reference", NS_REFERENCE).build());
+        let outcome = run(&local, &mut msg);
+        assert!(matches!(outcome, HandlerOutcome::Continue(ref e) if e.is_empty()));
+    }
+
+    #[test]
+    fn body_with_http_prefix_url_parks_pipeline() {
+        // The pre-filter accepts both `http://` and `https://`; assert
+        // the http variant.
+        let local = full("alice@example.com/web");
+        let mut msg = chat_with_body(
+            "alice@example.com/web",
+            "bob@example.com",
+            "see http://example.com/page",
+        );
+        let outcome = run(&local, &mut msg);
+        assert!(matches!(outcome, HandlerOutcome::AwaitCallback(_)));
     }
 
     #[test]

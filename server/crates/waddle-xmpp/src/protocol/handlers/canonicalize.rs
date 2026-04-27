@@ -36,6 +36,7 @@ use crate::protocol::message_context::MessageContext;
 use crate::protocol::session_state::Locality;
 use crate::protocol::traits::{HandlerOutcome, MessageHandler};
 use crate::xep::xep0359::{add_stanza_id, is_stanza_id_element};
+use jid::BareJid;
 use xmpp_parsers::message::{Message, MessageType};
 
 /// XEP-0359 strip-and-stamp handler for the message pipeline.
@@ -61,13 +62,26 @@ impl MessageHandler for CanonicalizeHandler {
             return HandlerOutcome::Continue(Vec::new());
         }
 
-        let by = ctx.full_jid.to_bare().to_string();
+        let local_archive = ctx.full_jid.to_bare();
+        let by = local_archive.to_string();
 
         // Strip any pre-existing `<stanza-id>` siblings whose `by=`
-        // matches this archive (XEP-0359 §5).
-        message
-            .payloads
-            .retain(|p| !(is_stanza_id_element(p) && p.attr("by") == Some(by.as_str())));
+        // matches this archive (XEP-0359 §5). Compare via typed
+        // [`BareJid`] equality so semantically equivalent JIDs in
+        // different string forms (case-folded localpart, IDN, …) still
+        // strip — string equality on `by=` would let those slip
+        // through and leak through into downstream archive lookups.
+        message.payloads.retain(|p| {
+            if !is_stanza_id_element(p) {
+                return true;
+            }
+            match p.attr("by").and_then(|raw| raw.parse::<BareJid>().ok()) {
+                Some(parsed) => parsed != local_archive,
+                // Malformed `by=` — leave the element alone; the
+                // server can't claim ownership of an unparseable bare.
+                None => true,
+            }
+        });
 
         // Stamp a fresh stanza-id from the injected entropy source.
         let id = ctx.id_gen.fresh_stanza_id();
@@ -200,6 +214,27 @@ mod tests {
         assert!(stamps
             .iter()
             .any(|s| s.by == "bob@example.com" && s.id == "bob-B1"));
+    }
+
+    #[test]
+    fn xep_0359_strips_same_archive_stamp_via_typed_jid_equality_not_string_equality() {
+        // Client-supplied stamp uses an upper-case domain, which is
+        // semantically equal to the local archive after JID
+        // normalization but NOT equal as a raw string. A
+        // string-equality strip would miss it; the typed `BareJid`
+        // strip catches it.
+        let local = full("alice@example.com/web");
+        let mut msg = chat_msg("alice@example.com/web", "bob@example.com");
+        msg.payloads
+            .push(build_stanza_id_element("spoofed", "alice@EXAMPLE.com"));
+
+        run_with_id(&local, &mut msg, "fresh-id");
+
+        let stamps = extract_stanza_ids(&msg);
+        // After strip-and-stamp, only the freshly stamped id remains
+        // (plus any non-matching cross-archive stamps — none here).
+        assert_eq!(stamps.len(), 1);
+        assert_eq!(stamps[0].id, "fresh-id");
     }
 
     #[test]
