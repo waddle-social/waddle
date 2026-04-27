@@ -32,6 +32,7 @@
 use jid::BareJid;
 use minidom::Element;
 use std::str::FromStr;
+use thiserror::Error;
 use xmpp_parsers::message::Message;
 
 /// Namespace for XEP-0359 Unique and Stable Stanza IDs.
@@ -226,15 +227,42 @@ pub fn strip_all_ids(msg: &mut Message) {
 
 // ── Conversion ───────────────────────────────────────────────────────
 
-impl From<xmpp_parsers::stanza_id::StanzaId> for StanzaId {
-    fn from(sid: xmpp_parsers::stanza_id::StanzaId) -> Self {
-        Self::new(sid.id, sid.by.into_bare())
+/// Reason a parsed `xmpp_parsers::stanza_id::StanzaId` cannot be lifted into
+/// the typed `StanzaId` shape.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum StanzaIdConversionError {
+    /// XEP-0359 §4 requires `by` to identify a service (account, MUC, or
+    /// domain), never a connected resource. A `by` carrying a resource is
+    /// malformed wire data and is rejected rather than silently truncated.
+    #[error("XEP-0359 §4 violation: stanza-id `by` must be a bare JID")]
+    NonBareBy,
+}
+
+/// Reason a parsed `xmpp_parsers::stanza_id::OriginId` cannot be lifted into
+/// the typed `OriginId` shape.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum OriginIdConversionError {
+    /// XEP-0359 §3 requires the origin-id to be a unique, non-empty value.
+    #[error("XEP-0359 §3 violation: origin-id must be non-empty")]
+    Empty,
+}
+
+impl TryFrom<xmpp_parsers::stanza_id::StanzaId> for StanzaId {
+    type Error = StanzaIdConversionError;
+
+    fn try_from(sid: xmpp_parsers::stanza_id::StanzaId) -> Result<Self, Self::Error> {
+        if sid.by.is_full() {
+            return Err(StanzaIdConversionError::NonBareBy);
+        }
+        Ok(Self::new(sid.id, sid.by.into_bare()))
     }
 }
 
-impl From<xmpp_parsers::stanza_id::OriginId> for OriginId {
-    fn from(oid: xmpp_parsers::stanza_id::OriginId) -> Self {
-        Self { id: oid.id }
+impl TryFrom<xmpp_parsers::stanza_id::OriginId> for OriginId {
+    type Error = OriginIdConversionError;
+
+    fn try_from(oid: xmpp_parsers::stanza_id::OriginId) -> Result<Self, Self::Error> {
+        OriginId::new(oid.id).ok_or(OriginIdConversionError::Empty)
     }
 }
 
@@ -459,19 +487,44 @@ mod tests {
     }
 
     #[test]
-    fn test_conversion_from_xmpp_parsers() {
+    fn test_conversion_from_xmpp_parsers_accepts_bare_by() {
         let sid: StanzaId = xmpp_parsers::stanza_id::StanzaId {
             id: "abc".to_owned(),
             by: "room@muc.example.com".parse().expect("valid jid"),
         }
-        .into();
+        .try_into()
+        .expect("bare by accepted");
         assert_eq!(sid.id, "abc");
         assert_eq!(sid.by, bare("room@muc.example.com"));
 
         let oid: OriginId = xmpp_parsers::stanza_id::OriginId {
             id: "def".to_owned(),
         }
-        .into();
+        .try_into()
+        .expect("non-empty origin id accepted");
         assert_eq!(oid.as_str(), "def");
+    }
+
+    #[test]
+    fn test_conversion_from_xmpp_parsers_rejects_full_by() {
+        let result: Result<StanzaId, _> = xmpp_parsers::stanza_id::StanzaId {
+            id: "abc".to_owned(),
+            by: "room@muc.example.com/nick".parse().expect("valid jid"),
+        }
+        .try_into();
+        assert_eq!(result, Err(StanzaIdConversionError::NonBareBy));
+    }
+
+    #[test]
+    fn test_conversion_from_xmpp_parsers_rejects_empty_origin() {
+        let result: Result<OriginId, _> =
+            xmpp_parsers::stanza_id::OriginId { id: String::new() }.try_into();
+        assert_eq!(result, Err(OriginIdConversionError::Empty));
+
+        let result: Result<OriginId, _> = xmpp_parsers::stanza_id::OriginId {
+            id: "   ".to_owned(),
+        }
+        .try_into();
+        assert_eq!(result, Err(OriginIdConversionError::Empty));
     }
 }
