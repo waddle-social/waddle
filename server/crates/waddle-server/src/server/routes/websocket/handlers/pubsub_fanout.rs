@@ -16,7 +16,10 @@
 //! - Expands subscribers per §6.1.6 (bare JID → all live resources) and
 //!   §6.1.7 (full JID → that resource).
 //! - Falls back to the SM detached-resource stash (XEP-0198) when the
-//!   live channel is closed or full.
+//!   live channel is closed or the recipient is not currently
+//!   connected. Bare-JID subscribers with no live resources also have
+//!   their detached resources enumerated explicitly so resumable
+//!   sessions still receive the event on resume.
 //! - Best-effort: storage errors are logged and swallowed; subscribers
 //!   catch up via `<items/>` on reconnect (RFC 6121 §8.5.2.1.4 forbids
 //!   offline storage of headline messages, which is the type used by
@@ -112,17 +115,40 @@ pub async fn fan_out_publish(
     for sub in subscribers {
         let target_resources: Vec<FullJid> = match sub.subscriber.try_as_full() {
             Ok(full) => vec![full.clone()],
-            Err(bare) => state
-                .deps
-                .protocol
-                .connection_registry
-                .get_resources_for_user(bare),
+            Err(bare) => {
+                // §6.1.6: notify all resources of the bare JID. Live
+                // resources go through the connection registry; detached
+                // (XEP-0198 resumable) sessions are enumerated explicitly
+                // so events still reach them via the per-resource SM
+                // stash even when the user has no live socket at publish
+                // time.
+                let mut all = state
+                    .deps
+                    .protocol
+                    .connection_registry
+                    .get_resources_for_user(bare);
+                match state
+                    .deps
+                    .protocol
+                    .sm_session_registry
+                    .detached_resources_for_user(bare)
+                    .await
+                {
+                    Ok(detached) => all.extend(detached),
+                    Err(error) => warn!(
+                        bare = %bare,
+                        error = %error,
+                        "Failed to enumerate detached resources for bare-JID fan-out"
+                    ),
+                }
+                all
+            }
         };
 
         if target_resources.is_empty() {
-            // Bare-JID subscriber with no live resources, or a full-JID
-            // we never see live. Headline messages MUST NOT go to offline
-            // storage (RFC 6121 §8.5.2.1.4), so drop on the floor;
+            // Bare-JID subscriber fully offline (no live, no resumable),
+            // or a full-JID we never see live. Headline messages MUST
+            // NOT go to offline storage (RFC 6121 §8.5.2.1.4); the
             // subscriber catches up via `<items/>` on reconnect.
             intended += 1;
             not_connected += 1;
