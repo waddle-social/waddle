@@ -1310,6 +1310,16 @@ async fn archive_groupchat_message(
         return None;
     }
 
+    // Refuse to archive (and stamp a stanza-id on) a message that is missing
+    // its sender JID — the previous flat-fields path silently stored
+    // `from = ""`, but a typed `Jid` cannot be empty. Bailing out here also
+    // avoids leaving a dangling `<stanza-id by/>` on the broadcast prototype
+    // that would never resolve to a stored row.
+    let from_jid = match message.from.as_ref() {
+        Some(jid) => jid.clone(),
+        None => return None,
+    };
+
     let archive_id = ArchiveId::new(uuid::Uuid::now_v7().to_string()).expect("UUID is non-empty");
     add_mam_stanza_id(message, archive_id.as_str(), room_jid);
 
@@ -1321,11 +1331,6 @@ async fn archive_groupchat_message(
     let rich = rich_archive_payload(message);
 
     let stanza_xml = serialize_groupchat_stanza_xml(message);
-
-    let from_jid = match message.from.as_ref() {
-        Some(jid) => jid.clone(),
-        None => return None,
-    };
 
     let stanza_id = message
         .id
