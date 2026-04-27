@@ -22,6 +22,143 @@ use tracing::Level;
 use xmpp_parsers::iq::Iq;
 use xmpp_parsers::message::Message;
 
+/// XEP-0359 stamped stanza-id value.
+///
+/// Newtype around the opaque id value so a stanza-id cannot be silently
+/// swapped for an origin-id, message id, or any other XMPP identifier
+/// crossing event boundaries. Per XEP-0359 §6 the value itself is
+/// opaque (no internal structure), but the *kind* is type-significant
+/// — typed-payloads hard rule (CLAUDE.md).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct StanzaIdValue(String);
+
+impl StanzaIdValue {
+    /// Wrap an opaque id value coming from an [`super::id_gen::IdGenerator`]
+    /// or from a parsed XEP-0359 `<stanza-id/>` element.
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    /// Borrow the underlying value.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for StanzaIdValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// XEP-0359 client-supplied origin-id value.
+///
+/// Newtype companion to [`StanzaIdValue`] for the same reasons; an
+/// origin-id is owned by the originating client and is a different
+/// identity space from the server-stamped stanza-id, so it must not be
+/// confused at handler/storage boundaries.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct OriginIdValue(String);
+
+impl OriginIdValue {
+    /// Wrap an origin-id value parsed from a XEP-0359 `<origin-id/>`
+    /// element.
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    /// Borrow the underlying value.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for OriginIdValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Reference to a previously-archived message.
+///
+/// Used by [`OutboundEvent::LookupArchivedMessage`] (issue #229 PR3 — rich
+/// target validation for XEP-0308 / 0424 / 0425 / 0461). The variants are
+/// split rather than collapsed into a single struct because they index
+/// physically different storage paths:
+///
+/// - [`MessageRef::StanzaId`] is keyed on `(archive, id)` — what
+///   XEP-0359 §5 stamps and what XEP-0424 retractions / XEP-0461 replies
+///   reference.
+/// - [`MessageRef::OriginId`] is keyed on `(sender, origin_id)` — what
+///   XEP-0359 §3 origin-ids carry and what XEP-0308 corrections may use as
+///   a fallback when the original message hasn't yet been seen by stanza-id.
+#[derive(Debug, Clone)]
+pub enum MessageRef {
+    /// XEP-0359 stable stanza-id, scoped to its stamping archive.
+    StanzaId {
+        /// `by=` of the stamping archive (user bare JID for 1:1, room JID
+        /// for groupchat).
+        by: BareJid,
+        /// The stamped opaque id value (typed via [`StanzaIdValue`] so
+        /// it cannot be confused with an origin-id at call boundaries).
+        id: StanzaIdValue,
+    },
+    /// XEP-0359 origin-id, scoped to the original sender.
+    OriginId {
+        /// Bare JID of the original sender.
+        sender: BareJid,
+        /// The client-supplied opaque origin-id value (typed via
+        /// [`OriginIdValue`]).
+        origin_id: OriginIdValue,
+    },
+}
+
+/// XEP-0280 carbon copy variant — sent vs received.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CarbonKind {
+    /// Mirror of an outgoing message (`<sent xmlns='urn:xmpp:carbons:2'>`)
+    /// fanned out to the sender's other resources.
+    Sent,
+    /// Mirror of an incoming message (`<received xmlns='urn:xmpp:carbons:2'>`)
+    /// fanned out to the recipient's other resources.
+    Received,
+}
+
+/// Typed reference to a stanza-id stamped by a specific archive.
+///
+/// Identical shape to [`MessageRef::StanzaId`] but kept separate because
+/// `StanzaIdRef` is an output (e.g. an inbox row links to its archived
+/// counterpart) whereas `MessageRef` is an input (a handler asks the
+/// archive to look up something).
+#[derive(Debug, Clone)]
+pub struct StanzaIdRef {
+    /// `by=` of the stamping archive.
+    pub by: BareJid,
+    /// The stamped opaque id value, typed via [`StanzaIdValue`] so it
+    /// cannot be confused with an origin-id at handler / storage
+    /// boundaries.
+    pub id: StanzaIdValue,
+}
+
+/// Placeholder for the typed archived-message payload from issue #228.
+///
+/// PR1 of issue #229 reserves the variant slots for the
+/// [`InboundEvent::ArchivedMessageLoaded`] callback shape; the typed
+/// payload lands with #228. We model the placeholder as a newtype so
+/// future field additions don't reshape every callsite, and so the
+/// public surface stays grep-able.
+#[derive(Debug, Clone)]
+pub struct ArchivedMessage {
+    /// XEP-0359 stamped stanza-id.
+    pub stanza_id: StanzaIdRef,
+    /// The archived message stanza, typed.
+    pub message: Box<Message>,
+    /// XEP-0424 tombstone state — `true` when this archive entry has
+    /// already been retracted. Used by `RichTargetValidationHandler` (PR3)
+    /// to reject a redundant retraction with `<bad-request>`.
+    pub tombstoned: bool,
+}
+
 /// Opaque identifier tying an async request to its eventual response.
 ///
 /// Handlers emit outbound events containing a [`CallbackId`]; the interpreter
@@ -87,6 +224,15 @@ pub enum InboundEvent {
         id: CallbackId,
         result: CallbackResult,
     },
+    /// Result of an earlier [`OutboundEvent::LookupArchivedMessage`].
+    ///
+    /// `result` is `None` when the archive has no entry matching the
+    /// requested [`MessageRef`] — the handler treats that as
+    /// `<item-not-found>` per XEP-0308 / 0424 / 0425 / 0461.
+    ArchivedMessageLoaded {
+        id: CallbackId,
+        result: Option<Box<ArchivedMessage>>,
+    },
 }
 
 /// Uniform success-or-error shape for callback completions.
@@ -129,20 +275,48 @@ pub enum OutboundEvent {
     // -------------------------------------------------------------------
     // Routing (per-connection)
     // -------------------------------------------------------------------
-    /// Deliver a stanza to exactly one connection identified by its full
-    /// JID.
+    /// Route a stanza to another local connection's state machine.
     ///
-    /// The interpreter resolves `jid` against `ConnectionRegistry` and
-    /// writes the stanza to that connection's outbound channel. If the
-    /// target is offline the event is typically logged and dropped
-    /// (standard XMPP offline-delivery semantics are archive-based, not
-    /// routing-based).
-    SendDirect { jid: FullJid, stanza: Box<Stanza> },
+    /// **Migration status (issue #229 PR1)**: the variant is renamed from
+    /// `SendDirect` and the *protocol-level intent* is described below,
+    /// but the live `waddle-server` interpreter still implements the
+    /// legacy "write directly to the peer's outbound channel" behaviour
+    /// to keep the existing integration tests green during the staged
+    /// migration. The semantic change to "feed the destination's state
+    /// machine via [`InboundEvent::StanzaFromPeer`]" lands alongside the
+    /// recipient-pass handlers in PR4, when the recipient pipeline
+    /// (XEP-0191 incoming block, XEP-0359 recipient stamp, XEP-0313
+    /// archive, XEP-0280 received-carbons, inbox projection) is in place.
+    ///
+    /// **Intended semantic (PR4 onward)**: the interpreter resolves `jid`
+    /// against `ConnectionRegistry` and feeds the stanza into the
+    /// destination connection's machine as
+    /// [`InboundEvent::StanzaFromPeer`]. The destination's recipient-pass
+    /// pipeline runs and ultimately emits [`OutboundEvent::SendStanza`]
+    /// to the destination's wire.
+    ///
+    /// If the target is offline the event is logged and dropped (XMPP
+    /// offline-delivery semantics are archive-based, not routing-based).
+    RouteToConnection { jid: FullJid, stanza: Box<Stanza> },
+    /// Hand a `<message type='groupchat'>` to the room handler chain
+    /// (Option C — issue #229 Q7) for occupancy validation,
+    /// XEP-0359/XEP-0421 stamping, XEP-0313 §5.1.3 archiving, and
+    /// per-occupant fan-out.
+    ///
+    /// The room handler chain lands in #229 PR5; in PR1 the variant is
+    /// stubbed in the interpreter.
+    DispatchToRoom {
+        room: BareJid,
+        message: Box<Message>,
+    },
     /// Deliver a message to every occupant of a MUC room.
     ///
     /// The interpreter resolves occupancy via `MucRoomRegistry`. The
     /// `exclude` field suppresses delivery to a specific JID (typically
     /// the sender, to avoid duplicate echoes).
+    ///
+    /// Deprecated by `DispatchToRoom` once the PR5 room handler chain
+    /// lands; kept for legacy callers until then.
     BroadcastToRoom {
         room: BareJid,
         message: Box<Message>,
@@ -179,6 +353,34 @@ pub enum OutboundEvent {
         to: BareJid,
         message: Box<Message>,
     },
+    /// Project a message into the local user's inbox (Waddle conversation
+    /// summary). `archive_ref` links the inbox row to its MAM entry so
+    /// clients can pivot to the archived stanza using the same XEP-0359
+    /// stanza-id space.
+    ///
+    /// Inbox is not a finalized XEP — this is a Waddle product surface;
+    /// the field set is engineering, not protocol-mandated.
+    ProjectInbox {
+        owner: BareJid,
+        peer: BareJid,
+        message: Box<Message>,
+        archive_ref: StanzaIdRef,
+    },
+    /// XEP-0280 carbon-copy fan-out to the owner's other resources.
+    ///
+    /// Carbon-suppression rules (XEP-0280 §6.1 `<private/>`, §6.2
+    /// `type='groupchat'`, XEP-0334 `<no-copy/>`) are enforced by the
+    /// emitting handler so this event is only produced for messages that
+    /// genuinely should be carboned. The interpreter wraps the message in
+    /// `<sent>`/`<received>` → `<forwarded xmlns='urn:xmpp:forward:0'>`
+    /// (XEP-0297) and delivers a copy to every resource of `owner`
+    /// except `exclude`.
+    SendCarbons {
+        owner: BareJid,
+        message: Box<Message>,
+        kind: CarbonKind,
+        exclude: FullJid,
+    },
 
     // -------------------------------------------------------------------
     // Async delegations (two-phase callback pattern — see plan §Design
@@ -209,6 +411,18 @@ pub enum OutboundEvent {
     /// `token` is an opaque bearer credential (per RFC 6750 §2.1) and has
     /// no internal structure to model; it stays a `String` by design.
     ValidateOAuthBearer { id: CallbackId, token: String },
+    /// Look up an archived message by [`MessageRef`] for rich-target
+    /// validation (XEP-0308 correction, XEP-0424 retraction,
+    /// XEP-0425 moderation, XEP-0461 reply). Result arrives as
+    /// [`InboundEvent::ArchivedMessageLoaded`].
+    ///
+    /// `archive` is the bare JID whose MAM is queried (the user's bare
+    /// JID for 1:1 messages, the room JID for groupchat).
+    LookupArchivedMessage {
+        id: CallbackId,
+        archive: BareJid,
+        reference: MessageRef,
+    },
 
     // -------------------------------------------------------------------
     // Timers

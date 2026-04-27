@@ -18,10 +18,12 @@
 //!
 //! Only a subset of variants have their interpreter wiring in place — the
 //! ones needed by handlers that have been migrated so far (ping, session).
-//! The remaining variants (`SendDirect`, `BroadcastToRoom`, `QueryMam`,
-//! `AskSfu`, `RequestEnrichment`, etc.) are defined in the event enum so
-//! future handlers can emit them, but land in the interpreter as later
-//! migration steps pull their XEP into the sans-I/O world.
+//! The remaining variants (`RouteToConnection`, `BroadcastToRoom`,
+//! `DispatchToRoom`, `QueryMam`, `AskSfu`, `RequestEnrichment`,
+//! `ProjectInbox`, `SendCarbons`, `LookupArchivedMessage`, …) are defined
+//! in the event enum so future handlers can emit them, but land in the
+//! interpreter as later migration steps pull their XEP into the sans-I/O
+//! world.
 
 use tracing::{debug, error, info, warn};
 use waddle_xmpp::parser::stanza_to_string;
@@ -87,23 +89,67 @@ pub async fn interpret(
             // user content, and their `Debug` impls would leak that
             // content into logs.
             // -------------------------------------------------------
-            OutboundEvent::SendDirect { jid, stanza } => {
+            OutboundEvent::RouteToConnection { jid, stanza } => {
+                // Until the per-connection state-machine routing for
+                // `StanzaFromPeer` lands (issue #229 PR4), preserve the
+                // legacy "write to peer's outbound channel" behaviour so
+                // existing integration tests stay green. The semantic
+                // change to "feed StanzaFromPeer into the destination
+                // machine" is wired in alongside the first handler that
+                // emits this event in PR4.
                 match registry.send_to(&jid, *stanza).await {
                     waddle_xmpp::registry::SendResult::Sent => {
-                        debug!(jid = %jid, "SendDirect delivered");
+                        debug!(jid = %jid, "RouteToConnection delivered");
                     }
                     waddle_xmpp::registry::SendResult::NotConnected => {
-                        debug!(jid = %jid, "SendDirect: target offline, dropping");
+                        debug!(jid = %jid, "RouteToConnection: target offline, dropping");
                     }
                     waddle_xmpp::registry::SendResult::ChannelClosed => {
-                        warn!(jid = %jid, "SendDirect: target channel closed, dropping");
+                        warn!(jid = %jid, "RouteToConnection: target channel closed, dropping");
                     }
                 }
+            }
+            OutboundEvent::DispatchToRoom { room, .. } => {
+                warn!(
+                    variant = "DispatchToRoom",
+                    room = %room,
+                    "OutboundEvent variant not yet wired in interpreter"
+                );
             }
             OutboundEvent::BroadcastToRoom { room, .. } => {
                 warn!(
                     variant = "BroadcastToRoom",
                     room = %room,
+                    "OutboundEvent variant not yet wired in interpreter"
+                );
+            }
+            OutboundEvent::ProjectInbox { owner, peer, .. } => {
+                warn!(
+                    variant = "ProjectInbox",
+                    owner = %owner,
+                    peer = %peer,
+                    "OutboundEvent variant not yet wired in interpreter"
+                );
+            }
+            OutboundEvent::SendCarbons {
+                owner,
+                kind,
+                exclude,
+                ..
+            } => {
+                warn!(
+                    variant = "SendCarbons",
+                    owner = %owner,
+                    kind = ?kind,
+                    exclude = %exclude,
+                    "OutboundEvent variant not yet wired in interpreter"
+                );
+            }
+            OutboundEvent::LookupArchivedMessage { id, archive, .. } => {
+                warn!(
+                    variant = "LookupArchivedMessage",
+                    callback_id = id.0,
+                    archive = %archive,
                     "OutboundEvent variant not yet wired in interpreter"
                 );
             }

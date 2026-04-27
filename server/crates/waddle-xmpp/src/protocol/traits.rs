@@ -3,15 +3,69 @@
 //! Every handler method is *synchronous*. Handlers emit
 //! [`super::event::OutboundEvent`]s; they never perform I/O, make actor
 //! calls, or block on database queries. Work that requires async is modelled
-//! via the two-phase flow documented in the plan's *Design patterns*
-//! section: a handler emits an outbound event carrying a
+//! via the two-phase flow: a handler emits an outbound event carrying a
 //! [`super::event::CallbackId`], the interpreter performs the work, and a
 //! response arrives as a follow-up [`super::event::InboundEvent`].
 
 use super::event::{OutboundEvent, StanzaContext};
+use super::message_context::MessageContext;
 use xmpp_parsers::iq::Iq;
 use xmpp_parsers::message::Message;
 use xmpp_parsers::presence::Presence;
+
+/// Stable identifier for a registered handler within a
+/// [`super::dispatch::StanzaDispatcher`] pipeline.
+///
+/// Today this is the handler's index in the dispatcher's vec, assigned at
+/// registration time. It's stable across the lifetime of one dispatcher
+/// instance and is used by [`HandlerOutcome::AwaitCallback`]'s
+/// `resume_after` field so the state machine can resume the pipeline at
+/// the correct position when an async callback returns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct HandlerId(pub usize);
+
+/// Outcome of one handler invocation in a pipeline.
+///
+/// Per Q2(b) of the #229 design grilling, the message and room handler
+/// pipelines need three distinct termination shapes — the trait can't
+/// just return `Vec<OutboundEvent>` because handlers like
+/// `BlockingFilterHandler` (XEP-0191 silent drop) and
+/// `RichTargetValidationHandler` (`<item-not-found>` reply) MUST stop
+/// later handlers from seeing the stanza, and handlers like
+/// `EnrichmentDispatchHandler` MUST park the pipeline pending an
+/// async callback.
+#[derive(Debug)]
+pub enum HandlerOutcome {
+    /// The handler emits zero or more events and the pipeline continues
+    /// to the next registered handler.
+    Continue(Vec<OutboundEvent>),
+    /// The handler emits zero or more events and the pipeline terminates
+    /// — no later handler runs, and there is no resume.
+    ///
+    /// Used for XEP-0191 silent-drop on incoming-block, for the
+    /// `<not-acceptable>` reply on outgoing-block, and for
+    /// `<item-not-found>` on a missing rich-target reference.
+    Halt(Vec<OutboundEvent>),
+    /// The handler emits zero or more events (typically including a
+    /// [`super::event::CallbackId`]-carrying delegation) and the pipeline
+    /// pauses. When the matching [`super::event::InboundEvent`] callback
+    /// arrives, the state machine resumes dispatch with the (possibly
+    /// rewritten) message starting at the handler immediately after
+    /// `resume_after`. Handlers up to and including `resume_after` do
+    /// **not** re-run on resume.
+    AwaitCallback {
+        events: Vec<OutboundEvent>,
+        resume_after: HandlerId,
+    },
+}
+
+impl HandlerOutcome {
+    /// Convenience: a `Continue` with no events. Many handlers don't
+    /// react to most messages and return this.
+    pub fn noop() -> Self {
+        HandlerOutcome::Continue(Vec::new())
+    }
+}
 
 /// Handles a single IQ namespace (e.g. `urn:xmpp:ping`).
 ///
@@ -40,15 +94,19 @@ pub trait IqHandler: Send + Sync {
 ///
 /// Unlike [`IqHandler`], message handling is **pipelined**: every
 /// registered message handler sees every message in the order they were
-/// registered. Each handler decides independently whether to emit outbound
-/// events (e.g. one handler archives, another broadcasts, a third requests
-/// GitHub-link enrichment). This matches the shape of the existing
-/// message-processing pipeline in `websocket.rs`.
+/// registered, until one returns [`HandlerOutcome::Halt`] or
+/// [`HandlerOutcome::AwaitCallback`]. Each handler decides independently
+/// whether to emit outbound events.
+///
+/// Handlers receive a [`MessageContext`] (richer than the IQ/presence
+/// [`StanzaContext`]) so they can read session-bounded state — XEP-0191
+/// blocklist, XEP-0280 carbons flag, XEP-0045 occupancy — synchronously,
+/// and access the [`super::id_gen::IdGenerator`] for XEP-0359 stamping.
 ///
 /// Implementations must be pure — they never perform I/O directly. Work
-/// that requires async (e.g. enrichment, MAM storage) is expressed as
-/// [`super::event::OutboundEvent`] callback variants, with the eventual
-/// result arriving as an [`super::event::InboundEvent`].
+/// that requires async (e.g. enrichment, MAM lookup) is expressed via
+/// [`HandlerOutcome::AwaitCallback`] paired with a
+/// [`super::event::CallbackId`]-carrying outbound event.
 pub trait MessageHandler: Send + Sync {
     /// Human-readable identifier, used in logs and for debugging dispatch
     /// order. Not a routing key.
@@ -56,9 +114,9 @@ pub trait MessageHandler: Send + Sync {
 
     /// Process a message stanza.
     ///
-    /// Returning an empty `Vec` is valid and means "this handler had
-    /// nothing to add for this message".
-    fn handle(&self, message: &Message, ctx: &StanzaContext<'_>) -> Vec<OutboundEvent>;
+    /// Returning [`HandlerOutcome::noop`] is valid and means "this handler
+    /// had nothing to add for this message".
+    fn handle(&self, message: &Message, ctx: &MessageContext<'_>) -> HandlerOutcome;
 }
 
 /// Handles presence stanzas.

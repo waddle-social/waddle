@@ -11,9 +11,13 @@
 use super::dispatch::StanzaDispatcher;
 use super::event::{CallbackId, InboundEvent, OutboundEvent, StanzaContext};
 use super::frame::InboundFrame;
+use super::id_gen::{IdGenerator, UuidV4Generator};
+use super::message_context::{MessageContext, MessageContextEnv};
 use super::phase::ConnectionPhase;
+use super::session_state::{Blocklist, CarbonsState, MucOccupancy};
 use crate::Stanza;
 use std::collections::HashMap;
+use std::sync::Arc;
 use tracing::Level;
 
 /// An async delegation the state machine is waiting to hear back about.
@@ -61,17 +65,49 @@ pub struct XmppStateMachine {
     next_callback: u64,
     /// In-flight async delegations keyed by the id sent to the interpreter.
     pending_ops: HashMap<CallbackId, PendingOp>,
+    /// Session-bounded XEP-0191 blocklist. Mutated by the XEP-0191 IQ
+    /// handler; read by the message pipeline via [`MessageContext`].
+    /// Empty until the XEP-0191 handler lands.
+    blocklist: Blocklist,
+    /// Session-bounded XEP-0280 carbons-enabled flag. Mutated by the
+    /// carbons IQ handler; read by `CarbonsHandler` via
+    /// [`MessageContext`].
+    carbons: CarbonsState,
+    /// Session-bounded XEP-0045 occupancy. Mutated by the MUC presence
+    /// handler; read by `RouteHandler`'s groupchat branch via
+    /// [`MessageContext`].
+    muc_occupancy: MucOccupancy,
+    /// Source of fresh, opaque XEP-0359 stanza-ids stamped by message
+    /// handlers. Defaults to UUIDv4; tests can override.
+    id_gen: Arc<dyn IdGenerator>,
 }
 
 impl XmppStateMachine {
-    /// Construct a new machine in the `Unauthenticated` phase.
+    /// Construct a new machine in the `Unauthenticated` phase, with a
+    /// production [`UuidV4Generator`] for XEP-0359 stamping.
     pub fn new(domain: impl Into<String>, dispatcher: StanzaDispatcher) -> Self {
+        Self::with_id_gen(domain, dispatcher, Arc::new(UuidV4Generator))
+    }
+
+    /// Construct a machine with a caller-supplied [`IdGenerator`] —
+    /// typically a deterministic test impl from
+    /// [`super::id_gen::CounterIdGenerator`] or
+    /// [`super::id_gen::FixedIdGenerator`].
+    pub fn with_id_gen(
+        domain: impl Into<String>,
+        dispatcher: StanzaDispatcher,
+        id_gen: Arc<dyn IdGenerator>,
+    ) -> Self {
         Self {
             phase: ConnectionPhase::new(),
             domain: domain.into(),
             dispatcher,
             next_callback: 0,
             pending_ops: HashMap::new(),
+            blocklist: Blocklist::empty(),
+            carbons: CarbonsState::Disabled,
+            muc_occupancy: MucOccupancy::empty(),
+            id_gen,
         }
     }
 
@@ -131,6 +167,9 @@ impl XmppStateMachine {
             }
             InboundEvent::OAuthBearerValidated { id, result } => {
                 self.on_oauth_bearer_validated(id, result)
+            }
+            InboundEvent::ArchivedMessageLoaded { id, result: _ } => {
+                self.log_completion(id, "ArchivedMessageLoaded")
             }
         }
     }
@@ -249,7 +288,25 @@ impl XmppStateMachine {
 
         match stanza {
             Stanza::Iq(iq) => self.dispatcher.dispatch_iq(&iq, &ctx),
-            Stanza::Message(message) => self.dispatcher.dispatch_message(&message, &ctx),
+            Stanza::Message(message) => {
+                let env = MessageContextEnv {
+                    domain: &self.domain,
+                    full_jid,
+                    blocklist: &self.blocklist,
+                    carbons: self.carbons,
+                    muc_occupancy: &self.muc_occupancy,
+                    id_gen: self.id_gen.as_ref(),
+                };
+                let mctx = MessageContext::derive(env, &message);
+                // PR1 exposes the dispatcher's typed outcome
+                // (`MessageDispatchOutcome`), but the state machine
+                // currently consumes only emitted events. Pause/resume
+                // and any pending-op registration based on
+                // `outcome.termination` are wired alongside the first
+                // `AwaitCallback`-emitting handler in PR2.
+                let outcome = self.dispatcher.dispatch_message(&message, &mctx);
+                outcome.events
+            }
             Stanza::Presence(presence) => self.dispatcher.dispatch_presence(&presence, &ctx),
         }
     }
@@ -297,6 +354,10 @@ pub(crate) mod test_support {
             dispatcher,
             next_callback: 0,
             pending_ops: HashMap::new(),
+            blocklist: Blocklist::empty(),
+            carbons: CarbonsState::Disabled,
+            muc_occupancy: MucOccupancy::empty(),
+            id_gen: Arc::new(UuidV4Generator),
         }
     }
 }
