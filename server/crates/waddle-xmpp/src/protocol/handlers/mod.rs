@@ -28,10 +28,13 @@ pub mod archive;
 pub mod blocking_filter;
 pub mod canonicalize;
 pub mod carbons;
+pub mod carbons_message;
 pub mod enrichment_dispatch;
 pub mod errors;
+pub mod inbox;
 pub mod ping;
 pub mod rich_target_validation;
+pub mod route;
 pub mod session;
 pub mod time;
 pub mod version;
@@ -52,6 +55,45 @@ pub fn register_default_handlers(dispatcher: &mut StanzaDispatcher) {
     dispatcher.register_iq(Arc::new(carbons::CarbonsHandler));
     dispatcher.register_iq(Arc::new(version::VersionHandler));
     dispatcher.register_iq(Arc::new(time::TimeHandler));
+}
+
+/// Register the full message-pipeline handler chain in the order
+/// locked by issue #229 Q2(a):
+///
+/// 1. [`blocking_filter::BlockingFilterHandler`] (XEP-0191) — drop
+///    blocked stanzas before they reach later stages (privacy
+///    invariant).
+/// 2. [`rich_target_validation::RichTargetValidationHandler`]
+///    (XEP-0308 / 0424 / 0461) — validate rich-message targets
+///    against the archive before stamping or routing.
+/// 3. [`canonicalize::CanonicalizeHandler`] (XEP-0359) — strip
+///    foreign `<stanza-id>` siblings and stamp under the local
+///    archive.
+/// 4. [`enrichment_dispatch::EnrichmentDispatchHandler`] — request
+///    embed enrichment via two-phase callback so later stages see the
+///    rewritten message.
+/// 5. [`archive::ArchiveHandler`] (XEP-0313) — persist to MAM under
+///    the local user's archive (sender-side and recipient-side
+///    distinct entries).
+/// 6. [`carbons_message::CarbonsMessageHandler`] (XEP-0280) — fan
+///    out sent / received carbons to other resources of the local
+///    user.
+/// 7. [`inbox::InboxHandler`] — project the conversation into the
+///    Waddle inbox.
+/// 8. [`route::RouteHandler`] — final stage: route 1:1 to the
+///    destination connection, dispatch groupchat to the room chain,
+///    or write to the local wire on the recipient pass.
+pub fn register_default_message_handlers(dispatcher: &mut StanzaDispatcher) {
+    dispatcher.register_message(Arc::new(blocking_filter::BlockingFilterHandler));
+    dispatcher.register_message(Arc::new(
+        rich_target_validation::RichTargetValidationHandler,
+    ));
+    dispatcher.register_message(Arc::new(canonicalize::CanonicalizeHandler));
+    dispatcher.register_message(Arc::new(enrichment_dispatch::EnrichmentDispatchHandler));
+    dispatcher.register_message(Arc::new(archive::ArchiveHandler));
+    dispatcher.register_message(Arc::new(carbons_message::CarbonsMessageHandler));
+    dispatcher.register_message(Arc::new(inbox::InboxHandler));
+    dispatcher.register_message(Arc::new(route::RouteHandler));
 }
 
 /// Build an empty `type="result"` IQ with `from`/`to` swapped relative to
