@@ -24,12 +24,14 @@
 //! - XEP-0045 muc#owner (needs MUC registry)
 //! - XEP-0166 Jingle (needs SfuServiceActor)
 
+pub mod archive;
 pub mod blocking_filter;
 pub mod canonicalize;
 pub mod carbons;
 pub mod enrichment_dispatch;
 pub mod errors;
 pub mod ping;
+pub mod rich_target_validation;
 pub mod session;
 pub mod time;
 pub mod version;

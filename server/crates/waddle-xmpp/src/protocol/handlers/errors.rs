@@ -67,6 +67,40 @@ pub fn send_message_error(reply: Message) -> super::super::event::OutboundEvent 
     super::super::event::OutboundEvent::SendStanza(Box::new(Stanza::Message(reply)))
 }
 
+/// Build an `<item-not-found type='cancel'/>` reply for a rich-target
+/// reference (XEP-0308 / 0424 / 0461) whose target message is not in
+/// the archive.
+pub fn item_not_found_reply(incoming: &Message, text: &str) -> Message {
+    let error = StanzaError::new(
+        ErrorType::Cancel,
+        DefinedCondition::ItemNotFound,
+        "en",
+        text,
+    );
+    message_error_reply(incoming, error)
+}
+
+/// Build a `<not-acceptable type='cancel'/>` reply for a rich-target
+/// where the requesting user is not the original author (XEP-0308 §7.1
+/// correction; XEP-0424 §3.4 retraction).
+pub fn not_acceptable_reply(incoming: &Message, text: &str) -> Message {
+    let error = StanzaError::new(
+        ErrorType::Cancel,
+        DefinedCondition::NotAcceptable,
+        "en",
+        text,
+    );
+    message_error_reply(incoming, error)
+}
+
+/// Build a `<bad-request type='modify'/>` reply for a malformed or
+/// inapplicable rich-target request (e.g. retraction of an
+/// already-tombstoned message — XEP-0424 §3.5).
+pub fn bad_request_reply(incoming: &Message, text: &str) -> Message {
+    let error = StanzaError::new(ErrorType::Modify, DefinedCondition::BadRequest, "en", text);
+    message_error_reply(incoming, error)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
