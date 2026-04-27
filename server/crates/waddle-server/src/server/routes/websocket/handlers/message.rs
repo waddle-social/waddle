@@ -95,7 +95,7 @@ pub async fn handle_message(
             .clone()
             .or_else(|| Some(uuid::Uuid::new_v4().to_string()));
         prototype.type_ = XmppMessageType::Groupchat;
-        remove_stanza_ids_by(&mut prototype, &room_jid.to_string());
+        remove_stanza_ids_by(&mut prototype, &room_jid);
 
         // Enrich links with extension-provided XML elements (fail-open).
         let _embeds_added = state
@@ -278,7 +278,7 @@ pub async fn handle_message(
         let intended = local_messages.len();
         for mut outbound in local_messages.drain(..) {
             if let Some(ref archive_id) = archive_id {
-                add_mam_stanza_id(&mut outbound.message, archive_id, &room_jid.to_string());
+                add_mam_stanza_id(&mut outbound.message, archive_id, &room_jid);
             }
 
             if outbound.to == *sender_jid {
@@ -1300,7 +1300,7 @@ async fn archive_groupchat_message(
     }
 
     let archive_id = uuid::Uuid::now_v7().to_string();
-    add_mam_stanza_id(message, archive_id.as_str(), &room_jid.to_string());
+    add_mam_stanza_id(message, archive_id.as_str(), room_jid);
 
     let body = prototype_body(message)
         .map(|value| value.trim().to_string())

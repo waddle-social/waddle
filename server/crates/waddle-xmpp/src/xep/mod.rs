@@ -161,7 +161,6 @@ pub mod xep0333;
 pub mod xep0334;
 pub mod xep0352;
 pub mod xep0357;
-pub mod xep0359;
 pub mod xep0363;
 pub mod xep0372;
 pub mod xep0377;
@@ -388,7 +387,7 @@ pub use xep0393::{
     Block, Span, StyledBody,
 };
 
-pub use xep0359::{
+pub use waddle_xmpp_core::xep::xep0359::{
     add_origin_id, add_stanza_id as add_stanza_id_xep0359, build_origin_id_element,
     build_stanza_id_element, extract_origin_id as extract_origin_id_xep0359, extract_origin_id_str,
     extract_stanza_id_by, extract_stanza_ids, has_origin_id, has_stanza_id, is_origin_id_element,

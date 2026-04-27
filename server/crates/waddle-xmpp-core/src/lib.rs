@@ -12,6 +12,7 @@ pub mod pubsub;
 pub mod roster;
 pub mod stanza;
 pub mod types;
+pub mod xep;
 
 pub use carbons::{
     build_carbons_result, build_received_carbon, build_sent_carbon, is_carbons_disable,
@@ -32,8 +33,8 @@ pub use domain::{
 };
 pub use error::{CoreError, CoreResult};
 pub use mam::{
-    add_stanza_id, build_fin_iq, build_result_messages, is_mam_query, parse_mam_query,
-    ArchivedMessage, MamQuery, MamResult, DATA_FORMS_NS, FORWARD_NS, MAM_NS, RSM_NS, STANZA_ID_NS,
+    build_fin_iq, build_result_messages, is_mam_query, parse_mam_query, ArchivedMessage, MamQuery,
+    MamResult, DATA_FORMS_NS, FORWARD_NS, MAM_NS, RSM_NS, STANZA_ID_NS,
 };
 pub use parser_utils::{ensure_thread_element, extract_thread_parent, reattach_thread_parent};
 pub use presence::{
@@ -50,3 +51,9 @@ pub use pubsub::{
 };
 pub use stanza::Stanza;
 pub use types::{Affiliation, ConnectionState, Role, StanzaType, Transport};
+pub use xep::xep0359::{
+    add_origin_id, add_stanza_id, build_origin_id_element, build_stanza_id_element,
+    extract_origin_id, extract_origin_id_str, extract_stanza_id_by, extract_stanza_ids,
+    has_origin_id, has_stanza_id, is_origin_id_element, is_stanza_id_element, remove_stanza_ids_by,
+    strip_all_ids, OriginId, StanzaId, StanzaIdCarrier, NS_SID,
+};

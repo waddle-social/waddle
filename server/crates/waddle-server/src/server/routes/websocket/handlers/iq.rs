@@ -952,7 +952,7 @@ pub async fn handle_iq_with_conn_state(
             request.reason.as_deref(),
         );
         let archive_id = uuid::Uuid::now_v7().to_string();
-        add_mam_stanza_id(&mut moderation, archive_id.as_str(), &room_jid.to_string());
+        add_mam_stanza_id(&mut moderation, archive_id.as_str(), &room_jid);
 
         if let (Some(target_id), Ok(moderator_jid)) = (
             RichMessageId::new(request.target_id.clone()),

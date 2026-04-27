@@ -331,15 +331,6 @@ pub fn build_fin_iq(original_iq: &Iq, result: &MamResult) -> Iq {
     }
 }
 
-/// Add a stanza-id extension to a message for MAM compliance.
-pub fn add_stanza_id(message: &mut Message, archive_id: &str, by: &str) {
-    let stanza_id = Element::builder("stanza-id", STANZA_ID_NS)
-        .attr("id", archive_id)
-        .attr("by", by)
-        .build();
-    message.payloads.push(stanza_id);
-}
-
 fn parse_data_form(form: &Element, query: &mut MamQuery) -> CoreResult<()> {
     for field in form.children() {
         if field.name() != "field" {
@@ -961,9 +952,12 @@ mod tests {
 
     #[test]
     fn adds_stanza_id_payload() {
-        let mut message = Message::new(Some(parse_message_jid("juliet@example.com")));
+        use crate::xep::xep0359::add_stanza_id;
 
-        add_stanza_id(&mut message, "archive-1", "room@example.com");
+        let mut message = Message::new(Some(parse_message_jid("juliet@example.com")));
+        let by: BareJid = "room@example.com".parse().expect("valid bare jid");
+
+        add_stanza_id(&mut message, "archive-1", &by);
 
         let stanza_id = message
             .payloads
