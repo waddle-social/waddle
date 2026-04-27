@@ -132,19 +132,20 @@ impl StanzaDispatcher {
     /// order plus a discriminator for *why* the pipeline ended, so the
     /// state machine can wire pause-resume on awaiting outcomes.
     ///
-    /// `resume_after` from `AwaitCallback` is **bounds-checked** against
-    /// the index of the awaiting handler — a handler MUST NOT request
-    /// resume past its own position (that would skip handlers it never
-    /// ran). On violation the dispatcher returns a `Halted` outcome with
-    /// a `Log { level: ERROR }` event so the bug surfaces immediately
-    /// rather than silently dropping pipeline stages.
+    /// `message` is taken as `&mut` so XEP-0359-stamping and other
+    /// rewriting handlers can mutate it for downstream handlers in the
+    /// same pass. Read-only handlers simply don't write.
+    ///
+    /// `resume_after` is filled in by the dispatcher from the iteration
+    /// index — handlers do not supply it themselves, so it cannot be
+    /// out of range. The complementary bounds check on caller-supplied
+    /// `resume_after` lives in [`StanzaDispatcher::resume_message`].
     pub fn dispatch_message(
         &self,
-        message: &Message,
+        message: &mut Message,
         ctx: &MessageContext<'_>,
     ) -> MessageDispatchOutcome {
         let mut events = Vec::new();
-        let handler_count = self.message_handlers.len();
         for (idx, handler) in self.message_handlers.iter().enumerate() {
             let id = HandlerId(idx);
             match handler.handle(message, ctx) {
@@ -156,30 +157,11 @@ impl StanzaDispatcher {
                         termination: MessageDispatchTermination::Halted { halted_at: id },
                     };
                 }
-                HandlerOutcome::AwaitCallback {
-                    events: more,
-                    resume_after,
-                } => {
+                HandlerOutcome::AwaitCallback(more) => {
                     events.extend(more);
-                    if resume_after.0 > idx || resume_after.0 >= handler_count {
-                        events.push(OutboundEvent::Log {
-                            level: Level::ERROR,
-                            message: format!(
-                                "handler '{}' at idx {idx} requested resume_after={:?} \
-                                 which is out of range (handler_count={handler_count}); \
-                                 halting pipeline to avoid silently skipping later handlers",
-                                handler.name(),
-                                resume_after,
-                            ),
-                        });
-                        return MessageDispatchOutcome {
-                            events,
-                            termination: MessageDispatchTermination::Halted { halted_at: id },
-                        };
-                    }
                     return MessageDispatchOutcome {
                         events,
-                        termination: MessageDispatchTermination::Awaiting { resume_after },
+                        termination: MessageDispatchTermination::Awaiting { resume_after: id },
                     };
                 }
             }
@@ -200,18 +182,14 @@ impl StanzaDispatcher {
     ///
     /// `resume_after` is **bounds-checked**: an out-of-range id (e.g. a
     /// stale callback against a dispatcher whose handler set has changed,
-    /// or a handler-supplied bug) returns a `Halted` outcome with an
+    /// or a state-machine bug) returns a `Halted` outcome with an
     /// `ERROR`-level diagnostic event, never silently no-ops or skips
     /// handlers. This protects security-critical handlers (XEP-0191
     /// blocking, XEP-0359 stamping) from being bypassed by a malformed
     /// resume.
-    ///
-    /// PR1 ships the dispatcher entry point only; concrete callback
-    /// wiring on the state machine arrives with the first
-    /// `AwaitCallback`-emitting handler in PR2.
     pub fn resume_message(
         &self,
-        message: &Message,
+        message: &mut Message,
         ctx: &MessageContext<'_>,
         resume_after: HandlerId,
     ) -> MessageDispatchOutcome {
@@ -245,32 +223,11 @@ impl StanzaDispatcher {
                         termination: MessageDispatchTermination::Halted { halted_at: id },
                     };
                 }
-                HandlerOutcome::AwaitCallback {
-                    events: more,
-                    resume_after: next_resume,
-                } => {
+                HandlerOutcome::AwaitCallback(more) => {
                     events.extend(more);
-                    if next_resume.0 > idx || next_resume.0 >= handler_count {
-                        events.push(OutboundEvent::Log {
-                            level: Level::ERROR,
-                            message: format!(
-                                "handler '{}' at idx {idx} requested resume_after={:?} \
-                                 which is out of range (handler_count={handler_count}); \
-                                 halting pipeline to avoid silently skipping later handlers",
-                                handler.name(),
-                                next_resume,
-                            ),
-                        });
-                        return MessageDispatchOutcome {
-                            events,
-                            termination: MessageDispatchTermination::Halted { halted_at: id },
-                        };
-                    }
                     return MessageDispatchOutcome {
                         events,
-                        termination: MessageDispatchTermination::Awaiting {
-                            resume_after: next_resume,
-                        },
+                        termination: MessageDispatchTermination::Awaiting { resume_after: id },
                     };
                 }
             }

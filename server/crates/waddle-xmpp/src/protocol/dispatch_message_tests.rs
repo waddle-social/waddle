@@ -98,7 +98,7 @@ impl MessageHandler for ContinueProbe {
         self.name
     }
 
-    fn handle(&self, _message: &Message, _ctx: &MessageContext<'_>) -> HandlerOutcome {
+    fn handle(&self, _message: &mut Message, _ctx: &MessageContext<'_>) -> HandlerOutcome {
         self.call_order.fetch_add(1, Ordering::SeqCst);
         HandlerOutcome::Continue(vec![OutboundEvent::Log {
             level: Level::DEBUG,
@@ -123,7 +123,7 @@ impl MessageHandler for HaltProbe {
         self.name
     }
 
-    fn handle(&self, _message: &Message, _ctx: &MessageContext<'_>) -> HandlerOutcome {
+    fn handle(&self, _message: &mut Message, _ctx: &MessageContext<'_>) -> HandlerOutcome {
         HandlerOutcome::Halt(vec![OutboundEvent::Log {
             level: Level::DEBUG,
             message: format!("{}-halted", self.name),
@@ -131,15 +131,15 @@ impl MessageHandler for HaltProbe {
     }
 }
 
-/// Pauses the pipeline with a fixed `resume_after`.
+/// Pauses the pipeline at this handler's position; the dispatcher fills
+/// in `resume_after` from the iteration index.
 struct AwaitProbe {
     name: &'static str,
-    resume_after: HandlerId,
 }
 
 impl AwaitProbe {
-    fn new(name: &'static str, resume_after: HandlerId) -> Arc<Self> {
-        Arc::new(Self { name, resume_after })
+    fn new(name: &'static str) -> Arc<Self> {
+        Arc::new(Self { name })
     }
 }
 
@@ -148,14 +148,11 @@ impl MessageHandler for AwaitProbe {
         self.name
     }
 
-    fn handle(&self, _message: &Message, _ctx: &MessageContext<'_>) -> HandlerOutcome {
-        HandlerOutcome::AwaitCallback {
-            events: vec![OutboundEvent::Log {
-                level: Level::DEBUG,
-                message: format!("{}-paused", self.name),
-            }],
-            resume_after: self.resume_after,
-        }
+    fn handle(&self, _message: &mut Message, _ctx: &MessageContext<'_>) -> HandlerOutcome {
+        HandlerOutcome::AwaitCallback(vec![OutboundEvent::Log {
+            level: Level::DEBUG,
+            message: format!("{}-paused", self.name),
+        }])
     }
 }
 
@@ -172,8 +169,9 @@ fn dispatch_message_runs_handlers_in_registration_order_and_completes() {
     dispatcher.register_message(ContinueProbe::new("h2", order.clone()));
 
     let fx = Fixture::new();
-    let msg = chat_message();
-    let outcome = dispatcher.dispatch_message(&msg, &fx.ctx(&msg));
+    let mut msg = chat_message();
+    let ctx = fx.ctx(&msg);
+    let outcome = dispatcher.dispatch_message(&mut msg, &ctx);
 
     assert_eq!(outcome.events.len(), 3);
     assert!(matches!(
@@ -193,8 +191,9 @@ fn dispatch_message_halt_short_circuits_later_handlers() {
     dispatcher.register_message(ContinueProbe::new("h2", counter_after_halt.clone()));
 
     let fx = Fixture::new();
-    let msg = chat_message();
-    let outcome = dispatcher.dispatch_message(&msg, &fx.ctx(&msg));
+    let mut msg = chat_message();
+    let ctx = fx.ctx(&msg);
+    let outcome = dispatcher.dispatch_message(&mut msg, &ctx);
 
     // h0 (continue) + h1 (halt) emitted events; h2 did not run.
     assert_eq!(outcome.events.len(), 2);
@@ -212,13 +211,14 @@ fn dispatch_message_await_short_circuits_and_carries_resume_after() {
     let mut dispatcher = StanzaDispatcher::new();
     let order = Arc::new(AtomicUsize::new(0));
     dispatcher.register_message(ContinueProbe::new("h0", order.clone()));
-    let id_h1 = dispatcher.register_message(AwaitProbe::new("h1-await", HandlerId(1)));
+    let id_h1 = dispatcher.register_message(AwaitProbe::new("h1-await"));
     let counter_after_await = Arc::new(AtomicUsize::new(0));
     dispatcher.register_message(ContinueProbe::new("h2", counter_after_await.clone()));
 
     let fx = Fixture::new();
-    let msg = chat_message();
-    let outcome = dispatcher.dispatch_message(&msg, &fx.ctx(&msg));
+    let mut msg = chat_message();
+    let ctx = fx.ctx(&msg);
+    let outcome = dispatcher.dispatch_message(&mut msg, &ctx);
 
     assert_eq!(outcome.events.len(), 2);
     assert_eq!(counter_after_await.load(Ordering::SeqCst), 0);
@@ -241,8 +241,9 @@ fn resume_message_skips_handlers_up_to_and_including_resume_after() {
     dispatcher.register_message(ContinueProbe::new("h2", h2_count.clone()));
 
     let fx = Fixture::new();
-    let msg = chat_message();
-    let outcome = dispatcher.resume_message(&msg, &fx.ctx(&msg), HandlerId(1));
+    let mut msg = chat_message();
+    let ctx = fx.ctx(&msg);
+    let outcome = dispatcher.resume_message(&mut msg, &ctx, HandlerId(1));
 
     // h0 and h1 must NOT run on resume; only h2.
     assert_eq!(h0_count.load(Ordering::SeqCst), 0);
@@ -260,14 +261,15 @@ fn resume_message_can_halt_or_await_again() {
     let mut dispatcher = StanzaDispatcher::new();
     let h0_count = Arc::new(AtomicUsize::new(0));
     dispatcher.register_message(ContinueProbe::new("h0", h0_count));
-    dispatcher.register_message(AwaitProbe::new("h1-await", HandlerId(1)));
+    dispatcher.register_message(AwaitProbe::new("h1-await"));
     dispatcher.register_message(HaltProbe::new("h2-halt"));
 
     let fx = Fixture::new();
-    let msg = chat_message();
+    let mut msg = chat_message();
+    let ctx = fx.ctx(&msg);
     // Resume after h0; the next handler (h1) parks again. Then resume
     // after h1; the next handler (h2) halts.
-    let resumed = dispatcher.resume_message(&msg, &fx.ctx(&msg), HandlerId(0));
+    let resumed = dispatcher.resume_message(&mut msg, &ctx, HandlerId(0));
     assert!(matches!(
         resumed.termination,
         MessageDispatchTermination::Awaiting {
@@ -275,7 +277,7 @@ fn resume_message_can_halt_or_await_again() {
         }
     ));
 
-    let resumed_again = dispatcher.resume_message(&msg, &fx.ctx(&msg), HandlerId(1));
+    let resumed_again = dispatcher.resume_message(&mut msg, &ctx, HandlerId(1));
     assert!(matches!(
         resumed_again.termination,
         MessageDispatchTermination::Halted {
@@ -295,8 +297,9 @@ fn resume_message_with_resume_after_at_last_handler_completes_immediately() {
     dispatcher.register_message(ContinueProbe::new("h1", h1_count.clone()));
 
     let fx = Fixture::new();
-    let msg = chat_message();
-    let outcome = dispatcher.resume_message(&msg, &fx.ctx(&msg), HandlerId(1));
+    let mut msg = chat_message();
+    let ctx = fx.ctx(&msg);
+    let outcome = dispatcher.resume_message(&mut msg, &ctx, HandlerId(1));
 
     assert_eq!(h0_count.load(Ordering::SeqCst), 0);
     assert_eq!(h1_count.load(Ordering::SeqCst), 0);
@@ -311,8 +314,9 @@ fn resume_message_with_resume_after_at_last_handler_completes_immediately() {
 fn empty_pipeline_completes_with_no_events() {
     let dispatcher = StanzaDispatcher::new();
     let fx = Fixture::new();
-    let msg = chat_message();
-    let outcome = dispatcher.dispatch_message(&msg, &fx.ctx(&msg));
+    let mut msg = chat_message();
+    let ctx = fx.ctx(&msg);
+    let outcome = dispatcher.dispatch_message(&mut msg, &ctx);
     assert!(outcome.events.is_empty());
     assert!(matches!(
         outcome.termination,
@@ -328,55 +332,12 @@ fn handler_outcome_noop_helper_is_an_empty_continue() {
     }
 }
 
-/// Probe that returns an `AwaitCallback` with a caller-supplied
-/// `resume_after` — used to drive bounds-check tests.
-struct OutOfRangeAwaitProbe {
-    resume_after: HandlerId,
-}
-
-impl MessageHandler for OutOfRangeAwaitProbe {
-    fn name(&self) -> &'static str {
-        "out-of-range-await"
-    }
-
-    fn handle(&self, _message: &Message, _ctx: &MessageContext<'_>) -> HandlerOutcome {
-        HandlerOutcome::AwaitCallback {
-            events: Vec::new(),
-            resume_after: self.resume_after,
-        }
-    }
-}
-
-#[test]
-fn dispatch_message_rejects_handler_supplied_resume_after_past_own_position() {
-    // A buggy handler at idx 0 asks to resume_after a future handler.
-    // Without a bounds check this would silently skip the bounds-checking
-    // pipeline stages in resume_message and bypass any later handlers
-    // (e.g. blocking, archive). The dispatcher must halt with an ERROR
-    // log instead.
-    let mut dispatcher = StanzaDispatcher::new();
-    dispatcher.register_message(Arc::new(OutOfRangeAwaitProbe {
-        resume_after: HandlerId(99),
-    }));
-    let counter = Arc::new(AtomicUsize::new(0));
-    dispatcher.register_message(ContinueProbe::new("never-runs", counter.clone()));
-
-    let fx = Fixture::new();
-    let msg = chat_message();
-    let outcome = dispatcher.dispatch_message(&msg, &fx.ctx(&msg));
-
-    assert!(matches!(
-        outcome.termination,
-        MessageDispatchTermination::Halted { .. }
-    ));
-    // Counter must not have ticked — second handler did not run.
-    assert_eq!(counter.load(Ordering::SeqCst), 0);
-    // ERROR log present in events.
-    assert!(outcome.events.iter().any(|e| matches!(
-        e,
-        OutboundEvent::Log { level, .. } if *level == Level::ERROR
-    )));
-}
+// `dispatch_message_rejects_handler_supplied_resume_after_past_own_position`
+// from an earlier draft is obsolete: `HandlerOutcome::AwaitCallback` is a
+// tuple variant whose `resume_after` is filled in by the dispatcher from
+// the iteration index, so handlers cannot supply an out-of-range value.
+// The complementary bounds-check on caller-supplied `resume_after` lives
+// in `resume_message` and is exercised below.
 
 #[test]
 fn resume_message_rejects_out_of_range_resume_after() {
@@ -385,9 +346,10 @@ fn resume_message_rejects_out_of_range_resume_after() {
     dispatcher.register_message(ContinueProbe::new("h0", counter.clone()));
 
     let fx = Fixture::new();
-    let msg = chat_message();
+    let mut msg = chat_message();
+    let ctx = fx.ctx(&msg);
     // resume_after points past the only registered handler.
-    let outcome = dispatcher.resume_message(&msg, &fx.ctx(&msg), HandlerId(99));
+    let outcome = dispatcher.resume_message(&mut msg, &ctx, HandlerId(99));
 
     assert!(matches!(
         outcome.termination,

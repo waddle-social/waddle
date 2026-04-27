@@ -48,15 +48,14 @@ pub enum HandlerOutcome {
     Halt(Vec<OutboundEvent>),
     /// The handler emits zero or more events (typically including a
     /// [`super::event::CallbackId`]-carrying delegation) and the pipeline
-    /// pauses. When the matching [`super::event::InboundEvent`] callback
-    /// arrives, the state machine resumes dispatch with the (possibly
-    /// rewritten) message starting at the handler immediately after
-    /// `resume_after`. Handlers up to and including `resume_after` do
-    /// **not** re-run on resume.
-    AwaitCallback {
-        events: Vec<OutboundEvent>,
-        resume_after: HandlerId,
-    },
+    /// pauses immediately after THIS handler. When the matching
+    /// [`super::event::InboundEvent`] callback arrives, the state machine
+    /// resumes dispatch with the (possibly rewritten) message starting at
+    /// the handler immediately after this one. The handler does not need
+    /// to know its own [`HandlerId`]; the dispatcher fills in the
+    /// `resume_after` value in the resulting
+    /// [`super::dispatch::MessageDispatchTermination::Awaiting`].
+    AwaitCallback(Vec<OutboundEvent>),
 }
 
 impl HandlerOutcome {
@@ -114,9 +113,20 @@ pub trait MessageHandler: Send + Sync {
 
     /// Process a message stanza.
     ///
+    /// Handlers receive `message` as `&mut Message` because canonical
+    /// XEP-0359 stanza-id stamping (and a handful of other rewrites such
+    /// as XEP-0421 occupant-id stamping) mutate the in-flight message so
+    /// that **subsequent** handlers in the same pipeline pass see the
+    /// rewritten form. The mutation is per-dispatch only — the state
+    /// machine owns the message for the duration of one
+    /// `dispatch_message` call and discards it afterward.
+    ///
+    /// Read-only handlers (e.g. `BlockingFilterHandler`,
+    /// `EnrichmentDispatchHandler`) simply don't write to `message`.
+    ///
     /// Returning [`HandlerOutcome::noop`] is valid and means "this handler
     /// had nothing to add for this message".
-    fn handle(&self, message: &Message, ctx: &MessageContext<'_>) -> HandlerOutcome;
+    fn handle(&self, message: &mut Message, ctx: &MessageContext<'_>) -> HandlerOutcome;
 }
 
 /// Handles presence stanzas.

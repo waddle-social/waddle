@@ -288,7 +288,7 @@ impl XmppStateMachine {
 
         match stanza {
             Stanza::Iq(iq) => self.dispatcher.dispatch_iq(&iq, &ctx),
-            Stanza::Message(message) => {
+            Stanza::Message(mut message) => {
                 let env = MessageContextEnv {
                     domain: &self.domain,
                     full_jid,
@@ -298,13 +298,12 @@ impl XmppStateMachine {
                     id_gen: self.id_gen.as_ref(),
                 };
                 let mctx = MessageContext::derive(env, &message);
-                // PR1 exposes the dispatcher's typed outcome
-                // (`MessageDispatchOutcome`), but the state machine
-                // currently consumes only emitted events. Pause/resume
-                // and any pending-op registration based on
-                // `outcome.termination` are wired alongside the first
-                // `AwaitCallback`-emitting handler in PR2.
-                let outcome = self.dispatcher.dispatch_message(&message, &mctx);
+                // The dispatcher exposes a typed `MessageDispatchOutcome`,
+                // but the state machine currently consumes only emitted
+                // events. Pause/resume and any pending-op registration
+                // based on `outcome.termination` are wired alongside the
+                // first `AwaitCallback`-emitting handler (PR2 in #229).
+                let outcome = self.dispatcher.dispatch_message(&mut message, &mctx);
                 outcome.events
             }
             Stanza::Presence(presence) => self.dispatcher.dispatch_presence(&presence, &ctx),
