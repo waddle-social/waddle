@@ -667,13 +667,59 @@ impl XmppStateMachine {
     }
 
     fn on_peer_stanza(&mut self, stanza: Stanza) -> Vec<OutboundEvent> {
-        // Stanzas delivered from other connections via the registry are
-        // forwarded unchanged to the client. Serialization of the stanza
-        // into an XML frame is wired in step 2 of the migration.
-        vec![OutboundEvent::Log {
-            level: Level::DEBUG,
-            message: format!("Peer-routed {} stanza (forwarding TBD)", stanza.name()),
-        }]
+        // Stanzas delivered from other connections via the registry
+        // run the **recipient-pass** of the message pipeline. The
+        // [`MessageContext::derive`] locality computation handles the
+        // sender/recipient asymmetry — for a peer stanza arriving on
+        // bob's machine, `(full_jid=bob, from=alice, to=bob)` derives
+        // `Locality::Recipient` and the chain emits the recipient-side
+        // archive write, recipient-side `<stanza-id by=bob/>` stamp,
+        // received-carbon fan-out, recipient-side inbox row, and a
+        // final wire write.
+        //
+        // IQ and presence peer routing arrive in later migration steps
+        // (issue #229 PR10 for groupchat, follow-ups for IQ).
+        let full_jid = match &self.phase {
+            ConnectionPhase::Ready { full_jid, .. } => full_jid.clone(),
+            ConnectionPhase::Unauthenticated
+            | ConnectionPhase::ScramPending { .. }
+            | ConnectionPhase::Authenticated { .. }
+            | ConnectionPhase::Closing { .. } => {
+                return vec![OutboundEvent::Log {
+                    level: Level::WARN,
+                    message: format!(
+                        "Peer-routed {} stanza arrived before this connection \
+                         reached Ready; dropping",
+                        stanza.name()
+                    ),
+                }];
+            }
+        };
+
+        match stanza {
+            Stanza::Message(mut message) => {
+                let outcome = {
+                    let env = MessageContextEnv {
+                        domain: &self.domain,
+                        full_jid: &full_jid,
+                        blocklist: &self.blocklist,
+                        carbons: self.carbons,
+                        muc_occupancy: &self.muc_occupancy,
+                        id_gen: self.id_gen.as_ref(),
+                    };
+                    let mctx = MessageContext::derive(env, &message);
+                    self.dispatcher.dispatch_message(&mut message, &mctx)
+                };
+                self.handle_message_outcome(outcome, message, &full_jid, None)
+            }
+            other => vec![OutboundEvent::Log {
+                level: Level::DEBUG,
+                message: format!(
+                    "Peer-routed {} stanza (only message-pipeline forwarding wired so far)",
+                    other.name()
+                ),
+            }],
+        }
     }
 
     fn on_closed(&mut self) -> Vec<OutboundEvent> {
@@ -796,6 +842,19 @@ pub(crate) mod test_support {
         full_jid: FullJid,
         dispatcher: StanzaDispatcher,
     ) -> XmppStateMachine {
+        ready_machine_with_id_gen(domain, full_jid, dispatcher, Arc::new(UuidV4Generator))
+    }
+
+    /// Variant of [`ready_machine`] that takes an explicit
+    /// [`IdGenerator`] — for tests that need deterministic XEP-0359
+    /// stanza-id stamping (e.g. the L4 wire-trace tests in
+    /// [`super::super::wire_trace_l4_tests`]).
+    pub fn ready_machine_with_id_gen(
+        domain: impl Into<String>,
+        full_jid: FullJid,
+        dispatcher: StanzaDispatcher,
+        id_gen: Arc<dyn IdGenerator>,
+    ) -> XmppStateMachine {
         XmppStateMachine {
             phase: ConnectionPhase::ready(full_jid, false),
             domain: domain.into(),
@@ -805,7 +864,7 @@ pub(crate) mod test_support {
             blocklist: Blocklist::empty(),
             carbons: CarbonsState::Disabled,
             muc_occupancy: MucOccupancy::empty(),
-            id_gen: Arc::new(UuidV4Generator),
+            id_gen,
         }
     }
 }

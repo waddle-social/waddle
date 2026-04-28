@@ -950,6 +950,7 @@ async fn create_router(
     // path in `routes::websocket::handle_iq`.
     let mut stanza_dispatcher = waddle_xmpp::protocol::StanzaDispatcher::new();
     waddle_xmpp::protocol::handlers::register_default_handlers(&mut stanza_dispatcher);
+    waddle_xmpp::protocol::handlers::register_default_message_handlers(&mut stanza_dispatcher);
     let stanza_dispatcher = Arc::new(stanza_dispatcher);
 
     // Shared durable PubSub/PEP storage for the WebSocket transport (XEP-0060/0163).

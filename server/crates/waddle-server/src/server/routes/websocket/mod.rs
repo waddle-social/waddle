@@ -2192,6 +2192,7 @@ mod tests {
 
         let mut dispatcher = StanzaDispatcher::new();
         waddle_xmpp::protocol::handlers::register_default_handlers(&mut dispatcher);
+        waddle_xmpp::protocol::handlers::register_default_message_handlers(&mut dispatcher);
 
         Arc::new(WebSocketState {
             deps: WebSocketDeps {
