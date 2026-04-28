@@ -32,39 +32,61 @@
 //! - [`OutboundEvent::ProjectInbox`] — Waddle inbox upsert keyed by
 //!   `(owner, peer)` with `archive_ref` linking back to the MAM entry.
 //! - [`OutboundEvent::UnregisterConnection`] — drop from the registry.
+//! - [`OutboundEvent::LookupArchivedMessage`] — XEP-0359 stanza-id /
+//!   origin-id lookup against personal MAM; result feeds back as
+//!   [`InboundEvent::ArchivedMessageLoaded`] in
+//!   [`InterpretOutcome::feedback`].
+//! - [`OutboundEvent::RequestEnrichment`] — XEP-0372 link enrichment
+//!   via `ExtensionManager`; result feeds back as
+//!   [`InboundEvent::EnrichmentComplete`] in
+//!   [`InterpretOutcome::feedback`]. Fail-open semantics match legacy.
 //!
 //! Stubbed (warn-logged until migration steps land them):
 //! - `BroadcastToRoom`, `DispatchToRoom`, `ArchiveGroupchat` — MUC
 //!   handler chain (PR10).
-//! - `LookupArchivedMessage`, `RequestEnrichment` — need callback
-//!   plumbing back into the state machine (PR8).
 //! - `AskSfu`, `QueryMam`, `LoadScramCredentials`,
 //!   `ValidateOAuthBearer`, `SetTimer`, `CancelTimer`,
 //!   `RegisterConnection` — wired in later migration steps.
 
+use std::str::FromStr;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
+use waddle_extensions::ExtensionManager;
 use waddle_xmpp::carbons::{build_received_carbon, build_sent_carbon};
 use waddle_xmpp::inbox::runtime::direct_message_entry;
 use waddle_xmpp::inbox::storage::InboxStorage;
 use waddle_xmpp::mam::projection::build_direct_archived_message;
 use waddle_xmpp::mam::storage::MamStorage;
+use waddle_xmpp::mam::ArchivedMessage as MamArchivedMessage;
 use waddle_xmpp::parser::stanza_to_string;
+use waddle_xmpp::protocol::event::{
+    ArchivedMessage as ProtocolArchivedMessage, InboundEvent, MessageRef, StanzaIdRef,
+    StanzaIdValue,
+};
 use waddle_xmpp::protocol::{CarbonKind, OutboundEvent};
 use waddle_xmpp::registry::ConnectionRegistry;
 use waddle_xmpp::stream_management::InMemorySmSessionRegistry;
 use waddle_xmpp::Stanza;
+use xmpp_parsers::message::Message;
+use xmpp_parsers::minidom::Element;
 
 /// Outcome of interpreting a batch of [`OutboundEvent`]s.
 ///
 /// The WebSocket transport uses `frames` to decide what to write back to
 /// the client. `close` signals the main loop should drop the connection.
+/// `feedback` carries [`InboundEvent`] callback completions the state
+/// machine must consume to resume parked dispatches (XEP-0359
+/// rich-target lookup, link enrichment). The caller is responsible for
+/// pumping `feedback` back through `state_machine.handle(...)` until
+/// the resulting outcome's `feedback` drains — see #229 PR9 cutover.
 #[derive(Debug, Default)]
 pub struct InterpretOutcome {
     /// Serialized XML frames to write to the transport, in order.
     pub frames: Vec<String>,
     /// Set to true when the state machine asked us to close the transport.
     pub close: bool,
+    /// Async-callback completions to feed back to the state machine.
+    pub feedback: Vec<InboundEvent>,
 }
 
 /// Typed dependency context for the interpreter.
@@ -89,6 +111,10 @@ pub struct Deps<'a> {
     /// Waddle inbox-projection backend. `None` in unit tests; always
     /// supplied in production.
     pub inbox_storage: Option<&'a Arc<dyn InboxStorage>>,
+    /// Wasm-extension manager for XEP-0372/etc. link enrichment.
+    /// `None` in unit tests that don't exercise the
+    /// [`OutboundEvent::RequestEnrichment`] arm.
+    pub extension_manager: Option<&'a Arc<ExtensionManager>>,
 }
 
 impl<'a> Deps<'a> {
@@ -102,6 +128,7 @@ impl<'a> Deps<'a> {
             sm_session_registry: None,
             mam_storage: None,
             inbox_storage: None,
+            extension_manager: None,
         }
     }
 
@@ -119,6 +146,23 @@ impl<'a> Deps<'a> {
             sm_session_registry: None,
             mam_storage: Some(mam_storage),
             inbox_storage: Some(inbox_storage),
+            extension_manager: None,
+        }
+    }
+
+    /// Build a `Deps` for unit tests that exercise the
+    /// [`OutboundEvent::RequestEnrichment`] arm.
+    #[cfg(test)]
+    pub fn test_with_extension_manager(
+        connection_registry: &'a ConnectionRegistry,
+        extension_manager: &'a Arc<ExtensionManager>,
+    ) -> Self {
+        Self {
+            connection_registry,
+            sm_session_registry: None,
+            mam_storage: None,
+            inbox_storage: None,
+            extension_manager: Some(extension_manager),
         }
     }
 }
@@ -403,13 +447,15 @@ pub async fn interpret(events: Vec<OutboundEvent>, deps: &Deps<'_>) -> Interpret
                     }
                 }
             }
-            OutboundEvent::LookupArchivedMessage { id, archive, .. } => {
-                warn!(
-                    variant = "LookupArchivedMessage",
-                    callback_id = id.0,
-                    archive = %archive,
-                    "OutboundEvent variant not yet wired in interpreter"
-                );
+            OutboundEvent::LookupArchivedMessage {
+                id,
+                archive,
+                reference,
+            } => {
+                let result = lookup_archived_message(deps, &archive, &reference).await;
+                outcome
+                    .feedback
+                    .push(InboundEvent::ArchivedMessageLoaded { id, result });
             }
             OutboundEvent::RegisterConnection(jid) => {
                 warn!(
@@ -483,12 +529,12 @@ pub async fn interpret(events: Vec<OutboundEvent>, deps: &Deps<'_>) -> Interpret
                     }
                 }
             }
-            OutboundEvent::RequestEnrichment { id, .. } => {
-                warn!(
-                    variant = "RequestEnrichment",
-                    callback_id = id.0,
-                    "OutboundEvent variant not yet wired in interpreter"
-                );
+            OutboundEvent::RequestEnrichment { id, message } => {
+                let enriched = enrich_message_event(deps, *message).await;
+                outcome.feedback.push(InboundEvent::EnrichmentComplete {
+                    id,
+                    message: Box::new(enriched),
+                });
             }
             OutboundEvent::AskSfu { id, .. } => {
                 warn!(
@@ -537,6 +583,153 @@ pub async fn interpret(events: Vec<OutboundEvent>, deps: &Deps<'_>) -> Interpret
     }
 
     outcome
+}
+
+/// Run XEP-0372 link enrichment against a typed message and return
+/// the rewritten value. Fails open: when no extension manager is
+/// supplied (test fixture, or a connection that opted out) or any
+/// extension actor returns an error, the original message is
+/// returned unchanged. This matches legacy `message.rs` behavior so
+/// the dispatcher cutover (#229 PR9) does not regress UX when a wasm
+/// extension is misbehaving.
+async fn enrich_message_event(deps: &Deps<'_>, mut message: Message) -> Message {
+    let Some(extension_manager) = deps.extension_manager else {
+        debug!(
+            "RequestEnrichment: no extension_manager in Deps; \
+             feeding original message back unchanged"
+        );
+        return message;
+    };
+    // `enrich_message` mutates in place and is itself fail-open
+    // (returns 0 when no body / no links / no extension actors). Any
+    // per-actor RPC failure inside is logged by the extension layer.
+    let _added = extension_manager.enrich_message(&mut message).await;
+    message
+}
+
+/// Resolve a typed [`MessageRef`] against `archive`'s personal MAM
+/// archive and project the storage row into the typed protocol
+/// [`ProtocolArchivedMessage`] shape the
+/// [`waddle_xmpp::protocol::handlers::rich_target_validation::RichTargetValidationHandler`]
+/// expects on the [`InboundEvent::ArchivedMessageLoaded`] callback.
+///
+/// Storage failures are demoted to `Ok(None)` with a WARN log so the
+/// handler treats them as `<item-not-found>` per XEP-0308 / 0424 /
+/// 0425 / 0461 — the same surface clients see when the target
+/// genuinely doesn't exist. We do not propagate the storage error
+/// shape into the callback because the protocol-side type does not
+/// model it and the resulting reply would be the same.
+async fn lookup_archived_message(
+    deps: &Deps<'_>,
+    archive: &jid::BareJid,
+    reference: &MessageRef,
+) -> Option<Box<ProtocolArchivedMessage>> {
+    let Some(mam_storage) = deps.mam_storage else {
+        debug!(
+            archive = %archive,
+            "LookupArchivedMessage: no mam_storage in Deps; treating as not-found"
+        );
+        return None;
+    };
+    let archive_str = archive.to_string();
+    let lookup = match reference {
+        MessageRef::StanzaId { id, .. } => {
+            mam_storage
+                .get_message_by_stanza_id(&archive_str, id.as_str())
+                .await
+        }
+        MessageRef::OriginId { origin_id, .. } => {
+            // The MAM trait stores client origin-ids in the
+            // `origin_id` column, but the only accessor that resolves
+            // them today goes through `get_message_by_stanza_id`,
+            // which matches both `stanza_id` and `origin_id`. Use it.
+            mam_storage
+                .get_message_by_stanza_id(&archive_str, origin_id.as_str())
+                .await
+        }
+    };
+    match lookup {
+        Ok(Some(row)) => project_archived_row(archive, reference, row),
+        Ok(None) => None,
+        Err(error) => {
+            warn!(
+                archive = %archive,
+                %error,
+                "LookupArchivedMessage: storage error; treating as not-found"
+            );
+            None
+        }
+    }
+}
+
+/// Project a storage [`MamArchivedMessage`] row into the protocol-side
+/// [`ProtocolArchivedMessage`] consumed by handler completions.
+///
+/// Falls back to an empty body-only stanza if `stanza_xml` is missing
+/// or unparseable — the rich-target handler primarily inspects the
+/// tombstone state and the sender's bare JID, both of which we can
+/// reconstruct without the original wire form. Logs a WARN so a
+/// regression in the projection is observable.
+fn project_archived_row(
+    archive: &jid::BareJid,
+    reference: &MessageRef,
+    row: MamArchivedMessage,
+) -> Option<Box<ProtocolArchivedMessage>> {
+    let tombstoned = matches!(
+        row.rich.as_ref().and_then(|r| r.payload.as_ref()),
+        Some(waddle_xmpp::mam::ArchivedRichPayload::Tombstone(_))
+    );
+
+    let message = match parse_archived_message_xml(row.stanza_xml.as_deref()) {
+        Some(m) => m,
+        None => fallback_archived_message(&row),
+    };
+
+    let stamp_id = row
+        .stanza_id
+        .clone()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| row.id.clone());
+    let stanza_id = StanzaIdRef {
+        by: archive.clone(),
+        id: StanzaIdValue::new(&stamp_id),
+    };
+
+    let _ = reference;
+    Some(Box::new(ProtocolArchivedMessage {
+        stanza_id,
+        message: Box::new(message),
+        tombstoned,
+    }))
+}
+
+fn parse_archived_message_xml(xml: Option<&str>) -> Option<Message> {
+    let xml = xml?;
+    let element = match Element::from_str(xml) {
+        Ok(e) => e,
+        Err(error) => {
+            warn!(
+                %error,
+                "LookupArchivedMessage: failed to parse stored stanza_xml; \
+                 falling back to body-only reconstruction"
+            );
+            return None;
+        }
+    };
+    Message::try_from(element).ok()
+}
+
+fn fallback_archived_message(row: &MamArchivedMessage) -> Message {
+    let to: Option<jid::Jid> = row.to.parse().ok();
+    let from: Option<jid::Jid> = row.from.parse().ok();
+    let mut msg = Message::new(to);
+    msg.from = from;
+    msg.id = row.stanza_id.clone();
+    if !row.body.is_empty() {
+        msg.bodies
+            .insert(String::new(), xmpp_parsers::message::Body(row.body.clone()));
+    }
+    msg
 }
 
 /// Build the XEP-0297-wrapped carbon envelope for `kind`. Pulled out
@@ -818,6 +1011,7 @@ mod tests {
             sm_session_registry: Some(&sm),
             mam_storage: None,
             inbox_storage: None,
+            extension_manager: None,
         };
         let _outcome = interpret(
             vec![OutboundEvent::SendCarbons {
@@ -1181,6 +1375,256 @@ mod tests {
             total, 1,
             "increment_unread=true bumps the owner's unread count"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // XEP-0308/0424/0461 — LookupArchivedMessage callback round-trip
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn xep_0424_lookup_archived_message_by_stanza_id_feeds_archived_loaded_back() {
+        use waddle_xmpp::mam::{ArchivedMessage, InMemoryMamStorage};
+        use waddle_xmpp::protocol::event::CallbackId;
+        use waddle_xmpp::protocol::event::StanzaIdValue;
+
+        let registry = ConnectionRegistry::new();
+        let mam: Arc<dyn MamStorage> = Arc::new(InMemoryMamStorage::new());
+        let inbox: Arc<dyn InboxStorage> =
+            Arc::new(waddle_xmpp::inbox::storage::InMemoryInboxStorage::new());
+        let deps = Deps::test_with_storage(&registry, &mam, &inbox);
+
+        // Seed the archive with a row keyed under alice's bare,
+        // canonical stamp = "canon-A1".
+        let archive_jid: jid::BareJid = "alice@example.com".parse().expect("bare");
+        let row = ArchivedMessage {
+            id: "canon-A1".to_string(),
+            timestamp: chrono::Utc::now(),
+            from: "alice@example.com".to_string(),
+            to: "bob@example.com".to_string(),
+            body: "hello".to_string(),
+            stanza_id: Some("canon-A1".to_string()),
+            thread_id: None,
+            reply_to_id: None,
+            reply_to_jid: None,
+            origin_id: None,
+            message_type: "chat".to_string(),
+            stanza_xml: Some(
+                r#"<message xmlns='jabber:client' type='chat' from='alice@example.com/web' to='bob@example.com'><body>hello</body></message>"#.to_string(),
+            ),
+            rich: None,
+            nickname_generation: None,
+        };
+        mam.store_message(&archive_jid.to_string(), &row)
+            .await
+            .expect("seed");
+
+        let events = vec![OutboundEvent::LookupArchivedMessage {
+            id: CallbackId(7),
+            archive: archive_jid.clone(),
+            reference: MessageRef::StanzaId {
+                by: archive_jid.clone(),
+                id: StanzaIdValue::new("canon-A1"),
+            },
+        }];
+        let outcome = interpret(events, &deps).await;
+
+        assert_eq!(outcome.feedback.len(), 1);
+        match outcome.feedback.into_iter().next().expect("feedback") {
+            InboundEvent::ArchivedMessageLoaded { id, result } => {
+                assert_eq!(id, CallbackId(7));
+                let archived = result.expect("row resolved");
+                assert_eq!(archived.stanza_id.id.as_str(), "canon-A1");
+                assert_eq!(archived.stanza_id.by, archive_jid);
+                assert!(!archived.tombstoned);
+                assert_eq!(
+                    archived.message.bodies.get("").map(|b| b.0.clone()),
+                    Some("hello".to_string()),
+                    "stanza_xml is parsed back into a typed Message"
+                );
+            }
+            other => panic!("expected ArchivedMessageLoaded, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn xep_0424_lookup_archived_message_not_found_feeds_none_back() {
+        use waddle_xmpp::mam::InMemoryMamStorage;
+        use waddle_xmpp::protocol::event::CallbackId;
+        use waddle_xmpp::protocol::event::StanzaIdValue;
+
+        let registry = ConnectionRegistry::new();
+        let mam: Arc<dyn MamStorage> = Arc::new(InMemoryMamStorage::new());
+        let inbox: Arc<dyn InboxStorage> =
+            Arc::new(waddle_xmpp::inbox::storage::InMemoryInboxStorage::new());
+        let deps = Deps::test_with_storage(&registry, &mam, &inbox);
+
+        let archive_jid: jid::BareJid = "alice@example.com".parse().expect("bare");
+        let events = vec![OutboundEvent::LookupArchivedMessage {
+            id: CallbackId(11),
+            archive: archive_jid.clone(),
+            reference: MessageRef::StanzaId {
+                by: archive_jid,
+                id: StanzaIdValue::new("never-stamped"),
+            },
+        }];
+        let outcome = interpret(events, &deps).await;
+
+        match outcome.feedback.into_iter().next().expect("feedback") {
+            InboundEvent::ArchivedMessageLoaded {
+                id: CallbackId(11),
+                result: None,
+            } => {}
+            other => panic!("expected ArchivedMessageLoaded(None), got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn xep_0424_lookup_archived_message_propagates_tombstone_state() {
+        use waddle_xmpp::mam::{
+            ArchivedMessage, ArchivedRichMessage, ArchivedRichPayload, ArchivedTombstone,
+            InMemoryMamStorage, RichMessageId,
+        };
+        use waddle_xmpp::protocol::event::CallbackId;
+        use waddle_xmpp::protocol::event::StanzaIdValue;
+
+        let registry = ConnectionRegistry::new();
+        let mam: Arc<dyn MamStorage> = Arc::new(InMemoryMamStorage::new());
+        let inbox: Arc<dyn InboxStorage> =
+            Arc::new(waddle_xmpp::inbox::storage::InMemoryInboxStorage::new());
+        let deps = Deps::test_with_storage(&registry, &mam, &inbox);
+
+        let archive_jid: jid::BareJid = "alice@example.com".parse().expect("bare");
+        let row = ArchivedMessage {
+            id: "tomb-1".to_string(),
+            timestamp: chrono::Utc::now(),
+            from: "alice@example.com".to_string(),
+            to: "bob@example.com".to_string(),
+            body: String::new(),
+            stanza_id: Some("tomb-1".to_string()),
+            thread_id: None,
+            reply_to_id: None,
+            reply_to_jid: None,
+            origin_id: None,
+            message_type: "chat".to_string(),
+            stanza_xml: None,
+            rich: Some(ArchivedRichMessage {
+                payload: Some(ArchivedRichPayload::Tombstone(ArchivedTombstone {
+                    retraction_id: Some(RichMessageId::new("retract-1").expect("rich id")),
+                    stamp: chrono::Utc::now(),
+                    moderation: None,
+                })),
+                reply: None,
+                references: Vec::new(),
+                mentions: Vec::new(),
+            }),
+            nickname_generation: None,
+        };
+        mam.store_message(&archive_jid.to_string(), &row)
+            .await
+            .expect("seed");
+
+        let events = vec![OutboundEvent::LookupArchivedMessage {
+            id: CallbackId(13),
+            archive: archive_jid.clone(),
+            reference: MessageRef::StanzaId {
+                by: archive_jid,
+                id: StanzaIdValue::new("tomb-1"),
+            },
+        }];
+        let outcome = interpret(events, &deps).await;
+
+        match outcome.feedback.into_iter().next().expect("feedback") {
+            InboundEvent::ArchivedMessageLoaded {
+                result: Some(archived),
+                ..
+            } => {
+                assert!(
+                    archived.tombstoned,
+                    "ArchivedRichPayload::Tombstone surfaces as `tombstoned: true`"
+                );
+            }
+            other => panic!("expected Some archived row, got {other:?}"),
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // XEP-0372 — RequestEnrichment callback round-trip
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn enrichment_request_without_extension_manager_fails_open_with_original_message() {
+        // No extension manager in Deps -> the original typed message
+        // is returned unchanged via EnrichmentComplete. This is the
+        // legacy fail-open contract (see `enrich_message` in the
+        // legacy `message.rs` path).
+        use waddle_xmpp::protocol::event::CallbackId;
+        let registry = ConnectionRegistry::new();
+        let deps = Deps::registry_only(&registry);
+
+        let mut original = chat_msg("alice@example.com/web", "bob@example.com", "look https://x");
+        original.id = Some("orig-id".to_string());
+
+        let events = vec![OutboundEvent::RequestEnrichment {
+            id: CallbackId(42),
+            message: Box::new(original.clone()),
+        }];
+        let outcome = interpret(events, &deps).await;
+
+        match outcome.feedback.into_iter().next().expect("feedback") {
+            InboundEvent::EnrichmentComplete {
+                id: CallbackId(42),
+                message,
+            } => {
+                assert_eq!(message.id, original.id);
+                assert_eq!(
+                    message.bodies.get("").map(|b| b.0.clone()),
+                    Some("look https://x".to_string()),
+                );
+            }
+            other => panic!("expected EnrichmentComplete, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn enrichment_request_calls_extension_manager_and_feeds_complete_back() {
+        // Wire a real (empty) ExtensionManager — no extension actors
+        // configured, so `enrich_message` returns 0 enrichments and
+        // we still feed back the original message via
+        // EnrichmentComplete with the original CallbackId. This proves
+        // the callback round-trip without depending on a live wasm
+        // runtime.
+        use waddle_extensions::{ExtensionConfig, ExtensionManager};
+        use waddle_xmpp::protocol::event::CallbackId;
+
+        let registry = ConnectionRegistry::new();
+        let em = Arc::new(
+            ExtensionManager::from_config(ExtensionConfig {
+                enabled: false,
+                ..Default::default()
+            })
+            .await
+            .expect("disabled extension manager"),
+        );
+        let deps = Deps::test_with_extension_manager(&registry, &em);
+
+        let mut original = chat_msg("alice@example.com/web", "bob@example.com", "ping");
+        original.id = Some("e-id".to_string());
+
+        let events = vec![OutboundEvent::RequestEnrichment {
+            id: CallbackId(99),
+            message: Box::new(original),
+        }];
+        let outcome = interpret(events, &deps).await;
+
+        match outcome.feedback.into_iter().next().expect("feedback") {
+            InboundEvent::EnrichmentComplete {
+                id: CallbackId(99),
+                message,
+            } => {
+                assert_eq!(message.id.as_deref(), Some("e-id"));
+            }
+            other => panic!("expected EnrichmentComplete, got {other:?}"),
+        }
     }
 
     #[tokio::test]
