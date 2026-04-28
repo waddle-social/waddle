@@ -80,9 +80,10 @@ pub fn build_direct_archived_message(
     // `stanza_id` column via `get_message_by_message_id`, and
     // (per `get_message_by_stanza_id`) the XEP-0359 stamp is
     // already keyed by `id`, so both retract-by-wire-id and
-    // retract-by-canonical-stamp resolve correctly. Falling back to
-    // the wire id when the canonical stamp is missing matches the
-    // legacy primary-key shape.
+    // retract-by-canonical-stamp resolve correctly. If the canonical
+    // stamp is missing, `id` is left empty here and the storage
+    // backend assigns the archive primary key at write time; the
+    // wire id still lives in `stanza_id`.
     let canonical_stamp = extract_stanza_id_by(message, archive_jid);
     let id = canonical_stamp.unwrap_or_default();
 

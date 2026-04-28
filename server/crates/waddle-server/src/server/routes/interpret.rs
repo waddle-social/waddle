@@ -384,7 +384,7 @@ async fn interpret_with_depth(
                 } else {
                     match jid.clone().try_into_full() {
                         Ok(full) => {
-                            deliver_peer_to_full(registry, deps.sm_session_registry, &full, *stanza)
+                            deliver_peer_to_full(registry, deps.sm_session_registry, &full, &stanza)
                                 .await
                         }
                         Err(bare) => {
@@ -461,7 +461,7 @@ async fn interpret_with_depth(
                                         registry,
                                         deps.sm_session_registry,
                                         &full,
-                                        (*stanza).clone(),
+                                        &stanza,
                                     )
                                     .await;
                                 }
@@ -1142,8 +1142,13 @@ async fn deliver_peer_to_full(
     registry: &waddle_xmpp::registry::ConnectionRegistry,
     sm_session_registry: Option<&Arc<InMemorySmSessionRegistry>>,
     target: &jid::FullJid,
-    stanza: Stanza,
+    stanza: &Stanza,
 ) {
+    // The live-send path needs ownership for `send_peer_to`; the
+    // detached fallback only borrows. Clone once here on the live
+    // branch so the caller hands us an `&Stanza` and avoids a
+    // redundant clone per live target on the bare-JID fan-out hot
+    // path (Copilot review on PR #276).
     match registry.send_peer_to(target, stanza.clone()).await {
         waddle_xmpp::registry::SendResult::Sent => {
             debug!(jid = %target, "RouteToConnection: peer-stanza queued for recipient pass");
@@ -1164,7 +1169,7 @@ async fn deliver_peer_to_full(
             // output — tracked as a follow-up to #229.
             if let Some(sm) = sm_session_registry {
                 match sm
-                    .record_stanza_for_detached_bound_resource(target, &stanza)
+                    .record_stanza_for_detached_bound_resource(target, stanza)
                     .await
                 {
                     Ok(true) => {
