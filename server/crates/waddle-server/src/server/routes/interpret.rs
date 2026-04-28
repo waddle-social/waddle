@@ -818,6 +818,30 @@ async fn interpret_with_depth(
                         );
                     }
                 }
+
+                // XEP-0424 §"prevent further distribution": when the
+                // archived message is itself a retraction *request*,
+                // replace the target message in this archive with a
+                // tombstone. The dispatcher's
+                // `RichTargetValidationHandler` already authorized
+                // the request (same-author check via
+                // `LookupArchivedMessage`), so the only remaining
+                // step is the in-place tombstone replace. Mirrors
+                // the legacy `apply_retraction_tombstones` helper
+                // (which `handle_message` invoked inline) — once per
+                // archive write so both sender's and recipient's
+                // archives observe the tombstone independently.
+                if let Some(waddle_xmpp::xep::xep0424::RetractionKind::Request(retraction)) =
+                    waddle_xmpp::xep::xep0424::extract_retraction_from_message(&message)
+                {
+                    apply_retraction_tombstone(
+                        mam_storage,
+                        &archive_jid,
+                        &retraction.retracts_id,
+                        &message,
+                    )
+                    .await;
+                }
             }
             OutboundEvent::RequestEnrichment { id, message } => {
                 let enriched = enrich_message_event(deps, *message).await;
@@ -1035,6 +1059,85 @@ async fn run_headless_recipient_pass(
 /// truly-offline recipients still drop here; the bare-JID arm above
 /// runs the headless recipient pass for offline persistence
 /// (archive/inbox/incoming-block) on local domains.
+/// Apply a XEP-0424 §"prevent further distribution" tombstone to the
+/// retraction target inside `archive`. Looks up the target via the
+/// retraction's wire id (matches legacy
+/// `lookup_retraction_target_message`), then replaces the row with a
+/// tombstone using `mam_storage.replace_with_tombstone`.
+///
+/// Called from the [`OutboundEvent::ArchiveDirect`] arm once per
+/// archive write, so sender's and recipient's archives both
+/// independently observe the tombstone. Failures are logged at WARN
+/// and ignored — the retraction message itself was already archived
+/// and the original is the SHOULD-be-tombstoned target, never the
+/// authoritative payload after this point.
+async fn apply_retraction_tombstone(
+    mam_storage: &Arc<dyn MamStorage>,
+    archive: &jid::BareJid,
+    target_wire_id: &str,
+    retraction_message: &Message,
+) {
+    let archive_str = archive.to_string();
+    let original = match mam_storage
+        .get_message_by_message_id(&archive_str, target_wire_id)
+        .await
+    {
+        Ok(Some(row)) => row,
+        Ok(None) => {
+            debug!(
+                archive = %archive,
+                target = target_wire_id,
+                "ApplyRetractionTombstone: target not found in archive; skipping"
+            );
+            return;
+        }
+        Err(error) => {
+            warn!(
+                archive = %archive,
+                target = target_wire_id,
+                %error,
+                "ApplyRetractionTombstone: archive lookup failed; skipping"
+            );
+            return;
+        }
+    };
+    let tombstone = waddle_xmpp::mam::ArchivedTombstone {
+        retraction_id: retraction_message
+            .id
+            .clone()
+            .and_then(waddle_xmpp::mam::RichMessageId::new),
+        stamp: chrono::Utc::now(),
+        moderation: None,
+    };
+    match mam_storage
+        .replace_with_tombstone(&original.id, tombstone)
+        .await
+    {
+        Ok(true) => {
+            debug!(
+                archive = %archive,
+                original_id = %original.id,
+                "ApplyRetractionTombstone: replaced row with tombstone"
+            );
+        }
+        Ok(false) => {
+            warn!(
+                archive = %archive,
+                original_id = %original.id,
+                "ApplyRetractionTombstone: target row not found at replace time"
+            );
+        }
+        Err(error) => {
+            warn!(
+                archive = %archive,
+                original_id = %original.id,
+                %error,
+                "ApplyRetractionTombstone: replace_with_tombstone failed"
+            );
+        }
+    }
+}
+
 async fn deliver_peer_to_full(
     registry: &waddle_xmpp::registry::ConnectionRegistry,
     sm_session_registry: Option<&Arc<InMemorySmSessionRegistry>>,
@@ -1310,21 +1413,25 @@ async fn lookup_archived_message(
         MessageRef::OriginId { sender, origin_id } => {
             // No origin-id-only accessor on `MamStorage` today, so we
             // narrow with `MamQuery.with = sender` (storage-level
-            // sender filter) and pick the first row whose
-            // `origin_id` matches the requested value. This enforces
-            // the typed `MessageRef::OriginId` contract — scoped to
-            // the *original sender*, not just any row sharing that
-            // opaque value — without leaking through the
-            // OR-collision in `get_message_by_stanza_id`.
+            // sender filter) and pick the first row whose `origin_id`
+            // *or wire `id` attribute* (`stanza_id` column) matches
+            // the requested value. The fall-through to the wire id
+            // mirrors the legacy `lookup_correction_target_message`
+            // behaviour — many clients (and the CUE e2e scenarios)
+            // omit the explicit `<origin-id/>` payload and rely on
+            // the message's `id` attribute as the correction
+            // target. Sender-bound matching keeps the
+            // OR-collision protection from #229 PR8: only rows sent
+            // by the original author can satisfy the correction.
             let query = waddle_xmpp::mam::MamQuery {
                 with: Some(sender.to_string()),
                 ..Default::default()
             };
             match mam_storage.query_messages(&archive_str, &query).await {
-                Ok(result) => Ok(result
-                    .messages
-                    .into_iter()
-                    .find(|row| row_matches_origin_id(row, sender, origin_id.as_str()))),
+                Ok(result) => Ok(result.messages.into_iter().find(|row| {
+                    row_matches_origin_id(row, sender, origin_id.as_str())
+                        || row_matches_wire_id(row, sender, origin_id.as_str())
+                })),
                 Err(e) => Err(e),
             }
         }
@@ -1354,6 +1461,25 @@ fn row_matches_origin_id(
     expected_origin_id: &str,
 ) -> bool {
     if row.origin_id.as_deref() != Some(expected_origin_id) {
+        return false;
+    }
+    match row.from.parse::<jid::BareJid>() {
+        Ok(bare) => bare == *expected_sender,
+        Err(_) => false,
+    }
+}
+
+/// Fallback match for the legacy XEP-0308 correction-target shape
+/// where the message carries no explicit `<origin-id/>` payload —
+/// matches the row's wire `id` attribute (the `stanza_id` storage
+/// column) to the correction's `replaces_id`. Same sender-bound
+/// scoping as [`row_matches_origin_id`].
+fn row_matches_wire_id(
+    row: &MamArchivedMessage,
+    expected_sender: &jid::BareJid,
+    expected_wire_id: &str,
+) -> bool {
+    if row.stanza_id.as_deref() != Some(expected_wire_id) {
         return false;
     }
     match row.from.parse::<jid::BareJid>() {
@@ -1856,9 +1982,12 @@ mod tests {
         assert_eq!(entries[0].last_stanza_id, canonical_id);
 
         // The same id resolves a MAM row in alice's archive — pivot
-        // works.
+        // works. The XEP-0359 canonical stamp is stored as the row's
+        // `id` (primary key) per the legacy projection shape, so the
+        // pivot uses `get_message_by_archive_or_stanza_id` (queries
+        // both `id` and `stanza_id`).
         let row = mam
-            .get_message_by_stanza_id(&alice.to_string(), canonical_id)
+            .get_message_by_archive_or_stanza_id(&alice.to_string(), canonical_id)
             .await
             .expect("mam lookup")
             .expect("MAM row keyed by canonical stanza-id");
