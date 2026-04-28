@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Waddle</string>
+    <string name="connection_service_channel_name">Waddle connection</string>
+    <string name="connection_service_channel_description">Keeps Waddle connected to your server while the app is in the background.</string>
+    <string name="connection_service_notification_connected">Connected</string>
+    <string name="connection_service_notification_connecting">Connecting…</string>
+    <string name="connection_service_notification_disconnected">Disconnected</string>
+</resources>
