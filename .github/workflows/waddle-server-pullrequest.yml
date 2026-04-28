@@ -23,6 +23,7 @@ permissions:
   contents: read
   checks: write
   pull-requests: write
+  id-token: write
 jobs:
   waddle-server-pullRequest:
     name: waddle-server-pullRequest

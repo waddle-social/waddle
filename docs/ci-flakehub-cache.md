@@ -14,7 +14,7 @@ permissions:
 
 The generated workflows may include additional permissions for checks, packages, or deployments. Do not remove those when editing the Cuenv source.
 
-Pull request workflows must not grant `id-token: write` when they run PR-controlled code. Those workflows still install the FlakeHub Cache action with its GitHub Actions cache fallback preference, but FlakeHub Cache authentication itself is only available on trusted workflows.
+Pull request workflows grant `id-token: write` so same-repository pull requests can authenticate to FlakeHub Cache. Pull requests from forks still run the cache setup step, but FlakeHub Cache is unavailable for those fork workflows because GitHub's JSON Web Token claims cannot authenticate them to FlakeHub Cache.
 
 Generated GitHub-owned actions are pinned by `server/scripts/pin-generated-github-actions.sh` after `cuenv sync ci -A`. Use `server/scripts/check-ci-drift.sh` for drift checks so regenerated workflows and pinned action SHAs are validated together.
 

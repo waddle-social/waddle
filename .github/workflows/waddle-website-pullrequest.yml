@@ -25,6 +25,7 @@ permissions:
   contents: read
   checks: write
   pull-requests: write
+  id-token: write
 jobs:
   waddle-website-pullRequest:
     name: waddle-website-pullRequest
