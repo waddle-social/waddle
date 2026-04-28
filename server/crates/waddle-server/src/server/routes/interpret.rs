@@ -48,6 +48,7 @@
 //!   `ValidateOAuthBearer`, `SetTimer`, `CancelTimer`,
 //!   `RegisterConnection` — wired in later migration steps.
 
+use crate::auth::Session;
 use kameo::actor::ActorRef;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -140,6 +141,19 @@ pub struct Deps<'a> {
     /// bridge in favour of a dedicated room handler chain (Q7
     /// option C).
     pub web_socket_state: Option<&'a WebSocketState>,
+    /// The authenticated `Session` of the connection that emitted the
+    /// outbound events being interpreted, when one is available.
+    ///
+    /// Threaded through so the
+    /// [`OutboundEvent::DispatchToRoom`] bridge arm can preserve the
+    /// legacy managed-room owner check (e.g. the announcements room
+    /// permits server owners to post; everyone else is forbidden).
+    /// Without this, every dispatcher-driven groupchat send would
+    /// fail the owner override and the announcements room would
+    /// reject server owners — a regression vs the legacy
+    /// `handle_message` path. `None` for unauthenticated dispatch
+    /// flows (early connection lifecycle, unit tests).
+    pub authenticated_session: Option<&'a Session>,
 }
 
 impl<'a> Deps<'a> {
@@ -156,6 +170,7 @@ impl<'a> Deps<'a> {
             extension_manager: None,
             room_registry: None,
             web_socket_state: None,
+            authenticated_session: None,
         }
     }
 
@@ -176,6 +191,7 @@ impl<'a> Deps<'a> {
             extension_manager: None,
             room_registry: None,
             web_socket_state: None,
+            authenticated_session: None,
         }
     }
 
@@ -194,6 +210,7 @@ impl<'a> Deps<'a> {
             extension_manager: Some(extension_manager),
             room_registry: None,
             web_socket_state: None,
+            authenticated_session: None,
         }
     }
 
@@ -215,6 +232,7 @@ impl<'a> Deps<'a> {
             extension_manager: None,
             room_registry: Some(room_registry),
             web_socket_state: None,
+            authenticated_session: None,
         }
     }
 }
@@ -313,7 +331,15 @@ pub async fn interpret(events: Vec<OutboundEvent>, deps: &Deps<'_>) -> Interpret
                 }
             }
             OutboundEvent::DispatchToRoom { room, message } => {
-                dispatch_to_room(deps, room, *message).await;
+                // The legacy MUC bridge is the only producer of the
+                // sender's echo + stanza-level error replies (managed-
+                // room owner check, rich-target validation). Forward
+                // those frames into `outcome.frames` so the sender
+                // sees them; otherwise sender-pass DispatchToRoom is
+                // a black hole on this path. Codex P1 + Qodo bug #3
+                // + Copilot review on PR #274.
+                let frames = dispatch_to_room(deps, room, *message).await;
+                outcome.frames.extend(frames);
             }
             OutboundEvent::BroadcastToRoom { room, .. } => {
                 warn!(
@@ -693,43 +719,43 @@ async fn deliver_peer_to_full(
 /// actor receives `BuildGroupchatBroadcast` without standing up a full
 /// `WebSocketState`. Production wires `web_socket_state`.
 ///
-/// The frames the legacy helper would have written back to the sender
-/// (the sender's own echo, or a stanza-level error reply) are NOT
-/// surfaced through `outcome.frames` — the dispatcher path's recipient
-/// pipeline owns sender echo via `RouteToConnection`/`SendStanza`, and
-/// re-emitting the legacy echo here would produce duplicates. This
-/// matches the recipient-pass contract documented on
-/// [`OutboundEvent::DispatchToRoom`].
-async fn dispatch_to_room(deps: &Deps<'_>, room_jid: jid::BareJid, message: Message) {
+/// Returns the frames the sender connection should write back —
+/// today this is the sender's own echo (or a stanza-level error
+/// reply when validation fails). The interpreter caller appends
+/// these into [`InterpretOutcome::frames`] so the sender-pass
+/// `DispatchToRoom` event isn't a black hole. Codex P1 + Qodo +
+/// Copilot review on PR #274.
+async fn dispatch_to_room(
+    deps: &Deps<'_>,
+    room_jid: jid::BareJid,
+    message: Message,
+) -> Vec<String> {
     if let Some(state) = deps.web_socket_state {
         let Some(sender_full) = sender_full_jid(&message) else {
             warn!(
                 room = %room_jid,
                 "DispatchToRoom: message.from is missing or not a full JID; dropping"
             );
-            return;
+            return Vec::new();
         };
         // Production path: full legacy MUC fan-out via the shared
-        // helper. Sender echo + error replies, if any, are emitted
-        // back to the sender by the legacy path's caller; the
-        // dispatcher path's sender-side pipeline already handles
-        // that surface separately, so we discard the helper's frame
-        // return here. (See note in this fn's docstring.)
-        let _frames = deliver_groupchat_via_room_actor(
+        // helper. The legacy helper consults `authenticated_session`
+        // for the managed-room owner check (announcements room
+        // admits server owners only). We thread the connection's
+        // session through `Deps` (PR14 review fix) so that owner
+        // override survives the dispatcher path; passing `&None`
+        // here would always reject server owners on the
+        // announcements room. Codex P2 + Qodo bug #4 + Copilot
+        // review on PR #274.
+        let owned_session = deps.authenticated_session.cloned();
+        return deliver_groupchat_via_room_actor(
             state,
             room_jid,
             sender_full,
             message,
-            // The legacy helper consults `authenticated_session`
-            // only for the managed-room owner check; the sender
-            // pass's caller (dispatcher main loop) already verified
-            // session presence before dispatch. Passing `&None` is
-            // safe — it only suppresses the owner override which
-            // does not apply on this path.
-            &None,
+            &owned_session,
         )
         .await;
-        return;
     }
 
     let Some(room_registry) = deps.room_registry else {
@@ -739,7 +765,7 @@ async fn dispatch_to_room(deps: &Deps<'_>, room_jid: jid::BareJid, message: Mess
             "DispatchToRoom: neither web_socket_state nor room_registry provided in Deps; \
              dropping. Production must populate web_socket_state."
         );
-        return;
+        return Vec::new();
     };
 
     // Slimmed test-only path: look up the room actor through the
@@ -754,7 +780,7 @@ async fn dispatch_to_room(deps: &Deps<'_>, room_jid: jid::BareJid, message: Mess
             room = %room_jid,
             "DispatchToRoom (test path): message.from is missing or not a full JID; dropping"
         );
-        return;
+        return Vec::new();
     };
 
     let room_actor = match room_registry
@@ -769,7 +795,7 @@ async fn dispatch_to_room(deps: &Deps<'_>, room_jid: jid::BareJid, message: Mess
                 room = %room_jid,
                 "DispatchToRoom (test path): room not registered; dropping"
             );
-            return;
+            return Vec::new();
         }
         Err(error) => {
             warn!(
@@ -777,7 +803,7 @@ async fn dispatch_to_room(deps: &Deps<'_>, room_jid: jid::BareJid, message: Mess
                 error = ?error,
                 "DispatchToRoom (test path): room registry lookup failed; dropping"
             );
-            return;
+            return Vec::new();
         }
     };
 
@@ -796,7 +822,7 @@ async fn dispatch_to_room(deps: &Deps<'_>, room_jid: jid::BareJid, message: Mess
                 error = ?error,
                 "DispatchToRoom (test path): sender not permitted to broadcast; dropping"
             );
-            return;
+            return Vec::new();
         }
     };
 
@@ -825,6 +851,9 @@ async fn dispatch_to_room(deps: &Deps<'_>, room_jid: jid::BareJid, message: Mess
             }
         }
     }
+    // Test path doesn't surface a sender echo; the production path
+    // returns the legacy helper's frames above.
+    Vec::new()
 }
 
 /// Extract the sender's full JID from a typed groupchat `Message`.
@@ -1307,6 +1336,7 @@ mod tests {
             extension_manager: None,
             room_registry: None,
             web_socket_state: None,
+            authenticated_session: None,
         };
         let _outcome = interpret(
             vec![OutboundEvent::SendCarbons {
