@@ -234,6 +234,22 @@ pub enum BlockingStorageError {
     QueryFailed(String),
 }
 
+/// Implements the protocol-side [`waddle_xmpp::xep::xep0191::BlockingStorage`]
+/// trait so the sans-I/O message pipeline interpreter can load an
+/// offline recipient's blocklist for the headless recipient pass
+/// (#229 PR15) without taking a hard dependency on this concrete type.
+#[async_trait::async_trait]
+impl waddle_xmpp::xep::xep0191::BlockingStorage for DatabaseBlockingStorage {
+    async fn list_blocked_jids(
+        &self,
+        user: &BareJid,
+    ) -> Result<Vec<BareJid>, waddle_xmpp::xep::xep0191::BlockingStorageError> {
+        Self::list_blocked_jids(self, user)
+            .await
+            .map_err(waddle_xmpp::xep::xep0191::BlockingStorageError::new)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

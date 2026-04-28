@@ -47,12 +47,118 @@
 //! </iq>
 //! ```
 
+use async_trait::async_trait;
+use jid::BareJid;
 use minidom::Element;
 use tracing::debug;
 use xmpp_parsers::iq::Iq;
 
 /// Namespace for XEP-0191 Blocking Command.
 pub const NS_BLOCKING: &str = "urn:xmpp:blocking";
+
+/// Error returned by [`BlockingStorage`] implementations.
+///
+/// Wraps the implementation's underlying typed error via [`std::error::Error::source`]
+/// so the diagnostic chain remains typed end-to-end (no stringly-typed
+/// payload — see the typed-payloads hard rule in `CLAUDE.md`).
+/// Implementations construct it via [`Self::new`].
+///
+/// Callers MUST treat any error as fail-closed for XEP-0191 enforcement:
+/// the bind path fails the bind with a stream error
+/// (`load_blocklist_for_bind`), and the headless offline-recipient pass
+/// skips recipient-side processing entirely
+/// (`run_headless_recipient_pass`). Degrading to an empty blocklist
+/// would silently disable incoming-block enforcement and risk
+/// persisting blocked messages into the recipient's archive / inbox.
+#[derive(Debug, thiserror::Error)]
+#[error("blocking storage error")]
+pub struct BlockingStorageError {
+    #[source]
+    source: Box<dyn std::error::Error + Send + Sync + 'static>,
+}
+
+impl BlockingStorageError {
+    /// Wrap an implementation-specific error so the protocol-side
+    /// trait can carry it without stringification. The underlying
+    /// typed error remains accessible via [`std::error::Error::source`].
+    pub fn new<E>(source: E) -> Self
+    where
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        Self {
+            source: Box::new(source),
+        }
+    }
+}
+
+/// Storage contract for the per-user XEP-0191 blocklist.
+///
+/// Defined here so the sans-I/O message pipeline (`waddle-xmpp::protocol`)
+/// can be passed a typed storage handle from the I/O layer
+/// (`waddle-server`) without taking a hard dependency on the concrete
+/// libSQL-backed implementation. The production impl lives in
+/// `waddle-server::db::blocking::DatabaseBlockingStorage`; tests can
+/// substitute [`InMemoryBlockingStorage`] or a custom fake.
+#[async_trait]
+pub trait BlockingStorage: Send + Sync {
+    /// Return every blocked bare JID for `user`. Used at bind time and
+    /// by the headless offline-recipient pass to seed the per-pass
+    /// [`crate::protocol::Blocklist`] snapshot consumed by
+    /// [`super::super::protocol::handlers::blocking_filter::BlockingFilterHandler`].
+    async fn list_blocked_jids(&self, user: &BareJid)
+        -> Result<Vec<BareJid>, BlockingStorageError>;
+}
+
+/// In-memory [`BlockingStorage`] implementation for tests.
+///
+/// Backed by a `Mutex<HashMap<BareJid, Vec<BareJid>>>`. Used by the
+/// offline-recipient-pass tests in `waddle-server` and any handler-level
+/// fixture that wants to seed a blocklist without a real database.
+#[derive(Debug, Default)]
+pub struct InMemoryBlockingStorage {
+    per_user: std::sync::Mutex<std::collections::HashMap<BareJid, Vec<BareJid>>>,
+}
+
+impl InMemoryBlockingStorage {
+    /// Construct an empty storage.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Replace the blocklist for `user` with `entries`.
+    pub fn set_blocklist(&self, user: BareJid, entries: Vec<BareJid>) {
+        let mut guard = self
+            .per_user
+            .lock()
+            .expect("InMemoryBlockingStorage mutex poisoned");
+        guard.insert(user, entries);
+    }
+}
+
+/// Typed sentinel error for [`InMemoryBlockingStorage`] faults. The
+/// only failure mode is a poisoned `Mutex<HashMap>`; the
+/// [`std::sync::PoisonError`] details are not retained because the
+/// poisoned guard is unrecoverable in this fixture and the diagnostic
+/// would only carry a generic "lock poisoned" string. Callers
+/// (typed-payloads rule) match on the error *type* rather than its
+/// payload.
+#[derive(Debug, thiserror::Error)]
+#[error("in-memory blocking storage mutex poisoned")]
+pub struct InMemoryBlockingStorageError;
+
+#[async_trait]
+impl BlockingStorage for InMemoryBlockingStorage {
+    async fn list_blocked_jids(
+        &self,
+        user: &BareJid,
+    ) -> Result<Vec<BareJid>, BlockingStorageError> {
+        let guard = self
+            .per_user
+            .lock()
+            .map_err(|_| BlockingStorageError::new(InMemoryBlockingStorageError))?;
+        Ok(guard.get(user).cloned().unwrap_or_default())
+    }
+}
 
 /// Request type for blocking operations.
 #[derive(Debug, Clone)]

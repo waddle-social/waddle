@@ -108,6 +108,11 @@ pub struct ProtocolServices {
     pub mam_storage: Arc<dyn MamStorage>,
     /// Shared Waddle inbox projection storage.
     pub inbox_storage: Arc<dyn InboxStorage>,
+    /// Shared XEP-0191 blocking-list storage. Used by the headless
+    /// offline-recipient pass (#229 PR15) to seed a transient
+    /// recipient state machine's blocklist when delivering to a
+    /// local-domain bare JID with no available resources.
+    pub blocking_storage: Arc<dyn waddle_xmpp::xep::xep0191::BlockingStorage>,
     /// Registry for ad-hoc commands exposed over the WebSocket transport.
     pub command_registry: Arc<CommandRegistry>,
     /// Runtime extension manager for message embeds + feature advertisements.
@@ -821,6 +826,9 @@ fn build_interpret_deps<'a>(
         room_registry: Some(&state.deps.protocol.room_registry),
         web_socket_state: Some(state),
         authenticated_session,
+        local_domain: state.deps.auth_state.xmpp_domain.as_str(),
+        blocking_storage: Some(&state.deps.protocol.blocking_storage),
+        message_dispatcher: Some(&state.deps.protocol.dispatcher),
     }
 }
 
@@ -2667,6 +2675,9 @@ mod tests {
                     mam_storage,
                     inbox_storage: Arc::new(
                         waddle_xmpp::inbox::storage::InMemoryInboxStorage::new(),
+                    ),
+                    blocking_storage: Arc::new(
+                        waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new(),
                     ),
                     command_registry: Arc::new(CommandRegistry::new()),
                     extension_manager,
