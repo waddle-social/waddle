@@ -303,6 +303,7 @@ pub async fn handle_iq_with_conn_state(
             sm_session_registry: Some(&state.deps.protocol.sm_session_registry),
             mam_storage: Some(&state.deps.protocol.mam_storage),
             inbox_storage: Some(&state.deps.protocol.inbox_storage),
+            extension_manager: Some(&state.deps.protocol.extension_manager),
         };
         let outcome = crate::server::routes::interpret::interpret(events, &deps).await;
         if outcome.close {
