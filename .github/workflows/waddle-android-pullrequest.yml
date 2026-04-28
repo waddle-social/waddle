@@ -48,10 +48,16 @@ jobs:
         targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
 
     - name: Cache cargo registry + target
+      # `shared-key` (vs `key`) replaces the per-job hash so the PR and
+      # default-branch workflows share one cache namespace. PRs read from the
+      # warm cache produced by the previous push to main; cache-on-failure
+      # keeps partially-built target/ even when later steps fail.
       uses: Swatinem/rust-cache@98c8021b550208e191a6a3145459bfc9fb29c4c0  # v2.7.7
       with:
         workspaces: server -> target
-        key: android-ffi
+        shared-key: android-ffi
+        cache-on-failure: 'true'
+        cache-all-crates: 'true'
 
     - name: Cache cargo-ndk binary
       uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57  # v4.2.0
