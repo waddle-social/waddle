@@ -41,8 +41,8 @@ use waddle_xmpp::{
         frame::{
             inject_client_ns_if_missing, parse_frame, InboundFrame, ParseError, MAX_FRAME_SIZE,
         },
-        ConnectionPhase, InboundEvent, OutboundEvent, ScramPendingState, StanzaDispatcher,
-        XmppStateMachine,
+        Blocklist, ConnectionPhase, InboundEvent, OutboundEvent, ScramPendingState,
+        StanzaDispatcher, XmppStateMachine,
     },
     registry::{ConnectionRegistry, DeliveryKind, OutboundStanza},
     stream_management::{
@@ -223,6 +223,13 @@ impl WsConnState {
     /// the resumed wire state is replayed via XEP-0198, not via SM
     /// callback completion).
     ///
+    /// `blocklist` is the bound user's persisted XEP-0191 blocklist,
+    /// loaded once from `DatabaseBlockingStorage` immediately before
+    /// this call; it seeds the SM's session-state snapshot consumed
+    /// by the message pipeline (#229 PR13). Per #229 Q5 the snapshot
+    /// is frozen for the duration of the session — see
+    /// [`XmppStateMachine::set_blocklist`].
+    ///
     /// [`InboundEvent::StanzaFromPeer`]: waddle_xmpp::protocol::InboundEvent::StanzaFromPeer
     fn ensure_state_machine(
         &mut self,
@@ -230,9 +237,11 @@ impl WsConnState {
         dispatcher: &Arc<StanzaDispatcher>,
         full_jid: jid::FullJid,
         resumed: bool,
+        blocklist: Blocklist,
     ) {
         let mut sm = XmppStateMachine::new(domain.to_string(), (**dispatcher).clone());
         sm.transition_to_ready(full_jid, resumed);
+        sm.set_blocklist(blocklist);
         self.state_machine = Some(sm);
     }
 
@@ -345,11 +354,27 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
                                 // whether `pending_resume_stream_id`
                                 // was just consumed below.
                                 let resumed = conn.pending_resume_stream_id.is_some();
+                                // Seed the SM's XEP-0191 session-state
+                                // snapshot from persistence (#229 PR13).
+                                // Q5: this is frozen for the lifetime of
+                                // the session — IQ-set mutations during
+                                // the session update the SM's internal
+                                // copy; a load failure logs and falls
+                                // back to an empty list rather than
+                                // refusing the bind, matching the
+                                // legacy `is_blocked` per-message
+                                // tolerance.
+                                let blocklist = load_blocklist_for_bind(
+                                    &state.deps.app_state.db_pool,
+                                    &jid,
+                                )
+                                .await;
                                 conn.ensure_state_machine(
                                     &domain,
                                     &state.deps.protocol.dispatcher,
                                     jid.clone(),
                                     resumed,
+                                    blocklist,
                                 );
                                 let owner = state.deps.protocol.connection_registry.register_with_stream_state(
                                     jid.clone(),
@@ -656,6 +681,39 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
     cleanup_connection_shutdown(state.as_ref(), &mut outbound_rx, &mut conn, superseded).await;
 
     info!("XMPP WebSocket connection closed");
+}
+
+/// Load the bound user's persisted XEP-0191 blocklist from the
+/// global database adapter and convert it into the typed
+/// [`Blocklist`] shape the per-connection state machine consumes.
+///
+/// Used at bind time by the main loop to seed
+/// [`WsConnState::ensure_state_machine`] (#229 PR13). On any storage
+/// error we log at WARN and fall back to an empty blocklist rather
+/// than refusing the bind: the legacy `is_blocked` per-message check
+/// in `handlers/message.rs` already tolerates transient storage
+/// failures by treating the user as unblocked, and refusing the bind
+/// would be a strictly worse user-visible failure mode than the
+/// existing path. Mid-session XEP-0191 IQ-set mutations remain
+/// authoritative (they update the SM's internal blocklist directly);
+/// the snapshot loaded here is the *bind-time* baseline only.
+async fn load_blocklist_for_bind(
+    db_pool: &Arc<crate::db::DatabasePool>,
+    full_jid: &FullJid,
+) -> Blocklist {
+    let bare = full_jid.to_bare();
+    let storage = crate::db::blocking::DatabaseBlockingStorage::new(db_pool.global().clone());
+    match storage.list_blocked_jids(&bare).await {
+        Ok(entries) => Blocklist::new(entries),
+        Err(error) => {
+            warn!(
+                jid = %bare,
+                %error,
+                "Failed to load blocklist at bind; SM session-state will be empty"
+            );
+            Blocklist::empty()
+        }
+    }
 }
 
 /// Build the [`crate::server::routes::interpret::Deps`] view a
@@ -2855,11 +2913,109 @@ mod tests {
             &state.deps.protocol.dispatcher,
             jid.clone(),
             false,
+            Blocklist::empty(),
         );
 
         let sm = conn.state_machine.as_ref().expect("SM initialized");
         assert!(matches!(sm.phase(), ConnectionPhase::Ready { .. }));
         assert_eq!(sm.phase().bound_jid(), Some(&jid));
+    }
+
+    #[tokio::test]
+    async fn ensure_state_machine_seeds_blocklist_from_database_at_bind() {
+        // #229 PR13: bind-time SM seeding from
+        // `DatabaseBlockingStorage`. Persist a single blocked entry
+        // for alice, run the bind-time loader against the same
+        // global pool, hand the result to `ensure_state_machine`,
+        // then drive a synchronous dispatch through a probe handler
+        // and observe the seeded entry on the `MessageContext`
+        // snapshot. Without the seed, the snapshot would be
+        // `Blocklist::empty()` and `BlockingFilterHandler` (post
+        // PR16 cutover) would silently regress XEP-0191 enforcement.
+        use crate::db::blocking::DatabaseBlockingStorage;
+        use std::sync::Mutex;
+        use waddle_xmpp::protocol::{HandlerOutcome, MessageContext, MessageHandler};
+
+        let state = create_test_websocket_state().await;
+        let alice_full: jid::FullJid = "alice@example.com/web".parse().expect("jid");
+        let alice_bare = alice_full.to_bare();
+        let blocked_bare: BareJid = "blocked@example.com".parse().expect("bare");
+
+        // Seed persistence with one entry.
+        let storage = DatabaseBlockingStorage::new(state.deps.app_state.db_pool.global().clone());
+        storage
+            .add_blocks(&alice_bare, &[blocked_bare.to_string()])
+            .await
+            .expect("add_blocks");
+
+        // Mirror the bind-site loader.
+        let blocklist = load_blocklist_for_bind(&state.deps.app_state.db_pool, &alice_full).await;
+        let loaded: Vec<_> = blocklist.iter().cloned().collect();
+        assert_eq!(loaded, vec![blocked_bare.clone()]);
+
+        // Build a probe-only dispatcher so the assertion isolates
+        // the SM seeding behaviour from any side effects of the
+        // production message-pipeline chain (those have their own
+        // dedicated tests). The goal here is "the seeded blocklist
+        // shows up on the `MessageContext` snapshot".
+        let captured: Arc<Mutex<Vec<waddle_xmpp::protocol::Blocklist>>> =
+            Arc::new(Mutex::new(Vec::new()));
+        struct SnapshotProbe {
+            captured: Arc<Mutex<Vec<waddle_xmpp::protocol::Blocklist>>>,
+        }
+        impl MessageHandler for SnapshotProbe {
+            fn name(&self) -> &'static str {
+                "ws-bind-blocklist-probe"
+            }
+            fn handle(
+                &self,
+                _message: &mut xmpp_parsers::message::Message,
+                ctx: &MessageContext<'_>,
+            ) -> HandlerOutcome {
+                self.captured
+                    .lock()
+                    .expect("mutex")
+                    .push(ctx.blocklist.clone());
+                HandlerOutcome::Continue(Vec::new())
+            }
+        }
+        let mut probe_dispatcher = StanzaDispatcher::new();
+        probe_dispatcher.register_message(Arc::new(SnapshotProbe {
+            captured: captured.clone(),
+        }));
+        let dispatcher = Arc::new(probe_dispatcher);
+
+        let mut conn = WsConnState::new();
+        conn.ensure_state_machine(
+            "example.com",
+            &dispatcher,
+            alice_full.clone(),
+            false,
+            blocklist,
+        );
+
+        // Drive a chat message dispatch so the probe fires.
+        let mut msg =
+            xmpp_parsers::message::Message::new(Some("bob@example.com".parse().expect("to jid")));
+        msg.from = Some(jid::Jid::from(alice_full.clone()));
+        msg.type_ = XmppMessageType::Chat;
+        msg.bodies.insert(
+            String::new(),
+            xmpp_parsers::message::Body("hello".to_string()),
+        );
+        let sm = conn.state_machine.as_mut().expect("SM");
+        sm.handle(InboundEvent::FrameReceived(InboundFrame::Stanza(Box::new(
+            Stanza::Message(msg),
+        ))));
+
+        let snapshots = captured.lock().expect("mutex").clone();
+        assert_eq!(snapshots.len(), 1, "probe runs exactly once");
+        let entries: Vec<_> = snapshots[0].iter().cloned().collect();
+        assert_eq!(
+            entries,
+            vec![blocked_bare],
+            "MessageContext snapshot must reflect the persisted blocklist"
+        );
     }
 
     #[tokio::test]
@@ -2872,7 +3028,13 @@ mod tests {
         let state = create_test_websocket_state().await;
         let mut conn = WsConnState::new();
         let jid: jid::FullJid = "bob@example.com/desk".parse().expect("jid");
-        conn.ensure_state_machine("example.com", &state.deps.protocol.dispatcher, jid, false);
+        conn.ensure_state_machine(
+            "example.com",
+            &state.deps.protocol.dispatcher,
+            jid,
+            false,
+            Blocklist::empty(),
+        );
         let sm = conn.state_machine.as_mut().expect("SM");
 
         let mut msg =
@@ -2913,6 +3075,7 @@ mod tests {
             &state.deps.protocol.dispatcher,
             bob_full,
             false,
+            Blocklist::empty(),
         );
         let sm = conn.state_machine.as_mut().expect("SM");
 
@@ -2972,7 +3135,13 @@ mod tests {
         let state = create_test_websocket_state().await;
         let mut conn = WsConnState::new();
         let jid: jid::FullJid = "bob@example.com/desk".parse().expect("jid");
-        conn.ensure_state_machine("example.com", &state.deps.protocol.dispatcher, jid, false);
+        conn.ensure_state_machine(
+            "example.com",
+            &state.deps.protocol.dispatcher,
+            jid,
+            false,
+            Blocklist::empty(),
+        );
         // Enable SM tracking so `record_outbound` actually retains the
         // drained XML.
         conn.sm_state.enabled = true;
@@ -3026,6 +3195,7 @@ mod tests {
             &state.deps.protocol.dispatcher,
             bob_full,
             false,
+            Blocklist::empty(),
         );
         conn.sm_state.enabled = true;
 
@@ -3091,6 +3261,7 @@ mod tests {
             &state.deps.protocol.dispatcher,
             jid.clone(),
             false,
+            Blocklist::empty(),
         );
 
         // Sanity: SM starts in Ready.

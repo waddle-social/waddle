@@ -260,6 +260,25 @@ impl XmppStateMachine {
         self.phase = ConnectionPhase::closing(bound);
     }
 
+    /// Replace the per-connection XEP-0191 blocklist snapshot.
+    ///
+    /// Called by the transport adapter immediately after
+    /// [`Self::transition_to_ready`] to seed the SM with the bound
+    /// user's persisted blocklist, loaded once from
+    /// [`crate::storage`]-equivalent persistence. Per #229 Q5, the
+    /// blocklist is **frozen** as a session-state snapshot for the
+    /// duration of this session: every
+    /// [`super::message_context::MessageContext`] derived during a
+    /// dispatch (including across pause/resume hops) reads from this
+    /// snapshot, never from the live database. Mutations driven by
+    /// XEP-0191 IQ handlers during the session update the SM's
+    /// internal blocklist; persistence-layer mutations from other
+    /// resources of the same user reflect on the *next* bind, not
+    /// mid-session.
+    pub fn set_blocklist(&mut self, blocklist: Blocklist) {
+        self.blocklist = blocklist;
+    }
+
     /// The pure event → events transition.
     ///
     /// This is the only public entry point during normal operation.
@@ -1464,6 +1483,66 @@ mod tests {
             entries,
             vec![original],
             "snapshot must be frozen at dispatch start across both pause/resume hops"
+        );
+    }
+
+    #[test]
+    fn set_blocklist_seeds_message_context_snapshot() {
+        // Regression for #229 PR13. The transport adapter calls
+        // `set_blocklist` once at bind to seed the SM's session-state
+        // snapshot from `DatabaseBlockingStorage`. A subsequent
+        // dispatch must surface those entries through
+        // `MessageContext.blocklist`. Without the seed, the
+        // `BlockingFilterHandler` (post-cutover) would read an empty
+        // blocklist and silently regress XEP-0191 enforcement.
+        use std::sync::Mutex;
+
+        let captured: Arc<Mutex<Vec<Blocklist>>> = Arc::new(Mutex::new(Vec::new()));
+
+        struct SnapshotProbe {
+            captured: Arc<Mutex<Vec<Blocklist>>>,
+        }
+        impl MessageHandler for SnapshotProbe {
+            fn name(&self) -> &'static str {
+                "set-blocklist-probe"
+            }
+            fn handle(&self, _message: &mut Message, ctx: &MessageContext<'_>) -> HandlerOutcome {
+                self.captured
+                    .lock()
+                    .expect("mutex")
+                    .push(ctx.blocklist.clone());
+                HandlerOutcome::Continue(Vec::new())
+            }
+        }
+
+        let mut dispatcher = StanzaDispatcher::new();
+        dispatcher.register_message(Arc::new(SnapshotProbe {
+            captured: captured.clone(),
+        }));
+
+        let mut sm = test_support::ready_machine("example.com", alice(), dispatcher);
+
+        let blocked: jid::BareJid = "blocked@example.com".parse().expect("bare");
+        sm.set_blocklist(Blocklist::new([blocked.clone()]));
+
+        // Drive a dispatch so the probe captures the live snapshot
+        // built from `MessageContextEnv { blocklist: &self.blocklist, .. }`.
+        let msg = chat_with_body("alice@example.com/web", "bob@example.com", "hello");
+        sm.handle(InboundEvent::FrameReceived(InboundFrame::Stanza(Box::new(
+            Stanza::Message(msg),
+        ))));
+
+        let snapshots = captured.lock().expect("mutex").clone();
+        assert_eq!(
+            snapshots.len(),
+            1,
+            "probe should fire exactly once on the synchronous dispatch"
+        );
+        let entries: Vec<_> = snapshots[0].iter().cloned().collect();
+        assert_eq!(
+            entries,
+            vec![blocked],
+            "MessageContext snapshot must reflect the seeded blocklist"
         );
     }
 
