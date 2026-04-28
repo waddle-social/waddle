@@ -49,7 +49,9 @@ echo "==> Building Android targets via cargo-ndk (profile: $PROFILE, API: $ANDRO
 mkdir -p "$JNI_LIBS"
 
 # cargo-ndk places the resulting .so under <output>/<abi>/lib<name>.so,
-# which matches Android's jniLibs layout exactly.
+# which matches Android's jniLibs layout exactly. cargo-ndk 4.x uses
+# `-P` (capital) for the Android API platform — `-p` is reserved for
+# cargo's `--package` passthrough.
 (
   cd "$SERVER"
   # shellcheck disable=SC2086 # CARGO_FLAG is intentionally word-split when empty
@@ -57,7 +59,7 @@ mkdir -p "$JNI_LIBS"
     -t arm64-v8a \
     -t armeabi-v7a \
     -t x86_64 \
-    -p "$ANDROID_API" \
+    -P "$ANDROID_API" \
     -o "$JNI_LIBS" \
     build -p waddle-xmpp-client-ffi $CARGO_FLAG
 )
