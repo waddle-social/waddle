@@ -67,8 +67,15 @@ mkdir -p "$JNI_LIBS"
 echo "==> Building host cdylib (uniffi-bindgen reads metadata from it)"
 (
   cd "$SERVER"
+  # The workspace release profile has `strip = true`, which removes the
+  # `UNIFFI_META_*` symbols uniffi-bindgen's `--library` mode scans for —
+  # leaving bindgen to silently produce zero output. Override strip just
+  # for this host build; it is only consumed by bindgen and not shipped.
+  # No-op for debug builds (no strip there). The Android cargo-ndk
+  # targets above stay stripped because metadata isn't read from them.
   # shellcheck disable=SC2086
-  cargo build -p waddle-xmpp-client-ffi $CARGO_FLAG
+  cargo build -p waddle-xmpp-client-ffi $CARGO_FLAG \
+    --config 'profile.release.strip = false'
 )
 
 case "$(uname -s)" in
