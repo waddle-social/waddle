@@ -14,9 +14,11 @@ underlying crate is shared with the Apple app
   sdk install java 25.0.3-tem
   sdk install gradle 9.5.0
   ```
-- **Android SDK** with platform 36, build-tools 36.0.0, and **NDK 29**
-  (install via Android Studio's SDK Manager or `sdkmanager`). NDK r29 is
-  the first release that ships an API 36 sysroot.
+- **Android SDK** with platform 36, build-tools 36.0.0, and **NDK 28.2**
+  (install via Android Studio's SDK Manager or `sdkmanager`). NDK r28.2
+  is the latest stable release that ships an API 36 sysroot — r29 is
+  still preview and has sysroot-layout differences cargo-ndk doesn't
+  yet handle.
 - **Rust** (the toolchain is pinned in `server/rust-toolchain.toml`).
 - **Three Android Rust targets**:
   ```bash
