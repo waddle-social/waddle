@@ -56,7 +56,10 @@
               pkgs.sqlite
             ];
           };
-          cargoArtifacts = craneLib.buildDepsOnly commonArgs;
+          cargoArtifacts = craneLib.buildDepsOnly (commonArgs // {
+            doCheck = false;
+            cargoCheckExtraArgs = "";
+          });
           waddle-server = craneLib.buildPackage (commonArgs // {
             inherit cargoArtifacts;
             doCheck = false;
