@@ -61,13 +61,29 @@ bun test && bun run lint
   - Prefer deleting dead code, wiring unused code into the exercised path, or
     narrowing visibility over suppressing warnings.
 
+- Gradle hard rule (apps/android/):
+  - `./gradlew ktlintCheck`, `./gradlew :app:lintDebug`, and
+    `./gradlew testDebugUnitTest` MUST pass on every PR; CI rejects the
+    branch otherwise.
+  - `compileSdk`, `minSdk`, and `targetSdk` are pinned to 36 and must move
+    in lockstep — do not stagger them. Android 16 is the only supported
+    runtime; we don't add backwards-compat shims.
+  - `:domain` and `:ffi` (and any new pure-Kotlin module) keep
+    `explicitApi = ExplicitApiMode.Strict`. Generated bindings under
+    `ffi/src/main/kotlin/uniffi/` are exempt because uniffi controls
+    visibility there.
+  - Per-ABI `.so` files and uniffi-generated Kotlin live under
+    `apps/android/ffi/src/main/{jniLibs,kotlin/uniffi}/` and are
+    gitignored. Always run `bash scripts/build-android-bindings.sh` before
+    `./gradlew :app:assembleDebug`.
+
 ## Code Style
 
 TypeScript 5.8.x; Bun 1.3.x: Follow standard conventions
 
 ## Commit Messages
 
-- Use Conventional Commits with a single scope: `fix(chat): ...`, `fix(server): ...`, `feat(apple/ui): ...`.
+- Use Conventional Commits with a single scope: `fix(chat): ...`, `fix(server): ...`, `feat(apple/ui): ...`, `feat(android/ui): ...`, `feat(android/ffi): ...`, `feat(android/ci): ...`.
 - Do not use unscoped subjects. If a change spans multiple areas, scope it to the dominant subsystem/user-facing surface and keep the subject lowercase after the colon.
 
 ## Recent Changes

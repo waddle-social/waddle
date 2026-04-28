@@ -9,20 +9,25 @@ underlying crate is shared with the Apple app
 
 ## Prerequisites
 
-- JDK 21 (Temurin recommended)
-- Android SDK 36 + NDK 27 + cmdline-tools
-- Rust toolchain (pinned in `server/rust-toolchain.toml`)
-- `cargo-ndk` on `PATH`
-- Three Android Rust targets:
+- **JDK 25** (LTS) and **Gradle 9.5** — install via [SDKMAN](https://sdkman.io):
+  ```bash
+  sdk install java 25.0.3-tem
+  sdk install gradle 9.5.0
+  ```
+- **Android SDK** with platform 36, build-tools 36.0.0, and **NDK 27**
+  (install via Android Studio's SDK Manager or `sdkmanager`).
+- **Rust** (the toolchain is pinned in `server/rust-toolchain.toml`).
+- **Three Android Rust targets**:
   ```bash
   rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
   ```
+- **`cargo-ndk`** (3.5+) on `PATH`:
+  ```bash
+  cargo install cargo-ndk
+  ```
 
-The repo's Nix flake exposes a dedicated dev shell with all of this:
-
-```bash
-nix develop .#android
-```
+Set `ANDROID_HOME` (or `ANDROID_SDK_ROOT`) and `ANDROID_NDK_HOME` so
+`cargo-ndk` and Gradle can find the toolchain.
 
 ## Build process
 
@@ -32,7 +37,7 @@ The `:ffi` Gradle module expects three pre-built `.so`s and the
 uniffi-generated Kotlin sources:
 
 ```bash
-bash ../../scripts/build-android-bindings.sh
+bash scripts/build-android-bindings.sh
 ```
 
 This produces:
@@ -45,6 +50,7 @@ Both paths are gitignored. Pass `--debug` for faster non-release builds.
 ### Step 2 — Assemble the app
 
 ```bash
+cd apps/android
 ./gradlew :app:assembleDebug
 ```
 
@@ -69,15 +75,16 @@ emulator -avd waddle-pixel &
 
 ## Module layout
 
-| Module    | Purpose                                                      |
-|-----------|--------------------------------------------------------------|
-| `:ffi`    | uniffi-generated Kotlin + JNI loader. Sealed.                |
-| `:domain` | Pure Kotlin/JVM repositories, models, coroutine wiring.      |
-| `:app`    | Compose UI, navigation, DI (Koin), Application + services.   |
+| Module    | Purpose                                                       |
+|-----------|---------------------------------------------------------------|
+| `:ffi`    | uniffi-generated Kotlin + JNI loader. Sealed.                 |
+| `:domain` | Repositories, models, coroutine wiring. Strict explicit-API.  |
+| `:app`    | Compose UI, navigation, DI (Koin), Application + services.    |
 
-We deliberately do **not** split per-feature modules — feature **packages**
-inside `:app` (`auth`, `rooms`, `dms`, `compose`, `profile`, `theme`) match
-the repo-wide "group by function, not by type" convention.
+Feature **packages** inside `:app` (`auth`, `rooms`, `dms`, `compose`,
+`profile`, `theme`) match the repo-wide "group by function, not by type"
+convention. We deliberately do **not** split per-feature modules until the
+surface area justifies it.
 
 ## Connection lifecycle
 
@@ -88,6 +95,11 @@ Application-scoped `WaddleConnectionManager` and is hosted by a
 Background delivery without push is best-effort on Android 16. A future
 revision will plumb XEP-0357 + FCM for true push delivery.
 
+The uniffi-generated `WaddleEventListener` callbacks run on uniffi's
+internal thread pool — **not** the Android main thread. The `:ffi` facade
+converts them into a `MutableSharedFlow<WaddleEvent>` (DROP_OLDEST) so
+they're safe to consume from any dispatcher.
+
 ## CI
 
 - `.github/workflows/waddle-android-default.yml` runs on push to `main`.
@@ -95,8 +107,9 @@ revision will plumb XEP-0357 + FCM for true push delivery.
   `apps/android/**`, `server/crates/waddle-xmpp-client-ffi/**`, or the
   build script.
 
-Both are generated from `apps/android/env.cue` by `cuenv ci --format github`
-and validated by the existing `ci-drift` workflow.
+Both workflows install JDK 25 (Temurin), Android SDK + NDK 27,
+`cargo-ndk`, and the Android Rust targets via standard GitHub Actions; the
+build is otherwise identical to the local flow.
 
 ## Conventions
 

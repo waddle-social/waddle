@@ -1,0 +1,100 @@
+name: waddle-android-pullRequest
+on:
+  pull_request:
+    paths:
+    - .github/workflows/waddle-android-pullrequest.yml
+    - apps/android/**
+    - server/Cargo.toml
+    - server/Cargo.lock
+    - server/crates/waddle-xmpp-client-ffi/**
+    - server/crates/waddle-xmpp-client/**
+    - server/crates/waddle-xmpp-core/**
+    - server/rust-toolchain.toml
+    - scripts/build-android-bindings.sh
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+  checks: write
+  pull-requests: write
+jobs:
+  build:
+    name: build android debug + lint + test
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      with:
+        fetch-depth: 2
+
+    - name: Setup JDK 25 (Temurin)
+      uses: actions/setup-java@7a6d8a8234af8eb26422e24e3006232cccaa061b  # v4.6.0
+      with:
+        distribution: temurin
+        java-version: '25'
+
+    - name: Setup Android SDK
+      uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407  # v3.2.2
+      with:
+        cmdline-tools-version: 13114758
+        packages: 'platform-tools platforms;android-36 build-tools;36.0.0 ndk;27.2.12479018'
+        accept-android-sdk-licenses: true
+
+    - name: Setup Rust toolchain
+      uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b  # stable
+      with:
+        toolchain: stable
+        targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+
+    - name: Cache cargo registry + target
+      uses: Swatinem/rust-cache@98c8021b550208e191a6a3145459bfc9fb29c4c0  # v2.7.7
+      with:
+        workspaces: server -> target
+        key: android-ffi
+
+    - name: Install cargo-ndk
+      run: |
+        if ! command -v cargo-ndk >/dev/null 2>&1; then
+          cargo install cargo-ndk --locked --version ^3.5
+        fi
+
+    - name: Build FFI artefacts (.so + Kotlin bindings)
+      env:
+        ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
+        ANDROID_API_LEVEL: '36'
+      run: bash scripts/build-android-bindings.sh
+
+    - name: Cache Gradle
+      uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57  # v4.2.0
+      with:
+        path: |
+          ~/.gradle/caches
+          ~/.gradle/wrapper
+        key: gradle-${{ runner.os }}-${{ hashFiles('apps/android/**/*.gradle*', 'apps/android/gradle/libs.versions.toml', 'apps/android/gradle/wrapper/gradle-wrapper.properties') }}
+        restore-keys: |
+          gradle-${{ runner.os }}-
+
+    - name: ktlintCheck
+      working-directory: apps/android
+      run: ./gradlew ktlintCheck --no-daemon
+
+    - name: lintDebug
+      working-directory: apps/android
+      run: ./gradlew :app:lintDebug --no-daemon
+
+    - name: testDebugUnitTest
+      working-directory: apps/android
+      run: ./gradlew testDebugUnitTest --no-daemon
+
+    - name: assembleDebug
+      working-directory: apps/android
+      run: ./gradlew :app:assembleDebug --no-daemon
+
+    - name: Upload debug APK
+      uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08  # v4.6.0
+      with:
+        name: app-debug.apk
+        path: apps/android/app/build/outputs/apk/debug/app-debug.apk
+        if-no-files-found: error
+        retention-days: 14
