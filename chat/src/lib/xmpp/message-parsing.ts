@@ -14,6 +14,7 @@ type MessageExtensionsTarget = Pick<
   LiveRoomMessage,
   | "id"
   | "wireIds"
+  | "correctionTargetId"
   | "body"
   | "mentions"
   | "references"
@@ -90,7 +91,7 @@ function extractMucUserRealJid(msg: ReceivedMessage): string | undefined {
 export function resolveMessageIds(
   msg: ReceivedMessage,
   preferredStanzaBy?: string,
-): { id: string; wireIds?: string[] } {
+): { id: string; wireIds?: string[]; correctionTargetId: string } {
   const extMsg = ext(msg);
   const originId = extMsg.originId as OriginIdPayload | undefined;
   const stanzaIds = asArray(extMsg.stanzaIds as StanzaIdPayload | StanzaIdPayload[] | undefined);
@@ -98,10 +99,13 @@ export function resolveMessageIds(
     ? stanzaIds.find((candidate) => candidate.by === preferredStanzaBy)?.id
     : undefined;
 
-  return splitMessageIds(
-    preferredStanzaId ?? stanzaIds[0]?.id ?? originId?.id ?? msg.id,
-    [msg.id, originId?.id, ...stanzaIds.map((candidate) => candidate.id)],
-  );
+  return {
+    ...splitMessageIds(
+      preferredStanzaId ?? stanzaIds[0]?.id ?? originId?.id ?? msg.id,
+      [msg.id, originId?.id, ...stanzaIds.map((candidate) => candidate.id)],
+    ),
+    correctionTargetId: originId?.id ?? msg.id ?? "",
+  };
 }
 
 /** Populate a LiveRoomMessage with data from XEP extensions on the stanza. */
@@ -412,6 +416,7 @@ export function dispatchGroupchat(msg: ReceivedMessage, h: GroupchatHandlers): v
     createdAt: new Date().toISOString(),
     type: msg.body || hasNonBodyMessagePayload(msg) ? "message" : "subject",
   };
+  if (messageIds.correctionTargetId) liveMsg.correctionTargetId = messageIds.correctionTargetId;
   const authorRealJid = extractMucUserRealJid(msg);
   if (authorRealJid) liveMsg.authorRealJid = authorRealJid;
   if (messageIds.wireIds?.length) liveMsg.wireIds = messageIds.wireIds;
