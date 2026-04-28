@@ -65,11 +65,14 @@ jobs:
 
     - name: Build FFI artefacts (.so + Kotlin bindings, release)
       env:
-        ANDROID_API_LEVEL: '36'
+        # Build the .so against API 35 even though the app's minSdk is 36 —
+        # the NDK 28.2 API 36 sysroot is missing crtbegin_so.o / liblog.so
+        # (cargo-ndk issue #200 against the same combination). Android lib
+        # ABI is forward-compatible: a lib built for API 35 runs fine on 36.
+        ANDROID_API_LEVEL: '35'
       run: |
         # Pin to NDK r28.2 — it's pre-installed on ubuntu-latest, stable
-        # (unlike r29 preview), and ships the API 36 sysroot that the
-        # default r27.3 lacks. cargo-ndk 4.x is well-tested against r28.
+        # (unlike r29 preview), and supplies the API 35 sysroot.
         export ANDROID_NDK_HOME="${ANDROID_HOME}/ndk/28.2.13676358"
         echo "ANDROID_NDK_HOME=${ANDROID_NDK_HOME}"
         test -d "${ANDROID_NDK_HOME}" || {
