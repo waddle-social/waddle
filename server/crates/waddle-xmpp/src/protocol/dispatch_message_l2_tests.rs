@@ -59,7 +59,9 @@ impl MessageHandler for ArchiveProbe {
             .as_ref()
             .map(|j| j.to_bare())
             .unwrap_or_else(|| "unknown@example.com".parse().expect("bare"));
+        let archive_jid = from_bare.clone();
         HandlerOutcome::Continue(vec![OutboundEvent::ArchiveDirect {
+            archive_jid,
             from: from_bare,
             to: to_bare,
             message: Box::new(message.clone()),

@@ -13,6 +13,7 @@
 //! `waddle-xmpp-core` so server and client crates can share typed history
 //! primitives without runtime coupling.
 
+pub mod projection;
 pub mod storage;
 
 pub use storage::{InMemoryMamStorage, MamStorage, MamStorageError, SqlxMamStorage};
