@@ -52,6 +52,47 @@ impl DatabaseBlockingStorage {
         Ok(blocked_jids)
     }
 
+    /// Get all blocked JIDs for a user as typed [`BareJid`]s.
+    ///
+    /// Same query path as [`Self::get_blocklist`] but parses each row's
+    /// `blocked_jid` text column into a typed [`BareJid`] before
+    /// returning. Rows that fail to parse are skipped and logged at
+    /// WARN — the legacy `is_blocked` per-message check tolerates the
+    /// same shape, so the SM-snapshot loader (#229 PR13) does too
+    /// rather than fail closed and silently disable the entire
+    /// blocklist if a single row is malformed.
+    ///
+    /// Used at bind time by
+    /// [`crate::server::routes::websocket::WsConnState::ensure_state_machine`]
+    /// to seed the per-connection [`waddle_xmpp::protocol::Blocklist`]
+    /// snapshot consumed by the sans-I/O message pipeline. The
+    /// snapshot is frozen for the duration of the session per #229 Q5
+    /// — XEP-0191 IQ-set mutations during the session are reflected
+    /// in this method's results on the *next* bind.
+    #[instrument(skip(self), fields(user = %user_jid))]
+    pub async fn list_blocked_jids(
+        &self,
+        user_jid: &BareJid,
+    ) -> Result<Vec<BareJid>, BlockingStorageError> {
+        let raw = self.get_blocklist(user_jid).await?;
+        let mut entries = Vec::with_capacity(raw.len());
+        for blocked in raw {
+            match blocked.parse::<BareJid>() {
+                Ok(jid) => entries.push(jid),
+                Err(error) => {
+                    tracing::warn!(
+                        user = %user_jid,
+                        blocked = %blocked,
+                        %error,
+                        "Skipping malformed blocklist row"
+                    );
+                }
+            }
+        }
+        debug!(count = entries.len(), "Loaded typed blocklist");
+        Ok(entries)
+    }
+
     /// Check if a JID is blocked by a user.
     #[instrument(skip(self), fields(user = %user_jid, blocked = %blocked_jid))]
     pub async fn is_blocked(
@@ -301,6 +342,24 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(removed, 0);
+    }
+
+    #[tokio::test]
+    async fn list_blocked_jids_returns_typed_bare_jids() {
+        let db = setup_test_db().await;
+        let storage = DatabaseBlockingStorage::new(db);
+
+        let user_jid: BareJid = "alice@example.com".parse().unwrap();
+        let blocked = "bob@example.com".to_string();
+        storage
+            .add_blocks(&user_jid, std::slice::from_ref(&blocked))
+            .await
+            .unwrap();
+
+        let entries = storage.list_blocked_jids(&user_jid).await.unwrap();
+        assert_eq!(entries.len(), 1);
+        let bob: BareJid = "bob@example.com".parse().unwrap();
+        assert_eq!(entries[0], bob);
     }
 
     #[tokio::test]

@@ -41,8 +41,8 @@ use waddle_xmpp::{
         frame::{
             inject_client_ns_if_missing, parse_frame, InboundFrame, ParseError, MAX_FRAME_SIZE,
         },
-        ConnectionPhase, InboundEvent, OutboundEvent, ScramPendingState, StanzaDispatcher,
-        XmppStateMachine,
+        Blocklist, ConnectionPhase, InboundEvent, OutboundEvent, ScramPendingState,
+        StanzaDispatcher, XmppStateMachine,
     },
     registry::{ConnectionRegistry, DeliveryKind, OutboundStanza},
     stream_management::{
@@ -223,6 +223,13 @@ impl WsConnState {
     /// the resumed wire state is replayed via XEP-0198, not via SM
     /// callback completion).
     ///
+    /// `blocklist` is the bound user's persisted XEP-0191 blocklist,
+    /// loaded once from `DatabaseBlockingStorage` immediately before
+    /// this call; it seeds the SM's session-state snapshot consumed
+    /// by the message pipeline (#229 PR13). Per #229 Q5 the snapshot
+    /// is frozen for the duration of the session — see
+    /// [`XmppStateMachine::set_blocklist`].
+    ///
     /// [`InboundEvent::StanzaFromPeer`]: waddle_xmpp::protocol::InboundEvent::StanzaFromPeer
     fn ensure_state_machine(
         &mut self,
@@ -230,9 +237,11 @@ impl WsConnState {
         dispatcher: &Arc<StanzaDispatcher>,
         full_jid: jid::FullJid,
         resumed: bool,
+        blocklist: Blocklist,
     ) {
         let mut sm = XmppStateMachine::new(domain.to_string(), (**dispatcher).clone());
         sm.transition_to_ready(full_jid, resumed);
+        sm.set_blocklist(blocklist);
         self.state_machine = Some(sm);
     }
 
@@ -345,11 +354,72 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
                                 // whether `pending_resume_stream_id`
                                 // was just consumed below.
                                 let resumed = conn.pending_resume_stream_id.is_some();
+                                // Seed the SM's XEP-0191 session-state
+                                // snapshot (#229 PR13).
+                                //
+                                // Fresh bind: load from
+                                // `DatabaseBlockingStorage`. On Err we
+                                // FAIL the bind via a stream-error
+                                // close rather than silently
+                                // initializing an empty list — a
+                                // session-long fail-open would bypass
+                                // XEP-0191 for the entire connection
+                                // (Codex P1 / Qodo P1 review).
+                                //
+                                // XEP-0198 resume: the previous
+                                // session was detached/dropped, but we
+                                // deliberately do NOT re-read from DB.
+                                // Re-reading would let blocklist
+                                // mutations from other resources
+                                // during the detach window leak into
+                                // the resumed stream, contradicting
+                                // the snapshot semantic. The resumed
+                                // session starts with an empty
+                                // snapshot; subsequent XEP-0191
+                                // IQ-set traffic on the resumed stream
+                                // re-populates it via the SM's
+                                // internal blocklist mutators.
+                                let blocklist = if resumed {
+                                    Blocklist::empty()
+                                } else {
+                                    match load_blocklist_for_bind(
+                                        &state.deps.app_state.db_pool,
+                                        &jid,
+                                    )
+                                    .await
+                                    {
+                                        Ok(bl) => bl,
+                                        Err(error) => {
+                                            error!(
+                                                jid = %jid,
+                                                %error,
+                                                "Failed to load XEP-0191 blocklist at \
+                                                 bind; failing the bind to avoid a \
+                                                 session-long fail-open. Client should \
+                                                 reconnect."
+                                            );
+                                            let stream_error =
+                                                build_internal_server_error_stream_error(
+                                                    "Session initialization failed; \
+                                                     please reconnect.",
+                                                );
+                                            let _ = send_ws_message(
+                                                &mut ws_sender,
+                                                Message::Text(stream_error),
+                                                "Failed to send blocklist-load \
+                                                 stream error",
+                                            )
+                                            .await;
+                                            break;
+                                        }
+                                    }
+                                };
                                 conn.ensure_state_machine(
                                     &domain,
                                     &state.deps.protocol.dispatcher,
                                     jid.clone(),
                                     resumed,
+                                    blocklist,
                                 );
                                 let owner = state.deps.protocol.connection_registry.register_with_stream_state(
                                     jid.clone(),
@@ -656,6 +726,72 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
     cleanup_connection_shutdown(state.as_ref(), &mut outbound_rx, &mut conn, superseded).await;
 
     info!("XMPP WebSocket connection closed");
+}
+
+/// Load the bound user's persisted XEP-0191 blocklist from the
+/// global database adapter and convert it into the typed
+/// [`Blocklist`] shape the per-connection state machine consumes.
+///
+/// Used at bind time by the main loop to seed
+/// [`WsConnState::ensure_state_machine`] (#229 PR13). The caller
+/// **fails the bind** on `Err` rather than silently degrading to an
+/// empty blocklist — that fail-closed semantic mirrors the legacy
+/// per-message `is_blocked` check (`handlers/message.rs` /
+/// `handlers/iq.rs` both `return vec![]` / refuse to route on
+/// storage error). Treating storage failure as a session-long
+/// fail-open (the agent's first cut) was a privacy/security
+/// regression: any transient DB hiccup at bind would silently bypass
+/// XEP-0191 enforcement for the entire connection until the client
+/// reconnected. Failing the bind kicks the client to reconnect
+/// instead, which is a self-healing recovery path.
+///
+/// Mid-session XEP-0191 IQ-set mutations remain authoritative (they
+/// update the SM's internal blocklist directly); the snapshot loaded
+/// here is the bind-time baseline only.
+async fn load_blocklist_for_bind(
+    db_pool: &Arc<crate::db::DatabasePool>,
+    full_jid: &FullJid,
+) -> Result<Blocklist, crate::db::blocking::BlockingStorageError> {
+    let bare = full_jid.to_bare();
+    let storage = crate::db::blocking::DatabaseBlockingStorage::new(db_pool.global().clone());
+    storage.list_blocked_jids(&bare).await.map(Blocklist::new)
+}
+
+/// Build a `<stream:error>` close frame for a fatal session-init
+/// failure (XEP-0191 blocklist load failure at bind time, etc.).
+/// Pairs with breaking the WebSocket main loop so the client sees
+/// the close + reconnects.
+fn build_internal_server_error_stream_error(text: &str) -> String {
+    let mut writer = Writer::new(Vec::new());
+    let mut stream_error = BytesStart::new("stream:error");
+    stream_error.push_attribute(("xmlns:stream", waddle_xmpp::ns::STREAM));
+    writer
+        .write_event(Event::Start(stream_error))
+        .expect("serializing stream error should not fail");
+
+    let mut internal = BytesStart::new("internal-server-error");
+    internal.push_attribute(("xmlns", "urn:ietf:params:xml:ns:xmpp-streams"));
+    writer
+        .write_event(Event::Empty(internal))
+        .expect("serializing internal-server-error should not fail");
+
+    let mut text_elem = BytesStart::new("text");
+    text_elem.push_attribute(("xmlns", "urn:ietf:params:xml:ns:xmpp-streams"));
+    text_elem.push_attribute(("xml:lang", "en"));
+    writer
+        .write_event(Event::Start(text_elem))
+        .expect("serializing stream error text should not fail");
+    writer
+        .write_event(Event::Text(quick_xml::events::BytesText::new(text)))
+        .expect("serializing stream error text body should not fail");
+    writer
+        .write_event(Event::End(quick_xml::events::BytesEnd::new("text")))
+        .expect("serializing stream error text close should not fail");
+
+    writer
+        .write_event(Event::End(quick_xml::events::BytesEnd::new("stream:error")))
+        .expect("serializing stream error close should not fail");
+    String::from_utf8(writer.into_inner()).expect("xml writer produces valid utf-8")
 }
 
 /// Build the [`crate::server::routes::interpret::Deps`] view a
@@ -2855,11 +2991,111 @@ mod tests {
             &state.deps.protocol.dispatcher,
             jid.clone(),
             false,
+            Blocklist::empty(),
         );
 
         let sm = conn.state_machine.as_ref().expect("SM initialized");
         assert!(matches!(sm.phase(), ConnectionPhase::Ready { .. }));
         assert_eq!(sm.phase().bound_jid(), Some(&jid));
+    }
+
+    #[tokio::test]
+    async fn ensure_state_machine_seeds_blocklist_from_database_at_bind() {
+        // #229 PR13: bind-time SM seeding from
+        // `DatabaseBlockingStorage`. Persist a single blocked entry
+        // for alice, run the bind-time loader against the same
+        // global pool, hand the result to `ensure_state_machine`,
+        // then drive a synchronous dispatch through a probe handler
+        // and observe the seeded entry on the `MessageContext`
+        // snapshot. Without the seed, the snapshot would be
+        // `Blocklist::empty()` and `BlockingFilterHandler` (post
+        // PR16 cutover) would silently regress XEP-0191 enforcement.
+        use crate::db::blocking::DatabaseBlockingStorage;
+        use std::sync::Mutex;
+        use waddle_xmpp::protocol::{HandlerOutcome, MessageContext, MessageHandler};
+
+        let state = create_test_websocket_state().await;
+        let alice_full: jid::FullJid = "alice@example.com/web".parse().expect("jid");
+        let alice_bare = alice_full.to_bare();
+        let blocked_bare: BareJid = "blocked@example.com".parse().expect("bare");
+
+        // Seed persistence with one entry.
+        let storage = DatabaseBlockingStorage::new(state.deps.app_state.db_pool.global().clone());
+        storage
+            .add_blocks(&alice_bare, &[blocked_bare.to_string()])
+            .await
+            .expect("add_blocks");
+
+        // Mirror the bind-site loader.
+        let blocklist = load_blocklist_for_bind(&state.deps.app_state.db_pool, &alice_full)
+            .await
+            .expect("blocklist load succeeds when storage is healthy");
+        let loaded: Vec<_> = blocklist.iter().cloned().collect();
+        assert_eq!(loaded, vec![blocked_bare.clone()]);
+
+        // Build a probe-only dispatcher so the assertion isolates
+        // the SM seeding behaviour from any side effects of the
+        // production message-pipeline chain (those have their own
+        // dedicated tests). The goal here is "the seeded blocklist
+        // shows up on the `MessageContext` snapshot".
+        let captured: Arc<Mutex<Vec<waddle_xmpp::protocol::Blocklist>>> =
+            Arc::new(Mutex::new(Vec::new()));
+        struct SnapshotProbe {
+            captured: Arc<Mutex<Vec<waddle_xmpp::protocol::Blocklist>>>,
+        }
+        impl MessageHandler for SnapshotProbe {
+            fn name(&self) -> &'static str {
+                "ws-bind-blocklist-probe"
+            }
+            fn handle(
+                &self,
+                _message: &mut xmpp_parsers::message::Message,
+                ctx: &MessageContext<'_>,
+            ) -> HandlerOutcome {
+                self.captured
+                    .lock()
+                    .expect("mutex")
+                    .push(ctx.blocklist.clone());
+                HandlerOutcome::Continue(Vec::new())
+            }
+        }
+        let mut probe_dispatcher = StanzaDispatcher::new();
+        probe_dispatcher.register_message(Arc::new(SnapshotProbe {
+            captured: captured.clone(),
+        }));
+        let dispatcher = Arc::new(probe_dispatcher);
+
+        let mut conn = WsConnState::new();
+        conn.ensure_state_machine(
+            "example.com",
+            &dispatcher,
+            alice_full.clone(),
+            false,
+            blocklist,
+        );
+
+        // Drive a chat message dispatch so the probe fires.
+        let mut msg =
+            xmpp_parsers::message::Message::new(Some("bob@example.com".parse().expect("to jid")));
+        msg.from = Some(jid::Jid::from(alice_full.clone()));
+        msg.type_ = XmppMessageType::Chat;
+        msg.bodies.insert(
+            String::new(),
+            xmpp_parsers::message::Body("hello".to_string()),
+        );
+        let sm = conn.state_machine.as_mut().expect("SM");
+        sm.handle(InboundEvent::FrameReceived(InboundFrame::Stanza(Box::new(
+            Stanza::Message(msg),
+        ))));
+
+        let snapshots = captured.lock().expect("mutex").clone();
+        assert_eq!(snapshots.len(), 1, "probe runs exactly once");
+        let entries: Vec<_> = snapshots[0].iter().cloned().collect();
+        assert_eq!(
+            entries,
+            vec![blocked_bare],
+            "MessageContext snapshot must reflect the persisted blocklist"
+        );
     }
 
     #[tokio::test]
@@ -2872,7 +3108,13 @@ mod tests {
         let state = create_test_websocket_state().await;
         let mut conn = WsConnState::new();
         let jid: jid::FullJid = "bob@example.com/desk".parse().expect("jid");
-        conn.ensure_state_machine("example.com", &state.deps.protocol.dispatcher, jid, false);
+        conn.ensure_state_machine(
+            "example.com",
+            &state.deps.protocol.dispatcher,
+            jid,
+            false,
+            Blocklist::empty(),
+        );
         let sm = conn.state_machine.as_mut().expect("SM");
 
         let mut msg =
@@ -2913,6 +3155,7 @@ mod tests {
             &state.deps.protocol.dispatcher,
             bob_full,
             false,
+            Blocklist::empty(),
         );
         let sm = conn.state_machine.as_mut().expect("SM");
 
@@ -2972,7 +3215,13 @@ mod tests {
         let state = create_test_websocket_state().await;
         let mut conn = WsConnState::new();
         let jid: jid::FullJid = "bob@example.com/desk".parse().expect("jid");
-        conn.ensure_state_machine("example.com", &state.deps.protocol.dispatcher, jid, false);
+        conn.ensure_state_machine(
+            "example.com",
+            &state.deps.protocol.dispatcher,
+            jid,
+            false,
+            Blocklist::empty(),
+        );
         // Enable SM tracking so `record_outbound` actually retains the
         // drained XML.
         conn.sm_state.enabled = true;
@@ -3026,6 +3275,7 @@ mod tests {
             &state.deps.protocol.dispatcher,
             bob_full,
             false,
+            Blocklist::empty(),
         );
         conn.sm_state.enabled = true;
 
@@ -3091,6 +3341,7 @@ mod tests {
             &state.deps.protocol.dispatcher,
             jid.clone(),
             false,
+            Blocklist::empty(),
         );
 
         // Sanity: SM starts in Ready.
