@@ -414,7 +414,11 @@ impl ConnectionRegistry {
     /// Inner helper shared by [`Self::send_to`] and [`Self::send_peer_to`]
     /// so the queueing / replacement / channel-closed paths stay in
     /// one place. The only thing the public callers vary is the
-    /// [`DeliveryKind`] tag on the queued [`OutboundStanza`].
+    /// [`DeliveryKind`] tag on the queued [`OutboundStanza`], which
+    /// is built via the same [`OutboundStanza::new`] / [`OutboundStanza::peer_stanza`]
+    /// constructors every other call site uses — no manual struct
+    /// literal here so the kind→constructor mapping stays in one
+    /// place.
     async fn send_to_with_kind(
         &self,
         jid: &FullJid,
@@ -429,12 +433,12 @@ impl ConnectionRegistry {
             }
         };
 
-        let outbound = OutboundStanza {
-            stanza: stanza.clone(),
-            kind,
+        let make_outbound = |s: Stanza| match kind {
+            DeliveryKind::DirectFrame => OutboundStanza::new(s),
+            DeliveryKind::PeerStanza => OutboundStanza::peer_stanza(s),
         };
 
-        match sender.send(outbound).await {
+        match sender.send(make_outbound(stanza.clone())).await {
             Ok(()) => {
                 debug!(?kind, "Stanza queued for delivery");
                 SendResult::Sent
@@ -446,8 +450,7 @@ impl ConnectionRegistry {
                     let current = entry.value().sender.clone();
                     drop(entry);
                     if !current.same_channel(&sender) {
-                        let outbound = OutboundStanza { stanza, kind };
-                        return match current.send(outbound).await {
+                        return match current.send(make_outbound(stanza)).await {
                             Ok(()) => {
                                 debug!(?kind, "Stanza queued for replacement connection");
                                 SendResult::Sent
@@ -462,6 +465,38 @@ impl ConnectionRegistry {
                 SendResult::ChannelClosed
             }
         }
+    }
+
+    /// RFC 6121 §8.5.2.1 destination-resource selection for bare-JID
+    /// 1:1 message routing.
+    ///
+    /// Returns every currently-connected resource of `bare_jid` whose
+    /// advertised presence priority equals the maximum among the
+    /// user's available resources. Per §8.5.2.1.1, only resources
+    /// that have advertised availability (positive presence) are
+    /// eligible; per §8.5.2.1.2, when multiple resources tie at the
+    /// highest priority the server SHOULD deliver to all of them.
+    ///
+    /// Returns `Vec::new()` when the user has no available
+    /// resources — caller should fall back to offline-storage
+    /// semantics.
+    pub fn select_routable_resources_for_user(&self, bare_jid: &BareJid) -> Vec<FullJid> {
+        let candidates: Vec<(FullJid, i8)> = self
+            .connections
+            .iter()
+            .filter(|entry| {
+                entry.key().to_bare() == *bare_jid && entry.value().is_presence_available()
+            })
+            .map(|entry| (entry.key().clone(), entry.value().presence_priority()))
+            .collect();
+        let Some(max_priority) = candidates.iter().map(|(_, p)| *p).max() else {
+            return Vec::new();
+        };
+        candidates
+            .into_iter()
+            .filter(|(_, p)| *p == max_priority)
+            .map(|(jid, _)| jid)
+            .collect()
     }
 
     /// Non-blocking send. Returns a typed `BroadcastOutcome` describing

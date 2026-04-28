@@ -223,29 +223,40 @@ pub async fn interpret(events: Vec<OutboundEvent>, deps: &Deps<'_>) -> Interpret
                 // archive, XEP-0280 received-carbons, inbox
                 // projection, then `SendStanza` to the wire.
                 //
-                // `jid` is a typed `Jid` (full or bare). The current
-                // registry only supports full-JID delivery, so
-                // bare-JID targets are logged and dropped — RFC 6121
-                // §8.5 highest-priority resource selection lives in
-                // a follow-up PR.
+                // `jid` is a typed `Jid` — full or bare. Full-JID
+                // targets deliver to that single resource. Bare-JID
+                // targets go through RFC 6121 §8.5.2.1 resource
+                // selection (highest-priority available resources;
+                // tie-broken by delivering to all of them).
+                //
+                // Known design gap (`#229` follow-up): when the
+                // target has *no* connected resources (offline /
+                // detached / `ChannelClosed` for every selected
+                // resource), recipient-side persistence
+                // (recipient MAM archive, inbox projection,
+                // received-carbons fan-out) is currently lost
+                // because those effects only run during a recipient
+                // pass that requires a live destination machine.
+                // The eventual `message.rs` cutover needs an offline
+                // fallback (sender-side recipient-archive write OR a
+                // headless recipient-pass runner). Tracked in the
+                // local plan and the issue's follow-ups.
                 match jid.clone().try_into_full() {
-                    Ok(full) => match registry.send_peer_to(&full, *stanza).await {
-                        waddle_xmpp::registry::SendResult::Sent => {
-                            debug!(jid = %full, "RouteToConnection: peer-stanza queued for recipient pass");
-                        }
-                        waddle_xmpp::registry::SendResult::NotConnected => {
-                            debug!(jid = %full, "RouteToConnection: target offline, dropping");
-                        }
-                        waddle_xmpp::registry::SendResult::ChannelClosed => {
-                            warn!(jid = %full, "RouteToConnection: target channel closed, dropping");
-                        }
-                    },
+                    Ok(full) => deliver_peer_to_full(registry, &full, *stanza).await,
                     Err(bare) => {
-                        warn!(
-                            bare_jid = %bare,
-                            "RouteToConnection: bare-JID resource selection (RFC 6121 §8.5) \
-                             not yet wired; dropping this event"
-                        );
+                        let targets = registry.select_routable_resources_for_user(&bare);
+                        if targets.is_empty() {
+                            debug!(
+                                bare_jid = %bare,
+                                "RouteToConnection: bare-JID has no available resources \
+                                 (RFC 6121 §8.5.2.1.1); dropping. Offline-recipient \
+                                 persistence is a known #229 follow-up."
+                            );
+                        } else {
+                            for full in targets {
+                                deliver_peer_to_full(registry, &full, (*stanza).clone()).await;
+                            }
+                        }
                     }
                 }
             }
@@ -591,6 +602,30 @@ pub async fn interpret(events: Vec<OutboundEvent>, deps: &Deps<'_>) -> Interpret
 /// returned unchanged. This matches legacy `message.rs` behavior so
 /// the dispatcher cutover (#229 PR9) does not regress UX when a wasm
 /// extension is misbehaving.
+/// Deliver a single `Stanza` to a specific full-JID destination as
+/// a [`waddle_xmpp::registry::DeliveryKind::PeerStanza`] so the
+/// destination's main loop runs the recipient pass before any wire
+/// write. Centralizes the per-target send + result-logging shape so
+/// both the full-JID and bare-JID-resource-selection arms of
+/// [`OutboundEvent::RouteToConnection`] go through the same path.
+async fn deliver_peer_to_full(
+    registry: &waddle_xmpp::registry::ConnectionRegistry,
+    target: &jid::FullJid,
+    stanza: Stanza,
+) {
+    match registry.send_peer_to(target, stanza).await {
+        waddle_xmpp::registry::SendResult::Sent => {
+            debug!(jid = %target, "RouteToConnection: peer-stanza queued for recipient pass");
+        }
+        waddle_xmpp::registry::SendResult::NotConnected => {
+            debug!(jid = %target, "RouteToConnection: target offline, dropping");
+        }
+        waddle_xmpp::registry::SendResult::ChannelClosed => {
+            warn!(jid = %target, "RouteToConnection: target channel closed, dropping");
+        }
+    }
+}
+
 async fn enrich_message_event(deps: &Deps<'_>, mut message: Message) -> Message {
     let Some(extension_manager) = deps.extension_manager else {
         debug!(
@@ -1948,6 +1983,121 @@ mod tests {
             }
             other => panic!("expected EnrichmentComplete, got {other:?}"),
         }
+    }
+
+    // -----------------------------------------------------------------
+    // #229 PR12 — RouteToConnection delivers as PeerStanza
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn route_to_connection_full_jid_queues_peer_stanza_kind() {
+        // Locks in the staged-cutover contract: full-JID
+        // RouteToConnection events queue an OutboundStanza tagged
+        // PeerStanza so the destination's main loop runs the
+        // recipient pass before any wire write.
+        use waddle_xmpp::registry::DeliveryKind;
+        let registry = ConnectionRegistry::new();
+        let bob: jid::FullJid = "bob@example.com/desk".parse().expect("jid");
+        let (bob_tx, mut bob_rx) = tokio::sync::mpsc::channel(8);
+        registry.register_with_carbons(bob.clone(), bob_tx, false);
+
+        let msg = chat_msg("alice@example.com/web", "bob@example.com", "hi");
+        let events = vec![OutboundEvent::RouteToConnection {
+            jid: jid::Jid::from(bob.clone()),
+            stanza: Box::new(Stanza::Message(msg)),
+        }];
+        let _outcome = interpret(events, &Deps::registry_only(&registry)).await;
+
+        let queued = drain_inbound(&mut bob_rx);
+        assert_eq!(queued.len(), 1, "delivered to bob's queue exactly once");
+        assert_eq!(
+            queued[0].kind,
+            DeliveryKind::PeerStanza,
+            "RouteToConnection MUST tag PeerStanza so the destination main \
+             loop runs the recipient pass; got {:?}",
+            queued[0].kind
+        );
+    }
+
+    #[tokio::test]
+    async fn route_to_connection_bare_jid_selects_highest_priority_available_resources() {
+        // RFC 6121 §8.5.2.1 resource selection: deliver to every
+        // resource tied at the highest available priority. A
+        // bare-JID `to` from the sender pass (handlers/route.rs
+        // emits `message.to` verbatim) lands here; without selection
+        // the cutover would silently drop bare-targeted 1:1 traffic.
+        use waddle_xmpp::registry::DeliveryKind;
+        let registry = ConnectionRegistry::new();
+        let bob_desk: jid::FullJid = "bob@example.com/desk".parse().expect("jid");
+        let bob_phone: jid::FullJid = "bob@example.com/phone".parse().expect("jid");
+        let bob_tablet: jid::FullJid = "bob@example.com/tablet".parse().expect("jid");
+        let (desk_tx, mut desk_rx) = tokio::sync::mpsc::channel(8);
+        let (phone_tx, mut phone_rx) = tokio::sync::mpsc::channel(8);
+        let (tablet_tx, mut tablet_rx) = tokio::sync::mpsc::channel(8);
+        registry.register_with_carbons(bob_desk.clone(), desk_tx, false);
+        registry.register_with_carbons(bob_phone.clone(), phone_tx, false);
+        registry.register_with_carbons(bob_tablet.clone(), tablet_tx, false);
+        // desk + phone available at priority 5 (tied); tablet at
+        // lower priority 1. Tablet must NOT receive.
+        registry.update_presence(&bob_desk, true, 5);
+        registry.update_presence(&bob_phone, true, 5);
+        registry.update_presence(&bob_tablet, true, 1);
+
+        let msg = chat_msg("alice@example.com/web", "bob@example.com", "hi bare");
+        let events = vec![OutboundEvent::RouteToConnection {
+            jid: "bob@example.com".parse::<jid::Jid>().expect("bare jid"),
+            stanza: Box::new(Stanza::Message(msg)),
+        }];
+        let _outcome = interpret(events, &Deps::registry_only(&registry)).await;
+
+        let desk_q = drain_inbound(&mut desk_rx);
+        let phone_q = drain_inbound(&mut phone_rx);
+        let tablet_q = drain_inbound(&mut tablet_rx);
+        assert_eq!(
+            desk_q.len(),
+            1,
+            "desk (tied at max priority) gets the message"
+        );
+        assert_eq!(
+            phone_q.len(),
+            1,
+            "phone (tied at max priority) gets the message"
+        );
+        assert!(
+            tablet_q.is_empty(),
+            "tablet (lower priority) is excluded by RFC 6121 §8.5.2.1.2"
+        );
+        for q in [&desk_q, &phone_q] {
+            assert_eq!(q[0].kind, DeliveryKind::PeerStanza);
+        }
+    }
+
+    #[tokio::test]
+    async fn route_to_connection_bare_jid_with_no_available_resources_drops() {
+        // Known design gap: when the bare-JID target has no
+        // available resources, the recipient-pass side effects
+        // (recipient archive, inbox) do NOT run. Documented as a
+        // known #229 follow-up. This test pins the current behavior
+        // (drop) so the gap doesn't quietly mutate before the
+        // follow-up lands an offline-pass strategy.
+        let registry = ConnectionRegistry::new();
+        let bob_desk: jid::FullJid = "bob@example.com/desk".parse().expect("jid");
+        let (desk_tx, mut desk_rx) = tokio::sync::mpsc::channel(8);
+        registry.register_with_carbons(bob_desk.clone(), desk_tx, false);
+        // Registered but presence NOT made available — `bob_desk`
+        // is not eligible per §8.5.2.1.1.
+
+        let msg = chat_msg("alice@example.com/web", "bob@example.com", "hi");
+        let events = vec![OutboundEvent::RouteToConnection {
+            jid: "bob@example.com".parse::<jid::Jid>().expect("bare jid"),
+            stanza: Box::new(Stanza::Message(msg)),
+        }];
+        let _outcome = interpret(events, &Deps::registry_only(&registry)).await;
+
+        assert!(
+            drain_inbound(&mut desk_rx).is_empty(),
+            "no available resources -> no delivery (offline-pass is a #229 follow-up)"
+        );
     }
 
     #[tokio::test]
