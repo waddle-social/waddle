@@ -46,13 +46,9 @@ fn bare(s: &str) -> BareJid {
     s.parse().expect("valid bare jid")
 }
 
-fn jid(s: &str) -> Jid {
-    s.parse().expect("valid jid")
-}
-
 fn chat_with_body(from: &FullJid, to: &BareJid, body: &str) -> Message {
-    let mut m = Message::new(Some(jid(&to.to_string())));
-    m.from = Some(jid(&from.to_string()));
+    let mut m = Message::new(Some(Jid::from(to.clone())));
+    m.from = Some(Jid::from(from.clone()));
     m.type_ = MessageType::Chat;
     m.id = Some("wire-id".to_string());
     m.bodies.insert(String::new(), Body(body.to_string()));
@@ -287,7 +283,7 @@ fn xep_0359_self_loop_peer_stanza_terminates_at_wire_not_re_routes() {
     // Force `to=alice/web` (full self-loop) so locality::derive
     // returns Both rather than Recipient. The override under test
     // is what disambiguates.
-    wire_msg.to = Some(jid(&alice_web.to_string()));
+    wire_msg.to = Some(Jid::from(alice_web.clone()));
     wire_msg
         .payloads
         .push(crate::xep::xep0359::build_stanza_id_element(
