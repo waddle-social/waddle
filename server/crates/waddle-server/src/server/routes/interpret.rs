@@ -213,26 +213,25 @@ pub async fn interpret(events: Vec<OutboundEvent>, deps: &Deps<'_>) -> Interpret
             // content into logs.
             // -------------------------------------------------------
             OutboundEvent::RouteToConnection { jid, stanza } => {
-                // Until the per-connection state-machine routing for
-                // `StanzaFromPeer` lands (issue #229 PR5), preserve the
-                // legacy "write to peer's outbound channel" behaviour so
-                // existing integration tests stay green. The semantic
-                // change to "feed StanzaFromPeer into the destination
-                // machine" is wired alongside the message.rs cutover
-                // in PR5.
+                // #229 PR12 cutover: the destination's main loop is
+                // now wired (PR11) to dispatch on `DeliveryKind` and
+                // run the recipient-pass pipeline for `PeerStanza`
+                // values, so we deliver as `PeerStanza`. The
+                // recipient's `XmppStateMachine::on_peer_stanza`
+                // takes it from there: XEP-0191 incoming block,
+                // XEP-0359 recipient stamp, XEP-0313 recipient-side
+                // archive, XEP-0280 received-carbons, inbox
+                // projection, then `SendStanza` to the wire.
                 //
-                // `jid` is now a typed `Jid` (full or bare); the
-                // current legacy registry only supports full-JID
-                // delivery, so bare-JID targets are logged and
-                // deferred to PR5's resource-selection logic. This
-                // is a *temporary* gap during the staged migration;
-                // it does not regress existing behaviour because no
-                // production handler emits `RouteToConnection` with a
-                // bare JID until PR5 cuts over.
+                // `jid` is a typed `Jid` (full or bare). The current
+                // registry only supports full-JID delivery, so
+                // bare-JID targets are logged and dropped — RFC 6121
+                // §8.5 highest-priority resource selection lives in
+                // a follow-up PR.
                 match jid.clone().try_into_full() {
-                    Ok(full) => match registry.send_to(&full, *stanza).await {
+                    Ok(full) => match registry.send_peer_to(&full, *stanza).await {
                         waddle_xmpp::registry::SendResult::Sent => {
-                            debug!(jid = %full, "RouteToConnection delivered");
+                            debug!(jid = %full, "RouteToConnection: peer-stanza queued for recipient pass");
                         }
                         waddle_xmpp::registry::SendResult::NotConnected => {
                             debug!(jid = %full, "RouteToConnection: target offline, dropping");
@@ -244,8 +243,8 @@ pub async fn interpret(events: Vec<OutboundEvent>, deps: &Deps<'_>) -> Interpret
                     Err(bare) => {
                         warn!(
                             bare_jid = %bare,
-                            "RouteToConnection: bare-JID resource selection lands in PR5; \
-                             dropping this event for now"
+                            "RouteToConnection: bare-JID resource selection (RFC 6121 §8.5) \
+                             not yet wired; dropping this event"
                         );
                     }
                 }

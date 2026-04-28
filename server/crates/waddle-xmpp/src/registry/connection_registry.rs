@@ -378,13 +378,49 @@ impl ConnectionRegistry {
         self.connections.len()
     }
 
-    /// Send a stanza to a connected user.
+    /// Send a stanza to a connected user as a [`DeliveryKind::DirectFrame`]
+    /// — the destination's main loop writes it straight to the wire
+    /// without running the recipient pass.
+    ///
+    /// This is the right call for server-generated frames (carbons,
+    /// IQ replies, SM acks, …). For peer-routed stanzas that should
+    /// run through the recipient pipeline, use [`Self::send_peer_to`].
     ///
     /// This waits for outbound channel capacity instead of dropping stanzas when
     /// a connection is temporarily backpressured. Closed channels are treated as
     /// stale connections and removed from the registry.
     #[instrument(skip(self, stanza), fields(to = %jid))]
     pub async fn send_to(&self, jid: &FullJid, stanza: Stanza) -> SendResult {
+        self.send_to_with_kind(jid, stanza, DeliveryKind::DirectFrame)
+            .await
+    }
+
+    /// Send a stanza to a connected user as a [`DeliveryKind::PeerStanza`]
+    /// — the destination's main loop feeds
+    /// [`crate::protocol::InboundEvent::StanzaFromPeer`] into its
+    /// state machine so the recipient-pass pipeline (XEP-0191
+    /// incoming block, XEP-0359 recipient stamp, XEP-0313 archive,
+    /// XEP-0280 received-carbons, inbox projection) runs before any
+    /// wire write.
+    ///
+    /// Used by the [`crate::protocol::OutboundEvent::RouteToConnection`]
+    /// interpreter arm starting in #229 PR12.
+    #[instrument(skip(self, stanza), fields(to = %jid))]
+    pub async fn send_peer_to(&self, jid: &FullJid, stanza: Stanza) -> SendResult {
+        self.send_to_with_kind(jid, stanza, DeliveryKind::PeerStanza)
+            .await
+    }
+
+    /// Inner helper shared by [`Self::send_to`] and [`Self::send_peer_to`]
+    /// so the queueing / replacement / channel-closed paths stay in
+    /// one place. The only thing the public callers vary is the
+    /// [`DeliveryKind`] tag on the queued [`OutboundStanza`].
+    async fn send_to_with_kind(
+        &self,
+        jid: &FullJid,
+        stanza: Stanza,
+        kind: DeliveryKind,
+    ) -> SendResult {
         let sender = match self.connections.get(jid) {
             Some(entry) => entry.value().sender.clone(),
             None => {
@@ -393,11 +429,14 @@ impl ConnectionRegistry {
             }
         };
 
-        let outbound = OutboundStanza::new(stanza.clone());
+        let outbound = OutboundStanza {
+            stanza: stanza.clone(),
+            kind,
+        };
 
         match sender.send(outbound).await {
             Ok(()) => {
-                debug!("Stanza queued for delivery");
+                debug!(?kind, "Stanza queued for delivery");
                 SendResult::Sent
             }
             Err(_) => {
@@ -407,10 +446,10 @@ impl ConnectionRegistry {
                     let current = entry.value().sender.clone();
                     drop(entry);
                     if !current.same_channel(&sender) {
-                        let outbound = OutboundStanza::new(stanza);
+                        let outbound = OutboundStanza { stanza, kind };
                         return match current.send(outbound).await {
                             Ok(()) => {
-                                debug!("Stanza queued for replacement connection");
+                                debug!(?kind, "Stanza queued for replacement connection");
                                 SendResult::Sent
                             }
                             Err(_) => {
