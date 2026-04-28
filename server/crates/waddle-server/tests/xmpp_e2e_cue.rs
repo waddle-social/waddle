@@ -181,6 +181,8 @@ enum Payload {
         description: String,
         url: String,
     },
+    #[serde(rename = "messageCorrection")]
+    MessageCorrection { id: String },
 }
 
 struct ScenarioContext {
@@ -822,6 +824,11 @@ fn payload_element(payload: &Payload) -> Element {
                     .build(),
             )
             .build(),
+        Payload::MessageCorrection { id } => {
+            Element::builder("replace", "urn:xmpp:message-correct:0")
+                .attr("id", id.as_str())
+                .build()
+        }
     }
 }
 
@@ -865,6 +872,9 @@ fn payload_expectations(payloads: &[Payload]) -> Result<Vec<String>> {
                     text_node_marker(url),
                 ]);
             }
+            Payload::MessageCorrection { id } => {
+                expected.extend(["urn:xmpp:message-correct:0".to_string(), id.clone()]);
+            }
         }
     }
     Ok(expected)
@@ -876,7 +886,7 @@ fn validate_file_share_fallback_body(body: Option<&str>, payloads: &[Payload]) -
     };
     let represented_by_payload = payloads.iter().any(|payload| match payload {
         Payload::FileShare { url, .. } => body == url,
-        Payload::LinkMetadata { .. } => false,
+        Payload::LinkMetadata { .. } | Payload::MessageCorrection { .. } => false,
     });
     if represented_by_payload {
         Ok(())

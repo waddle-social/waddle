@@ -160,9 +160,15 @@ package xmpp_e2e_scenarios
 	...
 }
 
-#Payload: #FileShare | #LinkMetadata
+#Payload: #FileShare | #LinkMetadata | #MessageCorrection
 
-#ExpectedPayload: #FileShare | #LinkMetadata
+#ExpectedPayload: #FileShare | #LinkMetadata | #MessageCorrection
+
+#MessageCorrection: {
+	kind: "messageCorrection"
+	id:   string
+	...
+}
 
 #FileShare: {
 	kind:        "fileShare"
