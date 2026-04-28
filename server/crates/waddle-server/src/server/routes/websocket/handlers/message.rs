@@ -2,12 +2,8 @@ use chrono::Utc;
 use jid::{BareJid, FullJid};
 use tracing::{debug, info, warn};
 use waddle_xmpp::{
-    carbons::{build_received_carbon, build_sent_carbon, should_copy_message},
     inbox::{
-        runtime::{
-            direct_message_entry, groupchat_entry, groupchat_thread_entry, preview_text,
-            should_project_message,
-        },
+        runtime::{groupchat_entry, groupchat_thread_entry, preview_text, should_project_message},
         InboxEntry,
     },
     mam::{
@@ -17,16 +13,16 @@ use waddle_xmpp::{
     },
     muc::room_actor::{BuildGroupchatBroadcast, GetNicknameGeneration, RoomActor},
     parser::message_to_string,
-    registry::{BroadcastOutcome, SendResult},
+    protocol::{frame::InboundFrame, InboundEvent, XmppStateMachine},
+    registry::BroadcastOutcome,
     xep::xep0430::build_inbox_push,
     xep::{
         extract_correction_from_message, extract_explicit_mentions, extract_reactions_from_message,
         extract_references_from_message, extract_retraction_from_message, has_file_sharing,
         is_moderation_request_message, is_moderation_result_message, is_reaction_message,
-        is_retraction_message, is_sticker_message, message_has_direct_invite,
-        parse_reply_from_message, remove_stanza_ids_by, should_skip_storage, RetractionKind,
-        NS_EXPLICIT_MENTIONS, NS_MESSAGE_CORRECT, NS_MESSAGE_RETRACT, NS_REACTIONS, NS_REFERENCE,
-        NS_REPLY,
+        is_retraction_message, is_sticker_message, parse_reply_from_message, remove_stanza_ids_by,
+        should_skip_storage, RetractionKind, NS_EXPLICIT_MENTIONS, NS_MESSAGE_CORRECT,
+        NS_MESSAGE_RETRACT, NS_REACTIONS, NS_REFERENCE, NS_REPLY,
     },
     Stanza,
 };
@@ -34,351 +30,56 @@ use xmpp_parsers::message::MessageType as XmppMessageType;
 use xmpp_parsers::minidom::Element;
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
-use super::super::{get_room_actor, stanza_to_xml, WebSocketState};
+use super::super::{
+    build_interpret_deps, drive_interpret_loop, get_room_actor, stanza_to_xml, WebSocketState,
+};
 use crate::auth::Session;
-use crate::db::blocking::DatabaseBlockingStorage;
 use crate::permissions::{CheckPermission, Object, ObjectType, Permission, Subject};
 use crate::server::bootstrap_membership::DEPLOYMENT_SERVER_ID;
 use kameo::actor::ActorRef;
 use waddle_xmpp::protocol::ConnectionPhase;
 
+/// Thin transport adapter that drives the sans-I/O dispatcher
+/// (#229 PR16). The state machine's [`InboundEvent::FrameReceived`]
+/// path runs the locked-Q2(a) chain (`BlockingFilter →
+/// RichTargetValidation → Canonicalize → EnrichmentDispatch → Archive →
+/// CarbonsMessage → Inbox → Route`) and emits typed
+/// [`waddle_xmpp::protocol::OutboundEvent`]s; the interpreter
+/// ([`crate::server::routes::interpret::interpret`]) executes the I/O
+/// side effects (route to peer, persist to MAM, project inbox, fan
+/// XEP-0280 carbons).
+///
+/// MUC `<message type='groupchat'>` traffic flows through the same
+/// adapter: the dispatcher emits
+/// [`waddle_xmpp::protocol::OutboundEvent::DispatchToRoom`] which the
+/// interpreter bridges to the legacy
+/// [`deliver_groupchat_via_room_actor`] helper until #229 PR17 lands the
+/// dedicated room handler chain.
 pub async fn handle_message(
-    mut incoming: xmpp_parsers::message::Message,
-    muc_domain: &str,
+    incoming: xmpp_parsers::message::Message,
     state: &WebSocketState,
     phase: &ConnectionPhase,
-    authenticated_session: &Option<Session>,
+    state_machine: Option<&mut XmppStateMachine>,
+    authenticated_session: Option<&Session>,
 ) -> Vec<String> {
-    let Some(sender_jid) = phase.bound_jid() else {
+    if phase.bound_jid().is_none() {
         warn!("Message received without authenticated session");
         return vec![];
     };
-
-    // Always stamp the authenticated sender.
-    incoming.from = Some(jid::Jid::from(sender_jid.clone()));
-
-    // Handle local MUC groupchat messages. Full-JID groupchat stanzas that are
-    // not addressed to the local MUC service fall through to direct routing.
-    if incoming.type_ == XmppMessageType::Groupchat
-        && incoming
-            .to
-            .as_ref()
-            .is_some_and(|jid| jid.to_bare().domain().as_str() == muc_domain)
-    {
-        let Some(to_jid) = incoming.to.as_ref() else {
-            warn!("Groupchat message without 'to' attribute");
-            return vec![];
-        };
-
-        // Parse room JID (strip resource if present)
-        let room_jid = to_jid.to_bare();
-
-        return deliver_groupchat_via_room_actor(
-            state,
-            room_jid,
-            sender_jid.clone(),
-            incoming,
-            authenticated_session,
-        )
-        .await;
-    }
-
-    // Handle direct messages, including default/normal messages and XEP-0249
-    // direct MUC invites which are often sent as normal messages.
-    let direct_full_jid_message = incoming
-        .to
-        .as_ref()
-        .is_some_and(|to| to.clone().try_into_full().is_ok())
-        && matches!(
-            incoming.type_,
-            XmppMessageType::Groupchat | XmppMessageType::Error
+    let Some(sm) = state_machine else {
+        warn!(
+            "Message received before per-connection state machine was initialized; \
+             dropping. This indicates a stanza arrived before bind completed."
         );
-    if matches!(
-        incoming.type_,
-        XmppMessageType::Chat | XmppMessageType::Normal | XmppMessageType::Headline
-    ) || message_has_direct_invite(&incoming)
-        || direct_full_jid_message
-    {
-        if let Some(to_jid) = incoming.to.as_ref() {
-            debug!(to = %to_jid, from = %sender_jid, "Direct chat message");
-
-            // Build a prototype message and enrich it with embeds before routing.
-            // Enrichment is fail-open: errors are logged but never block delivery.
-            let mut prototype = incoming.clone();
-            if prototype.id.is_none() {
-                prototype.id = extract_origin_id(&prototype)
-                    .or_else(|| Some(uuid::Uuid::new_v4().to_string()));
-            }
-            prototype.from = Some(jid::Jid::from(sender_jid.clone()));
-            let should_carbon =
-                prototype.type_ == XmppMessageType::Chat && should_copy_message(&prototype);
-            let blocking =
-                DatabaseBlockingStorage::new(state.deps.app_state.db_pool.global().clone());
-            match blocking
-                .is_blocked(&to_jid.to_bare(), &sender_jid.to_bare())
-                .await
-            {
-                Ok(true) => {
-                    info!(sender = %sender_jid, recipient = %to_jid, "Blocked direct message");
-                    return vec![];
-                }
-                Ok(false) => {}
-                Err(error) => {
-                    warn!(error = %error, sender = %sender_jid, recipient = %to_jid, "Failed to check blocklist before routing direct message");
-                    return vec![];
-                }
-            }
-
-            // Enrich links with extension-provided XML elements.
-            let _embeds_added = state
-                .deps
-                .protocol
-                .extension_manager
-                .enrich_message(&mut prototype)
-                .await;
-
-            if let Err(error) =
-                validate_rich_message_targets(state, &sender_jid.to_bare(), &prototype, false, None)
-                    .await
-            {
-                return vec![stanza_to_xml(&Stanza::Message(error_message(
-                    &incoming,
-                    to_jid,
-                    &jid::Jid::from(sender_jid.clone()),
-                    error,
-                )))];
-            }
-
-            // XEP-0424 §"prevent further distribution": when a DM is a
-            // retraction request, tombstone the original in BOTH
-            // archives that hold it (sender's and recipient's
-            // personal MAM).
-            if let Some(RetractionKind::Request(retraction)) =
-                extract_retraction_from_message(&prototype)
-            {
-                let archives = [sender_jid.to_bare(), to_jid.to_bare()];
-                apply_retraction_tombstones(
-                    state,
-                    &archives,
-                    &prototype,
-                    &retraction.retracts_id,
-                    Utc::now(),
-                    false,
-                )
-                .await;
-            }
-
-            // Archive body-bearing DMs to both sender's and recipient's personal MAM.
-            archive_direct_message(state, sender_jid, to_jid, &prototype).await;
-
-            if should_project_message(&prototype) {
-                let timestamp = Utc::now().timestamp();
-                let sender_bare = sender_jid.to_bare();
-                let recipient_bare = to_jid.to_bare();
-
-                if let Err(error) = state
-                    .deps
-                    .protocol
-                    .inbox_storage
-                    .upsert(
-                        &sender_bare,
-                        direct_message_entry(recipient_bare.clone(), &prototype, timestamp),
-                        false,
-                    )
-                    .await
-                {
-                    warn!(jid = %sender_bare, partner = %recipient_bare, error = %error, "Failed to update sender inbox for direct message");
-                }
-
-                if recipient_bare.domain() == sender_bare.domain() {
-                    match state
-                        .deps
-                        .protocol
-                        .inbox_storage
-                        .upsert(
-                            &recipient_bare,
-                            direct_message_entry(sender_bare.clone(), &prototype, timestamp),
-                            true,
-                        )
-                        .await
-                    {
-                        Ok(updated) => push_inbox_update(state, &recipient_bare, &updated).await,
-                        Err(error) => {
-                            warn!(jid = %recipient_bare, partner = %sender_bare, error = %error, "Failed to update recipient inbox for direct message");
-                        }
-                    }
-                }
-            }
-
-            // Route the enriched message
-            let delivered_full_jid = if let Ok(to_full_jid) = to_jid.clone().try_into_full() {
-                let mut msg = prototype.clone();
-                msg.to = Some(jid::Jid::from(to_full_jid.clone()));
-                let stanza = Stanza::Message(msg);
-                match state
-                    .deps
-                    .protocol
-                    .connection_registry
-                    .send_to(&to_full_jid, stanza.clone())
-                    .await
-                {
-                    SendResult::Sent => Some(to_full_jid),
-                    SendResult::NotConnected => match state
-                        .deps
-                        .protocol
-                        .sm_session_registry
-                        .record_stanza_for_detached_bound_resource(&to_full_jid, &stanza)
-                        .await
-                    {
-                        Ok(true) => Some(to_full_jid),
-                        Ok(false) => state
-                            .deps
-                            .protocol
-                            .connection_registry
-                            .send_to(&to_full_jid, stanza)
-                            .await
-                            .is_sent()
-                            .then_some(to_full_jid),
-                        Err(error) => {
-                            warn!(
-                                jid = %to_full_jid,
-                                error = %error,
-                                "Failed to record direct stanza for detached resource"
-                            );
-                            None
-                        }
-                    },
-                    SendResult::ChannelClosed => match state
-                        .deps
-                        .protocol
-                        .sm_session_registry
-                        .record_stanza_for_detached_bound_resource(&to_full_jid, &stanza)
-                        .await
-                    {
-                        Ok(true) => Some(to_full_jid),
-                        Ok(false) => None,
-                        Err(error) => {
-                            warn!(
-                                jid = %to_full_jid,
-                                error = %error,
-                                "Failed to record direct stanza after closed live channel"
-                            );
-                            None
-                        }
-                    },
-                }
-            } else {
-                let to_bare_jid = to_jid.to_bare();
-                let resources = state
-                    .deps
-                    .protocol
-                    .connection_registry
-                    .get_resources_for_user(&to_bare_jid);
-                let mut delivered_resources = Vec::new();
-                for resource_jid in &resources {
-                    let mut msg = prototype.clone();
-                    msg.to = Some(jid::Jid::from(resource_jid.clone()));
-                    let stanza = Stanza::Message(msg);
-                    if state
-                        .deps
-                        .protocol
-                        .connection_registry
-                        .send_to(resource_jid, stanza)
-                        .await
-                        .is_sent()
-                    {
-                        delivered_resources.push(resource_jid.clone());
-                    }
-                }
-                match state
-                    .deps
-                    .protocol
-                    .sm_session_registry
-                    .detached_resources_for_user(&to_bare_jid)
-                    .await
-                {
-                    Ok(detached_resources) => {
-                        for resource_jid in detached_resources {
-                            if delivered_resources.iter().any(|live| live == &resource_jid) {
-                                continue;
-                            }
-                            let mut msg = prototype.clone();
-                            msg.to = Some(jid::Jid::from(resource_jid.clone()));
-                            let stanza = Stanza::Message(msg);
-                            match state
-                                .deps
-                                .protocol
-                                .sm_session_registry
-                                .record_stanza_for_detached_bound_resource(&resource_jid, &stanza)
-                                .await
-                            {
-                                Ok(true) => delivered_resources.push(resource_jid.clone()),
-                                Ok(false) => {
-                                    if state
-                                        .deps
-                                        .protocol
-                                        .connection_registry
-                                        .send_to(&resource_jid, stanza)
-                                        .await
-                                        .is_sent()
-                                    {
-                                        delivered_resources.push(resource_jid.clone());
-                                    }
-                                }
-                                Err(error) => {
-                                    warn!(
-                                        jid = %resource_jid,
-                                        error = %error,
-                                        "Failed to record bare direct stanza for detached resource"
-                                    );
-                                }
-                            }
-                        }
-                    }
-                    Err(error) => {
-                        warn!(recipient = %to_bare_jid, error = %error, "Failed to list detached resources for bare direct message");
-                    }
-                }
-                for resource_jid in state
-                    .deps
-                    .protocol
-                    .connection_registry
-                    .get_resources_for_user(&to_bare_jid)
-                    .into_iter()
-                    .filter(|resource| !delivered_resources.contains(resource))
-                {
-                    let mut msg = prototype.clone();
-                    msg.to = Some(jid::Jid::from(resource_jid.clone()));
-                    let stanza = Stanza::Message(msg);
-                    let _ = state
-                        .deps
-                        .protocol
-                        .connection_registry
-                        .send_to(&resource_jid, stanza)
-                        .await;
-                }
-                None
-            };
-
-            if should_carbon {
-                if let Some(ref recipient_full_jid) = delivered_full_jid {
-                    send_received_carbons_to_websocket_resources(
-                        state,
-                        recipient_full_jid,
-                        &prototype,
-                    )
-                    .await;
-                }
-                send_sent_carbons_to_websocket_resources(state, sender_jid, &prototype).await;
-            }
-        } else {
-            warn!("Direct chat message without 'to' attribute");
-        }
         return vec![];
-    }
+    };
 
-    debug!(msg_type = ?incoming.type_, "Message stanza received");
-    vec![]
+    let events = sm.handle(InboundEvent::FrameReceived(InboundFrame::Stanza(Box::new(
+        Stanza::Message(incoming),
+    ))));
+    let deps = build_interpret_deps(state, authenticated_session);
+    let (frames, _close) = drive_interpret_loop(events, sm, &deps).await;
+    frames
 }
 
 /// Deliver a groupchat `<message type='groupchat'>` to a local MUC
@@ -1071,195 +772,6 @@ fn has_malformed_rich_payload(message: &xmpp_parsers::message::Message) -> bool 
     })
 }
 
-async fn send_sent_carbons_to_websocket_resources(
-    state: &WebSocketState,
-    sender_jid: &FullJid,
-    message: &xmpp_parsers::message::Message,
-) {
-    let sender_bare = sender_jid.to_bare();
-    let resources = state
-        .deps
-        .protocol
-        .connection_registry
-        .get_other_carbon_resources_for_user(&sender_bare, sender_jid);
-
-    let mut delivered_resources = Vec::new();
-    for resource_jid in resources {
-        let carbon =
-            match build_sent_carbon(message, &sender_bare.to_string(), &resource_jid.to_string()) {
-                Ok(carbon) => carbon,
-                Err(error) => {
-                    warn!(error = %error, to = %resource_jid, "Failed to build sent carbon");
-                    continue;
-                }
-            };
-        if state
-            .deps
-            .protocol
-            .connection_registry
-            .send_to(&resource_jid, Stanza::Message(carbon))
-            .await
-            .is_sent()
-        {
-            delivered_resources.push(resource_jid);
-        }
-    }
-
-    match state
-        .deps
-        .protocol
-        .sm_session_registry
-        .detached_carbon_resources_for_user(&sender_bare, sender_jid)
-        .await
-    {
-        Ok(detached_resources) => {
-            for resource_jid in detached_resources
-                .into_iter()
-                .filter(|resource| !delivered_resources.contains(resource))
-            {
-                let carbon = match build_sent_carbon(
-                    message,
-                    &sender_bare.to_string(),
-                    &resource_jid.to_string(),
-                ) {
-                    Ok(carbon) => carbon,
-                    Err(error) => {
-                        warn!(error = %error, to = %resource_jid, "Failed to build detached sent carbon");
-                        continue;
-                    }
-                };
-                let stanza = Stanza::Message(carbon);
-                match state
-                    .deps
-                    .protocol
-                    .sm_session_registry
-                    .record_stanza_for_detached_bound_resource(&resource_jid, &stanza)
-                    .await
-                {
-                    Ok(true) => {}
-                    Ok(false) => {
-                        if state
-                            .deps
-                            .protocol
-                            .connection_registry
-                            .is_carbons_enabled(&resource_jid)
-                        {
-                            let _ = state
-                                .deps
-                                .protocol
-                                .connection_registry
-                                .send_to(&resource_jid, stanza)
-                                .await;
-                        }
-                    }
-                    Err(error) => {
-                        warn!(jid = %resource_jid, error = %error, "Failed to record sent carbon for detached resource");
-                    }
-                }
-            }
-        }
-        Err(error) => {
-            warn!(jid = %sender_bare, error = %error, "Failed to list detached sent-carbon resources");
-        }
-    }
-}
-
-async fn send_received_carbons_to_websocket_resources(
-    state: &WebSocketState,
-    recipient_jid: &FullJid,
-    message: &xmpp_parsers::message::Message,
-) {
-    let recipient_bare = recipient_jid.to_bare();
-    let resources = state
-        .deps
-        .protocol
-        .connection_registry
-        .get_other_carbon_resources_for_user(&recipient_bare, recipient_jid);
-
-    let mut delivered_resources = Vec::new();
-    for resource_jid in resources {
-        let carbon = match build_received_carbon(
-            message,
-            &recipient_bare.to_string(),
-            &resource_jid.to_string(),
-        ) {
-            Ok(carbon) => carbon,
-            Err(error) => {
-                warn!(error = %error, to = %resource_jid, "Failed to build received carbon");
-                continue;
-            }
-        };
-        if state
-            .deps
-            .protocol
-            .connection_registry
-            .send_to(&resource_jid, Stanza::Message(carbon))
-            .await
-            .is_sent()
-        {
-            delivered_resources.push(resource_jid);
-        }
-    }
-
-    match state
-        .deps
-        .protocol
-        .sm_session_registry
-        .detached_carbon_resources_for_user(&recipient_bare, recipient_jid)
-        .await
-    {
-        Ok(detached_resources) => {
-            for resource_jid in detached_resources
-                .into_iter()
-                .filter(|resource| !delivered_resources.contains(resource))
-            {
-                let carbon = match build_received_carbon(
-                    message,
-                    &recipient_bare.to_string(),
-                    &resource_jid.to_string(),
-                ) {
-                    Ok(carbon) => carbon,
-                    Err(error) => {
-                        warn!(error = %error, to = %resource_jid, "Failed to build detached received carbon");
-                        continue;
-                    }
-                };
-                let stanza = Stanza::Message(carbon);
-                match state
-                    .deps
-                    .protocol
-                    .sm_session_registry
-                    .record_stanza_for_detached_bound_resource(&resource_jid, &stanza)
-                    .await
-                {
-                    Ok(true) => {}
-                    Ok(false) => {
-                        if state
-                            .deps
-                            .protocol
-                            .connection_registry
-                            .is_carbons_enabled(&resource_jid)
-                        {
-                            let _ = state
-                                .deps
-                                .protocol
-                                .connection_registry
-                                .send_to(&resource_jid, stanza)
-                                .await;
-                        }
-                    }
-                    Err(error) => {
-                        warn!(jid = %resource_jid, error = %error, "Failed to record received carbon for detached resource");
-                    }
-                }
-            }
-        }
-        Err(error) => {
-            warn!(jid = %recipient_bare, error = %error, "Failed to list detached received-carbon resources");
-        }
-    }
-}
-
 /// Push an inbox update headline to all connected sessions of a user.
 async fn push_inbox_update(state: &WebSocketState, user: &BareJid, entry: &InboxEntry) {
     let resources = state
@@ -1308,16 +820,6 @@ fn serialize_groupchat_stanza_xml(message: &xmpp_parsers::message::Message) -> O
         Ok(xml) => Some(xml),
         Err(error) => {
             warn!(error = %error, "Failed to serialize groupchat stanza XML for MAM archive");
-            None
-        }
-    }
-}
-
-fn serialize_direct_stanza_xml(message: &xmpp_parsers::message::Message) -> Option<String> {
-    match message_to_string(message) {
-        Ok(xml) => Some(xml),
-        Err(error) => {
-            warn!(error = %error, "Failed to serialize direct message stanza XML for MAM archive");
             None
         }
     }
@@ -1384,79 +886,6 @@ async fn archive_groupchat_message(
             );
             None
         }
-    }
-}
-
-/// Archive a direct (type="chat") message to both the sender's and recipient's
-/// personal MAM archives.  Only messages with a `<body>` are stored.
-async fn archive_direct_message(
-    state: &WebSocketState,
-    sender_jid: &FullJid,
-    to_jid: &jid::Jid,
-    message: &xmpp_parsers::message::Message,
-) {
-    let body = prototype_body(message)
-        .map(|value| value.trim().to_string())
-        .unwrap_or_default();
-    let rich = rich_archive_payload(message);
-    if body.is_empty() && rich.is_none() {
-        return;
-    }
-
-    let stanza_xml = serialize_direct_stanza_xml(message);
-
-    let (reply_to_id, reply_to_jid) = extract_reply_reference(message);
-    let origin_id = extract_origin_id(message);
-
-    let archived = ArchivedMessage {
-        id: String::new(),
-        timestamp: Utc::now(),
-        from: sender_jid.to_bare().to_string(),
-        to: to_jid.to_bare().to_string(),
-        body,
-        stanza_id: message.id.clone(),
-        thread_id: message.thread.as_ref().map(|thread| thread.0.clone()),
-        reply_to_id,
-        reply_to_jid,
-        origin_id,
-        message_type: mam_message_type(&message.type_),
-        stanza_xml,
-        rich,
-        nickname_generation: None,
-    };
-
-    // Store in sender's personal archive
-    let sender_bare = sender_jid.to_bare().to_string();
-    if let Err(err) = state
-        .deps
-        .protocol
-        .mam_storage
-        .store_message(sender_bare.as_str(), &archived)
-        .await
-    {
-        warn!(
-            from = %sender_jid,
-            to = %to_jid,
-            error = %err,
-            "Failed to archive DM to sender's personal MAM"
-        );
-    }
-
-    // Store in recipient's personal archive
-    let recipient_bare = to_jid.to_bare().to_string();
-    if let Err(err) = state
-        .deps
-        .protocol
-        .mam_storage
-        .store_message(recipient_bare.as_str(), &archived)
-        .await
-    {
-        warn!(
-            from = %sender_jid,
-            to = %to_jid,
-            error = %err,
-            "Failed to archive DM to recipient's personal MAM"
-        );
     }
 }
 

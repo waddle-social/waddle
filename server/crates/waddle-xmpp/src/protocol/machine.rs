@@ -560,6 +560,16 @@ impl XmppStateMachine {
         match stanza {
             Stanza::Iq(iq) => self.dispatcher.dispatch_iq(&iq, &ctx),
             Stanza::Message(mut message) => {
+                // Server-stamp the authenticated sender on every
+                // client-originated message stanza (RFC 6120 §8.1.2.1
+                // / RFC 6121). Clients SHOULD NOT set `from`, and even
+                // when they do the server is free to override it with
+                // the resource-bound full JID. This guarantees
+                // [`Locality::derive`]'s `from`-match resolves to
+                // `Sender` for outgoing messages and the dispatcher
+                // chain (blocking, archive, route, …) sees a
+                // canonical sender.
+                message.from = Some(jid::Jid::from(full_jid.clone()));
                 // Hot path: borrow `self.*` directly during the
                 // synchronous dispatch. The session-state snapshot is
                 // only materialized (cloned) when the pipeline parks

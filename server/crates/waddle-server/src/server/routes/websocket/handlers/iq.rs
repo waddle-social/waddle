@@ -135,6 +135,14 @@ pub async fn handle_iq(
 pub struct IqConnState<'a> {
     pub carbons_enabled: &'a mut bool,
     pub roster_interested: &'a mut bool,
+    /// Per-connection [`waddle_xmpp::protocol::XmppStateMachine`].
+    /// Required so XEP-0191 block/unblock IQs can mirror their
+    /// effect into the dispatcher's session-state snapshot — without
+    /// this, additions made on a live connection would not take
+    /// effect on the recipient pipeline until the next bind (PR13's
+    /// load-at-bind seed). `None` only for transition-period unit
+    /// tests; production (`handle_xmpp_frame`) always supplies it.
+    pub state_machine: Option<&'a mut waddle_xmpp::protocol::XmppStateMachine>,
 }
 
 pub async fn handle_iq_with_conn_state(
@@ -354,7 +362,15 @@ pub async fn handle_iq_with_conn_state(
     }
 
     if waddle_xmpp::xep::xep0191::is_blocking_query(&iq) {
-        return handle_blocking_iq(&iq, state, phase.bound_jid(), response_from, response_to).await;
+        return handle_blocking_iq(
+            &iq,
+            state,
+            phase.bound_jid(),
+            response_from,
+            response_to,
+            conn_state.state_machine.as_deref_mut(),
+        )
+        .await;
     }
 
     if is_push_enable(&iq) || is_push_disable(&iq) {
@@ -3658,6 +3674,7 @@ async fn handle_blocking_iq(
     sender_jid: Option<&FullJid>,
     response_from: Option<&str>,
     response_to: Option<&str>,
+    state_machine: Option<&mut waddle_xmpp::protocol::XmppStateMachine>,
 ) -> Vec<String> {
     let Some(sender_jid) = sender_jid else {
         return vec![build_iq_error_xml_with_addresses(

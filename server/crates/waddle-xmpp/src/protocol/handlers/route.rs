@@ -31,7 +31,6 @@
 //!   error sends are for typed error replies built by other handlers
 //!   and emitted via `SendStanza` directly).
 
-use super::errors::{not_acceptable_reply, send_message_error};
 use crate::protocol::event::OutboundEvent;
 use crate::protocol::message_context::MessageContext;
 use crate::protocol::session_state::Locality;
@@ -50,20 +49,23 @@ impl MessageHandler for RouteHandler {
 
     fn handle(&self, message: &mut Message, ctx: &MessageContext<'_>) -> HandlerOutcome {
         match (ctx.locality, message.type_.clone()) {
-            // Sender pass, groupchat — XEP-0045 §7.4 occupancy check
-            // then dispatch to the room chain.
+            // Sender pass, groupchat — dispatch to the room chain.
+            //
+            // The XEP-0045 §7.4 occupancy check (non-occupant may not
+            // send to a room) is enforced authoritatively by the room
+            // actor's `BuildGroupchatBroadcast` handler downstream of
+            // `OutboundEvent::DispatchToRoom`. The SM-side
+            // `ctx.muc_occupancy` snapshot is currently a no-op
+            // because no handler populates it (PR17 will introduce
+            // the room handler chain that owns occupancy state); a
+            // local `is_occupant=false` halt would always reject
+            // legitimate groupchat sends. Defer the check to the room
+            // actor and let it produce the typed error reply.
             (Locality::Sender, MessageType::Groupchat)
             | (Locality::Both, MessageType::Groupchat) => {
                 let Some(room) = message.to.as_ref().map(|j| j.to_bare()) else {
                     return HandlerOutcome::Continue(Vec::new());
                 };
-                if !ctx.muc_occupancy.is_occupant(&room) {
-                    let reply = not_acceptable_reply(
-                        message,
-                        "Sender is not currently a member of the room.",
-                    );
-                    return HandlerOutcome::Halt(vec![send_message_error(reply)]);
-                }
                 HandlerOutcome::Continue(vec![OutboundEvent::DispatchToRoom {
                     room,
                     message: Box::new(message.clone()),
@@ -113,7 +115,6 @@ mod tests {
     use crate::protocol::session_state::{Blocklist, CarbonsState, MucOccupancy, OccupancyEntry};
     use jid::{BareJid, FullJid};
     use xmpp_parsers::message::{Body, Message, MessageType};
-    use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
     fn full(s: &str) -> FullJid {
         s.parse().expect("valid full jid")
@@ -258,33 +259,25 @@ mod tests {
     }
 
     #[test]
-    fn xep_0045_sender_pass_groupchat_for_non_occupant_halts_with_not_acceptable() {
+    fn xep_0045_sender_pass_groupchat_dispatches_to_room_unconditionally() {
+        // Until the room handler chain (PR17) populates the
+        // `MucOccupancy` snapshot, the sender-side route handler
+        // emits `DispatchToRoom` unconditionally and lets the room
+        // actor enforce XEP-0045 §7.4 occupancy. The room actor's
+        // `BuildGroupchatBroadcast` returns `Err` for non-occupants
+        // and the dispatch bridge silently drops, mirroring legacy
+        // `handle_message`'s no-error-reply behaviour.
         let local = full("alice@example.com/web");
         let occ = MucOccupancy::empty();
         let mut msg = chat_with_body("alice@example.com/web", "room@conf.example.com", "shouted");
         msg.type_ = MessageType::Groupchat;
         let outcome = run(&local, &occ, &mut msg);
-        let events = match outcome {
-            HandlerOutcome::Halt(ref events) => events,
-            other => panic!("expected Halt, got {other:?}"),
-        };
-        assert_eq!(events.len(), 1);
-        let stanza = match &events[0] {
-            OutboundEvent::SendStanza(s) => s,
-            other => panic!("expected SendStanza, got {other:?}"),
-        };
-        let msg = match stanza.as_ref() {
-            Stanza::Message(m) => m,
-            other => panic!("expected Message, got {other:?}"),
-        };
-        let elem = msg
-            .payloads
-            .iter()
-            .find(|p| p.name() == "error")
-            .expect("error payload");
-        let parsed = StanzaError::try_from(elem.clone()).expect("typed parse");
-        assert_eq!(parsed.type_, ErrorType::Cancel);
-        assert_eq!(parsed.defined_condition, DefinedCondition::NotAcceptable);
+        match extract_event(&outcome) {
+            OutboundEvent::DispatchToRoom { room, .. } => {
+                assert_eq!(room.to_string(), "room@conf.example.com");
+            }
+            other => panic!("expected DispatchToRoom, got {other:?}"),
+        }
     }
 
     #[test]

@@ -383,10 +383,36 @@ async fn interpret_with_depth(
                     );
                 } else {
                     match jid.clone().try_into_full() {
-                        Ok(full) => deliver_peer_to_full(registry, &full, *stanza).await,
+                        Ok(full) => {
+                            deliver_peer_to_full(registry, deps.sm_session_registry, &full, *stanza)
+                                .await
+                        }
                         Err(bare) => {
-                            let targets = registry.select_routable_resources_for_user(&bare);
-                            if targets.is_empty() {
+                            // Enumerate XEP-0198 detached-but-resumable
+                            // resources for the bare JID. The legacy
+                            // `handle_message` direct-route path queued
+                            // bare-JID DMs onto detached resources via
+                            // `record_stanza_for_detached_bound_resource`
+                            // so a recipient mid-resume didn't lose
+                            // messages; we preserve that here.
+                            let detached_targets: Vec<jid::FullJid> = match deps.sm_session_registry
+                            {
+                                Some(sm) => sm
+                                    .detached_resources_for_user(&bare)
+                                    .await
+                                    .unwrap_or_else(|error| {
+                                        warn!(
+                                            bare_jid = %bare,
+                                            %error,
+                                            "RouteToConnection: failed to enumerate \
+                                             detached resources for bare-JID delivery"
+                                        );
+                                        Vec::new()
+                                    }),
+                                None => Vec::new(),
+                            };
+                            let live_targets = registry.select_routable_resources_for_user(&bare);
+                            if live_targets.is_empty() && detached_targets.is_empty() {
                                 if bare.domain().as_str() != deps.local_domain {
                                     debug!(
                                         bare_jid = %bare,
@@ -404,8 +430,60 @@ async fn interpret_with_depth(
                                     .await;
                                 }
                             } else {
-                                for full in targets {
-                                    deliver_peer_to_full(registry, &full, (*stanza).clone()).await;
+                                for full in live_targets {
+                                    deliver_peer_to_full(
+                                        registry,
+                                        deps.sm_session_registry,
+                                        &full,
+                                        (*stanza).clone(),
+                                    )
+                                    .await;
+                                }
+                                if let Some(sm) = deps.sm_session_registry {
+                                    for full in detached_targets {
+                                        // Skip if this resource was just
+                                        // delivered live (race between
+                                        // enumeration and live-resource
+                                        // selection).
+                                        if registry
+                                            .select_routable_resources_for_user(&bare)
+                                            .iter()
+                                            .any(|live| live == &full)
+                                        {
+                                            continue;
+                                        }
+                                        let stanza_typed = (*stanza).clone();
+                                        match sm
+                                            .record_stanza_for_detached_bound_resource(
+                                                &full,
+                                                &stanza_typed,
+                                            )
+                                            .await
+                                        {
+                                            Ok(true) => {
+                                                debug!(
+                                                    jid = %full,
+                                                    "RouteToConnection: bare-JID stanza queued \
+                                                     for detached XEP-0198 replay"
+                                                );
+                                            }
+                                            Ok(false) => {
+                                                debug!(
+                                                    jid = %full,
+                                                    "RouteToConnection: detached session expired \
+                                                     between enumeration and queue; dropping"
+                                                );
+                                            }
+                                            Err(error) => {
+                                                warn!(
+                                                    jid = %full,
+                                                    %error,
+                                                    "RouteToConnection: failed to record bare-JID \
+                                                     stanza for detached resource"
+                                                );
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -902,20 +980,55 @@ async fn run_headless_recipient_pass(
 /// write. Centralizes the per-target send + result-logging shape so
 /// both the full-JID and bare-JID-resource-selection arms of
 /// [`OutboundEvent::RouteToConnection`] go through the same path.
+///
+/// On `NotConnected` / `ChannelClosed`, falls back to recording the
+/// stanza on the recipient's detached XEP-0198 stream-management
+/// session (when one exists) so a recipient that's mid-resume doesn't
+/// silently lose direct messages — matching the legacy
+/// `handle_message` direct-route semantics. Cross-domain bare JIDs and
+/// truly-offline recipients still drop here; the bare-JID arm above
+/// runs the headless recipient pass for offline persistence
+/// (archive/inbox/incoming-block) on local domains.
 async fn deliver_peer_to_full(
     registry: &waddle_xmpp::registry::ConnectionRegistry,
+    sm_session_registry: Option<&Arc<InMemorySmSessionRegistry>>,
     target: &jid::FullJid,
     stanza: Stanza,
 ) {
-    match registry.send_peer_to(target, stanza).await {
+    match registry.send_peer_to(target, stanza.clone()).await {
         waddle_xmpp::registry::SendResult::Sent => {
             debug!(jid = %target, "RouteToConnection: peer-stanza queued for recipient pass");
         }
-        waddle_xmpp::registry::SendResult::NotConnected => {
-            debug!(jid = %target, "RouteToConnection: target offline, dropping");
-        }
-        waddle_xmpp::registry::SendResult::ChannelClosed => {
-            warn!(jid = %target, "RouteToConnection: target channel closed, dropping");
+        waddle_xmpp::registry::SendResult::NotConnected
+        | waddle_xmpp::registry::SendResult::ChannelClosed => {
+            if let Some(sm) = sm_session_registry {
+                match sm
+                    .record_stanza_for_detached_bound_resource(target, &stanza)
+                    .await
+                {
+                    Ok(true) => {
+                        debug!(
+                            jid = %target,
+                            "RouteToConnection: recipient detached, queued for XEP-0198 replay"
+                        );
+                    }
+                    Ok(false) => {
+                        debug!(
+                            jid = %target,
+                            "RouteToConnection: target offline and no detached session, dropping"
+                        );
+                    }
+                    Err(error) => {
+                        warn!(
+                            jid = %target,
+                            %error,
+                            "RouteToConnection: failed to record stanza for detached resource"
+                        );
+                    }
+                }
+            } else {
+                debug!(jid = %target, "RouteToConnection: target offline, dropping");
+            }
         }
     }
 }
