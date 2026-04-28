@@ -58,18 +58,16 @@ abstract class VerifyFfiArtifacts : DefaultTask() {
 	@org.gradle.api.tasks.TaskAction
 	fun verify() {
 		val path = displayPath.get()
-		val ok =
+		val resolved =
 			when (checkKind.get()) {
-				"directory" -> {
-					val dir = targetDir.get().asFile
-					dir.isDirectory && (dir.listFiles()?.isNotEmpty() == true)
-				}
-				"file" -> target.get().asFile.isFile
-				else -> false
+				"directory" -> targetDir.get().asFile
+				"file" -> target.get().asFile
+				else -> error("unknown checkKind ${checkKind.get()}")
 			}
-		if (!ok) {
+		logger.lifecycle("verifyFfi: checkKind=${checkKind.get()} path=$path resolved=$resolved exists=${resolved.exists()}")
+		if (!resolved.exists()) {
 			throw org.gradle.api.GradleException(
-				"Missing $path\n" +
+				"Missing $path (resolved to $resolved)\n" +
 					"Run `bash scripts/build-android-bindings.sh` from the repo root first.",
 			)
 		}

@@ -85,6 +85,9 @@ jobs:
           export ANDROID_NDK_HOME="${ANDROID_NDK_LATEST_HOME}"
         }
         bash scripts/build-android-bindings.sh
+        echo "==> Sanity check: artefacts on disk"
+        ls -la apps/android/ffi/src/main/kotlin/uniffi/waddle_xmpp_client/ || true
+        ls -la apps/android/ffi/src/main/jniLibs/arm64-v8a/ || true
 
     - name: Setup Gradle
       # Handles the dependency cache, build cache, and configuration cache
