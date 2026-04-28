@@ -244,9 +244,9 @@ impl waddle_xmpp::xep::xep0191::BlockingStorage for DatabaseBlockingStorage {
         &self,
         user: &BareJid,
     ) -> Result<Vec<BareJid>, waddle_xmpp::xep::xep0191::BlockingStorageError> {
-        Self::list_blocked_jids(self, user).await.map_err(|error| {
-            waddle_xmpp::xep::xep0191::BlockingStorageError::Other(error.to_string())
-        })
+        Self::list_blocked_jids(self, user)
+            .await
+            .map_err(waddle_xmpp::xep::xep0191::BlockingStorageError::new)
     }
 }
 

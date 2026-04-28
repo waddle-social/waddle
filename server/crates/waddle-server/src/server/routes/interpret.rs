@@ -362,37 +362,51 @@ async fn interpret_with_depth(
                 // archive + inbox + incoming-blocking still execute
                 // — see [`run_headless_recipient_pass`]. Cross-domain
                 // bare JIDs (future s2s) drop without a recipient pass.
-                match jid.clone().try_into_full() {
-                    Ok(full) => deliver_peer_to_full(registry, &full, *stanza).await,
-                    Err(bare) => {
-                        let targets = registry.select_routable_resources_for_user(&bare);
-                        if targets.is_empty() {
-                            if bare.domain().as_str() != deps.local_domain {
-                                debug!(
-                                    bare_jid = %bare,
-                                    local_domain = %deps.local_domain,
-                                    "RouteToConnection: cross-domain bare JID with no local \
-                                     resources; dropping (s2s out of scope)"
-                                );
-                            } else if recursion_depth >= MAX_RECIPIENT_PASS_DEPTH {
-                                debug!(
-                                    bare_jid = %bare,
-                                    recursion_depth,
-                                    "RouteToConnection: headless recipient-pass already running; \
-                                     dropping recursive route to prevent loop"
-                                );
+                //
+                // Recursion guard (Codex P1 on PR #275): the depth check
+                // gates the *entire* arm, not just the empty-targets
+                // branch. At `recursion_depth >= MAX_RECIPIENT_PASS_DEPTH`
+                // we are already inside a headless pass; any nested
+                // `RouteToConnection` — full-JID or bare-JID, with or
+                // without live targets — must drop, otherwise live
+                // delivery would re-trigger a second recipient pass and
+                // duplicate persistence. Persistence and incoming-block
+                // for the offline recipient are owned by the OUTER
+                // headless pass; nothing else.
+                if recursion_depth >= MAX_RECIPIENT_PASS_DEPTH {
+                    debug!(
+                        target_jid = %jid,
+                        recursion_depth,
+                        "RouteToConnection: headless recipient-pass already running; \
+                         dropping nested route (full or bare) to prevent duplicate \
+                         delivery / persistence"
+                    );
+                } else {
+                    match jid.clone().try_into_full() {
+                        Ok(full) => deliver_peer_to_full(registry, &full, *stanza).await,
+                        Err(bare) => {
+                            let targets = registry.select_routable_resources_for_user(&bare);
+                            if targets.is_empty() {
+                                if bare.domain().as_str() != deps.local_domain {
+                                    debug!(
+                                        bare_jid = %bare,
+                                        local_domain = %deps.local_domain,
+                                        "RouteToConnection: cross-domain bare JID with no \
+                                         local resources; dropping (s2s out of scope)"
+                                    );
+                                } else {
+                                    run_headless_recipient_pass(
+                                        deps,
+                                        &bare,
+                                        *stanza,
+                                        recursion_depth + 1,
+                                    )
+                                    .await;
+                                }
                             } else {
-                                run_headless_recipient_pass(
-                                    deps,
-                                    &bare,
-                                    *stanza,
-                                    recursion_depth + 1,
-                                )
-                                .await;
-                            }
-                        } else {
-                            for full in targets {
-                                deliver_peer_to_full(registry, &full, (*stanza).clone()).await;
+                                for full in targets {
+                                    deliver_peer_to_full(registry, &full, (*stanza).clone()).await;
+                                }
                             }
                         }
                     }
@@ -805,18 +819,26 @@ async fn run_headless_recipient_pass(
     };
     let synthetic_full = recipient_bare.with_resource(&synthetic_resource);
 
+    // Fail-closed on blocklist load error (Copilot review on PR #275).
+    // Mirroring `load_blocklist_for_bind`'s fail-closed semantic and
+    // PR13's bind-time policy: a transient storage error must not
+    // disable XEP-0191 incoming-block enforcement, otherwise a blocked
+    // sender could be persisted into the offline recipient's MAM /
+    // inbox. We skip the recipient pass entirely; the outer arm has
+    // already logged the routing intent, and the sender's archive
+    // entry survives independently of the recipient pass.
     let blocklist = match deps.blocking_storage {
         Some(storage) => match storage.list_blocked_jids(recipient_bare).await {
             Ok(jids) => Blocklist::new(jids),
             Err(error) => {
                 warn!(
                     bare_jid = %recipient_bare,
-                    %error,
-                    "headless recipient-pass: blocklist load failed; degrading to \
-                     empty (XEP-0191 incoming-block filter disabled for this single \
-                     message)"
+                    error = %error,
+                    "headless recipient-pass: blocklist load failed; skipping \
+                     recipient-side processing to preserve XEP-0191 incoming-block \
+                     enforcement (fail-closed)"
                 );
-                Blocklist::empty()
+                return;
             }
         },
         None => Blocklist::empty(),
@@ -2804,41 +2826,57 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn offline_recipient_pass_skips_route_to_connection_recursion() {
-        // The transient SM's RouteHandler emits `RouteToConnection`
-        // for the recipient pass on a chat message. With the recursion
-        // guard the inner re-entry must drop without spawning another
-        // headless pass — verify by registering a sentinel resource
-        // for bob *only* under a different bare JID and asserting the
-        // chat message body lands in bob's archive once, not multiple
-        // times. (If recursion looped, the archive count would grow.)
+    async fn route_to_connection_at_max_recursion_depth_drops_without_persistence() {
+        // Direct unit test of the Codex-P1 recursion guard.
+        // Calling `interpret_with_depth(...)` at
+        // `MAX_RECIPIENT_PASS_DEPTH` simulates the inner-pass entry — a
+        // `RouteToConnection` emitted from inside an in-flight headless
+        // pass. The guard MUST short-circuit the entire arm (whether
+        // the bare-JID has live targets or not), so no headless pass
+        // runs and no recipient archive / inbox row is written.
+        //
+        // This pins the guard against regressions: removing or
+        // weakening the depth check would let nested
+        // `RouteToConnection` re-enter and cause duplicate persistence
+        // in production. The test does not depend on which event the
+        // transient SM's recipient pass actually emits.
         use waddle_xmpp::inbox::storage::InMemoryInboxStorage;
         use waddle_xmpp::mam::storage::InMemoryMamStorage;
         use waddle_xmpp::xep::xep0191::InMemoryBlockingStorage;
 
         let registry = ConnectionRegistry::new();
         let mam: Arc<dyn MamStorage> = Arc::new(InMemoryMamStorage::new());
-        let inbox: Arc<dyn InboxStorage> = Arc::new(InMemoryInboxStorage::new());
+        let inbox_concrete = Arc::new(InMemoryInboxStorage::new());
+        let inbox: Arc<dyn InboxStorage> = inbox_concrete.clone();
         let blocking: Arc<dyn BlockingStorage> = Arc::new(InMemoryBlockingStorage::new());
         let dispatcher = pipelined_dispatcher();
         let deps = offline_pass_deps(&registry, &mam, &inbox, &blocking, &dispatcher);
 
-        let msg = chat_msg("alice@example.com/web", "bob@example.com", "no loop");
+        let msg = chat_msg("alice@example.com/web", "bob@example.com", "guard");
         let events = vec![OutboundEvent::RouteToConnection {
             jid: "bob@example.com".parse::<jid::Jid>().expect("bare"),
             stanza: Box::new(Stanza::Message(msg)),
         }];
-        let _ = interpret(events, &deps).await;
+        let outcome = interpret_with_depth(events, &deps, MAX_RECIPIENT_PASS_DEPTH).await;
 
+        let bob: jid::BareJid = "bob@example.com".parse().expect("bare");
         let bob_archive = mam
-            .query_messages("bob@example.com", &Default::default())
+            .query_messages(bob.as_str(), &Default::default())
             .await
             .expect("query bob");
-        assert_eq!(
-            bob_archive.messages.len(),
-            1,
-            "recursion guard prevents the inner RouteToConnection from triggering \
-             another headless pass — bob's archive has exactly one entry"
+        assert!(
+            bob_archive.messages.is_empty(),
+            "recursion guard at MAX_RECIPIENT_PASS_DEPTH prevents the headless \
+             pass from running — bob's archive must remain empty"
+        );
+        let entries = inbox_concrete.list(&bob).await.expect("list");
+        assert!(
+            entries.is_empty(),
+            "recursion guard prevents inbox projection at max depth"
+        );
+        assert!(
+            outcome.frames.is_empty(),
+            "recursion guard drops the route entirely — no frames produced"
         );
     }
 
@@ -2916,15 +2954,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn offline_recipient_pass_blocklist_storage_error_logs_warn_and_proceeds() {
-        // When the blocklist storage errors, the helper degrades to
-        // `Blocklist::empty()` so the dispatch still goes through —
-        // archive IS written, XEP-0191 incoming filter disabled for
-        // this single message.
+    async fn offline_recipient_pass_blocklist_storage_error_skips_recipient_persistence() {
+        // Fail-closed semantic (Copilot review on PR #275): when the
+        // blocklist storage errors, the helper MUST skip the recipient
+        // pass entirely — no archive, no inbox row — to preserve
+        // XEP-0191 incoming-block enforcement. Mirrors PR13's bind-time
+        // policy where a blocklist load error fails the bind.
+        // Degrading to `Blocklist::empty()` would silently allow blocked
+        // senders into the recipient's MAM / inbox.
         use async_trait::async_trait;
         use waddle_xmpp::inbox::storage::InMemoryInboxStorage;
         use waddle_xmpp::mam::storage::InMemoryMamStorage;
         use waddle_xmpp::xep::xep0191::{BlockingStorage, BlockingStorageError};
+
+        #[derive(Debug, thiserror::Error)]
+        #[error("simulated blocking storage failure")]
+        struct SimulatedFailure;
 
         struct FailingBlocking;
         #[async_trait]
@@ -2933,32 +2978,38 @@ mod tests {
                 &self,
                 _: &jid::BareJid,
             ) -> Result<Vec<jid::BareJid>, BlockingStorageError> {
-                Err(BlockingStorageError::Other("simulated".into()))
+                Err(BlockingStorageError::new(SimulatedFailure))
             }
         }
 
         let registry = ConnectionRegistry::new();
         let mam: Arc<dyn MamStorage> = Arc::new(InMemoryMamStorage::new());
-        let inbox: Arc<dyn InboxStorage> = Arc::new(InMemoryInboxStorage::new());
+        let inbox_concrete = Arc::new(InMemoryInboxStorage::new());
+        let inbox: Arc<dyn InboxStorage> = inbox_concrete.clone();
         let blocking: Arc<dyn BlockingStorage> = Arc::new(FailingBlocking);
         let dispatcher = pipelined_dispatcher();
         let deps = offline_pass_deps(&registry, &mam, &inbox, &blocking, &dispatcher);
 
-        let msg = chat_msg("alice@example.com/web", "bob@example.com", "degrade");
+        let msg = chat_msg("alice@example.com/web", "bob@example.com", "fail-closed");
         let events = vec![OutboundEvent::RouteToConnection {
             jid: "bob@example.com".parse::<jid::Jid>().expect("bare"),
             stanza: Box::new(Stanza::Message(msg)),
         }];
         let _ = interpret(events, &deps).await;
 
+        let bob: jid::BareJid = "bob@example.com".parse().expect("bare");
         let bob_archive = mam
-            .query_messages("bob@example.com", &Default::default())
+            .query_messages(bob.as_str(), &Default::default())
             .await
             .expect("query bob");
-        assert_eq!(
-            bob_archive.messages.len(),
-            1,
-            "blocklist load error degrades to empty — dispatch proceeds, archive written"
+        assert!(
+            bob_archive.messages.is_empty(),
+            "blocklist load error fails closed — recipient archive NOT written"
+        );
+        let entries = inbox_concrete.list(&bob).await.expect("list");
+        assert!(
+            entries.is_empty(),
+            "blocklist load error fails closed — recipient inbox NOT written"
         );
     }
 
@@ -3007,8 +3058,13 @@ mod tests {
         let inbox_concrete = Arc::new(InMemoryInboxStorage::new());
         let inbox: Arc<dyn InboxStorage> = inbox_concrete.clone();
         let blocking: Arc<dyn BlockingStorage> = Arc::new(InMemoryBlockingStorage::new());
-        // The headless pass should stamp under bob's bare; pin a
-        // deterministic id-gen on its dispatcher.
+        // The headless pass constructs a transient `XmppStateMachine`
+        // for bob, cloning this dispatcher so the recipient handler
+        // chain runs against bob's bare JID. XEP-0359 stanza-id
+        // determinism is owned by the per-machine `IdGenerator` (see
+        // `XmppStateMachine::with_id_gen`), not by the dispatcher
+        // itself — this fixture relies on uniqueness rather than
+        // deterministic ids.
         let mut headless_dispatch = StanzaDispatcher::new();
         register_default_message_handlers(&mut headless_dispatch);
         let dispatcher = Arc::new(headless_dispatch);

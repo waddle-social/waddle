@@ -56,18 +56,39 @@ use xmpp_parsers::iq::Iq;
 /// Namespace for XEP-0191 Blocking Command.
 pub const NS_BLOCKING: &str = "urn:xmpp:blocking";
 
-/// Errors returned by [`BlockingStorage`] implementations.
+/// Error returned by [`BlockingStorage`] implementations.
 ///
-/// Implementations should map their underlying storage errors into
-/// [`Self::Other`] with a typed `String` diagnostic. The interpreter
-/// treats any error as a degrade-to-empty signal for the offline
-/// recipient pass — see
-/// `crate::server::routes::interpret::run_headless_recipient_pass` in
-/// the server crate.
+/// Wraps the implementation's underlying typed error via [`std::error::Error::source`]
+/// so the diagnostic chain remains typed end-to-end (no stringly-typed
+/// payload — see the typed-payloads hard rule in `CLAUDE.md`).
+/// Implementations construct it via [`Self::new`].
+///
+/// Callers MUST treat any error as fail-closed for XEP-0191 enforcement:
+/// the bind path fails the bind with a stream error
+/// (`load_blocklist_for_bind`), and the headless offline-recipient pass
+/// skips recipient-side processing entirely
+/// (`run_headless_recipient_pass`). Degrading to an empty blocklist
+/// would silently disable incoming-block enforcement and risk
+/// persisting blocked messages into the recipient's archive / inbox.
 #[derive(Debug, thiserror::Error)]
-pub enum BlockingStorageError {
-    #[error("blocking storage error: {0}")]
-    Other(String),
+#[error("blocking storage error")]
+pub struct BlockingStorageError {
+    #[source]
+    source: Box<dyn std::error::Error + Send + Sync + 'static>,
+}
+
+impl BlockingStorageError {
+    /// Wrap an implementation-specific error so the protocol-side
+    /// trait can carry it without stringification. The underlying
+    /// typed error remains accessible via [`std::error::Error::source`].
+    pub fn new<E>(source: E) -> Self
+    where
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        Self {
+            source: Box::new(source),
+        }
+    }
 }
 
 /// Storage contract for the per-user XEP-0191 blocklist.
@@ -114,6 +135,14 @@ impl InMemoryBlockingStorage {
     }
 }
 
+/// Sentinel error type for `InMemoryBlockingStorage` faults. The
+/// `Mutex<HashMap>` only fails on poison; this carries the typed
+/// poison panic info (`PoisonError`'s `Debug`) without stringifying
+/// at the boundary.
+#[derive(Debug, thiserror::Error)]
+#[error("in-memory blocking storage mutex poisoned")]
+pub struct InMemoryBlockingStorageError;
+
 #[async_trait]
 impl BlockingStorage for InMemoryBlockingStorage {
     async fn list_blocked_jids(
@@ -123,7 +152,7 @@ impl BlockingStorage for InMemoryBlockingStorage {
         let guard = self
             .per_user
             .lock()
-            .map_err(|e| BlockingStorageError::Other(e.to_string()))?;
+            .map_err(|_| BlockingStorageError::new(InMemoryBlockingStorageError))?;
         Ok(guard.get(user).cloned().unwrap_or_default())
     }
 }
