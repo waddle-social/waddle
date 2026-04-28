@@ -64,6 +64,7 @@ schema.#Project & {
 			when: {
 				pullRequest: true
 			}
+			provider: github: permissions: contents: "read"
 			"tasks": [tasks.build]
 		}
 	}

@@ -23,7 +23,6 @@ permissions:
   contents: read
   checks: write
   pull-requests: write
-  packages: write
 jobs:
   waddle-server-pullRequest:
     name: waddle-server-pullRequest

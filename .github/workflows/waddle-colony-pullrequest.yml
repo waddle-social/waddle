@@ -26,7 +26,6 @@ permissions:
   contents: read
   checks: write
   pull-requests: write
-  packages: write
 jobs:
   waddle-colony-pullRequest:
     name: waddle-colony-pullRequest

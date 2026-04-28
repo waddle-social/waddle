@@ -25,7 +25,6 @@ permissions:
   contents: read
   checks: write
   pull-requests: write
-  packages: write
 jobs:
   waddle-website-pullRequest:
     name: waddle-website-pullRequest

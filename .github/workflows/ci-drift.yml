@@ -4,6 +4,7 @@ on:
     paths:
     - .github/workflows/ci-drift.yml
     - .github/workflows/codeql.yml
+    - .github/workflows/waddle-*.yml
     - cue.mod/**
     - env.cue
     - chat/env.cue
@@ -19,6 +20,7 @@ on:
     paths:
     - .github/workflows/ci-drift.yml
     - .github/workflows/codeql.yml
+    - .github/workflows/waddle-*.yml
     - cue.mod/**
     - env.cue
     - chat/env.cue

@@ -12,3 +12,8 @@ find "${root}/.github/workflows" -type f -name '*.yml' -print0 |
     s{^        GITHUB_REF_TYPE: \$\{\{ github\.ref_type \}\}\n}{}mg;
     s{^        GITHUB_REF_NAME: \$\{\{ github\.ref_name \}\}\n}{}mg;
   '
+
+find "${root}/.github/workflows" -type f -name '*pullrequest.yml' -print0 |
+  xargs -0 perl -0pi -e '
+    s{^  packages: write\n}{}mg;
+  '

@@ -27,7 +27,6 @@ permissions:
   contents: read
   checks: write
   pull-requests: write
-  packages: write
 jobs:
   waddle-chat-pullRequest:
     name: waddle-chat-pullRequest
