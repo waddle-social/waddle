@@ -634,22 +634,39 @@ async fn lookup_archived_message(
     let archive_str = archive.to_string();
     let lookup = match reference {
         MessageRef::StanzaId { id, .. } => {
+            // Strict stanza-id match: `get_message_by_message_id`
+            // matches only the `stanza_id` column (not `origin_id`)
+            // so the OR-collision identified in #229 PR8 review
+            // (origin-id colliding with someone else's stanza-id)
+            // can't return the wrong row.
             mam_storage
-                .get_message_by_stanza_id(&archive_str, id.as_str())
+                .get_message_by_message_id(&archive_str, id.as_str())
                 .await
         }
-        MessageRef::OriginId { origin_id, .. } => {
-            // The MAM trait stores client origin-ids in the
-            // `origin_id` column, but the only accessor that resolves
-            // them today goes through `get_message_by_stanza_id`,
-            // which matches both `stanza_id` and `origin_id`. Use it.
-            mam_storage
-                .get_message_by_stanza_id(&archive_str, origin_id.as_str())
-                .await
+        MessageRef::OriginId { sender, origin_id } => {
+            // No origin-id-only accessor on `MamStorage` today, so we
+            // narrow with `MamQuery.with = sender` (storage-level
+            // sender filter) and pick the first row whose
+            // `origin_id` matches the requested value. This enforces
+            // the typed `MessageRef::OriginId` contract — scoped to
+            // the *original sender*, not just any row sharing that
+            // opaque value — without leaking through the
+            // OR-collision in `get_message_by_stanza_id`.
+            let query = waddle_xmpp::mam::MamQuery {
+                with: Some(sender.to_string()),
+                ..Default::default()
+            };
+            match mam_storage.query_messages(&archive_str, &query).await {
+                Ok(result) => Ok(result
+                    .messages
+                    .into_iter()
+                    .find(|row| row_matches_origin_id(row, sender, origin_id.as_str()))),
+                Err(e) => Err(e),
+            }
         }
     };
     match lookup {
-        Ok(Some(row)) => project_archived_row(archive, reference, row),
+        Ok(Some(row)) => project_archived_row(archive, row),
         Ok(None) => None,
         Err(error) => {
             warn!(
@@ -662,17 +679,35 @@ async fn lookup_archived_message(
     }
 }
 
+/// Verify a storage row genuinely matches the typed
+/// [`MessageRef::OriginId`] key — `origin_id` field equality plus
+/// `sender` (`from`) equality via parsed [`jid::BareJid`] comparison.
+/// String equality on `from` would mishandle case-folded localparts
+/// or full-JID-vs-bare-JID strings; the typed compare normalizes both.
+fn row_matches_origin_id(
+    row: &MamArchivedMessage,
+    expected_sender: &jid::BareJid,
+    expected_origin_id: &str,
+) -> bool {
+    if row.origin_id.as_deref() != Some(expected_origin_id) {
+        return false;
+    }
+    match row.from.parse::<jid::BareJid>() {
+        Ok(bare) => bare == *expected_sender,
+        Err(_) => false,
+    }
+}
+
 /// Project a storage [`MamArchivedMessage`] row into the protocol-side
 /// [`ProtocolArchivedMessage`] consumed by handler completions.
 ///
 /// Falls back to an empty body-only stanza if `stanza_xml` is missing
 /// or unparseable — the rich-target handler primarily inspects the
 /// tombstone state and the sender's bare JID, both of which we can
-/// reconstruct without the original wire form. Logs a WARN so a
-/// regression in the projection is observable.
+/// reconstruct without the original wire form. Logs a WARN at each
+/// projection failure mode so regressions stay observable.
 fn project_archived_row(
     archive: &jid::BareJid,
-    reference: &MessageRef,
     row: MamArchivedMessage,
 ) -> Option<Box<ProtocolArchivedMessage>> {
     let tombstoned = matches!(
@@ -695,7 +730,6 @@ fn project_archived_row(
         id: StanzaIdValue::new(&stamp_id),
     };
 
-    let _ = reference;
     Some(Box::new(ProtocolArchivedMessage {
         stanza_id,
         message: Box::new(message),
@@ -716,7 +750,22 @@ fn parse_archived_message_xml(xml: Option<&str>) -> Option<Message> {
             return None;
         }
     };
-    Message::try_from(element).ok()
+    let element_name = element.name().to_string();
+    let element_ns = element.ns().to_string();
+    match Message::try_from(element) {
+        Ok(message) => Some(message),
+        Err(error) => {
+            warn!(
+                %error,
+                element_name = %element_name,
+                element_ns = %element_ns,
+                "LookupArchivedMessage: stored stanza_xml parsed but failed \
+                 to convert into xmpp_parsers::message::Message; falling \
+                 back to body-only reconstruction"
+            );
+            None
+        }
+    }
 }
 
 fn fallback_archived_message(row: &MamArchivedMessage) -> Message {
@@ -1479,6 +1528,217 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn xep_0359_lookup_archived_message_by_origin_id_feeds_archived_loaded_back() {
+        // OriginId lookup MUST be sender-scoped per the typed
+        // `MessageRef::OriginId { sender, origin_id }` contract.
+        // Seed two rows in alice's archive that share the same
+        // `origin_id` value but come from different senders:
+        // post-filter on `sender` must pick the alice-authored row,
+        // not the bob-authored one.
+        use waddle_xmpp::mam::{ArchivedMessage, InMemoryMamStorage};
+        use waddle_xmpp::protocol::event::{CallbackId, OriginIdValue};
+
+        let registry = ConnectionRegistry::new();
+        let mam: Arc<dyn MamStorage> = Arc::new(InMemoryMamStorage::new());
+        let inbox: Arc<dyn InboxStorage> =
+            Arc::new(waddle_xmpp::inbox::storage::InMemoryInboxStorage::new());
+        let deps = Deps::test_with_storage(&registry, &mam, &inbox);
+
+        let archive_jid: jid::BareJid = "alice@example.com".parse().expect("bare");
+        let alice_bare: jid::BareJid = "alice@example.com".parse().expect("bare");
+
+        // Bob-authored row in alice's archive (cross-resource self
+        // chat / received DM) sharing the colliding origin-id.
+        let bob_row = ArchivedMessage {
+            id: "row-from-bob".to_string(),
+            timestamp: chrono::Utc::now(),
+            from: "bob@example.com".to_string(),
+            to: "alice@example.com".to_string(),
+            body: "from bob".to_string(),
+            stanza_id: Some("alice-stamp-bob".to_string()),
+            thread_id: None,
+            reply_to_id: None,
+            reply_to_jid: None,
+            origin_id: Some("collision".to_string()),
+            message_type: "chat".to_string(),
+            stanza_xml: None,
+            rich: None,
+            nickname_generation: None,
+        };
+        // Alice-authored row in alice's archive (sender-side) with
+        // the same origin-id.
+        let alice_row = ArchivedMessage {
+            id: "row-from-alice".to_string(),
+            timestamp: chrono::Utc::now(),
+            from: "alice@example.com".to_string(),
+            to: "bob@example.com".to_string(),
+            body: "from alice".to_string(),
+            stanza_id: Some("alice-stamp-alice".to_string()),
+            thread_id: None,
+            reply_to_id: None,
+            reply_to_jid: None,
+            origin_id: Some("collision".to_string()),
+            message_type: "chat".to_string(),
+            stanza_xml: None,
+            rich: None,
+            nickname_generation: None,
+        };
+        // Insert bob's row FIRST so a naive OR-matcher would return it.
+        mam.store_message(&archive_jid.to_string(), &bob_row)
+            .await
+            .expect("seed bob");
+        mam.store_message(&archive_jid.to_string(), &alice_row)
+            .await
+            .expect("seed alice");
+
+        let events = vec![OutboundEvent::LookupArchivedMessage {
+            id: CallbackId(21),
+            archive: archive_jid.clone(),
+            reference: MessageRef::OriginId {
+                sender: alice_bare.clone(),
+                origin_id: OriginIdValue::new("collision"),
+            },
+        }];
+        let outcome = interpret(events, &deps).await;
+
+        match outcome.feedback.into_iter().next().expect("feedback") {
+            InboundEvent::ArchivedMessageLoaded {
+                id: CallbackId(21),
+                result: Some(archived),
+            } => {
+                let body = archived
+                    .message
+                    .bodies
+                    .get("")
+                    .map(|b| b.0.clone())
+                    .unwrap_or_default();
+                assert_eq!(
+                    body, "from alice",
+                    "OriginId lookup must scope to sender; bob's row was a collision decoy"
+                );
+            }
+            other => panic!("expected alice-authored row, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn xep_0359_lookup_archived_message_by_origin_id_rejects_cross_sender_collision() {
+        // Same archive, same origin_id, different sender than
+        // requested -> result MUST be None (handler will treat as
+        // <item-not-found>).
+        use waddle_xmpp::mam::{ArchivedMessage, InMemoryMamStorage};
+        use waddle_xmpp::protocol::event::{CallbackId, OriginIdValue};
+
+        let registry = ConnectionRegistry::new();
+        let mam: Arc<dyn MamStorage> = Arc::new(InMemoryMamStorage::new());
+        let inbox: Arc<dyn InboxStorage> =
+            Arc::new(waddle_xmpp::inbox::storage::InMemoryInboxStorage::new());
+        let deps = Deps::test_with_storage(&registry, &mam, &inbox);
+
+        let archive_jid: jid::BareJid = "alice@example.com".parse().expect("bare");
+        let row = ArchivedMessage {
+            id: "row-1".to_string(),
+            timestamp: chrono::Utc::now(),
+            from: "bob@example.com".to_string(),
+            to: "alice@example.com".to_string(),
+            body: "bob's".to_string(),
+            stanza_id: Some("alice-stamp".to_string()),
+            thread_id: None,
+            reply_to_id: None,
+            reply_to_jid: None,
+            origin_id: Some("oid-1".to_string()),
+            message_type: "chat".to_string(),
+            stanza_xml: None,
+            rich: None,
+            nickname_generation: None,
+        };
+        mam.store_message(&archive_jid.to_string(), &row)
+            .await
+            .expect("seed");
+
+        // Look up for a DIFFERENT sender (charlie) with the colliding
+        // origin-id. Must surface as not-found.
+        let charlie_bare: jid::BareJid = "charlie@example.com".parse().expect("bare");
+        let events = vec![OutboundEvent::LookupArchivedMessage {
+            id: CallbackId(31),
+            archive: archive_jid,
+            reference: MessageRef::OriginId {
+                sender: charlie_bare,
+                origin_id: OriginIdValue::new("oid-1"),
+            },
+        }];
+        let outcome = interpret(events, &deps).await;
+
+        match outcome.feedback.into_iter().next().expect("feedback") {
+            InboundEvent::ArchivedMessageLoaded {
+                id: CallbackId(31),
+                result: None,
+            } => {}
+            other => {
+                panic!("OriginId lookup must reject cross-sender collisions, got {other:?}")
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn xep_0359_lookup_archived_message_strict_stanza_id_ignores_origin_id_collision() {
+        // StanzaId path uses `get_message_by_message_id` (stanza_id
+        // ONLY), so a row whose `origin_id` happens to equal the
+        // requested stanza-id MUST NOT be returned.
+        use waddle_xmpp::mam::{ArchivedMessage, InMemoryMamStorage};
+        use waddle_xmpp::protocol::event::{CallbackId, StanzaIdValue};
+
+        let registry = ConnectionRegistry::new();
+        let mam: Arc<dyn MamStorage> = Arc::new(InMemoryMamStorage::new());
+        let inbox: Arc<dyn InboxStorage> =
+            Arc::new(waddle_xmpp::inbox::storage::InMemoryInboxStorage::new());
+        let deps = Deps::test_with_storage(&registry, &mam, &inbox);
+
+        let archive_jid: jid::BareJid = "alice@example.com".parse().expect("bare");
+        // Row whose origin_id equals the value the caller is looking
+        // up via StanzaId. Stanza_id is something else.
+        let collision_row = ArchivedMessage {
+            id: "row-collide".to_string(),
+            timestamp: chrono::Utc::now(),
+            from: "alice@example.com".to_string(),
+            to: "bob@example.com".to_string(),
+            body: "collide".to_string(),
+            stanza_id: Some("real-stamp".to_string()),
+            thread_id: None,
+            reply_to_id: None,
+            reply_to_jid: None,
+            origin_id: Some("queried-id".to_string()),
+            message_type: "chat".to_string(),
+            stanza_xml: None,
+            rich: None,
+            nickname_generation: None,
+        };
+        mam.store_message(&archive_jid.to_string(), &collision_row)
+            .await
+            .expect("seed");
+
+        let events = vec![OutboundEvent::LookupArchivedMessage {
+            id: CallbackId(41),
+            archive: archive_jid.clone(),
+            reference: MessageRef::StanzaId {
+                by: archive_jid,
+                id: StanzaIdValue::new("queried-id"),
+            },
+        }];
+        let outcome = interpret(events, &deps).await;
+
+        match outcome.feedback.into_iter().next().expect("feedback") {
+            InboundEvent::ArchivedMessageLoaded {
+                id: CallbackId(41),
+                result: None,
+            } => {}
+            other => {
+                panic!("strict stanza-id lookup must ignore origin-id collisions, got {other:?}")
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn xep_0424_lookup_archived_message_propagates_tombstone_state() {
         use waddle_xmpp::mam::{
             ArchivedMessage, ArchivedRichMessage, ArchivedRichPayload, ArchivedTombstone,
@@ -1579,6 +1839,70 @@ mod tests {
                 assert_eq!(
                     message.bodies.get("").map(|b| b.0.clone()),
                     Some("look https://x".to_string()),
+                );
+            }
+            other => panic!("expected EnrichmentComplete, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn enrichment_failure_fail_open_feeds_original_message_back() {
+        // Fail-open contract: when the extension manager has no
+        // working actors (e.g. all extension RPCs failed at startup,
+        // or the deployment intentionally disabled extensions),
+        // `enrich_message` is a no-op and the dispatch must still
+        // resume with the *original* message via EnrichmentComplete
+        // — never block on enrichment, never drop the message.
+        // We model this with a disabled config (no actors loaded),
+        // which is the exact failure mode legacy `message.rs` falls
+        // back to when the wasm runtime can't start any extension.
+        use waddle_extensions::{ExtensionConfig, ExtensionManager};
+        use waddle_xmpp::protocol::event::CallbackId;
+
+        let registry = ConnectionRegistry::new();
+        let em = Arc::new(
+            ExtensionManager::from_config(ExtensionConfig {
+                enabled: false,
+                ..Default::default()
+            })
+            .await
+            .expect("disabled extension manager"),
+        );
+        let deps = Deps::test_with_extension_manager(&registry, &em);
+
+        let mut original = chat_msg(
+            "alice@example.com/web",
+            "bob@example.com",
+            "check https://example.com",
+        );
+        original.id = Some("fail-open-id".to_string());
+        let original_payload_count = original.payloads.len();
+
+        let events = vec![OutboundEvent::RequestEnrichment {
+            id: CallbackId(123),
+            message: Box::new(original.clone()),
+        }];
+        let outcome = interpret(events, &deps).await;
+
+        match outcome.feedback.into_iter().next().expect("feedback") {
+            InboundEvent::EnrichmentComplete {
+                id: CallbackId(123),
+                message,
+            } => {
+                assert_eq!(
+                    message.id.as_deref(),
+                    Some("fail-open-id"),
+                    "fail-open path returns the original message id"
+                );
+                assert_eq!(
+                    message.bodies.get("").map(|b| b.0.clone()),
+                    original.bodies.get("").map(|b| b.0.clone()),
+                    "fail-open path returns the original body unchanged"
+                );
+                assert_eq!(
+                    message.payloads.len(),
+                    original_payload_count,
+                    "fail-open path adds no payloads when no actor produces enrichment"
                 );
             }
             other => panic!("expected EnrichmentComplete, got {other:?}"),
