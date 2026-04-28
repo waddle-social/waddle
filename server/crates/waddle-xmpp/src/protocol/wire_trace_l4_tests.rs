@@ -307,15 +307,52 @@ fn xep_0359_self_loop_peer_stanza_terminates_at_wire_not_re_routes() {
         .iter()
         .filter(|e| matches!(e, OutboundEvent::SendStanza(_)))
         .count();
+    // Diagnostic: variant-name list only — never `{events:#?}`.
+    // `OutboundEvent` carries variants whose Debug impl would serialize
+    // user-content fields (`Stanza::Message`, OAuth tokens, SCRAM
+    // credentials), and the static analyzer flags blanket Debug
+    // formatting as a cleartext-logging concern even on a path that
+    // can't produce those variants.
+    let variant_summary: Vec<&'static str> = events.iter().map(outbound_variant_name).collect();
     assert_eq!(
         route_count, 0,
         "peer-pass self-loop must NOT re-emit RouteToConnection \
-         (would create routing loop); got {events:#?}"
+         (would create routing loop); got variants: {variant_summary:?}"
     );
     assert_eq!(
         send_count, 1,
-        "peer-pass self-loop terminates with exactly one SendStanza"
+        "peer-pass self-loop terminates with exactly one SendStanza; \
+         got variants: {variant_summary:?}"
     );
+}
+
+/// Map an [`OutboundEvent`] variant to its name without serializing
+/// the typed payload. Used in panic messages so test diagnostics never
+/// blanket-Debug-format events whose variants may carry user content
+/// or credentials (per the cleartext-logging static check).
+fn outbound_variant_name(event: &OutboundEvent) -> &'static str {
+    match event {
+        OutboundEvent::SendStanza(_) => "SendStanza",
+        OutboundEvent::CloseTransport => "CloseTransport",
+        OutboundEvent::Log { .. } => "Log",
+        OutboundEvent::RouteToConnection { .. } => "RouteToConnection",
+        OutboundEvent::DispatchToRoom { .. } => "DispatchToRoom",
+        OutboundEvent::BroadcastToRoom { .. } => "BroadcastToRoom",
+        OutboundEvent::RegisterConnection(_) => "RegisterConnection",
+        OutboundEvent::UnregisterConnection(_) => "UnregisterConnection",
+        OutboundEvent::ArchiveGroupchat { .. } => "ArchiveGroupchat",
+        OutboundEvent::ArchiveDirect { .. } => "ArchiveDirect",
+        OutboundEvent::ProjectInbox { .. } => "ProjectInbox",
+        OutboundEvent::SendCarbons { .. } => "SendCarbons",
+        OutboundEvent::RequestEnrichment { .. } => "RequestEnrichment",
+        OutboundEvent::AskSfu { .. } => "AskSfu",
+        OutboundEvent::QueryMam { .. } => "QueryMam",
+        OutboundEvent::LoadScramCredentials { .. } => "LoadScramCredentials",
+        OutboundEvent::ValidateOAuthBearer { .. } => "ValidateOAuthBearer",
+        OutboundEvent::LookupArchivedMessage { .. } => "LookupArchivedMessage",
+        OutboundEvent::SetTimer { .. } => "SetTimer",
+        OutboundEvent::CancelTimer(_) => "CancelTimer",
+    }
 }
 
 #[test]
