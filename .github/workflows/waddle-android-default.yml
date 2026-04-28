@@ -56,8 +56,11 @@ jobs:
 
     - name: Install cargo-ndk
       run: |
+        # Pin to 3.5.x; cargo-ndk 4.x has linker-flag regressions around
+        # modern NDK sysroots (crtbegin_so.o lookup fails). 3.5.4 has the
+        # right flag handling and uses lowercase `-p` for the API level.
         if ! command -v cargo-ndk >/dev/null 2>&1; then
-          cargo install cargo-ndk --locked --version ^4.1
+          cargo install cargo-ndk --locked --version ^3.5
         fi
 
     - name: Build FFI artefacts (.so + Kotlin bindings, release)
