@@ -47,6 +47,7 @@ function fromLiveDmMessage(
     createdAt: msg.createdAt,
     isSelf: barePeerJid(msg.fromJid) === barePeerJid(session.jid),
   };
+  if (msg.correctionTargetId) tm.correctionTargetId = msg.correctionTargetId;
   if (msg.wireIds?.length) tm.wireIds = msg.wireIds;
   if (msg.mentions?.length) tm.mentions = msg.mentions;
   if (msg.markup?.length) tm.markup = msg.markup;
@@ -73,6 +74,7 @@ function queuedDmMessageToTimeline(
 ): TimelineMessage {
   const message: TimelineMessage = {
     id: queued.id,
+    correctionTargetId: queued.id,
     author: session.username,
     authorJid: session.jid,
     body: queued.body || (queued.files?.[0]?.url ?? ""),
@@ -273,15 +275,20 @@ export function useDmMessaging(
     messages.value = messages.value.map((m) => (matchMessageId(m, retractsId) ? { ...m, body: "", isRetracted: true } : m));
   }
 
+  function isSameDmCorrectionSender(target: TimelineMessage, correctionFromJid: string): boolean {
+    return barePeerJid(target.authorJid ?? "") === barePeerJid(correctionFromJid);
+  }
+
   function applyCorrection(
     replacesId: string,
     newBody: string,
+    correctionFromJid: string,
     markup?: LiveDmMessage["markup"],
     references?: LiveDmMessage["references"],
     githubEmbeds?: LiveDmMessage["githubEmbeds"],
   ) {
     messages.value = messages.value.map((m) => {
-      if (!matchMessageId(m, replacesId)) return m;
+      if (!matchMessageId(m, replacesId) || !isSameDmCorrectionSender(m, correctionFromJid)) return m;
       const updated: TimelineMessage = { ...m, body: newBody.trim(), isEdited: true };
       if (markup && markup.length > 0) {
         updated.markup = markup;
@@ -422,6 +429,7 @@ export function useDmMessaging(
       const retractionUpdates: string[] = [];
       const correctionUpdates: {
         targetId: string;
+        correctionFromJid: string;
         body: string;
         markup?: LiveDmMessage["markup"];
         references?: LiveDmMessage["references"];
@@ -439,6 +447,7 @@ export function useDmMessaging(
         } else if (msg.replacesId) {
           correctionUpdates.push({
             targetId: msg.replacesId,
+            correctionFromJid: msg.fromJid,
             body: msg.body,
             markup: msg.markup,
             references: msg.references,
@@ -456,7 +465,7 @@ export function useDmMessaging(
       });
       for (const update of correctionUpdates) {
         const target = findMessageById(timeline, update.targetId);
-        if (!target) continue;
+        if (!target || !isSameDmCorrectionSender(target, update.correctionFromJid)) continue;
         target.body = update.body;
         target.isEdited = true;
         if (update.markup && update.markup.length > 0) {
@@ -596,6 +605,7 @@ export function useDmMessaging(
           pendingEchoClientIds.add(msgId);
           const optimistic: TimelineMessage = {
             id: msgId,
+            correctionTargetId: msgId,
             author: session.value.username,
             authorJid: session.value.jid,
             body: bodyText || (attachments?.[0]?.url ?? ""),
@@ -678,7 +688,8 @@ export function useDmMessaging(
 
   async function editMessage(messageId: string, newBody: string, markup?: MarkupSpan[], references?: MessageReference[]) {
     if (!xmppClient.value || !activePeerJid.value || !newBody.trim()) return;
-    const targetId = findMessageById(messages.value, messageId)?.id ?? messageId;
+    const message = findMessageById(messages.value, messageId);
+    const targetId = message?.correctionTargetId ?? messageId;
     clearActionError();
     try {
       await xmppClient.value.sendDmCorrection(activePeerJid.value, newBody, targetId, markup, references);
@@ -766,7 +777,7 @@ export function useDmMessaging(
       return;
     }
     if (msg.replacesId) {
-      applyCorrection(msg.replacesId, msg.body, msg.markup, msg.references, msg.githubEmbeds);
+      applyCorrection(msg.replacesId, msg.body, msg.fromJid, msg.markup, msg.references, msg.githubEmbeds);
       return;
     }
     mergeLiveMessage(

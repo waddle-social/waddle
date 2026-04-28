@@ -97,6 +97,8 @@ wiremock = "0.6"
 http-body-util = "0.1"
 tokio-tungstenite = "0.24"
 pbkdf2 = { version = "0.12", features = ["hmac"] }
+cuengine = "0.40.6"
+tempfile = "3.14"
 
 [[bin]]
 name = "waddle-server"

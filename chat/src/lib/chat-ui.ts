@@ -39,9 +39,13 @@ export interface TimelineMessage {
   id: string;
   /** Equivalent wire-level ids (XEP-0359 stanza/origin ids, echoed ids). */
   wireIds?: string[];
+  /** XEP-0308 correction target: original sender message id/origin-id. */
+  correctionTargetId?: string;
   author: string;
   /** Actual bare JID when known; otherwise the room occupant JID. */
   authorJid?: string;
+  /** Full MUC occupant JID used for same-occupant protocol checks. */
+  authorOccupantJid?: string;
   /** XEP-0313 MUC archive real JID from muc#user item@jid, when present. */
   authorRealJid?: string;
   body: string;

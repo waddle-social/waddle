@@ -15,6 +15,10 @@ integration:
 websocket:
     cargo test -p waddle-server --test xep0092_software_version_ws --test xep0012_0202_ws --test xep0054_0049_0191_ws --verbose
 
+# Run CUE-authored XMPP E2E protocol scenarios.
+e2e:
+    cargo test -p waddle-server --test xmpp_e2e_cue --verbose
+
 # Run only inline unit tests.
 unit:
     cargo test -p waddle-xmpp --lib --verbose

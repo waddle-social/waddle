@@ -45,14 +45,17 @@ export function fromLiveMessage(
   msg: LiveRoomMessage,
   parentLookup?: (id: string) => { body?: string } | undefined,
 ): TimelineMessage {
+  const authorOccupantJid = `${msg.roomJid}/${msg.nick}`;
   const tm: TimelineMessage = {
     id: msg.id,
     author: msg.nick,
-    authorJid: msg.authorRealJid ?? `${msg.roomJid}/${msg.nick}`,
+    authorJid: msg.authorRealJid ?? authorOccupantJid,
+    authorOccupantJid,
     body: msg.body,
     createdAt: msg.createdAt,
     isSelf: msg.nick === session.username,
   };
+  if (msg.correctionTargetId) tm.correctionTargetId = msg.correctionTargetId;
   if (msg.authorRealJid) tm.authorRealJid = msg.authorRealJid;
   if (msg.wireIds && msg.wireIds.length > 0) {
     tm.wireIds = msg.wireIds;
@@ -140,6 +143,7 @@ function queuedRoomMessageToTimeline(
 ): TimelineMessage {
   const message: TimelineMessage = {
     id: queued.id,
+    correctionTargetId: queued.id,
     author: session.username,
     authorJid: `${roomJid}/${session.username}`,
     body: queued.body || (queued.files?.[0]?.url ?? ""),
@@ -310,7 +314,14 @@ export function useMessaging(
 
         // XEP-0308: Handle message corrections
         if (msg.replacesId) {
-          applyCorrection(msg.replacesId, msg.body, msg.markup, msg.references, msg.githubEmbeds);
+          applyCorrection(
+            msg.replacesId,
+            msg.body,
+            mucCorrectionSender(msg),
+            msg.markup,
+            msg.references,
+            msg.githubEmbeds,
+          );
           return;
         }
 
@@ -561,17 +572,41 @@ export function useMessaging(
     );
   }
 
+  function mucCorrectionSender(msg: Pick<LiveRoomMessage, "roomJid" | "nick" | "authorRealJid">): {
+    authorJid: string;
+    authorRealJid?: string;
+  } {
+    return {
+      authorJid: `${msg.roomJid}/${msg.nick}`,
+      ...(msg.authorRealJid ? { authorRealJid: msg.authorRealJid } : {}),
+    };
+  }
+
+  function isSameMucCorrectionSender(
+    target: TimelineMessage,
+    correction: { authorJid: string; authorRealJid?: string },
+  ): boolean {
+    if ((target.authorOccupantJid ?? target.authorJid) !== correction.authorJid) return false;
+    if (target.authorRealJid && correction.authorRealJid) {
+      return barePeerJid(target.authorRealJid) === barePeerJid(correction.authorRealJid);
+    }
+    return true;
+  }
+
   function applyCorrection(
     replacesId: string,
     newBody: string,
+    correctionSender: { authorJid: string; authorRealJid?: string },
     markup?: MarkupSpan[],
     references?: MessageReference[],
     githubEmbeds?: LiveRoomMessage["githubEmbeds"],
   ) {
-    const idx = messages.value.findIndex((m) => matchMessageId(m, replacesId));
+    const idx = messages.value.findIndex((m) =>
+      matchMessageId(m, replacesId) && isSameMucCorrectionSender(m, correctionSender)
+    );
     if (idx === -1) return;
     messages.value = messages.value.map((m) => {
-      if (!matchMessageId(m, replacesId)) return m;
+      if (!matchMessageId(m, replacesId) || !isSameMucCorrectionSender(m, correctionSender)) return m;
       const updated: TimelineMessage = { ...m, body: newBody.trim(), isEdited: true };
       if (markup && markup.length > 0) {
         updated.markup = markup;
@@ -769,6 +804,7 @@ export function useMessaging(
       const retractionUpdates: string[] = [];
       const correctionUpdates: {
         targetId: string;
+        correctionSender: { authorJid: string; authorRealJid?: string };
         body: string;
         markup?: MarkupSpan[];
         references?: MessageReference[];
@@ -787,6 +823,7 @@ export function useMessaging(
         } else if (msg.replacesId) {
           correctionUpdates.push({
             targetId: msg.replacesId,
+            correctionSender: mucCorrectionSender(msg),
             body: msg.body,
             markup: msg.markup,
             references: msg.references,
@@ -808,7 +845,7 @@ export function useMessaging(
 
       for (const update of correctionUpdates) {
         const target = findMessageById(timeline, update.targetId);
-        if (!target) continue;
+        if (!target || !isSameMucCorrectionSender(target, update.correctionSender)) continue;
         target.body = update.body;
         target.isEdited = true;
         if (update.markup && update.markup.length > 0) {
@@ -1034,6 +1071,7 @@ export function useMessaging(
         // Optimistic insert: show message immediately with "sending" status
         const optimistic: TimelineMessage = {
           id: msgId,
+          correctionTargetId: msgId,
           author: session.value.username,
           authorJid: `${currentRoomJid.value}/${session.value.username}`,
           body: bodyText || (attachments?.[0]?.url ?? ""),
@@ -1176,7 +1214,8 @@ export function useMessaging(
   async function editMessage(messageId: string, newBody: string, markup?: MarkupSpan[], references?: MessageReference[]) {
     if (!xmppClient.value || !activeChannelId.value || !newBody.trim())
       return;
-    const targetId = findMessageById(messages.value, messageId)?.id ?? messageId;
+    const message = findMessageById(messages.value, messageId);
+    const targetId = message?.correctionTargetId ?? messageId;
 
     clearActionError();
 

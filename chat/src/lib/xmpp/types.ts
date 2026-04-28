@@ -63,6 +63,8 @@ export interface ReplyPreview {
 export interface LiveRoomMessage {
   id: string;
   wireIds?: string[];
+  /** XEP-0308 correction target: original sender message id/origin-id. */
+  correctionTargetId?: string;
   roomJid: string;
   nick: string;
   body: string;
@@ -105,6 +107,8 @@ export interface LiveRoomMessage {
 export interface LiveDmMessage {
   id: string;
   wireIds?: string[];
+  /** XEP-0308 correction target: original sender message id/origin-id. */
+  correctionTargetId?: string;
   peerJid: string;
   fromJid: string;
   nick: string;

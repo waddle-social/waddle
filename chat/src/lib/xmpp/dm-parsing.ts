@@ -78,6 +78,7 @@ export function dispatchChat(msg: ReceivedMessage, h: DmHandlers): void {
     createdAt: new Date().toISOString(),
     type: "message",
   };
+  if (messageIds.correctionTargetId) liveMsg.correctionTargetId = messageIds.correctionTargetId;
   if (messageIds.wireIds?.length) liveMsg.wireIds = messageIds.wireIds;
   if (msg.replace) {
     liveMsg.replacesId = msg.replace;

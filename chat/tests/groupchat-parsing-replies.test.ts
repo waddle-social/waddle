@@ -309,6 +309,24 @@ describe("groupchat reply + thread parsing", () => {
     expect(h.messages).toHaveLength(1);
     expect(h.messages[0].id).toBe("stable-1");
     expect(h.messages[0].wireIds).toEqual(["echo-1", "client-1", "server-1"]);
+    expect(h.messages[0].correctionTargetId).toBe("client-1");
+  });
+
+  test("uses the sender message id as the correction target when no origin id exists", () => {
+    const h = makeHandlers();
+    dispatchGroupchat(
+      makeMsg({
+        id: "echo-1",
+        body: "editable",
+        stanzaIds: [{ id: "stable-1", by: "general@muc.waddle.social" }],
+      }),
+      h,
+    );
+
+    expect(h.messages).toHaveLength(1);
+    expect(h.messages[0].id).toBe("stable-1");
+    expect(h.messages[0].wireIds).toEqual(["echo-1"]);
+    expect(h.messages[0].correctionTargetId).toBe("echo-1");
   });
 
   test("leaves replyTo undefined when no reply element is present", () => {

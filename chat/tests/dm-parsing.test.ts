@@ -181,6 +181,7 @@ describe("dispatchChat", () => {
     expect(h.messages).toHaveLength(1);
     expect(h.messages[0].id).toBe("stable-1");
     expect(h.messages[0].wireIds).toEqual(["echo-1", "client-1"]);
+    expect(h.messages[0].correctionTargetId).toBe("client-1");
   });
 
   test("dispatches message corrections", () => {
