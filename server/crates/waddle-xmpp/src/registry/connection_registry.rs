@@ -17,20 +17,76 @@ use tracing::{debug, info, instrument};
 use crate::prometheus;
 use crate::Stanza;
 
+/// How the destination connection should handle an inbound
+/// [`OutboundStanza`].
+///
+/// Introduced in #229 PR10 as type-level infrastructure for the
+/// staged sans-I/O cutover. PR10 itself defaults every existing
+/// caller to [`DeliveryKind::DirectFrame`] so behavior is unchanged.
+/// PR11 wires the per-connection main loop to dispatch on this kind;
+/// PR12 switches the [`OutboundEvent::RouteToConnection`] interpreter
+/// arm to emit [`DeliveryKind::PeerStanza`] so the recipient pass
+/// runs in production for peer-routed stanzas.
+///
+/// [`OutboundEvent::RouteToConnection`]: crate::protocol::OutboundEvent::RouteToConnection
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeliveryKind {
+    /// **Peer-routed stanza** — the destination connection's main
+    /// loop must feed this through its [`crate::protocol::XmppStateMachine`]
+    /// as [`crate::protocol::InboundEvent::StanzaFromPeer`] so the
+    /// recipient pass of the message pipeline runs (XEP-0191
+    /// incoming block, XEP-0359 recipient stamp, XEP-0313 archive,
+    /// XEP-0280 received-carbons, inbox projection) before any wire
+    /// write. Unused in PR10; PR12 starts emitting it.
+    PeerStanza,
+    /// **Direct frame to wire** — the destination connection's main
+    /// loop serializes the stanza and writes it to its WebSocket
+    /// without any further protocol processing. Used for
+    /// XEP-0280 carbon copies (already wrapped + processed by the
+    /// sender), XEP-0198 SM acks, IQ replies built by the sender's
+    /// state machine, and other server-generated frames.
+    DirectFrame,
+}
+
 /// A stanza to be sent to a connection.
 ///
 /// This is the message type sent through the outbound channel to
-/// deliver stanzas to connected clients.
+/// deliver stanzas to connected clients. The [`DeliveryKind`] tells
+/// the destination's main loop whether the stanza should be fed
+/// through the recipient-pass pipeline before reaching the wire.
 #[derive(Debug, Clone)]
 pub struct OutboundStanza {
-    /// The stanza to send
+    /// The stanza to send.
     pub stanza: Stanza,
+    /// How the destination connection should handle the stanza.
+    pub kind: DeliveryKind,
 }
 
 impl OutboundStanza {
-    /// Create a new outbound stanza.
+    /// Create an outbound stanza that the destination's main loop
+    /// writes directly to its wire — [`DeliveryKind::DirectFrame`].
+    /// This is the default for all server-generated frames (carbon
+    /// copies, IQ replies, SM acks, …). Until PR12 switches
+    /// `RouteToConnection` to [`OutboundStanza::peer_stanza`],
+    /// peer-routed stanzas also use this constructor and so do not
+    /// trigger a recipient pass on the destination.
     pub fn new(stanza: Stanza) -> Self {
-        Self { stanza }
+        Self {
+            stanza,
+            kind: DeliveryKind::DirectFrame,
+        }
+    }
+
+    /// Create an outbound stanza tagged for the **recipient pass** —
+    /// [`DeliveryKind::PeerStanza`]. The destination's main loop is
+    /// expected to feed this through its state machine before any
+    /// wire write. Used by the [`crate::protocol::OutboundEvent::RouteToConnection`]
+    /// interpreter arm starting in #229 PR12.
+    pub fn peer_stanza(stanza: Stanza) -> Self {
+        Self {
+            stanza,
+            kind: DeliveryKind::PeerStanza,
+        }
     }
 }
 
@@ -817,6 +873,29 @@ mod tests {
     fn test_registry_creation() {
         let registry = ConnectionRegistry::new();
         assert_eq!(registry.connection_count(), 0);
+    }
+
+    #[test]
+    fn outbound_stanza_new_defaults_to_direct_frame() {
+        // The default constructor preserves PR1-PR9 behavior — every
+        // existing caller treats the destination's main loop as a
+        // dumb wire-writer. The recipient-pass plumbing
+        // (DeliveryKind::PeerStanza) lands later in the #229 staged
+        // cutover.
+        let msg = make_test_message("alice@example.com");
+        let outbound = OutboundStanza::new(Stanza::Message(msg));
+        assert_eq!(outbound.kind, DeliveryKind::DirectFrame);
+    }
+
+    #[test]
+    fn outbound_stanza_peer_stanza_marks_kind_for_recipient_pass() {
+        // The opt-in constructor used by `RouteToConnection` once
+        // PR12 lands. The destination's main loop will dispatch on
+        // `kind` and feed PeerStanza values through the recipient
+        // pass before any wire write.
+        let msg = make_test_message("bob@example.com");
+        let outbound = OutboundStanza::peer_stanza(Stanza::Message(msg));
+        assert_eq!(outbound.kind, DeliveryKind::PeerStanza);
     }
 
     #[test]
