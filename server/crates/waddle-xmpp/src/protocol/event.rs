@@ -363,7 +363,15 @@ pub enum OutboundEvent {
         message: Box<Message>,
     },
     /// Persist a one-to-one direct message to the MAM archive.
+    ///
+    /// `archive_jid` identifies which personal archive to write to —
+    /// the locality-aware [`super::handlers::archive::ArchiveHandler`]
+    /// emits this field as the local user's bare JID, so the interpreter
+    /// is dumb glue that does not need to reason about sender/recipient
+    /// pass semantics. `from` and `to` carry the canonical message tuple
+    /// for telemetry and remain on the typed `message` payload.
     ArchiveDirect {
+        archive_jid: BareJid,
         from: BareJid,
         to: BareJid,
         message: Box<Message>,
@@ -373,6 +381,12 @@ pub enum OutboundEvent {
     /// clients can pivot to the archived stanza using the same XEP-0359
     /// stanza-id space.
     ///
+    /// `increment_unread` is set by the locality-aware
+    /// [`super::handlers::inbox::InboxHandler`]: `true` on the recipient
+    /// pass (the message is *new* for this owner), `false` on the sender
+    /// pass (it's the owner's own outgoing copy and shouldn't bump
+    /// their unread count).
+    ///
     /// Inbox is not a finalized XEP — this is a Waddle product surface;
     /// the field set is engineering, not protocol-mandated.
     ProjectInbox {
@@ -380,6 +394,7 @@ pub enum OutboundEvent {
         peer: BareJid,
         message: Box<Message>,
         archive_ref: StanzaIdRef,
+        increment_unread: bool,
     },
     /// XEP-0280 carbon-copy fan-out to the owner's other resources.
     ///

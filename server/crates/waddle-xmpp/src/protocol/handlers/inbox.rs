@@ -71,18 +71,31 @@ impl MessageHandler for InboxHandler {
         match ctx.locality {
             Locality::Sender => {
                 if let Some(peer) = to_bare {
-                    events.push(build(owner, peer, message, &local_archive_id));
+                    // Sender pass: this owner is the message author, so
+                    // their unread count must NOT bump for their own
+                    // outgoing copy.
+                    events.push(build(owner, peer, message, &local_archive_id, false));
                 }
             }
             Locality::Recipient => {
                 if let Some(peer) = from_bare {
-                    events.push(build(owner, peer, message, &local_archive_id));
+                    // Recipient pass: a brand-new message arriving for
+                    // this owner — bump their unread count.
+                    events.push(build(owner, peer, message, &local_archive_id, true));
                 }
             }
             Locality::Both => {
                 // Self-loop alice/web -> alice/web — one inbox entry,
-                // peer = owner.
-                events.push(build(owner.clone(), owner, message, &local_archive_id));
+                // peer = owner. The owner is both author and recipient;
+                // legacy parity says do not bump unread for self-sent
+                // messages.
+                events.push(build(
+                    owner.clone(),
+                    owner,
+                    message,
+                    &local_archive_id,
+                    false,
+                ));
             }
             Locality::Neither => {}
         }
@@ -95,6 +108,7 @@ fn build(
     peer: BareJid,
     message: &Message,
     local_archive_id: &str,
+    increment_unread: bool,
 ) -> OutboundEvent {
     OutboundEvent::ProjectInbox {
         owner: owner.clone(),
@@ -104,6 +118,7 @@ fn build(
             by: owner,
             id: StanzaIdValue::new(local_archive_id),
         },
+        increment_unread,
     }
 }
 
@@ -192,6 +207,21 @@ mod tests {
         }
     }
 
+    fn extract_inbox_increments(outcome: &HandlerOutcome) -> Vec<bool> {
+        match outcome {
+            HandlerOutcome::Continue(events) => events
+                .iter()
+                .filter_map(|e| match e {
+                    OutboundEvent::ProjectInbox {
+                        increment_unread, ..
+                    } => Some(*increment_unread),
+                    _ => None,
+                })
+                .collect(),
+            other => panic!("expected Continue, got {other:?}"),
+        }
+    }
+
     // -----------------------------------------------------------------
     // Locality / peer attribution
     // -----------------------------------------------------------------
@@ -231,6 +261,42 @@ mod tests {
         let mut msg = chat_with_body("alice@example.com/web", "bob@example.com", "hi");
         let outcome = run(&local, &mut msg);
         assert!(extract_inbox(&outcome).is_empty());
+    }
+
+    #[test]
+    fn inbox_sender_pass_does_not_increment_unread() {
+        // Sender pass: the owner is the author, so unread must not
+        // bump for their own outgoing copy.
+        let local = full("alice@example.com/web");
+        let mut msg = chat_with_body("alice@example.com/web", "bob@example.com", "hi");
+        msg.payloads
+            .push(build_stanza_id_element("alice-A1", "alice@example.com"));
+        let outcome = run(&local, &mut msg);
+        assert_eq!(extract_inbox_increments(&outcome), vec![false]);
+    }
+
+    #[test]
+    fn inbox_recipient_pass_increments_unread() {
+        // Recipient pass: a new message arriving for this owner —
+        // bump unread.
+        let local = full("bob@example.com/desk");
+        let mut msg = chat_with_body("alice@example.com/web", "bob@example.com", "hi");
+        msg.payloads
+            .push(build_stanza_id_element("bob-B1", "bob@example.com"));
+        let outcome = run(&local, &mut msg);
+        assert_eq!(extract_inbox_increments(&outcome), vec![true]);
+    }
+
+    #[test]
+    fn inbox_self_loop_does_not_increment_unread() {
+        // Self-loop alice→alice: one event, owner=peer, do not bump
+        // unread (matches legacy parity for messages you sent yourself).
+        let local = full("alice@example.com/web");
+        let mut msg = chat_with_body("alice@example.com/web", "alice@example.com/web", "echo");
+        msg.payloads
+            .push(build_stanza_id_element("alice-self", "alice@example.com"));
+        let outcome = run(&local, &mut msg);
+        assert_eq!(extract_inbox_increments(&outcome), vec![false]);
     }
 
     #[test]

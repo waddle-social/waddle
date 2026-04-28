@@ -26,14 +26,18 @@
 //! - [`OutboundEvent::SendCarbons`] — XEP-0280 carbon fan-out via the
 //!   XEP-0297 `<sent>`/`<received>` envelope, including detached
 //!   XEP-0198 resumable sessions.
+//! - [`OutboundEvent::ArchiveDirect`] — XEP-0313 §5.1 personal MAM
+//!   write keyed under `archive_jid`. Eligibility was vetted by
+//!   [`waddle_xmpp::protocol::handlers::archive::ArchiveHandler`].
+//! - [`OutboundEvent::ProjectInbox`] — Waddle inbox upsert keyed by
+//!   `(owner, peer)` with `archive_ref` linking back to the MAM entry.
 //! - [`OutboundEvent::UnregisterConnection`] — drop from the registry.
 //!
 //! Stubbed (warn-logged until migration steps land them):
-//! - `BroadcastToRoom`, `DispatchToRoom` — MUC handler chain (PR8+).
-//! - `ProjectInbox`, `ArchiveDirect`, `ArchiveGroupchat` — need
-//!   storage references in the interpreter [`Deps`] (PR7+).
+//! - `BroadcastToRoom`, `DispatchToRoom`, `ArchiveGroupchat` — MUC
+//!   handler chain (PR10).
 //! - `LookupArchivedMessage`, `RequestEnrichment` — need callback
-//!   plumbing back into the state machine (PR8+).
+//!   plumbing back into the state machine (PR8).
 //! - `AskSfu`, `QueryMam`, `LoadScramCredentials`,
 //!   `ValidateOAuthBearer`, `SetTimer`, `CancelTimer`,
 //!   `RegisterConnection` — wired in later migration steps.
@@ -41,6 +45,10 @@
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 use waddle_xmpp::carbons::{build_received_carbon, build_sent_carbon};
+use waddle_xmpp::inbox::runtime::direct_message_entry;
+use waddle_xmpp::inbox::storage::InboxStorage;
+use waddle_xmpp::mam::projection::build_direct_archived_message;
+use waddle_xmpp::mam::storage::MamStorage;
 use waddle_xmpp::parser::stanza_to_string;
 use waddle_xmpp::protocol::{CarbonKind, OutboundEvent};
 use waddle_xmpp::registry::ConnectionRegistry;
@@ -62,9 +70,9 @@ pub struct InterpretOutcome {
 /// Typed dependency context for the interpreter.
 ///
 /// Grows as later migration steps add storage/actor handles
-/// (`MamStorage`, inbox storage, `extension_manager`, etc.). Threading
-/// dependencies through one struct rather than as loose function
-/// parameters keeps the call-site churn small.
+/// (`extension_manager`, etc.). Threading dependencies through one
+/// struct rather than as loose function parameters keeps the call-site
+/// churn small.
 #[derive(Clone)]
 pub struct Deps<'a> {
     pub connection_registry: &'a ConnectionRegistry,
@@ -74,18 +82,43 @@ pub struct Deps<'a> {
     /// history while resumable. `None` in unit tests that don't
     /// exercise SM behaviour.
     pub sm_session_registry: Option<&'a Arc<InMemorySmSessionRegistry>>,
+    /// XEP-0313 MAM persistence backend. `None` in unit tests that
+    /// don't exercise archive writes; production wiring (`iq.rs`)
+    /// always supplies it.
+    pub mam_storage: Option<&'a Arc<dyn MamStorage>>,
+    /// Waddle inbox-projection backend. `None` in unit tests; always
+    /// supplied in production.
+    pub inbox_storage: Option<&'a Arc<dyn InboxStorage>>,
 }
 
 impl<'a> Deps<'a> {
     /// Build a minimal `Deps` with only the connection registry — a
     /// test-only convenience for unit tests that don't exercise SM
-    /// fan-out. Production code constructs `Deps` directly so the
-    /// dependency surface is explicit at every call site.
+    /// fan-out, archive, or inbox storage.
     #[cfg(test)]
     pub fn registry_only(connection_registry: &'a ConnectionRegistry) -> Self {
         Self {
             connection_registry,
             sm_session_registry: None,
+            mam_storage: None,
+            inbox_storage: None,
+        }
+    }
+
+    /// Build a `Deps` for unit tests that exercise the storage arms
+    /// (`ArchiveDirect`, `ProjectInbox`). SM fan-out is left disabled
+    /// so the carbon-detached path stays an independent test concern.
+    #[cfg(test)]
+    pub fn test_with_storage(
+        connection_registry: &'a ConnectionRegistry,
+        mam_storage: &'a Arc<dyn MamStorage>,
+        inbox_storage: &'a Arc<dyn InboxStorage>,
+    ) -> Self {
+        Self {
+            connection_registry,
+            sm_session_registry: None,
+            mam_storage: Some(mam_storage),
+            inbox_storage: Some(inbox_storage),
         }
     }
 }
@@ -187,13 +220,45 @@ pub async fn interpret(events: Vec<OutboundEvent>, deps: &Deps<'_>) -> Interpret
                     "OutboundEvent variant not yet wired in interpreter"
                 );
             }
-            OutboundEvent::ProjectInbox { owner, peer, .. } => {
-                warn!(
-                    variant = "ProjectInbox",
-                    owner = %owner,
-                    peer = %peer,
-                    "OutboundEvent variant not yet wired in interpreter"
-                );
+            OutboundEvent::ProjectInbox {
+                owner,
+                peer,
+                message,
+                archive_ref,
+                increment_unread,
+            } => {
+                let Some(inbox_storage) = deps.inbox_storage else {
+                    debug!(
+                        owner = %owner,
+                        peer = %peer,
+                        "ProjectInbox: no inbox_storage in Deps; skipping (test fixture?)"
+                    );
+                    continue;
+                };
+                // Build the inbox entry from the typed message, then
+                // overwrite its stanza-id with the typed `archive_ref`
+                // so the inbox row links to the canonicalized MAM
+                // entry the handler stamped (rather than re-deriving
+                // from the wire `<message id=...>`).
+                let timestamp = chrono::Utc::now().timestamp();
+                let mut entry = direct_message_entry(peer.clone(), &message, timestamp);
+                entry.last_stanza_id = archive_ref.id.as_str().to_string();
+                if let Err(error) = inbox_storage.upsert(&owner, entry, increment_unread).await {
+                    warn!(
+                        owner = %owner,
+                        peer = %peer,
+                        %error,
+                        "ProjectInbox: inbox upsert failed; dropping projection"
+                    );
+                } else {
+                    debug!(
+                        owner = %owner,
+                        peer = %peer,
+                        archive_ref = archive_ref.id.as_str(),
+                        increment_unread,
+                        "ProjectInbox: persisted"
+                    );
+                }
             }
             OutboundEvent::SendCarbons {
                 owner,
@@ -365,13 +430,58 @@ pub async fn interpret(events: Vec<OutboundEvent>, deps: &Deps<'_>) -> Interpret
                     "OutboundEvent variant not yet wired in interpreter"
                 );
             }
-            OutboundEvent::ArchiveDirect { from, to, .. } => {
-                warn!(
-                    variant = "ArchiveDirect",
-                    from = %from,
-                    to = %to,
-                    "OutboundEvent variant not yet wired in interpreter"
+            OutboundEvent::ArchiveDirect {
+                archive_jid,
+                from,
+                to,
+                message,
+            } => {
+                let Some(mam_storage) = deps.mam_storage else {
+                    debug!(
+                        archive_jid = %archive_jid,
+                        from = %from,
+                        to = %to,
+                        "ArchiveDirect: no mam_storage in Deps; skipping (test fixture?)"
+                    );
+                    continue;
+                };
+                // Per XEP-0313 §5.1.3, the eligibility check is
+                // upstream (ArchiveHandler) — the interpreter just
+                // persists. The handler also already canonicalized the
+                // XEP-0359 `<stanza-id by=archive_jid/>` stamp on the
+                // typed message, so the projection serializer captures
+                // it for replay.
+                let archived = build_direct_archived_message(
+                    &archive_jid.to_string(),
+                    &from.to_string(),
+                    &to.to_string(),
+                    &message,
                 );
+                let archive_jid_str = archive_jid.to_string();
+                match mam_storage
+                    .store_message(archive_jid_str.as_str(), &archived)
+                    .await
+                {
+                    Ok(archive_id) => {
+                        debug!(
+                            archive_jid = %archive_jid,
+                            archive_id,
+                            "ArchiveDirect: persisted"
+                        );
+                    }
+                    Err(error) => {
+                        // Archive errors must not block dispatch — the
+                        // message is already on the wire to other
+                        // resources via routing/carbons. Log and drop.
+                        warn!(
+                            archive_jid = %archive_jid,
+                            from = %from,
+                            to = %to,
+                            %error,
+                            "ArchiveDirect: store_message failed; dropping archive write"
+                        );
+                    }
+                }
             }
             OutboundEvent::RequestEnrichment { id, .. } => {
                 warn!(
@@ -706,6 +816,8 @@ mod tests {
         let deps = Deps {
             connection_registry: &registry,
             sm_session_registry: Some(&sm),
+            mam_storage: None,
+            inbox_storage: None,
         };
         let _outcome = interpret(
             vec![OutboundEvent::SendCarbons {
@@ -729,6 +841,345 @@ mod tests {
         assert!(
             !session.unacked_stanzas.is_empty(),
             "detached SM session must have at least one queued carbon for resume"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // XEP-0313 — ArchiveDirect persistence
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn xep_0313_archive_direct_persists_to_mam_storage() {
+        use waddle_xmpp::mam::storage::InMemoryMamStorage;
+        let registry = ConnectionRegistry::new();
+        let mam: Arc<dyn MamStorage> = Arc::new(InMemoryMamStorage::new());
+        let inbox: Arc<dyn InboxStorage> =
+            Arc::new(waddle_xmpp::inbox::storage::InMemoryInboxStorage::new());
+        let deps = Deps::test_with_storage(&registry, &mam, &inbox);
+
+        let archive_jid: jid::BareJid = "alice@example.com".parse().expect("bare");
+        let from: jid::BareJid = "alice@example.com".parse().expect("bare");
+        let to: jid::BareJid = "bob@example.com".parse().expect("bare");
+        let mut msg = chat_msg("alice@example.com/web", "bob@example.com", "hello");
+        msg.id = Some("orig-1".to_string());
+
+        let events = vec![OutboundEvent::ArchiveDirect {
+            archive_jid: archive_jid.clone(),
+            from,
+            to,
+            message: Box::new(msg),
+        }];
+        let _outcome = interpret(events, &deps).await;
+
+        let stored = mam
+            .query_messages(&archive_jid.to_string(), &Default::default())
+            .await
+            .expect("query");
+        assert_eq!(
+            stored.messages.len(),
+            1,
+            "ArchiveDirect persists exactly one row"
+        );
+        let row = &stored.messages[0];
+        assert_eq!(row.from, "alice@example.com");
+        assert_eq!(row.to, "bob@example.com");
+        assert_eq!(row.body, "hello");
+        assert_eq!(row.stanza_id.as_deref(), Some("orig-1"));
+    }
+
+    #[tokio::test]
+    async fn xep_0359_archive_ref_pivots_inbox_row_to_mam_row_by_stanza_id() {
+        // End-to-end of the bug Qodo + Codex flagged: inbox writes
+        // `archive_ref` from the canonical XEP-0359 `<stanza-id>`
+        // stamp, and `MamStorage::get_message_by_stanza_id` must
+        // resolve that same id against `archive_jid`. If the
+        // projection ever stops using the canonical stamp as
+        // `ArchivedMessage.stanza_id`/`id`, the inbox row points at a
+        // dangling stanza-id and clients can't pivot to the archive.
+        use waddle_xmpp::inbox::storage::InMemoryInboxStorage;
+        use waddle_xmpp::mam::storage::InMemoryMamStorage;
+        use waddle_xmpp::protocol::event::{StanzaIdRef, StanzaIdValue};
+        use waddle_xmpp::xep::xep0359::build_stanza_id_element;
+        let registry = ConnectionRegistry::new();
+        let mam: Arc<dyn MamStorage> = Arc::new(InMemoryMamStorage::new());
+        let inbox_concrete = Arc::new(InMemoryInboxStorage::new());
+        let inbox: Arc<dyn InboxStorage> = inbox_concrete.clone();
+        let deps = Deps::test_with_storage(&registry, &mam, &inbox);
+
+        let alice: jid::BareJid = "alice@example.com".parse().expect("bare");
+        let bob: jid::BareJid = "bob@example.com".parse().expect("bare");
+        let mut msg = chat_msg("alice@example.com/web", "bob@example.com", "pivot test");
+        msg.id = Some("wire-id".to_string());
+        // Simulate CanonicalizeHandler stamping the canonical id
+        // under alice's archive — the same id InboxHandler will
+        // emit as `archive_ref`.
+        let canonical_id = "alice-canonical-1";
+        msg.payloads
+            .push(build_stanza_id_element(canonical_id, "alice@example.com"));
+
+        let events = vec![
+            OutboundEvent::ArchiveDirect {
+                archive_jid: alice.clone(),
+                from: alice.clone(),
+                to: bob.clone(),
+                message: Box::new(msg.clone()),
+            },
+            OutboundEvent::ProjectInbox {
+                owner: alice.clone(),
+                peer: bob.clone(),
+                message: Box::new(msg),
+                archive_ref: StanzaIdRef {
+                    by: alice.clone(),
+                    id: StanzaIdValue::new(canonical_id),
+                },
+                increment_unread: false,
+            },
+        ];
+        let _outcome = interpret(events, &deps).await;
+
+        // Inbox row carries the canonical stamp.
+        let entries = inbox_concrete.list(&alice).await.expect("inbox list");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].last_stanza_id, canonical_id);
+
+        // The same id resolves a MAM row in alice's archive — pivot
+        // works.
+        let row = mam
+            .get_message_by_stanza_id(&alice.to_string(), canonical_id)
+            .await
+            .expect("mam lookup")
+            .expect("MAM row keyed by canonical stanza-id");
+        assert_eq!(row.id, canonical_id);
+        assert_eq!(row.body, "pivot test");
+    }
+
+    #[tokio::test]
+    async fn xep_0313_archive_direct_writes_one_entry_per_event() {
+        // Sender pass + recipient pass on the same dispatch (true
+        // local-to-local) emit two events with distinct archive_jids
+        // — the interpreter writes one entry per archive.
+        use waddle_xmpp::mam::storage::InMemoryMamStorage;
+        let registry = ConnectionRegistry::new();
+        let mam: Arc<dyn MamStorage> = Arc::new(InMemoryMamStorage::new());
+        let inbox: Arc<dyn InboxStorage> =
+            Arc::new(waddle_xmpp::inbox::storage::InMemoryInboxStorage::new());
+        let deps = Deps::test_with_storage(&registry, &mam, &inbox);
+
+        let alice: jid::BareJid = "alice@example.com".parse().expect("bare");
+        let bob: jid::BareJid = "bob@example.com".parse().expect("bare");
+        let msg = chat_msg("alice@example.com/web", "bob@example.com", "yo");
+
+        let events = vec![
+            OutboundEvent::ArchiveDirect {
+                archive_jid: alice.clone(),
+                from: alice.clone(),
+                to: bob.clone(),
+                message: Box::new(msg.clone()),
+            },
+            OutboundEvent::ArchiveDirect {
+                archive_jid: bob.clone(),
+                from: alice.clone(),
+                to: bob.clone(),
+                message: Box::new(msg),
+            },
+        ];
+        let _outcome = interpret(events, &deps).await;
+
+        let alice_archive = mam
+            .query_messages(&alice.to_string(), &Default::default())
+            .await
+            .expect("query alice");
+        let bob_archive = mam
+            .query_messages(&bob.to_string(), &Default::default())
+            .await
+            .expect("query bob");
+        assert_eq!(
+            alice_archive.messages.len(),
+            1,
+            "alice archive has the sender-pass entry"
+        );
+        assert_eq!(
+            bob_archive.messages.len(),
+            1,
+            "bob archive has the recipient-pass entry"
+        );
+    }
+
+    #[tokio::test]
+    async fn xep_0313_archive_direct_drops_when_storage_errors() {
+        // Storage errors must NOT fail dispatch. We use a fake that
+        // always errors and assert interpret returns normally; the
+        // archive write is logged-and-dropped.
+        use async_trait::async_trait;
+        use waddle_xmpp::mam::storage::{MamStorage, MamStorageError};
+        use waddle_xmpp::mam::{ArchivedMessage, MamQuery, MamResult};
+
+        struct FailingMam;
+        #[async_trait]
+        impl MamStorage for FailingMam {
+            async fn store_message(
+                &self,
+                _: &str,
+                _: &ArchivedMessage,
+            ) -> Result<String, MamStorageError> {
+                Err(MamStorageError::Database("simulated".into()))
+            }
+            async fn query_messages(
+                &self,
+                _: &str,
+                _: &MamQuery,
+            ) -> Result<MamResult, MamStorageError> {
+                Ok(MamResult {
+                    messages: Vec::new(),
+                    complete: true,
+                    first_id: None,
+                    last_id: None,
+                    count: Some(0),
+                })
+            }
+            async fn get_message(
+                &self,
+                _: &str,
+            ) -> Result<Option<ArchivedMessage>, MamStorageError> {
+                Ok(None)
+            }
+            async fn replace_with_tombstone(
+                &self,
+                _: &str,
+                _: waddle_xmpp::mam::ArchivedTombstone,
+            ) -> Result<bool, MamStorageError> {
+                Ok(false)
+            }
+            async fn get_message_by_stanza_id(
+                &self,
+                _: &str,
+                _: &str,
+            ) -> Result<Option<ArchivedMessage>, MamStorageError> {
+                Ok(None)
+            }
+            async fn get_message_by_message_id(
+                &self,
+                _: &str,
+                _: &str,
+            ) -> Result<Option<ArchivedMessage>, MamStorageError> {
+                Ok(None)
+            }
+            async fn get_message_by_archive_or_stanza_id(
+                &self,
+                _: &str,
+                _: &str,
+            ) -> Result<Option<ArchivedMessage>, MamStorageError> {
+                Ok(None)
+            }
+            async fn count_messages(&self, _: &str) -> Result<u32, MamStorageError> {
+                Ok(0)
+            }
+            async fn delete_before(
+                &self,
+                _: &str,
+                _: chrono::DateTime<chrono::Utc>,
+            ) -> Result<u64, MamStorageError> {
+                Ok(0)
+            }
+        }
+
+        let registry = ConnectionRegistry::new();
+        let mam: Arc<dyn MamStorage> = Arc::new(FailingMam);
+        let inbox: Arc<dyn InboxStorage> =
+            Arc::new(waddle_xmpp::inbox::storage::InMemoryInboxStorage::new());
+        let deps = Deps::test_with_storage(&registry, &mam, &inbox);
+
+        let alice: jid::BareJid = "alice@example.com".parse().expect("bare");
+        let bob: jid::BareJid = "bob@example.com".parse().expect("bare");
+        let msg = chat_msg("alice@example.com/web", "bob@example.com", "yo");
+        let events = vec![OutboundEvent::ArchiveDirect {
+            archive_jid: alice.clone(),
+            from: alice,
+            to: bob,
+            message: Box::new(msg),
+        }];
+        let outcome = interpret(events, &deps).await;
+        // No frames, no close — error swallowed.
+        assert!(outcome.frames.is_empty());
+        assert!(!outcome.close);
+    }
+
+    // -----------------------------------------------------------------
+    // Inbox projection
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn inbox_project_writes_owner_peer_keyed_row_with_typed_archive_ref() {
+        use waddle_xmpp::inbox::storage::InMemoryInboxStorage;
+        use waddle_xmpp::mam::storage::InMemoryMamStorage;
+        use waddle_xmpp::protocol::event::{StanzaIdRef, StanzaIdValue};
+
+        let registry = ConnectionRegistry::new();
+        let mam: Arc<dyn MamStorage> = Arc::new(InMemoryMamStorage::new());
+        let inbox_concrete = Arc::new(InMemoryInboxStorage::new());
+        let inbox: Arc<dyn InboxStorage> = inbox_concrete.clone();
+        let deps = Deps::test_with_storage(&registry, &mam, &inbox);
+
+        let owner: jid::BareJid = "alice@example.com".parse().expect("bare");
+        let peer: jid::BareJid = "bob@example.com".parse().expect("bare");
+        let mut msg = chat_msg("alice@example.com/web", "bob@example.com", "hi there");
+        msg.id = Some("origin-X".to_string());
+
+        let events = vec![OutboundEvent::ProjectInbox {
+            owner: owner.clone(),
+            peer: peer.clone(),
+            message: Box::new(msg),
+            archive_ref: StanzaIdRef {
+                by: owner.clone(),
+                id: StanzaIdValue::new("alice-archive-1"),
+            },
+            increment_unread: false,
+        }];
+        let _outcome = interpret(events, &deps).await;
+
+        let entries = inbox_concrete.list(&owner).await.expect("list");
+        assert_eq!(entries.len(), 1);
+        let entry = &entries[0];
+        assert_eq!(entry.partner, peer);
+        assert_eq!(
+            entry.last_stanza_id, "alice-archive-1",
+            "last_stanza_id is sourced from the typed archive_ref, not the wire id"
+        );
+        assert_eq!(entry.unread, 0, "increment_unread=false leaves unread at 0");
+    }
+
+    #[tokio::test]
+    async fn inbox_project_increment_unread_bumps_recipient_count() {
+        use waddle_xmpp::inbox::storage::InMemoryInboxStorage;
+        use waddle_xmpp::mam::storage::InMemoryMamStorage;
+        use waddle_xmpp::protocol::event::{StanzaIdRef, StanzaIdValue};
+
+        let registry = ConnectionRegistry::new();
+        let mam: Arc<dyn MamStorage> = Arc::new(InMemoryMamStorage::new());
+        let inbox_concrete = Arc::new(InMemoryInboxStorage::new());
+        let inbox: Arc<dyn InboxStorage> = inbox_concrete.clone();
+        let deps = Deps::test_with_storage(&registry, &mam, &inbox);
+
+        let owner: jid::BareJid = "bob@example.com".parse().expect("bare");
+        let peer: jid::BareJid = "alice@example.com".parse().expect("bare");
+        let msg = chat_msg("alice@example.com/web", "bob@example.com", "hi bob");
+
+        let events = vec![OutboundEvent::ProjectInbox {
+            owner: owner.clone(),
+            peer: peer.clone(),
+            message: Box::new(msg),
+            archive_ref: StanzaIdRef {
+                by: owner.clone(),
+                id: StanzaIdValue::new("bob-archive-1"),
+            },
+            increment_unread: true,
+        }];
+        let _outcome = interpret(events, &deps).await;
+
+        let total = inbox_concrete.total_unread(&owner).await.expect("unread");
+        assert_eq!(
+            total, 1,
+            "increment_unread=true bumps the owner's unread count"
         );
     }
 

@@ -64,8 +64,10 @@ impl MessageHandler for ArchiveHandler {
         // avoid double-stamping the same archive.
         if ctx.locality.is_sender() {
             if let Some(to) = to_bare.clone() {
+                let from = from_bare.clone().unwrap_or_else(|| local_bare.clone());
                 events.push(OutboundEvent::ArchiveDirect {
-                    from: from_bare.clone().unwrap_or_else(|| local_bare.clone()),
+                    archive_jid: from.clone(),
+                    from,
                     to,
                     message: Box::new(message.clone()),
                 });
@@ -81,9 +83,11 @@ impl MessageHandler for ArchiveHandler {
         // self-loop case.
         if matches!(ctx.locality, Locality::Recipient) {
             if let Some(from) = from_bare {
+                let to = to_bare.unwrap_or_else(|| local_bare.clone());
                 events.push(OutboundEvent::ArchiveDirect {
+                    archive_jid: to.clone(),
                     from,
-                    to: to_bare.unwrap_or_else(|| local_bare.clone()),
+                    to,
                     message: Box::new(message.clone()),
                 });
             }
@@ -193,6 +197,19 @@ mod tests {
         }
     }
 
+    fn extract_archive_jids(outcome: &HandlerOutcome) -> Vec<BareJid> {
+        match outcome {
+            HandlerOutcome::Continue(events) => events
+                .iter()
+                .filter_map(|e| match e {
+                    OutboundEvent::ArchiveDirect { archive_jid, .. } => Some(archive_jid.clone()),
+                    _ => None,
+                })
+                .collect(),
+            other => panic!("expected Continue, got {other:?}"),
+        }
+    }
+
     // -----------------------------------------------------------------
     // Locality + (from, to) shape
     // -----------------------------------------------------------------
@@ -237,6 +254,31 @@ mod tests {
         let outcome = run(&local, &mut msg);
         let archives = extract_archive_events(&outcome);
         assert_eq!(archives.len(), 1);
+    }
+
+    #[test]
+    fn xep_0313_sender_pass_archive_jid_is_local_user_bare() {
+        // The archive_jid the interpreter writes to MUST be the local
+        // user's archive on the sender pass (so the interpreter does
+        // not need to know which side it's on).
+        let local = full("alice@example.com/web");
+        let mut msg = chat_with_body("alice@example.com/web", "bob@example.com", "hi");
+        let outcome = run(&local, &mut msg);
+        let archives = extract_archive_jids(&outcome);
+        assert_eq!(archives.len(), 1);
+        assert_eq!(archives[0], bare("alice@example.com"));
+    }
+
+    #[test]
+    fn xep_0313_recipient_pass_archive_jid_is_local_user_bare() {
+        // Same invariant on the recipient pass: archive_jid is the
+        // local user's bare, not the message sender's.
+        let local = full("bob@example.com/desk");
+        let mut msg = chat_with_body("alice@example.com/web", "bob@example.com", "hi");
+        let outcome = run(&local, &mut msg);
+        let archives = extract_archive_jids(&outcome);
+        assert_eq!(archives.len(), 1);
+        assert_eq!(archives[0], bare("bob@example.com"));
     }
 
     #[test]
