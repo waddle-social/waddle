@@ -104,6 +104,23 @@ impl<'a> Deps<'a> {
             inbox_storage: None,
         }
     }
+
+    /// Build a `Deps` for unit tests that exercise the storage arms
+    /// (`ArchiveDirect`, `ProjectInbox`). SM fan-out is left disabled
+    /// so the carbon-detached path stays an independent test concern.
+    #[cfg(test)]
+    pub fn test_with_storage(
+        connection_registry: &'a ConnectionRegistry,
+        mam_storage: &'a Arc<dyn MamStorage>,
+        inbox_storage: &'a Arc<dyn InboxStorage>,
+    ) -> Self {
+        Self {
+            connection_registry,
+            sm_session_registry: None,
+            mam_storage: Some(mam_storage),
+            inbox_storage: Some(inbox_storage),
+        }
+    }
 }
 
 /// Execute the side effects described by `events`.
@@ -434,8 +451,12 @@ pub async fn interpret(events: Vec<OutboundEvent>, deps: &Deps<'_>) -> Interpret
                 // XEP-0359 `<stanza-id by=archive_jid/>` stamp on the
                 // typed message, so the projection serializer captures
                 // it for replay.
-                let archived =
-                    build_direct_archived_message(&from.to_string(), &to.to_string(), &message);
+                let archived = build_direct_archived_message(
+                    &archive_jid.to_string(),
+                    &from.to_string(),
+                    &to.to_string(),
+                    &message,
+                );
                 let archive_jid_str = archive_jid.to_string();
                 match mam_storage
                     .store_message(archive_jid_str.as_str(), &archived)
@@ -827,19 +848,6 @@ mod tests {
     // XEP-0313 — ArchiveDirect persistence
     // -----------------------------------------------------------------
 
-    fn make_deps_with_storage<'a>(
-        registry: &'a ConnectionRegistry,
-        mam: &'a Arc<dyn MamStorage>,
-        inbox: &'a Arc<dyn InboxStorage>,
-    ) -> Deps<'a> {
-        Deps {
-            connection_registry: registry,
-            sm_session_registry: None,
-            mam_storage: Some(mam),
-            inbox_storage: Some(inbox),
-        }
-    }
-
     #[tokio::test]
     async fn xep_0313_archive_direct_persists_to_mam_storage() {
         use waddle_xmpp::mam::storage::InMemoryMamStorage;
@@ -847,7 +855,7 @@ mod tests {
         let mam: Arc<dyn MamStorage> = Arc::new(InMemoryMamStorage::new());
         let inbox: Arc<dyn InboxStorage> =
             Arc::new(waddle_xmpp::inbox::storage::InMemoryInboxStorage::new());
-        let deps = make_deps_with_storage(&registry, &mam, &inbox);
+        let deps = Deps::test_with_storage(&registry, &mam, &inbox);
 
         let archive_jid: jid::BareJid = "alice@example.com".parse().expect("bare");
         let from: jid::BareJid = "alice@example.com".parse().expect("bare");
@@ -880,6 +888,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn xep_0359_archive_ref_pivots_inbox_row_to_mam_row_by_stanza_id() {
+        // End-to-end of the bug Qodo + Codex flagged: inbox writes
+        // `archive_ref` from the canonical XEP-0359 `<stanza-id>`
+        // stamp, and `MamStorage::get_message_by_stanza_id` must
+        // resolve that same id against `archive_jid`. If the
+        // projection ever stops using the canonical stamp as
+        // `ArchivedMessage.stanza_id`/`id`, the inbox row points at a
+        // dangling stanza-id and clients can't pivot to the archive.
+        use waddle_xmpp::inbox::storage::InMemoryInboxStorage;
+        use waddle_xmpp::mam::storage::InMemoryMamStorage;
+        use waddle_xmpp::protocol::event::{StanzaIdRef, StanzaIdValue};
+        use waddle_xmpp::xep::xep0359::build_stanza_id_element;
+        let registry = ConnectionRegistry::new();
+        let mam: Arc<dyn MamStorage> = Arc::new(InMemoryMamStorage::new());
+        let inbox_concrete = Arc::new(InMemoryInboxStorage::new());
+        let inbox: Arc<dyn InboxStorage> = inbox_concrete.clone();
+        let deps = Deps::test_with_storage(&registry, &mam, &inbox);
+
+        let alice: jid::BareJid = "alice@example.com".parse().expect("bare");
+        let bob: jid::BareJid = "bob@example.com".parse().expect("bare");
+        let mut msg = chat_msg("alice@example.com/web", "bob@example.com", "pivot test");
+        msg.id = Some("wire-id".to_string());
+        // Simulate CanonicalizeHandler stamping the canonical id
+        // under alice's archive — the same id InboxHandler will
+        // emit as `archive_ref`.
+        let canonical_id = "alice-canonical-1";
+        msg.payloads
+            .push(build_stanza_id_element(canonical_id, "alice@example.com"));
+
+        let events = vec![
+            OutboundEvent::ArchiveDirect {
+                archive_jid: alice.clone(),
+                from: alice.clone(),
+                to: bob.clone(),
+                message: Box::new(msg.clone()),
+            },
+            OutboundEvent::ProjectInbox {
+                owner: alice.clone(),
+                peer: bob.clone(),
+                message: Box::new(msg),
+                archive_ref: StanzaIdRef {
+                    by: alice.clone(),
+                    id: StanzaIdValue::new(canonical_id),
+                },
+                increment_unread: false,
+            },
+        ];
+        let _outcome = interpret(events, &deps).await;
+
+        // Inbox row carries the canonical stamp.
+        let entries = inbox_concrete.list(&alice).await.expect("inbox list");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].last_stanza_id, canonical_id);
+
+        // The same id resolves a MAM row in alice's archive — pivot
+        // works.
+        let row = mam
+            .get_message_by_stanza_id(&alice.to_string(), canonical_id)
+            .await
+            .expect("mam lookup")
+            .expect("MAM row keyed by canonical stanza-id");
+        assert_eq!(row.id, canonical_id);
+        assert_eq!(row.body, "pivot test");
+    }
+
+    #[tokio::test]
     async fn xep_0313_archive_direct_writes_one_entry_per_event() {
         // Sender pass + recipient pass on the same dispatch (true
         // local-to-local) emit two events with distinct archive_jids
@@ -889,7 +963,7 @@ mod tests {
         let mam: Arc<dyn MamStorage> = Arc::new(InMemoryMamStorage::new());
         let inbox: Arc<dyn InboxStorage> =
             Arc::new(waddle_xmpp::inbox::storage::InMemoryInboxStorage::new());
-        let deps = make_deps_with_storage(&registry, &mam, &inbox);
+        let deps = Deps::test_with_storage(&registry, &mam, &inbox);
 
         let alice: jid::BareJid = "alice@example.com".parse().expect("bare");
         let bob: jid::BareJid = "bob@example.com".parse().expect("bare");
@@ -1013,7 +1087,7 @@ mod tests {
         let mam: Arc<dyn MamStorage> = Arc::new(FailingMam);
         let inbox: Arc<dyn InboxStorage> =
             Arc::new(waddle_xmpp::inbox::storage::InMemoryInboxStorage::new());
-        let deps = make_deps_with_storage(&registry, &mam, &inbox);
+        let deps = Deps::test_with_storage(&registry, &mam, &inbox);
 
         let alice: jid::BareJid = "alice@example.com".parse().expect("bare");
         let bob: jid::BareJid = "bob@example.com".parse().expect("bare");
@@ -1044,7 +1118,7 @@ mod tests {
         let mam: Arc<dyn MamStorage> = Arc::new(InMemoryMamStorage::new());
         let inbox_concrete = Arc::new(InMemoryInboxStorage::new());
         let inbox: Arc<dyn InboxStorage> = inbox_concrete.clone();
-        let deps = make_deps_with_storage(&registry, &mam, &inbox);
+        let deps = Deps::test_with_storage(&registry, &mam, &inbox);
 
         let owner: jid::BareJid = "alice@example.com".parse().expect("bare");
         let peer: jid::BareJid = "bob@example.com".parse().expect("bare");
@@ -1084,7 +1158,7 @@ mod tests {
         let mam: Arc<dyn MamStorage> = Arc::new(InMemoryMamStorage::new());
         let inbox_concrete = Arc::new(InMemoryInboxStorage::new());
         let inbox: Arc<dyn InboxStorage> = inbox_concrete.clone();
-        let deps = make_deps_with_storage(&registry, &mam, &inbox);
+        let deps = Deps::test_with_storage(&registry, &mam, &inbox);
 
         let owner: jid::BareJid = "bob@example.com".parse().expect("bare");
         let peer: jid::BareJid = "alice@example.com".parse().expect("bare");

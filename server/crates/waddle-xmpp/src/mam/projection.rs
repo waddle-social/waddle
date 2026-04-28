@@ -2,10 +2,11 @@
 //! [`ArchivedMessage`] shape MAM storage expects.
 //!
 //! Used by the sans-I/O dispatcher's storage interpreter
-//! ([`OutboundEvent::ArchiveDirect`]) — keeps the conversion in one
-//! place so handler-emitted typed events are projected consistently
-//! whether the call site is the legacy `message.rs` path (until #229
-//! PR9 cuts over) or the dispatcher.
+//! ([`OutboundEvent::ArchiveDirect`]) to keep the conversion in one
+//! place so dispatcher-emitted typed archive events are projected
+//! consistently before persistence. The legacy `message.rs` path
+//! still owns its own copies of these helpers until #229 PR9 cuts
+//! over and deletes them; this module supersedes that code.
 //!
 //! Archive eligibility (XEP-0313 §5.1.3 + XEP-0334 hint precedence) is
 //! enforced by [`super::super::protocol::handlers::archive::ArchiveHandler`]
@@ -15,6 +16,7 @@
 //! [`OutboundEvent::ArchiveDirect`]: super::super::protocol::event::OutboundEvent::ArchiveDirect
 
 use chrono::Utc;
+use tracing::warn;
 use xmpp_parsers::message::{Message, MessageType};
 
 use super::{
@@ -23,6 +25,7 @@ use super::{
     STANZA_ID_NS,
 };
 use crate::parser::message_to_string;
+use crate::xep::xep0359::extract_stanza_id_by;
 use crate::xep::{
     extract_correction_from_message, extract_explicit_mentions, extract_reactions_from_message,
     extract_references_from_message, extract_retraction_from_message, parse_reply_from_message,
@@ -32,12 +35,36 @@ use crate::xep::{
 /// Build the [`ArchivedMessage`] persisted form of a one-to-one
 /// (chat / normal) `<message/>` for direct MAM storage.
 ///
+/// `archive_jid` identifies whose personal archive this row belongs
+/// to and is used to look up the canonical XEP-0359
+/// `<stanza-id by='archive_jid' id='…'/>` stamp that
+/// [`super::super::protocol::handlers::canonicalize::CanonicalizeHandler`]
+/// stamped upstream. That id is then used as **both** the storage
+/// primary key (`ArchivedMessage.id`) and the canonical lookup field
+/// (`ArchivedMessage.stanza_id`) so:
+///
+/// - inbox `archive_ref` (also sourced from the same XEP-0359 stamp)
+///   pivots cleanly to the MAM row by id, and
+/// - [`super::storage::MamStorage::get_message_by_stanza_id`] resolves
+///   that same id against `archive_jid`.
+///
 /// `from` and `to` are the canonical bare-JID tuple for the archive
 /// row — the caller (interpreter) supplies them so the projection
-/// does not duplicate the pass-aware logic that lives in the
-/// [`super::super::protocol::handlers::archive::ArchiveHandler`]. The
-/// `id` field is left empty: storage assigns the row id at write time.
-pub fn build_direct_archived_message(from: &str, to: &str, message: &Message) -> ArchivedMessage {
+/// does not duplicate the pass-aware logic that lives in
+/// [`super::super::protocol::handlers::archive::ArchiveHandler`].
+///
+/// If the canonical stamp is missing (test fixture or misconfigured
+/// chain), the row falls back to an empty `id` (the storage backend
+/// will generate one) and `stanza_id` is taken from the wire
+/// `<message id=...>` for legacy parity. Production paths always run
+/// `CanonicalizeHandler` before `ArchiveHandler` per the locked
+/// Q2(a) order, so this fallback is defensive only.
+pub fn build_direct_archived_message(
+    archive_jid: &str,
+    from: &str,
+    to: &str,
+    message: &Message,
+) -> ArchivedMessage {
     let body = prototype_body(message)
         .map(|value| value.trim().to_string())
         .unwrap_or_default();
@@ -46,13 +73,19 @@ pub fn build_direct_archived_message(from: &str, to: &str, message: &Message) ->
     let rich = rich_archive_payload(message);
     let stanza_xml = serialize_message_xml(message);
 
+    let canonical_stamp = extract_stanza_id_by(message, archive_jid);
+    let (id, stanza_id) = match canonical_stamp {
+        Some(stamp) => (stamp.clone(), Some(stamp)),
+        None => (String::new(), message.id.clone()),
+    };
+
     ArchivedMessage {
-        id: String::new(),
+        id,
         timestamp: Utc::now(),
         from: from.to_string(),
         to: to.to_string(),
         body,
-        stanza_id: message.id.clone(),
+        stanza_id,
         thread_id: message.thread.as_ref().map(|thread| thread.0.clone()),
         reply_to_id,
         reply_to_jid,
@@ -105,7 +138,21 @@ fn extract_reply_reference(message: &Message) -> (Option<String>, Option<String>
 }
 
 fn serialize_message_xml(message: &Message) -> Option<String> {
-    message_to_string(message).ok()
+    match message_to_string(message) {
+        Ok(xml) => Some(xml),
+        Err(error) => {
+            // Replay fidelity is degraded if we can't capture the wire
+            // form, but the archive row still persists with body and
+            // typed metadata; warn-log so serializer regressions don't
+            // hide behind a silent `None`.
+            warn!(
+                message_id = message.id.as_deref().unwrap_or(""),
+                %error,
+                "MAM projection: failed to serialize message XML; storing without stanza_xml"
+            );
+            None
+        }
+    }
 }
 
 fn rich_archive_payload(message: &Message) -> Option<ArchivedRichMessage> {
@@ -220,13 +267,26 @@ mod tests {
 
     #[test]
     fn xep_0313_projects_canonical_fields_for_direct_chat() {
+        // No XEP-0359 stamp on the message — defensive fallback path.
         let msg = chat_with_body("alice@example.com/web", "bob@example.com", "hi");
-        let archived = build_direct_archived_message("alice@example.com", "bob@example.com", &msg);
-        assert!(archived.id.is_empty(), "id assigned by storage at write");
+        let archived = build_direct_archived_message(
+            "alice@example.com",
+            "alice@example.com",
+            "bob@example.com",
+            &msg,
+        );
+        assert!(
+            archived.id.is_empty(),
+            "no canonical stamp -> storage assigns id at write"
+        );
         assert_eq!(archived.from, "alice@example.com");
         assert_eq!(archived.to, "bob@example.com");
         assert_eq!(archived.body, "hi");
-        assert_eq!(archived.stanza_id.as_deref(), Some("orig-1"));
+        assert_eq!(
+            archived.stanza_id.as_deref(),
+            Some("orig-1"),
+            "fallback stanza_id is the wire <message id=...>"
+        );
         assert_eq!(archived.message_type, "chat");
         assert!(archived.rich.is_none());
         assert!(
@@ -236,12 +296,67 @@ mod tests {
     }
 
     #[test]
+    fn xep_0359_canonical_stamp_drives_archive_id_and_stanza_id() {
+        // Production path: CanonicalizeHandler stamps a fresh
+        // `<stanza-id by='alice@example.com' id='canon-1'/>` on the
+        // message before ArchiveHandler emits ArchiveDirect. The
+        // projection MUST use that id as both the storage primary key
+        // and the lookup field so inbox->MAM pivot works (the
+        // InboxHandler emits the same id as `archive_ref`).
+        use crate::xep::xep0359::build_stanza_id_element;
+        let mut msg = chat_with_body("alice@example.com/web", "bob@example.com", "hi");
+        msg.payloads
+            .push(build_stanza_id_element("canon-1", "alice@example.com"));
+        let archived = build_direct_archived_message(
+            "alice@example.com",
+            "alice@example.com",
+            "bob@example.com",
+            &msg,
+        );
+        assert_eq!(
+            archived.id, "canon-1",
+            "canonical XEP-0359 stamp becomes the storage primary key"
+        );
+        assert_eq!(
+            archived.stanza_id.as_deref(),
+            Some("canon-1"),
+            "canonical XEP-0359 stamp also fills stanza_id for stanza-id lookups"
+        );
+    }
+
+    #[test]
+    fn xep_0359_canonical_stamp_picks_archive_jid_specific_stamp() {
+        // Recipient pass: the message carries Alice's stamp AND Bob's
+        // stamp. The projection picks the one matching `archive_jid`
+        // — Bob's, since this is Bob's archive write.
+        use crate::xep::xep0359::build_stanza_id_element;
+        let mut msg = chat_with_body("alice@example.com/web", "bob@example.com", "hi");
+        msg.payloads
+            .push(build_stanza_id_element("alice-A1", "alice@example.com"));
+        msg.payloads
+            .push(build_stanza_id_element("bob-B1", "bob@example.com"));
+        let archived = build_direct_archived_message(
+            "bob@example.com",
+            "alice@example.com",
+            "bob@example.com",
+            &msg,
+        );
+        assert_eq!(archived.id, "bob-B1");
+        assert_eq!(archived.stanza_id.as_deref(), Some("bob-B1"));
+    }
+
+    #[test]
     fn xep_0313_projects_correction_into_rich_payload() {
         use crate::xep::xep0308::build_correction_message;
         let to: jid::Jid = "bob@example.com".parse().expect("jid");
         let from: jid::Jid = "alice@example.com/web".parse().expect("jid");
         let msg = build_correction_message(Some(to), Some(from), "fixed text", "old-id");
-        let archived = build_direct_archived_message("alice@example.com", "bob@example.com", &msg);
+        let archived = build_direct_archived_message(
+            "alice@example.com",
+            "alice@example.com",
+            "bob@example.com",
+            &msg,
+        );
         let rich = archived.rich.expect("correction projects rich payload");
         match rich.payload {
             Some(ArchivedRichPayload::Correction { replaces_id }) => {
