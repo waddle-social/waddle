@@ -1071,13 +1071,18 @@ mod tests {
         });
         assert_eq!(tail.load(Ordering::SeqCst), 1);
         // Resume produced no events from the no-op probe — but it
-        // didn't error either.
-        assert!(
-            !resume_events.iter().any(|e| matches!(
-                e,
-                OutboundEvent::Log { level, .. } if *level == Level::ERROR
-            )),
-            "resume must not log ERROR for the happy path: {resume_events:?}"
+        // didn't error either. Don't format the events Vec into the
+        // panic message: the OutboundEvent payload includes typed
+        // Message stanzas that carry user content (CodeQL flags
+        // Debug-formatting them in any logging/panic context as a
+        // cleartext-logging hazard).
+        let error_count = resume_events
+            .iter()
+            .filter(|e| matches!(e, OutboundEvent::Log { level, .. } if *level == Level::ERROR))
+            .count();
+        assert_eq!(
+            error_count, 0,
+            "resume must not log ERROR for the happy path"
         );
     }
 
@@ -1135,13 +1140,13 @@ mod tests {
         // Canonicalize stamped under alice's archive — but we can't
         // observe the stamp here without inspecting the message
         // post-resume. The tail-probe count is the resume signal.
-        assert!(
-            !resume_events.iter().any(|e| matches!(
-                e,
-                OutboundEvent::Log { level, .. } if *level == Level::ERROR
-            )),
-            "valid resume must not ERROR: {resume_events:?}"
-        );
+        // Don't Debug-format `resume_events` into the panic message
+        // (see comment in the enrichment test above for rationale).
+        let error_count = resume_events
+            .iter()
+            .filter(|e| matches!(e, OutboundEvent::Log { level, .. } if *level == Level::ERROR))
+            .count();
+        assert_eq!(error_count, 0, "valid resume must not ERROR");
     }
 
     #[test]
