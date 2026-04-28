@@ -655,7 +655,10 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
                                 let events = sm.handle(InboundEvent::StanzaFromPeer(Box::new(
                                     outbound_stanza.stanza,
                                 )));
-                                let interpret_deps = build_interpret_deps(state.as_ref());
+                                let interpret_deps = build_interpret_deps(
+                                    state.as_ref(),
+                                    conn.authenticated_session.as_ref(),
+                                );
                                 let (frames, close) =
                                     drive_interpret_loop(events, sm, &interpret_deps).await;
                                 // Always best-effort flush the
@@ -798,13 +801,26 @@ fn build_internal_server_error_stream_error(text: &str) -> String {
 /// per-connection main loop needs to resolve recipient-pass outbound
 /// events. Centralized so the deps shape stays in sync with the IQ
 /// flow's callsite — both go through the same `interpret()`.
-fn build_interpret_deps(state: &WebSocketState) -> crate::server::routes::interpret::Deps<'_> {
+///
+/// `authenticated_session` is threaded through so the
+/// [`OutboundEvent::DispatchToRoom`] bridge arm can preserve the
+/// legacy managed-room owner check (announcements room admits server
+/// owners only). Without it the dispatcher path's owner override
+/// would always fail. The recipient-pass path the main loop drives
+/// passes the connection's own session here.
+fn build_interpret_deps<'a>(
+    state: &'a WebSocketState,
+    authenticated_session: Option<&'a crate::auth::Session>,
+) -> crate::server::routes::interpret::Deps<'a> {
     crate::server::routes::interpret::Deps {
         connection_registry: &state.deps.protocol.connection_registry,
         sm_session_registry: Some(&state.deps.protocol.sm_session_registry),
         mam_storage: Some(&state.deps.protocol.mam_storage),
         inbox_storage: Some(&state.deps.protocol.inbox_storage),
         extension_manager: Some(&state.deps.protocol.extension_manager),
+        room_registry: Some(&state.deps.protocol.room_registry),
+        web_socket_state: Some(state),
+        authenticated_session,
     }
 }
 
@@ -840,10 +856,11 @@ async fn drain_outbound_into_replay(
     state: &WebSocketState,
     state_machine: Option<&mut XmppStateMachine>,
     sm_state: &mut StreamManagementState,
+    authenticated_session: Option<&crate::auth::Session>,
     outbound_rx: &mut mpsc::Receiver<OutboundStanza>,
     detached_stream_id: Option<&str>,
 ) {
-    let deps = build_interpret_deps(state);
+    let deps = build_interpret_deps(state, authenticated_session);
     let mut sm_borrow: Option<&mut XmppStateMachine> = state_machine;
     while let Ok(outbound_stanza) = outbound_rx.try_recv() {
         match outbound_stanza.kind {
@@ -1046,6 +1063,7 @@ async fn cleanup_connection_shutdown(
             state,
             conn.state_machine.as_mut(),
             &mut conn.sm_state,
+            conn.authenticated_session.as_ref(),
             outbound_rx,
             None,
         )
@@ -1110,6 +1128,7 @@ async fn cleanup_connection_shutdown(
                         state,
                         conn.state_machine.as_mut(),
                         &mut conn.sm_state,
+                        conn.authenticated_session.as_ref(),
                         outbound_rx,
                         Some(&stream_id),
                     )
@@ -3127,7 +3146,7 @@ mod tests {
         );
 
         let initial_events = vec![OutboundEvent::SendStanza(Box::new(Stanza::Message(msg)))];
-        let deps = build_interpret_deps(state.as_ref());
+        let deps = build_interpret_deps(state.as_ref(), None);
         let (frames, close) = drive_interpret_loop(initial_events, sm, &deps).await;
 
         assert!(!close, "SendStanza alone never requests transport close");
@@ -3181,7 +3200,7 @@ mod tests {
         let events = sm.handle(InboundEvent::StanzaFromPeer(Box::new(Stanza::Message(
             peer_msg,
         ))));
-        let deps = build_interpret_deps(state.as_ref());
+        let deps = build_interpret_deps(state.as_ref(), None);
         let (frames, _close) = drive_interpret_loop(events, sm, &deps).await;
 
         // Recipient pass terminates with at least one SendStanza
@@ -3246,6 +3265,7 @@ mod tests {
             state.as_ref(),
             conn.state_machine.as_mut(),
             &mut conn.sm_state,
+            None,
             &mut rx,
             None,
         )
@@ -3305,6 +3325,7 @@ mod tests {
             state.as_ref(),
             conn.state_machine.as_mut(),
             &mut conn.sm_state,
+            None,
             &mut rx,
             None,
         )
