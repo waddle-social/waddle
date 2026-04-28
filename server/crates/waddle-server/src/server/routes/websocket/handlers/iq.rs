@@ -298,11 +298,11 @@ pub async fn handle_iq_with_conn_state(
         }
         let ctx = ProtocolStanzaContext { domain, full_jid };
         let events = state.deps.protocol.dispatcher.dispatch_iq(&iq, &ctx);
-        let outcome = crate::server::routes::interpret::interpret(
-            events,
-            &state.deps.protocol.connection_registry,
-        )
-        .await;
+        let deps = crate::server::routes::interpret::Deps {
+            connection_registry: &state.deps.protocol.connection_registry,
+            sm_session_registry: Some(&state.deps.protocol.sm_session_registry),
+        };
+        let outcome = crate::server::routes::interpret::interpret(events, &deps).await;
         if outcome.close {
             warn!(
                 ns = %payload_ns,
