@@ -140,6 +140,7 @@ schema.#Project & {
 			}
 			tasks: [
 				_t.xmppUnitTests,
+				_t.xmppCueE2e,
 				_t.xmppServerTests,
 				_t.xmppXepIntegration,
 			]
@@ -327,6 +328,11 @@ schema.#Project & {
 
 		xmppServerTests: xRust.#Test & {
 			args: ["test", "--package", "waddle-server", "--verbose"]
+			inputs: _rustInputs
+		}
+
+		xmppCueE2e: xRust.#Test & {
+			args: ["test", "--package", "waddle-server", "--test", "xmpp_e2e_cue", "--verbose"]
 			inputs: _rustInputs
 		}
 
