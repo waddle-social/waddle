@@ -88,14 +88,28 @@ echo "==> Generating Kotlin bindings"
 mkdir -p "$KOTLIN_OUT"
 (
   cd "$SERVER"
+  set -x
   cargo run -p waddle-xmpp-client-ffi \
     --bin uniffi-bindgen \
     --features waddle-xmpp-client-ffi/uniffi-bindgen-bin \
     -- generate \
     --library "$HOST_LIB" \
     --language kotlin \
-    --out-dir "$KOTLIN_OUT"
+    --out-dir "$KOTLIN_OUT" 2>&1
+  set +x
 )
+
+echo "==> Verifying bindgen output"
+echo "  KOTLIN_OUT=$KOTLIN_OUT"
+ls -la "$KOTLIN_OUT" || true
+find "$KOTLIN_OUT" -type f -name '*.kt' 2>/dev/null || true
+
+if [[ ! -d "$KOTLIN_OUT/uniffi/waddle_xmpp_client" ]]; then
+  echo "error: bindgen ran but did not produce $KOTLIN_OUT/uniffi/waddle_xmpp_client/" >&2
+  echo "  searching the workspace for stray waddle_xmpp_client.kt files:" >&2
+  find "$REPO_ROOT" -name 'waddle_xmpp_client.kt' -not -path '*/node_modules/*' -not -path '*/.git/*' 2>/dev/null >&2 || true
+  exit 1
+fi
 
 echo "==> Done"
 echo "    .so:    $JNI_LIBS/{arm64-v8a,armeabi-v7a,x86_64}/libwaddle_xmpp_client_ffi.so"
