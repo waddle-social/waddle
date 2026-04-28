@@ -58,14 +58,15 @@ abstract class VerifyFfiArtifacts : DefaultTask() {
 	@org.gradle.api.tasks.TaskAction
 	fun verify() {
 		val path = displayPath.get()
-		val ok = when (checkKind.get()) {
-			"directory" -> {
-				val dir = targetDir.get().asFile
-				dir.isDirectory && (dir.listFiles()?.isNotEmpty() == true)
+		val ok =
+			when (checkKind.get()) {
+				"directory" -> {
+					val dir = targetDir.get().asFile
+					dir.isDirectory && (dir.listFiles()?.isNotEmpty() == true)
+				}
+				"file" -> target.get().asFile.isFile
+				else -> false
 			}
-			"file" -> target.get().asFile.isFile
-			else -> false
-		}
 		if (!ok) {
 			throw org.gradle.api.GradleException(
 				"Missing $path\n" +
