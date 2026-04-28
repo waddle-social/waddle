@@ -2,6 +2,8 @@
 
 Welcome to Waddle's technical and product documentation. This directory contains Architecture Decision Records (ADRs), Request for Comments (RFCs), and Product Requirements Documents (PRDs) that define Waddle's design and roadmap.
 
+- [FlakeHub Cache in CI](./ci-flakehub-cache.md)
+
 ## What is Waddle?
 
 Waddle is a next-generation social collaboration platform designed for developer communities, hobby groups, and modern online communities. Built Cloudflare-native with atproto identity, Waddle reimagines chat by removing rigid channels in favor of flexible, AI-powered conversation organization.

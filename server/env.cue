@@ -7,6 +7,34 @@ import (
 	xRust "github.com/cuenv/cuenv/contrib/rust"
 )
 
+let _flakehubCacheContributor = schema.#Contributor & {
+	id: "flakehubCache"
+	tasks: [
+		{
+			id:       "nix.install"
+			label:    "Install Determinate Nix"
+			priority: 0
+			provider: github: {
+				uses: "DeterminateSystems/determinate-nix-action@92ffb5400c3776307a27a1727d7e2ac3dcd9f844"
+				with: "extra-conf": "accept-flake-config = true"
+			}
+		},
+		{
+			id:       "flakehubCache.setup"
+			label:    "Setup FlakeHub Cache"
+			priority: 9
+			dependsOn: ["nix.install"]
+			provider: github: {
+				uses: "DeterminateSystems/flakehub-cache-action@e134de896b2302c1584a7b54ff35432708607d44"
+				with: {
+					"flakehub-flake-name": "waddle-social/waddle"
+					"use-gha-cache":       "no-preference"
+				}
+			}
+		},
+	]
+}
+
 let _rustInputs = [
 	"Cargo.toml",
 	"Cargo.lock",
@@ -35,15 +63,7 @@ schema.#Project & {
 
 	ci: providers: ["github"]
 	ci: contributors: [
-		schema.#Contributor & {
-			id: "nix"
-			tasks: [{
-				id:       "nix.install"
-				label:    "Install Nix"
-				priority: 0
-				provider: github: uses: "DeterminateSystems/determinate-nix-action@v3"
-			}]
-		},
+		_flakehubCacheContributor,
 		c.#CuenvRelease,
 		c.#OnePassword,
 		schema.#Contributor & {
@@ -58,24 +78,17 @@ schema.#Project & {
 						uses: "actions/checkout@v6"
 						with: {
 							"persist-credentials": false
-							ref: "${{ (inputs.tag != null) && format('refs/tags/{0}', inputs.tag) || '' }}"
+							ref:                   "${{ (inputs.tag != null) && format('refs/tags/{0}', inputs.tag) || '' }}"
 						}
 					}
 				},
 				{
-					id:        "determinate-nix"
-					label:     "Setup Determinate Nix"
-					priority: 2
-					dependsOn: ["checkout.tag"]
-					provider: github: uses: "DeterminateSystems/determinate-nix-action@v3"
-				},
-				{
-					id:        "push"
-					label:     "Push to FlakeHub"
-					priority: 3
-					dependsOn: ["determinate-nix"]
+					id:       "push"
+					label:    "Push to FlakeHub"
+					priority: 10
+					dependsOn: ["checkout.tag", "flakehubCache.setup"]
 					provider: github: {
-						uses: "DeterminateSystems/flakehub-push@main"
+						uses: "DeterminateSystems/flakehub-push@71f57208810a5d299fc6545350981de98fdbc860"
 						with: {
 							visibility:             "public"
 							name:                   "waddle-social/waddle"
@@ -97,7 +110,10 @@ schema.#Project & {
 				manual:        true
 			}
 			provider: github: {
-				permissions: packages: "write"
+				permissions: {
+					packages:   "write"
+					"id-token": "write"
+				}
 				runners: arch: {
 					amd64: "ubuntu-latest"
 				}
@@ -135,8 +151,18 @@ schema.#Project & {
 			when: {
 				branch: ["main"]
 				defaultBranch: true
-				pullRequest:   true
 				manual:        true
+			}
+			provider: github: permissions: "id-token": "write"
+			tasks: [
+				_t.xmppUnitTests,
+				_t.xmppServerTests,
+				_t.xmppXepIntegration,
+			]
+		}
+		xmppCompliancePullRequest: {
+			when: {
+				pullRequest: true
 			}
 			tasks: [
 				_t.xmppUnitTests,
@@ -150,6 +176,7 @@ schema.#Project & {
 				defaultBranch: true
 				manual:        true
 			}
+			provider: github: permissions: "id-token": "write"
 			derivePaths: true
 			tasks: [_t.buildGithubEnricher, _t.pushGithubEnricherOci, _t.pinGithubEnricherTag, _t.pushGithubEnricherGitops]
 		}
@@ -164,9 +191,13 @@ schema.#Project & {
 
 	tasks: {
 		checkCiDrift: schema.#Task & {
-			command: "cuenv"
-			args: ["sync", "ci", "--check", "-A"]
-			inputs: ["**/env.cue"]
+			command: "bash"
+			args: ["scripts/check-ci-drift.sh"]
+			inputs: [
+				"**/env.cue",
+				"scripts/check-ci-drift.sh",
+				"scripts/pin-generated-github-actions.sh",
+			]
 		}
 
 		fmt: xRust.#Fmt & {
@@ -312,11 +343,11 @@ schema.#Project & {
 		reconcileServerWithSource: schema.#Task & {
 			command: "bash"
 			args: ["-c", #"""
-				set -euo pipefail
-				flux reconcile source oci waddle-server -n flux-system
-				flux reconcile kustomization infra-waddle-server -n flux-system --with-source
-				flux reconcile helmrelease waddle-server -n waddle --with-source
-			"""#]
+					set -euo pipefail
+					flux reconcile source oci waddle-server -n flux-system
+					flux reconcile kustomization infra-waddle-server -n flux-system --with-source
+					flux reconcile helmrelease waddle-server -n waddle --with-source
+				"""#]
 		}
 
 		// XMPP compliance tasks — run as the xmppCompliance pipeline

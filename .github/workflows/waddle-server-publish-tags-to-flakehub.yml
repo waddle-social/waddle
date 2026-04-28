@@ -24,25 +24,23 @@ jobs:
     environment: flakehub
     steps:
     - name: Checkout
-      uses: actions/checkout@v4
+      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
       with:
         fetch-depth: 2
-    - name: Install Nix
-      uses: DeterminateSystems/determinate-nix-action@v3
+    - name: Install Determinate Nix
+      uses: DeterminateSystems/determinate-nix-action@92ffb5400c3776307a27a1727d7e2ac3dcd9f844
+      with:
+        extra-conf: accept-flake-config = true
     - name: Checkout tag
-      uses: actions/checkout@v6
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
       with:
         persist-credentials: false
         ref: ${{ (inputs.tag != null) && format('refs/tags/{0}', inputs.tag) || '' }}
-    - name: Setup Determinate Nix
-      uses: DeterminateSystems/determinate-nix-action@v3
-    - name: Push to FlakeHub
-      uses: DeterminateSystems/flakehub-push@main
+    - name: Setup FlakeHub Cache
+      uses: DeterminateSystems/flakehub-cache-action@e134de896b2302c1584a7b54ff35432708607d44
       with:
-        include-output-paths: true
-        name: waddle-social/waddle
-        tag: ${{ inputs.tag }}
-        visibility: public
+        flakehub-flake-name: waddle-social/waddle
+        use-gha-cache: no-preference
     - name: Setup cuenv (release)
       run: |-
         arch="$(uname -m)"
@@ -54,11 +52,15 @@ jobs:
         curl -sSL -o /usr/local/bin/cuenv "https://github.com/cuenv/cuenv/releases/latest/download/${cuenv_asset}" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync -A
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    - name: Push to FlakeHub
+      uses: DeterminateSystems/flakehub-push@71f57208810a5d299fc6545350981de98fdbc860
+      with:
+        include-output-paths: true
+        name: waddle-social/waddle
+        tag: ${{ inputs.tag }}
+        visibility: public
     - name: 'Run pipeline: Publish tags to FlakeHub'
       run: cuenv ci --pipeline Publish tags to FlakeHub --path server
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        GITHUB_ACTOR: ${{ github.actor }}
-        GITHUB_REF_TYPE: ${{ github.ref_type }}
-        GITHUB_REF_NAME: ${{ github.ref_name }}
         CUENV_ENVIRONMENT: flakehub
