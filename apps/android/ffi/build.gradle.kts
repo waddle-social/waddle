@@ -43,17 +43,32 @@ dependencies {
 // Fail fast if the operator forgot to run scripts/build-android-bindings.sh.
 // Compilation only needs the generated Kotlin; packaging needs the .so.
 abstract class VerifyFfiArtifacts : DefaultTask() {
-	@get:org.gradle.api.tasks.InputFiles
-	abstract val artifact: org.gradle.api.file.ConfigurableFileCollection
+	@get:org.gradle.api.tasks.Internal
+	abstract val target: org.gradle.api.file.RegularFileProperty
+
+	@get:org.gradle.api.tasks.Internal
+	abstract val targetDir: org.gradle.api.file.DirectoryProperty
 
 	@get:org.gradle.api.tasks.Input
-	abstract val expectedPath: org.gradle.api.provider.Property<String>
+	abstract val displayPath: org.gradle.api.provider.Property<String>
+
+	@get:org.gradle.api.tasks.Input
+	abstract val checkKind: org.gradle.api.provider.Property<String>
 
 	@org.gradle.api.tasks.TaskAction
 	fun verify() {
-		if (artifact.isEmpty || artifact.files.none { it.exists() }) {
+		val path = displayPath.get()
+		val ok = when (checkKind.get()) {
+			"directory" -> {
+				val dir = targetDir.get().asFile
+				dir.isDirectory && (dir.listFiles()?.isNotEmpty() == true)
+			}
+			"file" -> target.get().asFile.isFile
+			else -> false
+		}
+		if (!ok) {
 			throw org.gradle.api.GradleException(
-				"Missing ${expectedPath.get()}\n" +
+				"Missing $path\n" +
 					"Run `bash scripts/build-android-bindings.sh` from the repo root first.",
 			)
 		}
@@ -63,19 +78,17 @@ abstract class VerifyFfiArtifacts : DefaultTask() {
 tasks.register<VerifyFfiArtifacts>("verifyFfiBindings") {
 	group = "verification"
 	description = "Ensures the uniffi-generated Kotlin bindings exist (required for compilation)."
-	artifact.from(
-		layout.projectDirectory.dir("src/main/kotlin/uniffi/waddle_xmpp_client"),
-	)
-	expectedPath.set("src/main/kotlin/uniffi/waddle_xmpp_client/")
+	displayPath.set("src/main/kotlin/uniffi/waddle_xmpp_client")
+	checkKind.set("directory")
+	targetDir.set(layout.projectDirectory.dir("src/main/kotlin/uniffi/waddle_xmpp_client"))
 }
 
 tasks.register<VerifyFfiArtifacts>("verifyFfiNativeLib") {
 	group = "verification"
 	description = "Ensures the per-ABI .so files exist (required for packaging)."
-	artifact.from(
-		layout.projectDirectory.file("src/main/jniLibs/arm64-v8a/libwaddle_xmpp_client_ffi.so"),
-	)
-	expectedPath.set("src/main/jniLibs/arm64-v8a/libwaddle_xmpp_client_ffi.so")
+	displayPath.set("src/main/jniLibs/arm64-v8a/libwaddle_xmpp_client_ffi.so")
+	checkKind.set("file")
+	target.set(layout.projectDirectory.file("src/main/jniLibs/arm64-v8a/libwaddle_xmpp_client_ffi.so"))
 }
 
 tasks.named("preBuild") {
