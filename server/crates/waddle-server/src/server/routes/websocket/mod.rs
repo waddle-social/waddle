@@ -235,6 +235,27 @@ impl WsConnState {
         sm.transition_to_ready(full_jid, resumed);
         self.state_machine = Some(sm);
     }
+
+    /// Mirror the legacy [`Self::phase`] tracker's current value into
+    /// the per-connection [`XmppStateMachine`]'s phase. Called after
+    /// every `handle_xmpp_frame` round-trip + at start of
+    /// `cleanup_connection_shutdown` so a phase transition driven by
+    /// a deeply-nested helper (e.g. SASL failure or stream-error
+    /// inside `handle_xmpp_frame`) doesn't leave the SM stuck in
+    /// `Ready` and willing to accept late `PeerStanza` dispatches.
+    ///
+    /// Currently only the `Ready → Closing` direction needs explicit
+    /// mirroring (the `Ready` direction is handled lazily by
+    /// [`Self::ensure_state_machine`] at bind / SM-resume).
+    fn sync_state_machine_phase(&mut self) {
+        if let Some(sm) = self.state_machine.as_mut() {
+            if matches!(self.phase, ConnectionPhase::Closing { .. })
+                && !matches!(sm.phase(), ConnectionPhase::Closing { .. })
+            {
+                sm.transition_to_closing();
+            }
+        }
+    }
 }
 
 /// Create the WebSocket router
@@ -300,6 +321,16 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
                             &state,
                             &mut conn,
                         ).await;
+
+                        // Mirror any phase transition `handle_xmpp_frame`
+                        // performed (most importantly Ready → Closing on
+                        // SASL failure / stream error) into the per-
+                        // connection state machine. Without this, late
+                        // `PeerStanza` dispatches from the outbound
+                        // channel would still go through the recipient
+                        // pipeline even though the legacy phase tracker
+                        // has marked the connection Closing.
+                        conn.sync_state_machine_phase();
 
                         // Register connection after successful authentication AND resource binding
                         // This ensures the JID in ConnectionRegistry matches the JID stored in MUC room occupants
@@ -557,10 +588,13 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
                                 let interpret_deps = build_interpret_deps(state.as_ref());
                                 let (frames, close) =
                                     drive_interpret_loop(events, sm, &interpret_deps).await;
-                                if close {
-                                    info!("PeerStanza dispatch requested transport close");
-                                    break;
-                                }
+                                // Always best-effort flush the
+                                // accumulated frames first, even if
+                                // `close=true`. If `CloseTransport`
+                                // is ever emitted alongside a final
+                                // error stanza or stream-close
+                                // frame, the recipient must see
+                                // those bytes before we tear down.
                                 let mut send_failed = false;
                                 for xml in frames {
                                     if conn.sm_state.enabled && is_countable_stanza(&xml) {
@@ -578,6 +612,10 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
                                     }
                                 }
                                 if send_failed {
+                                    break;
+                                }
+                                if close {
+                                    info!("PeerStanza dispatch requested transport close");
                                     break;
                                 }
                             }
@@ -645,6 +683,88 @@ fn build_interpret_deps(state: &WebSocketState) -> crate::server::routes::interp
 /// The state machine `sm` is borrowed mutably so feedback events can
 /// be re-fed via `sm.handle(...)` and produce the next-round
 /// `OutboundEvent` batch.
+/// Drain `outbound_rx` of all immediately-available
+/// [`OutboundStanza`] values and record them into the per-connection
+/// XEP-0198 unacked queue (and, when a `detached_stream_id` is
+/// supplied, into the detached SM session's stored replay buffer).
+///
+/// Dispatches on [`DeliveryKind`] so the recipient-pass contract
+/// PR11 introduced is preserved through the detach path. Without
+/// this dispatch, queued `PeerStanza` values would be serialized
+/// raw and replayed bytes would be missing the recipient-side
+/// `<stanza-id>` stamp / archive write that the recipient pipeline
+/// produces — exactly the bug Qodo flagged on PR269.
+///
+/// `state_machine` borrows the per-connection SM mutably so it can
+/// feed `InboundEvent::StanzaFromPeer` for queued PeerStanza values.
+/// When `state_machine` is `None` (pre-bind queue, never reached in
+/// practice for a detach drain) PeerStanza values are dropped with
+/// a WARN log.
+async fn drain_outbound_into_replay(
+    state: &WebSocketState,
+    state_machine: Option<&mut XmppStateMachine>,
+    sm_state: &mut StreamManagementState,
+    outbound_rx: &mut mpsc::Receiver<OutboundStanza>,
+    detached_stream_id: Option<&str>,
+) {
+    let deps = build_interpret_deps(state);
+    let mut sm_borrow: Option<&mut XmppStateMachine> = state_machine;
+    while let Ok(outbound_stanza) = outbound_rx.try_recv() {
+        match outbound_stanza.kind {
+            DeliveryKind::DirectFrame => {
+                let xml = stanza_to_xml(&outbound_stanza.stanza);
+                record_drained_xml(state, sm_state, detached_stream_id, xml).await;
+            }
+            DeliveryKind::PeerStanza => {
+                let Some(sm) = sm_borrow.as_deref_mut() else {
+                    warn!(
+                        "PeerStanza encountered in detach drain without an SM; \
+                         dropping. Resumed connection will not see this stanza."
+                    );
+                    continue;
+                };
+                let events = sm.handle(InboundEvent::StanzaFromPeer(Box::new(
+                    outbound_stanza.stanza,
+                )));
+                let (frames, _close) = drive_interpret_loop(events, sm, &deps).await;
+                for xml in frames {
+                    record_drained_xml(state, sm_state, detached_stream_id, xml).await;
+                }
+            }
+        }
+    }
+}
+
+/// Helper: record a single drained XML frame into the per-connection
+/// SM unacked queue and, when applicable, into the detached SM
+/// session's stored replay buffer. Pulled out so both the
+/// `DirectFrame` and per-frame `PeerStanza` arms in
+/// [`drain_outbound_into_replay`] can share the same recording
+/// contract.
+async fn record_drained_xml(
+    state: &WebSocketState,
+    sm_state: &mut StreamManagementState,
+    detached_stream_id: Option<&str>,
+    xml: String,
+) {
+    if !sm_state.enabled || !is_countable_stanza(&xml) {
+        return;
+    }
+    sm_state.record_outbound(xml.clone());
+    if let Some(stream_id) = detached_stream_id {
+        let sequence = sm_state.outbound_count;
+        if let Err(error) = state
+            .deps
+            .protocol
+            .sm_session_registry
+            .record_outbound_for_detached_stream_at(stream_id, sequence, xml)
+            .await
+        {
+            warn!(stream_id = %stream_id, %error, "Failed to record drained outbound for detached SM session");
+        }
+    }
+}
+
 async fn drive_interpret_loop(
     initial_events: Vec<OutboundEvent>,
     sm: &mut XmppStateMachine,
@@ -732,6 +852,13 @@ async fn cleanup_connection_shutdown(
     if superseded {
         return;
     }
+    // Note: we deliberately do NOT mirror `conn.phase` Closing into
+    // the SM here — the drain loops below need the SM in `Ready`
+    // phase so they can run the recipient pass on queued
+    // `DeliveryKind::PeerStanza` values. Any explicit Closing
+    // transition that needs to lock out late peer dispatches has
+    // already happened via the post-`handle_xmpp_frame` mirror in
+    // the main loop.
 
     let Some(jid) = conn.phase.cleanup_jid().cloned() else {
         return;
@@ -776,12 +903,17 @@ async fn cleanup_connection_shutdown(
 
         let carbons_enabled = conn.carbons_enabled;
         let presence_available = entry.is_presence_available();
-        while let Ok(outbound_stanza) = outbound_rx.try_recv() {
-            let xml = stanza_to_xml(&outbound_stanza.stanza);
-            if conn.sm_state.enabled && is_countable_stanza(&xml) {
-                conn.sm_state.record_outbound(xml);
-            }
-        }
+        // First detach drain: snapshot whatever's already in the
+        // channel into the unacked queue. No detached_stream_id yet
+        // because we haven't decided to store the detached session.
+        drain_outbound_into_replay(
+            state,
+            conn.state_machine.as_mut(),
+            &mut conn.sm_state,
+            outbound_rx,
+            None,
+        )
+        .await;
         let user_id = conn
             .authenticated_session
             .as_ref()
@@ -833,19 +965,19 @@ async fn cleanup_connection_shutdown(
                         return;
                     }
                     outbound_rx.close();
-                    while let Ok(outbound_stanza) = outbound_rx.try_recv() {
-                        let xml = stanza_to_xml(&outbound_stanza.stanza);
-                        if conn.sm_state.enabled && is_countable_stanza(&xml) {
-                            conn.sm_state.record_outbound(xml.clone());
-                            let sequence = conn.sm_state.outbound_count;
-                            let _ = state
-                                .deps
-                                .protocol
-                                .sm_session_registry
-                                .record_outbound_for_detached_stream_at(&stream_id, sequence, xml)
-                                .await;
-                        }
-                    }
+                    // Second detach drain: anything that arrived
+                    // between the first drain and the registry
+                    // unregister. With the detached session stored,
+                    // we record both into the per-connection unacked
+                    // queue AND the detached stream's replay buffer.
+                    drain_outbound_into_replay(
+                        state,
+                        conn.state_machine.as_mut(),
+                        &mut conn.sm_state,
+                        outbound_rx,
+                        Some(&stream_id),
+                    )
+                    .await;
                     if let Some(session) = conn.authenticated_session.clone() {
                         state
                             .deps
@@ -2829,6 +2961,152 @@ mod tests {
             combined.contains("hi bob"),
             "recipient-pass wire frame must carry the message body; got: {combined}"
         );
+    }
+
+    #[tokio::test]
+    async fn drain_outbound_dispatches_direct_frame_into_unacked_unchanged() {
+        // Regression for the detach-drain DeliveryKind dispatch
+        // Qodo flagged on PR269: DirectFrame values must be recorded
+        // byte-for-byte (no recipient pipeline). This is the live
+        // contract the SM-resume replay path depends on.
+        let state = create_test_websocket_state().await;
+        let mut conn = WsConnState::new();
+        let jid: jid::FullJid = "bob@example.com/desk".parse().expect("jid");
+        conn.ensure_state_machine("example.com", &state.deps.protocol.dispatcher, jid, false);
+        // Enable SM tracking so `record_outbound` actually retains the
+        // drained XML.
+        conn.sm_state.enabled = true;
+
+        let mut msg =
+            xmpp_parsers::message::Message::new(Some("alice@example.com".parse().expect("to jid")));
+        msg.from = Some("bob@example.com/desk".parse().expect("from jid"));
+        msg.type_ = xmpp_parsers::message::MessageType::Chat;
+        msg.bodies.insert(
+            String::new(),
+            xmpp_parsers::message::Body("plain".to_string()),
+        );
+        let expected_xml = stanza_to_xml(&Stanza::Message(msg.clone()));
+
+        let (tx, mut rx) = mpsc::channel::<OutboundStanza>(4);
+        tx.send(OutboundStanza::new(Stanza::Message(msg)))
+            .await
+            .expect("send");
+        drop(tx); // close so try_recv eventually returns Empty
+
+        drain_outbound_into_replay(
+            state.as_ref(),
+            conn.state_machine.as_mut(),
+            &mut conn.sm_state,
+            &mut rx,
+            None,
+        )
+        .await;
+
+        let queue = conn.sm_state.get_stanzas_to_resend(0);
+        assert_eq!(queue.len(), 1, "DirectFrame recorded once");
+        assert_eq!(
+            queue[0], expected_xml,
+            "DirectFrame is recorded byte-for-byte (no recipient pipeline rewrite)"
+        );
+    }
+
+    #[tokio::test]
+    async fn drain_outbound_dispatches_peer_stanza_through_recipient_pass() {
+        // PeerStanza values queued during detach must run through
+        // the recipient pass before being recorded in the SM unacked
+        // queue, so a resumed connection's replay carries the
+        // recipient-side `<stanza-id>` stamp. Without the dispatch
+        // (Qodo's flagged bug), the queued bytes would be the raw
+        // peer stanza missing bob's stamp.
+        let state = create_test_websocket_state().await;
+        let mut conn = WsConnState::new();
+        let bob_full: jid::FullJid = "bob@example.com/desk".parse().expect("jid");
+        conn.ensure_state_machine(
+            "example.com",
+            &state.deps.protocol.dispatcher,
+            bob_full,
+            false,
+        );
+        conn.sm_state.enabled = true;
+
+        let mut peer_msg =
+            xmpp_parsers::message::Message::new(Some("bob@example.com".parse().expect("to jid")));
+        peer_msg.from = Some("alice@example.com/web".parse().expect("from jid"));
+        peer_msg.type_ = xmpp_parsers::message::MessageType::Chat;
+        peer_msg.id = Some("alice-wire-id".to_string());
+        peer_msg.bodies.insert(
+            String::new(),
+            xmpp_parsers::message::Body("hi from drain".to_string()),
+        );
+        peer_msg
+            .payloads
+            .push(waddle_xmpp::xep::xep0359::build_stanza_id_element(
+                "alice-A1",
+                "alice@example.com",
+            ));
+
+        let (tx, mut rx) = mpsc::channel::<OutboundStanza>(4);
+        tx.send(OutboundStanza::peer_stanza(Stanza::Message(peer_msg)))
+            .await
+            .expect("send");
+        drop(tx);
+
+        drain_outbound_into_replay(
+            state.as_ref(),
+            conn.state_machine.as_mut(),
+            &mut conn.sm_state,
+            &mut rx,
+            None,
+        )
+        .await;
+
+        let queue = conn.sm_state.get_stanzas_to_resend(0);
+        assert!(
+            !queue.is_empty(),
+            "PeerStanza drain MUST record at least the recipient-pass wire frame"
+        );
+        let combined: String = queue.join("\n");
+        assert!(
+            combined.contains("by=\"bob@example.com\""),
+            "drained PeerStanza replay must carry bob's recipient-side stanza-id; got: {combined}"
+        );
+        assert!(
+            combined.contains("alice-A1"),
+            "drained PeerStanza replay must preserve alice's cross-archive stamp; got: {combined}"
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_state_machine_phase_mirrors_closing_into_sm() {
+        // PR269 review fix #2/#6: when WsConnState.phase transitions
+        // to Closing (via SASL failure / stream-error / explicit
+        // shutdown inside `handle_xmpp_frame`), the per-connection SM
+        // must mirror so it stops accepting late `PeerStanza`
+        // dispatches from the outbound channel.
+        let state = create_test_websocket_state().await;
+        let mut conn = WsConnState::new();
+        let jid: jid::FullJid = "alice@example.com/web".parse().expect("jid");
+        conn.ensure_state_machine(
+            "example.com",
+            &state.deps.protocol.dispatcher,
+            jid.clone(),
+            false,
+        );
+
+        // Sanity: SM starts in Ready.
+        assert!(matches!(
+            conn.state_machine.as_ref().expect("sm").phase(),
+            ConnectionPhase::Ready { .. }
+        ));
+
+        // Simulate the legacy phase tracker transitioning to Closing.
+        conn.phase = ConnectionPhase::closing(Some(jid.clone()));
+        conn.sync_state_machine_phase();
+
+        assert!(matches!(
+            conn.state_machine.as_ref().expect("sm").phase(),
+            ConnectionPhase::Closing { .. }
+        ));
     }
 
     #[tokio::test]
