@@ -8,14 +8,20 @@
 //! (connection registry, MUC room occupancy, MAM archive) is resolved by
 //! the interpreter using the events emitted from here.
 
-use super::dispatch::StanzaDispatcher;
+use super::dispatch::{MessageDispatchOutcome, MessageDispatchTermination, StanzaDispatcher};
 use super::event::{CallbackId, InboundEvent, OutboundEvent, StanzaContext};
 use super::frame::InboundFrame;
+use super::handlers::enrichment_dispatch::ENRICHMENT_CALLBACK_SENTINEL;
+use super::handlers::rich_target_validation::{
+    self, RichTargetKind, RichTargetValidationHandler, RICH_TARGET_LOOKUP_CALLBACK_SENTINEL,
+};
 use super::id_gen::{IdGenerator, UuidV4Generator};
 use super::message_context::{MessageContext, MessageContextEnv};
 use super::phase::ConnectionPhase;
 use super::session_state::{Blocklist, CarbonsState, MucOccupancy};
+use super::traits::{HandlerId, HandlerOutcome};
 use crate::Stanza;
+use jid::BareJid;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::Level;
@@ -54,6 +60,85 @@ pub enum PendingOp {
     ScramCredentials { username: String },
     /// Awaiting OAUTHBEARER token validation against `AppState`.
     OAuthBearer,
+    /// Awaiting a callback that resumes a paused message-pipeline run.
+    ///
+    /// Created when [`super::dispatch::StanzaDispatcher::dispatch_message`]
+    /// returns
+    /// [`super::dispatch::MessageDispatchTermination::Awaiting`]; the
+    /// pending op stores everything the resume needs to rebuild a fresh
+    /// [`MessageContext`] and call
+    /// [`super::dispatch::StanzaDispatcher::resume_message`] when the
+    /// matching [`InboundEvent`] arrives.
+    MessageDispatchResume {
+        /// The handler index the pipeline paused at; resume runs the
+        /// handler immediately after.
+        resume_after: HandlerId,
+        /// Per-completion-path payload. Carries the stashed message
+        /// only for kinds that read it on completion (rich-target);
+        /// the enrichment path receives the rewritten message via the
+        /// [`InboundEvent::EnrichmentComplete`] payload itself, so
+        /// stashing a duplicate would just bloat the pending-op map.
+        kind: ResumeKind,
+        /// Connection's bound full JID at pause time, for
+        /// [`MessageContext`] rebuild on resume.
+        full_jid: jid::FullJid,
+        /// Snapshot of the session-bounded state at pause time. Per
+        /// #229 Q5, `MessageContext` is frozen at dispatch start; the
+        /// resumed dispatch sees the same view across every re-park.
+        blocklist: Blocklist,
+        carbons: CarbonsState,
+        muc_occupancy: MucOccupancy,
+    },
+}
+
+/// Frozen snapshot of session-bounded state at message-dispatch start.
+///
+/// Per #229 Q5, [`MessageContext`] is frozen for the duration of one
+/// logical dispatch — even when the pipeline parks via
+/// [`HandlerOutcome::AwaitCallback`] and re-enters via a callback, the
+/// resumed handlers see the same view of blocklist / carbons /
+/// occupancy as the initial dispatch did.
+///
+/// Threaded through every pause/resume hop so a long pipeline (e.g.
+/// rich-target lookup followed by enrichment) preserves that contract
+/// across multiple parks.
+#[derive(Debug, Clone)]
+struct SessionStateSnapshot {
+    blocklist: Blocklist,
+    carbons: CarbonsState,
+    muc_occupancy: MucOccupancy,
+}
+
+/// Per-kind payload for a paused message-pipeline run.
+///
+/// The shape varies by completion path so each variant carries only
+/// what the corresponding completion handler actually reads. In
+/// particular, `Enrichment` does **not** stash the message — the
+/// rewritten message arrives via the
+/// [`InboundEvent::EnrichmentComplete`] payload, so duplicating it in
+/// the pending-op map would just inflate memory while paused.
+#[derive(Debug, Clone)]
+pub enum ResumeKind {
+    /// The pause was triggered by
+    /// [`super::handlers::enrichment_dispatch::EnrichmentDispatchHandler`].
+    /// On `EnrichmentComplete`, the rewritten message from the
+    /// callback payload replaces the original and the pipeline resumes.
+    Enrichment,
+    /// The pause was triggered by
+    /// [`super::handlers::rich_target_validation::RichTargetValidationHandler`].
+    /// On `ArchivedMessageLoaded`, the state machine calls
+    /// [`RichTargetValidationHandler::handle_completion`] with the
+    /// stashed `kind`, `author`, and the original `message`; on
+    /// `Continue` the pipeline resumes, on `Halt` the typed error
+    /// reply is forwarded directly.
+    RichTarget {
+        kind: RichTargetKind,
+        author: BareJid,
+        /// Original inbound message — read by `handle_completion` to
+        /// build the typed error reply (which copies `incoming`'s
+        /// type + addresses).
+        message: Box<xmpp_parsers::message::Message>,
+    },
 }
 
 /// Per-connection XMPP protocol state machine.
@@ -168,8 +253,8 @@ impl XmppStateMachine {
             InboundEvent::OAuthBearerValidated { id, result } => {
                 self.on_oauth_bearer_validated(id, result)
             }
-            InboundEvent::ArchivedMessageLoaded { id, result: _ } => {
-                self.log_completion(id, "ArchivedMessageLoaded")
+            InboundEvent::ArchivedMessageLoaded { id, result } => {
+                self.on_archived_message_loaded(id, result.as_deref())
             }
         }
     }
@@ -184,9 +269,150 @@ impl XmppStateMachine {
     fn on_enrichment_complete(
         &mut self,
         id: CallbackId,
-        _message: xmpp_parsers::message::Message,
+        rewritten: xmpp_parsers::message::Message,
     ) -> Vec<OutboundEvent> {
-        self.log_completion(id, "EnrichmentComplete")
+        // Peek before taking — a kind-mismatch must NOT permanently
+        // consume the pending op, otherwise the *correct* completion
+        // arriving later would see "unknown callback id" and the
+        // pipeline would silently drop. Only remove the entry when
+        // we're sure it matches the expected
+        // `ResumeKind::Enrichment` shape.
+        let pending_kind_matches = matches!(
+            self.pending_ops.get(&id),
+            Some(PendingOp::MessageDispatchResume {
+                kind: ResumeKind::Enrichment,
+                ..
+            })
+        );
+        if !pending_kind_matches {
+            return self.unmatched_completion_log(id, "EnrichmentComplete", "Enrichment");
+        }
+        let op = self.pending_ops.remove(&id).expect("peek succeeded above");
+        match op {
+            PendingOp::MessageDispatchResume {
+                resume_after,
+                kind: ResumeKind::Enrichment,
+                full_jid,
+                blocklist,
+                carbons,
+                muc_occupancy,
+            } => self.resume_message_dispatch(
+                rewritten,
+                resume_after,
+                full_jid,
+                SessionStateSnapshot {
+                    blocklist,
+                    carbons,
+                    muc_occupancy,
+                },
+            ),
+            // Unreachable under the peek-before-take guard, but keep
+            // a typed branch for forward compatibility.
+            _ => unreachable!("peek matched ResumeKind::Enrichment"),
+        }
+    }
+
+    fn on_archived_message_loaded(
+        &mut self,
+        id: CallbackId,
+        result: Option<&super::event::ArchivedMessage>,
+    ) -> Vec<OutboundEvent> {
+        // Peek before taking — see `on_enrichment_complete` for why
+        // a kind-mismatch must not consume the pending op.
+        let pending_kind_matches = matches!(
+            self.pending_ops.get(&id),
+            Some(PendingOp::MessageDispatchResume {
+                kind: ResumeKind::RichTarget { .. },
+                ..
+            })
+        );
+        if !pending_kind_matches {
+            return self.unmatched_completion_log(id, "ArchivedMessageLoaded", "RichTarget");
+        }
+        let op = self.pending_ops.remove(&id).expect("peek succeeded above");
+        match op {
+            PendingOp::MessageDispatchResume {
+                resume_after,
+                kind:
+                    ResumeKind::RichTarget {
+                        kind,
+                        author,
+                        message,
+                    },
+                full_jid,
+                blocklist,
+                carbons,
+                muc_occupancy,
+            } => {
+                let completion =
+                    RichTargetValidationHandler::handle_completion(kind, &message, result, &author);
+                match completion {
+                    HandlerOutcome::Continue(continue_events) => {
+                        let mut all = continue_events;
+                        let resumed = self.resume_message_dispatch(
+                            *message,
+                            resume_after,
+                            full_jid,
+                            SessionStateSnapshot {
+                                blocklist,
+                                carbons,
+                                muc_occupancy,
+                            },
+                        );
+                        all.extend(resumed);
+                        all
+                    }
+                    HandlerOutcome::Halt(halt_events) => halt_events,
+                    HandlerOutcome::AwaitCallback(events) => {
+                        // Rich-target completion shouldn't itself
+                        // park — surface as ERROR but at least
+                        // forward the events so any reply reaches the
+                        // wire.
+                        let mut out = events;
+                        out.push(OutboundEvent::Log {
+                            level: Level::ERROR,
+                            message: format!(
+                                "RichTargetValidationHandler::handle_completion \
+                                 returned AwaitCallback for {id:?}; not supported"
+                            ),
+                        });
+                        out
+                    }
+                }
+            }
+            // Unreachable under the peek-before-take guard.
+            _ => unreachable!("peek matched ResumeKind::RichTarget"),
+        }
+    }
+
+    /// Build an ERROR / WARN log for a completion-event that doesn't
+    /// match the expected pending-op shape. Used by both completion
+    /// handlers; pulled out to keep the kind-mismatch branch in each
+    /// site short.
+    fn unmatched_completion_log(
+        &self,
+        id: CallbackId,
+        event_kind: &str,
+        expected_resume_kind: &str,
+    ) -> Vec<OutboundEvent> {
+        let level = if self.pending_ops.contains_key(&id) {
+            Level::ERROR
+        } else {
+            Level::WARN
+        };
+        let message = if self.pending_ops.contains_key(&id) {
+            format!(
+                "{event_kind} for callback id {id:?} but pending op is not \
+                 {expected_resume_kind}-typed; pending op preserved for the \
+                 expected completion"
+            )
+        } else {
+            format!(
+                "{event_kind} for unknown callback id {id:?}; late or duplicate \
+                 completion, dropping"
+            )
+        };
+        vec![OutboundEvent::Log { level, message }]
     }
 
     fn on_sfu_response(
@@ -261,12 +487,12 @@ impl XmppStateMachine {
         }
     }
 
-    fn on_stanza(&self, stanza: Stanza) -> Vec<OutboundEvent> {
+    fn on_stanza(&mut self, stanza: Stanza) -> Vec<OutboundEvent> {
         // Extract the full JID from the current phase. Stanzas are only
         // dispatched in `Ready`; in every other phase they are protocol
         // violations and get logged.
         let full_jid = match &self.phase {
-            ConnectionPhase::Ready { full_jid, .. } => full_jid,
+            ConnectionPhase::Ready { full_jid, .. } => full_jid.clone(),
             ConnectionPhase::Unauthenticated
             | ConnectionPhase::ScramPending { .. }
             | ConnectionPhase::Authenticated { .. }
@@ -283,37 +509,161 @@ impl XmppStateMachine {
 
         let ctx = StanzaContext {
             domain: &self.domain,
-            full_jid,
+            full_jid: &full_jid,
         };
 
         match stanza {
             Stanza::Iq(iq) => self.dispatcher.dispatch_iq(&iq, &ctx),
             Stanza::Message(mut message) => {
-                let env = MessageContextEnv {
-                    domain: &self.domain,
-                    full_jid,
-                    blocklist: &self.blocklist,
-                    carbons: self.carbons,
-                    muc_occupancy: &self.muc_occupancy,
-                    id_gen: self.id_gen.as_ref(),
+                // Hot path: borrow `self.*` directly during the
+                // synchronous dispatch. The session-state snapshot is
+                // only materialized (cloned) when the pipeline parks
+                // and we need to stash it in `PendingOp`; for stanzas
+                // that complete synchronously (the common case), no
+                // clone happens at all.
+                let outcome = {
+                    let env = MessageContextEnv {
+                        domain: &self.domain,
+                        full_jid: &full_jid,
+                        blocklist: &self.blocklist,
+                        carbons: self.carbons,
+                        muc_occupancy: &self.muc_occupancy,
+                        id_gen: self.id_gen.as_ref(),
+                    };
+                    let mctx = MessageContext::derive(env, &message);
+                    self.dispatcher.dispatch_message(&mut message, &mctx)
                 };
-                let mctx = MessageContext::derive(env, &message);
-                // The dispatcher exposes a typed `MessageDispatchOutcome`,
-                // but the state machine currently consumes only emitted
-                // events; `outcome.termination` is intentionally
-                // dropped here. The `AwaitCallback`-emitting handlers
-                // landed in PR2 (`EnrichmentDispatchHandler`) but are
-                // not yet *registered* in the live dispatcher — that
-                // happens in PR4 along with `message.rs`'s cutover, and
-                // pending-op registration based on `Awaiting`
-                // terminations is wired up at the same time. Until
-                // then, no production handler can produce an
-                // `Awaiting` outcome here.
-                let outcome = self.dispatcher.dispatch_message(&mut message, &mctx);
-                outcome.events
+                self.handle_message_outcome(outcome, message, &full_jid, None)
             }
             Stanza::Presence(presence) => self.dispatcher.dispatch_presence(&presence, &ctx),
         }
+    }
+
+    /// Process a [`MessageDispatchOutcome`] returned by either
+    /// `dispatch_message` or `resume_message`.
+    ///
+    /// On `Completed` / `Halted`, return the events as-is. On
+    /// `Awaiting`, allocate a fresh callback id, replace the
+    /// handler-supplied [`CallbackId`] sentinels in the emitted events,
+    /// and register a [`PendingOp::MessageDispatchResume`] that the
+    /// matching `InboundEvent` callback will resume.
+    ///
+    /// `snapshot` is `Some` only when this call is on a resume path —
+    /// the original dispatch-start view of session state, threaded
+    /// through every re-park so a long pipeline (rich-target lookup
+    /// followed by enrichment) sees the same `MessageContext` for each
+    /// pause. Without this, a second park would capture mutated
+    /// `self.*` state and the resumed handlers would observe a
+    /// different view than the initial dispatch did. On the initial
+    /// dispatch path `snapshot` is `None` and the snapshot is
+    /// materialized lazily from `self.*` only when the pipeline parks.
+    fn handle_message_outcome(
+        &mut self,
+        outcome: MessageDispatchOutcome,
+        message: xmpp_parsers::message::Message,
+        full_jid: &jid::FullJid,
+        snapshot: Option<&SessionStateSnapshot>,
+    ) -> Vec<OutboundEvent> {
+        let MessageDispatchOutcome {
+            mut events,
+            termination,
+        } = outcome;
+        match termination {
+            MessageDispatchTermination::Completed | MessageDispatchTermination::Halted { .. } => {
+                events
+            }
+            MessageDispatchTermination::Awaiting { resume_after } => {
+                let id = self.next_callback_id();
+                let inferred = match infer_resume_kind(&events, &message, full_jid) {
+                    Some(k) => k,
+                    None => {
+                        // No recognised callback-bearing event. Don't
+                        // register a pending op — the pipeline parked
+                        // without a way to resume, so this is
+                        // operator-visible misconfiguration. Surface
+                        // an ERROR log and return events as-is so the
+                        // halt is at least visible.
+                        events.push(OutboundEvent::Log {
+                            level: Level::ERROR,
+                            message: "MessageDispatchOutcome::Awaiting with no recognised \
+                                      callback event; pipeline cannot resume"
+                                .to_string(),
+                        });
+                        return events;
+                    }
+                };
+                replace_callback_sentinels(&mut events, id, &inferred);
+                // Build the per-kind PendingOp payload — the
+                // enrichment branch never reads the stashed message
+                // (the rewritten one comes via the callback) so the
+                // payload only carries a Message on the rich-target
+                // arm.
+                let pending_kind = match inferred {
+                    InferredResume::Enrichment => ResumeKind::Enrichment,
+                    InferredResume::RichTarget { kind, author } => ResumeKind::RichTarget {
+                        kind,
+                        author,
+                        message: Box::new(message),
+                    },
+                };
+                // Materialize the session-state snapshot lazily — only
+                // pay the clone when the pipeline actually parks. On
+                // the initial dispatch path, `snapshot` is `None` and
+                // we clone from `self.*`; on a resume path, we forward
+                // the original frozen snapshot to honour Q5.
+                let (blocklist, carbons, muc_occupancy) = match snapshot {
+                    Some(s) => (s.blocklist.clone(), s.carbons, s.muc_occupancy.clone()),
+                    None => (
+                        self.blocklist.clone(),
+                        self.carbons,
+                        self.muc_occupancy.clone(),
+                    ),
+                };
+                self.register_pending_op(
+                    id,
+                    PendingOp::MessageDispatchResume {
+                        resume_after,
+                        kind: pending_kind,
+                        full_jid: full_jid.clone(),
+                        blocklist,
+                        carbons,
+                        muc_occupancy,
+                    },
+                );
+                events
+            }
+        }
+    }
+
+    /// Resume a paused message-pipeline run with the (possibly
+    /// rewritten) message. Recursively chains through further `Awaiting`
+    /// terminations — a long pipeline can park multiple times (e.g.
+    /// rich-target lookup followed by enrichment). The `snapshot`
+    /// parameter carries the original dispatch-start session state
+    /// forward to any re-park, preserving the Q5 "frozen at dispatch
+    /// start" contract across the entire dispatch.
+    fn resume_message_dispatch(
+        &mut self,
+        message: xmpp_parsers::message::Message,
+        resume_after: HandlerId,
+        full_jid: jid::FullJid,
+        snapshot: SessionStateSnapshot,
+    ) -> Vec<OutboundEvent> {
+        let mut message = message;
+        let outcome = {
+            let env = MessageContextEnv {
+                domain: &self.domain,
+                full_jid: &full_jid,
+                blocklist: &snapshot.blocklist,
+                carbons: snapshot.carbons,
+                muc_occupancy: &snapshot.muc_occupancy,
+                id_gen: self.id_gen.as_ref(),
+            };
+            let mctx = MessageContext::derive(env, &message);
+            self.dispatcher
+                .resume_message(&mut message, &mctx, resume_after)
+        };
+        self.handle_message_outcome(outcome, message, &full_jid, Some(&snapshot))
     }
 
     fn on_peer_stanza(&mut self, stanza: Stanza) -> Vec<OutboundEvent> {
@@ -334,6 +684,99 @@ impl XmppStateMachine {
             level: Level::INFO,
             message: "Transport closed".to_string(),
         }]
+    }
+}
+
+/// Discriminator-only equivalent of [`ResumeKind`] returned by
+/// [`infer_resume_kind`]. The caller owns the inbound message and adds
+/// it to the eventual [`ResumeKind::RichTarget`] payload — no clone
+/// inside the inference path.
+#[derive(Debug)]
+enum InferredResume {
+    Enrichment,
+    RichTarget {
+        kind: RichTargetKind,
+        author: BareJid,
+    },
+}
+
+/// Inspect the events returned by an `Awaiting` dispatch and infer the
+/// resume discriminator.
+///
+/// The state machine recognises two callback-bearing events emitted by
+/// production handlers — `RequestEnrichment` (Enrichment) and
+/// `LookupArchivedMessage` (RichTarget). Future
+/// `AwaitCallback`-emitting handlers add an arm here.
+///
+/// `LookupArchivedMessage` doesn't carry the rich-target kind directly,
+/// so the function re-runs detection on the message via
+/// [`rich_target_validation::detect`] (which is pure and idempotent).
+fn infer_resume_kind(
+    events: &[OutboundEvent],
+    message: &xmpp_parsers::message::Message,
+    full_jid: &jid::FullJid,
+) -> Option<InferredResume> {
+    for event in events {
+        match event {
+            OutboundEvent::RequestEnrichment { .. } => {
+                return Some(InferredResume::Enrichment);
+            }
+            OutboundEvent::LookupArchivedMessage { .. } => {
+                // Re-detect to recover the kind+author the
+                // RichTargetValidationHandler used. Detection is
+                // pure and idempotent, so re-running matches the
+                // handler's original result. Bind temporaries to
+                // locals so the lifetimes inside `MessageContext` are
+                // explicit rather than relying on temporary-lifetime
+                // extension (which is brittle under refactors).
+                let blocklist = Blocklist::empty();
+                let muc_occupancy = MucOccupancy::empty();
+                // detect() doesn't call id_gen; a fixed generator is
+                // fine here. We only need the returned
+                // kind+reference+author.
+                let id_gen = super::id_gen::FixedIdGenerator(String::new());
+                let detected = rich_target_validation::detect(
+                    message,
+                    &MessageContext {
+                        domain: "",
+                        full_jid,
+                        locality: super::session_state::Locality::Sender,
+                        blocklist: &blocklist,
+                        carbons: CarbonsState::Disabled,
+                        muc_occupancy: &muc_occupancy,
+                        id_gen: &id_gen,
+                    },
+                )?;
+                return Some(InferredResume::RichTarget {
+                    kind: detected.kind,
+                    author: detected.author,
+                });
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Replace the handler-supplied sentinel [`CallbackId`] in emitted
+/// events with the freshly-allocated id the state machine will use as
+/// the pending-op key. Handlers can't allocate ids (they're pure), so
+/// they emit a sentinel and the state machine swaps it here.
+fn replace_callback_sentinels(
+    events: &mut [OutboundEvent],
+    real_id: CallbackId,
+    inferred: &InferredResume,
+) {
+    let sentinel = match inferred {
+        InferredResume::Enrichment => ENRICHMENT_CALLBACK_SENTINEL,
+        InferredResume::RichTarget { .. } => RICH_TARGET_LOOKUP_CALLBACK_SENTINEL,
+    };
+    for event in events.iter_mut() {
+        match event {
+            OutboundEvent::RequestEnrichment { id, .. } if *id == sentinel => *id = real_id,
+            OutboundEvent::LookupArchivedMessage { id, .. } if *id == sentinel => *id = real_id,
+            _ => {}
+        }
     }
 }
 
@@ -523,6 +966,423 @@ mod tests {
             result: crate::protocol::event::CallbackResult::Ok { stanza: None },
         });
         assert!(events2.iter().any(|e| matches!(
+            e,
+            OutboundEvent::Log { level, .. } if *level == Level::WARN
+        )));
+    }
+
+    // ----------------------------------------------------------------
+    // Pause/resume integration — the message pipeline parks via
+    // `AwaitCallback`, the matching `InboundEvent` arrives, the
+    // pipeline resumes and runs to completion.
+    // ----------------------------------------------------------------
+
+    use crate::protocol::event::{ArchivedMessage, StanzaIdRef, StanzaIdValue};
+    use crate::protocol::handlers::canonicalize::CanonicalizeHandler;
+    use crate::protocol::handlers::enrichment_dispatch::EnrichmentDispatchHandler;
+    use crate::protocol::handlers::rich_target_validation::RichTargetValidationHandler;
+    use crate::protocol::message_context::MessageContext;
+    use crate::protocol::traits::{HandlerOutcome, MessageHandler};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use xmpp_parsers::message::{Body, Message, MessageType};
+
+    fn ready_machine_with_dispatcher(
+        dispatcher: StanzaDispatcher,
+        domain: &str,
+        full_jid: jid::FullJid,
+    ) -> XmppStateMachine {
+        test_support::ready_machine(domain, full_jid, dispatcher)
+    }
+
+    fn alice() -> jid::FullJid {
+        "alice@example.com/web".parse().expect("jid")
+    }
+
+    fn chat_with_body(from: &str, to: &str, body: &str) -> Message {
+        let mut m = Message::new(Some(to.parse().expect("jid")));
+        m.from = Some(from.parse().expect("jid"));
+        m.type_ = MessageType::Chat;
+        m.bodies.insert(String::new(), Body(body.to_string()));
+        m
+    }
+
+    /// Probe handler that records every invocation so tests can assert
+    /// "ran on resume" or "did not run".
+    struct TailProbe {
+        invocations: Arc<AtomicUsize>,
+    }
+
+    impl MessageHandler for TailProbe {
+        fn name(&self) -> &'static str {
+            "test-tail-probe"
+        }
+
+        fn handle(&self, _message: &mut Message, _ctx: &MessageContext<'_>) -> HandlerOutcome {
+            self.invocations.fetch_add(1, Ordering::SeqCst);
+            HandlerOutcome::Continue(Vec::new())
+        }
+    }
+
+    #[test]
+    fn enrichment_await_then_complete_resumes_pipeline_with_rewritten_message() {
+        let mut dispatcher = StanzaDispatcher::new();
+        dispatcher.register_message(Arc::new(EnrichmentDispatchHandler));
+        let tail = Arc::new(AtomicUsize::new(0));
+        dispatcher.register_message(Arc::new(TailProbe {
+            invocations: tail.clone(),
+        }));
+
+        let mut sm = ready_machine_with_dispatcher(dispatcher, "example.com", alice());
+        let msg = chat_with_body(
+            "alice@example.com/web",
+            "bob@example.com",
+            "see https://example.com/page",
+        );
+        let events = sm.handle(InboundEvent::FrameReceived(InboundFrame::Stanza(Box::new(
+            Stanza::Message(msg),
+        ))));
+
+        // Pipeline parked: RequestEnrichment with a real CallbackId
+        // (sentinel was 0; the state machine swapped it).
+        let callback_id = events
+            .iter()
+            .find_map(|e| match e {
+                OutboundEvent::RequestEnrichment { id, .. } => Some(*id),
+                _ => None,
+            })
+            .expect("RequestEnrichment emitted");
+        assert_ne!(callback_id, ENRICHMENT_CALLBACK_SENTINEL);
+        // Tail handler has not run — pipeline is paused.
+        assert_eq!(tail.load(Ordering::SeqCst), 0);
+
+        // Feed the matching completion with a rewritten message; the
+        // pipeline resumes and the tail probe runs.
+        let mut rewritten = chat_with_body(
+            "alice@example.com/web",
+            "bob@example.com",
+            "see https://example.com/page",
+        );
+        rewritten
+            .payloads
+            .push(minidom::Element::builder("reference", "urn:xmpp:reference:0").build());
+        let resume_events = sm.handle(InboundEvent::EnrichmentComplete {
+            id: callback_id,
+            message: Box::new(rewritten),
+        });
+        assert_eq!(tail.load(Ordering::SeqCst), 1);
+        // Resume produced no events from the no-op probe — but it
+        // didn't error either. Don't format the events Vec into the
+        // panic message: the OutboundEvent payload includes typed
+        // Message stanzas that carry user content (CodeQL flags
+        // Debug-formatting them in any logging/panic context as a
+        // cleartext-logging hazard).
+        let error_count = resume_events
+            .iter()
+            .filter(|e| matches!(e, OutboundEvent::Log { level, .. } if *level == Level::ERROR))
+            .count();
+        assert_eq!(
+            error_count, 0,
+            "resume must not log ERROR for the happy path"
+        );
+    }
+
+    #[test]
+    fn xep_0308_await_then_loaded_with_valid_correction_target_resumes_pipeline() {
+        let mut dispatcher = StanzaDispatcher::new();
+        dispatcher.register_message(Arc::new(RichTargetValidationHandler));
+        // Register canonicalize so resume actually does something
+        // visible (stamps a stanza-id under alice's archive).
+        dispatcher.register_message(Arc::new(CanonicalizeHandler));
+        let tail = Arc::new(AtomicUsize::new(0));
+        dispatcher.register_message(Arc::new(TailProbe {
+            invocations: tail.clone(),
+        }));
+
+        let mut sm = ready_machine_with_dispatcher(dispatcher, "example.com", alice());
+        let mut msg = chat_with_body("alice@example.com/web", "bob@example.com", "fixed text");
+        msg.payloads
+            .push(crate::xep::xep0308::build_replace_element("orig-msg-1"));
+        let events = sm.handle(InboundEvent::FrameReceived(InboundFrame::Stanza(Box::new(
+            Stanza::Message(msg),
+        ))));
+
+        let callback_id = events
+            .iter()
+            .find_map(|e| match e {
+                OutboundEvent::LookupArchivedMessage { id, .. } => Some(*id),
+                _ => None,
+            })
+            .expect("LookupArchivedMessage emitted");
+        assert_ne!(callback_id, RICH_TARGET_LOOKUP_CALLBACK_SENTINEL);
+        assert_eq!(tail.load(Ordering::SeqCst), 0);
+
+        // Loaded with a valid same-author archived message → resume.
+        let mut archived_msg =
+            chat_with_body("alice@example.com/web", "bob@example.com", "original text");
+        archived_msg.id = Some("orig-msg-1".to_string());
+        let archived = ArchivedMessage {
+            stanza_id: StanzaIdRef {
+                by: "alice@example.com".parse().expect("bare"),
+                id: StanzaIdValue::new("archive-A1"),
+            },
+            message: Box::new(archived_msg),
+            tombstoned: false,
+        };
+        let resume_events = sm.handle(InboundEvent::ArchivedMessageLoaded {
+            id: callback_id,
+            result: Some(Box::new(archived)),
+        });
+        assert_eq!(
+            tail.load(Ordering::SeqCst),
+            1,
+            "valid completion resumes pipeline through canonicalize and tail"
+        );
+        // Canonicalize stamped under alice's archive — but we can't
+        // observe the stamp here without inspecting the message
+        // post-resume. The tail-probe count is the resume signal.
+        // Don't Debug-format `resume_events` into the panic message
+        // (see comment in the enrichment test above for rationale).
+        let error_count = resume_events
+            .iter()
+            .filter(|e| matches!(e, OutboundEvent::Log { level, .. } if *level == Level::ERROR))
+            .count();
+        assert_eq!(error_count, 0, "valid resume must not ERROR");
+    }
+
+    #[test]
+    fn xep_0424_retraction_target_not_found_emits_item_not_found_no_resume() {
+        let mut dispatcher = StanzaDispatcher::new();
+        dispatcher.register_message(Arc::new(RichTargetValidationHandler));
+        let tail = Arc::new(AtomicUsize::new(0));
+        dispatcher.register_message(Arc::new(TailProbe {
+            invocations: tail.clone(),
+        }));
+
+        let mut sm = ready_machine_with_dispatcher(dispatcher, "example.com", alice());
+        let mut msg = chat_with_body(
+            "alice@example.com/web",
+            "bob@example.com",
+            "I take that back",
+        );
+        msg.payloads
+            .push(crate::xep::xep0424::build_retract_element("stanza-X"));
+        let events = sm.handle(InboundEvent::FrameReceived(InboundFrame::Stanza(Box::new(
+            Stanza::Message(msg),
+        ))));
+        let callback_id = events
+            .iter()
+            .find_map(|e| match e {
+                OutboundEvent::LookupArchivedMessage { id, .. } => Some(*id),
+                _ => None,
+            })
+            .expect("LookupArchivedMessage emitted");
+
+        // Result: not found → typed item-not-found reply, no resume.
+        let resume_events = sm.handle(InboundEvent::ArchivedMessageLoaded {
+            id: callback_id,
+            result: None,
+        });
+        assert_eq!(
+            tail.load(Ordering::SeqCst),
+            0,
+            "item-not-found halt must not resume the pipeline"
+        );
+        // Verify the typed error reply is present.
+        let has_error_reply = resume_events.iter().any(|e| match e {
+            OutboundEvent::SendStanza(stanza) => {
+                matches!(stanza.as_ref(), Stanza::Message(m) if m.type_ == MessageType::Error)
+            }
+            _ => false,
+        });
+        assert!(has_error_reply, "expected SendStanza error reply");
+    }
+
+    #[test]
+    fn xep_0308_correction_by_wrong_author_emits_not_acceptable() {
+        let mut dispatcher = StanzaDispatcher::new();
+        dispatcher.register_message(Arc::new(RichTargetValidationHandler));
+        let tail = Arc::new(AtomicUsize::new(0));
+        dispatcher.register_message(Arc::new(TailProbe {
+            invocations: tail.clone(),
+        }));
+
+        let mut sm = ready_machine_with_dispatcher(dispatcher, "example.com", alice());
+        let mut msg = chat_with_body("alice@example.com/web", "bob@example.com", "fixed text");
+        msg.payloads
+            .push(crate::xep::xep0308::build_replace_element("orig-msg-1"));
+        let events = sm.handle(InboundEvent::FrameReceived(InboundFrame::Stanza(Box::new(
+            Stanza::Message(msg),
+        ))));
+        let callback_id = events
+            .iter()
+            .find_map(|e| match e {
+                OutboundEvent::LookupArchivedMessage { id, .. } => Some(*id),
+                _ => None,
+            })
+            .expect("LookupArchivedMessage emitted");
+
+        // Loaded with an archived message whose author differs.
+        let mut archived_msg =
+            chat_with_body("mallory@example.com/web", "bob@example.com", "imposter");
+        archived_msg.id = Some("orig-msg-1".to_string());
+        let archived = ArchivedMessage {
+            stanza_id: StanzaIdRef {
+                by: "alice@example.com".parse().expect("bare"),
+                id: StanzaIdValue::new("archive-X"),
+            },
+            message: Box::new(archived_msg),
+            tombstoned: false,
+        };
+        let resume_events = sm.handle(InboundEvent::ArchivedMessageLoaded {
+            id: callback_id,
+            result: Some(Box::new(archived)),
+        });
+        assert_eq!(tail.load(Ordering::SeqCst), 0);
+        let has_error_reply = resume_events.iter().any(|e| match e {
+            OutboundEvent::SendStanza(stanza) => {
+                matches!(stanza.as_ref(), Stanza::Message(m) if m.type_ == MessageType::Error)
+            }
+            _ => false,
+        });
+        assert!(has_error_reply);
+    }
+
+    #[test]
+    fn snapshot_is_frozen_across_re_park_does_not_leak_mutated_state() {
+        // Regression test for the PR5 snapshot-drift bug. A long
+        // pipeline can park twice (rich-target lookup, then enrichment
+        // on resume). The original dispatch-start snapshot of session
+        // state must be threaded through to the second park; without
+        // the fix, the second `PendingOp::MessageDispatchResume` would
+        // capture `self.*` mutated between the two parks and the
+        // resumed handlers would see a different view than the initial
+        // dispatch.
+        use std::sync::Mutex;
+        let captured: Arc<Mutex<Vec<Blocklist>>> = Arc::new(Mutex::new(Vec::new()));
+
+        struct SnapshotProbe {
+            captured: Arc<Mutex<Vec<Blocklist>>>,
+        }
+        impl MessageHandler for SnapshotProbe {
+            fn name(&self) -> &'static str {
+                "test-snapshot-probe"
+            }
+            fn handle(&self, _message: &mut Message, ctx: &MessageContext<'_>) -> HandlerOutcome {
+                self.captured
+                    .lock()
+                    .expect("mutex")
+                    .push(ctx.blocklist.clone());
+                HandlerOutcome::Continue(Vec::new())
+            }
+        }
+
+        let mut dispatcher = StanzaDispatcher::new();
+        // Order: rich-target → canonicalize → enrichment → snapshot probe.
+        dispatcher.register_message(Arc::new(RichTargetValidationHandler));
+        dispatcher.register_message(Arc::new(CanonicalizeHandler));
+        dispatcher.register_message(Arc::new(EnrichmentDispatchHandler));
+        dispatcher.register_message(Arc::new(SnapshotProbe {
+            captured: captured.clone(),
+        }));
+
+        let mut sm = test_support::ready_machine("example.com", alice(), dispatcher);
+        let original: jid::BareJid = "original@example.com".parse().expect("bare");
+        sm.blocklist = Blocklist::new([original.clone()]);
+
+        // Correction message with URL body — both handlers will fire
+        // (rich-target first, then enrichment after resume).
+        let mut msg = chat_with_body(
+            "alice@example.com/web",
+            "bob@example.com",
+            "https://example.com/page",
+        );
+        msg.payloads
+            .push(crate::xep::xep0308::build_replace_element("orig-msg-1"));
+        let events = sm.handle(InboundEvent::FrameReceived(InboundFrame::Stanza(Box::new(
+            Stanza::Message(msg),
+        ))));
+        let cb_rich = events
+            .iter()
+            .find_map(|e| match e {
+                OutboundEvent::LookupArchivedMessage { id, .. } => Some(*id),
+                _ => None,
+            })
+            .expect("rich-target parked");
+
+        // Mutate session state between the two parks. The fix
+        // requires the resumed dispatch (and its own re-park) to
+        // ignore this mutation.
+        let mutated: jid::BareJid = "mutated@example.com".parse().expect("bare");
+        sm.blocklist = Blocklist::new([mutated.clone()]);
+
+        // Provide rich-target completion → pipeline resumes → hits
+        // EnrichmentDispatchHandler → parks again.
+        let mut archived_msg = chat_with_body("alice@example.com/web", "bob@example.com", "orig");
+        archived_msg.id = Some("orig-msg-1".to_string());
+        let archived = ArchivedMessage {
+            stanza_id: StanzaIdRef {
+                by: "alice@example.com".parse().expect("bare"),
+                id: StanzaIdValue::new("A1"),
+            },
+            message: Box::new(archived_msg),
+            tombstoned: false,
+        };
+        let events2 = sm.handle(InboundEvent::ArchivedMessageLoaded {
+            id: cb_rich,
+            result: Some(Box::new(archived)),
+        });
+        let cb_enrich = events2
+            .iter()
+            .find_map(|e| match e {
+                OutboundEvent::RequestEnrichment { id, .. } => Some(*id),
+                _ => None,
+            })
+            .expect("enrichment parked on resume");
+
+        // Mutate again before the final completion — must still not
+        // leak through to the SnapshotProbe.
+        let doubly: jid::BareJid = "doubly@example.com".parse().expect("bare");
+        sm.blocklist = Blocklist::new([doubly]);
+
+        // Final completion. The resumed pipeline runs through to the
+        // SnapshotProbe; the probe's `ctx.blocklist` must reflect the
+        // ORIGINAL snapshot, not either mutation.
+        let rewritten = chat_with_body(
+            "alice@example.com/web",
+            "bob@example.com",
+            "https://example.com/page",
+        );
+        sm.handle(InboundEvent::EnrichmentComplete {
+            id: cb_enrich,
+            message: Box::new(rewritten),
+        });
+
+        let captured_blocklists = captured.lock().expect("mutex").clone();
+        assert_eq!(
+            captured_blocklists.len(),
+            1,
+            "probe should run exactly once on the final resume"
+        );
+        let entries: Vec<_> = captured_blocklists[0].iter().cloned().collect();
+        assert_eq!(
+            entries,
+            vec![original],
+            "snapshot must be frozen at dispatch start across both pause/resume hops"
+        );
+    }
+
+    #[test]
+    fn enrichment_complete_with_unknown_callback_id_logs_warn() {
+        let mut sm = test_support::ready_machine("example.com", alice(), StanzaDispatcher::new());
+        let events = sm.handle(InboundEvent::EnrichmentComplete {
+            id: CallbackId(99999),
+            message: Box::new(chat_with_body(
+                "alice@example.com/web",
+                "bob@example.com",
+                "ignored",
+            )),
+        });
+        assert!(events.iter().any(|e| matches!(
             e,
             OutboundEvent::Log { level, .. } if *level == Level::WARN
         )));
