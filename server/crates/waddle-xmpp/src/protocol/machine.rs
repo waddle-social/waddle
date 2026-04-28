@@ -73,21 +73,18 @@ pub enum PendingOp {
         /// The handler index the pipeline paused at; resume runs the
         /// handler immediately after.
         resume_after: HandlerId,
-        /// The (possibly already-stamped) message snapshot at pause
-        /// time. Replaced by the rewritten message on
-        /// `EnrichmentComplete`; reused as-is on `ArchivedMessageLoaded`.
-        message: Box<xmpp_parsers::message::Message>,
-        /// Which completion path applies — drives whether the state
-        /// machine resumes the pipeline directly or first runs the
-        /// XEP rule check via
-        /// [`RichTargetValidationHandler::handle_completion`].
+        /// Per-completion-path payload. Carries the stashed message
+        /// only for kinds that read it on completion (rich-target);
+        /// the enrichment path receives the rewritten message via the
+        /// [`InboundEvent::EnrichmentComplete`] payload itself, so
+        /// stashing a duplicate would just bloat the pending-op map.
         kind: ResumeKind,
         /// Connection's bound full JID at pause time, for
         /// [`MessageContext`] rebuild on resume.
         full_jid: jid::FullJid,
         /// Snapshot of the session-bounded state at pause time. Per
         /// #229 Q5, `MessageContext` is frozen at dispatch start; the
-        /// resumed dispatch sees the same view.
+        /// resumed dispatch sees the same view across every re-park.
         blocklist: Blocklist,
         carbons: CarbonsState,
         muc_occupancy: MucOccupancy,
@@ -112,25 +109,35 @@ struct SessionStateSnapshot {
     muc_occupancy: MucOccupancy,
 }
 
-/// Discriminator for the kind of completion the state machine should
-/// run when an [`InboundEvent`] arrives matching a
-/// [`PendingOp::MessageDispatchResume`].
+/// Per-kind payload for a paused message-pipeline run.
+///
+/// The shape varies by completion path so each variant carries only
+/// what the corresponding completion handler actually reads. In
+/// particular, `Enrichment` does **not** stash the message — the
+/// rewritten message arrives via the
+/// [`InboundEvent::EnrichmentComplete`] payload, so duplicating it in
+/// the pending-op map would just inflate memory while paused.
 #[derive(Debug, Clone)]
 pub enum ResumeKind {
     /// The pause was triggered by
     /// [`super::handlers::enrichment_dispatch::EnrichmentDispatchHandler`].
-    /// On `EnrichmentComplete`, the rewritten message replaces the
-    /// stashed one and the pipeline resumes.
+    /// On `EnrichmentComplete`, the rewritten message from the
+    /// callback payload replaces the original and the pipeline resumes.
     Enrichment,
     /// The pause was triggered by
     /// [`super::handlers::rich_target_validation::RichTargetValidationHandler`].
     /// On `ArchivedMessageLoaded`, the state machine calls
     /// [`RichTargetValidationHandler::handle_completion`] with the
-    /// stashed `kind` + `author`; on `Continue` the pipeline resumes,
-    /// on `Halt` the typed error reply is forwarded directly.
+    /// stashed `kind`, `author`, and the original `message`; on
+    /// `Continue` the pipeline resumes, on `Halt` the typed error
+    /// reply is forwarded directly.
     RichTarget {
         kind: RichTargetKind,
         author: BareJid,
+        /// Original inbound message — read by `handle_completion` to
+        /// build the typed error reply (which copies `incoming`'s
+        /// type + addresses).
+        message: Box<xmpp_parsers::message::Message>,
     },
 }
 
@@ -264,19 +271,26 @@ impl XmppStateMachine {
         id: CallbackId,
         rewritten: xmpp_parsers::message::Message,
     ) -> Vec<OutboundEvent> {
-        let Some(op) = self.take_pending_op(id) else {
-            return vec![OutboundEvent::Log {
-                level: Level::WARN,
-                message: format!(
-                    "EnrichmentComplete for unknown callback id {id:?}; \
-                     late or duplicate completion, dropping"
-                ),
-            }];
-        };
+        // Peek before taking — a kind-mismatch must NOT permanently
+        // consume the pending op, otherwise the *correct* completion
+        // arriving later would see "unknown callback id" and the
+        // pipeline would silently drop. Only remove the entry when
+        // we're sure it matches the expected
+        // `ResumeKind::Enrichment` shape.
+        let pending_kind_matches = matches!(
+            self.pending_ops.get(&id),
+            Some(PendingOp::MessageDispatchResume {
+                kind: ResumeKind::Enrichment,
+                ..
+            })
+        );
+        if !pending_kind_matches {
+            return self.unmatched_completion_log(id, "EnrichmentComplete", "Enrichment");
+        }
+        let op = self.pending_ops.remove(&id).expect("peek succeeded above");
         match op {
             PendingOp::MessageDispatchResume {
                 resume_after,
-                message: _stashed,
                 kind: ResumeKind::Enrichment,
                 full_jid,
                 blocklist,
@@ -292,20 +306,9 @@ impl XmppStateMachine {
                     muc_occupancy,
                 },
             ),
-            PendingOp::MessageDispatchResume { kind, .. } => vec![OutboundEvent::Log {
-                level: Level::ERROR,
-                message: format!(
-                    "EnrichmentComplete for callback id {id:?} but pending op \
-                     is not Enrichment-typed (kind={kind:?}); dropping"
-                ),
-            }],
-            other => vec![OutboundEvent::Log {
-                level: Level::ERROR,
-                message: format!(
-                    "EnrichmentComplete for callback id {id:?} but pending op \
-                     is not a MessageDispatchResume (op={other:?}); dropping"
-                ),
-            }],
+            // Unreachable under the peek-before-take guard, but keep
+            // a typed branch for forward compatibility.
+            _ => unreachable!("peek matched ResumeKind::Enrichment"),
         }
     }
 
@@ -314,20 +317,28 @@ impl XmppStateMachine {
         id: CallbackId,
         result: Option<&super::event::ArchivedMessage>,
     ) -> Vec<OutboundEvent> {
-        let Some(op) = self.take_pending_op(id) else {
-            return vec![OutboundEvent::Log {
-                level: Level::WARN,
-                message: format!(
-                    "ArchivedMessageLoaded for unknown callback id {id:?}; \
-                     late or duplicate completion, dropping"
-                ),
-            }];
-        };
+        // Peek before taking — see `on_enrichment_complete` for why
+        // a kind-mismatch must not consume the pending op.
+        let pending_kind_matches = matches!(
+            self.pending_ops.get(&id),
+            Some(PendingOp::MessageDispatchResume {
+                kind: ResumeKind::RichTarget { .. },
+                ..
+            })
+        );
+        if !pending_kind_matches {
+            return self.unmatched_completion_log(id, "ArchivedMessageLoaded", "RichTarget");
+        }
+        let op = self.pending_ops.remove(&id).expect("peek succeeded above");
         match op {
             PendingOp::MessageDispatchResume {
                 resume_after,
-                message,
-                kind: ResumeKind::RichTarget { kind, author },
+                kind:
+                    ResumeKind::RichTarget {
+                        kind,
+                        author,
+                        message,
+                    },
                 full_jid,
                 blocklist,
                 carbons,
@@ -369,21 +380,39 @@ impl XmppStateMachine {
                     }
                 }
             }
-            PendingOp::MessageDispatchResume { kind, .. } => vec![OutboundEvent::Log {
-                level: Level::ERROR,
-                message: format!(
-                    "ArchivedMessageLoaded for callback id {id:?} but pending op \
-                     is not RichTarget-typed (kind={kind:?}); dropping"
-                ),
-            }],
-            other => vec![OutboundEvent::Log {
-                level: Level::ERROR,
-                message: format!(
-                    "ArchivedMessageLoaded for callback id {id:?} but pending op \
-                     is not a MessageDispatchResume (op={other:?}); dropping"
-                ),
-            }],
+            // Unreachable under the peek-before-take guard.
+            _ => unreachable!("peek matched ResumeKind::RichTarget"),
         }
+    }
+
+    /// Build an ERROR / WARN log for a completion-event that doesn't
+    /// match the expected pending-op shape. Used by both completion
+    /// handlers; pulled out to keep the kind-mismatch branch in each
+    /// site short.
+    fn unmatched_completion_log(
+        &self,
+        id: CallbackId,
+        event_kind: &str,
+        expected_resume_kind: &str,
+    ) -> Vec<OutboundEvent> {
+        let level = if self.pending_ops.contains_key(&id) {
+            Level::ERROR
+        } else {
+            Level::WARN
+        };
+        let message = if self.pending_ops.contains_key(&id) {
+            format!(
+                "{event_kind} for callback id {id:?} but pending op is not \
+                 {expected_resume_kind}-typed; pending op preserved for the \
+                 expected completion"
+            )
+        } else {
+            format!(
+                "{event_kind} for unknown callback id {id:?}; late or duplicate \
+                 completion, dropping"
+            )
+        };
+        vec![OutboundEvent::Log { level, message }]
     }
 
     fn on_sfu_response(
@@ -486,27 +515,25 @@ impl XmppStateMachine {
         match stanza {
             Stanza::Iq(iq) => self.dispatcher.dispatch_iq(&iq, &ctx),
             Stanza::Message(mut message) => {
-                // Snapshot session state once at dispatch start —
-                // every subsequent pause/resume hop reuses this same
-                // view to honour Q5's "frozen at dispatch start" rule.
-                let snapshot = SessionStateSnapshot {
-                    blocklist: self.blocklist.clone(),
-                    carbons: self.carbons,
-                    muc_occupancy: self.muc_occupancy.clone(),
-                };
+                // Hot path: borrow `self.*` directly during the
+                // synchronous dispatch. The session-state snapshot is
+                // only materialized (cloned) when the pipeline parks
+                // and we need to stash it in `PendingOp`; for stanzas
+                // that complete synchronously (the common case), no
+                // clone happens at all.
                 let outcome = {
                     let env = MessageContextEnv {
                         domain: &self.domain,
                         full_jid: &full_jid,
-                        blocklist: &snapshot.blocklist,
-                        carbons: snapshot.carbons,
-                        muc_occupancy: &snapshot.muc_occupancy,
+                        blocklist: &self.blocklist,
+                        carbons: self.carbons,
+                        muc_occupancy: &self.muc_occupancy,
                         id_gen: self.id_gen.as_ref(),
                     };
                     let mctx = MessageContext::derive(env, &message);
                     self.dispatcher.dispatch_message(&mut message, &mctx)
                 };
-                self.handle_message_outcome(outcome, message, &full_jid, &snapshot)
+                self.handle_message_outcome(outcome, message, &full_jid, None)
             }
             Stanza::Presence(presence) => self.dispatcher.dispatch_presence(&presence, &ctx),
         }
@@ -521,20 +548,21 @@ impl XmppStateMachine {
     /// and register a [`PendingOp::MessageDispatchResume`] that the
     /// matching `InboundEvent` callback will resume.
     ///
-    /// `snapshot` is the *original* dispatch-start view of session
-    /// state — Q5's "frozen at dispatch start" rule. The same snapshot
-    /// is threaded through every re-park so a long pipeline (e.g.
-    /// rich-target lookup followed by enrichment) sees the same
-    /// `MessageContext` for each pause; without this, a second park
-    /// would capture potentially-mutated `self.*` state and the
-    /// resumed handlers would observe a different view than the
-    /// initial dispatch did.
+    /// `snapshot` is `Some` only when this call is on a resume path —
+    /// the original dispatch-start view of session state, threaded
+    /// through every re-park so a long pipeline (rich-target lookup
+    /// followed by enrichment) sees the same `MessageContext` for each
+    /// pause. Without this, a second park would capture mutated
+    /// `self.*` state and the resumed handlers would observe a
+    /// different view than the initial dispatch did. On the initial
+    /// dispatch path `snapshot` is `None` and the snapshot is
+    /// materialized lazily from `self.*` only when the pipeline parks.
     fn handle_message_outcome(
         &mut self,
         outcome: MessageDispatchOutcome,
         message: xmpp_parsers::message::Message,
         full_jid: &jid::FullJid,
-        snapshot: &SessionStateSnapshot,
+        snapshot: Option<&SessionStateSnapshot>,
     ) -> Vec<OutboundEvent> {
         let MessageDispatchOutcome {
             mut events,
@@ -546,7 +574,7 @@ impl XmppStateMachine {
             }
             MessageDispatchTermination::Awaiting { resume_after } => {
                 let id = self.next_callback_id();
-                let resume_kind = match infer_resume_kind(&events, &message, full_jid) {
+                let inferred = match infer_resume_kind(&events, &message, full_jid) {
                     Some(k) => k,
                     None => {
                         // No recognised callback-bearing event. Don't
@@ -564,17 +592,42 @@ impl XmppStateMachine {
                         return events;
                     }
                 };
-                replace_callback_sentinels(&mut events, id, &resume_kind);
+                replace_callback_sentinels(&mut events, id, &inferred);
+                // Build the per-kind PendingOp payload — the
+                // enrichment branch never reads the stashed message
+                // (the rewritten one comes via the callback) so the
+                // payload only carries a Message on the rich-target
+                // arm.
+                let pending_kind = match inferred {
+                    InferredResume::Enrichment => ResumeKind::Enrichment,
+                    InferredResume::RichTarget { kind, author } => ResumeKind::RichTarget {
+                        kind,
+                        author,
+                        message: Box::new(message),
+                    },
+                };
+                // Materialize the session-state snapshot lazily — only
+                // pay the clone when the pipeline actually parks. On
+                // the initial dispatch path, `snapshot` is `None` and
+                // we clone from `self.*`; on a resume path, we forward
+                // the original frozen snapshot to honour Q5.
+                let (blocklist, carbons, muc_occupancy) = match snapshot {
+                    Some(s) => (s.blocklist.clone(), s.carbons, s.muc_occupancy.clone()),
+                    None => (
+                        self.blocklist.clone(),
+                        self.carbons,
+                        self.muc_occupancy.clone(),
+                    ),
+                };
                 self.register_pending_op(
                     id,
                     PendingOp::MessageDispatchResume {
                         resume_after,
-                        message: Box::new(message),
-                        kind: resume_kind,
+                        kind: pending_kind,
                         full_jid: full_jid.clone(),
-                        blocklist: snapshot.blocklist.clone(),
-                        carbons: snapshot.carbons,
-                        muc_occupancy: snapshot.muc_occupancy.clone(),
+                        blocklist,
+                        carbons,
+                        muc_occupancy,
                     },
                 );
                 events
@@ -610,7 +663,7 @@ impl XmppStateMachine {
             self.dispatcher
                 .resume_message(&mut message, &mctx, resume_after)
         };
-        self.handle_message_outcome(outcome, message, &full_jid, &snapshot)
+        self.handle_message_outcome(outcome, message, &full_jid, Some(&snapshot))
     }
 
     fn on_peer_stanza(&mut self, stanza: Stanza) -> Vec<OutboundEvent> {
@@ -634,8 +687,21 @@ impl XmppStateMachine {
     }
 }
 
+/// Discriminator-only equivalent of [`ResumeKind`] returned by
+/// [`infer_resume_kind`]. The caller owns the inbound message and adds
+/// it to the eventual [`ResumeKind::RichTarget`] payload — no clone
+/// inside the inference path.
+#[derive(Debug)]
+enum InferredResume {
+    Enrichment,
+    RichTarget {
+        kind: RichTargetKind,
+        author: BareJid,
+    },
+}
+
 /// Inspect the events returned by an `Awaiting` dispatch and infer the
-/// [`ResumeKind`] that drives completion handling.
+/// resume discriminator.
 ///
 /// The state machine recognises two callback-bearing events emitted by
 /// production handlers — `RequestEnrichment` (Enrichment) and
@@ -649,33 +715,39 @@ fn infer_resume_kind(
     events: &[OutboundEvent],
     message: &xmpp_parsers::message::Message,
     full_jid: &jid::FullJid,
-) -> Option<ResumeKind> {
+) -> Option<InferredResume> {
     for event in events {
         match event {
             OutboundEvent::RequestEnrichment { .. } => {
-                return Some(ResumeKind::Enrichment);
+                return Some(InferredResume::Enrichment);
             }
             OutboundEvent::LookupArchivedMessage { .. } => {
                 // Re-detect to recover the kind+author the
                 // RichTargetValidationHandler used. Detection is
                 // pure and idempotent, so re-running matches the
-                // handler's original result.
+                // handler's original result. Bind temporaries to
+                // locals so the lifetimes inside `MessageContext` are
+                // explicit rather than relying on temporary-lifetime
+                // extension (which is brittle under refactors).
+                let blocklist = Blocklist::empty();
+                let muc_occupancy = MucOccupancy::empty();
+                // detect() doesn't call id_gen; a fixed generator is
+                // fine here. We only need the returned
+                // kind+reference+author.
+                let id_gen = super::id_gen::FixedIdGenerator(String::new());
                 let detected = rich_target_validation::detect(
                     message,
                     &MessageContext {
                         domain: "",
                         full_jid,
                         locality: super::session_state::Locality::Sender,
-                        blocklist: &Blocklist::empty(),
+                        blocklist: &blocklist,
                         carbons: CarbonsState::Disabled,
-                        muc_occupancy: &MucOccupancy::empty(),
-                        // detect() doesn't call id_gen; a fixed
-                        // generator is fine here. We only need the
-                        // returned kind+reference+author.
-                        id_gen: &super::id_gen::FixedIdGenerator(String::new()),
+                        muc_occupancy: &muc_occupancy,
+                        id_gen: &id_gen,
                     },
                 )?;
-                return Some(ResumeKind::RichTarget {
+                return Some(InferredResume::RichTarget {
                     kind: detected.kind,
                     author: detected.author,
                 });
@@ -693,11 +765,11 @@ fn infer_resume_kind(
 fn replace_callback_sentinels(
     events: &mut [OutboundEvent],
     real_id: CallbackId,
-    kind: &ResumeKind,
+    inferred: &InferredResume,
 ) {
-    let sentinel = match kind {
-        ResumeKind::Enrichment => ENRICHMENT_CALLBACK_SENTINEL,
-        ResumeKind::RichTarget { .. } => RICH_TARGET_LOOKUP_CALLBACK_SENTINEL,
+    let sentinel = match inferred {
+        InferredResume::Enrichment => ENRICHMENT_CALLBACK_SENTINEL,
+        InferredResume::RichTarget { .. } => RICH_TARGET_LOOKUP_CALLBACK_SENTINEL,
     };
     for event in events.iter_mut() {
         match event {
@@ -1010,7 +1082,7 @@ mod tests {
     }
 
     #[test]
-    fn rich_target_await_then_loaded_with_valid_target_resumes_pipeline() {
+    fn xep_0308_await_then_loaded_with_valid_correction_target_resumes_pipeline() {
         let mut dispatcher = StanzaDispatcher::new();
         dispatcher.register_message(Arc::new(RichTargetValidationHandler));
         // Register canonicalize so resume actually does something
@@ -1073,7 +1145,7 @@ mod tests {
     }
 
     #[test]
-    fn rich_target_loaded_not_found_emits_item_not_found_no_resume() {
+    fn xep_0424_retraction_target_not_found_emits_item_not_found_no_resume() {
         let mut dispatcher = StanzaDispatcher::new();
         dispatcher.register_message(Arc::new(RichTargetValidationHandler));
         let tail = Arc::new(AtomicUsize::new(0));
@@ -1121,7 +1193,7 @@ mod tests {
     }
 
     #[test]
-    fn rich_target_loaded_wrong_author_emits_not_acceptable() {
+    fn xep_0308_correction_by_wrong_author_emits_not_acceptable() {
         let mut dispatcher = StanzaDispatcher::new();
         dispatcher.register_message(Arc::new(RichTargetValidationHandler));
         let tail = Arc::new(AtomicUsize::new(0));
