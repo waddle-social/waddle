@@ -307,6 +307,9 @@ pub async fn handle_iq_with_conn_state(
             room_registry: Some(&state.deps.protocol.room_registry),
             web_socket_state: Some(state),
             authenticated_session: authenticated_session.as_ref(),
+            local_domain: state.deps.auth_state.xmpp_domain.as_str(),
+            blocking_storage: Some(&state.deps.protocol.blocking_storage),
+            message_dispatcher: Some(&state.deps.protocol.dispatcher),
         };
         let outcome = crate::server::routes::interpret::interpret(events, &deps).await;
         if outcome.close {

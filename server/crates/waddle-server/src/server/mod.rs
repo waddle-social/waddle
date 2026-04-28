@@ -970,6 +970,14 @@ async fn create_router(
     let resumable_sessions: Arc<dashmap::DashMap<String, crate::auth::Session>> =
         Arc::new(dashmap::DashMap::new());
 
+    // Shared XEP-0191 blocking-list storage for the headless
+    // offline-recipient pass (#229 PR15) and any future per-session
+    // bind path that wants to pull a recipient's blocklist via the
+    // protocol-side trait rather than the concrete struct.
+    let blocking_storage: Arc<dyn waddle_xmpp::xep::xep0191::BlockingStorage> = Arc::new(
+        crate::db::blocking::DatabaseBlockingStorage::new(state.db_pool.global().clone()),
+    );
+
     // XMPP over WebSocket (RFC 7395) with registries for message routing
     let websocket_state = Arc::new(WebSocketState {
         deps: WebSocketDeps {
@@ -981,6 +989,7 @@ async fn create_router(
                 room_registry,
                 mam_storage,
                 inbox_storage: Arc::clone(&state.inbox_storage),
+                blocking_storage,
                 command_registry: websocket_command_registry,
                 extension_manager,
                 dispatcher: stanza_dispatcher,
