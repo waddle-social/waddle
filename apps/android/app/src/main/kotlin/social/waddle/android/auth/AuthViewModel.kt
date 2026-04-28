@@ -85,8 +85,12 @@ internal class AuthViewModel(
     }
 
     private suspend fun bootstrap() {
-        val serverUrl = store.currentServerUrl()
-        val sessionId = store.currentSessionId()
+        // Wrap the whole bootstrap so a DataStore init failure or network
+        // hiccup never escapes — uncaught throws here would tear down the
+        // ViewModel and the entire UI before the user sees anything.
+        val serverUrl = runCatching { store.currentServerUrl() }
+            .getOrElse { SessionStore.DEFAULT_SERVER_URL }
+        val sessionId = runCatching { store.currentSessionId() }.getOrNull()
         if (sessionId != null) {
             try {
                 val session = api.session(serverUrl, sessionId)
@@ -94,7 +98,7 @@ internal class AuthViewModel(
                     mutable.value = AuthState.SignedIn(serverUrl, session)
                     return
                 }
-                store.clearSessionId()
+                runCatching { store.clearSessionId() }
             } catch (_: Throwable) {
                 // Network failure on bootstrap → fall back to sign-in flow.
             }

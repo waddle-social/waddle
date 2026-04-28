@@ -8,8 +8,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ElevatedCard
@@ -28,6 +26,12 @@ import androidx.compose.ui.unit.dp
 import social.waddle.android.auth.AuthState
 import social.waddle.android.domain.auth.AuthProvider
 
+/**
+ * Form + provider list. Built as a single [LazyColumn] so the provider
+ * items can scroll independently of (and without nesting under) any
+ * outer scroll container — nested vertical scrollers are a Compose
+ * measurement crash.
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun SignInScreen(
@@ -39,79 +43,87 @@ internal fun SignInScreen(
     Scaffold(
         topBar = { TopAppBar(title = { Text("Sign in to Waddle") }) },
     ) { padding ->
-        Column(
+        LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
-                .padding(24.dp)
-                .verticalScroll(rememberScrollState()),
+                .padding(horizontal = 24.dp),
             verticalArrangement = Arrangement.spacedBy(20.dp),
+            contentPadding = androidx.compose.foundation.layout.PaddingValues(vertical = 24.dp),
         ) {
-            OutlinedTextField(
-                value = state.serverUrl,
-                onValueChange = onServerUrlChange,
-                label = { Text("Server URL") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-            )
+            item {
+                OutlinedTextField(
+                    value = state.serverUrl,
+                    onValueChange = onServerUrlChange,
+                    label = { Text("Server URL") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
 
-            Text(
-                text = "Choose a provider",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Medium,
-            )
+            item {
+                Text(
+                    text = "Choose a provider",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Medium,
+                )
+            }
 
             when {
-                state.isLoadingProviders -> {
-                    Column(
+                state.isLoadingProviders -> item { LoadingRow() }
+                state.providers.isEmpty() -> item { EmptyProvidersCard(onRetryProviders) }
+                else -> items(state.providers, key = { it.id }) { provider ->
+                    Button(
+                        onClick = { onSelectProvider(provider) },
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.spacedBy(12.dp),
                     ) {
-                        CircularProgressIndicator(modifier = Modifier.size(32.dp))
-                        Text(
-                            text = "Loading providers…",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                }
-                state.providers.isEmpty() -> {
-                    ElevatedCard(modifier = Modifier.fillMaxWidth()) {
-                        Column(
-                            modifier = Modifier.padding(16.dp),
-                            verticalArrangement = Arrangement.spacedBy(12.dp),
-                        ) {
-                            Text(
-                                text = "No providers available from this server.",
-                                style = MaterialTheme.typography.bodyMedium,
-                            )
-                            TextButton(onClick = onRetryProviders) {
-                                Text("Retry")
-                            }
-                        }
-                    }
-                }
-                else -> {
-                    LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        items(state.providers, key = { it.id }) { provider ->
-                            Button(
-                                onClick = { onSelectProvider(provider) },
-                                modifier = Modifier.fillMaxWidth(),
-                            ) {
-                                Text(provider.displayName ?: provider.id)
-                            }
-                        }
+                        Text(provider.displayName ?: provider.id)
                     }
                 }
             }
 
             state.errorMessage?.let { message ->
-                Text(
-                    text = message,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error,
-                )
+                item {
+                    Text(
+                        text = message,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun LoadingRow() {
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        CircularProgressIndicator(modifier = Modifier.size(32.dp))
+        Text(
+            text = "Loading providers…",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+@Composable
+private fun EmptyProvidersCard(onRetry: () -> Unit) {
+    ElevatedCard(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text(
+                text = "No providers available from this server.",
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            TextButton(onClick = onRetry) {
+                Text("Retry")
             }
         }
     }
