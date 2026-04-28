@@ -304,6 +304,8 @@ pub async fn handle_iq_with_conn_state(
             mam_storage: Some(&state.deps.protocol.mam_storage),
             inbox_storage: Some(&state.deps.protocol.inbox_storage),
             extension_manager: Some(&state.deps.protocol.extension_manager),
+            room_registry: Some(&state.deps.protocol.room_registry),
+            web_socket_state: Some(state),
         };
         let outcome = crate::server::routes::interpret::interpret(events, &deps).await;
         if outcome.close {

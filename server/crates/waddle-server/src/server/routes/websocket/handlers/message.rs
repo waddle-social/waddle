@@ -73,289 +73,14 @@ pub async fn handle_message(
         // Parse room JID (strip resource if present)
         let room_jid = to_jid.to_bare();
 
-        debug!(room = %room_jid, sender = %sender_jid, "Groupchat message");
-
-        if waddle_xmpp::parse_managed_room_jid(&room_jid).as_deref() == Some("announcements")
-            && !session_is_server_owner(state, authenticated_session).await
-        {
-            return vec![stanza_to_xml(&Stanza::Message(forbidden_message_error(
-                &incoming, &room_jid, sender_jid,
-            )))];
-        }
-
-        let Some(room_actor) = get_room_actor(state, &room_jid).await else {
-            warn!(room = %room_jid, "Message to non-existent room");
-            return vec![];
-        };
-
-        // Build a prototype message, enrich once, then ask the room actor to fan it out.
-        let mut prototype = incoming.clone();
-        prototype.id = prototype
-            .id
-            .clone()
-            .or_else(|| Some(uuid::Uuid::new_v4().to_string()));
-        prototype.type_ = XmppMessageType::Groupchat;
-        remove_stanza_ids_by(&mut prototype, &room_jid.to_string());
-
-        // Enrich links with extension-provided XML elements (fail-open).
-        let _embeds_added = state
-            .deps
-            .protocol
-            .extension_manager
-            .enrich_message(&mut prototype)
-            .await;
-
-        let broadcast = match room_actor
-            .ask(BuildGroupchatBroadcast {
-                sender_jid: sender_jid.clone(),
-                message: prototype.clone(),
-            })
-            .await
-        {
-            Ok(broadcast) => broadcast,
-            Err(error) => {
-                warn!(
-                    sender = %sender_jid,
-                    room = %room_jid,
-                    error = ?error,
-                    "Sender not permitted to broadcast to MUC room"
-                );
-                return vec![];
-            }
-        };
-        let sender_nick = broadcast.sender_nick;
-        let mut local_messages = broadcast.messages;
-        let occupant_bare_jids = broadcast.occupant_bare_jids;
-        let sender_nickname_generation = broadcast.sender_nickname_generation;
-
-        let from_room_jid = format!("{}/{}", room_jid, sender_nick);
-        if let Ok(from_jid) = from_room_jid.parse::<FullJid>() {
-            prototype.from = Some(jid::Jid::from(from_jid));
-        } else {
-            prototype.from = Some(jid::Jid::from(sender_jid.clone()));
-        }
-        prototype.to = None;
-
-        if let Err(error) =
-            validate_rich_message_targets(state, &room_jid, &prototype, true, Some(&room_actor))
-                .await
-        {
-            return vec![stanza_to_xml(&Stanza::Message(error_message(
-                &incoming,
-                &jid::Jid::from(room_jid.clone()),
-                &jid::Jid::from(sender_jid.clone()),
-                error,
-            )))];
-        }
-
-        // XEP-0424 §"prevent further distribution… by replacing the
-        // original message with a tombstone": after authorization
-        // passes, mutate the room archive's original row in place.
-        if let Some(RetractionKind::Request(retraction)) =
-            extract_retraction_from_message(&prototype)
-        {
-            apply_retraction_tombstones(
-                state,
-                std::slice::from_ref(&room_jid),
-                &prototype,
-                &retraction.retracts_id,
-                Utc::now(),
-                true,
-            )
-            .await;
-        }
-
-        // Archive body-bearing and rich protocol room messages in XMPP MAM storage.
-        let archive_id =
-            archive_groupchat_message(state, &room_jid, &mut prototype, sender_nickname_generation)
-                .await;
-
-        if should_project_message(&prototype) {
-            let timestamp = Utc::now().timestamp();
-            let sender_bare = sender_jid.to_bare();
-            let entry = groupchat_entry(room_jid.clone(), &prototype, timestamp);
-
-            if let Err(error) = state
-                .deps
-                .protocol
-                .inbox_storage
-                .upsert(&sender_bare, entry.clone(), false)
-                .await
-            {
-                warn!(jid = %sender_bare, room = %room_jid, error = %error, "Failed to update sender inbox for groupchat");
-            }
-
-            // Thread-level inbox projection: if the message carries a <thread/>,
-            // upsert a thread-scoped entry alongside the channel-level one.
-            let thread_entry = prototype.thread.as_ref().map(|thread| {
-                // Resolve thread title from Waddle thread metadata or first message preview.
-                let forum_title = waddle_xmpp::xep::xep0508::extract_forum_action(&prototype)
-                    .and_then(|action| match action {
-                        waddle_xmpp::xep::xep0508::ForumAction::CreateThread(tc) => Some(tc.title),
-                        _ => None,
-                    });
-                let title = forum_title.or_else(|| preview_text(&prototype));
-                let author_nick = prototype
-                    .from
-                    .as_ref()
-                    .and_then(|jid| jid.resource().map(|r| r.to_string()));
-                groupchat_thread_entry(
-                    room_jid.clone(),
-                    &prototype,
-                    timestamp,
-                    &thread.0,
-                    title.as_deref(),
-                    author_nick.as_deref(),
-                )
-            });
-
-            let mut projected_bares = std::collections::HashSet::new();
-            for occupant_bare in occupant_bare_jids
-                .iter()
-                .filter_map(|jid| jid.parse::<BareJid>().ok())
-                .filter(|jid| projected_bares.insert(jid.clone()))
-            {
-                match state
-                    .deps
-                    .protocol
-                    .inbox_storage
-                    .upsert(&occupant_bare, entry.clone(), true)
-                    .await
-                {
-                    Ok(updated) => push_inbox_update(state, &occupant_bare, &updated).await,
-                    Err(error) => {
-                        warn!(jid = %occupant_bare, room = %room_jid, error = %error, "Failed to update occupant inbox for groupchat");
-                    }
-                }
-
-                // Push thread-level entry too
-                if let Some(ref thread_entry) = thread_entry {
-                    match state
-                        .deps
-                        .protocol
-                        .inbox_storage
-                        .upsert(&occupant_bare, thread_entry.clone(), true)
-                        .await
-                    {
-                        Ok(updated) => push_inbox_update(state, &occupant_bare, &updated).await,
-                        Err(error) => {
-                            warn!(jid = %occupant_bare, room = %room_jid, error = %error, "Failed to update occupant thread inbox");
-                        }
-                    }
-                }
-            }
-
-            // Upsert thread entry for sender too (without incrementing unread)
-            if let Some(ref thread_entry) = thread_entry {
-                if let Err(error) = state
-                    .deps
-                    .protocol
-                    .inbox_storage
-                    .upsert(&sender_bare, thread_entry.clone(), false)
-                    .await
-                {
-                    warn!(jid = %sender_bare, room = %room_jid, error = %error, "Failed to update sender thread inbox");
-                }
-            }
-        }
-
-        // Send to all occupants. Groupchat broadcasts are fire-and-forget:
-        // message bodies are already archived to MAM, so any occupant the
-        // server can't reach right now (backpressured or stale) will pick up
-        // the message on their next MAM catch-up. Blocking here is what
-        // caused join cascades under zombie load.
-        //
-        // Accounting invariant for the broadcast log below:
-        //   `intended = delivered + dropped_full + dropped_closed + not_connected`
-        // The sender is always one of `occupants` in a groupchat send but is
-        // reached via the direct echo response (not `try_send_to`), so the
-        // echo path counts as one `delivered` to keep the invariant true.
-        let mut echo_response = None;
-        let mut delivered = 0u32;
-        let mut dropped_full = 0u32;
-        let mut dropped_closed = 0u32;
-        let mut not_connected = 0u32;
-        let intended = local_messages.len();
-        for mut outbound in local_messages.drain(..) {
-            if let Some(ref archive_id) = archive_id {
-                add_mam_stanza_id(&mut outbound.message, archive_id, &room_jid.to_string());
-            }
-
-            if outbound.to == *sender_jid {
-                // Echo back to sender — serialize the enriched prototype
-                echo_response = Some(stanza_to_xml(&Stanza::Message(outbound.message)));
-                delivered += 1;
-            } else {
-                let stanza = Stanza::Message(outbound.message);
-                match state
-                    .deps
-                    .protocol
-                    .connection_registry
-                    .try_send_to(&outbound.to, stanza.clone())
-                {
-                    BroadcastOutcome::Delivered => delivered += 1,
-                    BroadcastOutcome::DroppedFull => dropped_full += 1,
-                    BroadcastOutcome::DroppedClosed => match state
-                        .deps
-                        .protocol
-                        .sm_session_registry
-                        .record_stanza_for_detached_bound_resource(&outbound.to, &stanza)
-                        .await
-                    {
-                        Ok(true) => delivered += 1,
-                        Ok(false) => dropped_closed += 1,
-                        Err(error) => {
-                            warn!(
-                                jid = %outbound.to,
-                                error = %error,
-                                "Failed to record groupchat stanza for detached resource after closed live send"
-                            );
-                            dropped_closed += 1;
-                        }
-                    },
-                    BroadcastOutcome::NotConnected => {
-                        match state
-                            .deps
-                            .protocol
-                            .sm_session_registry
-                            .record_stanza_for_detached_bound_resource(&outbound.to, &stanza)
-                            .await
-                        {
-                            Ok(true) => delivered += 1,
-                            Ok(false) => not_connected += 1,
-                            Err(error) => {
-                                warn!(
-                                    jid = %outbound.to,
-                                    error = %error,
-                                    "Failed to record groupchat stanza for detached resource"
-                                );
-                                not_connected += 1;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        debug_assert_eq!(
-            intended as u32,
-            delivered + dropped_full + dropped_closed + not_connected,
-            "broadcast accounting must cover every occupant exactly once"
-        );
-
-        info!(
-            room = %room_jid,
-            sender = %sender_nick,
-            intended,
-            delivered,
-            dropped_full,
-            dropped_closed,
-            not_connected,
-            "Groupchat message broadcast"
-        );
-
-        // Return the echo to the sender
-        return echo_response.into_iter().collect();
+        return deliver_groupchat_via_room_actor(
+            state,
+            room_jid,
+            sender_jid.clone(),
+            incoming,
+            authenticated_session,
+        )
+        .await;
     }
 
     // Handle direct messages, including default/normal messages and XEP-0249
@@ -654,6 +379,315 @@ pub async fn handle_message(
 
     debug!(msg_type = ?incoming.type_, "Message stanza received");
     vec![]
+}
+
+/// Deliver a groupchat `<message type='groupchat'>` to a local MUC
+/// room: managed-room owner check, `BuildGroupchatBroadcast`, rich-target
+/// validation, retraction tombstones, MAM archive write, inbox
+/// projection, and per-occupant fan-out via the connection registry.
+///
+/// Shared between the legacy `handle_message` Groupchat branch and the
+/// sans-I/O dispatcher's [`OutboundEvent::DispatchToRoom`] interpreter
+/// arm, so MUC fan-out semantics stay bit-for-bit identical regardless
+/// of which routing path triggered delivery. PR17 in #229 will retire
+/// this helper in favour of a dedicated room handler chain (Q7
+/// option C); until then both call sites share one implementation here.
+///
+/// Returns the wire frames the caller should write back to the sender —
+/// today this is the sender's own echo (or a stanza-level error reply
+/// when validation fails).
+///
+/// [`OutboundEvent::DispatchToRoom`]: waddle_xmpp::protocol::OutboundEvent::DispatchToRoom
+pub(crate) async fn deliver_groupchat_via_room_actor(
+    state: &WebSocketState,
+    room_jid: BareJid,
+    sender_jid: FullJid,
+    incoming: xmpp_parsers::message::Message,
+    authenticated_session: &Option<Session>,
+) -> Vec<String> {
+    debug!(room = %room_jid, sender = %sender_jid, "Groupchat message");
+
+    if waddle_xmpp::parse_managed_room_jid(&room_jid).as_deref() == Some("announcements")
+        && !session_is_server_owner(state, authenticated_session).await
+    {
+        return vec![stanza_to_xml(&Stanza::Message(forbidden_message_error(
+            &incoming,
+            &room_jid,
+            &sender_jid,
+        )))];
+    }
+
+    let Some(room_actor) = get_room_actor(state, &room_jid).await else {
+        warn!(room = %room_jid, "Message to non-existent room");
+        return vec![];
+    };
+
+    // Build a prototype message, enrich once, then ask the room actor to fan it out.
+    let mut prototype = incoming.clone();
+    prototype.id = prototype
+        .id
+        .clone()
+        .or_else(|| Some(uuid::Uuid::new_v4().to_string()));
+    prototype.type_ = XmppMessageType::Groupchat;
+    remove_stanza_ids_by(&mut prototype, &room_jid.to_string());
+
+    // Enrich links with extension-provided XML elements (fail-open).
+    let _embeds_added = state
+        .deps
+        .protocol
+        .extension_manager
+        .enrich_message(&mut prototype)
+        .await;
+
+    let broadcast = match room_actor
+        .ask(BuildGroupchatBroadcast {
+            sender_jid: sender_jid.clone(),
+            message: prototype.clone(),
+        })
+        .await
+    {
+        Ok(broadcast) => broadcast,
+        Err(error) => {
+            warn!(
+                sender = %sender_jid,
+                room = %room_jid,
+                error = ?error,
+                "Sender not permitted to broadcast to MUC room"
+            );
+            return vec![];
+        }
+    };
+    let sender_nick = broadcast.sender_nick;
+    let mut local_messages = broadcast.messages;
+    let occupant_bare_jids = broadcast.occupant_bare_jids;
+    let sender_nickname_generation = broadcast.sender_nickname_generation;
+
+    let from_room_jid = format!("{}/{}", room_jid, sender_nick);
+    if let Ok(from_jid) = from_room_jid.parse::<FullJid>() {
+        prototype.from = Some(jid::Jid::from(from_jid));
+    } else {
+        prototype.from = Some(jid::Jid::from(sender_jid.clone()));
+    }
+    prototype.to = None;
+
+    if let Err(error) =
+        validate_rich_message_targets(state, &room_jid, &prototype, true, Some(&room_actor)).await
+    {
+        return vec![stanza_to_xml(&Stanza::Message(error_message(
+            &incoming,
+            &jid::Jid::from(room_jid.clone()),
+            &jid::Jid::from(sender_jid.clone()),
+            error,
+        )))];
+    }
+
+    // XEP-0424 §"prevent further distribution… by replacing the
+    // original message with a tombstone": after authorization
+    // passes, mutate the room archive's original row in place.
+    if let Some(RetractionKind::Request(retraction)) = extract_retraction_from_message(&prototype) {
+        apply_retraction_tombstones(
+            state,
+            std::slice::from_ref(&room_jid),
+            &prototype,
+            &retraction.retracts_id,
+            Utc::now(),
+            true,
+        )
+        .await;
+    }
+
+    // Archive body-bearing and rich protocol room messages in XMPP MAM storage.
+    let archive_id =
+        archive_groupchat_message(state, &room_jid, &mut prototype, sender_nickname_generation)
+            .await;
+
+    if should_project_message(&prototype) {
+        let timestamp = Utc::now().timestamp();
+        let sender_bare = sender_jid.to_bare();
+        let entry = groupchat_entry(room_jid.clone(), &prototype, timestamp);
+
+        if let Err(error) = state
+            .deps
+            .protocol
+            .inbox_storage
+            .upsert(&sender_bare, entry.clone(), false)
+            .await
+        {
+            warn!(jid = %sender_bare, room = %room_jid, error = %error, "Failed to update sender inbox for groupchat");
+        }
+
+        // Thread-level inbox projection: if the message carries a <thread/>,
+        // upsert a thread-scoped entry alongside the channel-level one.
+        let thread_entry =
+            prototype.thread.as_ref().map(|thread| {
+                // Resolve thread title from Waddle thread metadata or first message preview.
+                let forum_title = waddle_xmpp::xep::xep0508::extract_forum_action(&prototype)
+                    .and_then(|action| match action {
+                        waddle_xmpp::xep::xep0508::ForumAction::CreateThread(tc) => Some(tc.title),
+                        _ => None,
+                    });
+                let title = forum_title.or_else(|| preview_text(&prototype));
+                let author_nick = prototype
+                    .from
+                    .as_ref()
+                    .and_then(|jid| jid.resource().map(|r| r.to_string()));
+                groupchat_thread_entry(
+                    room_jid.clone(),
+                    &prototype,
+                    timestamp,
+                    &thread.0,
+                    title.as_deref(),
+                    author_nick.as_deref(),
+                )
+            });
+
+        let mut projected_bares = std::collections::HashSet::new();
+        for occupant_bare in occupant_bare_jids
+            .iter()
+            .filter_map(|jid| jid.parse::<BareJid>().ok())
+            .filter(|jid| projected_bares.insert(jid.clone()))
+        {
+            match state
+                .deps
+                .protocol
+                .inbox_storage
+                .upsert(&occupant_bare, entry.clone(), true)
+                .await
+            {
+                Ok(updated) => push_inbox_update(state, &occupant_bare, &updated).await,
+                Err(error) => {
+                    warn!(jid = %occupant_bare, room = %room_jid, error = %error, "Failed to update occupant inbox for groupchat");
+                }
+            }
+
+            // Push thread-level entry too
+            if let Some(ref thread_entry) = thread_entry {
+                match state
+                    .deps
+                    .protocol
+                    .inbox_storage
+                    .upsert(&occupant_bare, thread_entry.clone(), true)
+                    .await
+                {
+                    Ok(updated) => push_inbox_update(state, &occupant_bare, &updated).await,
+                    Err(error) => {
+                        warn!(jid = %occupant_bare, room = %room_jid, error = %error, "Failed to update occupant thread inbox");
+                    }
+                }
+            }
+        }
+
+        // Upsert thread entry for sender too (without incrementing unread)
+        if let Some(ref thread_entry) = thread_entry {
+            if let Err(error) = state
+                .deps
+                .protocol
+                .inbox_storage
+                .upsert(&sender_bare, thread_entry.clone(), false)
+                .await
+            {
+                warn!(jid = %sender_bare, room = %room_jid, error = %error, "Failed to update sender thread inbox");
+            }
+        }
+    }
+
+    // Send to all occupants. Groupchat broadcasts are fire-and-forget:
+    // message bodies are already archived to MAM, so any occupant the
+    // server can't reach right now (backpressured or stale) will pick up
+    // the message on their next MAM catch-up. Blocking here is what
+    // caused join cascades under zombie load.
+    //
+    // Accounting invariant for the broadcast log below:
+    //   `intended = delivered + dropped_full + dropped_closed + not_connected`
+    // The sender is always one of `occupants` in a groupchat send but is
+    // reached via the direct echo response (not `try_send_to`), so the
+    // echo path counts as one `delivered` to keep the invariant true.
+    let mut echo_response = None;
+    let mut delivered = 0u32;
+    let mut dropped_full = 0u32;
+    let mut dropped_closed = 0u32;
+    let mut not_connected = 0u32;
+    let intended = local_messages.len();
+    for mut outbound in local_messages.drain(..) {
+        if let Some(ref archive_id) = archive_id {
+            add_mam_stanza_id(&mut outbound.message, archive_id, &room_jid.to_string());
+        }
+
+        if outbound.to == sender_jid {
+            // Echo back to sender — serialize the enriched prototype
+            echo_response = Some(stanza_to_xml(&Stanza::Message(outbound.message)));
+            delivered += 1;
+        } else {
+            let stanza = Stanza::Message(outbound.message);
+            match state
+                .deps
+                .protocol
+                .connection_registry
+                .try_send_to(&outbound.to, stanza.clone())
+            {
+                BroadcastOutcome::Delivered => delivered += 1,
+                BroadcastOutcome::DroppedFull => dropped_full += 1,
+                BroadcastOutcome::DroppedClosed => match state
+                    .deps
+                    .protocol
+                    .sm_session_registry
+                    .record_stanza_for_detached_bound_resource(&outbound.to, &stanza)
+                    .await
+                {
+                    Ok(true) => delivered += 1,
+                    Ok(false) => dropped_closed += 1,
+                    Err(error) => {
+                        warn!(
+                            jid = %outbound.to,
+                            error = %error,
+                            "Failed to record groupchat stanza for detached resource after closed live send"
+                        );
+                        dropped_closed += 1;
+                    }
+                },
+                BroadcastOutcome::NotConnected => {
+                    match state
+                        .deps
+                        .protocol
+                        .sm_session_registry
+                        .record_stanza_for_detached_bound_resource(&outbound.to, &stanza)
+                        .await
+                    {
+                        Ok(true) => delivered += 1,
+                        Ok(false) => not_connected += 1,
+                        Err(error) => {
+                            warn!(
+                                jid = %outbound.to,
+                                error = %error,
+                                "Failed to record groupchat stanza for detached resource"
+                            );
+                            not_connected += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    debug_assert_eq!(
+        intended as u32,
+        delivered + dropped_full + dropped_closed + not_connected,
+        "broadcast accounting must cover every occupant exactly once"
+    );
+
+    info!(
+        room = %room_jid,
+        sender = %sender_nick,
+        intended,
+        delivered,
+        dropped_full,
+        dropped_closed,
+        not_connected,
+        "Groupchat message broadcast"
+    );
+
+    // Return the echo to the sender
+    echo_response.into_iter().collect()
 }
 
 async fn session_is_server_owner(state: &WebSocketState, session: &Option<Session>) -> bool {

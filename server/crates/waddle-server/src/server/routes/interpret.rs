@@ -48,6 +48,7 @@
 //!   `ValidateOAuthBearer`, `SetTimer`, `CancelTimer`,
 //!   `RegisterConnection` — wired in later migration steps.
 
+use kameo::actor::ActorRef;
 use std::str::FromStr;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
@@ -58,17 +59,22 @@ use waddle_xmpp::inbox::storage::InboxStorage;
 use waddle_xmpp::mam::projection::build_direct_archived_message;
 use waddle_xmpp::mam::storage::MamStorage;
 use waddle_xmpp::mam::ArchivedMessage as MamArchivedMessage;
+use waddle_xmpp::muc::room_actor::BuildGroupchatBroadcast;
+use waddle_xmpp::muc::room_registry_actor::{GetRoom, RoomRegistryActor};
 use waddle_xmpp::parser::stanza_to_string;
 use waddle_xmpp::protocol::event::{
     ArchivedMessage as ProtocolArchivedMessage, InboundEvent, MessageRef, StanzaIdRef,
     StanzaIdValue,
 };
 use waddle_xmpp::protocol::{CarbonKind, OutboundEvent};
-use waddle_xmpp::registry::ConnectionRegistry;
+use waddle_xmpp::registry::{BroadcastOutcome, ConnectionRegistry};
 use waddle_xmpp::stream_management::InMemorySmSessionRegistry;
 use waddle_xmpp::Stanza;
 use xmpp_parsers::message::Message;
 use xmpp_parsers::minidom::Element;
+
+use crate::server::routes::websocket::handlers::message::deliver_groupchat_via_room_actor;
+use crate::server::routes::websocket::WebSocketState;
 
 /// Outcome of interpreting a batch of [`OutboundEvent`]s.
 ///
@@ -115,6 +121,25 @@ pub struct Deps<'a> {
     /// `None` in unit tests that don't exercise the
     /// [`OutboundEvent::RequestEnrichment`] arm.
     pub extension_manager: Option<&'a Arc<ExtensionManager>>,
+    /// MUC room-registry actor. Used by the
+    /// [`OutboundEvent::DispatchToRoom`] arm to look up the per-room
+    /// actor and (in unit tests that don't supply a full
+    /// `web_socket_state`) drive a slimmed `BuildGroupchatBroadcast`
+    /// fan-out so the actor wiring can be exercised without standing
+    /// up the full WebSocket route stack.
+    pub room_registry: Option<&'a ActorRef<RoomRegistryActor>>,
+    /// WebSocket route state. Required by
+    /// [`OutboundEvent::DispatchToRoom`] to invoke the legacy MUC
+    /// fan-out helper (managed-room owner check, rich-target
+    /// validation, retraction tombstones, MAM archive, inbox
+    /// projection, occupant fan-out). `None` in unit tests; always
+    /// supplied in production.
+    ///
+    /// PR14 in #229 introduces this bridge so the dispatcher cutover
+    /// can land without regressing MUC delivery; PR17 retires the
+    /// bridge in favour of a dedicated room handler chain (Q7
+    /// option C).
+    pub web_socket_state: Option<&'a WebSocketState>,
 }
 
 impl<'a> Deps<'a> {
@@ -129,6 +154,8 @@ impl<'a> Deps<'a> {
             mam_storage: None,
             inbox_storage: None,
             extension_manager: None,
+            room_registry: None,
+            web_socket_state: None,
         }
     }
 
@@ -147,6 +174,8 @@ impl<'a> Deps<'a> {
             mam_storage: Some(mam_storage),
             inbox_storage: Some(inbox_storage),
             extension_manager: None,
+            room_registry: None,
+            web_socket_state: None,
         }
     }
 
@@ -163,6 +192,29 @@ impl<'a> Deps<'a> {
             mam_storage: None,
             inbox_storage: None,
             extension_manager: Some(extension_manager),
+            room_registry: None,
+            web_socket_state: None,
+        }
+    }
+
+    /// Build a `Deps` for unit tests that exercise the
+    /// [`OutboundEvent::DispatchToRoom`] arm without a full
+    /// `WebSocketState`. The room registry handle drives the slimmer
+    /// `BuildGroupchatBroadcast` + connection-registry fan-out path so
+    /// tests can assert that the room actor is reached.
+    #[cfg(test)]
+    pub fn test_with_room_registry(
+        connection_registry: &'a ConnectionRegistry,
+        room_registry: &'a ActorRef<RoomRegistryActor>,
+    ) -> Self {
+        Self {
+            connection_registry,
+            sm_session_registry: None,
+            mam_storage: None,
+            inbox_storage: None,
+            extension_manager: None,
+            room_registry: Some(room_registry),
+            web_socket_state: None,
         }
     }
 }
@@ -260,12 +312,8 @@ pub async fn interpret(events: Vec<OutboundEvent>, deps: &Deps<'_>) -> Interpret
                     }
                 }
             }
-            OutboundEvent::DispatchToRoom { room, .. } => {
-                warn!(
-                    variant = "DispatchToRoom",
-                    room = %room,
-                    "OutboundEvent variant not yet wired in interpreter"
-                );
+            OutboundEvent::DispatchToRoom { room, message } => {
+                dispatch_to_room(deps, room, *message).await;
             }
             OutboundEvent::BroadcastToRoom { room, .. } => {
                 warn!(
@@ -624,6 +672,168 @@ async fn deliver_peer_to_full(
             warn!(jid = %target, "RouteToConnection: target channel closed, dropping");
         }
     }
+}
+
+/// Bridge the [`OutboundEvent::DispatchToRoom`] arm to the legacy MUC
+/// fan-out path.
+///
+/// The dispatcher chain (#229 PR9) emits `DispatchToRoom` for sender-pass
+/// groupchat sends and the eventual room handler chain (PR17) will own
+/// the per-room fan-out directly. Until that lands, this helper bridges
+/// the dispatcher arm to the existing legacy MUC delivery code in
+/// `routes::websocket::handlers::message::deliver_groupchat_via_room_actor`
+/// so semantics stay bit-for-bit identical regardless of which routing
+/// path triggered delivery.
+///
+/// The `web_socket_state` carries every dependency the helper needs
+/// (managed-room owner check, MAM storage, inbox storage, connection +
+/// SM registries, room-registry actor). When `web_socket_state` is
+/// `None` and only `room_registry` is provided, this helper drives a
+/// slimmer test-only fan-out so unit tests can assert that the room
+/// actor receives `BuildGroupchatBroadcast` without standing up a full
+/// `WebSocketState`. Production wires `web_socket_state`.
+///
+/// The frames the legacy helper would have written back to the sender
+/// (the sender's own echo, or a stanza-level error reply) are NOT
+/// surfaced through `outcome.frames` — the dispatcher path's recipient
+/// pipeline owns sender echo via `RouteToConnection`/`SendStanza`, and
+/// re-emitting the legacy echo here would produce duplicates. This
+/// matches the recipient-pass contract documented on
+/// [`OutboundEvent::DispatchToRoom`].
+async fn dispatch_to_room(deps: &Deps<'_>, room_jid: jid::BareJid, message: Message) {
+    if let Some(state) = deps.web_socket_state {
+        let Some(sender_full) = sender_full_jid(&message) else {
+            warn!(
+                room = %room_jid,
+                "DispatchToRoom: message.from is missing or not a full JID; dropping"
+            );
+            return;
+        };
+        // Production path: full legacy MUC fan-out via the shared
+        // helper. Sender echo + error replies, if any, are emitted
+        // back to the sender by the legacy path's caller; the
+        // dispatcher path's sender-side pipeline already handles
+        // that surface separately, so we discard the helper's frame
+        // return here. (See note in this fn's docstring.)
+        let _frames = deliver_groupchat_via_room_actor(
+            state,
+            room_jid,
+            sender_full,
+            message,
+            // The legacy helper consults `authenticated_session`
+            // only for the managed-room owner check; the sender
+            // pass's caller (dispatcher main loop) already verified
+            // session presence before dispatch. Passing `&None` is
+            // safe — it only suppresses the owner override which
+            // does not apply on this path.
+            &None,
+        )
+        .await;
+        return;
+    }
+
+    let Some(room_registry) = deps.room_registry else {
+        warn!(
+            variant = "DispatchToRoom",
+            room = %room_jid,
+            "DispatchToRoom: neither web_socket_state nor room_registry provided in Deps; \
+             dropping. Production must populate web_socket_state."
+        );
+        return;
+    };
+
+    // Slimmed test-only path: look up the room actor through the
+    // registry, ask it to build the per-occupant broadcast, and fan
+    // out via the connection registry. No managed-room owner check,
+    // no MAM archive write, no inbox projection, no rich-target
+    // validation, no retraction tombstones — those run only on the
+    // production path. Used by L1 interpreter tests to assert the
+    // actor wiring.
+    let Some(sender_full) = sender_full_jid(&message) else {
+        warn!(
+            room = %room_jid,
+            "DispatchToRoom (test path): message.from is missing or not a full JID; dropping"
+        );
+        return;
+    };
+
+    let room_actor = match room_registry
+        .ask(GetRoom {
+            room_jid: room_jid.clone(),
+        })
+        .await
+    {
+        Ok(Some(actor)) => actor,
+        Ok(None) => {
+            warn!(
+                room = %room_jid,
+                "DispatchToRoom (test path): room not registered; dropping"
+            );
+            return;
+        }
+        Err(error) => {
+            warn!(
+                room = %room_jid,
+                error = ?error,
+                "DispatchToRoom (test path): room registry lookup failed; dropping"
+            );
+            return;
+        }
+    };
+
+    let broadcast = match room_actor
+        .ask(BuildGroupchatBroadcast {
+            sender_jid: sender_full.clone(),
+            message,
+        })
+        .await
+    {
+        Ok(broadcast) => broadcast,
+        Err(error) => {
+            warn!(
+                sender = %sender_full,
+                room = %room_jid,
+                error = ?error,
+                "DispatchToRoom (test path): sender not permitted to broadcast; dropping"
+            );
+            return;
+        }
+    };
+
+    for outbound in broadcast.messages {
+        if outbound.to == sender_full {
+            // Sender echo is the dispatcher pipeline's responsibility on
+            // this path; do not re-emit it here.
+            continue;
+        }
+        let stanza = Stanza::Message(outbound.message);
+        match deps
+            .connection_registry
+            .try_send_to(&outbound.to, stanza.clone())
+        {
+            BroadcastOutcome::Delivered => {
+                debug!(jid = %outbound.to, "DispatchToRoom (test path): delivered");
+            }
+            BroadcastOutcome::DroppedFull => {
+                debug!(jid = %outbound.to, "DispatchToRoom (test path): mailbox full");
+            }
+            BroadcastOutcome::DroppedClosed => {
+                debug!(jid = %outbound.to, "DispatchToRoom (test path): channel closed");
+            }
+            BroadcastOutcome::NotConnected => {
+                debug!(jid = %outbound.to, "DispatchToRoom (test path): target offline");
+            }
+        }
+    }
+}
+
+/// Extract the sender's full JID from a typed groupchat `Message`.
+///
+/// Returns `None` when `message.from` is missing or carries only a
+/// bare JID — both are protocol-error states for a sender-pass
+/// groupchat dispatch and the caller drops the event.
+fn sender_full_jid(message: &Message) -> Option<jid::FullJid> {
+    message.from.clone()?.try_into_full().ok()
 }
 
 async fn enrich_message_event(deps: &Deps<'_>, mut message: Message) -> Message {
@@ -1095,6 +1305,8 @@ mod tests {
             mam_storage: None,
             inbox_storage: None,
             extension_manager: None,
+            room_registry: None,
+            web_socket_state: None,
         };
         let _outcome = interpret(
             vec![OutboundEvent::SendCarbons {
@@ -2114,5 +2326,158 @@ mod tests {
         assert_eq!(outcome.frames.len(), 2);
         assert!(outcome.frames[0].contains("id=\"a\""));
         assert!(outcome.frames[1].contains("id=\"b\""));
+    }
+
+    // -----------------------------------------------------------------
+    // #229 PR14 — DispatchToRoom interpreter arm bridges to legacy MUC
+    // fan-out
+    // -----------------------------------------------------------------
+
+    /// L1 interpreter test for the `OutboundEvent::DispatchToRoom`
+    /// arm: spawns a `RoomRegistryActor`, registers a populated test
+    /// room, fires the event through `interpret(...)`, and asserts the
+    /// room actor produced a per-occupant broadcast that landed on the
+    /// connection-registry queue of the non-sender occupant. This
+    /// pins the contract that the DispatchToRoom arm is no longer a
+    /// warn-stub and reaches the room actor with
+    /// `BuildGroupchatBroadcast`. Production semantics
+    /// (managed-room owner check, MAM archive, inbox projection,
+    /// rich-target validation, retraction tombstones) flow through
+    /// the legacy MUC fan-out helper exercised by the integration
+    /// tests in `crates/waddle-server/tests/xep0359_stanza_ids_ws.rs`.
+    #[tokio::test]
+    async fn dispatch_to_room_bridges_to_room_actor_and_fans_out_to_occupants() {
+        use waddle_xmpp::muc::room_actor::Join;
+        use waddle_xmpp::muc::room_registry_actor::GetOrCreateRoom;
+        use waddle_xmpp::muc::RoomConfig;
+        use waddle_xmpp::{Affiliation, Role};
+
+        let registry = ConnectionRegistry::new();
+        let room_registry = kameo::spawn(RoomRegistryActor::new("muc.example.com".to_string()));
+
+        let room_jid: jid::BareJid = "testroom@muc.example.com".parse().expect("parse room jid");
+        let alice_full: jid::FullJid = "alice@example.com/web".parse().expect("parse alice jid");
+        let bob_full: jid::FullJid = "bob@example.com/web".parse().expect("parse bob jid");
+
+        // Alice and Bob are both occupants. Alice sends; Bob must
+        // receive the broadcast on his connection-registry queue.
+        let room_actor = room_registry
+            .ask(GetOrCreateRoom {
+                room_jid: room_jid.clone(),
+                waddle_id: "waddle-test".to_string(),
+                channel_id: "test-channel".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("create room");
+        room_actor
+            .ask(Join {
+                nick: "alice".to_string(),
+                real_jid: alice_full.clone(),
+                role: Role::Participant,
+                affiliation: Affiliation::Member,
+            })
+            .await
+            .expect("alice join");
+        room_actor
+            .ask(Join {
+                nick: "bob".to_string(),
+                real_jid: bob_full.clone(),
+                role: Role::Participant,
+                affiliation: Affiliation::Member,
+            })
+            .await
+            .expect("bob join");
+
+        let (bob_tx, mut bob_rx) = tokio::sync::mpsc::channel(8);
+        registry.register_with_carbons(bob_full.clone(), bob_tx, false);
+
+        // Build a typed groupchat message addressed to the room with
+        // alice's full JID stamped as `from` (the sender pass already
+        // does this before emitting `DispatchToRoom`).
+        let mut message =
+            xmpp_parsers::message::Message::new(Some(jid::Jid::from(room_jid.clone())));
+        message.id = Some("dispatch-to-room-1".to_string());
+        message.type_ = xmpp_parsers::message::MessageType::Groupchat;
+        message.from = Some(jid::Jid::from(alice_full.clone()));
+        message.bodies.insert(
+            String::new(),
+            xmpp_parsers::message::Body("hello room".to_string()),
+        );
+
+        let events = vec![OutboundEvent::DispatchToRoom {
+            room: room_jid.clone(),
+            message: Box::new(message),
+        }];
+        let outcome = interpret(
+            events,
+            &Deps::test_with_room_registry(&registry, &room_registry),
+        )
+        .await;
+
+        assert!(
+            outcome.frames.is_empty(),
+            "DispatchToRoom must not surface frames through outcome.frames \
+             (sender echo is owned by the dispatcher's recipient pipeline)"
+        );
+        assert!(!outcome.close);
+
+        let bob_queue = drain_inbound(&mut bob_rx);
+        assert_eq!(
+            bob_queue.len(),
+            1,
+            "bob must receive exactly one broadcast frame from the room actor"
+        );
+        let stanza = &bob_queue[0].stanza;
+        let msg = match stanza {
+            Stanza::Message(m) => m,
+            other => panic!("expected Message stanza on bob's queue, got {other:?}"),
+        };
+        assert_eq!(
+            msg.type_,
+            xmpp_parsers::message::MessageType::Groupchat,
+            "fan-out must preserve type='groupchat'"
+        );
+        assert!(
+            msg.from
+                .as_ref()
+                .and_then(|j| j.resource())
+                .map(|r| r.as_str() == "alice")
+                .unwrap_or(false),
+            "broadcast `from` must be the room JID with sender's MUC nick",
+        );
+        let body = msg
+            .bodies
+            .get(&String::new())
+            .expect("broadcast carries the original body");
+        assert_eq!(body.0, "hello room");
+    }
+
+    /// Without either `web_socket_state` or `room_registry`, the
+    /// arm must drop the event with a warn — the dispatcher's
+    /// downstream effects do not run, but neither do they panic.
+    /// Pinned so a regression that "silently" relies on something
+    /// unset surfaces here rather than as a missing wire frame.
+    #[tokio::test]
+    async fn dispatch_to_room_drops_when_no_room_registry_or_state_in_deps() {
+        let registry = ConnectionRegistry::new();
+        let room_jid: jid::BareJid = "testroom@muc.example.com".parse().expect("parse room jid");
+        let mut message =
+            xmpp_parsers::message::Message::new(Some(jid::Jid::from(room_jid.clone())));
+        message.type_ = xmpp_parsers::message::MessageType::Groupchat;
+        message.from = Some(
+            "alice@example.com/web"
+                .parse::<jid::FullJid>()
+                .map(jid::Jid::from)
+                .expect("from"),
+        );
+
+        let events = vec![OutboundEvent::DispatchToRoom {
+            room: room_jid,
+            message: Box::new(message),
+        }];
+        let outcome = interpret(events, &Deps::registry_only(&registry)).await;
+        assert!(outcome.frames.is_empty());
+        assert!(!outcome.close);
     }
 }
