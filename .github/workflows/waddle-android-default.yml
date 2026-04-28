@@ -62,9 +62,11 @@ jobs:
 
     - name: Build FFI artefacts (.so + Kotlin bindings, release)
       env:
-        ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_LATEST_HOME }}
         ANDROID_API_LEVEL: '36'
-      run: bash scripts/build-android-bindings.sh
+      run: |
+        export ANDROID_NDK_HOME="${ANDROID_NDK_HOME:-${ANDROID_NDK_LATEST_HOME:-${ANDROID_NDK_ROOT}}}"
+        echo "ANDROID_NDK_HOME=${ANDROID_NDK_HOME}"
+        bash scripts/build-android-bindings.sh
 
     - name: Cache Gradle
       uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57  # v4.2.0
