@@ -88,10 +88,16 @@ echo "==> Generating Kotlin bindings"
 mkdir -p "$KOTLIN_OUT"
 (
   cd "$SERVER"
+  # Build the bindgen binary in the same profile as the cdylib; on Linux a
+  # debug-profile bindgen has been observed to exit silently without emitting
+  # any output (whereas the release-profile binary works). Keeping the two
+  # profiles aligned avoids any uniffi metadata/version mismatch.
   set -x
+  # shellcheck disable=SC2086
   cargo run -p waddle-xmpp-client-ffi \
     --bin uniffi-bindgen \
     --features waddle-xmpp-client-ffi/uniffi-bindgen-bin \
+    $CARGO_FLAG \
     -- generate \
     --library "$HOST_LIB" \
     --language kotlin \
