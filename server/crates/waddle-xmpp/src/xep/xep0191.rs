@@ -135,10 +135,13 @@ impl InMemoryBlockingStorage {
     }
 }
 
-/// Sentinel error type for `InMemoryBlockingStorage` faults. The
-/// `Mutex<HashMap>` only fails on poison; this carries the typed
-/// poison panic info (`PoisonError`'s `Debug`) without stringifying
-/// at the boundary.
+/// Typed sentinel error for [`InMemoryBlockingStorage`] faults. The
+/// only failure mode is a poisoned `Mutex<HashMap>`; the
+/// [`std::sync::PoisonError`] details are not retained because the
+/// poisoned guard is unrecoverable in this fixture and the diagnostic
+/// would only carry a generic "lock poisoned" string. Callers
+/// (typed-payloads rule) match on the error *type* rather than its
+/// payload.
 #[derive(Debug, thiserror::Error)]
 #[error("in-memory blocking storage mutex poisoned")]
 pub struct InMemoryBlockingStorageError;

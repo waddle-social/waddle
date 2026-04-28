@@ -767,26 +767,52 @@ async fn interpret_with_depth(
 /// [`waddle_xmpp::protocol::InboundEvent::StanzaFromPeer`], and
 /// recursively interprets the resulting outbound events with
 /// `recursion_depth` bumped so the inner pass can't loop on
-/// `RouteToConnection`. Only [`OutboundEvent::ArchiveDirect`] and
-/// [`OutboundEvent::ProjectInbox`] from the inner pass actually
-/// persist anything: [`OutboundEvent::SendStanza`] frames have no
-/// wire to write to (transient SM is ephemeral) and are discarded
-/// with the inner [`InterpretOutcome`]; [`OutboundEvent::SendCarbons`]
-/// has no live carbon-enabled resources for an offline user so the
-/// fan-out is a no-op; nested [`OutboundEvent::RouteToConnection`]
-/// drops via the depth-cap.
+/// `RouteToConnection`. Per-event behaviour during the inner
+/// `interpret_with_depth` call:
 ///
-/// **Blocklist load failure** is degraded to [`Blocklist::empty`]
-/// with a WARN log: the alternative (failing the entire dispatch on
-/// a transient DB hiccup for an offline recipient) would deny the
-/// sender's send. Trade-off: XEP-0191 incoming-block enforcement is
-/// disabled for this single message until the next storage-healthy
-/// dispatch.
+/// - [`OutboundEvent::ArchiveDirect`] persists to recipient's MAM
+///   archive (the desired effect of the headless pass).
+/// - [`OutboundEvent::ProjectInbox`] writes the recipient's inbox
+///   row (the other desired effect).
+/// - [`OutboundEvent::SendCarbons`] (kind=`Received`, emitted by
+///   `CarbonsMessageHandler` on `Locality::Recipient`) goes through
+///   the standard fan-out: live carbon-enabled resources of the
+///   recipient (necessarily empty here because we're in the
+///   offline branch — `select_routable_resources_for_user` returned
+///   no live resources) and detached XEP-0198 SM sessions. Queueing
+///   to detached SM sessions is *correct*: when those sessions
+///   resume, they receive the recipient-side carbon copy per
+///   XEP-0280 §6 — the same delivery they would get had the bare-JID
+///   target been routable. This is not a no-op in production; it
+///   is the offline counterpart to the live recipient pass's carbon
+///   fan-out.
+/// - [`OutboundEvent::SendStanza`] frames have no wire to write to
+///   (the transient SM is ephemeral and never connected to a
+///   transport), so the inner outcome's `frames` are discarded.
+/// - [`OutboundEvent::RequestEnrichment`] does not fire from a
+///   recipient pass: `EnrichmentDispatchHandler::is_eligible`
+///   returns false when the local user is not the sender, so no
+///   parking / callback round-trip is initiated. Enrichment was
+///   already performed by the sender pass before this event was
+///   emitted.
+/// - Nested [`OutboundEvent::RouteToConnection`] drops via the
+///   depth-cap in the outer arm, regardless of full/bare or live
+///   targets.
 ///
-/// `synthetic_full_jid_resource` is a static literal (`"offline-recipient-pass"`)
-/// because the recipient-pass [`waddle_xmpp::protocol::session_state::Locality`]
-/// derivation matches `to` against the bound bare JID — the
-/// resource value is irrelevant.
+/// **Blocklist load failure is fail-closed** (Copilot review on
+/// PR #275): when [`BlockingStorage::list_blocked_jids`] returns an
+/// error, this helper returns early without touching the recipient's
+/// archive or inbox. Mirrors `load_blocklist_for_bind`'s policy.
+/// Degrading to an empty blocklist would silently disable XEP-0191
+/// incoming-block enforcement and risk persisting blocked messages
+/// into the recipient's MAM / inbox.
+///
+/// The synthetic full-JID resource is a static literal
+/// (`"offline-recipient-pass"`) because the recipient-pass
+/// [`waddle_xmpp::protocol::session_state::Locality`] derivation
+/// matches `to` against the bound bare JID — the resource value is
+/// irrelevant for locality, and the synthetic resource never reaches
+/// the wire (no `SendStanza` frames bubble out).
 async fn run_headless_recipient_pass(
     deps: &Deps<'_>,
     recipient_bare: &jid::BareJid,
