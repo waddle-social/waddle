@@ -47,7 +47,7 @@ rxml = "0.12"
 quick-xml = "0.37.5"
 dashmap = "6.0"
 
-tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 
 # Object Storage
 bytes = "1"
