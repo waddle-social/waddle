@@ -54,6 +54,12 @@ jobs:
         workspaces: server -> target
         key: android-ffi
 
+    - name: Cache cargo-ndk binary
+      uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57  # v4.2.0
+      with:
+        path: ~/.cargo/bin/cargo-ndk
+        key: cargo-ndk-3.5-${{ runner.os }}
+
     - name: Install cargo-ndk
       run: |
         # Pin to 3.5.x; cargo-ndk 4.x has linker-flag regressions around
@@ -81,19 +87,20 @@ jobs:
         }
         bash scripts/build-android-bindings.sh
 
-    - name: Cache Gradle
-      uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57  # v4.2.0
+    - name: Setup Gradle
+      # Handles the dependency cache, build cache, and configuration cache
+      # in one step (replaces a hand-rolled actions/cache for ~/.gradle).
+      # Read-write on main pushes — feeds the cache that PRs read from.
+      uses: gradle/actions/setup-gradle@48b5f213c81028ace310571dc5ec0fbbca0b2947  # v4
       with:
-        path: |
-          ~/.gradle/caches
-          ~/.gradle/wrapper
-        key: gradle-${{ runner.os }}-${{ hashFiles('apps/android/**/*.gradle*', 'apps/android/gradle/libs.versions.toml', 'apps/android/gradle/wrapper/gradle-wrapper.properties') }}
-        restore-keys: |
-          gradle-${{ runner.os }}-
+        cache-read-only: false
+        build-scan-publish: false
+        gradle-home-cache-cleanup: true
+        add-job-summary: on-failure
 
     - name: bundleRelease
       working-directory: apps/android
-      run: ./gradlew :app:bundleRelease --no-daemon
+      run: ./gradlew :app:bundleRelease --build-cache
 
     - name: Upload release AAB (unsigned)
       uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08  # v4.6.0
