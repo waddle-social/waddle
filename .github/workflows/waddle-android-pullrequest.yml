@@ -56,7 +56,7 @@ jobs:
     - name: Install cargo-ndk
       run: |
         if ! command -v cargo-ndk >/dev/null 2>&1; then
-          cargo install cargo-ndk --locked --version ^3.5
+          cargo install cargo-ndk --locked --version ^4.1
         fi
 
     - name: Build FFI artefacts (.so + Kotlin bindings)
