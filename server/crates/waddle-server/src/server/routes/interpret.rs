@@ -26,9 +26,11 @@
 //! world.
 
 use tracing::{debug, error, info, warn};
+use waddle_xmpp::carbons::{build_received_carbon, build_sent_carbon};
 use waddle_xmpp::parser::stanza_to_string;
-use waddle_xmpp::protocol::OutboundEvent;
+use waddle_xmpp::protocol::{CarbonKind, OutboundEvent};
 use waddle_xmpp::registry::ConnectionRegistry;
+use waddle_xmpp::Stanza;
 
 /// Outcome of interpreting a batch of [`OutboundEvent`]s.
 ///
@@ -151,17 +153,78 @@ pub async fn interpret(
             }
             OutboundEvent::SendCarbons {
                 owner,
+                message,
                 kind,
                 exclude,
-                ..
             } => {
-                warn!(
-                    variant = "SendCarbons",
-                    owner = %owner,
-                    kind = ?kind,
-                    exclude = %exclude,
-                    "OutboundEvent variant not yet wired in interpreter"
-                );
+                // Per XEP-0280 §5, a carbon copy is the original
+                // <message/> wrapped in <sent>/<received> →
+                // <forwarded xmlns='urn:xmpp:forward:0'> → original.
+                // The outer envelope is addressed FROM the user's
+                // bare JID TO the receiving resource. We fan out only
+                // to other resources of `owner` that have explicitly
+                // opted in via XEP-0280 enable.
+                //
+                // Suppression rules (groupchat, <private/>, no-copy,
+                // body-less) are enforced by `CarbonsMessageHandler`
+                // before emitting this event; the interpreter does
+                // not re-check them — but it DOES per-target filter
+                // through `get_other_carbon_resources_for_user` so a
+                // resource that disabled carbons after the message
+                // entered the pipeline still gets skipped.
+                let owner_str = owner.to_string();
+                let targets = registry.get_other_carbon_resources_for_user(&owner, &exclude);
+                if targets.is_empty() {
+                    debug!(
+                        owner = %owner,
+                        kind = ?kind,
+                        "SendCarbons: no carbon-enabled resources to fan out to"
+                    );
+                    continue;
+                }
+                for target in targets {
+                    let envelope_result = match kind {
+                        CarbonKind::Sent => {
+                            build_sent_carbon(&message, &owner_str, &target.to_string())
+                        }
+                        CarbonKind::Received => {
+                            build_received_carbon(&message, &owner_str, &target.to_string())
+                        }
+                    };
+                    let envelope = match envelope_result {
+                        Ok(env) => env,
+                        Err(error) => {
+                            warn!(
+                                target = %target,
+                                kind = ?kind,
+                                %error,
+                                "SendCarbons: failed to build envelope; skipping target"
+                            );
+                            continue;
+                        }
+                    };
+                    match registry.send_to(&target, Stanza::Message(envelope)).await {
+                        waddle_xmpp::registry::SendResult::Sent => {
+                            debug!(target = %target, kind = ?kind, "SendCarbons: delivered");
+                        }
+                        waddle_xmpp::registry::SendResult::NotConnected => {
+                            // Race between get_other_carbon_resources and
+                            // send_to — target disconnected. Benign.
+                            debug!(
+                                target = %target,
+                                kind = ?kind,
+                                "SendCarbons: target offline at fan-out time, dropping"
+                            );
+                        }
+                        waddle_xmpp::registry::SendResult::ChannelClosed => {
+                            warn!(
+                                target = %target,
+                                kind = ?kind,
+                                "SendCarbons: target channel closed, dropping"
+                            );
+                        }
+                    }
+                }
             }
             OutboundEvent::LookupArchivedMessage { id, archive, .. } => {
                 warn!(
@@ -322,6 +385,149 @@ mod tests {
         let outcome = interpret(events, &test_registry()).await;
         assert!(outcome.frames.is_empty());
         assert!(!outcome.close);
+    }
+
+    // -----------------------------------------------------------------
+    // XEP-0280 — SendCarbons fan-out
+    // -----------------------------------------------------------------
+
+    fn chat_msg(from: &str, to: &str, body: &str) -> xmpp_parsers::message::Message {
+        let mut m = xmpp_parsers::message::Message::new(Some(to.parse().expect("jid")));
+        m.from = Some(from.parse().expect("jid"));
+        m.type_ = xmpp_parsers::message::MessageType::Chat;
+        m.bodies
+            .insert(String::new(), xmpp_parsers::message::Body(body.to_string()));
+        m
+    }
+
+    fn drain_inbound(
+        rx: &mut tokio::sync::mpsc::Receiver<waddle_xmpp::registry::OutboundStanza>,
+    ) -> Vec<waddle_xmpp::registry::OutboundStanza> {
+        let mut out = Vec::new();
+        while let Ok(stanza) = rx.try_recv() {
+            out.push(stanza);
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn xep_0280_send_carbons_fans_out_to_other_carbon_enabled_resources() {
+        let registry = ConnectionRegistry::new();
+        // Owner: alice. Two resources — web (originating, excluded)
+        // and phone (carbon-enabled, expected target).
+        let alice_web: jid::FullJid = "alice@example.com/web".parse().expect("jid");
+        let alice_phone: jid::FullJid = "alice@example.com/phone".parse().expect("jid");
+        let (_web_tx, _web_rx) = tokio::sync::mpsc::channel(8);
+        registry.register_with_carbons(alice_web.clone(), _web_tx, true);
+        let (phone_tx, mut phone_rx) = tokio::sync::mpsc::channel(8);
+        registry.register_with_carbons(alice_phone.clone(), phone_tx, true);
+
+        let owner: jid::BareJid = "alice@example.com".parse().expect("bare");
+        let original = chat_msg("alice@example.com/web", "bob@example.com", "hi");
+        let events = vec![OutboundEvent::SendCarbons {
+            owner,
+            message: Box::new(original),
+            kind: CarbonKind::Sent,
+            exclude: alice_web,
+        }];
+        let _outcome = interpret(events, &registry).await;
+
+        // alice/phone should receive a <sent> carbon envelope.
+        let received = drain_inbound(&mut phone_rx);
+        assert_eq!(received.len(), 1, "alice/phone received one carbon");
+        // Verify it's wrapped per XEP-0297 — a <sent> child in carbons:2 ns.
+        let stanza = &received[0].stanza;
+        let msg = match stanza {
+            Stanza::Message(m) => m,
+            other => panic!("expected Message stanza, got {other:?}"),
+        };
+        assert!(
+            msg.payloads
+                .iter()
+                .any(|p| p.name() == "sent" && p.ns() == "urn:xmpp:carbons:2"),
+            "carbon must carry <sent xmlns='urn:xmpp:carbons:2'/>"
+        );
+    }
+
+    #[tokio::test]
+    async fn xep_0280_send_carbons_skips_originating_resource() {
+        let registry = ConnectionRegistry::new();
+        let alice_web: jid::FullJid = "alice@example.com/web".parse().expect("jid");
+        let (web_tx, mut web_rx) = tokio::sync::mpsc::channel(8);
+        registry.register_with_carbons(alice_web.clone(), web_tx, true);
+
+        let owner: jid::BareJid = "alice@example.com".parse().expect("bare");
+        let original = chat_msg("alice@example.com/web", "bob@example.com", "hi");
+        let events = vec![OutboundEvent::SendCarbons {
+            owner,
+            message: Box::new(original),
+            kind: CarbonKind::Sent,
+            exclude: alice_web,
+        }];
+        let _outcome = interpret(events, &registry).await;
+
+        // No carbon to alice/web — it's the originating resource.
+        let received = drain_inbound(&mut web_rx);
+        assert!(received.is_empty(), "originating resource excluded");
+    }
+
+    #[tokio::test]
+    async fn xep_0280_send_carbons_skips_resources_without_carbons_enabled() {
+        let registry = ConnectionRegistry::new();
+        let alice_web: jid::FullJid = "alice@example.com/web".parse().expect("jid");
+        let alice_phone: jid::FullJid = "alice@example.com/phone".parse().expect("jid");
+        let (_web_tx, _web_rx) = tokio::sync::mpsc::channel(8);
+        registry.register_with_carbons(alice_web.clone(), _web_tx, true);
+        // alice/phone has carbons DISABLED.
+        let (phone_tx, mut phone_rx) = tokio::sync::mpsc::channel(8);
+        registry.register_with_carbons(alice_phone.clone(), phone_tx, false);
+
+        let owner: jid::BareJid = "alice@example.com".parse().expect("bare");
+        let original = chat_msg("alice@example.com/web", "bob@example.com", "hi");
+        let events = vec![OutboundEvent::SendCarbons {
+            owner,
+            message: Box::new(original),
+            kind: CarbonKind::Sent,
+            exclude: alice_web,
+        }];
+        let _outcome = interpret(events, &registry).await;
+
+        let received = drain_inbound(&mut phone_rx);
+        assert!(received.is_empty(), "carbons-disabled resource skipped");
+    }
+
+    #[tokio::test]
+    async fn xep_0280_send_carbons_received_kind_emits_received_envelope() {
+        let registry = ConnectionRegistry::new();
+        let bob_desk: jid::FullJid = "bob@example.com/desk".parse().expect("jid");
+        let bob_phone: jid::FullJid = "bob@example.com/phone".parse().expect("jid");
+        let (_desk_tx, _desk_rx) = tokio::sync::mpsc::channel(8);
+        registry.register_with_carbons(bob_desk.clone(), _desk_tx, true);
+        let (phone_tx, mut phone_rx) = tokio::sync::mpsc::channel(8);
+        registry.register_with_carbons(bob_phone.clone(), phone_tx, true);
+
+        let owner: jid::BareJid = "bob@example.com".parse().expect("bare");
+        let original = chat_msg("alice@example.com/web", "bob@example.com", "hi");
+        let events = vec![OutboundEvent::SendCarbons {
+            owner,
+            message: Box::new(original),
+            kind: CarbonKind::Received,
+            exclude: bob_desk,
+        }];
+        let _outcome = interpret(events, &registry).await;
+
+        let received = drain_inbound(&mut phone_rx);
+        assert_eq!(received.len(), 1);
+        let msg = match &received[0].stanza {
+            Stanza::Message(m) => m,
+            other => panic!("expected Message, got {other:?}"),
+        };
+        assert!(
+            msg.payloads
+                .iter()
+                .any(|p| p.name() == "received" && p.ns() == "urn:xmpp:carbons:2"),
+            "kind=Received emits <received xmlns='urn:xmpp:carbons:2'/>"
+        );
     }
 
     #[tokio::test]
