@@ -1,13 +1,17 @@
 package social.waddle.android.ui.rooms
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
@@ -19,23 +23,21 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
 import org.koin.compose.koinInject
-import social.waddle.android.connection.WaddleConnectionManager
 import social.waddle.android.connection.ConnectionState
+import social.waddle.android.connection.WaddleConnectionManager
 import uniffi.waddle_xmpp_client.WaddleRoom
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-internal fun RoomListScreen() {
+internal fun RoomListScreen(onRoomSelected: (WaddleRoom) -> Unit) {
     val connection = koinInject<WaddleConnectionManager>()
     val state by connection.state.collectAsState()
-    val rooms by emptyRoomsFlow.collectAsState()
+    val session by connection.activeSession.collectAsState()
+    val rooms by (session?.rooms?.rooms ?: emptyRooms).collectAsState()
 
     Scaffold(
-        topBar = {
-            TopAppBar(title = { Text("Channels") })
-        },
+        topBar = { TopAppBar(title = { Text("Channels") }) },
     ) { padding ->
         Column(
             modifier = Modifier
@@ -44,28 +46,33 @@ internal fun RoomListScreen() {
             verticalArrangement = Arrangement.Top,
         ) {
             ConnectionBanner(state)
-            if (rooms.isEmpty()) {
-                Box(
-                    modifier = Modifier.fillMaxSize().padding(24.dp),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text(
-                        text = "Sign in to load your channels.",
-                        style = MaterialTheme.typography.bodyLarge,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            } else {
-                LazyColumn(
-                    contentPadding = androidx.compose.foundation.layout.PaddingValues(
-                        horizontal = 8.dp,
-                        vertical = 4.dp,
-                    ),
-                ) {
-                    items(rooms, key = { it.jid }) { room -> RoomRow(room) }
+            when {
+                rooms.isEmpty() && state == ConnectionState.Connected -> EmptyMessage("No channels yet.")
+                rooms.isEmpty() -> EmptyMessage("Connecting…")
+                else -> LazyColumn {
+                    items(rooms, key = { it.jid }) { room ->
+                        RoomRow(room, onClick = { onRoomSelected(room) })
+                        HorizontalDivider()
+                    }
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun EmptyMessage(text: String) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(24.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = text,
+            style = MaterialTheme.typography.bodyLarge,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 
@@ -82,7 +89,7 @@ private fun ConnectionBanner(state: ConnectionState) {
             text = it,
             style = MaterialTheme.typography.labelMedium,
             modifier = Modifier
-                .fillMaxSize()
+                .fillMaxWidth()
                 .padding(horizontal = 16.dp, vertical = 8.dp),
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -90,13 +97,17 @@ private fun ConnectionBanner(state: ConnectionState) {
 }
 
 @Composable
-private fun RoomRow(room: WaddleRoom) {
-    androidx.compose.material3.ListItem(
-        headlineContent = { Text(room.name) },
-        supportingContent = { Text(room.channelType, style = MaterialTheme.typography.labelSmall) },
+private fun RoomRow(room: WaddleRoom, onClick: () -> Unit) {
+    ListItem(
+        modifier = Modifier.clickable(onClick = onClick),
+        headlineContent = { Text("# ${room.name}") },
+        supportingContent = {
+            val type = room.channelType
+            if (type.isNotBlank()) {
+                Text(type, style = MaterialTheme.typography.labelSmall)
+            }
+        },
     )
 }
 
-// Until a real RoomsViewModel arrives, the room list is fed by a placeholder
-// flow. Hooking the screen up to `domain.RoomRepository` is the next step.
-private val emptyRoomsFlow: StateFlow<List<WaddleRoom>> = MutableStateFlow(emptyList())
+private val emptyRooms = MutableStateFlow<List<WaddleRoom>>(emptyList())

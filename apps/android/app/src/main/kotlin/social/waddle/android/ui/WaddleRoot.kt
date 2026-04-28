@@ -17,7 +17,9 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import social.waddle.android.ui.activity.ActivityScreen
 import social.waddle.android.ui.dms.DmListScreen
 import social.waddle.android.ui.profile.ProfileScreen
+import social.waddle.android.ui.rooms.RoomDetailScreen
 import social.waddle.android.ui.rooms.RoomListScreen
+import uniffi.waddle_xmpp_client.WaddleRoom
 
 internal enum class TopLevelDestination(
     val title: String,
@@ -30,8 +32,24 @@ internal enum class TopLevelDestination(
 }
 
 @Composable
-internal fun WaddleRoot() {
+internal fun WaddleRoot(
+    username: String,
+    jid: String,
+    onSignOut: () -> Unit,
+) {
     var current by remember { mutableStateOf(TopLevelDestination.Channels) }
+    var selectedRoom by remember { mutableStateOf<WaddleRoom?>(null) }
+
+    val openRoom = selectedRoom
+    if (current == TopLevelDestination.Channels && openRoom != null) {
+        RoomDetailScreen(
+            room = openRoom,
+            ownJid = jid,
+            onBack = { selectedRoom = null },
+        )
+        return
+    }
+
     NavigationSuiteScaffold(
         navigationSuiteItems = {
             TopLevelDestination.entries.forEach { destination ->
@@ -45,10 +63,14 @@ internal fun WaddleRoot() {
         },
     ) {
         when (current) {
-            TopLevelDestination.Channels -> RoomListScreen()
+            TopLevelDestination.Channels -> RoomListScreen(onRoomSelected = { selectedRoom = it })
             TopLevelDestination.DirectMessages -> DmListScreen()
             TopLevelDestination.Activity -> ActivityScreen()
-            TopLevelDestination.Profile -> ProfileScreen()
+            TopLevelDestination.Profile -> ProfileScreen(
+                username = username,
+                jid = jid,
+                onSignOut = onSignOut,
+            )
         }
     }
 }

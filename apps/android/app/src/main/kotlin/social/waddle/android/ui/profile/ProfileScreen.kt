@@ -4,10 +4,12 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
@@ -17,6 +19,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import org.koin.compose.koinInject
 import social.waddle.android.R
@@ -25,7 +29,11 @@ import social.waddle.android.connection.WaddleConnectionManager
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-internal fun ProfileScreen() {
+internal fun ProfileScreen(
+    username: String,
+    jid: String,
+    onSignOut: () -> Unit,
+) {
     val connection = koinInject<WaddleConnectionManager>()
     val state by connection.state.collectAsState()
 
@@ -43,14 +51,27 @@ internal fun ProfileScreen() {
                 modifier = Modifier.size(96.dp),
             )
             Text(
-                text = "Waddle",
+                text = username,
                 style = MaterialTheme.typography.headlineMedium,
+                fontWeight = FontWeight.Medium,
+            )
+            Text(
+                text = jid,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
             )
             Text(
                 text = state.label(),
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            OutlinedButton(
+                onClick = onSignOut,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("Sign out")
+            }
         }
     }
 }
