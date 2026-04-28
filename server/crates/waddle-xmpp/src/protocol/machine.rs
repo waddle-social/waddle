@@ -707,7 +707,18 @@ impl XmppStateMachine {
                         muc_occupancy: &self.muc_occupancy,
                         id_gen: self.id_gen.as_ref(),
                     };
-                    let mctx = MessageContext::derive(env, &message);
+                    // Peer stanzas are by definition recipient-pass —
+                    // the sender pass already ran on the originating
+                    // connection and the routing layer produced this
+                    // delivery. Override the derived locality so the
+                    // self-loop edge case (alice/web → alice/web,
+                    // which `Locality::derive` classifies as `Both`)
+                    // can't trip [`RouteHandler`]'s `Both` branch into
+                    // re-emitting `RouteToConnection` and looping back
+                    // through routing. The recipient pass terminates
+                    // with `SendStanza` to bob's wire, full stop.
+                    let mut mctx = MessageContext::derive(env, &message);
+                    mctx.locality = super::session_state::Locality::Recipient;
                     self.dispatcher.dispatch_message(&mut message, &mctx)
                 };
                 self.handle_message_outcome(outcome, message, &full_jid, None)

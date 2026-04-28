@@ -83,10 +83,14 @@ fn xep_0359_sender_pass_archives_under_local_user_and_routes_to_recipient() {
     // Expected events (Q2(a) order):
     // - ArchiveDirect { archive_jid: alice, ... } (XEP-0313)
     // - ProjectInbox { owner: alice, peer: bob, ... } (Waddle inbox)
-    // - SendCarbons { owner: alice, kind: Sent, ... } (XEP-0280 §4
-    //   suppressed when no other resources, but the event would emit
-    //   if alice had carbons enabled — we assert the emission shape)
     // - RouteToConnection { jid: bob, ... } (final route)
+    //
+    // SendCarbons is NOT emitted in this fixture because the default
+    // session state has carbons disabled — the
+    // [`super::handlers::carbons_message::CarbonsMessageHandler`]
+    // gate suppresses fan-out per XEP-0280 §4. The L1
+    // CarbonsMessageHandler suite asserts the emission shape when
+    // carbons are enabled; this L4 test focuses on archive/inbox/route.
     let alice_web = full("alice@example.com/web");
     let bob = bare("bob@example.com");
 
@@ -229,6 +233,92 @@ fn xep_0359_recipient_pass_writes_recipient_archive_and_double_stamps_outgoing_w
             "bob-canon-1".to_string()
         )],
         "recipient-pass inbox row keys to bob's local archive ref"
+    );
+
+    // 3. Final wire write — XEP-0359 §5 + XEP-0280 §4 require the
+    //    bytes Bob sees to carry BOTH stanza-ids: alice's (sender
+    //    pass, preserved as cross-archive) and bob's (recipient pass,
+    //    freshly stamped under bob's bare).
+    let send_stanza_msgs: Vec<&Message> = events
+        .iter()
+        .filter_map(|e| match e {
+            OutboundEvent::SendStanza(stanza) => match stanza.as_ref() {
+                Stanza::Message(m) => Some(m),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        send_stanza_msgs.len(),
+        1,
+        "recipient pass terminates with exactly one SendStanza to bob's wire"
+    );
+    let wire_stamps = stanza_id_bys(send_stanza_msgs[0]);
+    assert!(
+        wire_stamps.contains(&"alice@example.com".to_string()),
+        "wire bytes preserve alice's cross-archive stamp; got {wire_stamps:?}"
+    );
+    assert!(
+        wire_stamps.contains(&"bob@example.com".to_string()),
+        "wire bytes carry bob's recipient-side stamp; got {wire_stamps:?}"
+    );
+    assert_eq!(
+        wire_stamps.len(),
+        2,
+        "wire bytes carry exactly two <stanza-id/> siblings; got {wire_stamps:?}"
+    );
+}
+
+#[test]
+fn xep_0359_self_loop_peer_stanza_terminates_at_wire_not_re_routes() {
+    // Regression for the routing-loop bug Codex flagged: a peer
+    // stanza arriving from `from=alice/web, to=alice/web` on
+    // alice/web's connection is `Locality::Both` per
+    // `MessageContext::derive`. RouteHandler treats `Both` chat as
+    // needing routing — without the peer-pass locality override in
+    // `on_peer_stanza`, this would re-emit `RouteToConnection` and
+    // loop. The override forces `Locality::Recipient` so the pass
+    // terminates with `SendStanza`.
+    let alice_web = full("alice@example.com/web");
+    let alice = bare("alice@example.com");
+
+    let mut wire_msg = chat_with_body(&alice_web, &alice, "self");
+    // Force `to=alice/web` (full self-loop) so locality::derive
+    // returns Both rather than Recipient. The override under test
+    // is what disambiguates.
+    wire_msg.to = Some(jid(&alice_web.to_string()));
+    wire_msg
+        .payloads
+        .push(crate::xep::xep0359::build_stanza_id_element(
+            "alice-loop-1",
+            "alice@example.com",
+        ));
+
+    let id_gen = Arc::new(FixedIdGenerator("alice-loop-2".to_string()));
+    let mut sm =
+        ready_machine_with_id_gen("example.com", alice_web.clone(), build_dispatcher(), id_gen);
+
+    let events = sm.handle(InboundEvent::StanzaFromPeer(Box::new(Stanza::Message(
+        wire_msg,
+    ))));
+
+    let route_count = events
+        .iter()
+        .filter(|e| matches!(e, OutboundEvent::RouteToConnection { .. }))
+        .count();
+    let send_count = events
+        .iter()
+        .filter(|e| matches!(e, OutboundEvent::SendStanza(_)))
+        .count();
+    assert_eq!(
+        route_count, 0,
+        "peer-pass self-loop must NOT re-emit RouteToConnection \
+         (would create routing loop); got {events:#?}"
+    );
+    assert_eq!(
+        send_count, 1,
+        "peer-pass self-loop terminates with exactly one SendStanza"
     );
 }
 
