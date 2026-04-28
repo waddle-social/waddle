@@ -5,6 +5,34 @@ import (
 	c "github.com/cuenv/cuenv/contrib/contributors"
 )
 
+let _flakehubCacheContributor = schema.#Contributor & {
+	id: "flakehubCache"
+	tasks: [
+		{
+			id:       "nix.install"
+			label:    "Install Determinate Nix"
+			priority: 0
+			provider: github: {
+				uses: "DeterminateSystems/determinate-nix-action@92ffb5400c3776307a27a1727d7e2ac3dcd9f844"
+				with: "extra-conf": "accept-flake-config = true"
+			}
+		},
+		{
+			id:       "flakehubCache.setup"
+			label:    "Setup FlakeHub Cache"
+			priority: 9
+			dependsOn: ["nix.install"]
+			provider: github: {
+				uses: "DeterminateSystems/flakehub-cache-action@e134de896b2302c1584a7b54ff35432708607d44"
+				with: {
+					"flakehub-flake-name": "waddle-social/waddle"
+					"use-gha-cache":       "no-preference"
+				}
+			}
+		},
+	]
+}
+
 schema.#Project & {
 	name: "waddle-colony"
 
@@ -15,7 +43,7 @@ schema.#Project & {
 
 	ci: providers: ["github"]
 	ci: contributors: [
-		c.#Nix,
+		_flakehubCacheContributor,
 		c.#CuenvRelease,
 		c.#OnePassword,
 		c.#BunWorkspace,
@@ -25,22 +53,18 @@ schema.#Project & {
 		default: {
 			environment: "production"
 			when: {
-				branch:        ["main"]
+				branch: ["main"]
 				defaultBranch: true
 				manual:        true
 			}
+			provider: github: permissions: "id-token": "write"
 			"tasks": [tasks.deployMain]
 		}
 		pullRequest: {
-			environment: "production"
 			when: {
 				pullRequest: true
 			}
-			"tasks": [tasks.deployPreview]
-			annotations: "Preview URL": schema.#TaskCaptureRef & {
-				cuenvTask:    "deployPreview"
-				cuenvCapture: "previewUrl"
-			}
+			"tasks": [tasks.build]
 		}
 	}
 
