@@ -411,7 +411,24 @@ async fn interpret_with_depth(
                                     }),
                                 None => Vec::new(),
                             };
-                            let live_targets = registry.select_routable_resources_for_user(&bare);
+                            // RFC 6121 §8.5.2.1.1 prefers presence-available
+                            // resources for bare-JID delivery; fall back to
+                            // any connected resource when none have emitted
+                            // `<presence/>` yet. Many clients defer presence
+                            // until after resource binding completes, and
+                            // the legacy `handle_message` direct-route path
+                            // delivered without consulting presence. This
+                            // preserves that behaviour without giving up
+                            // RFC priority routing for clients that do use
+                            // presence.
+                            let live_targets = {
+                                let priority = registry.select_routable_resources_for_user(&bare);
+                                if priority.is_empty() {
+                                    registry.get_resources_for_user(&bare)
+                                } else {
+                                    priority
+                                }
+                            };
                             if live_targets.is_empty() && detached_targets.is_empty() {
                                 if bare.domain().as_str() != deps.local_domain {
                                     debug!(
@@ -430,6 +447,15 @@ async fn interpret_with_depth(
                                     .await;
                                 }
                             } else {
+                                // Build a set from the cached `live_targets`
+                                // before iterating so we can both consume
+                                // the targets for delivery and re-check
+                                // membership when filtering the detached
+                                // list — avoids re-querying the registry
+                                // per detached resource (Copilot review on
+                                // PR #276).
+                                let live_set: std::collections::HashSet<jid::FullJid> =
+                                    live_targets.iter().cloned().collect();
                                 for full in live_targets {
                                     deliver_peer_to_full(
                                         registry,
@@ -445,13 +471,33 @@ async fn interpret_with_depth(
                                         // delivered live (race between
                                         // enumeration and live-resource
                                         // selection).
-                                        if registry
-                                            .select_routable_resources_for_user(&bare)
-                                            .iter()
-                                            .any(|live| live == &full)
-                                        {
+                                        if live_set.contains(&full) {
                                             continue;
                                         }
+                                        // Known limitation: queues the
+                                        // pre-recipient-pass stanza into
+                                        // the detached XEP-0198 replay
+                                        // buffer. When the resource
+                                        // resumes, replay sends the
+                                        // stored XML verbatim WITHOUT
+                                        // running the recipient-pass
+                                        // chain, so the replayed message
+                                        // is missing the recipient-side
+                                        // `<stanza-id by='recipient/>`
+                                        // (XEP-0359 §5) and recipient-
+                                        // side filtering / archive /
+                                        // inbox effects don't fire.
+                                        // This matches LEGACY behaviour
+                                        // (which had no recipient pass
+                                        // at all) and is therefore not a
+                                        // regression. Closing the gap
+                                        // properly requires running the
+                                        // headless recipient pass per
+                                        // detached target and queueing
+                                        // its `SendStanza` output —
+                                        // tracked as a follow-up to
+                                        // #229 (Copilot review on
+                                        // PR #276).
                                         let stanza_typed = (*stanza).clone();
                                         match sm
                                             .record_stanza_for_detached_bound_resource(
@@ -1001,6 +1047,18 @@ async fn deliver_peer_to_full(
         }
         waddle_xmpp::registry::SendResult::NotConnected
         | waddle_xmpp::registry::SendResult::ChannelClosed => {
+            // Known limitation (Copilot review on PR #276): queues the
+            // pre-recipient-pass stanza into the detached XEP-0198
+            // replay buffer. Replay sends the stored XML verbatim
+            // WITHOUT a recipient-pass dispatch, so the replayed
+            // message is missing the recipient-side
+            // `<stanza-id by='recipient'/>` (XEP-0359 §5) and
+            // recipient-side filtering / archive / inbox effects don't
+            // fire. Matches LEGACY behaviour (which had no recipient
+            // pass at all) and is therefore not a regression. Closing
+            // the gap properly requires running the headless recipient
+            // pass per detached target and queueing its `SendStanza`
+            // output — tracked as a follow-up to #229.
             if let Some(sm) = sm_session_registry {
                 match sm
                     .record_stanza_for_detached_bound_resource(target, &stanza)
@@ -2651,21 +2709,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn route_to_connection_bare_jid_with_no_available_resources_drops() {
-        // No available resources -> no wire delivery to any registered
-        // resource. The PR15 headless offline-recipient pass still
-        // persists archive + inbox if `Deps::message_dispatcher` is
-        // wired (see the dedicated `offline_recipient_pass_*` tests
-        // below); this test uses `Deps::registry_only` which leaves
-        // the dispatcher `None`, so the offline pass is skipped and
-        // no wire delivery happens — the original RFC 6121 §8.5.2.1.1
-        // drop semantic.
+    async fn route_to_connection_bare_jid_falls_back_to_connected_resources_without_presence() {
+        // RFC 6121 §8.5.2.1.1 prefers presence-available resources
+        // for bare-JID delivery, but Waddle falls back to *any*
+        // connected resource when no resource has emitted
+        // `<presence/>` yet (matching legacy `handle_message`
+        // behaviour and unblocking integration tests where clients
+        // bind without sending presence). This test pins that
+        // fall-back: a bare-JID DM addressed to a user with one
+        // registered-but-not-presence-available resource is delivered
+        // to that resource instead of falling through to the offline
+        // headless pass.
         let registry = ConnectionRegistry::new();
         let bob_desk: jid::FullJid = "bob@example.com/desk".parse().expect("jid");
         let (desk_tx, mut desk_rx) = tokio::sync::mpsc::channel(8);
         registry.register_with_carbons(bob_desk.clone(), desk_tx, false);
-        // Registered but presence NOT made available — `bob_desk`
-        // is not eligible per §8.5.2.1.1.
+        // Registered but presence NOT made available — legacy
+        // routing still delivers to this resource.
 
         let msg = chat_msg("alice@example.com/web", "bob@example.com", "hi");
         let events = vec![OutboundEvent::RouteToConnection {
@@ -2674,10 +2734,11 @@ mod tests {
         }];
         let _outcome = interpret(events, &Deps::registry_only(&registry)).await;
 
-        assert!(
-            drain_inbound(&mut desk_rx).is_empty(),
-            "no available resources -> no wire delivery; PR15 headless pass is \
-             gated on `message_dispatcher` being wired"
+        let delivered = drain_inbound(&mut desk_rx);
+        assert_eq!(
+            delivered.len(),
+            1,
+            "no presence -> still delivered to connected resource as a legacy fallback"
         );
     }
 

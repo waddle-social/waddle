@@ -1949,6 +1949,7 @@ async fn handle_xmpp_frame(
                     let mut iq_conn_state = handlers::iq::IqConnState {
                         carbons_enabled,
                         roster_interested,
+                        state_machine: state_machine.as_mut(),
                     };
                     handlers::iq::handle_iq_with_conn_state(
                         iq,
@@ -4908,6 +4909,7 @@ mod tests {
         let mut conn_state = IqConnState {
             carbons_enabled: &mut carbons_enabled,
             roster_interested: &mut roster_interested,
+            state_machine: None,
         };
         let responses = handle_iq_with_conn_state(
             parse_iq_for_test(frame),
@@ -6030,6 +6032,7 @@ mod tests {
         let mut conn_state = IqConnState {
             carbons_enabled: &mut carbons_enabled,
             roster_interested: &mut roster_interested,
+            state_machine: None,
         };
         let responses = handle_iq_with_conn_state(
             parse_iq_for_test(frame),
