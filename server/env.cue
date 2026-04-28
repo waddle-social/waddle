@@ -145,6 +145,10 @@ schema.#Project & {
 			when: {
 				pullRequest: true
 			}
+			provider: github: permissions: {
+				contents:   "read"
+				"id-token": "write"
+			}
 			tasks: [_t.checkCiDrift, _t.fmt, _t.clippy, _t.test, _t.buildCi]
 		}
 		xmppCompliance: {
@@ -163,6 +167,10 @@ schema.#Project & {
 		xmppCompliancePullRequest: {
 			when: {
 				pullRequest: true
+			}
+			provider: github: permissions: {
+				contents:   "read"
+				"id-token": "write"
 			}
 			tasks: [
 				_t.xmppUnitTests,
@@ -184,6 +192,10 @@ schema.#Project & {
 		githubEnricherPullRequest: {
 			when: {
 				pullRequest: true
+			}
+			provider: github: permissions: {
+				contents:   "read"
+				"id-token": "write"
 			}
 			derivePaths: true
 			tasks: [_t.buildGithubEnricher]

@@ -18,6 +18,7 @@ permissions:
   contents: read
   checks: write
   pull-requests: write
+  id-token: write
 jobs:
   waddle-server-githubEnricherPullRequest:
     name: waddle-server-githubEnricherPullRequest
