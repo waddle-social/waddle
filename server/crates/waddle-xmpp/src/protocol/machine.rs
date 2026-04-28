@@ -234,6 +234,32 @@ impl XmppStateMachine {
         &self.phase
     }
 
+    /// Transition this state machine into [`ConnectionPhase::Ready`]
+    /// for `full_jid`. Used by the WebSocket transport adapter
+    /// (#229 PR11) to mirror the per-connection
+    /// [`crate::registry::ConnectionRegistry`] bind transition into
+    /// the state machine so subsequent
+    /// [`InboundEvent::StanzaFromPeer`] / [`InboundEvent::FrameReceived`]
+    /// events dispatch through the message-pipeline chain instead of
+    /// being rejected with a "before authentication" warning.
+    ///
+    /// `resumed` should be `true` when the bind happens via XEP-0198
+    /// resume, `false` for a fresh bind. This matches the
+    /// `ConnectionPhase::ready` constructor's signature and lets the
+    /// SM observe the same metadata the legacy phase tracker uses.
+    pub fn transition_to_ready(&mut self, full_jid: jid::FullJid, resumed: bool) {
+        self.phase = ConnectionPhase::ready(full_jid, resumed);
+    }
+
+    /// Transition this state machine into [`ConnectionPhase::Closing`].
+    /// Used by the transport adapter on connection teardown so the SM
+    /// rejects late stanzas with the same diagnostic the legacy path
+    /// produces.
+    pub fn transition_to_closing(&mut self) {
+        let bound = self.phase.bound_jid().cloned();
+        self.phase = ConnectionPhase::closing(bound);
+    }
+
     /// The pure event → events transition.
     ///
     /// This is the only public entry point during normal operation.
