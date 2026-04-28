@@ -355,20 +355,65 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
                                 // was just consumed below.
                                 let resumed = conn.pending_resume_stream_id.is_some();
                                 // Seed the SM's XEP-0191 session-state
-                                // snapshot from persistence (#229 PR13).
-                                // Q5: this is frozen for the lifetime of
-                                // the session — IQ-set mutations during
-                                // the session update the SM's internal
-                                // copy; a load failure logs and falls
-                                // back to an empty list rather than
-                                // refusing the bind, matching the
-                                // legacy `is_blocked` per-message
-                                // tolerance.
-                                let blocklist = load_blocklist_for_bind(
-                                    &state.deps.app_state.db_pool,
-                                    &jid,
-                                )
-                                .await;
+                                // snapshot (#229 PR13).
+                                //
+                                // Fresh bind: load from
+                                // `DatabaseBlockingStorage`. On Err we
+                                // FAIL the bind via a stream-error
+                                // close rather than silently
+                                // initializing an empty list — a
+                                // session-long fail-open would bypass
+                                // XEP-0191 for the entire connection
+                                // (Codex P1 / Qodo P1 review).
+                                //
+                                // XEP-0198 resume: the previous
+                                // session was detached/dropped, but we
+                                // deliberately do NOT re-read from DB.
+                                // Re-reading would let blocklist
+                                // mutations from other resources
+                                // during the detach window leak into
+                                // the resumed stream, contradicting
+                                // the snapshot semantic. The resumed
+                                // session starts with an empty
+                                // snapshot; subsequent XEP-0191
+                                // IQ-set traffic on the resumed stream
+                                // re-populates it via the SM's
+                                // internal blocklist mutators.
+                                let blocklist = if resumed {
+                                    Blocklist::empty()
+                                } else {
+                                    match load_blocklist_for_bind(
+                                        &state.deps.app_state.db_pool,
+                                        &jid,
+                                    )
+                                    .await
+                                    {
+                                        Ok(bl) => bl,
+                                        Err(error) => {
+                                            error!(
+                                                jid = %jid,
+                                                %error,
+                                                "Failed to load XEP-0191 blocklist at \
+                                                 bind; failing the bind to avoid a \
+                                                 session-long fail-open. Client should \
+                                                 reconnect."
+                                            );
+                                            let stream_error =
+                                                build_internal_server_error_stream_error(
+                                                    "Session initialization failed; \
+                                                     please reconnect.",
+                                                );
+                                            let _ = send_ws_message(
+                                                &mut ws_sender,
+                                                Message::Text(stream_error),
+                                                "Failed to send blocklist-load \
+                                                 stream error",
+                                            )
+                                            .await;
+                                            break;
+                                        }
+                                    }
+                                };
                                 conn.ensure_state_machine(
                                     &domain,
                                     &state.deps.protocol.dispatcher,
@@ -688,32 +733,65 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
 /// [`Blocklist`] shape the per-connection state machine consumes.
 ///
 /// Used at bind time by the main loop to seed
-/// [`WsConnState::ensure_state_machine`] (#229 PR13). On any storage
-/// error we log at WARN and fall back to an empty blocklist rather
-/// than refusing the bind: the legacy `is_blocked` per-message check
-/// in `handlers/message.rs` already tolerates transient storage
-/// failures by treating the user as unblocked, and refusing the bind
-/// would be a strictly worse user-visible failure mode than the
-/// existing path. Mid-session XEP-0191 IQ-set mutations remain
-/// authoritative (they update the SM's internal blocklist directly);
-/// the snapshot loaded here is the *bind-time* baseline only.
+/// [`WsConnState::ensure_state_machine`] (#229 PR13). The caller
+/// **fails the bind** on `Err` rather than silently degrading to an
+/// empty blocklist — that fail-closed semantic mirrors the legacy
+/// per-message `is_blocked` check (`handlers/message.rs` /
+/// `handlers/iq.rs` both `return vec![]` / refuse to route on
+/// storage error). Treating storage failure as a session-long
+/// fail-open (the agent's first cut) was a privacy/security
+/// regression: any transient DB hiccup at bind would silently bypass
+/// XEP-0191 enforcement for the entire connection until the client
+/// reconnected. Failing the bind kicks the client to reconnect
+/// instead, which is a self-healing recovery path.
+///
+/// Mid-session XEP-0191 IQ-set mutations remain authoritative (they
+/// update the SM's internal blocklist directly); the snapshot loaded
+/// here is the bind-time baseline only.
 async fn load_blocklist_for_bind(
     db_pool: &Arc<crate::db::DatabasePool>,
     full_jid: &FullJid,
-) -> Blocklist {
+) -> Result<Blocklist, crate::db::blocking::BlockingStorageError> {
     let bare = full_jid.to_bare();
     let storage = crate::db::blocking::DatabaseBlockingStorage::new(db_pool.global().clone());
-    match storage.list_blocked_jids(&bare).await {
-        Ok(entries) => Blocklist::new(entries),
-        Err(error) => {
-            warn!(
-                jid = %bare,
-                %error,
-                "Failed to load blocklist at bind; SM session-state will be empty"
-            );
-            Blocklist::empty()
-        }
-    }
+    storage.list_blocked_jids(&bare).await.map(Blocklist::new)
+}
+
+/// Build a `<stream:error>` close frame for a fatal session-init
+/// failure (XEP-0191 blocklist load failure at bind time, etc.).
+/// Pairs with breaking the WebSocket main loop so the client sees
+/// the close + reconnects.
+fn build_internal_server_error_stream_error(text: &str) -> String {
+    let mut writer = Writer::new(Vec::new());
+    let mut stream_error = BytesStart::new("stream:error");
+    stream_error.push_attribute(("xmlns:stream", waddle_xmpp::ns::STREAM));
+    writer
+        .write_event(Event::Start(stream_error))
+        .expect("serializing stream error should not fail");
+
+    let mut internal = BytesStart::new("internal-server-error");
+    internal.push_attribute(("xmlns", "urn:ietf:params:xml:ns:xmpp-streams"));
+    writer
+        .write_event(Event::Empty(internal))
+        .expect("serializing internal-server-error should not fail");
+
+    let mut text_elem = BytesStart::new("text");
+    text_elem.push_attribute(("xmlns", "urn:ietf:params:xml:ns:xmpp-streams"));
+    text_elem.push_attribute(("xml:lang", "en"));
+    writer
+        .write_event(Event::Start(text_elem))
+        .expect("serializing stream error text should not fail");
+    writer
+        .write_event(Event::Text(quick_xml::events::BytesText::new(text)))
+        .expect("serializing stream error text body should not fail");
+    writer
+        .write_event(Event::End(quick_xml::events::BytesEnd::new("text")))
+        .expect("serializing stream error text close should not fail");
+
+    writer
+        .write_event(Event::End(quick_xml::events::BytesEnd::new("stream:error")))
+        .expect("serializing stream error close should not fail");
+    String::from_utf8(writer.into_inner()).expect("xml writer produces valid utf-8")
 }
 
 /// Build the [`crate::server::routes::interpret::Deps`] view a
@@ -2949,7 +3027,9 @@ mod tests {
             .expect("add_blocks");
 
         // Mirror the bind-site loader.
-        let blocklist = load_blocklist_for_bind(&state.deps.app_state.db_pool, &alice_full).await;
+        let blocklist = load_blocklist_for_bind(&state.deps.app_state.db_pool, &alice_full)
+            .await
+            .expect("blocklist load succeeds when storage is healthy");
         let loaded: Vec<_> = blocklist.iter().cloned().collect();
         assert_eq!(loaded, vec![blocked_bare.clone()]);
 
