@@ -383,10 +383,53 @@ async fn interpret_with_depth(
                     );
                 } else {
                     match jid.clone().try_into_full() {
-                        Ok(full) => deliver_peer_to_full(registry, &full, *stanza).await,
+                        Ok(full) => {
+                            deliver_peer_to_full(registry, deps.sm_session_registry, &full, &stanza)
+                                .await
+                        }
                         Err(bare) => {
-                            let targets = registry.select_routable_resources_for_user(&bare);
-                            if targets.is_empty() {
+                            // Enumerate XEP-0198 detached-but-resumable
+                            // resources for the bare JID. The legacy
+                            // `handle_message` direct-route path queued
+                            // bare-JID DMs onto detached resources via
+                            // `record_stanza_for_detached_bound_resource`
+                            // so a recipient mid-resume didn't lose
+                            // messages; we preserve that here.
+                            let detached_targets: Vec<jid::FullJid> = match deps.sm_session_registry
+                            {
+                                Some(sm) => sm
+                                    .detached_resources_for_user(&bare)
+                                    .await
+                                    .unwrap_or_else(|error| {
+                                        warn!(
+                                            bare_jid = %bare,
+                                            %error,
+                                            "RouteToConnection: failed to enumerate \
+                                             detached resources for bare-JID delivery"
+                                        );
+                                        Vec::new()
+                                    }),
+                                None => Vec::new(),
+                            };
+                            // RFC 6121 §8.5.2.1.1 prefers presence-available
+                            // resources for bare-JID delivery; fall back to
+                            // any connected resource when none have emitted
+                            // `<presence/>` yet. Many clients defer presence
+                            // until after resource binding completes, and
+                            // the legacy `handle_message` direct-route path
+                            // delivered without consulting presence. This
+                            // preserves that behaviour without giving up
+                            // RFC priority routing for clients that do use
+                            // presence.
+                            let live_targets = {
+                                let priority = registry.select_routable_resources_for_user(&bare);
+                                if priority.is_empty() {
+                                    registry.get_resources_for_user(&bare)
+                                } else {
+                                    priority
+                                }
+                            };
+                            if live_targets.is_empty() && detached_targets.is_empty() {
                                 if bare.domain().as_str() != deps.local_domain {
                                     debug!(
                                         bare_jid = %bare,
@@ -404,8 +447,89 @@ async fn interpret_with_depth(
                                     .await;
                                 }
                             } else {
-                                for full in targets {
-                                    deliver_peer_to_full(registry, &full, (*stanza).clone()).await;
+                                // Build a set from the cached `live_targets`
+                                // before iterating so we can both consume
+                                // the targets for delivery and re-check
+                                // membership when filtering the detached
+                                // list — avoids re-querying the registry
+                                // per detached resource (Copilot review on
+                                // PR #276).
+                                let live_set: std::collections::HashSet<jid::FullJid> =
+                                    live_targets.iter().cloned().collect();
+                                for full in live_targets {
+                                    deliver_peer_to_full(
+                                        registry,
+                                        deps.sm_session_registry,
+                                        &full,
+                                        &stanza,
+                                    )
+                                    .await;
+                                }
+                                if let Some(sm) = deps.sm_session_registry {
+                                    for full in detached_targets {
+                                        // Skip if this resource was just
+                                        // delivered live (race between
+                                        // enumeration and live-resource
+                                        // selection).
+                                        if live_set.contains(&full) {
+                                            continue;
+                                        }
+                                        // Known limitation: queues the
+                                        // pre-recipient-pass stanza into
+                                        // the detached XEP-0198 replay
+                                        // buffer. When the resource
+                                        // resumes, replay sends the
+                                        // stored XML verbatim WITHOUT
+                                        // running the recipient-pass
+                                        // chain, so the replayed message
+                                        // is missing the recipient-side
+                                        // `<stanza-id by='recipient/>`
+                                        // (XEP-0359 §5) and recipient-
+                                        // side filtering / archive /
+                                        // inbox effects don't fire.
+                                        // This matches LEGACY behaviour
+                                        // (which had no recipient pass
+                                        // at all) and is therefore not a
+                                        // regression. Closing the gap
+                                        // properly requires running the
+                                        // headless recipient pass per
+                                        // detached target and queueing
+                                        // its `SendStanza` output —
+                                        // tracked as a follow-up to
+                                        // #229 (Copilot review on
+                                        // PR #276).
+                                        let stanza_typed = (*stanza).clone();
+                                        match sm
+                                            .record_stanza_for_detached_bound_resource(
+                                                &full,
+                                                &stanza_typed,
+                                            )
+                                            .await
+                                        {
+                                            Ok(true) => {
+                                                debug!(
+                                                    jid = %full,
+                                                    "RouteToConnection: bare-JID stanza queued \
+                                                     for detached XEP-0198 replay"
+                                                );
+                                            }
+                                            Ok(false) => {
+                                                debug!(
+                                                    jid = %full,
+                                                    "RouteToConnection: detached session expired \
+                                                     between enumeration and queue; dropping"
+                                                );
+                                            }
+                                            Err(error) => {
+                                                warn!(
+                                                    jid = %full,
+                                                    %error,
+                                                    "RouteToConnection: failed to record bare-JID \
+                                                     stanza for detached resource"
+                                                );
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -694,6 +818,30 @@ async fn interpret_with_depth(
                         );
                     }
                 }
+
+                // XEP-0424 §"prevent further distribution": when the
+                // archived message is itself a retraction *request*,
+                // replace the target message in this archive with a
+                // tombstone. The dispatcher's
+                // `RichTargetValidationHandler` already authorized
+                // the request (same-author check via
+                // `LookupArchivedMessage`), so the only remaining
+                // step is the in-place tombstone replace. Mirrors
+                // the legacy `apply_retraction_tombstones` helper
+                // (which `handle_message` invoked inline) — once per
+                // archive write so both sender's and recipient's
+                // archives observe the tombstone independently.
+                if let Some(waddle_xmpp::xep::xep0424::RetractionKind::Request(retraction)) =
+                    waddle_xmpp::xep::xep0424::extract_retraction_from_message(&message)
+                {
+                    apply_retraction_tombstone(
+                        mam_storage,
+                        &archive_jid,
+                        &retraction.retracts_id,
+                        &message,
+                    )
+                    .await;
+                }
             }
             OutboundEvent::RequestEnrichment { id, message } => {
                 let enriched = enrich_message_event(deps, *message).await;
@@ -896,26 +1044,157 @@ async fn run_headless_recipient_pass(
     );
 }
 
+/// Apply a XEP-0424 §"prevent further distribution" tombstone to the
+/// retraction target inside `archive`. Looks up the target via the
+/// retraction's wire id (matches legacy
+/// `lookup_retraction_target_message`), then replaces the row with a
+/// tombstone using `mam_storage.replace_with_tombstone`.
+///
+/// Called from the [`OutboundEvent::ArchiveDirect`] arm once per
+/// archive write, so sender's and recipient's archives both
+/// independently observe the tombstone. Failures are logged at WARN
+/// and ignored — the retraction message itself was already archived
+/// and the original is the SHOULD-be-tombstoned target, never the
+/// authoritative payload after this point.
+async fn apply_retraction_tombstone(
+    mam_storage: &Arc<dyn MamStorage>,
+    archive: &jid::BareJid,
+    target_wire_id: &str,
+    retraction_message: &Message,
+) {
+    let archive_str = archive.to_string();
+    let original = match mam_storage
+        .get_message_by_message_id(&archive_str, target_wire_id)
+        .await
+    {
+        Ok(Some(row)) => row,
+        Ok(None) => {
+            debug!(
+                archive = %archive,
+                target = target_wire_id,
+                "ApplyRetractionTombstone: target not found in archive; skipping"
+            );
+            return;
+        }
+        Err(error) => {
+            warn!(
+                archive = %archive,
+                target = target_wire_id,
+                %error,
+                "ApplyRetractionTombstone: archive lookup failed; skipping"
+            );
+            return;
+        }
+    };
+    let tombstone = waddle_xmpp::mam::ArchivedTombstone {
+        retraction_id: retraction_message
+            .id
+            .clone()
+            .and_then(waddle_xmpp::mam::RichMessageId::new),
+        stamp: chrono::Utc::now(),
+        moderation: None,
+    };
+    match mam_storage
+        .replace_with_tombstone(&original.id, tombstone)
+        .await
+    {
+        Ok(true) => {
+            debug!(
+                archive = %archive,
+                original_id = %original.id,
+                "ApplyRetractionTombstone: replaced row with tombstone"
+            );
+        }
+        Ok(false) => {
+            warn!(
+                archive = %archive,
+                original_id = %original.id,
+                "ApplyRetractionTombstone: target row not found at replace time"
+            );
+        }
+        Err(error) => {
+            warn!(
+                archive = %archive,
+                original_id = %original.id,
+                %error,
+                "ApplyRetractionTombstone: replace_with_tombstone failed"
+            );
+        }
+    }
+}
+
 /// Deliver a single `Stanza` to a specific full-JID destination as
 /// a [`waddle_xmpp::registry::DeliveryKind::PeerStanza`] so the
 /// destination's main loop runs the recipient pass before any wire
 /// write. Centralizes the per-target send + result-logging shape so
 /// both the full-JID and bare-JID-resource-selection arms of
 /// [`OutboundEvent::RouteToConnection`] go through the same path.
+///
+/// On `NotConnected` / `ChannelClosed`, falls back to recording the
+/// stanza on the recipient's detached XEP-0198 stream-management
+/// session (when one exists) so a recipient that's mid-resume doesn't
+/// silently lose direct messages — matching the legacy
+/// `handle_message` direct-route semantics. Cross-domain bare JIDs and
+/// truly-offline recipients still drop here; the bare-JID arm above
+/// runs the headless recipient pass for offline persistence
+/// (archive/inbox/incoming-block) on local domains.
 async fn deliver_peer_to_full(
     registry: &waddle_xmpp::registry::ConnectionRegistry,
+    sm_session_registry: Option<&Arc<InMemorySmSessionRegistry>>,
     target: &jid::FullJid,
-    stanza: Stanza,
+    stanza: &Stanza,
 ) {
-    match registry.send_peer_to(target, stanza).await {
+    // The live-send path needs ownership for `send_peer_to`; the
+    // detached fallback only borrows. Clone once here on the live
+    // branch so the caller hands us an `&Stanza` and avoids a
+    // redundant clone per live target on the bare-JID fan-out hot
+    // path (Copilot review on PR #276).
+    match registry.send_peer_to(target, stanza.clone()).await {
         waddle_xmpp::registry::SendResult::Sent => {
             debug!(jid = %target, "RouteToConnection: peer-stanza queued for recipient pass");
         }
-        waddle_xmpp::registry::SendResult::NotConnected => {
-            debug!(jid = %target, "RouteToConnection: target offline, dropping");
-        }
-        waddle_xmpp::registry::SendResult::ChannelClosed => {
-            warn!(jid = %target, "RouteToConnection: target channel closed, dropping");
+        waddle_xmpp::registry::SendResult::NotConnected
+        | waddle_xmpp::registry::SendResult::ChannelClosed => {
+            // Known limitation (Copilot review on PR #276): queues the
+            // pre-recipient-pass stanza into the detached XEP-0198
+            // replay buffer. Replay sends the stored XML verbatim
+            // WITHOUT a recipient-pass dispatch, so the replayed
+            // message is missing the recipient-side
+            // `<stanza-id by='recipient'/>` (XEP-0359 §5) and
+            // recipient-side filtering / archive / inbox effects don't
+            // fire. Matches LEGACY behaviour (which had no recipient
+            // pass at all) and is therefore not a regression. Closing
+            // the gap properly requires running the headless recipient
+            // pass per detached target and queueing its `SendStanza`
+            // output — tracked as a follow-up to #229.
+            if let Some(sm) = sm_session_registry {
+                match sm
+                    .record_stanza_for_detached_bound_resource(target, stanza)
+                    .await
+                {
+                    Ok(true) => {
+                        debug!(
+                            jid = %target,
+                            "RouteToConnection: recipient detached, queued for XEP-0198 replay"
+                        );
+                    }
+                    Ok(false) => {
+                        debug!(
+                            jid = %target,
+                            "RouteToConnection: target offline and no detached session, dropping"
+                        );
+                    }
+                    Err(error) => {
+                        warn!(
+                            jid = %target,
+                            %error,
+                            "RouteToConnection: failed to record stanza for detached resource"
+                        );
+                    }
+                }
+            } else {
+                debug!(jid = %target, "RouteToConnection: target offline, dropping");
+            }
         }
     }
 }
@@ -1139,21 +1418,25 @@ async fn lookup_archived_message(
         MessageRef::OriginId { sender, origin_id } => {
             // No origin-id-only accessor on `MamStorage` today, so we
             // narrow with `MamQuery.with = sender` (storage-level
-            // sender filter) and pick the first row whose
-            // `origin_id` matches the requested value. This enforces
-            // the typed `MessageRef::OriginId` contract — scoped to
-            // the *original sender*, not just any row sharing that
-            // opaque value — without leaking through the
-            // OR-collision in `get_message_by_stanza_id`.
+            // sender filter) and pick the first row whose `origin_id`
+            // *or wire `id` attribute* (`stanza_id` column) matches
+            // the requested value. The fall-through to the wire id
+            // mirrors the legacy `lookup_correction_target_message`
+            // behaviour — many clients (and the CUE e2e scenarios)
+            // omit the explicit `<origin-id/>` payload and rely on
+            // the message's `id` attribute as the correction
+            // target. Sender-bound matching keeps the
+            // OR-collision protection from #229 PR8: only rows sent
+            // by the original author can satisfy the correction.
             let query = waddle_xmpp::mam::MamQuery {
                 with: Some(sender.to_string()),
                 ..Default::default()
             };
             match mam_storage.query_messages(&archive_str, &query).await {
-                Ok(result) => Ok(result
-                    .messages
-                    .into_iter()
-                    .find(|row| row_matches_origin_id(row, sender, origin_id.as_str()))),
+                Ok(result) => Ok(result.messages.into_iter().find(|row| {
+                    row_matches_origin_id(row, sender, origin_id.as_str())
+                        || row_matches_wire_id(row, sender, origin_id.as_str())
+                })),
                 Err(e) => Err(e),
             }
         }
@@ -1183,6 +1466,25 @@ fn row_matches_origin_id(
     expected_origin_id: &str,
 ) -> bool {
     if row.origin_id.as_deref() != Some(expected_origin_id) {
+        return false;
+    }
+    match row.from.parse::<jid::BareJid>() {
+        Ok(bare) => bare == *expected_sender,
+        Err(_) => false,
+    }
+}
+
+/// Fallback match for the legacy XEP-0308 correction-target shape
+/// where the message carries no explicit `<origin-id/>` payload —
+/// matches the row's wire `id` attribute (the `stanza_id` storage
+/// column) to the correction's `replaces_id`. Same sender-bound
+/// scoping as [`row_matches_origin_id`].
+fn row_matches_wire_id(
+    row: &MamArchivedMessage,
+    expected_sender: &jid::BareJid,
+    expected_wire_id: &str,
+) -> bool {
+    if row.stanza_id.as_deref() != Some(expected_wire_id) {
         return false;
     }
     match row.from.parse::<jid::BareJid>() {
@@ -1630,14 +1932,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn xep_0359_archive_ref_pivots_inbox_row_to_mam_row_by_stanza_id() {
+    async fn xep_0359_archive_ref_pivots_inbox_row_to_mam_row_via_archive_or_stanza_id() {
         // End-to-end of the bug Qodo + Codex flagged: inbox writes
         // `archive_ref` from the canonical XEP-0359 `<stanza-id>`
-        // stamp, and `MamStorage::get_message_by_stanza_id` must
-        // resolve that same id against `archive_jid`. If the
-        // projection ever stops using the canonical stamp as
-        // `ArchivedMessage.stanza_id`/`id`, the inbox row points at a
-        // dangling stanza-id and clients can't pivot to the archive.
+        // stamp, and `MamStorage::get_message_by_archive_or_stanza_id`
+        // must resolve that same id against `archive_jid` by querying
+        // both the archive's primary key (`id`) and the wire id
+        // (`stanza_id`). If the projection ever stops using the
+        // canonical stamp as `ArchivedMessage.id`, the inbox row
+        // points at a dangling stanza-id and clients can't pivot to
+        // the archive.
         use waddle_xmpp::inbox::storage::InMemoryInboxStorage;
         use waddle_xmpp::mam::storage::InMemoryMamStorage;
         use waddle_xmpp::protocol::event::{StanzaIdRef, StanzaIdValue};
@@ -1685,9 +1989,12 @@ mod tests {
         assert_eq!(entries[0].last_stanza_id, canonical_id);
 
         // The same id resolves a MAM row in alice's archive — pivot
-        // works.
+        // works. The XEP-0359 canonical stamp is stored as the row's
+        // `id` (primary key) per the legacy projection shape, so the
+        // pivot uses `get_message_by_archive_or_stanza_id` (queries
+        // both `id` and `stanza_id`).
         let row = mam
-            .get_message_by_stanza_id(&alice.to_string(), canonical_id)
+            .get_message_by_archive_or_stanza_id(&alice.to_string(), canonical_id)
             .await
             .expect("mam lookup")
             .expect("MAM row keyed by canonical stanza-id");
@@ -2538,21 +2845,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn route_to_connection_bare_jid_with_no_available_resources_drops() {
-        // No available resources -> no wire delivery to any registered
-        // resource. The PR15 headless offline-recipient pass still
-        // persists archive + inbox if `Deps::message_dispatcher` is
-        // wired (see the dedicated `offline_recipient_pass_*` tests
-        // below); this test uses `Deps::registry_only` which leaves
-        // the dispatcher `None`, so the offline pass is skipped and
-        // no wire delivery happens — the original RFC 6121 §8.5.2.1.1
-        // drop semantic.
+    async fn route_to_connection_bare_jid_falls_back_to_connected_resources_without_presence() {
+        // RFC 6121 §8.5.2.1.1 prefers presence-available resources
+        // for bare-JID delivery, but Waddle falls back to *any*
+        // connected resource when no resource has emitted
+        // `<presence/>` yet (matching legacy `handle_message`
+        // behaviour and unblocking integration tests where clients
+        // bind without sending presence). This test pins that
+        // fall-back: a bare-JID DM addressed to a user with one
+        // registered-but-not-presence-available resource is delivered
+        // to that resource instead of falling through to the offline
+        // headless pass.
         let registry = ConnectionRegistry::new();
         let bob_desk: jid::FullJid = "bob@example.com/desk".parse().expect("jid");
         let (desk_tx, mut desk_rx) = tokio::sync::mpsc::channel(8);
         registry.register_with_carbons(bob_desk.clone(), desk_tx, false);
-        // Registered but presence NOT made available — `bob_desk`
-        // is not eligible per §8.5.2.1.1.
+        // Registered but presence NOT made available — legacy
+        // routing still delivers to this resource.
 
         let msg = chat_msg("alice@example.com/web", "bob@example.com", "hi");
         let events = vec![OutboundEvent::RouteToConnection {
@@ -2561,10 +2870,11 @@ mod tests {
         }];
         let _outcome = interpret(events, &Deps::registry_only(&registry)).await;
 
-        assert!(
-            drain_inbound(&mut desk_rx).is_empty(),
-            "no available resources -> no wire delivery; PR15 headless pass is \
-             gated on `message_dispatcher` being wired"
+        let delivered = drain_inbound(&mut desk_rx);
+        assert_eq!(
+            delivered.len(),
+            1,
+            "no presence -> still delivered to connected resource as a legacy fallback"
         );
     }
 

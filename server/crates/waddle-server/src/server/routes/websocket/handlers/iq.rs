@@ -119,6 +119,7 @@ pub async fn handle_iq(
     let mut conn_state = IqConnState {
         carbons_enabled: &mut carbons_enabled,
         roster_interested: &mut roster_interested,
+        state_machine: None,
     };
     handle_iq_with_conn_state(
         iq,
@@ -135,6 +136,14 @@ pub async fn handle_iq(
 pub struct IqConnState<'a> {
     pub carbons_enabled: &'a mut bool,
     pub roster_interested: &'a mut bool,
+    /// Per-connection [`waddle_xmpp::protocol::XmppStateMachine`].
+    /// Required so XEP-0191 block/unblock IQs can mirror their
+    /// effect into the dispatcher's session-state snapshot — without
+    /// this, additions made on a live connection would not take
+    /// effect on the recipient pipeline until the next bind (PR13's
+    /// load-at-bind seed). `None` only for transition-period unit
+    /// tests; production (`handle_xmpp_frame`) always supplies it.
+    pub state_machine: Option<&'a mut waddle_xmpp::protocol::XmppStateMachine>,
 }
 
 pub async fn handle_iq_with_conn_state(
@@ -354,7 +363,15 @@ pub async fn handle_iq_with_conn_state(
     }
 
     if waddle_xmpp::xep::xep0191::is_blocking_query(&iq) {
-        return handle_blocking_iq(&iq, state, phase.bound_jid(), response_from, response_to).await;
+        return handle_blocking_iq(
+            &iq,
+            state,
+            phase.bound_jid(),
+            response_from,
+            response_to,
+            conn_state.state_machine.as_deref_mut(),
+        )
+        .await;
     }
 
     if is_push_enable(&iq) || is_push_disable(&iq) {
@@ -3658,6 +3675,7 @@ async fn handle_blocking_iq(
     sender_jid: Option<&FullJid>,
     response_from: Option<&str>,
     response_to: Option<&str>,
+    state_machine: Option<&mut waddle_xmpp::protocol::XmppStateMachine>,
 ) -> Vec<String> {
     let Some(sender_jid) = sender_jid else {
         return vec![build_iq_error_xml_with_addresses(
@@ -3697,9 +3715,9 @@ async fn handle_blocking_iq(
         }
     };
 
-    match request {
+    let response = match request {
         waddle_xmpp::xep::xep0191::BlockingRequest::GetBlocklist => {
-            match storage.get_blocklist(&user_bare).await {
+            return match storage.get_blocklist(&user_bare).await {
                 Ok(blocked) => vec![iq_to_xml(
                     waddle_xmpp::xep::xep0191::build_blocklist_response(iq, &blocked),
                 )],
@@ -3713,7 +3731,7 @@ async fn handle_blocking_iq(
                         "internal-server-error",
                     )]
                 }
-            }
+            };
         }
         waddle_xmpp::xep::xep0191::BlockingRequest::Block(jids) => {
             if let Err(error) = storage.add_blocks(&user_bare, &jids).await {
@@ -3775,7 +3793,36 @@ async fn handle_blocking_iq(
                 waddle_xmpp::xep::xep0191::build_blocking_success(iq),
             )]
         }
+    };
+
+    // After a successful Block/Unblock storage mutation, mirror the
+    // updated XEP-0191 list into the per-connection
+    // [`waddle_xmpp::protocol::XmppStateMachine`] so the dispatcher's
+    // session-state snapshot reflects the change for subsequent
+    // sender / recipient passes. Without this, blocks added live on
+    // a session would not take effect until the next bind (PR13's
+    // load-at-bind seed). Failing to reload the storage view is
+    // logged at WARN and leaves the SM blocklist unchanged: the
+    // storage layer is authoritative on disk and the next bind will
+    // reload, while the request itself already succeeded for the
+    // client.
+    if let Some(sm) = state_machine {
+        match storage.list_blocked_jids(&user_bare).await {
+            Ok(jids) => {
+                sm.set_blocklist(waddle_xmpp::protocol::Blocklist::new(jids));
+            }
+            Err(error) => {
+                warn!(
+                    jid = %user_bare,
+                    %error,
+                    "Failed to refresh in-memory blocklist after XEP-0191 IQ-set; \
+                     dispatcher snapshot will catch up on next bind"
+                );
+            }
+        }
     }
+
+    response
 }
 
 async fn send_blocking_pushes(

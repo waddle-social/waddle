@@ -73,11 +73,19 @@ pub fn build_direct_archived_message(
     let rich = rich_archive_payload(message);
     let stanza_xml = serialize_message_xml(message);
 
+    // Storage shape mirrors the legacy `archive_direct_message`:
+    // `id` is the canonical XEP-0359 stamp (the archive's primary
+    // key for MAM lookups), and `stanza_id` carries the message's
+    // wire `id` attribute. XEP-0424 retraction lookups query the
+    // `stanza_id` column via `get_message_by_message_id`, and
+    // (per `get_message_by_stanza_id`) the XEP-0359 stamp is
+    // already keyed by `id`, so both retract-by-wire-id and
+    // retract-by-canonical-stamp resolve correctly. If the canonical
+    // stamp is missing, `id` is left empty here and the storage
+    // backend assigns the archive primary key at write time; the
+    // wire id still lives in `stanza_id`.
     let canonical_stamp = extract_stanza_id_by(message, archive_jid);
-    let (id, stanza_id) = match canonical_stamp {
-        Some(stamp) => (stamp.clone(), Some(stamp)),
-        None => (String::new(), message.id.clone()),
-    };
+    let id = canonical_stamp.unwrap_or_default();
 
     ArchivedMessage {
         id,
@@ -85,7 +93,7 @@ pub fn build_direct_archived_message(
         from: from.to_string(),
         to: to.to_string(),
         body,
-        stanza_id,
+        stanza_id: message.id.clone(),
         thread_id: message.thread.as_ref().map(|thread| thread.0.clone()),
         reply_to_id,
         reply_to_jid,
@@ -300,11 +308,16 @@ mod tests {
         // Production path: CanonicalizeHandler stamps a fresh
         // `<stanza-id by='alice@example.com' id='canon-1'/>` on the
         // message before ArchiveHandler emits ArchiveDirect. The
-        // projection MUST use that id as both the storage primary key
-        // and the lookup field so inbox->MAM pivot works (the
-        // InboxHandler emits the same id as `archive_ref`).
+        // projection uses that id as the storage primary key (`id`).
+        // `stanza_id` mirrors the original wire `id` attribute so
+        // XEP-0424 retract lookups (which historically resolved
+        // against the wire id, and which the dispatcher path's
+        // `MessageRef::StanzaId` arm queries via
+        // `get_message_by_message_id`) keep working. Inbox->MAM
+        // pivot uses the canonical stamp via `id`.
         use crate::xep::xep0359::build_stanza_id_element;
         let mut msg = chat_with_body("alice@example.com/web", "bob@example.com", "hi");
+        msg.id = Some("wire-id-1".to_string());
         msg.payloads
             .push(build_stanza_id_element("canon-1", "alice@example.com"));
         let archived = build_direct_archived_message(
@@ -319,8 +332,8 @@ mod tests {
         );
         assert_eq!(
             archived.stanza_id.as_deref(),
-            Some("canon-1"),
-            "canonical XEP-0359 stamp also fills stanza_id for stanza-id lookups"
+            Some("wire-id-1"),
+            "stanza_id mirrors the wire id attribute for retraction-by-wire-id lookups"
         );
     }
 
@@ -328,9 +341,12 @@ mod tests {
     fn xep_0359_canonical_stamp_picks_archive_jid_specific_stamp() {
         // Recipient pass: the message carries Alice's stamp AND Bob's
         // stamp. The projection picks the one matching `archive_jid`
-        // — Bob's, since this is Bob's archive write.
+        // — Bob's, since this is Bob's archive write — and uses it
+        // as the storage primary key. `stanza_id` continues to track
+        // the wire `id` attribute for legacy-style retraction lookups.
         use crate::xep::xep0359::build_stanza_id_element;
         let mut msg = chat_with_body("alice@example.com/web", "bob@example.com", "hi");
+        msg.id = Some("wire-id-2".to_string());
         msg.payloads
             .push(build_stanza_id_element("alice-A1", "alice@example.com"));
         msg.payloads
@@ -342,7 +358,7 @@ mod tests {
             &msg,
         );
         assert_eq!(archived.id, "bob-B1");
-        assert_eq!(archived.stanza_id.as_deref(), Some("bob-B1"));
+        assert_eq!(archived.stanza_id.as_deref(), Some("wire-id-2"));
     }
 
     #[test]

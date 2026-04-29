@@ -3,6 +3,12 @@
 //! This module provides the `StanzaRouter` which determines whether a JID is local
 //! or remote and routes local stanzas through the in-process connection registry.
 //!
+//! Message stanzas no longer go through this router: the per-connection
+//! sans-I/O dispatcher chain
+//! ([`crate::protocol::handlers::register_default_message_handlers`]) and
+//! the `RouteToConnection` interpreter arm own message routing as of #229
+//! PR16. Only IQ and presence still flow through `StanzaRouter`.
+//!
 //! # Routing Logic
 //!
 //! For each stanza, the router:
@@ -21,16 +27,15 @@
 //!     connection_registry,
 //! );
 //!
-//! // Route a message locally or return RemoteUnsupported for remote domains.
-//! router.route_message(message, sender_jid).await?;
+//! // Route IQ stanzas locally.
+//! router.route_iq(iq, &sender_jid).await?;
 //! ```
 
 use std::sync::Arc;
 
-use jid::{BareJid, FullJid, Jid};
+use jid::{FullJid, Jid};
 use tracing::{debug, info, instrument};
 use xmpp_parsers::iq::Iq;
-use xmpp_parsers::message::Message;
 use xmpp_parsers::presence::Presence;
 
 use crate::registry::{ConnectionRegistry, SendResult};
@@ -191,97 +196,6 @@ impl StanzaRouter {
     /// Check if a JID is outside the local WebSocket-served domains.
     pub fn is_remote_jid(&self, jid: &Jid) -> bool {
         matches!(self.get_destination(jid), RoutingDestination::Remote { .. })
-    }
-
-    /// Route a message stanza to its destination.
-    ///
-    /// For local recipients, the message is sent via the connection registry.
-    /// Remote recipients are not routed by the WebSocket-only server.
-    #[instrument(skip(self, message), fields(to = ?message.to, msg_type = ?message.type_))]
-    pub async fn route_message(
-        &self,
-        message: Message,
-        _sender_jid: &FullJid,
-    ) -> Result<RoutingResult, XmppError> {
-        let to_jid = match &message.to {
-            Some(jid) => jid,
-            None => {
-                debug!("Message has no destination JID");
-                return Ok(RoutingResult::NoDestination);
-            }
-        };
-
-        match self.get_destination(to_jid) {
-            RoutingDestination::Local => self.route_message_local(message).await,
-            RoutingDestination::LocalMuc | RoutingDestination::LocalSpaces => {
-                // MUC/Spaces messages should be handled by their respective services,
-                // not by this router directly. Return as local.
-                debug!("Message to local service should be handled by service handler");
-                Ok(RoutingResult::DeliveredLocal {
-                    delivered_count: 0,
-                    offline_count: 0,
-                })
-            }
-            RoutingDestination::Remote { domain } => self.route_message_remote(&domain).await,
-        }
-    }
-
-    /// Route a message to local users.
-    ///
-    pub async fn route_message_local(&self, message: Message) -> Result<RoutingResult, XmppError> {
-        let to_jid = message.to.as_ref().ok_or_else(|| {
-            XmppError::bad_request(Some("Message has no destination".to_string()))
-        })?;
-
-        // Get the bare JID for looking up all resources
-        let bare_jid: BareJid = match to_jid.clone().try_into_full() {
-            Ok(full) => full.to_bare(),
-            Err(bare) => bare,
-        };
-
-        // Get all connected resources for this user
-        let resources = self.connection_registry.get_resources_for_user(&bare_jid);
-
-        if resources.is_empty() {
-            debug!(to = %bare_jid, "Recipient has no connected resources");
-            return Ok(RoutingResult::DeliveredLocal {
-                delivered_count: 0,
-                offline_count: 1,
-            });
-        }
-
-        let stanza = Stanza::Message(message);
-        let mut delivered_count = 0;
-        let mut offline_count = 0;
-
-        // Send to all connected resources
-        for resource_jid in &resources {
-            match self
-                .connection_registry
-                .send_to(resource_jid, stanza.clone())
-                .await
-            {
-                SendResult::Sent => {
-                    debug!(to = %resource_jid, "Message delivered to local user");
-                    delivered_count += 1;
-                }
-                SendResult::NotConnected | SendResult::ChannelClosed => {
-                    debug!(to = %resource_jid, "Local user not connected");
-                    offline_count += 1;
-                }
-            }
-        }
-
-        Ok(RoutingResult::DeliveredLocal {
-            delivered_count,
-            offline_count,
-        })
-    }
-
-    /// Reject a message addressed to a remote server.
-    async fn route_message_remote(&self, domain: &str) -> Result<RoutingResult, XmppError> {
-        debug!(domain = %domain, "Remote routing is not supported");
-        Ok(RoutingResult::RemoteUnsupported)
     }
 
     /// Route a presence stanza to its destination.
@@ -607,62 +521,6 @@ mod tests {
         let router = StanzaRouter::new(config, registry);
 
         assert!(!router.is_remote_routing_enabled());
-    }
-
-    #[tokio::test]
-    async fn test_route_message_local_not_connected() {
-        let config = create_test_config();
-        let registry = Arc::new(ConnectionRegistry::new());
-        let router = StanzaRouter::new(config, registry);
-
-        let sender_jid: FullJid = "sender@waddle.social/resource".parse().unwrap();
-        let mut message = Message::new(Some(Jid::from(
-            "user@waddle.social".parse::<BareJid>().unwrap(),
-        )));
-        message.id = Some("test-123".to_string());
-
-        let result = router.route_message(message, &sender_jid).await.unwrap();
-
-        match result {
-            RoutingResult::DeliveredLocal {
-                delivered_count,
-                offline_count,
-            } => {
-                assert_eq!(delivered_count, 0);
-                assert_eq!(offline_count, 1);
-            }
-            _ => panic!("Expected DeliveredLocal result"),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_route_message_no_destination() {
-        let config = create_test_config();
-        let registry = Arc::new(ConnectionRegistry::new());
-        let router = StanzaRouter::new(config, registry);
-
-        let sender_jid: FullJid = "sender@waddle.social/resource".parse().unwrap();
-        let message = Message::new(None);
-
-        let result = router.route_message(message, &sender_jid).await.unwrap();
-
-        assert!(matches!(result, RoutingResult::NoDestination));
-    }
-
-    #[tokio::test]
-    async fn test_route_message_remote_unsupported() {
-        let config = create_test_config();
-        let registry = Arc::new(ConnectionRegistry::new());
-        let router = StanzaRouter::new(config, registry);
-
-        let sender_jid: FullJid = "sender@waddle.social/resource".parse().unwrap();
-        let message = Message::new(Some(Jid::from(
-            "user@example.com".parse::<BareJid>().unwrap(),
-        )));
-
-        let result = router.route_message(message, &sender_jid).await.unwrap();
-
-        assert!(matches!(result, RoutingResult::RemoteUnsupported));
     }
 
     #[tokio::test]
