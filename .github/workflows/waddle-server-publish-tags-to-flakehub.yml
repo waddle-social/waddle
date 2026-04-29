@@ -40,11 +40,6 @@ jobs:
       with:
         persist-credentials: false
         ref: ${{ (inputs.tag != null) && format('refs/tags/{0}', inputs.tag) || '' }}
-    - name: Setup FlakeHub Cache
-      uses: DeterminateSystems/flakehub-cache-action@e134de896b2302c1584a7b54ff35432708607d44
-      with:
-        flakehub-flake-name: waddle-social/waddle
-        use-gha-cache: disabled
     - name: Setup cuenv (release)
       run: |-
         arch="$(uname -m)"

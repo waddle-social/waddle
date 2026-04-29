@@ -27,19 +27,6 @@ let _flakehubCacheContributor = schema.#Contributor & {
 				with: "extra-conf": "accept-flake-config = true"
 			}
 		},
-		{
-			id:       "flakehubCache.setup"
-			label:    "Setup FlakeHub Cache"
-			priority: 9
-			dependsOn: ["nix.install"]
-			provider: github: {
-				uses: "DeterminateSystems/flakehub-cache-action@e134de896b2302c1584a7b54ff35432708607d44"
-				with: {
-					"flakehub-flake-name": "waddle-social/waddle"
-					"use-gha-cache":       "disabled"
-				}
-			}
-		},
 	]
 }
 

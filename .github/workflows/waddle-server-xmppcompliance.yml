@@ -44,11 +44,6 @@ jobs:
       uses: DeterminateSystems/determinate-nix-action@92ffb5400c3776307a27a1727d7e2ac3dcd9f844
       with:
         extra-conf: accept-flake-config = true
-    - name: Setup FlakeHub Cache
-      uses: DeterminateSystems/flakehub-cache-action@e134de896b2302c1584a7b54ff35432708607d44
-      with:
-        flakehub-flake-name: waddle-social/waddle
-        use-gha-cache: disabled
     - name: nixWarmServerDeps
       run: nix build ../#waddle-server-deps ../#waddle-server-workspace-deps ../#waddle-server-workspace-all-features-deps ../#waddle-server-xmpp-deps ../#waddle-server-test-deps -L --accept-flake-config
       working-directory: server
@@ -72,11 +67,6 @@ jobs:
       uses: DeterminateSystems/determinate-nix-action@92ffb5400c3776307a27a1727d7e2ac3dcd9f844
       with:
         extra-conf: accept-flake-config = true
-    - name: Setup FlakeHub Cache
-      uses: DeterminateSystems/flakehub-cache-action@e134de896b2302c1584a7b54ff35432708607d44
-      with:
-        flakehub-flake-name: waddle-social/waddle
-        use-gha-cache: disabled
     - name: nixXmppServerTests
       run: nix build ../#checks.x86_64-linux.waddle-server-xmpp-server-tests -L --accept-flake-config
       working-directory: server
@@ -100,11 +90,6 @@ jobs:
       uses: DeterminateSystems/determinate-nix-action@92ffb5400c3776307a27a1727d7e2ac3dcd9f844
       with:
         extra-conf: accept-flake-config = true
-    - name: Setup FlakeHub Cache
-      uses: DeterminateSystems/flakehub-cache-action@e134de896b2302c1584a7b54ff35432708607d44
-      with:
-        flakehub-flake-name: waddle-social/waddle
-        use-gha-cache: disabled
     - name: nixXmppUnitTests
       run: nix build ../#checks.x86_64-linux.waddle-server-xmpp-unit-tests -L --accept-flake-config
       working-directory: server
@@ -128,11 +113,6 @@ jobs:
       uses: DeterminateSystems/determinate-nix-action@92ffb5400c3776307a27a1727d7e2ac3dcd9f844
       with:
         extra-conf: accept-flake-config = true
-    - name: Setup FlakeHub Cache
-      uses: DeterminateSystems/flakehub-cache-action@e134de896b2302c1584a7b54ff35432708607d44
-      with:
-        flakehub-flake-name: waddle-social/waddle
-        use-gha-cache: disabled
     - name: nixXmppXepIntegration
       run: nix build ../#checks.x86_64-linux.waddle-server-xmpp-xep-integration -L --accept-flake-config
       working-directory: server
