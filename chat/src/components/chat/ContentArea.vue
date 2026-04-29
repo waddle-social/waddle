@@ -6,8 +6,10 @@ import { getConnectionNoticeCopy } from "@/lib/connection-notice";
 import { findMessageElementById } from "@/lib/message-targeting";
 import { getReplyJumpNotice } from "@/lib/reply-ux";
 import {
+  getPinnedScrollTop,
   getNewMessagesDividerPlacement,
   orderTimelineForScrollDirection,
+  type ScrollDirectionMode,
 } from "@/lib/scroll-direction";
 import { extractFilesFromEvent } from "@/lib/xmpp/file-upload";
 import type { ChannelSummary, SpaceSummary } from "@/lib/chat-types";
@@ -217,19 +219,18 @@ function onSelectGif(url: string) {
 }
 
 const messagesContainer = ref<HTMLDivElement | null>(null);
-const virtualTimelineRef = ref<(ComponentPublicInstance & {
+type VirtualTimelineHandle = ComponentPublicInstance & {
   scrollElement: HTMLDivElement | null;
   scrollToMessageId: (messageId: string, align?: "start" | "center" | "end") => Promise<boolean>;
-}) | null>(null);
+  scrollToPinnedEdge: (mode: ScrollDirectionMode) => Promise<boolean>;
+};
+const virtualTimelineRef = ref<VirtualTimelineHandle | null>(null);
 const setMessagesContainer = (el: HTMLDivElement | null) => {
   messagesContainer.value = el;
   void nextTick(updateCurrentDayMarker);
 };
 const setVirtualTimelineRef = (
-  instance: (ComponentPublicInstance & {
-    scrollElement: HTMLDivElement | null;
-    scrollToMessageId: (messageId: string, align?: "start" | "center" | "end") => Promise<boolean>;
-  }) | null,
+  instance: VirtualTimelineHandle | null,
 ) => {
   virtualTimelineRef.value = instance;
   setMessagesContainer(instance?.scrollElement ?? null);
@@ -355,7 +356,16 @@ const updateNoticeBody = computed(() =>
     : "A newer version is ready. Refresh to load it.",
 );
 
-defineExpose({ messagesContainer });
+async function scrollToPinnedEdge(mode: ScrollDirectionMode) {
+  if (await virtualTimelineRef.value?.scrollToPinnedEdge(mode)) return true;
+  await nextTick();
+  const el = messagesContainer.value;
+  if (!el) return false;
+  el.scrollTop = getPinnedScrollTop(el, mode);
+  return true;
+}
+
+defineExpose({ messagesContainer, scrollToPinnedEdge });
 
 function doSearch() {
   emit("search", searchInput.value);

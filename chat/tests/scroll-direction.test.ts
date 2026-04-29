@@ -9,7 +9,9 @@ import {
   orderTimelineForScrollDirection,
   readStoredScrollDirection,
 } from "../src/lib/scroll-direction";
+import { dmKey, roomKey, setLastSeen } from "../src/lib/last-seen-store";
 import type { WaddleSession } from "../src/lib/server-auth";
+import type { LiveRoomMessage } from "../src/lib/xmpp-client";
 
 function createStorageMock() {
   const values = new Map<string, string>();
@@ -183,6 +185,39 @@ describe("scroll direction preference", () => {
     expect(messaging.messages.value.at(-1)?.body).toBe("hello world");
   });
 
+  test("pins room timelines to the bottom for optimistic sends in chat mode", async () => {
+    const sendChatState = mock(async () => undefined);
+    const sendGroupMessage = mock(async () => ({ id: "client-1", state: "sending" as const }));
+    const actionError = ref("");
+    const messaging = useMessaging(
+      ref(session()),
+      ref(null),
+      ref({
+        ...handlerStubs(),
+        sendChatState,
+        sendGroupMessage,
+      } as never) as never,
+      ref("w1"),
+      ref("c1"),
+      ref({ id: "c1", name: "general", channel_type: "text" }),
+      String,
+      actionError,
+      () => {
+        actionError.value = "";
+      },
+    );
+    const timelineEl = makeTimelineEl();
+    messaging.timelineEl.value = timelineEl;
+
+    await messaging.sendMessage("hello world");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await nextTick();
+    await nextTick();
+
+    expect(timelineEl.scrollTop).toBe(480);
+    expect(messaging.messages.value.at(-1)?.body).toBe("hello world");
+  });
+
   test("pins room timelines to the top in social mode without reordering stored messages", async () => {
     setScrollDirection("social");
     const queryMam = mock(async () => [
@@ -224,6 +259,178 @@ describe("scroll direction preference", () => {
 
     expect(messaging.messages.value.map((message) => message.id)).toEqual(["room-1", "room-2"]);
     expect(timelineEl.scrollTop).toBe(0);
+  });
+
+  test("room initial load ignores older last-seen and persists the newest visible message", async () => {
+    setLastSeen(roomKey("c1"), "room-1");
+    const queryMam = mock(async () => [
+      {
+        id: "room-1",
+        roomJid: "w1-c1@rooms.example.com",
+        nick: "bob",
+        body: "earlier",
+        createdAt: "2024-01-01T00:00:00Z",
+        type: "message" as const,
+      },
+      {
+        id: "room-2",
+        roomJid: "w1-c1@rooms.example.com",
+        nick: "bob",
+        body: "later",
+        createdAt: "2024-01-01T00:00:10Z",
+        type: "message" as const,
+      },
+    ]);
+    const actionError = ref("");
+    const messaging = useMessaging(
+      ref(session()),
+      ref(null),
+      ref({ ...handlerStubs(), queryMam } as never) as never,
+      ref("w1"),
+      ref("c1"),
+      ref({ id: "c1", name: "general", channel_type: "text" }),
+      String,
+      actionError,
+      () => {
+        actionError.value = "";
+      },
+    );
+    const timelineEl = makeTimelineEl();
+    messaging.timelineEl.value = timelineEl;
+
+    await messaging.loadMessages("w1", "c1");
+
+    expect(messaging.firstUnseenId.value).toBeNull();
+    expect(timelineEl.scrollTop).toBe(480);
+    expect(localStorage.getItem(roomKey("c1"))).toBe("room-2");
+  });
+
+  test("DM initial load ignores older last-seen and persists the newest visible message", async () => {
+    setLastSeen(dmKey("bob@example.com"), "dm-1");
+    const queryPersonalMam = mock(async () => [
+      {
+        id: "dm-1",
+        peerJid: "bob@example.com",
+        fromJid: "bob@example.com/phone",
+        nick: "bob",
+        body: "earlier",
+        createdAt: "2024-01-01T00:00:00Z",
+        type: "message" as const,
+      },
+      {
+        id: "dm-2",
+        peerJid: "bob@example.com",
+        fromJid: "bob@example.com/laptop",
+        nick: "bob",
+        body: "later",
+        createdAt: "2024-01-01T00:00:10Z",
+        type: "message" as const,
+      },
+    ]);
+    const actionError = ref("");
+    const dm = useDmMessaging(
+      ref(session()),
+      ref({ queryPersonalMam } as never) as never,
+      ref("bob@example.com"),
+      String,
+      actionError,
+      () => {
+        actionError.value = "";
+      },
+    );
+    const timelineEl = makeTimelineEl();
+    dm.timelineEl.value = timelineEl;
+
+    await dm.loadMessages("bob@example.com");
+
+    expect(dm.firstUnseenId.value).toBeNull();
+    expect(timelineEl.scrollTop).toBe(480);
+    expect(localStorage.getItem(dmKey("bob@example.com"))).toBe("dm-2");
+  });
+
+  test("live DM messages pin to the active edge in chat and social modes", async () => {
+    const actionError = ref("");
+    const dm = useDmMessaging(
+      ref(session()),
+      ref(null),
+      ref("bob@example.com"),
+      String,
+      actionError,
+      () => {
+        actionError.value = "";
+      },
+    );
+    const timelineEl = makeTimelineEl();
+    dm.timelineEl.value = timelineEl;
+
+    dm.onIncomingMessage({
+      id: "dm-live-chat",
+      peerJid: "bob@example.com",
+      fromJid: "bob@example.com/phone",
+      nick: "bob",
+      body: "chat edge",
+      createdAt: "2024-01-01T00:00:00Z",
+      type: "message",
+    });
+    await nextTick();
+    await nextTick();
+    expect(timelineEl.scrollTop).toBe(480);
+
+    setScrollDirection("social");
+    timelineEl.scrollTop = 240;
+    dm.onIncomingMessage({
+      id: "dm-live-social",
+      peerJid: "bob@example.com",
+      fromJid: "bob@example.com/phone",
+      nick: "bob",
+      body: "social edge",
+      createdAt: "2024-01-01T00:00:10Z",
+      type: "message",
+    });
+    await nextTick();
+    await nextTick();
+    expect(timelineEl.scrollTop).toBe(0);
+  });
+
+  test("live room messages pin through the virtual timeline edge scroller when available", async () => {
+    let liveHandler: ((msg: LiveRoomMessage) => void) | null = null;
+    const virtualScroll = mock(async () => true);
+    const actionError = ref("");
+    const messaging = useMessaging(
+      ref(session()),
+      ref(null),
+      ref({
+        ...handlerStubs(),
+        setMessageHandler: (handler: (msg: LiveRoomMessage) => void) => {
+          liveHandler = handler;
+        },
+      } as never) as never,
+      ref("w1"),
+      ref("c1"),
+      ref({ id: "c1", name: "general", channel_type: "text" }),
+      String,
+      actionError,
+      () => {
+        actionError.value = "";
+      },
+    );
+    const timelineEl = makeTimelineEl();
+    messaging.timelineEl.value = timelineEl;
+    messaging.timelineEdgeScroller.value = virtualScroll;
+
+    liveHandler?.({
+      id: "room-live",
+      roomJid: "c1@muc.example.com",
+      nick: "bob",
+      body: "from room",
+      createdAt: "2024-01-01T00:00:00Z",
+      type: "message",
+    });
+    await nextTick();
+    await nextTick();
+
+    expect(virtualScroll).toHaveBeenCalledWith("chat");
+    expect(timelineEl.scrollTop).toBe(240);
   });
 
   test("re-pins an open DM timeline when the preference changes", async () => {

@@ -2,6 +2,10 @@
 import { computed, nextTick, ref, watch, watchEffect } from "vue";
 import { useVirtualizer } from "@tanstack/vue-virtual";
 import type { TimelineMessage } from "@/lib/chat-ui";
+import {
+  isTopPinnedScrollDirection,
+  type ScrollDirectionMode,
+} from "@/lib/scroll-direction";
 
 const props = withDefaults(defineProps<{
   items: TimelineMessage[];
@@ -67,7 +71,18 @@ async function scrollToMessageId(messageId: string, align: "start" | "center" | 
   return true;
 }
 
-defineExpose({ scrollElement, scrollToMessageId });
+async function scrollToPinnedEdge(mode: ScrollDirectionMode) {
+  if (props.items.length === 0) return false;
+  const itemIndex = isTopPinnedScrollDirection(mode) ? 0 : props.items.length - 1;
+  const offset = hasOlderSentinel.value && props.sentinelPosition === "start" ? 1 : 0;
+  virtualizer.value.scrollToIndex(itemIndex + offset, {
+    align: isTopPinnedScrollDirection(mode) ? "start" : "end",
+  });
+  await nextTick();
+  return true;
+}
+
+defineExpose({ scrollElement, scrollToMessageId, scrollToPinnedEdge });
 </script>
 
 <template>

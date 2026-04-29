@@ -26,8 +26,9 @@ import {
   mergeMessageIds,
 } from "@/lib/message-ids";
 import { findMessageElementById } from "@/lib/message-targeting";
-import { getPinnedScrollTop, isTopPinnedScrollDirection } from "@/lib/scroll-direction";
-import { dmKey, getLastSeen, setLastSeen } from "@/lib/last-seen-store";
+import { isTopPinnedScrollDirection, type ScrollDirectionMode } from "@/lib/scroll-direction";
+import { createPinnedEdgeScroller } from "@/lib/pinned-edge-scroll";
+import { dmKey, setLastSeen } from "@/lib/last-seen-store";
 import {
   listQueuedDmMessages,
   type PersistedQueuedDmMessage,
@@ -125,6 +126,12 @@ export function useDmMessaging(
   const hasOlderMessages = ref(true);
   const isSending = ref(false);
   const timelineEl: Ref<HTMLDivElement | null> = ref(null);
+  const timelineEdgeScroller: Ref<((mode: ScrollDirectionMode) => boolean | Promise<boolean>) | null> = ref(null);
+  const pinnedEdgeScroller = createPinnedEdgeScroller({
+    element: timelineEl,
+    mode: scrollDirection,
+    virtualScroll: timelineEdgeScroller,
+  });
   const typingUsers = ref<string[]>([]);
   const searchResults = ref<{ id: string; nick: string; body: string; createdAt: string }[]>([]);
   const isSearching = ref(false);
@@ -156,29 +163,11 @@ export function useDmMessaging(
   }
 
   async function scrollToPinnedEdge() {
-    await nextTick();
-    await nextTick();
-    const el = timelineEl.value;
-    if (!el) return;
-    el.scrollTop = getPinnedScrollTop(el, scrollDirection.value);
+    await pinnedEdgeScroller.scrollToPinnedEdge();
   }
 
-  // Initial-load variant: re-pin for ~500ms so late layout (images, avatars,
-  // markup reflow) doesn't strand the user above the newest message. Not
-  // used per-message — ResizeObserver allocation per live message would be
-  // O(n) overhead. Same pattern as useMessaging.ts.
   async function scrollToPinnedEdgeAndPin() {
-    await scrollToPinnedEdge();
-    const el = timelineEl.value;
-    if (!el || typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(() => {
-      el.scrollTop = getPinnedScrollTop(el, scrollDirection.value);
-    });
-    observer.observe(el);
-    for (const child of Array.from(el.children)) {
-      observer.observe(child);
-    }
-    setTimeout(() => observer.disconnect(), 500);
+    await pinnedEdgeScroller.scrollToPinnedEdge({ settle: true });
   }
 
   async function scrollFirstUnseenIntoView(messageId: string) {
@@ -439,7 +428,7 @@ export function useDmMessaging(
     const peerJid = activePeerJid.value;
     messages.value = [...messages.value, msg];
     // Always snaps to the active edge, so last-seen advances in lockstep.
-    void scrollToPinnedEdge();
+    void scrollToPinnedEdgeAndPin();
     if (peerJid && isFeedVisible(msg)) {
       setLastSeen(dmKey(barePeerJid(peerJid)), msg.id);
     }
@@ -503,6 +492,7 @@ export function useDmMessaging(
     isLoadingOlderMessages.value = false;
     hasOlderMessages.value = true;
     oldestArchiveId = null;
+    pinnedEdgeScroller.disconnect();
     firstUnseenId.value = null;
     clearActionError();
     pendingEchoClientIds.clear();
@@ -524,27 +514,11 @@ export function useDmMessaging(
       messages.value = timelineWithQueue;
       if (requestId === messageRequestId) isLoadingMessages.value = false;
 
-      // See useMessaging.loadMessages — same last-seen anchor semantics,
-      // keyed by peer bare JID. Anchor is computed against feed-visible
-      // messages so it always matches something ContentArea renders.
       const key = dmKey(barePeerJid(peerJid));
-      const lastSeenId = getLastSeen(key);
-      const lastSeenIdx = lastSeenId
-        ? timelineWithQueue.findIndex((m) => matchMessageId(m, lastSeenId))
-        : -1;
-      const firstUnseen =
-        lastSeenIdx !== -1 && lastSeenIdx < timelineWithQueue.length - 1
-          ? timelineWithQueue.slice(lastSeenIdx + 1).find(isFeedVisible)
-          : undefined;
-      if (firstUnseen) {
-        firstUnseenId.value = firstUnseen.id;
-        await scrollFirstUnseenIntoView(firstUnseen.id);
-      } else {
-        firstUnseenId.value = null;
-        await scrollToPinnedEdgeAndPin();
-        const newest = [...timelineWithQueue].reverse().find(isFeedVisible);
-        if (newest) setLastSeen(key, newest.id);
-      }
+      firstUnseenId.value = null;
+      await scrollToPinnedEdgeAndPin();
+      const newest = [...timelineWithQueue].reverse().find(isFeedVisible);
+      if (newest) setLastSeen(key, newest.id);
     } catch (e) {
       if (requestId === messageRequestId) {
         const queuedOnly = appendQueuedMessages([], peerJid);
@@ -682,7 +656,7 @@ export function useDmMessaging(
             }));
           }
           messages.value = [...messages.value, optimistic];
-          void scrollToPinnedEdge();
+          void scrollToPinnedEdgeAndPin();
         }
         if (fromComposer) draft.value = "";
         if (composingTimeout) {
@@ -798,6 +772,7 @@ export function useDmMessaging(
 
   function clearMessages() {
     messageRequestId++;
+    pinnedEdgeScroller.disconnect();
     pendingEchoClientIds.clear();
     messages.value = [];
     isLoadingMessages.value = false;
@@ -808,6 +783,7 @@ export function useDmMessaging(
   function disconnect() {
     messageRequestId++;
     searchRequestId++;
+    pinnedEdgeScroller.disconnect();
     pendingEchoClientIds.clear();
     isLoadingMessages.value = false;
     isSearching.value = false;
@@ -862,6 +838,7 @@ export function useDmMessaging(
     isSending,
     typingUsers,
     timelineEl,
+    timelineEdgeScroller,
     searchResults,
     isSearching,
     loadMessages,

@@ -31,8 +31,9 @@ import {
   mergeMessageIds,
 } from "@/lib/message-ids";
 import { findMessageElementById } from "@/lib/message-targeting";
-import { getPinnedScrollTop, isTopPinnedScrollDirection } from "@/lib/scroll-direction";
-import { getLastSeen, roomKey, setLastSeen } from "@/lib/last-seen-store";
+import { isTopPinnedScrollDirection, type ScrollDirectionMode } from "@/lib/scroll-direction";
+import { createPinnedEdgeScroller } from "@/lib/pinned-edge-scroll";
+import { roomKey, setLastSeen } from "@/lib/last-seen-store";
 import {
   listQueuedRoomMessages,
   type PersistedQueuedRoomMessage,
@@ -252,6 +253,12 @@ export function useMessaging(
   const threadHasOlder = ref<Record<string, boolean>>({});
   const isSending = ref(false);
   const timelineEl: Ref<HTMLDivElement | null> = ref(null);
+  const timelineEdgeScroller: Ref<((mode: ScrollDirectionMode) => boolean | Promise<boolean>) | null> = ref(null);
+  const pinnedEdgeScroller = createPinnedEdgeScroller({
+    element: timelineEl,
+    mode: scrollDirection,
+    virtualScroll: timelineEdgeScroller,
+  });
   const typingUsers = ref<string[]>([]);
   const roomHats = ref<RoomHats>({});
   const roomPresence = ref<RoomPresence>({});
@@ -470,29 +477,11 @@ export function useMessaging(
   }
 
   async function scrollToPinnedEdge() {
-    await nextTick();
-    await nextTick();
-    const el = timelineEl.value;
-    if (!el) return;
-    el.scrollTop = getPinnedScrollTop(el, scrollDirection.value);
+    await pinnedEdgeScroller.scrollToPinnedEdge();
   }
 
-  // Initial-load variant: after scrolling, re-pin for ~500ms via a
-  // ResizeObserver so late layout (images, avatars, markup reflow) doesn't
-  // strand the user above the newest message. Not used per-message —
-  // ResizeObserver allocation per live message would be O(n) overhead.
   async function scrollToPinnedEdgeAndPin() {
-    await scrollToPinnedEdge();
-    const el = timelineEl.value;
-    if (!el || typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(() => {
-      el.scrollTop = getPinnedScrollTop(el, scrollDirection.value);
-    });
-    observer.observe(el);
-    for (const child of Array.from(el.children)) {
-      observer.observe(child);
-    }
-    setTimeout(() => observer.disconnect(), 500);
+    await pinnedEdgeScroller.scrollToPinnedEdge({ settle: true });
   }
 
   function persistLastSeen(channelId: string, messageId: string) {
@@ -691,7 +680,7 @@ export function useMessaging(
     // mergeLiveMessage always snaps to the active edge, so last-seen should advance
     // in lockstep regardless of the user's prior scroll position — if we're
     // scrolling them to the message, by definition they can see it.
-    void scrollToPinnedEdge();
+    void scrollToPinnedEdgeAndPin();
     if (channelId && isFeedVisible(msg)) {
       persistLastSeen(channelId, msg.id);
     }
@@ -880,6 +869,7 @@ export function useMessaging(
     loadingOlderThreadIds.value = new Set();
     threadHasOlder.value = {};
     oldestThreadArchiveIds.clear();
+    pinnedEdgeScroller.disconnect();
     // Reset the divider anchor up-front: a previous conversation's id could
     // coincidentally match a message in the new timeline, and an aborted
     // request (requestId mismatch) would otherwise leave stale state.
@@ -915,29 +905,10 @@ export function useMessaging(
         isLoadingMessages.value = false;
       }
 
-      // Restore scroll position: if we have a last-seen anchor that's still
-      // in the MAM window AND there are unseen *feed-visible* messages after
-      // it, park the view on the first such message and render a divider
-      // above it. ContentArea renders `feedMessages` (thread replies hidden),
-      // so the anchor must match something actually rendered. Otherwise
-      // scroll to bottom and track the newest feed message as last-seen.
-      const lastSeenId = getLastSeen(roomKey(channelId));
-      const lastSeenIdx = lastSeenId
-        ? timelineWithQueue.findIndex((m) => matchMessageId(m, lastSeenId))
-        : -1;
-      const firstUnseen =
-        lastSeenIdx !== -1 && lastSeenIdx < timelineWithQueue.length - 1
-          ? timelineWithQueue.slice(lastSeenIdx + 1).find(isFeedVisible)
-          : undefined;
-      if (firstUnseen) {
-        firstUnseenId.value = firstUnseen.id;
-        await scrollFirstUnseenIntoView(firstUnseen.id);
-      } else {
-        firstUnseenId.value = null;
-        await scrollToPinnedEdgeAndPin();
-        const newest = [...timelineWithQueue].reverse().find(isFeedVisible);
-        if (newest) persistLastSeen(channelId, newest.id);
-      }
+      firstUnseenId.value = null;
+      await scrollToPinnedEdgeAndPin();
+      const newest = [...timelineWithQueue].reverse().find(isFeedVisible);
+      if (newest) persistLastSeen(channelId, newest.id);
     } catch (e) {
       if (requestId === messageRequestId) {
         const queuedOnly = appendQueuedMessages([], roomJid);
@@ -1195,7 +1166,7 @@ export function useMessaging(
         }
         pendingEchoClientIds.add(msgId);
         messages.value = applyForumContext([...messages.value, optimistic]);
-        void scrollToPinnedEdge();
+        void scrollToPinnedEdgeAndPin();
       }
 
       // Clear draft on successful send (triggers ChatEditor clear via watcher)
@@ -1317,6 +1288,7 @@ export function useMessaging(
   function disconnect() {
     messageRequestId++;
     searchRequestId++;
+    pinnedEdgeScroller.disconnect();
     pendingEchoClientIds.clear();
     // $xmppStatus is authoritative and owned by XmppProvider; do not write it here.
     clearTypingState();
@@ -1327,6 +1299,7 @@ export function useMessaging(
 
   function clearMessages() {
     messageRequestId++;
+    pinnedEdgeScroller.disconnect();
     pendingEchoClientIds.clear();
     messages.value = [];
     isLoadingMessages.value = false;
@@ -1397,6 +1370,7 @@ export function useMessaging(
     hasOlderMessages,
     isSending,
     timelineEl,
+    timelineEdgeScroller,
     currentRoomJid,
     typingUsers,
     roomHats,

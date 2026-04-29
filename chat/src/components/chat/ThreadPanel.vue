@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch, type ComponentPublicInstance } from "vue";
+import { computed, nextTick, onBeforeUnmount, ref, watch, type ComponentPublicInstance, type Ref } from "vue";
 import { X, CornerDownRight, MessageSquarePlus, ChevronRight, ChevronLeft } from "lucide-vue-next";
 import MessageCard from "@/components/chat/MessageCard.vue";
 import MessageComposer from "@/components/chat/MessageComposer.vue";
@@ -9,7 +9,12 @@ import type { MentionCandidate } from "@/lib/mentions";
 import type { OccupantHat, OccupantPresence, RoomHats, RoomPresence } from "@/lib/xmpp-client";
 import type { ThreadEntry, ThreadIndex } from "@/composables/useThreads";
 import { useScrollDirection } from "@/composables/useScrollDirection";
-import { isTopPinnedScrollDirection, orderTimelineForScrollDirection, getPinnedScrollTop } from "@/lib/scroll-direction";
+import {
+  isTopPinnedScrollDirection,
+  orderTimelineForScrollDirection,
+  type ScrollDirectionMode,
+} from "@/lib/scroll-direction";
+import { createPinnedEdgeScroller } from "@/lib/pinned-edge-scroll";
 import { formatDayDivider, isSameDay } from "@/composables/useMessaging";
 
 const props = defineProps<{
@@ -81,6 +86,11 @@ const orderedThreadMessages = computed(() => {
   const root = activeEntry.value?.root;
   return root ? [root, ...orderedChildren.value] : [...orderedChildren.value];
 });
+const newestThreadMessageId = computed(() =>
+  activeEntry.value?.directChildren.at(-1)?.id
+    ?? activeEntry.value?.root?.id
+    ?? null,
+);
 
 // Burst window matches the main feed (ContentArea.vue): same author + < 5 min
 // apart + same day, no intervening other-author message in rendered order.
@@ -126,26 +136,58 @@ const isTopPinned = computed(() =>
 const olderSentinelPosition = computed(() => scrollDirectionMode.value === "social" ? "end" : "start");
 
 const scrollContainerRef = ref<HTMLElement | null>(null);
+const virtualTimelineEdgeScroller: Ref<((mode: ScrollDirectionMode) => boolean | Promise<boolean>) | null> = ref(null);
+const pinnedEdgeScroller = createPinnedEdgeScroller({
+  element: scrollContainerRef,
+  mode: scrollDirectionMode,
+  virtualScroll: virtualTimelineEdgeScroller,
+});
 const currentDayMarkerLabel = ref("");
 const draft = ref("");
 const replyingTo = ref<{ id: string; author: string; body?: string } | null>(null);
+let olderLoadSnapshot: {
+  element: HTMLElement;
+  height: number;
+  mode: ScrollDirectionMode;
+  threadId: string | null;
+  top: number;
+  token: number;
+} | null = null;
+let olderLoadRestoreToken = 0;
 
 type ComposerHandle = { focus: () => void };
 const composerRef = ref<ComposerHandle | null>(null);
+type VirtualTimelineHandle = ComponentPublicInstance & {
+  scrollElement: HTMLDivElement | null;
+  scrollToMessageId: (messageId: string, align?: "start" | "center" | "end") => Promise<boolean>;
+};
 
 function setComposerRef(el: ComposerHandle | null) {
   composerRef.value = el;
 }
 
 async function scrollToPinnedEdge() {
-  // Two ticks: first lets Vue flush the DOM update, second gives the browser
-  // time to recalculate layout (scrollHeight) before we set scrollTop.
-  await nextTick();
-  await nextTick();
-  const el = scrollContainerRef.value;
-  if (!el) return;
-  el.scrollTop = getPinnedScrollTop(el, scrollDirectionMode.value);
+  await pinnedEdgeScroller.scrollToPinnedEdge({ settle: true });
   updateCurrentDayMarker();
+}
+
+function newestRenderedMessage() {
+  return orderedChildren.value[0]
+    ?? activeEntry.value?.root
+    ?? null;
+}
+
+function oldestRenderedMessage() {
+  const children = orderedChildren.value;
+  return children[children.length - 1]
+    ?? activeEntry.value?.root
+    ?? null;
+}
+
+function activeEdgeMessage(mode: ScrollDirectionMode) {
+  return isTopPinnedScrollDirection(mode)
+    ? newestRenderedMessage()
+    : (orderedThreadMessages.value[orderedThreadMessages.value.length - 1] ?? oldestRenderedMessage());
 }
 
 function updateCurrentDayMarker() {
@@ -187,10 +229,18 @@ function setScrollContainerRef(el: HTMLElement | null) {
   void nextTick(updateCurrentDayMarker);
 }
 
-const setVirtualTimelineRef = (
-  instance: (ComponentPublicInstance & { scrollElement: HTMLDivElement | null }) | null,
-) => {
+const setVirtualTimelineRef = (instance: VirtualTimelineHandle | null) => {
   setScrollContainerRef(instance?.scrollElement ?? null);
+  virtualTimelineEdgeScroller.value = instance
+    ? async (mode) => {
+        const target = activeEdgeMessage(mode);
+        if (!target) return false;
+        return instance.scrollToMessageId(
+          target.id,
+          isTopPinnedScrollDirection(mode) ? "start" : "end",
+        );
+      }
+    : null;
 };
 
 // Switching threads resets composer state and scrolls to the pinned edge.
@@ -205,12 +255,61 @@ watch(scrollDirectionMode, () => {
 });
 
 watch(
+  () => props.isLoadingOlderReplies,
+  (loading, wasLoading) => {
+    if (loading) {
+      pinnedEdgeScroller.disconnect();
+      const el = scrollContainerRef.value;
+      olderLoadRestoreToken++;
+      olderLoadSnapshot = el
+        ? {
+            element: el,
+            height: el.scrollHeight,
+            mode: scrollDirectionMode.value,
+            threadId: activeThreadId.value,
+            top: el.scrollTop,
+            token: olderLoadRestoreToken,
+          }
+        : null;
+      return;
+    }
+    if (!wasLoading || !olderLoadSnapshot) return;
+    const snapshot = olderLoadSnapshot;
+    olderLoadSnapshot = null;
+    void nextTick(() => {
+      const el = scrollContainerRef.value;
+      if (
+        !props.isLoadingOlderReplies
+        && snapshot.token === olderLoadRestoreToken
+        && el === snapshot.element
+        && activeThreadId.value === snapshot.threadId
+        && scrollDirectionMode.value === snapshot.mode
+        && !isTopPinnedScrollDirection(scrollDirectionMode.value)
+      ) {
+        el.scrollTop = snapshot.top + (el.scrollHeight - snapshot.height);
+      }
+      updateCurrentDayMarker();
+    });
+  },
+);
+
+watch(
   [activeEntry, orderedChildren],
   () => {
     void nextTick(updateCurrentDayMarker);
   },
   { flush: "post" },
 );
+
+watch(newestThreadMessageId, (newest, previousNewest) => {
+  if (newest && previousNewest && newest !== previousNewest) {
+    void scrollToPinnedEdge();
+  }
+});
+
+onBeforeUnmount(() => {
+  pinnedEdgeScroller.disconnect();
+});
 
 const breadcrumbLabels = computed(() =>
   props.threadStack.map((id) => {
