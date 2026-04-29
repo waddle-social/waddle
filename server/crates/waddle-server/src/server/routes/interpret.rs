@@ -46,43 +46,77 @@
 //!   [`InboundEvent::EnrichmentComplete`] in
 //!   [`InterpretOutcome::feedback`]. Fail-open semantics match legacy.
 //!
+//! - [`OutboundEvent::DispatchToRoom`] — MUC sender-pass: hoists
+//!   managed-room owner check + rich-target validation, queries the
+//!   per-room actor for a frozen
+//!   [`waddle_xmpp::muc::room_actor::RoomChainSnapshot`], runs the
+//!   stateless room handler chain, and recursively interprets emitted
+//!   events.
+//! - [`OutboundEvent::ArchiveGroupchat`] — XEP-0313 §5.1.3 room MAM
+//!   write keyed by room JID.
+//! - [`OutboundEvent::ApplyGroupchatRetractionTombstone`] — XEP-0424
+//!   §"prevent further distribution" tombstone replace against the
+//!   room archive (mirrors the 1:1 retraction tombstone arm).
+//! - [`OutboundEvent::ProjectGroupchatInbox`] — per-occupant inbox
+//!   upsert (channel + thread rows) plus the XEP-0430 inbox push to
+//!   the owner's other resources.
+//!
 //! Stubbed (warn-logged until migration steps land them):
-//! - `BroadcastToRoom`, `DispatchToRoom`, `ArchiveGroupchat` — MUC
-//!   handler chain (PR10).
 //! - `AskSfu`, `QueryMam`, `LoadScramCredentials`,
 //!   `ValidateOAuthBearer`, `SetTimer`, `CancelTimer`,
 //!   `RegisterConnection` — wired in later migration steps.
 
 use crate::auth::Session;
+use crate::permissions::{CheckPermission, Object, ObjectType, Permission, Subject};
+use crate::server::bootstrap_membership::DEPLOYMENT_SERVER_ID;
+use jid::{BareJid, FullJid, Jid};
 use kameo::actor::ActorRef;
 use std::str::FromStr;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 use waddle_extensions::ExtensionManager;
 use waddle_xmpp::carbons::{build_received_carbon, build_sent_carbon};
-use waddle_xmpp::inbox::runtime::direct_message_entry;
+use waddle_xmpp::inbox::runtime::{direct_message_entry, groupchat_entry, groupchat_thread_entry};
 use waddle_xmpp::inbox::storage::InboxStorage;
+use waddle_xmpp::inbox::InboxEntry;
 use waddle_xmpp::mam::projection::build_direct_archived_message;
 use waddle_xmpp::mam::storage::MamStorage;
-use waddle_xmpp::mam::ArchivedMessage as MamArchivedMessage;
-use waddle_xmpp::muc::room_actor::BuildGroupchatBroadcast;
+use waddle_xmpp::mam::{
+    ArchivedMention, ArchivedMessage as MamArchivedMessage, ArchivedReactionSet, ArchivedReference,
+    ArchivedReply, ArchivedRetraction, ArchivedRichMessage, ArchivedRichPayload, ArchivedTombstone,
+    RichMessageId, RichText, STANZA_ID_NS,
+};
+use waddle_xmpp::muc::presence::OCCUPANT_ID_SECRET;
+use waddle_xmpp::muc::room_actor::{GetNicknameGeneration, GetRoomSnapshot, RoomActor};
 use waddle_xmpp::muc::room_registry_actor::{GetRoom, RoomRegistryActor};
-use waddle_xmpp::parser::stanza_to_string;
+use waddle_xmpp::parse_managed_room_jid;
+use waddle_xmpp::parser::{message_to_string, stanza_to_string};
 use waddle_xmpp::protocol::event::{
-    ArchivedMessage as ProtocolArchivedMessage, InboundEvent, MessageRef, StanzaIdRef,
-    StanzaIdValue,
+    ArchivedMessage as ProtocolArchivedMessage, GroupchatThreadProjection, InboundEvent,
+    MessageRef, StanzaIdRef, StanzaIdValue,
+};
+use waddle_xmpp::protocol::id_gen::UuidV4Generator;
+use waddle_xmpp::protocol::room::{
+    default_room_pipeline_dispatcher, OccupantSnapshot, RoomContext,
 };
 use waddle_xmpp::protocol::{
     Blocklist, CarbonKind, OutboundEvent, StanzaDispatcher, XmppStateMachine,
 };
-use waddle_xmpp::registry::{BroadcastOutcome, ConnectionRegistry};
+use waddle_xmpp::registry::ConnectionRegistry;
 use waddle_xmpp::stream_management::InMemorySmSessionRegistry;
 use waddle_xmpp::xep::xep0191::BlockingStorage;
+use waddle_xmpp::xep::xep0430::build_inbox_push;
+use waddle_xmpp::xep::{
+    extract_correction_from_message, extract_explicit_mentions, extract_reactions_from_message,
+    extract_references_from_message, extract_retraction_from_message, parse_reply_from_message,
+    remove_stanza_ids_by, RetractionKind, NS_EXPLICIT_MENTIONS, NS_MESSAGE_CORRECT,
+    NS_MESSAGE_RETRACT, NS_REACTIONS, NS_REFERENCE, NS_REPLY,
+};
 use waddle_xmpp::Stanza;
-use xmpp_parsers::message::Message;
+use xmpp_parsers::message::{Message, MessageType as XmppMessageType};
 use xmpp_parsers::minidom::Element;
+use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
-use crate::server::routes::websocket::handlers::message::deliver_groupchat_via_room_actor;
 use crate::server::routes::websocket::WebSocketState;
 
 /// Outcome of interpreting a batch of [`OutboundEvent`]s.
@@ -132,34 +166,24 @@ pub struct Deps<'a> {
     pub extension_manager: Option<&'a Arc<ExtensionManager>>,
     /// MUC room-registry actor. Used by the
     /// [`OutboundEvent::DispatchToRoom`] arm to look up the per-room
-    /// actor and (in unit tests that don't supply a full
-    /// `web_socket_state`) drive a slimmed `BuildGroupchatBroadcast`
-    /// fan-out so the actor wiring can be exercised without standing
-    /// up the full WebSocket route stack.
+    /// actor and ask it for a frozen
+    /// [`waddle_xmpp::muc::room_actor::RoomChainSnapshot`].
     pub room_registry: Option<&'a ActorRef<RoomRegistryActor>>,
-    /// WebSocket route state. Required by
-    /// [`OutboundEvent::DispatchToRoom`] to invoke the legacy MUC
-    /// fan-out helper (managed-room owner check, rich-target
-    /// validation, retraction tombstones, MAM archive, inbox
-    /// projection, occupant fan-out). `None` in unit tests; always
-    /// supplied in production.
-    ///
-    /// PR14 in #229 introduces this bridge so the dispatcher cutover
-    /// can land without regressing MUC delivery; PR17 retires the
-    /// bridge in favour of a dedicated room handler chain (Q7
-    /// option C).
+    /// WebSocket route state. Used by the
+    /// [`OutboundEvent::DispatchToRoom`] arm for the managed-room
+    /// owner check (announcements room) and by
+    /// [`OutboundEvent::ProjectGroupchatInbox`] for inbox upserts +
+    /// XEP-0430 push fan-out. `None` in unit tests; always supplied
+    /// in production via
+    /// [`super::super::websocket::build_interpret_deps`].
     pub web_socket_state: Option<&'a WebSocketState>,
     /// The authenticated `Session` of the connection that emitted the
     /// outbound events being interpreted, when one is available.
     ///
     /// Threaded through so the
-    /// [`OutboundEvent::DispatchToRoom`] bridge arm can preserve the
-    /// legacy managed-room owner check (e.g. the announcements room
-    /// permits server owners to post; everyone else is forbidden).
-    /// Without this, every dispatcher-driven groupchat send would
-    /// fail the owner override and the announcements room would
-    /// reject server owners — a regression vs the legacy
-    /// `handle_message` path. `None` for unauthenticated dispatch
+    /// [`OutboundEvent::DispatchToRoom`] arm can perform the
+    /// managed-room owner check (announcements room admits server
+    /// owners only) without re-querying. `None` for unauthenticated
     /// flows (early connection lifecycle, unit tests).
     pub authenticated_session: Option<&'a Session>,
     /// Authoritative local XMPP domain. Used by the
@@ -242,31 +266,6 @@ impl<'a> Deps<'a> {
             inbox_storage: None,
             extension_manager: Some(extension_manager),
             room_registry: None,
-            web_socket_state: None,
-            authenticated_session: None,
-            local_domain: "example.com",
-            blocking_storage: None,
-            message_dispatcher: None,
-        }
-    }
-
-    /// Build a `Deps` for unit tests that exercise the
-    /// [`OutboundEvent::DispatchToRoom`] arm without a full
-    /// `WebSocketState`. The room registry handle drives the slimmer
-    /// `BuildGroupchatBroadcast` + connection-registry fan-out path so
-    /// tests can assert that the room actor is reached.
-    #[cfg(test)]
-    pub fn test_with_room_registry(
-        connection_registry: &'a ConnectionRegistry,
-        room_registry: &'a ActorRef<RoomRegistryActor>,
-    ) -> Self {
-        Self {
-            connection_registry,
-            sm_session_registry: None,
-            mam_storage: None,
-            inbox_storage: None,
-            extension_manager: None,
-            room_registry: Some(room_registry),
             web_socket_state: None,
             authenticated_session: None,
             local_domain: "example.com",
@@ -537,22 +536,29 @@ async fn interpret_with_depth(
                 }
             }
             OutboundEvent::DispatchToRoom { room, message } => {
-                // The legacy MUC bridge is the only producer of the
-                // sender's echo + stanza-level error replies (managed-
-                // room owner check, rich-target validation). Forward
-                // those frames into `outcome.frames` so the sender
-                // sees them; otherwise sender-pass DispatchToRoom is
-                // a black hole on this path. Codex P1 + Qodo bug #3
-                // + Copilot review on PR #274.
-                let frames = dispatch_to_room(deps, room, *message).await;
-                outcome.frames.extend(frames);
-            }
-            OutboundEvent::BroadcastToRoom { room, .. } => {
-                warn!(
-                    variant = "BroadcastToRoom",
-                    room = %room,
-                    "OutboundEvent variant not yet wired in interpreter"
-                );
+                // #229 PR18 — MUC cutover. Replaces the legacy
+                // `deliver_groupchat_via_room_actor` bridge with the
+                // stateless room handler chain (Q7 option C). The
+                // chain handles XEP-0045 §7.4 occupancy validation,
+                // §7.5 visitor-may-not-speak, XEP-0359 stanza-id
+                // stamping, XEP-0421 occupant-id stamping, XEP-0313
+                // archive-eligibility, XEP-0424 retraction tombstone
+                // emission, per-occupant inbox projection, and
+                // per-occupant fan-out — emitting typed
+                // [`OutboundEvent`]s the interpreter then resolves
+                // recursively below.
+                let nested =
+                    Box::pin(dispatch_to_room(deps, room, *message, recursion_depth)).await;
+                let InterpretOutcome {
+                    frames: nested_frames,
+                    close: nested_close,
+                    feedback: nested_feedback,
+                } = nested;
+                outcome.frames.extend(nested_frames);
+                if nested_close {
+                    outcome.close = true;
+                }
+                outcome.feedback.extend(nested_feedback);
             }
             OutboundEvent::ProjectInbox {
                 owner,
@@ -758,13 +764,95 @@ async fn interpret_with_depth(
                 let _entry = registry.unregister(&jid);
                 debug!(jid = %jid, "UnregisterConnection: removed from registry");
             }
-            OutboundEvent::ArchiveGroupchat { room, sender, .. } => {
-                warn!(
-                    variant = "ArchiveGroupchat",
+            OutboundEvent::ArchiveGroupchat {
+                room,
+                sender,
+                message,
+                sender_nickname_generation,
+            } => {
+                let Some(mam_storage) = deps.mam_storage else {
+                    debug!(
+                        room = %room,
+                        sender = %sender,
+                        "ArchiveGroupchat: no mam_storage in Deps; skipping (test fixture?)"
+                    );
+                    continue;
+                };
+                // Per XEP-0313 §5.1.3 the eligibility check ran inside
+                // `MucArchiveHandler` before this event was emitted —
+                // the interpreter only persists. Mirrors the legacy
+                // `archive_groupchat_message` projection: derive a
+                // fresh archive id, stamp the canonical
+                // `<stanza-id by='room'/>` for replay, then persist.
+                // `sender_nickname_generation` rides on the event so
+                // we don't pay a second `RoomActor::GetRoomSnapshot`
+                // round-trip per archive write (Copilot review on
+                // PR #279).
+                let archive_id = match archive_groupchat_message(
+                    mam_storage,
+                    &room,
+                    &message,
+                    sender_nickname_generation,
+                )
+                .await
+                {
+                    Some(id) => id,
+                    None => continue,
+                };
+                debug!(
                     room = %room,
-                    sender = %sender,
-                    "OutboundEvent variant not yet wired in interpreter"
+                    archive_id,
+                    "ArchiveGroupchat: persisted"
                 );
+            }
+            OutboundEvent::ApplyGroupchatRetractionTombstone {
+                room,
+                target_message_id,
+                retraction_message,
+            } => {
+                let Some(mam_storage) = deps.mam_storage else {
+                    debug!(
+                        room = %room,
+                        target = %target_message_id,
+                        "ApplyGroupchatRetractionTombstone: no mam_storage in Deps; skipping"
+                    );
+                    continue;
+                };
+                apply_groupchat_retraction_tombstone(
+                    mam_storage,
+                    &room,
+                    &target_message_id,
+                    &retraction_message,
+                )
+                .await;
+            }
+            OutboundEvent::ProjectGroupchatInbox {
+                owner,
+                room,
+                message,
+                is_recipient,
+                thread,
+                dispatch_timestamp,
+            } => {
+                let Some(inbox_storage) = deps.inbox_storage else {
+                    debug!(
+                        owner = %owner,
+                        room = %room,
+                        "ProjectGroupchatInbox: no inbox_storage in Deps; skipping (test fixture?)"
+                    );
+                    continue;
+                };
+                project_groupchat_inbox(
+                    inbox_storage,
+                    deps.connection_registry,
+                    &owner,
+                    &room,
+                    &message,
+                    is_recipient,
+                    &thread,
+                    dispatch_timestamp,
+                )
+                .await;
             }
             OutboundEvent::ArchiveDirect {
                 archive_jid,
@@ -1199,89 +1287,91 @@ async fn deliver_peer_to_full(
     }
 }
 
-/// Bridge the [`OutboundEvent::DispatchToRoom`] arm to the legacy MUC
-/// fan-out path.
+/// Run the [`OutboundEvent::DispatchToRoom`] arm against the stateless
+/// room handler chain (#229 PR18 — MUC cutover).
 ///
-/// The dispatcher chain (#229 PR9) emits `DispatchToRoom` for sender-pass
-/// groupchat sends and the eventual room handler chain (PR17) will own
-/// the per-room fan-out directly. Until that lands, this helper bridges
-/// the dispatcher arm to the existing legacy MUC delivery code in
-/// `routes::websocket::handlers::message::deliver_groupchat_via_room_actor`
-/// so semantics stay bit-for-bit identical regardless of which routing
-/// path triggered delivery.
+/// Order of operations:
 ///
-/// The `web_socket_state` carries every dependency the helper needs
-/// (managed-room owner check, MAM storage, inbox storage, connection +
-/// SM registries, room-registry actor). When `web_socket_state` is
-/// `None` and only `room_registry` is provided, this helper drives a
-/// slimmer test-only fan-out so unit tests can assert that the room
-/// actor receives `BuildGroupchatBroadcast` without standing up a full
-/// `WebSocketState`. Production wires `web_socket_state`.
+/// 1. Enrich the message via [`ExtensionManager::enrich_message`]
+///    (XEP-0372 link previews, fail-open).
+/// 2. Resolve the per-room actor and ask for a frozen
+///    [`waddle_xmpp::muc::room_actor::RoomChainSnapshot`] in one
+///    round-trip.
+/// 3. Validate rich-message targets (XEP-0308 corrections, XEP-0424
+///    retractions) against the room archive — uses the snapshot's
+///    `sender_nickname_generation` for the XEP-0308 §3 occupancy
+///    continuity check. On Err, returns a typed message-error reply
+///    in `outcome.frames`.
+/// 4. Resolve the managed-room owner override (announcements room
+///    admits server owners only). Hoisted from the chain so the
+///    chain stays sync.
+/// 5. Run the room handler chain — emits `SendStanza` (typed error
+///    replies), `ArchiveGroupchat`, `ApplyGroupchatRetractionTombstone`,
+///    `ProjectGroupchatInbox`, and `RouteToConnection` per occupant.
+/// 6. Recursively interpret those events; the sender's echo flows
+///    through `RouteToConnection` to the sender's own connection.
 ///
-/// Returns the frames the sender connection should write back —
-/// today this is the sender's own echo (or a stanza-level error
-/// reply when validation fails). The interpreter caller appends
-/// these into [`InterpretOutcome::frames`] so the sender-pass
-/// `DispatchToRoom` event isn't a black hole. Codex P1 + Qodo +
-/// Copilot review on PR #274.
+/// Returns an [`InterpretOutcome`] so the caller (the
+/// `OutboundEvent::DispatchToRoom` arm) can fold the nested frames /
+/// feedback / close into the parent outcome.
 async fn dispatch_to_room(
     deps: &Deps<'_>,
     room_jid: jid::BareJid,
-    message: Message,
-) -> Vec<String> {
-    if let Some(state) = deps.web_socket_state {
-        let Some(sender_full) = sender_full_jid(&message) else {
-            warn!(
-                room = %room_jid,
-                "DispatchToRoom: message.from is missing or not a full JID; dropping"
-            );
-            return Vec::new();
-        };
-        // Production path: full legacy MUC fan-out via the shared
-        // helper. The legacy helper consults `authenticated_session`
-        // for the managed-room owner check (announcements room
-        // admits server owners only). We thread the connection's
-        // session through `Deps` (PR14 review fix) so that owner
-        // override survives the dispatcher path; passing `&None`
-        // here would always reject server owners on the
-        // announcements room. Codex P2 + Qodo bug #4 + Copilot
-        // review on PR #274.
-        let owned_session = deps.authenticated_session.cloned();
-        return deliver_groupchat_via_room_actor(
-            state,
-            room_jid,
-            sender_full,
-            message,
-            &owned_session,
-        )
-        .await;
-    }
-
+    incoming: Message,
+    recursion_depth: u8,
+) -> InterpretOutcome {
+    let mut outcome = InterpretOutcome::default();
+    let Some(state) = deps.web_socket_state else {
+        warn!(
+            variant = "DispatchToRoom",
+            room = %room_jid,
+            "DispatchToRoom: no web_socket_state in Deps; dropping. \
+             Production must populate web_socket_state."
+        );
+        return outcome;
+    };
     let Some(room_registry) = deps.room_registry else {
         warn!(
             variant = "DispatchToRoom",
             room = %room_jid,
-            "DispatchToRoom: neither web_socket_state nor room_registry provided in Deps; \
-             dropping. Production must populate web_socket_state."
+            "DispatchToRoom: no room_registry in Deps; dropping"
         );
-        return Vec::new();
+        return outcome;
     };
-
-    // Slimmed test-only path: look up the room actor through the
-    // registry, ask it to build the per-occupant broadcast, and fan
-    // out via the connection registry. No managed-room owner check,
-    // no MAM archive write, no inbox projection, no rich-target
-    // validation, no retraction tombstones — those run only on the
-    // production path. Used by L1 interpreter tests to assert the
-    // actor wiring.
-    let Some(sender_full) = sender_full_jid(&message) else {
+    let Some(sender_full) = incoming
+        .from
+        .as_ref()
+        .and_then(|jid| jid.clone().try_into_full().ok())
+    else {
         warn!(
             room = %room_jid,
-            "DispatchToRoom (test path): message.from is missing or not a full JID; dropping"
+            "DispatchToRoom: message.from is missing or not a full JID; dropping"
         );
-        return Vec::new();
+        return outcome;
     };
 
+    // 1. Enrich the message before the chain sees it. The legacy
+    //    bridge enriched on the prototype before
+    //    `BuildGroupchatBroadcast`, so reflected copies carry the
+    //    enrichment payloads. Fail-open: extension errors leave the
+    //    message unchanged.
+    let mut prototype = incoming.clone();
+    if prototype.id.is_none() {
+        prototype.id = Some(uuid::Uuid::new_v4().to_string());
+    }
+    prototype.type_ = XmppMessageType::Groupchat;
+    // Strip any client-claimed `<stanza-id by='room'/>` so the chain's
+    // canonicalize handler stamps the canonical value. Mirrors the
+    // legacy `remove_stanza_ids_by` call.
+    remove_stanza_ids_by(&mut prototype, &room_jid.to_string());
+    let _embeds_added = state
+        .deps
+        .protocol
+        .extension_manager
+        .enrich_message(&mut prototype)
+        .await;
+
+    // 2. Look up the room actor + snapshot in one round-trip each.
     let room_actor = match room_registry
         .ask(GetRoom {
             room_jid: room_jid.clone(),
@@ -1290,78 +1380,210 @@ async fn dispatch_to_room(
     {
         Ok(Some(actor)) => actor,
         Ok(None) => {
-            warn!(
-                room = %room_jid,
-                "DispatchToRoom (test path): room not registered; dropping"
-            );
-            return Vec::new();
+            warn!(room = %room_jid, "DispatchToRoom: room not registered; dropping");
+            return outcome;
         }
         Err(error) => {
             warn!(
                 room = %room_jid,
                 error = ?error,
-                "DispatchToRoom (test path): room registry lookup failed; dropping"
+                "DispatchToRoom: room registry lookup failed; dropping"
             );
-            return Vec::new();
+            return outcome;
         }
     };
-
-    let broadcast = match room_actor
-        .ask(BuildGroupchatBroadcast {
+    let snapshot = match room_actor
+        .ask(GetRoomSnapshot {
             sender_jid: sender_full.clone(),
-            message,
         })
         .await
     {
-        Ok(broadcast) => broadcast,
+        Ok(snapshot) => snapshot,
         Err(error) => {
             warn!(
-                sender = %sender_full,
                 room = %room_jid,
                 error = ?error,
-                "DispatchToRoom (test path): sender not permitted to broadcast; dropping"
+                "DispatchToRoom: GetRoomSnapshot failed; dropping"
             );
-            return Vec::new();
+            return outcome;
         }
     };
 
-    for outbound in broadcast.messages {
-        if outbound.to == sender_full {
-            // Sender echo is the dispatcher pipeline's responsibility on
-            // this path; do not re-emit it here.
-            continue;
-        }
-        let stanza = Stanza::Message(outbound.message);
-        match deps
-            .connection_registry
-            .try_send_to(&outbound.to, stanza.clone())
-        {
-            BroadcastOutcome::Delivered => {
-                debug!(jid = %outbound.to, "DispatchToRoom (test path): delivered");
-            }
-            BroadcastOutcome::DroppedFull => {
-                debug!(jid = %outbound.to, "DispatchToRoom (test path): mailbox full");
-            }
-            BroadcastOutcome::DroppedClosed => {
-                debug!(jid = %outbound.to, "DispatchToRoom (test path): channel closed");
-            }
-            BroadcastOutcome::NotConnected => {
-                debug!(jid = %outbound.to, "DispatchToRoom (test path): target offline");
-            }
-        }
+    // 3. Managed-room owner override (announcements room admits
+    //    server owners only). Pre-derived synchronously here so the
+    //    chain's `OccupancyValidationHandler` can read
+    //    `managed_room_forbidden` without an async permission call.
+    let managed_room_forbidden =
+        if parse_managed_room_jid(&room_jid).as_deref() == Some("announcements") {
+            !session_is_server_owner(state, deps.authenticated_session).await
+        } else {
+            false
+        };
+
+    // 4. Run the chain's occupancy / managed-room gate FIRST, BEFORE
+    //    rich-target validation (Copilot review on PR #279). Otherwise
+    //    a non-occupant or managed-room-forbidden sender would receive
+    //    rich-target errors (potentially leaking archive-derived info
+    //    like `<item-not-found/>`) instead of the required XEP-0045
+    //    §7.4 `<not-acceptable/>` / managed-room `<forbidden/>` reply.
+    //    The gate handler (`OccupancyValidationHandler`) is sync and
+    //    pure — calling it directly here is equivalent to running a
+    //    one-handler dispatcher, with no extra allocation.
+    let occupants: Vec<OccupantSnapshot> = snapshot
+        .occupants
+        .iter()
+        .map(|o| OccupantSnapshot {
+            full_jid: o.full_jid.clone(),
+            nick: o.nick.clone(),
+            affiliation: o.affiliation,
+            role: o.role,
+        })
+        .collect();
+    let id_gen = UuidV4Generator;
+    // Capture a single dispatch timestamp here so every per-occupant
+    // `ProjectGroupchatInbox` event the chain emits carries the same
+    // value (Copilot review on PR #279). Avoids per-occupant
+    // `Utc::now()` drift across a second-boundary.
+    let dispatch_timestamp = chrono::Utc::now().timestamp();
+    let gate_ctx = RoomContext {
+        room: &room_jid,
+        sender_full: &sender_full,
+        occupants: &occupants,
+        managed_room_forbidden,
+        room_moderated: snapshot.config.moderated,
+        id_gen: &id_gen,
+        occupant_id_secret: OCCUPANT_ID_SECRET,
+        sender_nickname_generation: snapshot.sender_nickname_generation.unwrap_or(0),
+        dispatch_timestamp,
+    };
+    let mut gate_working = prototype.clone();
+    use waddle_xmpp::protocol::room::RoomHandler;
+    let gate_outcome =
+        waddle_xmpp::protocol::room::occupancy_validation::OccupancyValidationHandler
+            .handle(&mut gate_working, &gate_ctx);
+    if let waddle_xmpp::protocol::room::RoomHandlerOutcome::Halt(gate_events) = gate_outcome {
+        // Fold the nested outcome's full state — frames, close
+        // signal, and async-callback feedback — back into the outer
+        // outcome (Copilot review on PR #279). Dropping `close` /
+        // `feedback` would silently lose stream-close requests or
+        // pending callback completions if a future gate handler ever
+        // emits them.
+        let nested = Box::pin(interpret_with_depth(gate_events, deps, recursion_depth)).await;
+        outcome.frames.extend(nested.frames);
+        outcome.close = outcome.close || nested.close;
+        outcome.feedback.extend(nested.feedback);
+        return outcome;
     }
-    // Test path doesn't surface a sender echo; the production path
-    // returns the legacy helper's frames above.
-    Vec::new()
+
+    // 5. Rich-target validation against the room archive. Runs only
+    //    after the gate has admitted the sender, so non-occupants /
+    //    managed-room-forbidden senders never see archive-derived
+    //    error conditions. Archive rows store `from` in the XEP-0045
+    //    §7.2.13 `room/nick` form (the chain stamps it AFTER
+    //    validation), so derive that view here for the same-sender
+    //    comparison rather than relying on `prototype.from` (alice's
+    //    real full JID).
+    let sender_room_nick_jid = snapshot
+        .sender_nick
+        .as_deref()
+        .and_then(|nick| room_jid.clone().with_resource_str(nick).ok().map(Jid::from));
+    if let Err(stanza_error) = validate_groupchat_rich_targets(
+        deps,
+        &room_jid,
+        &prototype,
+        sender_room_nick_jid.as_ref(),
+        &room_actor,
+        snapshot.sender_nickname_generation,
+    )
+    .await
+    {
+        let reply = build_message_error_reply(&incoming, &room_jid, &sender_full, stanza_error);
+        match Stanza::Message(reply).to_element_string() {
+            Ok(xml) => outcome.frames.push(xml),
+            Err(error) => {
+                warn!(
+                    room = %room_jid,
+                    %error,
+                    "DispatchToRoom: failed to serialize rich-target error reply"
+                );
+            }
+        }
+        return outcome;
+    }
+
+    // 6. Build context + run the rest of the chain (canonicalize,
+    //    archive, inbox, reflect). Reuse the `gate_ctx` config — same
+    //    snapshot, same managed-room flag, same id-gen.
+    let ctx = RoomContext {
+        room: &room_jid,
+        sender_full: &sender_full,
+        occupants: &occupants,
+        managed_room_forbidden,
+        // XEP-0045 §7.5 (Copilot review on PR #279): the chain's
+        // `OccupancyValidationHandler` enforces visitor-may-not-speak
+        // against this flag + the sender's snapshot role, replacing
+        // the legacy `RoomActor::BuildGroupchatBroadcast` check that
+        // previously emitted `RoomActorError::VisitorMayNotSpeak`.
+        room_moderated: snapshot.config.moderated,
+        id_gen: &id_gen,
+        occupant_id_secret: OCCUPANT_ID_SECRET,
+        // Carry the sender's nickname-generation through the chain
+        // so `MucArchiveHandler` can stamp it directly on
+        // `OutboundEvent::ArchiveGroupchat`. Avoids a second
+        // `RoomActor::GetRoomSnapshot` round-trip per groupchat
+        // archive write (Copilot review on PR #279).
+        sender_nickname_generation: snapshot.sender_nickname_generation.unwrap_or(0),
+        dispatch_timestamp,
+    };
+    let mut working = prototype;
+    // Run only the post-gate pipeline (canonicalize → archive → inbox
+    // → reflector). The occupancy gate already ran above as an
+    // explicit stand-alone call (Copilot review on PR #279); using
+    // the full `default_room_dispatcher()` here would re-run it.
+    let dispatch_outcome = default_room_pipeline_dispatcher().dispatch(&mut working, &ctx);
+
+    // 6. Recursively interpret the chain's emitted events. Pass the
+    //    depth through unchanged: `recursion_depth` is the headless
+    //    offline-recipient pass guard, and the room handler chain
+    //    legitimately emits one `RouteToConnection` per occupant —
+    //    including offline ones, which the `RouteToConnection` arm
+    //    promotes to a headless recipient pass (depth bumped there).
+    //    Bumping here would break that path for every offline
+    //    occupant.
+    let nested = Box::pin(interpret_with_depth(
+        dispatch_outcome.events,
+        deps,
+        recursion_depth,
+    ))
+    .await;
+    outcome.frames.extend(nested.frames);
+    if nested.close {
+        outcome.close = true;
+    }
+    outcome.feedback.extend(nested.feedback);
+    outcome
 }
 
-/// Extract the sender's full JID from a typed groupchat `Message`.
-///
-/// Returns `None` when `message.from` is missing or carries only a
-/// bare JID — both are protocol-error states for a sender-pass
-/// groupchat dispatch and the caller drops the event.
-fn sender_full_jid(message: &Message) -> Option<jid::FullJid> {
-    message.from.clone()?.try_into_full().ok()
+/// Resolve the managed-room owner override against the deployment
+/// permission actor. Mirrors the legacy
+/// `session_is_server_owner` helper that lived on the legacy MUC
+/// bridge — kept here so the room handler chain can stay synchronous
+/// and the async permission-actor call lands in the interpreter.
+async fn session_is_server_owner(state: &WebSocketState, session: Option<&Session>) -> bool {
+    let Some(session) = session else {
+        return false;
+    };
+    state
+        .deps
+        .app_state
+        .permission_actor
+        .ask(CheckPermission {
+            object: Object::new(ObjectType::Server, DEPLOYMENT_SERVER_ID),
+            subject: Subject::user(&session.user_id),
+            permission: Permission::Owner,
+        })
+        .await
+        .is_ok_and(|response| response.allowed)
 }
 
 async fn enrich_message_event(deps: &Deps<'_>, mut message: Message) -> Message {
@@ -1608,6 +1830,628 @@ impl ToElementString for waddle_xmpp::Stanza {
             Stanza::Message(msg) => stanza_to_string(msg.clone()),
             Stanza::Presence(p) => stanza_to_string(p.clone()),
         }
+    }
+}
+
+// -----------------------------------------------------------------------
+// MUC cutover helpers (#229 PR18)
+// -----------------------------------------------------------------------
+
+/// Validate XEP-0308 corrections / XEP-0424 retractions against the
+/// room archive. Mirrors the legacy `validate_rich_message_targets`
+/// helper that lived on the legacy MUC bridge but operates against
+/// `Deps::mam_storage` directly so the chain runner can invoke it
+/// without standing up the legacy `WebSocketState` plumbing.
+///
+/// Returns `Ok(())` when the message has no rich payload requiring
+/// validation (or when validation passes), or `Err(StanzaError)` with
+/// the typed error reply the caller surfaces in `outcome.frames`.
+async fn validate_groupchat_rich_targets(
+    deps: &Deps<'_>,
+    room: &BareJid,
+    message: &Message,
+    sender_room_nick_jid: Option<&Jid>,
+    room_actor: &ActorRef<RoomActor>,
+    sender_nickname_generation: Option<u64>,
+) -> Result<(), StanzaError> {
+    if message.from.is_none() {
+        return Ok(());
+    }
+    if has_malformed_rich_payload(message) {
+        return Err(bad_request_error(
+            "Rich-message payload is missing required identifier.",
+        ));
+    }
+    let Some(mam_storage) = deps.mam_storage else {
+        // No archive available — nothing to validate against. Mirrors
+        // the legacy bridge's `state.deps.protocol.mam_storage` use:
+        // production always supplies it; in test fixtures without
+        // storage we treat the validation as a no-op.
+        return Ok(());
+    };
+    // The archive stores `from` in the XEP-0045 §7.2.13 `room/nick`
+    // form (the chain stamps it AFTER validation), so the
+    // same-sender check compares against the sender's room/nick view
+    // — not against `prototype.from` (alice's real full JID, set by
+    // the user-side state machine before `DispatchToRoom` was
+    // emitted). When the snapshot has no nick for the sender (sender
+    // not currently joined under any nickname), any rich-target
+    // operation is forbidden because we cannot satisfy the
+    // continuity check.
+    let Some(sender_archive_view) = sender_room_nick_jid else {
+        if extract_correction_from_message(message).is_some()
+            || matches!(
+                extract_retraction_from_message(message),
+                Some(RetractionKind::Request(_))
+            )
+        {
+            return Err(forbidden_error(
+                "Sender is not joined to the room; rich-target operations require occupancy.",
+            ));
+        }
+        return Ok(());
+    };
+
+    if let Some(correction) = extract_correction_from_message(message) {
+        let original = match mam_storage
+            .get_message_by_message_id(&room.to_string(), &correction.replaces_id)
+            .await
+        {
+            Ok(Some(original)) => original,
+            Ok(None) => return Err(item_not_found_error("Correction target not found.")),
+            Err(_) => return Err(internal_server_error_for_lookup()),
+        };
+        if !sender_strings_match_for_groupchat(sender_archive_view, &original.from) {
+            return Err(forbidden_error(
+                "Only the original sender may correct a message.",
+            ));
+        }
+        verify_groupchat_occupancy_generation(
+            sender_archive_view,
+            &original,
+            room_actor,
+            sender_nickname_generation,
+        )
+        .await?;
+    }
+
+    if let Some(RetractionKind::Request(retraction)) = extract_retraction_from_message(message) {
+        let original =
+            match lookup_groupchat_retraction_target(mam_storage, room, &retraction.retracts_id)
+                .await
+            {
+                Ok(Some(original)) => original,
+                Ok(None) => return Err(item_not_found_error("Retraction target not found.")),
+                Err(_) => return Err(internal_server_error_for_lookup()),
+            };
+        if !sender_strings_match_for_groupchat(sender_archive_view, &original.from) {
+            return Err(forbidden_error(
+                "Only the original sender may retract a message.",
+            ));
+        }
+    }
+    Ok(())
+}
+
+async fn lookup_groupchat_retraction_target(
+    mam_storage: &Arc<dyn MamStorage>,
+    room: &BareJid,
+    target_id: &str,
+) -> Result<Option<MamArchivedMessage>, waddle_xmpp::mam::MamStorageError> {
+    let archive_str = room.to_string();
+    mam_storage
+        .get_message(target_id)
+        .await
+        .map(|message| message.filter(|message| message.to == archive_str))
+}
+
+fn sender_strings_match_for_groupchat(sender: &Jid, original_from: &str) -> bool {
+    sender.to_string() == original_from
+}
+
+/// XEP-0308 §3 occupancy continuity check: a full-JID that left the
+/// room and rejoined under the same nickname MUST NOT be allowed to
+/// correct messages from the previous occupancy. Compares the
+/// per-nickname generation captured on the archive row at write time
+/// against the room actor's current generation for the sender's
+/// nickname.
+async fn verify_groupchat_occupancy_generation(
+    sender: &Jid,
+    original: &MamArchivedMessage,
+    room_actor: &ActorRef<RoomActor>,
+    sender_current_generation: Option<u64>,
+) -> Result<(), StanzaError> {
+    let Some(nick) = sender.resource().map(|r| r.to_string()) else {
+        return Err(forbidden_error(
+            "Correction sender has no MUC nickname for occupancy check.",
+        ));
+    };
+    let Some(archived_generation) = original.nickname_generation else {
+        return Err(forbidden_error(
+            "Original message predates occupancy tracking; correction window has closed.",
+        ));
+    };
+    // Prefer the generation snapshot already captured by `dispatch_to_room`
+    // (it came from the same `GetRoomSnapshot` query that populated the
+    // chain context); fall back to a fresh per-nickname query if the
+    // snapshot didn't include the sender (unlikely — would mean the
+    // sender is not joined under any nickname).
+    let current_generation = match sender_current_generation {
+        Some(value) => value,
+        None => match room_actor
+            .ask(GetNicknameGeneration { nick: nick.clone() })
+            .await
+        {
+            Ok(value) => value,
+            Err(_) => return Err(internal_server_error_for_lookup()),
+        },
+    };
+    if current_generation != archived_generation {
+        return Err(forbidden_error(
+            "Occupancy generation has advanced; correction is no longer permitted across the leave/rejoin boundary.",
+        ));
+    }
+    Ok(())
+}
+
+fn has_malformed_rich_payload(message: &Message) -> bool {
+    message.payloads.iter().any(|payload| {
+        (payload.ns() == NS_MESSAGE_CORRECT
+            && payload.name() == "replace"
+            && payload.attr("id").is_none_or(str::is_empty))
+            || (payload.ns() == NS_MESSAGE_RETRACT
+                && payload.name() == "retract"
+                && payload.attr("id").is_none_or(str::is_empty))
+            || (payload.ns() == NS_REACTIONS
+                && payload.name() == "reactions"
+                && payload.attr("id").is_none_or(str::is_empty))
+            || (payload.ns() == NS_REPLY
+                && payload.name() == "reply"
+                && payload.attr("id").is_none_or(str::is_empty))
+            || (payload.ns() == NS_REFERENCE
+                && payload.name() == "reference"
+                && (payload.attr("type").is_none_or(str::is_empty)
+                    || payload.attr("uri").is_none_or(str::is_empty)))
+            || (payload.ns() == NS_EXPLICIT_MENTIONS
+                && payload.name() == "mention"
+                && payload.attr("jid").is_none_or(str::is_empty)
+                && payload.attr("occupantid").is_none_or(str::is_empty)
+                && payload.attr("mentions").is_none_or(str::is_empty))
+    })
+}
+
+fn bad_request_error(text: &str) -> StanzaError {
+    StanzaError::new(ErrorType::Modify, DefinedCondition::BadRequest, "en", text)
+}
+
+fn item_not_found_error(text: &str) -> StanzaError {
+    StanzaError::new(
+        ErrorType::Cancel,
+        DefinedCondition::ItemNotFound,
+        "en",
+        text,
+    )
+}
+
+fn forbidden_error(text: &str) -> StanzaError {
+    StanzaError::new(ErrorType::Auth, DefinedCondition::Forbidden, "en", text)
+}
+
+fn internal_server_error_for_lookup() -> StanzaError {
+    StanzaError::new(
+        ErrorType::Wait,
+        DefinedCondition::InternalServerError,
+        "en",
+        "Archive lookup failed while validating rich-message target.",
+    )
+}
+
+/// Build a typed `<message type='error'>` reply addressed from the
+/// room JID back to the sender. Mirrors the legacy `error_message`
+/// helper.
+fn build_message_error_reply(
+    incoming: &Message,
+    room: &BareJid,
+    sender: &FullJid,
+    error: StanzaError,
+) -> Message {
+    let mut reply = incoming.clone();
+    reply.type_ = XmppMessageType::Error;
+    reply.from = Some(Jid::from(room.clone()));
+    reply.to = Some(Jid::from(sender.clone()));
+    reply.payloads.push(Element::from(error));
+    reply
+}
+
+/// Persist a groupchat message to the room MAM archive. Mirrors the
+/// legacy `archive_groupchat_message` projection so MAM replay
+/// reproduces the canonicalized stanza byte-for-byte.
+///
+/// The archive primary key is the XEP-0359 stanza-id the chain's
+/// `MucCanonicalizeHandler` already stamped on the message — we
+/// reuse it rather than generating a second uuid so the storage
+/// row's primary key matches the wire `<stanza-id by='room'/>` value
+/// (legacy invariant the rich-target lookups rely on).
+async fn archive_groupchat_message(
+    mam_storage: &Arc<dyn MamStorage>,
+    room: &BareJid,
+    message: &Message,
+    sender_nickname_generation: u64,
+) -> Option<String> {
+    let archive_clone = message.clone();
+    let archive_id = match extract_room_stanza_id(&archive_clone, room) {
+        Some(id) => id,
+        None => {
+            // Chain bug: `MucCanonicalizeHandler` MUST stamp
+            // `<stanza-id by='room'/>` before `MucArchiveHandler`
+            // emits `ArchiveGroupchat`. Persisting a fresh archive-
+            // only id here would break the "archive id == wire
+            // stanza-id" invariant — clients reflecting back the wire
+            // stanza-id (XEP-0308 corrections, XEP-0424 retractions)
+            // would fail to resolve the archive row. Skip the write;
+            // the reflection still goes out, and a separate audit can
+            // surface the chain regression (Copilot review on
+            // PR #279).
+            warn!(
+                room = %room,
+                "ArchiveGroupchat: message has no `<stanza-id by='room'/>`; \
+                 skipping archive write because persisting an archive-only id would \
+                 break the wire/archive stanza-id invariant (chain bug)"
+            );
+            return None;
+        }
+    };
+
+    finish_archive_groupchat_message(
+        mam_storage,
+        room,
+        archive_clone,
+        archive_id,
+        sender_nickname_generation,
+    )
+    .await
+}
+
+fn extract_room_stanza_id(message: &Message, room: &BareJid) -> Option<String> {
+    let room_str = room.to_string();
+    message
+        .payloads
+        .iter()
+        .filter(|payload| payload.name() == "stanza-id" && payload.ns() == STANZA_ID_NS)
+        .find(|payload| payload.attr("by").is_some_and(|by| by == room_str.as_str()))
+        .and_then(|payload| payload.attr("id").map(ToOwned::to_owned))
+}
+
+async fn finish_archive_groupchat_message(
+    mam_storage: &Arc<dyn MamStorage>,
+    room: &BareJid,
+    archive_clone: Message,
+    archive_id: String,
+    sender_nickname_generation: u64,
+) -> Option<String> {
+    let body = prototype_body(&archive_clone)
+        .map(|value| value.trim().to_string())
+        .unwrap_or_default();
+    let (reply_to_id, reply_to_jid) = extract_reply_reference(&archive_clone);
+    let origin_id = extract_origin_id(&archive_clone);
+    let rich = rich_archive_payload(&archive_clone);
+    let stanza_xml = serialize_groupchat_stanza_xml(&archive_clone);
+
+    let archived = MamArchivedMessage {
+        id: archive_id,
+        timestamp: chrono::Utc::now(),
+        from: archive_clone
+            .from
+            .as_ref()
+            .map(|jid| jid.to_string())
+            .unwrap_or_default(),
+        to: room.to_string(),
+        body,
+        stanza_id: archive_clone.id.clone(),
+        thread_id: archive_clone.thread.as_ref().map(|thread| thread.0.clone()),
+        reply_to_id,
+        reply_to_jid,
+        origin_id,
+        message_type: mam_message_type(&archive_clone.type_),
+        stanza_xml,
+        rich,
+        nickname_generation: Some(sender_nickname_generation),
+    };
+
+    let archive_jid_str = room.to_string();
+    match mam_storage
+        .store_message(archive_jid_str.as_str(), &archived)
+        .await
+    {
+        Ok(archive_id) => Some(archive_id),
+        Err(error) => {
+            warn!(
+                room = %room,
+                %error,
+                "ArchiveGroupchat: store_message failed; dropping archive write"
+            );
+            None
+        }
+    }
+}
+
+async fn apply_groupchat_retraction_tombstone(
+    mam_storage: &Arc<dyn MamStorage>,
+    room: &BareJid,
+    target_message_id: &str,
+    retraction_message: &Message,
+) {
+    let archive_str = room.to_string();
+    let original = match mam_storage.get_message(target_message_id).await {
+        Ok(Some(row)) if row.to == archive_str => row,
+        Ok(_) => {
+            debug!(
+                archive = %room,
+                target = target_message_id,
+                "ApplyGroupchatRetractionTombstone: target not found in room archive; skipping"
+            );
+            return;
+        }
+        Err(error) => {
+            warn!(
+                archive = %room,
+                target = target_message_id,
+                %error,
+                "ApplyGroupchatRetractionTombstone: archive lookup failed; skipping"
+            );
+            return;
+        }
+    };
+    let tombstone = ArchivedTombstone {
+        retraction_id: retraction_message.id.clone().and_then(RichMessageId::new),
+        stamp: chrono::Utc::now(),
+        moderation: None,
+    };
+    match mam_storage
+        .replace_with_tombstone(&original.id, tombstone)
+        .await
+    {
+        Ok(true) => {
+            debug!(
+                archive = %room,
+                original_id = %original.id,
+                "ApplyGroupchatRetractionTombstone: replaced with tombstone"
+            );
+        }
+        Ok(false) => warn!(
+            archive = %room,
+            original_id = %original.id,
+            "ApplyGroupchatRetractionTombstone: target row not found at replace time"
+        ),
+        Err(error) => warn!(
+            archive = %room,
+            original_id = %original.id,
+            %error,
+            "ApplyGroupchatRetractionTombstone: replace_with_tombstone failed"
+        ),
+    }
+}
+
+/// Apply the `(owner, room, message)` projection against the inbox
+/// storage. Mirrors the legacy
+/// `deliver_groupchat_via_room_actor`'s per-occupant
+/// channel + thread upserts and the XEP-0430 inbox push to the
+/// owner's other resources.
+#[allow(clippy::too_many_arguments)]
+async fn project_groupchat_inbox(
+    inbox_storage: &Arc<dyn InboxStorage>,
+    connection_registry: &waddle_xmpp::registry::ConnectionRegistry,
+    owner: &BareJid,
+    room: &BareJid,
+    message: &Message,
+    is_recipient: bool,
+    thread: &Option<GroupchatThreadProjection>,
+    dispatch_timestamp: i64,
+) {
+    let entry = groupchat_entry(room.clone(), message, dispatch_timestamp);
+    match inbox_storage.upsert(owner, entry, is_recipient).await {
+        Ok(updated) if is_recipient => {
+            push_inbox_update(connection_registry, owner, &updated).await;
+        }
+        Ok(_) => {}
+        Err(error) => {
+            warn!(
+                jid = %owner,
+                room = %room,
+                %error,
+                "ProjectGroupchatInbox: channel-row upsert failed"
+            );
+        }
+    }
+    let Some(thread) = thread else {
+        return;
+    };
+    let thread_entry = groupchat_thread_entry(
+        room.clone(),
+        message,
+        dispatch_timestamp,
+        &thread.thread_id,
+        thread.title.as_deref(),
+        thread.author_nick.as_deref(),
+    );
+    match inbox_storage
+        .upsert(owner, thread_entry, is_recipient)
+        .await
+    {
+        Ok(updated) if is_recipient => {
+            push_inbox_update(connection_registry, owner, &updated).await;
+        }
+        Ok(_) => {}
+        Err(error) => {
+            warn!(
+                jid = %owner,
+                room = %room,
+                %error,
+                "ProjectGroupchatInbox: thread-row upsert failed"
+            );
+        }
+    }
+}
+
+/// XEP-0430 inbox push to all live resources of `user`. Decoupled
+/// from `WebSocketState` (Copilot review on PR #279) so unit tests
+/// and non-WebSocket callers can drive the projection without
+/// standing up the full route stack.
+async fn push_inbox_update(
+    connection_registry: &waddle_xmpp::registry::ConnectionRegistry,
+    user: &BareJid,
+    entry: &InboxEntry,
+) {
+    let resources = connection_registry.get_resources_for_user(user);
+    for resource_jid in resources {
+        let msg = build_inbox_push(Jid::from(resource_jid.clone()), entry);
+        let _ = connection_registry
+            .send_to(&resource_jid, Stanza::Message(msg))
+            .await;
+    }
+}
+
+fn mam_message_type(message_type: &XmppMessageType) -> String {
+    match message_type {
+        XmppMessageType::Chat => "chat".to_string(),
+        XmppMessageType::Error => "error".to_string(),
+        XmppMessageType::Groupchat => "groupchat".to_string(),
+        XmppMessageType::Headline => "headline".to_string(),
+        XmppMessageType::Normal => "normal".to_string(),
+    }
+}
+
+fn extract_reply_reference(message: &Message) -> (Option<String>, Option<String>) {
+    let Some(reply) = message
+        .payloads
+        .iter()
+        .find(|payload| payload.name() == "reply" && payload.ns() == NS_REPLY)
+    else {
+        return (None, None);
+    };
+    (
+        reply.attr("id").map(ToOwned::to_owned),
+        reply.attr("to").map(ToOwned::to_owned),
+    )
+}
+
+fn extract_origin_id(message: &Message) -> Option<String> {
+    message
+        .payloads
+        .iter()
+        .find(|payload| payload.name() == "origin-id" && payload.ns() == STANZA_ID_NS)
+        .and_then(|origin| origin.attr("id").map(ToOwned::to_owned))
+}
+
+fn prototype_body(message: &Message) -> Option<String> {
+    message
+        .bodies
+        .get("")
+        .or_else(|| message.bodies.values().next())
+        .map(|body| body.0.clone())
+}
+
+fn serialize_groupchat_stanza_xml(message: &Message) -> Option<String> {
+    let mut msg = message.clone();
+    msg.to = None;
+    match message_to_string(&msg) {
+        Ok(xml) => Some(xml),
+        Err(error) => {
+            warn!(%error, "Failed to serialize groupchat stanza XML for MAM archive");
+            None
+        }
+    }
+}
+
+fn rich_archive_payload(message: &Message) -> Option<ArchivedRichMessage> {
+    let payload = extract_correction_from_message(message)
+        .and_then(|correction| {
+            RichMessageId::new(correction.replaces_id)
+                .map(|replaces_id| ArchivedRichPayload::Correction { replaces_id })
+        })
+        .or_else(|| {
+            extract_retraction_from_message(message).and_then(|kind| match kind {
+                RetractionKind::Request(retraction) => RichMessageId::new(retraction.retracts_id)
+                    .map(|target_id| {
+                        ArchivedRichPayload::Retraction(ArchivedRetraction {
+                            target_id,
+                            stamp: None,
+                            retraction_id: message.id.clone().and_then(RichMessageId::new),
+                        })
+                    }),
+                RetractionKind::Tombstone(retracted) => message.id.clone().and_then(|id| {
+                    RichMessageId::new(id).map(|target_id| {
+                        ArchivedRichPayload::Retraction(ArchivedRetraction {
+                            target_id,
+                            stamp: chrono::DateTime::parse_from_rfc3339(&retracted.stamp)
+                                .ok()
+                                .map(|stamp| stamp.with_timezone(&chrono::Utc)),
+                            retraction_id: None,
+                        })
+                    })
+                }),
+            })
+        })
+        .or_else(|| {
+            extract_reactions_from_message(message).and_then(|reactions| {
+                RichMessageId::new(reactions.message_id).map(|target_id| {
+                    ArchivedRichPayload::Reactions(ArchivedReactionSet {
+                        target_id,
+                        emojis: reactions
+                            .emojis
+                            .into_iter()
+                            .filter_map(RichText::new)
+                            .collect(),
+                    })
+                })
+            })
+        });
+    let reply = parse_reply_from_message(message).and_then(|reply| {
+        RichMessageId::new(reply.id).map(|id| ArchivedReply {
+            id,
+            to: reply.to.and_then(|to| to.parse().ok()),
+        })
+    });
+    let references = extract_references_from_message(message)
+        .into_iter()
+        .filter_map(|reference| {
+            let ref_type = RichText::new(reference.ref_type.as_str())?;
+            Some(ArchivedReference {
+                ref_type,
+                begin: reference.begin.and_then(|value| value.try_into().ok()),
+                end: reference.end.and_then(|value| value.try_into().ok()),
+                uri: reference.uri.and_then(RichText::new),
+                anchor: reference.anchor.and_then(RichText::new),
+            })
+        })
+        .collect::<Vec<_>>();
+    let mentions = extract_explicit_mentions(message)
+        .map(|mentions| {
+            mentions
+                .mentions
+                .into_iter()
+                .map(|mention| ArchivedMention {
+                    begin: mention.begin,
+                    end: mention.end,
+                    jid: mention.jid,
+                    occupant_id: mention.occupant_id.and_then(RichText::new),
+                    mentions: mention.mentions.and_then(RichText::new),
+                    uri: mention.uri.and_then(RichText::new),
+                    active: mention.active,
+                    noping: mention.noping,
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if payload.is_none() && reply.is_none() && references.is_empty() && mentions.is_empty() {
+        None
+    } else {
+        Some(ArchivedRichMessage {
+            payload,
+            reply,
+            references,
+            mentions,
+        })
     }
 }
 
@@ -2895,137 +3739,20 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // #229 PR14 — DispatchToRoom interpreter arm bridges to legacy MUC
-    // fan-out
+    // #229 PR18 — DispatchToRoom interpreter arm runs the room handler
+    // chain (Q7 option C). The end-to-end semantics (managed-room owner
+    // check, rich-target validation, MAM archive, retraction
+    // tombstones, per-occupant inbox projection, occupant fan-out) are
+    // exercised by the integration tests in
+    // `crates/waddle-server/tests/*_ws.rs`; the L1 unit test below pins
+    // the chain wiring against the lightweight in-process `Deps` shape.
     // -----------------------------------------------------------------
 
-    /// L1 interpreter test for the `OutboundEvent::DispatchToRoom`
-    /// arm: spawns a `RoomRegistryActor`, registers a populated test
-    /// room, fires the event through `interpret(...)`, and asserts the
-    /// room actor produced a per-occupant broadcast that landed on the
-    /// connection-registry queue of the non-sender occupant. This
-    /// pins the contract that the DispatchToRoom arm is no longer a
-    /// warn-stub and reaches the room actor with
-    /// `BuildGroupchatBroadcast`. Production semantics
-    /// (managed-room owner check, MAM archive, inbox projection,
-    /// rich-target validation, retraction tombstones) flow through
-    /// the legacy MUC fan-out helper exercised by the integration
-    /// tests in `crates/waddle-server/tests/xep0359_stanza_ids_ws.rs`.
+    /// Without `web_socket_state` the arm logs a warn and drops the
+    /// event without panicking — production must wire `web_socket_state`
+    /// via [`super::super::websocket::build_interpret_deps`].
     #[tokio::test]
-    async fn dispatch_to_room_bridges_to_room_actor_and_fans_out_to_occupants() {
-        use waddle_xmpp::muc::room_actor::Join;
-        use waddle_xmpp::muc::room_registry_actor::GetOrCreateRoom;
-        use waddle_xmpp::muc::RoomConfig;
-        use waddle_xmpp::{Affiliation, Role};
-
-        let registry = ConnectionRegistry::new();
-        let room_registry = kameo::spawn(RoomRegistryActor::new("muc.example.com".to_string()));
-
-        let room_jid: jid::BareJid = "testroom@muc.example.com".parse().expect("parse room jid");
-        let alice_full: jid::FullJid = "alice@example.com/web".parse().expect("parse alice jid");
-        let bob_full: jid::FullJid = "bob@example.com/web".parse().expect("parse bob jid");
-
-        // Alice and Bob are both occupants. Alice sends; Bob must
-        // receive the broadcast on his connection-registry queue.
-        let room_actor = room_registry
-            .ask(GetOrCreateRoom {
-                room_jid: room_jid.clone(),
-                waddle_id: "waddle-test".to_string(),
-                channel_id: "test-channel".to_string(),
-                config: RoomConfig::default(),
-            })
-            .await
-            .expect("create room");
-        room_actor
-            .ask(Join {
-                nick: "alice".to_string(),
-                real_jid: alice_full.clone(),
-                role: Role::Participant,
-                affiliation: Affiliation::Member,
-            })
-            .await
-            .expect("alice join");
-        room_actor
-            .ask(Join {
-                nick: "bob".to_string(),
-                real_jid: bob_full.clone(),
-                role: Role::Participant,
-                affiliation: Affiliation::Member,
-            })
-            .await
-            .expect("bob join");
-
-        let (bob_tx, mut bob_rx) = tokio::sync::mpsc::channel(8);
-        registry.register_with_carbons(bob_full.clone(), bob_tx, false);
-
-        // Build a typed groupchat message addressed to the room with
-        // alice's full JID stamped as `from` (the sender pass already
-        // does this before emitting `DispatchToRoom`).
-        let mut message =
-            xmpp_parsers::message::Message::new(Some(jid::Jid::from(room_jid.clone())));
-        message.id = Some("dispatch-to-room-1".to_string());
-        message.type_ = xmpp_parsers::message::MessageType::Groupchat;
-        message.from = Some(jid::Jid::from(alice_full.clone()));
-        message.bodies.insert(
-            String::new(),
-            xmpp_parsers::message::Body("hello room".to_string()),
-        );
-
-        let events = vec![OutboundEvent::DispatchToRoom {
-            room: room_jid.clone(),
-            message: Box::new(message),
-        }];
-        let outcome = interpret(
-            events,
-            &Deps::test_with_room_registry(&registry, &room_registry),
-        )
-        .await;
-
-        assert!(
-            outcome.frames.is_empty(),
-            "DispatchToRoom must not surface frames through outcome.frames \
-             (sender echo is owned by the dispatcher's recipient pipeline)"
-        );
-        assert!(!outcome.close);
-
-        let bob_queue = drain_inbound(&mut bob_rx);
-        assert_eq!(
-            bob_queue.len(),
-            1,
-            "bob must receive exactly one broadcast frame from the room actor"
-        );
-        let stanza = &bob_queue[0].stanza;
-        let msg = match stanza {
-            Stanza::Message(m) => m,
-            other => panic!("expected Message stanza on bob's queue, got {other:?}"),
-        };
-        assert_eq!(
-            msg.type_,
-            xmpp_parsers::message::MessageType::Groupchat,
-            "fan-out must preserve type='groupchat'"
-        );
-        assert!(
-            msg.from
-                .as_ref()
-                .and_then(|j| j.resource())
-                .map(|r| r.as_str() == "alice")
-                .unwrap_or(false),
-            "broadcast `from` must be the room JID with sender's MUC nick",
-        );
-        let body = msg
-            .bodies
-            .get(&String::new())
-            .expect("broadcast carries the original body");
-        assert_eq!(body.0, "hello room");
-    }
-
-    /// Without either `web_socket_state` or `room_registry`, the
-    /// arm must drop the event with a warn — the dispatcher's
-    /// downstream effects do not run, but neither do they panic.
-    /// Pinned so a regression that "silently" relies on something
-    /// unset surfaces here rather than as a missing wire frame.
-    #[tokio::test]
-    async fn dispatch_to_room_drops_when_no_room_registry_or_state_in_deps() {
+    async fn dispatch_to_room_drops_when_no_web_socket_state_in_deps() {
         let registry = ConnectionRegistry::new();
         let room_jid: jid::BareJid = "testroom@muc.example.com".parse().expect("parse room jid");
         let mut message =

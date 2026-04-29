@@ -53,9 +53,9 @@ pub enum ConnectionPhase {
     /// Fully bound and registered. The connection may send/receive stanzas.
     ///
     /// `joined_rooms` is tracked here (rather than in a registry lookup) so
-    /// the state machine can emit `BroadcastToRoom` leave presences on
-    /// `TransportClosed` without needing any cross-connection state. See the
-    /// plan's *Design patterns* section.
+    /// the state machine can emit room leave presences on `TransportClosed`
+    /// without needing any cross-connection state. See the plan's
+    /// *Design patterns* section.
     Ready {
         /// The connection's bound full JID, e.g. `alice@waddle.social/web-1`.
         full_jid: FullJid,

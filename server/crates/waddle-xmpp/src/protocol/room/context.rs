@@ -75,6 +75,18 @@ pub struct RoomContext<'a> {
     /// can short-circuit with a typed `<forbidden/>` reply without
     /// awaiting an async permission check.
     pub managed_room_forbidden: bool,
+    /// True when the room is configured as moderated (XEP-0045 §5.1.4
+    /// `muc#roomconfig_moderatedroom`). Combined with the sender's
+    /// snapshot role, this lets
+    /// [`super::occupancy_validation::OccupancyValidationHandler`]
+    /// enforce XEP-0045 §7.5 (visitors may not send messages in
+    /// moderated rooms) — the chain emits a typed
+    /// `<error type='auth'><forbidden/></error>` reply. Closes a
+    /// regression introduced by PR18: the legacy
+    /// `RoomActor::BuildGroupchatBroadcast` path enforced this; the
+    /// chain didn't, until this field landed (Copilot review on
+    /// PR #279).
+    pub room_moderated: bool,
     /// Source of fresh, opaque XEP-0359 stanza-id values for the
     /// canonical `<stanza-id by='room'/>` stamp the
     /// [`super::canonicalize::MucCanonicalizeHandler`] applies.
@@ -83,6 +95,22 @@ pub struct RoomContext<'a> {
     /// (per-(room, bare-jid) HMAC). Borrowed from the deployment config
     /// so tests can substitute a fixture without mutating global state.
     pub occupant_id_secret: &'a [u8],
+    /// Sender's per-room nickname generation (XEP-0308 §3 correction
+    /// window). Provided here so the
+    /// [`super::archive::MucArchiveHandler`] can include it directly
+    /// in [`super::super::event::OutboundEvent::ArchiveGroupchat`]
+    /// without the interpreter having to issue a second
+    /// `RoomActor::GetRoomSnapshot` query at archive time (Copilot
+    /// review on PR #279).
+    pub sender_nickname_generation: u64,
+    /// Single dispatch timestamp (Unix epoch seconds) shared across
+    /// every per-occupant
+    /// [`super::super::event::OutboundEvent::ProjectGroupchatInbox`]
+    /// projection emitted by [`super::inbox::MucInboxHandler`].
+    /// Captured by the interpreter at dispatch start so projections
+    /// don't drift across a second-boundary (Copilot review on
+    /// PR #279).
+    pub dispatch_timestamp: i64,
 }
 
 impl<'a> RoomContext<'a> {

@@ -19,6 +19,7 @@
 use super::super::event::OutboundEvent;
 use super::context::RoomContext;
 use super::traits::{RoomHandler, RoomHandlerOutcome};
+use crate::xep::xep0424::{extract_retraction_from_message, RetractionKind};
 use crate::xep::{
     has_file_sharing, is_moderation_request_message, is_moderation_result_message,
     is_reaction_message, is_retraction_message, is_sticker_message, should_skip_storage,
@@ -26,6 +27,15 @@ use crate::xep::{
 use xmpp_parsers::message::{Message, MessageType};
 
 /// XEP-0313 archive handler for the room handler chain.
+///
+/// Emits [`OutboundEvent::ArchiveGroupchat`] for archivable messages and,
+/// when the message is a XEP-0424 retraction request, also emits an
+/// [`OutboundEvent::ApplyGroupchatRetractionTombstone`] so the
+/// interpreter can replace the target row in the room archive with a
+/// tombstone (XEP-0424 §"prevent further distribution"). Mirrors the
+/// 1:1 path in
+/// [`super::super::handlers::archive::ArchiveHandler`] +
+/// [`OutboundEvent::ArchiveDirect`]'s retraction branch.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct MucArchiveHandler;
 
@@ -35,15 +45,24 @@ impl RoomHandler for MucArchiveHandler {
     }
 
     fn handle(&self, message: &mut Message, ctx: &RoomContext<'_>) -> RoomHandlerOutcome {
-        if !is_archivable(message) {
-            return RoomHandlerOutcome::Continue(Vec::new());
+        let mut events = Vec::new();
+        if is_archivable(message) {
+            events.push(OutboundEvent::ArchiveGroupchat {
+                room: ctx.room.clone(),
+                sender: ctx.sender_full.clone(),
+                message: Box::new(message.clone()),
+                sender_nickname_generation: ctx.sender_nickname_generation,
+            });
         }
-        let event = OutboundEvent::ArchiveGroupchat {
-            room: ctx.room.clone(),
-            sender: ctx.sender_full.clone(),
-            message: Box::new(message.clone()),
-        };
-        RoomHandlerOutcome::Continue(vec![event])
+        if let Some(RetractionKind::Request(retraction)) = extract_retraction_from_message(message)
+        {
+            events.push(OutboundEvent::ApplyGroupchatRetractionTombstone {
+                room: ctx.room.clone(),
+                target_message_id: retraction.retracts_id,
+                retraction_message: Box::new(message.clone()),
+            });
+        }
+        RoomHandlerOutcome::Continue(events)
     }
 }
 
@@ -105,8 +124,11 @@ mod tests {
             sender_full: sender,
             occupants: &occupants,
             managed_room_forbidden: false,
+            room_moderated: false,
             id_gen: &id_gen,
             occupant_id_secret: b"test-secret",
+            sender_nickname_generation: 0,
+            dispatch_timestamp: 0,
         };
         match MucArchiveHandler.handle(msg, &ctx) {
             RoomHandlerOutcome::Continue(e) => e,

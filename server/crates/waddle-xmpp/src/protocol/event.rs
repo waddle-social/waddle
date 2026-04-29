@@ -251,6 +251,25 @@ pub enum CallbackResult {
     Err { stanza: Box<Stanza> },
 }
 
+/// Thread metadata accompanying an [`OutboundEvent::ProjectGroupchatInbox`]
+/// projection.
+///
+/// Distinct from the wire `<thread/>` element so the interpreter doesn't
+/// have to re-walk the typed message looking for the thread id at
+/// projection time. `title` and `author_nick` are pre-derived by the
+/// chain handler that emits the event (Waddle forum-thread metadata
+/// or the first-message preview).
+#[derive(Debug, Clone)]
+pub struct GroupchatThreadProjection {
+    /// Wire `<thread/>` parent identifier.
+    pub thread_id: String,
+    /// Thread title — `Some(...)` when extracted from a Waddle
+    /// `CreateThread` action or fallback message preview.
+    pub title: Option<String>,
+    /// Thread author nickname (the resource component of `from`).
+    pub author_nick: Option<String>,
+}
+
 /// Every effect the state machine can cause.
 ///
 /// The interpreter resolves these against real-world resources (sockets,
@@ -318,24 +337,13 @@ pub enum OutboundEvent {
     /// XEP-0359/XEP-0421 stamping, XEP-0313 §5.1.3 archiving, and
     /// per-occupant fan-out.
     ///
-    /// The room handler chain lands in #229 PR5; in PR1 the variant is
-    /// stubbed in the interpreter.
+    /// The interpreter resolves the per-room actor against the room
+    /// registry, asks for a frozen `RoomChainSnapshot`, builds a
+    /// `RoomContext`, and runs `default_room_dispatcher().dispatch(...)`.
+    /// Emitted events are recursively interpreted in the same call.
     DispatchToRoom {
         room: BareJid,
         message: Box<Message>,
-    },
-    /// Deliver a message to every occupant of a MUC room.
-    ///
-    /// The interpreter resolves occupancy via `MucRoomRegistry`. The
-    /// `exclude` field suppresses delivery to a specific JID (typically
-    /// the sender, to avoid duplicate echoes).
-    ///
-    /// Deprecated by `DispatchToRoom` once the PR5 room handler chain
-    /// lands; kept for legacy callers until then.
-    BroadcastToRoom {
-        room: BareJid,
-        message: Box<Message>,
-        exclude: Option<FullJid>,
     },
 
     // -------------------------------------------------------------------
@@ -357,10 +365,16 @@ pub enum OutboundEvent {
     /// Persist a groupchat message to the MAM archive.
     ///
     /// The interpreter's MAM storage layer owns ID generation and indexing.
+    /// `sender_nickname_generation` is the per-XEP-0308 §3 nickname
+    /// generation captured at dispatch start (carried through the
+    /// chain via `RoomContext`) so the archive arm can stamp the
+    /// archive row without a second `RoomActor::GetRoomSnapshot`
+    /// round-trip (Copilot review on PR #279).
     ArchiveGroupchat {
         room: BareJid,
         sender: FullJid,
         message: Box<Message>,
+        sender_nickname_generation: u64,
     },
     /// Persist a one-to-one direct message to the MAM archive.
     ///
@@ -395,6 +409,58 @@ pub enum OutboundEvent {
         message: Box<Message>,
         archive_ref: StanzaIdRef,
         increment_unread: bool,
+    },
+    /// XEP-0424 §"prevent further distribution" — replace the target
+    /// row in a room's MAM archive with a tombstone after a groupchat
+    /// retraction passes authorization.
+    ///
+    /// Emitted by the room handler chain's archive handler when the
+    /// in-flight message is a retraction request. The interpreter
+    /// performs the actual `MamStorage::replace_with_tombstone` call.
+    /// Mirrors the typed `ArchivedTombstone` semantic the 1:1 path
+    /// invokes via [`OutboundEvent::ArchiveDirect`]'s retraction
+    /// branch, but keyed by room JID instead of personal archive.
+    ApplyGroupchatRetractionTombstone {
+        /// Room JID whose archive holds the target row (the only
+        /// archive-key used for groupchat persistence).
+        room: BareJid,
+        /// Wire id of the message being retracted — XEP-0424
+        /// `<retract id='...'/>`.
+        target_message_id: String,
+        /// The retraction message itself, used to derive the tombstone's
+        /// `retraction_id` (XEP-0424 §"tombstones cite the retraction").
+        retraction_message: Box<Message>,
+    },
+    /// Project a groupchat message into one user's inbox (Waddle product
+    /// surface). Sibling to [`OutboundEvent::ProjectInbox`] for the
+    /// MUC-locality chain — emitted once per occupant by the room
+    /// handler chain's inbox handler.
+    ///
+    /// `is_recipient` is `true` for everyone except the sender, who
+    /// gets their own copy without bumping the unread counter.
+    ///
+    /// `thread` carries the message's `<thread/>` payload when present
+    /// so the interpreter can write the thread-scoped inbox row
+    /// alongside the channel-level one. `None` when the message is not
+    /// thread-scoped — the channel row is still written.
+    ProjectGroupchatInbox {
+        /// Bare JID whose inbox is being updated.
+        owner: BareJid,
+        /// Room JID this projection belongs to.
+        room: BareJid,
+        /// The canonicalized groupchat message (post-chain mutations).
+        message: Box<Message>,
+        /// `true` for recipients (bumps unread); `false` for the sender.
+        is_recipient: bool,
+        /// Optional thread metadata for the thread-level row.
+        thread: Option<GroupchatThreadProjection>,
+        /// Single dispatch timestamp (Unix epoch seconds) shared
+        /// across every per-occupant projection of this groupchat
+        /// message. The chain captures `Utc::now().timestamp()` once
+        /// at dispatch start and copies it into each per-occupant
+        /// event so projections don't drift across a second-boundary
+        /// (Copilot review on PR #279).
+        dispatch_timestamp: i64,
     },
     /// XEP-0280 carbon-copy fan-out to the owner's other resources.
     ///

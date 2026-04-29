@@ -337,12 +337,15 @@ fn outbound_variant_name(event: &OutboundEvent) -> &'static str {
         OutboundEvent::Log { .. } => "Log",
         OutboundEvent::RouteToConnection { .. } => "RouteToConnection",
         OutboundEvent::DispatchToRoom { .. } => "DispatchToRoom",
-        OutboundEvent::BroadcastToRoom { .. } => "BroadcastToRoom",
         OutboundEvent::RegisterConnection(_) => "RegisterConnection",
         OutboundEvent::UnregisterConnection(_) => "UnregisterConnection",
         OutboundEvent::ArchiveGroupchat { .. } => "ArchiveGroupchat",
         OutboundEvent::ArchiveDirect { .. } => "ArchiveDirect",
+        OutboundEvent::ApplyGroupchatRetractionTombstone { .. } => {
+            "ApplyGroupchatRetractionTombstone"
+        }
         OutboundEvent::ProjectInbox { .. } => "ProjectInbox",
+        OutboundEvent::ProjectGroupchatInbox { .. } => "ProjectGroupchatInbox",
         OutboundEvent::SendCarbons { .. } => "SendCarbons",
         OutboundEvent::RequestEnrichment { .. } => "RequestEnrichment",
         OutboundEvent::AskSfu { .. } => "AskSfu",
