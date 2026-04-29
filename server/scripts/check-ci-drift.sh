@@ -5,7 +5,6 @@ root="$(git rev-parse --show-toplevel)"
 
 cd "${root}"
 cuenv sync ci -A
-"${root}/server/scripts/pin-generated-github-actions.sh"
 
 expected_generated_workflows="$(
   cat <<'WORKFLOWS'

@@ -24,7 +24,7 @@ jobs:
     environment: flakehub
     steps:
     - name: Checkout
-      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      uses: actions/checkout@v4
       with:
         fetch-depth: 2
     - name: Set up Namespace Nix cache
@@ -36,7 +36,7 @@ jobs:
       with:
         extra-conf: accept-flake-config = true
     - name: Checkout tag
-      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+      uses: actions/checkout@v6
       with:
         persist-credentials: false
         ref: ${{ (inputs.tag != null) && format('refs/tags/{0}', inputs.tag) || '' }}
@@ -62,4 +62,7 @@ jobs:
       run: cuenv ci --pipeline Publish tags to FlakeHub --path server
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GITHUB_ACTOR: ${{ github.actor }}
+        GITHUB_REF_TYPE: ${{ github.ref_type }}
+        GITHUB_REF_NAME: ${{ github.ref_name }}
         CUENV_ENVIRONMENT: flakehub

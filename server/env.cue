@@ -13,7 +13,7 @@ let _flakehubCacheContributor = schema.#Contributor & {
 		{
 			id:       "namespace.nixCache"
 			label:    "Set up Namespace Nix cache"
-			priority: -1
+			priority: 0
 			provider: github: {
 				uses: "namespacelabs/nscloud-cache-action@v1"
 				with: cache: "nix"
@@ -22,7 +22,7 @@ let _flakehubCacheContributor = schema.#Contributor & {
 		{
 			id:       "nix.install"
 			label:    "Install Determinate Nix"
-			priority: 0
+			priority: 1
 			dependsOn: ["namespace.nixCache"]
 			provider: github: {
 				uses: "DeterminateSystems/determinate-nix-action@92ffb5400c3776307a27a1727d7e2ac3dcd9f844"
@@ -227,7 +227,6 @@ schema.#Project & {
 			inputs: [
 				"**/env.cue",
 				"scripts/check-ci-drift.sh",
-				"scripts/pin-generated-github-actions.sh",
 			]
 		}
 
@@ -237,7 +236,6 @@ schema.#Project & {
 			inputs: list.Concat([_nixInputs, [
 				"**/env.cue",
 				"scripts/check-ci-drift.sh",
-				"scripts/pin-generated-github-actions.sh",
 			]])
 		}
 

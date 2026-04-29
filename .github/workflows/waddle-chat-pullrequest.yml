@@ -27,6 +27,7 @@ permissions:
   contents: read
   checks: write
   pull-requests: write
+  packages: write
   id-token: write
 jobs:
   waddle-chat-pullRequest:
@@ -34,7 +35,7 @@ jobs:
     runs-on: namespace-profile-linux-x86
     steps:
     - name: Checkout
-      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      uses: actions/checkout@v4
       with:
         fetch-depth: 2
     - name: Set up Namespace Nix cache
@@ -64,3 +65,6 @@ jobs:
       run: cuenv ci --pipeline pullRequest --path chat
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GITHUB_ACTOR: ${{ github.actor }}
+        GITHUB_REF_TYPE: ${{ github.ref_type }}
+        GITHUB_REF_NAME: ${{ github.ref_name }}

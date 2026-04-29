@@ -12,7 +12,6 @@ on:
     - infrastructure/waddle.cloud/env.cue
     - server/env.cue
     - server/scripts/check-ci-drift.sh
-    - server/scripts/pin-generated-github-actions.sh
     - website/env.cue
   push:
     branches:
@@ -28,7 +27,6 @@ on:
     - infrastructure/waddle.cloud/env.cue
     - server/env.cue
     - server/scripts/check-ci-drift.sh
-    - server/scripts/pin-generated-github-actions.sh
     - website/env.cue
   workflow_dispatch: {}
 concurrency:
