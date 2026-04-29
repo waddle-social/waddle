@@ -27,7 +27,7 @@ export function useChannelUnread(
   const inboxState = ref<InboxState>(createInboxState());
   let hydrateRequestId = 0;
 
-  const totalUnreadCount = computed(() => {
+  const totalChannelUnreadCount = computed(() => {
     let total = 0;
     for (const entry of inboxState.value.channels.values()) {
       if (entry.kind !== "muc") continue;
@@ -36,33 +36,56 @@ export function useChannelUnread(
     return total;
   });
 
+  const totalThreadUnreadCount = computed(() => {
+    let total = 0;
+    for (const entry of inboxState.value.threads.values()) {
+      if (entry.kind !== "muc") continue;
+      total += entry.unread;
+    }
+    return total;
+  });
+
+  // Server total unread counts conversation rows only; thread rows are nested detail.
+  const totalUnreadCount = totalChannelUnreadCount;
+
   const totalMentionCount = computed(() => {
     // Server doesn't track mentions separately yet — return 0
     return 0;
   });
 
-  async function hydrateFromInbox() {
+  async function hydrateFromInbox(): Promise<boolean> {
     const client = xmppClient.value;
-    if (!client) return;
+    if (!client) {
+      inboxState.value = createInboxState();
+      return false;
+    }
 
     const requestId = ++hydrateRequestId;
     try {
       const inbox = await client.fetchInbox();
-      if (requestId !== hydrateRequestId || client !== xmppClient.value) return;
+      if (requestId !== hydrateRequestId || client !== xmppClient.value) return false;
 
       inboxState.value = applyEntries(createInboxState(), inbox.conversations);
+      return true;
     } catch {
       // best-effort
+      return false;
     }
   }
 
   /** Handle a server-pushed inbox entry (headline message with absolute unread count). */
   function onInboxPush(entry: InboxEntry) {
+    if (entry.kind !== "muc") return;
     inboxState.value = applyEntry(inboxState.value, entry);
   }
 
   function clearUnread(roomJid: string) {
     inboxState.value = markReadInState(inboxState.value, roomJid);
+  }
+
+  function clearAll() {
+    hydrateRequestId += 1;
+    inboxState.value = createInboxState();
   }
 
   function markRead(roomJid: string) {
@@ -107,11 +130,14 @@ export function useChannelUnread(
 
   return {
     inboxState,
+    totalChannelUnreadCount,
+    totalThreadUnreadCount,
     totalUnreadCount,
     totalMentionCount,
     hydrateFromInbox,
     onInboxPush,
     clearUnread,
+    clearAll,
     markRead,
     markThreadRead,
     channelUnreadMap,

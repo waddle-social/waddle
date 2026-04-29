@@ -2,6 +2,7 @@
 
 const CACHE_NAME = "waddle-__WADDLE_BUILD_SHA__";
 const NOTIFICATION_ICON_URL = "/android-chrome-192x192.png";
+const UNREAD_COUNT_MESSAGE_TYPE = "waddle:unread-count";
 const PRECACHE_URLS = [
   "/offline.html",
   "/manifest.webmanifest",
@@ -92,13 +93,18 @@ self.addEventListener("push", (event) => {
     const text = event.data?.text() ?? "";
     data = { title: "Waddle", body: text };
   }
+  const unreadCount = parseUnreadCount(data);
   event.waitUntil(
-    self.registration.showNotification(data.title ?? "Waddle", {
-      body: data.body ?? "",
-      tag: data.roomJid,
-      icon: NOTIFICATION_ICON_URL,
-      data: { url: data.url ?? roomJidToPath(data.roomJid) },
-    }),
+    Promise.all([
+      updateAppBadge(unreadCount),
+      postUnreadCountToClients(unreadCount),
+      self.registration.showNotification(data.title ?? "Waddle", {
+        body: data.body ?? "",
+        tag: data.roomJid,
+        icon: NOTIFICATION_ICON_URL,
+        data: { url: data.url ?? roomJidToPath(data.roomJid) },
+      }),
+    ]),
   );
 });
 
@@ -123,4 +129,39 @@ function roomJidToPath(roomJid) {
   const parts = localpart.split("_");
   if (parts.length < 2) return "/";
   return `/${encodeURIComponent(parts[0])}/${encodeURIComponent(parts[1])}`;
+}
+
+function parseUnreadCount(data) {
+  const value = data?.unreadCount ?? data?.totalUnread ?? data?.["message-count"];
+  if (value === undefined || value === null) return null;
+  const parsed = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) return null;
+  return Math.floor(parsed);
+}
+
+async function updateAppBadge(unreadCount) {
+  if (unreadCount === null) return;
+  try {
+    if (unreadCount > 0 && typeof navigator.setAppBadge === "function") {
+      await navigator.setAppBadge(unreadCount);
+      return;
+    }
+    if (unreadCount === 0 && typeof navigator.clearAppBadge === "function") {
+      await navigator.clearAppBadge();
+    }
+  } catch {
+    // best-effort browser chrome integration
+  }
+}
+
+async function postUnreadCountToClients(unreadCount) {
+  if (unreadCount === null) return;
+  try {
+    const windowClients = await clients.matchAll({ type: "window", includeUncontrolled: true });
+    for (const client of windowClients) {
+      client.postMessage?.({ type: UNREAD_COUNT_MESSAGE_TYPE, unreadCount });
+    }
+  } catch {
+    // best-effort open-window sync
+  }
 }

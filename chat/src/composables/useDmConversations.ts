@@ -41,11 +41,15 @@ export function useDmConversations(
   const localReadAtByJid = ref<Record<string, number>>({});
 
   const hasUnread = computed(() => conversations.value.some((c) => c.unreadCount > 0));
+  const totalUnreadCount = computed(() =>
+    conversations.value.reduce((total, conversation) => total + Math.max(0, conversation.unreadCount), 0)
+  );
   const selfBareJid = computed(() => barePeerJid(session.value?.jid ?? ""));
 
   let inboxRequestId = 0;
   const pendingMarkRead = new Set<string>();
   const queuedMarkRead = new Set<string>();
+  const inboxAccountedMessageIdsByJid = new Map<string, Set<string>>();
 
   function storageKey() {
     const bare = session.value ? barePeerJid(session.value.jid) : "";
@@ -133,6 +137,25 @@ export function useDmConversations(
       });
   }
 
+  function rememberInboxAccountedMessage(entry: InboxEntry) {
+    if (!entry.lastStanzaId) return;
+    const bare = barePeerJid(entry.partner);
+    const messageIds = inboxAccountedMessageIdsByJid.get(bare) ?? new Set<string>();
+    messageIds.add(entry.lastStanzaId);
+    while (messageIds.size > 20) {
+      const oldest = messageIds.values().next().value;
+      if (!oldest) break;
+      messageIds.delete(oldest);
+    }
+    inboxAccountedMessageIdsByJid.set(bare, messageIds);
+  }
+
+  function wasUnreadAccountedByInbox(peerJid: string, msg: LiveDmMessage): boolean {
+    const messageIds = inboxAccountedMessageIdsByJid.get(barePeerJid(peerJid));
+    if (!messageIds) return false;
+    return [msg.id, ...(msg.wireIds ?? [])].some((messageId) => messageIds.has(messageId));
+  }
+
   function mergeInboxEntry(existing: DmConversation | undefined, entry: InboxEntry): DmConversation {
     const bare = barePeerJid(entry.partner);
     const serverTimestamp = inboxTimestamp(entry.lastUpdated);
@@ -168,16 +191,22 @@ export function useDmConversations(
     for (const entry of entries) {
       if (entry.kind !== "direct") continue;
       const bare = barePeerJid(entry.partner);
+      rememberInboxAccountedMessage(entry);
       merged.set(bare, mergeInboxEntry(merged.get(bare), entry));
     }
 
     conversations.value = sortByRecent([...merged.values()]);
   }
 
-  async function hydrateFromInbox() {
+  function onInboxPush(entry: InboxEntry) {
+    if (entry.kind !== "direct") return;
+    mergeInboxConversations([entry]);
+  }
+
+  async function hydrateFromInbox(): Promise<boolean> {
     const currentClient = xmppClient.value;
     const currentSessionJid = session.value?.jid ?? null;
-    if (!currentClient || !currentSessionJid) return;
+    if (!currentClient || !currentSessionJid) return false;
 
     const requestId = ++inboxRequestId;
     try {
@@ -186,15 +215,17 @@ export function useDmConversations(
         requestId !== inboxRequestId
         || currentClient !== xmppClient.value
         || currentSessionJid !== (session.value?.jid ?? null)
-      ) return;
+      ) return false;
 
       const directConversations = inbox.conversations.filter((conversation) => conversation.kind === "direct");
       mergeInboxConversations(directConversations);
       for (const conversation of directConversations) {
         void currentClient.subscribeToPeerPresence(barePeerJid(conversation.partner)).catch(() => undefined);
       }
+      return true;
     } catch {
       // best-effort
+      return false;
     }
   }
 
@@ -236,7 +267,9 @@ export function useDmConversations(
     const existing = ensureConversation(bare);
     const isSelfMessage = barePeerJid(msg.fromJid) === selfBareJid.value;
     const isActiveConversation = activePeerJid.value === bare;
-    const shouldIncrementUnread = !isSelfMessage && !isActiveConversation;
+    const shouldIncrementUnread = !isSelfMessage
+      && !isActiveConversation
+      && !wasUnreadAccountedByInbox(bare, msg);
 
     conversations.value = sortByRecent(conversations.value.map((c) => (
       c.peerJid === bare
@@ -270,6 +303,7 @@ export function useDmConversations(
       inboxRequestId += 1;
       pendingMarkRead.clear();
       queuedMarkRead.clear();
+      inboxAccountedMessageIdsByJid.clear();
       conversations.value = [];
       activePeerJid.value = null;
       presenceByJid.value = {};
@@ -288,9 +322,11 @@ export function useDmConversations(
     conversations,
     activePeerJid,
     hasUnread,
+    totalUnreadCount,
     openDm,
     closeDm,
     hydrateFromInbox,
+    onInboxPush,
     markRead,
     receiveIncomingDm,
     updatePresence,
