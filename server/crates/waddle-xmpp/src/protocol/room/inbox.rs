@@ -55,6 +55,7 @@ impl RoomHandler for MucInboxHandler {
                 message: Box::new(message.clone()),
                 is_recipient: false,
                 thread: thread.clone(),
+                dispatch_timestamp: ctx.dispatch_timestamp,
             });
         }
         for occupant in ctx.occupants {
@@ -68,6 +69,7 @@ impl RoomHandler for MucInboxHandler {
                 message: Box::new(message.clone()),
                 is_recipient: true,
                 thread: thread.clone(),
+                dispatch_timestamp: ctx.dispatch_timestamp,
             });
         }
         RoomHandlerOutcome::Continue(events)
@@ -150,6 +152,7 @@ mod tests {
             id_gen: &id_gen,
             occupant_id_secret: b"test-secret",
             sender_nickname_generation: 0,
+            dispatch_timestamp: 0,
         };
         match MucInboxHandler.handle(msg, &ctx) {
             RoomHandlerOutcome::Continue(events) => events,

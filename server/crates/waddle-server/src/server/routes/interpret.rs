@@ -82,9 +82,9 @@ use waddle_xmpp::inbox::InboxEntry;
 use waddle_xmpp::mam::projection::build_direct_archived_message;
 use waddle_xmpp::mam::storage::MamStorage;
 use waddle_xmpp::mam::{
-    add_stanza_id as add_mam_stanza_id, ArchivedMention, ArchivedMessage as MamArchivedMessage,
-    ArchivedReactionSet, ArchivedReference, ArchivedReply, ArchivedRetraction, ArchivedRichMessage,
-    ArchivedRichPayload, ArchivedTombstone, RichMessageId, RichText, STANZA_ID_NS,
+    ArchivedMention, ArchivedMessage as MamArchivedMessage, ArchivedReactionSet, ArchivedReference,
+    ArchivedReply, ArchivedRetraction, ArchivedRichMessage, ArchivedRichPayload, ArchivedTombstone,
+    RichMessageId, RichText, STANZA_ID_NS,
 };
 use waddle_xmpp::muc::presence::OCCUPANT_ID_SECRET;
 use waddle_xmpp::muc::room_actor::{GetNicknameGeneration, GetRoomSnapshot, RoomActor};
@@ -96,7 +96,9 @@ use waddle_xmpp::protocol::event::{
     MessageRef, StanzaIdRef, StanzaIdValue,
 };
 use waddle_xmpp::protocol::id_gen::UuidV4Generator;
-use waddle_xmpp::protocol::room::{default_room_dispatcher, OccupantSnapshot, RoomContext};
+use waddle_xmpp::protocol::room::{
+    default_room_pipeline_dispatcher, OccupantSnapshot, RoomContext,
+};
 use waddle_xmpp::protocol::{
     Blocklist, CarbonKind, OutboundEvent, StanzaDispatcher, XmppStateMachine,
 };
@@ -830,17 +832,27 @@ async fn interpret_with_depth(
                 message,
                 is_recipient,
                 thread,
+                dispatch_timestamp,
             } => {
-                let Some(state) = deps.web_socket_state else {
+                let Some(inbox_storage) = deps.inbox_storage else {
                     debug!(
                         owner = %owner,
                         room = %room,
-                        "ProjectGroupchatInbox: no web_socket_state in Deps; skipping"
+                        "ProjectGroupchatInbox: no inbox_storage in Deps; skipping (test fixture?)"
                     );
                     continue;
                 };
-                project_groupchat_inbox(state, &owner, &room, &message, is_recipient, &thread)
-                    .await;
+                project_groupchat_inbox(
+                    inbox_storage,
+                    deps.connection_registry,
+                    &owner,
+                    &room,
+                    &message,
+                    is_recipient,
+                    &thread,
+                    dispatch_timestamp,
+                )
+                .await;
             }
             OutboundEvent::ArchiveDirect {
                 archive_jid,
@@ -1428,6 +1440,11 @@ async fn dispatch_to_room(
         })
         .collect();
     let id_gen = UuidV4Generator;
+    // Capture a single dispatch timestamp here so every per-occupant
+    // `ProjectGroupchatInbox` event the chain emits carries the same
+    // value (Copilot review on PR #279). Avoids per-occupant
+    // `Utc::now()` drift across a second-boundary.
+    let dispatch_timestamp = chrono::Utc::now().timestamp();
     let gate_ctx = RoomContext {
         room: &room_jid,
         sender_full: &sender_full,
@@ -1437,6 +1454,7 @@ async fn dispatch_to_room(
         id_gen: &id_gen,
         occupant_id_secret: OCCUPANT_ID_SECRET,
         sender_nickname_generation: snapshot.sender_nickname_generation.unwrap_or(0),
+        dispatch_timestamp,
     };
     let mut gate_working = prototype.clone();
     use waddle_xmpp::protocol::room::RoomHandler;
@@ -1444,8 +1462,16 @@ async fn dispatch_to_room(
         waddle_xmpp::protocol::room::occupancy_validation::OccupancyValidationHandler
             .handle(&mut gate_working, &gate_ctx);
     if let waddle_xmpp::protocol::room::RoomHandlerOutcome::Halt(gate_events) = gate_outcome {
+        // Fold the nested outcome's full state — frames, close
+        // signal, and async-callback feedback — back into the outer
+        // outcome (Copilot review on PR #279). Dropping `close` /
+        // `feedback` would silently lose stream-close requests or
+        // pending callback completions if a future gate handler ever
+        // emits them.
         let nested = Box::pin(interpret_with_depth(gate_events, deps, recursion_depth)).await;
         outcome.frames.extend(nested.frames);
+        outcome.close = outcome.close || nested.close;
+        outcome.feedback.extend(nested.feedback);
         return outcome;
     }
 
@@ -1507,9 +1533,14 @@ async fn dispatch_to_room(
         // `RoomActor::GetRoomSnapshot` round-trip per groupchat
         // archive write (Copilot review on PR #279).
         sender_nickname_generation: snapshot.sender_nickname_generation.unwrap_or(0),
+        dispatch_timestamp,
     };
     let mut working = prototype;
-    let dispatch_outcome = default_room_dispatcher().dispatch(&mut working, &ctx);
+    // Run only the post-gate pipeline (canonicalize → archive → inbox
+    // → reflector). The occupancy gate already ran above as an
+    // explicit stand-alone call (Copilot review on PR #279); using
+    // the full `default_room_dispatcher()` here would re-run it.
+    let dispatch_outcome = default_room_pipeline_dispatcher().dispatch(&mut working, &ctx);
 
     // 6. Recursively interpret the chain's emitted events. Pass the
     //    depth through unchanged: `recursion_depth` is the headless
@@ -2051,23 +2082,23 @@ async fn archive_groupchat_message(
     let archive_id = match extract_room_stanza_id(&archive_clone, room) {
         Some(id) => id,
         None => {
+            // Chain bug: `MucCanonicalizeHandler` MUST stamp
+            // `<stanza-id by='room'/>` before `MucArchiveHandler`
+            // emits `ArchiveGroupchat`. Persisting a fresh archive-
+            // only id here would break the "archive id == wire
+            // stanza-id" invariant — clients reflecting back the wire
+            // stanza-id (XEP-0308 corrections, XEP-0424 retractions)
+            // would fail to resolve the archive row. Skip the write;
+            // the reflection still goes out, and a separate audit can
+            // surface the chain regression (Copilot review on
+            // PR #279).
             warn!(
                 room = %room,
-                "ArchiveGroupchat: message has no `<stanza-id by='room'/>` to use \
-                 as archive primary key; falling back to fresh uuid (chain bug)"
+                "ArchiveGroupchat: message has no `<stanza-id by='room'/>`; \
+                 skipping archive write because persisting an archive-only id would \
+                 break the wire/archive stanza-id invariant (chain bug)"
             );
-            let fresh = uuid::Uuid::now_v7().to_string();
-            // Stamp the fallback so the row + wire stanza-id agree.
-            let mut tmp = archive_clone.clone();
-            add_mam_stanza_id(&mut tmp, fresh.as_str(), &room.to_string());
-            return finish_archive_groupchat_message(
-                mam_storage,
-                room,
-                tmp,
-                fresh,
-                sender_nickname_generation,
-            )
-            .await;
+            return None;
         }
     };
 
@@ -2206,25 +2237,21 @@ async fn apply_groupchat_retraction_tombstone(
 /// `deliver_groupchat_via_room_actor`'s per-occupant
 /// channel + thread upserts and the XEP-0430 inbox push to the
 /// owner's other resources.
+#[allow(clippy::too_many_arguments)]
 async fn project_groupchat_inbox(
-    state: &WebSocketState,
+    inbox_storage: &Arc<dyn InboxStorage>,
+    connection_registry: &waddle_xmpp::registry::ConnectionRegistry,
     owner: &BareJid,
     room: &BareJid,
     message: &Message,
     is_recipient: bool,
     thread: &Option<GroupchatThreadProjection>,
+    dispatch_timestamp: i64,
 ) {
-    let timestamp = chrono::Utc::now().timestamp();
-    let entry = groupchat_entry(room.clone(), message, timestamp);
-    match state
-        .deps
-        .protocol
-        .inbox_storage
-        .upsert(owner, entry, is_recipient)
-        .await
-    {
+    let entry = groupchat_entry(room.clone(), message, dispatch_timestamp);
+    match inbox_storage.upsert(owner, entry, is_recipient).await {
         Ok(updated) if is_recipient => {
-            push_inbox_update(state, owner, &updated).await;
+            push_inbox_update(connection_registry, owner, &updated).await;
         }
         Ok(_) => {}
         Err(error) => {
@@ -2242,20 +2269,17 @@ async fn project_groupchat_inbox(
     let thread_entry = groupchat_thread_entry(
         room.clone(),
         message,
-        timestamp,
+        dispatch_timestamp,
         &thread.thread_id,
         thread.title.as_deref(),
         thread.author_nick.as_deref(),
     );
-    match state
-        .deps
-        .protocol
-        .inbox_storage
+    match inbox_storage
         .upsert(owner, thread_entry, is_recipient)
         .await
     {
         Ok(updated) if is_recipient => {
-            push_inbox_update(state, owner, &updated).await;
+            push_inbox_update(connection_registry, owner, &updated).await;
         }
         Ok(_) => {}
         Err(error) => {
@@ -2269,20 +2293,19 @@ async fn project_groupchat_inbox(
     }
 }
 
-/// XEP-0430 inbox push to all live resources of `user`. Mirrors the
-/// legacy `push_inbox_update` helper.
-async fn push_inbox_update(state: &WebSocketState, user: &BareJid, entry: &InboxEntry) {
-    let resources = state
-        .deps
-        .protocol
-        .connection_registry
-        .get_resources_for_user(user);
+/// XEP-0430 inbox push to all live resources of `user`. Decoupled
+/// from `WebSocketState` (Copilot review on PR #279) so unit tests
+/// and non-WebSocket callers can drive the projection without
+/// standing up the full route stack.
+async fn push_inbox_update(
+    connection_registry: &waddle_xmpp::registry::ConnectionRegistry,
+    user: &BareJid,
+    entry: &InboxEntry,
+) {
+    let resources = connection_registry.get_resources_for_user(user);
     for resource_jid in resources {
         let msg = build_inbox_push(Jid::from(resource_jid.clone()), entry);
-        let _ = state
-            .deps
-            .protocol
-            .connection_registry
+        let _ = connection_registry
             .send_to(&resource_jid, Stanza::Message(msg))
             .await;
     }

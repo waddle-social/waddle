@@ -178,6 +178,7 @@ mod tests {
             id_gen: &id_gen,
             occupant_id_secret: b"test-secret",
             sender_nickname_generation: 0,
+            dispatch_timestamp: 0,
         };
         OccupancyValidationHandler.handle(msg, &ctx)
     }

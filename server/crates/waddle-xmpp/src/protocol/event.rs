@@ -251,14 +251,14 @@ pub enum CallbackResult {
     Err { stanza: Box<Stanza> },
 }
 
-/// Thread metadata accompanying a [`OutboundEvent::ProjectGroupchatInbox`]
+/// Thread metadata accompanying an [`OutboundEvent::ProjectGroupchatInbox`]
 /// projection.
 ///
 /// Distinct from the wire `<thread/>` element so the interpreter doesn't
 /// have to re-walk the typed message looking for the thread id at
-/// projection time. `title` and `author` are pre-derived by the chain
-/// handler that emits the event (Waddle forum-thread metadata or the
-/// first-message preview).
+/// projection time. `title` and `author_nick` are pre-derived by the
+/// chain handler that emits the event (Waddle forum-thread metadata
+/// or the first-message preview).
 #[derive(Debug, Clone)]
 pub struct GroupchatThreadProjection {
     /// Wire `<thread/>` parent identifier.
@@ -454,6 +454,13 @@ pub enum OutboundEvent {
         is_recipient: bool,
         /// Optional thread metadata for the thread-level row.
         thread: Option<GroupchatThreadProjection>,
+        /// Single dispatch timestamp (Unix epoch seconds) shared
+        /// across every per-occupant projection of this groupchat
+        /// message. The chain captures `Utc::now().timestamp()` once
+        /// at dispatch start and copies it into each per-occupant
+        /// event so projections don't drift across a second-boundary
+        /// (Copilot review on PR #279).
+        dispatch_timestamp: i64,
     },
     /// XEP-0280 carbon-copy fan-out to the owner's other resources.
     ///

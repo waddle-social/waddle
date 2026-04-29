@@ -47,10 +47,34 @@ pub fn register_default_room_handlers(dispatcher: &mut RoomDispatcher) {
     dispatcher.register(Arc::new(reflector::ReflectorHandler));
 }
 
-/// Build a [`RoomDispatcher`] with the default chain registered.
+/// Build a [`RoomDispatcher`] with the full chain (gate + pipeline)
+/// registered. Used by the L4 wire-trace tests and by any caller that
+/// runs the chain end-to-end without splitting the gate.
 pub fn default_room_dispatcher() -> RoomDispatcher {
     let mut d = RoomDispatcher::new();
     register_default_room_handlers(&mut d);
+    d
+}
+
+/// Register only the post-gate pipeline handlers (canonicalize →
+/// archive → inbox → reflector). The interpreter runs
+/// [`occupancy_validation::OccupancyValidationHandler`] as an
+/// explicit gate before rich-target validation (Copilot review on
+/// PR #279), so the production dispatch path uses this variant to
+/// avoid running the gate twice.
+pub fn register_room_pipeline_handlers(dispatcher: &mut RoomDispatcher) {
+    dispatcher.register(Arc::new(canonicalize::MucCanonicalizeHandler));
+    dispatcher.register(Arc::new(archive::MucArchiveHandler));
+    dispatcher.register(Arc::new(inbox::MucInboxHandler));
+    dispatcher.register(Arc::new(reflector::ReflectorHandler));
+}
+
+/// Build a [`RoomDispatcher`] for the post-gate pipeline (the chain
+/// minus the occupancy gate). The interpreter calls this variant
+/// after running the gate explicitly.
+pub fn default_room_pipeline_dispatcher() -> RoomDispatcher {
+    let mut d = RoomDispatcher::new();
+    register_room_pipeline_handlers(&mut d);
     d
 }
 
@@ -62,5 +86,11 @@ mod tests {
     fn default_dispatcher_registers_five_handlers() {
         let d = default_room_dispatcher();
         assert_eq!(d.handler_count(), 5);
+    }
+
+    #[test]
+    fn pipeline_dispatcher_registers_four_handlers() {
+        let d = default_room_pipeline_dispatcher();
+        assert_eq!(d.handler_count(), 4);
     }
 }

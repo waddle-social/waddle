@@ -103,6 +103,14 @@ pub struct RoomContext<'a> {
     /// `RoomActor::GetRoomSnapshot` query at archive time (Copilot
     /// review on PR #279).
     pub sender_nickname_generation: u64,
+    /// Single dispatch timestamp (Unix epoch seconds) shared across
+    /// every per-occupant
+    /// [`super::super::event::OutboundEvent::ProjectGroupchatInbox`]
+    /// projection emitted by [`super::inbox::MucInboxHandler`].
+    /// Captured by the interpreter at dispatch start so projections
+    /// don't drift across a second-boundary (Copilot review on
+    /// PR #279).
+    pub dispatch_timestamp: i64,
 }
 
 impl<'a> RoomContext<'a> {
