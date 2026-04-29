@@ -1,4 +1,4 @@
-import { nextTick, ref, watch, type Ref } from "vue";
+import { computed, nextTick, ref, watch, type Ref } from "vue";
 import {
   inferredFileDisposition,
   type DeliveryStatus,
@@ -137,6 +137,14 @@ export function useDmMessaging(
   const isSearching = ref(false);
   const uploadProgress = ref({ uploading: false, progress: 0, filename: "" });
   const firstUnseenId = ref<string | null>(null);
+  const latestRemoteMessageId = computed<string | null>(() => {
+    for (let i = messages.value.length - 1; i >= 0; i--) {
+      const m = messages.value[i];
+      if (!m || m.isSelf || m.isRetracted) continue;
+      return m.id;
+    }
+    return null;
+  });
 
   let messageRequestId = 0;
   let oldestArchiveId: string | null = null;
@@ -486,7 +494,7 @@ export function useDmMessaging(
     })();
   }
 
-  async function loadMessages(peerJid: string) {
+  async function loadMessages(peerJid: string, unreadAtLoad = 0) {
     if (!session.value) return;
     const requestId = ++messageRequestId;
     initialLatestPagePinned = false;
@@ -517,7 +525,10 @@ export function useDmMessaging(
       if (requestId === messageRequestId) isLoadingMessages.value = false;
 
       const key = dmKey(barePeerJid(peerJid));
-      firstUnseenId.value = null;
+      const feedTimeline = timelineWithQueue.filter(isFeedVisible);
+      firstUnseenId.value = unreadAtLoad > 0 && feedTimeline.length >= unreadAtLoad
+        ? feedTimeline[feedTimeline.length - unreadAtLoad]?.id ?? null
+        : null;
       const pinned = await scrollToPinnedEdgeAndPin();
       if (!pinned || requestId !== messageRequestId || activePeerJid.value !== peerJid) return;
       initialLatestPagePinned = true;
@@ -849,7 +860,6 @@ export function useDmMessaging(
       if (!messages.value.some(isFeedVisible)) return;
       const requestId = messageRequestId;
       const peerJid = activePeerJid.value;
-      firstUnseenId.value = null;
       const pinned = await scrollToPinnedEdgeAndPin();
       if (
         pinned &&
@@ -900,5 +910,7 @@ export function useDmMessaging(
     onMessageDeliveryFailure,
     onSessionLifecycle,
     scrollToPinnedEdge,
+    isPinnedAtEdge: pinnedEdgeScroller.isPinnedAtEdge,
+    latestRemoteMessageId,
   };
 }

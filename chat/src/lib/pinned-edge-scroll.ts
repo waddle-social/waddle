@@ -1,8 +1,11 @@
-import { nextTick, watch, type Ref } from "vue";
+import { nextTick, ref, watch, type Ref } from "vue";
 import {
   getPinnedScrollTop,
+  isTopPinnedScrollDirection,
   type ScrollDirectionMode,
 } from "@/lib/scroll-direction";
+
+const PINNED_EDGE_TOLERANCE_PX = 64;
 
 type EdgeScrollFn = (mode: ScrollDirectionMode) => boolean | Promise<boolean>;
 type ScrollTarget = {
@@ -11,6 +14,17 @@ type ScrollTarget = {
   token: number;
   virtualScroll: EdgeScrollFn | null;
 };
+
+function computeIsPinned(el: HTMLElement, mode: ScrollDirectionMode): boolean {
+  const scrollTop = typeof el.scrollTop === "number" ? el.scrollTop : 0;
+  if (isTopPinnedScrollDirection(mode)) {
+    return scrollTop <= PINNED_EDGE_TOLERANCE_PX;
+  }
+  const scrollHeight = typeof el.scrollHeight === "number" ? el.scrollHeight : 0;
+  const clientHeight = typeof el.clientHeight === "number" ? el.clientHeight : 0;
+  const distanceFromBottom = scrollHeight - scrollTop - clientHeight;
+  return distanceFromBottom <= PINNED_EDGE_TOLERANCE_PX;
+}
 
 export function createPinnedEdgeScroller(options: {
   element: Ref<HTMLElement | null>;
@@ -21,6 +35,42 @@ export function createPinnedEdgeScroller(options: {
   let settleTimer: ReturnType<typeof setTimeout> | null = null;
   let generation = 0;
   let settleGeneration = 0;
+
+  const isPinnedAtEdge = ref(true);
+
+  let trackedElement: HTMLElement | null = null;
+  let scrollListener: (() => void) | null = null;
+
+  function recomputePinned() {
+    const el = options.element.value;
+    if (!el) {
+      if (isPinnedAtEdge.value !== true) isPinnedAtEdge.value = true;
+      return;
+    }
+    const next = computeIsPinned(el, options.mode.value);
+    if (isPinnedAtEdge.value !== next) isPinnedAtEdge.value = next;
+  }
+
+  function attachScrollListener() {
+    const el = options.element.value;
+    if (el === trackedElement) return;
+    if (trackedElement && scrollListener && typeof trackedElement.removeEventListener === "function") {
+      trackedElement.removeEventListener("scroll", scrollListener);
+    }
+    trackedElement = el;
+    scrollListener = null;
+    if (!el) {
+      isPinnedAtEdge.value = true;
+      return;
+    }
+    if (typeof el.addEventListener !== "function") {
+      recomputePinned();
+      return;
+    }
+    scrollListener = () => recomputePinned();
+    el.addEventListener("scroll", scrollListener, { passive: true });
+    recomputePinned();
+  }
 
   function disconnectSettleLock() {
     generation++;
@@ -43,18 +93,21 @@ export function createPinnedEdgeScroller(options: {
 
   async function pinTarget(target: ScrollTarget): Promise<boolean> {
     if (target.virtualScroll && await target.virtualScroll(target.mode)) {
+      recomputePinned();
       return target.token === generation;
     }
     if (target.token !== generation) return false;
 
     if (!target.element) return false;
     target.element.scrollTop = getPinnedScrollTop(target.element, target.mode);
+    recomputePinned();
     return true;
   }
 
   async function pinCurrent(token: number): Promise<boolean> {
     const target = captureTarget();
     if (target.virtualScroll && await target.virtualScroll(target.mode)) {
+      recomputePinned();
       return target.token === generation && token === generation;
     }
     if (target.token !== generation || token !== generation) return false;
@@ -62,6 +115,7 @@ export function createPinnedEdgeScroller(options: {
     const currentElement = options.element.value;
     if (!currentElement) return false;
     currentElement.scrollTop = getPinnedScrollTop(currentElement, options.mode.value);
+    recomputePinned();
     return true;
   }
 
@@ -100,12 +154,27 @@ export function createPinnedEdgeScroller(options: {
 
   watch(
     () => [options.element.value, options.virtualScroll?.value ?? null] as const,
-    () => disconnectSettleLock(),
-    { flush: "sync" },
+    () => {
+      disconnectSettleLock();
+      attachScrollListener();
+    },
+    { flush: "sync", immediate: true },
   );
 
+  watch(() => options.mode.value, () => recomputePinned());
+
+  function disconnect() {
+    disconnectSettleLock();
+    if (trackedElement && scrollListener && typeof trackedElement.removeEventListener === "function") {
+      trackedElement.removeEventListener("scroll", scrollListener);
+    }
+    trackedElement = null;
+    scrollListener = null;
+  }
+
   return {
-    disconnect: disconnectSettleLock,
+    disconnect,
     scrollToPinnedEdge,
+    isPinnedAtEdge: isPinnedAtEdge as Readonly<Ref<boolean>>,
   };
 }

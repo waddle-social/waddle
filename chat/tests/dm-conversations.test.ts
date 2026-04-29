@@ -160,7 +160,10 @@ describe("useDmConversations", () => {
     expect(composable.totalUnreadCount.value).toBe(0);
   });
 
-  test("receiveIncomingDm syncs inbox read for the active conversation", async () => {
+  test("receiveIncomingDm does not auto-sync inbox read for active conversation", async () => {
+    // Auto-mark-read responsibility lives in useReadReceipts (gated on
+    // viewport + window focus); useDmConversations only suppresses the
+    // unread increment for the active conversation.
     const client = makeClient();
     const { composable } = makeComposable({ client });
 
@@ -168,7 +171,7 @@ describe("useDmConversations", () => {
     composable.receiveIncomingDm(makeDmMessage());
 
     expect(composable.conversations.value[0].unreadCount).toBe(0);
-    expect(client.markInboxRead).toHaveBeenCalledWith("bob@example.com");
+    expect(client.markInboxRead).not.toHaveBeenCalled();
   });
 
   test("receiveIncomingDm does not increment unread for self-sent messages", () => {
@@ -179,7 +182,9 @@ describe("useDmConversations", () => {
     expect(composable.conversations.value[0].unreadCount).toBe(0);
   });
 
-  test("openDm clears inbox unread locally and syncs markInboxRead", async () => {
+  test("openDm does not auto-mark-read on its own", async () => {
+    // Auto-mark-read responsibility lives in useReadReceipts (gated on
+    // viewport + window focus); openDm only sets the active peer.
     const client = makeClient([
       {
         partner: "bob@example.com",
@@ -195,10 +200,10 @@ describe("useDmConversations", () => {
     await composable.hydrateFromInbox();
     await composable.openDm("bob@example.com");
 
-    expect(composable.conversations.value[0].unreadCount).toBe(0);
-    expect(composable.hasUnread.value).toBe(false);
-    expect(composable.totalUnreadCount.value).toBe(0);
-    expect(client.markInboxRead).toHaveBeenCalledWith("bob@example.com");
+    expect(composable.conversations.value[0].unreadCount).toBe(3);
+    expect(composable.hasUnread.value).toBe(true);
+    expect(composable.totalUnreadCount.value).toBe(3);
+    expect(client.markInboxRead).not.toHaveBeenCalled();
   });
 
   test("markRead resets unread count", () => {
