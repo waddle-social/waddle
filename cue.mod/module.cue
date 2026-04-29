@@ -7,3 +7,8 @@ deps: {
 		v: "v0.41.0"
 	}
 }
+custom: {
+	"github.com/cuenv/cuenv": {
+		version: "0.41.1"
+	}
+}

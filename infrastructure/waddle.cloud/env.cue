@@ -9,9 +9,19 @@ let _flakehubCacheContributor = schema.#Contributor & {
 	id: "flakehubCache"
 	tasks: [
 		{
+			id:       "namespace.nixCache"
+			label:    "Set up Namespace Nix cache"
+			priority: -1
+			provider: github: {
+				uses: "namespacelabs/nscloud-cache-action@v1"
+				with: cache: "nix"
+			}
+		},
+		{
 			id:       "nix.install"
 			label:    "Install Determinate Nix"
 			priority: 0
+			dependsOn: ["namespace.nixCache"]
 			provider: github: {
 				uses: "DeterminateSystems/determinate-nix-action@92ffb5400c3776307a27a1727d7e2ac3dcd9f844"
 				with: "extra-conf": "accept-flake-config = true"
@@ -26,7 +36,7 @@ let _flakehubCacheContributor = schema.#Contributor & {
 				uses: "DeterminateSystems/flakehub-cache-action@e134de896b2302c1584a7b54ff35432708607d44"
 				with: {
 					"flakehub-flake-name": "waddle-social/waddle"
-					"use-gha-cache":       "no-preference"
+					"use-gha-cache":       "disabled"
 				}
 			}
 		},
@@ -45,6 +55,15 @@ schema.#Project & {
 
 	ci: providers: ["github"]
 	ci: contributors: [_flakehubCacheContributor, c.#CuenvRelease]
+
+	ci: provider: github: {
+		runner: "namespace-profile-linux-x86"
+		runners: arch: {
+			"linux-x64":    "namespace-profile-linux-x86"
+			"darwin-arm64": "namespace-profile-darwin-arm64"
+			amd64:          "namespace-profile-linux-x86"
+		}
+	}
 
 	ci: pipelines: {
 		default: {
