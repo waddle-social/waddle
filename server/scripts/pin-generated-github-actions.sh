@@ -16,8 +16,8 @@ find "${root}/.github/workflows" -type f -name '*.yml' -print0 |
 find "${root}/.github/workflows" -type f -name 'waddle-*.yml' -print0 |
   xargs -0 perl -0pi -e '
     my $namespace_nix_cache = "    - name: Set up Namespace Nix cache\n      uses: namespacelabs/nscloud-cache-action\@v1\n      with:\n        cache: nix\n";
-    s{\n    - name: Set up Namespace Nix cache\n      if: success\(\)\n      uses: namespacelabs/nscloud-cache-action\@v1\n      with:\n        cache: nix\n}{}g;
-    s{\n    - name: Set up Namespace Nix cache\n      uses: namespacelabs/nscloud-cache-action\@v1\n      with:\n        cache: nix\n}{}g;
+    s{^    - name: Set up Namespace Nix cache\n      if: success\(\)\n      uses: namespacelabs/nscloud-cache-action\@v1\n      with:\n        cache: nix\n}{}mg;
+    s{^    - name: Set up Namespace Nix cache\n      uses: namespacelabs/nscloud-cache-action\@v1\n      with:\n        cache: nix\n}{}mg;
     s{(    - name: Install Determinate Nix\n)}{$namespace_nix_cache$1}g;
   '
 
