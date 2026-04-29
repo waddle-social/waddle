@@ -1359,6 +1359,17 @@ export function useMessaging(
     void alignTimelineToPreference();
   });
 
+  watch(
+    [timelineEl, timelineEdgeScroller],
+    ([el, edgeScroller]) => {
+      if (!el || !edgeScroller || isLoadingMessages.value) return;
+      if (!messages.value.some(isFeedVisible)) return;
+      firstUnseenId.value = null;
+      void scrollToPinnedEdgeAndPin();
+    },
+    { flush: "post" },
+  );
+
   return {
     xmppStatus,
     messages,
