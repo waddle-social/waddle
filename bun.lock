@@ -29,6 +29,7 @@
         "astro": "^6.1.8",
         "emojilib": "^4.0.3",
         "events": "^3.3.0",
+        "keystrok": "^0.1.1",
         "lucide-vue-next": "^1.0.0",
         "nanostores": "^1.3.0",
         "shiki": "^4.0.2",
@@ -1035,6 +1036,8 @@
     "json5": ["json5@2.2.3", "", { "bin": { "json5": "lib/cli.js" } }, "sha512-XmOWe7eyHYH14cLdVPoyg+GOH3rYX++KpzrylJwSW98t3Nk+U8XOl8FWKOgwtzdb8lXGf6zYwDUzeHMWfxasyg=="],
 
     "jsonc-parser": ["jsonc-parser@2.3.1", "", {}, "sha512-H8jvkz1O50L3dMZCsLqiuB2tA7muqbSg1AtGEkN0leAqGjsUzDJir3Zwr02BhqdcITPg3ei3mZ+HjMocAknhhg=="],
+
+    "keystrok": ["keystrok@0.1.1", "", {}, "sha512-B9hOlvVsSZxYZAjJSLcq4MM3ZJ1qWvkaL1VsONpPS+SsreB0np7DOShipft9j0H3oT1GD7VdseaTS9I8k8X+lg=="],
 
     "kleur": ["kleur@4.1.5", "", {}, "sha512-o+NO+8WrRiQEE4/7nwRJhN1HWpVmJm511pBHUxPLtp0BUISzlBplORYSmTclCnJvQq2tKu/sgl3xVpkc7ZWuQQ=="],
 

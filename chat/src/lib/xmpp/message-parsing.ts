@@ -91,7 +91,7 @@ function extractMucUserRealJid(msg: ReceivedMessage): string | undefined {
 export function resolveMessageIds(
   msg: ReceivedMessage,
   preferredStanzaBy?: string,
-): { id: string; wireIds?: string[]; correctionTargetId: string } {
+): { id: string; wireIds?: string[]; correctionTargetId: string; reactionTargetId?: string } {
   const extMsg = ext(msg);
   const originId = extMsg.originId as OriginIdPayload | undefined;
   const stanzaIds = asArray(extMsg.stanzaIds as StanzaIdPayload | StanzaIdPayload[] | undefined);
@@ -105,6 +105,7 @@ export function resolveMessageIds(
       [msg.id, originId?.id, ...stanzaIds.map((candidate) => candidate.id)],
     ),
     correctionTargetId: originId?.id ?? msg.id ?? "",
+    ...(preferredStanzaId ? { reactionTargetId: preferredStanzaId } : {}),
   };
 }
 
@@ -417,6 +418,7 @@ export function dispatchGroupchat(msg: ReceivedMessage, h: GroupchatHandlers): v
     type: msg.body || hasNonBodyMessagePayload(msg) ? "message" : "subject",
   };
   if (messageIds.correctionTargetId) liveMsg.correctionTargetId = messageIds.correctionTargetId;
+  if (messageIds.reactionTargetId) liveMsg.reactionTargetId = messageIds.reactionTargetId;
   const authorRealJid = extractMucUserRealJid(msg);
   if (authorRealJid) liveMsg.authorRealJid = authorRealJid;
   if (messageIds.wireIds?.length) liveMsg.wireIds = messageIds.wireIds;

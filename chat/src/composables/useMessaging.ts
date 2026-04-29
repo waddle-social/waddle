@@ -57,6 +57,7 @@ export function fromLiveMessage(
     isSelf: msg.nick === session.username,
   };
   if (msg.correctionTargetId) tm.correctionTargetId = msg.correctionTargetId;
+  if (msg.reactionTargetId) tm.reactionTargetId = msg.reactionTargetId;
   if (msg.authorRealJid) tm.authorRealJid = msg.authorRealJid;
   if (msg.wireIds && msg.wireIds.length > 0) {
     tm.wireIds = msg.wireIds;
@@ -548,7 +549,7 @@ export function useMessaging(
 
   function applyReaction(messageId: string, nick: string, emojis: string[]) {
     messages.value = messages.value.map((m): TimelineMessage => {
-      if (!matchMessageId(m, messageId)) return m;
+      if (m.reactionTargetId !== messageId) return m;
       const existing: Record<string, string[]> = m.reactions ? { ...m.reactions } : {};
       // Remove this nick from all existing emoji lists
       for (const key of Object.keys(existing)) {
@@ -853,7 +854,7 @@ export function useMessaging(
     }
 
     for (const update of reactionUpdates) {
-      const target = findMessageById(timeline, update.targetId);
+      const target = timeline.find((message) => message.reactionTargetId === update.targetId);
       if (!target) continue;
       const reactions: Record<string, string[]> = target.reactions ? { ...target.reactions } : {};
       for (const emoji of update.emojis) {
@@ -1230,7 +1231,8 @@ export function useMessaging(
 
     // Compute the new reaction set for this user
     const msg = findMessageById(messages.value, messageId);
-    const targetId = msg?.id ?? messageId;
+    const targetId = msg?.reactionTargetId;
+    if (!targetId) return;
     const myNick = session.value.username;
     const currentReactions = msg?.reactions ?? {};
 

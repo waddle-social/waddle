@@ -61,6 +61,7 @@ const props = defineProps<{
   uploadProgress: { uploading: boolean; progress: number; filename: string };
   threadIndex: ThreadIndex;
   xmppClient?: BrowserXmppClient | null;
+  reactionMode?: { selectedMessageId: string | null } | null;
 }>();
 
 const emit = defineEmits<{
@@ -849,6 +850,7 @@ function dayDividerLabel(createdAt: string): string {
             :author-jid="authorJidByNick?.[msg.author]"
             :thread-reply-count="threadIndex.get(msg.id)?.count ?? 0"
             :grouped="isGroupedFollowUp(msg.id)"
+            :reaction-mode-selected="reactionMode?.selectedMessageId === msg.id"
             @edit="(id, body, m, r) => emit('editMessage', id, body, m, r)"
             @retract="(id) => emit('retractMessage', id)"
             @react="(id, emoji) => emit('reactMessage', id, emoji)"
