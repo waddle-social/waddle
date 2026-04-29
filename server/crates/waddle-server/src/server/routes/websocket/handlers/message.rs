@@ -155,7 +155,17 @@ pub(crate) async fn deliver_groupchat_via_room_actor(
                 error = ?error,
                 "Sender not permitted to broadcast to MUC room"
             );
-            return vec![];
+            // XEP-0045 §7.4: a non-occupant attempting to send to a
+            // room MUST receive a `<not-acceptable type='cancel'/>`
+            // reply. Closes the gap PR16 documented (legacy path
+            // silently dropped). Mirrors the typed reply
+            // `protocol::room::OccupancyValidationHandler` emits in
+            // the room handler chain (#229 PR17).
+            return vec![stanza_to_xml(&Stanza::Message(not_occupant_message_error(
+                &incoming,
+                &room_jid,
+                &sender_jid,
+            )))];
         }
     };
     let sender_nick = broadcast.sender_nick;
@@ -309,10 +319,28 @@ pub(crate) async fn deliver_groupchat_via_room_actor(
     let mut dropped_closed = 0u32;
     let mut not_connected = 0u32;
     let intended = local_messages.len();
+    // XEP-0421: stamp the sender's stable occupant-id on every
+    // reflected copy. Closes the gap PR16 documented (legacy fan-out
+    // path stamped occupant-id only on presence joins/leaves, never
+    // on outgoing groupchat reflections). The id is server-derived
+    // from `(sender_bare, room_bare)` via HMAC-SHA256 of the
+    // deployment's occupant-id secret — same user across nicks /
+    // sessions yields the same id; can't be spoofed by clients.
+    let sender_bare_str = sender_jid.to_bare().to_string();
+    let room_jid_str = room_jid.to_string();
+    let sender_occupant_id = waddle_xmpp::xep::xep0421::generate_occupant_id(
+        &sender_bare_str,
+        &room_jid_str,
+        waddle_xmpp::muc::presence::OCCUPANT_ID_SECRET,
+    );
     for mut outbound in local_messages.drain(..) {
         if let Some(ref archive_id) = archive_id {
             add_mam_stanza_id(&mut outbound.message, archive_id, &room_jid.to_string());
         }
+        waddle_xmpp::xep::xep0421::set_occupant_id_on_message(
+            &mut outbound.message,
+            &sender_occupant_id,
+        );
 
         if outbound.to == sender_jid {
             // Echo back to sender — serialize the enriched prototype
@@ -406,6 +434,29 @@ async fn session_is_server_owner(state: &WebSocketState, session: &Option<Sessio
         })
         .await
         .is_ok_and(|response| response.allowed)
+}
+
+/// Build the XEP-0045 §7.4 typed `<not-acceptable type='cancel'/>` reply
+/// for a non-occupant sender. Mirrors the reply
+/// `protocol::room::OccupancyValidationHandler` emits — the chain runs
+/// against an `OccupantSnapshot` list and halts with this exact shape
+/// when `sender_snapshot()` returns `None` (sender is not in the room).
+fn not_occupant_message_error(
+    incoming: &xmpp_parsers::message::Message,
+    room_jid: &BareJid,
+    sender_jid: &FullJid,
+) -> xmpp_parsers::message::Message {
+    error_message(
+        incoming,
+        &jid::Jid::from(room_jid.clone()),
+        &jid::Jid::from(sender_jid.clone()),
+        StanzaError::new(
+            ErrorType::Cancel,
+            DefinedCondition::NotAcceptable,
+            "en",
+            "Only room occupants may send messages to this room.",
+        ),
+    )
 }
 
 fn forbidden_message_error(

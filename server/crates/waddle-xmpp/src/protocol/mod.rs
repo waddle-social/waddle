@@ -40,6 +40,8 @@ mod dispatch_message_l2_tests;
 #[cfg(test)]
 mod dispatch_message_tests;
 #[cfg(test)]
+mod wire_trace_l4_room_tests;
+#[cfg(test)]
 mod wire_trace_l4_tests;
 
 pub use dispatch::{MessageDispatchOutcome, MessageDispatchTermination, StanzaDispatcher};

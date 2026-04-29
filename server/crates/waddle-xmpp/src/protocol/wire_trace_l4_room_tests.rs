@@ -1,0 +1,257 @@
+//! L4 wire-trace tests for the MUC room handler chain (#229 PR17).
+//!
+//! These tests exercise the room chain end-to-end — frozen
+//! [`super::room::RoomContext`], all four handlers in registration
+//! order, deterministic [`super::id_gen::FixedIdGenerator`] — and assert
+//! on the exact event shape the chain produces.
+//!
+//! The chain is the locked Q7 option C order:
+//!
+//! 1. `OccupancyValidationHandler` (XEP-0045 §7.4 + managed-room policy)
+//! 2. `MucCanonicalizeHandler` (XEP-0359 strip+stamp `by=room`,
+//!    XEP-0421 occupant-id, `from='room/nick'`)
+//! 3. `MucArchiveHandler` (XEP-0313 §5.1.3 → `ArchiveGroupchat`)
+//! 4. `ReflectorHandler` (per-occupant `RouteToConnection`)
+
+use super::event::OutboundEvent;
+use super::id_gen::FixedIdGenerator;
+use super::room::{default_room_dispatcher, OccupantSnapshot, RoomContext};
+use crate::types::{Affiliation, Role};
+use crate::xep::xep0359::{extract_stanza_ids, NS_SID};
+use crate::xep::xep0421::{extract_occupant_id_from_message, generate_occupant_id};
+use crate::Stanza;
+use jid::{BareJid, FullJid, Jid};
+use xmpp_parsers::message::{Body, Message, MessageType};
+use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
+
+const TEST_OCCUPANT_ID_SECRET: &[u8] = b"l4-test-occupant-id-secret";
+
+fn full(s: &str) -> FullJid {
+    s.parse().expect("valid full jid")
+}
+fn bare(s: &str) -> BareJid {
+    s.parse().expect("valid bare jid")
+}
+
+fn occ(full_jid: FullJid, nick: &str) -> OccupantSnapshot {
+    OccupantSnapshot {
+        full_jid,
+        nick: nick.to_string(),
+        affiliation: Affiliation::Member,
+        role: Role::Participant,
+    }
+}
+
+fn groupchat(room: &BareJid, sender: &FullJid, body: &str) -> Message {
+    let mut m = Message::new(Some(Jid::from(room.clone())));
+    m.from = Some(Jid::from(sender.clone()));
+    m.type_ = MessageType::Groupchat;
+    m.id = Some("client-msg-id".to_string());
+    m.bodies.insert(String::new(), Body(body.to_string()));
+    m
+}
+
+#[test]
+fn xep_0045_groupchat_dispatches_through_handler_chain_with_canonical_stamps() {
+    // Two occupants in `team@conf.example.com`: alice (sender) and bob.
+    // Alice sends `<message type='groupchat' to='room' body='hi'>`.
+    //
+    // Run the full room chain. Assert on:
+    //   - Each occupant gets a `RouteToConnection` (XEP-0045 §7.2.13
+    //     fan-out includes sender for echo).
+    //   - Each routed copy carries:
+    //       - `from='team@conf.example.com/alice-nick'` (XEP-0045)
+    //       - `<stanza-id by='team@conf.example.com'>` (XEP-0359)
+    //       - `<occupant-id>` matching the deterministic HMAC for
+    //         (alice@example.com, team@conf.example.com)
+    //   - `ArchiveGroupchat` emitted with `room=team@conf.example.com`
+    //     and the sender's full JID.
+    let room = bare("team@conf.example.com");
+    let alice = full("alice@example.com/web");
+    let bob = full("bob@example.com/desk");
+
+    let occupants = vec![
+        occ(alice.clone(), "alice-nick"),
+        occ(bob.clone(), "bob-nick"),
+    ];
+    let id_gen = FixedIdGenerator("room-archive-id-1".to_string());
+    let ctx = RoomContext {
+        room: &room,
+        sender_full: &alice,
+        occupants: &occupants,
+        managed_room_forbidden: false,
+        id_gen: &id_gen,
+        occupant_id_secret: TEST_OCCUPANT_ID_SECRET,
+    };
+
+    let mut msg = groupchat(&room, &alice, "hi everyone");
+    let dispatcher = default_room_dispatcher();
+    let outcome = dispatcher.dispatch(&mut msg, &ctx);
+
+    assert!(!outcome.halted, "occupant sender must not halt");
+
+    // Archive event present.
+    let archive_events: Vec<_> = outcome
+        .events
+        .iter()
+        .filter_map(|e| match e {
+            OutboundEvent::ArchiveGroupchat { room, sender, .. } => {
+                Some((room.clone(), sender.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(archive_events.len(), 1, "exactly one archive write");
+    assert_eq!(archive_events[0].0, room);
+    assert_eq!(archive_events[0].1, alice);
+
+    // Fan-out targets — both alice and bob in occupant order.
+    let routes: Vec<&Message> = outcome
+        .events
+        .iter()
+        .filter_map(|e| match e {
+            OutboundEvent::RouteToConnection { stanza, .. } => match stanza.as_ref() {
+                Stanza::Message(m) => Some(m),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    assert_eq!(routes.len(), 2, "fan-out to both occupants");
+
+    // Every reflected copy carries the canonical stamps.
+    let expected_occupant_id = generate_occupant_id(
+        &alice.to_bare().to_string(),
+        &room.to_string(),
+        TEST_OCCUPANT_ID_SECRET,
+    );
+    for route in &routes {
+        // from='room/alice-nick'
+        assert_eq!(
+            route.from.as_ref().map(|j| j.to_string()),
+            Some("team@conf.example.com/alice-nick".to_string()),
+            "reflected copy carries XEP-0045 `from='room/nick'`"
+        );
+        // `<stanza-id by='room' id='room-archive-id-1'>`
+        let stamps = extract_stanza_ids(route);
+        let room_stamp = stamps
+            .iter()
+            .find(|s| s.by == "team@conf.example.com")
+            .expect("room-stamped stanza-id present");
+        assert_eq!(room_stamp.id, "room-archive-id-1");
+        // `<occupant-id id='<HMAC>'>`
+        let occupant_id = extract_occupant_id_from_message(route)
+            .expect("occupant-id stamped on every reflection");
+        assert_eq!(occupant_id, expected_occupant_id);
+    }
+}
+
+#[test]
+fn xep_0045_non_occupant_halts_chain_with_typed_not_acceptable() {
+    // Alice is not in the room — `OccupancyValidationHandler` halts the
+    // chain with the typed XEP-0045 §7.4 reply. Assert: no
+    // `ArchiveGroupchat`, no `RouteToConnection`, exactly one
+    // `SendStanza` carrying the typed error.
+    let room = bare("team@conf.example.com");
+    let alice = full("alice@example.com/web");
+
+    let id_gen = FixedIdGenerator("ignored".to_string());
+    let ctx = RoomContext {
+        room: &room,
+        sender_full: &alice,
+        occupants: &[], // empty — alice is NOT a member
+        managed_room_forbidden: false,
+        id_gen: &id_gen,
+        occupant_id_secret: TEST_OCCUPANT_ID_SECRET,
+    };
+
+    let mut msg = groupchat(&room, &alice, "intruder");
+    let outcome = default_room_dispatcher().dispatch(&mut msg, &ctx);
+    assert!(outcome.halted, "non-occupant must halt the chain");
+
+    let archive = outcome
+        .events
+        .iter()
+        .filter(|e| matches!(e, OutboundEvent::ArchiveGroupchat { .. }))
+        .count();
+    let routes = outcome
+        .events
+        .iter()
+        .filter(|e| matches!(e, OutboundEvent::RouteToConnection { .. }))
+        .count();
+    assert_eq!(archive, 0, "halted chain does not archive");
+    assert_eq!(routes, 0, "halted chain does not reflect");
+
+    let send_stanzas: Vec<&Message> = outcome
+        .events
+        .iter()
+        .filter_map(|e| match e {
+            OutboundEvent::SendStanza(stanza) => match stanza.as_ref() {
+                Stanza::Message(m) => Some(m),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    assert_eq!(send_stanzas.len(), 1, "exactly one error reply");
+    assert_eq!(send_stanzas[0].type_, MessageType::Error);
+    let err_elem = send_stanzas[0]
+        .payloads
+        .iter()
+        .find(|p| p.name() == "error")
+        .expect("error payload");
+    let parsed = StanzaError::try_from(err_elem.clone()).expect("typed StanzaError");
+    assert_eq!(parsed.type_, ErrorType::Cancel);
+    assert_eq!(parsed.defined_condition, DefinedCondition::NotAcceptable);
+}
+
+#[test]
+fn xep_0359_room_chain_strips_client_spoofed_room_stanza_id() {
+    // Q8(a) regression: client tries to spoof `<stanza-id by='room'/>`
+    // — the canonicalize handler strips the spoof under the room's
+    // typed BareJid equality and stamps the genuine value.
+    let room = bare("team@conf.example.com");
+    let alice = full("alice@example.com/web");
+    let occupants = vec![occ(alice.clone(), "alice-nick")];
+    let id_gen = FixedIdGenerator("genuine-room-id".to_string());
+    let ctx = RoomContext {
+        room: &room,
+        sender_full: &alice,
+        occupants: &occupants,
+        managed_room_forbidden: false,
+        id_gen: &id_gen,
+        occupant_id_secret: TEST_OCCUPANT_ID_SECRET,
+    };
+
+    let mut msg = groupchat(&room, &alice, "spoof attempt");
+    msg.payloads
+        .push(crate::xep::xep0359::build_stanza_id_element(
+            "client-claim",
+            "team@conf.example.com",
+        ));
+
+    let outcome = default_room_dispatcher().dispatch(&mut msg, &ctx);
+    assert!(!outcome.halted);
+
+    // Pull the first reflection and inspect its room-stamped stanza-id.
+    let reflected = outcome
+        .events
+        .iter()
+        .find_map(|e| match e {
+            OutboundEvent::RouteToConnection { stanza, .. } => match stanza.as_ref() {
+                Stanza::Message(m) => Some(m),
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("at least one reflection");
+    // Exactly ONE `<stanza-id by='room'/>`, with the genuine id.
+    let room_stamps: Vec<_> = reflected
+        .payloads
+        .iter()
+        .filter(|p| p.name() == "stanza-id" && p.ns() == NS_SID)
+        .filter(|p| p.attr("by") == Some("team@conf.example.com"))
+        .collect();
+    assert_eq!(room_stamps.len(), 1, "spoofed stamp stripped");
+    assert_eq!(room_stamps[0].attr("id"), Some("genuine-room-id"));
+}

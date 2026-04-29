@@ -14,7 +14,12 @@ use xmpp_parsers::presence::{Presence, Type as PresenceType};
 use crate::types::{Affiliation, Role};
 use crate::XmppError;
 
-const OCCUPANT_ID_SECRET: &[u8] = b"waddle-xmpp-occupant-id-v1";
+/// Server-side secret used to derive the XEP-0421 stable occupant-id
+/// HMAC. Shared between the presence-side stamping (this module) and
+/// the message-side groupchat reflection stamping (#229 PR17 room
+/// chain) so the same user resolves to the same occupant-id across
+/// presence joins/leaves AND outgoing groupchat messages.
+pub const OCCUPANT_ID_SECRET: &[u8] = b"waddle-xmpp-occupant-id-v1";
 
 /// Namespace for MUC user protocol.
 pub const NS_MUC_USER: &str = "http://jabber.org/protocol/muc#user";
