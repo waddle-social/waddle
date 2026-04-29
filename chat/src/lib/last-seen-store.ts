@@ -22,16 +22,6 @@ function storage(): Storage | null {
   }
 }
 
-export function getLastSeen(key: string): string | null {
-  const s = storage();
-  if (!s) return null;
-  try {
-    return s.getItem(key);
-  } catch {
-    return null;
-  }
-}
-
 export function setLastSeen(key: string, messageId: string): void {
   const s = storage();
   if (!s) return;

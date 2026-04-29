@@ -24,6 +24,7 @@ import HomeDashboard from "@/components/chat/HomeDashboard.vue";
 import DmPanel from "@/components/chat/DmPanel.vue";
 import ContentArea from "@/components/chat/ContentArea.vue";
 import ThreadPanel from "@/components/chat/ThreadPanel.vue";
+import type { ScrollDirectionMode } from "@/lib/scroll-direction";
 import SettingsMobileHeader from "@/components/chat/SettingsMobileHeader.vue";
 import ProfilePanel from "@/components/chat/ProfilePanel.vue";
 import UserSettingsPage from "@/components/chat/UserSettingsPage.vue";
@@ -92,21 +93,30 @@ const dmMessaging = useDmMessaging(
   ui.clearActionError,
 );
 
-const contentAreaRef = ref<ComponentPublicInstance & { messagesContainer: HTMLDivElement | null } | null>(null);
+type ContentAreaHandle = ComponentPublicInstance & {
+  messagesContainer: HTMLDivElement | null;
+  scrollToPinnedEdge: (mode: ScrollDirectionMode) => Promise<boolean>;
+};
+const contentAreaRef = ref<ContentAreaHandle | null>(null);
 const setContentAreaRef = (
-  instance: (ComponentPublicInstance & { messagesContainer: HTMLDivElement | null }) | null,
+  instance: ContentAreaHandle | null,
 ) => {
   contentAreaRef.value = instance;
 };
 
 watchEffect(() => {
   const timeline = contentAreaRef.value?.messagesContainer ?? null;
+  const edgeScroller = contentAreaRef.value?.scrollToPinnedEdge ?? null;
   if (ui.sidebarMode.value === "dms") {
     dmMessaging.timelineEl.value = timeline;
+    dmMessaging.timelineEdgeScroller.value = edgeScroller;
     messaging.timelineEl.value = null;
+    messaging.timelineEdgeScroller.value = null;
   } else {
     messaging.timelineEl.value = timeline;
+    messaging.timelineEdgeScroller.value = edgeScroller;
     dmMessaging.timelineEl.value = null;
+    dmMessaging.timelineEdgeScroller.value = null;
   }
 });
 
