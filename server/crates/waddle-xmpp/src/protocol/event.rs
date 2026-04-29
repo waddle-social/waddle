@@ -365,10 +365,16 @@ pub enum OutboundEvent {
     /// Persist a groupchat message to the MAM archive.
     ///
     /// The interpreter's MAM storage layer owns ID generation and indexing.
+    /// `sender_nickname_generation` is the per-XEP-0308 §3 nickname
+    /// generation captured at dispatch start (carried through the
+    /// chain via `RoomContext`) so the archive arm can stamp the
+    /// archive row without a second `RoomActor::GetRoomSnapshot`
+    /// round-trip (Copilot review on PR #279).
     ArchiveGroupchat {
         room: BareJid,
         sender: FullJid,
         message: Box<Message>,
+        sender_nickname_generation: u64,
     },
     /// Persist a one-to-one direct message to the MAM archive.
     ///

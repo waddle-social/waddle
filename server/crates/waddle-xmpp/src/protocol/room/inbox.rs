@@ -146,8 +146,10 @@ mod tests {
             sender_full,
             occupants,
             managed_room_forbidden: false,
+            room_moderated: false,
             id_gen: &id_gen,
             occupant_id_secret: b"test-secret",
+            sender_nickname_generation: 0,
         };
         match MucInboxHandler.handle(msg, &ctx) {
             RoomHandlerOutcome::Continue(events) => events,

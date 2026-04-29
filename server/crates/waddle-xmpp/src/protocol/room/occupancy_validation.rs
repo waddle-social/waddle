@@ -23,6 +23,7 @@
 use super::super::handlers::errors::{message_error_reply, send_message_error};
 use super::context::RoomContext;
 use super::traits::{RoomHandler, RoomHandlerOutcome};
+use crate::types::Role;
 use jid::Jid;
 use xmpp_parsers::message::{Message, MessageType};
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
@@ -47,8 +48,18 @@ impl RoomHandler for OccupancyValidationHandler {
         }
 
         // XEP-0045 §7.4: non-occupants cannot send to the room.
-        if ctx.sender_snapshot().is_none() {
+        let Some(sender) = ctx.sender_snapshot() else {
             let reply = not_acceptable_reply(message, ctx);
+            return RoomHandlerOutcome::Halt(vec![send_message_error(reply)]);
+        };
+
+        // XEP-0045 §7.5: visitors may not send messages in moderated
+        // rooms. The legacy `RoomActor::BuildGroupchatBroadcast` path
+        // enforced this via `RoomActorError::VisitorMayNotSpeak`; the
+        // chain mirrors it here so the cutover doesn't drop the
+        // conformance gate (Copilot review on PR #279).
+        if ctx.room_moderated && sender.role == Role::Visitor {
+            let reply = visitor_forbidden_reply(message, ctx);
             return RoomHandlerOutcome::Halt(vec![send_message_error(reply)]);
         }
 
@@ -95,6 +106,24 @@ fn forbidden_reply(incoming: &Message, ctx: &RoomContext<'_>) -> Message {
     reply
 }
 
+/// Build the XEP-0045 §7.5 `<forbidden type='auth'/>` reply for a
+/// visitor attempting to send a message to a moderated room.
+fn visitor_forbidden_reply(incoming: &Message, ctx: &RoomContext<'_>) -> Message {
+    let mut reply = message_error_reply(
+        incoming,
+        StanzaError::new(
+            ErrorType::Auth,
+            DefinedCondition::Forbidden,
+            "en",
+            "Visitors may not send messages to this moderated room.",
+        ),
+    );
+    reply.from = Some(Jid::from(ctx.room.clone()));
+    reply.to = Some(Jid::from(ctx.sender_full.clone()));
+    reply.type_ = MessageType::Error;
+    reply
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -128,14 +157,27 @@ mod tests {
         managed_forbidden: bool,
         msg: &mut Message,
     ) -> RoomHandlerOutcome {
+        run_with_moderation(room, sender, occupants, managed_forbidden, false, msg)
+    }
+
+    fn run_with_moderation(
+        room: &BareJid,
+        sender: &FullJid,
+        occupants: Vec<OccupantSnapshot>,
+        managed_forbidden: bool,
+        moderated: bool,
+        msg: &mut Message,
+    ) -> RoomHandlerOutcome {
         let id_gen = FixedIdGenerator("fresh".to_string());
         let ctx = RoomContext {
             room,
             sender_full: sender,
             occupants: &occupants,
             managed_room_forbidden: managed_forbidden,
+            room_moderated: moderated,
             id_gen: &id_gen,
             occupant_id_secret: b"test-secret",
+            sender_nickname_generation: 0,
         };
         OccupancyValidationHandler.handle(msg, &ctx)
     }
@@ -199,6 +241,71 @@ mod tests {
         match outcome {
             RoomHandlerOutcome::Continue(events) => assert!(events.is_empty()),
             RoomHandlerOutcome::Halt(_) => panic!("occupant must pass through"),
+        }
+    }
+
+    #[test]
+    fn xep_0045_visitor_in_moderated_room_receives_forbidden_error() {
+        // XEP-0045 §7.5: visitors may not send messages in moderated
+        // rooms. Sender IS an occupant (passes §7.4) but role=Visitor
+        // and the room is moderated → typed `<forbidden type='auth'/>`.
+        let room = bare("moderated@conf.example.com");
+        let sender = full("alice@example.com/web");
+        let occupants = vec![OccupantSnapshot {
+            full_jid: sender.clone(),
+            nick: "alice".to_string(),
+            affiliation: Affiliation::None,
+            role: Role::Visitor,
+        }];
+        let mut msg = groupchat_to(&room, &sender, "hi (as visitor)");
+        let outcome = run_with_moderation(&room, &sender, occupants, false, true, &mut msg);
+        let reply = extract_error(&outcome);
+        let err_elem = reply
+            .payloads
+            .iter()
+            .find(|p| p.name() == "error")
+            .expect("error payload");
+        let parsed = StanzaError::try_from(err_elem.clone()).expect("typed StanzaError");
+        assert_eq!(parsed.type_, ErrorType::Auth);
+        assert_eq!(parsed.defined_condition, DefinedCondition::Forbidden);
+    }
+
+    #[test]
+    fn xep_0045_participant_in_moderated_room_passes_through() {
+        // Same room moderated=true, but sender is a Participant (not
+        // Visitor) — must pass through without error.
+        let room = bare("moderated@conf.example.com");
+        let sender = full("alice@example.com/web");
+        let occupants = vec![OccupantSnapshot {
+            full_jid: sender.clone(),
+            nick: "alice".to_string(),
+            affiliation: Affiliation::Member,
+            role: Role::Participant,
+        }];
+        let mut msg = groupchat_to(&room, &sender, "hi");
+        let outcome = run_with_moderation(&room, &sender, occupants, false, true, &mut msg);
+        match outcome {
+            RoomHandlerOutcome::Continue(events) => assert!(events.is_empty()),
+            RoomHandlerOutcome::Halt(_) => panic!("participant in moderated room must pass"),
+        }
+    }
+
+    #[test]
+    fn xep_0045_visitor_in_unmoderated_room_passes_through() {
+        // moderated=false → visitors may speak.
+        let room = bare("open@conf.example.com");
+        let sender = full("alice@example.com/web");
+        let occupants = vec![OccupantSnapshot {
+            full_jid: sender.clone(),
+            nick: "alice".to_string(),
+            affiliation: Affiliation::None,
+            role: Role::Visitor,
+        }];
+        let mut msg = groupchat_to(&room, &sender, "hi");
+        let outcome = run_with_moderation(&room, &sender, occupants, false, false, &mut msg);
+        match outcome {
+            RoomHandlerOutcome::Continue(events) => assert!(events.is_empty()),
+            RoomHandlerOutcome::Halt(_) => panic!("visitor in unmoderated room must pass"),
         }
     }
 

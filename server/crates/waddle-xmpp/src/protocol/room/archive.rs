@@ -51,6 +51,7 @@ impl RoomHandler for MucArchiveHandler {
                 room: ctx.room.clone(),
                 sender: ctx.sender_full.clone(),
                 message: Box::new(message.clone()),
+                sender_nickname_generation: ctx.sender_nickname_generation,
             });
         }
         if let Some(RetractionKind::Request(retraction)) = extract_retraction_from_message(message)
@@ -123,8 +124,10 @@ mod tests {
             sender_full: sender,
             occupants: &occupants,
             managed_room_forbidden: false,
+            room_moderated: false,
             id_gen: &id_gen,
             occupant_id_secret: b"test-secret",
+            sender_nickname_generation: 0,
         };
         match MucArchiveHandler.handle(msg, &ctx) {
             RoomHandlerOutcome::Continue(e) => e,

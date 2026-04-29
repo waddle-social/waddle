@@ -112,8 +112,10 @@ mod tests {
             sender_full,
             occupants,
             managed_room_forbidden: false,
+            room_moderated: false,
             id_gen: gen,
             occupant_id_secret: b"test-secret",
+            sender_nickname_generation: 0,
         }
     }
 

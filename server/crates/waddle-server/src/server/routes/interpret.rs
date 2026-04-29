@@ -766,6 +766,7 @@ async fn interpret_with_depth(
                 room,
                 sender,
                 message,
+                sender_nickname_generation,
             } => {
                 let Some(mam_storage) = deps.mam_storage else {
                     debug!(
@@ -781,13 +782,15 @@ async fn interpret_with_depth(
                 // `archive_groupchat_message` projection: derive a
                 // fresh archive id, stamp the canonical
                 // `<stanza-id by='room'/>` for replay, then persist.
-                let nickname_generation =
-                    lookup_sender_nickname_generation(deps, &room, &sender).await;
+                // `sender_nickname_generation` rides on the event so
+                // we don't pay a second `RoomActor::GetRoomSnapshot`
+                // round-trip per archive write (Copilot review on
+                // PR #279).
                 let archive_id = match archive_groupchat_message(
                     mam_storage,
                     &room,
                     &message,
-                    nickname_generation,
+                    sender_nickname_generation,
                 )
                 .await
                 {
@@ -1394,13 +1397,66 @@ async fn dispatch_to_room(
         }
     };
 
-    // 3. Rich-target validation against the room archive. The chain
-    //    runs after this so a malformed / unauthorized correction or
-    //    retraction surfaces with the correct typed reply. Archive
-    //    rows store `from` in the XEP-0045 §7.2.13 `room/nick` form
-    //    (the chain stamps it AFTER validation), so derive that view
-    //    here for the same-sender comparison rather than relying on
-    //    `prototype.from` (alice's real full JID).
+    // 3. Managed-room owner override (announcements room admits
+    //    server owners only). Pre-derived synchronously here so the
+    //    chain's `OccupancyValidationHandler` can read
+    //    `managed_room_forbidden` without an async permission call.
+    let managed_room_forbidden =
+        if parse_managed_room_jid(&room_jid).as_deref() == Some("announcements") {
+            !session_is_server_owner(state, deps.authenticated_session).await
+        } else {
+            false
+        };
+
+    // 4. Run the chain's occupancy / managed-room gate FIRST, BEFORE
+    //    rich-target validation (Copilot review on PR #279). Otherwise
+    //    a non-occupant or managed-room-forbidden sender would receive
+    //    rich-target errors (potentially leaking archive-derived info
+    //    like `<item-not-found/>`) instead of the required XEP-0045
+    //    §7.4 `<not-acceptable/>` / managed-room `<forbidden/>` reply.
+    //    The gate handler (`OccupancyValidationHandler`) is sync and
+    //    pure — calling it directly here is equivalent to running a
+    //    one-handler dispatcher, with no extra allocation.
+    let occupants: Vec<OccupantSnapshot> = snapshot
+        .occupants
+        .iter()
+        .map(|o| OccupantSnapshot {
+            full_jid: o.full_jid.clone(),
+            nick: o.nick.clone(),
+            affiliation: o.affiliation,
+            role: o.role,
+        })
+        .collect();
+    let id_gen = UuidV4Generator;
+    let gate_ctx = RoomContext {
+        room: &room_jid,
+        sender_full: &sender_full,
+        occupants: &occupants,
+        managed_room_forbidden,
+        room_moderated: snapshot.config.moderated,
+        id_gen: &id_gen,
+        occupant_id_secret: OCCUPANT_ID_SECRET,
+        sender_nickname_generation: snapshot.sender_nickname_generation.unwrap_or(0),
+    };
+    let mut gate_working = prototype.clone();
+    use waddle_xmpp::protocol::room::RoomHandler;
+    let gate_outcome =
+        waddle_xmpp::protocol::room::occupancy_validation::OccupancyValidationHandler
+            .handle(&mut gate_working, &gate_ctx);
+    if let waddle_xmpp::protocol::room::RoomHandlerOutcome::Halt(gate_events) = gate_outcome {
+        let nested = Box::pin(interpret_with_depth(gate_events, deps, recursion_depth)).await;
+        outcome.frames.extend(nested.frames);
+        return outcome;
+    }
+
+    // 5. Rich-target validation against the room archive. Runs only
+    //    after the gate has admitted the sender, so non-occupants /
+    //    managed-room-forbidden senders never see archive-derived
+    //    error conditions. Archive rows store `from` in the XEP-0045
+    //    §7.2.13 `room/nick` form (the chain stamps it AFTER
+    //    validation), so derive that view here for the same-sender
+    //    comparison rather than relying on `prototype.from` (alice's
+    //    real full JID).
     let sender_room_nick_jid = snapshot
         .sender_nick
         .as_deref()
@@ -1429,36 +1485,28 @@ async fn dispatch_to_room(
         return outcome;
     }
 
-    // 4. Managed-room owner override (announcements room admits
-    //    server owners only). The chain's
-    //    `OccupancyValidationHandler` reads `managed_room_forbidden`
-    //    pre-derived here.
-    let managed_room_forbidden =
-        if parse_managed_room_jid(&room_jid).as_deref() == Some("announcements") {
-            !session_is_server_owner(state, deps.authenticated_session).await
-        } else {
-            false
-        };
-
-    // 5. Build context + run chain.
-    let occupants: Vec<OccupantSnapshot> = snapshot
-        .occupants
-        .iter()
-        .map(|o| OccupantSnapshot {
-            full_jid: o.full_jid.clone(),
-            nick: o.nick.clone(),
-            affiliation: o.affiliation,
-            role: o.role,
-        })
-        .collect();
-    let id_gen = UuidV4Generator;
+    // 6. Build context + run the rest of the chain (canonicalize,
+    //    archive, inbox, reflect). Reuse the `gate_ctx` config — same
+    //    snapshot, same managed-room flag, same id-gen.
     let ctx = RoomContext {
         room: &room_jid,
         sender_full: &sender_full,
         occupants: &occupants,
         managed_room_forbidden,
+        // XEP-0045 §7.5 (Copilot review on PR #279): the chain's
+        // `OccupancyValidationHandler` enforces visitor-may-not-speak
+        // against this flag + the sender's snapshot role, replacing
+        // the legacy `RoomActor::BuildGroupchatBroadcast` check that
+        // previously emitted `RoomActorError::VisitorMayNotSpeak`.
+        room_moderated: snapshot.config.moderated,
         id_gen: &id_gen,
         occupant_id_secret: OCCUPANT_ID_SECRET,
+        // Carry the sender's nickname-generation through the chain
+        // so `MucArchiveHandler` can stamp it directly on
+        // `OutboundEvent::ArchiveGroupchat`. Avoids a second
+        // `RoomActor::GetRoomSnapshot` round-trip per groupchat
+        // archive write (Copilot review on PR #279).
+        sender_nickname_generation: snapshot.sender_nickname_generation.unwrap_or(0),
     };
     let mut working = prototype;
     let dispatch_outcome = default_room_dispatcher().dispatch(&mut working, &ctx);
@@ -1757,41 +1805,6 @@ impl ToElementString for waddle_xmpp::Stanza {
 // -----------------------------------------------------------------------
 // MUC cutover helpers (#229 PR18)
 // -----------------------------------------------------------------------
-
-/// Resolve the sender's per-XEP-0308 §3 occupancy generation by asking
-/// the per-room actor. The chain handler emits
-/// [`OutboundEvent::ArchiveGroupchat`] without the generation, so the
-/// archive arm asks the actor in a follow-up round-trip just before
-/// persisting. Mirrors the legacy
-/// `archive_groupchat_message(..., sender_nickname_generation)` shape.
-async fn lookup_sender_nickname_generation(
-    deps: &Deps<'_>,
-    room: &BareJid,
-    sender_full: &FullJid,
-) -> u64 {
-    let Some(room_registry) = deps.room_registry else {
-        return 0;
-    };
-    let actor = match room_registry
-        .ask(GetRoom {
-            room_jid: room.clone(),
-        })
-        .await
-    {
-        Ok(Some(actor)) => actor,
-        _ => return 0,
-    };
-    let snapshot = match actor
-        .ask(GetRoomSnapshot {
-            sender_jid: sender_full.clone(),
-        })
-        .await
-    {
-        Ok(snapshot) => snapshot,
-        Err(_) => return 0,
-    };
-    snapshot.sender_nickname_generation.unwrap_or(0)
-}
 
 /// Validate XEP-0308 corrections / XEP-0424 retractions against the
 /// room archive. Mirrors the legacy `validate_rich_message_targets`
