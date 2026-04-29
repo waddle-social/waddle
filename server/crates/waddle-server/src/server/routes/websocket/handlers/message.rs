@@ -11,7 +11,7 @@ use waddle_xmpp::{
         ArchivedReference, ArchivedReply, ArchivedRetraction, ArchivedRichMessage,
         ArchivedRichPayload, RichMessageId, RichText, STANZA_ID_NS,
     },
-    muc::room_actor::{BuildGroupchatBroadcast, GetNicknameGeneration, RoomActor},
+    muc::room_actor::{BuildGroupchatBroadcast, GetNicknameGeneration, RoomActor, RoomActorError},
     parser::message_to_string,
     protocol::{frame::InboundFrame, InboundEvent, XmppStateMachine},
     registry::BroadcastOutcome,
@@ -148,14 +148,49 @@ pub(crate) async fn deliver_groupchat_via_room_actor(
         .await
     {
         Ok(broadcast) => broadcast,
+        // The room actor's typed `BuildGroupchatBroadcast` errors map
+        // 1:1 to wire stanza errors (Codex P2 + Qodo bug #3 review on
+        // PR #277): only genuine non-occupant senders see XEP-0045
+        // §7.4 `<not-acceptable/>`; visitors in moderated rooms see
+        // §7.5 `<forbidden/>`; everything else (broadcast prep
+        // failures, unrelated `RoomActorError` variants) is a
+        // server-side fault and must surface as
+        // `<internal-server-error/>` so clients don't get a
+        // misleading "you're not in the room" reply during a
+        // transient issue. Transport-level kameo errors (mailbox
+        // closed, etc.) also fall to internal-server-error.
+        Err(kameo::error::SendError::HandlerError(RoomActorError::SenderNotOccupant(_))) => {
+            warn!(
+                sender = %sender_jid,
+                room = %room_jid,
+                "XEP-0045 §7.4: sender is not an occupant of the room"
+            );
+            return vec![stanza_to_xml(&Stanza::Message(not_occupant_message_error(
+                &incoming,
+                &room_jid,
+                &sender_jid,
+            )))];
+        }
+        Err(kameo::error::SendError::HandlerError(RoomActorError::VisitorMayNotSpeak(_))) => {
+            warn!(
+                sender = %sender_jid,
+                room = %room_jid,
+                "XEP-0045 §7.5: visitor may not speak in moderated room"
+            );
+            return vec![stanza_to_xml(&Stanza::Message(
+                visitor_may_not_speak_message_error(&incoming, &room_jid, &sender_jid),
+            ))];
+        }
         Err(error) => {
             warn!(
                 sender = %sender_jid,
                 room = %room_jid,
                 error = ?error,
-                "Sender not permitted to broadcast to MUC room"
+                "Groupchat broadcast preparation failed; replying with internal-server-error"
             );
-            return vec![];
+            return vec![stanza_to_xml(&Stanza::Message(
+                internal_server_error_message(&incoming, &room_jid, &sender_jid),
+            ))];
         }
     };
     let sender_nick = broadcast.sender_nick;
@@ -309,10 +344,31 @@ pub(crate) async fn deliver_groupchat_via_room_actor(
     let mut dropped_closed = 0u32;
     let mut not_connected = 0u32;
     let intended = local_messages.len();
+    // XEP-0421: stamp the sender's stable occupant-id on every
+    // reflected copy. Closes the gap PR16 documented (legacy fan-out
+    // path stamped occupant-id only on presence joins/leaves, never
+    // on outgoing groupchat reflections). The id is server-derived
+    // from `(sender_bare, room_bare)` via HMAC-SHA256 keyed by the
+    // process-wide `OCCUPANT_ID_SECRET` constant — same user across
+    // nicks / sessions yields the same id; can't be spoofed by
+    // clients. The constant is shared with `presence.rs` so MUC
+    // presence and outgoing groupchat reflections produce matching
+    // ids; a future change can thread a per-deployment configured
+    // secret through `WebSocketState` if rotation / per-tenant
+    // isolation becomes a requirement (Copilot review on PR #277).
+    let sender_occupant_id = waddle_xmpp::xep::xep0421::generate_occupant_id(
+        &sender_jid.to_bare(),
+        &room_jid,
+        waddle_xmpp::muc::presence::OCCUPANT_ID_SECRET,
+    );
     for mut outbound in local_messages.drain(..) {
         if let Some(ref archive_id) = archive_id {
             add_mam_stanza_id(&mut outbound.message, archive_id, &room_jid.to_string());
         }
+        waddle_xmpp::xep::xep0421::set_occupant_id_on_message(
+            &mut outbound.message,
+            &sender_occupant_id,
+        );
 
         if outbound.to == sender_jid {
             // Echo back to sender — serialize the enriched prototype
@@ -408,6 +464,29 @@ async fn session_is_server_owner(state: &WebSocketState, session: &Option<Sessio
         .is_ok_and(|response| response.allowed)
 }
 
+/// Build the XEP-0045 §7.4 typed `<not-acceptable type='cancel'/>` reply
+/// for a non-occupant sender. Mirrors the reply
+/// `protocol::room::OccupancyValidationHandler` emits — the chain runs
+/// against an `OccupantSnapshot` list and halts with this exact shape
+/// when `sender_snapshot()` returns `None` (sender is not in the room).
+fn not_occupant_message_error(
+    incoming: &xmpp_parsers::message::Message,
+    room_jid: &BareJid,
+    sender_jid: &FullJid,
+) -> xmpp_parsers::message::Message {
+    error_message(
+        incoming,
+        &jid::Jid::from(room_jid.clone()),
+        &jid::Jid::from(sender_jid.clone()),
+        StanzaError::new(
+            ErrorType::Cancel,
+            DefinedCondition::NotAcceptable,
+            "en",
+            "Only room occupants may send messages to this room.",
+        ),
+    )
+}
+
 fn forbidden_message_error(
     incoming: &xmpp_parsers::message::Message,
     room_jid: &BareJid,
@@ -422,6 +501,56 @@ fn forbidden_message_error(
             DefinedCondition::Forbidden,
             "en",
             "Sender is not permitted to address this resource.",
+        ),
+    )
+}
+
+/// XEP-0045 §7.5 typed reply for a visitor in a moderated room.
+/// The sender IS an occupant but their role is `visitor` and the
+/// room's `moderated` flag forbids visitors from sending messages
+/// to the room. Maps `RoomActorError::VisitorMayNotSpeak` to the
+/// wire reply `<error type='auth'><forbidden/></error>`.
+fn visitor_may_not_speak_message_error(
+    incoming: &xmpp_parsers::message::Message,
+    room_jid: &BareJid,
+    sender_jid: &FullJid,
+) -> xmpp_parsers::message::Message {
+    error_message(
+        incoming,
+        &jid::Jid::from(room_jid.clone()),
+        &jid::Jid::from(sender_jid.clone()),
+        StanzaError::new(
+            ErrorType::Auth,
+            DefinedCondition::Forbidden,
+            "en",
+            "Visitors may not send messages to this moderated room.",
+        ),
+    )
+}
+
+/// Typed reply for transient server-side broadcast failures (room
+/// actor mailbox closed, internal broadcast preparation error, etc.).
+/// Maps to the wire reply
+/// `<error type='wait'><internal-server-error/></error>` per
+/// RFC 6120 §8.3.2's guidance for transient server faults — the
+/// client may retry. Mirrors `internal_server_error_for_lookup` and
+/// other repo-wide internal-server-error sites (Copilot review on
+/// PR #277). Distinct from `<not-acceptable/>` so clients can tell
+/// "your message is malformed" from "the server hiccuped".
+fn internal_server_error_message(
+    incoming: &xmpp_parsers::message::Message,
+    room_jid: &BareJid,
+    sender_jid: &FullJid,
+) -> xmpp_parsers::message::Message {
+    error_message(
+        incoming,
+        &jid::Jid::from(room_jid.clone()),
+        &jid::Jid::from(sender_jid.clone()),
+        StanzaError::new(
+            ErrorType::Wait,
+            DefinedCondition::InternalServerError,
+            "en",
+            "Internal server error while delivering groupchat message.",
         ),
     )
 }

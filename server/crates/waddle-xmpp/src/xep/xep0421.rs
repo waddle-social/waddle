@@ -89,18 +89,24 @@ impl OccupantIdCarrier for Presence {
 
 /// Generate a stable occupant ID from a user's bare JID and room JID.
 ///
-/// Uses HMAC-SHA-256 with the room JID as key and user JID as message,
-/// producing a hex-encoded opaque identifier. The same inputs always
-/// produce the same output.
+/// Uses HMAC-SHA-256 with the deployment server-secret as key and the
+/// room + user JID as message, producing a hex-encoded opaque
+/// identifier. The same inputs always produce the same output.
+///
+/// Takes typed JIDs (typed-payloads hard rule) — the canonical JID
+/// string form is generated at the HMAC boundary only, never carried
+/// across function boundaries as `String`.
 pub fn generate_occupant_id(
-    user_bare_jid: &str,
-    room_jid: &str,
+    user_bare_jid: &jid::BareJid,
+    room_jid: &jid::BareJid,
     server_secret: &[u8],
 ) -> OccupantId {
     let mut mac = HmacSha256::new_from_slice(server_secret).expect("HMAC accepts any key length");
-    mac.update(room_jid.as_bytes());
+    // `BareJid::as_str` returns the canonical string form; we hash
+    // bytes at the I/O boundary only.
+    mac.update(room_jid.as_str().as_bytes());
     mac.update(b":");
-    mac.update(user_bare_jid.as_bytes());
+    mac.update(user_bare_jid.as_str().as_bytes());
     let result = mac.finalize().into_bytes();
 
     // Use first 16 bytes (128 bits) for a shorter but still unique ID
@@ -178,30 +184,46 @@ mod tests {
 
     const TEST_SECRET: &[u8] = b"waddle-test-secret-key-for-occupant-ids";
 
+    fn alice() -> jid::BareJid {
+        "alice@example.com".parse().expect("bare")
+    }
+    fn bob() -> jid::BareJid {
+        "bob@example.com".parse().expect("bare")
+    }
+    fn room() -> jid::BareJid {
+        "room@muc.example.com".parse().expect("bare")
+    }
+    fn room1() -> jid::BareJid {
+        "room1@muc.example.com".parse().expect("bare")
+    }
+    fn room2() -> jid::BareJid {
+        "room2@muc.example.com".parse().expect("bare")
+    }
+
     #[test]
     fn test_generate_occupant_id_deterministic() {
-        let id1 = generate_occupant_id("alice@example.com", "room@muc.example.com", TEST_SECRET);
-        let id2 = generate_occupant_id("alice@example.com", "room@muc.example.com", TEST_SECRET);
+        let id1 = generate_occupant_id(&alice(), &room(), TEST_SECRET);
+        let id2 = generate_occupant_id(&alice(), &room(), TEST_SECRET);
         assert_eq!(id1, id2);
     }
 
     #[test]
     fn test_generate_different_users() {
-        let alice = generate_occupant_id("alice@example.com", "room@muc.example.com", TEST_SECRET);
-        let bob = generate_occupant_id("bob@example.com", "room@muc.example.com", TEST_SECRET);
-        assert_ne!(alice, bob);
+        let alice_id = generate_occupant_id(&alice(), &room(), TEST_SECRET);
+        let bob_id = generate_occupant_id(&bob(), &room(), TEST_SECRET);
+        assert_ne!(alice_id, bob_id);
     }
 
     #[test]
     fn test_generate_different_rooms() {
-        let room1 = generate_occupant_id("alice@example.com", "room1@muc.example.com", TEST_SECRET);
-        let room2 = generate_occupant_id("alice@example.com", "room2@muc.example.com", TEST_SECRET);
-        assert_ne!(room1, room2);
+        let r1 = generate_occupant_id(&alice(), &room1(), TEST_SECRET);
+        let r2 = generate_occupant_id(&alice(), &room2(), TEST_SECRET);
+        assert_ne!(r1, r2);
     }
 
     #[test]
     fn test_generate_id_length() {
-        let id = generate_occupant_id("alice@example.com", "room@muc.example.com", TEST_SECRET);
+        let id = generate_occupant_id(&alice(), &room(), TEST_SECRET);
         // 16 bytes = 32 hex chars
         assert_eq!(id.0.len(), 32);
     }

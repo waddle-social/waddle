@@ -31,6 +31,7 @@ pub mod id_gen;
 pub mod machine;
 pub mod message_context;
 pub mod phase;
+pub mod room;
 pub mod session_state;
 pub mod traits;
 
@@ -38,6 +39,8 @@ pub mod traits;
 mod dispatch_message_l2_tests;
 #[cfg(test)]
 mod dispatch_message_tests;
+#[cfg(test)]
+mod wire_trace_l4_room_tests;
 #[cfg(test)]
 mod wire_trace_l4_tests;
 
