@@ -246,6 +246,10 @@ export function useMessaging(
   const draft = ref("");
   const forumPostTitle = ref("");
   const isLoadingMessages = ref(false);
+  const isLoadingOlderMessages = ref(false);
+  const hasOlderMessages = ref(true);
+  const loadingOlderThreadIds = ref<Set<string>>(new Set());
+  const threadHasOlder = ref<Record<string, boolean>>({});
   const isSending = ref(false);
   const timelineEl: Ref<HTMLDivElement | null> = ref(null);
   const typingUsers = ref<string[]>([]);
@@ -264,6 +268,8 @@ export function useMessaging(
   let slowModeTimer: ReturnType<typeof setInterval> | null = null;
 
   let messageRequestId = 0;
+  let oldestArchiveId: string | null = null;
+  const oldestThreadArchiveIds = new Map<string, string>();
   let searchRequestId = 0;
   let lastChatState: ChatStateType = "active";
   let composingTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -770,12 +776,110 @@ export function useMessaging(
     return !m.threadId || m.id === m.threadId;
   }
 
+  function buildTimelineFromMamResults(
+    mamResults: LiveRoomMessage[],
+    existing: TimelineMessage[] = [],
+  ): TimelineMessage[] {
+    const regularMessages: LiveRoomMessage[] = [];
+    const reactionUpdates: { targetId: string; nick: string; emojis: string[] }[] = [];
+    const retractionUpdates: string[] = [];
+    const correctionUpdates: {
+      targetId: string;
+      correctionSender: { authorJid: string; authorRealJid?: string };
+      body: string;
+      markup?: MarkupSpan[];
+      references?: MessageReference[];
+      githubEmbeds?: LiveRoomMessage["githubEmbeds"];
+    }[] = [];
+
+    for (const msg of mamResults) {
+      if (msg._reactionTarget && msg._reactionEmojis) {
+        reactionUpdates.push({
+          targetId: msg._reactionTarget,
+          nick: msg.nick,
+          emojis: msg._reactionEmojis,
+        });
+      } else if (msg.retractsId) {
+        retractionUpdates.push(msg.retractsId);
+      } else if (msg.replacesId) {
+        correctionUpdates.push({
+          targetId: msg.replacesId,
+          correctionSender: mucCorrectionSender(msg),
+          body: msg.body,
+          markup: msg.markup,
+          references: msg.references,
+          githubEmbeds: msg.githubEmbeds,
+        });
+      } else if (msg.body || (msg.sharedFiles && msg.sharedFiles.length > 0) || msg.isSticker || (msg.githubEmbeds && msg.githubEmbeds.length > 0)) {
+        regularMessages.push(msg);
+      }
+    }
+
+    const byId = new Map<string, TimelineMessage>();
+    for (const message of existing) {
+      indexMessageByIds(byId, message);
+    }
+    const timeline = [...existing];
+    for (const raw of regularMessages) {
+      if (findMessageById(timeline, raw.id)) continue;
+      const tm = fromLiveMessage(session.value!, raw, (id) => byId.get(id));
+      indexMessageByIds(byId, tm);
+      timeline.push(tm);
+    }
+
+    for (const update of correctionUpdates) {
+      const target = findMessageById(timeline, update.targetId);
+      if (!target || !isSameMucCorrectionSender(target, update.correctionSender)) continue;
+      target.body = update.body;
+      target.isEdited = true;
+      if (update.markup && update.markup.length > 0) target.markup = update.markup;
+      else delete target.markup;
+      if (update.references && update.references.length > 0) target.references = update.references;
+      else delete target.references;
+      if (update.githubEmbeds && update.githubEmbeds.length > 0) {
+        target.githubEmbeds = update.githubEmbeds;
+      } else if (target.githubEmbeds?.length) {
+        const surviving = target.githubEmbeds.filter((e) => update.body.includes(e.url));
+        if (surviving.length > 0) target.githubEmbeds = surviving;
+        else delete target.githubEmbeds;
+      } else {
+        delete target.githubEmbeds;
+      }
+    }
+
+    for (const retractsId of retractionUpdates) {
+      const target = findMessageById(timeline, retractsId);
+      if (!target) continue;
+      target.body = "";
+      target.isRetracted = true;
+    }
+
+    for (const update of reactionUpdates) {
+      const target = findMessageById(timeline, update.targetId);
+      if (!target) continue;
+      const reactions: Record<string, string[]> = target.reactions ? { ...target.reactions } : {};
+      for (const emoji of update.emojis) {
+        if (!reactions[emoji]) reactions[emoji] = [];
+        if (!reactions[emoji].includes(update.nick)) reactions[emoji].push(update.nick);
+      }
+      target.reactions = reactions;
+    }
+
+    return applyForumContext(timeline.sort((a, b) => a.createdAt.localeCompare(b.createdAt)));
+  }
+
   async function loadMessages(spaceId: string, channelId: string) {
     if (!session.value) return;
 
     const requestId = ++messageRequestId;
     const roomJid = roomBareJidFor(session.value, channelId);
     isLoadingMessages.value = true;
+    isLoadingOlderMessages.value = false;
+    hasOlderMessages.value = true;
+    oldestArchiveId = null;
+    loadingOlderThreadIds.value = new Set();
+    threadHasOlder.value = {};
+    oldestThreadArchiveIds.clear();
     // Reset the divider anchor up-front: a previous conversation's id could
     // coincidentally match a message in the new timeline, and an aborted
     // request (requestId mismatch) would otherwise leave stale state.
@@ -786,9 +890,14 @@ export function useMessaging(
 
     try {
       // XEP-0313: Load message history via MAM (XMPP-native)
-      const mamResults = xmppClient.value
-        ? await xmppClient.value.queryMam(spaceId, channelId, 100)
-        : [];
+      const page = xmppClient.value && "queryMamPage" in xmppClient.value
+        ? await xmppClient.value.queryMamPage(spaceId, channelId, 100, { type: "latest" })
+        : null;
+      const mamResults = page
+        ? page.messages
+        : xmppClient.value
+          ? await xmppClient.value.queryMam(spaceId, channelId, 100)
+          : [];
 
       if (
         requestId !== messageRequestId ||
@@ -798,103 +907,9 @@ export function useMessaging(
         return;
       }
 
-      // Separate regular messages from timeline updates
-      const regularMessages: LiveRoomMessage[] = [];
-      const reactionUpdates: { targetId: string; nick: string; emojis: string[] }[] = [];
-      const retractionUpdates: string[] = [];
-      const correctionUpdates: {
-        targetId: string;
-        correctionSender: { authorJid: string; authorRealJid?: string };
-        body: string;
-        markup?: MarkupSpan[];
-        references?: MessageReference[];
-        githubEmbeds?: LiveRoomMessage["githubEmbeds"];
-      }[] = [];
-
-      for (const msg of mamResults) {
-        if (msg._reactionTarget && msg._reactionEmojis) {
-          reactionUpdates.push({
-            targetId: msg._reactionTarget,
-            nick: msg.nick,
-            emojis: msg._reactionEmojis,
-          });
-        } else if (msg.retractsId) {
-          retractionUpdates.push(msg.retractsId);
-        } else if (msg.replacesId) {
-          correctionUpdates.push({
-            targetId: msg.replacesId,
-            correctionSender: mucCorrectionSender(msg),
-            body: msg.body,
-            markup: msg.markup,
-            references: msg.references,
-            githubEmbeds: msg.githubEmbeds,
-          });
-        } else if (msg.body || (msg.sharedFiles && msg.sharedFiles.length > 0) || msg.isSticker || (msg.githubEmbeds && msg.githubEmbeds.length > 0)) {
-          regularMessages.push(msg);
-        }
-      }
-
-      // Convert to timeline messages; accumulate in a map so replies that land
-      // after their parent in the MAM batch can resolve a preview.
-      const byId = new Map<string, TimelineMessage>();
-      const timeline = regularMessages.map((m) => {
-        const tm = fromLiveMessage(session.value!, m, (id) => byId.get(id));
-        indexMessageByIds(byId, tm);
-        return tm;
-      });
-
-      for (const update of correctionUpdates) {
-        const target = findMessageById(timeline, update.targetId);
-        if (!target || !isSameMucCorrectionSender(target, update.correctionSender)) continue;
-        target.body = update.body;
-        target.isEdited = true;
-        if (update.markup && update.markup.length > 0) {
-          target.markup = update.markup;
-        } else {
-          delete target.markup;
-        }
-        if (update.references && update.references.length > 0) {
-          target.references = update.references;
-        } else {
-          delete target.references;
-        }
-        if (update.githubEmbeds && update.githubEmbeds.length > 0) {
-          target.githubEmbeds = update.githubEmbeds;
-        } else if (target.githubEmbeds?.length) {
-          const surviving = target.githubEmbeds.filter((e) => update.body.includes(e.url));
-          if (surviving.length > 0) {
-            target.githubEmbeds = surviving;
-          } else {
-            delete target.githubEmbeds;
-          }
-        } else {
-          delete target.githubEmbeds;
-        }
-      }
-
-      for (const retractsId of retractionUpdates) {
-        const target = findMessageById(timeline, retractsId);
-        if (!target) continue;
-        target.body = "";
-        target.isRetracted = true;
-      }
-
-      // Apply reactions from MAM history
-      for (const update of reactionUpdates) {
-        const target = findMessageById(timeline, update.targetId);
-        if (target) {
-          const reactions: Record<string, string[]> = target.reactions ? { ...target.reactions } : {};
-          for (const emoji of update.emojis) {
-            if (!reactions[emoji]) reactions[emoji] = [];
-            if (!reactions[emoji].includes(update.nick)) {
-              reactions[emoji].push(update.nick);
-            }
-          }
-          target.reactions = reactions;
-        }
-      }
-
-      const timelineWithQueue = appendQueuedMessages(applyForumContext(timeline), roomJid);
+      oldestArchiveId = page?.firstArchiveId ?? mamResults[0]?.id ?? null;
+      hasOlderMessages.value = page ? !page.complete && !!page.firstArchiveId : mamResults.length >= 100;
+      const timelineWithQueue = appendQueuedMessages(buildTimelineFromMamResults(mamResults), roomJid);
       messages.value = timelineWithQueue;
       if (requestId === messageRequestId) {
         isLoadingMessages.value = false;
@@ -933,6 +948,42 @@ export function useMessaging(
     }
   }
 
+  async function loadOlderMessages() {
+    const client = xmppClient.value;
+    const spaceId = activeSpaceId.value ?? "";
+    const channelId = activeChannelId.value;
+    const before = oldestArchiveId;
+    if (!client || !channelId || !before || !hasOlderMessages.value || isLoadingOlderMessages.value) return;
+    if (!("queryMamPage" in client)) return;
+    const requestId = messageRequestId;
+    const isCurrentRequest = () =>
+      requestId === messageRequestId &&
+      xmppClient.value === client &&
+      (activeSpaceId.value ?? "") === spaceId &&
+      activeChannelId.value === channelId;
+
+    const el = timelineEl.value;
+    const previousHeight = el?.scrollHeight ?? 0;
+    const previousTop = el?.scrollTop ?? 0;
+    isLoadingOlderMessages.value = true;
+    try {
+      const page = await client.queryMamPage(spaceId, channelId, 100, { type: "before", before });
+      if (!isCurrentRequest()) return;
+      oldestArchiveId = page.firstArchiveId ?? oldestArchiveId;
+      hasOlderMessages.value = !page.complete && !!page.firstArchiveId && page.firstArchiveId !== before;
+      const withoutQueued = messages.value.filter((m) => !(m.isSelf && m.deliveryStatus === "queued"));
+      messages.value = appendQueuedMessages(buildTimelineFromMamResults(page.messages, withoutQueued), roomBareJidFor(session.value!, channelId));
+      await nextTick();
+      if (el && !isTopPinnedScrollDirection(scrollDirection.value)) {
+        el.scrollTop = previousTop + (el.scrollHeight - previousHeight);
+      }
+    } catch (e) {
+      if (isCurrentRequest()) actionError.value = normalizeError(e);
+    } finally {
+      if (isCurrentRequest()) isLoadingOlderMessages.value = false;
+    }
+  }
+
   /**
    * Backfill a thread via XEP-0313 MAM filtered by thread id. Returns every
    * archived reply whose `<thread>` element matches `threadId`. The thread
@@ -945,29 +996,59 @@ export function useMessaging(
     const spaceId = activeSpaceId.value;
     const channelId = activeChannelId.value;
     if (!client || !channelId || !threadId || !session.value) return;
-    const results = await client.queryMamByThread(spaceId ?? "", channelId, threadId, 100);
+    const requestId = messageRequestId;
+    const page = "queryMamThreadPage" in client
+      ? await client.queryMamThreadPage(spaceId ?? "", channelId, threadId, 100, { type: "latest" })
+      : null;
+    const results = page ? page.messages : await client.queryMamByThread(spaceId ?? "", channelId, threadId, 100);
     if (
       xmppClient.value !== client ||
       (activeSpaceId.value ?? "") !== (spaceId ?? "") ||
-      activeChannelId.value !== channelId
+      activeChannelId.value !== channelId ||
+      requestId !== messageRequestId
     ) {
       return;
     }
-    const appended: TimelineMessage[] = [];
-    const localById = new Map<string, TimelineMessage>();
-    for (const message of messages.value) {
-      indexMessageByIds(localById, message);
+    if (page?.firstArchiveId) oldestThreadArchiveIds.set(threadId, page.firstArchiveId);
+    threadHasOlder.value = {
+      ...threadHasOlder.value,
+      [threadId]: page ? !page.complete && !!page.firstArchiveId : results.length >= 100,
+    };
+    const next = buildTimelineFromMamResults(results, messages.value);
+    if (next.length === messages.value.length) return;
+    messages.value = next;
+  }
+
+  async function loadOlderThreadMessages(threadId: string): Promise<void> {
+    const client = xmppClient.value;
+    const spaceId = activeSpaceId.value;
+    const channelId = activeChannelId.value;
+    const before = oldestThreadArchiveIds.get(threadId);
+    if (!client || !channelId || !threadId || !before || loadingOlderThreadIds.value.has(threadId)) return;
+    if (!("queryMamThreadPage" in client)) return;
+    const requestId = messageRequestId;
+    const isCurrentRequest = () =>
+      requestId === messageRequestId &&
+      xmppClient.value === client &&
+      (activeSpaceId.value ?? "") === (spaceId ?? "") &&
+      activeChannelId.value === channelId;
+    loadingOlderThreadIds.value = new Set([...loadingOlderThreadIds.value, threadId]);
+    try {
+      const page = await client.queryMamThreadPage(spaceId ?? "", channelId, threadId, 100, { type: "before", before });
+      if (!isCurrentRequest()) return;
+      if (page.firstArchiveId) oldestThreadArchiveIds.set(threadId, page.firstArchiveId);
+      threadHasOlder.value = {
+        ...threadHasOlder.value,
+        [threadId]: !page.complete && !!page.firstArchiveId && page.firstArchiveId !== before,
+      };
+      messages.value = buildTimelineFromMamResults(page.messages, messages.value);
+    } catch (e) {
+      if (isCurrentRequest()) actionError.value = normalizeError(e);
+    } finally {
+      const next = new Set(loadingOlderThreadIds.value);
+      next.delete(threadId);
+      loadingOlderThreadIds.value = next;
     }
-    for (const raw of results) {
-      if (findMessageById(messages.value, raw.id)) continue;
-      const tm = fromLiveMessage(session.value, raw, (id) => localById.get(id));
-      indexMessageByIds(localById, tm);
-      appended.push(tm);
-    }
-    if (appended.length === 0) return;
-    messages.value = [...messages.value, ...appended].sort((a, b) =>
-      a.createdAt.localeCompare(b.createdAt),
-    );
   }
 
   async function selectChannel(channelId: string) {
@@ -1312,6 +1393,8 @@ export function useMessaging(
     draft,
     forumPostTitle,
     isLoadingMessages,
+    isLoadingOlderMessages,
+    hasOlderMessages,
     isSending,
     timelineEl,
     currentRoomJid,
@@ -1321,7 +1404,11 @@ export function useMessaging(
     roomLastSeen,
     slowModeCooldown,
     loadMessages,
+    loadOlderMessages,
     backfillThread,
+    loadOlderThreadMessages,
+    loadingOlderThreadIds,
+    threadHasOlder,
     selectChannel,
     sendMessage,
     uploadProgress,

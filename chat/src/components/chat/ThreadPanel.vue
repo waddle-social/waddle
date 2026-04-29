@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from "vue";
+import { computed, nextTick, ref, watch, type ComponentPublicInstance } from "vue";
 import { X, CornerDownRight, MessageSquarePlus, ChevronRight, ChevronLeft } from "lucide-vue-next";
 import MessageCard from "@/components/chat/MessageCard.vue";
 import MessageComposer from "@/components/chat/MessageComposer.vue";
+import VirtualTimeline from "@/components/chat/VirtualTimeline.vue";
 import type { TimelineMessage, MarkupSpan, MessageReference } from "@/lib/chat-ui";
 import type { MentionCandidate } from "@/lib/mentions";
 import type { OccupantHat, OccupantPresence, RoomHats, RoomPresence } from "@/lib/xmpp-client";
@@ -30,6 +31,8 @@ const props = defineProps<{
   mentionCandidates: MentionCandidate[];
   slowModeCooldown: number;
   isSending: boolean;
+  isLoadingOlderReplies?: boolean;
+  hasOlderReplies?: boolean;
   uploadProgress: { uploading: boolean; progress: number; filename: string };
   channelName: string;
   /**
@@ -57,6 +60,7 @@ const emit = defineEmits<{
   displayed: [messageId: string];
   selectGif: [url: string];
   typing: [];
+  loadOlder: [threadId: string];
 }>();
 
 const { mode: scrollDirectionMode } = useScrollDirection();
@@ -73,6 +77,10 @@ const orderedChildren = computed(() => {
   const children = activeEntry.value?.directChildren ?? [];
   return orderTimelineForScrollDirection(children, scrollDirectionMode.value);
 });
+const orderedThreadMessages = computed(() => {
+  const root = activeEntry.value?.root;
+  return root ? [root, ...orderedChildren.value] : [...orderedChildren.value];
+});
 
 // Burst window matches the main feed (ContentArea.vue): same author + < 5 min
 // apart + same day, no intervening other-author message in rendered order.
@@ -81,8 +89,7 @@ const BURST_WINDOW_MS = 5 * 60 * 1000;
 const threadDisplayMeta = computed(() => {
   const grouped = new Set<string>();
   const dayDivider = new Set<string>();
-  const root = activeEntry.value?.root;
-  const sequence: TimelineMessage[] = root ? [root, ...orderedChildren.value] : [...orderedChildren.value];
+  const sequence = orderedThreadMessages.value;
   for (let i = 0; i < sequence.length; i++) {
     const cur = sequence[i];
     if (!cur) continue;
@@ -116,6 +123,7 @@ function dayDividerLabel(createdAt: string): string {
 const isTopPinned = computed(() =>
   isTopPinnedScrollDirection(scrollDirectionMode.value),
 );
+const olderSentinelPosition = computed(() => scrollDirectionMode.value === "social" ? "end" : "start");
 
 const scrollContainerRef = ref<HTMLElement | null>(null);
 const currentDayMarkerLabel = ref("");
@@ -179,19 +187,18 @@ function setScrollContainerRef(el: HTMLElement | null) {
   void nextTick(updateCurrentDayMarker);
 }
 
+const setVirtualTimelineRef = (
+  instance: (ComponentPublicInstance & { scrollElement: HTMLDivElement | null }) | null,
+) => {
+  setScrollContainerRef(instance?.scrollElement ?? null);
+};
+
 // Switching threads resets composer state and scrolls to the pinned edge.
 watch(activeThreadId, () => {
   replyingTo.value = null;
   draft.value = "";
   void scrollToPinnedEdge();
 });
-
-watch(
-  () => activeEntry.value?.directChildren.length,
-  () => {
-    void scrollToPinnedEdge();
-  },
-);
 
 watch(scrollDirectionMode, () => {
   void scrollToPinnedEdge();
@@ -345,23 +352,34 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
     </div>
 
     <div
-      :ref="setScrollContainerRef"
-      class="chat-pane-scroll flex-1 min-h-0 overflow-auto px-3 py-4 lg:px-4"
-      @scroll="updateCurrentDayMarker"
+      v-if="activeEntry && !activeEntry.root"
+      class="type-caption flex-shrink-0 bg-muted/35 px-4 py-2 text-muted-foreground"
     >
-      <div v-if="activeEntry" class="chat-panel-stack">
-        <div v-if="!activeEntry.root" class="type-caption rounded-lg bg-muted/40 px-3 py-2 text-muted-foreground">
-          Thread root isn't in the loaded history. Scroll the main channel or reload to backfill.
-        </div>
+      Thread root isn't in the loaded history. Scroll the main channel or reload to backfill.
+    </div>
+
+    <VirtualTimeline
+      v-if="activeEntry"
+      :ref="setVirtualTimelineRef"
+      :items="orderedThreadMessages"
+      :has-older="hasOlderReplies ?? false"
+      :loading-older="isLoadingOlderReplies ?? false"
+      :sentinel-position="olderSentinelPosition"
+      aria-label="Thread messages"
+      content-class="chat-panel-stack"
+      @scroll="updateCurrentDayMarker"
+      @load-older="activeThreadId && emit('loadOlder', activeThreadId)"
+    >
+      <template #item="{ item: message }">
         <MessageCard
-          v-if="activeEntry.root"
-          :message="activeEntry.root"
+          v-if="message.id === activeEntry.root?.id"
+          :message="message"
           :current-user="currentUser"
-          :avatar-url="avatarUrlByAuthor[activeEntry.root.author] ?? null"
-          :hats="hatsFor(activeEntry.root.author)"
-          :presence="presenceFor(activeEntry.root.author)"
-          :last-seen="roomLastSeen[activeEntry.root.author]"
-          :author-jid="authorJidByNick?.[activeEntry.root.author]"
+          :avatar-url="avatarUrlByAuthor[message.author] ?? null"
+          :hats="hatsFor(message.author)"
+          :presence="presenceFor(message.author)"
+          :last-seen="roomLastSeen[message.author]"
+          :author-jid="authorJidByNick?.[message.author]"
           :thread-reply-count="activeEntry.count"
           hide-thread-chip
           @edit="(id, body, m, r) => emit('editMessage', id, body, m, r)"
@@ -370,30 +388,29 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
           @reply="beginReplyInThread"
           @open-thread="onOpenThreadFromCard"
         />
-
-        <template v-for="child in orderedChildren" :key="child.id">
+        <template v-else>
           <div
-            v-if="showDayDividerBefore(child.id)"
+            v-if="showDayDividerBefore(message.id)"
             class="chat-day-divider type-section-label"
-            :data-day-marker-created-at="child.createdAt"
+            :data-day-marker-created-at="message.createdAt"
             role="separator"
-            :aria-label="dayDividerLabel(child.createdAt)"
+            :aria-label="dayDividerLabel(message.createdAt)"
           >
             <div class="chat-day-divider__rule" />
-            <span class="chat-day-divider__label">{{ dayDividerLabel(child.createdAt) }}</span>
+            <span class="chat-day-divider__label">{{ dayDividerLabel(message.createdAt) }}</span>
             <div class="chat-day-divider__rule" />
           </div>
           <div class="relative group/thread-child">
             <MessageCard
-              :message="child"
+              :message="message"
               :current-user="currentUser"
-              :avatar-url="avatarUrlByAuthor[child.author] ?? null"
-              :hats="hatsFor(child.author)"
-              :presence="presenceFor(child.author)"
-              :last-seen="roomLastSeen[child.author]"
-              :author-jid="authorJidByNick?.[child.author]"
-              :thread-reply-count="threadIndex.get(child.id)?.count ?? 0"
-              :grouped="isGroupedFollowUp(child.id)"
+              :avatar-url="avatarUrlByAuthor[message.author] ?? null"
+              :hats="hatsFor(message.author)"
+              :presence="presenceFor(message.author)"
+              :last-seen="roomLastSeen[message.author]"
+              :author-jid="authorJidByNick?.[message.author]"
+              :thread-reply-count="threadIndex.get(message.id)?.count ?? 0"
+              :grouped="isGroupedFollowUp(message.id)"
               hide-thread-chip
               @edit="(id, body, m, r) => emit('editMessage', id, body, m, r)"
               @retract="(id) => emit('retractMessage', id)"
@@ -403,20 +420,20 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
             />
           <div class="chat-thread-actions">
             <button
-              v-if="replyChildHasNestedThread(child)"
+              v-if="replyChildHasNestedThread(message)"
               type="button"
               class="type-caption inline-flex items-center gap-1 text-primary/80 hover:text-primary transition-colors"
-              @click="onOpenThreadFromCard(child.id)"
+              @click="onOpenThreadFromCard(message.id)"
             >
               <CornerDownRight class="w-3 h-3" />
-              <span>{{ threadIndex.get(child.id)?.count ?? 0 }} in sub-thread</span>
+              <span>{{ threadIndex.get(message.id)?.count ?? 0 }} in sub-thread</span>
             </button>
             <button
               v-else
               type="button"
               class="type-caption inline-flex items-center gap-1 text-muted-foreground hover:text-primary transition-colors opacity-60 group-hover/thread-child:opacity-100 focus-visible:opacity-100"
               title="Start sub-thread"
-              @click="startSubThread(child)"
+              @click="startSubThread(message)"
             >
               <MessageSquarePlus class="w-3 h-3" />
               <span>Start sub-thread</span>
@@ -424,20 +441,25 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
           </div>
           </div>
         </template>
+      </template>
+    </VirtualTimeline>
 
-        <div
-          v-if="activeEntry.directChildren.length === 0 && !hideComposer"
-          class="type-caption text-center py-8 text-muted-foreground"
-        >
-          No replies yet. Start the conversation.
-        </div>
-      </div>
-      <div
-        v-else
-        class="type-caption text-center py-10 text-muted-foreground"
-      >
+    <div
+      v-else
+      :ref="setScrollContainerRef"
+      class="chat-pane-scroll flex-1 min-h-0 overflow-auto px-3 py-4 lg:px-4"
+      @scroll="updateCurrentDayMarker"
+    >
+      <div class="type-caption text-center py-10 text-muted-foreground">
         Loading thread…
       </div>
+    </div>
+
+    <div
+      v-if="activeEntry?.directChildren.length === 0 && !hideComposer"
+      class="type-caption flex-shrink-0 text-center py-3 text-muted-foreground"
+    >
+      No replies yet. Start the conversation.
     </div>
 
     <!-- Composer: bottom-pinned mode (chat mode) - hidden in parent context pane -->

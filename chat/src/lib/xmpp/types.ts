@@ -17,6 +17,17 @@ export interface XmppStatusSnapshot {
  */
 export type SessionLifecycleEvent = { type: "resumed" } | { type: "fresh" };
 
+export type MamPageParam =
+  | { type: "latest" }
+  | { type: "before"; before: string };
+
+export interface MamHistoryPage<T> {
+  messages: T[];
+  firstArchiveId?: string;
+  lastArchiveId?: string;
+  complete: boolean;
+}
+
 /**
  * Transport- or protocol-level failure classification, surfaced via
  * `BrowserXmppClient.onError` for telemetry / diagnostics. Different

@@ -121,6 +121,8 @@ export function useDmMessaging(
   const messages = ref<TimelineMessage[]>([]);
   const draft = ref("");
   const isLoadingMessages = ref(false);
+  const isLoadingOlderMessages = ref(false);
+  const hasOlderMessages = ref(true);
   const isSending = ref(false);
   const timelineEl: Ref<HTMLDivElement | null> = ref(null);
   const typingUsers = ref<string[]>([]);
@@ -130,6 +132,7 @@ export function useDmMessaging(
   const firstUnseenId = ref<string | null>(null);
 
   let messageRequestId = 0;
+  let oldestArchiveId: string | null = null;
   let searchRequestId = 0;
   let lastChatState: ChatStateType = "active";
   let composingTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -317,6 +320,86 @@ export function useDmMessaging(
     });
   }
 
+  function buildTimelineFromMamResults(
+    mamResults: LiveDmMessage[],
+    existing: TimelineMessage[] = [],
+  ): TimelineMessage[] {
+    const regular: LiveDmMessage[] = [];
+    const reactionUpdates: { targetId: string; nick: string; emojis: string[] }[] = [];
+    const retractionUpdates: string[] = [];
+    const correctionUpdates: {
+      targetId: string;
+      correctionFromJid: string;
+      body: string;
+      markup?: LiveDmMessage["markup"];
+      references?: LiveDmMessage["references"];
+      githubEmbeds?: LiveDmMessage["githubEmbeds"];
+    }[] = [];
+    for (const msg of mamResults) {
+      if (msg._reactionTarget && msg._reactionEmojis) {
+        reactionUpdates.push({ targetId: msg._reactionTarget, nick: msg.nick, emojis: msg._reactionEmojis });
+      } else if (msg.retractsId) {
+        retractionUpdates.push(msg.retractsId);
+      } else if (msg.replacesId) {
+        correctionUpdates.push({
+          targetId: msg.replacesId,
+          correctionFromJid: msg.fromJid,
+          body: msg.body,
+          markup: msg.markup,
+          references: msg.references,
+          githubEmbeds: msg.githubEmbeds,
+        });
+      } else if (msg.body || (msg.sharedFiles && msg.sharedFiles.length > 0) || msg.isSticker || (msg.githubEmbeds && msg.githubEmbeds.length > 0)) {
+        regular.push(msg);
+      }
+    }
+    const byId = new Map<string, TimelineMessage>();
+    for (const message of existing) indexMessageByIds(byId, message);
+    const timeline = [...existing];
+    for (const raw of regular) {
+      if (findMessageById(timeline, raw.id)) continue;
+      const tm = fromLiveDmMessage(session.value!, raw, (id) => byId.get(id));
+      indexMessageByIds(byId, tm);
+      timeline.push(tm);
+    }
+    for (const update of correctionUpdates) {
+      const target = findMessageById(timeline, update.targetId);
+      if (!target || !isSameDmCorrectionSender(target, update.correctionFromJid)) continue;
+      target.body = update.body;
+      target.isEdited = true;
+      if (update.markup && update.markup.length > 0) target.markup = update.markup;
+      else delete target.markup;
+      if (update.references && update.references.length > 0) target.references = update.references;
+      else delete target.references;
+      if (update.githubEmbeds && update.githubEmbeds.length > 0) {
+        target.githubEmbeds = update.githubEmbeds;
+      } else if (target.githubEmbeds?.length) {
+        const surviving = target.githubEmbeds.filter((e) => update.body.includes(e.url));
+        if (surviving.length > 0) target.githubEmbeds = surviving;
+        else delete target.githubEmbeds;
+      } else {
+        delete target.githubEmbeds;
+      }
+    }
+    for (const retractsId of retractionUpdates) {
+      const target = findMessageById(timeline, retractsId);
+      if (!target) continue;
+      target.body = "";
+      target.isRetracted = true;
+    }
+    for (const update of reactionUpdates) {
+      const target = findMessageById(timeline, update.targetId);
+      if (!target) continue;
+      const reactions: Record<string, string[]> = target.reactions ? { ...target.reactions } : {};
+      for (const emoji of update.emojis) {
+        if (!reactions[emoji]) reactions[emoji] = [];
+        if (!reactions[emoji].includes(update.nick)) reactions[emoji].push(update.nick);
+      }
+      target.reactions = reactions;
+    }
+    return timeline.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  }
+
   function mergeLiveMessage(msg: TimelineMessage) {
     // Self-echo reconciliation: match by id first; otherwise body-match only
     // against messages still awaiting reconciliation so duplicates don't
@@ -417,96 +500,26 @@ export function useDmMessaging(
     if (!session.value) return;
     const requestId = ++messageRequestId;
     isLoadingMessages.value = true;
+    isLoadingOlderMessages.value = false;
+    hasOlderMessages.value = true;
+    oldestArchiveId = null;
     firstUnseenId.value = null;
     clearActionError();
     pendingEchoClientIds.clear();
     messages.value = appendQueuedMessages([], peerJid);
     try {
-      const mamResults = xmppClient.value ? await xmppClient.value.queryPersonalMam(peerJid, 100) : [];
+      const page = xmppClient.value && "queryPersonalMamPage" in xmppClient.value
+        ? await xmppClient.value.queryPersonalMamPage(peerJid, 100, { type: "latest" })
+        : null;
+      const mamResults = page
+        ? page.messages
+        : xmppClient.value
+          ? await xmppClient.value.queryPersonalMam(peerJid, 100)
+          : [];
       if (requestId !== messageRequestId || activePeerJid.value !== peerJid) return;
-      const regular: LiveDmMessage[] = [];
-      const reactionUpdates: { targetId: string; nick: string; emojis: string[] }[] = [];
-      const retractionUpdates: string[] = [];
-      const correctionUpdates: {
-        targetId: string;
-        correctionFromJid: string;
-        body: string;
-        markup?: LiveDmMessage["markup"];
-        references?: LiveDmMessage["references"];
-        githubEmbeds?: LiveDmMessage["githubEmbeds"];
-      }[] = [];
-      for (const msg of mamResults) {
-        if (msg._reactionTarget && msg._reactionEmojis) {
-          reactionUpdates.push({
-            targetId: msg._reactionTarget,
-            nick: msg.nick,
-            emojis: msg._reactionEmojis,
-          });
-        } else if (msg.retractsId) {
-          retractionUpdates.push(msg.retractsId);
-        } else if (msg.replacesId) {
-          correctionUpdates.push({
-            targetId: msg.replacesId,
-            correctionFromJid: msg.fromJid,
-            body: msg.body,
-            markup: msg.markup,
-            references: msg.references,
-            githubEmbeds: msg.githubEmbeds,
-          });
-        } else if (msg.body || (msg.sharedFiles && msg.sharedFiles.length > 0) || msg.isSticker || (msg.githubEmbeds && msg.githubEmbeds.length > 0)) {
-          regular.push(msg);
-        }
-      }
-      const byId = new Map<string, TimelineMessage>();
-      const timeline = regular.map((m) => {
-        const tm = fromLiveDmMessage(session.value!, m, (id) => byId.get(id));
-        indexMessageByIds(byId, tm);
-        return tm;
-      });
-      for (const update of correctionUpdates) {
-        const target = findMessageById(timeline, update.targetId);
-        if (!target || !isSameDmCorrectionSender(target, update.correctionFromJid)) continue;
-        target.body = update.body;
-        target.isEdited = true;
-        if (update.markup && update.markup.length > 0) {
-          target.markup = update.markup;
-        } else {
-          delete target.markup;
-        }
-        if (update.references && update.references.length > 0) {
-          target.references = update.references;
-        } else {
-          delete target.references;
-        }
-        if (update.githubEmbeds && update.githubEmbeds.length > 0) {
-          target.githubEmbeds = update.githubEmbeds;
-        } else if (target.githubEmbeds?.length) {
-          const surviving = target.githubEmbeds.filter((e) => update.body.includes(e.url));
-          if (surviving.length > 0) {
-            target.githubEmbeds = surviving;
-          } else {
-            delete target.githubEmbeds;
-          }
-        } else {
-          delete target.githubEmbeds;
-        }
-      }
-      for (const retractsId of retractionUpdates) {
-        const target = findMessageById(timeline, retractsId);
-        if (!target) continue;
-        target.body = "";
-        target.isRetracted = true;
-      }
-      for (const update of reactionUpdates) {
-        const target = findMessageById(timeline, update.targetId);
-        if (!target) continue;
-        const reactions: Record<string, string[]> = target.reactions ? { ...target.reactions } : {};
-        for (const emoji of update.emojis) {
-          if (!reactions[emoji]) reactions[emoji] = [];
-          if (!reactions[emoji].includes(update.nick)) reactions[emoji].push(update.nick);
-        }
-        target.reactions = reactions;
-      }
+      oldestArchiveId = page?.firstArchiveId ?? mamResults[0]?.id ?? null;
+      hasOlderMessages.value = page ? !page.complete && !!page.firstArchiveId : mamResults.length >= 100;
+      const timeline = buildTimelineFromMamResults(mamResults);
       const timelineWithQueue = appendQueuedMessages(timeline, peerJid);
       messages.value = timelineWithQueue;
       if (requestId === messageRequestId) isLoadingMessages.value = false;
@@ -539,6 +552,39 @@ export function useDmMessaging(
         actionError.value = queuedOnly.length > 0 ? "" : normalizeError(e);
         isLoadingMessages.value = false;
       }
+    }
+  }
+
+  async function loadOlderMessages() {
+    const client = xmppClient.value;
+    const peerJid = activePeerJid.value;
+    const before = oldestArchiveId;
+    if (!client || !peerJid || !before || !hasOlderMessages.value || isLoadingOlderMessages.value) return;
+    if (!("queryPersonalMamPage" in client)) return;
+    const requestId = messageRequestId;
+    const isCurrentRequest = () =>
+      requestId === messageRequestId &&
+      xmppClient.value === client &&
+      activePeerJid.value === peerJid;
+    const el = timelineEl.value;
+    const previousHeight = el?.scrollHeight ?? 0;
+    const previousTop = el?.scrollTop ?? 0;
+    isLoadingOlderMessages.value = true;
+    try {
+      const page = await client.queryPersonalMamPage(peerJid, 100, { type: "before", before });
+      if (!isCurrentRequest()) return;
+      oldestArchiveId = page.firstArchiveId ?? oldestArchiveId;
+      hasOlderMessages.value = !page.complete && !!page.firstArchiveId && page.firstArchiveId !== before;
+      const withoutQueued = messages.value.filter((m) => !(m.isSelf && m.deliveryStatus === "queued"));
+      messages.value = appendQueuedMessages(buildTimelineFromMamResults(page.messages, withoutQueued), peerJid);
+      await nextTick();
+      if (el && !isTopPinnedScrollDirection(scrollDirection.value)) {
+        el.scrollTop = previousTop + (el.scrollHeight - previousHeight);
+      }
+    } catch (e) {
+      if (isCurrentRequest()) actionError.value = normalizeError(e);
+    } finally {
+      if (isCurrentRequest()) isLoadingOlderMessages.value = false;
     }
   }
 
@@ -811,12 +857,15 @@ export function useDmMessaging(
     firstUnseenId,
     draft,
     isLoadingMessages,
+    isLoadingOlderMessages,
+    hasOlderMessages,
     isSending,
     typingUsers,
     timelineEl,
     searchResults,
     isSearching,
     loadMessages,
+    loadOlderMessages,
     sendMessage,
     uploadProgress,
     editMessage,

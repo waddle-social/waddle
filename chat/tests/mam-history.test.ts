@@ -1,8 +1,8 @@
 import { describe, expect, mock, test } from "bun:test";
 import { ref } from "vue";
 import type { Agent } from "stanza";
-import { queryPersonalMam } from "../src/lib/xmpp/dm-history";
-import { queryMam } from "../src/lib/xmpp/history";
+import { queryPersonalMam, queryPersonalMamPage } from "../src/lib/xmpp/dm-history";
+import { queryMam, queryMamPage, queryMamThreadPage } from "../src/lib/xmpp/history";
 import { useDmMessaging } from "../src/composables/useDmMessaging";
 import { useMessaging } from "../src/composables/useMessaging";
 import { handlerStubs } from "./helpers/xmpp-client-mock";
@@ -10,6 +10,14 @@ import { handlerStubs } from "./helpers/xmpp-client-mock";
 function makeMamAgent(results: unknown[]) {
   return {
     searchHistory: mock(async () => ({ results })),
+  } as unknown as Agent & {
+    searchHistory: ReturnType<typeof mock>;
+  };
+}
+
+function makeMamPageAgent(page: { results?: unknown[]; paging?: unknown; complete?: boolean }) {
+  return {
+    searchHistory: mock(async () => page),
   } as unknown as Agent & {
     searchHistory: ReturnType<typeof mock>;
   };
@@ -25,6 +33,26 @@ describe("MAM history parsing", () => {
       "room@muc.example.com",
       { paging: { max: 20, before: "" } },
     );
+  });
+
+  test("paged room history requests latest and older pages with RSM before cursors", async () => {
+    const xmpp = makeMamPageAgent({
+      results: [],
+      paging: { first: "archive-1", last: "archive-20" },
+      complete: false,
+    });
+
+    const latest = await queryMamPage(xmpp, "room@muc.example.com", 20, { type: "latest" });
+    const older = await queryMamPage(xmpp, "room@muc.example.com", 20, {
+      type: "before",
+      before: "archive-1",
+    });
+
+    expect(xmpp.searchHistory.mock.calls[0]?.[1]).toEqual({ paging: { max: 20, before: "" } });
+    expect(xmpp.searchHistory.mock.calls[1]?.[1]).toEqual({ paging: { max: 20, before: "archive-1" } });
+    expect(latest.firstArchiveId).toBe("archive-1");
+    expect(latest.lastArchiveId).toBe("archive-20");
+    expect(older.complete).toBe(false);
   });
 
   test("parses archived room reactions, corrections, and retractions with original stanza IDs", async () => {
@@ -199,6 +227,49 @@ describe("MAM history parsing", () => {
         paging: { max: 20, before: "" },
       }),
     );
+  });
+
+  test("paged DM history keeps the with filter and uses RSM before cursors", async () => {
+    const xmpp = makeMamPageAgent({
+      results: [],
+      paging: { first: "dm-1", last: "dm-20" },
+      complete: true,
+    });
+
+    const page = await queryPersonalMamPage(
+      xmpp,
+      "alice@example.com",
+      "bob@example.com",
+      20,
+      { type: "before", before: "dm-1" },
+    );
+
+    const callArgs = xmpp.searchHistory.mock.calls[0];
+    expect(callArgs?.[0]).toBe("alice@example.com");
+    expect((callArgs?.[1] as { paging?: unknown })?.paging).toEqual({ max: 20, before: "dm-1" });
+    const fields =
+      ((callArgs?.[1] as { form?: { fields?: { name: string; value?: string }[] } })?.form?.fields) ?? [];
+    expect(fields.find((field) => field.name === "with")?.value).toBe("bob@example.com");
+    expect(page.firstArchiveId).toBe("dm-1");
+    expect(page.complete).toBe(true);
+  });
+
+  test("paged thread history uses the XEP-0313 thread form field and RSM before cursor", async () => {
+    const xmpp = makeMamPageAgent({ results: [], paging: { first: "thread-1" }, complete: false });
+
+    await queryMamThreadPage(
+      xmpp,
+      "room@muc.example.com",
+      "thread-42",
+      20,
+      { type: "before", before: "thread-1" },
+    );
+
+    const callArgs = xmpp.searchHistory.mock.calls[0];
+    expect((callArgs?.[1] as { paging?: unknown })?.paging).toEqual({ max: 20, before: "thread-1" });
+    const fields =
+      ((callArgs?.[1] as { form?: { fields?: { name: string; value?: string }[] } })?.form?.fields) ?? [];
+    expect(fields.find((field) => field.name === "{urn:xmpp:mam:2}thread")?.value).toBe("thread-42");
   });
 
   // Reconnect catch-up: an iPhone/Safari session that drops its websocket

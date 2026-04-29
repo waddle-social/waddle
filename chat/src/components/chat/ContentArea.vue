@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, ref, watch, type ComponentPublicInstance } from "vue";
 import { AlertCircle, CheckCircle2, Hash, MessageCircle, MessagesSquare, RefreshCw, Search, Upload, WifiOff, X } from "lucide-vue-next";
 import { isForumChannel as detectForumChannel } from "@/lib/channel-types";
 import { getConnectionNoticeCopy } from "@/lib/connection-notice";
@@ -21,6 +21,7 @@ import ChatHeader from "@/components/chat/ChatHeader.vue";
 import MessageCard from "@/components/chat/MessageCard.vue";
 import MessageComposer from "@/components/chat/MessageComposer.vue";
 import UserProfileDrawer from "@/components/chat/UserProfileDrawer.vue";
+import VirtualTimeline from "@/components/chat/VirtualTimeline.vue";
 
 const draft = defineModel<string>("draft", { required: true });
 const forumTitle = defineModel<string>("forumTitle", { default: "" });
@@ -37,6 +38,8 @@ const props = defineProps<{
   updateAvailable: boolean;
   isApplyingUpdate: boolean;
   isLoadingMessages: boolean;
+  isLoadingOlderMessages: boolean;
+  hasOlderMessages: boolean;
   isSending: boolean;
   canManageChannels: boolean;
   memberCount: number;
@@ -80,6 +83,7 @@ const emit = defineEmits<{
   openDm: [peerJid: string];
   openThread: [threadId: string];
   refreshUpdate: [];
+  loadOlder: [];
 }>();
 
 // Hide thread members from the main feed — they live inside the thread panel.
@@ -94,6 +98,7 @@ const orderedFeedMessages = computed(() =>
 const newMessagesDividerPlacement = computed(() =>
   getNewMessagesDividerPlacement(scrollDirection.value),
 );
+const olderSentinelPosition = computed(() => scrollDirection.value === "social" ? "end" : "start");
 
 const replyingTo = ref<{ id: string; author: string; body?: string; preview?: string } | null>(null);
 
@@ -164,7 +169,10 @@ function cancelPendingFlash() {
   }
 }
 
-function scrollToMessage(messageId: string) {
+async function scrollToMessage(messageId: string) {
+  if (await virtualTimelineRef.value?.scrollToMessageId(messageId, "center")) {
+    await nextTick();
+  }
   const el = findMessageElementById(messagesContainer.value, messageId);
   const notice = getReplyJumpNotice(el instanceof HTMLElement);
   if (!notice && el instanceof HTMLElement) {
@@ -209,9 +217,22 @@ function onSelectGif(url: string) {
 }
 
 const messagesContainer = ref<HTMLDivElement | null>(null);
+const virtualTimelineRef = ref<(ComponentPublicInstance & {
+  scrollElement: HTMLDivElement | null;
+  scrollToMessageId: (messageId: string, align?: "start" | "center" | "end") => Promise<boolean>;
+}) | null>(null);
 const setMessagesContainer = (el: HTMLDivElement | null) => {
   messagesContainer.value = el;
   void nextTick(updateCurrentDayMarker);
+};
+const setVirtualTimelineRef = (
+  instance: (ComponentPublicInstance & {
+    scrollElement: HTMLDivElement | null;
+    scrollToMessageId: (messageId: string, align?: "start" | "center" | "end") => Promise<boolean>;
+  }) | null,
+) => {
+  virtualTimelineRef.value = instance;
+  setMessagesContainer(instance?.scrollElement ?? null);
 };
 const currentDayMarkerLabel = ref("");
 const composerRef = ref<MessageComposerHandle | null>(null);
@@ -743,6 +764,7 @@ function dayDividerLabel(createdAt: string): string {
 
     <!-- Messages -->
     <div
+      v-if="isLoadingMessages || !channel && !dmPeer || feedMessages.length === 0"
       :ref="setMessagesContainer"
       class="chat-pane-scroll chat-message-scroll flex-1 min-h-0 overflow-auto px-[var(--chat-content-inline)]"
       @scroll="updateCurrentDayMarker"
@@ -785,8 +807,20 @@ function dayDividerLabel(createdAt: string): string {
         </div>
       </div>
 
-      <div v-else class="chat-message-lane chat-message-list">
-        <template v-for="msg in orderedFeedMessages" :key="msg.id">
+    </div>
+
+    <VirtualTimeline
+      v-else
+      :ref="setVirtualTimelineRef"
+      :items="orderedFeedMessages"
+      :has-older="hasOlderMessages"
+      :loading-older="isLoadingOlderMessages"
+      :sentinel-position="olderSentinelPosition"
+      aria-label="Messages"
+      @scroll="updateCurrentDayMarker"
+      @load-older="emit('loadOlder')"
+    >
+      <template #item="{ item: msg }">
           <div
             v-if="showDayDividerBefore(msg.id)"
             class="chat-day-divider type-section-label"
@@ -838,9 +872,8 @@ function dayDividerLabel(createdAt: string): string {
             <span>New messages</span>
             <div class="flex-1 h-px bg-destructive/40" />
           </div>
-        </template>
-      </div>
-    </div>
+      </template>
+    </VirtualTimeline>
 
     <!-- Typing indicator -->
     <div

@@ -1,6 +1,6 @@
 import type { Agent } from "stanza";
 import type { ReceivedMessage } from "stanza/protocol";
-import type { LiveDmMessage } from "./types";
+import type { LiveDmMessage, MamHistoryPage, MamPageParam } from "./types";
 import { barePeerJid } from "./jid";
 import { dispatchChat } from "./dm-parsing";
 
@@ -28,6 +28,12 @@ function withArchivedMessageId(
     ...innerMsg,
     id: innerMsg.id ?? mamResultId ?? crypto.randomUUID(),
   } as ReceivedMessage;
+}
+
+function pagingForPageParam(max: number, pageParam: MamPageParam) {
+  return pageParam.type === "latest"
+    ? { max, before: "" }
+    : { max, before: pageParam.before };
 }
 
 export async function queryPersonalMam(
@@ -66,8 +72,23 @@ export async function queryPersonalMam(
     throw err;
   }
 
+  return parseDmMamResult(result, selfBareJid, peerBareJid).messages;
+}
+
+function parseDmMamResult(
+  result: Awaited<ReturnType<Agent["searchHistory"]>>,
+  selfBareJid: string,
+  peerBareJid: string,
+): MamHistoryPage<LiveDmMessage> {
   const collected: LiveDmMessage[] = [];
-  if (!result.results) return collected;
+  if (!result.results) {
+    return {
+      messages: collected,
+      firstArchiveId: result.paging?.first,
+      lastArchiveId: result.paging?.last,
+      complete: result.complete === true,
+    };
+  }
 
   for (const mamResult of result.results) {
     const innerMsg = mamResult.item?.message;
@@ -121,7 +142,38 @@ export async function queryPersonalMam(
     }
   }
 
-  return collected;
+  return {
+    messages: collected,
+    firstArchiveId: result.paging?.first,
+    lastArchiveId: result.paging?.last,
+    complete: result.complete === true,
+  };
+}
+
+export async function queryPersonalMamPage(
+  xmpp: Agent,
+  selfBareJid: string,
+  peerBareJid: string,
+  max: number,
+  pageParam: MamPageParam = { type: "latest" },
+): Promise<MamHistoryPage<LiveDmMessage>> {
+  const fields = [
+    { name: "FORM_TYPE", type: "hidden" as const, value: "urn:xmpp:mam:2" },
+    { name: "with", value: peerBareJid },
+  ];
+
+  let result;
+  try {
+    result = await xmpp.searchHistory(selfBareJid, {
+      paging: pagingForPageParam(max, pageParam),
+      form: { type: "submit", fields },
+    });
+  } catch (err) {
+    if (isItemNotFound(err)) return { messages: [], complete: true };
+    throw err;
+  }
+
+  return parseDmMamResult(result, selfBareJid, peerBareJid);
 }
 
 export async function searchDmMessages(
