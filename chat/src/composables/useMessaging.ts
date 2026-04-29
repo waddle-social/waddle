@@ -266,6 +266,14 @@ export function useMessaging(
   const slowModeCooldown = ref(0);
   const uploadProgress = ref({ uploading: false, progress: 0, filename: "" });
   const firstUnseenId = ref<string | null>(null);
+  const latestRemoteMessageId = computed<string | null>(() => {
+    for (let i = messages.value.length - 1; i >= 0; i--) {
+      const m = messages.value[i];
+      if (!m || m.isSelf || m.isRetracted) continue;
+      return m.id;
+    }
+    return null;
+  });
   const activeChannels = ref<Set<string>>(new Set());
   const lastMentionActivity = ref<RoomActivityEvent | null>(null);
   const roomAvatarHashes = ref<Record<string, string>>({});
@@ -858,7 +866,7 @@ export function useMessaging(
     return applyForumContext(timeline.sort((a, b) => a.createdAt.localeCompare(b.createdAt)));
   }
 
-  async function loadMessages(spaceId: string, channelId: string) {
+  async function loadMessages(spaceId: string, channelId: string, unreadAtLoad = 0) {
     if (!session.value) return;
 
     const requestId = ++messageRequestId;
@@ -907,7 +915,10 @@ export function useMessaging(
         isLoadingMessages.value = false;
       }
 
-      firstUnseenId.value = null;
+      const feedTimeline = timelineWithQueue.filter(isFeedVisible);
+      firstUnseenId.value = unreadAtLoad > 0 && feedTimeline.length >= unreadAtLoad
+        ? feedTimeline[feedTimeline.length - unreadAtLoad]?.id ?? null
+        : null;
       const pinned = await scrollToPinnedEdgeAndPin();
       if (
         !pinned ||
@@ -1395,7 +1406,6 @@ export function useMessaging(
       const requestId = messageRequestId;
       const spaceId = activeSpaceId.value ?? "";
       const channelId = activeChannelId.value;
-      firstUnseenId.value = null;
       const pinned = await scrollToPinnedEdgeAndPin();
       if (
         pinned &&
@@ -1456,6 +1466,8 @@ export function useMessaging(
     clearSearch,
     clearChannelActivity,
     scrollToPinnedEdge,
+    isPinnedAtEdge: pinnedEdgeScroller.isPinnedAtEdge,
+    latestRemoteMessageId,
     lastMentionActivity,
     onMessageQueueStatus,
     onMessageAck,

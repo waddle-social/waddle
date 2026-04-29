@@ -11,6 +11,8 @@ import { useAppUpdate } from "@/composables/useAppUpdate";
 import { useNotifications } from "@/composables/useNotifications";
 import { useChannelUnread } from "@/composables/useChannelUnread";
 import { useTabUnreadIndicator } from "@/composables/useTabUnreadIndicator";
+import { useWindowVisibility } from "@/composables/useWindowVisibility";
+import { useReadReceipts } from "@/composables/useReadReceipts";
 import { useVersion } from "@/composables/useVersion";
 import { useRosterContacts } from "@/composables/useRosterContacts";
 import { buildDmPath, buildPath, buildSettingsPath, parseRoute, pushDmRoute, pushRoute, pushSettingsRoute, resolveChannel, shouldLoadStructureForRoute } from "@/composables/useRouting";
@@ -242,6 +244,59 @@ useTabUnreadIndicator(totalTabUnreadCount, {
     dmConversations.hydrateFromInbox(),
     channelUnread.hydrateFromInbox(),
   ]).then((results) => results.every(Boolean)),
+});
+
+const { isWindowFocused } = useWindowVisibility();
+const readReceiptsKind = computed<"channel" | "dm" | null>(() => {
+  if (ui.sidebarMode.value === "dms") {
+    return dmConversations.activePeerJid.value ? "dm" : null;
+  }
+  return waddles.activeChannelId.value ? "channel" : null;
+});
+const readReceiptsActiveRoomJid = computed<string | null>(() => {
+  if (readReceiptsKind.value !== "channel") return null;
+  const channelId = waddles.activeChannelId.value;
+  const sess = session.value;
+  if (!channelId || !sess) return null;
+  return roomBareJidFor(sess, channelId);
+});
+const readReceiptsActivePeerJid = computed<string | null>(() =>
+  readReceiptsKind.value === "dm" ? dmConversations.activePeerJid.value : null,
+);
+const readReceiptsIsPinnedAtEdge = computed<boolean>(() =>
+  readReceiptsKind.value === "dm"
+    ? dmMessaging.isPinnedAtEdge.value
+    : messaging.isPinnedAtEdge.value,
+);
+const readReceiptsLatestRemoteId = computed<string | null>(() =>
+  readReceiptsKind.value === "dm"
+    ? dmMessaging.latestRemoteMessageId.value
+    : messaging.latestRemoteMessageId.value,
+);
+const readReceiptsUnreadCount = computed<number>(() => {
+  if (readReceiptsKind.value === "dm") {
+    const peer = readReceiptsActivePeerJid.value;
+    if (!peer) return 0;
+    return dmConversations.conversations.value.find((c) => c.peerJid === peer)?.unreadCount ?? 0;
+  }
+  if (readReceiptsKind.value === "channel") {
+    const channelId = waddles.activeChannelId.value;
+    if (!channelId) return 0;
+    return computedChannelUnreadMap.value[channelId]?.unread ?? 0;
+  }
+  return 0;
+});
+useReadReceipts({
+  isWindowFocused,
+  isPinnedAtEdge: readReceiptsIsPinnedAtEdge,
+  activeKind: readReceiptsKind,
+  activeRoomJid: readReceiptsActiveRoomJid,
+  activePeerJid: readReceiptsActivePeerJid,
+  latestRemoteMessageId: readReceiptsLatestRemoteId,
+  unreadCountForActive: readReceiptsUnreadCount,
+  markChannelRead: (jid) => channelUnread.markRead(jid),
+  markDmRead: (peer) => dmConversations.markRead(peer),
+  markDisplayed: (id) => activeTarget.value.markDisplayed(id),
 });
 
 const notifications = useNotifications();
@@ -805,9 +860,13 @@ async function selectChannel(channelId: string) {
   if (connectionStore.session) {
     const roomJid = roomBareJidFor(connectionStore.session, channelId);
     messaging.clearChannelActivity(roomJid);
-    channelUnread.markRead(roomJid);
   }
-  await messaging.loadMessages(waddles.currentChannel.value?.spaceId ?? "", channelId);
+  const unreadAtLoad = computedChannelUnreadMap.value[channelId]?.unread ?? 0;
+  await messaging.loadMessages(
+    waddles.currentChannel.value?.spaceId ?? "",
+    channelId,
+    unreadAtLoad,
+  );
   ui.showMobileNav.value = false;
 }
 
@@ -816,8 +875,10 @@ async function handleOpenDm(peerJid: string) {
   ui.sidebarMode.value = "dms";
   await dmConversations.openDm(peerJid);
   dmMessaging.clearMessages();
-  if (dmConversations.activePeerJid.value) {
-    await dmMessaging.loadMessages(dmConversations.activePeerJid.value);
+  const activePeer = dmConversations.activePeerJid.value;
+  if (activePeer) {
+    const unreadAtLoad = dmConversations.conversations.value.find((c) => c.peerJid === activePeer)?.unreadCount ?? 0;
+    await dmMessaging.loadMessages(activePeer, unreadAtLoad);
   }
   ui.showMobileNav.value = false;
 }
@@ -1236,7 +1297,6 @@ onUnmounted(() => {
               @edit-message="editActiveMessage"
               @retract-message="retractActiveMessage"
               @react-message="reactActiveMessage"
-              @displayed="markActiveDisplayed"
               @search="searchActiveMessages"
               @clear-search="clearActiveSearch"
               @load-older="loadOlderActiveMessages"

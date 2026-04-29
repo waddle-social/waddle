@@ -250,7 +250,6 @@ export function useDmConversations(
     const bare = barePeerJid(peerJid);
     ensureConversation(bare);
     activePeerJid.value = bare;
-    markRead(bare);
     try {
       await xmppClient.value?.subscribeToPeerPresence(bare);
     } catch {
@@ -283,10 +282,6 @@ export function useDmConversations(
           }
         : c
     )));
-
-    if (!isSelfMessage && isActiveConversation) {
-      markRead(bare, { forceSync: true });
-    }
   }
 
   function updatePresence(event: PresenceUpdateEvent) {
