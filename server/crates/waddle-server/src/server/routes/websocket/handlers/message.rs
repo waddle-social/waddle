@@ -531,10 +531,12 @@ fn visitor_may_not_speak_message_error(
 /// Typed reply for transient server-side broadcast failures (room
 /// actor mailbox closed, internal broadcast preparation error, etc.).
 /// Maps to the wire reply
-/// `<error type='cancel'><internal-server-error/></error>` so
-/// clients see a server-fault classification rather than a misleading
-/// `<not-acceptable/>` (which would imply the message itself was
-/// invalid).
+/// `<error type='wait'><internal-server-error/></error>` per
+/// RFC 6120 §8.3.2's guidance for transient server faults — the
+/// client may retry. Mirrors `internal_server_error_for_lookup` and
+/// other repo-wide internal-server-error sites (Copilot review on
+/// PR #277). Distinct from `<not-acceptable/>` so clients can tell
+/// "your message is malformed" from "the server hiccuped".
 fn internal_server_error_message(
     incoming: &xmpp_parsers::message::Message,
     room_jid: &BareJid,
@@ -545,7 +547,7 @@ fn internal_server_error_message(
         &jid::Jid::from(room_jid.clone()),
         &jid::Jid::from(sender_jid.clone()),
         StanzaError::new(
-            ErrorType::Cancel,
+            ErrorType::Wait,
             DefinedCondition::InternalServerError,
             "en",
             "Internal server error while delivering groupchat message.",

@@ -151,8 +151,10 @@ pub enum RoomActorError {
     #[error("visitor '{0}' may not speak in a moderated room")]
     VisitorMayNotSpeak(FullJid),
     /// Broadcast prep failed inside the room (occupant lookup, role
-    /// check, etc.). Maps to `<error type='cancel'><internal-server-error/></error>`
-    /// because it represents a server-side issue, not a client error.
+    /// check, etc.). Maps to `<error type='wait'><internal-server-error/></error>`
+    /// because it represents a transient server-side fault — clients
+    /// may retry. Matches RFC 6120 §8.3.2 guidance and other
+    /// repo-wide `<internal-server-error/>` emission sites.
     #[error("groupchat broadcast preparation failed: {0}")]
     BroadcastFailed(String),
 }

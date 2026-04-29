@@ -19,6 +19,17 @@ use crate::XmppError;
 /// the message-side groupchat reflection stamping (#229 PR17 room
 /// chain) so the same user resolves to the same occupant-id across
 /// presence joins/leaves AND outgoing groupchat messages.
+///
+/// **Deployment-config gap (Copilot review on PR #277, post-#229
+/// follow-up):** XEP-0421 §3 recommends the occupant-id derivation be
+/// keyed by a per-deployment secret so occupant-ids are unlinkable
+/// across deployments. Today this is a process-wide compiled-in
+/// constant. The new room handler chain takes the secret via
+/// [`crate::protocol::room::context::RoomContext::occupant_id_secret`]
+/// so a follow-up PR can thread a configured, rotatable secret from
+/// `WebSocketState` (or equivalent app state) through the production
+/// `presence.rs` and `message.rs` call sites and demote this constant
+/// to a `#[cfg(test)]` default.
 pub const OCCUPANT_ID_SECRET: &[u8] = b"waddle-xmpp-occupant-id-v1";
 
 /// Namespace for MUC user protocol.
