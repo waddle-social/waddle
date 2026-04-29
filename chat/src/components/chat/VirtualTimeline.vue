@@ -32,13 +32,13 @@ function itemForVirtualIndex(index: number): TimelineMessage | null {
   return props.items[index - offset] ?? null;
 }
 
-const virtualizer = useVirtualizer({
-  count: rowCount,
+const virtualizer = useVirtualizer(computed(() => ({
+  count: rowCount.value,
   getScrollElement: () => scrollElement.value,
-  estimateSize: (index) => (index === sentinelIndex.value ? 44 : 112),
+  estimateSize: (index: number) => (index === sentinelIndex.value ? 44 : 112),
   overscan: 8,
-  getItemKey: (index) => itemForVirtualIndex(index)?.id ?? "older-history-sentinel",
-});
+  getItemKey: (index: number) => itemForVirtualIndex(index)?.id ?? "older-history-sentinel",
+})));
 
 const virtualItems = computed(() => virtualizer.value.getVirtualItems());
 const totalSize = computed(() => virtualizer.value.getTotalSize());
