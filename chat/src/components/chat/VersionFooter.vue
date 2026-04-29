@@ -36,7 +36,7 @@ const tooltip = computed(
     </div>
     <div class="type-version flex items-center justify-center gap-1 border-t border-border/50 pt-2 text-muted-foreground/70">
       <span>Made proudly in</span>
-      <span role="img" aria-label="Germany, Norway, and Scotland">🇩🇪🇳🇴🏴</span>
+      <span role="img" aria-label="Germany, Norway, and Scotland">🇩🇪🇳🇴🏴󠁧󠁢󠁳󠁣󠁴󠁿</span>
     </div>
   </div>
   <div
@@ -50,7 +50,7 @@ const tooltip = computed(
     </div>
     <div class="flex items-center gap-1">
       <span>Made proudly in</span>
-      <span role="img" aria-label="Germany, Norway, and Scotland">🇩🇪🇳🇴🏴</span>
+      <span role="img" aria-label="Germany, Norway, and Scotland">🇩🇪🇳🇴🏴󠁧󠁢󠁳󠁣󠁴󠁿</span>
     </div>
   </div>
 </template>
