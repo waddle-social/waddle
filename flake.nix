@@ -29,7 +29,6 @@
           inherit system;
           overlays = [ rust-overlay.overlays.default ];
         };
-      waddleGitSha = self.rev or (self.dirtyRev or "unknown");
     in
     {
       packages = forAllSystems (
@@ -39,7 +38,23 @@
           lib = pkgs.lib;
           rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./server/rust-toolchain.toml;
           craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
-          serverSrc = lib.fileset.toSource {
+          serverPackageSrc = lib.fileset.toSource {
+            root = ./server;
+            fileset =
+              let
+                testFiles = lib.fileset.unions [
+                  ./server/crates/waddle-server/tests
+                  ./server/crates/waddle-xmpp/tests
+                ];
+              in
+              lib.fileset.unions [
+                ./server/Cargo.toml
+                ./server/Cargo.lock
+                (lib.fileset.difference ./server/crates testFiles)
+                ./server/wit
+              ];
+          };
+          serverCheckSrc = lib.fileset.toSource {
             root = ./server;
             fileset = lib.fileset.unions [
               ./server/Cargo.toml
@@ -48,18 +63,12 @@
               ./server/wit
             ];
           };
-          commonArgs = {
+          baseArgs = {
             pname = "waddle-server";
             version = "0.1.0";
-            src = serverSrc;
+            src = serverPackageSrc;
             strictDeps = true;
             cargoExtraArgs = "--locked --package waddle-server --bin waddle-server";
-            WADDLE_GIT_SHA = waddleGitSha;
-            WADDLE_CERTS_EPHEMERAL = "true";
-            WADDLE_TEST_FIXED_ACCOUNT_ENABLED = "true";
-            WADDLE_TEST_FIXED_ACCOUNT_PASSWORD = "cuenv-test-password";
-            WADDLE_UPLOAD_DIR = "./uploads";
-            RUST_BACKTRACE = "1";
             nativeBuildInputs = [
               pkgs.pkg-config
               pkgs.protobuf
@@ -69,15 +78,62 @@
               pkgs.sqlite
             ];
           };
+          checkBaseArgs = baseArgs // {
+            src = serverCheckSrc;
+            nativeBuildInputs = baseArgs.nativeBuildInputs ++ [
+              pkgs.go
+            ];
+            preBuild = ''
+              export HOME="$TMPDIR"
+              export GOCACHE="$TMPDIR/go-cache"
+              export GOMODCACHE="$TMPDIR/go-mod-cache"
+            '';
+          };
           cargoArtifacts = craneLib.buildDepsOnly (
-            commonArgs
+            baseArgs
             // {
               doCheck = false;
               cargoCheckExtraArgs = "";
             }
           );
+          workspaceArtifacts = craneLib.buildDepsOnly (
+            checkBaseArgs
+            // {
+              cargoExtraArgs = "--locked --workspace";
+              cargoCheckExtraArgs = "--all-targets";
+              cargoBuildExtraArgs = "--all-targets";
+              cargoTestExtraArgs = "--all-targets --no-run";
+            }
+          );
+          workspaceAllFeaturesArtifacts = craneLib.buildDepsOnly (
+            checkBaseArgs
+            // {
+              cargoExtraArgs = "--locked --workspace --all-features";
+              cargoCheckExtraArgs = "--all-targets";
+              cargoBuildExtraArgs = "--all-targets";
+              cargoTestExtraArgs = "--all-targets --no-run";
+            }
+          );
+          xmppArtifacts = craneLib.buildDepsOnly (
+            checkBaseArgs
+            // {
+              cargoExtraArgs = "--locked --package waddle-xmpp";
+              cargoCheckExtraArgs = "--all-targets";
+              cargoBuildExtraArgs = "--all-targets";
+              cargoTestExtraArgs = "--all-targets --no-run";
+            }
+          );
+          serverTestArtifacts = craneLib.buildDepsOnly (
+            checkBaseArgs
+            // {
+              cargoExtraArgs = "--locked --package waddle-server";
+              cargoCheckExtraArgs = "--all-targets";
+              cargoBuildExtraArgs = "--all-targets";
+              cargoTestExtraArgs = "--all-targets --no-run";
+            }
+          );
           waddle-server = craneLib.buildPackage (
-            commonArgs
+            baseArgs
             // {
               inherit cargoArtifacts;
               doCheck = false;
@@ -112,6 +168,11 @@
         in
         {
           inherit waddle-server;
+          waddle-server-deps = cargoArtifacts;
+          waddle-server-workspace-deps = workspaceArtifacts;
+          waddle-server-workspace-all-features-deps = workspaceAllFeaturesArtifacts;
+          waddle-server-xmpp-deps = xmppArtifacts;
+          waddle-server-test-deps = serverTestArtifacts;
           default = waddle-server;
         }
         // lib.optionalAttrs pkgs.stdenv.isLinux {
@@ -126,7 +187,7 @@
           lib = pkgs.lib;
           rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./server/rust-toolchain.toml;
           craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
-          serverSrc = lib.fileset.toSource {
+          serverCheckSrc = lib.fileset.toSource {
             root = ./server;
             fileset = lib.fileset.unions [
               ./server/Cargo.toml
@@ -135,28 +196,41 @@
               ./server/wit
             ];
           };
-          commonArgs = {
+          baseArgs = {
             pname = "waddle-server";
             version = "0.1.0";
-            src = serverSrc;
+            src = serverCheckSrc;
             strictDeps = true;
-            WADDLE_GIT_SHA = waddleGitSha;
-            WADDLE_CERTS_EPHEMERAL = "true";
-            WADDLE_TEST_FIXED_ACCOUNT_ENABLED = "true";
-            WADDLE_TEST_FIXED_ACCOUNT_PASSWORD = "cuenv-test-password";
-            WADDLE_UPLOAD_DIR = "./uploads";
-            RUST_BACKTRACE = "1";
             nativeBuildInputs = [
               pkgs.pkg-config
               pkgs.protobuf
+              pkgs.go
             ];
             buildInputs = [
               pkgs.openssl
               pkgs.sqlite
             ];
+            preBuild = ''
+              export HOME="$TMPDIR"
+              export GOCACHE="$TMPDIR/go-cache"
+              export GOMODCACHE="$TMPDIR/go-mod-cache"
+            '';
+          };
+          testRuntimeEnv = {
+            WADDLE_CERTS_EPHEMERAL = "true";
+            WADDLE_TEST_FIXED_ACCOUNT_ENABLED = "true";
+            WADDLE_TEST_FIXED_ACCOUNT_PASSWORD = "cuenv-test-password";
+            WADDLE_UPLOAD_DIR = "./uploads";
+            RUST_BACKTRACE = "1";
+          };
+          testArgs = baseArgs // testRuntimeEnv;
+          serverTestArgs = testArgs // {
+            postUnpack = ''
+              cp -R ${./server/charts} "$sourceRoot/charts"
+            '';
           };
           workspaceArtifacts = craneLib.buildDepsOnly (
-            commonArgs
+            baseArgs
             // {
               cargoExtraArgs = "--locked --workspace";
               cargoCheckExtraArgs = "--all-targets";
@@ -165,7 +239,7 @@
             }
           );
           workspaceAllFeaturesArtifacts = craneLib.buildDepsOnly (
-            commonArgs
+            baseArgs
             // {
               cargoExtraArgs = "--locked --workspace --all-features";
               cargoCheckExtraArgs = "--all-targets";
@@ -174,7 +248,7 @@
             }
           );
           xmppArtifacts = craneLib.buildDepsOnly (
-            commonArgs
+            baseArgs
             // {
               cargoExtraArgs = "--locked --package waddle-xmpp";
               cargoCheckExtraArgs = "--all-targets";
@@ -183,7 +257,7 @@
             }
           );
           serverTestArtifacts = craneLib.buildDepsOnly (
-            commonArgs
+            baseArgs
             // {
               cargoExtraArgs = "--locked --package waddle-server";
               cargoCheckExtraArgs = "--all-targets";
@@ -197,11 +271,11 @@
           waddle-server-fmt = craneLib.cargoFmt {
             pname = "waddle-server-fmt";
             version = "0.1.0";
-            src = serverSrc;
+            src = serverCheckSrc;
             cargoExtraArgs = "--all";
           };
           waddle-server-clippy = craneLib.cargoClippy (
-            commonArgs
+            baseArgs
             // {
               cargoArtifacts = workspaceAllFeaturesArtifacts;
               cargoExtraArgs = "--locked --workspace --all-features";
@@ -209,7 +283,7 @@
             }
           );
           waddle-server-test = craneLib.cargoTest (
-            commonArgs
+            serverTestArgs
             // {
               cargoArtifacts = workspaceArtifacts;
               cargoExtraArgs = "--locked --workspace";
@@ -217,7 +291,7 @@
             }
           );
           waddle-server-xmpp-unit-tests = craneLib.cargoTest (
-            commonArgs
+            testArgs
             // {
               pname = "waddle-server-xmpp-unit-tests";
               cargoArtifacts = xmppArtifacts;
@@ -226,7 +300,7 @@
             }
           );
           waddle-server-xmpp-server-tests = craneLib.cargoTest (
-            commonArgs
+            serverTestArgs
             // {
               pname = "waddle-server-xmpp-server-tests";
               cargoArtifacts = serverTestArtifacts;
@@ -235,7 +309,7 @@
             }
           );
           waddle-server-xmpp-cue-e2e = craneLib.cargoTest (
-            commonArgs
+            serverTestArgs
             // {
               pname = "waddle-server-xmpp-cue-e2e";
               cargoArtifacts = serverTestArtifacts;
@@ -244,7 +318,7 @@
             }
           );
           waddle-server-xmpp-xep-integration = craneLib.cargoTest (
-            commonArgs
+            testArgs
             // {
               pname = "waddle-server-xmpp-xep-integration";
               cargoArtifacts = xmppArtifacts;

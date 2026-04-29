@@ -6,7 +6,6 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 description = "Waddle Social - Native XMPP server library"
-build = "build.rs"
 autotests = true
 
 [dependencies]

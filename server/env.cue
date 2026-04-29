@@ -58,6 +58,7 @@ let _nixInputs = [
 	"Cargo.toml",
 	"Cargo.lock",
 	"crates/**",
+	"scripts/check-nix-cache-keys.sh",
 	"wit/**",
 ]
 
@@ -138,7 +139,9 @@ schema.#Project & {
 				}
 			}
 			tasks: [
+				_t.nixCacheKeyContract,
 				_t.nixFlakeCheck,
+				_t.nixWarmServerDeps,
 				_t.nixBuildServer,
 				_t.publishContainerImage,
 			]
@@ -168,7 +171,12 @@ schema.#Project & {
 				contents:   "read"
 				"id-token": "write"
 			}
-			tasks: [_t.nixFlakeCheck, _t.nixBuildServer]
+			tasks: [
+				_t.nixCacheKeyContract,
+				_t.nixFlakeCheck,
+				_t.nixWarmServerDeps,
+				_t.nixBuildServer,
+			]
 		}
 		xmppCompliance: {
 			mode: "expanded"
@@ -179,6 +187,7 @@ schema.#Project & {
 			}
 			provider: github: permissions: "id-token": "write"
 			tasks: [
+				_t.nixWarmServerDeps,
 				_t.nixXmppUnitTests,
 				_t.nixXmppServerTests,
 				_t.nixXmppXepIntegration,
@@ -194,6 +203,7 @@ schema.#Project & {
 				"id-token": "write"
 			}
 			tasks: [
+				_t.nixWarmServerDeps,
 				_t.nixXmppUnitTests,
 				_t.nixXmppCueE2e,
 				_t.nixXmppServerTests,
@@ -244,35 +254,60 @@ schema.#Project & {
 			]])
 		}
 
+		nixCacheKeyContract: schema.#Task & {
+			command: "bash"
+			args: ["scripts/check-nix-cache-keys.sh"]
+			inputs: _nixInputs
+		}
+
+		nixWarmServerDeps: schema.#Task & {
+			command: "nix"
+			args: [
+				"build",
+				"../#waddle-server-deps",
+				"../#waddle-server-workspace-deps",
+				"../#waddle-server-workspace-all-features-deps",
+				"../#waddle-server-xmpp-deps",
+				"../#waddle-server-test-deps",
+				"-L",
+				"--accept-flake-config",
+			]
+			inputs: _nixInputs
+		}
+
 		nixBuildServer: schema.#Task & {
 			command: "nix"
 			args: ["build", "../#waddle-server", "-L", "--accept-flake-config"]
 			inputs: _nixInputs
-			dependsOn: [tasks.nixFlakeCheck]
+			dependsOn: [tasks.nixFlakeCheck, tasks.nixWarmServerDeps]
 		}
 
 		nixXmppUnitTests: schema.#Task & {
 			command: "nix"
 			args: ["build", "../#checks.x86_64-linux.waddle-server-xmpp-unit-tests", "-L", "--accept-flake-config"]
 			inputs: _nixInputs
+			dependsOn: [tasks.nixWarmServerDeps]
 		}
 
 		nixXmppServerTests: schema.#Task & {
 			command: "nix"
 			args: ["build", "../#checks.x86_64-linux.waddle-server-xmpp-server-tests", "-L", "--accept-flake-config"]
 			inputs: _nixInputs
+			dependsOn: [tasks.nixWarmServerDeps]
 		}
 
 		nixXmppCueE2e: schema.#Task & {
 			command: "nix"
 			args: ["build", "../#checks.x86_64-linux.waddle-server-xmpp-cue-e2e", "-L", "--accept-flake-config"]
 			inputs: _nixInputs
+			dependsOn: [tasks.nixWarmServerDeps]
 		}
 
 		nixXmppXepIntegration: schema.#Task & {
 			command: "nix"
 			args: ["build", "../#checks.x86_64-linux.waddle-server-xmpp-xep-integration", "-L", "--accept-flake-config"]
 			inputs: _nixInputs
+			dependsOn: [tasks.nixWarmServerDeps]
 		}
 
 		fmt: xRust.#Fmt & {
@@ -388,7 +423,7 @@ schema.#Project & {
 				"""#]
 			inputs: list.Concat([_nixInputs, ["charts/**"]])
 			outputs: ["target/digests/**"]
-			dependsOn: [tasks.nixFlakeCheck, tasks.nixBuildServer]
+			dependsOn: [tasks.nixCacheKeyContract, tasks.nixFlakeCheck, tasks.nixBuildServer]
 		}
 
 		flakehubPublished: schema.#Task & {

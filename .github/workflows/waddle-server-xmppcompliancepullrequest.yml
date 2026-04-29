@@ -14,6 +14,7 @@ on:
     - server/crates/**
     - server/env.cue
     - server/schema/**
+    - server/scripts/check-nix-cache-keys.sh
     - server/wit/**
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
@@ -24,9 +25,37 @@ permissions:
   pull-requests: write
   id-token: write
 jobs:
+  nixWarmServerDeps:
+    name: nixWarmServerDeps
+    runs-on: namespace-profile-linux-x86
+    steps:
+    - name: Checkout
+      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      with:
+        fetch-depth: 2
+    - name: Set up Namespace Nix cache
+      uses: namespacelabs/nscloud-cache-action@v1
+      with:
+        cache: nix
+    - name: Install Determinate Nix
+      uses: DeterminateSystems/determinate-nix-action@92ffb5400c3776307a27a1727d7e2ac3dcd9f844
+      with:
+        extra-conf: accept-flake-config = true
+    - name: Setup FlakeHub Cache
+      uses: DeterminateSystems/flakehub-cache-action@e134de896b2302c1584a7b54ff35432708607d44
+      with:
+        flakehub-flake-name: waddle-social/waddle
+        use-gha-cache: disabled
+    - name: nixWarmServerDeps
+      run: nix build ../#waddle-server-deps ../#waddle-server-workspace-deps ../#waddle-server-workspace-all-features-deps ../#waddle-server-xmpp-deps ../#waddle-server-test-deps -L --accept-flake-config
+      working-directory: server
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   nixXmppCueE2e:
     name: nixXmppCueE2e
     runs-on: namespace-profile-linux-x86
+    needs:
+    - nixWarmServerDeps
     steps:
     - name: Checkout
       uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
@@ -53,6 +82,8 @@ jobs:
   nixXmppServerTests:
     name: nixXmppServerTests
     runs-on: namespace-profile-linux-x86
+    needs:
+    - nixWarmServerDeps
     steps:
     - name: Checkout
       uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
@@ -79,6 +110,8 @@ jobs:
   nixXmppUnitTests:
     name: nixXmppUnitTests
     runs-on: namespace-profile-linux-x86
+    needs:
+    - nixWarmServerDeps
     steps:
     - name: Checkout
       uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
@@ -105,6 +138,8 @@ jobs:
   nixXmppXepIntegration:
     name: nixXmppXepIntegration
     runs-on: namespace-profile-linux-x86
+    needs:
+    - nixWarmServerDeps
     steps:
     - name: Checkout
       uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5

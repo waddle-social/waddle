@@ -1,8 +1,8 @@
 //! XEP-0092: Software Version
 //!
 //! Allows clients to query the server (or any entity) for its software
-//! name, version, and host operating system. Waddle uses this to expose
-//! the running commit SHA so operators can verify deployments.
+//! name, version, and host operating system. Waddle reports the package version
+//! here so cache keys do not depend on per-commit build metadata.
 //!
 //! ## XML Format
 //!
@@ -18,7 +18,7 @@
 //! <iq type='result' from='example.com' id='v-1'>
 //!   <query xmlns='jabber:iq:version'>
 //!     <name>Waddle</name>
-//!     <version>0.1.0 (abcdef123456)</version>
+//!     <version>0.1.0</version>
 //!     <os>Linux</os>
 //!   </query>
 //! </iq>

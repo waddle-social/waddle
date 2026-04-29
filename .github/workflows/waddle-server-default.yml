@@ -19,6 +19,7 @@ on:
     - server/env.cue
     - server/schema/**
     - server/scripts/check-ci-drift.sh
+    - server/scripts/check-nix-cache-keys.sh
     - server/scripts/pin-generated-github-actions.sh
     - server/wit/**
   workflow_dispatch: {}
@@ -37,6 +38,7 @@ jobs:
     runs-on: namespace-profile-linux-x86
     needs:
     - nixFlakeCheck
+    - nixWarmServerDeps
     steps:
     - name: Checkout
       uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
@@ -57,6 +59,43 @@ jobs:
         use-gha-cache: disabled
     - name: nixBuildServer
       run: nix build ../#waddle-server -L --accept-flake-config
+      working-directory: server
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  nixCacheKeyContract:
+    name: nixCacheKeyContract
+    runs-on: namespace-profile-linux-x86
+    steps:
+    - name: Checkout
+      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      with:
+        fetch-depth: 2
+    - name: Set up Namespace Nix cache
+      uses: namespacelabs/nscloud-cache-action@v1
+      with:
+        cache: nix
+    - name: Install Determinate Nix
+      uses: DeterminateSystems/determinate-nix-action@92ffb5400c3776307a27a1727d7e2ac3dcd9f844
+      with:
+        extra-conf: accept-flake-config = true
+    - name: Setup FlakeHub Cache
+      uses: DeterminateSystems/flakehub-cache-action@e134de896b2302c1584a7b54ff35432708607d44
+      with:
+        flakehub-flake-name: waddle-social/waddle
+        use-gha-cache: disabled
+    - name: Setup cuenv (release)
+      run: |-
+        arch="$(uname -m)"
+        case "$arch" in
+          x86_64|amd64) cuenv_asset="cuenv-linux-x64" ;;
+          aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
+          *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
+        esac
+        curl -sSL -o /usr/local/bin/cuenv "https://github.com/cuenv/cuenv/releases/latest/download/${cuenv_asset}" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync -A
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    - name: nixCacheKeyContract
+      run: cuenv task nixCacheKeyContract --skip-dependencies
       working-directory: server
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -86,10 +125,37 @@ jobs:
       working-directory: server
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  nixWarmServerDeps:
+    name: nixWarmServerDeps
+    runs-on: namespace-profile-linux-x86
+    steps:
+    - name: Checkout
+      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      with:
+        fetch-depth: 2
+    - name: Set up Namespace Nix cache
+      uses: namespacelabs/nscloud-cache-action@v1
+      with:
+        cache: nix
+    - name: Install Determinate Nix
+      uses: DeterminateSystems/determinate-nix-action@92ffb5400c3776307a27a1727d7e2ac3dcd9f844
+      with:
+        extra-conf: accept-flake-config = true
+    - name: Setup FlakeHub Cache
+      uses: DeterminateSystems/flakehub-cache-action@e134de896b2302c1584a7b54ff35432708607d44
+      with:
+        flakehub-flake-name: waddle-social/waddle
+        use-gha-cache: disabled
+    - name: nixWarmServerDeps
+      run: nix build ../#waddle-server-deps ../#waddle-server-workspace-deps ../#waddle-server-workspace-all-features-deps ../#waddle-server-xmpp-deps ../#waddle-server-test-deps -L --accept-flake-config
+      working-directory: server
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   publishContainerImage:
     name: publishContainerImage
     runs-on: namespace-profile-linux-x86
     needs:
+    - nixCacheKeyContract
     - nixFlakeCheck
     - nixBuildServer
     steps:

@@ -1,7 +1,7 @@
 //! XEP-0092 — Software Version.
 //!
-//! Responds with the running Waddle package version, stamped git SHA, and host
-//! OS so WebSocket clients can display deployment state.
+//! Responds with the running Waddle package version and host OS so WebSocket
+//! clients can display deployment state.
 
 use crate::protocol::event::{OutboundEvent, StanzaContext};
 use crate::protocol::traits::IqHandler;
@@ -21,7 +21,7 @@ impl IqHandler for VersionHandler {
     fn handle(&self, iq: &Iq, _ctx: &StanzaContext<'_>) -> Vec<OutboundEvent> {
         let info = SoftwareVersion {
             name: "Waddle".to_string(),
-            version: format!("{} ({})", env!("CARGO_PKG_VERSION"), env!("WADDLE_GIT_SHA")),
+            version: env!("CARGO_PKG_VERSION").to_string(),
             os: Some(std::env::consts::OS.to_string()),
         };
         vec![OutboundEvent::SendStanza(Box::new(Stanza::Iq(
@@ -81,7 +81,8 @@ mod tests {
                     assert_eq!(payload.name(), "query");
                     assert_eq!(payload.ns(), NS_VERSION);
                     assert!(payload.get_child("name", NS_VERSION).is_some());
-                    assert!(payload.get_child("version", NS_VERSION).is_some());
+                    let version = payload.get_child("version", NS_VERSION).expect("version");
+                    assert_eq!(version.text(), env!("CARGO_PKG_VERSION"));
                     assert!(payload.get_child("os", NS_VERSION).is_some());
                 }
                 other => panic!("expected Iq stanza, got {other:?}"),
