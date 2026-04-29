@@ -50,6 +50,19 @@ function makeTimelineEl() {
   } as unknown as HTMLDivElement;
 }
 
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((innerResolve) => {
+    resolve = innerResolve;
+  });
+  return { promise, resolve };
+}
+
+async function flushAsync() {
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await nextTick();
+}
+
 const originalWindow = globalThis.window;
 const originalLocalStorage = globalThis.localStorage;
 
@@ -342,6 +355,7 @@ describe("scroll direction preference", () => {
 
     await messaging.loadMessages("w1", "c1");
     expect(virtualScroll).not.toHaveBeenCalled();
+    expect(localStorage.getItem(roomKey("c1"))).toBeNull();
 
     messaging.timelineEl.value = makeTimelineEl();
     messaging.timelineEdgeScroller.value = virtualScroll;
@@ -349,8 +363,268 @@ describe("scroll direction preference", () => {
     await nextTick();
     await nextTick();
     await nextTick();
+    await flushAsync();
 
     expect(virtualScroll).toHaveBeenCalledWith("chat");
+    expect(localStorage.getItem(roomKey("c1"))).toBe("room-2");
+  });
+
+  test("room initial load waits for a scroll target before persisting last-seen or older loading", async () => {
+    const queryMamPage = mock(async (_spaceId, _channelId, _max, pageParam) => {
+      if (pageParam.type === "before") {
+        return {
+          messages: [
+            {
+              id: "room-0",
+              roomJid: "w1-c1@rooms.example.com",
+              nick: "bob",
+              body: "oldest",
+              createdAt: "2023-12-31T23:59:50Z",
+              type: "message" as const,
+            },
+          ],
+          firstArchiveId: "room-0",
+          complete: true,
+        };
+      }
+      return {
+        messages: [
+          {
+            id: "room-1",
+            roomJid: "w1-c1@rooms.example.com",
+            nick: "bob",
+            body: "earlier",
+            createdAt: "2024-01-01T00:00:00Z",
+            type: "message" as const,
+          },
+          {
+            id: "room-2",
+            roomJid: "w1-c1@rooms.example.com",
+            nick: "bob",
+            body: "later",
+            createdAt: "2024-01-01T00:00:10Z",
+            type: "message" as const,
+          },
+        ],
+        firstArchiveId: "room-1",
+        complete: false,
+      };
+    });
+    const actionError = ref("");
+    const messaging = useMessaging(
+      ref(session()),
+      ref(null),
+      ref({ ...handlerStubs(), queryMamPage } as never) as never,
+      ref("w1"),
+      ref("c1"),
+      ref({ id: "c1", name: "general", channel_type: "text" }),
+      String,
+      actionError,
+      () => {
+        actionError.value = "";
+      },
+    );
+
+    await messaging.loadMessages("w1", "c1");
+    await messaging.loadOlderMessages();
+
+    expect(localStorage.getItem(roomKey("c1"))).toBeNull();
+    expect(queryMamPage).toHaveBeenCalledTimes(1);
+  });
+
+  test("room initial load does not persist last-seen after the active channel changes during edge pin", async () => {
+    const activeChannelId = ref("c1");
+    const pin = deferred();
+    const queryMam = mock(async () => [
+      {
+        id: "room-1",
+        roomJid: "w1-c1@rooms.example.com",
+        nick: "bob",
+        body: "earlier",
+        createdAt: "2024-01-01T00:00:00Z",
+        type: "message" as const,
+      },
+      {
+        id: "room-2",
+        roomJid: "w1-c1@rooms.example.com",
+        nick: "bob",
+        body: "later",
+        createdAt: "2024-01-01T00:00:10Z",
+        type: "message" as const,
+      },
+    ]);
+    const virtualScroll = mock(async () => {
+      await pin.promise;
+      return true;
+    });
+    const actionError = ref("");
+    const messaging = useMessaging(
+      ref(session()),
+      ref(null),
+      ref({ ...handlerStubs(), queryMam } as never) as never,
+      ref("w1"),
+      activeChannelId,
+      ref({ id: "c1", name: "general", channel_type: "text" }),
+      String,
+      actionError,
+      () => {
+        actionError.value = "";
+      },
+    );
+    messaging.timelineEl.value = makeTimelineEl();
+    messaging.timelineEdgeScroller.value = virtualScroll;
+
+    const load = messaging.loadMessages("w1", "c1");
+    await flushAsync();
+    expect(virtualScroll).toHaveBeenCalledWith("chat");
+
+    activeChannelId.value = "c2";
+    pin.resolve();
+    await load;
+
+    expect(localStorage.getItem(roomKey("c1"))).toBeNull();
+  });
+
+  test("room older-history loads are blocked until the latest page is pinned", async () => {
+    const pin = deferred();
+    const queryMamPage = mock(async (_spaceId, _channelId, _max, pageParam) => {
+      if (pageParam.type === "before") {
+        return {
+          messages: [
+            {
+              id: "room-0",
+              roomJid: "w1-c1@rooms.example.com",
+              nick: "bob",
+              body: "oldest",
+              createdAt: "2023-12-31T23:59:50Z",
+              type: "message" as const,
+            },
+          ],
+          firstArchiveId: "room-0",
+          complete: true,
+        };
+      }
+      return {
+        messages: [
+          {
+            id: "room-1",
+            roomJid: "w1-c1@rooms.example.com",
+            nick: "bob",
+            body: "earlier",
+            createdAt: "2024-01-01T00:00:00Z",
+            type: "message" as const,
+          },
+          {
+            id: "room-2",
+            roomJid: "w1-c1@rooms.example.com",
+            nick: "bob",
+            body: "later",
+            createdAt: "2024-01-01T00:00:10Z",
+            type: "message" as const,
+          },
+        ],
+        firstArchiveId: "room-1",
+        complete: false,
+      };
+    });
+    const virtualScroll = mock(async () => {
+      await pin.promise;
+      return true;
+    });
+    const actionError = ref("");
+    const messaging = useMessaging(
+      ref(session()),
+      ref(null),
+      ref({ ...handlerStubs(), queryMamPage } as never) as never,
+      ref("w1"),
+      ref("c1"),
+      ref({ id: "c1", name: "general", channel_type: "text" }),
+      String,
+      actionError,
+      () => {
+        actionError.value = "";
+      },
+    );
+    messaging.timelineEl.value = makeTimelineEl();
+    messaging.timelineEdgeScroller.value = virtualScroll;
+
+    const load = messaging.loadMessages("w1", "c1");
+    await flushAsync();
+    await messaging.loadOlderMessages();
+    expect(queryMamPage).toHaveBeenCalledTimes(1);
+
+    pin.resolve();
+    await load;
+    await messaging.loadOlderMessages();
+
+    expect(queryMamPage).toHaveBeenCalledTimes(2);
+    expect(messaging.messages.value.map((message) => message.id)).toContain("room-0");
+  });
+
+  test("room clear blocks older-history loads until a fresh latest page is pinned", async () => {
+    const queryMamPage = mock(async (_spaceId, _channelId, _max, pageParam) => {
+      if (pageParam.type === "before") {
+        return {
+          messages: [
+            {
+              id: "room-0",
+              roomJid: "w1-c1@rooms.example.com",
+              nick: "bob",
+              body: "oldest",
+              createdAt: "2023-12-31T23:59:50Z",
+              type: "message" as const,
+            },
+          ],
+          firstArchiveId: "room-0",
+          complete: true,
+        };
+      }
+      return {
+        messages: [
+          {
+            id: "room-1",
+            roomJid: "w1-c1@rooms.example.com",
+            nick: "bob",
+            body: "earlier",
+            createdAt: "2024-01-01T00:00:00Z",
+            type: "message" as const,
+          },
+          {
+            id: "room-2",
+            roomJid: "w1-c1@rooms.example.com",
+            nick: "bob",
+            body: "later",
+            createdAt: "2024-01-01T00:00:10Z",
+            type: "message" as const,
+          },
+        ],
+        firstArchiveId: "room-1",
+        complete: false,
+      };
+    });
+    const actionError = ref("");
+    const messaging = useMessaging(
+      ref(session()),
+      ref(null),
+      ref({ ...handlerStubs(), queryMamPage } as never) as never,
+      ref("w1"),
+      ref("c1"),
+      ref({ id: "c1", name: "general", channel_type: "text" }),
+      String,
+      actionError,
+      () => {
+        actionError.value = "";
+      },
+    );
+    messaging.timelineEl.value = makeTimelineEl();
+
+    await messaging.loadMessages("w1", "c1");
+    await messaging.loadOlderMessages();
+    expect(queryMamPage).toHaveBeenCalledTimes(2);
+
+    messaging.clearMessages();
+    await messaging.loadOlderMessages();
+    expect(queryMamPage).toHaveBeenCalledTimes(2);
   });
 
   test("DM initial load ignores older last-seen and persists the newest visible message", async () => {
@@ -432,6 +706,7 @@ describe("scroll direction preference", () => {
 
     await dm.loadMessages("bob@example.com");
     expect(virtualScroll).not.toHaveBeenCalled();
+    expect(localStorage.getItem(dmKey("bob@example.com"))).toBeNull();
 
     dm.timelineEl.value = makeTimelineEl();
     dm.timelineEdgeScroller.value = virtualScroll;
@@ -439,8 +714,267 @@ describe("scroll direction preference", () => {
     await nextTick();
     await nextTick();
     await nextTick();
+    await flushAsync();
 
     expect(virtualScroll).toHaveBeenCalledWith("chat");
+    expect(localStorage.getItem(dmKey("bob@example.com"))).toBe("dm-2");
+  });
+
+  test("DM initial load waits for a scroll target before persisting last-seen or older loading", async () => {
+    const queryPersonalMamPage = mock(async (_peerJid, _max, pageParam) => {
+      if (pageParam.type === "before") {
+        return {
+          messages: [
+            {
+              id: "dm-0",
+              peerJid: "bob@example.com",
+              fromJid: "bob@example.com/tablet",
+              nick: "bob",
+              body: "oldest",
+              createdAt: "2023-12-31T23:59:50Z",
+              type: "message" as const,
+            },
+          ],
+          firstArchiveId: "dm-0",
+          complete: true,
+        };
+      }
+      return {
+        messages: [
+          {
+            id: "dm-1",
+            peerJid: "bob@example.com",
+            fromJid: "bob@example.com/phone",
+            nick: "bob",
+            body: "earlier",
+            createdAt: "2024-01-01T00:00:00Z",
+            type: "message" as const,
+          },
+          {
+            id: "dm-2",
+            peerJid: "bob@example.com",
+            fromJid: "bob@example.com/laptop",
+            nick: "bob",
+            body: "later",
+            createdAt: "2024-01-01T00:00:10Z",
+            type: "message" as const,
+          },
+        ],
+        firstArchiveId: "dm-1",
+        complete: false,
+      };
+    });
+    const actionError = ref("");
+    const dm = useDmMessaging(
+      ref(session()),
+      ref({ queryPersonalMamPage } as never) as never,
+      ref("bob@example.com"),
+      String,
+      actionError,
+      () => {
+        actionError.value = "";
+      },
+    );
+
+    await dm.loadMessages("bob@example.com");
+    await dm.loadOlderMessages();
+
+    expect(localStorage.getItem(dmKey("bob@example.com"))).toBeNull();
+    expect(queryPersonalMamPage).toHaveBeenCalledTimes(1);
+  });
+
+  test("DM initial load does not persist last-seen after the active peer changes during edge pin", async () => {
+    const activePeerJid = ref("bob@example.com");
+    const pin = deferred();
+    const queryPersonalMam = mock(async () => [
+      {
+        id: "dm-1",
+        peerJid: "bob@example.com",
+        fromJid: "bob@example.com/phone",
+        nick: "bob",
+        body: "earlier",
+        createdAt: "2024-01-01T00:00:00Z",
+        type: "message" as const,
+      },
+      {
+        id: "dm-2",
+        peerJid: "bob@example.com",
+        fromJid: "bob@example.com/laptop",
+        nick: "bob",
+        body: "later",
+        createdAt: "2024-01-01T00:00:10Z",
+        type: "message" as const,
+      },
+    ]);
+    const virtualScroll = mock(async () => {
+      await pin.promise;
+      return true;
+    });
+    const actionError = ref("");
+    const dm = useDmMessaging(
+      ref(session()),
+      ref({ queryPersonalMam } as never) as never,
+      activePeerJid,
+      String,
+      actionError,
+      () => {
+        actionError.value = "";
+      },
+    );
+    dm.timelineEl.value = makeTimelineEl();
+    dm.timelineEdgeScroller.value = virtualScroll;
+
+    const load = dm.loadMessages("bob@example.com");
+    await flushAsync();
+    expect(virtualScroll).toHaveBeenCalledWith("chat");
+
+    activePeerJid.value = "carol@example.com";
+    pin.resolve();
+    await load;
+
+    expect(localStorage.getItem(dmKey("bob@example.com"))).toBeNull();
+  });
+
+  test("DM older-history loads are blocked until the latest page is pinned", async () => {
+    const pin = deferred();
+    const queryPersonalMamPage = mock(async (_peerJid, _max, pageParam) => {
+      if (pageParam.type === "before") {
+        return {
+          messages: [
+            {
+              id: "dm-0",
+              peerJid: "bob@example.com",
+              fromJid: "bob@example.com/tablet",
+              nick: "bob",
+              body: "oldest",
+              createdAt: "2023-12-31T23:59:50Z",
+              type: "message" as const,
+            },
+          ],
+          firstArchiveId: "dm-0",
+          complete: true,
+        };
+      }
+      return {
+        messages: [
+          {
+            id: "dm-1",
+            peerJid: "bob@example.com",
+            fromJid: "bob@example.com/phone",
+            nick: "bob",
+            body: "earlier",
+            createdAt: "2024-01-01T00:00:00Z",
+            type: "message" as const,
+          },
+          {
+            id: "dm-2",
+            peerJid: "bob@example.com",
+            fromJid: "bob@example.com/laptop",
+            nick: "bob",
+            body: "later",
+            createdAt: "2024-01-01T00:00:10Z",
+            type: "message" as const,
+          },
+        ],
+        firstArchiveId: "dm-1",
+        complete: false,
+      };
+    });
+    const virtualScroll = mock(async () => {
+      await pin.promise;
+      return true;
+    });
+    const actionError = ref("");
+    const dm = useDmMessaging(
+      ref(session()),
+      ref({ queryPersonalMamPage } as never) as never,
+      ref("bob@example.com"),
+      String,
+      actionError,
+      () => {
+        actionError.value = "";
+      },
+    );
+    dm.timelineEl.value = makeTimelineEl();
+    dm.timelineEdgeScroller.value = virtualScroll;
+
+    const load = dm.loadMessages("bob@example.com");
+    await flushAsync();
+    await dm.loadOlderMessages();
+    expect(queryPersonalMamPage).toHaveBeenCalledTimes(1);
+
+    pin.resolve();
+    await load;
+    await dm.loadOlderMessages();
+
+    expect(queryPersonalMamPage).toHaveBeenCalledTimes(2);
+    expect(dm.messages.value.map((message) => message.id)).toContain("dm-0");
+  });
+
+  test("DM clear blocks older-history loads until a fresh latest page is pinned", async () => {
+    const queryPersonalMamPage = mock(async (_peerJid, _max, pageParam) => {
+      if (pageParam.type === "before") {
+        return {
+          messages: [
+            {
+              id: "dm-0",
+              peerJid: "bob@example.com",
+              fromJid: "bob@example.com/tablet",
+              nick: "bob",
+              body: "oldest",
+              createdAt: "2023-12-31T23:59:50Z",
+              type: "message" as const,
+            },
+          ],
+          firstArchiveId: "dm-0",
+          complete: true,
+        };
+      }
+      return {
+        messages: [
+          {
+            id: "dm-1",
+            peerJid: "bob@example.com",
+            fromJid: "bob@example.com/phone",
+            nick: "bob",
+            body: "earlier",
+            createdAt: "2024-01-01T00:00:00Z",
+            type: "message" as const,
+          },
+          {
+            id: "dm-2",
+            peerJid: "bob@example.com",
+            fromJid: "bob@example.com/laptop",
+            nick: "bob",
+            body: "later",
+            createdAt: "2024-01-01T00:00:10Z",
+            type: "message" as const,
+          },
+        ],
+        firstArchiveId: "dm-1",
+        complete: false,
+      };
+    });
+    const actionError = ref("");
+    const dm = useDmMessaging(
+      ref(session()),
+      ref({ queryPersonalMamPage } as never) as never,
+      ref("bob@example.com"),
+      String,
+      actionError,
+      () => {
+        actionError.value = "";
+      },
+    );
+    dm.timelineEl.value = makeTimelineEl();
+
+    await dm.loadMessages("bob@example.com");
+    await dm.loadOlderMessages();
+    expect(queryPersonalMamPage).toHaveBeenCalledTimes(2);
+
+    dm.clearMessages();
+    await dm.loadOlderMessages();
+    expect(queryPersonalMamPage).toHaveBeenCalledTimes(2);
   });
 
   test("live DM messages pin to the active edge in chat and social modes", async () => {

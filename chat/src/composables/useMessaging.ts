@@ -276,6 +276,7 @@ export function useMessaging(
 
   let messageRequestId = 0;
   let oldestArchiveId: string | null = null;
+  let initialLatestPagePinned = false;
   const oldestThreadArchiveIds = new Map<string, string>();
   let searchRequestId = 0;
   let lastChatState: ChatStateType = "active";
@@ -481,7 +482,7 @@ export function useMessaging(
   }
 
   async function scrollToPinnedEdgeAndPin() {
-    await pinnedEdgeScroller.scrollToPinnedEdge({ settle: true });
+    return pinnedEdgeScroller.scrollToPinnedEdge({ settle: true });
   }
 
   function persistLastSeen(channelId: string, messageId: string) {
@@ -862,6 +863,7 @@ export function useMessaging(
 
     const requestId = ++messageRequestId;
     const roomJid = roomBareJidFor(session.value, channelId);
+    initialLatestPagePinned = false;
     isLoadingMessages.value = true;
     isLoadingOlderMessages.value = false;
     hasOlderMessages.value = true;
@@ -906,7 +908,16 @@ export function useMessaging(
       }
 
       firstUnseenId.value = null;
-      await scrollToPinnedEdgeAndPin();
+      const pinned = await scrollToPinnedEdgeAndPin();
+      if (
+        !pinned ||
+        requestId !== messageRequestId ||
+        (activeSpaceId.value ?? "") !== spaceId ||
+        activeChannelId.value !== channelId
+      ) {
+        return;
+      }
+      initialLatestPagePinned = true;
       const newest = [...timelineWithQueue].reverse().find(isFeedVisible);
       if (newest) persistLastSeen(channelId, newest.id);
     } catch (e) {
@@ -924,7 +935,16 @@ export function useMessaging(
     const spaceId = activeSpaceId.value ?? "";
     const channelId = activeChannelId.value;
     const before = oldestArchiveId;
-    if (!client || !channelId || !before || !hasOlderMessages.value || isLoadingOlderMessages.value) return;
+    if (
+      !client ||
+      !channelId ||
+      !before ||
+      !initialLatestPagePinned ||
+      !hasOlderMessages.value ||
+      isLoadingOlderMessages.value
+    ) {
+      return;
+    }
     if (!("queryMamPage" in client)) return;
     const requestId = messageRequestId;
     const isCurrentRequest = () =>
@@ -1290,6 +1310,10 @@ export function useMessaging(
     searchRequestId++;
     pinnedEdgeScroller.disconnect();
     pendingEchoClientIds.clear();
+    initialLatestPagePinned = false;
+    oldestArchiveId = null;
+    hasOlderMessages.value = true;
+    isLoadingOlderMessages.value = false;
     // $xmppStatus is authoritative and owned by XmppProvider; do not write it here.
     clearTypingState();
     isLoadingMessages.value = false;
@@ -1301,6 +1325,10 @@ export function useMessaging(
     messageRequestId++;
     pinnedEdgeScroller.disconnect();
     pendingEchoClientIds.clear();
+    initialLatestPagePinned = false;
+    oldestArchiveId = null;
+    hasOlderMessages.value = true;
+    isLoadingOlderMessages.value = false;
     messages.value = [];
     isLoadingMessages.value = false;
     clearTypingState();
@@ -1361,11 +1389,25 @@ export function useMessaging(
 
   watch(
     [timelineEl, timelineEdgeScroller],
-    ([el, edgeScroller]) => {
+    async ([el, edgeScroller]) => {
       if (!el || !edgeScroller || isLoadingMessages.value) return;
       if (!messages.value.some(isFeedVisible)) return;
+      const requestId = messageRequestId;
+      const spaceId = activeSpaceId.value ?? "";
+      const channelId = activeChannelId.value;
       firstUnseenId.value = null;
-      void scrollToPinnedEdgeAndPin();
+      const pinned = await scrollToPinnedEdgeAndPin();
+      if (
+        pinned &&
+        requestId === messageRequestId &&
+        (activeSpaceId.value ?? "") === spaceId &&
+        activeChannelId.value === channelId &&
+        messages.value.some(isFeedVisible)
+      ) {
+        initialLatestPagePinned = true;
+        const newest = [...messages.value].reverse().find(isFeedVisible);
+        if (channelId && newest) persistLastSeen(channelId, newest.id);
+      }
     },
     { flush: "post" },
   );

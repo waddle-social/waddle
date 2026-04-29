@@ -140,6 +140,7 @@ export function useDmMessaging(
 
   let messageRequestId = 0;
   let oldestArchiveId: string | null = null;
+  let initialLatestPagePinned = false;
   let searchRequestId = 0;
   let lastChatState: ChatStateType = "active";
   let composingTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -167,7 +168,7 @@ export function useDmMessaging(
   }
 
   async function scrollToPinnedEdgeAndPin() {
-    await pinnedEdgeScroller.scrollToPinnedEdge({ settle: true });
+    return pinnedEdgeScroller.scrollToPinnedEdge({ settle: true });
   }
 
   async function scrollFirstUnseenIntoView(messageId: string) {
@@ -488,6 +489,7 @@ export function useDmMessaging(
   async function loadMessages(peerJid: string) {
     if (!session.value) return;
     const requestId = ++messageRequestId;
+    initialLatestPagePinned = false;
     isLoadingMessages.value = true;
     isLoadingOlderMessages.value = false;
     hasOlderMessages.value = true;
@@ -516,7 +518,9 @@ export function useDmMessaging(
 
       const key = dmKey(barePeerJid(peerJid));
       firstUnseenId.value = null;
-      await scrollToPinnedEdgeAndPin();
+      const pinned = await scrollToPinnedEdgeAndPin();
+      if (!pinned || requestId !== messageRequestId || activePeerJid.value !== peerJid) return;
+      initialLatestPagePinned = true;
       const newest = [...timelineWithQueue].reverse().find(isFeedVisible);
       if (newest) setLastSeen(key, newest.id);
     } catch (e) {
@@ -533,7 +537,9 @@ export function useDmMessaging(
     const client = xmppClient.value;
     const peerJid = activePeerJid.value;
     const before = oldestArchiveId;
-    if (!client || !peerJid || !before || !hasOlderMessages.value || isLoadingOlderMessages.value) return;
+    if (!client || !peerJid || !before || !initialLatestPagePinned || !hasOlderMessages.value || isLoadingOlderMessages.value) {
+      return;
+    }
     if (!("queryPersonalMamPage" in client)) return;
     const requestId = messageRequestId;
     const isCurrentRequest = () =>
@@ -774,6 +780,10 @@ export function useDmMessaging(
     messageRequestId++;
     pinnedEdgeScroller.disconnect();
     pendingEchoClientIds.clear();
+    initialLatestPagePinned = false;
+    oldestArchiveId = null;
+    hasOlderMessages.value = true;
+    isLoadingOlderMessages.value = false;
     messages.value = [];
     isLoadingMessages.value = false;
     firstUnseenId.value = null;
@@ -785,6 +795,10 @@ export function useDmMessaging(
     searchRequestId++;
     pinnedEdgeScroller.disconnect();
     pendingEchoClientIds.clear();
+    initialLatestPagePinned = false;
+    oldestArchiveId = null;
+    hasOlderMessages.value = true;
+    isLoadingOlderMessages.value = false;
     isLoadingMessages.value = false;
     isSearching.value = false;
     firstUnseenId.value = null;
@@ -830,11 +844,23 @@ export function useDmMessaging(
 
   watch(
     [timelineEl, timelineEdgeScroller],
-    ([el, edgeScroller]) => {
+    async ([el, edgeScroller]) => {
       if (!el || !edgeScroller || isLoadingMessages.value) return;
       if (!messages.value.some(isFeedVisible)) return;
+      const requestId = messageRequestId;
+      const peerJid = activePeerJid.value;
       firstUnseenId.value = null;
-      void scrollToPinnedEdgeAndPin();
+      const pinned = await scrollToPinnedEdgeAndPin();
+      if (
+        pinned &&
+        requestId === messageRequestId &&
+        activePeerJid.value === peerJid &&
+        messages.value.some(isFeedVisible)
+      ) {
+        initialLatestPagePinned = true;
+        const newest = [...messages.value].reverse().find(isFeedVisible);
+        if (peerJid && newest) setLastSeen(dmKey(barePeerJid(peerJid)), newest.id);
+      }
     },
     { flush: "post" },
   );
