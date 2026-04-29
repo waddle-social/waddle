@@ -434,8 +434,8 @@ fn add_presence_identity_payloads(
 
     if let Some(occupant_bare_jid) = occupant_bare_jid {
         let occupant_id = crate::xep::xep0421::generate_occupant_id(
-            &occupant_bare_jid.to_string(),
-            &from_room_jid.to_bare().to_string(),
+            &occupant_bare_jid,
+            &from_room_jid.to_bare(),
             OCCUPANT_ID_SECRET,
         );
         crate::xep::xep0421::set_occupant_id_on_presence(presence, &occupant_id);

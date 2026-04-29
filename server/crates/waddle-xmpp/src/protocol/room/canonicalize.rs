@@ -4,7 +4,7 @@
 //! Mutates the in-flight message so subsequent room handlers (archive,
 //! reflector) and the eventual wire write see the canonicalized form.
 //!
-//! Three rewrites in order:
+//! Four rewrites in order:
 //!
 //! 1. **Strip same-`by=room`** XEP-0359 `<stanza-id>` siblings (XEP-0359
 //!    §5 strip rule, room scope). Defends against client spoofing of a
@@ -64,24 +64,28 @@ impl RoomHandler for MucCanonicalizeHandler {
         add_stanza_id(message, &id, &ctx.room.to_string());
 
         // 3. Rewrite `from='room/nick'` and drop `to` (the reflector
-        //    fills `to` per occupant).
+        //    fills `to` per occupant). If the sender nick is somehow
+        //    not representable as a resourcepart, do NOT fall back to
+        //    the sender's real full JID — that would leak the user's
+        //    identity in the reflection and violate XEP-0045 §7.2.13
+        //    (Copilot review on PR #277). Use a non-identifying
+        //    `room/unknown` resource instead.
         let from_room_nick = ctx
             .room
             .clone()
             .with_resource_str(&sender.nick)
+            .or_else(|_| ctx.room.clone().with_resource_str("unknown"))
             .map(Jid::from)
-            .unwrap_or_else(|_| Jid::from(ctx.sender_full.clone()));
+            .unwrap_or_else(|_| Jid::from(ctx.room.clone()));
         message.from = Some(from_room_nick);
         message.to = None;
 
         // 4. Stamp XEP-0421 occupant-id (server-derived stable id —
         //    same user across nicks/sessions yields the same id).
+        //    Typed JIDs in/out (typed-payloads hard rule); HMAC bytes
+        //    are produced at the I/O boundary inside the helper.
         let bare = sender.bare_jid();
-        let occupant_id = generate_occupant_id(
-            &bare.to_string(),
-            &ctx.room.to_string(),
-            ctx.occupant_id_secret,
-        );
+        let occupant_id = generate_occupant_id(&bare, ctx.room, ctx.occupant_id_secret);
         set_occupant_id_on_message(message, &occupant_id);
 
         RoomHandlerOutcome::Continue(Vec::new())
@@ -201,11 +205,7 @@ mod tests {
         let id = extract_occupant_id_from_message(&msg).expect("occupant-id stamped");
 
         // Stable: same (user, room) yields same id with the same secret.
-        let expected = generate_occupant_id(
-            &sender.to_bare().to_string(),
-            &room.to_string(),
-            b"test-secret",
-        );
+        let expected = generate_occupant_id(&sender.to_bare(), &room, b"test-secret");
         assert_eq!(id, expected);
         // Non-empty.
         assert!(!id.as_str().is_empty());

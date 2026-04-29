@@ -142,6 +142,19 @@ pub enum RoomActorError {
     OccupantNotFound(String),
     #[error("join is forbidden (members_only={members_only})")]
     JoinForbidden { members_only: bool },
+    /// XEP-0045 §7.4: sender is not an occupant of this room. Maps to
+    /// the typed stanza error `<error type='cancel'><not-acceptable/></error>`.
+    #[error("sender '{0}' is not an occupant of this room")]
+    SenderNotOccupant(FullJid),
+    /// XEP-0045 §7.5: a visitor in a moderated room may not speak.
+    /// Maps to the typed stanza error `<error type='auth'><forbidden/></error>`.
+    #[error("visitor '{0}' may not speak in a moderated room")]
+    VisitorMayNotSpeak(FullJid),
+    /// Broadcast prep failed inside the room (occupant lookup, role
+    /// check, etc.). Maps to `<error type='cancel'><internal-server-error/></error>`
+    /// because it represents a server-side issue, not a client error.
+    #[error("groupchat broadcast preparation failed: {0}")]
+    BroadcastFailed(String),
 }
 
 impl RoomActor {
@@ -421,19 +434,17 @@ impl kameo::message::Message<BuildGroupchatBroadcast> for RoomActor {
         let sender_occupant = self
             .room
             .find_occupant_by_real_jid(&msg.sender_jid)
-            .ok_or_else(|| RoomActorError::OccupantNotFound(msg.sender_jid.to_string()))?;
+            .ok_or_else(|| RoomActorError::SenderNotOccupant(msg.sender_jid.clone()))?;
         let sender_nick = sender_occupant.nick.clone();
 
         if self.room.config.moderated && sender_occupant.role == Role::Visitor {
-            return Err(RoomActorError::OccupantNotFound(
-                "Visitors cannot speak in moderated rooms".to_string(),
-            ));
+            return Err(RoomActorError::VisitorMayNotSpeak(msg.sender_jid.clone()));
         }
 
         let messages = self
             .room
             .broadcast_message(&sender_nick, &msg.message)
-            .map_err(|error| RoomActorError::OccupantNotFound(error.to_string()))?;
+            .map_err(|error| RoomActorError::BroadcastFailed(error.to_string()))?;
 
         let sender_jid_for_filter = msg.sender_jid;
         let occupant_bare_jids: Vec<String> = self

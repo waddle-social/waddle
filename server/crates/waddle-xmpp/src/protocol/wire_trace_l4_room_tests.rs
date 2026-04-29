@@ -120,11 +120,8 @@ fn xep_0045_groupchat_dispatches_through_handler_chain_with_canonical_stamps() {
     assert_eq!(routes.len(), 2, "fan-out to both occupants");
 
     // Every reflected copy carries the canonical stamps.
-    let expected_occupant_id = generate_occupant_id(
-        &alice.to_bare().to_string(),
-        &room.to_string(),
-        TEST_OCCUPANT_ID_SECRET,
-    );
+    let expected_occupant_id =
+        generate_occupant_id(&alice.to_bare(), &room, TEST_OCCUPANT_ID_SECRET);
     for route in &routes {
         // from='room/alice-nick'
         assert_eq!(
