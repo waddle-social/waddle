@@ -5667,6 +5667,16 @@ mod tests {
         .await;
         let room_jid: BareJid = "github-room@muc.example.com".parse().expect("room jid");
         let sender_jid: FullJid = "alice@example.com/web".parse().expect("sender jid");
+        // #229 PR18 cutover: groupchat reflections now flow through the
+        // connection registry as `RouteToConnection` peer-stanza
+        // delivery — including the sender's own echo. Register the
+        // sender's connection so the echo lands somewhere we can drain.
+        let (sender_tx, mut sender_rx) = mpsc::channel(8);
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .register(sender_jid.clone(), sender_tx);
         let room_actor = get_or_create_room_actor(
             state.as_ref(),
             &room_jid,
@@ -5697,10 +5707,14 @@ mod tests {
             ),
         );
 
-        let responses = handle_message_for_test(state.as_ref(), &sender_jid, None, message).await;
+        let _responses = handle_message_for_test(state.as_ref(), &sender_jid, None, message).await;
 
-        assert_eq!(responses.len(), 1, "sender should receive reflected echo");
-        let echo = &responses[0];
+        // Echo arrives as a PeerStanza on the sender's outbound channel
+        // (post-cutover semantic).
+        let echo_stanza = sender_rx
+            .try_recv()
+            .expect("sender echo queued on outbound channel");
+        let echo = stanza_to_xml(&echo_stanza.stanza);
         assert!(
             !echo.contains("urn:waddle:github:0"),
             "unavailable actor must not inject a GitHub issue payload: {echo}"
@@ -6131,6 +6145,15 @@ mod tests {
         let sender_jid: FullJid = format!("{}@example.com/web", session.xmpp_localpart)
             .parse()
             .expect("sender jid");
+        // #229 PR18 cutover: groupchat reflections flow through the
+        // connection registry as PeerStanza, so register the sender's
+        // outbound channel before driving `handle_message`.
+        let (sender_tx, mut sender_rx) = mpsc::channel(8);
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .register(sender_jid.clone(), sender_tx);
         let room_actor = get_or_create_room_actor(
             state.as_ref(),
             &room_jid,
@@ -6155,18 +6178,17 @@ mod tests {
                 <body>Hello from WebSocket</body>\
              </message>"
         );
-        let message_responses = handle_message_for_test(
+        let _message_responses = handle_message_for_test(
             state.as_ref(),
             &sender_jid,
             Some(&session),
             parse_message_for_test(message_xml.as_str()),
         )
         .await;
-        assert_eq!(
-            message_responses.len(),
-            1,
-            "sender should receive reflected echo"
-        );
+        let echo_stanza = sender_rx
+            .try_recv()
+            .expect("sender echo queued on outbound channel");
+        let _echo_xml = stanza_to_xml(&echo_stanza.stanza);
 
         let mam_query = format!(
             "<iq xmlns='jabber:client' type='set' to='{room_jid}' id='mam-1'>\

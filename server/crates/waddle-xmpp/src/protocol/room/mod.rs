@@ -14,14 +14,20 @@
 //! 2. [`canonicalize::MucCanonicalizeHandler`] — XEP-0359 stanza-id
 //!    `by=room`, XEP-0421 occupant-id stamp, `from='room/nick'` rewrite.
 //! 3. [`archive::MucArchiveHandler`] — XEP-0313 §5.1.3 archive-eligibility
-//!    → emits [`super::event::OutboundEvent::ArchiveGroupchat`].
-//! 4. [`reflector::ReflectorHandler`] — per-occupant fan-out via
+//!    → emits [`super::event::OutboundEvent::ArchiveGroupchat`] and, for
+//!    XEP-0424 retraction requests, an
+//!    [`super::event::OutboundEvent::ApplyGroupchatRetractionTombstone`].
+//! 4. [`inbox::MucInboxHandler`] — Waddle inbox projection per occupant
+//!    (channel + thread rows) via
+//!    [`super::event::OutboundEvent::ProjectGroupchatInbox`].
+//! 5. [`reflector::ReflectorHandler`] — per-occupant fan-out via
 //!    [`super::event::OutboundEvent::RouteToConnection`].
 
 pub mod archive;
 pub mod canonicalize;
 pub mod context;
 pub mod dispatch;
+pub mod inbox;
 pub mod occupancy_validation;
 pub mod reflector;
 pub mod traits;
@@ -37,6 +43,7 @@ pub fn register_default_room_handlers(dispatcher: &mut RoomDispatcher) {
     dispatcher.register(Arc::new(occupancy_validation::OccupancyValidationHandler));
     dispatcher.register(Arc::new(canonicalize::MucCanonicalizeHandler));
     dispatcher.register(Arc::new(archive::MucArchiveHandler));
+    dispatcher.register(Arc::new(inbox::MucInboxHandler));
     dispatcher.register(Arc::new(reflector::ReflectorHandler));
 }
 
@@ -52,8 +59,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_dispatcher_registers_four_handlers() {
+    fn default_dispatcher_registers_five_handlers() {
         let d = default_room_dispatcher();
-        assert_eq!(d.handler_count(), 4);
+        assert_eq!(d.handler_count(), 5);
     }
 }

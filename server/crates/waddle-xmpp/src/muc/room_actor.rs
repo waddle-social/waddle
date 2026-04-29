@@ -420,6 +420,111 @@ impl kameo::message::Message<GetSnapshot> for RoomActor {
     }
 }
 
+/// Frozen-at-dispatch-start snapshot of the room state needed by the
+/// sans-I/O room handler chain (#229 PR18).
+///
+/// Returned by [`GetRoomSnapshot`] in a single round-trip so the
+/// [`crate::protocol::event::OutboundEvent::DispatchToRoom`] interpreter
+/// arm can build a [`crate::protocol::room::RoomContext`] without N+1
+/// actor queries. Mirrors the data the legacy
+/// `BuildGroupchatBroadcast` flow accessed inline (occupants list,
+/// sender's role/affiliation/nick, sender's nickname-generation,
+/// room config).
+#[derive(Debug, Clone)]
+pub struct RoomChainSnapshot {
+    /// One entry per active occupant session — same `nick` may appear
+    /// multiple times when an occupant has joined under multiple
+    /// resources.
+    pub occupants: Vec<RoomChainOccupant>,
+    /// The sender's nickname when present in the room, or `None` when
+    /// the sender is not currently joined (XEP-0045 §7.4 trigger:
+    /// `OccupancyValidationHandler` will halt with `<not-acceptable/>`).
+    pub sender_nick: Option<String>,
+    /// Sender's role at dispatch start (visitor/participant/moderator),
+    /// or `None` when the sender is not joined.
+    pub sender_role: Option<Role>,
+    /// Sender's affiliation at dispatch start, or `None` when not joined.
+    pub sender_affiliation: Option<Affiliation>,
+    /// Per-XEP-0308 §3 occupancy generation for the sender's nickname.
+    /// `None` when the sender is not joined or the nickname has never
+    /// been observed.
+    pub sender_nickname_generation: Option<u64>,
+    /// Snapshot of the room config (members_only, moderated, etc.).
+    pub config: RoomConfig,
+}
+
+/// One occupant session in a [`RoomChainSnapshot`].
+///
+/// Distinct from [`OccupantInfo`] / [`super::Occupant`] because the
+/// chain needs *one entry per active session* (an occupant joined
+/// from multiple resources gets one snapshot per resource), whereas
+/// `OccupantInfo` collapses sessions to one row per nickname.
+#[derive(Debug, Clone)]
+pub struct RoomChainOccupant {
+    pub full_jid: FullJid,
+    pub nick: String,
+    pub role: Role,
+    pub affiliation: Affiliation,
+}
+
+/// Read the room state into a [`RoomChainSnapshot`] tailored for the
+/// sans-I/O room handler chain (#229 PR18). Single round-trip so the
+/// interpreter can build a [`crate::protocol::room::RoomContext`] in
+/// one actor call.
+pub struct GetRoomSnapshot {
+    /// Full JID of the connection driving this dispatch — used to
+    /// resolve the sender's nick, role, affiliation, and
+    /// nickname-generation in one pass.
+    pub sender_jid: FullJid,
+}
+
+impl kameo::message::Message<GetRoomSnapshot> for RoomActor {
+    type Reply = Result<RoomChainSnapshot, Infallible>;
+
+    async fn handle(
+        &mut self,
+        msg: GetRoomSnapshot,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let occupants: Vec<RoomChainOccupant> = self
+            .room
+            .occupants
+            .values()
+            .flat_map(|occupant| {
+                let nick = occupant.nick.clone();
+                let role = occupant.role;
+                let affiliation = occupant.affiliation;
+                self.room
+                    .get_occupant_sessions(&occupant.nick)
+                    .into_iter()
+                    .map(move |full_jid| RoomChainOccupant {
+                        full_jid,
+                        nick: nick.clone(),
+                        role,
+                        affiliation,
+                    })
+            })
+            .collect();
+
+        let sender_occupant = self.room.find_occupant_by_real_jid(&msg.sender_jid);
+        let sender_nick = sender_occupant.map(|o| o.nick.clone());
+        let sender_role = sender_occupant.map(|o| o.role);
+        let sender_affiliation = sender_occupant.map(|o| o.affiliation);
+        let sender_nickname_generation = sender_nick
+            .as_deref()
+            .and_then(|nick| self.room.current_nickname_generation(nick));
+
+        Ok(RoomChainSnapshot {
+            occupants,
+            sender_nick,
+            sender_role,
+            sender_affiliation,
+            sender_nickname_generation,
+            config: self.room.config.clone(),
+        })
+    }
+}
+
 pub struct BuildGroupchatBroadcast {
     pub sender_jid: FullJid,
     pub message: Message,
