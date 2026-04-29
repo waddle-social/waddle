@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { type ComponentPublicInstance, computed, onMounted, onUnmounted, ref, watch, watchEffect } from "vue";
+import { createKeystrok, type Keystrok } from "keystrok";
 import { useWaddles } from "@/composables/useWaddles";
 import { useMembers } from "@/composables/useMembers";
 import { useDmConversations } from "@/composables/useDmConversations";
@@ -27,7 +28,8 @@ import HomeDashboard from "@/components/chat/HomeDashboard.vue";
 import DmPanel from "@/components/chat/DmPanel.vue";
 import ContentArea from "@/components/chat/ContentArea.vue";
 import ThreadPanel from "@/components/chat/ThreadPanel.vue";
-import type { ScrollDirectionMode } from "@/lib/scroll-direction";
+import { orderTimelineForScrollDirection, type ScrollDirectionMode } from "@/lib/scroll-direction";
+import { useScrollDirection } from "@/composables/useScrollDirection";
 import SettingsMobileHeader from "@/components/chat/SettingsMobileHeader.vue";
 import ProfilePanel from "@/components/chat/ProfilePanel.vue";
 import UserSettingsPage from "@/components/chat/UserSettingsPage.vue";
@@ -39,8 +41,15 @@ import NewDmDialog from "@/components/modals/NewDmDialog.vue";
 import MemberManagement from "@/components/modals/MemberManagement.vue";
 import ConfirmDialog from "@/components/ui/ConfirmDialog.vue";
 import type { MemberSummary } from "@/lib/chat-types";
-import type { MarkupSpan, MessageReference } from "@/lib/chat-ui";
+import type { MarkupSpan, MessageReference, TimelineMessage } from "@/lib/chat-ui";
 import { avatarLookupCandidates, mentionAutocompleteCandidates, mentionMatchesUsername, mergeMentionMembers } from "@/lib/mentions";
+import {
+  moveReactionSelection,
+  preserveReactionSelection,
+  quickReactionForKey,
+  selectInitialReactionMessage,
+  type ReactionModeScope,
+} from "@/lib/reaction-mode";
 
 const props = defineProps<{
   tenorApiKey?: string;
@@ -49,6 +58,7 @@ const props = defineProps<{
 const tenorApiKey = props.tenorApiKey ?? "";
 
 const ui = useUiState();
+const { mode: scrollDirectionMode } = useScrollDirection();
 
 const xmppClient = computed(() => connectionStore.client);
 const session = computed(() => connectionStore.session);
@@ -135,11 +145,173 @@ const activeFirstUnseenId = computed(() =>
 // don't use XEP-0201 threads yet.
 const activeThreadStack = ref<string[]>([]);
 const threads = useThreads(activeMessages);
+type ReactionModeTarget = "main" | "thread";
+const reactionModeTarget = ref<ReactionModeTarget | null>(null);
+const reactionModeSelectedMessageId = ref<string | null>(null);
+const CHAT_KEYSTROK_SCOPE = "chat";
+const REACTION_MODE_KEYSTROK_SCOPE = "chat-reaction-mode";
+let chatKeystrok: Keystrok | null = null;
 
 function getThreadLabel(threadId: string): string {
   const entry = threads.resolveEntry(threadId);
   const body = entry?.root?.body?.trim() ?? "";
   return body.length > 0 ? body.slice(0, 40) : threadId.slice(0, 8);
+}
+
+const orderedMainReactionMessages = computed(() =>
+  orderTimelineForScrollDirection(
+    reactionModeMessageCandidates(activeMessages.value.filter((message) => !message.threadId || message.id === message.threadId)),
+    scrollDirectionMode.value,
+  ),
+);
+
+const activeThreadReactionMessages = computed<TimelineMessage[]>(() => {
+  if (ui.sidebarMode.value !== "channels") return [];
+  const threadId = activeThreadStack.value[activeThreadStack.value.length - 1];
+  if (!threadId) return [];
+  const entry = threads.resolveEntry(threadId);
+  if (!entry) return [];
+  const orderedChildren = orderTimelineForScrollDirection(reactionModeMessageCandidates(entry.directChildren), scrollDirectionMode.value);
+  return entry.root ? reactionModeMessageCandidates([entry.root, ...orderedChildren]) : orderedChildren;
+});
+
+const reactionModeMessages = computed(() =>
+  reactionModeTarget.value === "thread"
+    ? activeThreadReactionMessages.value
+    : orderedMainReactionMessages.value,
+);
+
+const reactionModeScope = computed<ReactionModeScope>(() =>
+  reactionModeTarget.value === "thread" ? "thread" : "feed",
+);
+
+const reactionModeState = computed(() =>
+  reactionModeTarget.value
+    ? {
+        selectedMessageId: reactionModeSelectedMessageId.value,
+      }
+    : null,
+);
+
+function activeReactionTarget(): ReactionModeTarget | null {
+  if (ui.activePage.value !== "chat") return null;
+  if (ui.sidebarMode.value === "channels" && activeThreadStack.value.length > 0) return "thread";
+  if (ui.sidebarMode.value === "dms" && activeDmPeer.value) return "main";
+  if (ui.sidebarMode.value === "channels" && waddles.currentChannel.value) return "main";
+  return null;
+}
+
+function reactionModeMessageCandidates(messages: readonly TimelineMessage[]): TimelineMessage[] {
+  return messages.map((message) => ({
+    ...message,
+    canReact: ui.sidebarMode.value === "dms" || !!message.reactionTargetId,
+  }));
+}
+
+function exitReactionMode() {
+  reactionModeTarget.value = null;
+  reactionModeSelectedMessageId.value = null;
+  chatKeystrok?.scope(REACTION_MODE_KEYSTROK_SCOPE).deactivate();
+}
+
+function startReactionMode(target = activeReactionTarget()): boolean {
+  if (!target) return false;
+  const messages = target === "thread" ? activeThreadReactionMessages.value : orderedMainReactionMessages.value;
+  const scope = target === "thread" ? "thread" : "feed";
+  const selected = selectInitialReactionMessage(messages, scope);
+  if (!selected) return false;
+  reactionModeTarget.value = target;
+  reactionModeSelectedMessageId.value = selected;
+  chatKeystrok?.scope(REACTION_MODE_KEYSTROK_SCOPE).override();
+  return true;
+}
+
+function reactToSelectedMessage(emoji: string) {
+  const messageId = reactionModeSelectedMessageId.value;
+  if (!messageId) return;
+  reactActiveMessage(messageId, emoji);
+  exitReactionMode();
+}
+
+function isEditableKeyTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  if (target.closest("[contenteditable='true']")) return true;
+  return !!target.closest("input, textarea, select");
+}
+
+function isComposerEditorTarget(target: EventTarget | null): boolean {
+  return target instanceof HTMLElement && !!target.closest(".chat-composer .ProseMirror");
+}
+
+function isComposerEditorEmpty(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  const editor = target.closest(".chat-composer .ProseMirror");
+  if (!(editor instanceof HTMLElement)) return false;
+  return (editor.textContent ?? "").length === 0;
+}
+
+function canStartReactionModeFromEvent(event: KeyboardEvent): boolean {
+  if (anyModalOpen()) return false;
+  if (!isEditableKeyTarget(event.target)) return true;
+  if (!isComposerEditorTarget(event.target)) return false;
+  return isComposerEditorEmpty(event.target);
+}
+
+function consumeKeystrokEvent(event: KeyboardEvent) {
+  event.preventDefault();
+  event.stopPropagation();
+}
+
+function handleStartReactionModeShortcut(event: KeyboardEvent) {
+  if (!canStartReactionModeFromEvent(event)) return;
+  if (startReactionMode()) {
+    consumeKeystrokEvent(event);
+  }
+}
+
+function handleLiteralPlusKeyDown(event: KeyboardEvent) {
+  if (event.key !== "+" || event.ctrlKey || event.metaKey || event.altKey) return;
+  if (reactionModeTarget.value) {
+    if (!ensureReactionModeOwnsEvent(event)) return;
+    consumeKeystrokEvent(event);
+    return;
+  }
+  handleStartReactionModeShortcut(event);
+}
+
+function shouldYieldReactionModeForEvent(event: KeyboardEvent): boolean {
+  if (anyModalOpen()) return true;
+  return isEditableKeyTarget(event.target);
+}
+
+function ensureReactionModeOwnsEvent(event: KeyboardEvent): boolean {
+  if (!shouldYieldReactionModeForEvent(event)) return true;
+  exitReactionMode();
+  return false;
+}
+
+function handleReactionModeMove(event: KeyboardEvent, direction: "previous" | "next") {
+  if (!ensureReactionModeOwnsEvent(event)) return;
+  reactionModeSelectedMessageId.value = moveReactionSelection(
+    reactionModeSelectedMessageId.value,
+    reactionModeMessages.value,
+    reactionModeScope.value,
+    direction,
+  );
+  consumeKeystrokEvent(event);
+}
+
+function handleReactionModeQuickReaction(event: KeyboardEvent) {
+  if (!ensureReactionModeOwnsEvent(event)) return;
+  const emoji = quickReactionForKey(event.key);
+  if (emoji) reactToSelectedMessage(emoji);
+  consumeKeystrokEvent(event);
+}
+
+function handleReactionModeEscape(event: KeyboardEvent) {
+  const shouldYield = shouldYieldReactionModeForEvent(event);
+  exitReactionMode();
+  if (!shouldYield) consumeKeystrokEvent(event);
 }
 const activeDraft = computed({
   get: () => (ui.sidebarMode.value === "dms" ? dmMessaging.draft.value : messaging.draft.value),
@@ -656,6 +828,46 @@ function loadOlderThreadMessages(threadId: string) {
   void messaging.loadOlderThreadMessages(threadId);
 }
 
+function anyModalOpen(): boolean {
+  const domModalOpen = typeof document !== "undefined" && !!document.querySelector("[aria-modal='true']");
+  return ui.showCreateChannel.value ||
+    ui.showEditChannel.value ||
+    ui.showWaddleSettings.value ||
+    ui.showMembers.value ||
+    ui.confirmDeleteWaddle.value ||
+    ui.confirmDeleteChannel.value ||
+    ui.showNewDm.value ||
+    ui.confirmRemoveMember.value !== null ||
+    ui.showMobileNav.value ||
+    ui.showMobileDetails.value ||
+    domModalOpen;
+}
+
+function handleChatEscape(event: KeyboardEvent) {
+  if (activeThreadStack.value.length === 0) return;
+  // Don't intercept Escape when any dialog/drawer is open so they can close first.
+  if (anyModalOpen()) return;
+  activeThreadStack.value = activeThreadStack.value.slice(0, -1);
+  consumeKeystrokEvent(event);
+}
+
+function bindChatKeystrokShortcuts() {
+  chatKeystrok = createKeystrok();
+  chatKeystrok
+    .bind("escape", handleChatEscape, { scope: CHAT_KEYSTROK_SCOPE })
+    .bind("escape", handleReactionModeEscape, { scope: REACTION_MODE_KEYSTROK_SCOPE })
+    .bind("up", (event) => handleReactionModeMove(event, "previous"), { scope: REACTION_MODE_KEYSTROK_SCOPE })
+    .bind("down", (event) => handleReactionModeMove(event, "next"), { scope: REACTION_MODE_KEYSTROK_SCOPE })
+    .bind("backspace", handleReactionModeEscape, { scope: REACTION_MODE_KEYSTROK_SCOPE })
+    .bind("delete", handleReactionModeEscape, { scope: REACTION_MODE_KEYSTROK_SCOPE });
+
+  for (const key of ["1", "2", "3", "4", "5"]) {
+    chatKeystrok.bind(key, handleReactionModeQuickReaction, { scope: REACTION_MODE_KEYSTROK_SCOPE });
+  }
+
+  chatKeystrok.scope(CHAT_KEYSTROK_SCOPE).activate();
+}
+
 // --- Deep linking ---
 
 function updateUrl() {
@@ -681,12 +893,37 @@ watch(
     // Channel / DM / mode changes close any open thread panel — the ids inside
     // the stack belong to the channel we just left.
     activeThreadStack.value = [];
+    exitReactionMode();
     updateUrl();
   },
 );
 
-watch(activeThreadStack, updateUrl, { deep: true });
-watch(() => ui.activePage.value, updateUrl);
+watch(activeThreadStack, () => {
+  exitReactionMode();
+  updateUrl();
+}, { deep: true });
+watch(() => ui.activePage.value, () => {
+  exitReactionMode();
+  updateUrl();
+});
+
+watch(
+  [reactionModeMessages, reactionModeScope],
+  () => {
+    if (!reactionModeTarget.value) return;
+    const selected = preserveReactionSelection(
+      reactionModeSelectedMessageId.value,
+      reactionModeMessages.value,
+      reactionModeScope.value,
+    );
+    if (!selected) {
+      exitReactionMode();
+      return;
+    }
+    reactionModeSelectedMessageId.value = selected;
+  },
+  { flush: "post" },
+);
 
 function openUserSettings() {
   ui.showMobileNav.value = false;
@@ -992,34 +1229,19 @@ watch(
   { immediate: true },
 );
 
-function handleKeyDown(e: KeyboardEvent) {
-  if (e.key !== "Escape") return;
-  if (activeThreadStack.value.length === 0) return;
-  // Don't intercept Escape when any dialog/drawer is open so they can close first.
-  const anyModalOpen =
-    ui.showCreateChannel.value ||
-    ui.showEditChannel.value ||
-    ui.showWaddleSettings.value ||
-    ui.showMembers.value ||
-    ui.confirmDeleteWaddle.value ||
-    ui.confirmDeleteChannel.value ||
-    ui.showNewDm.value ||
-    ui.confirmRemoveMember.value !== null ||
-    ui.showMobileNav.value ||
-    ui.showMobileDetails.value;
-  if (anyModalOpen) return;
-  activeThreadStack.value = activeThreadStack.value.slice(0, -1);
-  e.preventDefault();
-}
-
 onMounted(() => {
   window.addEventListener("popstate", onPopState);
-  window.addEventListener("keydown", handleKeyDown);
+  // keystrok uses "+" as its shortcut separator, so the literal plus key is
+  // handled directly while the rest of reaction mode remains scoped there.
+  window.addEventListener("keydown", handleLiteralPlusKeyDown, true);
+  bindChatKeystrokShortcuts();
 });
 
 onUnmounted(() => {
   window.removeEventListener("popstate", onPopState);
-  window.removeEventListener("keydown", handleKeyDown);
+  window.removeEventListener("keydown", handleLiteralPlusKeyDown, true);
+  chatKeystrok?.destroy();
+  chatKeystrok = null;
   appUpdate.stop();
   messaging.disconnect();
   dmMessaging.disconnect();
@@ -1292,6 +1514,7 @@ onUnmounted(() => {
               :upload-progress="activeUploadProgress"
               :thread-index="threads.index.value"
               :xmpp-client="xmppClient"
+              :reaction-mode="reactionModeTarget === 'main' ? reactionModeState : null"
               @send="sendActiveMessage"
               @typing="notifyActiveComposing"
               @edit-message="editActiveMessage"
@@ -1365,6 +1588,7 @@ onUnmounted(() => {
               :upload-progress="{ uploading: false, progress: 0, filename: '' }"
               :channel-name="waddles.currentChannel.value?.name ?? ''"
               :hide-composer="true"
+              :reaction-mode="null"
               @close="closeThreadPanel"
               @pop-to="popThreadTo"
               @push-thread="pushThread"
@@ -1400,6 +1624,7 @@ onUnmounted(() => {
               :has-older-replies="messaging.threadHasOlder.value[activeThreadStack[activeThreadStack.length - 1] ?? ''] ?? false"
               :upload-progress="messaging.uploadProgress.value"
               :channel-name="waddles.currentChannel.value?.name ?? ''"
+              :reaction-mode="reactionModeTarget === 'thread' ? reactionModeState : null"
               @close="closeThreadPanel"
               @pop-to="popThreadTo"
               @push-thread="pushThread"

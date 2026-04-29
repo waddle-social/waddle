@@ -40,6 +40,7 @@ const props = defineProps<{
   hasOlderReplies?: boolean;
   uploadProgress: { uploading: boolean; progress: number; filename: string };
   channelName: string;
+  reactionMode?: { selectedMessageId: string | null } | null;
   /**
    * When true, the composer is hidden but sub-thread navigation stays active.
    * Used to render the parent context pane in the accordion layout.
@@ -481,6 +482,7 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
           :author-jid="authorJidByNick?.[message.author]"
           :thread-reply-count="activeEntry.count"
           hide-thread-chip
+          :reaction-mode-selected="reactionMode?.selectedMessageId === message.id"
           @edit="(id, body, m, r) => emit('editMessage', id, body, m, r)"
           @retract="(id) => emit('retractMessage', id)"
           @react="(id, emoji) => emit('reactMessage', id, emoji)"
@@ -511,6 +513,7 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
               :thread-reply-count="threadIndex.get(message.id)?.count ?? 0"
               :grouped="isGroupedFollowUp(message.id)"
               hide-thread-chip
+              :reaction-mode-selected="reactionMode?.selectedMessageId === message.id"
               @edit="(id, body, m, r) => emit('editMessage', id, body, m, r)"
               @retract="(id) => emit('retractMessage', id)"
               @react="(id, emoji) => emit('reactMessage', id, emoji)"

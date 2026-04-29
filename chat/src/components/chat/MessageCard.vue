@@ -44,6 +44,7 @@ import type { OccupantHat, OccupantPresence } from "@/lib/xmpp-client";
 import { formatTimeOfDay } from "@/composables/useMessaging";
 import { useLongPress } from "@/composables/useLongPress";
 import { $desktopToolbarOwnerId } from "@/stores/message-toolbar";
+import { QUICK_REACTION_EMOJIS } from "@/lib/reaction-mode";
 
 const HAT_LABELS: Record<string, string> = {
   "urn:xmpp:hats:owner": "OWNER",
@@ -84,6 +85,7 @@ const props = defineProps<{
   threadReplyCount?: number;
   hideThreadChip?: boolean;
   grouped?: boolean;
+  reactionModeSelected?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -96,7 +98,7 @@ const emit = defineEmits<{
   openThread: [threadId: string];
 }>();
 
-const quickEmojis = ["👍", "❤️", "😂", "🎉", "👀"];
+const quickEmojis = QUICK_REACTION_EMOJIS;
 
 const seniorHat = computed<OccupantHat | null>(() => {
   if (!props.hats || props.hats.length === 0) return null;
@@ -468,7 +470,7 @@ const desktopToolbarLockedByAnother = computed(() =>
   desktopToolbarOwnerId.value !== null && desktopToolbarOwnerId.value !== props.message.id,
 );
 const desktopToolbarVisibilityClass = computed(() => (
-  ownsDesktopToolbarLock.value
+  ownsDesktopToolbarLock.value || props.reactionModeSelected
     ? "opacity-100 pointer-events-auto z-floating"
     : "opacity-0 group-hover:opacity-100 focus-within:opacity-100 pointer-events-none group-hover:pointer-events-auto focus-within:pointer-events-auto z-sticky"
 ));
@@ -660,6 +662,7 @@ watch(
       message.deliveryStatus === 'sending' || message.deliveryStatus === 'queued' ? 'opacity-50' : '',
       longPress.isPressing.value ? 'no-callout' : '',
       grouped ? 'chat-message-grouped' : '',
+      reactionModeSelected ? 'chat-message-grid--reaction-selected' : '',
     ]"
     @pointerdown="longPress.handlers.onPointerdown"
     @pointermove="longPress.handlers.onPointermove"
@@ -1083,19 +1086,29 @@ watch(
     <div
       v-if="!isEditing && !desktopToolbarLockedByAnother"
       :class="[
-        'absolute -top-4 right-3 flex items-center gap-1 transition-opacity duration-150 bg-card/95 backdrop-blur border border-border rounded-lg shadow-lg p-1 [@media(pointer:coarse)]:hidden',
+        'chat-hover-action-toolbar absolute -top-4 right-3 flex items-center gap-1 transition-opacity duration-150 bg-card/95 backdrop-blur border border-border rounded-lg shadow-lg p-1 [@media(pointer:coarse)]:hidden',
         desktopToolbarVisibilityClass,
+        reactionModeSelected ? 'chat-hover-action-toolbar--reaction-mode' : '',
       ]"
+      :role="reactionModeSelected ? 'status' : undefined"
+      :aria-live="reactionModeSelected ? 'polite' : undefined"
     >
       <button
-        v-for="e in quickEmojis"
+        v-for="(e, index) in quickEmojis"
         :key="e"
         type="button"
-        class="type-emoji-button h-8 w-8 flex items-center justify-center rounded-md hover:bg-muted hover:scale-105 transition-all duration-150"
+        class="type-emoji-button relative h-8 w-8 flex items-center justify-center rounded-md hover:bg-muted hover:scale-105 transition-all duration-150"
         :title="`React with ${e}`"
         :aria-label="`React to message with ${e}`"
         @click="react(e)"
-      >{{ e }}</button>
+      >
+        <span
+          v-if="reactionModeSelected"
+          class="chat-reaction-mode-keycap type-meta type-numeric"
+          aria-hidden="true"
+        >{{ index + 1 }}</span>
+        {{ e }}
+      </button>
       <div class="relative">
         <button
           ref="pickerButtonEl"

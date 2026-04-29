@@ -375,6 +375,7 @@ describe("MAM history application", () => {
           body: "hello",
           createdAt: "2024-01-01T00:00:00Z",
           type: "message",
+          reactionTargetId: "msg-1",
         },
         {
           id: "edit-1",
@@ -431,7 +432,7 @@ describe("MAM history application", () => {
     expect(messaging.messages.value[0].reactions).toEqual({ "👍": ["alice"] });
   });
 
-  test("applies archived room updates when reactions target an alternate wire id", async () => {
+  test("ignores archived room reactions that target an alternate wire id", async () => {
     const session = ref({
       username: "alice",
       jid: "alice@example.com/desktop",
@@ -443,6 +444,7 @@ describe("MAM history application", () => {
         {
           id: "stable-msg-1",
           wireIds: ["echo-msg-1", "client-msg-1"],
+          reactionTargetId: "stable-msg-1",
           roomJid: "general@muc.example.com",
           nick: "bob",
           body: "hello",
@@ -480,7 +482,7 @@ describe("MAM history application", () => {
 
     expect(messaging.messages.value).toHaveLength(1);
     expect(messaging.messages.value[0].id).toBe("stable-msg-1");
-    expect(messaging.messages.value[0].reactions).toEqual({ "👍": ["alice"] });
+    expect(messaging.messages.value[0].reactions).toBeUndefined();
   });
 
   test("applies archived DM updates onto the original timeline message", async () => {

@@ -48,6 +48,8 @@ export interface TimelineMessage {
   authorOccupantJid?: string;
   /** XEP-0313 MUC archive real JID from muc#user item@jid, when present. */
   authorRealJid?: string;
+  /** XEP-0444 groupchat reaction target: room-assigned XEP-0359 stanza-id. */
+  reactionTargetId?: string;
   body: string;
   createdAt: string;
   isSelf: boolean;

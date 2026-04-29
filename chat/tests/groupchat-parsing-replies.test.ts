@@ -308,6 +308,7 @@ describe("groupchat reply + thread parsing", () => {
 
     expect(h.messages).toHaveLength(1);
     expect(h.messages[0].id).toBe("stable-1");
+    expect(h.messages[0].reactionTargetId).toBe("stable-1");
     expect(h.messages[0].wireIds).toEqual(["echo-1", "client-1", "server-1"]);
     expect(h.messages[0].correctionTargetId).toBe("client-1");
   });
