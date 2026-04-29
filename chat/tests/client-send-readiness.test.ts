@@ -5,7 +5,7 @@ import { ref } from "vue";
 import type { WaddleSession } from "../src/lib/server-auth";
 import { useDmMessaging } from "../src/composables/useDmMessaging";
 import { useMessaging } from "../src/composables/useMessaging";
-import { BrowserXmppClient, roomBareJidFor } from "../src/lib/xmpp-client";
+import { BrowserXmppClient, roomBareJidFor, type InboxEntry } from "../src/lib/xmpp-client";
 import { listQueuedDmMessages, listQueuedRoomMessages } from "../src/lib/outbound-queue-store";
 import { handlerStubs } from "./helpers/xmpp-client-mock";
 
@@ -285,6 +285,52 @@ describe("carbon forwarding", () => {
       peerJid: "bob@example.com",
       body: "hello from another resource path",
     }));
+  });
+});
+
+describe("inbox push adapter", () => {
+  test("preserves thread metadata from inbound inbox pushes", () => {
+    const client = new BrowserXmppClient(session());
+    const inboxEntries: InboxEntry[] = [];
+    client.setInboxPushHandler((entry) => {
+      inboxEntries.push(entry);
+    });
+    const xmpp = Object.assign(new EventEmitter(), {}) as unknown as Agent;
+    (client as unknown as { xmpp: Agent }).xmpp = xmpp;
+    (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
+
+    xmpp.emit("message", {
+      type: "headline",
+      from: "example.com",
+      to: "alice@example.com/desktop",
+      inboxPush: {
+        partner: "space_channel@muc.example.com",
+        kind: "muc",
+        lastStanzaId: "sid-thread",
+        lastUpdated: 1_700_000,
+        unread: 2,
+        preview: "thread reply",
+        thread: "thread-1",
+        threadTitle: "Planning",
+        replyCount: 5,
+        author: "bob",
+      },
+    });
+
+    expect(inboxEntries).toEqual([
+      {
+        partner: "space_channel@muc.example.com",
+        kind: "muc",
+        lastStanzaId: "sid-thread",
+        lastUpdated: 1_700_000,
+        unread: 2,
+        preview: "thread reply",
+        thread: "thread-1",
+        threadTitle: "Planning",
+        replyCount: 5,
+        author: "bob",
+      },
+    ]);
   });
 });
 

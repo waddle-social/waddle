@@ -10,6 +10,7 @@ import { useUiState } from "@/composables/useUiState";
 import { useAppUpdate } from "@/composables/useAppUpdate";
 import { useNotifications } from "@/composables/useNotifications";
 import { useChannelUnread } from "@/composables/useChannelUnread";
+import { useTabUnreadIndicator } from "@/composables/useTabUnreadIndicator";
 import { useVersion } from "@/composables/useVersion";
 import { useRosterContacts } from "@/composables/useRosterContacts";
 import { buildDmPath, buildPath, buildSettingsPath, parseRoute, pushDmRoute, pushRoute, pushSettingsRoute, resolveChannel, shouldLoadStructureForRoute } from "@/composables/useRouting";
@@ -227,6 +228,21 @@ const activeDmPeer = computed(() => {
 });
 
 const computedChannelUnreadMap = computed(() => channelUnread.channelUnreadMap());
+// Thread rows are drill-down detail; room unread already carries the
+// server-equivalent conversation total, so the browser badge must not add both.
+const totalTabUnreadCount = computed(() =>
+  connectionStore.appState === "ready" && session.value && xmppClient.value
+    ? dmConversations.totalUnreadCount.value + channelUnread.totalUnreadCount.value
+    : 0
+);
+useTabUnreadIndicator(totalTabUnreadCount, {
+  shouldAcceptServiceWorkerUnreadCount: () =>
+    connectionStore.appState === "ready" && !!session.value && !!xmppClient.value,
+  onServiceWorkerUnreadCount: () => Promise.all([
+    dmConversations.hydrateFromInbox(),
+    channelUnread.hydrateFromInbox(),
+  ]).then((results) => results.every(Boolean)),
+});
 
 const notifications = useNotifications();
 const appUpdate = useAppUpdate();
@@ -383,6 +399,7 @@ watch(xmppClient, (client) => {
     dmMessaging.onMessageQueueStatus(id, status);
   });
   client.setInboxPushHandler((entry) => {
+    dmConversations.onInboxPush(entry);
     channelUnread.onInboxPush(entry);
   });
   client.setSessionLifecycleHandler((event) => {
@@ -767,6 +784,7 @@ async function handleLogout() {
   messaging.disconnect();
   dmMessaging.disconnect();
   waddles.clearData();
+  channelUnread.clearAll();
   rosterContacts.clearRosterContacts();
   setupPromptShown = false;
   messaging.clearMessages();

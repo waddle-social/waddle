@@ -53,6 +53,7 @@ describe("useDmConversations", () => {
     expect(composable.conversations.value).toEqual([]);
     expect(composable.activePeerJid.value).toBeNull();
     expect(composable.hasUnread.value).toBe(false);
+    expect(composable.totalUnreadCount.value).toBe(0);
   });
 
   test("openDm creates a conversation and sets activePeerJid", async () => {
@@ -114,6 +115,7 @@ describe("useDmConversations", () => {
       lastMessageBody: "from inbox",
       unreadCount: 2,
     });
+    expect(composable.totalUnreadCount.value).toBe(2);
     expect(client.subscribeToPeerPresence).toHaveBeenCalledWith("bob@example.com");
   });
 
@@ -147,6 +149,7 @@ describe("useDmConversations", () => {
     expect(composable.conversations.value[0].unreadCount).toBe(1);
     expect(composable.conversations.value[0].lastMessageBody).toBe("hello");
     expect(composable.hasUnread.value).toBe(true);
+    expect(composable.totalUnreadCount.value).toBe(1);
   });
 
   test("receiveIncomingDm does not increment unread for active conversation", async () => {
@@ -154,6 +157,7 @@ describe("useDmConversations", () => {
     await composable.openDm("bob@example.com");
     composable.receiveIncomingDm(makeDmMessage());
     expect(composable.conversations.value[0].unreadCount).toBe(0);
+    expect(composable.totalUnreadCount.value).toBe(0);
   });
 
   test("receiveIncomingDm syncs inbox read for the active conversation", async () => {
@@ -193,6 +197,7 @@ describe("useDmConversations", () => {
 
     expect(composable.conversations.value[0].unreadCount).toBe(0);
     expect(composable.hasUnread.value).toBe(false);
+    expect(composable.totalUnreadCount.value).toBe(0);
     expect(client.markInboxRead).toHaveBeenCalledWith("bob@example.com");
   });
 
@@ -201,9 +206,89 @@ describe("useDmConversations", () => {
     composable.receiveIncomingDm(makeDmMessage());
     composable.receiveIncomingDm(makeDmMessage({ id: "msg-2" }));
     expect(composable.conversations.value[0].unreadCount).toBe(2);
+    expect(composable.totalUnreadCount.value).toBe(2);
     composable.markRead("bob@example.com");
     expect(composable.conversations.value[0].unreadCount).toBe(0);
     expect(composable.hasUnread.value).toBe(false);
+    expect(composable.totalUnreadCount.value).toBe(0);
+  });
+
+  test("onInboxPush applies direct unread totals and ignores non-DM entries", () => {
+    const { composable } = makeComposable();
+
+    composable.onInboxPush({
+      partner: "bob@example.com",
+      kind: "direct",
+      lastStanzaId: "sid-1",
+      lastUpdated: epochSeconds("2026-01-02T12:00:00Z"),
+      unread: 4,
+      preview: "from push",
+    });
+    composable.onInboxPush({
+      partner: "general@conference.example.com",
+      kind: "muc",
+      lastStanzaId: "sid-2",
+      lastUpdated: epochSeconds("2026-01-02T12:05:00Z"),
+      unread: 3,
+      preview: "ignore me",
+    });
+
+    expect(composable.conversations.value).toHaveLength(1);
+    expect(composable.conversations.value[0]).toMatchObject({
+      peerJid: "bob@example.com",
+      lastMessageBody: "from push",
+      unreadCount: 4,
+    });
+    expect(composable.totalUnreadCount.value).toBe(4);
+  });
+
+  test("does not double-count a DM already accounted by an inbox push", () => {
+    const { composable } = makeComposable();
+
+    composable.onInboxPush({
+      partner: "bob@example.com",
+      kind: "direct",
+      lastStanzaId: "server-stanza-1",
+      lastUpdated: epochSeconds("2026-01-02T12:00:00Z"),
+      unread: 4,
+      preview: "from push",
+    });
+    composable.receiveIncomingDm(makeDmMessage({
+      id: "server-stanza-1",
+      body: "same message",
+      createdAt: "2026-01-02T12:00:01Z",
+    }));
+
+    expect(composable.conversations.value[0]).toMatchObject({
+      lastMessageBody: "same message",
+      unreadCount: 4,
+    });
+    expect(composable.totalUnreadCount.value).toBe(4);
+
+    composable.onInboxPush({
+      partner: "bob@example.com",
+      kind: "direct",
+      lastStanzaId: "server-stanza-2",
+      lastUpdated: epochSeconds("2026-01-02T12:00:02Z"),
+      unread: 5,
+      preview: "from push again",
+    });
+    composable.receiveIncomingDm(makeDmMessage({
+      id: "client-origin-2",
+      wireIds: ["server-stanza-2"],
+      body: "same wire id message",
+      createdAt: "2026-01-02T12:00:02Z",
+    }));
+
+    expect(composable.conversations.value[0].unreadCount).toBe(5);
+
+    composable.receiveIncomingDm(makeDmMessage({
+      id: "server-stanza-3",
+      body: "new message",
+      createdAt: "2026-01-02T12:00:03Z",
+    }));
+
+    expect(composable.conversations.value[0].unreadCount).toBe(6);
   });
 
   test("updatePresence updates conversation presence", async () => {

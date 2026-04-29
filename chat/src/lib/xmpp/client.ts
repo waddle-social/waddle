@@ -1484,6 +1484,10 @@ export class BrowserXmppClient {
         lastUpdated?: number;
         unread?: number;
         preview?: string;
+        thread?: string;
+        threadTitle?: string;
+        replyCount?: number;
+        author?: string;
       };
     }).inboxPush;
     if (!push?.partner) return;
@@ -1494,6 +1498,10 @@ export class BrowserXmppClient {
       lastUpdated: typeof push.lastUpdated === "number" ? push.lastUpdated : 0,
       unread: typeof push.unread === "number" ? push.unread : 0,
       preview: push.preview || undefined,
+      thread: push.thread || undefined,
+      threadTitle: push.threadTitle || undefined,
+      replyCount: typeof push.replyCount === "number" ? push.replyCount : undefined,
+      author: push.author || undefined,
     });
   }
 

@@ -17,6 +17,7 @@ pub trait WebPushSender: Send + Sync + 'static {
         title: &str,
         body: &str,
         room_jid: &str,
+        unread_count: u64,
     ) -> Pin<Box<dyn Future<Output = Result<(), PushError>> + Send + '_>>;
 }
 
@@ -51,23 +52,13 @@ impl WebPushSender for HttpWebPushSender {
         title: &str,
         body: &str,
         room_jid: &str,
+        unread_count: u64,
     ) -> Pin<Box<dyn Future<Output = Result<(), PushError>> + Send + '_>> {
         let endpoint = subscription.endpoint.clone();
-        let subscription_endpoint = subscription.endpoint.clone();
-        let subscription_p256dh = subscription.p256dh.clone();
-        let subscription_auth = subscription.auth_key.clone();
         // This sender targets an application relay/gateway endpoint. The relay is
         // responsible for performing standards-compliant Web Push (VAPID/encryption)
         // using the subscription keys supplied below.
-        let payload = serde_json::json!({
-            "title": title,
-            "body": body,
-            "roomJid": room_jid,
-            "url": room_jid_to_path(room_jid),
-            "endpoint": subscription_endpoint,
-            "p256dh": subscription_p256dh,
-            "auth": subscription_auth,
-        });
+        let payload = relay_payload(subscription, title, body, room_jid, unread_count);
         Box::pin(async move {
             let ep = endpoint.as_deref().ok_or(PushError::MissingEndpoint)?;
             match self.client.post(ep).json(&payload).send().await {
@@ -105,6 +96,7 @@ pub async fn notify_mentioned_users<S, W>(
     sender_nick: &str,
     body: &str,
     room_jid: &str,
+    unread_count: u64,
 ) where
     S: PushSubscriptionStore + ?Sized,
     W: WebPushSender + ?Sized,
@@ -129,13 +121,32 @@ pub async fn notify_mentioned_users<S, W>(
         };
         for sub in &subs {
             if let Err(e) = sender
-                .send_notification(sub, &title, &preview, room_jid)
+                .send_notification(sub, &title, &preview, room_jid, unread_count)
                 .await
             {
                 debug!(user_jid = %jid, error = %e, "Push notification failed");
             }
         }
     }
+}
+
+fn relay_payload(
+    subscription: &PushSubscription,
+    title: &str,
+    body: &str,
+    room_jid: &str,
+    unread_count: u64,
+) -> serde_json::Value {
+    serde_json::json!({
+        "title": title,
+        "body": body,
+        "roomJid": room_jid,
+        "url": room_jid_to_path(room_jid),
+        "message-count": unread_count,
+        "endpoint": subscription.endpoint.as_deref(),
+        "p256dh": subscription.p256dh.as_deref(),
+        "auth": subscription.auth_key.as_deref(),
+    })
 }
 
 #[cfg(test)]
@@ -160,6 +171,7 @@ mod tests {
             _: &str,
             _: &str,
             _: &str,
+            _: u64,
         ) -> Pin<Box<dyn Future<Output = Result<(), PushError>> + Send + '_>> {
             self.0.fetch_add(1, Ordering::SeqCst);
             Box::pin(async { Ok(()) })
@@ -189,6 +201,7 @@ mod tests {
             "charlie",
             "Hey!",
             "room@muc",
+            3,
         )
         .await;
         assert_eq!(sender.count(), 1); // only alice has a sub
@@ -205,9 +218,35 @@ mod tests {
             "bob",
             "Hi",
             "room@muc",
+            0,
         )
         .await;
         assert_eq!(sender.count(), 0);
+    }
+
+    #[test]
+    fn relay_payload_includes_xep_0357_message_count() {
+        let subscription = PushSubscription {
+            user_jid: "alice@ex".into(),
+            service_jid: "push.ex".into(),
+            node: Some("n1".into()),
+            endpoint: Some("https://ep".into()),
+            p256dh: Some("BASE64KEY".into()),
+            auth_key: Some("BASE64AUTH".into()),
+        };
+        let payload = relay_payload(
+            &subscription,
+            "Waddle",
+            "New message",
+            "c2@conference.example.com",
+            6,
+        );
+
+        assert_eq!(payload["message-count"], 6);
+        assert_eq!(payload["url"], "/c2");
+        assert_eq!(payload["endpoint"], "https://ep");
+        assert_eq!(payload["p256dh"], "BASE64KEY");
+        assert_eq!(payload["auth"], "BASE64AUTH");
     }
 
     #[test]
