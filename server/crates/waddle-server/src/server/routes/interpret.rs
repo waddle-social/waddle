@@ -1044,21 +1044,6 @@ async fn run_headless_recipient_pass(
     );
 }
 
-/// Deliver a single `Stanza` to a specific full-JID destination as
-/// a [`waddle_xmpp::registry::DeliveryKind::PeerStanza`] so the
-/// destination's main loop runs the recipient pass before any wire
-/// write. Centralizes the per-target send + result-logging shape so
-/// both the full-JID and bare-JID-resource-selection arms of
-/// [`OutboundEvent::RouteToConnection`] go through the same path.
-///
-/// On `NotConnected` / `ChannelClosed`, falls back to recording the
-/// stanza on the recipient's detached XEP-0198 stream-management
-/// session (when one exists) so a recipient that's mid-resume doesn't
-/// silently lose direct messages — matching the legacy
-/// `handle_message` direct-route semantics. Cross-domain bare JIDs and
-/// truly-offline recipients still drop here; the bare-JID arm above
-/// runs the headless recipient pass for offline persistence
-/// (archive/inbox/incoming-block) on local domains.
 /// Apply a XEP-0424 §"prevent further distribution" tombstone to the
 /// retraction target inside `archive`. Looks up the target via the
 /// retraction's wire id (matches legacy
@@ -1138,6 +1123,21 @@ async fn apply_retraction_tombstone(
     }
 }
 
+/// Deliver a single `Stanza` to a specific full-JID destination as
+/// a [`waddle_xmpp::registry::DeliveryKind::PeerStanza`] so the
+/// destination's main loop runs the recipient pass before any wire
+/// write. Centralizes the per-target send + result-logging shape so
+/// both the full-JID and bare-JID-resource-selection arms of
+/// [`OutboundEvent::RouteToConnection`] go through the same path.
+///
+/// On `NotConnected` / `ChannelClosed`, falls back to recording the
+/// stanza on the recipient's detached XEP-0198 stream-management
+/// session (when one exists) so a recipient that's mid-resume doesn't
+/// silently lose direct messages — matching the legacy
+/// `handle_message` direct-route semantics. Cross-domain bare JIDs and
+/// truly-offline recipients still drop here; the bare-JID arm above
+/// runs the headless recipient pass for offline persistence
+/// (archive/inbox/incoming-block) on local domains.
 async fn deliver_peer_to_full(
     registry: &waddle_xmpp::registry::ConnectionRegistry,
     sm_session_registry: Option<&Arc<InMemorySmSessionRegistry>>,
@@ -1932,14 +1932,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn xep_0359_archive_ref_pivots_inbox_row_to_mam_row_by_stanza_id() {
+    async fn xep_0359_archive_ref_pivots_inbox_row_to_mam_row_via_archive_or_stanza_id() {
         // End-to-end of the bug Qodo + Codex flagged: inbox writes
         // `archive_ref` from the canonical XEP-0359 `<stanza-id>`
-        // stamp, and `MamStorage::get_message_by_stanza_id` must
-        // resolve that same id against `archive_jid`. If the
-        // projection ever stops using the canonical stamp as
-        // `ArchivedMessage.stanza_id`/`id`, the inbox row points at a
-        // dangling stanza-id and clients can't pivot to the archive.
+        // stamp, and `MamStorage::get_message_by_archive_or_stanza_id`
+        // must resolve that same id against `archive_jid` by querying
+        // both the archive's primary key (`id`) and the wire id
+        // (`stanza_id`). If the projection ever stops using the
+        // canonical stamp as `ArchivedMessage.id`, the inbox row
+        // points at a dangling stanza-id and clients can't pivot to
+        // the archive.
         use waddle_xmpp::inbox::storage::InMemoryInboxStorage;
         use waddle_xmpp::mam::storage::InMemoryMamStorage;
         use waddle_xmpp::protocol::event::{StanzaIdRef, StanzaIdValue};
