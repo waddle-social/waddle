@@ -149,6 +149,12 @@ const activeTypingUsers = computed(() =>
 const activeIsLoadingMessages = computed(() =>
   ui.sidebarMode.value === "dms" ? dmMessaging.isLoadingMessages.value : messaging.isLoadingMessages.value,
 );
+const activeIsLoadingOlderMessages = computed(() =>
+  ui.sidebarMode.value === "dms" ? dmMessaging.isLoadingOlderMessages.value : messaging.isLoadingOlderMessages.value,
+);
+const activeHasOlderMessages = computed(() =>
+  ui.sidebarMode.value === "dms" ? dmMessaging.hasOlderMessages.value : messaging.hasOlderMessages.value,
+);
 const activeIsSending = computed(() =>
   ui.sidebarMode.value === "dms" ? dmMessaging.isSending.value : messaging.isSending.value,
 );
@@ -488,10 +494,7 @@ function openThread(threadId: string) {
     return;
   }
   activeThreadStack.value = [threadId];
-  const known = messaging.messages.value.some((m) => m.id === threadId);
-  if (!known) {
-    void messaging.backfillThread(threadId);
-  }
+  void messaging.backfillThread(threadId);
 }
 
 async function onSelectThread(channelId: string, threadId: string) {
@@ -516,10 +519,7 @@ function pushThread(threadId: string) {
     return;
   }
   activeThreadStack.value = [...activeThreadStack.value, threadId];
-  const known = messaging.messages.value.some((m) => m.id === threadId);
-  if (!known) {
-    void messaging.backfillThread(threadId);
-  }
+  void messaging.backfillThread(threadId);
 }
 
 function popThreadTo(index: number) {
@@ -564,6 +564,14 @@ function searchActiveMessages(query: string) {
 
 function clearActiveSearch() {
   activeTarget.value.clearSearch();
+}
+
+function loadOlderActiveMessages() {
+  void activeTarget.value.loadOlderMessages();
+}
+
+function loadOlderThreadMessages(threadId: string) {
+  void messaging.loadOlderThreadMessages(threadId);
 }
 
 // --- Deep linking ---
@@ -698,16 +706,12 @@ async function applyRouteTarget(route: ReturnType<typeof parseRoute>, requestId:
     await messaging.loadMessages(waddles.currentChannel.value?.spaceId ?? "", waddles.activeChannelId.value);
   }
 
-  // Restore the thread panel from the URL. If the outermost thread root isn't
-  // in the freshly loaded history, MAM-backfill it so the panel has something
-  // to render.
+  // Restore the thread panel from the URL and initialize paging for every
+  // visible thread pane. Dedupe in the messaging composable keeps already
+  // loaded roots/replies stable.
   activeThreadStack.value = route.threadStack;
-  const outerThreadId = route.threadStack[0];
-  if (outerThreadId) {
-    const known = messaging.messages.value.some((m) => m.id === outerThreadId);
-    if (!known) {
-      void messaging.backfillThread(outerThreadId);
-    }
+  for (const threadId of route.threadStack) {
+    void messaging.backfillThread(threadId);
   }
 }
 
@@ -1178,6 +1182,8 @@ onUnmounted(() => {
               :update-available="appUpdate.updateAvailable.value"
               :is-applying-update="appUpdate.isApplyingUpdate.value"
               :is-loading-messages="activeIsLoadingMessages"
+              :is-loading-older-messages="activeIsLoadingOlderMessages"
+              :has-older-messages="activeHasOlderMessages"
               :is-sending="activeIsSending"
               :can-manage-channels="waddles.canManageChannels.value"
               :member-count="waddles.members.value.length"
@@ -1205,6 +1211,7 @@ onUnmounted(() => {
               @displayed="markActiveDisplayed"
               @search="searchActiveMessages"
               @clear-search="clearActiveSearch"
+              @load-older="loadOlderActiveMessages"
               @edit-channel="openChannelEdit"
               @open-nav="ui.showMobileNav.value = true"
               @open-details="ui.showMobileDetails.value = true"
@@ -1265,6 +1272,8 @@ onUnmounted(() => {
                :mention-candidates="mentionCandidates"
               :slow-mode-cooldown="messaging.slowModeCooldown.value"
               :is-sending="false"
+              :is-loading-older-replies="messaging.loadingOlderThreadIds.value.has(activeThreadStack[activeThreadStack.length - 2] ?? '')"
+              :has-older-replies="messaging.threadHasOlder.value[activeThreadStack[activeThreadStack.length - 2] ?? ''] ?? false"
               :upload-progress="{ uploading: false, progress: 0, filename: '' }"
               :channel-name="waddles.currentChannel.value?.name ?? ''"
               :hide-composer="true"
@@ -1275,6 +1284,7 @@ onUnmounted(() => {
               @retract-message="retractActiveMessage"
               @react-message="reactActiveMessage"
               @displayed="markActiveDisplayed"
+              @load-older="loadOlderThreadMessages"
             />
           </div>
 
@@ -1298,6 +1308,8 @@ onUnmounted(() => {
                :mention-candidates="mentionCandidates"
               :slow-mode-cooldown="messaging.slowModeCooldown.value"
               :is-sending="messaging.isSending.value"
+              :is-loading-older-replies="messaging.loadingOlderThreadIds.value.has(activeThreadStack[activeThreadStack.length - 1] ?? '')"
+              :has-older-replies="messaging.threadHasOlder.value[activeThreadStack[activeThreadStack.length - 1] ?? ''] ?? false"
               :upload-progress="messaging.uploadProgress.value"
               :channel-name="waddles.currentChannel.value?.name ?? ''"
               @close="closeThreadPanel"
@@ -1310,6 +1322,7 @@ onUnmounted(() => {
               @displayed="markActiveDisplayed"
               @select-gif="sendGif"
               @typing="notifyActiveComposing"
+              @load-older="loadOlderThreadMessages"
             />
           </div>
         </div>

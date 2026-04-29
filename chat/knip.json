@@ -3,6 +3,7 @@
   "entry": [
     "src/components/ChatApp.vue",
     "src/components/XmppProvider.vue",
+    "src/vue-app.ts",
     "src/service-worker/sw-template.js",
     "scripts/*.mjs",
     "tests/**/*.test.ts"

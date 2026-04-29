@@ -8,7 +8,7 @@ import type { WaddleHat } from "./extensions/hats";
 import type {
   ChatStateEvent, ChatStateType, DiscoveredChannel, DisplayedEvent,
   DmChatStateEvent, DmDisplayedEvent, DmReactionEvent, ListRoomMembersOptions, LiveDmMessage, LiveRoomMessage,
-  OccupantPresence, PresenceUpdateEvent, ReactionEvent, RoomActivityEvent,
+  MamHistoryPage, MamPageParam, OccupantPresence, PresenceUpdateEvent, ReactionEvent, RoomActivityEvent,
   RoomHats, RoomPresence, RosterContact, SessionLifecycleEvent, XmppErrorEvent, XmppStatusSnapshot,
 } from "./types";
 import { barePeerJid, jidDomain, roomBareJidFor } from "./jid";
@@ -1180,11 +1180,34 @@ export class BrowserXmppClient {
     await this.connect(); await this.switchRoom(w, c);
     return this.xmpp ? history.queryMam(this.xmpp, this.roomJidForChannel(c), max) : [];
   }
+  async queryMamPage(
+    w: string,
+    c: string,
+    max = 100,
+    pageParam: MamPageParam = { type: "latest" },
+  ): Promise<MamHistoryPage<LiveRoomMessage>> {
+    await this.connect(); await this.switchRoom(w, c);
+    return this.xmpp
+      ? history.queryMamPage(this.xmpp, this.roomJidForChannel(c), max, pageParam)
+      : { messages: [], complete: true };
+  }
   async queryMamByThread(w: string, c: string, threadId: string, max = 100): Promise<LiveRoomMessage[]> {
     await this.connect(); await this.switchRoom(w, c);
     return this.xmpp
       ? history.queryMamByThread(this.xmpp, this.roomJidForChannel(c), threadId, max)
       : [];
+  }
+  async queryMamThreadPage(
+    w: string,
+    c: string,
+    threadId: string,
+    max = 100,
+    pageParam: MamPageParam = { type: "latest" },
+  ): Promise<MamHistoryPage<LiveRoomMessage>> {
+    await this.connect(); await this.switchRoom(w, c);
+    return this.xmpp
+      ? history.queryMamThreadPage(this.xmpp, this.roomJidForChannel(c), threadId, max, pageParam)
+      : { messages: [], complete: true };
   }
   async searchMessages(_spaceId: string, c: string, query: string, max = 20) {
     await this.connect();
@@ -1194,6 +1217,17 @@ export class BrowserXmppClient {
     await this.connect();
     const selfBare = barePeerJid(this.session.jid);
     return this.xmpp ? dmHistory.queryPersonalMam(this.xmpp, selfBare, barePeerJid(peerJid), max) : [];
+  }
+  async queryPersonalMamPage(
+    peerJid: string,
+    max = 100,
+    pageParam: MamPageParam = { type: "latest" },
+  ): Promise<MamHistoryPage<LiveDmMessage>> {
+    await this.connect();
+    const selfBare = barePeerJid(this.session.jid);
+    return this.xmpp
+      ? dmHistory.queryPersonalMamPage(this.xmpp, selfBare, barePeerJid(peerJid), max, pageParam)
+      : { messages: [], complete: true };
   }
   async searchDmMessages(peerJid: string, query: string, max = 20) {
     await this.connect();
