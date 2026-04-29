@@ -11,9 +11,19 @@ let _flakehubCacheContributor = schema.#Contributor & {
 	id: "flakehubCache"
 	tasks: [
 		{
+			id:       "namespace.nixCache"
+			label:    "Set up Namespace Nix cache"
+			priority: -1
+			provider: github: {
+				uses: "namespacelabs/nscloud-cache-action@v1"
+				with: cache: "nix"
+			}
+		},
+		{
 			id:       "nix.install"
 			label:    "Install Determinate Nix"
 			priority: 0
+			dependsOn: ["namespace.nixCache"]
 			provider: github: {
 				uses: "DeterminateSystems/determinate-nix-action@92ffb5400c3776307a27a1727d7e2ac3dcd9f844"
 				with: "extra-conf": "accept-flake-config = true"
@@ -28,7 +38,7 @@ let _flakehubCacheContributor = schema.#Contributor & {
 				uses: "DeterminateSystems/flakehub-cache-action@e134de896b2302c1584a7b54ff35432708607d44"
 				with: {
 					"flakehub-flake-name": "waddle-social/waddle"
-					"use-gha-cache":       "no-preference"
+					"use-gha-cache":       "disabled"
 				}
 			}
 		},
@@ -101,6 +111,15 @@ schema.#Project & {
 		},
 	]
 
+	ci: provider: github: {
+		runner: "namespace-profile-linux-x86"
+		runners: arch: {
+			"linux-x64":    "namespace-profile-linux-x86"
+			"darwin-arm64": "namespace-profile-darwin-arm64"
+			amd64:          "namespace-profile-linux-x86"
+		}
+	}
+
 	ci: pipelines: {
 		default: {
 			mode: "expanded"
@@ -115,13 +134,12 @@ schema.#Project & {
 					"id-token": "write"
 				}
 				runners: arch: {
-					amd64: "ubuntu-latest"
+					amd64: "namespace-profile-linux-x86"
 				}
 			}
 			tasks: [
-				_t.fmt,
-				_t.clippy,
-				_t.test,
+				_t.nixFlakeCheck,
+				_t.nixBuildServer,
 				_t.publishContainerImage,
 			]
 		}
@@ -142,6 +160,7 @@ schema.#Project & {
 			tasks: [_t.flakehubPublished]
 		}
 		pullRequest: {
+			mode: "expanded"
 			when: {
 				pullRequest: true
 			}
@@ -149,9 +168,10 @@ schema.#Project & {
 				contents:   "read"
 				"id-token": "write"
 			}
-			tasks: [_t.checkCiDrift, _t.fmt, _t.clippy, _t.test, _t.buildCi]
+			tasks: [_t.nixFlakeCheck, _t.nixBuildServer]
 		}
 		xmppCompliance: {
+			mode: "expanded"
 			when: {
 				branch: ["main"]
 				defaultBranch: true
@@ -159,12 +179,13 @@ schema.#Project & {
 			}
 			provider: github: permissions: "id-token": "write"
 			tasks: [
-				_t.xmppUnitTests,
-				_t.xmppServerTests,
-				_t.xmppXepIntegration,
+				_t.nixXmppUnitTests,
+				_t.nixXmppServerTests,
+				_t.nixXmppXepIntegration,
 			]
 		}
 		xmppCompliancePullRequest: {
+			mode: "expanded"
 			when: {
 				pullRequest: true
 			}
@@ -173,10 +194,10 @@ schema.#Project & {
 				"id-token": "write"
 			}
 			tasks: [
-				_t.xmppUnitTests,
-				_t.xmppCueE2e,
-				_t.xmppServerTests,
-				_t.xmppXepIntegration,
+				_t.nixXmppUnitTests,
+				_t.nixXmppCueE2e,
+				_t.nixXmppServerTests,
+				_t.nixXmppXepIntegration,
 			]
 		}
 		githubEnricher: {
@@ -211,6 +232,47 @@ schema.#Project & {
 				"scripts/check-ci-drift.sh",
 				"scripts/pin-generated-github-actions.sh",
 			]
+		}
+
+		nixFlakeCheck: schema.#Task & {
+			command: "nix"
+			args: ["flake", "check", "..", "-L", "--accept-flake-config"]
+			inputs: list.Concat([_nixInputs, [
+				"**/env.cue",
+				"scripts/check-ci-drift.sh",
+				"scripts/pin-generated-github-actions.sh",
+			]])
+		}
+
+		nixBuildServer: schema.#Task & {
+			command: "nix"
+			args: ["build", "../#waddle-server", "-L", "--accept-flake-config"]
+			inputs: _nixInputs
+			dependsOn: [tasks.nixFlakeCheck]
+		}
+
+		nixXmppUnitTests: schema.#Task & {
+			command: "nix"
+			args: ["build", "../#checks.x86_64-linux.waddle-server-xmpp-unit-tests", "-L", "--accept-flake-config"]
+			inputs: _nixInputs
+		}
+
+		nixXmppServerTests: schema.#Task & {
+			command: "nix"
+			args: ["build", "../#checks.x86_64-linux.waddle-server-xmpp-server-tests", "-L", "--accept-flake-config"]
+			inputs: _nixInputs
+		}
+
+		nixXmppCueE2e: schema.#Task & {
+			command: "nix"
+			args: ["build", "../#checks.x86_64-linux.waddle-server-xmpp-cue-e2e", "-L", "--accept-flake-config"]
+			inputs: _nixInputs
+		}
+
+		nixXmppXepIntegration: schema.#Task & {
+			command: "nix"
+			args: ["build", "../#checks.x86_64-linux.waddle-server-xmpp-xep-integration", "-L", "--accept-flake-config"]
+			inputs: _nixInputs
 		}
 
 		fmt: xRust.#Fmt & {
@@ -326,7 +388,7 @@ schema.#Project & {
 				"""#]
 			inputs: list.Concat([_nixInputs, ["charts/**"]])
 			outputs: ["target/digests/**"]
-			dependsOn: [tasks.fmt, tasks.clippy, tasks.test]
+			dependsOn: [tasks.nixFlakeCheck, tasks.nixBuildServer]
 		}
 
 		flakehubPublished: schema.#Task & {
