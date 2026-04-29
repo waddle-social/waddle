@@ -53,20 +53,15 @@ impl MessageHandler for RouteHandler {
             //
             // The XEP-0045 §7.4 occupancy check (non-occupant may not
             // send to a room) is intentionally not enforced here.
-            // `ctx.muc_occupancy` is currently a no-op snapshot —
-            // no handler populates it until PR17 introduces the room
-            // handler chain that owns occupancy state, so a local
-            // `is_occupant=false` halt would always reject legitimate
-            // groupchat sends. The legacy fan-out helper invoked via
-            // `OutboundEvent::DispatchToRoom`
-            // (`deliver_groupchat_via_room_actor`) currently logs
-            // `BuildGroupchatBroadcast` errors and drops; it does NOT
-            // synthesize a typed `<error type='modify'>
-            // <not-acceptable/></error>` reply for non-occupants.
-            // PR17's `OccupancyValidationHandler` (Q7 option C) will
-            // close that XEP-0045 conformance gap by emitting the
-            // typed reply directly. Tracked alongside #229's
-            // pre-existing follow-ups.
+            // `ctx.muc_occupancy` is the user-side snapshot and may
+            // not include the room (the room actor is the
+            // authoritative source). The interpreter-side
+            // `OutboundEvent::DispatchToRoom` arm queries the per-room
+            // actor for a frozen `RoomChainSnapshot` and runs the
+            // room handler chain (#229 PR17 + PR18, option C);
+            // `OccupancyValidationHandler` halts non-occupant senders
+            // there with a typed XEP-0045 §7.4 `<not-acceptable/>`
+            // reply.
             (Locality::Sender, MessageType::Groupchat)
             | (Locality::Both, MessageType::Groupchat) => {
                 let Some(room) = message.to.as_ref().map(|j| j.to_bare()) else {
