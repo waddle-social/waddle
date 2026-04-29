@@ -31,6 +31,7 @@ pub mod id_gen;
 pub mod machine;
 pub mod message_context;
 pub mod phase;
+pub mod room;
 pub mod session_state;
 pub mod traits;
 
