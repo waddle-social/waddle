@@ -1401,13 +1401,10 @@ async fn dispatch_to_room(
     //    (the chain stamps it AFTER validation), so derive that view
     //    here for the same-sender comparison rather than relying on
     //    `prototype.from` (alice's real full JID).
-    let sender_room_nick_jid = snapshot.sender_nick.as_deref().and_then(|nick| {
-        room_jid
-            .clone()
-            .with_resource_str(nick)
-            .ok()
-            .map(Jid::from)
-    });
+    let sender_room_nick_jid = snapshot
+        .sender_nick
+        .as_deref()
+        .and_then(|nick| room_jid.clone().with_resource_str(nick).ok().map(Jid::from));
     if let Err(stanza_error) = validate_groupchat_rich_targets(
         deps,
         &room_jid,
@@ -1809,12 +1806,13 @@ async fn validate_groupchat_rich_targets(
     deps: &Deps<'_>,
     room: &BareJid,
     message: &Message,
+    sender_room_nick_jid: Option<&Jid>,
     room_actor: &ActorRef<RoomActor>,
     sender_nickname_generation: Option<u64>,
 ) -> Result<(), StanzaError> {
-    let Some(sender) = message.from.as_ref() else {
+    if message.from.is_none() {
         return Ok(());
-    };
+    }
     if has_malformed_rich_payload(message) {
         return Err(bad_request_error(
             "Rich-message payload is missing required identifier.",
@@ -1827,6 +1825,28 @@ async fn validate_groupchat_rich_targets(
         // storage we treat the validation as a no-op.
         return Ok(());
     };
+    // The archive stores `from` in the XEP-0045 §7.2.13 `room/nick`
+    // form (the chain stamps it AFTER validation), so the
+    // same-sender check compares against the sender's room/nick view
+    // — not against `prototype.from` (alice's real full JID, set by
+    // the user-side state machine before `DispatchToRoom` was
+    // emitted). When the snapshot has no nick for the sender (sender
+    // not currently joined under any nickname), any rich-target
+    // operation is forbidden because we cannot satisfy the
+    // continuity check.
+    let Some(sender_archive_view) = sender_room_nick_jid else {
+        if extract_correction_from_message(message).is_some()
+            || matches!(
+                extract_retraction_from_message(message),
+                Some(RetractionKind::Request(_))
+            )
+        {
+            return Err(forbidden_error(
+                "Sender is not joined to the room; rich-target operations require occupancy.",
+            ));
+        }
+        return Ok(());
+    };
 
     if let Some(correction) = extract_correction_from_message(message) {
         let original = match mam_storage
@@ -1837,13 +1857,13 @@ async fn validate_groupchat_rich_targets(
             Ok(None) => return Err(item_not_found_error("Correction target not found.")),
             Err(_) => return Err(internal_server_error_for_lookup()),
         };
-        if !sender_strings_match_for_groupchat(sender, &original.from) {
+        if !sender_strings_match_for_groupchat(sender_archive_view, &original.from) {
             return Err(forbidden_error(
                 "Only the original sender may correct a message.",
             ));
         }
         verify_groupchat_occupancy_generation(
-            sender,
+            sender_archive_view,
             &original,
             room_actor,
             sender_nickname_generation,
@@ -1860,7 +1880,7 @@ async fn validate_groupchat_rich_targets(
                 Ok(None) => return Err(item_not_found_error("Retraction target not found.")),
                 Err(_) => return Err(internal_server_error_for_lookup()),
             };
-        if !sender_strings_match_for_groupchat(sender, &original.from) {
+        if !sender_strings_match_for_groupchat(sender_archive_view, &original.from) {
             return Err(forbidden_error(
                 "Only the original sender may retract a message.",
             ));
@@ -2002,16 +2022,69 @@ fn build_message_error_reply(
 /// Persist a groupchat message to the room MAM archive. Mirrors the
 /// legacy `archive_groupchat_message` projection so MAM replay
 /// reproduces the canonicalized stanza byte-for-byte.
+///
+/// The archive primary key is the XEP-0359 stanza-id the chain's
+/// `MucCanonicalizeHandler` already stamped on the message — we
+/// reuse it rather than generating a second uuid so the storage
+/// row's primary key matches the wire `<stanza-id by='room'/>` value
+/// (legacy invariant the rich-target lookups rely on).
 async fn archive_groupchat_message(
     mam_storage: &Arc<dyn MamStorage>,
     room: &BareJid,
     message: &Message,
     sender_nickname_generation: u64,
 ) -> Option<String> {
-    let archive_id = uuid::Uuid::now_v7().to_string();
-    let mut archive_clone = message.clone();
-    add_mam_stanza_id(&mut archive_clone, archive_id.as_str(), &room.to_string());
+    let archive_clone = message.clone();
+    let archive_id = match extract_room_stanza_id(&archive_clone, room) {
+        Some(id) => id,
+        None => {
+            warn!(
+                room = %room,
+                "ArchiveGroupchat: message has no `<stanza-id by='room'/>` to use \
+                 as archive primary key; falling back to fresh uuid (chain bug)"
+            );
+            let fresh = uuid::Uuid::now_v7().to_string();
+            // Stamp the fallback so the row + wire stanza-id agree.
+            let mut tmp = archive_clone.clone();
+            add_mam_stanza_id(&mut tmp, fresh.as_str(), &room.to_string());
+            return finish_archive_groupchat_message(
+                mam_storage,
+                room,
+                tmp,
+                fresh,
+                sender_nickname_generation,
+            )
+            .await;
+        }
+    };
 
+    finish_archive_groupchat_message(
+        mam_storage,
+        room,
+        archive_clone,
+        archive_id,
+        sender_nickname_generation,
+    )
+    .await
+}
+
+fn extract_room_stanza_id(message: &Message, room: &BareJid) -> Option<String> {
+    let room_str = room.to_string();
+    message
+        .payloads
+        .iter()
+        .filter(|payload| payload.name() == "stanza-id" && payload.ns() == STANZA_ID_NS)
+        .find(|payload| payload.attr("by").is_some_and(|by| by == room_str.as_str()))
+        .and_then(|payload| payload.attr("id").map(ToOwned::to_owned))
+}
+
+async fn finish_archive_groupchat_message(
+    mam_storage: &Arc<dyn MamStorage>,
+    room: &BareJid,
+    archive_clone: Message,
+    archive_id: String,
+    sender_nickname_generation: u64,
+) -> Option<String> {
     let body = prototype_body(&archive_clone)
         .map(|value| value.trim().to_string())
         .unwrap_or_default();

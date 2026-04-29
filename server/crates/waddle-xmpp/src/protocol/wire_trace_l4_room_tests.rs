@@ -252,3 +252,118 @@ fn xep_0359_room_chain_strips_client_spoofed_room_stanza_id() {
     assert_eq!(room_stamps.len(), 1, "spoofed stamp stripped");
     assert_eq!(room_stamps[0].attr("id"), Some("genuine-room-id"));
 }
+
+#[test]
+fn xep_0424_groupchat_retraction_emits_archive_and_tombstone_events() {
+    // #229 PR18 regression: a XEP-0424 retraction sent to a room must
+    // emit BOTH an `ArchiveGroupchat` (for the retraction event row)
+    // and an `ApplyGroupchatRetractionTombstone` (for the original
+    // row). The interpreter persists both; the chain handler
+    // (`MucArchiveHandler`) is responsible for emitting them.
+    let room = bare("team@conf.example.com");
+    let alice = full("alice@example.com/web");
+    let occupants = vec![occ(alice.clone(), "alice-nick")];
+    let id_gen = FixedIdGenerator("retraction-archive".to_string());
+    let ctx = RoomContext {
+        room: &room,
+        sender_full: &alice,
+        occupants: &occupants,
+        managed_room_forbidden: false,
+        id_gen: &id_gen,
+        occupant_id_secret: TEST_OCCUPANT_ID_SECRET,
+    };
+
+    let mut msg = Message::new(Some(Jid::from(room.clone())));
+    msg.from = Some(Jid::from(alice.clone()));
+    msg.type_ = MessageType::Groupchat;
+    msg.id = Some("retract-1".to_string());
+    msg.bodies
+        .insert(String::new(), Body("/me retracted".to_string()));
+    msg.payloads.push(
+        xmpp_parsers::minidom::Element::builder("retract", "urn:xmpp:message-retract:1")
+            .attr("id", "target-stanza-id")
+            .build(),
+    );
+    let outcome = default_room_dispatcher().dispatch(&mut msg, &ctx);
+    assert!(!outcome.halted);
+
+    let has_archive = outcome
+        .events
+        .iter()
+        .any(|e| matches!(e, OutboundEvent::ArchiveGroupchat { .. }));
+    let has_tombstone = outcome.events.iter().any(|e| {
+        matches!(
+            e,
+            OutboundEvent::ApplyGroupchatRetractionTombstone {
+                target_message_id,
+                ..
+            } if target_message_id == "target-stanza-id"
+        )
+    });
+    assert!(
+        has_archive,
+        "retraction message itself must be archived as a timeline row"
+    );
+    assert!(
+        has_tombstone,
+        "retraction request must emit a tombstone event for the target row"
+    );
+}
+
+#[test]
+fn xep_0430_groupchat_message_emits_per_occupant_inbox_projection() {
+    // #229 PR18 regression: the room chain emits one
+    // `ProjectGroupchatInbox` per *unique-bare* occupant, with
+    // `is_recipient=false` for the sender's own row and
+    // `is_recipient=true` for everyone else.
+    let room = bare("team@conf.example.com");
+    let alice = full("alice@example.com/web");
+    let bob = full("bob@example.com/desk");
+    let charlie_a = full("charlie@example.com/a");
+    let charlie_b = full("charlie@example.com/b");
+    let occupants = vec![
+        occ(alice.clone(), "alice"),
+        occ(bob.clone(), "bob"),
+        occ(charlie_a.clone(), "charlie"),
+        occ(charlie_b.clone(), "charlie"),
+    ];
+    let id_gen = FixedIdGenerator("inbox-archive".to_string());
+    let ctx = RoomContext {
+        room: &room,
+        sender_full: &alice,
+        occupants: &occupants,
+        managed_room_forbidden: false,
+        id_gen: &id_gen,
+        occupant_id_secret: TEST_OCCUPANT_ID_SECRET,
+    };
+    let mut msg = groupchat(&room, &alice, "hello inbox");
+    let outcome = default_room_dispatcher().dispatch(&mut msg, &ctx);
+    assert!(!outcome.halted);
+
+    let projections: Vec<(BareJid, bool)> = outcome
+        .events
+        .iter()
+        .filter_map(|e| match e {
+            OutboundEvent::ProjectGroupchatInbox {
+                owner,
+                is_recipient,
+                ..
+            } => Some((owner.clone(), *is_recipient)),
+            _ => None,
+        })
+        .collect();
+    // Three unique bare JIDs (charlie's two sessions collapse).
+    assert_eq!(projections.len(), 3);
+    let alice_bare: BareJid = "alice@example.com".parse().unwrap();
+    let bob_bare: BareJid = "bob@example.com".parse().unwrap();
+    let charlie_bare: BareJid = "charlie@example.com".parse().unwrap();
+    let alice_row = projections.iter().find(|(o, _)| o == &alice_bare).unwrap();
+    let bob_row = projections.iter().find(|(o, _)| o == &bob_bare).unwrap();
+    let charlie_row = projections
+        .iter()
+        .find(|(o, _)| o == &charlie_bare)
+        .unwrap();
+    assert!(!alice_row.1, "sender's own row must not bump unread");
+    assert!(bob_row.1, "non-sender occupants get unread bumped");
+    assert!(charlie_row.1, "non-sender occupants get unread bumped");
+}
