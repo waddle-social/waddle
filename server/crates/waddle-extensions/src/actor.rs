@@ -4,12 +4,12 @@ use anyhow::Result;
 use tracing::warn;
 
 use crate::runtime::LoadedExtension;
-use crate::types::{DetectedLink, EmbedElement, ExtensionInfo};
+use crate::types::{DisplayText, ExtensionEffect, ExtensionEvent, ExtensionManifest};
 
-/// An extension loaded into wasmtime and ready to handle enrichment requests.
+/// An extension loaded into wasmtime and ready to handle typed framework events.
 #[derive(Debug)]
 pub struct WasmExtensionActor {
-    info: ExtensionInfo,
+    manifest: ExtensionManifest,
     extension: Arc<LoadedExtension>,
 }
 
@@ -18,31 +18,34 @@ impl WasmExtensionActor {
     ///
     /// `config` is the JSON config payload to forward to the guest's `init` function.
     pub async fn initialize(extension: LoadedExtension, config: &str) -> Result<Self> {
-        let info = extension.call_init(config).await?;
+        let manifest = extension.call_init(config).await?;
         Ok(Self {
-            info,
+            manifest,
             extension: Arc::new(extension),
         })
     }
 
-    pub fn info(&self) -> ExtensionInfo {
-        self.info.clone()
+    pub fn manifest(&self) -> ExtensionManifest {
+        self.manifest.clone()
     }
 
-    pub async fn enrich_message(
-        &self,
-        body: String,
-        links: Vec<DetectedLink>,
-    ) -> Vec<EmbedElement> {
-        match self.extension.call_enrich_message(body, links).await {
-            Ok(embeds) => embeds,
+    pub async fn handle_event(&self, event: ExtensionEvent) -> Vec<ExtensionEffect> {
+        match self.extension.call_handle_event(event).await {
+            Ok(response) => response
+                .effects
+                .into_iter()
+                .filter(|effect| effect.validate_for_manifest(&self.manifest))
+                .collect(),
             Err(error) => {
+                let message = format!("Extension {} failed: {error}", self.manifest.id);
                 warn!(
-                    extension = %self.info.name,
+                    extension = %self.manifest.id,
                     %error,
-                    "extension enrich_message failed; continuing fail-open"
+                    "extension handle-event failed; continuing fail-open"
                 );
-                Vec::new()
+                vec![ExtensionEffect::HostWarning(
+                    DisplayText::new(message).expect("host warning is non-empty"),
+                )]
             }
         }
     }

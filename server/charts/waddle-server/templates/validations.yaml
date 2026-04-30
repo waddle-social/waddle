@@ -8,6 +8,63 @@
 {{- fail "replicaCount > 1 with persistence.accessModes containing ReadWriteOnce is usually unschedulable. Use ReadWriteMany/ReadOnlyMany, disable persistence, or set persistence.allowUnsafeRwoScale=true if your storage backend supports it." -}}
 {{- end -}}
 
+{{- $sha256DigestPattern := "^sha256:[a-f0-9]{64}$" -}}
+{{- $placeholderSha256Digest := "sha256:0000000000000000000000000000000000000000000000000000000000000000" -}}
+
+{{- with .Values.image.digest -}}
+{{- if not (regexMatch $sha256DigestPattern (toString .)) -}}
+{{- fail "image.digest must use sha256:<64 lowercase hex>" -}}
+{{- end -}}
+{{- if eq (toString .) $placeholderSha256Digest -}}
+{{- fail "image.digest must not be the all-zero placeholder digest" -}}
+{{- end -}}
+{{- end -}}
+
+{{- if .Values.extensions.enabled -}}
+{{- $modules := default (list) .Values.extensions.modules -}}
+{{- if eq (len $modules) 0 -}}
+{{- fail "extensions.enabled requires at least one extensions.modules entry" -}}
+{{- end -}}
+{{- $seenNames := list -}}
+{{- range $index, $module := $modules -}}
+{{- $name := required (printf "extensions.modules[%d].name is required" $index) $module.name -}}
+{{- if has $name $seenNames -}}
+{{- fail (printf "extensions.modules contains duplicate module name %q" $name) -}}
+{{- end -}}
+{{- $seenNames = append $seenNames $name -}}
+{{- $localPath := default "" $module.localPath -}}
+{{- if not $localPath -}}
+{{- $registry := toString (required (printf "extensions.modules[%d].registry is required" $index) $module.registry) -}}
+{{- if contains "@" $registry -}}
+{{- fail (printf "extensions.modules[%d].registry must not include a digest; set digest separately" $index) -}}
+{{- end -}}
+{{- if regexMatch ":[^/]+$" $registry -}}
+{{- fail (printf "extensions.modules[%d].registry must not include a mutable tag; set digest separately" $index) -}}
+{{- end -}}
+{{- $digest := required (printf "extensions.modules[%d].digest is required unless localPath is set" $index) $module.digest -}}
+{{- if not (regexMatch $sha256DigestPattern (toString $digest)) -}}
+{{- fail (printf "extensions.modules[%d].digest must use sha256:<64 lowercase hex>" $index) -}}
+{{- end -}}
+{{- if eq (toString $digest) $placeholderSha256Digest -}}
+{{- fail (printf "extensions.modules[%d].digest must not be the all-zero placeholder digest" $index) -}}
+{{- end -}}
+{{- end -}}
+{{- $namespace := toString (required (printf "extensions.modules[%d].namespace is required" $index) $module.namespace) -}}
+{{- if or (hasPrefix "urn:xmpp:" $namespace) (hasPrefix "jabber:" $namespace) (hasPrefix "http://jabber.org/" $namespace) -}}
+{{- fail (printf "extensions.modules[%d].namespace %q is an official XMPP namespace; Waddle-specific extensions must not use it" $index $namespace) -}}
+{{- end -}}
+{{- $configSecretFiles := coalesce $module.configSecretFiles $module.config_secret_files (dict) -}}
+{{- range $key, $path := $configSecretFiles -}}
+{{- if not $key -}}
+{{- fail (printf "extensions.modules[%d].configSecretFiles contains an empty key" $index) -}}
+{{- end -}}
+{{- if not (hasPrefix "/" (toString $path)) -}}
+{{- fail (printf "extensions.modules[%d].configSecretFiles[%s] must be an absolute file path" $index $key) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
 {{- if .Values.spicedb.enabled -}}
 {{- if not .Values.spicedb.endpoint -}}
 {{- fail "spicedb.endpoint is required when spicedb.enabled is true" -}}

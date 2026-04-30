@@ -41,7 +41,7 @@ import NewDmDialog from "@/components/modals/NewDmDialog.vue";
 import MemberManagement from "@/components/modals/MemberManagement.vue";
 import ConfirmDialog from "@/components/ui/ConfirmDialog.vue";
 import type { MemberSummary } from "@/lib/chat-types";
-import type { MarkupSpan, MessageReference, TimelineMessage } from "@/lib/chat-ui";
+import type { ExtensionAnnotationAction, MarkupSpan, MessageReference, TimelineMessage } from "@/lib/chat-ui";
 import { avatarLookupCandidates, mentionAutocompleteCandidates, mentionMatchesUsername, mergeMentionMembers } from "@/lib/mentions";
 import {
   moveReactionSelection,
@@ -819,6 +819,10 @@ function markActiveDisplayed(messageId: string) {
   activeTarget.value.markDisplayed(messageId);
 }
 
+async function invokeActiveExtensionAction(action: ExtensionAnnotationAction) {
+  await activeTarget.value.invokeExtensionAction(action);
+}
+
 function searchActiveMessages(query: string) {
   void activeTarget.value.searchMessages(query);
 }
@@ -1544,6 +1548,7 @@ onUnmounted(() => {
               @open-details="ui.showMobileDetails.value = true"
               @open-dm="handleOpenDm"
               @open-thread="openThread"
+              :invoke-extension-action="invokeActiveExtensionAction"
               @refresh-update="refreshAppUpdate"
             />
           </div>
@@ -1611,6 +1616,7 @@ onUnmounted(() => {
               @edit-message="editActiveMessage"
               @retract-message="retractActiveMessage"
               @react-message="reactActiveMessage"
+              :invoke-extension-action="invokeActiveExtensionAction"
               @displayed="markActiveDisplayed"
               @load-older="loadOlderThreadMessages"
             />
@@ -1648,6 +1654,7 @@ onUnmounted(() => {
               @edit-message="editActiveMessage"
               @retract-message="retractActiveMessage"
               @react-message="reactActiveMessage"
+              :invoke-extension-action="invokeActiveExtensionAction"
               @displayed="markActiveDisplayed"
               @select-gif="sendGif"
               @typing="notifyActiveComposing"

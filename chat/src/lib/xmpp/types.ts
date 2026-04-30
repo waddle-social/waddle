@@ -1,5 +1,5 @@
 import type { WaddleChannelType } from "@/lib/channel-types";
-import type { GitHubEmbed } from "@/lib/chat-ui";
+import type { ExtensionAnnotation } from "@/lib/chat-ui";
 import type { WaddleEncryptedFile } from "./extensions/encrypted-file";
 
 /** Shared types for the XMPP client layer. */
@@ -93,8 +93,8 @@ export interface LiveRoomMessage {
   references?: import("@/lib/chat-ui").MessageReference[];
   /** XEP-0446/0447 — zero or more attachments. */
   sharedFiles?: SharedFileInfo[];
-  /** Waddle GitHub enrichment embeds. */
-  githubEmbeds?: GitHubEmbed[];
+  /** Waddle unified extension framework annotations. */
+  extensionAnnotations?: ExtensionAnnotation[];
   /** XEP-0449 */
   isSticker?: boolean;
   /** XEP-0513 */
@@ -114,6 +114,7 @@ export interface LiveRoomMessage {
   reactionTargetId?: string;
   _reactionTarget?: string;
   _reactionEmojis?: string[];
+  _reactionSenderId?: string;
 }
 
 /** A direct message received/sent via type:"chat" stanzas */
@@ -136,7 +137,7 @@ export interface LiveDmMessage {
   /** XEP-0372 */
   references?: import("@/lib/chat-ui").MessageReference[];
   sharedFiles?: SharedFileInfo[];
-  githubEmbeds?: GitHubEmbed[];
+  extensionAnnotations?: ExtensionAnnotation[];
   isSticker?: boolean;
   /** XEP-0461 */
   replyTo?: ReplyPreview;
@@ -184,6 +185,7 @@ export interface DisplayedEvent {
 export interface ReactionEvent {
   roomJid: string;
   nick: string;
+  authorRealJid?: string;
   messageId: string;
   emojis: string[];
 }

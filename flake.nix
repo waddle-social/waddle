@@ -60,6 +60,7 @@
               ./server/Cargo.toml
               ./server/Cargo.lock
               ./server/crates
+              ./server/extensions
               ./server/wit
             ];
           };
@@ -342,6 +343,8 @@
               pkgs.nodejs_22
               pkgs.go
               pkgs.cue
+              pkgs.kubectl
+              pkgs.kubernetes-helm
               pkgs.just
               pkgs.jujutsu
               pkgs.cargo-chef

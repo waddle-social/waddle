@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, watch, onBeforeUnmount } from "vue";
-import { Send, Image, Paperclip, FileText, Music4, X } from "lucide-vue-next";
+import { Send, Image, Paperclip, FileText, Music4, Puzzle, X } from "lucide-vue-next";
 import type { JSONContent } from "@tiptap/core";
 import GifPicker from "@/components/chat/GifPicker.vue";
 import ChatEditor from "@/components/chat/ChatEditor.vue";
@@ -52,6 +52,7 @@ const emit = defineEmits<{
   typing: [];
   selectGif: [url: string];
   cancelReply: [];
+  openExtensions: [];
 }>();
 
 const replyAuthorName = computed(() => {
@@ -640,6 +641,16 @@ watch(
         @click="openFilePicker"
       >
         <Paperclip class="w-4 h-4" aria-hidden="true" />
+      </button>
+      <button
+        type="button"
+        class="chat-composer-input-action h-9 w-9 shrink-0 flex items-center justify-center transition-all duration-200 text-muted-foreground hover:bg-background/70 hover:text-primary disabled:opacity-40 [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11"
+        title="Extensions"
+        aria-label="Extensions"
+        :disabled="disabled"
+        @click="emit('openExtensions')"
+      >
+        <Puzzle class="w-4 h-4" aria-hidden="true" />
       </button>
       <ChatEditor
         :ref="setEditorRef"

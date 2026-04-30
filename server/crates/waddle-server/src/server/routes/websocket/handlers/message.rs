@@ -1,5 +1,7 @@
 use tracing::warn;
 use waddle_xmpp::{
+    parser::stanza_to_string,
+    protocol::handlers::errors::bad_request_reply,
     protocol::{frame::InboundFrame, InboundEvent, XmppStateMachine},
     Stanza,
 };
@@ -43,7 +45,7 @@ pub async fn handle_message(
     state_machine: Option<&mut XmppStateMachine>,
     authenticated_session: Option<&Session>,
 ) -> Vec<String> {
-    if phase.bound_jid().is_none() {
+    let Some(bound_jid) = phase.bound_jid().cloned() else {
         warn!("Message received without authenticated session");
         return vec![];
     };
@@ -55,10 +57,36 @@ pub async fn handle_message(
         return vec![];
     };
 
+    if incoming.type_ != xmpp_parsers::message::MessageType::Groupchat
+        && incoming.type_ != xmpp_parsers::message::MessageType::Error
+        && waddle_extensions::message_has_framework_envelope(&incoming)
+    {
+        let mut stamped = incoming.clone();
+        stamped.from = Some(jid::Jid::from(bound_jid));
+        remove_framework_envelopes(&mut stamped);
+        let reply = bad_request_reply(
+            &stamped,
+            "Client-authored Waddle extension envelopes are not allowed.",
+        );
+        return match stanza_to_string(reply) {
+            Ok(frame) => vec![frame],
+            Err(error) => {
+                warn!(error = ?error, "failed to serialize framework-envelope rejection");
+                vec![]
+            }
+        };
+    }
+
     let events = sm.handle(InboundEvent::FrameReceived(InboundFrame::Stanza(Box::new(
         Stanza::Message(incoming),
     ))));
     let deps = build_interpret_deps(state, authenticated_session);
     let (frames, _close) = drive_interpret_loop(events, sm, &deps).await;
     frames
+}
+
+fn remove_framework_envelopes(message: &mut xmpp_parsers::message::Message) {
+    message
+        .payloads
+        .retain(|payload| !payload.ns().starts_with("urn:waddle:"));
 }

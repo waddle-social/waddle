@@ -2,11 +2,14 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Error as AnyhowError, Result};
+use anyhow::{bail, Result};
+use chrono::{DateTime, Utc};
 use futures::future::join_all;
+use hmac::{Hmac, Mac};
 use regex::Regex;
 use serde_json::Value;
-use std::collections::HashSet;
+use sha2::Sha256;
+use std::collections::{HashMap, HashSet};
 use thiserror::Error;
 use tokio::time::timeout;
 use tracing::{debug, warn};
@@ -16,10 +19,29 @@ use crate::actor::WasmExtensionActor;
 use crate::config::{ExtensionConfig, ExtensionModuleConfig};
 use crate::oci::OciExtensionPuller;
 use crate::runtime::{LoadedExtension, WasmRuntime};
-use crate::types::{message_has_embed_for_namespaces, DetectedLink};
+use crate::types::{
+    is_official_namespace, message_has_framework_envelope, CommandAction, CommandInvocation,
+    CommandNode, CommandSessionId, DetectedLink, DisplayText, ExtensionEffect, ExtensionEnvelope,
+    ExtensionEvent, LaunchContext, LaunchId, LaunchInvocation, LinkTarget, MessageContext,
+    MessageHook, PayloadNamespace, PluginId, StanzaId, WaddleId, FRAMEWORK_NAMESPACE,
+};
 
 const MAX_DETECTED_LINKS: usize = 3;
-const EXTENSION_ENRICH_TIMEOUT: Duration = Duration::from_secs(5);
+const EXTENSION_ENRICH_TIMEOUT: Duration = Duration::from_millis(750);
+
+pub struct LaunchInvocationRequest<'a> {
+    pub plugin_name: &'a str,
+    pub action_id: &'a str,
+    pub launch_id: LaunchId,
+    pub context: LaunchContext,
+    pub requester: WaddleId,
+    pub session_id: Option<CommandSessionId>,
+    pub action: Option<CommandAction>,
+    pub fields: Vec<crate::types::FormFieldValue>,
+    pub form: Option<crate::types::DataForm>,
+    pub expires_at: Option<crate::types::Timestamp>,
+    pub launch_token: &'a str,
+}
 
 #[derive(Debug, Error)]
 enum EffectiveModuleConfigError {
@@ -39,49 +61,50 @@ enum EffectiveModuleConfigError {
 pub struct ExtensionManager {
     actors: Vec<Arc<WasmExtensionActor>>,
     feature_namespaces: Vec<String>,
+    launch_signing_key: Option<Vec<u8>>,
 }
 
 impl ExtensionManager {
     /// Build an `ExtensionManager` from the given configuration.
     ///
-    /// Failures to load an individual extension are logged (fail-open) and do not
-    /// prevent the remaining extensions from loading.
+    /// Configured extension modules fail fast. Message enrichment itself remains
+    /// fail-open so user messages are not lost after startup.
     pub async fn from_config(config: ExtensionConfig) -> Result<Self> {
         if !config.enabled {
             return Ok(Self {
                 actors: Vec::new(),
                 feature_namespaces: Vec::new(),
+                launch_signing_key: None,
             });
         }
+        config.validate().map_err(anyhow::Error::msg)?;
 
         let runtime = WasmRuntime::new()?;
         let puller = OciExtensionPuller::new(&config.cache_dir);
         let mut actors = Vec::new();
         let mut feature_namespaces = Vec::new();
+        let mut plugin_ids = HashSet::new();
+        let mut command_nodes = HashSet::new();
+        let mut payload_namespaces: HashMap<PayloadNamespace, PluginId> = HashMap::new();
 
         for module in &config.modules {
             let config_json = match effective_module_config_json(module) {
                 Ok(config_json) => config_json,
                 Err(error) => {
-                    warn!(
-                        extension = %module.name,
-                        %error,
-                        "failed to prepare extension config; skipping enrichment actor"
-                    );
-                    continue;
+                    return Err(anyhow::Error::new(error).context(format!(
+                        "failed to prepare extension config for {}",
+                        module.name
+                    )));
                 }
             };
 
             let wasm_path = match puller.resolve_wasm_path(module).await {
                 Ok(path) => path,
                 Err(error) => {
-                    warn!(
-                        extension = %module.name,
-                        %error,
-                        error_chain = %format_error_chain(&error),
-                        "failed to resolve extension WASM path; skipping enrichment actor"
-                    );
-                    continue;
+                    return Err(error.context(format!(
+                        "failed to resolve extension WASM path for {}",
+                        module.name
+                    )));
                 }
             };
 
@@ -91,37 +114,59 @@ impl ExtensionManager {
                     if module.local_path.is_none() {
                         remove_invalid_cached_extension(module, &wasm_path);
                     }
-                    warn!(
-                        extension = %module.name,
-                        %error,
-                        error_chain = %format_error_chain(&error),
-                        "failed to compile extension component; skipping enrichment actor"
-                    );
-                    continue;
+                    return Err(error.context(format!(
+                        "failed to compile extension component for {}",
+                        module.name
+                    )));
                 }
             };
 
             let actor = match WasmExtensionActor::initialize(loaded, &config_json).await {
                 Ok(actor) => actor,
                 Err(error) => {
-                    warn!(
-                        extension = %module.name,
-                        %error,
-                        error_chain = %format_error_chain(&error),
-                        "extension init() failed; skipping enrichment actor"
+                    return Err(
+                        error.context(format!("extension init() failed for {}", module.name))
                     );
-                    continue;
                 }
             };
 
-            let info = actor.info();
-            if !info.namespace.is_empty() && !feature_namespaces.contains(&info.namespace) {
-                feature_namespaces.push(info.namespace.clone());
+            let manifest = actor.manifest();
+            validate_manifest_against_module(module, &manifest)?;
+            if !plugin_ids.insert(manifest.id.clone()) {
+                bail!(
+                    "extension plugin id {} is declared by multiple modules",
+                    manifest.id
+                );
             }
-            for feature in &info.features {
-                if !feature_namespaces.contains(&feature.namespace) {
-                    feature_namespaces.push(feature.namespace.clone());
+            for command in &manifest.commands {
+                if command.node == CommandNode::invoke() {
+                    continue;
                 }
+                if !command_nodes.insert(command.node.clone()) {
+                    bail!(
+                        "extension command node {} is declared by multiple modules",
+                        command.node
+                    );
+                }
+            }
+            for rule in &manifest.payloads {
+                match payload_namespaces.get(&rule.root.namespace) {
+                    Some(owner) if owner != &manifest.id => {
+                        bail!(
+                            "extension payload namespace {} is declared by multiple modules",
+                            rule.root.namespace
+                        );
+                    }
+                    Some(_) => {}
+                    None => {
+                        payload_namespaces.insert(rule.root.namespace.clone(), manifest.id.clone());
+                    }
+                }
+                push_feature_namespace(
+                    module,
+                    &mut feature_namespaces,
+                    rule.root.namespace.as_str(),
+                );
             }
 
             actors.push(Arc::new(actor));
@@ -130,7 +175,16 @@ impl ExtensionManager {
         Ok(Self {
             actors,
             feature_namespaces,
+            launch_signing_key: None,
         })
+    }
+
+    pub fn with_launch_signing_key(mut self, key: impl AsRef<[u8]>) -> Self {
+        let key = key.as_ref();
+        if !key.is_empty() {
+            self.launch_signing_key = Some(key.to_vec());
+        }
+        self
     }
 
     pub async fn from_env() -> Result<Self> {
@@ -146,8 +200,137 @@ impl ExtensionManager {
         self.feature_namespaces.clone()
     }
 
+    pub fn command_nodes(&self) -> Vec<(String, String)> {
+        self.actors
+            .iter()
+            .flat_map(|actor| {
+                actor
+                    .manifest()
+                    .commands
+                    .into_iter()
+                    .filter(|command| command.node != CommandNode::invoke())
+                    .map(|command| (command.node.into_string(), command.name.into_string()))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    pub async fn invoke_command(
+        &self,
+        node: &str,
+        waddle_id: WaddleId,
+        session_id: Option<CommandSessionId>,
+        action: Option<CommandAction>,
+        fields: Vec<crate::types::FormFieldValue>,
+        form: Option<crate::types::DataForm>,
+    ) -> Vec<ExtensionEffect> {
+        let Ok(command_node) = CommandNode::new(node.to_string()) else {
+            return Vec::new();
+        };
+        let dispatch_node = command_node.clone();
+        let event = ExtensionEvent::Command(CommandInvocation {
+            waddle_id,
+            command_node: dispatch_node,
+            session_id,
+            action,
+            form,
+            fields,
+        });
+        for actor in &self.actors {
+            if actor.manifest().declares_command(&command_node) {
+                return self.sign_effects(actor.handle_event(event).await);
+            }
+        }
+        Vec::new()
+    }
+
+    pub async fn invoke_launch(
+        &self,
+        request: LaunchInvocationRequest<'_>,
+    ) -> Vec<ExtensionEffect> {
+        let LaunchInvocationRequest {
+            plugin_name,
+            action_id,
+            launch_id,
+            context,
+            requester,
+            session_id,
+            action,
+            fields,
+            form,
+            expires_at,
+            launch_token,
+        } = request;
+        let Ok(plugin_id) = PluginId::new(plugin_name.to_string()) else {
+            return Vec::new();
+        };
+        let Ok(action_id) = crate::types::ActionId::new(action_id.to_string()) else {
+            return Vec::new();
+        };
+        if !self.verify_launch_token(
+            &plugin_id,
+            &action_id,
+            &launch_id,
+            &context,
+            expires_at.as_ref(),
+            launch_token,
+        ) {
+            warn!(
+                plugin = %plugin_name,
+                launch_id = %launch_id,
+                "rejected unsigned or tampered extension launch invocation"
+            );
+            return Vec::new();
+        }
+        let event = ExtensionEvent::Launch(LaunchInvocation {
+            context,
+            requester,
+            launch_id,
+            session_id,
+            action,
+            form,
+            fields,
+        });
+        for actor in &self.actors {
+            if actor.manifest().id.as_str() == plugin_name {
+                return self.sign_effects(actor.handle_event(event).await);
+            }
+        }
+        Vec::new()
+    }
+
+    pub fn validates_launch_invocation(
+        &self,
+        plugin_name: &str,
+        action_id: &str,
+        launch_id: &LaunchId,
+        context: &LaunchContext,
+        expires_at: Option<&crate::types::Timestamp>,
+        launch_token: &str,
+    ) -> bool {
+        let Ok(plugin_id) = PluginId::new(plugin_name.to_string()) else {
+            return false;
+        };
+        let Ok(action_id) = crate::types::ActionId::new(action_id.to_string()) else {
+            return false;
+        };
+        self.verify_launch_token(
+            &plugin_id,
+            &action_id,
+            launch_id,
+            context,
+            expires_at,
+            launch_token,
+        )
+    }
+
     pub async fn enrich_message(&self, msg: &mut Message) -> usize {
-        if message_has_embed_for_namespaces(msg, &self.feature_namespaces) {
+        self.enrich_message_for_waddle(msg, WaddleId::new("local").expect("static waddle id"))
+            .await
+    }
+
+    pub async fn enrich_message_for_waddle(&self, msg: &mut Message, waddle_id: WaddleId) -> usize {
+        if message_has_framework_envelope(msg) {
             return 0;
         }
 
@@ -159,47 +342,267 @@ impl ExtensionManager {
         else {
             return 0;
         };
+        let Ok(body_text) = DisplayText::new(body.clone()) else {
+            return 0;
+        };
 
         let links = detect_links(&body);
-        if links.is_empty() {
-            return 0;
-        }
 
         let mut count = 0usize;
         if !self.actors.is_empty() {
-            let enrich_futures = self.actors.iter().map(|actor| {
-                let actor_name = actor.info().name;
+            let hook_links: Vec<LinkTarget> = links
+                .into_iter()
+                .filter_map(|link| LinkTarget::try_from(link).ok())
+                .collect();
+            let source_stanza_id = msg.id.clone().and_then(|id| StanzaId::new(id).ok());
+            let event = ExtensionEvent::MessageHook(MessageHook {
+                context: MessageContext {
+                    waddle_id,
+                    stanza_id: source_stanza_id.clone(),
+                },
+                body: body_text,
+                links: hook_links,
+            });
+            let enrich_futures = self.actors.iter().filter_map(|actor| {
+                let manifest = actor.manifest();
+                if !manifest.declares_capability(crate::types::ExtensionCapability::MessageEnrich)
+                    && !manifest
+                        .declares_capability(crate::types::ExtensionCapability::MessageObserve)
+                {
+                    return None;
+                }
+                let actor_name = actor.manifest().id.to_string();
                 let actor = Arc::clone(actor);
-                let body = body.clone();
-                let links = links.clone();
-                async move {
-                    match timeout(EXTENSION_ENRICH_TIMEOUT, actor.enrich_message(body, links)).await
-                    {
-                        Ok(embeds) => embeds,
+                let event = event.clone();
+                Some(async move {
+                    match timeout(EXTENSION_ENRICH_TIMEOUT, actor.handle_event(event)).await {
+                        Ok(effects) => (actor_name, effects),
                         Err(_) => {
                             warn!(
                                 extension = %actor_name,
                                 timeout_secs = EXTENSION_ENRICH_TIMEOUT.as_secs(),
                                 "extension enrichment timed out; continuing fail-open"
                             );
-                            Vec::new()
+                            (actor_name, Vec::new())
                         }
                     }
-                }
+                })
             });
             let results = join_all(enrich_futures).await;
 
-            for embeds in results {
-                for embed in embeds {
-                    msg.payloads.push(embed.to_minidom());
-                    count += 1;
+            let mut enrichments = Vec::new();
+            for (_actor_name, effects) in results {
+                for effect in self.sign_effects(effects) {
+                    match effect {
+                        ExtensionEffect::EnrichMessage(envelope) => {
+                            enrichments.extend(envelope.enrichments);
+                        }
+                        ExtensionEffect::PublishPubSub(_)
+                        | ExtensionEffect::ReferenceArtifact(_)
+                        | ExtensionEffect::HostWarning(_)
+                        | ExtensionEffect::Noop => {}
+                    }
                 }
+            }
+            count = enrichments.len();
+            if !enrichments.is_empty() {
+                msg.payloads
+                    .push(ExtensionEnvelope::new(enrichments).to_minidom());
             }
             if count > 0 {
                 debug!(embeds_added = count, "message enriched by extensions");
             }
         }
         count
+    }
+
+    fn sign_effects(&self, mut effects: Vec<ExtensionEffect>) -> Vec<ExtensionEffect> {
+        for effect in &mut effects {
+            match effect {
+                ExtensionEffect::EnrichMessage(envelope) => {
+                    for enrichment in &mut envelope.enrichments {
+                        for launch in &mut enrichment.launches {
+                            self.sign_launch(launch);
+                        }
+                    }
+                }
+                ExtensionEffect::PublishPubSub(_)
+                | ExtensionEffect::ReferenceArtifact(_)
+                | ExtensionEffect::HostWarning(_)
+                | ExtensionEffect::Noop => {}
+            }
+        }
+        effects
+    }
+
+    fn sign_launch(&self, launch: &mut crate::types::LaunchDescriptor) {
+        let Some(key) = self.launch_signing_key.as_deref() else {
+            return;
+        };
+        let expires_at = launch
+            .expires_at
+            .get_or_insert_with(|| default_launch_expiry().expect("generated expiry is valid"));
+        let token = sign_launch_token(
+            key,
+            &launch.plugin,
+            &launch.action,
+            &launch.id,
+            &launch.context,
+            Some(expires_at),
+        );
+        launch.token = crate::types::LaunchToken::new(token).ok();
+    }
+
+    fn verify_launch_token(
+        &self,
+        plugin: &PluginId,
+        action: &crate::types::ActionId,
+        launch_id: &LaunchId,
+        context: &LaunchContext,
+        expires_at: Option<&crate::types::Timestamp>,
+        token: &str,
+    ) -> bool {
+        let Some(key) = self.launch_signing_key.as_deref() else {
+            return false;
+        };
+        if let Some(expires_at) = expires_at {
+            let Ok(expires_at) = DateTime::parse_from_rfc3339(expires_at.as_str()) else {
+                return false;
+            };
+            if expires_at.with_timezone(&Utc) <= Utc::now() {
+                return false;
+            }
+        }
+        let expected = sign_launch_token(key, plugin, action, launch_id, context, expires_at);
+        constant_time_eq(expected.as_bytes(), token.as_bytes())
+    }
+}
+
+fn sign_launch_token(
+    key: &[u8],
+    plugin: &PluginId,
+    action: &crate::types::ActionId,
+    launch_id: &LaunchId,
+    context: &LaunchContext,
+    expires_at: Option<&crate::types::Timestamp>,
+) -> String {
+    type HmacSha256 = Hmac<Sha256>;
+    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key length");
+    mac.update(plugin.as_str().as_bytes());
+    mac.update(b"\0");
+    mac.update(action.as_str().as_bytes());
+    mac.update(b"\0");
+    mac.update(launch_id.as_str().as_bytes());
+    mac.update(b"\0");
+    mac.update(context.waddle_id.as_str().as_bytes());
+    mac.update(b"\0");
+    if let Some(stanza_id) = &context.source_stanza_id {
+        mac.update(stanza_id.as_str().as_bytes());
+    }
+    mac.update(b"\0");
+    if let Some(expires_at) = expires_at {
+        mac.update(expires_at.as_str().as_bytes());
+    }
+    hex::encode(mac.finalize().into_bytes())
+}
+
+fn default_launch_expiry() -> Option<crate::types::Timestamp> {
+    crate::types::Timestamp::new((Utc::now() + chrono::Duration::hours(1)).to_rfc3339()).ok()
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    left.iter()
+        .zip(right)
+        .fold(0u8, |diff, (left, right)| diff | (left ^ right))
+        == 0
+}
+
+fn validate_manifest_against_module(
+    module: &ExtensionModuleConfig,
+    manifest: &crate::types::ExtensionManifest,
+) -> Result<()> {
+    if manifest.id.as_str() != module.name {
+        bail!(
+            "extension module {} returned manifest id {}; manifest id must match configured module name",
+            module.name,
+            manifest.id
+        );
+    }
+
+    let expected_namespace = PayloadNamespace::new(module.namespace.clone()).map_err(|error| {
+        anyhow::anyhow!("extension {} namespace is invalid: {error}", module.name)
+    })?;
+    for rule in &manifest.payloads {
+        if rule.root.namespace != expected_namespace {
+            bail!(
+                "extension {} declared payload namespace {}; expected configured namespace {}",
+                module.name,
+                rule.root.namespace,
+                expected_namespace
+            );
+        }
+    }
+    for node in &manifest.pubsub_nodes {
+        if node.as_str() != expected_namespace.as_str()
+            && !node
+                .as_str()
+                .strip_prefix(expected_namespace.as_str())
+                .is_some_and(|suffix| suffix.starts_with(':'))
+        {
+            bail!(
+                "extension {} declared PubSub node {} outside configured namespace {}",
+                module.name,
+                node,
+                expected_namespace
+            );
+        }
+    }
+    for command in &manifest.commands {
+        if command.node == CommandNode::invoke() {
+            continue;
+        }
+        let expected_command = format!("{FRAMEWORK_NAMESPACE}:{}", manifest.id.as_str());
+        if command.node.as_str() != expected_command {
+            bail!(
+                "extension {} declared command node {}; expected {}",
+                module.name,
+                command.node,
+                expected_command
+            );
+        }
+    }
+    Ok(())
+}
+
+fn push_feature_namespace(
+    module: &ExtensionModuleConfig,
+    feature_namespaces: &mut Vec<String>,
+    namespace: &str,
+) {
+    if namespace.trim().is_empty() {
+        return;
+    }
+    if is_official_namespace(namespace) {
+        warn!(
+            extension = %module.name,
+            namespace,
+            "extension attempted to advertise an official XMPP namespace; ignoring"
+        );
+        return;
+    }
+    if !namespace.starts_with("urn:") && !namespace.starts_with("https://") {
+        warn!(
+            extension = %module.name,
+            namespace,
+            "extension attempted to advertise a non-absolute namespace; ignoring"
+        );
+        return;
+    }
+    if !feature_namespaces.iter().any(|value| value == namespace) {
+        feature_namespaces.push(namespace.to_string());
     }
 }
 
@@ -316,14 +719,6 @@ fn detect_links(body: &str) -> Vec<DetectedLink> {
     links
 }
 
-fn format_error_chain(error: &AnyhowError) -> String {
-    error
-        .chain()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join(": ")
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -378,10 +773,14 @@ mod tests {
         );
 
         let module = ExtensionModuleConfig {
-            name: "github-enricher".to_string(),
-            registry: "ghcr.io/waddle-social/waddle/extensions/github-enricher".to_string(),
-            tag: "latest".to_string(),
-            namespace: "urn:waddle:github:0".to_string(),
+            name: "example-extension".to_string(),
+            registry: "ghcr.io/waddle-social/waddle/extensions/example-extension".to_string(),
+            digest: Some(
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_string(),
+            ),
+            tag: None,
+            namespace: "urn:example:extension:1".to_string(),
             config: json!({
                 "github_token": "from-config",
                 "log_level": "debug"
@@ -416,10 +815,14 @@ mod tests {
         );
 
         let module = ExtensionModuleConfig {
-            name: "github-enricher".to_string(),
-            registry: "ghcr.io/waddle-social/waddle/extensions/github-enricher".to_string(),
-            tag: "latest".to_string(),
-            namespace: "urn:waddle:github:0".to_string(),
+            name: "example-extension".to_string(),
+            registry: "ghcr.io/waddle-social/waddle/extensions/example-extension".to_string(),
+            digest: Some(
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_string(),
+            ),
+            tag: None,
+            namespace: "urn:example:extension:1".to_string(),
             config: json!(["not", "an", "object"]),
             config_secret_files,
             local_path: None,
@@ -430,7 +833,7 @@ mod tests {
         assert!(matches!(
             error,
             EffectiveModuleConfigError::NonObjectBaseConfig { extension }
-            if extension == "github-enricher"
+            if extension == "example-extension"
         ));
     }
 
@@ -446,10 +849,14 @@ mod tests {
         );
 
         let module = ExtensionModuleConfig {
-            name: "github-enricher".to_string(),
-            registry: "ghcr.io/waddle-social/waddle/extensions/github-enricher".to_string(),
-            tag: "latest".to_string(),
-            namespace: "urn:waddle:github:0".to_string(),
+            name: "example-extension".to_string(),
+            registry: "ghcr.io/waddle-social/waddle/extensions/example-extension".to_string(),
+            digest: Some(
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_string(),
+            ),
+            tag: None,
+            namespace: "urn:example:extension:1".to_string(),
             config: json!({}),
             config_secret_files,
             local_path: None,
@@ -461,40 +868,83 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn from_config_does_not_advertise_namespace_or_fallback_when_actor_cannot_load() {
+    async fn from_config_fails_fast_when_configured_actor_cannot_load() {
         let config = ExtensionConfig {
             enabled: true,
             cache_dir: "/var/lib/waddle/extensions".to_string(),
             modules: vec![ExtensionModuleConfig {
-                name: "github-enricher".to_string(),
-                registry: "ghcr.io/waddle-social/waddle/extensions/github-enricher".to_string(),
-                tag: "latest".to_string(),
-                namespace: "urn:waddle:github:0".to_string(),
+                name: "example-extension".to_string(),
+                registry: "ghcr.io/waddle-social/waddle/extensions/example-extension".to_string(),
+                digest: None,
+                tag: Some("latest".to_string()),
+                namespace: "urn:example:extension:1".to_string(),
                 config: json!({}),
                 config_secret_files: Default::default(),
-                local_path: Some("missing-github-enricher-test.wasm".to_string()),
+                local_path: Some("missing-example-extension-test.wasm".to_string()),
             }],
         };
 
-        let manager = ExtensionManager::from_config(config)
+        let error = ExtensionManager::from_config(config)
             .await
-            .expect("manager should stay fail-open");
-        assert!(manager.feature_namespaces().is_empty());
+            .expect_err("configured extension load should fail fast");
+        assert!(error
+            .to_string()
+            .contains("failed to resolve extension WASM path"));
+    }
 
-        let mut msg = Message::new(None);
-        msg.bodies.insert(
-            String::new(),
-            Body("https://github.com/waddle-social/waddle".to_string()),
+    #[tokio::test]
+    async fn disabled_config_does_not_require_cache_dir() {
+        let manager = ExtensionManager::from_config(ExtensionConfig {
+            enabled: false,
+            cache_dir: String::new(),
+            modules: Vec::new(),
+        })
+        .await
+        .expect("disabled extension manager should not validate unused cache dir");
+
+        assert!(manager.feature_namespaces().is_empty());
+    }
+
+    #[test]
+    fn advertised_feature_namespaces_reject_official_namespaces() {
+        let module = ExtensionModuleConfig {
+            name: "bad-advertiser".to_string(),
+            registry: "ghcr.io/waddle-social/waddle/extensions/bad-advertiser".to_string(),
+            digest: Some(
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_string(),
+            ),
+            tag: None,
+            namespace: "urn:waddle:bad:1".to_string(),
+            config: json!({}),
+            config_secret_files: Default::default(),
+            local_path: None,
+        };
+        let mut namespaces = Vec::new();
+
+        super::push_feature_namespace(&module, &mut namespaces, "urn:xmpp:mam:2");
+        super::push_feature_namespace(&module, &mut namespaces, "jabber:iq:roster");
+        super::push_feature_namespace(
+            &module,
+            &mut namespaces,
+            "http://jabber.org/protocol/disco#info",
         );
-        assert_eq!(manager.enrich_message(&mut msg).await, 0);
-        assert!(msg.payloads.is_empty());
+        super::push_feature_namespace(&module, &mut namespaces, "https://example.com/not-waddle");
+        super::push_feature_namespace(&module, &mut namespaces, "urn:example:extension:1");
+        super::push_feature_namespace(&module, &mut namespaces, "urn:example:extension:1");
+
+        assert_eq!(
+            namespaces,
+            vec!["https://example.com/not-waddle", "urn:example:extension:1"]
+        );
     }
 
     #[tokio::test]
     async fn enrich_message_does_not_fallback_without_loaded_actor() {
         let manager = ExtensionManager {
             actors: Vec::new(),
-            feature_namespaces: vec!["urn:waddle:github:0".to_string()],
+            feature_namespaces: vec!["urn:example:extension:1".to_string()],
+            launch_signing_key: None,
         };
 
         let mut msg = Message::new(None);

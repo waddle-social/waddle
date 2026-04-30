@@ -106,15 +106,65 @@ describe("groupchat reply + thread parsing", () => {
     ]);
   });
 
-  test("keeps body-less GitHub enrichment messages in the timeline", () => {
+  test("keeps body-less extension enrichments with typed launch metadata in the timeline", () => {
     const h = makeHandlers();
     dispatchGroupchat(
       makeMsg({
-        id: "msg-github-only",
-        githubRepos: {
-          url: "https://github.com/waddle-social/waddle",
-          owner: "waddle-social",
-          name: "waddle",
+        id: "msg-extension-only",
+        waddleExtensions: {
+          enrichments: [{
+            id: "enrich-quiz",
+            plugin: "pub-quiz",
+            capability: "launch",
+            payloadNamespace: "urn:waddle:pub-quiz:1",
+            surface: "game",
+            source: {
+              stanzaId: "archive-id-quiz-1",
+              by: "general@muc.waddle.social",
+              bodyStart: "0",
+              bodyEnd: "0",
+            },
+            payload: {
+              elements: [{
+                name: "quiz-question",
+                attributes: {
+                  xmlns: "urn:waddle:pub-quiz:1",
+                  "game-id": "game-1",
+                  "question-id": "q1",
+                },
+                children: [
+                  { name: "prompt", attributes: {}, children: ["Which XEP defines Ad-Hoc Commands?"] },
+                  { name: "choice", attributes: { id: "b" }, children: ["XEP-0050"] },
+                ],
+              }],
+            },
+            launches: [{
+              id: "answer-b",
+              plugin: "pub-quiz",
+              action: "answer",
+              commandNode: "urn:waddle:extension:1:invoke",
+              token: "launch-token-answer-b",
+              label: "Answer B",
+              expiresAt: "2026-04-27T10:05:00Z",
+              context: {
+                waddleId: "waddle-123",
+                room: "general@muc.waddle.social",
+                stanzaId: "archive-id-quiz-1",
+              },
+              payload: {
+                elements: [{
+                  name: "answer-request",
+                  attributes: {
+                    xmlns: "urn:waddle:pub-quiz:1",
+                    "game-id": "game-1",
+                    "question-id": "q1",
+                    "choice-id": "b",
+                  },
+                  children: [],
+                }],
+              },
+            }],
+          }],
         },
       }),
       h,
@@ -122,84 +172,83 @@ describe("groupchat reply + thread parsing", () => {
 
     expect(h.messages).toHaveLength(1);
     expect(h.messages[0].body).toBe("");
-    expect(h.messages[0].type).toBe("message");
-    expect(h.messages[0].githubEmbeds).toEqual([
-      {
-        kind: "repo",
-        url: "https://github.com/waddle-social/waddle",
-        owner: "waddle-social",
-        name: "waddle",
+    expect(h.messages[0].extensionAnnotations?.[0]).toMatchObject({
+      extensionId: "pub-quiz",
+      annotationId: "enrich-quiz",
+      surfaceKind: "game",
+      title: "Which XEP defines Ad-Hoc Commands?",
+      payloadNamespace: "urn:waddle:pub-quiz:1",
+      source: {
+        stanzaId: "archive-id-quiz-1",
+        by: "general@muc.waddle.social",
+        bodyStart: 0,
+        bodyEnd: 0,
       },
-    ]);
-  });
-
-  test("ignores malformed body-less GitHub enrichment payloads", () => {
-    const h = makeHandlers();
-    dispatchGroupchat(
-      makeMsg({
-        id: "msg-github-malformed",
-        githubRepos: {
-          url: "https://github.com/waddle-social/waddle",
+    });
+    const action = h.messages[0].extensionAnnotations?.[0]?.actions[0];
+    expect(action).toMatchObject({
+      label: "Answer B",
+      route: "answer-b",
+      launch: {
+        id: "answer-b",
+        pluginId: "pub-quiz",
+        actionId: "answer",
+        commandNode: "urn:waddle:extension:1:invoke",
+        launchToken: "launch-token-answer-b",
+        expiresAt: "2026-04-27T10:05:00Z",
+        context: {
+          waddleId: "waddle-123",
+          roomJid: "general@muc.waddle.social",
+          stanzaId: "archive-id-quiz-1",
         },
-      }),
-      h,
-    );
-
-    expect(h.messages).toHaveLength(0);
+      },
+    });
+    expect(action?.launch?.payloads[0]).toMatchObject({
+      namespace: "urn:waddle:pub-quiz:1",
+      name: "answer-request",
+      attributes: {
+        "choice-id": "b",
+      },
+    });
   });
 
-  test("ignores GitHub enrichment payloads with non-GitHub URLs", () => {
-    const h = makeHandlers();
-    dispatchGroupchat(
-      makeMsg({
-        id: "msg-github-spoof",
-        githubRepos: {
-          url: "https://evil.example/waddle-social/waddle",
-          owner: "waddle-social",
-          name: "waddle",
-        },
-      }),
-      h,
-    );
+  test("defaults sample payload namespaces to the generic message-card surface", () => {
+    const samples = [
+      ["urn:waddle:links-task-board:1", "link"],
+      ["urn:waddle:pub-quiz:1", "quiz-question"],
+      ["urn:waddle:ai-chatbot:1", "assistant-answer"],
+      ["urn:waddle:ai-assistant-canvas:1", "canvas"],
+      ["urn:waddle:decision-polls:1", "poll"],
+    ] as const;
 
-    expect(h.messages).toHaveLength(0);
-  });
+    for (const [namespace, element] of samples) {
+      const h = makeHandlers();
+      dispatchGroupchat(
+        makeMsg({
+          id: `msg-${element}`,
+          waddleExtensions: {
+            enrichments: [{
+              id: `enrich-${element}`,
+              plugin: element,
+              capability: "message.enrich",
+              payloadNamespace: namespace,
+              payload: {
+                elements: [{
+                  name: element,
+                  attributes: { xmlns: namespace, title: `${element} title` },
+                  children: [],
+                }],
+              },
+            }],
+          },
+        }),
+        h,
+      );
 
-  test("extracts GitHub issue and pull request enrichment payloads", () => {
-    const h = makeHandlers();
-    dispatchGroupchat(
-      makeMsg({
-        id: "msg-github",
-        body: "links",
-        githubIssues: [{
-          url: "https://github.com/waddle-social/waddle/issues/42",
-          owner: "waddle-social",
-          name: "waddle",
-        }],
-        githubPullRequests: [{
-          url: "https://github.com/waddle-social/waddle/pull/48",
-          owner: "waddle-social",
-          name: "waddle",
-        }],
-      }),
-      h,
-    );
-
-    expect(h.messages).toHaveLength(1);
-    expect(h.messages[0].githubEmbeds).toEqual([
-      {
-        kind: "issue",
-        url: "https://github.com/waddle-social/waddle/issues/42",
-        owner: "waddle-social",
-        name: "waddle",
-      },
-      {
-        kind: "pr",
-        url: "https://github.com/waddle-social/waddle/pull/48",
-        owner: "waddle-social",
-        name: "waddle",
-      },
-    ]);
+      expect(h.messages).toHaveLength(1);
+      expect(h.messages[0].extensionAnnotations?.[0]?.surfaceKind).toBe("message-card");
+      expect(h.messages[0].extensionAnnotations?.[0]?.payloads?.[0]?.namespace).toBe(namespace);
+    }
   });
 
   test("extracts thread id and parent thread id", () => {

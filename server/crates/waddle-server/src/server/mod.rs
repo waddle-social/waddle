@@ -34,7 +34,13 @@ use tower_http::{
 };
 use tracing::{info, info_span, warn, Level, Span};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
-use waddle_extensions::{ExtensionConfig, ExtensionManager};
+use waddle_extensions::{
+    CommandAction as ExtensionCommandAction, CommandSessionId, DataForm as ExtensionDataForm,
+    DataFormField as ExtensionDataFormField, DataFormType as ExtensionDataFormType, DataFormValue,
+    ExtensionConfig, ExtensionEffect, ExtensionManager, FormFieldOption,
+    FormFieldType as ExtensionFormFieldType, FormFieldValue, LaunchContext, LaunchId,
+    PubSubPublish, StanzaId, UiActionId, WaddleId, INVOKE_COMMAND_NODE,
+};
 use waddle_xmpp::inbox::storage::InboxStorage;
 use waddle_xmpp::mam::{MamStorage, SqlxMamStorage};
 use waddle_xmpp::pubsub::{NodeConfig, PubSubItem, PubSubStorage};
@@ -926,17 +932,28 @@ async fn create_router(
     let service_domains = XmppServiceDomains::new(&xmpp_domain, &xmpp_config.component_domain);
     let room_registry = kameo::spawn(RoomRegistryActor::new(service_domains.muc.clone()));
 
+    let extension_launch_key = server_config
+        .session_key
+        .clone()
+        .unwrap_or_else(|| format!("development-extension-launch-key:{xmpp_domain}"));
     let extension_manager = Arc::new(
         match ExtensionManager::from_config(server_config.extensions.clone()).await {
-            Ok(mgr) => mgr,
+            Ok(mgr) => mgr.with_launch_signing_key(extension_launch_key.as_bytes()),
             Err(error) => {
-                warn!(error = %error, "Failed to initialize extension manager; continuing fail-open");
+                if server_config.extensions.enabled && !server_config.extensions.modules.is_empty()
+                {
+                    return Err(anyhow::anyhow!(
+                        "failed to initialize configured extensions: {error}"
+                    ));
+                }
+                warn!(error = %error, "Failed to initialize disabled extension manager; continuing without extensions");
                 ExtensionManager::from_config(ExtensionConfig {
                     enabled: false,
                     cache_dir: String::new(),
                     modules: Vec::new(),
                 })
                 .await
+                .map(|mgr| mgr.with_launch_signing_key(extension_launch_key.as_bytes()))
                 .expect("BUG: failed to create disabled ExtensionManager")
             }
         },
@@ -955,6 +972,14 @@ async fn create_router(
 
     // Shared durable PubSub/PEP storage for the WebSocket transport (XEP-0060/0163).
     let pubsub_storage = build_pubsub_storage(xmpp_config.pubsub_database_url.clone()).await?;
+    let extension_pubsub_owner: jid::BareJid = format!("extensions@{xmpp_domain}").parse()?;
+    register_extension_commands(
+        Arc::clone(&extension_manager),
+        Arc::clone(&websocket_command_registry),
+        Arc::clone(&pubsub_storage),
+        extension_pubsub_owner,
+    )
+    .await;
     if let Err(error) =
         bootstrap_fresh_xmpp_topology(&state, Arc::clone(&pubsub_storage), &service_domains).await
     {
@@ -1117,6 +1142,448 @@ async fn create_router(
         .layer(CompressionLayer::new())
         .layer(configure_cors());
     Ok(router)
+}
+
+async fn register_extension_commands(
+    extension_manager: Arc<ExtensionManager>,
+    command_registry: Arc<waddle_xmpp::commands::CommandRegistry>,
+    pubsub_storage: Arc<dyn PubSubStorage>,
+    extension_pubsub_owner: jid::BareJid,
+) {
+    let launch_manager = Arc::clone(&extension_manager);
+    let launch_storage = Arc::clone(&pubsub_storage);
+    let launch_owner = extension_pubsub_owner.clone();
+    command_registry
+        .register(INVOKE_COMMAND_NODE, "Invoke extension action", move |ctx| {
+            let manager = Arc::clone(&launch_manager);
+            let storage = Arc::clone(&launch_storage);
+            let owner = launch_owner.clone();
+            async move {
+                let submitted_form = ctx.command.form.as_ref();
+                let fields = extension_command_fields(submitted_form);
+                let Some(plugin) = extension_field_value(&fields, "plugin")
+                    .or_else(|| extension_field_value(&fields, "waddle#plugin_id"))
+                else {
+                    return extension_warning_result("Extension launch is missing plugin");
+                };
+                let Some(launch) = extension_field_value(&fields, "launch-id")
+                    .or_else(|| extension_field_value(&fields, "waddle#launch_id"))
+                else {
+                    return extension_warning_result("Extension launch is missing launch-id");
+                };
+                let Some(action_id) = extension_field_value(&fields, "action")
+                    .or_else(|| extension_field_value(&fields, "waddle#action_id"))
+                else {
+                    return extension_warning_result("Extension launch is missing action id");
+                };
+                let Some(launch_token) = extension_field_value(&fields, "launch-token")
+                    .or_else(|| extension_field_value(&fields, "waddle#launch_token"))
+                else {
+                    return extension_warning_result("Extension launch is missing launch token");
+                };
+                let waddle_id = extension_field_value(&fields, "waddle-id")
+                    .or_else(|| extension_field_value(&fields, "waddle#waddle_id"))
+                    .unwrap_or_else(|| ctx.from.to_string());
+                let Ok(launch_id) = LaunchId::new(launch) else {
+                    return extension_warning_result("Extension launch id is invalid");
+                };
+                let Ok(waddle_id) = WaddleId::new(waddle_id) else {
+                    return extension_warning_result("Extension launch waddle id is invalid");
+                };
+                let source_stanza_id = extension_field_value(&fields, "source-stanza-id")
+                    .or_else(|| extension_field_value(&fields, "waddle#message_stanza_id"))
+                    .and_then(|value| StanzaId::new(value).ok());
+                let expires_at = extension_field_value(&fields, "expires-at")
+                    .or_else(|| extension_field_value(&fields, "waddle#expires_at"))
+                    .and_then(|value| waddle_extensions::Timestamp::new(value).ok());
+                let context = LaunchContext {
+                    waddle_id,
+                    source_stanza_id,
+                };
+                if !manager.validates_launch_invocation(
+                    &plugin,
+                    &action_id,
+                    &launch_id,
+                    &context,
+                    expires_at.as_ref(),
+                    &launch_token,
+                ) {
+                    return extension_warning_result(
+                        "Extension launch token is missing, expired, or invalid",
+                    );
+                }
+                let effects = manager
+                    .invoke_launch(waddle_extensions::manager::LaunchInvocationRequest {
+                        plugin_name: &plugin,
+                        action_id: &action_id,
+                        launch_id,
+                        context,
+                        requester: WaddleId::new(ctx.from.to_string())
+                            .expect("requester JID string is non-empty"),
+                        session_id: extension_session_id(ctx.command.session_id),
+                        action: ctx.command.action.map(extension_command_action),
+                        fields,
+                        form: submitted_form.and_then(extension_data_form),
+                        expires_at,
+                        launch_token: &launch_token,
+                    })
+                    .await;
+                extension_command_result(effects, Some((storage, owner))).await
+            }
+        })
+        .await;
+
+    for (node, name) in extension_manager.command_nodes() {
+        let manager = Arc::clone(&extension_manager);
+        let storage = Arc::clone(&pubsub_storage);
+        let owner = extension_pubsub_owner.clone();
+        let registered_node = node.clone();
+        command_registry
+            .register(node, name, move |ctx| {
+                let manager = Arc::clone(&manager);
+                let storage = Arc::clone(&storage);
+                let owner = owner.clone();
+                let registered_node = registered_node.clone();
+                async move {
+                    let waddle_id = match WaddleId::new(ctx.from.to_string()) {
+                        Ok(value) => value,
+                        Err(error) => {
+                            return waddle_xmpp::commands::CommandResult::Completed {
+                                form: None,
+                                notes: vec![waddle_xmpp::commands::Note::warn(format!(
+                                    "Invalid requester JID: {error}"
+                                ))],
+                            };
+                        }
+                    };
+                    let submitted_form = ctx.command.form.as_ref();
+                    let fields = extension_command_fields(submitted_form);
+                    let effects = manager
+                        .invoke_command(
+                            &registered_node,
+                            waddle_id,
+                            extension_session_id(ctx.command.session_id),
+                            ctx.command.action.map(extension_command_action),
+                            fields,
+                            submitted_form.and_then(extension_data_form),
+                        )
+                        .await;
+                    extension_command_result(effects, Some((storage, owner))).await
+                }
+            })
+            .await;
+    }
+}
+
+fn extension_command_fields(
+    form: Option<&waddle_xmpp::xep::xep0004::DataForm>,
+) -> Vec<FormFieldValue> {
+    form.map(|form| {
+        form.fields
+            .iter()
+            .filter_map(|field| {
+                let name = UiActionId::new(field.var.clone()?).ok()?;
+                let values = field
+                    .values
+                    .iter()
+                    .map(|value| DataFormValue::new(value.clone()))
+                    .collect();
+                Some(FormFieldValue { name, values })
+            })
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+fn extension_field_value(fields: &[FormFieldValue], name: &str) -> Option<String> {
+    fields
+        .iter()
+        .find(|field| field.name.as_str() == name)
+        .and_then(|field| field.values.first())
+        .map(|value| value.as_str().to_string())
+}
+
+fn extension_data_form(form: &waddle_xmpp::xep::xep0004::DataForm) -> Option<ExtensionDataForm> {
+    Some(ExtensionDataForm {
+        form_type: extension_data_form_type(form.form_type),
+        title: form
+            .title
+            .clone()
+            .and_then(|title| waddle_extensions::DisplayText::new(title).ok()),
+        instructions: form
+            .instructions
+            .iter()
+            .filter_map(|instruction| waddle_extensions::DisplayText::new(instruction.clone()).ok())
+            .collect(),
+        fields: form
+            .fields
+            .iter()
+            .filter_map(extension_data_form_field)
+            .collect(),
+    })
+}
+
+fn extension_data_form_type(
+    form_type: waddle_xmpp::xep::xep0004::FormType,
+) -> ExtensionDataFormType {
+    match form_type {
+        waddle_xmpp::xep::xep0004::FormType::Form => ExtensionDataFormType::Form,
+        waddle_xmpp::xep::xep0004::FormType::Submit => ExtensionDataFormType::Submit,
+        waddle_xmpp::xep::xep0004::FormType::Cancel => ExtensionDataFormType::Cancel,
+        waddle_xmpp::xep::xep0004::FormType::Result => ExtensionDataFormType::Result,
+    }
+}
+
+fn extension_data_form_field(
+    field: &waddle_xmpp::xep::xep0004::Field,
+) -> Option<ExtensionDataFormField> {
+    Some(ExtensionDataFormField {
+        name: UiActionId::new(field.var.clone()?).ok()?,
+        field_type: extension_form_field_type(field.field_type),
+        label: field
+            .label
+            .clone()
+            .and_then(|label| waddle_extensions::DisplayText::new(label).ok()),
+        required: field.required,
+        values: field
+            .values
+            .iter()
+            .map(|value| DataFormValue::new(value.clone()))
+            .collect(),
+        options: field
+            .options
+            .iter()
+            .map(|option| FormFieldOption {
+                label: option
+                    .label
+                    .clone()
+                    .and_then(|label| waddle_extensions::DisplayText::new(label).ok()),
+                value: DataFormValue::new(option.value.clone()),
+            })
+            .collect(),
+    })
+}
+
+fn extension_form_field_type(
+    field_type: waddle_xmpp::xep::xep0004::FieldType,
+) -> ExtensionFormFieldType {
+    match field_type {
+        waddle_xmpp::xep::xep0004::FieldType::Boolean => ExtensionFormFieldType::Boolean,
+        waddle_xmpp::xep::xep0004::FieldType::Fixed => ExtensionFormFieldType::Fixed,
+        waddle_xmpp::xep::xep0004::FieldType::Hidden => ExtensionFormFieldType::Hidden,
+        waddle_xmpp::xep::xep0004::FieldType::JidMulti => ExtensionFormFieldType::JidMulti,
+        waddle_xmpp::xep::xep0004::FieldType::JidSingle => ExtensionFormFieldType::JidSingle,
+        waddle_xmpp::xep::xep0004::FieldType::ListMulti => ExtensionFormFieldType::ListMulti,
+        waddle_xmpp::xep::xep0004::FieldType::ListSingle => ExtensionFormFieldType::ListSingle,
+        waddle_xmpp::xep::xep0004::FieldType::TextMulti => ExtensionFormFieldType::TextMulti,
+        waddle_xmpp::xep::xep0004::FieldType::TextPrivate => ExtensionFormFieldType::TextPrivate,
+        waddle_xmpp::xep::xep0004::FieldType::TextSingle => ExtensionFormFieldType::TextSingle,
+    }
+}
+
+fn extension_session_id(session_id: Option<String>) -> Option<CommandSessionId> {
+    session_id.and_then(|session_id| CommandSessionId::new(session_id).ok())
+}
+
+fn extension_command_action(action: waddle_xmpp::xep::xep0050::Action) -> ExtensionCommandAction {
+    match action {
+        waddle_xmpp::xep::xep0050::Action::Execute => ExtensionCommandAction::Execute,
+        waddle_xmpp::xep::xep0050::Action::Next => ExtensionCommandAction::Next,
+        waddle_xmpp::xep::xep0050::Action::Prev => ExtensionCommandAction::Prev,
+        waddle_xmpp::xep::xep0050::Action::Complete => ExtensionCommandAction::Complete,
+        waddle_xmpp::xep::xep0050::Action::Cancel => ExtensionCommandAction::Cancel,
+    }
+}
+
+fn extension_warning_result(message: &str) -> waddle_xmpp::commands::CommandResult {
+    waddle_xmpp::commands::CommandResult::Completed {
+        form: None,
+        notes: vec![waddle_xmpp::commands::Note::warn(message.to_string())],
+    }
+}
+
+async fn extension_command_result(
+    effects: Vec<ExtensionEffect>,
+    pubsub: Option<(Arc<dyn PubSubStorage>, jid::BareJid)>,
+) -> waddle_xmpp::commands::CommandResult {
+    let mut notes = Vec::new();
+    let mut result_form = None;
+    for effect in effects {
+        match effect {
+            ExtensionEffect::PublishPubSub(publish) => match pubsub.as_ref() {
+                Some((storage, owner)) => {
+                    match publish_extension_pubsub(storage.as_ref(), owner, publish).await {
+                        Ok(item_id) => notes.push(waddle_xmpp::commands::Note::info(format!(
+                            "Published PubSub item {item_id}"
+                        ))),
+                        Err(error) => notes.push(waddle_xmpp::commands::Note::warn(format!(
+                            "PubSub publish failed: {error}"
+                        ))),
+                    }
+                }
+                None => notes.push(waddle_xmpp::commands::Note::warn(
+                    "PubSub publish unavailable".to_string(),
+                )),
+            },
+            ExtensionEffect::ReferenceArtifact(artifact) => {
+                let text = format!("Referenced artifact {}", artifact.uri.as_str());
+                notes.push(waddle_xmpp::commands::Note::info(text));
+            }
+            ExtensionEffect::HostWarning(message) => {
+                notes.push(waddle_xmpp::commands::Note::warn(
+                    message.as_str().to_string(),
+                ));
+            }
+            ExtensionEffect::EnrichMessage(envelope) => {
+                let count = envelope.enrichments.len();
+                if result_form.is_none() {
+                    result_form = Some(extension_enrichment_result_form(&envelope));
+                }
+                notes.push(waddle_xmpp::commands::Note::info(format!(
+                    "Produced {count} message enrichment{}",
+                    if count == 1 { "" } else { "s" }
+                )));
+            }
+            ExtensionEffect::Noop => {}
+        }
+    }
+    if notes.is_empty() {
+        notes.push(waddle_xmpp::commands::Note::warn(
+            "Extension action completed without a visible result".to_string(),
+        ));
+    }
+
+    waddle_xmpp::commands::CommandResult::Completed {
+        form: result_form,
+        notes,
+    }
+}
+
+fn extension_enrichment_result_form(
+    envelope: &waddle_extensions::ExtensionEnvelope,
+) -> waddle_xmpp::xep::xep0004::DataForm {
+    use waddle_xmpp::xep::xep0004::{DataForm, Field, FormType};
+
+    let mut form = DataForm::new(FormType::Result)
+        .with_title("Extension result")
+        .add_field(Field::form_type("urn:waddle:extension:1:result"));
+    let Some(enrichment) = envelope.enrichments.first() else {
+        return form;
+    };
+    form = form
+        .add_field(Field::text_single("extension#id", enrichment.id.as_str()))
+        .add_field(Field::text_single(
+            "extension#plugin",
+            enrichment.plugin.as_str(),
+        ))
+        .add_field(Field::text_single(
+            "extension#title",
+            enrichment
+                .ui
+                .first()
+                .and_then(|view| view.title.as_ref())
+                .map(|title| title.as_str())
+                .unwrap_or_else(|| enrichment.plugin.as_str()),
+        ))
+        .add_field(Field::text_single(
+            "extension#summary",
+            enrichment.payload_namespace.as_str(),
+        ))
+        .add_field(Field::text_single(
+            "launch-count",
+            enrichment.launches.len().to_string(),
+        ));
+    for (index, launch) in enrichment.launches.iter().enumerate() {
+        let prefix = format!("launch#{index}");
+        form = form
+            .add_field(Field::text_single(
+                format!("{prefix}#id"),
+                launch.id.as_str(),
+            ))
+            .add_field(Field::text_single(
+                format!("{prefix}#plugin"),
+                launch.plugin.as_str(),
+            ))
+            .add_field(Field::text_single(
+                format!("{prefix}#action"),
+                launch.action.as_str(),
+            ))
+            .add_field(Field::text_single(
+                format!("{prefix}#command-node"),
+                launch.command_node.as_str(),
+            ))
+            .add_field(Field::text_single(
+                format!("{prefix}#label"),
+                launch.label.as_str(),
+            ))
+            .add_field(Field::text_single(
+                format!("{prefix}#waddle-id"),
+                launch.context.waddle_id.as_str(),
+            ));
+        if let Some(stanza_id) = &launch.context.source_stanza_id {
+            form = form.add_field(Field::text_single(
+                format!("{prefix}#source-stanza-id"),
+                stanza_id.as_str(),
+            ));
+        }
+        if let Some(token) = &launch.token {
+            form = form.add_field(Field::text_single(
+                format!("{prefix}#token"),
+                token.as_str(),
+            ));
+        }
+        if let Some(expires_at) = &launch.expires_at {
+            form = form.add_field(Field::text_single(
+                format!("{prefix}#expires-at"),
+                expires_at.as_str(),
+            ));
+        }
+        for (payload_index, payload) in launch.payloads.iter().enumerate() {
+            let payload_prefix = format!("{prefix}#payload#{payload_index}");
+            form = form
+                .add_field(Field::text_single(
+                    format!("{payload_prefix}#namespace"),
+                    payload.namespace.as_str(),
+                ))
+                .add_field(Field::text_single(
+                    format!("{payload_prefix}#name"),
+                    payload.root.local_name.as_str(),
+                ));
+            for child in &payload.root.children {
+                if let waddle_extensions::XmlNode::Text(text) = child {
+                    form = form.add_field(Field::text_single(
+                        format!("{payload_prefix}#text"),
+                        text.as_str(),
+                    ));
+                }
+            }
+            for attribute in &payload.root.attributes {
+                if attribute.local_name == "xmlns" {
+                    continue;
+                }
+                form = form.add_field(Field::text_single(
+                    format!("{payload_prefix}#attr#{}", attribute.local_name),
+                    attribute.value.as_str(),
+                ));
+            }
+        }
+    }
+    form
+}
+
+async fn publish_extension_pubsub(
+    storage: &dyn PubSubStorage,
+    owner: &jid::BareJid,
+    publish: PubSubPublish,
+) -> Result<String, waddle_xmpp::XmppError> {
+    let item = PubSubItem::new(
+        publish.item_id.map(|item_id| item_id.into_string()),
+        Some(publish.payload.to_minidom()),
+    );
+    let result = storage
+        .publish_item(owner, publish.node.as_str(), &item, Some(owner), true)
+        .await?;
+    Ok(result.item_id)
 }
 
 /// Build the per-request `tracing` span and attach the inbound W3C

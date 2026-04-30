@@ -18,6 +18,7 @@ import { $xmppStatus } from "@/stores/xmpp-status";
 import {
   inferredFileDisposition,
   type DeliveryStatus,
+  type ExtensionAnnotationAction,
   type MarkupSpan,
   type MessageReference,
   type TimelineMessage,
@@ -68,8 +69,8 @@ export function fromLiveMessage(
   if (msg.sharedFiles && msg.sharedFiles.length > 0) {
     tm.sharedFiles = msg.sharedFiles;
   }
-  if (msg.githubEmbeds && msg.githubEmbeds.length > 0) {
-    tm.githubEmbeds = msg.githubEmbeds;
+  if (msg.extensionAnnotations && msg.extensionAnnotations.length > 0) {
+    tm.extensionAnnotations = msg.extensionAnnotations;
   }
   if (msg.isSticker) {
     tm.isSticker = true;
@@ -343,7 +344,7 @@ export function useMessaging(
             mucCorrectionSender(msg),
             msg.markup,
             msg.references,
-            msg.githubEmbeds,
+            msg.extensionAnnotations,
           );
           return;
         }
@@ -381,7 +382,12 @@ export function useMessaging(
       });
       client.setReactionHandler((event) => {
         if (!currentRoomJid.value || event.roomJid !== currentRoomJid.value) return;
-        applyReaction(event.messageId, event.nick, event.emojis);
+        applyReaction(
+          event.messageId,
+          event.nick,
+          event.emojis,
+          event.authorRealJid ?? `${event.roomJid}/${event.nick}`,
+        );
       });
       client.setDisplayedHandler((event) => {
         if (!currentRoomJid.value || event.roomJid !== currentRoomJid.value) return;
@@ -547,28 +553,73 @@ export function useMessaging(
       .catch(() => undefined);
   }
 
-  function applyReaction(messageId: string, nick: string, emojis: string[]) {
+  function applyReaction(messageId: string, nick: string, emojis: string[], senderId = nick) {
     messages.value = messages.value.map((m): TimelineMessage => {
       if (m.reactionTargetId !== messageId) return m;
-      const existing: Record<string, string[]> = m.reactions ? { ...m.reactions } : {};
-      // Remove this nick from all existing emoji lists
-      for (const key of Object.keys(existing)) {
-        existing[key] = (existing[key] ?? []).filter((n) => n !== nick);
-        if (existing[key].length === 0) delete existing[key];
-      }
-      // Add the nick to each new emoji
+      const reactionSenders = reactionSendersForUpdate(m, nick, senderId);
+      removeSenderReactions(reactionSenders, nick, senderId);
       for (const emoji of emojis) {
-        if (!existing[emoji]) existing[emoji] = [];
-        existing[emoji].push(nick);
+        if (!reactionSenders[emoji]) reactionSenders[emoji] = {};
+        reactionSenders[emoji][senderId] = nick;
       }
+      const reactions = reactionsFromSenders(reactionSenders);
       const updated = { ...m };
-      if (Object.keys(existing).length > 0) {
-        updated.reactions = existing;
+      if (Object.keys(reactionSenders).length > 0) {
+        updated.reactionSenders = reactionSenders;
+        updated.reactions = reactions;
       } else {
+        delete updated.reactionSenders;
         delete updated.reactions;
       }
       return updated;
     });
+  }
+
+  function reactionSendersForUpdate(
+    message: TimelineMessage,
+    nick?: string,
+    senderId?: string,
+  ): Record<string, Record<string, string>> {
+    const reactionSenders: Record<string, Record<string, string>> = {};
+    for (const [emoji, senders] of Object.entries(message.reactionSenders ?? {})) {
+      reactionSenders[emoji] = { ...senders };
+    }
+    if (Object.keys(reactionSenders).length > 0) return reactionSenders;
+    for (const [emoji, nicks] of Object.entries(message.reactions ?? {})) {
+      reactionSenders[emoji] = {};
+      for (const existingNick of nicks) {
+        const legacySenderId = existingNick === nick && senderId ? senderId : existingNick;
+        reactionSenders[emoji][legacySenderId] = existingNick;
+      }
+    }
+    return reactionSenders;
+  }
+
+  function removeSenderReactions(
+    reactionSenders: Record<string, Record<string, string>>,
+    nick: string,
+    senderId: string,
+  ) {
+    for (const key of Object.keys(reactionSenders)) {
+      for (const existingSenderId of Object.keys(reactionSenders[key])) {
+        if (
+          existingSenderId === senderId ||
+          existingSenderId === nick ||
+          existingSenderId.endsWith(`/${nick}`)
+        ) {
+          delete reactionSenders[key][existingSenderId];
+        }
+      }
+      if (Object.keys(reactionSenders[key]).length === 0) delete reactionSenders[key];
+    }
+  }
+
+  function reactionsFromSenders(
+    reactionSenders: Record<string, Record<string, string>>,
+  ): Record<string, string[]> {
+    return Object.fromEntries(
+      Object.entries(reactionSenders).map(([emoji, senders]) => [emoji, Object.values(senders)]),
+    );
   }
 
   function applyRetraction(retractsId: string) {
@@ -604,7 +655,7 @@ export function useMessaging(
     correctionSender: { authorJid: string; authorRealJid?: string },
     markup?: MarkupSpan[],
     references?: MessageReference[],
-    githubEmbeds?: LiveRoomMessage["githubEmbeds"],
+    extensionAnnotations?: LiveRoomMessage["extensionAnnotations"],
   ) {
     const idx = messages.value.findIndex((m) =>
       matchMessageId(m, replacesId) && isSameMucCorrectionSender(m, correctionSender)
@@ -623,18 +674,10 @@ export function useMessaging(
       } else {
         delete updated.references;
       }
-      if (githubEmbeds && githubEmbeds.length > 0) {
-        updated.githubEmbeds = githubEmbeds;
-      } else if (m.githubEmbeds?.length) {
-        const newBodyText = newBody.trim();
-        const surviving = m.githubEmbeds.filter((e) => newBodyText.includes(e.url));
-        if (surviving.length > 0) {
-          updated.githubEmbeds = surviving;
-        } else {
-          delete updated.githubEmbeds;
-        }
+      if (extensionAnnotations && extensionAnnotations.length > 0) {
+        updated.extensionAnnotations = extensionAnnotations;
       } else {
-        delete updated.githubEmbeds;
+        delete updated.extensionAnnotations;
       }
       return updated;
     });
@@ -780,7 +823,7 @@ export function useMessaging(
     existing: TimelineMessage[] = [],
   ): TimelineMessage[] {
     const regularMessages: LiveRoomMessage[] = [];
-    const reactionUpdates: { targetId: string; nick: string; emojis: string[] }[] = [];
+    const reactionUpdates: { targetId: string; nick: string; senderId: string; emojis: string[] }[] = [];
     const retractionUpdates: string[] = [];
     const correctionUpdates: {
       targetId: string;
@@ -788,7 +831,7 @@ export function useMessaging(
       body: string;
       markup?: MarkupSpan[];
       references?: MessageReference[];
-      githubEmbeds?: LiveRoomMessage["githubEmbeds"];
+      extensionAnnotations?: LiveRoomMessage["extensionAnnotations"];
     }[] = [];
 
     for (const msg of mamResults) {
@@ -796,6 +839,7 @@ export function useMessaging(
         reactionUpdates.push({
           targetId: msg._reactionTarget,
           nick: msg.nick,
+          senderId: msg._reactionSenderId ?? `${msg.roomJid}/${msg.nick}`,
           emojis: msg._reactionEmojis,
         });
       } else if (msg.retractsId) {
@@ -807,9 +851,14 @@ export function useMessaging(
           body: msg.body,
           markup: msg.markup,
           references: msg.references,
-          githubEmbeds: msg.githubEmbeds,
+          extensionAnnotations: msg.extensionAnnotations,
         });
-      } else if (msg.body || (msg.sharedFiles && msg.sharedFiles.length > 0) || msg.isSticker || (msg.githubEmbeds && msg.githubEmbeds.length > 0)) {
+      } else if (
+        msg.body
+        || (msg.sharedFiles && msg.sharedFiles.length > 0)
+        || msg.isSticker
+        || (msg.extensionAnnotations && msg.extensionAnnotations.length > 0)
+      ) {
         regularMessages.push(msg);
       }
     }
@@ -835,14 +884,10 @@ export function useMessaging(
       else delete target.markup;
       if (update.references && update.references.length > 0) target.references = update.references;
       else delete target.references;
-      if (update.githubEmbeds && update.githubEmbeds.length > 0) {
-        target.githubEmbeds = update.githubEmbeds;
-      } else if (target.githubEmbeds?.length) {
-        const surviving = target.githubEmbeds.filter((e) => update.body.includes(e.url));
-        if (surviving.length > 0) target.githubEmbeds = surviving;
-        else delete target.githubEmbeds;
+      if (update.extensionAnnotations && update.extensionAnnotations.length > 0) {
+        target.extensionAnnotations = update.extensionAnnotations;
       } else {
-        delete target.githubEmbeds;
+        delete target.extensionAnnotations;
       }
     }
 
@@ -856,12 +901,20 @@ export function useMessaging(
     for (const update of reactionUpdates) {
       const target = timeline.find((message) => message.reactionTargetId === update.targetId);
       if (!target) continue;
-      const reactions: Record<string, string[]> = target.reactions ? { ...target.reactions } : {};
+      const reactionSenders = reactionSendersForUpdate(target, update.nick, update.senderId);
+      removeSenderReactions(reactionSenders, update.nick, update.senderId);
       for (const emoji of update.emojis) {
-        if (!reactions[emoji]) reactions[emoji] = [];
-        if (!reactions[emoji].includes(update.nick)) reactions[emoji].push(update.nick);
+        if (!reactionSenders[emoji]) reactionSenders[emoji] = {};
+        reactionSenders[emoji][update.senderId] = update.nick;
       }
-      target.reactions = reactions;
+      const reactions = reactionsFromSenders(reactionSenders);
+      if (Object.keys(reactionSenders).length > 0) {
+        target.reactionSenders = reactionSenders;
+        target.reactions = reactions;
+      } else {
+        delete target.reactionSenders;
+        delete target.reactions;
+      }
     }
 
     return applyForumContext(timeline.sort((a, b) => a.createdAt.localeCompare(b.createdAt)));
@@ -1296,6 +1349,27 @@ export function useMessaging(
     }
   }
 
+  async function invokeExtensionAction(action: ExtensionAnnotationAction) {
+    const client = xmppClient.value;
+    if (!client) {
+      const error = new Error("XMPP session is not ready.");
+      actionError.value = normalizeError(error);
+      throw error;
+    }
+    if (!action.launch) {
+      const error = new Error("This extension action is missing launch metadata.");
+      actionError.value = normalizeError(error);
+      throw error;
+    }
+    clearActionError();
+    try {
+      return await client.invokeExtensionLaunch(action.launch);
+    } catch (e) {
+      actionError.value = normalizeError(e);
+      throw e;
+    }
+  }
+
   async function editMessage(messageId: string, newBody: string, markup?: MarkupSpan[], references?: MessageReference[]) {
     if (!xmppClient.value || !activeChannelId.value || !newBody.trim())
       return;
@@ -1454,6 +1528,7 @@ export function useMessaging(
     editMessage,
     retractMessage,
     moderateMessage,
+    invokeExtensionAction,
     toggleReaction,
     markDisplayed,
     notifyComposing,

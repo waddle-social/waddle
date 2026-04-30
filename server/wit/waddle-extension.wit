@@ -1,4 +1,4 @@
-package waddle:extension@0.1.0;
+package waddle:extension@1.0.0;
 
 interface types {
     record detected-link {
@@ -7,37 +7,397 @@ interface types {
         end-offset: u32,
     }
 
-    record embed-element {
-        element-name: string,
-        namespace: string,
-        attributes: list<tuple<string, string>>,
-        children: list<string>,
+    record action-id {
+        value: string,
     }
 
-    record enrichment-result {
-        embeds: list<embed-element>,
+    record artifact-uri {
+        value: string,
     }
 
-    record feature-advertisement {
-        namespace: string,
+    record command-node {
+        value: string,
     }
 
-    record extension-info {
-        name: string,
-        namespace: string,
-        version: string,
-        features: list<feature-advertisement>,
+    record command-session-id {
+        value: string,
+    }
+
+    record display-text {
+        value: string,
+    }
+
+    record enrichment-id {
+        value: string,
+    }
+
+    record list-id {
+        value: string,
+    }
+
+    record list-item-id {
+        value: string,
+    }
+
+    record launch-id {
+        value: string,
+    }
+
+    record media-type {
+        value: string,
+    }
+
+    record payload-namespace {
+        value: string,
+    }
+
+    record plugin-id {
+        value: string,
+    }
+
+    record plugin-version {
+        value: string,
+    }
+
+    record pubsub-item-id {
+        value: string,
+    }
+
+    record pubsub-node {
+        value: string,
+    }
+
+    record sha256-digest {
+        value: string,
+    }
+
+    record stanza-id {
+        value: string,
+    }
+
+    record timestamp {
+        value: string,
+    }
+
+    record ui-action-id {
+        value: string,
+    }
+
+    record ui-view-id {
+        value: string,
+    }
+
+    record url {
+        value: string,
+    }
+
+    record waddle-id {
+        value: string,
+    }
+
+    record body-range {
+        start: u32,
+        end: u32,
+    }
+
+    record artifact-reference {
+        uri: artifact-uri,
+        sha256: sha256-digest,
+        media-type: option<media-type>,
+    }
+
+    enum extension-capability {
+        message-enrich,
+        message-observe,
+        commands,
+        launch,
+        pubsub-publish,
+        artifact-reference,
+        ui-declarative,
+    }
+
+    record payload-root {
+        namespace: payload-namespace,
+        local-name: string,
+    }
+
+    enum payload-surface {
+        message-enrichment,
+        launch-payload,
+        pubsub-item,
+    }
+
+    record payload-rule {
+        surface: payload-surface,
+        root: payload-root,
+    }
+
+    record extension-manifest {
+        id: plugin-id,
+        name: display-text,
+        version: plugin-version,
+        payloads: list<payload-rule>,
+        capabilities: list<extension-capability>,
+        commands: list<command-descriptor>,
+        pubsub-nodes: list<pubsub-node>,
+        artifact: option<artifact-reference>,
+    }
+
+    record command-descriptor {
+        node: command-node,
+        name: display-text,
+    }
+
+    enum text-style {
+        body,
+        heading,
+        muted,
+        code,
+    }
+
+    record text-block {
+        text: display-text,
+        style: text-style,
+    }
+
+    record image-block {
+        artifact: artifact-reference,
+        alt: display-text,
+    }
+
+    record action-block {
+        launch-id: launch-id,
+        label: display-text,
+    }
+
+    record form-field-option {
+        label: option<display-text>,
+        value: data-form-value,
+    }
+
+    enum form-field-type {
+        boolean,
+        fixed,
+        hidden,
+        jid-multi,
+        jid-single,
+        list-multi,
+        list-single,
+        text-multi,
+        text-private,
+        text-single,
+    }
+
+    record data-form-field {
+        name: ui-action-id,
+        field-type: form-field-type,
+        label: option<display-text>,
+        required: bool,
+        values: list<data-form-value>,
+        options: list<form-field-option>,
+    }
+
+    record data-form-value {
+        value: string,
+    }
+
+    enum data-form-type {
+        form,
+        submit,
+        cancel,
+        result-form,
+    }
+
+    record data-form {
+        form-type: data-form-type,
+        title: option<display-text>,
+        instructions: list<display-text>,
+        fields: list<data-form-field>,
+    }
+
+    variant ui-block {
+        text(text-block),
+        image(image-block),
+        action(action-block),
+        form(data-form),
+        list-block(list-view),
+    }
+
+    record ui-view {
+        id: ui-view-id,
+        title: option<display-text>,
+        blocks: list<ui-block>,
+    }
+
+    record list-item {
+        id: list-item-id,
+        label: display-text,
+        description: option<display-text>,
+        image: option<artifact-reference>,
+        launch-id: option<launch-id>,
+    }
+
+    record list-view {
+        id: list-id,
+        title: option<display-text>,
+        items: list<list-item>,
+    }
+
+    record xml-attribute {
+        namespace: option<payload-namespace>,
+        local-name: string,
+        value: string,
+    }
+
+    record xml-element {
+        namespace: payload-namespace,
+        local-name: string,
+        attributes: list<xml-attribute>,
+    }
+
+    variant xml-token {
+        start-element(xml-element),
+        end-element,
+        text(string),
+    }
+
+    record extension-payload {
+        namespace: payload-namespace,
+        root: payload-root,
+        tokens: list<xml-token>,
+    }
+
+    record launch-context {
+        waddle-id: waddle-id,
+        source-stanza-id: option<stanza-id>,
+    }
+
+    record launch-descriptor {
+        id: launch-id,
+        plugin: plugin-id,
+        action: action-id,
+        command-node: command-node,
+        label: display-text,
+        context: launch-context,
+        payloads: list<extension-payload>,
+        fallback: option<ui-view>,
+        expires-at: option<timestamp>,
+    }
+
+    record message-source {
+        stanza-id: stanza-id,
+        body-range: option<body-range>,
+    }
+
+    record message-enrichment {
+        id: enrichment-id,
+        plugin: plugin-id,
+        capability: extension-capability,
+        payload-namespace: payload-namespace,
+        created-at: timestamp,
+        source: option<message-source>,
+        ui: list<ui-view>,
+        payloads: list<extension-payload>,
+        launches: list<launch-descriptor>,
+    }
+
+    record extension-envelope {
+        version: u32,
+        enrichments: list<message-enrichment>,
+    }
+
+    record message-context {
+        waddle-id: waddle-id,
+        stanza-id: option<stanza-id>,
+    }
+
+    record link-target {
+        url: url,
+        range: body-range,
+    }
+
+    record message-hook {
+        context: message-context,
+        body: display-text,
+        links: list<link-target>,
+    }
+
+    record form-field-value {
+        name: ui-action-id,
+        values: list<data-form-value>,
+    }
+
+    enum command-action {
+        execute,
+        next,
+        prev,
+        complete,
+        cancel,
+    }
+
+    record command-invocation {
+        waddle-id: waddle-id,
+        command-node: command-node,
+        session-id: option<command-session-id>,
+        action: option<command-action>,
+        form: option<data-form>,
+        fields: list<form-field-value>,
+    }
+
+    record launch-invocation {
+        context: launch-context,
+        requester: waddle-id,
+        launch-id: launch-id,
+        session-id: option<command-session-id>,
+        action: option<command-action>,
+        form: option<data-form>,
+        fields: list<form-field-value>,
+    }
+
+    variant extension-event {
+        message-hook(message-hook),
+        command(command-invocation),
+        launch(launch-invocation),
+    }
+
+    record pubsub-publish {
+        node: pubsub-node,
+        item-id: option<pubsub-item-id>,
+        payload: extension-payload,
+    }
+
+    variant extension-effect {
+        enrich-message(extension-envelope),
+        publish-pubsub(pubsub-publish),
+        reference-artifact(artifact-reference),
+        noop,
+    }
+
+    record extension-response {
+        effects: list<extension-effect>,
+    }
+
+    enum extension-error-code {
+        unsupported-event,
+        invalid-request,
+        denied,
+        temporary-failure,
+    }
+
+    record extension-error {
+        code: extension-error-code,
+        message: display-text,
     }
 }
 
-interface enrich {
-    use types.{detected-link, enrichment-result};
-    enrich-message: func(body: string, links: list<detected-link>) -> enrichment-result;
+interface framework {
+    use types.{extension-error, extension-event, extension-response};
+    handle-event: func(event: extension-event) -> result<extension-response, extension-error>;
 }
 
 interface lifecycle {
-    use types.{extension-info};
-    init: func(config: string) -> result<extension-info, string>;
+    use types.{extension-manifest};
+    init: func(config: string) -> result<extension-manifest, string>;
 }
 
 world waddle-extension {
@@ -45,5 +405,5 @@ world waddle-extension {
     import wasi:clocks/monotonic-clock@0.2.0;
 
     export lifecycle;
-    export enrich;
+    export framework;
 }

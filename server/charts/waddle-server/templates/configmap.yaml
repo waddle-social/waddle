@@ -32,6 +32,9 @@ data:
   {{- if .Values.database.xmppInboxUrl }}
   WADDLE_XMPP_INBOX_DATABASE_URL: {{ .Values.database.xmppInboxUrl | quote }}
   {{- end }}
+  {{- if .Values.database.xmppPubsubUrl }}
+  WADDLE_XMPP_PUBSUB_DATABASE_URL: {{ .Values.database.xmppPubsubUrl | quote }}
+  {{- end }}
   {{- if .Values.spicedb.enabled }}
   WADDLE_SPICEDB_ENDPOINT: {{ .Values.spicedb.endpoint | quote }}
   WADDLE_SPICEDB_INSECURE: {{ .Values.spicedb.insecure | toString | quote }}

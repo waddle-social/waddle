@@ -26,13 +26,66 @@ export interface TimelineSharedFile {
   encrypted?: WaddleEncryptedFile;
 }
 
-export type GitHubEmbedKind = "repo" | "issue" | "pr";
+export type ExtensionSurfaceKind =
+  | "message-card"
+  | "board"
+  | "game"
+  | "chat-bot"
+  | "dynamic-canvas"
+  | "utility-panel";
 
-export interface GitHubEmbed {
-  kind: GitHubEmbedKind;
-  url: string;
-  owner: string;
+export interface ExtensionEnvelopeSource {
+  stanzaId: string;
+  by?: string;
+  bodyStart?: number;
+  bodyEnd?: number;
+}
+
+export interface ExtensionPayloadElement {
+  namespace: string;
   name: string;
+  attributes: Record<string, string>;
+  text?: string;
+  children: ExtensionPayloadElement[];
+}
+
+export interface ExtensionLaunchContext {
+  waddleId?: string;
+  roomJid?: string;
+  stanzaId?: string;
+}
+
+export interface ExtensionLaunchDescriptor {
+  id: string;
+  pluginId: string;
+  actionId: string;
+  commandNode: string;
+  launchToken?: string;
+  label: string;
+  context: ExtensionLaunchContext;
+  expiresAt?: string;
+  source?: ExtensionEnvelopeSource;
+  payloads: ExtensionPayloadElement[];
+}
+
+export interface ExtensionAnnotationAction {
+  label: string;
+  route: string;
+  launch?: ExtensionLaunchDescriptor;
+}
+
+export interface ExtensionAnnotation {
+  extensionId: string;
+  annotationId: string;
+  surfaceKind: ExtensionSurfaceKind;
+  title: string;
+  summary?: string;
+  imageUrl?: string;
+  source?: ExtensionEnvelopeSource;
+  payloadNamespace?: string;
+  payloads?: ExtensionPayloadElement[];
+  fields: Record<string, string>;
+  actions: ExtensionAnnotationAction[];
 }
 
 export interface TimelineMessage {
@@ -61,6 +114,8 @@ export interface TimelineMessage {
   isRetracted?: boolean;
   /** Aggregated emoji reactions: emoji -> list of nicks (XEP-0444). */
   reactions?: Record<string, string[]>;
+  /** Archived reaction sender identities: emoji -> sender id -> display nick. */
+  reactionSenders?: Record<string, Record<string, string>>;
   /** Users who have seen this message (XEP-0333). */
   readBy?: string[];
   /** Mentioned JIDs/nicks in this message (XEP-0372). */
@@ -71,8 +126,8 @@ export interface TimelineMessage {
   isSticker?: boolean;
   /** XEP-0446/0447: Shared files (zero or more attachments). */
   sharedFiles?: TimelineSharedFile[];
-  /** Waddle GitHub enrichment embeds. */
-  githubEmbeds?: GitHubEmbed[];
+  /** Waddle unified extension framework annotations. */
+  extensionAnnotations?: ExtensionAnnotation[];
   /** XEP-0513: Broadcast mention (everyone/here). */
   broadcastMention?: "everyone" | "here";
   /** XEP-0394: Message Markup offset-based annotations. */
@@ -283,32 +338,79 @@ export function inferredFileDisposition(
     : "attachment";
 }
 
-export function githubEmbedKindLabel(kind: GitHubEmbedKind): string {
+export function extensionSurfaceLabel(kind: ExtensionSurfaceKind): string {
   switch (kind) {
-    case "issue":
-      return "Issue";
-    case "pr":
-      return "Pull request";
+    case "board":
+      return "Board";
+    case "game":
+      return "Game";
+    case "chat-bot":
+      return "AI bot";
+    case "dynamic-canvas":
+      return "Dynamic canvas";
+    case "utility-panel":
+      return "Utility";
     default:
-      return "Repository";
+      return "Extension";
   }
 }
 
-export function githubEmbedNumber(embed: GitHubEmbed): string | null {
-  const marker = embed.kind === "issue" ? "/issues/" : embed.kind === "pr" ? "/pull/" : "";
-  if (!marker) return null;
-  try {
-    const url = new URL(embed.url);
-    const value = url.pathname.split(marker)[1]?.split("/")[0];
-    return value && /^\d+$/.test(value) ? value : null;
-  } catch {
-    const value = embed.url.split(marker)[1]?.split(/[/?#]/)[0];
-    return value && /^\d+$/.test(value) ? value : null;
-  }
+function humanizeExtensionKey(value: string): string {
+  return value
+    .replace(/^payload#/, "")
+    .replace(/^waddle#/, "waddle ")
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/[-_:#]+/g, " ")
+    .trim()
+    .replace(/\s+/g, " ")
+    .replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
-export function githubEmbedDisplayTitle(embed: GitHubEmbed): string {
-  const repo = `${embed.owner}/${embed.name}`;
-  const number = githubEmbedNumber(embed);
-  return number ? `${repo} #${number}` : repo;
+function payloadText(element: ExtensionPayloadElement): string | null {
+  if (element.text?.trim()) return element.text.trim();
+  for (const child of element.children) {
+    const text = payloadText(child);
+    if (text) return text;
+  }
+  return null;
+}
+
+interface ExtensionCardDetail {
+  label: string;
+  value: string;
+}
+
+export function extensionCardDetails(annotation: ExtensionAnnotation, limit = 6): ExtensionCardDetail[] {
+  const details: ExtensionCardDetail[] = [];
+  const seen = new Set<string>();
+
+  const add = (label: string, value: string | undefined) => {
+    const trimmed = value?.trim();
+    if (!trimmed) return;
+    const key = `${label}:${trimmed}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    details.push({ label, value: trimmed });
+  };
+
+  for (const [key, value] of Object.entries(annotation.fields)) {
+    if (key === "surface" || key === "payloadNamespace") continue;
+    add(humanizeExtensionKey(key), value);
+  }
+
+  const payload = annotation.payloads?.[0];
+  if (payload) {
+    for (const [key, value] of Object.entries(payload.attributes)) {
+      if (key === "xmlns") continue;
+      add(humanizeExtensionKey(key), value);
+      if (details.length >= limit) return details.slice(0, limit);
+    }
+    for (const child of payload.children) {
+      const text = payloadText(child);
+      if (text) add(humanizeExtensionKey(child.name), text);
+      if (details.length >= limit) return details.slice(0, limit);
+    }
+  }
+
+  return details.slice(0, limit);
 }
