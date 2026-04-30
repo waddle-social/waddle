@@ -150,6 +150,21 @@ export function defaultCreateForm(): CreateMucFormData {
   return { intent: "muc", name: "", description: "", muc_type: "text" };
 }
 
+/** Returns the best create form for the current navigation container. */
+export function defaultCreateFormForContext(spaceNode?: string | null): CreateMucFormData | CreateSpaceMucFormData {
+  if (spaceNode) {
+    return {
+      intent: "space-muc",
+      space_node: spaceNode,
+      name: "",
+      description: "",
+      muc_type: "text",
+    };
+  }
+
+  return defaultCreateForm();
+}
+
 // ── Create result typed model ────────────────────────────────────────
 
 /** Returned by createChannel() for a Space-only creation — no room was created. */

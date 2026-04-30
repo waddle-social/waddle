@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { MessageCircle } from "lucide-vue-next";
+import { Layers, MessageCircle } from "lucide-vue-next";
 import type { SpaceSummary } from "@/lib/chat-types";
 import type { WaddleSession } from "@/lib/server-auth";
 import type { ServerVersion } from "@/composables/useVersion";
@@ -21,6 +21,7 @@ defineProps<{
 }>();
 
 const emit = defineEmits<{
+  toggleChannels: [];
   toggleDms: [];
   openSettings: [];
   logout: [];
@@ -60,6 +61,19 @@ const emit = defineEmits<{
 
     <!-- Bottom actions -->
     <div class="chat-rail-actions" :class="horizontal ? 'chat-rail-actions-horizontal' : 'chat-rail-actions-vertical'">
+      <button
+        class="relative w-10 h-10 flex items-center justify-center rounded-lg transition-all duration-200 hover:scale-105"
+        :class="activeSidebarMode === 'channels'
+          ? 'bg-rail-hover text-primary'
+          : 'text-rail-foreground hover:bg-rail-hover hover:text-primary'"
+        title="Spaces"
+        aria-label="Spaces"
+        :aria-pressed="activeSidebarMode === 'channels'"
+        type="button"
+        @click="emit('toggleChannels')"
+      >
+        <Layers class="w-4 h-4" />
+      </button>
       <button
         class="relative w-10 h-10 flex items-center justify-center rounded-lg transition-all duration-200 hover:scale-105"
         :class="activeSidebarMode === 'dms'

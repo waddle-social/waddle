@@ -3,7 +3,7 @@ import type { SpaceSummary, ChannelSummary, MemberSummary } from "@/lib/chat-typ
 import type { WaddleSession } from "@/lib/server-auth";
 import type { BrowserXmppClient } from "@/lib/xmpp-client";
 import type { CommunityFormData, CreateFormData, ChannelEditFormData, CreateChannelResult } from "@/lib/chat-ui";
-import { defaultCreateForm } from "@/lib/chat-ui";
+import { defaultCreateForm, defaultCreateFormForContext } from "@/lib/chat-ui";
 import {
   createMucRoom,
   createSpaceNode,
@@ -37,6 +37,7 @@ export function useWaddles(
   const spacesServiceJid = ref<string | null>(null);
 
   const activeChannelId: Ref<string | null> = ref(null);
+  const selectedSpaceId: Ref<string | null> = ref(null);
 
   const isLoadingStructure = ref(false);
   const isSubmitting = ref(false);
@@ -62,7 +63,7 @@ export function useWaddles(
   const currentChannel = computed(
     () => channels.value.find((c) => c.id === activeChannelId.value) ?? null,
   );
-  const activeSpaceId = computed(() => currentChannel.value?.spaceId ?? null);
+  const activeSpaceId = computed(() => currentChannel.value?.spaceId ?? selectedSpaceId.value);
   const currentSpace = computed(() =>
     activeSpaceId.value
       ? waddles.value.find((w) => w.id === activeSpaceId.value) ?? null
@@ -132,6 +133,7 @@ export function useWaddles(
 
   watch(currentChannel, (c) => {
     if (c) {
+      selectedSpaceId.value = c.spaceId ?? null;
       editChannelForm.value = {
         name: c.name,
         description: c.description ?? "",
@@ -142,6 +144,10 @@ export function useWaddles(
 
   function resetForms() {
     createChannelForm.value = defaultCreateForm();
+  }
+
+  function prepareCreateChannelForContext(spaceId: string | null = currentSpace.value?.id ?? null) {
+    createChannelForm.value = defaultCreateFormForContext(spaceId);
   }
 
   async function loadStructure(preferredChannelId?: string | null, opts?: LoadStructureOptions): Promise<string | null> {
@@ -182,6 +188,7 @@ export function useWaddles(
 
       if (opts?.noChannelSelect) {
         activeChannelId.value = null;
+        selectedSpaceId.value = null;
         resetForms();
         return null;
       }
@@ -195,6 +202,7 @@ export function useWaddles(
 
       activeChannelId.value = nextChannelId;
       const nextChannel = channelList.find((channel) => channel.id === nextChannelId);
+      selectedSpaceId.value = nextChannel ? nextChannel.spaceId ?? null : selectedSpaceId.value;
       if (nextChannelId && xmppClient.value) {
         const memberReqId = ++memberRequestId;
         try {
@@ -257,14 +265,6 @@ export function useWaddles(
     }
   }
 
-  function selectDiscoveredSpace(spaceId: string): string | null {
-    if (!waddles.value.some((space) => space.id === spaceId)) return null;
-    const nextChannelId = channels.value.find((channel) => channel.spaceId === spaceId)?.id ?? null;
-    activeChannelId.value = nextChannelId;
-    members.value = [];
-    return nextChannelId;
-  }
-
   async function updateWaddle() {
     actionError.value = "Space settings are managed by the server configuration.";
   }
@@ -324,6 +324,7 @@ export function useWaddles(
 
         createChannelForm.value = defaultCreateForm();
         await loadStructure(null, { noChannelSelect: true });
+        selectedSpaceId.value = node;
         return {
           intent: "space",
           spaceId: node,
@@ -414,6 +415,7 @@ export function useWaddles(
     members.value = [];
     serverRole.value = null;
     activeChannelId.value = null;
+    selectedSpaceId.value = null;
   }
 
   return {
@@ -441,7 +443,7 @@ export function useWaddles(
     loadSpace,
     loadStructure,
     reloadChannelMembers,
-    selectDiscoveredSpace,
+    prepareCreateChannelForContext,
     updateWaddle,
     deleteWaddle,
     createChannel,

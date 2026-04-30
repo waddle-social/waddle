@@ -5,6 +5,8 @@ export function useUiState() {
   const activePage = ref<"dashboard" | "chat" | "settings">("dashboard");
   const adminTab = ref<AdminTab>("rooms");
   const sidebarMode = ref<"channels" | "dms">("channels");
+  const collapsedSpaceGroupIds = ref<Set<string>>(new Set());
+  const createChannelContextSpaceId = ref<string | null>(null);
   const showMobileNav = ref(false);
   const showMobileDetails = ref(false);
   const showCreateChannel = ref(false);
@@ -29,6 +31,8 @@ export function useUiState() {
     activePage,
     adminTab,
     sidebarMode,
+    collapsedSpaceGroupIds,
+    createChannelContextSpaceId,
     showMobileNav,
     showMobileDetails,
     showCreateChannel,

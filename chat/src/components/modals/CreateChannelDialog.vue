@@ -19,6 +19,7 @@ const props = defineProps<{
   isSubmitting: boolean;
   /** Available spaces for the "MUC in existing Space" intent (node id → display name). */
   spaces?: { node: string; name: string }[];
+  defaultSpaceNode?: string | null;
 }>();
 
 const emit = defineEmits<{
@@ -37,8 +38,8 @@ const INTENTS: { value: CreateIntent; label: string; caption: string; icon: unkn
   },
   {
     value: "muc",
-    label: "Channel",
-    caption: "A standalone real-time channel.",
+    label: "Standalone channel",
+    caption: "A real-time channel outside any Space.",
     icon: Hash,
   },
   {
@@ -64,7 +65,7 @@ function selectIntent(intent: CreateIntent) {
       emit("update:form", { intent: "muc", name: "", description: "", muc_type: "text" } satisfies CreateMucFormData);
       break;
     case "space-muc":
-      emit("update:form", { intent: "space-muc", space_node: "", name: "", description: "", muc_type: "text" } satisfies CreateSpaceMucFormData);
+      emit("update:form", { intent: "space-muc", space_node: props.defaultSpaceNode ?? "", name: "", description: "", muc_type: "text" } satisfies CreateSpaceMucFormData);
       break;
     case "space-with-muc":
       emit("update:form", { intent: "space-with-muc", space_name: "", space_description: "", muc_name: "", muc_description: "", muc_type: "text" } satisfies CreateSpaceWithMucFormData);
@@ -106,7 +107,7 @@ const isSubmitDisabled = computed(() => {
 const dialogTitle = computed(() => {
   switch (props.form.intent) {
     case "space": return "New Space";
-    case "muc": return "New Channel";
+    case "muc": return "New Standalone Channel";
     case "space-muc": return "New Channel in Space";
     case "space-with-muc": return "New Space + Channel";
   }
