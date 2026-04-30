@@ -698,6 +698,7 @@ function showFirstRunSetupIfNeeded() {
   }
 
   setupPromptShown = true;
+  ui.createChannelContextSpaceId.value = null;
   waddles.createChannelForm.value = {
     intent: "space-with-muc",
     space_name: "",
@@ -706,6 +707,12 @@ function showFirstRunSetupIfNeeded() {
     muc_description: "",
     muc_type: "text",
   };
+  ui.showCreateChannel.value = true;
+}
+
+function openCreateChannelDialog(spaceId: string | null = null) {
+  ui.createChannelContextSpaceId.value = spaceId;
+  waddles.prepareCreateChannelForContext(spaceId);
   ui.showCreateChannel.value = true;
 }
 
@@ -1133,6 +1140,7 @@ async function handleCreateChannel() {
   const created = await waddles.createChannel();
   if (!created) return;
   ui.showCreateChannel.value = false;
+  ui.createChannelContextSpaceId.value = null;
   if (created.intent === "space") {
     // Space-only: topology reloaded, no room to load — leave channel unselected.
     return;
@@ -1297,6 +1305,7 @@ onUnmounted(() => {
             :has-unread-dms="dmConversations.hasUnread.value"
             :session="null"
             horizontal
+            @toggle-channels="ui.sidebarMode.value = 'channels'"
             @toggle-dms="ui.sidebarMode.value = 'dms'"
           />
         </div>
@@ -1311,14 +1320,17 @@ onUnmounted(() => {
           :is-loading="waddles.isLoadingStructure.value"
           :member-count="waddles.members.value.length"
           :active-channel-jids="messaging.activeChannels.value"
+          :collapsed-group-ids="ui.collapsedSpaceGroupIds.value"
           :channel-unread-map="computedChannelUnreadMap"
           :thread-entries-fn="(roomJid: string) => channelUnread.threadEntries(roomJid)"
           class="!w-full !border-r-0 !flex-1"
           @select-channel="selectChannel"
           @select-thread="onSelectThread"
-          @create-channel="ui.showCreateChannel.value = true"
+          @create-channel="openCreateChannelDialog()"
+          @create-channel-in-space="openCreateChannelDialog"
           @open-settings="ui.showWaddleSettings.value = true"
           @open-members="ui.showMembers.value = true"
+          @update-collapsed-group-ids="ui.collapsedSpaceGroupIds.value = $event"
         />
         <DmPanel
           v-else
@@ -1395,6 +1407,7 @@ onUnmounted(() => {
           :web-commit-sha="version.webCommitSha.value"
           :server-version="version.serverVersion.value"
           @open-settings="openUserSettings"
+          @toggle-channels="ui.sidebarMode.value = 'channels'"
           @toggle-dms="ui.sidebarMode.value = 'dms'"
           @logout="handleLogout"
           @request-notifications="handleRequestNotifications"
@@ -1415,13 +1428,16 @@ onUnmounted(() => {
           :is-loading="waddles.isLoadingStructure.value"
           :member-count="waddles.members.value.length"
           :active-channel-jids="messaging.activeChannels.value"
+          :collapsed-group-ids="ui.collapsedSpaceGroupIds.value"
           :channel-unread-map="computedChannelUnreadMap"
           :thread-entries-fn="(roomJid: string) => channelUnread.threadEntries(roomJid)"
           @select-channel="selectChannel"
           @select-thread="onSelectThread"
-          @create-channel="ui.showCreateChannel.value = true"
+          @create-channel="openCreateChannelDialog()"
+          @create-channel-in-space="openCreateChannelDialog"
           @open-settings="ui.showWaddleSettings.value = true"
           @open-members="ui.showMembers.value = true"
+          @update-collapsed-group-ids="ui.collapsedSpaceGroupIds.value = $event"
         />
         <DmPanel
           v-else
@@ -1652,6 +1668,7 @@ onUnmounted(() => {
       :form="waddles.createChannelForm.value"
       :is-submitting="waddles.isSubmitting.value"
       :spaces="waddles.sortedSpaces.value.map((space) => ({ node: space.id, name: space.name }))"
+      :default-space-node="ui.createChannelContextSpaceId.value"
       @update:form="waddles.createChannelForm.value = $event"
       @submit="handleCreateChannel"
     />

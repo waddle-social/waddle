@@ -7,6 +7,17 @@ interface ChannelGroup {
   channels: ChannelSummary[];
 }
 
+export const STANDALONE_CHANNEL_GROUP_ID = "synthetic:standalone";
+export const STANDALONE_CHANNEL_GROUP_NAME = "Standalone channels";
+
+function sortChannels(items: ChannelSummary[]) {
+  return [...items].sort(
+    (a, b) =>
+      (a.position ?? 0) - (b.position ?? 0) ||
+      a.name.localeCompare(b.name, undefined, { sensitivity: "base" }),
+  );
+}
+
 export function groupChannelsBySpace(
   spaces: SpaceSummary[],
   channels: ChannelSummary[],
@@ -25,30 +36,33 @@ export function groupChannelsBySpace(
     }
   }
 
-  const sortChannels = (items: ChannelSummary[]) =>
-    [...items].sort(
-      (a, b) =>
-        (a.position ?? 0) - (b.position ?? 0) ||
-        a.name.localeCompare(b.name, undefined, { sensitivity: "base" }),
-    );
-
   const groups: ChannelGroup[] = spaces
     .map((space) => ({
-      id: space.id,
+      id: `space:${space.id}`,
       name: space.name,
       space,
       channels: sortChannels(grouped.get(space.id) ?? []),
-    }))
-    .filter((group) => group.channels.length > 0);
+    }));
 
   if (standalone.length > 0) {
     groups.push({
-      id: "standalone",
-      name: "Channels",
+      id: STANDALONE_CHANNEL_GROUP_ID,
+      name: STANDALONE_CHANNEL_GROUP_NAME,
       space: null,
       channels: sortChannels(standalone),
     });
   }
 
   return groups;
+}
+
+export function firstChannelIdForSpace(
+  channels: ChannelSummary[],
+  spaceId: string,
+): string | null {
+  return sortChannels(channels.filter((channel) => channel.spaceId === spaceId))[0]?.id ?? null;
+}
+
+export function firstStandaloneChannelId(channels: ChannelSummary[]): string | null {
+  return sortChannels(channels.filter((channel) => !channel.spaceId))[0]?.id ?? null;
 }

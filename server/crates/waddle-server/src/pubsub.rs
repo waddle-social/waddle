@@ -14,7 +14,7 @@ use waddle_xmpp::XmppError;
 
 use crate::db::{Database, DatabaseConfig, DatabaseDriver, IntoParams};
 
-const PUBSUB_SCHEMA_VERSION: i64 = 1;
+const PUBSUB_SCHEMA_VERSION: i64 = 2;
 
 #[derive(Clone)]
 pub struct DatabasePubSubStorage {
@@ -117,7 +117,7 @@ impl DatabasePubSubStorage {
                     node_name TEXT NOT NULL,
                     access_model TEXT NOT NULL,
                     publish_model TEXT NOT NULL,
-                    max_items INTEGER NOT NULL,
+                    max_items BIGINT NOT NULL,
                     persist_items INTEGER NOT NULL,
                     deliver_payloads INTEGER NOT NULL,
                     notify_retract INTEGER NOT NULL,

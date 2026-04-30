@@ -1,6 +1,7 @@
 import { describe, it, expect } from "bun:test";
 import {
   defaultCreateForm,
+  defaultCreateFormForContext,
   type CreateFormData,
   type CreateSpaceFormData,
   type CreateMucFormData,
@@ -16,6 +17,30 @@ describe("create intent form model", () => {
       expect(form.name).toBe("");
       expect(form.description).toBe("");
       expect(form.muc_type).toBe("text");
+    });
+
+    it("keeps the default muc intent explicitly standalone", () => {
+      const form = defaultCreateForm();
+      expect(form.intent).toBe("muc");
+      expect("space_node" in form).toBe(false);
+    });
+  });
+
+  describe("defaultCreateFormForContext", () => {
+    it("prefers a space-muc intent when an active Space exists", () => {
+      const form = defaultCreateFormForContext("team-space");
+      expect(form).toEqual({
+        intent: "space-muc",
+        space_node: "team-space",
+        name: "",
+        description: "",
+        muc_type: "text",
+      });
+    });
+
+    it("uses a standalone muc intent when no active Space exists", () => {
+      expect(defaultCreateFormForContext(null)).toEqual(defaultCreateForm());
+      expect(defaultCreateFormForContext(undefined)).toEqual(defaultCreateForm());
     });
   });
 
