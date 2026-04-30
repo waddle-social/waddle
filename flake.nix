@@ -287,7 +287,7 @@
             // {
               cargoArtifacts = workspaceArtifacts;
               cargoExtraArgs = "--locked --workspace";
-              cargoTestExtraArgs = "--all-targets";
+              cargoTestExtraArgs = "--lib --tests";
             }
           );
           waddle-server-xmpp-unit-tests = craneLib.cargoTest (
