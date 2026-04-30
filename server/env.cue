@@ -133,6 +133,7 @@ schema.#Project & {
 			derivePaths: false
 			provider: github: {
 				permissions: {
+					"id-token":      "write"
 					packages:        "write"
 					"pull-requests": "none"
 				}

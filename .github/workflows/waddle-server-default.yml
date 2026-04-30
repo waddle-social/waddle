@@ -15,6 +15,7 @@ permissions:
   checks: write
   pull-requests: none
   packages: write
+  id-token: write
 jobs:
   build-cuenv:
     name: build.cuenv
