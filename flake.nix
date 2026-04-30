@@ -305,7 +305,7 @@
               pname = "waddle-server-xmpp-server-tests";
               cargoArtifacts = serverTestArtifacts;
               cargoExtraArgs = "--locked --package waddle-server";
-              cargoTestExtraArgs = "--verbose";
+              cargoTestExtraArgs = "--lib --tests --verbose";
             }
           );
           waddle-server-xmpp-cue-e2e = craneLib.cargoTest (
