@@ -20,10 +20,18 @@ let _flakehubCacheContributor = schema.#Contributor & {
 			}
 		},
 		{
+			id:       "nix.cleanReceipt"
+			label:    "Remove cached Determinate Nix receipt"
+			priority: 1
+			command:  "sudo"
+			args: ["rm", "-f", "/nix/receipt.json", "/nix/receipt.tmp", "/nix/nix-installer", "/nix/uninstall-phase1.json", "/nix/uninstall-phase2.json", "/nix/var/nix/daemon-socket/socket"]
+			dependsOn: ["namespace.nixCache"]
+		},
+		{
 			id:       "nix.install"
 			label:    "Install Determinate Nix"
-			priority: 1
-			dependsOn: ["namespace.nixCache"]
+			priority: 2
+			dependsOn: ["nix.cleanReceipt"]
 			provider: github: {
 				uses: "DeterminateSystems/determinate-nix-action@92ffb5400c3776307a27a1727d7e2ac3dcd9f844"
 				with: "extra-conf": "accept-flake-config = true"

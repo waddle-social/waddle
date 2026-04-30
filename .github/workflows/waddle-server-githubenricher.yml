@@ -36,6 +36,8 @@ jobs:
       uses: namespacelabs/nscloud-cache-action@v1
       with:
         cache: nix
+    - name: Remove cached Determinate Nix receipt
+      run: sudo rm -f /nix/receipt.json /nix/receipt.tmp /nix/nix-installer /nix/uninstall-phase1.json /nix/uninstall-phase2.json /nix/var/nix/daemon-socket/socket
     - name: Install Determinate Nix
       uses: DeterminateSystems/determinate-nix-action@92ffb5400c3776307a27a1727d7e2ac3dcd9f844
       with:
