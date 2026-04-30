@@ -41,7 +41,7 @@ permissions:
 jobs:
   waddle-server-xmppCompliance:
     name: waddle-server-xmppCompliance
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-linux-x86
     steps:
     - name: Checkout
       uses: actions/checkout@v4

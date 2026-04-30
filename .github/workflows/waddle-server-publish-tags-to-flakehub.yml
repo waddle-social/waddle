@@ -20,7 +20,7 @@ permissions:
 jobs:
   waddle-server-Publish-tags-to-FlakeHub:
     name: waddle-server-Publish tags to FlakeHub
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-linux-x86
     environment: flakehub
     steps:
     - name: Checkout

@@ -19,7 +19,7 @@ permissions:
 jobs:
   build-cuenv:
     name: build.cuenv
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-linux-x86
     timeout-minutes: 30
     steps:
     - name: Checkout
@@ -48,7 +48,7 @@ jobs:
         /usr/local/bin/cuenv sync -A
   buildExtensionModules:
     name: buildExtensionModules
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-linux-x86
     needs:
     - build-cuenv
     - fmt
@@ -101,7 +101,7 @@ jobs:
         include-hidden-files: true
   clippy:
     name: clippy
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-linux-x86
     needs:
     - build-cuenv
     steps:
@@ -139,7 +139,7 @@ jobs:
         GITHUB_REF_NAME: ${{ github.ref_name }}
   fmt:
     name: fmt
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-linux-x86
     needs:
     - build-cuenv
     steps:
@@ -177,7 +177,7 @@ jobs:
         GITHUB_REF_NAME: ${{ github.ref_name }}
   publishContainerImage:
     name: publishContainerImage
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-linux-x86
     needs:
     - build-cuenv
     - fmt
@@ -228,7 +228,7 @@ jobs:
         include-hidden-files: true
   renderDeployment:
     name: renderDeployment
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-linux-x86
     needs:
     - build-cuenv
     steps:
@@ -266,7 +266,7 @@ jobs:
         GITHUB_REF_NAME: ${{ github.ref_name }}
   test:
     name: test
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-linux-x86
     needs:
     - build-cuenv
     steps:

@@ -122,6 +122,16 @@ schema.#Project & {
 		},
 	]
 
+	ci: provider: github: {
+		flakehubCache: flakeName: "waddle-social/waddle"
+		runner: "namespace-profile-linux-x86"
+		runners: arch: {
+			"linux-x64":    "namespace-profile-linux-x86"
+			"darwin-arm64": "namespace-profile-darwin-arm64"
+			amd64:          "namespace-profile-linux-x86"
+		}
+	}
+
 	ci: pipelines: {
 		default: {
 			mode: "expanded"
@@ -138,7 +148,7 @@ schema.#Project & {
 					"pull-requests": "none"
 				}
 				runners: arch: {
-					amd64: "ubuntu-latest"
+					amd64: "namespace-profile-linux-x86"
 				}
 			}
 			tasks: [
