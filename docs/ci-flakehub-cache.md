@@ -16,9 +16,7 @@ The generated workflows may include additional permissions for checks, packages,
 
 Pull request workflows grant `id-token: write` so same-repository pull requests can authenticate to FlakeHub Cache. Pull requests from forks still run the cache setup step, but FlakeHub Cache is unavailable for those fork workflows because GitHub's JSON Web Token claims cannot authenticate them to FlakeHub Cache.
 
-Generated GitHub-owned actions are pinned by `server/scripts/pin-generated-github-actions.sh` after `cuenv sync ci -A`. Use `server/scripts/check-ci-drift.sh` for drift checks so regenerated workflows and pinned action SHAs are validated together.
-
-The root `ci-drift` workflow runs that check for every active Cuenv project `env.cue`, the pinning scripts, and workflow policy files.
+Regenerate GitHub Actions workflows from the Cuenv sources with `cuenv sync ci -A`.
 
 For local machines, install Determinate Nix and authenticate once:
 

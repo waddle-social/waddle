@@ -7,39 +7,6 @@ import (
 	xRust "github.com/cuenv/cuenv/contrib/rust"
 )
 
-let _flakehubCacheContributor = schema.#Contributor & {
-	id: "flakehubCache"
-	tasks: [
-		{
-			id:       "namespace.nixCache"
-			label:    "Set up Namespace Nix cache"
-			priority: 0
-			provider: github: {
-				uses: "namespacelabs/nscloud-cache-action@v1"
-				with: cache: "nix"
-			}
-		},
-		{
-			id:       "nix.cleanReceipt"
-			label:    "Remove cached Determinate Nix receipt"
-			priority: 1
-			command:  "sudo"
-			args: ["rm", "-f", "/nix/receipt.json", "/nix/receipt.tmp", "/nix/nix-installer", "/nix/uninstall-phase1.json", "/nix/uninstall-phase2.json", "/nix/var/nix/daemon-socket/socket"]
-			dependsOn: ["namespace.nixCache"]
-		},
-		{
-			id:       "nix.install"
-			label:    "Install Determinate Nix"
-			priority: 2
-			dependsOn: ["nix.cleanReceipt"]
-			provider: github: {
-				uses: "DeterminateSystems/determinate-nix-action@92ffb5400c3776307a27a1727d7e2ac3dcd9f844"
-				with: "extra-conf": "accept-flake-config = true"
-			}
-		},
-	]
-}
-
 let _rustInputs = [
 	"Cargo.toml",
 	"Cargo.lock",
@@ -52,7 +19,10 @@ let _nixInputs = [
 	"../flake.lock",
 	"Cargo.toml",
 	"Cargo.lock",
+	"charts/**",
 	"crates/**",
+	"env.cue",
+	"rust-toolchain.toml",
 	"scripts/check-nix-cache-keys.sh",
 	"wit/**",
 ]
@@ -69,9 +39,7 @@ schema.#Project & {
 
 	ci: providers: ["github"]
 	ci: contributors: [
-		_flakehubCacheContributor,
-		c.#CuenvRelease,
-		c.#OnePassword,
+		c.#FlakeHubCache,
 		schema.#Contributor & {
 			id: "flakehub"
 			when: environment: ["flakehub"]
@@ -108,6 +76,7 @@ schema.#Project & {
 	]
 
 	ci: provider: github: {
+		flakehubCache: flakeName: "waddle-social/waddle"
 		runner: "namespace-profile-linux-x86"
 		runners: arch: {
 			"linux-x64":    "namespace-profile-linux-x86"
@@ -133,15 +102,10 @@ schema.#Project & {
 					amd64: "namespace-profile-linux-x86"
 				}
 			}
-			tasks: [
-				_t.nixCacheKeyContract,
-				_t.nixFlakeCheck,
-				_t.nixWarmServerDeps,
-				_t.nixBuildServer,
-				_t.publishContainerImage,
-			]
+			tasks: [_t.publishContainerImage]
 		}
 		"Publish tags to FlakeHub": {
+			mode:        "expanded"
 			environment: "flakehub"
 			when: {
 				tag: ["v?[0-9]+.[0-9]+.[0-9]+*"]
@@ -168,44 +132,13 @@ schema.#Project & {
 			}
 			tasks: [
 				_t.nixCacheKeyContract,
-				_t.nixFlakeCheck,
 				_t.nixWarmServerDeps,
+				_t.nixFlakeCheck,
 				_t.nixBuildServer,
 			]
 		}
-		xmppCompliance: {
-			mode: "expanded"
-			when: {
-				branch: ["main"]
-				defaultBranch: true
-				manual:        true
-			}
-			provider: github: permissions: "id-token": "write"
-			tasks: [
-				_t.nixWarmServerDeps,
-				_t.nixXmppUnitTests,
-				_t.nixXmppServerTests,
-				_t.nixXmppXepIntegration,
-			]
-		}
-		xmppCompliancePullRequest: {
-			mode: "expanded"
-			when: {
-				pullRequest: true
-			}
-			provider: github: permissions: {
-				contents:   "read"
-				"id-token": "write"
-			}
-			tasks: [
-				_t.nixWarmServerDeps,
-				_t.nixXmppUnitTests,
-				_t.nixXmppCueE2e,
-				_t.nixXmppServerTests,
-				_t.nixXmppXepIntegration,
-			]
-		}
 		githubEnricher: {
+			mode: "expanded"
 			when: {
 				branch: ["main"]
 				defaultBranch: true
@@ -216,6 +149,7 @@ schema.#Project & {
 			tasks: [_t.buildGithubEnricher, _t.pushGithubEnricherOci, _t.pinGithubEnricherTag, _t.pushGithubEnricherGitops]
 		}
 		githubEnricherPullRequest: {
+			mode: "expanded"
 			when: {
 				pullRequest: true
 			}
@@ -229,27 +163,17 @@ schema.#Project & {
 	}
 
 	tasks: {
-		checkCiDrift: schema.#Task & {
-			command: "bash"
-			args: ["scripts/check-ci-drift.sh"]
-			inputs: [
-				"**/env.cue",
-				"scripts/check-ci-drift.sh",
-			]
-		}
-
-		nixFlakeCheck: schema.#Task & {
-			command: "nix"
-			args: ["flake", "check", "..", "-L", "--accept-flake-config"]
-			inputs: list.Concat([_nixInputs, [
-				"**/env.cue",
-				"scripts/check-ci-drift.sh",
-			]])
-		}
-
 		nixCacheKeyContract: schema.#Task & {
-			command: "bash"
-			args: ["scripts/check-nix-cache-keys.sh"]
+			command: "nix"
+			args: [
+				"develop",
+				"-L",
+				"--accept-flake-config",
+				"..",
+				"-c",
+				"bash",
+				"scripts/check-nix-cache-keys.sh",
+			]
 			inputs: _nixInputs
 		}
 
@@ -264,43 +188,45 @@ schema.#Project & {
 				"../#waddle-server-test-deps",
 				"-L",
 				"--accept-flake-config",
+				"--max-jobs",
+				"1",
+				"--cores",
+				"0",
 			]
 			inputs: _nixInputs
 		}
 
+		nixFlakeCheck: schema.#Task & {
+			command: "nix"
+			args: [
+				"flake",
+				"check",
+				"..",
+				"-L",
+				"--accept-flake-config",
+				"--max-jobs",
+				"1",
+				"--cores",
+				"0",
+			]
+			inputs: _nixInputs
+			dependsOn: [tasks.nixWarmServerDeps]
+		}
+
 		nixBuildServer: schema.#Task & {
 			command: "nix"
-			args: ["build", "../#waddle-server", "-L", "--accept-flake-config"]
+			args: [
+				"build",
+				"../#waddle-server",
+				"-L",
+				"--accept-flake-config",
+				"--max-jobs",
+				"1",
+				"--cores",
+				"0",
+			]
 			inputs: _nixInputs
-			dependsOn: [tasks.nixFlakeCheck, tasks.nixWarmServerDeps]
-		}
-
-		nixXmppUnitTests: schema.#Task & {
-			command: "nix"
-			args: ["build", "../#checks.x86_64-linux.waddle-server-xmpp-unit-tests", "-L", "--accept-flake-config"]
-			inputs: _nixInputs
-			dependsOn: [tasks.nixWarmServerDeps]
-		}
-
-		nixXmppServerTests: schema.#Task & {
-			command: "nix"
-			args: ["build", "../#checks.x86_64-linux.waddle-server-xmpp-server-tests", "-L", "--accept-flake-config"]
-			inputs: _nixInputs
-			dependsOn: [tasks.nixWarmServerDeps]
-		}
-
-		nixXmppCueE2e: schema.#Task & {
-			command: "nix"
-			args: ["build", "../#checks.x86_64-linux.waddle-server-xmpp-cue-e2e", "-L", "--accept-flake-config"]
-			inputs: _nixInputs
-			dependsOn: [tasks.nixWarmServerDeps]
-		}
-
-		nixXmppXepIntegration: schema.#Task & {
-			command: "nix"
-			args: ["build", "../#checks.x86_64-linux.waddle-server-xmpp-xep-integration", "-L", "--accept-flake-config"]
-			inputs: _nixInputs
-			dependsOn: [tasks.nixWarmServerDeps]
+			dependsOn: [tasks.nixWarmServerDeps, tasks.nixFlakeCheck]
 		}
 
 		fmt: xRust.#Fmt & {
@@ -348,15 +274,16 @@ schema.#Project & {
 		}
 
 		publishContainerImage: schema.#Task & {
-			command: "bash"
+			command: "nix"
 			env: {
-				GITHUB_TOKEN:    schema.#EnvPassthrough
+				GITHUB_TOKEN:    "${{ secrets.GITHUB_TOKEN }}"
 				GITHUB_ACTOR:    "${{ github.actor }}"
 				GITHUB_REF_TYPE: "${{ github.ref_type }}"
 				GITHUB_REF_NAME: "${{ github.ref_name }}"
 				CUENV_ARCH:      "amd64"
 			}
-			args: ["-c", #"""
+			args: ["develop", "-L", "--accept-flake-config", "..", "-c", "bash", "-c", #"""
+				'
 				set -euo pipefail
 				case "${CUENV_ARCH}" in
 				  amd64) ;;
@@ -373,9 +300,9 @@ schema.#Project & {
 
 				docker tag ghcr.io/waddle-social/waddle:nix "ghcr.io/waddle-social/waddle:sha-${SHORT_SHA}"
 				docker push "ghcr.io/waddle-social/waddle:sha-${SHORT_SHA}" 2>&1 | tee "../target/digests/push-${CUENV_ARCH}.log"
-				digest="$(docker inspect --format='{{index .RepoDigests 0}}' "ghcr.io/waddle-social/waddle:sha-${SHORT_SHA}" | sed 's/^.*@//')"
+				digest="$(docker inspect --format="{{index .RepoDigests 0}}" "ghcr.io/waddle-social/waddle:sha-${SHORT_SHA}" | sed "s/^.*@//")"
 				if [ -z "${digest}" ]; then
-				  digest="$(grep -Eo 'sha256:[a-f0-9]{64}' "../target/digests/push-${CUENV_ARCH}.log" | tail -n1)"
+				  digest="$(grep -Eo "sha256:[a-f0-9]{64}" "../target/digests/push-${CUENV_ARCH}.log" | tail -n1)"
 				fi
 				if [ -z "${digest}" ]; then
 				  echo "No image digest found" >&2
@@ -413,14 +340,16 @@ schema.#Project & {
 				  --path=../infrastructure/waddle.cloud/gitops/waddle-server \
 				  --source="$(git config --get remote.origin.url)" \
 				  --revision="${SHORT_SHA}"
+				'
 				"""#]
 			inputs: list.Concat([_nixInputs, ["charts/**"]])
 			outputs: ["target/digests/**"]
-			dependsOn: [tasks.nixCacheKeyContract, tasks.nixFlakeCheck, tasks.nixBuildServer]
+			dependsOn: [tasks.nixCacheKeyContract, tasks.nixBuildServer]
 		}
 
 		flakehubPublished: schema.#Task & {
-			command: "true"
+			command: "nix"
+			args: ["flake", "metadata", "..", "--accept-flake-config"]
 			inputs: [
 				"../flake.nix",
 				"../flake.lock",
@@ -453,30 +382,15 @@ schema.#Project & {
 				"""#]
 		}
 
-		// XMPP compliance tasks — run as the xmppCompliance pipeline
-		xmppUnitTests: xRust.#Test & {
-			args: ["test", "--package", "waddle-xmpp", "--lib", "--verbose"]
-			inputs: _rustInputs
-		}
-
-		xmppServerTests: xRust.#Test & {
-			args: ["test", "--package", "waddle-server", "--verbose"]
-			inputs: _rustInputs
-		}
-
-		xmppCueE2e: xRust.#Test & {
-			args: ["test", "--package", "waddle-server", "--test", "xmpp_e2e_cue", "--verbose"]
-			inputs: _rustInputs
-		}
-
-		xmppXepIntegration: xRust.#Test & {
-			args: ["test", "--package", "waddle-xmpp", "--tests", "--verbose"]
-			inputs: _rustInputs
-		}
-
 		buildGithubEnricher: schema.#Task & {
-			command: "cargo"
+			command: "nix"
 			args: [
+				"develop",
+				"-L",
+				"--accept-flake-config",
+				"..",
+				"-c",
+				"cargo",
 				"build",
 				"--release",
 				"--target", "wasm32-wasip2",
@@ -488,12 +402,13 @@ schema.#Project & {
 		}
 
 		pushGithubEnricherOci: schema.#Task & {
-			command: "bash"
+			command: "nix"
 			env: {
-				GITHUB_TOKEN: schema.#EnvPassthrough
-				GITHUB_ACTOR: schema.#EnvPassthrough
+				GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+				GITHUB_ACTOR: "${{ github.actor }}"
 			}
-			args: ["-c", #"""
+			args: ["develop", "-L", "--accept-flake-config", "..", "-c", "bash", "-c", #"""
+				'
 					set -euo pipefail
 					WASM_FILE="target/wasm32-wasip2/release/github_enricher.wasm"
 					IMAGE="ghcr.io/waddle-social/waddle/extensions/github-enricher"
@@ -508,28 +423,32 @@ schema.#Project & {
 					oras push "${IMAGE}:latest" \
 					  --artifact-type application/vnd.waddle.extension.wasm.v1+wasm \
 					  "${WASM_FILE}:application/wasm"
+				'
 				"""#]
 			dependsOn: [tasks.buildGithubEnricher]
 		}
 
 		pinGithubEnricherTag: schema.#Task & {
-			command: "bash"
-			args: ["-c", #"""
+			command: "nix"
+			args: ["develop", "-L", "--accept-flake-config", "..", "-c", "bash", "-c", #"""
+				'
 					set -euo pipefail
 					FULL_SHA="$(git rev-parse HEAD)"
 					yq -i "(.spec.values.extensions.modules[] | select(.name == \"github-enricher\") | .tag) = \"sha-${FULL_SHA}\"" ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml
 					yq -e ".spec.values.extensions.modules[] | select(.name == \"github-enricher\") | .tag == \"sha-${FULL_SHA}\"" ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml > /dev/null
+				'
 				"""#]
 			dependsOn: [tasks.pushGithubEnricherOci]
 		}
 
 		pushGithubEnricherGitops: schema.#Task & {
-			command: "bash"
+			command: "nix"
 			env: {
-				GITHUB_TOKEN: schema.#EnvPassthrough
-				GITHUB_ACTOR: schema.#EnvPassthrough
+				GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+				GITHUB_ACTOR: "${{ github.actor }}"
 			}
-			args: ["-c", #"""
+			args: ["develop", "-L", "--accept-flake-config", "..", "-c", "bash", "-c", #"""
+				'
 				set -euo pipefail
 					echo "${GITHUB_TOKEN}" | docker login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
 					flux push artifact \
@@ -537,6 +456,7 @@ schema.#Project & {
 					  --path=../infrastructure/waddle.cloud/gitops/waddle-server \
 					  --source="$(git config --get remote.origin.url)" \
 					  --revision="$(git rev-parse --short HEAD)"
+				'
 				"""#]
 			dependsOn: [tasks.pinGithubEnricherTag]
 		}

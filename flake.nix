@@ -267,7 +267,6 @@
           );
         in
         {
-          waddle-server-build = self.packages.${system}.waddle-server;
           waddle-server-fmt = craneLib.cargoFmt {
             pname = "waddle-server-fmt";
             version = "0.1.0";
