@@ -122,16 +122,6 @@ schema.#Project & {
 		},
 	]
 
-	ci: provider: github: {
-		flakehubCache: flakeName: "waddle-social/waddle"
-		runner: "namespace-profile-linux-x86"
-		runners: arch: {
-			"linux-x64":    "namespace-profile-linux-x86"
-			"darwin-arm64": "namespace-profile-darwin-arm64"
-			amd64:          "namespace-profile-linux-x86"
-		}
-	}
-
 	ci: pipelines: {
 		default: {
 			mode: "expanded"
@@ -148,7 +138,7 @@ schema.#Project & {
 					"pull-requests": "none"
 				}
 				runners: arch: {
-					amd64: "namespace-profile-linux-x86"
+					amd64: "ubuntu-latest"
 				}
 			}
 			tasks: [
@@ -395,15 +385,19 @@ schema.#Project & {
 		publishContainerImage: schema.#Task & {
 			command: "bash"
 			env: {
-				GITHUB_TOKEN:    "${{ secrets.GITHUB_TOKEN }}"
-				GITHUB_ACTOR:    "${{ github.actor }}"
-				GITHUB_REF_TYPE: "${{ github.ref_type }}"
-				GITHUB_REF_NAME: "${{ github.ref_name }}"
-				CUENV_ARCH:      "amd64"
+				CI_GITHUB_TOKEN:    schema.#EnvPassthrough & {name: "GITHUB_TOKEN"}
+				CI_GITHUB_ACTOR:    schema.#EnvPassthrough & {name: "GITHUB_ACTOR"}
+				CI_GITHUB_REF_TYPE: schema.#EnvPassthrough & {name: "GITHUB_REF_TYPE"}
+				CI_GITHUB_REF_NAME: schema.#EnvPassthrough & {name: "GITHUB_REF_NAME"}
+				CUENV_ARCH:         "amd64"
 			}
 			args: ["-c", #"""
 					set -euo pipefail
 					placeholder_digest="sha256:0000000000000000000000000000000000000000000000000000000000000000"
+					GITHUB_TOKEN="${CI_GITHUB_TOKEN:?missing GITHUB_TOKEN}"
+					GITHUB_ACTOR="${CI_GITHUB_ACTOR:?missing GITHUB_ACTOR}"
+					GITHUB_REF_TYPE="${CI_GITHUB_REF_TYPE:?missing GITHUB_REF_TYPE}"
+					GITHUB_REF_NAME="${CI_GITHUB_REF_NAME:?missing GITHUB_REF_NAME}"
 					case "${CUENV_ARCH}" in
 					  amd64) ;;
 					  *) echo "unsupported CUENV_ARCH=${CUENV_ARCH}" >&2; exit 1 ;;
