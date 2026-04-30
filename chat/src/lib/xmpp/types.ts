@@ -114,6 +114,7 @@ export interface LiveRoomMessage {
   reactionTargetId?: string;
   _reactionTarget?: string;
   _reactionEmojis?: string[];
+  _reactionSenderId?: string;
 }
 
 /** A direct message received/sent via type:"chat" stanzas */
@@ -184,6 +185,7 @@ export interface DisplayedEvent {
 export interface ReactionEvent {
   roomJid: string;
   nick: string;
+  authorRealJid?: string;
   messageId: string;
   emojis: string[];
 }

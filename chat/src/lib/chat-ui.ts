@@ -114,6 +114,8 @@ export interface TimelineMessage {
   isRetracted?: boolean;
   /** Aggregated emoji reactions: emoji -> list of nicks (XEP-0444). */
   reactions?: Record<string, string[]>;
+  /** Archived reaction sender identities: emoji -> sender id -> display nick. */
+  reactionSenders?: Record<string, Record<string, string>>;
   /** Users who have seen this message (XEP-0333). */
   readBy?: string[];
   /** Mentioned JIDs/nicks in this message (XEP-0372). */

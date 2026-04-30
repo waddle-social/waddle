@@ -84,6 +84,7 @@ database:
   url: ""
   xmppMamUrl: ""
   xmppInboxUrl: ""
+  xmppPubsubUrl: ""
 
 xmpp:
   enabled: true
@@ -149,6 +150,7 @@ secret:
   databaseUrl: ""
   xmppMamDatabaseUrl: ""
   xmppInboxDatabaseUrl: ""
+  xmppPubsubDatabaseUrl: ""
   spicedbPresharedKey: ""
 
 probes:

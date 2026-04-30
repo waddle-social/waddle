@@ -74,7 +74,7 @@ use kameo::actor::ActorRef;
 use std::str::FromStr;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
-use waddle_extensions::ExtensionManager;
+use waddle_extensions::{message_has_framework_envelope, ExtensionManager, WaddleId};
 use waddle_xmpp::carbons::{build_received_carbon, build_sent_carbon};
 use waddle_xmpp::inbox::runtime::{direct_message_entry, groupchat_entry, groupchat_thread_entry};
 use waddle_xmpp::inbox::storage::InboxStorage;
@@ -1292,7 +1292,7 @@ async fn deliver_peer_to_full(
 ///
 /// Order of operations:
 ///
-/// 1. Enrich the message via [`ExtensionManager::enrich_message`]
+/// 1. Enrich the message via [`ExtensionManager::enrich_message_for_waddle`]
 ///    (XEP-0372 link previews, fail-open).
 /// 2. Resolve the per-room actor and ask for a frozen
 ///    [`waddle_xmpp::muc::room_actor::RoomChainSnapshot`] in one
@@ -1350,11 +1350,10 @@ async fn dispatch_to_room(
         return outcome;
     };
 
-    // 1. Enrich the message before the chain sees it. The legacy
-    //    bridge enriched on the prototype before
-    //    `BuildGroupchatBroadcast`, so reflected copies carry the
-    //    enrichment payloads. Fail-open: extension errors leave the
-    //    message unchanged.
+    // 1. Prepare the prototype the room gate sees. Enrichment is delayed
+    //    until after occupancy / managed-room validation so unauthorized
+    //    senders receive the XEP-0045 room error before any Waddle-specific
+    //    extension payload checks or extension runtime calls.
     let mut prototype = incoming.clone();
     if prototype.id.is_none() {
         prototype.id = Some(uuid::Uuid::new_v4().to_string());
@@ -1364,13 +1363,6 @@ async fn dispatch_to_room(
     // canonicalize handler stamps the canonical value. Mirrors the
     // legacy `remove_stanza_ids_by` call.
     remove_stanza_ids_by(&mut prototype, &room_jid.to_string());
-    let _embeds_added = state
-        .deps
-        .protocol
-        .extension_manager
-        .enrich_message(&mut prototype)
-        .await;
-
     // 2. Look up the room actor + snapshot in one round-trip each.
     let room_actor = match room_registry
         .ask(GetRoom {
@@ -1457,6 +1449,7 @@ async fn dispatch_to_room(
         dispatch_timestamp,
     };
     let mut gate_working = prototype.clone();
+    remove_framework_envelopes(&mut gate_working);
     use waddle_xmpp::protocol::room::RoomHandler;
     let gate_outcome =
         waddle_xmpp::protocol::room::occupancy_validation::OccupancyValidationHandler
@@ -1475,7 +1468,42 @@ async fn dispatch_to_room(
         return outcome;
     }
 
-    // 5. Rich-target validation against the room archive. Runs only
+    if message_has_framework_envelope(&prototype) {
+        let mut sanitized = incoming.clone();
+        remove_framework_envelopes(&mut sanitized);
+        let reply = build_message_error_reply(
+            &sanitized,
+            &room_jid,
+            &sender_full,
+            bad_request_error("Client-authored Waddle extension envelopes are not allowed."),
+        );
+        match Stanza::Message(reply).to_element_string() {
+            Ok(xml) => outcome.frames.push(xml),
+            Err(error) => {
+                warn!(
+                    room = %room_jid,
+                    %error,
+                    "DispatchToRoom: failed to serialize framework-envelope rejection"
+                );
+            }
+        }
+        return outcome;
+    }
+
+    // 5. Enrich the message before the post-gate chain sees it. The legacy
+    //    bridge enriched on the prototype before
+    //    `BuildGroupchatBroadcast`, so reflected copies carry the
+    //    enrichment payloads. Fail-open: extension errors leave the
+    //    message unchanged.
+    let waddle_id = waddle_id_for_room_jid(&room_jid);
+    let _embeds_added = state
+        .deps
+        .protocol
+        .extension_manager
+        .enrich_message_for_waddle(&mut prototype, waddle_id)
+        .await;
+
+    // 6. Rich-target validation against the room archive. Runs only
     //    after the gate has admitted the sender, so non-occupants /
     //    managed-room-forbidden senders never see archive-derived
     //    error conditions. Archive rows store `from` in the XEP-0045
@@ -1511,7 +1539,7 @@ async fn dispatch_to_room(
         return outcome;
     }
 
-    // 6. Build context + run the rest of the chain (canonicalize,
+    // 7. Build context + run the rest of the chain (canonicalize,
     //    archive, inbox, reflect). Reuse the `gate_ctx` config — same
     //    snapshot, same managed-room flag, same id-gen.
     let ctx = RoomContext {
@@ -1586,19 +1614,25 @@ async fn session_is_server_owner(state: &WebSocketState, session: Option<&Sessio
         .is_ok_and(|response| response.allowed)
 }
 
-async fn enrich_message_event(deps: &Deps<'_>, mut message: Message) -> Message {
-    let Some(extension_manager) = deps.extension_manager else {
+async fn enrich_message_event(deps: &Deps<'_>, message: Message) -> Message {
+    if deps.extension_manager.is_none() {
         debug!(
             "RequestEnrichment: no extension_manager in Deps; \
              feeding original message back unchanged"
         );
         return message;
-    };
-    // `enrich_message` mutates in place and is itself fail-open
-    // (returns 0 when no body / no links / no extension actors). Any
-    // per-actor RPC failure inside is logged by the extension layer.
-    let _added = extension_manager.enrich_message(&mut message).await;
+    }
+    debug!("RequestEnrichment: direct messages do not carry a typed Waddle scope; skipping");
     message
+}
+
+fn waddle_id_for_room_jid(room_jid: &BareJid) -> WaddleId {
+    let value = if parse_managed_room_jid(room_jid).is_some() {
+        "space".to_string()
+    } else {
+        "default".to_string()
+    };
+    WaddleId::new(value).expect("static room Waddle scope is non-empty")
 }
 
 /// Resolve a typed [`MessageRef`] against `archive`'s personal MAM
@@ -2018,6 +2052,12 @@ fn has_malformed_rich_payload(message: &Message) -> bool {
                 && payload.attr("occupantid").is_none_or(str::is_empty)
                 && payload.attr("mentions").is_none_or(str::is_empty))
     })
+}
+
+fn remove_framework_envelopes(message: &mut Message) {
+    message
+        .payloads
+        .retain(|payload| !payload.ns().starts_with("urn:waddle:"));
 }
 
 fn bad_request_error(text: &str) -> StanzaError {
@@ -3460,6 +3500,15 @@ mod tests {
     // -----------------------------------------------------------------
     // XEP-0372 — RequestEnrichment callback round-trip
     // -----------------------------------------------------------------
+
+    #[test]
+    fn extension_waddle_scope_matches_managed_room_context() {
+        let managed_room: BareJid = "general@muc.example.com".parse().expect("room jid");
+        assert_eq!(waddle_id_for_room_jid(&managed_room).as_str(), "space");
+
+        let unmanaged_room: BareJid = "conference.example.com".parse().expect("room jid");
+        assert_eq!(waddle_id_for_room_jid(&unmanaged_room).as_str(), "default");
+    }
 
     #[tokio::test]
     async fn enrichment_request_without_extension_manager_fails_open_with_original_message() {

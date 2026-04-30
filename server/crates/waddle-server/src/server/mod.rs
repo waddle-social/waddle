@@ -1213,20 +1213,20 @@ async fn register_extension_commands(
                     );
                 }
                 let effects = manager
-                    .invoke_launch(
-                        &plugin,
-                        &action_id,
+                    .invoke_launch(waddle_extensions::manager::LaunchInvocationRequest {
+                        plugin_name: &plugin,
+                        action_id: &action_id,
                         launch_id,
                         context,
-                        WaddleId::new(ctx.from.to_string())
+                        requester: WaddleId::new(ctx.from.to_string())
                             .expect("requester JID string is non-empty"),
-                        extension_session_id(ctx.command.session_id),
-                        ctx.command.action.map(extension_command_action),
+                        session_id: extension_session_id(ctx.command.session_id),
+                        action: ctx.command.action.map(extension_command_action),
                         fields,
-                        submitted_form.and_then(extension_data_form),
+                        form: submitted_form.and_then(extension_data_form),
                         expires_at,
-                        &launch_token,
-                    )
+                        launch_token: &launch_token,
+                    })
                     .await;
                 extension_command_result(effects, Some((storage, owner))).await
             }

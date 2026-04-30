@@ -324,7 +324,6 @@ export function useDmMessaging(
       body: string;
       markup?: LiveDmMessage["markup"];
       references?: LiveDmMessage["references"];
-      githubEmbeds?: LiveDmMessage["githubEmbeds"];
       extensionAnnotations?: LiveDmMessage["extensionAnnotations"];
     }[] = [];
     for (const msg of mamResults) {
@@ -339,14 +338,12 @@ export function useDmMessaging(
           body: msg.body,
           markup: msg.markup,
           references: msg.references,
-          githubEmbeds: msg.githubEmbeds,
           extensionAnnotations: msg.extensionAnnotations,
         });
       } else if (
         msg.body
         || (msg.sharedFiles && msg.sharedFiles.length > 0)
         || msg.isSticker
-        || (msg.githubEmbeds && msg.githubEmbeds.length > 0)
         || (msg.extensionAnnotations && msg.extensionAnnotations.length > 0)
       ) {
         regular.push(msg);
@@ -370,15 +367,6 @@ export function useDmMessaging(
       else delete target.markup;
       if (update.references && update.references.length > 0) target.references = update.references;
       else delete target.references;
-      if (update.githubEmbeds && update.githubEmbeds.length > 0) {
-        target.githubEmbeds = update.githubEmbeds;
-      } else if (target.githubEmbeds?.length) {
-        const surviving = target.githubEmbeds.filter((e) => update.body.includes(e.url));
-        if (surviving.length > 0) target.githubEmbeds = surviving;
-        else delete target.githubEmbeds;
-      } else {
-        delete target.githubEmbeds;
-      }
       if (update.extensionAnnotations && update.extensionAnnotations.length > 0) {
         target.extensionAnnotations = update.extensionAnnotations;
       } else {
@@ -395,11 +383,16 @@ export function useDmMessaging(
       const target = findMessageById(timeline, update.targetId);
       if (!target) continue;
       const reactions: Record<string, string[]> = target.reactions ? { ...target.reactions } : {};
+      for (const key of Object.keys(reactions)) {
+        reactions[key] = (reactions[key] ?? []).filter((n) => n !== update.nick);
+        if (reactions[key].length === 0) delete reactions[key];
+      }
       for (const emoji of update.emojis) {
         if (!reactions[emoji]) reactions[emoji] = [];
         if (!reactions[emoji].includes(update.nick)) reactions[emoji].push(update.nick);
       }
-      target.reactions = reactions;
+      if (Object.keys(reactions).length > 0) target.reactions = reactions;
+      else delete target.reactions;
     }
     return timeline.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   }
@@ -857,7 +850,6 @@ export function useDmMessaging(
         msg.fromJid,
         msg.markup,
         msg.references,
-        msg.githubEmbeds,
         msg.extensionAnnotations,
       );
       return;

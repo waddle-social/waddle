@@ -674,7 +674,14 @@ export function dispatchGroupchat(msg: ReceivedMessage, h: GroupchatHandlers): v
 
   const reactions = ext(msg).reactions as { id?: string; items?: string[] } | undefined;
   if (reactions?.id) {
-    h.onReaction?.({ roomJid, nick, messageId: reactions.id, emojis: (reactions.items ?? []).filter((t) => t.length > 0) });
+    const authorRealJid = extractMucUserRealJid(msg);
+    h.onReaction?.({
+      roomJid,
+      nick,
+      ...(authorRealJid ? { authorRealJid } : {}),
+      messageId: reactions.id,
+      emojis: (reactions.items ?? []).filter((t) => t.length > 0),
+    });
     return;
   }
 

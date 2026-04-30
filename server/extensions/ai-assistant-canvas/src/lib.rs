@@ -48,10 +48,7 @@ impl exports::waddle::extension::framework::Guest for AiAssistantCanvas {
                         }),
                         payload: canvas_payload(artifact.clone()),
                     }),
-                    visible_message(canvas_message(
-                        command.waddle_id,
-                        artifact,
-                    )),
+                    visible_message(canvas_message(command.waddle_id, artifact)),
                 ]
             }
             types::ExtensionEvent::Launch(launch) => {
@@ -79,10 +76,7 @@ impl exports::waddle::extension::framework::Guest for AiAssistantCanvas {
                         }),
                         payload: canvas_payload(artifact.clone()),
                     }),
-                    visible_message(canvas_message(
-                        launch.context.waddle_id,
-                        artifact,
-                    )),
+                    visible_message(canvas_message(launch.context.waddle_id, artifact)),
                 ]
             }
             _ => vec![],

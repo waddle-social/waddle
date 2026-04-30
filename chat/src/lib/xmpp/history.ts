@@ -71,7 +71,7 @@ function parseRoomMamResult(
         : new Date().toISOString();
       const archivedMsg = withArchivedMessageId(mamResult.id, innerMsg as ReceivedMessage);
       let parsedMessage: LiveRoomMessage | null = null;
-      let reactionUpdate: { targetId: string; emojis: string[]; nick: string } | null = null;
+      let reactionUpdate: { targetId: string; emojis: string[]; nick: string; senderId: string } | null = null;
 
       dispatchGroupchat(archivedMsg, {
         currentRoom: roomJid,
@@ -84,6 +84,7 @@ function parseRoomMamResult(
             targetId: event.messageId,
             emojis: event.emojis,
             nick: event.nick,
+            senderId: event.authorRealJid ?? `${event.roomJid}/${event.nick}`,
           };
         },
         onChatState: null,
@@ -97,7 +98,7 @@ function parseRoomMamResult(
       }
 
       if (reactionUpdate) {
-        const { nick, targetId, emojis } = reactionUpdate;
+        const { nick, senderId, targetId, emojis } = reactionUpdate;
         collected.push({
           id: archivedMsg.id ?? crypto.randomUUID(),
           roomJid,
@@ -107,6 +108,7 @@ function parseRoomMamResult(
           type: "subject",
           _reactionTarget: targetId,
           _reactionEmojis: emojis,
+          _reactionSenderId: senderId,
         });
       }
     }

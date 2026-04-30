@@ -29,6 +29,20 @@ use crate::types::{
 const MAX_DETECTED_LINKS: usize = 3;
 const EXTENSION_ENRICH_TIMEOUT: Duration = Duration::from_millis(750);
 
+pub struct LaunchInvocationRequest<'a> {
+    pub plugin_name: &'a str,
+    pub action_id: &'a str,
+    pub launch_id: LaunchId,
+    pub context: LaunchContext,
+    pub requester: WaddleId,
+    pub session_id: Option<CommandSessionId>,
+    pub action: Option<CommandAction>,
+    pub fields: Vec<crate::types::FormFieldValue>,
+    pub form: Option<crate::types::DataForm>,
+    pub expires_at: Option<crate::types::Timestamp>,
+    pub launch_token: &'a str,
+}
+
 #[derive(Debug, Error)]
 enum EffectiveModuleConfigError {
     #[error("extension {extension} config_secret_files requires config to be a JSON object")]
@@ -232,18 +246,21 @@ impl ExtensionManager {
 
     pub async fn invoke_launch(
         &self,
-        plugin_name: &str,
-        action_id: &str,
-        launch_id: LaunchId,
-        context: LaunchContext,
-        requester: WaddleId,
-        session_id: Option<CommandSessionId>,
-        action: Option<CommandAction>,
-        fields: Vec<crate::types::FormFieldValue>,
-        form: Option<crate::types::DataForm>,
-        expires_at: Option<crate::types::Timestamp>,
-        launch_token: &str,
+        request: LaunchInvocationRequest<'_>,
     ) -> Vec<ExtensionEffect> {
+        let LaunchInvocationRequest {
+            plugin_name,
+            action_id,
+            launch_id,
+            context,
+            requester,
+            session_id,
+            action,
+            fields,
+            form,
+            expires_at,
+            launch_token,
+        } = request;
         let Ok(plugin_id) = PluginId::new(plugin_name.to_string()) else {
             return Vec::new();
         };

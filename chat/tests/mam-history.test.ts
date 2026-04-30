@@ -92,6 +92,7 @@ describe("MAM history parsing", () => {
             from: "room@muc.example.com/Bob",
             to: "room@muc.example.com",
             type: "groupchat",
+            muc: { item: { jid: "bob@example.com/mobile" } },
             reactions: { id: "msg-1", items: ["👍"] },
           },
         },
@@ -131,6 +132,7 @@ describe("MAM history parsing", () => {
     expect(results[0].id).toBe("msg-1");
     expect(results[1]._reactionTarget).toBe("msg-1");
     expect(results[1]._reactionEmojis).toEqual(["👍"]);
+    expect(results[1]._reactionSenderId).toBe("bob@example.com");
     expect(results[2].id).toBe("edit-1");
     expect(results[2].replacesId).toBe("msg-1");
     expect(results[3].id).toBe("retract-1");
@@ -409,6 +411,7 @@ describe("MAM history application", () => {
           type: "subject",
           _reactionTarget: "msg-1",
           _reactionEmojis: ["👍"],
+          _reactionSenderId: "alice@example.com",
         },
         {
           id: "retract-1",
@@ -498,6 +501,91 @@ describe("MAM history application", () => {
     expect(messaging.messages.value).toHaveLength(1);
     expect(messaging.messages.value[0].id).toBe("stable-msg-1");
     expect(messaging.messages.value[0].reactions).toBeUndefined();
+  });
+
+  test("archived room reactions replace a sender's previous reaction set", async () => {
+    const session = ref({
+      username: "alice",
+      jid: "alice@example.com/desktop",
+      domain: "example.com",
+    } as never);
+    const xmppClient = ref({
+      ...handlerStubs(),
+      queryMam: mock(async () => [
+        {
+          id: "msg-1",
+          reactionTargetId: "msg-1",
+          roomJid: "general@muc.example.com",
+          nick: "bob",
+          body: "hello",
+          createdAt: "2024-01-01T00:00:00Z",
+          type: "message",
+        },
+        {
+          id: "reaction-1",
+          roomJid: "general@muc.example.com",
+          nick: "alice",
+          body: "",
+          createdAt: "2024-01-01T00:01:00Z",
+          type: "subject",
+          _reactionTarget: "msg-1",
+          _reactionEmojis: ["👍"],
+          _reactionSenderId: "alice@example.com",
+        },
+        {
+          id: "reaction-2",
+          roomJid: "general@muc.example.com",
+          nick: "alice",
+          body: "",
+          createdAt: "2024-01-01T00:02:00Z",
+          type: "subject",
+          _reactionTarget: "msg-1",
+          _reactionEmojis: ["🔥"],
+          _reactionSenderId: "alice@example.com",
+        },
+        {
+          id: "reaction-3",
+          roomJid: "general@muc.example.com",
+          nick: "alice",
+          body: "",
+          createdAt: "2024-01-01T00:03:00Z",
+          type: "subject",
+          _reactionTarget: "msg-1",
+          _reactionEmojis: [],
+          _reactionSenderId: "alice@example.com",
+        },
+        {
+          id: "reaction-4",
+          roomJid: "general@muc.example.com",
+          nick: "alice",
+          body: "",
+          createdAt: "2024-01-01T00:04:00Z",
+          type: "subject",
+          _reactionTarget: "msg-1",
+          _reactionEmojis: ["👀"],
+          _reactionSenderId: "other-alice@example.com",
+        },
+      ]),
+    } as never);
+    const actionError = ref("");
+    const messaging = useMessaging(
+      session,
+      ref(null),
+      xmppClient,
+      ref("w1"),
+      ref("c1"),
+      ref({ id: "c1", name: "general", channel_type: "text" }),
+      String,
+      actionError,
+      () => {
+        actionError.value = "";
+      },
+    );
+
+    await messaging.loadMessages("w1", "c1");
+
+    expect(messaging.messages.value).toHaveLength(1);
+    expect(messaging.messages.value[0].reactions).toEqual({ "👀": ["alice"] });
   });
 
   test("applies archived DM updates onto the original timeline message", async () => {
@@ -608,6 +696,8 @@ describe("MAM history application", () => {
     messaging.messages.value = [{
       id: "msg-1",
       author: "bob",
+      authorJid: "c1@muc.example.com/bob",
+      authorOccupantJid: "c1@muc.example.com/bob",
       body: "hello",
       createdAt: "2024-01-01T00:00:00Z",
       isSelf: false,
@@ -627,6 +717,205 @@ describe("MAM history application", () => {
     expect(messaging.messages.value[0].body).toBe("hello, edited");
     expect(messaging.messages.value[0].isEdited).toBe(true);
     expect(messaging.messages.value[0].extensionAnnotations).toBeUndefined();
+  });
+
+  test("live room reactions replace legacy reaction state for the same sender", async () => {
+    const session = ref({
+      username: "alice",
+      jid: "alice@example.com/desktop",
+      domain: "example.com",
+    } as never);
+    let onReaction: ((event: {
+      roomJid: string;
+      nick: string;
+      messageId: string;
+      emojis: string[];
+      authorRealJid?: string;
+    }) => void) | null = null;
+    const xmppClient = ref(null as never);
+    const actionError = ref("");
+    const messaging = useMessaging(
+      session,
+      ref(null),
+      xmppClient,
+      ref("w1"),
+      ref("c1"),
+      ref({ id: "c1", name: "general", channel_type: "text" }),
+      String,
+      actionError,
+      () => {
+        actionError.value = "";
+      },
+    );
+
+    xmppClient.value = {
+      ...handlerStubs(),
+      queryMam: mock(async () => []),
+      setReactionHandler(handler: typeof onReaction) {
+        onReaction = handler;
+      },
+    } as never;
+    await nextTick();
+
+    messaging.messages.value = [{
+      id: "msg-1",
+      reactionTargetId: "msg-1",
+      author: "bob",
+      authorJid: "c1@muc.example.com/bob",
+      authorOccupantJid: "c1@muc.example.com/bob",
+      body: "hello",
+      createdAt: "2024-01-01T00:00:00Z",
+      isSelf: false,
+      reactions: { "👍": ["alice"], "✅": ["carol"] },
+    }];
+
+    onReaction?.({
+      roomJid: "c1@muc.example.com",
+      nick: "alice",
+      messageId: "msg-1",
+      emojis: ["🔥"],
+      authorRealJid: "alice@example.com",
+    });
+
+    expect(messaging.messages.value[0].reactions).toEqual({ "✅": ["carol"], "🔥": ["alice"] });
+    expect(messaging.messages.value[0].reactionSenders).toEqual({
+      "✅": { carol: "carol" },
+      "🔥": { "alice@example.com": "alice" },
+    });
+  });
+
+  test("live room reactions replace occupant-key reactions after real JID becomes known", async () => {
+    const session = ref({
+      username: "alice",
+      jid: "alice@example.com/desktop",
+      domain: "example.com",
+    } as never);
+    let onReaction: ((event: {
+      roomJid: string;
+      nick: string;
+      messageId: string;
+      emojis: string[];
+      authorRealJid?: string;
+    }) => void) | null = null;
+    const xmppClient = ref(null as never);
+    const actionError = ref("");
+    const messaging = useMessaging(
+      session,
+      ref(null),
+      xmppClient,
+      ref("w1"),
+      ref("c1"),
+      ref({ id: "c1", name: "general", channel_type: "text" }),
+      String,
+      actionError,
+      () => {
+        actionError.value = "";
+      },
+    );
+
+    xmppClient.value = {
+      ...handlerStubs(),
+      queryMam: mock(async () => []),
+      setReactionHandler(handler: typeof onReaction) {
+        onReaction = handler;
+      },
+    } as never;
+    await nextTick();
+
+    messaging.messages.value = [{
+      id: "msg-1",
+      reactionTargetId: "msg-1",
+      author: "bob",
+      authorJid: "c1@muc.example.com/bob",
+      authorOccupantJid: "c1@muc.example.com/bob",
+      body: "hello",
+      createdAt: "2024-01-01T00:00:00Z",
+      isSelf: false,
+      reactions: { "👍": ["alice"] },
+      reactionSenders: { "👍": { "c1@muc.example.com/alice": "alice" } },
+    }];
+
+    onReaction?.({
+      roomJid: "c1@muc.example.com",
+      nick: "alice",
+      messageId: "msg-1",
+      emojis: ["🔥"],
+      authorRealJid: "alice@example.com",
+    });
+
+    expect(messaging.messages.value[0].reactions).toEqual({ "🔥": ["alice"] });
+    expect(messaging.messages.value[0].reactionSenders).toEqual({
+      "🔥": { "alice@example.com": "alice" },
+    });
+  });
+
+  test("live room reactions preserve distinct real JID senders with the same nick", async () => {
+    const session = ref({
+      username: "alice",
+      jid: "alice@example.com/desktop",
+      domain: "example.com",
+    } as never);
+    let onReaction: ((event: {
+      roomJid: string;
+      nick: string;
+      messageId: string;
+      emojis: string[];
+      authorRealJid?: string;
+    }) => void) | null = null;
+    const xmppClient = ref(null as never);
+    const actionError = ref("");
+    const messaging = useMessaging(
+      session,
+      ref(null),
+      xmppClient,
+      ref("w1"),
+      ref("c1"),
+      ref({ id: "c1", name: "general", channel_type: "text" }),
+      String,
+      actionError,
+      () => {
+        actionError.value = "";
+      },
+    );
+
+    xmppClient.value = {
+      ...handlerStubs(),
+      queryMam: mock(async () => []),
+      setReactionHandler(handler: typeof onReaction) {
+        onReaction = handler;
+      },
+    } as never;
+    await nextTick();
+
+    messaging.messages.value = [{
+      id: "msg-1",
+      reactionTargetId: "msg-1",
+      author: "bob",
+      authorJid: "c1@muc.example.com/bob",
+      authorOccupantJid: "c1@muc.example.com/bob",
+      body: "hello",
+      createdAt: "2024-01-01T00:00:00Z",
+      isSelf: false,
+      reactions: { "👀": ["alice"] },
+      reactionSenders: { "👀": { "other-alice@example.com": "alice" } },
+    }];
+
+    onReaction?.({
+      roomJid: "c1@muc.example.com",
+      nick: "alice",
+      messageId: "msg-1",
+      emojis: ["🔥"],
+      authorRealJid: "alice@example.com",
+    });
+
+    expect(messaging.messages.value[0].reactions).toEqual({
+      "👀": ["alice"],
+      "🔥": ["alice"],
+    });
+    expect(messaging.messages.value[0].reactionSenders).toEqual({
+      "👀": { "other-alice@example.com": "alice" },
+      "🔥": { "alice@example.com": "alice" },
+    });
   });
 
   test("clears DM extension annotations when a live correction omits them", () => {
@@ -719,6 +1008,64 @@ describe("MAM history application", () => {
     expect(messaging.messages.value).toHaveLength(1);
     expect(messaging.messages.value[0].id).toBe("stable-msg-1");
     expect(messaging.messages.value[0].reactions).toEqual({ "🔥": ["bob"] });
+  });
+
+  test("archived DM reactions replace a sender's previous reaction set", async () => {
+    const session = ref({
+      username: "alice",
+      jid: "alice@example.com/desktop",
+    } as never);
+    const xmppClient = ref({
+      queryPersonalMam: mock(async () => [
+        {
+          id: "msg-1",
+          peerJid: "bob@example.com",
+          fromJid: "bob@example.com",
+          nick: "bob",
+          body: "hey",
+          createdAt: "2024-01-01T00:00:00Z",
+          type: "message",
+        },
+        {
+          id: "reaction-1",
+          peerJid: "bob@example.com",
+          fromJid: "bob@example.com",
+          nick: "bob",
+          body: "",
+          createdAt: "2024-01-01T00:01:00Z",
+          type: "message",
+          _reactionTarget: "msg-1",
+          _reactionEmojis: ["🔥"],
+        },
+        {
+          id: "reaction-2",
+          peerJid: "bob@example.com",
+          fromJid: "bob@example.com",
+          nick: "bob",
+          body: "",
+          createdAt: "2024-01-01T00:02:00Z",
+          type: "message",
+          _reactionTarget: "msg-1",
+          _reactionEmojis: ["🎉"],
+        },
+      ]),
+    } as never);
+    const actionError = ref("");
+    const messaging = useDmMessaging(
+      session,
+      xmppClient,
+      ref("bob@example.com"),
+      String,
+      actionError,
+      () => {
+        actionError.value = "";
+      },
+    );
+
+    await messaging.loadMessages("bob@example.com");
+
+    expect(messaging.messages.value).toHaveLength(1);
+    expect(messaging.messages.value[0].reactions).toEqual({ "🎉": ["bob"] });
   });
 
 });

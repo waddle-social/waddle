@@ -30,9 +30,6 @@ let _gitopsWaddleServerInputs = [
 	"../infrastructure/waddle.cloud/gitops/waddle-server/**",
 	"../infrastructure/waddle.cloud/gitops/waddle-server-source.yaml",
 	"../infrastructure/waddle.cloud/gitops/kustomization-infra-waddle-server.yaml",
-	"infrastructure/waddle.cloud/gitops/waddle-server/**",
-	"infrastructure/waddle.cloud/gitops/waddle-server-source.yaml",
-	"infrastructure/waddle.cloud/gitops/kustomization-infra-waddle-server.yaml",
 ]
 
 schema.#Project & {
@@ -53,10 +50,35 @@ schema.#Project & {
 				id:       "nix.install"
 				label:    "Install Nix"
 				priority: 0
-				provider: github: uses: "DeterminateSystems/determinate-nix-action@v3"
+				provider: github: uses: "DeterminateSystems/determinate-nix-action@f4c468f2287f0f14a113841b41f2dc8957119519"
 			}]
 		},
-		c.#CuenvRelease,
+		schema.#Contributor & {
+			id: "cuenv"
+			tasks: [{
+				id:       "cuenv.setup"
+				label:    "Setup cuenv (pinned release)"
+				priority: 10
+				script: """
+					arch="$(uname -m)"
+					case "$arch" in
+					  x86_64|amd64)
+					    cuenv_asset="cuenv-linux-x64"
+					    cuenv_sha256="1bdcea6505d4ededee6fd416e7b5dc071e93db6fc91baaaf680e92f175743312"
+					    ;;
+					  aarch64|arm64)
+					    cuenv_asset="cuenv-linux-arm64"
+					    cuenv_sha256="6d56a2864434509270e59b931d97b77b416e5161d60f0928bdf14c25f54b897e"
+					    ;;
+					  *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
+					esac
+					curl -sSL -o /usr/local/bin/cuenv "https://github.com/cuenv/cuenv/releases/download/0.41.1/${cuenv_asset}"
+					echo "${cuenv_sha256}  /usr/local/bin/cuenv" | sha256sum -c -
+					chmod +x /usr/local/bin/cuenv
+					/usr/local/bin/cuenv sync -A
+					"""
+			}]
+		},
 		c.#OnePassword,
 		schema.#Contributor & {
 			id: "flakehub"
@@ -67,7 +89,7 @@ schema.#Project & {
 					label:    "Checkout tag"
 					priority: 1
 					provider: github: {
-						uses: "actions/checkout@v6"
+						uses: "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd"
 						with: {
 							"persist-credentials": false
 							ref:                   "${{ (inputs.tag != null) && format('refs/tags/{0}', inputs.tag) || '' }}"
@@ -79,7 +101,7 @@ schema.#Project & {
 					label:    "Setup Determinate Nix"
 					priority: 2
 					dependsOn: ["checkout.tag"]
-					provider: github: uses: "DeterminateSystems/determinate-nix-action@v3"
+					provider: github: uses: "DeterminateSystems/determinate-nix-action@f4c468f2287f0f14a113841b41f2dc8957119519"
 				},
 				{
 					id:       "push"
@@ -87,7 +109,7 @@ schema.#Project & {
 					priority: 3
 					dependsOn: ["determinate-nix"]
 					provider: github: {
-						uses: "DeterminateSystems/flakehub-push@main"
+						uses: "DeterminateSystems/flakehub-push@a225170f3ab20a9d93dbb4424090ef0523ca7425"
 						with: {
 							visibility:             "public"
 							name:                   "waddle-social/waddle"
@@ -110,7 +132,10 @@ schema.#Project & {
 			}
 			derivePaths: false
 			provider: github: {
-				permissions: packages: "write"
+				permissions: {
+					packages:        "write"
+					"pull-requests": "none"
+				}
 				runners: arch: {
 					amd64: "ubuntu-latest"
 				}
@@ -135,14 +160,22 @@ schema.#Project & {
 				}
 			}
 			provider: github: permissions: {
-				"id-token": "write"
-				contents:   "read"
+				"id-token":      "write"
+				contents:        "read"
+				"pull-requests": "none"
 			}
 			tasks: [_t.flakehubPublished]
 		}
 		pullRequest: {
 			when: {
 				pullRequest: true
+			}
+			derivePaths: false
+			provider: github: permissions: {
+				contents:        "read"
+				checks:          "write"
+				packages:        "read"
+				"pull-requests": "none"
 			}
 			tasks: [_t.checkCiDrift, _t.fmt, _t.clippy, _t.test, _t.renderDeployment, _t.buildExtensionModules, _t.buildCi]
 		}
@@ -152,6 +185,12 @@ schema.#Project & {
 				defaultBranch: true
 				pullRequest:   true
 				manual:        true
+			}
+			provider: github: permissions: {
+				contents:        "read"
+				checks:          "write"
+				packages:        "read"
+				"pull-requests": "none"
 			}
 			tasks: [
 				_t.xmppUnitTests,
@@ -345,7 +384,7 @@ schema.#Project & {
 		publishContainerImage: schema.#Task & {
 			command: "bash"
 			env: {
-				GITHUB_TOKEN:    schema.#EnvPassthrough
+				GITHUB_TOKEN:    "${{ secrets.GITHUB_TOKEN }}"
 				GITHUB_ACTOR:    "${{ github.actor }}"
 				GITHUB_REF_TYPE: "${{ github.ref_type }}"
 				GITHUB_REF_NAME: "${{ github.ref_name }}"

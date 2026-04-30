@@ -256,7 +256,10 @@ fn launch(
             vec![
                 ("game-id", GAME_ID.to_string()),
                 ("question-id", QUESTION_ID.to_string()),
-                ("choice-id", id.strip_prefix("answer-").unwrap_or(id).to_string()),
+                (
+                    "choice-id",
+                    id.strip_prefix("answer-").unwrap_or(id).to_string(),
+                ),
             ],
             label,
         )],

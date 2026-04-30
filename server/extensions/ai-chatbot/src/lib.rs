@@ -51,11 +51,7 @@ impl exports::waddle::extension::framework::Guest for AiChatbot {
                     .and_then(|field| field.values.first())
                     .map(|value| value.value.as_str())
                     .unwrap_or("Ask me from chat with /ask.");
-                vec![visible_message(answer(
-                    prompt,
-                    command.waddle_id,
-                    None,
-                ))]
+                vec![visible_message(answer(prompt, command.waddle_id, None))]
             }
             types::ExtensionEvent::Launch(launch) => {
                 let prompt = field_value(&launch.fields, "payload#assistant-followup#question")
