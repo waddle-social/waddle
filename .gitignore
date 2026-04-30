@@ -28,6 +28,10 @@ node_modules
 
 # Nix
 result
+
+# Rust
+/target/
+
 dist/
 build/
 coverage/
