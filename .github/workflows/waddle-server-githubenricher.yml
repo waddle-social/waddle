@@ -9,9 +9,8 @@ on:
     paths:
     - .github/workflows/waddle-server-githubenricher.yml
     - cue.mod/**
-    - server/Cargo.lock
+    - server/**
     - server/env.cue
-    - server/extensions/github-enricher/**
     - server/schema/**
   workflow_dispatch: {}
 concurrency:
@@ -24,40 +23,8 @@ permissions:
   packages: write
   id-token: write
 jobs:
-  buildGithubEnricher:
-    name: buildGithubEnricher
-    runs-on: namespace-profile-linux-x86
-    steps:
-    - name: Checkout
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 2
-    - name: Install Determinate Nix
-      uses: DeterminateSystems/determinate-nix-action@v3
-      with:
-        extra-conf: accept-flake-config = true
-    - name: Setup FlakeHub Cache
-      uses: DeterminateSystems/flakehub-cache-action@v3
-      with:
-        flakehub-flake-name: waddle-social/waddle
-        use-gha-cache: disabled
-    - name: buildGithubEnricher
-      run: nix develop -L --accept-flake-config .. -c cargo build --release --target wasm32-wasip2 --target-dir target --manifest-path extensions/github-enricher/Cargo.toml
-      working-directory: server
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        GITHUB_ACTOR: ${{ github.actor }}
-        GITHUB_REF_TYPE: ${{ github.ref_type }}
-        GITHUB_REF_NAME: ${{ github.ref_name }}
-    - name: Upload artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: buildGithubEnricher-artifacts
-        path: target/wasm32-wasip2/release/github_enricher.wasm
-        if-no-files-found: ignore
-        include-hidden-files: true
-  pinGithubEnricherTag:
-    name: pinGithubEnricherTag
+  pushGithubEnricherGitops:
+    name: pushGithubEnricherGitops
     runs-on: namespace-profile-linux-x86
     needs:
     - pushGithubEnricherOci
@@ -75,35 +42,8 @@ jobs:
       with:
         flakehub-flake-name: waddle-social/waddle
         use-gha-cache: disabled
-    - name: pinGithubEnricherTag
-      run: "nix develop -L --accept-flake-config .. -c bash -c '\n\tset -euo pipefail\n\tFULL_SHA=\"$(git rev-parse HEAD)\"\n\tyq -i \"(.spec.values.extensions.modules[] | select(.name == \\\"github-enricher\\\") | .tag) = \\\"sha-${FULL_SHA}\\\"\" ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml\n\tyq -e \".spec.values.extensions.modules[] | select(.name == \\\"github-enricher\\\") | .tag == \\\"sha-${FULL_SHA}\\\"\" ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml > /dev/null\n'"
-      working-directory: server
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        GITHUB_ACTOR: ${{ github.actor }}
-        GITHUB_REF_TYPE: ${{ github.ref_type }}
-        GITHUB_REF_NAME: ${{ github.ref_name }}
-  pushGithubEnricherGitops:
-    name: pushGithubEnricherGitops
-    runs-on: namespace-profile-linux-x86
-    needs:
-    - pinGithubEnricherTag
-    steps:
-    - name: Checkout
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 2
-    - name: Install Determinate Nix
-      uses: DeterminateSystems/determinate-nix-action@v3
-      with:
-        extra-conf: accept-flake-config = true
-    - name: Setup FlakeHub Cache
-      uses: DeterminateSystems/flakehub-cache-action@v3
-      with:
-        flakehub-flake-name: waddle-social/waddle
-        use-gha-cache: disabled
     - name: pushGithubEnricherGitops
-      run: "nix develop -L --accept-flake-config .. -c bash -c '\nset -euo pipefail\n\techo \"${GITHUB_TOKEN}\" | docker login ghcr.io --username \"${GITHUB_ACTOR}\" --password-stdin\n\tflux push artifact \\\n\t  oci://ghcr.io/waddle-social/waddle/gitops-waddle-server:latest \\\n\t  --path=../infrastructure/waddle.cloud/gitops/waddle-server \\\n\t  --source=\"$(git config --get remote.origin.url)\" \\\n\t  --revision=\"$(git rev-parse --short HEAD)\"\n'"
+      run: "nix develop -L --accept-flake-config .. -c bash -c '\nset -euo pipefail\n\tFULL_SHA=\"$(git rev-parse HEAD)\"\n\tyq -i \"(.spec.values.extensions.modules[] | select(.name == \\\"github-enricher\\\") | .tag) = \\\"sha-${FULL_SHA}\\\"\" ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml\n\tyq -e \".spec.values.extensions.modules[] | select(.name == \\\"github-enricher\\\") | .tag == \\\"sha-${FULL_SHA}\\\"\" ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml > /dev/null\n\techo \"${GITHUB_TOKEN}\" | docker login ghcr.io --username \"${GITHUB_ACTOR}\" --password-stdin\n\tflux push artifact \\\n\t  oci://ghcr.io/waddle-social/waddle/gitops-waddle-server:latest \\\n\t  --path=../infrastructure/waddle.cloud/gitops/waddle-server \\\n\t  --source=\"$(git config --get remote.origin.url)\" \\\n\t  --revision=\"$(git rev-parse --short HEAD)\"\n'"
       working-directory: server
       env:
         GITHUB_ACTOR: ${{ github.actor }}
@@ -113,8 +53,6 @@ jobs:
   pushGithubEnricherOci:
     name: pushGithubEnricherOci
     runs-on: namespace-profile-linux-x86
-    needs:
-    - buildGithubEnricher
     steps:
     - name: Checkout
       uses: actions/checkout@v4
@@ -130,7 +68,7 @@ jobs:
         flakehub-flake-name: waddle-social/waddle
         use-gha-cache: disabled
     - name: pushGithubEnricherOci
-      run: "nix develop -L --accept-flake-config .. -c bash -c '\n\tset -euo pipefail\n\tWASM_FILE=\"target/wasm32-wasip2/release/github_enricher.wasm\"\n\tIMAGE=\"ghcr.io/waddle-social/waddle/extensions/github-enricher\"\n\techo \"${GITHUB_TOKEN}\" | oras login ghcr.io -u \"${GITHUB_ACTOR}\" --password-stdin\n\tFULL_SHA=\"$(git rev-parse HEAD)\"\n\toras push \"${IMAGE}:sha-${FULL_SHA}\" \\\n\t  --artifact-type application/vnd.waddle.extension.wasm.v1+wasm \\\n\t  \"${WASM_FILE}:application/wasm\"\n\toras push \"${IMAGE}:main\" \\\n\t  --artifact-type application/vnd.waddle.extension.wasm.v1+wasm \\\n\t  \"${WASM_FILE}:application/wasm\"\n\toras push \"${IMAGE}:latest\" \\\n\t  --artifact-type application/vnd.waddle.extension.wasm.v1+wasm \\\n\t  \"${WASM_FILE}:application/wasm\"\n'"
+      run: "nix develop -L --accept-flake-config .. -c bash -c '\n\tset -euo pipefail\n\tcargo build --release --target wasm32-wasip2 --target-dir ../target --manifest-path extensions/github-enricher/Cargo.toml\n\tWASM_FILE=\"../target/wasm32-wasip2/release/github_enricher.wasm\"\n\tIMAGE=\"ghcr.io/waddle-social/waddle/extensions/github-enricher\"\n\techo \"${GITHUB_TOKEN}\" | oras login ghcr.io -u \"${GITHUB_ACTOR}\" --password-stdin\n\tFULL_SHA=\"$(git rev-parse HEAD)\"\n\toras push \"${IMAGE}:sha-${FULL_SHA}\" \\\n\t  --artifact-type application/vnd.waddle.extension.wasm.v1+wasm \\\n\t  \"${WASM_FILE}:application/wasm\"\n\toras push \"${IMAGE}:main\" \\\n\t  --artifact-type application/vnd.waddle.extension.wasm.v1+wasm \\\n\t  \"${WASM_FILE}:application/wasm\"\n\toras push \"${IMAGE}:latest\" \\\n\t  --artifact-type application/vnd.waddle.extension.wasm.v1+wasm \\\n\t  \"${WASM_FILE}:application/wasm\"\n'"
       working-directory: server
       env:
         GITHUB_ACTOR: ${{ github.actor }}

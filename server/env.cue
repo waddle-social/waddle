@@ -144,9 +144,12 @@ schema.#Project & {
 				defaultBranch: true
 				manual:        true
 			}
-			provider: github: permissions: "id-token": "write"
+			provider: github: permissions: {
+				packages:   "write"
+				"id-token": "write"
+			}
 			derivePaths: true
-			tasks: [_t.buildGithubEnricher, _t.pushGithubEnricherOci, _t.pinGithubEnricherTag, _t.pushGithubEnricherGitops]
+			tasks: [_t.pushGithubEnricherOci, _t.pushGithubEnricherGitops]
 		}
 		githubEnricherPullRequest: {
 			mode: "expanded"
@@ -394,7 +397,7 @@ schema.#Project & {
 				"build",
 				"--release",
 				"--target", "wasm32-wasip2",
-				"--target-dir", "target",
+				"--target-dir", "../target",
 				"--manifest-path", "extensions/github-enricher/Cargo.toml",
 			]
 			inputs: ["extensions/github-enricher/**", "Cargo.lock"]
@@ -410,7 +413,8 @@ schema.#Project & {
 			args: ["develop", "-L", "--accept-flake-config", "..", "-c", "bash", "-c", #"""
 				'
 					set -euo pipefail
-					WASM_FILE="target/wasm32-wasip2/release/github_enricher.wasm"
+					cargo build --release --target wasm32-wasip2 --target-dir ../target --manifest-path extensions/github-enricher/Cargo.toml
+					WASM_FILE="../target/wasm32-wasip2/release/github_enricher.wasm"
 					IMAGE="ghcr.io/waddle-social/waddle/extensions/github-enricher"
 					echo "${GITHUB_TOKEN}" | oras login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
 					FULL_SHA="$(git rev-parse HEAD)"
@@ -425,20 +429,6 @@ schema.#Project & {
 					  "${WASM_FILE}:application/wasm"
 				'
 				"""#]
-			dependsOn: [tasks.buildGithubEnricher]
-		}
-
-		pinGithubEnricherTag: schema.#Task & {
-			command: "nix"
-			args: ["develop", "-L", "--accept-flake-config", "..", "-c", "bash", "-c", #"""
-				'
-					set -euo pipefail
-					FULL_SHA="$(git rev-parse HEAD)"
-					yq -i "(.spec.values.extensions.modules[] | select(.name == \"github-enricher\") | .tag) = \"sha-${FULL_SHA}\"" ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml
-					yq -e ".spec.values.extensions.modules[] | select(.name == \"github-enricher\") | .tag == \"sha-${FULL_SHA}\"" ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml > /dev/null
-				'
-				"""#]
-			dependsOn: [tasks.pushGithubEnricherOci]
 		}
 
 		pushGithubEnricherGitops: schema.#Task & {
@@ -450,6 +440,9 @@ schema.#Project & {
 			args: ["develop", "-L", "--accept-flake-config", "..", "-c", "bash", "-c", #"""
 				'
 				set -euo pipefail
+					FULL_SHA="$(git rev-parse HEAD)"
+					yq -i "(.spec.values.extensions.modules[] | select(.name == \"github-enricher\") | .tag) = \"sha-${FULL_SHA}\"" ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml
+					yq -e ".spec.values.extensions.modules[] | select(.name == \"github-enricher\") | .tag == \"sha-${FULL_SHA}\"" ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml > /dev/null
 					echo "${GITHUB_TOKEN}" | docker login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
 					flux push artifact \
 					  oci://ghcr.io/waddle-social/waddle/gitops-waddle-server:latest \
@@ -458,7 +451,7 @@ schema.#Project & {
 					  --revision="$(git rev-parse --short HEAD)"
 				'
 				"""#]
-			dependsOn: [tasks.pinGithubEnricherTag]
+			dependsOn: [tasks.pushGithubEnricherOci]
 		}
 	}
 
