@@ -50,6 +50,7 @@ import {
   invokeExtensionLaunch,
   submitExtensionCommandForm,
   type DiscoveredExtensionCommand,
+  type ExtensionCommandAction,
   type ExtensionCommandFormField,
   type ExtensionCommandResult,
 } from "./extension-commands";
@@ -1103,9 +1104,10 @@ export class BrowserXmppClient {
     command: DiscoveredExtensionCommand,
     sessionId: string,
     fields: ExtensionCommandFormField[],
+    action?: ExtensionCommandAction,
   ): Promise<ExtensionCommandResult> {
     const xmpp = await this.requireConnectedXmpp();
-    return submitExtensionCommandForm(xmpp, command, sessionId, fields);
+    return submitExtensionCommandForm(xmpp, command, sessionId, fields, action);
   }
 
   async enablePushNotifications(opts: {

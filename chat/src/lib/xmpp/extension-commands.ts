@@ -14,17 +14,34 @@ export interface ExtensionCommandNote {
 export interface ExtensionCommandResult {
   status?: string;
   sessionId?: string;
+  actions?: ExtensionCommandActions;
   notes: ExtensionCommandNote[];
   form?: unknown;
+}
+
+export type ExtensionCommandAction = "next" | "prev" | "complete" | "cancel";
+
+export interface ExtensionCommandActions {
+  execute?: ExtensionCommandAction;
+  allowed: ExtensionCommandAction[];
+}
+
+export interface ExtensionCommandFormOption {
+  label: string;
+  value: string;
 }
 
 export interface ExtensionCommandFormField {
   name: string;
   label: string;
   type: string;
+  description?: string;
   value: string;
   values: string[];
+  options: ExtensionCommandFormOption[];
   required: boolean;
+  blocked: boolean;
+  hidden: boolean;
 }
 
 export interface DiscoveredExtensionCommand {
@@ -43,7 +60,7 @@ interface ExtensionCommandOutcome {
 interface DataFormField {
   name: string;
   type?: string;
-  value: string;
+  value: string | string[] | boolean;
 }
 
 interface ExtensionInvokeIq {
@@ -51,8 +68,8 @@ interface ExtensionInvokeIq {
   to: string;
   command: {
     node: string;
-    action: "execute";
-    form: {
+    action: "execute" | ExtensionCommandAction;
+    form?: {
       type: "submit";
       fields: DataFormField[];
     };
@@ -132,23 +149,25 @@ function buildExtensionCommandExecuteIq(serviceJid: string, node: string): Exten
     command: {
       node,
       action: "execute",
-      form: {
-        type: "submit",
-        fields: [
-          { name: "FORM_TYPE", type: "hidden", value: NS_ADHOC_COMMANDS },
-        ],
-      },
     },
   };
 }
 
 export function parseExtensionCommandResult(response: unknown): ExtensionCommandResult {
-  const command = (response as { command?: { status?: unknown; sessionid?: unknown; sessionId?: unknown; notes?: Array<{ type?: unknown; value?: unknown }>; form?: unknown } } | undefined)?.command;
+  const command = (response as { command?: { status?: unknown; sid?: unknown; sessionid?: unknown; sessionId?: unknown; availableActions?: unknown; actions?: unknown; notes?: Array<{ type?: unknown; value?: unknown }>; form?: unknown } } | undefined)?.command;
   const notes = Array.isArray(command?.notes) ? command.notes : [];
+  const rawActions = command?.availableActions ?? command?.actions;
+  const actions = parseCommandActions(
+    rawActions,
+    typeof command?.status === "string" ? command.status : undefined,
+    rawActions !== undefined,
+  );
   return {
     ...(typeof command?.status === "string" && command.status ? { status: command.status } : {}),
+    ...(typeof command?.sid === "string" && command.sid ? { sessionId: command.sid } : {}),
     ...(typeof command?.sessionid === "string" && command.sessionid ? { sessionId: command.sessionid } : {}),
     ...(typeof command?.sessionId === "string" && command.sessionId ? { sessionId: command.sessionId } : {}),
+    ...(actions ? { actions } : {}),
     ...(command?.form ? { form: command.form } : {}),
     notes: notes
       .map((note) => ({
@@ -163,22 +182,60 @@ export function parseExtensionCommandForm(form: unknown): ExtensionCommandFormFi
   const fields = (form as { fields?: unknown[] } | undefined)?.fields;
   if (!Array.isArray(fields)) return [];
   return fields.flatMap((field) => {
-    const item = field as { name?: unknown; var?: unknown; label?: unknown; type?: unknown; value?: unknown; values?: unknown[]; required?: unknown };
+    const item = field as {
+      name?: unknown;
+      var?: unknown;
+      label?: unknown;
+      type?: unknown;
+      desc?: unknown;
+      description?: unknown;
+      value?: unknown;
+      values?: unknown[];
+      rawValues?: unknown[];
+      required?: unknown;
+      options?: unknown[];
+    };
     const name = typeof item.name === "string" ? item.name : typeof item.var === "string" ? item.var : "";
-    if (!name) return [];
-    const values = Array.isArray(item.values) ? item.values : item.value !== undefined ? [item.value] : [];
+    const type = typeof item.type === "string" ? item.type : "text-single";
+    if (!name && type !== "fixed") return [];
+    const values = Array.isArray(item.value)
+      ? item.value
+      : Array.isArray(item.values)
+        ? item.values
+        : Array.isArray(item.rawValues)
+          ? item.rawValues
+          : item.value !== undefined
+            ? [item.value]
+            : [];
     const stringValues = values
       .filter((value) => typeof value === "string" || typeof value === "number" || typeof value === "boolean")
       .map((value) => String(value));
+    const fieldValues = type === "boolean" && stringValues.length === 0 ? ["0"] : stringValues;
+    const fieldName = name || `fixed:${fieldValues.join("\n")}`;
     return [{
-      name,
-      label: typeof item.label === "string" && item.label ? item.label : name,
-      type: typeof item.type === "string" ? item.type : "text-single",
-      value: stringValues[0] ?? "",
-      values: stringValues,
+      name: fieldName,
+      label: typeof item.label === "string" && item.label ? item.label : fieldName,
+      type,
+      ...(typeof item.desc === "string" && item.desc ? { description: item.desc } : {}),
+      ...(typeof item.description === "string" && item.description ? { description: item.description } : {}),
+      value: fieldValues[0] ?? "",
+      values: fieldValues,
+      options: parseFieldOptions(item.options),
       required: item.required === true,
+      blocked: isForbiddenExtensionCommandField(name, type),
+      hidden: type === "hidden",
     }];
   });
+}
+
+export function visibleExtensionCommandFields(fields: ExtensionCommandFormField[]): ExtensionCommandFormField[] {
+  return fields.filter((field) => !field.hidden);
+}
+
+export function extensionCommandFormBlockedReason(fields: ExtensionCommandFormField[]): string | undefined {
+  const blocked = fields.find((field) => field.blocked);
+  if (!blocked) return undefined;
+  return `Extension command form contains a forbidden field: ${blocked.label}.`;
 }
 
 export function parseExtensionCommandLaunches(form: unknown): ExtensionAnnotationAction[] {
@@ -255,6 +312,9 @@ export function extensionCommandOutcome(result: unknown): ExtensionCommandOutcom
 
   const status = parsed.status?.trim().toLowerCase();
   if (status === "executing") {
+    if (parsed.form && parseExtensionCommandForm(parsed.form).length > 0) {
+      return { state: "warning" };
+    }
     return { state: "warning", detail: "Extension returned a form that this client cannot complete yet." };
   }
   if (status && status !== "completed" && status !== "complete") {
@@ -314,23 +374,27 @@ export async function submitExtensionCommandForm(
   command: DiscoveredExtensionCommand,
   sessionId: string,
   fields: ExtensionCommandFormField[],
+  action: ExtensionCommandAction = "complete",
 ): Promise<ExtensionCommandResult> {
   const response = await xmpp.sendIQ({
     type: "set",
     to: command.serviceJid,
     command: {
       node: command.node,
-      sessionid: sessionId,
-      action: "complete",
-        form: {
-          type: "submit",
-          fields: fields.map((field) => ({
-            name: field.name,
-            type: field.type,
-            value: field.value,
-            values: field.values.length > 0 ? field.values : [field.value],
-          })),
-        },
+      sid: sessionId,
+      action,
+      ...(action === "cancel" || action === "prev" ? {} : {
+          form: {
+            type: "submit",
+            fields: fields
+              .filter((field) => field.type !== "fixed")
+              .map((field) => ({
+                name: field.name,
+                type: field.type,
+                value: dataFormFieldValue(field),
+              })),
+          },
+        }),
     },
   } as unknown as Parameters<Agent["sendIQ"]>[0]);
   return parseExtensionCommandResult(response);
@@ -353,6 +417,68 @@ export async function discoverExtensionCommands(
       node: item.node!,
       name: item.name || item.node!,
     }));
+}
+
+function parseFieldOptions(options: unknown): ExtensionCommandFormOption[] {
+  if (!Array.isArray(options)) return [];
+  return options.flatMap((option) => {
+    const item = option as { label?: unknown; value?: unknown; values?: unknown[] };
+    const rawValue = item.value ?? item.values?.[0];
+    if (typeof rawValue !== "string" && typeof rawValue !== "number" && typeof rawValue !== "boolean") return [];
+    const value = String(rawValue);
+    return [{
+      label: typeof item.label === "string" && item.label ? item.label : value,
+      value,
+    }];
+  });
+}
+
+function dataFormFieldValue(field: ExtensionCommandFormField): string | string[] | boolean {
+  if (field.type === "boolean") return field.value === "1" || field.value === "true";
+  if (field.type === "hidden" && field.values.length > 1) return field.values;
+  if (field.type === "list-multi" || field.type === "text-multi" || field.type === "jid-multi") {
+    return field.values.length > 0 ? field.values : [];
+  }
+  return field.value;
+}
+
+function parseCommandActions(actions: unknown, status?: string, actionsProvided = false): ExtensionCommandActions | undefined {
+  const value = (actions && typeof actions === "object" ? actions : {}) as {
+    execute?: unknown;
+    next?: unknown;
+    prev?: unknown;
+    previous?: unknown;
+    complete?: unknown;
+    cancel?: unknown;
+    allowed?: unknown[];
+  };
+  const allowed = new Set<ExtensionCommandAction>();
+  if (actions && typeof actions === "object") {
+    if (Array.isArray(value.allowed)) {
+      for (const action of value.allowed) {
+        if (isExtensionCommandAction(action)) allowed.add(action);
+      }
+    }
+    if (value.next !== undefined) allowed.add("next");
+    if (value.prev !== undefined || value.previous !== undefined) allowed.add("prev");
+    if (value.complete !== undefined) allowed.add("complete");
+    if (value.cancel !== undefined) allowed.add("cancel");
+  }
+  const execute = isExtensionCommandAction(value.execute) ? value.execute : undefined;
+  if (execute) allowed.add(execute);
+  if (status === "executing" && !actionsProvided) allowed.add("complete");
+  if (status === "executing") allowed.add("cancel");
+  const allowedList = [...allowed];
+  return allowedList.length > 0 || execute ? { ...(execute ? { execute } : {}), allowed: allowedList } : undefined;
+}
+
+function isExtensionCommandAction(value: unknown): value is ExtensionCommandAction {
+  return value === "next" || value === "prev" || value === "complete" || value === "cancel";
+}
+
+function isForbiddenExtensionCommandField(name: string, type: string): boolean {
+  if (type === "text-private") return true;
+  return /(?:^|[#:_-])(secret|token|password|api[_-]?key|apikey|credential)(?:$|[#:_-])/i.test(name);
 }
 
 async function discoverExtensionCommandService(xmpp: Agent, userJid: string): Promise<string> {

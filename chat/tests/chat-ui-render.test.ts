@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   extensionCardDetails,
+  extensionPresentation,
   inferredFileDisposition,
   isAudioFile,
   isImageFile,
@@ -145,5 +146,62 @@ describe("renderStyledBody", () => {
       { label: "Question", value: "Ship the extension framework this week?" },
       { label: "Option", value: "Yes" },
     ]);
+  });
+
+  test("renders decision poll extensions as member-facing poll presentations", () => {
+    const annotation: ExtensionAnnotation = {
+      extensionId: "decision-polls",
+      annotationId: "poll-1",
+      surfaceKind: "utility-panel",
+      title: "Ship it?",
+      summary: "urn:waddle:decision-polls:1",
+      payloadNamespace: "urn:waddle:decision-polls:1",
+      fields: {
+        payloadNamespace: "urn:waddle:decision-polls:1",
+      },
+      payloads: [{
+        namespace: "urn:waddle:decision-polls:1",
+        name: "poll",
+        attributes: {
+          xmlns: "urn:waddle:decision-polls:1",
+          status: "open",
+        },
+        children: [
+          {
+            namespace: "urn:waddle:decision-polls:1",
+            name: "question",
+            attributes: {},
+            text: "Ship it?",
+            children: [],
+          },
+          {
+            namespace: "urn:waddle:decision-polls:1",
+            name: "option",
+            attributes: { id: "yes", votes: "2" },
+            text: "Yes",
+            children: [],
+          },
+          {
+            namespace: "urn:waddle:decision-polls:1",
+            name: "option",
+            attributes: { id: "no", votes: "1" },
+            text: "No",
+            children: [],
+          },
+        ],
+      }],
+      actions: [],
+    };
+
+    expect(extensionPresentation(annotation)).toMatchObject({
+      kind: "decision-polls",
+      label: "Poll",
+      title: "Ship it?",
+      summary: "open",
+      options: [
+        { id: "yes", label: "Yes", value: 2 },
+        { id: "no", label: "No", value: 1 },
+      ],
+    });
   });
 });

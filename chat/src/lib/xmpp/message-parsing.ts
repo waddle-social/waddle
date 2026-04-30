@@ -10,6 +10,9 @@ import type {
   ExtensionLaunchDescriptor,
   ExtensionPayloadElement,
   ExtensionSurfaceKind,
+  ExtensionUiBlock,
+  ExtensionUiBlockKind,
+  ExtensionUiView,
   MessageReference,
 } from "@/lib/chat-ui";
 import type {
@@ -277,9 +280,11 @@ function extensionAnnotationsFromStanza(stanza: Record<string, unknown>): Extens
 function parseExtensionEnrichment(payload: ExtensionEnrichmentPayload): ExtensionAnnotation | null {
   if (!payload.id || !payload.plugin) return null;
   const plugin = payload.plugin;
-  const payloads = parsePayloadElements(payload.payload, payload.payloadNamespace);
+  const elements = parsePayloadElements(payload.payload, payload.payloadNamespace);
+  const views = parseExtensionUiViews(elements);
+  const payloads = elements.filter((element) => element.namespace !== FRAMEWORK_NAMESPACE);
   const source = parseExtensionSource(payload.source);
-  const surfaceKind = inferSurfaceKind(payload, payloads);
+  const surfaceKind = inferSurfaceKind(payload, elements);
   if (!surfaceKind) return null;
   const launches = asArray(payload.launches).flatMap((launch) =>
     parseExtensionLaunch(launch, plugin, source) ?? [],
@@ -298,6 +303,7 @@ function parseExtensionEnrichment(payload: ExtensionEnrichmentPayload): Extensio
     ...(payload.payloadNamespace ? { summary: payload.payloadNamespace } : {}),
     ...(source ? { source } : {}),
     ...(payload.payloadNamespace ? { payloadNamespace: payload.payloadNamespace } : {}),
+    ...(views.length > 0 ? { views } : {}),
     ...(payloads.length > 0 ? { payloads } : {}),
     fields: {
       ...(payload.capability ? { capability: payload.capability } : {}),
@@ -401,8 +407,7 @@ function parsePayloadElements(
   fallbackNamespace?: string,
 ): ExtensionPayloadElement[] {
   return asArray(payload?.elements)
-    .flatMap((element) => normalizePayloadElement(element, fallbackNamespace) ?? [])
-    .filter((element) => element.namespace !== FRAMEWORK_NAMESPACE);
+    .flatMap((element) => normalizePayloadElement(element, fallbackNamespace) ?? []);
 }
 
 function normalizePayloadElement(
@@ -430,6 +435,37 @@ function normalizePayloadElement(
     ...(text ? { text } : {}),
     children,
   };
+}
+
+function parseExtensionUiViews(elements: ExtensionPayloadElement[]): ExtensionUiView[] {
+  return elements
+    .filter((element) => element.namespace === FRAMEWORK_NAMESPACE && element.name === "view")
+    .map((element, index) => ({
+      id: element.attributes.id || `view-${index + 1}`,
+      ...(element.attributes.title ? { title: element.attributes.title } : {}),
+      blocks: element.children.map(parseExtensionUiBlock),
+    }));
+}
+
+function parseExtensionUiBlock(element: ExtensionPayloadElement): ExtensionUiBlock {
+  const kind = parseExtensionUiBlockKind(element.name);
+  return {
+    kind,
+    ...(element.attributes.id ? { id: element.attributes.id } : {}),
+    ...(element.attributes.title ? { title: element.attributes.title } : {}),
+    ...(element.attributes.label ? { label: element.attributes.label } : {}),
+    ...(element.attributes.description ? { description: element.attributes.description } : {}),
+    ...(element.attributes.style ? { style: element.attributes.style } : {}),
+    ...(element.attributes["launch-id"] ? { launchId: element.attributes["launch-id"] } : {}),
+    ...(element.text ? { text: element.text } : {}),
+    attributes: element.attributes,
+    children: element.children.map(parseExtensionUiBlock),
+  };
+}
+
+function parseExtensionUiBlockKind(name: string): ExtensionUiBlockKind {
+  if (name === "text" || name === "image" || name === "action" || name === "form" || name === "list") return name;
+  return "unknown";
 }
 
 function readablePayloadTitle(element: ExtensionPayloadElement): string {
