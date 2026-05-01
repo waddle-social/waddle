@@ -82,9 +82,11 @@ pub trait MamStorage: Send + Sync {
     ) -> Result<Option<ArchivedMessage>, MamStorageError>;
 
     /// Replace an archived message with a XEP-0424 / XEP-0425 tombstone in
-    /// place. Clears `body`, `stanza_xml`, `thread_id`, `reply_to_id`,
-    /// `reply_to_jid`, and overwrites `rich_payload` with the typed
-    /// `ArchivedRichPayload::Tombstone(...)` value.
+    /// place. Clears `body`, `stanza_xml`, `thread_id`, `parent_thread_id`,
+    /// `reply_to_id`, `reply_to_jid`, and overwrites `rich_payload` with
+    /// the typed `ArchivedRichPayload::Tombstone(...)` value, per
+    /// XEP-0424 §Tombstones / XEP-0425 §Tombstones: "any related
+    /// elements which might leak information about the original message".
     ///
     /// Looks up the row by `archive_id` (the storage primary key). Returns
     /// `Ok(true)` when a row was found and updated, `Ok(false)` when no row
@@ -323,9 +325,17 @@ fn apply_tombstone(
     tombstone: waddle_xmpp_core::mam::ArchivedTombstone,
 ) {
     use waddle_xmpp_core::mam::{ArchivedRichMessage, ArchivedRichPayload};
+    // XEP-0424 §Tombstones / XEP-0425 §Tombstones: replace the original
+    // contents — `<body/>` AND any related elements which might leak
+    // information about the original message — with a `<retracted/>`
+    // tombstone. The XEP-0201 `parent_thread_id` falls under that rule
+    // (it identifies the parent thread of the retracted message and so
+    // leaks the conversation tree the message participated in), and is
+    // scrubbed alongside `thread_id`/`reply_to_*`/`stanza_xml`/`body`.
     message.body.clear();
     message.stanza_xml = None;
     message.thread_id = None;
+    message.parent_thread_id = None;
     message.reply_to_id = None;
     message.reply_to_jid = None;
     message.rich = Some(ArchivedRichMessage {
@@ -1157,7 +1167,7 @@ impl MamStorage for SqlxMamStorage {
         let rows = match &self.backend {
             MamDatabaseBackend::Sqlite(pool) => {
                 let mut builder = QueryBuilder::<Sqlite>::new(
-                    "UPDATE mam_messages SET body = '', stanza_xml = NULL, thread_id = NULL, reply_to_id = NULL, reply_to_jid = NULL, rich_payload = ",
+                    "UPDATE mam_messages SET body = '', stanza_xml = NULL, thread_id = NULL, parent_thread_id = NULL, reply_to_id = NULL, reply_to_jid = NULL, rich_payload = ",
                 );
                 builder
                     .push_bind(encoded.as_str())
@@ -1167,7 +1177,7 @@ impl MamStorage for SqlxMamStorage {
             }
             MamDatabaseBackend::Postgres(pool) => {
                 let mut builder = QueryBuilder::<Postgres>::new(
-                    "UPDATE mam_messages SET body = '', stanza_xml = NULL, thread_id = NULL, reply_to_id = NULL, reply_to_jid = NULL, rich_payload = ",
+                    "UPDATE mam_messages SET body = '', stanza_xml = NULL, thread_id = NULL, parent_thread_id = NULL, reply_to_id = NULL, reply_to_jid = NULL, rich_payload = ",
                 );
                 builder
                     .push_bind(encoded.as_str())
@@ -1535,6 +1545,156 @@ mod tests {
             to: archive.to_string(),
             message_type: "groupchat".to_string(),
             ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn xep_0424_tombstone_scrubs_parent_thread_id() {
+        // XEP-0424 §Tombstones: replace `<body/>` and any related
+        // elements which might leak information. `parent_thread_id`
+        // identifies the parent thread and so must be cleared.
+        use waddle_xmpp_core::mam::{ArchivedRichMessage, ArchivedTombstone, RichMessageId};
+
+        let storage = create_test_storage().await;
+        let archive_jid = "room@conference.example.com";
+        let msg = ArchivedMessage {
+            id: String::new(),
+            timestamp: Utc::now(),
+            from: format!("{archive_jid}/alice"),
+            to: archive_jid.to_string(),
+            body: "secret thread content".to_string(),
+            stanza_id: Some("wire-id-1".to_string()),
+            thread_id: Some("child-thread".to_string()),
+            parent_thread_id: Some("root-thread".to_string()),
+            reply_to_id: None,
+            reply_to_jid: None,
+            origin_id: None,
+            message_type: "groupchat".to_string(),
+            stanza_xml: Some(
+                "<message xmlns='jabber:client'><body>secret</body><thread parent='root-thread'>child-thread</thread></message>".to_string(),
+            ),
+            rich: None,
+            nickname_generation: None,
+        };
+        let archive_id = storage.store_message(archive_jid, &msg).await.unwrap();
+
+        let tombstone = ArchivedTombstone {
+            retraction_id: Some(RichMessageId::new("retract-1").expect("rich id")),
+            stamp: Utc::now(),
+            moderation: None,
+        };
+        let replaced = storage
+            .replace_with_tombstone(&archive_id, tombstone)
+            .await
+            .unwrap();
+        assert!(replaced);
+
+        let row = storage
+            .get_message(&archive_id)
+            .await
+            .unwrap()
+            .expect("tombstone row");
+
+        assert!(row.body.is_empty(), "body must be cleared");
+        assert!(
+            row.stanza_xml.is_none(),
+            "stanza_xml must be cleared so the original wire form does not leak"
+        );
+        assert_eq!(
+            row.thread_id, None,
+            "thread_id is leak-prone (identifies the conversation), must be NULL"
+        );
+        assert_eq!(
+            row.parent_thread_id, None,
+            "parent_thread_id is leak-prone (identifies the parent conversation tree), must be NULL"
+        );
+        assert_eq!(row.reply_to_id, None);
+        assert_eq!(row.reply_to_jid, None);
+
+        // The row's rich payload must be the tombstone marker — a
+        // `<retracted/>`-only message with no `<thread/>` ever
+        // re-emitted on replay.
+        let rich = row.rich.expect("tombstone row has rich payload");
+        assert!(
+            matches!(
+                rich,
+                ArchivedRichMessage {
+                    payload: Some(waddle_xmpp_core::mam::ArchivedRichPayload::Tombstone(_)),
+                    ..
+                }
+            ),
+            "tombstone rich payload variant must be `Tombstone`"
+        );
+    }
+
+    #[tokio::test]
+    async fn xep_0425_moderation_tombstone_scrubs_parent_thread_id() {
+        // XEP-0425 §Tombstones uses the same scrub rule as XEP-0424;
+        // the only difference is the `<moderated/>` annotation in the
+        // rich payload. Same leak-prone fields must be cleared.
+        use waddle_xmpp_core::mam::{ArchivedModeration, ArchivedTombstone, RichMessageId};
+
+        let storage = create_test_storage().await;
+        let archive_jid = "room@conference.example.com";
+        let msg = ArchivedMessage {
+            id: String::new(),
+            timestamp: Utc::now(),
+            from: format!("{archive_jid}/alice"),
+            to: archive_jid.to_string(),
+            body: "moderated content".to_string(),
+            stanza_id: Some("wire-id-2".to_string()),
+            thread_id: Some("child-thread".to_string()),
+            parent_thread_id: Some("root-thread".to_string()),
+            reply_to_id: None,
+            reply_to_jid: None,
+            origin_id: None,
+            message_type: "groupchat".to_string(),
+            stanza_xml: Some(
+                "<message xmlns='jabber:client'><body>x</body><thread parent='root-thread'>child-thread</thread></message>".to_string(),
+            ),
+            rich: None,
+            nickname_generation: None,
+        };
+        let archive_id = storage.store_message(archive_jid, &msg).await.unwrap();
+
+        let moderator: jid::Jid = "mod@example.com".parse().expect("jid");
+        let tombstone = ArchivedTombstone {
+            retraction_id: None,
+            stamp: Utc::now(),
+            moderation: Some(ArchivedModeration {
+                target_id: RichMessageId::new("wire-id-2").expect("rich id"),
+                moderated_by: moderator,
+                stamp: Some(Utc::now()),
+                reason: None,
+            }),
+        };
+        storage
+            .replace_with_tombstone(&archive_id, tombstone)
+            .await
+            .unwrap();
+
+        let row = storage
+            .get_message(&archive_id)
+            .await
+            .unwrap()
+            .expect("tombstone row");
+
+        assert_eq!(row.thread_id, None);
+        assert_eq!(row.parent_thread_id, None);
+        assert!(row.body.is_empty());
+        assert!(row.stanza_xml.is_none());
+
+        // Verify the tombstone is the moderation variant (covers the
+        // XEP-0425 path specifically).
+        let rich = row.rich.expect("tombstone row has rich payload");
+        match rich.payload {
+            Some(waddle_xmpp_core::mam::ArchivedRichPayload::Tombstone(t)) => {
+                assert!(
+                    t.moderation.is_some(),
+                    "moderation tombstone must carry XEP-0425 moderation annotation"
+                );
+            }
+            other => panic!("expected Tombstone, got {other:?}"),
         }
     }
 }
