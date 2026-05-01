@@ -156,8 +156,11 @@ pub enum ArchivedRichPayload {
     Reactions(ArchivedReactionSet),
     /// In-place tombstone produced by XEP-0424 retraction or
     /// XEP-0425 moderation. The original row's `body` and
-    /// leak-prone fields (`thread_id`, `reply_to_id`, mentions, ...)
-    /// are cleared when this variant is set.
+    /// leak-prone fields (`thread_id`, `parent_thread_id`,
+    /// `reply_to_id`, `reply_to_jid`, `stanza_xml`, mentions, ...)
+    /// are cleared when this variant is set, per XEP-0424 §Tombstones
+    /// / XEP-0425 §Tombstones: "any related elements which might leak
+    /// information about the original message" must be replaced.
     Tombstone(ArchivedTombstone),
 }
 
@@ -200,6 +203,13 @@ pub struct ArchivedMessage {
     pub stanza_id: Option<String>,
     /// RFC 6121 thread identifier for this message.
     pub thread_id: Option<String>,
+    /// XEP-0201 nested-thread parent (the `parent` attribute on
+    /// `<thread/>`). Only meaningful when `thread_id` is `Some`.
+    /// Cleared on XEP-0424 / XEP-0425 tombstones — see the
+    /// [`ArchivedRichPayload::Tombstone`] doc comment for the full
+    /// list of leak-prone fields.
+    #[serde(default)]
+    pub parent_thread_id: Option<String>,
     /// XEP-0461 reply target message ID.
     pub reply_to_id: Option<String>,
     /// XEP-0461 optional original sender JID.
@@ -236,6 +246,7 @@ impl Default for ArchivedMessage {
             body: String::new(),
             stanza_id: None,
             thread_id: None,
+            parent_thread_id: None,
             reply_to_id: None,
             reply_to_jid: None,
             origin_id: None,

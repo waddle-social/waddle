@@ -401,7 +401,8 @@ impl SqlxMamStorage {
                 execute_sqlite_batch(pool, SQLITE_MAM_SCHEMA).await?;
                 ensure_sqlite_column(pool, "rich_payload", "TEXT").await?;
                 ensure_sqlite_column(pool, "stanza_xml", "TEXT").await?;
-                ensure_sqlite_column(pool, "nickname_generation", "INTEGER").await
+                ensure_sqlite_column(pool, "nickname_generation", "INTEGER").await?;
+                ensure_sqlite_column(pool, "parent_thread_id", "TEXT").await
             }
             MamDatabaseBackend::Postgres(pool) => {
                 execute_postgres_batch(pool, POSTGRES_MAM_SCHEMA).await?;
@@ -416,6 +417,11 @@ impl SqlxMamStorage {
                 )
                 .execute(pool)
                 .await?;
+                sqlx::query(
+                    "ALTER TABLE mam_messages ADD COLUMN IF NOT EXISTS parent_thread_id TEXT",
+                )
+                .execute(pool)
+                .await?;
                 Ok(())
             }
         }
@@ -427,7 +433,7 @@ impl SqlxMamStorage {
 }
 
 const SELECT_COLUMNS: &str =
-    "id, room_jid, timestamp, from_jid, to_jid, body, stanza_id, thread_id, reply_to_id, reply_to_jid, origin_id, message_type, stanza_xml, rich_payload, nickname_generation";
+    "id, room_jid, timestamp, from_jid, to_jid, body, stanza_id, thread_id, reply_to_id, reply_to_jid, origin_id, message_type, stanza_xml, rich_payload, nickname_generation, parent_thread_id";
 
 const SQLITE_MAM_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS mam_messages (
@@ -446,6 +452,7 @@ CREATE TABLE IF NOT EXISTS mam_messages (
     stanza_xml TEXT,
     rich_payload TEXT,
     nickname_generation INTEGER,
+    parent_thread_id TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_mam_room_timestamp
@@ -477,6 +484,7 @@ CREATE TABLE IF NOT EXISTS mam_messages (
     stanza_xml TEXT,
     rich_payload TEXT,
     nickname_generation BIGINT,
+    parent_thread_id TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_mam_room_timestamp
@@ -711,6 +719,7 @@ fn decode_sqlite_message_row(row: &SqliteRow) -> Result<ArchivedMessage, MamStor
         body: row.try_get(5)?,
         stanza_id: row.try_get(6)?,
         thread_id: row.try_get(7)?,
+        parent_thread_id: row.try_get(15)?,
         reply_to_id: row.try_get(8)?,
         reply_to_jid: row.try_get(9)?,
         origin_id: row.try_get(10)?,
@@ -732,6 +741,7 @@ fn decode_postgres_message_row(row: &PgRow) -> Result<ArchivedMessage, MamStorag
         body: row.try_get(5)?,
         stanza_id: row.try_get(6)?,
         thread_id: row.try_get(7)?,
+        parent_thread_id: row.try_get(15)?,
         reply_to_id: row.try_get(8)?,
         reply_to_jid: row.try_get(9)?,
         origin_id: row.try_get(10)?,
@@ -808,7 +818,7 @@ impl MamStorage for SqlxMamStorage {
         match &self.backend {
             MamDatabaseBackend::Sqlite(pool) => {
                 let mut query = QueryBuilder::<Sqlite>::new(
-                    "INSERT INTO mam_messages (id, room_jid, timestamp, from_jid, to_jid, body, stanza_id, thread_id, reply_to_id, reply_to_jid, origin_id, message_type, stanza_xml, rich_payload, nickname_generation) ",
+                    "INSERT INTO mam_messages (id, room_jid, timestamp, from_jid, to_jid, body, stanza_id, thread_id, reply_to_id, reply_to_jid, origin_id, message_type, stanza_xml, rich_payload, nickname_generation, parent_thread_id) ",
                 );
                 query.push_values(std::iter::once(()), |mut builder, _| {
                     builder
@@ -826,13 +836,14 @@ impl MamStorage for SqlxMamStorage {
                         .push_bind(message_type)
                         .push_bind(message.stanza_xml.as_deref())
                         .push_bind(rich_payload.as_deref())
-                        .push_bind(nickname_generation);
+                        .push_bind(nickname_generation)
+                        .push_bind(message.parent_thread_id.as_deref());
                 });
                 query.build().execute(pool).await?;
             }
             MamDatabaseBackend::Postgres(pool) => {
                 let mut query = QueryBuilder::<Postgres>::new(
-                    "INSERT INTO mam_messages (id, room_jid, timestamp, from_jid, to_jid, body, stanza_id, thread_id, reply_to_id, reply_to_jid, origin_id, message_type, stanza_xml, rich_payload, nickname_generation) ",
+                    "INSERT INTO mam_messages (id, room_jid, timestamp, from_jid, to_jid, body, stanza_id, thread_id, reply_to_id, reply_to_jid, origin_id, message_type, stanza_xml, rich_payload, nickname_generation, parent_thread_id) ",
                 );
                 query.push_values(std::iter::once(()), |mut builder, _| {
                     builder
@@ -850,7 +861,8 @@ impl MamStorage for SqlxMamStorage {
                         .push_bind(message_type)
                         .push_bind(message.stanza_xml.as_deref())
                         .push_bind(rich_payload.as_deref())
-                        .push_bind(nickname_generation);
+                        .push_bind(nickname_generation)
+                        .push_bind(message.parent_thread_id.as_deref());
                 });
                 query.build().execute(pool).await?;
             }
@@ -1224,6 +1236,7 @@ mod tests {
             body: "Reply body".to_string(),
             stanza_id: Some("archive-stanza-1".to_string()),
             thread_id: Some("thread-root-1".to_string()),
+            parent_thread_id: None,
             reply_to_id: Some("parent-message-1".to_string()),
             reply_to_jid: Some("bob@example.com".to_string()),
             origin_id: Some("origin-abc".to_string()),
@@ -1252,6 +1265,45 @@ mod tests {
         assert_eq!(retrieved.origin_id.as_deref(), Some("origin-abc"));
         assert_eq!(retrieved.message_type, "groupchat");
         assert!(retrieved.stanza_xml.is_some());
+    }
+
+    #[tokio::test]
+    async fn xep_0201_parent_thread_id_round_trips_through_storage() {
+        // Locks the column-level round-trip for the new parent_thread_id
+        // column. Replay of `<thread parent>` is covered separately by the
+        // mam.rs replay-builder tests in commit 4.
+        let storage = create_test_storage().await;
+        let msg = ArchivedMessage {
+            id: String::new(),
+            timestamp: Utc::now(),
+            from: "room@conference.example.com/alice".to_string(),
+            to: "room@conference.example.com".to_string(),
+            body: "Nested-thread reply".to_string(),
+            stanza_id: Some("archive-stanza-2".to_string()),
+            thread_id: Some("child-thread".to_string()),
+            parent_thread_id: Some("root-thread".to_string()),
+            reply_to_id: None,
+            reply_to_jid: None,
+            origin_id: None,
+            message_type: "groupchat".to_string(),
+            stanza_xml: None,
+            rich: None,
+            nickname_generation: None,
+        };
+
+        let archive_id = storage
+            .store_message("room@conference.example.com", &msg)
+            .await
+            .unwrap();
+
+        let retrieved = storage
+            .get_message(&archive_id)
+            .await
+            .unwrap()
+            .expect("archived message");
+
+        assert_eq!(retrieved.thread_id.as_deref(), Some("child-thread"));
+        assert_eq!(retrieved.parent_thread_id.as_deref(), Some("root-thread"));
     }
 
     #[tokio::test]

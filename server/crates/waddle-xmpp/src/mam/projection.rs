@@ -95,6 +95,10 @@ pub fn build_direct_archived_message(
         body,
         stanza_id: message.id.clone(),
         thread_id: message.thread.as_ref().map(|thread| thread.0.clone()),
+        // Parent attribute is populated in commit 3 once the inbound
+        // parse boundary calls `reattach_thread_parent` and the helper
+        // can recover it from the post-reattach payload form.
+        parent_thread_id: None,
         reply_to_id,
         reply_to_jid,
         origin_id,
