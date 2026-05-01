@@ -183,6 +183,7 @@ fn answer(
     waddle_id: types::WaddleId,
     source_stanza_id: Option<types::StanzaId>,
 ) -> VisibleMessage {
+    let answer = answer_body(prompt);
     VisibleMessage {
         ui: vec![types::UiView {
             id: types::UiViewId {
@@ -191,9 +192,7 @@ fn answer(
             title: Some(display(PLUGIN_NAME)),
             blocks: vec![
                 types::UiBlock::Text(types::TextBlock {
-                    text: display(
-                        "I can help summarize the recent thread, draft replies, or turn this into an action list.",
-                    ),
+                    text: display(&answer),
                     style: types::TextStyle::Body,
                 }),
                 types::UiBlock::Text(types::TextBlock {
@@ -241,10 +240,121 @@ fn answer(
 }
 
 fn answer_body(prompt: &str) -> String {
+    let prompt = clean_prompt(prompt);
+    if let Some(answer) = answer_letter_count(&prompt) {
+        return answer;
+    }
+    if let Some(answer) = answer_arithmetic(&prompt) {
+        return answer;
+    }
     format!(
-        "I can help summarize the recent thread, draft replies, or turn this into an action list.\n\n{}",
-        prompt
+        "I received: {prompt}\n\nI can answer simple arithmetic and letter-count questions here. A real AI provider is not wired into this extension yet."
     )
+}
+
+fn clean_prompt(prompt: &str) -> String {
+    let trimmed = prompt.trim();
+    let without_command = if trimmed.len() >= 3 && trimmed[..3].eq_ignore_ascii_case("/ai") {
+        &trimmed[3..]
+    } else {
+        trimmed
+    };
+    without_command
+        .replace("@waddle", "")
+        .replace("@Waddle", "")
+        .trim()
+        .to_string()
+}
+
+fn answer_letter_count(prompt: &str) -> Option<String> {
+    let lower = prompt.to_ascii_lowercase();
+    if !lower.contains("how many") || !lower.contains(" in ") {
+        return None;
+    }
+    let needle = extract_quoted_letter(prompt).or_else(|| extract_letter_before_in(prompt))?;
+    let word = prompt
+        .rsplit_once(" in ")
+        .map(|(_, word)| word)
+        .unwrap_or(prompt)
+        .trim_matches(|ch: char| !ch.is_alphanumeric());
+    if word.is_empty() {
+        return None;
+    }
+    let count = word
+        .chars()
+        .filter(|ch| ch.eq_ignore_ascii_case(&needle))
+        .count();
+    Some(format!(
+        "\"{word}\" contains {count} '{}'{}.",
+        needle,
+        if count == 1 { "" } else { "s" }
+    ))
+}
+
+fn extract_quoted_letter(prompt: &str) -> Option<char> {
+    let mut chars = prompt.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\'' || ch == '"' || ch == '`' {
+            let letter = chars.next()?;
+            let closing = chars.next()?;
+            if closing == ch && letter.is_alphabetic() {
+                return Some(letter);
+            }
+        }
+    }
+    None
+}
+
+fn extract_letter_before_in(prompt: &str) -> Option<char> {
+    let before_in = prompt.rsplit_once(" in ")?.0;
+    before_in.split_whitespace().rev().find_map(|token| {
+        let token = token
+            .trim_matches(|ch: char| !ch.is_alphabetic())
+            .trim_end_matches("'s");
+        (token.chars().count() == 1)
+            .then(|| token.chars().next())
+            .flatten()
+    })
+}
+
+fn answer_arithmetic(prompt: &str) -> Option<String> {
+    let expression = prompt.trim().trim_end_matches('?').trim();
+    let expression = if expression.len() >= 8 && expression[..8].eq_ignore_ascii_case("what is ") {
+        &expression[8..]
+    } else {
+        expression
+    }
+    .trim();
+    let mut parts = expression.split_whitespace();
+    let left = parts.next()?.parse::<i64>().ok()?;
+    let op = parts.next()?;
+    let right = parts.next()?.parse::<i64>().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    let value = match op {
+        "+" => left.checked_add(right)?,
+        "-" => left.checked_sub(right)?,
+        "*" | "x" | "X" => left.checked_mul(right)?,
+        "/" => {
+            if right == 0 {
+                return Some("Division by zero is undefined.".to_string());
+            }
+            if left % right == 0 {
+                left / right
+            } else {
+                return Some(format!("{left} / {right} = {}", left as f64 / right as f64));
+            }
+        }
+        "%" => {
+            if right == 0 {
+                return Some("Modulo by zero is undefined.".to_string());
+            }
+            left % right
+        }
+        _ => return None,
+    };
+    Some(format!("{left} {op} {right} = {value}."))
 }
 
 fn payload(root: &str, attrs: Vec<(&str, String)>, text: &str) -> types::ExtensionPayload {
@@ -326,7 +436,9 @@ fn display(value: &str) -> types::DisplayText {
 
 #[cfg(test)]
 mod tests {
-    use super::{contains_waddle_mention, message_hook_response, starts_with_ai_command, types};
+    use super::{
+        answer_body, contains_waddle_mention, message_hook_response, starts_with_ai_command, types,
+    };
 
     #[test]
     fn detects_ai_root_command_case_insensitively_with_boundary() {
@@ -356,6 +468,27 @@ mod tests {
     fn allows_threaded_followups_that_mention_waddle() {
         let hook = message_hook("@Waddle continue", Some("thread-root"), Some("parent-msg"));
         assert!(message_hook_response(hook).is_some());
+    }
+
+    #[test]
+    fn answers_basic_arithmetic_without_canned_text() {
+        assert_eq!(answer_body("/ai what is 10 % 5?"), "10 % 5 = 0.");
+        assert_eq!(answer_body("/ai what is 5 * 5?"), "5 * 5 = 25.");
+    }
+
+    #[test]
+    fn answers_letter_count_questions_without_canned_text() {
+        assert_eq!(
+            answer_body("/ai How many r's in Strawberry?"),
+            "\"Strawberry\" contains 3 'r's."
+        );
+    }
+
+    #[test]
+    fn falls_back_honestly_when_no_local_answer_exists() {
+        let answer = answer_body("/ai summarize the release notes");
+        assert!(answer.contains("A real AI provider is not wired"));
+        assert!(!answer.contains("I can help summarize the recent thread"));
     }
 
     fn message_hook(

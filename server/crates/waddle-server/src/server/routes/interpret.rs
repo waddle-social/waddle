@@ -1815,9 +1815,10 @@ fn canonicalize_bot_response_target(
     source_thread_id: Option<&str>,
     source_reply: Option<ExtensionReplyTarget>,
 ) -> Option<BotGroupchatResponse> {
-    response.thread_id =
-        source_thread_id.and_then(|thread_id| ExtensionThreadId::new(thread_id.to_string()).ok());
     response.reply_to = source_reply;
+    response.thread_id = source_thread_id
+        .or_else(|| response.reply_to.as_ref().map(|reply| reply.id.as_str()))
+        .and_then(|thread_id| ExtensionThreadId::new(thread_id.to_string()).ok());
     if response.thread_id.is_some() && response.reply_to.is_some() {
         Some(response)
     } else {
@@ -4202,6 +4203,36 @@ mod tests {
         assert_eq!(message.id.as_deref(), Some("client-root-id"));
         assert!(message.thread.is_none());
         assert!(extract_forum_action(&message).is_none());
+    }
+
+    #[test]
+    fn bot_response_target_uses_canonical_reply_id_as_thread_for_plain_roots() {
+        use waddle_extensions::{
+            BotGroupchatResponse, DisplayText, FullJidValue, RoomJid, StanzaId, ThreadId,
+        };
+
+        let response = BotGroupchatResponse {
+            body: DisplayText::new("AI answer").expect("body"),
+            room: RoomJid::new("chat@muc.example.com").expect("room"),
+            thread_id: Some(ThreadId::new("client-origin-id").expect("thread")),
+            reply_to: None,
+        };
+        let source_reply = ExtensionReplyTarget {
+            id: StanzaId::new("canonical-room-stanza-id").expect("reply id"),
+            to: Some(FullJidValue::new("chat@muc.example.com/alice").expect("reply to")),
+        };
+
+        let response =
+            canonicalize_bot_response_target(response, None, Some(source_reply)).expect("target");
+
+        assert_eq!(
+            response.thread_id.as_ref().map(|thread| thread.as_str()),
+            Some("canonical-room-stanza-id")
+        );
+        assert_eq!(
+            response.reply_to.as_ref().map(|reply| reply.id.as_str()),
+            Some("canonical-room-stanza-id")
+        );
     }
 
     #[test]

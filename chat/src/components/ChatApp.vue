@@ -43,6 +43,7 @@ import ConfirmDialog from "@/components/ui/ConfirmDialog.vue";
 import type { MemberSummary } from "@/lib/chat-types";
 import type { ExtensionAnnotationAction, MarkupSpan, MessageReference, TimelineMessage } from "@/lib/chat-ui";
 import { avatarLookupCandidates, mentionAutocompleteCandidates, mentionMatchesUsername, mergeMentionMembers } from "@/lib/mentions";
+import { withAiAssistantMentionCandidate } from "@/lib/ai-thread-ux";
 import {
   moveReactionSelection,
   preserveReactionSelection,
@@ -378,7 +379,7 @@ watch(authorJidByNick, (value) => {
 const fetchedAvatarUrlByJid = ref<Record<string, string | null>>({});
 const avatarFetchStateByJid = ref<Record<string, "pending" | "done">>({});
 const mentionCandidates = computed(() =>
-  mentionAutocompleteCandidates(mergedMentionMembers.value.members).map((candidate) => {
+  withAiAssistantMentionCandidate(mentionAutocompleteCandidates(mergedMentionMembers.value.members)).map((candidate) => {
     if (candidate.kind === "broadcast" || !candidate.jid) return candidate;
     return {
       ...candidate,

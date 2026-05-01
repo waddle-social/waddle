@@ -1,9 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import type { TimelineMessage } from "../src/lib/chat-ui";
 import {
+  aiComposerCommandResults,
   filterV1ExtensionPaletteCommands,
   isAiThreadPromptBody,
   nextAiThreadRootToOpen,
+  withAiAssistantMentionCandidate,
 } from "../src/lib/ai-thread-ux";
 
 function message(overrides: Partial<TimelineMessage>): TimelineMessage {
@@ -73,5 +75,31 @@ describe("AI thread UX", () => {
       { serviceJid: "extensions.example.com", node: "urn:waddle:extension:poll", name: "Poll" },
       { serviceJid: "extensions.example.com", node: "urn:waddle:extension:notes", name: "Notes" },
     ]);
+  });
+
+  test("offers the AI slash command for composer autocomplete", () => {
+    expect(aiComposerCommandResults("").map((command) => command.command)).toEqual(["/ai"]);
+    expect(aiComposerCommandResults("a").map((command) => command.command)).toEqual(["/ai"]);
+    expect(aiComposerCommandResults("poll")).toEqual([]);
+  });
+
+  test("adds the Waddle assistant to mention autocomplete once", () => {
+    expect(withAiAssistantMentionCandidate([])).toEqual([
+      {
+        username: "waddle",
+        jid: null,
+        avatar_url: null,
+        kind: "member",
+      },
+    ]);
+
+    expect(withAiAssistantMentionCandidate([
+      {
+        username: "Waddle",
+        jid: "waddle@example.com",
+        avatar_url: null,
+        kind: "member",
+      },
+    ])).toHaveLength(1);
   });
 });

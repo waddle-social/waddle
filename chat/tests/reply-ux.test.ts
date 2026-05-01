@@ -51,8 +51,21 @@ describe("reply UX helpers", () => {
         mentionCount: 0,
         showEmoji: true,
         emojiCount: 1,
+        showCommands: false,
+        commandCount: 0,
       }),
     ).toBe("select-emoji");
+
+    expect(
+      getComposerAutocompleteAction({
+        showMentions: false,
+        mentionCount: 0,
+        showEmoji: false,
+        emojiCount: 0,
+        showCommands: true,
+        commandCount: 1,
+      }),
+    ).toBe("select-command");
 
     expect(
       getComposerAutocompleteAction({
