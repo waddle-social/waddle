@@ -43,6 +43,11 @@ pub struct ArchivedMessage {
     pub message_type: String,
     pub body: Option<String>,
     pub thread: Option<String>,
+    /// XEP-0201 nested-thread parent. Populated from the `parent`
+    /// attribute on the inner `<thread/>` element via the canonical
+    /// `crate::xep::thread::parse_thread` helper. `None` for root
+    /// threads or messages without a `<thread/>`.
+    pub parent_thread_id: Option<String>,
     /// Raw inner `<message>` element for full parsing by the messaging module.
     pub inner: Element,
 }
@@ -311,10 +316,13 @@ pub fn parse_mam_result(element: &Element) -> Option<ArchivedMessage> {
         .or_else(|| inner.get_child("body", ""))
         .map(|b| b.text());
 
-    let thread = inner
-        .get_child("thread", CLIENT_NS)
-        .or_else(|| inner.get_child("thread", ""))
-        .map(|t| t.text());
+    // XEP-0201: parse via the canonical `crate::xep::thread::parse_thread`
+    // helper so the optional `parent` attribute is surfaced as a typed
+    // field instead of being recoverable only via re-parsing `inner`
+    // downstream of FFI.
+    let thread_ref = crate::xep::thread::parse_thread(&inner);
+    let thread = thread_ref.as_ref().map(|t| t.id.clone());
+    let parent_thread_id = thread_ref.as_ref().and_then(|t| t.parent.clone());
 
     // XEP-0359 stanza-id embedded in the inner message.
     let stanza_id = inner
@@ -332,6 +340,7 @@ pub fn parse_mam_result(element: &Element) -> Option<ArchivedMessage> {
         message_type,
         body,
         thread,
+        parent_thread_id,
         inner,
     })
 }
@@ -472,6 +481,85 @@ mod tests {
     }
 
     #[test]
+    fn xep_0201_parses_archived_message_with_thread_parent() {
+        // Locks the typed-parent surface on the client `ArchivedMessage`:
+        // a MAM result carrying `<thread parent='X'>id</thread>` populates
+        // both `thread` and `parent_thread_id` instead of dropping parent.
+        // FFI consumers (Swift/Kotlin) read `archived.parent_thread_id`
+        // directly via `archived_to_ffi`.
+        let inner = Element::builder("message", CLIENT_NS)
+            .attr("from", "alice@example.com/web")
+            .attr("type", "chat")
+            .append(Element::builder("body", CLIENT_NS).append("hi").build())
+            .append(
+                Element::builder("thread", CLIENT_NS)
+                    .attr("parent", "root-thread")
+                    .append("child-thread")
+                    .build(),
+            )
+            .build();
+        let forwarded = Element::builder("forwarded", "urn:xmpp:forward:0")
+            .append(
+                Element::builder("delay", "urn:xmpp:delay")
+                    .attr("stamp", "2024-01-01T12:00:00Z")
+                    .build(),
+            )
+            .append(inner)
+            .build();
+        let result = Element::builder("message", CLIENT_NS)
+            .attr("type", "normal")
+            .append(
+                Element::builder("result", MAM_NS)
+                    .attr("queryid", "q1")
+                    .attr("id", "mam-1")
+                    .append(forwarded)
+                    .build(),
+            )
+            .build();
+
+        let archived = parse_mam_result(&result).expect("should parse");
+        assert_eq!(archived.thread.as_deref(), Some("child-thread"));
+        assert_eq!(archived.parent_thread_id.as_deref(), Some("root-thread"));
+    }
+
+    #[test]
+    fn xep_0201_parses_archived_message_without_thread_parent() {
+        // Root-only thread: parent_thread_id stays None.
+        let inner = Element::builder("message", CLIENT_NS)
+            .attr("from", "alice@example.com/web")
+            .attr("type", "chat")
+            .append(Element::builder("body", CLIENT_NS).append("hi").build())
+            .append(
+                Element::builder("thread", CLIENT_NS)
+                    .append("root-thread")
+                    .build(),
+            )
+            .build();
+        let forwarded = Element::builder("forwarded", "urn:xmpp:forward:0")
+            .append(
+                Element::builder("delay", "urn:xmpp:delay")
+                    .attr("stamp", "2024-01-01T12:00:00Z")
+                    .build(),
+            )
+            .append(inner)
+            .build();
+        let result = Element::builder("message", CLIENT_NS)
+            .attr("type", "normal")
+            .append(
+                Element::builder("result", MAM_NS)
+                    .attr("queryid", "q1")
+                    .attr("id", "mam-1")
+                    .append(forwarded)
+                    .build(),
+            )
+            .build();
+
+        let archived = parse_mam_result(&result).expect("should parse");
+        assert_eq!(archived.thread.as_deref(), Some("root-thread"));
+        assert_eq!(archived.parent_thread_id, None);
+    }
+
+    #[test]
     fn parse_mam_result_ignores_non_mam_message() {
         let plain = Element::builder("message", CLIENT_NS)
             .attr("type", "chat")
@@ -552,6 +640,7 @@ mod tests {
                 timestamp: None,
                 from: Some("room@muc.example.com/alice".to_string()),
                 to: Some("alice@example.com/res".to_string()),
+                parent_thread_id: None,
                 message_type: "groupchat".to_string(),
                 body: Some(body.to_string()),
                 thread: None,
