@@ -73,7 +73,7 @@ function parseRoomMamResult(
         ? mamResult.item.delay.timestamp.toISOString()
         : new Date().toISOString();
       const archivedMsg = withArchivedMessageId(mamResult.id, innerMsg as ReceivedMessage);
-      let parsedMessage: LiveRoomMessage | null = null;
+      let parsedMessage: LiveRoomMessage | undefined;
       let reactionUpdate: { targetId: string; emojis: string[]; nick: string; senderId: string } | null = null;
 
       dispatchGroupchat(archivedMsg, {
