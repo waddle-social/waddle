@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::{fmt, str::FromStr};
 use tracing::info;
 use waddle_extensions::ExtensionConfig;
+use waddle_xmpp::xep::xep0421::{OccupantIdSecret, OCCUPANT_ID_SECRET_MIN_BYTES};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -133,6 +134,41 @@ pub struct ServerConfig {
     /// SpiceDB backend configuration.
     /// Runtime startup requires this to be set.
     pub spicedb: Option<SpiceDbConfig>,
+    /// Per-deployment HMAC key used to derive XEP-0421 occupant
+    /// identifiers. Loaded from `WADDLE_OCCUPANT_ID_SECRET` and shared
+    /// across the WebSocket dependencies and `RoomRegistryActor` so
+    /// every stamping site reads the same key. Required at startup;
+    /// see [`parse_occupant_id_secret`] for the validation rules.
+    pub occupant_id_secret: OccupantIdSecret,
+}
+
+/// Validate the `WADDLE_OCCUPANT_ID_SECRET` env var into a typed secret.
+///
+/// Pure function so the validation logic is unit-testable without
+/// mutating process-global env state. Called by [`ServerConfig::from_env`]
+/// with the result of `std::env::var(...).ok().as_deref()`.
+fn parse_occupant_id_secret(raw: Option<&str>) -> Result<OccupantIdSecret, String> {
+    let value = raw.ok_or_else(|| {
+        format!(
+            "WADDLE_OCCUPANT_ID_SECRET is required (≥{OCCUPANT_ID_SECRET_MIN_BYTES} bytes; \
+             generate with: openssl rand -base64 48)"
+        )
+    })?;
+    OccupantIdSecret::new(value.as_bytes().to_vec()).map_err(|e| {
+        format!(
+            "WADDLE_OCCUPANT_ID_SECRET invalid: {e} \
+             (generate with: openssl rand -base64 48)"
+        )
+    })
+}
+
+#[cfg(test)]
+const TEST_OCCUPANT_ID_SECRET: &str = "test-occupant-id-secret-32-bytes-long";
+
+#[cfg(test)]
+fn test_occupant_id_secret() -> OccupantIdSecret {
+    OccupantIdSecret::new(TEST_OCCUPANT_ID_SECRET.as_bytes().to_vec())
+        .expect("test secret meets length floor")
 }
 
 impl Default for ServerConfig {
@@ -144,6 +180,19 @@ impl Default for ServerConfig {
             auth: AuthConfig::default(),
             extensions: ExtensionConfig::default(),
             spicedb: None,
+            // The Default impl is only used in tests / scaffolding paths
+            // that don't go through `from_env`. Production startup must
+            // call `ServerConfig::from_env` which enforces the env var.
+            #[cfg(test)]
+            occupant_id_secret: test_occupant_id_secret(),
+            // In non-test builds the Default impl is unused for production
+            // bootstrap; supply a placeholder that meets the length floor
+            // so any incidental `Default::default()` still type-checks.
+            #[cfg(not(test))]
+            occupant_id_secret: OccupantIdSecret::new(
+                b"PLACEHOLDER-default-impl-do-not-use-32b".to_vec(),
+            )
+            .expect("placeholder meets length floor"),
         }
     }
 }
@@ -163,6 +212,9 @@ impl ServerConfig {
             ExtensionConfig::from_env().map_err(|e| format!("invalid extension config: {e}"))?;
         let spicedb = SpiceDbConfig::from_env()?;
 
+        let occupant_id_secret =
+            parse_occupant_id_secret(std::env::var("WADDLE_OCCUPANT_ID_SECRET").ok().as_deref())?;
+
         Ok(Self {
             mode,
             base_url,
@@ -170,6 +222,7 @@ impl ServerConfig {
             auth,
             extensions,
             spicedb,
+            occupant_id_secret,
         })
     }
 
@@ -200,6 +253,7 @@ impl ServerConfig {
             auth: AuthConfig::default(),
             extensions: ExtensionConfig::default(),
             spicedb: None,
+            occupant_id_secret: test_occupant_id_secret(),
         }
     }
 
@@ -212,7 +266,47 @@ impl ServerConfig {
             auth: AuthConfig::default(),
             extensions: ExtensionConfig::default(),
             spicedb: None,
+            occupant_id_secret: test_occupant_id_secret(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_occupant_id_secret_rejects_unset() {
+        let err = parse_occupant_id_secret(None).unwrap_err();
+        assert!(
+            err.contains("WADDLE_OCCUPANT_ID_SECRET is required"),
+            "error must name the env var; got: {err}"
+        );
+        assert!(
+            err.contains("openssl rand"),
+            "error must include the generation recipe; got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_occupant_id_secret_rejects_short_value() {
+        let err = parse_occupant_id_secret(Some("short")).unwrap_err();
+        assert!(
+            err.contains("at least"),
+            "error must mention the length floor; got: {err}"
+        );
+        assert!(
+            err.contains("openssl rand"),
+            "error must include the generation recipe; got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_occupant_id_secret_accepts_minimum_length() {
+        // Exactly the floor — must succeed.
+        let value: String = "x".repeat(OCCUPANT_ID_SECRET_MIN_BYTES);
+        let secret = parse_occupant_id_secret(Some(&value)).expect("32 bytes is accepted");
+        assert_eq!(secret.key().len(), OCCUPANT_ID_SECRET_MIN_BYTES);
     }
 }
 

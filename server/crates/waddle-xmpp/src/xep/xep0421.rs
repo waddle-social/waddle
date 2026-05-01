@@ -32,13 +32,78 @@
 use hmac::{Hmac, Mac};
 use minidom::Element;
 use sha2::Sha256;
+use std::sync::Arc;
 use xmpp_parsers::message::Message;
 use xmpp_parsers::presence::Presence;
 
 /// Namespace for XEP-0421 Occupant Identifiers.
 pub const NS_OCCUPANT_ID: &str = "urn:xmpp:occupant-id:0";
 
+/// Minimum byte length of the deployment-keyed occupant-id secret.
+///
+/// XEP-0421 §3 specifies that the derivation be keyed by a per-deployment
+/// secret to avoid cross-deployment linkability. The 32-byte floor is the
+/// project's chosen entropy minimum; values below this are rejected at
+/// `OccupantIdSecret` construction.
+pub const OCCUPANT_ID_SECRET_MIN_BYTES: usize = 32;
+
 type HmacSha256 = Hmac<Sha256>;
+
+/// Per-deployment HMAC key used to derive XEP-0421 occupant identifiers.
+///
+/// The inner allocation is shared via `Arc<[u8]>` so the same secret can
+/// flow through `WebSocketDeps`, `RoomRegistryActor`, every spawned
+/// `RoomActor`, and `RoomContext` without copying the bytes.
+///
+/// `Debug` is hand-implemented to redact the value — never print, log, or
+/// derive trace fields from this type. The bytes are accessible only via
+/// `key()` for HMAC consumption.
+#[derive(Clone)]
+pub struct OccupantIdSecret(Arc<[u8]>);
+
+impl OccupantIdSecret {
+    /// Validate and wrap a deployment secret. Rejects values shorter than
+    /// `OCCUPANT_ID_SECRET_MIN_BYTES`.
+    pub fn new(bytes: impl Into<Arc<[u8]>>) -> Result<Self, OccupantIdSecretError> {
+        let bytes: Arc<[u8]> = bytes.into();
+        if bytes.len() < OCCUPANT_ID_SECRET_MIN_BYTES {
+            return Err(OccupantIdSecretError::TooShort {
+                got: bytes.len(),
+                min: OCCUPANT_ID_SECRET_MIN_BYTES,
+            });
+        }
+        Ok(Self(bytes))
+    }
+
+    /// Borrow the raw HMAC key bytes. The only legitimate consumer is
+    /// `generate_occupant_id` (or its kameo/test equivalents).
+    pub fn key(&self) -> &[u8] {
+        &self.0
+    }
+
+    /// Test-only constructor that bypasses length validation. Lets unit
+    /// tests use short labels like `b"test-secret"` without coupling them
+    /// to the production length floor.
+    #[cfg(test)]
+    pub(crate) fn for_testing(bytes: impl Into<Arc<[u8]>>) -> Self {
+        Self(bytes.into())
+    }
+}
+
+impl std::fmt::Debug for OccupantIdSecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("OccupantIdSecret")
+            .field(&format_args!("<redacted, {} bytes>", self.0.len()))
+            .finish()
+    }
+}
+
+/// Failure reasons for `OccupantIdSecret::new`.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum OccupantIdSecretError {
+    #[error("occupant-id secret must be at least {min} bytes, got {got}")]
+    TooShort { got: usize, min: usize },
+}
 
 /// An opaque occupant identifier.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -96,16 +161,23 @@ impl OccupantIdCarrier for Presence {
 /// Takes typed JIDs (typed-payloads hard rule) — the canonical JID
 /// string form is generated at the HMAC boundary only, never carried
 /// across function boundaries as `String`.
+///
+/// Inputs are joined with a `0x00` byte (per XEP-0421 §3 example) which
+/// cannot appear in a bare JID per RFC 7622 / PRECIS, so the boundary is
+/// unambiguous. Earlier revisions used `:` as a separator, which is a
+/// valid JID-localpart character and produced collisions like
+/// `room=a@x` + `user=b:c@y` ↔ `room=a@x:b` + `user=c@y`.
 pub fn generate_occupant_id(
     user_bare_jid: &jid::BareJid,
     room_jid: &jid::BareJid,
-    server_secret: &[u8],
+    server_secret: &OccupantIdSecret,
 ) -> OccupantId {
-    let mut mac = HmacSha256::new_from_slice(server_secret).expect("HMAC accepts any key length");
+    let mut mac =
+        HmacSha256::new_from_slice(server_secret.key()).expect("HMAC accepts any key length");
     // `BareJid::as_str` returns the canonical string form; we hash
     // bytes at the I/O boundary only.
     mac.update(room_jid.as_str().as_bytes());
-    mac.update(b":");
+    mac.update(&[0u8]);
     mac.update(user_bare_jid.as_str().as_bytes());
     let result = mac.finalize().into_bytes();
 
@@ -182,7 +254,10 @@ mod tests {
     use super::*;
     use xmpp_parsers::message::MessageType;
 
-    const TEST_SECRET: &[u8] = b"waddle-test-secret-key-for-occupant-ids";
+    fn test_secret() -> OccupantIdSecret {
+        OccupantIdSecret::new(b"waddle-test-secret-key-for-occupant-ids".to_vec())
+            .expect("test secret meets length floor")
+    }
 
     fn alice() -> jid::BareJid {
         "alice@example.com".parse().expect("bare")
@@ -202,30 +277,80 @@ mod tests {
 
     #[test]
     fn test_generate_occupant_id_deterministic() {
-        let id1 = generate_occupant_id(&alice(), &room(), TEST_SECRET);
-        let id2 = generate_occupant_id(&alice(), &room(), TEST_SECRET);
+        let secret = test_secret();
+        let id1 = generate_occupant_id(&alice(), &room(), &secret);
+        let id2 = generate_occupant_id(&alice(), &room(), &secret);
         assert_eq!(id1, id2);
     }
 
     #[test]
     fn test_generate_different_users() {
-        let alice_id = generate_occupant_id(&alice(), &room(), TEST_SECRET);
-        let bob_id = generate_occupant_id(&bob(), &room(), TEST_SECRET);
+        let secret = test_secret();
+        let alice_id = generate_occupant_id(&alice(), &room(), &secret);
+        let bob_id = generate_occupant_id(&bob(), &room(), &secret);
         assert_ne!(alice_id, bob_id);
     }
 
     #[test]
     fn test_generate_different_rooms() {
-        let r1 = generate_occupant_id(&alice(), &room1(), TEST_SECRET);
-        let r2 = generate_occupant_id(&alice(), &room2(), TEST_SECRET);
+        let secret = test_secret();
+        let r1 = generate_occupant_id(&alice(), &room1(), &secret);
+        let r2 = generate_occupant_id(&alice(), &room2(), &secret);
         assert_ne!(r1, r2);
     }
 
     #[test]
+    fn test_generate_different_secrets_produce_different_ids() {
+        // XEP-0421 §3: the deployment-keyed derivation MUST make occupant-ids
+        // unlinkable across deployments using different secrets. Same (user,
+        // room) inputs with different keys must yield different ids.
+        let secret_a = OccupantIdSecret::new(b"deployment-a-secret-32-bytes-long".to_vec())
+            .expect("≥32 bytes");
+        let secret_b = OccupantIdSecret::new(b"deployment-b-secret-32-bytes-long".to_vec())
+            .expect("≥32 bytes");
+        let id_a = generate_occupant_id(&alice(), &room(), &secret_a);
+        let id_b = generate_occupant_id(&alice(), &room(), &secret_b);
+        assert_ne!(id_a, id_b);
+    }
+
+    #[test]
     fn test_generate_id_length() {
-        let id = generate_occupant_id(&alice(), &room(), TEST_SECRET);
+        let secret = test_secret();
+        let id = generate_occupant_id(&alice(), &room(), &secret);
         // 16 bytes = 32 hex chars
         assert_eq!(id.0.len(), 32);
+    }
+
+    #[test]
+    fn test_secret_rejects_short_input() {
+        let result = OccupantIdSecret::new(b"too-short".to_vec());
+        assert_eq!(
+            result.unwrap_err(),
+            OccupantIdSecretError::TooShort {
+                got: 9,
+                min: OCCUPANT_ID_SECRET_MIN_BYTES,
+            }
+        );
+    }
+
+    #[test]
+    fn test_secret_accepts_minimum_length() {
+        let bytes = vec![0x42u8; OCCUPANT_ID_SECRET_MIN_BYTES];
+        OccupantIdSecret::new(bytes).expect("32 bytes meets floor");
+    }
+
+    #[test]
+    fn test_secret_debug_redacts_bytes() {
+        let secret = test_secret();
+        let rendered = format!("{secret:?}");
+        assert!(
+            rendered.contains("redacted"),
+            "Debug output should redact the secret bytes; got: {rendered}"
+        );
+        assert!(
+            !rendered.contains("waddle-test-secret"),
+            "Debug must not leak secret bytes; got: {rendered}"
+        );
     }
 
     #[test]

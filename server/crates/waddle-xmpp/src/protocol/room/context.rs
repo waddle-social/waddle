@@ -16,6 +16,7 @@
 
 use super::super::id_gen::IdGenerator;
 use crate::types::{Affiliation, Role};
+use crate::xep::xep0421::OccupantIdSecret;
 use jid::{BareJid, FullJid};
 
 /// Snapshot of one occupant of the room, frozen at dispatch start.
@@ -94,7 +95,7 @@ pub struct RoomContext<'a> {
     /// Server-side secret used to derive the XEP-0421 stable occupant-id
     /// (per-(room, bare-jid) HMAC). Borrowed from the deployment config
     /// so tests can substitute a fixture without mutating global state.
-    pub occupant_id_secret: &'a [u8],
+    pub occupant_id_secret: &'a OccupantIdSecret,
     /// Sender's per-room nickname generation (XEP-0308 §3 correction
     /// window). Provided here so the
     /// [`super::archive::MucArchiveHandler`] can include it directly

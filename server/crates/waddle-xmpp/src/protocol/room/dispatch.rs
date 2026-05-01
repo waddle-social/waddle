@@ -80,6 +80,7 @@ mod tests {
     use super::*;
     use crate::protocol::id_gen::FixedIdGenerator;
     use crate::types::{Affiliation, Role};
+    use crate::xep::xep0421::OccupantIdSecret;
     use jid::{BareJid, FullJid};
     use xmpp_parsers::message::{Message, MessageType};
 
@@ -106,6 +107,7 @@ mod tests {
         sender_full: &'a FullJid,
         occupants: &'a [OccupantSnapshot],
         id_gen: &'a FixedIdGenerator,
+        occupant_id_secret: &'a OccupantIdSecret,
     ) -> RoomContext<'a> {
         RoomContext {
             room,
@@ -114,7 +116,7 @@ mod tests {
             managed_room_forbidden: false,
             room_moderated: false,
             id_gen,
-            occupant_id_secret: b"test-secret",
+            occupant_id_secret,
             sender_nickname_generation: 0,
             project_sender_inbox: true,
             dispatch_timestamp: 0,
@@ -139,7 +141,8 @@ mod tests {
             role: Role::Participant,
         }];
         let id_gen = FixedIdGenerator("fresh-id".to_string());
-        let ctx = fixture_ctx(&room, &sender, &occupants, &id_gen);
+        let secret = OccupantIdSecret::for_testing(b"test-secret".to_vec());
+        let ctx = fixture_ctx(&room, &sender, &occupants, &id_gen, &secret);
 
         let mut chain = RoomDispatcher::new();
         chain.register(Arc::new(CountHandler {

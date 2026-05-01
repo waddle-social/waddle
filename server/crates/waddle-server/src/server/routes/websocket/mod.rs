@@ -49,6 +49,7 @@ use waddle_xmpp::{
         InMemorySmSessionRegistry, SmClaimCompletion, SmEnable, SmResume, SmSessionRegistry,
         SmStanza, StreamManagementState, SM_NS,
     },
+    xep::xep0421::OccupantIdSecret,
     Stanza,
 };
 use xmpp_parsers::minidom::Element;
@@ -97,6 +98,10 @@ pub struct WebSocketDeps {
     pub service_domains: XmppServiceDomains,
     /// Protocol/runtime services used by the WebSocket C2S path.
     pub protocol: ProtocolServices,
+    /// Per-deployment XEP-0421 occupant-id HMAC key. Cheap-clone via the
+    /// inner `Arc<[u8]>`; shared with `RoomRegistryActor` so every
+    /// stamping site uses the same key.
+    pub occupant_id_secret: OccupantIdSecret,
 }
 
 pub struct ProtocolServices {
@@ -2685,6 +2690,8 @@ mod tests {
                     connection_registry: Arc::new(ConnectionRegistry::new()),
                     room_registry: kameo::spawn(RoomRegistryActor::new(
                         "muc.example.com".to_string(),
+                        OccupantIdSecret::new(b"test-occupant-id-secret-32-bytes-long".to_vec())
+                            .expect("test secret meets length floor"),
                     )),
                     mam_storage,
                     inbox_storage: Arc::new(
@@ -2702,6 +2709,10 @@ mod tests {
                     sm_session_registry: Arc::new(InMemorySmSessionRegistry::new()),
                     resumable_sessions: Arc::new(dashmap::DashMap::new()),
                 },
+                occupant_id_secret: OccupantIdSecret::new(
+                    b"test-occupant-id-secret-32-bytes-long".to_vec(),
+                )
+                .expect("test secret meets length floor"),
             },
         })
     }

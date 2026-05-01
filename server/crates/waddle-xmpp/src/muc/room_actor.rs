@@ -130,6 +130,7 @@ impl OccupantInfo {
 #[actor(mailbox = bounded(2048))]
 pub struct RoomActor {
     room: MucRoom,
+    occupant_id_secret: crate::xep::xep0421::OccupantIdSecret,
 }
 
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
@@ -161,8 +162,11 @@ pub enum RoomActorError {
 
 impl RoomActor {
     /// Create a new `RoomActor` wrapping the given room.
-    pub fn new(room: MucRoom) -> Self {
-        Self { room }
+    pub fn new(room: MucRoom, occupant_id_secret: crate::xep::xep0421::OccupantIdSecret) -> Self {
+        Self {
+            room,
+            occupant_id_secret,
+        }
     }
 }
 
@@ -919,6 +923,7 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
                             item.reason.as_deref(),
                             Some(&msg.sender_jid.to_bare()),
                             Some(&target_occupant.real_jid),
+                            &self.occupant_id_secret,
                         );
                         presence_updates.push((occupant.real_jid.clone(), presence));
                     }
@@ -936,6 +941,7 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
                             new_role,
                             is_self,
                             Some(&target_occupant.real_jid),
+                            &self.occupant_id_secret,
                         );
                         presence_updates.push((occupant.real_jid.clone(), presence));
                     }
@@ -1004,6 +1010,7 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
                                 item.reason.as_deref(),
                                 Some(&msg.sender_jid.to_bare()),
                                 Some(&occupant.real_jid),
+                                &self.occupant_id_secret,
                             );
                             presence_updates.push((occ.real_jid.clone(), presence));
                         }
@@ -1018,6 +1025,7 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
                                 occupant.role,
                                 is_self,
                                 Some(&occupant.real_jid),
+                                &self.occupant_id_secret,
                             );
                             presence_updates.push((occ.real_jid.clone(), presence));
                         }
@@ -1097,8 +1105,13 @@ impl kameo::message::Message<DestroyWithNotifications> for RoomActor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::xep::xep0421::OccupantIdSecret;
     use kameo::actor::ActorRef;
     use kameo::error::SendError;
+
+    fn test_secret() -> OccupantIdSecret {
+        OccupantIdSecret::for_testing(b"test-secret".to_vec())
+    }
 
     fn test_room() -> MucRoom {
         let room_jid: BareJid = "testroom@muc.example.com".parse().expect("valid jid");
@@ -1117,18 +1130,21 @@ mod tests {
     }
 
     async fn spawn_room_actor() -> ActorRef<RoomActor> {
-        kameo::spawn(RoomActor::new(test_room()))
+        kameo::spawn(RoomActor::new(test_room(), test_secret()))
     }
 
     async fn spawn_room_actor_with_config(mut config: RoomConfig) -> ActorRef<RoomActor> {
         let room_jid: BareJid = "testroom@muc.example.com".parse().expect("valid jid");
         config.name = "Test Room".to_string();
-        kameo::spawn(RoomActor::new(MucRoom::new(
-            room_jid,
-            "waddle-1".to_string(),
-            "channel-1".to_string(),
-            config,
-        )))
+        kameo::spawn(RoomActor::new(
+            MucRoom::new(
+                room_jid,
+                "waddle-1".to_string(),
+                "channel-1".to_string(),
+                config,
+            ),
+            test_secret(),
+        ))
     }
 
     #[tokio::test]

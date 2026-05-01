@@ -87,6 +87,7 @@ helm upgrade --install waddle ./charts/waddle-server \
 The chart supports an app secret containing:
 
 - `WADDLE_SESSION_KEY` (required by server features relying on encrypted session data)
+- `WADDLE_OCCUPANT_ID_SECRET` (**required**; per-deployment HMAC key for XEP-0421 occupant identifiers; ≥32 bytes)
 - `WADDLE_AUTH_PROVIDERS_JSON` (optional; required to enable `/api/auth/*` broker flows)
 - `WADDLE_DATABASE_URL` (optional; preferred location for DB DSN with credentials)
 - `WADDLE_XMPP_MAM_DATABASE_URL` (optional MAM DSN override)
@@ -95,19 +96,42 @@ The chart supports an app secret containing:
 Provider JSON may also be set in `config.authProvidersJson`, but `secret.authProvidersJson`
 is recommended because provider definitions usually include client secrets.
 
-Default behavior:
+### Required keys when bringing your own Secret
+
+Setting `secret.create=false` and providing `secret.existingSecret=<name>` skips
+chart templating entirely. The externally-managed Secret **must** contain at
+minimum:
+
+- `WADDLE_SESSION_KEY`
+- `WADDLE_OCCUPANT_ID_SECRET`
+
+…plus any other keys this chart documents (database DSNs, auth providers,
+SpiceDB preshared key) that your deployment relies on. If
+`WADDLE_OCCUPANT_ID_SECRET` is missing, the server hard-fails at startup with
+a clear error.
+
+### Default behavior
 
 - `secret.create=true` creates a chart-managed secret
-- If `secret.sessionKey` is empty:
-  - on first install, a random key is generated
-  - on upgrades, the existing `WADDLE_SESSION_KEY` is preserved (via `lookup`) when present
+- If `secret.sessionKey` / `secret.occupantIdSecret` is empty:
+  - on first install, a random 64-character alphanumeric value is generated
+  - on upgrades, the existing in-cluster value is preserved (via `lookup`)
+
+> ⚠️ **Do not rotate `WADDLE_OCCUPANT_ID_SECRET` without an explicit migration plan.**
+> The XEP-0421 occupant identifier is the only stable per-(room, user) handle for
+> client-side identity continuity (recognising users across nick changes). Rotating
+> the secret invalidates every previously-issued occupant-id, severing that continuity.
+> The chart auto-generates the secret once on first install; back up the resulting
+> Kubernetes Secret externally (Velero, sealed-secrets export, password manager) so a
+> namespace deletion or etcd loss does not silently rotate the key.
 
 Recommended for stable upgrades:
 
 ```bash
 helm upgrade --install waddle ./charts/waddle-server \
   --namespace waddle \
-  --set secret.sessionKey="$(openssl rand -hex 32)"
+  --set secret.sessionKey="$(openssl rand -hex 32)" \
+  --set secret.occupantIdSecret="$(openssl rand -base64 48)"
 ```
 
 Or use an existing secret:

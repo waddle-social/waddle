@@ -18,13 +18,20 @@ use super::id_gen::FixedIdGenerator;
 use super::room::{default_room_dispatcher, OccupantSnapshot, RoomContext};
 use crate::types::{Affiliation, Role};
 use crate::xep::xep0359::{extract_stanza_ids, NS_SID};
-use crate::xep::xep0421::{extract_occupant_id_from_message, generate_occupant_id};
+use crate::xep::xep0421::{
+    extract_occupant_id_from_message, generate_occupant_id, OccupantIdSecret,
+};
 use crate::Stanza;
 use jid::{BareJid, FullJid, Jid};
 use xmpp_parsers::message::{Body, Message, MessageType};
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
-const TEST_OCCUPANT_ID_SECRET: &[u8] = b"l4-test-occupant-id-secret";
+fn test_occupant_id_secret() -> OccupantIdSecret {
+    // ≥32 bytes so the value also passes the production length floor;
+    // the L4 wire-trace fixture mirrors what a real deployment would carry.
+    OccupantIdSecret::new(b"l4-wire-trace-occupant-id-secret-32b".to_vec())
+        .expect("test secret meets length floor")
+}
 
 fn full(s: &str) -> FullJid {
     s.parse().expect("valid full jid")
@@ -75,6 +82,7 @@ fn xep_0045_groupchat_dispatches_through_handler_chain_with_canonical_stamps() {
         occ(bob.clone(), "bob-nick"),
     ];
     let id_gen = FixedIdGenerator("room-archive-id-1".to_string());
+    let secret = test_occupant_id_secret();
     let ctx = RoomContext {
         room: &room,
         sender_full: &alice,
@@ -82,7 +90,7 @@ fn xep_0045_groupchat_dispatches_through_handler_chain_with_canonical_stamps() {
         managed_room_forbidden: false,
         room_moderated: false,
         id_gen: &id_gen,
-        occupant_id_secret: TEST_OCCUPANT_ID_SECRET,
+        occupant_id_secret: &secret,
         sender_nickname_generation: 0,
         project_sender_inbox: true,
         dispatch_timestamp: 0,
@@ -124,8 +132,7 @@ fn xep_0045_groupchat_dispatches_through_handler_chain_with_canonical_stamps() {
     assert_eq!(routes.len(), 2, "fan-out to both occupants");
 
     // Every reflected copy carries the canonical stamps.
-    let expected_occupant_id =
-        generate_occupant_id(&alice.to_bare(), &room, TEST_OCCUPANT_ID_SECRET);
+    let expected_occupant_id = generate_occupant_id(&alice.to_bare(), &room, &secret);
     for route in &routes {
         // from='room/alice-nick'
         assert_eq!(
@@ -157,6 +164,7 @@ fn xep_0045_non_occupant_halts_chain_with_typed_not_acceptable() {
     let alice = full("alice@example.com/web");
 
     let id_gen = FixedIdGenerator("ignored".to_string());
+    let secret = test_occupant_id_secret();
     let ctx = RoomContext {
         room: &room,
         sender_full: &alice,
@@ -164,7 +172,7 @@ fn xep_0045_non_occupant_halts_chain_with_typed_not_acceptable() {
         managed_room_forbidden: false,
         room_moderated: false,
         id_gen: &id_gen,
-        occupant_id_secret: TEST_OCCUPANT_ID_SECRET,
+        occupant_id_secret: &secret,
         sender_nickname_generation: 0,
         project_sender_inbox: true,
         dispatch_timestamp: 0,
@@ -219,6 +227,7 @@ fn xep_0359_room_chain_strips_client_spoofed_room_stanza_id() {
     let alice = full("alice@example.com/web");
     let occupants = vec![occ(alice.clone(), "alice-nick")];
     let id_gen = FixedIdGenerator("genuine-room-id".to_string());
+    let secret = test_occupant_id_secret();
     let ctx = RoomContext {
         room: &room,
         sender_full: &alice,
@@ -226,7 +235,7 @@ fn xep_0359_room_chain_strips_client_spoofed_room_stanza_id() {
         managed_room_forbidden: false,
         room_moderated: false,
         id_gen: &id_gen,
-        occupant_id_secret: TEST_OCCUPANT_ID_SECRET,
+        occupant_id_secret: &secret,
         sender_nickname_generation: 0,
         project_sender_inbox: true,
         dispatch_timestamp: 0,
@@ -276,6 +285,7 @@ fn xep_0424_groupchat_retraction_emits_archive_and_tombstone_events() {
     let alice = full("alice@example.com/web");
     let occupants = vec![occ(alice.clone(), "alice-nick")];
     let id_gen = FixedIdGenerator("retraction-archive".to_string());
+    let secret = test_occupant_id_secret();
     let ctx = RoomContext {
         room: &room,
         sender_full: &alice,
@@ -283,7 +293,7 @@ fn xep_0424_groupchat_retraction_emits_archive_and_tombstone_events() {
         managed_room_forbidden: false,
         room_moderated: false,
         id_gen: &id_gen,
-        occupant_id_secret: TEST_OCCUPANT_ID_SECRET,
+        occupant_id_secret: &secret,
         sender_nickname_generation: 0,
         project_sender_inbox: true,
         dispatch_timestamp: 0,
@@ -344,6 +354,7 @@ fn xep_0430_groupchat_message_emits_per_occupant_inbox_projection() {
         occ(charlie_b.clone(), "charlie"),
     ];
     let id_gen = FixedIdGenerator("inbox-archive".to_string());
+    let secret = test_occupant_id_secret();
     let ctx = RoomContext {
         room: &room,
         sender_full: &alice,
@@ -351,7 +362,7 @@ fn xep_0430_groupchat_message_emits_per_occupant_inbox_projection() {
         managed_room_forbidden: false,
         room_moderated: false,
         id_gen: &id_gen,
-        occupant_id_secret: TEST_OCCUPANT_ID_SECRET,
+        occupant_id_secret: &secret,
         sender_nickname_generation: 0,
         project_sender_inbox: true,
         dispatch_timestamp: 0,

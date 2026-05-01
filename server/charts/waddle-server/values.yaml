@@ -141,6 +141,13 @@ secret:
   create: true
   existingSecret: ""
   sessionKey: ""
+  # Per-deployment HMAC key used to derive XEP-0421 occupant identifiers.
+  # Required (≥32 bytes). When `secret.create` is true and this value is
+  # empty the chart auto-generates a 64-character alphanumeric secret on
+  # first install and preserves it across upgrades via `lookup`.
+  # **Do not rotate** without an explicit migration plan — rotation breaks
+  # XEP-0421 occupant-id continuity for every existing room/user pair.
+  occupantIdSecret: ""
   # JSON object/array for WADDLE_AUTH_PROVIDERS_JSON.
   # This usually contains provider client secrets and should stay in Secret data.
   # Example:

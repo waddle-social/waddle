@@ -16,6 +16,7 @@ use tracing::{debug, info, warn};
 use super::room_actor::RoomActor;
 use super::{MucRoom, RoomConfig};
 use crate::metrics;
+use crate::xep::xep0421::OccupantIdSecret;
 
 /// Actor that owns the mapping from room JIDs to per-room actors.
 ///
@@ -27,6 +28,10 @@ pub struct RoomRegistryActor {
     rooms: HashMap<BareJid, ActorRef<RoomActor>>,
     poisoned_rooms: HashSet<BareJid>,
     muc_domain: String,
+    /// Per-deployment XEP-0421 occupant-id HMAC key. Forwarded to every
+    /// `RoomActor` at spawn so all rooms in this deployment share the
+    /// same keying material.
+    occupant_id_secret: OccupantIdSecret,
 }
 
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
@@ -39,12 +44,13 @@ pub enum RoomRegistryError {
 
 impl RoomRegistryActor {
     /// Create a new registry for the given MUC service domain.
-    pub fn new(muc_domain: String) -> Self {
+    pub fn new(muc_domain: String, occupant_id_secret: OccupantIdSecret) -> Self {
         info!(domain = %muc_domain, "Creating RoomRegistryActor");
         Self {
             rooms: HashMap::new(),
             poisoned_rooms: HashSet::new(),
             muc_domain,
+            occupant_id_secret,
         }
     }
 
@@ -59,7 +65,7 @@ impl RoomRegistryActor {
         config: RoomConfig,
     ) -> ActorRef<RoomActor> {
         let room = MucRoom::new(room_jid.clone(), waddle_id, channel_id, config);
-        let actor_ref = kameo::spawn(RoomActor::new(room));
+        let actor_ref = kameo::spawn(RoomActor::new(room, self.occupant_id_secret.clone()));
         self.rooms.insert(room_jid, actor_ref.clone());
         actor_ref
     }
@@ -314,7 +320,10 @@ mod tests {
     }
 
     async fn spawn_registry() -> ActorRef<RoomRegistryActor> {
-        kameo::spawn(RoomRegistryActor::new("muc.example.com".to_string()))
+        kameo::spawn(RoomRegistryActor::new(
+            "muc.example.com".to_string(),
+            OccupantIdSecret::for_testing(b"test-secret".to_vec()),
+        ))
     }
 
     #[tokio::test]

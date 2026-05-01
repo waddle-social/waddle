@@ -1689,6 +1689,7 @@ pub async fn handle_muc_join(
     if !join_outcome.is_same_bare_multi_session_join {
         for existing in &join_outcome.existing_occupants {
             let presence_stanza = create_presence_stanza(
+                state,
                 room_jid,
                 nick,
                 sender_jid,
@@ -1807,7 +1808,9 @@ pub async fn handle_muc_leave(
 
     let Some(room_actor) = get_room_actor(state, room_jid).await else {
         debug!(room = %room_jid, "Room not found for leave");
-        return vec![build_muc_self_unavailable_xml(room_jid, nick, sender_jid)];
+        return vec![build_muc_self_unavailable_xml(
+            state, room_jid, nick, sender_jid,
+        )];
     };
 
     let outcome = match room_actor
@@ -1819,11 +1822,15 @@ pub async fn handle_muc_leave(
         Ok(Some(outcome)) => outcome,
         Ok(None) => {
             debug!(room = %room_jid, nick = %nick, sender = %sender_jid, "MUC leave for absent occupant");
-            return vec![build_muc_self_unavailable_xml(room_jid, nick, sender_jid)];
+            return vec![build_muc_self_unavailable_xml(
+                state, room_jid, nick, sender_jid,
+            )];
         }
         Err(error) => {
             warn!(room = %room_jid, nick = %nick, sender = %sender_jid, error = ?error, "Failed to leave MUC room");
-            return vec![build_muc_self_unavailable_xml(room_jid, nick, sender_jid)];
+            return vec![build_muc_self_unavailable_xml(
+                state, room_jid, nick, sender_jid,
+            )];
         }
     };
 
@@ -1841,6 +1848,7 @@ pub async fn handle_muc_leave(
                 Affiliation::Member,
                 false,
                 Some(sender_jid),
+                &state.deps.occupant_id_secret,
             );
             let stanza = Stanza::Presence(presence);
             let _outcome = state
@@ -1852,6 +1860,7 @@ pub async fn handle_muc_leave(
     }
 
     vec![build_muc_self_unavailable_xml(
+        state,
         room_jid,
         &outcome.nick,
         sender_jid,
@@ -1977,7 +1986,12 @@ fn build_muc_subject_message_xml(room_jid: &BareJid, to_jid: &FullJid, room_name
     )
 }
 
-fn build_muc_self_unavailable_xml(room_jid: &BareJid, nick: &str, sender_jid: &FullJid) -> String {
+fn build_muc_self_unavailable_xml(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    nick: &str,
+    sender_jid: &FullJid,
+) -> String {
     let from_jid = room_jid
         .clone()
         .with_resource_str(nick)
@@ -1989,6 +2003,7 @@ fn build_muc_self_unavailable_xml(room_jid: &BareJid, nick: &str, sender_jid: &F
         Affiliation::Member,
         true,
         Some(sender_jid),
+        &state.deps.occupant_id_secret,
     );
     stanza_to_xml(&Stanza::Presence(presence))
 }
@@ -2019,6 +2034,7 @@ async fn server_permission_allowed(
 
 /// Create a presence stanza for MUC
 fn create_presence_stanza(
+    state: &WebSocketState,
     room_jid: &BareJid,
     nick: &str,
     real_jid: &FullJid,
@@ -2038,6 +2054,7 @@ fn create_presence_stanza(
         role,
         false,
         Some(real_jid),
+        &state.deps.occupant_id_secret,
     )
 }
 
