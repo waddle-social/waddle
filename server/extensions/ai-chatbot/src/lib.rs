@@ -21,6 +21,8 @@ const PLUGIN_ID: &str = "ai-chatbot";
 const PLUGIN_NAME: &str = "AI Chatbot";
 const PLUGIN_NS: &str = "urn:waddle:ai-chatbot:1";
 const VERSION: &str = "0.1.0";
+const AI_COMMAND: &str = "/ai";
+const WADDLE_MENTION: &str = "@waddle";
 
 impl exports::waddle::extension::lifecycle::Guest for AiChatbot {
     fn init(_config: String) -> Result<types::ExtensionManifest, String> {
@@ -93,8 +95,7 @@ fn contains_waddle_mention(body: &str) -> bool {
 
 fn starts_with_ai_command(body: &str) -> bool {
     let trimmed = body.trim_start();
-    let lower = trimmed.to_ascii_lowercase();
-    lower.starts_with("/ai") && is_command_boundary(lower.as_bytes().get(3))
+    has_ai_command_prefix(trimmed) && is_command_boundary(trimmed.as_bytes().get(AI_COMMAND.len()))
 }
 
 fn is_command_boundary(next: Option<&u8>) -> bool {
@@ -102,7 +103,7 @@ fn is_command_boundary(next: Option<&u8>) -> bool {
 }
 
 fn is_word_boundary(next: Option<&u8>) -> bool {
-    !matches!(next, Some(b'a'..=b'z' | b'0'..=b'9' | b'_'))
+    !matches!(next, Some(b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_'))
 }
 
 fn manifest() -> types::ExtensionManifest {
@@ -135,16 +136,42 @@ fn answer_body(prompt: &str) -> String {
 
 fn clean_prompt(prompt: &str) -> String {
     let trimmed = prompt.trim();
-    let without_command = if trimmed.len() >= 3 && trimmed[..3].eq_ignore_ascii_case("/ai") {
-        &trimmed[3..]
-    } else {
-        trimmed
-    };
-    without_command
-        .replace("@waddle", "")
-        .replace("@Waddle", "")
-        .trim()
-        .to_string()
+    let without_command = strip_ai_command(trimmed).unwrap_or(trimmed);
+    remove_waddle_mentions(without_command).trim().to_string()
+}
+
+fn strip_ai_command(trimmed: &str) -> Option<&str> {
+    (has_ai_command_prefix(trimmed)
+        && is_command_boundary(trimmed.as_bytes().get(AI_COMMAND.len())))
+    .then(|| trimmed.get(AI_COMMAND.len()..).unwrap_or(""))
+}
+
+fn has_ai_command_prefix(trimmed: &str) -> bool {
+    trimmed
+        .get(..AI_COMMAND.len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(AI_COMMAND))
+}
+
+fn remove_waddle_mentions(value: &str) -> String {
+    let mut cleaned = String::with_capacity(value.len());
+    let mut cursor = 0;
+    while cursor < value.len() {
+        let remaining = &value[cursor..];
+        if remaining
+            .get(..WADDLE_MENTION.len())
+            .is_some_and(|mention| mention.eq_ignore_ascii_case(WADDLE_MENTION))
+            && is_word_boundary(remaining.as_bytes().get(WADDLE_MENTION.len()))
+        {
+            cursor += WADDLE_MENTION.len();
+        } else {
+            let Some(ch) = remaining.chars().next() else {
+                break;
+            };
+            cleaned.push(ch);
+            cursor += ch.len_utf8();
+        }
+    }
+    cleaned
 }
 
 fn plugin_id() -> types::PluginId {
@@ -178,8 +205,13 @@ fn display(value: &str) -> types::DisplayText {
 #[cfg(test)]
 mod tests {
     use super::{
-        answer_body, contains_waddle_mention, message_hook_response, starts_with_ai_command, types,
+        answer_body, clean_prompt, contains_waddle_mention, message_hook_response,
+        starts_with_ai_command, types,
     };
+
+    mod shared_ai_prompt_cases {
+        include!("../../../test-fixtures/ai_prompt_cases.rs");
+    }
 
     #[test]
     fn detects_ai_root_command_case_insensitively_with_boundary() {
@@ -188,6 +220,7 @@ mod tests {
         assert!(starts_with_ai_command("/Ai\tthread"));
         assert!(!starts_with_ai_command("prefix /ai"));
         assert!(!starts_with_ai_command("/airship"));
+        assert!(!starts_with_ai_command("☃ /ai later"));
     }
 
     #[test]
@@ -218,6 +251,28 @@ mod tests {
         assert!(answer.contains("WADDLE_AI_MODEL"));
         assert!(!answer.contains("simple arithmetic"));
         assert!(!answer.contains("letter-count"));
+    }
+
+    #[test]
+    fn clean_prompt_strips_ai_command_and_mentions_case_insensitively() {
+        assert_eq!(clean_prompt(" /AI @WADDLE summarize "), "summarize");
+        assert_eq!(clean_prompt("@wAdDlE continue"), "continue");
+        assert_eq!(clean_prompt("@waddle_bot continue"), "@waddle_bot continue");
+        assert_eq!(clean_prompt("@waddleBot continue"), "@waddleBot continue");
+        assert_eq!(clean_prompt("☃ /ai later"), "☃ /ai later");
+        assert_eq!(clean_prompt("/airship @WADDLE"), "/airship");
+    }
+
+    #[test]
+    fn shared_ai_prompt_cases_match_extension_parser() {
+        for &(body, is_prompt, cleaned) in shared_ai_prompt_cases::AI_PROMPT_CASES {
+            assert_eq!(
+                starts_with_ai_command(body) || contains_waddle_mention(body),
+                is_prompt,
+                "{body}"
+            );
+            assert_eq!(clean_prompt(body), cleaned, "{body}");
+        }
     }
 
     #[test]

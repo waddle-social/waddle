@@ -4,6 +4,7 @@ use jid::{BareJid, FullJid, Jid};
 use std::sync::Arc;
 use tracing::{debug, warn};
 use url::{Host, Url};
+use waddle_extensions::AI_CHATBOT_NAMESPACE;
 use waddle_xmpp::{
     carbons::CARBONS_NS,
     commands::{CommandContext, CommandResult},
@@ -91,8 +92,6 @@ use crate::server::bootstrap_membership::DEPLOYMENT_SERVER_ID;
 use crate::server::xmpp_state::{get_xmpp_channel, list_xmpp_channels, XmppChannelRecord};
 use crate::vcard::VCardStore;
 
-const AI_CHATBOT_FEATURE: &str = "urn:waddle:ai-chatbot:1";
-
 fn extension_features_for_disco(state: &WebSocketState) -> Vec<Feature> {
     let ai_provider_configured = is_ai_provider_configured();
     state
@@ -101,7 +100,7 @@ fn extension_features_for_disco(state: &WebSocketState) -> Vec<Feature> {
         .extension_manager
         .extension_features()
         .into_iter()
-        .filter(|ns| ai_provider_configured || ns != AI_CHATBOT_FEATURE)
+        .filter(|ns| ai_provider_configured || ns != AI_CHATBOT_NAMESPACE)
         .map(|ns| Feature::new(&ns))
         .collect()
 }

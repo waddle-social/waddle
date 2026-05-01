@@ -76,8 +76,8 @@ use std::str::FromStr;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 use waddle_extensions::{
-    message_has_framework_envelope, BotGroupchatResponse, DisplayText, ExtensionEffect,
-    ExtensionManager, FullJidValue, ReplyTarget as ExtensionReplyTarget,
+    message_has_framework_envelope, BotGroupchatResponse, BotGroupchatResponsePurpose, DisplayText,
+    ExtensionEffect, ExtensionManager, FullJidValue, ReplyTarget as ExtensionReplyTarget,
     StanzaId as ExtensionStanzaId, ThreadId as ExtensionThreadId, WaddleId,
 };
 use waddle_xmpp::carbons::{build_received_carbon, build_sent_carbon};
@@ -1637,6 +1637,7 @@ async fn dispatch_to_room(
                     Ok(answer) => match DisplayText::new(answer) {
                         Ok(answer) => {
                             response.body = answer;
+                            response.purpose = BotGroupchatResponsePurpose::Message;
                         }
                         Err(error) => {
                             warn!(
@@ -1650,7 +1651,7 @@ async fn dispatch_to_room(
                         warn!(
                             room = %room_jid,
                             %error,
-                            "AI provider unavailable; keeping explicit fallback response"
+                            "AI provider request failed; keeping explicit fallback response"
                         );
                     }
                 }
@@ -1677,10 +1678,7 @@ async fn dispatch_to_room(
 }
 
 fn is_ai_provider_fallback(response: &BotGroupchatResponse) -> bool {
-    response
-        .body
-        .as_str()
-        .starts_with("AI provider unavailable. Configure WADDLE_AI_PROVIDER=openai")
+    response.purpose == BotGroupchatResponsePurpose::AiProviderFallback
 }
 
 struct BotGroupchatDispatch<'a> {
@@ -4121,8 +4119,8 @@ mod tests {
     #[tokio::test]
     async fn bot_groupchat_response_dispatches_threaded_muc_message() {
         use waddle_extensions::{
-            BotGroupchatResponse, DisplayText, FullJidValue, ReplyTarget, RoomJid, StanzaId,
-            ThreadId,
+            BotGroupchatResponse, BotGroupchatResponsePurpose, DisplayText, FullJidValue,
+            ReplyTarget, RoomJid, StanzaId, ThreadId,
         };
 
         let registry = ConnectionRegistry::new();
@@ -4149,6 +4147,7 @@ mod tests {
             },
         ];
         let response = BotGroupchatResponse {
+            purpose: BotGroupchatResponsePurpose::Message,
             body: DisplayText::new("AI answer").expect("body"),
             room: RoomJid::new(room_jid.to_string()).expect("room"),
             thread_id: Some(ThreadId::new("root-msg").expect("thread")),
@@ -4209,6 +4208,32 @@ mod tests {
     }
 
     #[test]
+    fn ai_provider_fallback_detection_uses_typed_purpose() {
+        use waddle_extensions::{
+            BotGroupchatResponse, BotGroupchatResponsePurpose, DisplayText, RoomJid,
+        };
+
+        let response = BotGroupchatResponse {
+            purpose: BotGroupchatResponsePurpose::Message,
+            body: DisplayText::new("AI provider unavailable. Configure WADDLE_AI_PROVIDER=openai")
+                .expect("body"),
+            room: RoomJid::new("chat@muc.example.com").expect("room"),
+            thread_id: None,
+            reply_to: None,
+        };
+        assert!(!is_ai_provider_fallback(&response));
+
+        let fallback = BotGroupchatResponse {
+            purpose: BotGroupchatResponsePurpose::AiProviderFallback,
+            body: DisplayText::new("fallback copy can change").expect("body"),
+            room: RoomJid::new("chat@muc.example.com").expect("room"),
+            thread_id: None,
+            reply_to: None,
+        };
+        assert!(is_ai_provider_fallback(&fallback));
+    }
+
+    #[test]
     fn message_thread_id_reads_existing_forum_reply_without_rfc_thread() {
         let xml = r#"<message xmlns='jabber:client' id='child'>
             <thread-reply xmlns='urn:waddle:forums:0' thread-id='root-msg'/>
@@ -4243,10 +4268,12 @@ mod tests {
     #[test]
     fn bot_response_target_uses_canonical_reply_id_as_thread_for_plain_roots() {
         use waddle_extensions::{
-            BotGroupchatResponse, DisplayText, FullJidValue, RoomJid, StanzaId, ThreadId,
+            BotGroupchatResponse, BotGroupchatResponsePurpose, DisplayText, FullJidValue, RoomJid,
+            StanzaId, ThreadId,
         };
 
         let response = BotGroupchatResponse {
+            purpose: BotGroupchatResponsePurpose::Message,
             body: DisplayText::new("AI answer").expect("body"),
             room: RoomJid::new("chat@muc.example.com").expect("room"),
             thread_id: Some(ThreadId::new("client-origin-id").expect("thread")),

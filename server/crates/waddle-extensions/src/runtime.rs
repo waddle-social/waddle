@@ -7,17 +7,17 @@ use wasmtime::{Config, Engine, Store};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 use crate::types::{
-    ActionBlock, ActionId, ArtifactReference, BodyRange, BotGroupchatResponse, CommandAction,
-    CommandDescriptor, CommandInvocation, CommandNode, CommandSessionId, DataForm, DataFormField,
-    DataFormType, DataFormValue, DisplayText, EnrichmentId, ExtensionCapability, ExtensionEffect,
-    ExtensionEnvelope, ExtensionEvent, ExtensionManifest, ExtensionPayload, ExtensionResponse,
-    FormFieldOption, FormFieldType, FormFieldValue, FullJidValue, ImageBlock, LaunchContext,
-    LaunchDescriptor, LaunchId, LaunchInvocation, LinkTarget, ListId, ListItem, ListItemId,
-    ListView, MediaType, MessageContext, MessageEnrichment, MessageHook, MessageSource,
-    PayloadNamespace, PayloadRoot, PayloadRule, PayloadSurface, PluginId, PluginVersion,
-    PubSubItemId, PubSubNode, PubSubPublish, ReplyTarget, RoomJid, Sha256Digest, StanzaId,
-    TextBlock, TextStyle, ThreadId, Timestamp, UiActionId, UiBlock, UiView, UiViewId, Url,
-    WaddleId, XmlAttribute, XmlElement, XmlNode,
+    ActionBlock, ActionId, ArtifactReference, BodyRange, BotGroupchatResponse,
+    BotGroupchatResponsePurpose, CommandAction, CommandDescriptor, CommandInvocation, CommandNode,
+    CommandSessionId, DataForm, DataFormField, DataFormType, DataFormValue, DisplayText,
+    EnrichmentId, ExtensionCapability, ExtensionEffect, ExtensionEnvelope, ExtensionEvent,
+    ExtensionManifest, ExtensionPayload, ExtensionResponse, FormFieldOption, FormFieldType,
+    FormFieldValue, FullJidValue, ImageBlock, LaunchContext, LaunchDescriptor, LaunchId,
+    LaunchInvocation, LinkTarget, ListId, ListItem, ListItemId, ListView, MediaType,
+    MessageContext, MessageEnrichment, MessageHook, MessageSource, PayloadNamespace, PayloadRoot,
+    PayloadRule, PayloadSurface, PluginId, PluginVersion, PubSubItemId, PubSubNode, PubSubPublish,
+    ReplyTarget, RoomJid, Sha256Digest, StanzaId, TextBlock, TextStyle, ThreadId, Timestamp,
+    UiActionId, UiBlock, UiView, UiViewId, Url, WaddleId, XmlAttribute, XmlElement, XmlNode,
 };
 
 wasmtime::component::bindgen!({
@@ -609,6 +609,7 @@ impl TryFrom<wit_types::BotGroupchatResponse> for BotGroupchatResponse {
 
     fn try_from(value: wit_types::BotGroupchatResponse) -> Result<Self> {
         Ok(Self {
+            purpose: BotGroupchatResponsePurpose::Message,
             body: wit_newtype_to_domain!(value.body, DisplayText)?,
             room: wit_newtype_to_domain!(value.room, RoomJid)?,
             thread_id: value

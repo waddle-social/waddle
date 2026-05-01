@@ -593,6 +593,74 @@ fn uses_backward_pagination(query: &MamQuery) -> bool {
     query.before_id.is_some()
 }
 
+macro_rules! push_common_mam_filters {
+    ($builder:expr, $query:expr, $with_filter:expr) => {{
+        if let Some(with) = $with_filter {
+            $builder
+                .push(" AND (from_jid LIKE ")
+                .push_bind(with)
+                .push(" OR to_jid LIKE ")
+                .push_bind(with)
+                .push(")");
+        }
+        if let Some(thread_id) = $query.thread_id.as_ref() {
+            $builder
+                .push(" AND (id = ")
+                .push_bind(thread_id.as_str())
+                .push(" OR stanza_id = ")
+                .push_bind(thread_id.as_str())
+                .push(" OR thread_id = ")
+                .push_bind(thread_id.as_str())
+                .push(" OR (thread_id IS NULL AND reply_to_id = ")
+                .push_bind(thread_id.as_str())
+                .push("))");
+        }
+        if let Some(fulltext) = $query.fulltext.as_ref() {
+            for term in fulltext.as_str().split_whitespace() {
+                $builder
+                    .push(" AND LOWER(body) LIKE ")
+                    .push_bind(format!("%{}%", term.to_lowercase()));
+            }
+        }
+    }};
+}
+
+fn push_sqlite_mam_filters<'args>(
+    builder: &mut QueryBuilder<'args, Sqlite>,
+    archive_jid: &'args str,
+    query: &'args MamQuery,
+    with_filter: Option<&'args str>,
+) {
+    builder.push_bind(archive_jid);
+    if let Some(start) = query.start {
+        builder
+            .push(" AND timestamp >= ")
+            .push_bind(start.to_rfc3339());
+    }
+    if let Some(end) = query.end {
+        builder
+            .push(" AND timestamp <= ")
+            .push_bind(end.to_rfc3339());
+    }
+    push_common_mam_filters!(builder, query, with_filter);
+}
+
+fn push_postgres_mam_filters<'args>(
+    builder: &mut QueryBuilder<'args, Postgres>,
+    archive_jid: &'args str,
+    query: &'args MamQuery,
+    with_filter: Option<&'args str>,
+) {
+    builder.push_bind(archive_jid);
+    if let Some(start) = query.start {
+        builder.push(" AND timestamp >= ").push_bind(start);
+    }
+    if let Some(end) = query.end {
+        builder.push(" AND timestamp <= ").push_bind(end);
+    }
+    push_common_mam_filters!(builder, query, with_filter);
+}
+
 fn finalize_result(
     mut messages: Vec<ArchivedMessage>,
     query: &MamQuery,
@@ -806,44 +874,12 @@ impl MamStorage for SqlxMamStorage {
                 let mut count_builder = QueryBuilder::<Sqlite>::new(
                     "SELECT COUNT(*) FROM mam_messages WHERE room_jid = ",
                 );
-                count_builder.push_bind(archive_jid);
-                if let Some(start) = query.start {
-                    count_builder
-                        .push(" AND timestamp >= ")
-                        .push_bind(start.to_rfc3339());
-                }
-                if let Some(end) = query.end {
-                    count_builder
-                        .push(" AND timestamp <= ")
-                        .push_bind(end.to_rfc3339());
-                }
-                if let Some(with) = with_filter.as_deref() {
-                    count_builder
-                        .push(" AND (from_jid LIKE ")
-                        .push_bind(with)
-                        .push(" OR to_jid LIKE ")
-                        .push_bind(with)
-                        .push(")");
-                }
-                if let Some(thread_id) = query.thread_id.as_ref() {
-                    count_builder
-                        .push(" AND (id = ")
-                        .push_bind(thread_id.as_str())
-                        .push(" OR stanza_id = ")
-                        .push_bind(thread_id.as_str())
-                        .push(" OR thread_id = ")
-                        .push_bind(thread_id.as_str())
-                        .push(" OR (thread_id IS NULL AND reply_to_id = ")
-                        .push_bind(thread_id.as_str())
-                        .push("))");
-                }
-                if let Some(fulltext) = query.fulltext.as_ref() {
-                    for term in fulltext.as_str().split_whitespace() {
-                        count_builder
-                            .push(" AND LOWER(body) LIKE ")
-                            .push_bind(format!("%{}%", term.to_lowercase()));
-                    }
-                }
+                push_sqlite_mam_filters(
+                    &mut count_builder,
+                    archive_jid,
+                    query,
+                    with_filter.as_deref(),
+                );
                 let count = count_builder
                     .build_query_scalar::<i64>()
                     .fetch_one(pool)
@@ -852,44 +888,7 @@ impl MamStorage for SqlxMamStorage {
                 let mut builder = QueryBuilder::<Sqlite>::new(format!(
                     "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE room_jid = "
                 ));
-                builder.push_bind(archive_jid);
-                if let Some(start) = query.start {
-                    builder
-                        .push(" AND timestamp >= ")
-                        .push_bind(start.to_rfc3339());
-                }
-                if let Some(end) = query.end {
-                    builder
-                        .push(" AND timestamp <= ")
-                        .push_bind(end.to_rfc3339());
-                }
-                if let Some(with) = with_filter.as_deref() {
-                    builder
-                        .push(" AND (from_jid LIKE ")
-                        .push_bind(with)
-                        .push(" OR to_jid LIKE ")
-                        .push_bind(with)
-                        .push(")");
-                }
-                if let Some(thread_id) = query.thread_id.as_ref() {
-                    builder
-                        .push(" AND (id = ")
-                        .push_bind(thread_id.as_str())
-                        .push(" OR stanza_id = ")
-                        .push_bind(thread_id.as_str())
-                        .push(" OR thread_id = ")
-                        .push_bind(thread_id.as_str())
-                        .push(" OR (thread_id IS NULL AND reply_to_id = ")
-                        .push_bind(thread_id.as_str())
-                        .push("))");
-                }
-                if let Some(fulltext) = query.fulltext.as_ref() {
-                    for term in fulltext.as_str().split_whitespace() {
-                        builder
-                            .push(" AND LOWER(body) LIKE ")
-                            .push_bind(format!("%{}%", term.to_lowercase()));
-                    }
-                }
+                push_sqlite_mam_filters(&mut builder, archive_jid, query, with_filter.as_deref());
                 if let Some(before_id) = query.before_id.as_deref().filter(|id| !id.is_empty()) {
                     builder.push(" AND id < ").push_bind(before_id);
                 }
@@ -918,40 +917,12 @@ impl MamStorage for SqlxMamStorage {
                 let mut count_builder = QueryBuilder::<Postgres>::new(
                     "SELECT COUNT(*) FROM mam_messages WHERE room_jid = ",
                 );
-                count_builder.push_bind(archive_jid);
-                if let Some(start) = query.start {
-                    count_builder.push(" AND timestamp >= ").push_bind(start);
-                }
-                if let Some(end) = query.end {
-                    count_builder.push(" AND timestamp <= ").push_bind(end);
-                }
-                if let Some(with) = with_filter.as_deref() {
-                    count_builder
-                        .push(" AND (from_jid LIKE ")
-                        .push_bind(with)
-                        .push(" OR to_jid LIKE ")
-                        .push_bind(with)
-                        .push(")");
-                }
-                if let Some(thread_id) = query.thread_id.as_ref() {
-                    count_builder
-                        .push(" AND (id = ")
-                        .push_bind(thread_id.as_str())
-                        .push(" OR stanza_id = ")
-                        .push_bind(thread_id.as_str())
-                        .push(" OR thread_id = ")
-                        .push_bind(thread_id.as_str())
-                        .push(" OR (thread_id IS NULL AND reply_to_id = ")
-                        .push_bind(thread_id.as_str())
-                        .push("))");
-                }
-                if let Some(fulltext) = query.fulltext.as_ref() {
-                    for term in fulltext.as_str().split_whitespace() {
-                        count_builder
-                            .push(" AND LOWER(body) LIKE ")
-                            .push_bind(format!("%{}%", term.to_lowercase()));
-                    }
-                }
+                push_postgres_mam_filters(
+                    &mut count_builder,
+                    archive_jid,
+                    query,
+                    with_filter.as_deref(),
+                );
                 let count = count_builder
                     .build_query_scalar::<i64>()
                     .fetch_one(pool)
@@ -960,40 +931,7 @@ impl MamStorage for SqlxMamStorage {
                 let mut builder = QueryBuilder::<Postgres>::new(format!(
                     "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE room_jid = "
                 ));
-                builder.push_bind(archive_jid);
-                if let Some(start) = query.start {
-                    builder.push(" AND timestamp >= ").push_bind(start);
-                }
-                if let Some(end) = query.end {
-                    builder.push(" AND timestamp <= ").push_bind(end);
-                }
-                if let Some(with) = with_filter.as_deref() {
-                    builder
-                        .push(" AND (from_jid LIKE ")
-                        .push_bind(with)
-                        .push(" OR to_jid LIKE ")
-                        .push_bind(with)
-                        .push(")");
-                }
-                if let Some(thread_id) = query.thread_id.as_ref() {
-                    builder
-                        .push(" AND (id = ")
-                        .push_bind(thread_id.as_str())
-                        .push(" OR stanza_id = ")
-                        .push_bind(thread_id.as_str())
-                        .push(" OR thread_id = ")
-                        .push_bind(thread_id.as_str())
-                        .push(" OR (thread_id IS NULL AND reply_to_id = ")
-                        .push_bind(thread_id.as_str())
-                        .push("))");
-                }
-                if let Some(fulltext) = query.fulltext.as_ref() {
-                    for term in fulltext.as_str().split_whitespace() {
-                        builder
-                            .push(" AND LOWER(body) LIKE ")
-                            .push_bind(format!("%{}%", term.to_lowercase()));
-                    }
-                }
+                push_postgres_mam_filters(&mut builder, archive_jid, query, with_filter.as_deref());
                 if let Some(before_id) = query.before_id.as_deref().filter(|id| !id.is_empty()) {
                     builder.push(" AND id < ").push_bind(before_id);
                 }
