@@ -84,6 +84,7 @@ fn xep_0045_groupchat_dispatches_through_handler_chain_with_canonical_stamps() {
         id_gen: &id_gen,
         occupant_id_secret: TEST_OCCUPANT_ID_SECRET,
         sender_nickname_generation: 0,
+        project_sender_inbox: true,
         dispatch_timestamp: 0,
     };
 
@@ -165,6 +166,7 @@ fn xep_0045_non_occupant_halts_chain_with_typed_not_acceptable() {
         id_gen: &id_gen,
         occupant_id_secret: TEST_OCCUPANT_ID_SECRET,
         sender_nickname_generation: 0,
+        project_sender_inbox: true,
         dispatch_timestamp: 0,
     };
 
@@ -226,6 +228,7 @@ fn xep_0359_room_chain_strips_client_spoofed_room_stanza_id() {
         id_gen: &id_gen,
         occupant_id_secret: TEST_OCCUPANT_ID_SECRET,
         sender_nickname_generation: 0,
+        project_sender_inbox: true,
         dispatch_timestamp: 0,
     };
 
@@ -282,6 +285,7 @@ fn xep_0424_groupchat_retraction_emits_archive_and_tombstone_events() {
         id_gen: &id_gen,
         occupant_id_secret: TEST_OCCUPANT_ID_SECRET,
         sender_nickname_generation: 0,
+        project_sender_inbox: true,
         dispatch_timestamp: 0,
     };
 
@@ -349,6 +353,7 @@ fn xep_0430_groupchat_message_emits_per_occupant_inbox_projection() {
         id_gen: &id_gen,
         occupant_id_secret: TEST_OCCUPANT_ID_SECRET,
         sender_nickname_generation: 0,
+        project_sender_inbox: true,
         dispatch_timestamp: 0,
     };
     let mut msg = groupchat(&room, &alice, "hello inbox");

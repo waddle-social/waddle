@@ -105,7 +105,7 @@ mod tests {
         room: &'a BareJid,
         sender_full: &'a FullJid,
         occupants: &'a [OccupantSnapshot],
-        gen: &'a FixedIdGenerator,
+        id_gen: &'a FixedIdGenerator,
     ) -> RoomContext<'a> {
         RoomContext {
             room,
@@ -113,9 +113,10 @@ mod tests {
             occupants,
             managed_room_forbidden: false,
             room_moderated: false,
-            id_gen: gen,
+            id_gen,
             occupant_id_secret: b"test-secret",
             sender_nickname_generation: 0,
+            project_sender_inbox: true,
             dispatch_timestamp: 0,
         }
     }

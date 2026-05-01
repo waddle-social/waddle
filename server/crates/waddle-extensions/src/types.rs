@@ -3,6 +3,7 @@ use std::fmt;
 use minidom::Element;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use xmpp_parsers::jid::{BareJid, FullJid};
 use xmpp_parsers::message::Message;
 
 pub const FRAMEWORK_NAMESPACE: &str = "urn:waddle:extension:1";
@@ -32,6 +33,10 @@ pub enum FrameworkTypeError {
     InvalidSha256Digest(String),
     #[error("artifact URI {0:?} must be immutable HTTP(S) and include /sha256/")]
     InvalidArtifactUri(String),
+    #[error("bare JID {0:?} is invalid")]
+    InvalidBareJid(String),
+    #[error("full JID {0:?} is invalid")]
+    InvalidFullJid(String),
     #[error("artifact URI {uri:?} must include digest {sha256:?}")]
     ArtifactDigestMismatch { uri: String, sha256: String },
     #[error("body range end {end} must be greater than start {start}")]
@@ -101,10 +106,77 @@ typed_non_empty_string!(PubSubItemId, "pubsub item id");
 typed_non_empty_string!(PubSubNode, "pubsub node");
 typed_non_empty_string!(StanzaId, "stanza id");
 typed_non_empty_string!(Timestamp, "timestamp");
+typed_non_empty_string!(ThreadId, "thread id");
 typed_non_empty_string!(UiActionId, "ui action id");
 typed_non_empty_string!(UiViewId, "ui view id");
 typed_non_empty_string!(Url, "url");
 typed_non_empty_string!(WaddleId, "waddle id");
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct RoomJid(String);
+
+impl RoomJid {
+    pub fn new(value: impl Into<String>) -> Result<Self, FrameworkTypeError> {
+        let value = value.into();
+        value
+            .parse::<BareJid>()
+            .map_err(|_| FrameworkTypeError::InvalidBareJid(value.clone()))?;
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+impl AsRef<str> for RoomJid {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl fmt::Display for RoomJid {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct FullJidValue(String);
+
+impl FullJidValue {
+    pub fn new(value: impl Into<String>) -> Result<Self, FrameworkTypeError> {
+        let value = value.into();
+        value
+            .parse::<FullJid>()
+            .map_err(|_| FrameworkTypeError::InvalidFullJid(value.clone()))?;
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+impl AsRef<str> for FullJidValue {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl fmt::Display for FullJidValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct PluginId(String);
@@ -345,6 +417,8 @@ pub enum ExtensionCapability {
     MessageEnrich,
     #[serde(rename = "message.observe")]
     MessageObserve,
+    #[serde(rename = "bot.groupchat.send")]
+    BotGroupchatSend,
     #[serde(rename = "commands")]
     Commands,
     #[serde(rename = "launch")]
@@ -362,6 +436,7 @@ impl ExtensionCapability {
         match self {
             Self::MessageEnrich => "message.enrich",
             Self::MessageObserve => "message.observe",
+            Self::BotGroupchatSend => "bot.groupchat.send",
             Self::Commands => "commands",
             Self::Launch => "launch",
             Self::PubSubPublish => "pubsub.publish",
@@ -1101,12 +1176,22 @@ pub struct MessageHook {
 pub struct MessageContext {
     pub waddle_id: WaddleId,
     pub stanza_id: Option<StanzaId>,
+    pub room: Option<RoomJid>,
+    pub sender: Option<FullJidValue>,
+    pub thread_id: Option<ThreadId>,
+    pub reply_to: Option<ReplyTarget>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LinkTarget {
     pub url: Url,
     pub range: BodyRange,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplyTarget {
+    pub id: StanzaId,
+    pub to: Option<FullJidValue>,
 }
 
 impl TryFrom<DetectedLink> for LinkTarget {
@@ -1177,6 +1262,7 @@ pub struct ExtensionResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ExtensionEffect {
     EnrichMessage(ExtensionEnvelope),
+    BotGroupchatResponse(BotGroupchatResponse),
     PublishPubSub(PubSubPublish),
     ReferenceArtifact(ArtifactReference),
     HostWarning(DisplayText),
@@ -1212,6 +1298,9 @@ impl ExtensionEffect {
                     && publish.payload.namespace == publish.payload.root.namespace
                     && manifest.declares_payload(PayloadSurface::PubSubItem, &publish.payload)
             }
+            Self::BotGroupchatResponse(_) => {
+                manifest.declares_capability(ExtensionCapability::BotGroupchatSend)
+            }
             Self::ReferenceArtifact(_) => {
                 manifest.declares_capability(ExtensionCapability::ArtifactReference)
             }
@@ -1226,6 +1315,14 @@ pub struct PubSubPublish {
     pub node: PubSubNode,
     pub item_id: Option<PubSubItemId>,
     pub payload: ExtensionPayload,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BotGroupchatResponse {
+    pub body: DisplayText,
+    pub room: RoomJid,
+    pub thread_id: Option<ThreadId>,
+    pub reply_to: Option<ReplyTarget>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

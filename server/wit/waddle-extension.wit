@@ -27,6 +27,10 @@ interface types {
         value: string,
     }
 
+    record full-jid {
+        value: string,
+    }
+
     record enrichment-id {
         value: string,
     }
@@ -67,6 +71,10 @@ interface types {
         value: string,
     }
 
+    record room-jid {
+        value: string,
+    }
+
     record sha256-digest {
         value: string,
     }
@@ -76,6 +84,10 @@ interface types {
     }
 
     record timestamp {
+        value: string,
+    }
+
+    record thread-id {
         value: string,
     }
 
@@ -109,6 +121,7 @@ interface types {
     enum extension-capability {
         message-enrich,
         message-observe,
+        bot-groupchat-send,
         commands,
         launch,
         pubsub-publish,
@@ -306,9 +319,18 @@ interface types {
         enrichments: list<message-enrichment>,
     }
 
+    record reply-target {
+        id: stanza-id,
+        to: option<full-jid>,
+    }
+
     record message-context {
         waddle-id: waddle-id,
         stanza-id: option<stanza-id>,
+        room: option<room-jid>,
+        sender: option<full-jid>,
+        thread-id: option<thread-id>,
+        reply-to: option<reply-target>,
     }
 
     record link-target {
@@ -366,8 +388,16 @@ interface types {
         payload: extension-payload,
     }
 
+    record bot-groupchat-response {
+        body: display-text,
+        room: room-jid,
+        thread-id: option<thread-id>,
+        reply-to: option<reply-target>,
+    }
+
     variant extension-effect {
         enrich-message(extension-envelope),
+        bot-groupchat-response(bot-groupchat-response),
         publish-pubsub(pubsub-publish),
         reference-artifact(artifact-reference),
         noop,

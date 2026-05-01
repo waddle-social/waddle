@@ -32,7 +32,7 @@ impl RoomHandler for ReflectorHandler {
 
     fn handle(&self, message: &mut Message, ctx: &RoomContext<'_>) -> RoomHandlerOutcome {
         let mut events = Vec::with_capacity(ctx.occupants.len());
-        for occupant in ctx.occupants {
+        for occupant in ctx.recipient_occupants() {
             let mut copy = message.clone();
             copy.to = Some(Jid::from(occupant.full_jid.clone()));
             events.push(OutboundEvent::RouteToConnection {
@@ -76,6 +76,7 @@ mod tests {
             id_gen: &id_gen,
             occupant_id_secret: b"test-secret",
             sender_nickname_generation: 0,
+            project_sender_inbox: true,
             dispatch_timestamp: 0,
         };
         match ReflectorHandler.handle(msg, &ctx) {

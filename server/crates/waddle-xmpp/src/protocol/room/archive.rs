@@ -128,6 +128,7 @@ mod tests {
             id_gen: &id_gen,
             occupant_id_secret: b"test-secret",
             sender_nickname_generation: 0,
+            project_sender_inbox: true,
             dispatch_timestamp: 0,
         };
         match MucArchiveHandler.handle(msg, &ctx) {

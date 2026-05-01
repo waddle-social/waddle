@@ -74,7 +74,11 @@ use kameo::actor::ActorRef;
 use std::str::FromStr;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
-use waddle_extensions::{message_has_framework_envelope, ExtensionManager, WaddleId};
+use waddle_extensions::{
+    message_has_framework_envelope, BotGroupchatResponse, ExtensionEffect, ExtensionManager,
+    FullJidValue, ReplyTarget as ExtensionReplyTarget, StanzaId as ExtensionStanzaId,
+    ThreadId as ExtensionThreadId, WaddleId,
+};
 use waddle_xmpp::carbons::{build_received_carbon, build_sent_carbon};
 use waddle_xmpp::inbox::runtime::{direct_message_entry, groupchat_entry, groupchat_thread_entry};
 use waddle_xmpp::inbox::storage::InboxStorage;
@@ -107,10 +111,12 @@ use waddle_xmpp::stream_management::InMemorySmSessionRegistry;
 use waddle_xmpp::xep::xep0191::BlockingStorage;
 use waddle_xmpp::xep::xep0430::build_inbox_push;
 use waddle_xmpp::xep::{
-    extract_correction_from_message, extract_explicit_mentions, extract_reactions_from_message,
-    extract_references_from_message, extract_retraction_from_message, parse_reply_from_message,
-    remove_stanza_ids_by, RetractionKind, NS_EXPLICIT_MENTIONS, NS_MESSAGE_CORRECT,
-    NS_MESSAGE_RETRACT, NS_REACTIONS, NS_REFERENCE, NS_REPLY,
+    extract_correction_from_message, extract_explicit_mentions, extract_forum_action,
+    extract_reactions_from_message, extract_references_from_message,
+    extract_retraction_from_message, parse_reply_from_message, remove_stanza_ids_by,
+    set_reply_payload, set_thread_id, ForumAction, ReplyReference, RetractionKind,
+    NS_EXPLICIT_MENTIONS, NS_MESSAGE_CORRECT, NS_MESSAGE_RETRACT, NS_REACTIONS, NS_REFERENCE,
+    NS_REPLY,
 };
 use waddle_xmpp::Stanza;
 use xmpp_parsers::message::{Message, MessageType as XmppMessageType};
@@ -1437,6 +1443,7 @@ async fn dispatch_to_room(
     // value (Copilot review on PR #279). Avoids per-occupant
     // `Utc::now()` drift across a second-boundary.
     let dispatch_timestamp = chrono::Utc::now().timestamp();
+    normalize_thread_create_source(&mut prototype);
     let gate_ctx = RoomContext {
         room: &room_jid,
         sender_full: &sender_full,
@@ -1446,6 +1453,7 @@ async fn dispatch_to_room(
         id_gen: &id_gen,
         occupant_id_secret: OCCUPANT_ID_SECRET,
         sender_nickname_generation: snapshot.sender_nickname_generation.unwrap_or(0),
+        project_sender_inbox: true,
         dispatch_timestamp,
     };
     let mut gate_working = prototype.clone();
@@ -1496,12 +1504,18 @@ async fn dispatch_to_room(
     //    enrichment payloads. Fail-open: extension errors leave the
     //    message unchanged.
     let waddle_id = waddle_id_for_room_jid(&room_jid);
-    let _embeds_added = state
+    let extension_outcome = state
         .deps
         .protocol
         .extension_manager
-        .enrich_message_for_waddle(&mut prototype, waddle_id)
+        .process_message_for_waddle(&mut prototype, waddle_id)
         .await;
+    let bot_response_requested = extension_outcome
+        .effects
+        .iter()
+        .any(|effect| matches!(effect, ExtensionEffect::BotGroupchatResponse(_)));
+    let source_thread_id_before_dispatch =
+        bot_response_source_thread_id(&mut prototype, bot_response_requested);
 
     // 6. Rich-target validation against the room archive. Runs only
     //    after the gate has admitted the sender, so non-occupants /
@@ -1561,6 +1575,7 @@ async fn dispatch_to_room(
         // `RoomActor::GetRoomSnapshot` round-trip per groupchat
         // archive write (Copilot review on PR #279).
         sender_nickname_generation: snapshot.sender_nickname_generation.unwrap_or(0),
+        project_sender_inbox: true,
         dispatch_timestamp,
     };
     let mut working = prototype;
@@ -1589,7 +1604,250 @@ async fn dispatch_to_room(
         outcome.close = true;
     }
     outcome.feedback.extend(nested.feedback);
+
+    let canonical_source_reply = canonical_reply_target_for_room_message(&working, &room_jid);
+    let canonical_source_thread_id = message_thread_id(&working)
+        .or(source_thread_id_before_dispatch)
+        .or_else(|| {
+            canonical_source_reply
+                .as_ref()
+                .map(|reply| reply.id.as_str().to_string())
+        });
+
+    for effect in extension_outcome.effects {
+        if let ExtensionEffect::BotGroupchatResponse(response) = effect {
+            let Some(response) = canonicalize_bot_response_target(
+                response,
+                canonical_source_thread_id.as_deref(),
+                canonical_source_reply.clone(),
+            ) else {
+                warn!(
+                    room = %room_jid,
+                    "DispatchToRoom: bot response requested but canonical source target was unavailable; dropping"
+                );
+                continue;
+            };
+            let nested = Box::pin(dispatch_bot_groupchat_response(
+                deps,
+                BotGroupchatDispatch {
+                    room_jid: &room_jid,
+                    occupants: &occupants,
+                    room_actor: Some(&room_actor),
+                    room_moderated: snapshot.config.moderated,
+                    dispatch_timestamp,
+                    recursion_depth,
+                },
+                response,
+            ))
+            .await;
+            outcome.frames.extend(nested.frames);
+            outcome.close = outcome.close || nested.close;
+            outcome.feedback.extend(nested.feedback);
+        }
+    }
     outcome
+}
+
+struct BotGroupchatDispatch<'a> {
+    room_jid: &'a BareJid,
+    occupants: &'a [OccupantSnapshot],
+    room_actor: Option<&'a ActorRef<RoomActor>>,
+    room_moderated: bool,
+    dispatch_timestamp: i64,
+    recursion_depth: u8,
+}
+
+async fn dispatch_bot_groupchat_response(
+    deps: &Deps<'_>,
+    bot_ctx: BotGroupchatDispatch<'_>,
+    response: BotGroupchatResponse,
+) -> InterpretOutcome {
+    let mut outcome = InterpretOutcome::default();
+    if response.room.as_str() != bot_ctx.room_jid.to_string() {
+        warn!(
+            room = %bot_ctx.room_jid,
+            response_room = response.room.as_str(),
+            "BotGroupchatResponse room did not match dispatch room; dropping"
+        );
+        return outcome;
+    }
+
+    let Some(bot_full) = bot_full_jid(bot_ctx.room_jid) else {
+        warn!(room = %bot_ctx.room_jid, "BotGroupchatResponse could not build bot sender JID; dropping");
+        return outcome;
+    };
+
+    let mut working = Message::new(Some(Jid::from(bot_ctx.room_jid.clone())));
+    working.id = Some(uuid::Uuid::new_v4().to_string());
+    working.from = Some(Jid::from(bot_full.clone()));
+    working.type_ = XmppMessageType::Groupchat;
+    working.bodies.insert(
+        String::new(),
+        xmpp_parsers::message::Body(response.body.as_str().to_string()),
+    );
+
+    if let Some(thread_id) = response.thread_id.as_ref() {
+        set_thread_id(&mut working, thread_id.as_str());
+    }
+    if let Some(reply_to) = response.reply_to.as_ref() {
+        let mut reply = ReplyReference::new(reply_to.id.as_str());
+        if let Some(to) = reply_to.to.as_ref() {
+            reply = reply.with_to(to.as_str());
+        }
+        set_reply_payload(&mut working, &reply);
+    }
+
+    if let Some(room_actor) = bot_ctx.room_actor {
+        if let Err(stanza_error) = validate_groupchat_rich_targets(
+            deps,
+            bot_ctx.room_jid,
+            &working,
+            None,
+            room_actor,
+            Some(0),
+        )
+        .await
+        {
+            warn!(
+                room = %bot_ctx.room_jid,
+                error = ?stanza_error,
+                "BotGroupchatResponse failed rich-target validation; dropping"
+            );
+            return outcome;
+        }
+    }
+
+    let bot_nick = available_bot_nick(bot_ctx.occupants);
+    let mut bot_occupants = bot_ctx.occupants.to_vec();
+    bot_occupants.push(OccupantSnapshot {
+        full_jid: bot_full.clone(),
+        nick: bot_nick,
+        affiliation: waddle_xmpp::Affiliation::Member,
+        role: waddle_xmpp::Role::Participant,
+    });
+
+    let id_gen = UuidV4Generator;
+    let ctx = RoomContext {
+        room: bot_ctx.room_jid,
+        sender_full: &bot_full,
+        occupants: &bot_occupants,
+        managed_room_forbidden: false,
+        room_moderated: bot_ctx.room_moderated,
+        id_gen: &id_gen,
+        occupant_id_secret: OCCUPANT_ID_SECRET,
+        sender_nickname_generation: 0,
+        project_sender_inbox: false,
+        dispatch_timestamp: bot_ctx.dispatch_timestamp,
+    };
+
+    let dispatch_outcome = default_room_pipeline_dispatcher().dispatch(&mut working, &ctx);
+    let nested = Box::pin(interpret_with_depth(
+        dispatch_outcome.events,
+        deps,
+        bot_ctx.recursion_depth,
+    ))
+    .await;
+    outcome.frames.extend(nested.frames);
+    outcome.close = nested.close;
+    outcome.feedback.extend(nested.feedback);
+    outcome
+}
+
+fn bot_full_jid(room_jid: &BareJid) -> Option<FullJid> {
+    let domain = room_jid.domain();
+    format!("waddle@{domain}/bot").parse::<FullJid>().ok()
+}
+
+fn available_bot_nick(occupants: &[OccupantSnapshot]) -> String {
+    const BASE: &str = "waddle";
+    if !occupants.iter().any(|occupant| occupant.nick == BASE) {
+        return BASE.to_string();
+    }
+    for suffix in 2.. {
+        let candidate = format!("{BASE}-{suffix}");
+        if !occupants.iter().any(|occupant| occupant.nick == candidate) {
+            return candidate;
+        }
+    }
+    unreachable!("unbounded suffix search always returns")
+}
+
+fn normalize_thread_create_source(message: &mut Message) -> Option<String> {
+    let Some(ForumAction::CreateThread(_)) = extract_forum_action(message) else {
+        return None;
+    };
+    let thread_id = message
+        .thread
+        .as_ref()
+        .map(|thread| thread.0.clone())
+        .or_else(|| message.id.clone())
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    if message.id.is_none() {
+        message.id = Some(thread_id.clone());
+    }
+    if message.thread.is_none() {
+        set_thread_id(message, &thread_id);
+    }
+    Some(thread_id)
+}
+
+fn bot_response_source_thread_id(
+    prototype: &mut Message,
+    bot_response_requested: bool,
+) -> Option<String> {
+    let source_thread_id = message_thread_id(prototype);
+    if !bot_response_requested {
+        return source_thread_id;
+    }
+
+    if let Some(thread_id) = source_thread_id {
+        if prototype.thread.is_none() {
+            set_thread_id(prototype, &thread_id);
+        }
+        return Some(thread_id);
+    }
+
+    None
+}
+
+fn canonicalize_bot_response_target(
+    mut response: BotGroupchatResponse,
+    source_thread_id: Option<&str>,
+    source_reply: Option<ExtensionReplyTarget>,
+) -> Option<BotGroupchatResponse> {
+    response.thread_id =
+        source_thread_id.and_then(|thread_id| ExtensionThreadId::new(thread_id.to_string()).ok());
+    response.reply_to = source_reply;
+    if response.thread_id.is_some() && response.reply_to.is_some() {
+        Some(response)
+    } else {
+        None
+    }
+}
+
+fn canonical_reply_target_for_room_message(
+    message: &Message,
+    room: &BareJid,
+) -> Option<ExtensionReplyTarget> {
+    let id = ExtensionStanzaId::new(extract_room_stanza_id(message, room)?).ok()?;
+    let to = message
+        .from
+        .as_ref()
+        .and_then(|from| FullJidValue::new(from.to_string()).ok());
+    Some(ExtensionReplyTarget { id, to })
+}
+
+fn message_thread_id(message: &Message) -> Option<String> {
+    message
+        .thread
+        .as_ref()
+        .map(|thread| thread.0.clone())
+        .or_else(|| {
+            extract_forum_action(message).and_then(|action| match action {
+                ForumAction::Reply(reply) => Some(reply.thread_id),
+                ForumAction::CreateThread(_) => message.id.clone(),
+            })
+        })
 }
 
 /// Resolve the managed-room owner override against the deployment
@@ -2498,6 +2756,7 @@ fn rich_archive_payload(message: &Message) -> Option<ArchivedRichMessage> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use waddle_xmpp::xep::{set_thread_create, ThreadCreate};
     use waddle_xmpp::Stanza;
     use xmpp_parsers::iq::{Iq, IqType};
     use xmpp_parsers::minidom::Element;
@@ -3821,6 +4080,192 @@ mod tests {
         let outcome = interpret(events, &Deps::registry_only(&registry)).await;
         assert!(outcome.frames.is_empty());
         assert!(!outcome.close);
+    }
+
+    #[tokio::test]
+    async fn bot_groupchat_response_dispatches_threaded_muc_message() {
+        use waddle_extensions::{
+            BotGroupchatResponse, DisplayText, FullJidValue, ReplyTarget, RoomJid, StanzaId,
+            ThreadId,
+        };
+
+        let registry = ConnectionRegistry::new();
+        let room_jid: jid::BareJid = "chat@muc.example.com".parse().expect("room jid");
+        let alice: jid::FullJid = "alice@example.com/web".parse().expect("alice jid");
+        let bob: jid::FullJid = "bob@example.com/web".parse().expect("bob jid");
+        let (alice_tx, mut alice_rx) = tokio::sync::mpsc::channel(8);
+        let (bob_tx, mut bob_rx) = tokio::sync::mpsc::channel(8);
+        registry.register(alice.clone(), alice_tx);
+        registry.register(bob.clone(), bob_tx);
+
+        let occupants = vec![
+            OccupantSnapshot {
+                full_jid: alice.clone(),
+                nick: "alice".to_string(),
+                affiliation: waddle_xmpp::Affiliation::Member,
+                role: waddle_xmpp::Role::Participant,
+            },
+            OccupantSnapshot {
+                full_jid: bob.clone(),
+                nick: "bob".to_string(),
+                affiliation: waddle_xmpp::Affiliation::Member,
+                role: waddle_xmpp::Role::Participant,
+            },
+        ];
+        let response = BotGroupchatResponse {
+            body: DisplayText::new("AI answer").expect("body"),
+            room: RoomJid::new(room_jid.to_string()).expect("room"),
+            thread_id: Some(ThreadId::new("root-msg").expect("thread")),
+            reply_to: Some(ReplyTarget {
+                id: StanzaId::new("root-msg").expect("reply id"),
+                to: Some(FullJidValue::new(alice.to_string()).expect("reply to")),
+            }),
+        };
+
+        let outcome = dispatch_bot_groupchat_response(
+            &Deps::registry_only(&registry),
+            BotGroupchatDispatch {
+                room_jid: &room_jid,
+                occupants: &occupants,
+                room_actor: None,
+                room_moderated: false,
+                dispatch_timestamp: 1777629203,
+                recursion_depth: 0,
+            },
+            response,
+        )
+        .await;
+
+        assert!(outcome.frames.is_empty());
+        assert!(!outcome.close);
+
+        let alice_delivered = drain_inbound(&mut alice_rx);
+        let bob_delivered = drain_inbound(&mut bob_rx);
+        assert_eq!(alice_delivered.len(), 1);
+        assert_eq!(bob_delivered.len(), 1);
+
+        let Stanza::Message(message) = &alice_delivered[0].stanza else {
+            panic!("expected bot groupchat message");
+        };
+        assert_eq!(message.type_, xmpp_parsers::message::MessageType::Groupchat);
+        assert_eq!(
+            message.from.as_ref().map(ToString::to_string),
+            Some(format!("{room_jid}/waddle"))
+        );
+        assert_eq!(
+            message.thread.as_ref().map(|thread| thread.0.as_str()),
+            Some("root-msg")
+        );
+        assert_eq!(
+            message.bodies.get("").map(|body| body.0.as_str()),
+            Some("AI answer")
+        );
+        let reply = parse_reply_from_message(message).expect("reply payload");
+        assert_eq!(reply.id, "root-msg");
+        assert_eq!(reply.to, Some(alice.to_string()));
+        assert!(
+            !message
+                .payloads
+                .iter()
+                .any(|payload| payload.ns() == "urn:waddle:forums:0"),
+            "plain MUC bot responses must not reuse forum metadata"
+        );
+    }
+
+    #[test]
+    fn message_thread_id_reads_existing_forum_reply_without_rfc_thread() {
+        let xml = r#"<message xmlns='jabber:client' id='child'>
+            <thread-reply xmlns='urn:waddle:forums:0' thread-id='root-msg'/>
+        </message>"#;
+        let element: Element = xml.parse().expect("element");
+        let message = Message::try_from(element).expect("message");
+        assert_eq!(message_thread_id(&message).as_deref(), Some("root-msg"));
+    }
+
+    #[test]
+    fn bot_response_source_thread_leaves_plain_root_unthreaded() {
+        let mut message = Message::new(Some(Jid::from(
+            "chat@muc.example.com"
+                .parse::<jid::BareJid>()
+                .expect("room jid"),
+        )));
+        message.id = Some("client-root-id".to_string());
+        message.type_ = xmpp_parsers::message::MessageType::Groupchat;
+        message.bodies.insert(
+            String::new(),
+            xmpp_parsers::message::Body("/ai explain this".to_string()),
+        );
+
+        let thread_id = bot_response_source_thread_id(&mut message, true);
+
+        assert_eq!(thread_id, None);
+        assert_eq!(message.id.as_deref(), Some("client-root-id"));
+        assert!(message.thread.is_none());
+        assert!(extract_forum_action(&message).is_none());
+    }
+
+    #[test]
+    fn bot_response_source_thread_stamps_existing_forum_root() {
+        let mut message = Message::new(Some(Jid::from(
+            "chat@muc.example.com"
+                .parse::<jid::BareJid>()
+                .expect("room jid"),
+        )));
+        message.id = Some("forum-root-id".to_string());
+        message.type_ = xmpp_parsers::message::MessageType::Groupchat;
+        set_thread_create(&mut message, &ThreadCreate::new("Forum root"));
+
+        let thread_id = bot_response_source_thread_id(&mut message, true);
+
+        assert_eq!(thread_id.as_deref(), Some("forum-root-id"));
+        assert_eq!(
+            message.thread.as_ref().map(|thread| thread.0.as_str()),
+            Some("forum-root-id")
+        );
+    }
+
+    #[test]
+    fn thread_create_source_is_normalized_for_inbox_projection() {
+        let mut message = Message::new(Some(Jid::from(
+            "chat@muc.example.com"
+                .parse::<jid::BareJid>()
+                .expect("room jid"),
+        )));
+        message.id = Some("live-forum-root".to_string());
+        message.type_ = xmpp_parsers::message::MessageType::Groupchat;
+        set_thread_create(&mut message, &ThreadCreate::new("Live forum root"));
+
+        let thread_id = normalize_thread_create_source(&mut message);
+
+        assert_eq!(thread_id.as_deref(), Some("live-forum-root"));
+        assert_eq!(
+            message.thread.as_ref().map(|thread| thread.0.as_str()),
+            Some("live-forum-root")
+        );
+        assert!(matches!(
+            extract_forum_action(&message),
+            Some(ForumAction::CreateThread(_))
+        ));
+    }
+
+    #[test]
+    fn bot_nick_avoids_existing_occupant_collision() {
+        let occupants = vec![
+            OccupantSnapshot {
+                full_jid: "alice@example.com/web".parse().expect("alice jid"),
+                nick: "waddle".to_string(),
+                affiliation: waddle_xmpp::Affiliation::Member,
+                role: waddle_xmpp::Role::Participant,
+            },
+            OccupantSnapshot {
+                full_jid: "bob@example.com/web".parse().expect("bob jid"),
+                nick: "waddle-2".to_string(),
+                affiliation: waddle_xmpp::Affiliation::Member,
+                role: waddle_xmpp::Role::Participant,
+            },
+        ];
+
+        assert_eq!(available_bot_nick(&occupants), "waddle-3");
     }
 
     // -----------------------------------------------------------------

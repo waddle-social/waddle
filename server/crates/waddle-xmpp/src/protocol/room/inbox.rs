@@ -48,7 +48,10 @@ impl RoomHandler for MucInboxHandler {
         // also enumerated as an occupant, and this matches RFC
         // expectations for "your own outgoing copy" surfacing in your
         // inbox.
-        if seen.insert(sender_bare.clone()) {
+        if ctx.project_sender_inbox
+            && ctx.sender_snapshot().is_some()
+            && seen.insert(sender_bare.clone())
+        {
             events.push(OutboundEvent::ProjectGroupchatInbox {
                 owner: sender_bare,
                 room: ctx.room.clone(),
@@ -58,7 +61,7 @@ impl RoomHandler for MucInboxHandler {
                 dispatch_timestamp: ctx.dispatch_timestamp,
             });
         }
-        for occupant in ctx.occupants {
+        for occupant in ctx.recipient_occupants() {
             let bare = occupant.bare_jid();
             if !seen.insert(bare.clone()) {
                 continue;
@@ -76,23 +79,23 @@ impl RoomHandler for MucInboxHandler {
     }
 }
 
-/// Resolve the thread metadata for a groupchat message, mirroring the
-/// legacy
-/// `deliver_groupchat_via_room_actor::groupchat_thread_entry(...)`
-/// title-resolution logic: prefer a Waddle `CreateThread` action's
-/// title, fall back to the message preview, and capture the resource
-/// component of `from` as the author nick.
+/// Resolve thread metadata for actual roots. Replies must not publish
+/// title/author metadata, otherwise a bot or later human reply can overwrite
+/// the root's inbox projection.
 fn thread_projection(message: &Message) -> Option<GroupchatThreadProjection> {
     let thread = message.thread.as_ref()?;
     let forum_title = extract_forum_action(message).and_then(|action| match action {
         ForumAction::CreateThread(tc) => Some(tc.title),
         _ => None,
     });
-    let title = forum_title.or_else(|| preview_text(message));
-    let author_nick = message
-        .from
-        .as_ref()
-        .and_then(|jid| jid.resource().map(|r| r.to_string()));
+    let is_thread_root = message.id.as_deref() == Some(thread.0.as_str());
+    let title = forum_title.or_else(|| is_thread_root.then(|| preview_text(message)).flatten());
+    let author_nick = title.as_ref().and_then(|_| {
+        message
+            .from
+            .as_ref()
+            .and_then(|jid| jid.resource().map(|r| r.to_string()))
+    });
     Some(GroupchatThreadProjection {
         thread_id: thread.0.clone(),
         title,
@@ -106,6 +109,7 @@ mod tests {
     use crate::protocol::id_gen::FixedIdGenerator;
     use crate::protocol::room::context::OccupantSnapshot;
     use crate::types::{Affiliation, Role};
+    use crate::xep::xep0461::set_thread_id;
     use jid::{FullJid, Jid};
     use xmpp_parsers::message::{Body, Message, MessageType};
 
@@ -152,6 +156,7 @@ mod tests {
             id_gen: &id_gen,
             occupant_id_secret: b"test-secret",
             sender_nickname_generation: 0,
+            project_sender_inbox: true,
             dispatch_timestamp: 0,
         };
         match MucInboxHandler.handle(msg, &ctx) {
@@ -228,5 +233,35 @@ mod tests {
         let proj = projections(&events);
         // Sender + one bob row (the second bob session collapsed).
         assert_eq!(proj.len(), 2);
+    }
+
+    #[test]
+    fn thread_projection_does_not_publish_reply_metadata() {
+        let room = bare("team@conf.example.com");
+        let bot = full("team@conf.example.com/waddle");
+        let mut msg = groupchat(&room, &bot, "AI answer");
+        msg.id = Some("reply-stanza".to_string());
+        set_thread_id(&mut msg, "root-stanza");
+
+        let thread = thread_projection(&msg).expect("thread projection");
+
+        assert_eq!(thread.thread_id, "root-stanza");
+        assert_eq!(thread.title, None);
+        assert_eq!(thread.author_nick, None);
+    }
+
+    #[test]
+    fn thread_projection_publishes_root_metadata() {
+        let room = bare("team@conf.example.com");
+        let alice = full("team@conf.example.com/alice");
+        let mut msg = groupchat(&room, &alice, "Root prompt");
+        msg.id = Some("root-stanza".to_string());
+        set_thread_id(&mut msg, "root-stanza");
+
+        let thread = thread_projection(&msg).expect("thread projection");
+
+        assert_eq!(thread.thread_id, "root-stanza");
+        assert_eq!(thread.title.as_deref(), Some("Root prompt"));
+        assert_eq!(thread.author_nick.as_deref(), Some("alice"));
     }
 }

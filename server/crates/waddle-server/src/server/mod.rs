@@ -873,7 +873,9 @@ fn build_cors(origins: Option<&str>) -> CorsLayer {
                 .filter_map(|o| o.trim().parse().ok())
                 .collect();
             if allowed.is_empty() {
-                warn!("WADDLE_CORS_ORIGINS set but no valid origins parsed, falling back to permissive CORS");
+                warn!(
+                    "WADDLE_CORS_ORIGINS set but no valid origins parsed, falling back to permissive CORS"
+                );
                 CorsLayer::permissive()
             } else {
                 info!(origins = ?allowed, "Configured CORS with explicit allowed origins");
@@ -1444,6 +1446,7 @@ async fn extension_command_result(
                     if count == 1 { "" } else { "s" }
                 )));
             }
+            ExtensionEffect::BotGroupchatResponse(_) => {}
             ExtensionEffect::Noop => {}
         }
     }

@@ -7,16 +7,17 @@ use wasmtime::{Config, Engine, Store};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 use crate::types::{
-    ActionBlock, ActionId, ArtifactReference, BodyRange, CommandAction, CommandDescriptor,
-    CommandInvocation, CommandNode, CommandSessionId, DataForm, DataFormField, DataFormType,
-    DataFormValue, DisplayText, EnrichmentId, ExtensionCapability, ExtensionEffect,
+    ActionBlock, ActionId, ArtifactReference, BodyRange, BotGroupchatResponse, CommandAction,
+    CommandDescriptor, CommandInvocation, CommandNode, CommandSessionId, DataForm, DataFormField,
+    DataFormType, DataFormValue, DisplayText, EnrichmentId, ExtensionCapability, ExtensionEffect,
     ExtensionEnvelope, ExtensionEvent, ExtensionManifest, ExtensionPayload, ExtensionResponse,
-    FormFieldOption, FormFieldType, FormFieldValue, ImageBlock, LaunchContext, LaunchDescriptor,
-    LaunchId, LaunchInvocation, LinkTarget, ListId, ListItem, ListItemId, ListView, MediaType,
-    MessageContext, MessageEnrichment, MessageHook, MessageSource, PayloadNamespace, PayloadRoot,
-    PayloadRule, PayloadSurface, PluginId, PluginVersion, PubSubItemId, PubSubNode, PubSubPublish,
-    Sha256Digest, StanzaId, TextBlock, TextStyle, Timestamp, UiActionId, UiBlock, UiView, UiViewId,
-    Url, WaddleId, XmlAttribute, XmlElement, XmlNode,
+    FormFieldOption, FormFieldType, FormFieldValue, FullJidValue, ImageBlock, LaunchContext,
+    LaunchDescriptor, LaunchId, LaunchInvocation, LinkTarget, ListId, ListItem, ListItemId,
+    ListView, MediaType, MessageContext, MessageEnrichment, MessageHook, MessageSource,
+    PayloadNamespace, PayloadRoot, PayloadRule, PayloadSurface, PluginId, PluginVersion,
+    PubSubItemId, PubSubNode, PubSubPublish, ReplyTarget, RoomJid, Sha256Digest, StanzaId,
+    TextBlock, TextStyle, ThreadId, Timestamp, UiActionId, UiBlock, UiView, UiViewId, Url,
+    WaddleId, XmlAttribute, XmlElement, XmlNode,
 };
 
 wasmtime::component::bindgen!({
@@ -301,6 +302,19 @@ impl From<MessageContext> for wit_types::MessageContext {
         Self {
             waddle_id: value.waddle_id.into(),
             stanza_id: value.stanza_id.map(Into::into),
+            room: value.room.map(Into::into),
+            sender: value.sender.map(Into::into),
+            thread_id: value.thread_id.map(Into::into),
+            reply_to: value.reply_to.map(Into::into),
+        }
+    }
+}
+
+impl From<ReplyTarget> for wit_types::ReplyTarget {
+    fn from(value: ReplyTarget) -> Self {
+        Self {
+            id: value.id.into(),
+            to: value.to.map(Into::into),
         }
     }
 }
@@ -535,6 +549,7 @@ impl_domain_newtype_to_wit!(CommandNode, CommandNode);
 impl_domain_newtype_to_wit!(CommandSessionId, CommandSessionId);
 impl_domain_newtype_to_wit!(DisplayText, DisplayText);
 impl_domain_newtype_to_wit!(EnrichmentId, EnrichmentId);
+impl_domain_newtype_to_wit!(FullJidValue, FullJid);
 impl_domain_newtype_to_wit!(LaunchId, LaunchId);
 impl_domain_newtype_to_wit!(ListId, ListId);
 impl_domain_newtype_to_wit!(ListItemId, ListItemId);
@@ -543,8 +558,10 @@ impl_domain_newtype_to_wit!(PayloadNamespace, PayloadNamespace);
 impl_domain_newtype_to_wit!(PluginId, PluginId);
 impl_domain_newtype_to_wit!(PubSubItemId, PubsubItemId);
 impl_domain_newtype_to_wit!(PubSubNode, PubsubNode);
+impl_domain_newtype_to_wit!(RoomJid, RoomJid);
 impl_domain_newtype_to_wit!(Sha256Digest, Sha256Digest);
 impl_domain_newtype_to_wit!(StanzaId, StanzaId);
+impl_domain_newtype_to_wit!(ThreadId, ThreadId);
 impl_domain_newtype_to_wit!(Timestamp, Timestamp);
 impl_domain_newtype_to_wit!(UiActionId, UiActionId);
 impl_domain_newtype_to_wit!(UiViewId, UiViewId);
@@ -573,6 +590,9 @@ impl TryFrom<wit_types::ExtensionEffect> for ExtensionEffect {
             wit_types::ExtensionEffect::EnrichMessage(envelope) => {
                 Self::EnrichMessage(envelope.try_into()?)
             }
+            wit_types::ExtensionEffect::BotGroupchatResponse(response) => {
+                Self::BotGroupchatResponse(response.try_into()?)
+            }
             wit_types::ExtensionEffect::PublishPubsub(publish) => {
                 Self::PublishPubSub(publish.try_into()?)
             }
@@ -580,6 +600,36 @@ impl TryFrom<wit_types::ExtensionEffect> for ExtensionEffect {
                 Self::ReferenceArtifact(artifact.try_into()?)
             }
             wit_types::ExtensionEffect::Noop => Self::Noop,
+        })
+    }
+}
+
+impl TryFrom<wit_types::BotGroupchatResponse> for BotGroupchatResponse {
+    type Error = anyhow::Error;
+
+    fn try_from(value: wit_types::BotGroupchatResponse) -> Result<Self> {
+        Ok(Self {
+            body: wit_newtype_to_domain!(value.body, DisplayText)?,
+            room: wit_newtype_to_domain!(value.room, RoomJid)?,
+            thread_id: value
+                .thread_id
+                .map(|thread_id| wit_newtype_to_domain!(thread_id, ThreadId))
+                .transpose()?,
+            reply_to: value.reply_to.map(TryInto::try_into).transpose()?,
+        })
+    }
+}
+
+impl TryFrom<wit_types::ReplyTarget> for ReplyTarget {
+    type Error = anyhow::Error;
+
+    fn try_from(value: wit_types::ReplyTarget) -> Result<Self> {
+        Ok(Self {
+            id: wit_newtype_to_domain!(value.id, StanzaId)?,
+            to: value
+                .to
+                .map(|to| wit_newtype_to_domain!(to, FullJidValue))
+                .transpose()?,
         })
     }
 }
@@ -634,6 +684,7 @@ impl From<wit_types::ExtensionCapability> for ExtensionCapability {
         match value {
             wit_types::ExtensionCapability::MessageEnrich => Self::MessageEnrich,
             wit_types::ExtensionCapability::MessageObserve => Self::MessageObserve,
+            wit_types::ExtensionCapability::BotGroupchatSend => Self::BotGroupchatSend,
             wit_types::ExtensionCapability::Commands => Self::Commands,
             wit_types::ExtensionCapability::Launch => Self::Launch,
             wit_types::ExtensionCapability::PubsubPublish => Self::PubSubPublish,

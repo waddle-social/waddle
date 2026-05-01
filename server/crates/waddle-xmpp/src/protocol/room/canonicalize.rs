@@ -26,6 +26,8 @@ use super::context::RoomContext;
 use super::traits::{RoomHandler, RoomHandlerOutcome};
 use crate::xep::xep0359::{add_stanza_id, is_stanza_id_element};
 use crate::xep::xep0421::{generate_occupant_id, set_occupant_id_on_message};
+use crate::xep::xep0461::set_thread_id;
+use crate::xep::xep0508::{extract_forum_action, ForumAction};
 use jid::{BareJid, Jid};
 use xmpp_parsers::message::Message;
 
@@ -62,6 +64,12 @@ impl RoomHandler for MucCanonicalizeHandler {
         // 2. Stamp a fresh stanza-id.
         let id = ctx.id_gen.fresh_stanza_id();
         add_stanza_id(message, &id, &ctx.room.to_string());
+        if matches!(
+            extract_forum_action(message),
+            Some(ForumAction::CreateThread(_))
+        ) {
+            set_thread_id(message, &id);
+        }
 
         // 3. Rewrite `from='room/nick'` and drop `to` (the reflector
         //    fills `to` per occupant). If the sender nick is somehow
@@ -101,6 +109,7 @@ mod tests {
     use crate::types::{Affiliation, Role};
     use crate::xep::xep0359::{build_stanza_id_element, extract_stanza_ids};
     use crate::xep::xep0421::{extract_occupant_id_from_message, OccupantId};
+    use crate::xep::xep0508::{set_thread_create, ThreadCreate};
     use jid::FullJid;
     use xmpp_parsers::message::{Body, Message, MessageType};
 
@@ -142,6 +151,7 @@ mod tests {
             id_gen: &id_gen,
             occupant_id_secret: b"test-secret",
             sender_nickname_generation: 0,
+            project_sender_inbox: true,
             dispatch_timestamp: 0,
         };
         match MucCanonicalizeHandler.handle(msg, &ctx) {
@@ -179,6 +189,23 @@ mod tests {
         assert!(stamps
             .iter()
             .any(|s| s.by == "team@conf.example.com" && s.id == "stamp-1"));
+    }
+
+    #[test]
+    fn thread_create_root_uses_room_stanza_id_as_thread_id() {
+        let room = bare("team@conf.example.com");
+        let sender = full("alice@example.com/web");
+        let mut msg = groupchat(&room, &sender, "new topic");
+        msg.id = Some("client-id".to_string());
+        set_thread_id(&mut msg, "spoofed-thread");
+        set_thread_create(&mut msg, &ThreadCreate::new("Topic"));
+
+        run(&room, &sender, "alice-nick", &mut msg, "room-stanza-id");
+
+        assert_eq!(
+            msg.thread.as_ref().map(|thread| thread.0.as_str()),
+            Some("room-stanza-id")
+        );
     }
 
     #[test]
