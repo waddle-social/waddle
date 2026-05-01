@@ -7,6 +7,7 @@ import {
   extensionServiceJidForUserJid,
   invokeExtensionCommand,
   parseExtensionCommandForm,
+  parseExtensionCommandLaunches,
   parseExtensionCommandResult,
   submitExtensionCommandForm,
   visibleExtensionCommandFields,
@@ -106,11 +107,114 @@ describe("extension command invocation", () => {
       .toBe("archive-id-from-source");
   });
 
-  test("requires launch tokens before invoking action buttons", () => {
+  test("requires core launch identity before invoking action buttons", () => {
+    expect(() => buildExtensionLaunchInvokeIq("alice@example.com/web", {
+      ...launch,
+      pluginId: " ",
+    })).toThrow("Launch is missing plugin id.");
+  });
+
+  test("requires signed launch proof before invoking action buttons", () => {
     expect(() => buildExtensionLaunchInvokeIq("alice@example.com/web", {
       ...launch,
       launchToken: undefined,
     })).toThrow("Launch is missing launch token.");
+  });
+
+  test("builds launch invoke requests without source stanza metadata", () => {
+    const iq = buildExtensionLaunchInvokeIq("alice@example.com/web", {
+      id: "ask-followup",
+      pluginId: "ai-chatbot",
+      actionId: "ask-followup",
+      commandNode: "urn:waddle:extension:1:invoke",
+      launchToken: "signed-followup-token",
+      expiresAt: "2026-05-01T10:53:23Z",
+      label: "Ask follow-up",
+      context: {
+        waddleId: "alice@example.com/web",
+      },
+      payloads: [{
+        namespace: "urn:waddle:ai-chatbot:1",
+        name: "assistant-followup",
+        attributes: {
+          xmlns: "urn:waddle:ai-chatbot:1",
+          question: "Ask me from chat with /ask.",
+        },
+        text: "Ask me from chat with /ask.",
+        children: [],
+      }],
+    });
+
+    expect(iq.command.form.fields).toContainEqual({ name: "launch-token", value: "signed-followup-token" });
+    expect(iq.command.form.fields).toContainEqual({ name: "expires-at", value: "2026-05-01T10:53:23Z" });
+    expect(iq.command.form.fields).toContainEqual({ name: "payload#assistant-followup#question", value: "Ask me from chat with /ask." });
+    expect(iq.command.form.fields).not.toContainEqual(expect.objectContaining({ name: "source-stanza-id" }));
+    expect(iq.command.form.fields).not.toContainEqual(expect.objectContaining({ name: "waddle#message_stanza_id" }));
+  });
+
+  test("parses AI chatbot result launches without source stanza metadata", () => {
+    const actions = parseExtensionCommandLaunches({
+      fields: [
+        { name: "FORM_TYPE", type: "hidden", value: "urn:waddle:extension:1:result" },
+        { name: "launch-count", value: "1" },
+        { name: "launch#0#id", value: "ask-followup" },
+        { name: "launch#0#plugin", value: "ai-chatbot" },
+        { name: "launch#0#action", value: "ask-followup" },
+        { name: "launch#0#command-node", value: "urn:waddle:extension:1:invoke" },
+        { name: "launch#0#label", value: "Ask follow-up" },
+        { name: "launch#0#waddle-id", value: "alice@example.com/web" },
+        { name: "launch#0#token", value: "signed-followup-token" },
+        { name: "launch#0#expires-at", value: "2026-05-01T10:53:23Z" },
+        { name: "launch#0#payload#0#namespace", value: "urn:waddle:ai-chatbot:1" },
+        { name: "launch#0#payload#0#name", value: "assistant-followup" },
+        { name: "launch#0#payload#0#text", value: "Ask me from chat with /ask." },
+        { name: "launch#0#payload#0#attr#question", value: "Ask me from chat with /ask." },
+      ],
+    });
+
+    expect(actions).toEqual([{
+      label: "Ask follow-up",
+      route: "ask-followup",
+      launch: {
+        id: "ask-followup",
+        pluginId: "ai-chatbot",
+        actionId: "ask-followup",
+        commandNode: "urn:waddle:extension:1:invoke",
+        launchToken: "signed-followup-token",
+        expiresAt: "2026-05-01T10:53:23Z",
+        label: "Ask follow-up",
+        context: {
+          waddleId: "alice@example.com/web",
+        },
+        payloads: [{
+          namespace: "urn:waddle:ai-chatbot:1",
+          name: "assistant-followup",
+          attributes: {
+            xmlns: "urn:waddle:ai-chatbot:1",
+            question: "Ask me from chat with /ask.",
+          },
+          text: "Ask me from chat with /ask.",
+          children: [],
+        }],
+      },
+    }]);
+  });
+
+  test("does not parse launch actions from unrelated data forms", () => {
+    expect(parseExtensionCommandLaunches({
+      fields: [
+        { name: "FORM_TYPE", type: "hidden", value: "urn:example:other:result" },
+        { name: "launch-count", value: "1" },
+        { name: "launch#0#id", value: "ask-followup" },
+        { name: "launch#0#plugin", value: "ai-chatbot" },
+        { name: "launch#0#action", value: "ask-followup" },
+        { name: "launch#0#command-node", value: "urn:waddle:extension:1:invoke" },
+        { name: "launch#0#label", value: "Ask follow-up" },
+        { name: "launch#0#waddle-id", value: "alice@example.com/web" },
+        { name: "launch#0#token", value: "signed-followup-token" },
+        { name: "launch#0#expires-at", value: "2026-05-01T10:53:23Z" },
+      ],
+    })).toEqual([]);
   });
 
   test("classifies command notes and non-completed statuses for button state", () => {
@@ -145,6 +249,21 @@ describe("extension command invocation", () => {
       form: { fields: [{ name: "payload#question", type: "text-single", value: "" }] },
       notes: [],
     })).toEqual({ state: "warning" });
+
+    expect(extensionCommandOutcome({
+      status: "completed",
+      form: {
+        fields: [
+          { name: "FORM_TYPE", type: "hidden", value: "urn:waddle:extension:1:result" },
+          { name: "extension#body", value: "I can help summarize the recent thread." },
+          { name: "extension#prompt", value: "Morning" },
+        ],
+      },
+      notes: [{ type: "info", value: "Produced 1 message enrichment" }],
+    })).toEqual({
+      state: "success",
+      detail: "I can help summarize the recent thread. Morning",
+    });
   });
 
   test("parses XEP-0004 form fields, options, visibility, and forbidden fields", () => {

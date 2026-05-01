@@ -87,6 +87,10 @@ function requiredLaunchValue(value: string | undefined, label: string): string {
   throw new Error(`Launch is missing ${label}.`);
 }
 
+function optionalDataFormField(name: string, value: string | undefined): DataFormField[] {
+  return value?.trim() ? [{ name, value }] : [];
+}
+
 export function buildExtensionLaunchInvokeIq(
   userJid: string,
   launch: ExtensionLaunchDescriptor,
@@ -99,12 +103,12 @@ export function buildExtensionLaunchInvokeIq(
     { name: "plugin", value: requiredLaunchValue(launch.pluginId, "plugin id") },
     { name: "action", value: requiredLaunchValue(launch.actionId, "action id") },
     { name: "waddle-id", value: requiredLaunchValue(launch.context.waddleId, "waddle id") },
-    { name: "source-stanza-id", value: requiredLaunchValue(messageStanzaId, "source stanza id") },
+    ...optionalDataFormField("source-stanza-id", messageStanzaId),
     { name: "launch-id", value: requiredLaunchValue(launch.id, "launch id") },
     { name: "launch-token", value: requiredLaunchValue(launch.launchToken, "launch token") },
     { name: "expires-at", value: requiredLaunchValue(launch.expiresAt, "expiry") },
     { name: "waddle#waddle_id", value: requiredLaunchValue(launch.context.waddleId, "waddle id") },
-    { name: "waddle#message_stanza_id", value: requiredLaunchValue(messageStanzaId, "source stanza id") },
+    ...optionalDataFormField("waddle#message_stanza_id", messageStanzaId),
     { name: "waddle#launch_id", value: requiredLaunchValue(launch.id, "launch id") },
     { name: "waddle#launch_token", value: requiredLaunchValue(launch.launchToken, "launch token") },
     { name: "waddle#expires_at", value: requiredLaunchValue(launch.expiresAt, "expiry") },
@@ -241,6 +245,9 @@ export function extensionCommandFormBlockedReason(fields: ExtensionCommandFormFi
 export function parseExtensionCommandLaunches(form: unknown): ExtensionAnnotationAction[] {
   const fields = parseExtensionCommandForm(form);
   const byName = new Map(fields.map((field) => [field.name, field.value]));
+  if (byName.get("FORM_TYPE") !== `${NS_WADDLE_EXTENSION_1}:result`) {
+    return [];
+  }
   const count = Number.parseInt(byName.get("launch-count") ?? "0", 10);
   const actions: ExtensionAnnotationAction[] = [];
   for (let index = 0; index < count; index += 1) {
@@ -322,6 +329,9 @@ export function extensionCommandOutcome(result: unknown): ExtensionCommandOutcom
     return { state: "warning", detail: `Command returned status: ${parsed.status}.` };
   }
 
+  const formDetail = extensionResultFormDetail(parsed.form);
+  if (formDetail) return { state: "success", detail: formDetail };
+
   const infoDetail = commandNotesDetail(parsed.notes, ["info"]);
   return infoDetail ? { state: "success", detail: infoDetail } : { state: "success" };
 }
@@ -343,6 +353,18 @@ function commandNotesDetail(notes: ExtensionCommandNote[], types: string[]): str
     .map((note) => note.value.trim())
     .filter((value) => value.length > 0);
   return values.length > 0 ? values.join(" ") : undefined;
+}
+
+function extensionResultFormDetail(form: unknown): string | undefined {
+  const fields = parseExtensionCommandForm(form);
+  const byName = new Map(fields.map((field) => [field.name, field.value.trim()]));
+  if (byName.get("FORM_TYPE") !== `${NS_WADDLE_EXTENSION_1}:result`) return undefined;
+  const body = byName.get("extension#body");
+  const prompt = byName.get("extension#prompt");
+  return [body, prompt]
+    .filter((value): value is string => !!value)
+    .join(" ")
+    .trim() || undefined;
 }
 
 export async function invokeExtensionLaunch(

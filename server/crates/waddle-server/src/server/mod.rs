@@ -41,6 +41,7 @@ use waddle_extensions::{
     FormFieldType as ExtensionFormFieldType, FormFieldValue, LaunchContext, LaunchId,
     PubSubPublish, StanzaId, UiActionId, WaddleId, INVOKE_COMMAND_NODE,
 };
+use waddle_extensions::types::UiBlock;
 use waddle_xmpp::inbox::storage::InboxStorage;
 use waddle_xmpp::mam::{MamStorage, SqlxMamStorage};
 use waddle_xmpp::pubsub::{NodeConfig, PubSubItem, PubSubStorage};
@@ -935,6 +936,7 @@ async fn create_router(
     let extension_launch_key = server_config
         .session_key
         .clone()
+        .filter(|key| !key.is_empty())
         .unwrap_or_else(|| format!("development-extension-launch-key:{xmpp_domain}"));
     let extension_manager = Arc::new(
         match ExtensionManager::from_config(server_config.extensions.clone()).await {
@@ -1193,9 +1195,12 @@ async fn register_extension_commands(
                 let source_stanza_id = extension_field_value(&fields, "source-stanza-id")
                     .or_else(|| extension_field_value(&fields, "waddle#message_stanza_id"))
                     .and_then(|value| StanzaId::new(value).ok());
-                let expires_at = extension_field_value(&fields, "expires-at")
+                let Some(expires_at) = extension_field_value(&fields, "expires-at")
                     .or_else(|| extension_field_value(&fields, "waddle#expires_at"))
-                    .and_then(|value| waddle_extensions::Timestamp::new(value).ok());
+                    .and_then(|value| waddle_extensions::Timestamp::new(value).ok())
+                else {
+                    return extension_warning_result("Extension launch expiry is missing or invalid");
+                };
                 let context = LaunchContext {
                     waddle_id,
                     source_stanza_id,
@@ -1205,7 +1210,7 @@ async fn register_extension_commands(
                     &action_id,
                     &launch_id,
                     &context,
-                    expires_at.as_ref(),
+                    Some(&expires_at),
                     &launch_token,
                 ) {
                     return extension_warning_result(
@@ -1224,7 +1229,7 @@ async fn register_extension_commands(
                         action: ctx.command.action.map(extension_command_action),
                         fields,
                         form: submitted_form.and_then(extension_data_form),
-                        expires_at,
+                        expires_at: Some(expires_at),
                         launch_token: &launch_token,
                     })
                     .await;
@@ -1488,11 +1493,33 @@ fn extension_enrichment_result_form(
         .add_field(Field::text_single(
             "extension#summary",
             enrichment.payload_namespace.as_str(),
-        ))
-        .add_field(Field::text_single(
-            "launch-count",
-            enrichment.launches.len().to_string(),
         ));
+    let text_blocks: Vec<_> = enrichment
+        .ui
+        .first()
+        .map(|view| {
+            view.blocks
+                .iter()
+                .filter_map(|block| match block {
+                    UiBlock::Text(text) => Some(text.text.as_str()),
+                    UiBlock::Image(_)
+                    | UiBlock::Action(_)
+                    | UiBlock::Form(_)
+                    | UiBlock::List(_) => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if let Some(body) = text_blocks.first() {
+        form = form.add_field(Field::text_single("extension#body", *body));
+    }
+    if let Some(prompt) = text_blocks.get(1) {
+        form = form.add_field(Field::text_single("extension#prompt", *prompt));
+    }
+    form = form.add_field(Field::text_single(
+        "launch-count",
+        enrichment.launches.len().to_string(),
+    ));
     for (index, launch) in enrichment.launches.iter().enumerate() {
         let prefix = format!("launch#{index}");
         form = form
