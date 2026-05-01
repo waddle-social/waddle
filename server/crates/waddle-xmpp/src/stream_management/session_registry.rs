@@ -187,6 +187,22 @@ pub trait SmSessionRegistry: Send + Sync {
 
     /// Get the number of stored sessions.
     async fn session_count(&self) -> usize;
+
+    /// Remove every unacked outbound `<message/>` stanza in stored
+    /// sessions whose wire `id` attribute matches `message_id`. Called
+    /// when a XEP-0424 retraction or XEP-0425 moderation tombstone is
+    /// applied so that a recipient mid-resume does not replay the
+    /// pre-scrub stanza on the wire.
+    ///
+    /// The match is by the literal `id` attribute on the cached
+    /// `<message/>` element. Returns the number of stanza entries
+    /// removed across all stored sessions.
+    ///
+    /// Default impl is a no-op so registry implementations can opt in
+    /// incrementally; the in-memory implementation overrides it.
+    async fn scrub_unacked_message_id(&self, _message_id: &str) -> Result<usize, SmRegistryError> {
+        Ok(0)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -339,6 +355,45 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
     async fn session_count(&self) -> usize {
         self.sessions.read().map(|s| s.len()).unwrap_or(0)
     }
+
+    async fn scrub_unacked_message_id(&self, message_id: &str) -> Result<usize, SmRegistryError> {
+        let mut removed_total = 0usize;
+        let mut sessions = self
+            .sessions
+            .write()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+        for session in sessions.values_mut() {
+            removed_total += scrub_session_unacked(session, message_id);
+        }
+        drop(sessions);
+        let mut claimed = self
+            .claimed_sessions
+            .write()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+        for session in claimed.values_mut() {
+            removed_total += scrub_session_unacked(session, message_id);
+        }
+        Ok(removed_total)
+    }
+}
+
+/// Strip every unacked outbound `<message id="$message_id"/>` entry from
+/// a session's queue. Returns the number of entries removed.
+///
+/// Defensive parse: each cached unacked entry is XML the server already
+/// produced via the typed builder pipeline, so a parse failure here is
+/// either a regression or a legitimately non-message frame. Parse errors
+/// and non-message frames are skipped silently — only matching messages
+/// are removed.
+fn scrub_session_unacked(session: &mut DetachedSession, message_id: &str) -> usize {
+    let before = session.unacked_stanzas.len();
+    session
+        .unacked_stanzas
+        .retain(|(_, xml)| match xml.parse::<minidom::Element>() {
+            Ok(el) => !(el.name() == "message" && el.attr("id") == Some(message_id)),
+            Err(_) => true,
+        });
+    before - session.unacked_stanzas.len()
 }
 
 impl InMemorySmSessionRegistry {
@@ -990,6 +1045,100 @@ mod tests {
             presence_status: None,
             presence_priority: 0,
         }
+    }
+
+    fn make_test_session_with_unacked(
+        stream_id: &str,
+        unacked: Vec<(u32, String)>,
+    ) -> DetachedSession {
+        let mut s = make_test_session(stream_id);
+        s.unacked_stanzas = unacked;
+        s
+    }
+
+    #[tokio::test]
+    async fn xep_0198_scrub_unacked_message_id_removes_matching_messages() {
+        // XEP-0424 §"prevent further distribution" + XEP-0198 resume
+        // safety: when a tombstone is applied, the original
+        // `<message id='target'>` must not replay on a recipient's
+        // resume. Locks the scrub against false negatives (matching
+        // messages must be removed) and false positives (non-matching
+        // messages and non-message frames must be preserved).
+        let registry = InMemorySmSessionRegistry::new();
+        let session = make_test_session_with_unacked(
+            "stream-tomb",
+            vec![
+                (
+                    1,
+                    "<message xmlns='jabber:client' id='target' type='chat'><body>secret</body><thread parent='root'>child</thread></message>"
+                        .to_string(),
+                ),
+                (
+                    2,
+                    "<message xmlns='jabber:client' id='other' type='chat'><body>safe</body></message>"
+                        .to_string(),
+                ),
+                (3, "<presence/>".to_string()),
+                (4, "<iq type='result' id='not-a-message'/>".to_string()),
+            ],
+        );
+        registry.store_session(session).await.unwrap();
+
+        let removed = registry.scrub_unacked_message_id("target").await.unwrap();
+        assert_eq!(removed, 1, "exactly one matching message should be removed");
+
+        let again = registry
+            .peek_session("stream-tomb")
+            .await
+            .unwrap()
+            .expect("session still present");
+        assert_eq!(again.unacked_stanzas.len(), 3);
+        assert!(
+            !again
+                .unacked_stanzas
+                .iter()
+                .any(|(_, xml)| xml.contains("id='target'") || xml.contains("id=\"target\"")),
+            "scrubbed message must not appear in queue"
+        );
+        assert!(
+            again
+                .unacked_stanzas
+                .iter()
+                .any(|(_, xml)| xml.contains("id='other'") || xml.contains("id=\"other\"")),
+            "non-matching message must remain"
+        );
+        assert!(
+            again
+                .unacked_stanzas
+                .iter()
+                .any(|(_, xml)| xml.contains("<presence")),
+            "presence frame must remain (not a message)"
+        );
+        assert!(
+            again
+                .unacked_stanzas
+                .iter()
+                .any(|(_, xml)| xml.contains("<iq")),
+            "iq frame must remain (not a message)"
+        );
+    }
+
+    #[tokio::test]
+    async fn xep_0198_scrub_unacked_message_id_handles_no_match() {
+        let registry = InMemorySmSessionRegistry::new();
+        registry
+            .store_session(make_test_session_with_unacked(
+                "stream-nomatch",
+                vec![(
+                    1,
+                    "<message xmlns='jabber:client' id='other' type='chat'><body>x</body></message>"
+                        .to_string(),
+                )],
+            ))
+            .await
+            .unwrap();
+        let removed = registry.scrub_unacked_message_id("not-here").await.unwrap();
+        assert_eq!(removed, 0);
     }
 
     #[tokio::test]

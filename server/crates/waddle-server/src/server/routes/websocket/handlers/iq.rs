@@ -1050,6 +1050,35 @@ pub async fn handle_iq_with_conn_state(
                             "Failed to replace original with moderation tombstone"
                         );
                     }
+                    // XEP-0425 §Tombstones / XEP-0198: scrub the
+                    // pre-tombstone groupchat reflection from any
+                    // detached resume queues so a recipient mid-resume
+                    // does not replay the moderated content. Best
+                    // effort — tombstone is already applied to the
+                    // archive.
+                    use waddle_xmpp::stream_management::SmSessionRegistry as _;
+                    let target_wire_id = request.target_id.as_str();
+                    match state
+                        .deps
+                        .protocol
+                        .sm_session_registry
+                        .scrub_unacked_message_id(target_wire_id)
+                        .await
+                    {
+                        Ok(removed) if removed > 0 => debug!(
+                            room = %room_jid,
+                            target = target_wire_id,
+                            removed,
+                            "XEP-0425 moderation: scrubbed unacked SM queue entries"
+                        ),
+                        Ok(_) => {}
+                        Err(error) => warn!(
+                            room = %room_jid,
+                            target = target_wire_id,
+                            %error,
+                            "XEP-0425 moderation: scrub_unacked_message_id failed; pre-scrub stanza may still replay on resume"
+                        ),
+                    }
                 }
                 Ok(_) => {}
                 Err(error) => warn!(

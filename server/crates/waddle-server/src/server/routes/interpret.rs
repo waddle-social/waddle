@@ -826,6 +826,7 @@ async fn interpret_with_depth(
                 };
                 apply_groupchat_retraction_tombstone(
                     mam_storage,
+                    deps.sm_session_registry,
                     &room,
                     &target_message_id,
                     &retraction_message,
@@ -930,6 +931,7 @@ async fn interpret_with_depth(
                 {
                     apply_retraction_tombstone(
                         mam_storage,
+                        deps.sm_session_registry,
                         &archive_jid,
                         &retraction.retracts_id,
                         &message,
@@ -1152,6 +1154,7 @@ async fn run_headless_recipient_pass(
 /// authoritative payload after this point.
 async fn apply_retraction_tombstone(
     mam_storage: &Arc<dyn MamStorage>,
+    sm_session_registry: Option<&Arc<InMemorySmSessionRegistry>>,
     archive: &jid::BareJid,
     target_wire_id: &str,
     retraction_message: &Message,
@@ -1215,6 +1218,16 @@ async fn apply_retraction_tombstone(
             );
         }
     }
+    // Drop matching unacked outbound copies from any detached XEP-0198
+    // session queues so a recipient mid-resume does not replay the
+    // pre-scrub stanza on the wire. XEP-0424 §"prevent further
+    // distribution" applies to in-flight as well as archived copies.
+    scrub_unacked_for_tombstone(
+        sm_session_registry,
+        target_wire_id,
+        "ApplyRetractionTombstone",
+    )
+    .await;
 }
 
 /// Deliver a single `Stanza` to a specific full-JID destination as
@@ -2521,6 +2534,7 @@ async fn finish_archive_groupchat_message(
 
 async fn apply_groupchat_retraction_tombstone(
     mam_storage: &Arc<dyn MamStorage>,
+    sm_session_registry: Option<&Arc<InMemorySmSessionRegistry>>,
     room: &BareJid,
     target_message_id: &str,
     retraction_message: &Message,
@@ -2573,6 +2587,47 @@ async fn apply_groupchat_retraction_tombstone(
             %error,
             "ApplyGroupchatRetractionTombstone: replace_with_tombstone failed"
         ),
+    }
+    // Drop matching unacked groupchat reflections from detached
+    // XEP-0198 session queues. The reflection is what occupants see;
+    // scrubbing here closes the resume-side replay leak for groupchat
+    // retractions identically to the 1:1 case.
+    scrub_unacked_for_tombstone(
+        sm_session_registry,
+        target_message_id,
+        "ApplyGroupchatRetractionTombstone",
+    )
+    .await;
+}
+
+/// Walk the SM session registry and drop every unacked outbound
+/// `<message id="$target">` entry. Returns silently on any registry
+/// error (logged at WARN) — the tombstone has already been applied to
+/// the archive, and dropping the in-flight copy is best-effort.
+async fn scrub_unacked_for_tombstone(
+    sm_session_registry: Option<&Arc<InMemorySmSessionRegistry>>,
+    target_wire_id: &str,
+    site: &'static str,
+) {
+    let Some(sm) = sm_session_registry else {
+        return;
+    };
+    use waddle_xmpp::stream_management::SmSessionRegistry as _;
+    match sm.scrub_unacked_message_id(target_wire_id).await {
+        Ok(removed) if removed > 0 => {
+            debug!(
+                target = target_wire_id,
+                removed, "{site}: scrubbed unacked SM queue entries for tombstoned message"
+            );
+        }
+        Ok(_) => {}
+        Err(error) => {
+            warn!(
+                target = target_wire_id,
+                %error,
+                "{site}: scrub_unacked_message_id failed; pre-scrub stanza may still replay on resume"
+            );
+        }
     }
 }
 
