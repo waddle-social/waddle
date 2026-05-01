@@ -1372,15 +1372,24 @@ pub(crate) fn stanza_to_xml(stanza: &Stanza) -> String {
         // only re-attaches when the typed field is the only source —
         // no parent context exists in that case.
         if let Some(thread) = message.thread.as_ref() {
-            let has_thread = element.children().any(|child| child.name() == "thread");
+            // RFC 6121 §5.2.5 scopes `<thread/>` to the enclosing
+            // message's namespace (`jabber:client` / `jabber:server`,
+            // sometimes serialized with empty ns). Match that — any
+            // `<thread>` element from a *different* namespace is an
+            // unrelated extension payload that must not suppress
+            // reattachment of the actual conversation thread
+            // (Copilot review on PR #305).
+            let stanza_ns = element.ns();
+            let has_thread = element.children().any(|child| {
+                child.name() == "thread" && (child.ns() == stanza_ns || child.ns().is_empty())
+            });
             if !has_thread {
                 let info = waddle_xmpp::xep0201::ThreadInfo {
                     id: thread.0.clone(),
                     parent: None,
                 };
                 element.append_child(waddle_xmpp::xep0201::build_thread_element(
-                    &info,
-                    "jabber:client",
+                    &info, &stanza_ns,
                 ));
             }
         }
@@ -6515,6 +6524,47 @@ mod tests {
                 && payload.attr("id") == Some("msg-1")
                 && payload.attr("to") == Some("alice@localhost")
         }));
+    }
+
+    #[test]
+    fn xep_0201_thread_reattach_ignores_unrelated_namespaced_thread_payload() {
+        // RFC 6121 §5.2.5 scopes `<thread/>` to the enclosing message's
+        // namespace. If a stanza already contains a `<thread>` payload
+        // in some other namespace (an unrelated extension), the
+        // reattach branch must NOT see it as a conflict and skip
+        // serializing the typed `message.thread` field — that would
+        // drop the actual conversation thread on the wire (Copilot
+        // review on PR #305).
+        use xmpp_parsers::message::{Body, Message, MessageType, Thread};
+        use xmpp_parsers::minidom::Element;
+
+        let mut msg = Message::new(Some(jid::Jid::from(
+            "bob@example.com".parse::<jid::BareJid>().expect("jid"),
+        )));
+        msg.from = Some(jid::Jid::from(
+            "alice@example.com/web"
+                .parse::<jid::FullJid>()
+                .expect("jid"),
+        ));
+        msg.id = Some("msg-ns".to_string());
+        msg.type_ = MessageType::Chat;
+        msg.bodies.insert(String::new(), Body("hi".to_string()));
+        msg.thread = Some(Thread("conversation-thread".to_string()));
+        // Unrelated extension element happening to be named "thread"
+        // in a different namespace — must not suppress reattachment.
+        msg.payloads.push(
+            Element::builder("thread", "urn:example:other:0")
+                .attr("kind", "unrelated")
+                .build(),
+        );
+
+        let rendered = stanza_to_xml(&Stanza::Message(msg));
+        let reparsed = parse_message_for_test(&rendered);
+        assert_eq!(
+            reparsed.thread.as_ref().map(|t| t.0.as_str()),
+            Some("conversation-thread"),
+            "RFC 6121 thread must survive serialization despite unrelated <thread> in another ns; rendered: {rendered}"
+        );
     }
 
     #[tokio::test]

@@ -450,8 +450,12 @@ fn cached_message_matches_tombstone(
     if el.attr("id") == Some(target_id) {
         return true;
     }
+    // XEP-0359 §3 scopes `<stanza-id/>` to `urn:xmpp:sid:0`. Match that
+    // namespace explicitly so an unrelated extension element happening
+    // to be named "stanza-id" in a different namespace cannot trigger
+    // a tombstone scrub (Copilot review on PR #305).
     el.children()
-        .any(|c| c.name() == "stanza-id" && c.attr("id") == Some(target_id))
+        .any(|c| c.is("stanza-id", "urn:xmpp:sid:0") && c.attr("id") == Some(target_id))
 }
 
 fn jid_bare_equals(jid_str: &str, archive_jid: &str) -> bool {
@@ -1272,6 +1276,33 @@ mod tests {
                 .iter()
                 .any(|(_, xml)| xml.contains("conv-B")),
             "conversation B's message must survive — different scope"
+        );
+    }
+
+    #[tokio::test]
+    async fn xep_0198_scrub_for_tombstone_ignores_non_xep0359_stanza_id_namespace() {
+        // XEP-0359 §3 scopes `<stanza-id/>` to `urn:xmpp:sid:0`. An
+        // unrelated extension element that happens to be named
+        // "stanza-id" in a different namespace must NOT trigger a
+        // tombstone scrub (Copilot review on PR #305).
+        let registry = InMemorySmSessionRegistry::new();
+        let session = make_test_session_with_unacked(
+            "stream-ns",
+            vec![(
+                1,
+                "<message xmlns='jabber:client' from='alice@example.com/web' to='user@example.com/resource' id='wire-id' type='chat'><body>safe</body><stanza-id xmlns='urn:example:other:0' id='target'/></message>"
+                    .to_string(),
+            )],
+        );
+        registry.store_session(session).await.unwrap();
+
+        let removed = registry
+            .scrub_unacked_for_tombstone("target", "user@example.com")
+            .await
+            .unwrap();
+        assert_eq!(
+            removed, 0,
+            "stanza-id in non-XEP-0359 namespace must not be matched"
         );
     }
 
