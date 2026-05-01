@@ -1222,9 +1222,12 @@ async fn apply_retraction_tombstone(
     // session queues so a recipient mid-resume does not replay the
     // pre-scrub stanza on the wire. XEP-0424 §"prevent further
     // distribution" applies to in-flight as well as archived copies.
+    // Scope by the recipient archive's bare JID so a colliding wire id
+    // in another conversation is not accidentally scrubbed (Codex P1).
     scrub_unacked_for_tombstone(
         sm_session_registry,
         target_wire_id,
+        &archive_str,
         "ApplyRetractionTombstone",
     )
     .await;
@@ -2591,41 +2594,54 @@ async fn apply_groupchat_retraction_tombstone(
     // Drop matching unacked groupchat reflections from detached
     // XEP-0198 session queues. The reflection is what occupants see;
     // scrubbing here closes the resume-side replay leak for groupchat
-    // retractions identically to the 1:1 case.
+    // retractions identically to the 1:1 case. Scope by the room JID
+    // so the matcher's stanza-id branch can find groupchat reflections
+    // that key by the room's XEP-0359 stamp, and so a colliding wire
+    // id in another conversation is not accidentally scrubbed
+    // (Codex P1, Copilot review on PR #305).
     scrub_unacked_for_tombstone(
         sm_session_registry,
         target_message_id,
+        &archive_str,
         "ApplyGroupchatRetractionTombstone",
     )
     .await;
 }
 
 /// Walk the SM session registry and drop every unacked outbound
-/// `<message id="$target">` entry. Returns silently on any registry
-/// error (logged at WARN) — the tombstone has already been applied to
-/// the archive, and dropping the in-flight copy is best-effort.
+/// `<message/>` entry that matches a XEP-0424 / XEP-0425 tombstone.
+/// `target_id` is matched against either the cached message's wire
+/// `id` attribute or any XEP-0359 `<stanza-id id='…'/>` child, scoped
+/// to `archive_jid` so cross-conversation collateral damage is
+/// impossible. Returns silently on any registry error (logged at
+/// WARN) — the archive scrub has already happened, and dropping the
+/// in-flight copy is best-effort.
 async fn scrub_unacked_for_tombstone(
     sm_session_registry: Option<&Arc<InMemorySmSessionRegistry>>,
-    target_wire_id: &str,
+    target_id: &str,
+    archive_jid: &str,
     site: &'static str,
 ) {
     let Some(sm) = sm_session_registry else {
         return;
     };
     use waddle_xmpp::stream_management::SmSessionRegistry as _;
-    match sm.scrub_unacked_message_id(target_wire_id).await {
+    match sm.scrub_unacked_for_tombstone(target_id, archive_jid).await {
         Ok(removed) if removed > 0 => {
             debug!(
-                target = target_wire_id,
-                removed, "{site}: scrubbed unacked SM queue entries for tombstoned message"
+                target = target_id,
+                archive = archive_jid,
+                removed,
+                "{site}: scrubbed unacked SM queue entries for tombstoned message"
             );
         }
         Ok(_) => {}
         Err(error) => {
             warn!(
-                target = target_wire_id,
+                target = target_id,
+                archive = archive_jid,
                 %error,
-                "{site}: scrub_unacked_message_id failed; pre-scrub stanza may still replay on resume"
+                "{site}: scrub_unacked_for_tombstone failed; pre-scrub stanza may still replay on resume"
             );
         }
     }

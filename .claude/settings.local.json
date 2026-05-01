@@ -22,7 +22,10 @@
       "Bash(bun install:*)",
       "Bash(bun test:*)",
       "Bash(rustup target:*)",
-      "Bash(cargo build:*)"
+      "Bash(cargo build:*)",
+      "Bash(gh issue *)",
+      "Bash(git clone *)",
+      "Bash(git push *)"
     ]
   }
 }

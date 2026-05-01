@@ -1055,28 +1055,34 @@ pub async fn handle_iq_with_conn_state(
                     // detached resume queues so a recipient mid-resume
                     // does not replay the moderated content. Best
                     // effort — tombstone is already applied to the
-                    // archive.
+                    // archive. Scope by the room JID so the matcher's
+                    // stanza-id branch finds groupchat reflections
+                    // that key by the room's XEP-0359 stamp, and so a
+                    // colliding wire id in another conversation is not
+                    // accidentally scrubbed (Codex P1, Copilot review
+                    // on PR #305).
                     use waddle_xmpp::stream_management::SmSessionRegistry as _;
-                    let target_wire_id = request.target_id.as_str();
+                    let target_id = request.target_id.as_str();
+                    let room_jid_str = room_jid.to_string();
                     match state
                         .deps
                         .protocol
                         .sm_session_registry
-                        .scrub_unacked_message_id(target_wire_id)
+                        .scrub_unacked_for_tombstone(target_id, &room_jid_str)
                         .await
                     {
                         Ok(removed) if removed > 0 => debug!(
                             room = %room_jid,
-                            target = target_wire_id,
+                            target = target_id,
                             removed,
                             "XEP-0425 moderation: scrubbed unacked SM queue entries"
                         ),
                         Ok(_) => {}
                         Err(error) => warn!(
                             room = %room_jid,
-                            target = target_wire_id,
+                            target = target_id,
                             %error,
-                            "XEP-0425 moderation: scrub_unacked_message_id failed; pre-scrub stanza may still replay on resume"
+                            "XEP-0425 moderation: scrub_unacked_for_tombstone failed; pre-scrub stanza may still replay on resume"
                         ),
                     }
                 }
