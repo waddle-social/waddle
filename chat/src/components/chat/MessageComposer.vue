@@ -45,6 +45,7 @@ const props = defineProps<{
   slowModeCooldown: number;
   uploadProgress: { uploading: boolean; progress: number; filename: string };
   replyingTo?: { id: string; author: string; preview?: string } | null;
+  aiAssistantEnabled?: boolean;
   isTopPinned?: boolean;
   extensionsOpen?: boolean;
 }>();
@@ -164,7 +165,7 @@ const mentionResults = computed(() => {
 });
 
 const emojiResults = computed(() => searchEmoji(emojiQuery.value));
-const commandResults = computed(() => aiComposerCommandResults(commandQuery.value).slice(0, 8));
+const commandResults = computed(() => aiComposerCommandResults(commandQuery.value, props.aiAssistantEnabled === true).slice(0, 8));
 const showForumTitleInput = computed(() => props.isForumChannel && !props.replyingTo);
 
 const activeResults = computed(() => {
@@ -240,7 +241,7 @@ function checkAutocompleteFromEditor() {
   const textBefore = doc.textBetween(0, pos, "\n", "\uFFFC");
 
   const commandMatch = textBefore.match(/^\/([a-z]*)$/i);
-  if (commandMatch) {
+  if (commandMatch && props.aiAssistantEnabled === true) {
     commandQuery.value = commandMatch[1];
     selectedIndex.value = 0;
     showCommands.value = true;

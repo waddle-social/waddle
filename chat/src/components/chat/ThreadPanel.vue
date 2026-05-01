@@ -40,6 +40,7 @@ const props = defineProps<{
   hasOlderReplies?: boolean;
   uploadProgress: { uploading: boolean; progress: number; filename: string };
   channelName: string;
+  aiAssistantEnabled?: boolean;
   reactionMode?: { selectedMessageId: string | null } | null;
   /**
    * When true, the composer is hidden but sub-thread navigation stays active.
@@ -432,6 +433,7 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
         :slow-mode-cooldown="slowModeCooldown"
         :upload-progress="uploadProgress"
         :replying-to="replyingTo"
+        :ai-assistant-enabled="aiAssistantEnabled === true"
         :is-top-pinned="true"
         @send="onSend"
         @cancel-reply="cancelReplyInThread"
@@ -580,6 +582,7 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
         :slow-mode-cooldown="slowModeCooldown"
         :upload-progress="uploadProgress"
         :replying-to="replyingTo"
+        :ai-assistant-enabled="aiAssistantEnabled === true"
         :is-top-pinned="false"
         @send="onSend"
         @cancel-reply="cancelReplyInThread"

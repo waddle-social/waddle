@@ -78,13 +78,14 @@ describe("AI thread UX", () => {
   });
 
   test("offers the AI slash command for composer autocomplete", () => {
-    expect(aiComposerCommandResults("").map((command) => command.command)).toEqual(["/ai"]);
-    expect(aiComposerCommandResults("a").map((command) => command.command)).toEqual(["/ai"]);
-    expect(aiComposerCommandResults("poll")).toEqual([]);
+    expect(aiComposerCommandResults("", true).map((command) => command.command)).toEqual(["/ai"]);
+    expect(aiComposerCommandResults("a", true).map((command) => command.command)).toEqual(["/ai"]);
+    expect(aiComposerCommandResults("poll", true)).toEqual([]);
+    expect(aiComposerCommandResults("", false)).toEqual([]);
   });
 
   test("adds the Waddle assistant to mention autocomplete once", () => {
-    expect(withAiAssistantMentionCandidate([])).toEqual([
+    expect(withAiAssistantMentionCandidate([], true)).toEqual([
       {
         username: "waddle",
         jid: null,
@@ -92,6 +93,7 @@ describe("AI thread UX", () => {
         kind: "member",
       },
     ]);
+    expect(withAiAssistantMentionCandidate([], false)).toEqual([]);
 
     expect(withAiAssistantMentionCandidate([
       {
@@ -100,6 +102,6 @@ describe("AI thread UX", () => {
         avatar_url: null,
         kind: "member",
       },
-    ])).toHaveLength(1);
+    ], true)).toHaveLength(1);
   });
 });

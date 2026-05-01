@@ -3,7 +3,7 @@ import { nextTick, ref } from "vue";
 import type { Agent } from "stanza";
 import type { ExtensionAnnotation } from "../src/lib/chat-ui";
 import { queryPersonalMam, queryPersonalMamPage } from "../src/lib/xmpp/dm-history";
-import { queryMam, queryMamPage, queryMamThreadPage } from "../src/lib/xmpp/history";
+import { queryMam, queryMamByThread, queryMamPage, queryMamThreadPage } from "../src/lib/xmpp/history";
 import { useDmMessaging } from "../src/composables/useDmMessaging";
 import { useMessaging } from "../src/composables/useMessaging";
 import { handlerStubs } from "./helpers/xmpp-client-mock";
@@ -269,7 +269,7 @@ describe("MAM history parsing", () => {
     expect(page.complete).toBe(true);
   });
 
-  test("paged thread history uses the XEP-0313 thread form field and RSM before cursor", async () => {
+  test("paged thread history uses the Waddle MAM thread form field and RSM before cursor", async () => {
     const xmpp = makeMamPageAgent({ results: [], paging: { first: "thread-1" }, complete: false });
 
     await queryMamThreadPage(
@@ -284,7 +284,50 @@ describe("MAM history parsing", () => {
     expect((callArgs?.[1] as { paging?: unknown })?.paging).toEqual({ max: 20, before: "thread-1" });
     const fields =
       ((callArgs?.[1] as { form?: { fields?: { name: string; value?: string }[] } })?.form?.fields) ?? [];
-    expect(fields.find((field) => field.name === "{urn:xmpp:mam:2}thread")?.value).toBe("thread-42");
+    expect(fields.find((field) => field.name === "{urn:waddle:mam-thread:0}thread")?.value).toBe("thread-42");
+    expect(fields.find((field) => field.name === "{urn:xmpp:mam:2}thread")).toBeUndefined();
+  });
+
+  test("thread backfill assigns legacy reply without thread only for requested thread", async () => {
+    const xmpp = makeMamAgent([
+      {
+        id: "archive-reply-1",
+        item: {
+          delay: { timestamp: new Date("2024-01-01T00:00:00Z") },
+          message: {
+            id: "reply-1",
+            from: "room@muc.example.com/Waddle",
+            to: "room@muc.example.com",
+            type: "groupchat",
+            body: "provider answer",
+            reply: { id: "thread-42" },
+          },
+        },
+      },
+    ]);
+
+    const threadResults = await queryMamByThread(xmpp, "room@muc.example.com", "thread-42", 20);
+    const roomResults = await queryMam(makeMamAgent([
+      {
+        id: "archive-reply-1",
+        item: {
+          delay: { timestamp: new Date("2024-01-01T00:00:00Z") },
+          message: {
+            id: "reply-1",
+            from: "room@muc.example.com/Waddle",
+            to: "room@muc.example.com",
+            type: "groupchat",
+            body: "provider answer",
+            reply: { id: "thread-42" },
+          },
+        },
+      },
+    ]), "room@muc.example.com", 20);
+
+    expect(threadResults[0].replyTo?.id).toBe("thread-42");
+    expect(threadResults[0].threadId).toBe("thread-42");
+    expect(roomResults[0].replyTo?.id).toBe("thread-42");
+    expect(roomResults[0].threadId).toBeUndefined();
   });
 
   // Reconnect catch-up: an iPhone/Safari session that drops its websocket

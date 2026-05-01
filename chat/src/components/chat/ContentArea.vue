@@ -73,6 +73,7 @@ const props = defineProps<{
   threadIndex: ThreadIndex;
   xmppClient?: BrowserXmppClient | null;
   reactionMode?: { selectedMessageId: string | null } | null;
+  aiAssistantEnabled?: boolean;
   invokeExtensionAction?: (action: ExtensionAnnotationAction) => Promise<unknown>;
 }>();
 
@@ -926,6 +927,7 @@ function dayDividerLabel(createdAt: string): string {
       :slow-mode-cooldown="slowModeCooldown"
       :upload-progress="uploadProgress"
       :replying-to="replyingTo"
+      :ai-assistant-enabled="aiAssistantEnabled === true"
       :is-top-pinned="true"
       :extensions-open="extensionLauncherOpen"
       @send="onSend"
@@ -1127,6 +1129,7 @@ function dayDividerLabel(createdAt: string): string {
       :slow-mode-cooldown="slowModeCooldown"
       :upload-progress="uploadProgress"
       :replying-to="replyingTo"
+      :ai-assistant-enabled="aiAssistantEnabled === true"
       :extensions-open="extensionLauncherOpen"
       @send="onSend"
       @cancel-reply="cancelReply"

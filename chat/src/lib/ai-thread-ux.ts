@@ -2,6 +2,7 @@ import type { TimelineMessage } from "@/lib/chat-ui";
 import type { MentionCandidate } from "@/lib/mentions";
 
 const AI_ASSISTANT_MENTION = "waddle";
+export const AI_CHATBOT_FEATURE = "urn:waddle:ai-chatbot:1";
 
 const AI_CHATBOT_COMMAND_PATTERNS = [
   /(?:^|[:/#-])ai-chatbot(?:$|[:/#-])/i,
@@ -27,7 +28,8 @@ export function isAiThreadPromptBody(body: string): boolean {
   return /^\s*\/ai(?:\s|$)/i.test(body) || /@waddle\b/i.test(body);
 }
 
-export function aiComposerCommandResults(query: string): AiComposerCommand[] {
+export function aiComposerCommandResults(query: string, enabled = true): AiComposerCommand[] {
+  if (!enabled) return [];
   const normalized = query.trim().replace(/^\/+/, "").toLowerCase();
   return AI_COMPOSER_COMMANDS.filter((candidate) =>
     candidate.command.slice(1).startsWith(normalized)
@@ -37,7 +39,9 @@ export function aiComposerCommandResults(query: string): AiComposerCommand[] {
 
 export function withAiAssistantMentionCandidate(
   candidates: readonly MentionCandidate[],
+  enabled = true,
 ): MentionCandidate[] {
+  if (!enabled) return [...candidates];
   if (candidates.some((candidate) => candidate.username.toLowerCase() === AI_ASSISTANT_MENTION)) {
     return [...candidates];
   }

@@ -4,6 +4,8 @@ import type { ReceivedMessage } from "stanza/protocol";
 import type { LiveRoomMessage, MamHistoryPage, MamPageParam } from "./types";
 import { dispatchGroupchat } from "./message-parsing";
 
+const WADDLE_MAM_THREAD_FIELD = "{urn:waddle:mam-thread:0}thread";
+
 function pagingForPageParam(max: number, pageParam: MamPageParam) {
   return pageParam.type === "latest"
     ? { max, before: "" }
@@ -58,6 +60,7 @@ export async function queryMam(
 function parseRoomMamResult(
   result: Awaited<ReturnType<Agent["searchHistory"]>>,
   roomJid: string,
+  requestedThreadId?: string,
 ): MamHistoryPage<LiveRoomMessage> {
   const collected: LiveRoomMessage[] = [];
 
@@ -93,6 +96,13 @@ function parseRoomMamResult(
       });
 
       if (parsedMessage) {
+        if (
+          requestedThreadId
+          && !parsedMessage.threadId
+          && parsedMessage.replyTo?.id === requestedThreadId
+        ) {
+          parsedMessage = { ...parsedMessage, threadId: requestedThreadId };
+        }
         collected.push(parsedMessage);
         continue;
       }
@@ -152,11 +162,11 @@ export async function queryMamByThread(
       type: "submit",
       fields: [
         { name: "FORM_TYPE", type: "hidden", value: "urn:xmpp:mam:2" },
-        { name: "{urn:xmpp:mam:2}thread", value: threadId },
+        { name: WADDLE_MAM_THREAD_FIELD, value: threadId },
       ],
     },
   });
-  return parseRoomMamResult(result, roomJid).messages;
+  return parseRoomMamResult(result, roomJid, threadId).messages;
 }
 
 export async function queryMamThreadPage(
@@ -174,11 +184,11 @@ export async function queryMamThreadPage(
       type: "submit",
       fields: [
         { name: "FORM_TYPE", type: "hidden", value: "urn:xmpp:mam:2" },
-        { name: "{urn:xmpp:mam:2}thread", value: threadId },
+        { name: WADDLE_MAM_THREAD_FIELD, value: threadId },
       ],
     },
   });
-  return parseRoomMamResult(result, roomJid);
+  return parseRoomMamResult(result, roomJid, threadId);
 }
 
 /** XEP-0431: Full-text search in MAM. Throws on IQ/transport errors. */

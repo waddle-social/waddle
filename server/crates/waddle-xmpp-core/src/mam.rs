@@ -16,6 +16,14 @@ use crate::{CoreError, CoreResult};
 /// MAM XML namespace (XEP-0313 v2).
 pub const MAM_NS: &str = "urn:xmpp:mam:2";
 
+/// Waddle MAM thread filter namespace.
+///
+/// XEP-0313 permits extension data form fields, but `{urn:xmpp:mam:2}thread`
+/// is not a standard MAM field. Keep Waddle-specific filtering in a Waddle
+/// namespace so official MAM semantics stay conformant.
+pub const WADDLE_MAM_THREAD_NS: &str = "urn:waddle:mam-thread:0";
+pub const WADDLE_MAM_THREAD_FIELD: &str = "{urn:waddle:mam-thread:0}thread";
+
 /// Result Set Management namespace (XEP-0059).
 pub const RSM_NS: &str = "http://jabber.org/protocol/rsm";
 
@@ -161,6 +169,20 @@ pub struct ArchivedRichMessage {
     pub mentions: Vec<ArchivedMention>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreadId(String);
+
+impl ThreadId {
+    pub fn new(value: impl Into<String>) -> Option<Self> {
+        let value = value.into();
+        (!value.trim().is_empty()).then_some(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
 /// Archived message metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArchivedMessage {
@@ -234,6 +256,10 @@ pub struct MamQuery {
     pub end: Option<DateTime<Utc>>,
     /// Filter by sender.
     pub with: Option<String>,
+    /// Filter by Waddle thread root id.
+    pub thread_id: Option<ThreadId>,
+    /// XEP-0431 full-text search terms.
+    pub fulltext: Option<RichText>,
     /// Maximum results to return.
     pub max: Option<u32>,
     /// Pagination: before this ID.
@@ -260,9 +286,7 @@ pub struct MamResult {
 /// Parse a MAM query from an IQ stanza.
 pub fn parse_mam_query(iq: &Iq) -> CoreResult<(String, MamQuery)> {
     let query_elem = match &iq.payload {
-        IqType::Set(elem) | IqType::Get(elem) if elem.name() == "query" && elem.ns() == MAM_NS => {
-            elem
-        }
+        IqType::Set(elem) if elem.name() == "query" && elem.ns() == MAM_NS => elem,
         IqType::Set(_) | IqType::Get(_) => {
             return Err(CoreError::bad_request(Some(
                 "Missing MAM query element".to_string(),
@@ -295,6 +319,14 @@ pub fn parse_mam_query(iq: &Iq) -> CoreResult<(String, MamQuery)> {
     Ok((query_id, mam_query))
 }
 
+/// Check if an IQ asks for the XEP-0313 supported query fields form.
+pub fn is_mam_query_form_request(iq: &Iq) -> bool {
+    matches!(
+        &iq.payload,
+        IqType::Get(elem) if elem.name() == "query" && elem.ns() == MAM_NS
+    )
+}
+
 /// Check if an IQ is a MAM query.
 pub fn is_mam_query(iq: &Iq) -> bool {
     matches!(
@@ -302,6 +334,61 @@ pub fn is_mam_query(iq: &Iq) -> bool {
         IqType::Set(elem) | IqType::Get(elem)
             if elem.name() == "query" && elem.ns() == MAM_NS
     )
+}
+
+/// Build the XEP-0313 supported query fields response.
+pub fn build_query_form_iq(original_iq: &Iq) -> Iq {
+    let form = Element::builder("x", DATA_FORMS_NS)
+        .attr("type", "form")
+        .append(
+            Element::builder("field", DATA_FORMS_NS)
+                .attr("var", "FORM_TYPE")
+                .attr("type", "hidden")
+                .append(
+                    Element::builder("value", DATA_FORMS_NS)
+                        .append(MAM_NS)
+                        .build(),
+                )
+                .build(),
+        )
+        .append(
+            Element::builder("field", DATA_FORMS_NS)
+                .attr("var", "with")
+                .attr("type", "jid-single")
+                .build(),
+        )
+        .append(
+            Element::builder("field", DATA_FORMS_NS)
+                .attr("var", "start")
+                .attr("type", "text-single")
+                .build(),
+        )
+        .append(
+            Element::builder("field", DATA_FORMS_NS)
+                .attr("var", "end")
+                .attr("type", "text-single")
+                .build(),
+        )
+        .append(
+            Element::builder("field", DATA_FORMS_NS)
+                .attr("var", WADDLE_MAM_THREAD_FIELD)
+                .attr("type", "text-single")
+                .build(),
+        )
+        .append(
+            Element::builder("field", DATA_FORMS_NS)
+                .attr("var", "fulltext")
+                .attr("type", "text-single")
+                .build(),
+        )
+        .build();
+    let query = Element::builder("query", MAM_NS).append(form).build();
+    Iq {
+        from: original_iq.to.clone(),
+        to: original_iq.from.clone(),
+        id: original_iq.id.clone(),
+        payload: IqType::Result(Some(query)),
+    }
 }
 
 /// Build MAM result messages for each archived message.
@@ -353,6 +440,7 @@ fn parse_data_form(form: &Element, query: &mut MamQuery) -> CoreResult<()> {
             .map(|value| value.text());
 
         match var {
+            "" | "FORM_TYPE" => {}
             "start" => {
                 if let Some(value) = value.filter(|value| !value.is_empty()) {
                     query.start = Some(parse_datetime(&value)?);
@@ -366,7 +454,15 @@ fn parse_data_form(form: &Element, query: &mut MamQuery) -> CoreResult<()> {
             "with" => {
                 query.with = value.filter(|value| !value.is_empty());
             }
-            _ => {}
+            WADDLE_MAM_THREAD_FIELD => {
+                query.thread_id = value.and_then(ThreadId::new);
+            }
+            "fulltext" => {
+                query.fulltext = value.and_then(RichText::new);
+            }
+            _ => {
+                return Err(CoreError::NotImplemented);
+            }
         }
     }
 
@@ -765,6 +861,16 @@ mod tests {
                                     )
                                     .build(),
                             )
+                            .append(
+                                Element::builder("field", DATA_FORMS_NS)
+                                    .attr("var", "fulltext")
+                                    .append(
+                                        Element::builder("value", DATA_FORMS_NS)
+                                            .append("release notes")
+                                            .build(),
+                                    )
+                                    .build(),
+                            )
                             .build(),
                     )
                     .append(
@@ -783,10 +889,118 @@ mod tests {
         assert_eq!(query.max, Some(10));
         assert_eq!(query.after_id.as_deref(), Some("msg-9"));
         assert_eq!(query.with.as_deref(), Some("juliet@example.com"));
+        assert_eq!(
+            query.fulltext.as_ref().map(RichText::as_str),
+            Some("release notes")
+        );
         let start = query.start.expect("start filter");
         assert_eq!(start.year(), 2024);
         assert_eq!(start.month(), 1);
         assert_eq!(start.day(), 15);
+    }
+
+    #[test]
+    fn parses_waddle_mam_thread_field() {
+        let iq = Iq {
+            from: None,
+            to: None,
+            id: "mam-thread".to_string(),
+            payload: IqType::Set(
+                Element::builder("query", MAM_NS)
+                    .append(
+                        Element::builder("x", DATA_FORMS_NS)
+                            .attr("type", "submit")
+                            .append(
+                                Element::builder("field", DATA_FORMS_NS)
+                                    .attr("var", WADDLE_MAM_THREAD_FIELD)
+                                    .append(
+                                        Element::builder("value", DATA_FORMS_NS)
+                                            .append("thread-root")
+                                            .build(),
+                                    )
+                                    .build(),
+                            )
+                            .append(
+                                Element::builder("field", DATA_FORMS_NS)
+                                    .attr("var", "FORM_TYPE")
+                                    .append(
+                                        Element::builder("value", DATA_FORMS_NS)
+                                            .append(MAM_NS)
+                                            .build(),
+                                    )
+                                    .build(),
+                            )
+                            .build(),
+                    )
+                    .build(),
+            ),
+        };
+
+        let (_, query) = parse_mam_query(&iq).expect("valid MAM query");
+
+        assert_eq!(
+            query.thread_id.as_ref().map(ThreadId::as_str),
+            Some("thread-root")
+        );
+    }
+
+    #[test]
+    fn rejects_unsupported_mam_form_fields() {
+        let iq = Iq {
+            from: None,
+            to: None,
+            id: "mam-thread".to_string(),
+            payload: IqType::Set(
+                Element::builder("query", MAM_NS)
+                    .append(
+                        Element::builder("x", DATA_FORMS_NS)
+                            .attr("type", "submit")
+                            .append(
+                                Element::builder("field", DATA_FORMS_NS)
+                                    .attr("var", "{urn:xmpp:mam:2}thread")
+                                    .append(
+                                        Element::builder("value", DATA_FORMS_NS)
+                                            .append("wrong-thread")
+                                            .build(),
+                                    )
+                                    .build(),
+                            )
+                            .build(),
+                    )
+                    .build(),
+            ),
+        };
+
+        let err = parse_mam_query(&iq).expect_err("unsupported MAM field");
+        assert!(matches!(err, CoreError::NotImplemented));
+    }
+
+    #[test]
+    fn builds_mam_query_form_with_waddle_thread_field() {
+        let iq = Iq {
+            from: Some("juliet@example.com/chamber".parse().expect("from jid")),
+            to: Some("room@muc.example.com".parse().expect("to jid")),
+            id: "mam-form".to_string(),
+            payload: IqType::Get(Element::builder("query", MAM_NS).build()),
+        };
+
+        assert!(is_mam_query_form_request(&iq));
+        let result = build_query_form_iq(&iq);
+        let IqType::Result(Some(query)) = result.payload else {
+            panic!("expected query form result");
+        };
+        let form = query.get_child("x", DATA_FORMS_NS).expect("form");
+        let fields = form
+            .children()
+            .filter_map(|field| field.attr("var"))
+            .collect::<Vec<_>>();
+
+        assert!(fields.contains(&"FORM_TYPE"));
+        assert!(fields.contains(&"with"));
+        assert!(fields.contains(&"start"));
+        assert!(fields.contains(&"end"));
+        assert!(fields.contains(&WADDLE_MAM_THREAD_FIELD));
+        assert!(fields.contains(&"fulltext"));
     }
 
     #[test]

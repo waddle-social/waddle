@@ -55,11 +55,11 @@ pub use error::{
 pub use parser::{ns, StreamHeader};
 pub use routing::{RouterConfig, RoutingDestination, RoutingResult, StanzaRouter};
 pub use types::*;
-pub use waddle_xmpp_core::Stanza;
 pub use waddle_xmpp_core::{
     managed_room_jid, managed_room_localpart, parse_managed_room_jid, parse_managed_room_localpart,
     ChannelInfo, ChannelRoomInfo, ChannelType, UploadSlotInfo,
 };
+pub use waddle_xmpp_core::{CoreError, Stanza};
 pub use xep::xep0077::{RegistrationError, RegistrationRequest};
 
 use jid::BareJid;

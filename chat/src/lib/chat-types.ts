@@ -17,6 +17,7 @@ export interface ChannelSummary {
   description?: string | null;
   channel_type?: string;
   position?: number;
+  features?: string[];
   is_default?: boolean;
   created_at?: string;
   updated_at?: string | null;
