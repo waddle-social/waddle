@@ -227,12 +227,31 @@ fn parse_stanza(frame: &str, kind: &str) -> Result<InboundFrame, ParseError> {
                 err: format!("{err:?}"),
             }
         })?),
-        "message" => Stanza::Message(xmpp_parsers::message::Message::try_from(element).map_err(
-            |err| ParseError::InvalidStanza {
-                kind: "message",
-                err: format!("{err:?}"),
-            },
-        )?),
+        "message" => {
+            // XEP-0201: capture the optional `<thread parent='X'>` attribute
+            // before `Message::try_from` discards it. xmpp_parsers 0.21 types
+            // `Message::thread` as `Option<Thread(String)>` and silently drops
+            // the parent attribute. Re-attaching it as a payload element here
+            // — at the inbound parse boundary — is the typed-payloads
+            // "exactly once" parse: every downstream consumer (archive write,
+            // MAM replay, retraction round-trip) reads parent through
+            // `xep0201::thread_info_from_message` and never sees the raw
+            // wire form again.
+            let stanza_ns = element.ns().to_string();
+            let thread_parent = waddle_xmpp_core::parser_utils::extract_thread_parent(&element);
+            let mut msg = xmpp_parsers::message::Message::try_from(element).map_err(|err| {
+                ParseError::InvalidStanza {
+                    kind: "message",
+                    err: format!("{err:?}"),
+                }
+            })?;
+            if let Some(parent) = thread_parent {
+                waddle_xmpp_core::parser_utils::reattach_thread_parent(
+                    &mut msg, parent, &stanza_ns,
+                );
+            }
+            Stanza::Message(msg)
+        }
         "presence" => {
             Stanza::Presence(xmpp_parsers::presence::Presence::try_from(element).map_err(
                 |err| ParseError::InvalidStanza {
@@ -508,6 +527,51 @@ mod tests {
             panic!("expected Stanza");
         };
         assert!(matches!(*stanza, Stanza::Message(_)));
+    }
+
+    #[test]
+    fn xep_0201_message_thread_parent_survives_inbound_parse() {
+        // RFC 6121 / XEP-0201: `<thread parent='X'>id</thread>` is the
+        // wire shape for nested threads. xmpp_parsers 0.21 silently drops
+        // the `parent` attribute at typed parse, so the inbound boundary
+        // calls `extract_thread_parent` + `reattach_thread_parent` to move
+        // the typed thread element into `msg.payloads` (with parent
+        // intact) and clear `msg.thread`. Downstream consumers read both
+        // id and parent via `xep0201::thread_info_from_message`.
+        let xml = r#"<message type="chat" to="bob@waddle.social" id="m-2"><body>hi</body><thread parent="root-1">child-2</thread></message>"#;
+        let frame = parse_frame(xml).expect("message should parse");
+        let InboundFrame::Stanza(stanza) = frame else {
+            panic!("expected Stanza");
+        };
+        let Stanza::Message(msg) = *stanza else {
+            panic!("expected Message stanza");
+        };
+        // Post-reattach invariant: typed field cleared, payload form set.
+        assert!(msg.thread.is_none(), "typed thread field should be cleared");
+        let info = waddle_xmpp_core::xep0201::thread_info_from_message(&msg)
+            .expect("thread info recoverable from payload form");
+        assert_eq!(info.id, "child-2");
+        assert_eq!(info.parent.as_deref(), Some("root-1"));
+    }
+
+    #[test]
+    fn xep_0201_message_root_thread_parses_without_parent_payload() {
+        // Root thread (no parent attribute). The typed Message::thread
+        // field carries the id; reattach is skipped because there's no
+        // parent to preserve. `thread_info_from_message` falls back to
+        // the typed field.
+        let xml = r#"<message type="chat" to="bob@waddle.social" id="m-3"><body>hi</body><thread>root-only</thread></message>"#;
+        let frame = parse_frame(xml).expect("message should parse");
+        let InboundFrame::Stanza(stanza) = frame else {
+            panic!("expected Stanza");
+        };
+        let Stanza::Message(msg) = *stanza else {
+            panic!("expected Message stanza");
+        };
+        let info = waddle_xmpp_core::xep0201::thread_info_from_message(&msg)
+            .expect("thread info recoverable");
+        assert_eq!(info.id, "root-only");
+        assert_eq!(info.parent, None);
     }
 
     #[test]

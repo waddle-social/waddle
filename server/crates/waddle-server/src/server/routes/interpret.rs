@@ -2470,6 +2470,16 @@ async fn finish_archive_groupchat_message(
     let rich = rich_archive_payload(&archive_clone);
     let stanza_xml = serialize_groupchat_stanza_xml(&archive_clone);
 
+    // XEP-0201: read the typed thread info (id + optional parent) from the
+    // post-reattach payload form. `protocol::frame::parse_stanza` calls
+    // `reattach_thread_parent` at the inbound boundary so the parent
+    // attribute survives `Message::try_from` here.
+    let (thread_id, parent_thread_id) =
+        match waddle_xmpp::xep0201::thread_info_from_message(&archive_clone) {
+            Some(info) => (Some(info.id), info.parent),
+            None => (None, None),
+        };
+
     let archived = MamArchivedMessage {
         id: archive_id,
         timestamp: chrono::Utc::now(),
@@ -2481,11 +2491,8 @@ async fn finish_archive_groupchat_message(
         to: room.to_string(),
         body,
         stanza_id: archive_clone.id.clone(),
-        thread_id: archive_clone.thread.as_ref().map(|thread| thread.0.clone()),
-        // Parent attribute is populated in commit 3 once the inbound
-        // parse boundary calls `reattach_thread_parent` and the helper
-        // can recover it from the post-reattach payload form.
-        parent_thread_id: None,
+        thread_id,
+        parent_thread_id,
         reply_to_id,
         reply_to_jid,
         origin_id,
