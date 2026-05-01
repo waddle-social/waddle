@@ -1362,16 +1362,26 @@ pub(crate) async fn destroy_room_actor(state: &WebSocketState, room_jid: &BareJi
 pub(crate) fn stanza_to_xml(stanza: &Stanza) -> String {
     let mut element = stanza.to_element();
     if let Stanza::Message(message) = stanza {
-        // xmpp_parsers currently drops RFC 6121 <thread/> during Message -> Element.
-        // Re-attach it so forwarded/broadcast messages preserve thread metadata.
+        // xmpp_parsers drops RFC 6121 `<thread/>` during Message -> Element.
+        // Re-attach via the canonical XEP-0201 builder so the wire shape
+        // — including any optional `parent` attribute — round-trips.
+        // Note: post-`reattach_thread_parent` messages have
+        // `message.thread = None` (the typed field is cleared and the
+        // thread element lives in `msg.payloads` instead, which
+        // `to_element()` already serializes faithfully). This branch
+        // only re-attaches when the typed field is the only source —
+        // no parent context exists in that case.
         if let Some(thread) = message.thread.as_ref() {
             let has_thread = element.children().any(|child| child.name() == "thread");
             if !has_thread {
-                element.append_child(
-                    Element::builder("thread", "jabber:client")
-                        .append(thread.0.clone())
-                        .build(),
-                );
+                let info = waddle_xmpp::xep0201::ThreadInfo {
+                    id: thread.0.clone(),
+                    parent: None,
+                };
+                element.append_child(waddle_xmpp::xep0201::build_thread_element(
+                    &info,
+                    "jabber:client",
+                ));
             }
         }
     }
