@@ -3,8 +3,13 @@ import type { ExtensionLaunchDescriptor } from "../src/lib/chat-ui";
 import {
   buildExtensionLaunchInvokeIq,
   extensionCommandOutcome,
+  extensionCommandFormBlockedReason,
   extensionServiceJidForUserJid,
+  invokeExtensionCommand,
+  parseExtensionCommandForm,
   parseExtensionCommandResult,
+  submitExtensionCommandForm,
+  visibleExtensionCommandFields,
 } from "../src/lib/xmpp/extension-commands";
 
 const launch: ExtensionLaunchDescriptor = {
@@ -65,6 +70,32 @@ describe("extension command invocation", () => {
     ]);
   });
 
+  test("builds plain XEP-0050 execute requests for discovered commands", async () => {
+    let sent: unknown;
+    const xmpp = {
+      async sendIQ(iq: unknown) {
+        sent = iq;
+        return { command: { status: "completed", notes: [] } };
+      },
+    };
+
+    await invokeExtensionCommand(
+      xmpp as any,
+      "alice@example.com/web",
+      { serviceJid: "extensions.example.com", node: "urn:waddle:extension:noop", name: "Noop" },
+    );
+
+    expect(sent).toMatchObject({
+      type: "set",
+      to: "extensions.example.com",
+      command: {
+        node: "urn:waddle:extension:noop",
+        action: "execute",
+      },
+    });
+    expect((sent as { command?: { form?: unknown } }).command?.form).toBeUndefined();
+  });
+
   test("uses source stanza metadata when context only carries the waddle id", () => {
     const iq = buildExtensionLaunchInvokeIq("alice@example.com/web", {
       ...launch,
@@ -108,6 +139,186 @@ describe("extension command invocation", () => {
     expect(extensionCommandOutcome({ status: "executing", notes: [] })).toEqual({
       state: "warning",
       detail: "Extension returned a form that this client cannot complete yet.",
+    });
+    expect(extensionCommandOutcome({
+      status: "executing",
+      form: { fields: [{ name: "payload#question", type: "text-single", value: "" }] },
+      notes: [],
+    })).toEqual({ state: "warning" });
+  });
+
+  test("parses XEP-0004 form fields, options, visibility, and forbidden fields", () => {
+    const fields = parseExtensionCommandForm({
+      fields: [
+        { type: "fixed", value: "Section heading" },
+        { name: "FORM_TYPE", type: "hidden", value: "urn:waddle:extension:1" },
+        { name: "hidden#multi", type: "hidden", value: ["a", "b"] },
+        { name: "payload#question", type: "text-single", label: "Question", required: true, desc: "Ask the room." },
+        {
+          name: "payload#mode",
+          type: "list-single",
+          label: "Mode",
+          value: "single",
+          options: [
+            { label: "Single choice", value: "single" },
+            { label: "Multiple choice", value: "multi" },
+          ],
+        },
+        { name: "payload#notify", type: "boolean", value: true },
+        { name: "waddle#api_key", type: "text-private", label: "API key" },
+      ],
+    });
+
+    expect(visibleExtensionCommandFields(fields).map((field) => field.name)).toEqual([
+      "fixed:Section heading",
+      "payload#question",
+      "payload#mode",
+      "payload#notify",
+      "waddle#api_key",
+    ]);
+    expect(fields[0]).toMatchObject({
+      label: "fixed:Section heading",
+      type: "fixed",
+      value: "Section heading",
+    });
+    expect(fields[3]).toMatchObject({
+      label: "Question",
+      required: true,
+      description: "Ask the room.",
+      value: "",
+      blocked: false,
+    });
+    expect(fields[4]?.options).toEqual([
+      { label: "Single choice", value: "single" },
+      { label: "Multiple choice", value: "multi" },
+    ]);
+    expect(fields[5]?.value).toBe("true");
+    expect(extensionCommandFormBlockedReason(fields)).toBe("Extension command form contains a forbidden field: API key.");
+  });
+
+  test("parses allowed XEP-0050 stage actions", () => {
+    const result = parseExtensionCommandResult({
+      command: {
+        status: "executing",
+        sid: "session-1",
+        availableActions: { execute: "next", next: true },
+        notes: [],
+      },
+    });
+
+    expect(result.sessionId).toBe("session-1");
+    expect(result.actions).toEqual({
+      execute: "next",
+      allowed: ["next", "cancel"],
+    });
+  });
+
+  test("defaults executing commands without actions to complete plus cancel", () => {
+    const result = parseExtensionCommandResult({
+      command: {
+        status: "executing",
+        sid: "session-1",
+        notes: [],
+      },
+    });
+
+    expect(result.actions).toEqual({
+      allowed: ["complete", "cancel"],
+    });
+  });
+
+  test("preserves XEP-0004 multi-value fields from Stanza form values", () => {
+    const fields = parseExtensionCommandForm({
+      fields: [
+        { name: "payload#choices", type: "list-multi", value: ["yes", "maybe"] },
+        { name: "payload#notes", type: "text-multi", value: ["first", "second"] },
+        { name: "payload#notify", type: "boolean" },
+      ],
+    });
+
+    expect(fields[0]?.values).toEqual(["yes", "maybe"]);
+    expect(fields[1]?.values).toEqual(["first", "second"]);
+    expect(fields[2]).toMatchObject({ value: "0", values: ["0"] });
+  });
+
+  test("submits XEP-0050 session id and XEP-0004 multi values using Stanza names", async () => {
+    let sent: unknown;
+    const xmpp = {
+      async sendIQ(iq: unknown) {
+        sent = iq;
+        return { command: { status: "completed", notes: [] } };
+      },
+    };
+
+    await submitExtensionCommandForm(
+      xmpp as any,
+      { serviceJid: "extensions.example.com", node: "urn:waddle:extension:poll", name: "Poll" },
+      "session-1",
+      [
+        {
+          name: "fixed:Do not send me",
+          label: "Do not send me",
+          type: "fixed",
+          value: "Do not send me",
+          values: ["Do not send me"],
+          options: [],
+          required: false,
+          blocked: false,
+          hidden: false,
+        },
+        {
+          name: "payload#choices",
+          label: "Choices",
+          type: "list-multi",
+          value: "yes",
+          values: ["yes", "maybe"],
+          options: [],
+          required: true,
+          blocked: false,
+          hidden: false,
+        },
+        {
+          name: "payload#notify",
+          label: "Notify",
+          type: "boolean",
+          value: "0",
+          values: ["0"],
+          options: [],
+          required: true,
+          blocked: false,
+          hidden: false,
+        },
+        {
+          name: "hidden#multi",
+          label: "Hidden",
+          type: "hidden",
+          value: "alpha",
+          values: ["alpha", "beta"],
+          options: [],
+          required: false,
+          blocked: false,
+          hidden: true,
+        },
+      ],
+      "next",
+    );
+
+    expect(sent).toMatchObject({
+      type: "set",
+      to: "extensions.example.com",
+      command: {
+        node: "urn:waddle:extension:poll",
+        sid: "session-1",
+        action: "next",
+        form: {
+          type: "submit",
+          fields: [
+            { name: "payload#choices", type: "list-multi", value: ["yes", "maybe"] },
+            { name: "payload#notify", type: "boolean", value: false },
+            { name: "hidden#multi", type: "hidden", value: ["alpha", "beta"] },
+          ],
+        },
+      },
     });
   });
 });

@@ -45,6 +45,7 @@ const props = defineProps<{
   uploadProgress: { uploading: boolean; progress: number; filename: string };
   replyingTo?: { id: string; author: string; preview?: string } | null;
   isTopPinned?: boolean;
+  extensionsOpen?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -74,6 +75,10 @@ const setEditorRef = (instance: InstanceType<typeof ChatEditor> | null) => {
 const fileInputRef = ref<HTMLInputElement | null>(null);
 const setFileInputRef = (el: HTMLInputElement | null) => {
   fileInputRef.value = el;
+};
+const extensionButtonRef = ref<HTMLButtonElement | null>(null);
+const setExtensionButtonRef = (el: HTMLButtonElement | null) => {
+  extensionButtonRef.value = el;
 };
 
 const tiptapEditor = computed(() => {
@@ -331,7 +336,11 @@ function focus() {
   editorRef.value?.focus();
 }
 
-defineExpose({ addAttachments, focus });
+function focusExtensions() {
+  extensionButtonRef.value?.focus();
+}
+
+defineExpose({ addAttachments, focus, focusExtensions });
 
 function openFilePicker() {
   fileInputRef.value?.click();
@@ -643,10 +652,12 @@ watch(
         <Paperclip class="w-4 h-4" aria-hidden="true" />
       </button>
       <button
+        :ref="setExtensionButtonRef"
         type="button"
         class="chat-composer-input-action h-9 w-9 shrink-0 flex items-center justify-center transition-all duration-200 text-muted-foreground hover:bg-background/70 hover:text-primary disabled:opacity-40 [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11"
         title="Extensions"
         aria-label="Extensions"
+        :aria-expanded="extensionsOpen"
         :disabled="disabled"
         @click="emit('openExtensions')"
       >

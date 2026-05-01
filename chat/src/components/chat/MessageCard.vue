@@ -28,6 +28,8 @@ import EmojiPicker from "@/components/chat/EmojiPicker.vue";
 import ImageLightbox from "@/components/ui/ImageLightbox.vue";
 import {
   extensionCardDetails,
+  extensionActionStatusLabel,
+  extensionPresentation,
   renderStyledBody,
   extensionSurfaceLabel,
   isAudioFile,
@@ -162,17 +164,16 @@ async function invokeExtension(annotationId: string, action: ExtensionAnnotation
     const result = await props.invokeExtensionAction(action);
     const outcome = extensionCommandOutcome(result);
     setExtensionActionState(annotationId, action, outcome);
-    setTimeout(() => {
-      if (extensionActionState(annotationId, action)?.state === "success") {
-        setExtensionActionState(annotationId, action);
-      }
-    }, 2500);
   } catch (error) {
     setExtensionActionState(annotationId, action, {
       state: "error",
       detail: error instanceof Error ? error.message : "Action failed.",
     });
   }
+}
+
+function actionStatusLabel(annotationId: string, action: ExtensionAnnotationAction): string {
+  return extensionActionStatusLabel(extensionActionState(annotationId, action)?.state);
 }
 
 const imageAttachments = computed(() =>
@@ -875,24 +876,37 @@ watch(
           class="chat-extension-card flex min-w-0 items-start gap-3 rounded-lg border border-border bg-muted/25 p-3 text-left"
         >
           <span class="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-md bg-background text-foreground ring-1 ring-border">
-            <ClipboardList v-if="annotation.surfaceKind === 'board'" class="h-4 w-4 text-primary/80" aria-hidden="true" />
-            <Gamepad2 v-else-if="annotation.surfaceKind === 'game'" class="h-4 w-4 text-success" aria-hidden="true" />
-            <Bot v-else-if="annotation.surfaceKind === 'chat-bot'" class="h-4 w-4 text-primary/80" aria-hidden="true" />
-            <Sparkles v-else-if="annotation.surfaceKind === 'dynamic-canvas'" class="h-4 w-4 text-warning" aria-hidden="true" />
+            <ClipboardList v-if="extensionPresentation(annotation).kind === 'links-task-board' || annotation.surfaceKind === 'board'" class="h-4 w-4 text-primary/80" aria-hidden="true" />
+            <Gamepad2 v-else-if="extensionPresentation(annotation).kind === 'pub-quiz' || annotation.surfaceKind === 'game'" class="h-4 w-4 text-success" aria-hidden="true" />
+            <Bot v-else-if="extensionPresentation(annotation).kind === 'ai-chatbot' || annotation.surfaceKind === 'chat-bot'" class="h-4 w-4 text-primary/80" aria-hidden="true" />
+            <Sparkles v-else-if="extensionPresentation(annotation).kind === 'ai-assistant-canvas' || annotation.surfaceKind === 'dynamic-canvas'" class="h-4 w-4 text-warning" aria-hidden="true" />
             <LayoutDashboard v-else class="h-4 w-4" aria-hidden="true" />
           </span>
           <span class="min-w-0 flex-1">
             <span class="type-section-label block text-muted-foreground">
-              {{ extensionSurfaceLabel(annotation.surfaceKind) }}
+              {{ extensionPresentation(annotation).label || extensionSurfaceLabel(annotation.surfaceKind) }}
             </span>
-            <span class="type-control block truncate text-foreground">
-              {{ annotation.title }}
+            <span class="type-control block break-words text-foreground">
+              {{ extensionPresentation(annotation).title }}
             </span>
-            <span v-if="annotation.summary" class="type-caption mt-1 block text-muted-foreground">
-              {{ annotation.summary }}
+            <span v-if="extensionPresentation(annotation).summary" class="type-caption mt-1 block break-words text-muted-foreground">
+              {{ extensionPresentation(annotation).summary }}
+            </span>
+            <span
+              v-if="extensionPresentation(annotation).options.length > 0"
+              class="mt-2 grid gap-1"
+            >
+              <span
+                v-for="option in extensionPresentation(annotation).options"
+                :key="`${annotation.annotationId}:option:${option.id}`"
+                class="type-caption flex min-w-0 items-center justify-between gap-3 rounded-md bg-background/70 px-2 py-1.5 text-foreground ring-1 ring-border/70"
+              >
+                <span class="min-w-0 break-words">{{ option.label }}</span>
+                <span v-if="option.value !== undefined" class="type-numeric text-muted-foreground">{{ option.value }}</span>
+              </span>
             </span>
             <dl
-              v-if="extensionCardDetails(annotation).length > 0"
+              v-if="extensionPresentation(annotation).kind === 'generic' && extensionCardDetails(annotation).length > 0"
               class="mt-2 grid min-w-0 grid-cols-[max-content_minmax(0,1fr)] gap-x-2 gap-y-1"
             >
               <template
@@ -900,7 +914,7 @@ watch(
                 :key="`${annotation.annotationId}:${detail.label}:${detail.value}`"
               >
                 <dt class="type-meta text-muted-foreground/70">{{ detail.label }}</dt>
-                <dd class="type-caption min-w-0 truncate text-foreground/85" :title="detail.value">{{ detail.value }}</dd>
+                <dd class="type-caption min-w-0 break-words text-foreground/85" :title="detail.value">{{ detail.value }}</dd>
               </template>
             </dl>
             <span v-if="annotation.actions.length > 0" class="mt-2 flex flex-wrap gap-2">
@@ -908,7 +922,7 @@ watch(
                 v-for="action in annotation.actions"
                 :key="`${annotation.annotationId}:${action.route}:${action.label}`"
                 type="button"
-                class="type-caption inline-flex min-h-7 items-center gap-1.5 rounded-md border border-border bg-background px-2 py-1 text-foreground transition-colors hover:bg-muted disabled:cursor-not-allowed disabled:opacity-60"
+                class="type-caption inline-flex min-h-8 items-center gap-1.5 rounded-md border border-border bg-background px-2.5 py-1.5 text-foreground transition-colors hover:bg-muted disabled:cursor-not-allowed disabled:opacity-60"
                 :disabled="extensionActionState(annotation.annotationId, action)?.state === 'loading' || !action.launch"
                 :title="extensionActionState(annotation.annotationId, action)?.detail ?? action.launch?.commandNode ?? action.label"
                 @click.stop="invokeExtension(annotation.annotationId, action)"
@@ -934,6 +948,9 @@ watch(
                   aria-hidden="true"
                 />
                 {{ action.label }}
+                <span v-if="actionStatusLabel(annotation.annotationId, action)" class="text-muted-foreground">
+                  {{ actionStatusLabel(annotation.annotationId, action) }}
+                </span>
               </button>
             </span>
             <span

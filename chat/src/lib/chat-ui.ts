@@ -49,6 +49,27 @@ export interface ExtensionPayloadElement {
   children: ExtensionPayloadElement[];
 }
 
+export type ExtensionUiBlockKind = "text" | "image" | "action" | "form" | "list" | "unknown";
+
+export interface ExtensionUiBlock {
+  kind: ExtensionUiBlockKind;
+  id?: string;
+  title?: string;
+  text?: string;
+  label?: string;
+  description?: string;
+  style?: string;
+  launchId?: string;
+  attributes: Record<string, string>;
+  children: ExtensionUiBlock[];
+}
+
+export interface ExtensionUiView {
+  id: string;
+  title?: string;
+  blocks: ExtensionUiBlock[];
+}
+
 export interface ExtensionLaunchContext {
   waddleId?: string;
   roomJid?: string;
@@ -83,6 +104,7 @@ export interface ExtensionAnnotation {
   imageUrl?: string;
   source?: ExtensionEnvelopeSource;
   payloadNamespace?: string;
+  views?: ExtensionUiView[];
   payloads?: ExtensionPayloadElement[];
   fields: Record<string, string>;
   actions: ExtensionAnnotationAction[];
@@ -413,4 +435,176 @@ export function extensionCardDetails(annotation: ExtensionAnnotation, limit = 6)
   }
 
   return details.slice(0, limit);
+}
+
+type ExtensionPresentationKind =
+  | "links-task-board"
+  | "pub-quiz"
+  | "ai-chatbot"
+  | "ai-assistant-canvas"
+  | "decision-polls"
+  | "generic";
+
+interface ExtensionPresentationOption {
+  id: string;
+  label: string;
+  value?: number;
+}
+
+interface ExtensionPresentation {
+  kind: ExtensionPresentationKind;
+  label: string;
+  title: string;
+  summary?: string;
+  primaryValue?: string;
+  secondaryValue?: string;
+  options: ExtensionPresentationOption[];
+  details: ExtensionCardDetail[];
+}
+
+export function extensionPresentation(annotation: ExtensionAnnotation): ExtensionPresentation {
+  const payload = annotation.payloads?.[0];
+  const plugin = annotation.extensionId;
+  if (plugin === "decision-polls" || payload?.namespace === "urn:waddle:decision-polls:1") {
+    return decisionPollPresentation(annotation, payload);
+  }
+  if (plugin === "pub-quiz" || payload?.namespace === "urn:waddle:pub-quiz:1") {
+    return pubQuizPresentation(annotation, payload);
+  }
+  if (plugin === "links-task-board" || payload?.namespace === "urn:waddle:links-task-board:1") {
+    return linksTaskBoardPresentation(annotation, payload);
+  }
+  if (plugin === "ai-chatbot" || payload?.namespace === "urn:waddle:ai-chatbot:1") {
+    return aiChatbotPresentation(annotation, payload);
+  }
+  if (plugin === "ai-assistant-canvas" || payload?.namespace === "urn:waddle:ai-assistant-canvas:1") {
+    return canvasPresentation(annotation, payload);
+  }
+  return {
+    kind: "generic",
+    label: extensionSurfaceLabel(annotation.surfaceKind),
+    title: annotation.title,
+    ...(annotation.summary ? { summary: annotation.summary } : {}),
+    options: [],
+    details: extensionCardDetails(annotation),
+  };
+}
+
+export function extensionActionStatusLabel(state?: "loading" | "success" | "warning" | "error"): string {
+  switch (state) {
+    case "loading":
+      return "Working";
+    case "success":
+      return "Done";
+    case "warning":
+      return "Needs attention";
+    case "error":
+      return "Failed";
+    default:
+      return "";
+  }
+}
+
+function childText(payload: ExtensionPayloadElement | undefined, name: string): string | undefined {
+  const text = payload?.children.find((child) => child.name === name)?.text?.trim();
+  return text || undefined;
+}
+
+function payloadAttr(payload: ExtensionPayloadElement | undefined, ...names: string[]): string | undefined {
+  for (const name of names) {
+    const value = payload?.attributes[name]?.trim();
+    if (value) return value;
+  }
+  return undefined;
+}
+
+function payloadOptions(payload: ExtensionPayloadElement | undefined): ExtensionPresentationOption[] {
+  return payload?.children
+    .filter((child) => child.name === "option" || child.name === "answer")
+    .map((child, index) => ({
+      id: child.attributes.id ?? child.attributes["option-id"] ?? String(index),
+      label: child.text?.trim() || child.attributes.label || child.attributes.title || `Option ${index + 1}`,
+      ...(Number.isFinite(Number(child.attributes.votes)) ? { value: Number(child.attributes.votes) } : {}),
+    })) ?? [];
+}
+
+function decisionPollPresentation(
+  annotation: ExtensionAnnotation,
+  payload: ExtensionPayloadElement | undefined,
+): ExtensionPresentation {
+  const question = childText(payload, "question") ?? payloadAttr(payload, "question") ?? annotation.title;
+  const status = payloadAttr(payload, "status", "state") ?? payloadAttr(payload, "closes-at");
+  return {
+    kind: "decision-polls",
+    label: "Poll",
+    title: question,
+    ...(status ? { summary: status } : annotation.summary ? { summary: annotation.summary } : {}),
+    options: payloadOptions(payload),
+    details: extensionCardDetails(annotation, 3),
+  };
+}
+
+function pubQuizPresentation(
+  annotation: ExtensionAnnotation,
+  payload: ExtensionPayloadElement | undefined,
+): ExtensionPresentation {
+  const question = childText(payload, "question") ?? payloadAttr(payload, "question") ?? annotation.title;
+  const round = payloadAttr(payload, "round", "round-id");
+  return {
+    kind: "pub-quiz",
+    label: "Quiz",
+    title: question,
+    ...(round ? { summary: `Round ${round}` } : annotation.summary ? { summary: annotation.summary } : {}),
+    options: payloadOptions(payload),
+    details: extensionCardDetails(annotation, 3),
+  };
+}
+
+function linksTaskBoardPresentation(
+  annotation: ExtensionAnnotation,
+  payload: ExtensionPayloadElement | undefined,
+): ExtensionPresentation {
+  const title = payloadAttr(payload, "title", "name") ?? childText(payload, "title") ?? annotation.title;
+  const url = payloadAttr(payload, "url", "href");
+  const site = payloadAttr(payload, "site", "host");
+  return {
+    kind: "links-task-board",
+    label: payload?.name === "task" ? "Task" : "Link",
+    title,
+    ...(site || url ? { summary: site ?? url } : annotation.summary ? { summary: annotation.summary } : {}),
+    ...(url ? { primaryValue: url } : {}),
+    options: [],
+    details: extensionCardDetails(annotation, 4),
+  };
+}
+
+function aiChatbotPresentation(
+  annotation: ExtensionAnnotation,
+  payload: ExtensionPayloadElement | undefined,
+): ExtensionPresentation {
+  const answer = childText(payload, "answer") ?? childText(payload, "response") ?? payload?.text?.trim();
+  return {
+    kind: "ai-chatbot",
+    label: "AI answer",
+    title: annotation.title,
+    ...(answer ? { summary: answer } : annotation.summary ? { summary: annotation.summary } : {}),
+    options: [],
+    details: extensionCardDetails(annotation, 3),
+  };
+}
+
+function canvasPresentation(
+  annotation: ExtensionAnnotation,
+  payload: ExtensionPayloadElement | undefined,
+): ExtensionPresentation {
+  const prompt = childText(payload, "prompt") ?? payloadAttr(payload, "prompt") ?? annotation.title;
+  const render = payloadAttr(payload, "render-id", "artifact-digest", "artifact");
+  return {
+    kind: "ai-assistant-canvas",
+    label: "Canvas",
+    title: prompt,
+    ...(render ? { summary: render } : annotation.summary ? { summary: annotation.summary } : {}),
+    options: [],
+    details: extensionCardDetails(annotation, 3),
+  };
 }
