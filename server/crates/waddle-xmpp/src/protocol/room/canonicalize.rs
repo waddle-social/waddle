@@ -108,7 +108,7 @@ mod tests {
     use crate::protocol::room::context::OccupantSnapshot;
     use crate::types::{Affiliation, Role};
     use crate::xep::xep0359::{build_stanza_id_element, extract_stanza_ids};
-    use crate::xep::xep0421::{extract_occupant_id_from_message, OccupantId};
+    use crate::xep::xep0421::{extract_occupant_id_from_message, OccupantId, OccupantIdSecret};
     use crate::xep::xep0508::{set_thread_create, ThreadCreate};
     use jid::FullJid;
     use xmpp_parsers::message::{Body, Message, MessageType};
@@ -142,6 +142,7 @@ mod tests {
             role: Role::Participant,
         }];
         let id_gen = FixedIdGenerator(fresh.to_string());
+        let secret = OccupantIdSecret::for_testing(b"test-secret".to_vec());
         let ctx = RoomContext {
             room,
             sender_full: sender,
@@ -149,7 +150,7 @@ mod tests {
             managed_room_forbidden: false,
             room_moderated: false,
             id_gen: &id_gen,
-            occupant_id_secret: b"test-secret",
+            occupant_id_secret: &secret,
             sender_nickname_generation: 0,
             project_sender_inbox: true,
             dispatch_timestamp: 0,
@@ -235,7 +236,8 @@ mod tests {
         let id = extract_occupant_id_from_message(&msg).expect("occupant-id stamped");
 
         // Stable: same (user, room) yields same id with the same secret.
-        let expected = generate_occupant_id(&sender.to_bare(), &room, b"test-secret");
+        let secret = OccupantIdSecret::for_testing(b"test-secret".to_vec());
+        let expected = generate_occupant_id(&sender.to_bare(), &room, &secret);
         assert_eq!(id, expected);
         // Non-empty.
         assert!(!id.as_str().is_empty());

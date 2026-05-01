@@ -96,8 +96,16 @@ docker run --rm \
   -e WADDLE_DATABASE_URL=sqlite:///var/lib/waddle/waddle.db \
   -e WADDLE_XMPP_MAM_DATABASE_URL=sqlite:///var/lib/waddle/mam.db \
   -e WADDLE_XMPP_INBOX_DATABASE_URL=sqlite:///var/lib/waddle/inbox.db \
+  -e WADDLE_OCCUPANT_ID_SECRET="$(openssl rand -base64 48)" \
   waddle-server:local
 ```
+
+`WADDLE_OCCUPANT_ID_SECRET` is the per-deployment HMAC key used to derive
+XEP-0421 occupant identifiers. It must be at least 32 bytes and stay
+stable across restarts; rotating it severs occupant-id continuity for
+clients tracking users across nick changes. The Helm chart auto-generates
+and persists this secret on first install; bare-metal/docker deployments
+must supply it themselves.
 
 GitHub Actions publishes container images to GHCR on every push to `main` and on semver tags (`vX.Y.Z`).
 Release tags publish semver image tags (for example `v0.2.1` -> `0.2.1`, `0.2`, `0`).

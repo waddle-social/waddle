@@ -109,6 +109,7 @@ mod tests {
     use crate::protocol::id_gen::FixedIdGenerator;
     use crate::protocol::room::context::OccupantSnapshot;
     use crate::types::{Affiliation, Role};
+    use crate::xep::xep0421::OccupantIdSecret;
     use crate::xep::xep0461::set_thread_id;
     use jid::{FullJid, Jid};
     use xmpp_parsers::message::{Body, Message, MessageType};
@@ -147,6 +148,7 @@ mod tests {
         msg: &mut Message,
     ) -> Vec<OutboundEvent> {
         let id_gen = FixedIdGenerator("ignored".to_string());
+        let secret = OccupantIdSecret::for_testing(b"test-secret".to_vec());
         let ctx = RoomContext {
             room,
             sender_full,
@@ -154,7 +156,7 @@ mod tests {
             managed_room_forbidden: false,
             room_moderated: false,
             id_gen: &id_gen,
-            occupant_id_secret: b"test-secret",
+            occupant_id_secret: &secret,
             sender_nickname_generation: 0,
             project_sender_inbox: true,
             dispatch_timestamp: 0,

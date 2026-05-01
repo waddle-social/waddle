@@ -599,6 +599,9 @@ schema.#Project & {
 			WADDLE_TEST_FIXED_ACCOUNT_ENABLED:  "true"
 			WADDLE_TEST_FIXED_ACCOUNT_PASSWORD: "cuenv-test-password"
 			WADDLE_UPLOAD_DIR:                  "./uploads"
+			// XEP-0421 occupant-id HMAC key. Test/CI value only — production
+			// must set its own via the Helm chart or secret manager.
+			WADDLE_OCCUPANT_ID_SECRET: "cuenv-test-occupant-id-secret-32-bytes-long"
 		}
 	}
 

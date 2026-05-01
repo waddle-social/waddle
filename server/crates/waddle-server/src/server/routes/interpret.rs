@@ -91,7 +91,6 @@ use waddle_xmpp::mam::{
     ArchivedReply, ArchivedRetraction, ArchivedRichMessage, ArchivedRichPayload, ArchivedTombstone,
     RichMessageId, RichText, STANZA_ID_NS,
 };
-use waddle_xmpp::muc::presence::OCCUPANT_ID_SECRET;
 use waddle_xmpp::muc::room_actor::{GetNicknameGeneration, GetRoomSnapshot, RoomActor};
 use waddle_xmpp::muc::room_registry_actor::{GetRoom, RoomRegistryActor};
 use waddle_xmpp::parse_managed_room_jid;
@@ -1452,7 +1451,7 @@ async fn dispatch_to_room(
         managed_room_forbidden,
         room_moderated: snapshot.config.moderated,
         id_gen: &id_gen,
-        occupant_id_secret: OCCUPANT_ID_SECRET,
+        occupant_id_secret: &state.deps.occupant_id_secret,
         sender_nickname_generation: snapshot.sender_nickname_generation.unwrap_or(0),
         project_sender_inbox: true,
         dispatch_timestamp,
@@ -1569,7 +1568,7 @@ async fn dispatch_to_room(
         // previously emitted `RoomActorError::VisitorMayNotSpeak`.
         room_moderated: snapshot.config.moderated,
         id_gen: &id_gen,
-        occupant_id_secret: OCCUPANT_ID_SECRET,
+        occupant_id_secret: &state.deps.occupant_id_secret,
         // Carry the sender's nickname-generation through the chain
         // so `MucArchiveHandler` can stamp it directly on
         // `OutboundEvent::ArchiveGroupchat`. Avoids a second
@@ -1665,6 +1664,7 @@ async fn dispatch_to_room(
                     room_moderated: snapshot.config.moderated,
                     dispatch_timestamp,
                     recursion_depth,
+                    occupant_id_secret: &state.deps.occupant_id_secret,
                 },
                 response,
             ))
@@ -1688,6 +1688,7 @@ struct BotGroupchatDispatch<'a> {
     room_moderated: bool,
     dispatch_timestamp: i64,
     recursion_depth: u8,
+    occupant_id_secret: &'a waddle_xmpp::xep::xep0421::OccupantIdSecret,
 }
 
 async fn dispatch_bot_groupchat_response(
@@ -1767,7 +1768,7 @@ async fn dispatch_bot_groupchat_response(
         managed_room_forbidden: false,
         room_moderated: bot_ctx.room_moderated,
         id_gen: &id_gen,
-        occupant_id_secret: OCCUPANT_ID_SECRET,
+        occupant_id_secret: bot_ctx.occupant_id_secret,
         sender_nickname_generation: 0,
         project_sender_inbox: false,
         dispatch_timestamp: bot_ctx.dispatch_timestamp,
@@ -4157,6 +4158,10 @@ mod tests {
             }),
         };
 
+        let test_secret = waddle_xmpp::xep::xep0421::OccupantIdSecret::new(
+            b"test-occupant-id-secret-32-bytes-long".to_vec(),
+        )
+        .expect("test secret meets length floor");
         let outcome = dispatch_bot_groupchat_response(
             &Deps::registry_only(&registry),
             BotGroupchatDispatch {
@@ -4166,6 +4171,7 @@ mod tests {
                 room_moderated: false,
                 dispatch_timestamp: 1777629203,
                 recursion_depth: 0,
+                occupant_id_secret: &test_secret,
             },
             response,
         )
