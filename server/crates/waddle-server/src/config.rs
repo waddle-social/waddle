@@ -171,6 +171,12 @@ fn test_occupant_id_secret() -> OccupantIdSecret {
         .expect("test secret meets length floor")
 }
 
+// `Default` is gated to `#[cfg(test)]`. Production startup MUST go
+// through `ServerConfig::from_env`, which enforces the deployment-keyed
+// `WADDLE_OCCUPANT_ID_SECRET`; a non-test `Default` impl could be
+// silently used (e.g. via `..Default::default()` in scaffolding) and
+// reintroduce the cross-deployment linkability that #283 closes.
+#[cfg(test)]
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
@@ -180,19 +186,7 @@ impl Default for ServerConfig {
             auth: AuthConfig::default(),
             extensions: ExtensionConfig::default(),
             spicedb: None,
-            // The Default impl is only used in tests / scaffolding paths
-            // that don't go through `from_env`. Production startup must
-            // call `ServerConfig::from_env` which enforces the env var.
-            #[cfg(test)]
             occupant_id_secret: test_occupant_id_secret(),
-            // In non-test builds the Default impl is unused for production
-            // bootstrap; supply a placeholder that meets the length floor
-            // so any incidental `Default::default()` still type-checks.
-            #[cfg(not(test))]
-            occupant_id_secret: OccupantIdSecret::new(
-                b"PLACEHOLDER-default-impl-do-not-use-32b".to_vec(),
-            )
-            .expect("placeholder meets length floor"),
         }
     }
 }

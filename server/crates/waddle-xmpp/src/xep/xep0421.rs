@@ -105,6 +105,33 @@ pub enum OccupantIdSecretError {
     TooShort { got: usize, min: usize },
 }
 
+/// Bundled occupant-identity inputs for XEP-0045/0421 presence stamping.
+///
+/// Three fields that always travel together when a presence-builder needs
+/// to stamp an `<occupant-id/>`:
+///
+/// - `bare_jid` — the user's bare JID. **Always required.** The room
+///   service knows who the occupant is regardless of whether the real
+///   JID is disclosed in the MUC `<item jid='…'>`. Used as the HMAC
+///   message input.
+/// - `real_jid` — whether to disclose the user's full JID in
+///   `<item jid='…'>`. `Some` for non-anonymous and semi-anonymous
+///   rooms; `None` for fully-anonymous rooms (XEP-0045 §15.6.4). The
+///   choice is independent of `bare_jid` — a fully-anonymous room
+///   still stamps occupant-id (XEP-0421 §"Business Rules"), it just
+///   doesn't expose the real JID.
+/// - `secret` — the per-deployment HMAC key.
+///
+/// Bundling these three drops public `build_*_presence` argument counts
+/// below clippy's `too_many_arguments` threshold without an `#[allow]`,
+/// and is the typed-payloads-rule-conformant shape for "occupant
+/// identity context" crossing the legacy presence builders' boundary.
+pub struct OccupantIdentity<'a> {
+    pub bare_jid: &'a jid::BareJid,
+    pub real_jid: Option<&'a jid::FullJid>,
+    pub secret: &'a OccupantIdSecret,
+}
+
 /// An opaque occupant identifier.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct OccupantId(pub String);
@@ -341,16 +368,22 @@ mod tests {
 
     #[test]
     fn test_secret_debug_redacts_bytes() {
-        let secret = test_secret();
+        // Build the secret from a known marker substring. The `Debug`
+        // impl MUST redact the bytes; we then check the rendered form
+        // contains "redacted" and does NOT contain the marker. We
+        // deliberately do NOT interpolate the rendered string into any
+        // panic / assertion message — doing so would taint-flow the
+        // secret-derived value into a panic-log sink (false-positive
+        // for CodeQL `rust/cleartext-logging`, but also pointless: if
+        // redaction failed, the panic message would itself leak the
+        // bytes during test failure).
+        const MARKER: &str = "do-not-leak-this-byte-string-32b!!!!!";
+        let secret = OccupantIdSecret::new(MARKER.as_bytes().to_vec()).expect("≥32 bytes");
         let rendered = format!("{secret:?}");
-        assert!(
-            rendered.contains("redacted"),
-            "Debug output should redact the secret bytes; got: {rendered}"
-        );
-        assert!(
-            !rendered.contains("waddle-test-secret"),
-            "Debug must not leak secret bytes; got: {rendered}"
-        );
+        let redacted = rendered.contains("redacted");
+        let leaked = rendered.contains(MARKER);
+        assert!(redacted, "Debug output should contain 'redacted'");
+        assert!(!leaked, "Debug must not leak secret bytes");
     }
 
     #[test]

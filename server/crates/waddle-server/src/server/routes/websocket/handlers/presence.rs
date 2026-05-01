@@ -1842,13 +1842,17 @@ pub async fn handle_muc_leave(
                 .clone()
                 .with_resource_str(&outcome.nick)
                 .unwrap_or_else(|_| sender_jid.clone());
+            let sender_bare = sender_jid.to_bare();
             let presence = waddle_xmpp::muc::build_leave_presence(
                 &from_jid,
                 occupant_jid,
                 Affiliation::Member,
                 false,
-                Some(sender_jid),
-                &state.deps.occupant_id_secret,
+                &waddle_xmpp::xep::xep0421::OccupantIdentity {
+                    bare_jid: &sender_bare,
+                    real_jid: Some(sender_jid),
+                    secret: &state.deps.occupant_id_secret,
+                },
             );
             let stanza = Stanza::Presence(presence);
             let _outcome = state
@@ -1997,13 +2001,17 @@ fn build_muc_self_unavailable_xml(
         .with_resource_str(nick)
         .unwrap_or_else(|_| sender_jid.clone());
 
+    let sender_bare = sender_jid.to_bare();
     let presence = waddle_xmpp::muc::build_leave_presence(
         &from_jid,
         sender_jid,
         Affiliation::Member,
         true,
-        Some(sender_jid),
-        &state.deps.occupant_id_secret,
+        &waddle_xmpp::xep::xep0421::OccupantIdentity {
+            bare_jid: &sender_bare,
+            real_jid: Some(sender_jid),
+            secret: &state.deps.occupant_id_secret,
+        },
     );
     stanza_to_xml(&Stanza::Presence(presence))
 }
@@ -2047,14 +2055,18 @@ fn create_presence_stanza(
         .with_resource_str(nick)
         .unwrap_or_else(|_| real_jid.clone());
 
+    let real_bare = real_jid.to_bare();
     waddle_xmpp::muc::build_occupant_presence(
         &from_jid,
         to_jid,
         affiliation,
         role,
         false,
-        Some(real_jid),
-        &state.deps.occupant_id_secret,
+        &waddle_xmpp::xep::xep0421::OccupantIdentity {
+            bare_jid: &real_bare,
+            real_jid: Some(real_jid),
+            secret: &state.deps.occupant_id_secret,
+        },
     )
 }
 

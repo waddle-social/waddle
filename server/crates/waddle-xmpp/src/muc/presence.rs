@@ -12,7 +12,7 @@ use xmpp_parsers::muc::user::{
 use xmpp_parsers::presence::{Presence, Type as PresenceType};
 
 use crate::types::{Affiliation, Role};
-use crate::xep::xep0421::OccupantIdSecret;
+use crate::xep::xep0421::OccupantIdentity;
 use crate::XmppError;
 
 /// Namespace for MUC user protocol.
@@ -267,34 +267,19 @@ pub fn build_occupant_presence(
     affiliation: Affiliation,
     role: Role,
     is_self: bool, // true if this is the joining user's own presence
-    occupant_real_jid: Option<&FullJid>, // real JID to include (semi-anonymous rooms)
-    occupant_id_secret: &OccupantIdSecret,
+    identity: &OccupantIdentity<'_>,
 ) -> Presence {
     let mut presence = Presence::new(PresenceType::None);
     presence.from = Some(Jid::from(from_room_jid.clone()));
     presence.to = Some(Jid::from(to_jid.clone()));
 
-    add_muc_user_payload(&mut presence, affiliation, role, is_self, occupant_real_jid);
-    add_presence_identity_payloads(
-        &mut presence,
-        from_room_jid,
-        affiliation,
-        role,
-        occupant_real_jid.map(|jid| jid.to_bare()),
-        occupant_id_secret,
-    );
+    add_muc_user_payload(&mut presence, affiliation, role, is_self, identity.real_jid);
+    add_presence_identity_payloads(&mut presence, from_room_jid, affiliation, role, identity);
 
     presence
 }
 
 /// Build a rebroadcast in-room presence update with server-trusted MUC identity.
-///
-/// `clippy::too_many_arguments` is suppressed: the parameter list mirrors
-/// the XEP-0045 §7.x identity tuple for an occupant presence update, plus
-/// the per-deployment XEP-0421 key threaded in by #283. Bundling them
-/// into a sub-struct would obscure the spec mapping; the existing
-/// `interpret.rs::project_groupchat_inbox` follows the same pattern.
-#[allow(clippy::too_many_arguments)]
 pub fn build_occupant_presence_update(
     incoming_presence: &Presence,
     from_room_jid: &FullJid,
@@ -302,22 +287,14 @@ pub fn build_occupant_presence_update(
     affiliation: Affiliation,
     role: Role,
     is_self: bool,
-    occupant_real_jid: Option<&FullJid>,
-    occupant_id_secret: &OccupantIdSecret,
+    identity: &OccupantIdentity<'_>,
 ) -> Presence {
     let mut presence = incoming_presence.clone();
     presence.from = Some(Jid::from(from_room_jid.clone()));
     presence.to = Some(Jid::from(to_jid.clone()));
     strip_server_controlled_presence_payloads(&mut presence);
-    add_muc_user_payload(&mut presence, affiliation, role, is_self, occupant_real_jid);
-    add_presence_identity_payloads(
-        &mut presence,
-        from_room_jid,
-        affiliation,
-        role,
-        occupant_real_jid.map(|jid| jid.to_bare()),
-        occupant_id_secret,
-    );
+    add_muc_user_payload(&mut presence, affiliation, role, is_self, identity.real_jid);
+    add_presence_identity_payloads(&mut presence, from_room_jid, affiliation, role, identity);
 
     presence
 }
@@ -377,8 +354,7 @@ pub fn build_leave_presence(
     to_jid: &FullJid,        // recipient's real JID
     affiliation: Affiliation,
     is_self: bool,
-    occupant_real_jid: Option<&FullJid>,
-    occupant_id_secret: &OccupantIdSecret,
+    identity: &OccupantIdentity<'_>,
 ) -> Presence {
     let mut presence = Presence::new(PresenceType::Unavailable);
     presence.from = Some(Jid::from(from_room_jid.clone()));
@@ -387,7 +363,7 @@ pub fn build_leave_presence(
     // Build the MUC user element
     let mut statuses = Vec::new();
 
-    if occupant_real_jid.is_some() {
+    if identity.real_jid.is_some() {
         statuses.push(Status::NonAnonymousRoom);
     }
 
@@ -399,7 +375,7 @@ pub fn build_leave_presence(
     let item = Item {
         affiliation: affiliation_to_muc(affiliation),
         role: MucRole::None,
-        jid: occupant_real_jid.cloned(),
+        jid: identity.real_jid.cloned(),
         nick: None,
         actor: None,
         continue_: None,
@@ -418,8 +394,7 @@ pub fn build_leave_presence(
         from_room_jid,
         affiliation,
         Role::None,
-        occupant_real_jid.map(|jid| jid.to_bare()),
-        occupant_id_secret,
+        identity,
     );
 
     presence
@@ -430,8 +405,7 @@ fn add_presence_identity_payloads(
     from_room_jid: &FullJid,
     affiliation: Affiliation,
     role: Role,
-    occupant_bare_jid: Option<BareJid>,
-    occupant_id_secret: &OccupantIdSecret,
+    identity: &OccupantIdentity<'_>,
 ) {
     let affiliation_name = match affiliation {
         Affiliation::Owner => "owner",
@@ -446,14 +420,16 @@ fn add_presence_identity_payloads(
     }
     crate::xep::xep0317::set_hats(presence, &hats);
 
-    if let Some(occupant_bare_jid) = occupant_bare_jid {
-        let occupant_id = crate::xep::xep0421::generate_occupant_id(
-            &occupant_bare_jid,
-            &from_room_jid.to_bare(),
-            occupant_id_secret,
-        );
-        crate::xep::xep0421::set_occupant_id_on_presence(presence, &occupant_id);
-    }
+    // XEP-0421 §"Business Rules": occupant-id MUST be on every emitted
+    // MUC presence regardless of whether the real JID is disclosed.
+    // The room service knows `bare_jid` even in fully-anonymous rooms;
+    // disclosure is governed independently by `identity.real_jid`.
+    let occupant_id = crate::xep::xep0421::generate_occupant_id(
+        identity.bare_jid,
+        &from_room_jid.to_bare(),
+        identity.secret,
+    );
+    crate::xep::xep0421::set_occupant_id_on_presence(presence, &occupant_id);
 }
 
 /// Convert internal Affiliation to xmpp_parsers MUC Affiliation.
@@ -490,11 +466,6 @@ fn role_to_muc(role: Role) -> MucRole {
 /// * `is_self` - True if this presence is going to the kicked user
 /// * `reason` - Optional reason for the kick
 /// * `actor` - Optional JID of who performed the kick
-///
-/// `clippy::too_many_arguments` is suppressed for the same reason as
-/// `build_occupant_presence_update`: the parameter list maps directly to
-/// the XEP-0045 §8.2 kick stanza shape.
-#[allow(clippy::too_many_arguments)]
 pub fn build_kick_presence(
     from_room_jid: &FullJid,
     to_jid: &FullJid,
@@ -502,15 +473,14 @@ pub fn build_kick_presence(
     is_self: bool,
     reason: Option<&str>,
     actor: Option<&BareJid>,
-    occupant_real_jid: Option<&FullJid>,
-    occupant_id_secret: &OccupantIdSecret,
+    identity: &OccupantIdentity<'_>,
 ) -> Presence {
     let mut presence = Presence::new(PresenceType::Unavailable);
     presence.from = Some(Jid::from(from_room_jid.clone()));
     presence.to = Some(Jid::from(to_jid.clone()));
 
     let mut statuses = vec![Status::Kicked];
-    if occupant_real_jid.is_some() {
+    if identity.real_jid.is_some() {
         statuses.push(Status::NonAnonymousRoom);
     }
     if is_self {
@@ -529,7 +499,7 @@ pub fn build_kick_presence(
     let item = Item {
         affiliation: affiliation_to_muc(affiliation),
         role: MucRole::None, // Kicked = role none
-        jid: occupant_real_jid.cloned(),
+        jid: identity.real_jid.cloned(),
         nick: None,
         actor: actor_elem,
         continue_: None,
@@ -548,8 +518,7 @@ pub fn build_kick_presence(
         from_room_jid,
         affiliation,
         Role::None,
-        occupant_real_jid.map(|jid| jid.to_bare()),
-        occupant_id_secret,
+        identity,
     );
 
     presence
@@ -573,15 +542,14 @@ pub fn build_ban_presence(
     is_self: bool,
     reason: Option<&str>,
     actor: Option<&BareJid>,
-    occupant_real_jid: Option<&FullJid>,
-    occupant_id_secret: &OccupantIdSecret,
+    identity: &OccupantIdentity<'_>,
 ) -> Presence {
     let mut presence = Presence::new(PresenceType::Unavailable);
     presence.from = Some(Jid::from(from_room_jid.clone()));
     presence.to = Some(Jid::from(to_jid.clone()));
 
     let mut statuses = vec![Status::Banned];
-    if occupant_real_jid.is_some() {
+    if identity.real_jid.is_some() {
         statuses.push(Status::NonAnonymousRoom);
     }
     if is_self {
@@ -600,7 +568,7 @@ pub fn build_ban_presence(
     let item = Item {
         affiliation: MucAffiliation::Outcast, // Banned = outcast
         role: MucRole::None,                  // Banned = role none
-        jid: occupant_real_jid.cloned(),
+        jid: identity.real_jid.cloned(),
         nick: None,
         actor: actor_elem,
         continue_: None,
@@ -619,8 +587,7 @@ pub fn build_ban_presence(
         from_room_jid,
         Affiliation::Outcast,
         Role::None,
-        occupant_real_jid.map(|jid| jid.to_bare()),
-        occupant_id_secret,
+        identity,
     );
 
     presence
@@ -644,15 +611,14 @@ pub fn build_affiliation_change_presence(
     new_affiliation: Affiliation,
     role: Role,
     is_self: bool,
-    occupant_real_jid: Option<&FullJid>,
-    occupant_id_secret: &OccupantIdSecret,
+    identity: &OccupantIdentity<'_>,
 ) -> Presence {
     let mut presence = Presence::new(PresenceType::None);
     presence.from = Some(Jid::from(from_room_jid.clone()));
     presence.to = Some(Jid::from(to_jid.clone()));
 
     let mut statuses = Vec::new();
-    if occupant_real_jid.is_some() {
+    if identity.real_jid.is_some() {
         statuses.push(Status::NonAnonymousRoom);
     }
     if is_self {
@@ -662,7 +628,7 @@ pub fn build_affiliation_change_presence(
     let item = Item {
         affiliation: affiliation_to_muc(new_affiliation),
         role: role_to_muc(role),
-        jid: occupant_real_jid.cloned(),
+        jid: identity.real_jid.cloned(),
         nick: None,
         actor: None,
         continue_: None,
@@ -681,8 +647,7 @@ pub fn build_affiliation_change_presence(
         from_room_jid,
         new_affiliation,
         role,
-        occupant_real_jid.map(|jid| jid.to_bare()),
-        occupant_id_secret,
+        identity,
     );
 
     presence
@@ -706,15 +671,14 @@ pub fn build_role_change_presence(
     affiliation: Affiliation,
     new_role: Role,
     is_self: bool,
-    occupant_real_jid: Option<&FullJid>,
-    occupant_id_secret: &OccupantIdSecret,
+    identity: &OccupantIdentity<'_>,
 ) -> Presence {
     let mut presence = Presence::new(PresenceType::None);
     presence.from = Some(Jid::from(from_room_jid.clone()));
     presence.to = Some(Jid::from(to_jid.clone()));
 
     let mut statuses = Vec::new();
-    if occupant_real_jid.is_some() {
+    if identity.real_jid.is_some() {
         statuses.push(Status::NonAnonymousRoom);
     }
     if is_self {
@@ -724,7 +688,7 @@ pub fn build_role_change_presence(
     let item = Item {
         affiliation: affiliation_to_muc(affiliation),
         role: role_to_muc(new_role),
-        jid: occupant_real_jid.cloned(),
+        jid: identity.real_jid.cloned(),
         nick: None,
         actor: None,
         continue_: None,
@@ -743,8 +707,7 @@ pub fn build_role_change_presence(
         from_room_jid,
         affiliation,
         new_role,
-        occupant_real_jid.map(|jid| jid.to_bare()),
-        occupant_id_secret,
+        identity,
     );
 
     presence
@@ -754,8 +717,8 @@ pub fn build_role_change_presence(
 mod tests {
     use super::*;
 
-    fn test_secret() -> OccupantIdSecret {
-        OccupantIdSecret::for_testing(b"presence-test-secret".to_vec())
+    fn test_secret() -> crate::xep::xep0421::OccupantIdSecret {
+        crate::xep::xep0421::OccupantIdSecret::for_testing(b"presence-test-secret".to_vec())
     }
 
     fn make_sender_jid() -> FullJid {
@@ -859,14 +822,18 @@ mod tests {
         let occupant_jid: FullJid = "joiner@example.com/desktop".parse().unwrap();
 
         let secret = test_secret();
+        let occupant_bare = occupant_jid.to_bare();
         let presence = build_occupant_presence(
             &from,
             &to,
             Affiliation::Member,
             Role::Participant,
             true, // is_self
-            Some(&occupant_jid),
-            &secret,
+            &OccupantIdentity {
+                bare_jid: &occupant_bare,
+                real_jid: Some(&occupant_jid),
+                secret: &secret,
+            },
         );
 
         assert_eq!(presence.from, Some(Jid::from(from)));
@@ -897,13 +864,17 @@ mod tests {
         let occupant_jid: FullJid = "leaver@example.com/phone".parse().unwrap();
 
         let secret = test_secret();
+        let occupant_bare = occupant_jid.to_bare();
         let presence = build_leave_presence(
             &from,
             &to,
             Affiliation::Member,
             true,
-            Some(&occupant_jid),
-            &secret,
+            &OccupantIdentity {
+                bare_jid: &occupant_bare,
+                real_jid: Some(&occupant_jid),
+                secret: &secret,
+            },
         );
 
         assert_eq!(presence.type_, PresenceType::Unavailable);
@@ -938,6 +909,7 @@ mod tests {
             .insert(String::new(), "coding".to_string());
 
         let secret = test_secret();
+        let occupant_bare = occupant_jid.to_bare();
         let presence = build_occupant_presence_update(
             &incoming,
             &from,
@@ -945,8 +917,11 @@ mod tests {
             Affiliation::Member,
             Role::Participant,
             false,
-            Some(&occupant_jid),
-            &secret,
+            &OccupantIdentity {
+                bare_jid: &occupant_bare,
+                real_jid: Some(&occupant_jid),
+                secret: &secret,
+            },
         );
 
         assert_eq!(presence.statuses.get(""), Some(&"coding".to_string()));

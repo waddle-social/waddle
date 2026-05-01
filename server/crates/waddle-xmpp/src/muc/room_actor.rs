@@ -20,6 +20,7 @@ use super::{
     build_role_change_presence, MucRoom, OutboundMucMessage, RoomConfig,
 };
 use crate::types::{Affiliation, Role};
+use crate::xep::xep0421::OccupantIdentity;
 
 // ---------------------------------------------------------------------------
 // Shared types
@@ -912,6 +913,12 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
                     .room_jid
                     .with_resource_str(&target_nick)
                     .expect("nick was previously accepted as resource");
+                let target_bare = target_occupant.real_jid.to_bare();
+                let target_identity = OccupantIdentity {
+                    bare_jid: &target_bare,
+                    real_jid: Some(&target_occupant.real_jid),
+                    secret: &self.occupant_id_secret,
+                };
                 if new_role == Role::None {
                     for (nick, occupant) in self.room.occupants.iter() {
                         let is_self = nick == &target_nick;
@@ -922,8 +929,7 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
                             is_self,
                             item.reason.as_deref(),
                             Some(&msg.sender_jid.to_bare()),
-                            Some(&target_occupant.real_jid),
-                            &self.occupant_id_secret,
+                            &target_identity,
                         );
                         presence_updates.push((occupant.real_jid.clone(), presence));
                     }
@@ -940,8 +946,7 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
                             target_occupant.affiliation,
                             new_role,
                             is_self,
-                            Some(&target_occupant.real_jid),
-                            &self.occupant_id_secret,
+                            &target_identity,
                         );
                         presence_updates.push((occupant.real_jid.clone(), presence));
                     }
@@ -1000,6 +1005,12 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
                         .room_jid
                         .with_resource_str(&occupant.nick)
                         .expect("nick was previously accepted as resource");
+                    let occupant_bare = occupant.real_jid.to_bare();
+                    let occupant_identity = OccupantIdentity {
+                        bare_jid: &occupant_bare,
+                        real_jid: Some(&occupant.real_jid),
+                        secret: &self.occupant_id_secret,
+                    };
                     if new_affiliation == Affiliation::Outcast {
                         for (nick, occ) in self.room.occupants.iter() {
                             let is_self = nick == &occupant.nick;
@@ -1009,8 +1020,7 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
                                 is_self,
                                 item.reason.as_deref(),
                                 Some(&msg.sender_jid.to_bare()),
-                                Some(&occupant.real_jid),
-                                &self.occupant_id_secret,
+                                &occupant_identity,
                             );
                             presence_updates.push((occ.real_jid.clone(), presence));
                         }
@@ -1024,8 +1034,7 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
                                 new_affiliation,
                                 occupant.role,
                                 is_self,
-                                Some(&occupant.real_jid),
-                                &self.occupant_id_secret,
+                                &occupant_identity,
                             );
                             presence_updates.push((occ.real_jid.clone(), presence));
                         }
