@@ -93,7 +93,10 @@ pub fn build_direct_archived_message(
     // `protocol::frame::parse_stanza` calls `reattach_thread_parent` so the
     // parent attribute survives `Message::try_from`'s typed lossy parse.
     let (thread_id, parent_thread_id) = match thread_info_from_message(message) {
-        Some(info) => (Some(info.id), info.parent),
+        Some(info) => (
+            Some(info.id),
+            info.parent.and_then(waddle_xmpp_core::mam::ThreadId::new),
+        ),
         None => (None, None),
     };
 
@@ -409,7 +412,7 @@ mod tests {
             &msg,
         );
         assert_eq!(archived.thread_id.as_deref(), Some("root-1"));
-        assert_eq!(archived.parent_thread_id, None);
+        assert!(archived.parent_thread_id.is_none());
     }
 
     #[test]
@@ -433,7 +436,10 @@ mod tests {
             &msg,
         );
         assert_eq!(archived.thread_id.as_deref(), Some("child-2"));
-        assert_eq!(archived.parent_thread_id.as_deref(), Some("root-1"));
+        assert_eq!(
+            archived.parent_thread_id.as_ref().map(|t| t.as_str()),
+            Some("root-1")
+        );
     }
 
     #[test]
@@ -446,6 +452,6 @@ mod tests {
             &msg,
         );
         assert_eq!(archived.thread_id, None);
-        assert_eq!(archived.parent_thread_id, None);
+        assert!(archived.parent_thread_id.is_none());
     }
 }

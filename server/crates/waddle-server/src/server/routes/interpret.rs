@@ -2492,7 +2492,10 @@ async fn finish_archive_groupchat_message(
     // attribute survives `Message::try_from` here.
     let (thread_id, parent_thread_id) =
         match waddle_xmpp::xep0201::thread_info_from_message(&archive_clone) {
-            Some(info) => (Some(info.id), info.parent),
+            Some(info) => (
+                Some(info.id),
+                info.parent.and_then(waddle_xmpp::mam::ThreadId::new),
+            ),
             None => (None, None),
         };
 

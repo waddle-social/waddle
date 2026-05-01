@@ -41,7 +41,7 @@ fn nested_thread_groupchat_row(
         body: body.to_string(),
         stanza_id: Some(format!("wire-{archive_id}")),
         thread_id: Some(thread_id.to_string()),
-        parent_thread_id: parent_thread_id.map(str::to_string),
+        parent_thread_id: parent_thread_id.and_then(waddle_xmpp::mam::ThreadId::new),
         reply_to_id: None,
         reply_to_jid: None,
         origin_id: None,
@@ -77,7 +77,10 @@ async fn xep_0201_nested_thread_round_trips_through_mam() {
     assert_eq!(result.messages.len(), 1);
     let retrieved = &result.messages[0];
     assert_eq!(retrieved.thread_id.as_deref(), Some("child-thread"));
-    assert_eq!(retrieved.parent_thread_id.as_deref(), Some("root-thread"));
+    assert_eq!(
+        retrieved.parent_thread_id.as_ref().map(|t| t.as_str()),
+        Some("root-thread")
+    );
 
     // Build the MAM result envelope and assert the inner `<message>`
     // carries `<thread parent='root-thread'>child-thread</thread>`.
@@ -137,7 +140,7 @@ async fn xep_0201_cross_archive_parent_thread_id_round_trips_without_validation(
     let retrieved = &result.messages[0];
     assert_eq!(retrieved.thread_id.as_deref(), Some("child-thread-a"));
     assert_eq!(
-        retrieved.parent_thread_id.as_deref(),
+        retrieved.parent_thread_id.as_ref().map(|t| t.as_str()),
         Some("parent-not-in-this-archive"),
         "cross-archive parent must round-trip; archive does not validate parent membership"
     );
@@ -202,7 +205,10 @@ async fn xep_0201_inmemory_mam_storage_also_round_trips_parent() {
         .expect("query in-memory");
     assert_eq!(result.messages.len(), 1);
     assert_eq!(
-        result.messages[0].parent_thread_id.as_deref(),
+        result.messages[0]
+            .parent_thread_id
+            .as_ref()
+            .map(|t| t.as_str()),
         Some("root-thread-m")
     );
 }

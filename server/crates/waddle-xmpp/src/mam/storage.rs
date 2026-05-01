@@ -729,7 +729,9 @@ fn decode_sqlite_message_row(row: &SqliteRow) -> Result<ArchivedMessage, MamStor
         body: row.try_get(5)?,
         stanza_id: row.try_get(6)?,
         thread_id: row.try_get(7)?,
-        parent_thread_id: row.try_get(15)?,
+        parent_thread_id: row
+            .try_get::<Option<String>, _>(15)?
+            .and_then(waddle_xmpp_core::mam::ThreadId::new),
         reply_to_id: row.try_get(8)?,
         reply_to_jid: row.try_get(9)?,
         origin_id: row.try_get(10)?,
@@ -751,7 +753,9 @@ fn decode_postgres_message_row(row: &PgRow) -> Result<ArchivedMessage, MamStorag
         body: row.try_get(5)?,
         stanza_id: row.try_get(6)?,
         thread_id: row.try_get(7)?,
-        parent_thread_id: row.try_get(15)?,
+        parent_thread_id: row
+            .try_get::<Option<String>, _>(15)?
+            .and_then(waddle_xmpp_core::mam::ThreadId::new),
         reply_to_id: row.try_get(8)?,
         reply_to_jid: row.try_get(9)?,
         origin_id: row.try_get(10)?,
@@ -847,7 +851,7 @@ impl MamStorage for SqlxMamStorage {
                         .push_bind(message.stanza_xml.as_deref())
                         .push_bind(rich_payload.as_deref())
                         .push_bind(nickname_generation)
-                        .push_bind(message.parent_thread_id.as_deref());
+                        .push_bind(message.parent_thread_id.as_ref().map(|t| t.as_str()));
                 });
                 query.build().execute(pool).await?;
             }
@@ -872,7 +876,7 @@ impl MamStorage for SqlxMamStorage {
                         .push_bind(message.stanza_xml.as_deref())
                         .push_bind(rich_payload.as_deref())
                         .push_bind(nickname_generation)
-                        .push_bind(message.parent_thread_id.as_deref());
+                        .push_bind(message.parent_thread_id.as_ref().map(|t| t.as_str()));
                 });
                 query.build().execute(pool).await?;
             }
@@ -1291,7 +1295,7 @@ mod tests {
             body: "Nested-thread reply".to_string(),
             stanza_id: Some("archive-stanza-2".to_string()),
             thread_id: Some("child-thread".to_string()),
-            parent_thread_id: Some("root-thread".to_string()),
+            parent_thread_id: waddle_xmpp_core::mam::ThreadId::new("root-thread"),
             reply_to_id: None,
             reply_to_jid: None,
             origin_id: None,
@@ -1313,7 +1317,10 @@ mod tests {
             .expect("archived message");
 
         assert_eq!(retrieved.thread_id.as_deref(), Some("child-thread"));
-        assert_eq!(retrieved.parent_thread_id.as_deref(), Some("root-thread"));
+        assert_eq!(
+            retrieved.parent_thread_id.as_ref().map(|t| t.as_str()),
+            Some("root-thread")
+        );
     }
 
     #[tokio::test]
@@ -1565,7 +1572,7 @@ mod tests {
             body: "secret thread content".to_string(),
             stanza_id: Some("wire-id-1".to_string()),
             thread_id: Some("child-thread".to_string()),
-            parent_thread_id: Some("root-thread".to_string()),
+            parent_thread_id: waddle_xmpp_core::mam::ThreadId::new("root-thread"),
             reply_to_id: None,
             reply_to_jid: None,
             origin_id: None,
@@ -1644,7 +1651,7 @@ mod tests {
             body: "moderated content".to_string(),
             stanza_id: Some("wire-id-2".to_string()),
             thread_id: Some("child-thread".to_string()),
-            parent_thread_id: Some("root-thread".to_string()),
+            parent_thread_id: waddle_xmpp_core::mam::ThreadId::new("root-thread"),
             reply_to_id: None,
             reply_to_jid: None,
             origin_id: None,

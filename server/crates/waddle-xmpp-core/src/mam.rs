@@ -208,8 +208,15 @@ pub struct ArchivedMessage {
     /// Cleared on XEP-0424 / XEP-0425 tombstones — see the
     /// [`ArchivedRichPayload::Tombstone`] doc comment for the full
     /// list of leak-prone fields.
+    ///
+    /// Typed as `ThreadId` (the existing newtype) per the
+    /// typed-payloads hard rule for new struct fields. The companion
+    /// `thread_id: Option<String>` field stays untyped here for now;
+    /// #228 will collapse both into a single `thread:
+    /// Option<xep0201::ThreadInfo>` field when the broader
+    /// retyping of `ArchivedMessage` lands.
     #[serde(default)]
-    pub parent_thread_id: Option<String>,
+    pub parent_thread_id: Option<ThreadId>,
     /// XEP-0461 reply target message ID.
     pub reply_to_id: Option<String>,
     /// XEP-0461 optional original sender JID.
@@ -625,7 +632,10 @@ fn build_typed_inner_message(archived: &ArchivedMessage, rich: &ArchivedRichMess
     if let Some(thread_id) = archived.thread_id.as_deref() {
         let info = crate::xep0201::ThreadInfo {
             id: thread_id.to_owned(),
-            parent: archived.parent_thread_id.clone(),
+            parent: archived
+                .parent_thread_id
+                .as_ref()
+                .map(|t| t.as_str().to_owned()),
         };
         builder = builder.append(crate::xep0201::build_thread_element(&info, CLIENT_NS));
     }
@@ -797,7 +807,10 @@ fn build_legacy_inner_message(archived: &ArchivedMessage) -> Element {
     if let Some(thread_id) = archived.thread_id.as_deref() {
         let info = crate::xep0201::ThreadInfo {
             id: thread_id.to_owned(),
-            parent: archived.parent_thread_id.clone(),
+            parent: archived
+                .parent_thread_id
+                .as_ref()
+                .map(|t| t.as_str().to_owned()),
         };
         builder = builder.append(crate::xep0201::build_thread_element(&info, CLIENT_NS));
     }
@@ -1126,7 +1139,7 @@ mod tests {
             body: "nested reply".to_string(),
             stanza_id: Some("wire-id-1".to_string()),
             thread_id: Some("child-thread".to_string()),
-            parent_thread_id: Some("root-thread".to_string()),
+            parent_thread_id: ThreadId::new("root-thread"),
             origin_id: None,
             message_type: "chat".to_string(),
             stanza_xml,
@@ -1202,7 +1215,7 @@ mod tests {
             to: "bob@example.com".to_string(),
             body: "body".to_string(),
             thread_id: None,
-            parent_thread_id: Some("root-thread".to_string()),
+            parent_thread_id: ThreadId::new("root-thread"),
             message_type: "chat".to_string(),
             stanza_xml: None,
             rich: None,
