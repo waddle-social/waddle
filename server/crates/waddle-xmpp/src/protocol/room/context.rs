@@ -103,6 +103,11 @@ pub struct RoomContext<'a> {
     /// `RoomActor::GetRoomSnapshot` query at archive time (Copilot
     /// review on PR #279).
     pub sender_nickname_generation: u64,
+    /// Whether the sender should receive the sender-owned inbox
+    /// projection. Real occupant sends do; synthetic server-authored
+    /// sends can disable this while still using the sender snapshot
+    /// for MUC canonicalization.
+    pub project_sender_inbox: bool,
     /// Single dispatch timestamp (Unix epoch seconds) shared across
     /// every per-occupant
     /// [`super::super::event::OutboundEvent::ProjectGroupchatInbox`]
@@ -124,5 +129,23 @@ impl<'a> RoomContext<'a> {
         self.occupants
             .iter()
             .find(|o| &o.full_jid == self.sender_full)
+    }
+
+    /// Occupants that should receive delivery and recipient-owned inbox projection.
+    ///
+    /// Normal user-originated dispatches use the full occupant set.
+    /// Server-authored synthetic dispatches may include a sender-only
+    /// snapshot so canonicalization can produce `room/nick` without
+    /// treating that synthetic sender as a real recipient.
+    pub fn recipient_occupants(&'a self) -> Box<dyn Iterator<Item = &'a OccupantSnapshot> + 'a> {
+        if self.project_sender_inbox {
+            Box::new(self.occupants.iter())
+        } else {
+            Box::new(
+                self.occupants
+                    .iter()
+                    .filter(|occupant| &occupant.full_jid != self.sender_full),
+            )
+        }
     }
 }

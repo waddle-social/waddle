@@ -5,6 +5,7 @@ import { isForumChannel as detectForumChannel } from "@/lib/channel-types";
 import { getConnectionNoticeCopy } from "@/lib/connection-notice";
 import { findMessageElementById } from "@/lib/message-targeting";
 import { getReplyJumpNotice } from "@/lib/reply-ux";
+import { filterV1ExtensionPaletteCommands, isAiThreadPromptBody, nextAiThreadRootToOpen } from "@/lib/ai-thread-ux";
 import {
   getPinnedScrollTop,
   getNewMessagesDividerPlacement,
@@ -121,6 +122,8 @@ const extensionLauncherDetail = ref("");
 const extensionCommandStates = ref<Record<string, { state: "loading" | "success" | "warning" | "error"; detail?: string }>>({});
 const extensionCommandForms = ref<Record<string, { sessionId: string; fields: ExtensionCommandFormField[]; actions?: ExtensionCommandAction[] }>>({});
 const extensionCommandActions = ref<Record<string, ExtensionAnnotationAction[]>>({});
+const pendingAiThreadPromptBodies: string[] = [];
+let seenMessageIdsForAiThread = new Set(props.messages.map((message) => message.id));
 
 type MessageComposerHandle = {
   addAttachments: (files: Array<File | Blob>) => void;
@@ -199,7 +202,7 @@ async function openExtensionLauncher() {
   extensionLauncherState.value = "loading";
   extensionLauncherDetail.value = "";
   try {
-    extensionCommands.value = await props.xmppClient.discoverExtensionCommands();
+    extensionCommands.value = filterV1ExtensionPaletteCommands(await props.xmppClient.discoverExtensionCommands());
     extensionLauncherState.value = "idle";
     if (extensionCommands.value.length === 0) {
       extensionLauncherDetail.value = "No extension commands discovered.";
@@ -377,6 +380,9 @@ async function scrollToMessage(messageId: string) {
 
 function onSend(body: string, markup: MarkupSpan[], references: MessageReference[], files?: Array<File | Blob>) {
   const pending = replyingTo.value;
+  if (!pending && props.channel && !props.dmPeer && isAiThreadPromptBody(body)) {
+    pendingAiThreadPromptBodies.push(body);
+  }
   emit(
     "send",
     body,
@@ -440,6 +446,22 @@ const conversationScope = computed(() => [
   props.channel?.id ?? "",
   props.dmPeer?.peerJid ?? "",
 ].join(":"));
+
+watch(conversationScope, () => {
+  pendingAiThreadPromptBodies.length = 0;
+  seenMessageIdsForAiThread = new Set(props.messages.map((message) => message.id));
+});
+
+watch(() => props.messages, (messages) => {
+  if (pendingAiThreadPromptBodies.length > 0) {
+    const match = nextAiThreadRootToOpen(messages, pendingAiThreadPromptBodies, seenMessageIdsForAiThread);
+    if (match) {
+      pendingAiThreadPromptBodies.splice(match.promptIndex, 1);
+      emit("openThread", match.messageId);
+    }
+  }
+  seenMessageIdsForAiThread = new Set(messages.map((message) => message.id));
+});
 const hasSeenOnline = ref(props.xmppStatus.state === "online");
 const showReconnectedNotice = ref(false);
 let reconnectedNoticeTimeout: ReturnType<typeof setTimeout> | null = null;

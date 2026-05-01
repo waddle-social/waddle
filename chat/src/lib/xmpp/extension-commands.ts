@@ -1,5 +1,6 @@
 import type { Agent } from "stanza";
 import type { ExtensionAnnotationAction, ExtensionLaunchDescriptor } from "@/lib/chat-ui";
+import { filterV1ExtensionPaletteCommands } from "@/lib/ai-thread-ux";
 import { jidDomain } from "./jid";
 
 const NS_WADDLE_EXTENSION_1 = "urn:waddle:extension:1";
@@ -410,13 +411,13 @@ export async function discoverExtensionCommands(
   };
   const response = await disco.getDiscoItems?.(serviceJid, NS_ADHOC_COMMANDS);
   const items = response?.items ?? [];
-  return items
+  return filterV1ExtensionPaletteCommands(items
     .filter((item) => item.node && item.node !== INVOKE_COMMAND_NODE)
     .map((item) => ({
       serviceJid: item.jid ?? serviceJid,
       node: item.node!,
       name: item.name || item.node!,
-    }));
+    })));
 }
 
 function parseFieldOptions(options: unknown): ExtensionCommandFormOption[] {

@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { ExtensionLaunchDescriptor } from "../src/lib/chat-ui";
 import {
   buildExtensionLaunchInvokeIq,
+  discoverExtensionCommands,
   extensionCommandOutcome,
   extensionCommandFormBlockedReason,
   extensionServiceJidForUserJid,
@@ -94,6 +95,29 @@ describe("extension command invocation", () => {
       },
     });
     expect((sent as { command?: { form?: unknown } }).command?.form).toBeUndefined();
+  });
+
+  test("hides the AI chatbot command from discovered extension commands for v1", async () => {
+    const xmpp = {
+      async getDiscoItems(jid: string, node?: string) {
+        if (!node) return { items: [{ jid: "extensions.example.com" }] };
+        return {
+          items: [
+            { jid, node: "urn:waddle:extension:poll", name: "Poll" },
+            { jid, node: "urn:waddle:extension:1:ai-chatbot", name: "Ask AI Chatbot" },
+            { jid, node: "urn:waddle:extension:notes", name: "Notes" },
+          ],
+        };
+      },
+      async getDiscoInfo() {
+        return { features: ["http://jabber.org/protocol/commands"] };
+      },
+    };
+
+    expect(await discoverExtensionCommands(xmpp as any, "alice@example.com/web")).toEqual([
+      { serviceJid: "example.com", node: "urn:waddle:extension:poll", name: "Poll" },
+      { serviceJid: "example.com", node: "urn:waddle:extension:notes", name: "Notes" },
+    ]);
   });
 
   test("uses source stanza metadata when context only carries the waddle id", () => {

@@ -22,12 +22,19 @@ use crate::runtime::{LoadedExtension, WasmRuntime};
 use crate::types::{
     is_official_namespace, message_has_framework_envelope, CommandAction, CommandInvocation,
     CommandNode, CommandSessionId, DetectedLink, DisplayText, ExtensionEffect, ExtensionEnvelope,
-    ExtensionEvent, LaunchContext, LaunchId, LaunchInvocation, LinkTarget, MessageContext,
-    MessageHook, PayloadNamespace, PluginId, StanzaId, WaddleId, FRAMEWORK_NAMESPACE,
+    ExtensionEvent, FullJidValue, LaunchContext, LaunchId, LaunchInvocation, LinkTarget,
+    MessageContext, MessageHook, PayloadNamespace, PluginId, ReplyTarget, RoomJid, StanzaId,
+    ThreadId, WaddleId, FRAMEWORK_NAMESPACE,
 };
 
 const MAX_DETECTED_LINKS: usize = 3;
 const EXTENSION_ENRICH_TIMEOUT: Duration = Duration::from_millis(750);
+
+#[derive(Debug, Clone, Default)]
+pub struct MessageExtensionOutcome {
+    pub enrichments_added: usize,
+    pub effects: Vec<ExtensionEffect>,
+}
 
 pub struct LaunchInvocationRequest<'a> {
     pub plugin_name: &'a str,
@@ -330,8 +337,18 @@ impl ExtensionManager {
     }
 
     pub async fn enrich_message_for_waddle(&self, msg: &mut Message, waddle_id: WaddleId) -> usize {
+        self.process_message_for_waddle(msg, waddle_id)
+            .await
+            .enrichments_added
+    }
+
+    pub async fn process_message_for_waddle(
+        &self,
+        msg: &mut Message,
+        waddle_id: WaddleId,
+    ) -> MessageExtensionOutcome {
         if message_has_framework_envelope(msg) {
-            return 0;
+            return MessageExtensionOutcome::default();
         }
 
         let Some(body) = msg
@@ -340,25 +357,40 @@ impl ExtensionManager {
             .or_else(|| msg.bodies.values().next())
             .map(|body| body.0.clone())
         else {
-            return 0;
+            return MessageExtensionOutcome::default();
         };
         let Ok(body_text) = DisplayText::new(body.clone()) else {
-            return 0;
+            return MessageExtensionOutcome::default();
         };
 
         let links = detect_links(&body);
 
-        let mut count = 0usize;
+        let mut outcome = MessageExtensionOutcome::default();
         if !self.actors.is_empty() {
             let hook_links: Vec<LinkTarget> = links
                 .into_iter()
                 .filter_map(|link| LinkTarget::try_from(link).ok())
                 .collect();
             let source_stanza_id = msg.id.clone().and_then(|id| StanzaId::new(id).ok());
+            let room = msg
+                .to
+                .as_ref()
+                .and_then(|jid| RoomJid::new(jid.to_bare().to_string()).ok());
+            let sender = if room.is_some() {
+                None
+            } else {
+                msg.from
+                    .as_ref()
+                    .and_then(|jid| FullJidValue::new(jid.to_string()).ok())
+            };
             let event = ExtensionEvent::MessageHook(MessageHook {
                 context: MessageContext {
                     waddle_id,
                     stanza_id: source_stanza_id.clone(),
+                    room,
+                    sender,
+                    thread_id: thread_id_from_message(msg),
+                    reply_to: reply_target_from_payloads(&msg.payloads),
                 },
                 body: body_text,
                 links: hook_links,
@@ -372,18 +404,19 @@ impl ExtensionManager {
                     return None;
                 }
                 let actor_name = actor.manifest().id.to_string();
+                let manifest = actor.manifest();
                 let actor = Arc::clone(actor);
                 let event = event.clone();
                 Some(async move {
                     match timeout(EXTENSION_ENRICH_TIMEOUT, actor.handle_event(event)).await {
-                        Ok(effects) => (actor_name, effects),
+                        Ok(effects) => (actor_name, manifest, effects),
                         Err(_) => {
                             warn!(
                                 extension = %actor_name,
                                 timeout_secs = EXTENSION_ENRICH_TIMEOUT.as_secs(),
                                 "extension enrichment timed out; continuing fail-open"
                             );
-                            (actor_name, Vec::new())
+                            (actor_name, manifest, Vec::new())
                         }
                     }
                 })
@@ -391,11 +424,22 @@ impl ExtensionManager {
             let results = join_all(enrich_futures).await;
 
             let mut enrichments = Vec::new();
-            for (_actor_name, effects) in results {
+            let mut emitted_effects = Vec::new();
+            for (actor_name, manifest, effects) in results {
                 for effect in self.sign_effects(effects) {
+                    if !effect.validate_for_manifest(&manifest) {
+                        warn!(
+                            extension = %actor_name,
+                            "extension emitted undeclared or invalid message effect; dropping"
+                        );
+                        continue;
+                    }
                     match effect {
                         ExtensionEffect::EnrichMessage(envelope) => {
                             enrichments.extend(envelope.enrichments);
+                        }
+                        ExtensionEffect::BotGroupchatResponse(response) => {
+                            emitted_effects.push(ExtensionEffect::BotGroupchatResponse(response));
                         }
                         ExtensionEffect::PublishPubSub(_)
                         | ExtensionEffect::ReferenceArtifact(_)
@@ -404,16 +448,21 @@ impl ExtensionManager {
                     }
                 }
             }
-            count = enrichments.len();
+            let count = enrichments.len();
             if !enrichments.is_empty() {
                 msg.payloads
                     .push(ExtensionEnvelope::new(enrichments).to_minidom());
             }
-            if count > 0 {
-                debug!(embeds_added = count, "message enriched by extensions");
+            outcome.enrichments_added = count;
+            outcome.effects = emitted_effects;
+            if outcome.enrichments_added > 0 {
+                debug!(
+                    embeds_added = outcome.enrichments_added,
+                    "message enriched by extensions"
+                );
             }
         }
-        count
+        outcome
     }
 
     fn sign_effects(&self, mut effects: Vec<ExtensionEffect>) -> Vec<ExtensionEffect> {
@@ -427,6 +476,7 @@ impl ExtensionManager {
                     }
                 }
                 ExtensionEffect::PublishPubSub(_)
+                | ExtensionEffect::BotGroupchatResponse(_)
                 | ExtensionEffect::ReferenceArtifact(_)
                 | ExtensionEffect::HostWarning(_)
                 | ExtensionEffect::Noop => {}
@@ -667,6 +717,32 @@ where
     }
 
     Ok(Value::Object(config))
+}
+
+fn reply_target_from_payloads(payloads: &[minidom::Element]) -> Option<ReplyTarget> {
+    payloads
+        .iter()
+        .find(|payload| payload.name() == "reply" && payload.ns() == "urn:xmpp:reply:0")
+        .and_then(|payload| {
+            let id = payload.attr("id").and_then(|id| StanzaId::new(id).ok())?;
+            let to = payload.attr("to").and_then(|to| FullJidValue::new(to).ok());
+            Some(ReplyTarget { id, to })
+        })
+}
+
+fn thread_id_from_message(msg: &Message) -> Option<ThreadId> {
+    msg.thread
+        .as_ref()
+        .and_then(|thread| ThreadId::new(thread.0.clone()).ok())
+        .or_else(|| {
+            msg.payloads
+                .iter()
+                .find(|payload| {
+                    payload.name() == "thread-reply" && payload.ns() == "urn:waddle:forums:0"
+                })
+                .and_then(|payload| payload.attr("thread-id"))
+                .and_then(|thread_id| ThreadId::new(thread_id).ok())
+        })
 }
 
 fn detect_links(body: &str) -> Vec<DetectedLink> {
