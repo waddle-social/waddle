@@ -146,7 +146,6 @@ pub mod xep0172;
 pub mod xep0184;
 pub mod xep0191;
 pub mod xep0199;
-pub mod xep0201;
 pub mod xep0202;
 pub mod xep0203;
 pub mod xep0223;
@@ -279,11 +278,6 @@ pub use xep0184::{
 };
 
 pub use xep0199::{build_ping_result, is_ping, NS_PING};
-
-pub use xep0201::{
-    build_thread_element, install_thread_element, parse_thread_info, thread_parent_from_message,
-    ThreadInfo, NS_THREAD_FEATURE, THREAD_ELEMENT,
-};
 
 pub use xep0092::{
     build_version_element, build_version_response, is_version_query, parse_version_response,
@@ -511,7 +505,7 @@ pub use xep0448::{
 
 pub use xep0461::{
     build_reply_element, is_reply_element, parse_reply_from_message, set_reply_payload,
-    set_thread_id, thread_id_from_message, ReplyReference, NS_REPLY,
+    ReplyReference, NS_REPLY,
 };
 
 pub use xep0059::{

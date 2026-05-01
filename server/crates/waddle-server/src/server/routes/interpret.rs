@@ -114,10 +114,10 @@ use waddle_xmpp::xep::{
     extract_correction_from_message, extract_explicit_mentions, extract_forum_action,
     extract_reactions_from_message, extract_references_from_message,
     extract_retraction_from_message, parse_reply_from_message, remove_stanza_ids_by,
-    set_reply_payload, set_thread_id, ForumAction, ReplyReference, RetractionKind,
-    NS_EXPLICIT_MENTIONS, NS_MESSAGE_CORRECT, NS_MESSAGE_RETRACT, NS_REACTIONS, NS_REFERENCE,
-    NS_REPLY,
+    set_reply_payload, ForumAction, ReplyReference, RetractionKind, NS_EXPLICIT_MENTIONS,
+    NS_MESSAGE_CORRECT, NS_MESSAGE_RETRACT, NS_REACTIONS, NS_REFERENCE, NS_REPLY,
 };
+use waddle_xmpp::xep0201::set_thread_id;
 use waddle_xmpp::Stanza;
 use xmpp_parsers::message::{Message, MessageType as XmppMessageType};
 use xmpp_parsers::minidom::Element;

@@ -6,7 +6,7 @@
 //! Thread identifiers continue to use RFC 6121 `<thread/>`.
 
 use minidom::Element;
-use xmpp_parsers::message::{Message, Thread};
+use xmpp_parsers::message::Message;
 
 /// Namespace for XEP-0461 Message Replies.
 pub const NS_REPLY: &str = "urn:xmpp:reply:0";
@@ -83,28 +83,6 @@ pub fn set_reply_payload(msg: &mut Message, reply: &ReplyReference) {
     msg.payloads.push(build_reply_element(reply));
 }
 
-/// Read RFC 6121 `<thread/>` identifier from a message.
-///
-/// Checks both the typed `Message::thread` field and any raw `<thread/>`
-/// payload element — the latter is used to preserve the XEP-0201 `parent`
-/// attribute since `xmpp_parsers 0.21`'s typed `Thread(String)` drops it.
-pub fn thread_id_from_message(msg: &Message) -> Option<String> {
-    if let Some(thread) = msg.thread.as_ref() {
-        return Some(thread.0.clone());
-    }
-    msg.payloads
-        .iter()
-        .find(|elem| elem.name() == "thread")
-        .map(|elem| elem.text())
-        .map(|text| text.trim().to_owned())
-        .filter(|text| !text.is_empty())
-}
-
-/// Set RFC 6121 `<thread/>` identifier on a message.
-pub fn set_thread_id(msg: &mut Message, thread_id: impl Into<String>) {
-    msg.thread = Some(Thread(thread_id.into()));
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -154,18 +132,6 @@ mod tests {
     }
 
     #[test]
-    fn test_thread_helpers() {
-        let mut msg = Message::new(None::<jid::Jid>);
-        assert_eq!(thread_id_from_message(&msg), None);
-
-        set_thread_id(&mut msg, "thread-root-1");
-        assert_eq!(
-            thread_id_from_message(&msg).as_deref(),
-            Some("thread-root-1")
-        );
-    }
-
-    #[test]
     fn test_is_reply_element() {
         let reply = Element::builder("reply", NS_REPLY).build();
         assert!(is_reply_element(&reply));
@@ -196,14 +162,6 @@ mod tests {
     fn test_parse_reply_from_message_no_reply() {
         let msg = Message::new(None::<jid::Jid>);
         assert!(parse_reply_from_message(&msg).is_none());
-    }
-
-    #[test]
-    fn test_set_thread_id_overwrites() {
-        let mut msg = Message::new(None::<jid::Jid>);
-        set_thread_id(&mut msg, "first");
-        set_thread_id(&mut msg, "second");
-        assert_eq!(thread_id_from_message(&msg).as_deref(), Some("second"));
     }
 
     #[test]
