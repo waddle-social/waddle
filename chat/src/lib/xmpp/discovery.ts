@@ -187,6 +187,7 @@ async function hydrateChannelType(
       channelType: parseChannelType(info),
       spaceId: channel.spaceId ?? parentSpaceId ?? undefined,
       standalone: channel.spaceId || parentSpaceId ? false : channel.standalone,
+      ...(info.features?.length ? { features: info.features } : {}),
     };
   } catch {
     return channel;

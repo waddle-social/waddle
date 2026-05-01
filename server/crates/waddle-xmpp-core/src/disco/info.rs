@@ -4,7 +4,7 @@ use minidom::Element;
 use tracing::debug;
 use xmpp_parsers::iq::Iq;
 
-use crate::CoreError;
+use crate::{mam::WADDLE_MAM_THREAD_NS, CoreError};
 
 const DATA_FORMS_NS: &str = "jabber:x:data";
 const SERVER_INFO_FORM_TYPE: &str = "urn:xmpp:serverinfo:0";
@@ -94,6 +94,10 @@ impl Feature {
 
     pub fn mam() -> Self {
         Self::new("urn:xmpp:mam:2")
+    }
+
+    pub fn waddle_mam_thread() -> Self {
+        Self::new(WADDLE_MAM_THREAD_NS)
     }
 
     pub fn replies() -> Self {
@@ -465,6 +469,7 @@ pub fn server_features() -> Vec<Feature> {
         Feature::caps(),
         Feature::roster_versioning(),
         Feature::mam(),
+        Feature::waddle_mam_thread(),
         Feature::stanza_ids(),
         Feature::replies(),
         Feature::message_correction(),
@@ -564,6 +569,7 @@ pub fn muc_room_features(
         Feature::disco_info(),
         Feature::muc(),
         Feature::mam(),
+        Feature::waddle_mam_thread(),
         Feature::stanza_ids(),
         Feature::replies(),
         Feature::message_correction(),

@@ -181,6 +181,7 @@ export function useWaddles(
         spaceId: c.spaceId,
         channel_type: c.channelType,
         position: c.position,
+        features: c.features,
       }));
 
       channels.value = channelList;

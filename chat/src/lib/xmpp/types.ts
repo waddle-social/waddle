@@ -245,6 +245,7 @@ export interface DiscoveredChannel {
   position: number;
   spaceId?: string;
   standalone?: boolean;
+  features?: string[];
 }
 
 export interface DiscoveredSpace {

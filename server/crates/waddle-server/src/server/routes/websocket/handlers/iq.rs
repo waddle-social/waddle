@@ -1,8 +1,10 @@
+use crate::ai_provider::is_ai_provider_configured;
 use chrono;
 use jid::{BareJid, FullJid, Jid};
 use std::sync::Arc;
 use tracing::{debug, warn};
 use url::{Host, Url};
+use waddle_extensions::AI_CHATBOT_NAMESPACE;
 use waddle_xmpp::{
     carbons::CARBONS_NS,
     commands::{CommandContext, CommandResult},
@@ -15,9 +17,10 @@ use waddle_xmpp::{
     inbox::runtime::filter_query,
     isr::{build_isr_token_error, build_isr_token_result, is_isr_token_request, IsrToken, ISR_NS},
     mam::{
-        add_stanza_id as add_mam_stanza_id, build_fin_iq, build_result_messages, is_mam_query,
-        parse_mam_query, ArchivedMessage, ArchivedModeration, ArchivedRichMessage,
-        ArchivedRichPayload, RichMessageId, RichText,
+        add_stanza_id as add_mam_stanza_id, build_fin_iq, build_query_form_iq,
+        build_result_messages, is_mam_query, is_mam_query_form_request, parse_mam_query,
+        ArchivedMessage, ArchivedModeration, ArchivedRichMessage, ArchivedRichPayload,
+        RichMessageId, RichText,
     },
     muc::{
         admin::{
@@ -88,6 +91,19 @@ use crate::permissions::{
 use crate::server::bootstrap_membership::DEPLOYMENT_SERVER_ID;
 use crate::server::xmpp_state::{get_xmpp_channel, list_xmpp_channels, XmppChannelRecord};
 use crate::vcard::VCardStore;
+
+fn extension_features_for_disco(state: &WebSocketState) -> Vec<Feature> {
+    let ai_provider_configured = is_ai_provider_configured();
+    state
+        .deps
+        .protocol
+        .extension_manager
+        .extension_features()
+        .into_iter()
+        .filter(|ns| ai_provider_configured || ns != AI_CHATBOT_NAMESPACE)
+        .map(|ns| Feature::new(&ns))
+        .collect()
+}
 
 /// Only called from test helpers.
 #[cfg(test)]
@@ -402,15 +418,7 @@ pub async fn handle_iq_with_conn_state(
                 Feature::muc_self_ping_optimization(),
                 Feature::new(NS_CHANNEL_SEARCH),
             ];
-            features.extend(
-                state
-                    .deps
-                    .protocol
-                    .extension_manager
-                    .extension_features()
-                    .into_iter()
-                    .map(|ns| Feature::new(&ns)),
-            );
+            features.extend(extension_features_for_disco(state));
             let response = build_disco_info_response(request_iq, &identities, &features, None);
             return vec![iq_to_xml(response)];
         }
@@ -444,15 +452,7 @@ pub async fn handle_iq_with_conn_state(
                         snapshot.config.moderated,
                         snapshot.config.forum,
                     );
-                    features.extend(
-                        state
-                            .deps
-                            .protocol
-                            .extension_manager
-                            .extension_features()
-                            .into_iter()
-                            .map(|ns| Feature::new(&ns)),
-                    );
+                    features.extend(extension_features_for_disco(state));
                     let extensions = room_space_metadata_extensions(state, &room_jid, domain).await;
                     if !extensions.is_empty() {
                         features.push(Feature::spaces());
@@ -481,15 +481,7 @@ pub async fn handle_iq_with_conn_state(
                             channel.channel_type == "announcement",
                             channel.channel_type == "forum",
                         );
-                        features.extend(
-                            state
-                                .deps
-                                .protocol
-                                .extension_manager
-                                .extension_features()
-                                .into_iter()
-                                .map(|ns| Feature::new(&ns)),
-                        );
+                        features.extend(extension_features_for_disco(state));
                         let extensions =
                             room_space_metadata_extensions(state, &room_jid, domain).await;
                         if !extensions.is_empty() {
@@ -515,15 +507,7 @@ pub async fn handle_iq_with_conn_state(
                         .unwrap_or_else(|| "Room".to_string());
                     let identities = vec![Identity::muc_room(Some(&room_name))];
                     let mut features = muc_room_features(false, false, false, false);
-                    features.extend(
-                        state
-                            .deps
-                            .protocol
-                            .extension_manager
-                            .extension_features()
-                            .into_iter()
-                            .map(|ns| Feature::new(&ns)),
-                    );
+                    features.extend(extension_features_for_disco(state));
                     let response =
                         build_disco_info_response(request_iq, &identities, &features, None);
                     return vec![iq_to_xml(response)];
@@ -615,15 +599,7 @@ pub async fn handle_iq_with_conn_state(
             Feature::new("jabber:iq:search"),
             Feature::new(ISR_NS),
         ]);
-        features.extend(
-            state
-                .deps
-                .protocol
-                .extension_manager
-                .extension_features()
-                .into_iter()
-                .map(|ns| Feature::new(&ns)),
-        );
+        features.extend(extension_features_for_disco(state));
         let response =
             match server_affiliation_for_requester(state, authenticated_session.as_ref()).await {
                 Some(role) => build_disco_info_response_with_extensions(
@@ -1129,10 +1105,17 @@ pub async fn handle_iq_with_conn_state(
             return vec![build_iq_error_xml(&id, "cancel", "item-not-found")];
         }
 
+        if is_mam_query_form_request(request_iq) {
+            return vec![iq_to_xml(build_query_form_iq(request_iq))];
+        }
+
         let (query_id, query) = match parse_mam_query(request_iq) {
             Ok(parsed) => parsed,
             Err(err) => {
                 warn!(error = %err, target = %target_bare, "Invalid MAM query");
+                if matches!(err, waddle_xmpp::CoreError::NotImplemented) {
+                    return vec![build_iq_error_xml(&id, "cancel", "feature-not-implemented")];
+                }
                 return vec![build_iq_error_xml(&id, "modify", "bad-request")];
             }
         };
@@ -1152,13 +1135,15 @@ pub async fn handle_iq_with_conn_state(
             }
         };
 
-        result.count = state
-            .deps
-            .protocol
-            .mam_storage
-            .count_messages(archive_jid.as_str())
-            .await
-            .ok();
+        if result.count.is_none() {
+            result.count = state
+                .deps
+                .protocol
+                .mam_storage
+                .count_messages(archive_jid.as_str())
+                .await
+                .ok();
+        }
 
         let recipient_jid = request_iq
             .from

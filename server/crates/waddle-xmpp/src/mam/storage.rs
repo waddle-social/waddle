@@ -22,6 +22,7 @@ use tracing::{debug, info, instrument};
 use uuid::Uuid;
 
 use super::{ArchivedMessage, MamQuery, MamResult};
+use crate::xep::matches_fulltext;
 
 /// Errors that can occur during MAM storage operations.
 #[derive(Error, Debug)]
@@ -186,6 +187,14 @@ impl MamStorage for InMemoryMamStorage {
             messages
                 .retain(|message| message.from.starts_with(with) || message.to.starts_with(with));
         }
+        if let Some(thread_id) = query.thread_id.as_ref() {
+            messages.retain(|message| matches_thread_filter(message, thread_id.as_str()));
+        }
+        if let Some(fulltext) = query.fulltext.as_ref() {
+            messages.retain(|message| matches_fulltext(message.body.as_str(), fulltext.as_str()));
+        }
+        let count = Some(u32::try_from(messages.len()).unwrap_or(u32::MAX));
+
         if let Some(before_id) = query.before_id.as_deref().filter(|id| !id.is_empty()) {
             messages.retain(|message| message.id.as_str() < before_id);
         }
@@ -217,7 +226,7 @@ impl MamStorage for InMemoryMamStorage {
             complete,
             first_id,
             last_id,
-            count: None,
+            count,
         })
     }
 
@@ -584,7 +593,79 @@ fn uses_backward_pagination(query: &MamQuery) -> bool {
     query.before_id.is_some()
 }
 
-fn finalize_result(mut messages: Vec<ArchivedMessage>, query: &MamQuery) -> MamResult {
+macro_rules! push_common_mam_filters {
+    ($builder:expr, $query:expr, $with_filter:expr) => {{
+        if let Some(with) = $with_filter {
+            $builder
+                .push(" AND (from_jid LIKE ")
+                .push_bind(with)
+                .push(" OR to_jid LIKE ")
+                .push_bind(with)
+                .push(")");
+        }
+        if let Some(thread_id) = $query.thread_id.as_ref() {
+            $builder
+                .push(" AND (id = ")
+                .push_bind(thread_id.as_str())
+                .push(" OR stanza_id = ")
+                .push_bind(thread_id.as_str())
+                .push(" OR thread_id = ")
+                .push_bind(thread_id.as_str())
+                .push(" OR (thread_id IS NULL AND reply_to_id = ")
+                .push_bind(thread_id.as_str())
+                .push("))");
+        }
+        if let Some(fulltext) = $query.fulltext.as_ref() {
+            for term in fulltext.as_str().split_whitespace() {
+                $builder
+                    .push(" AND LOWER(body) LIKE ")
+                    .push_bind(format!("%{}%", term.to_lowercase()));
+            }
+        }
+    }};
+}
+
+fn push_sqlite_mam_filters<'args>(
+    builder: &mut QueryBuilder<'args, Sqlite>,
+    archive_jid: &'args str,
+    query: &'args MamQuery,
+    with_filter: Option<&'args str>,
+) {
+    builder.push_bind(archive_jid);
+    if let Some(start) = query.start {
+        builder
+            .push(" AND timestamp >= ")
+            .push_bind(start.to_rfc3339());
+    }
+    if let Some(end) = query.end {
+        builder
+            .push(" AND timestamp <= ")
+            .push_bind(end.to_rfc3339());
+    }
+    push_common_mam_filters!(builder, query, with_filter);
+}
+
+fn push_postgres_mam_filters<'args>(
+    builder: &mut QueryBuilder<'args, Postgres>,
+    archive_jid: &'args str,
+    query: &'args MamQuery,
+    with_filter: Option<&'args str>,
+) {
+    builder.push_bind(archive_jid);
+    if let Some(start) = query.start {
+        builder.push(" AND timestamp >= ").push_bind(start);
+    }
+    if let Some(end) = query.end {
+        builder.push(" AND timestamp <= ").push_bind(end);
+    }
+    push_common_mam_filters!(builder, query, with_filter);
+}
+
+fn finalize_result(
+    mut messages: Vec<ArchivedMessage>,
+    query: &MamQuery,
+    count: Option<u32>,
+) -> MamResult {
     let actual_limit = query.max.unwrap_or(100).min(500) as usize;
     let complete = messages.len() <= actual_limit;
 
@@ -604,8 +685,15 @@ fn finalize_result(mut messages: Vec<ArchivedMessage>, query: &MamQuery) -> MamR
         complete,
         first_id,
         last_id,
-        count: None,
+        count,
     }
+}
+
+fn matches_thread_filter(message: &ArchivedMessage, thread_id: &str) -> bool {
+    message.id == thread_id
+        || message.stanza_id.as_deref() == Some(thread_id)
+        || message.thread_id.as_deref() == Some(thread_id)
+        || (message.thread_id.is_none() && message.reply_to_id.as_deref() == Some(thread_id))
 }
 
 fn decode_sqlite_message_row(row: &SqliteRow) -> Result<ArchivedMessage, MamStorageError> {
@@ -783,28 +871,24 @@ impl MamStorage for SqlxMamStorage {
 
         match &self.backend {
             MamDatabaseBackend::Sqlite(pool) => {
+                let mut count_builder = QueryBuilder::<Sqlite>::new(
+                    "SELECT COUNT(*) FROM mam_messages WHERE room_jid = ",
+                );
+                push_sqlite_mam_filters(
+                    &mut count_builder,
+                    archive_jid,
+                    query,
+                    with_filter.as_deref(),
+                );
+                let count = count_builder
+                    .build_query_scalar::<i64>()
+                    .fetch_one(pool)
+                    .await?;
+
                 let mut builder = QueryBuilder::<Sqlite>::new(format!(
                     "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE room_jid = "
                 ));
-                builder.push_bind(archive_jid);
-                if let Some(start) = query.start {
-                    builder
-                        .push(" AND timestamp >= ")
-                        .push_bind(start.to_rfc3339());
-                }
-                if let Some(end) = query.end {
-                    builder
-                        .push(" AND timestamp <= ")
-                        .push_bind(end.to_rfc3339());
-                }
-                if let Some(with) = with_filter.as_deref() {
-                    builder
-                        .push(" AND (from_jid LIKE ")
-                        .push_bind(with)
-                        .push(" OR to_jid LIKE ")
-                        .push_bind(with)
-                        .push(")");
-                }
+                push_sqlite_mam_filters(&mut builder, archive_jid, query, with_filter.as_deref());
                 if let Some(before_id) = query.before_id.as_deref().filter(|id| !id.is_empty()) {
                     builder.push(" AND id < ").push_bind(before_id);
                 }
@@ -823,27 +907,31 @@ impl MamStorage for SqlxMamStorage {
                     .iter()
                     .map(decode_sqlite_message_row)
                     .collect::<Result<Vec<_>, _>>()?;
-                Ok(finalize_result(messages, query))
+                Ok(finalize_result(
+                    messages,
+                    query,
+                    Some(u32::try_from(count).unwrap_or(u32::MAX)),
+                ))
             }
             MamDatabaseBackend::Postgres(pool) => {
+                let mut count_builder = QueryBuilder::<Postgres>::new(
+                    "SELECT COUNT(*) FROM mam_messages WHERE room_jid = ",
+                );
+                push_postgres_mam_filters(
+                    &mut count_builder,
+                    archive_jid,
+                    query,
+                    with_filter.as_deref(),
+                );
+                let count = count_builder
+                    .build_query_scalar::<i64>()
+                    .fetch_one(pool)
+                    .await?;
+
                 let mut builder = QueryBuilder::<Postgres>::new(format!(
                     "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE room_jid = "
                 ));
-                builder.push_bind(archive_jid);
-                if let Some(start) = query.start {
-                    builder.push(" AND timestamp >= ").push_bind(start);
-                }
-                if let Some(end) = query.end {
-                    builder.push(" AND timestamp <= ").push_bind(end);
-                }
-                if let Some(with) = with_filter.as_deref() {
-                    builder
-                        .push(" AND (from_jid LIKE ")
-                        .push_bind(with)
-                        .push(" OR to_jid LIKE ")
-                        .push_bind(with)
-                        .push(")");
-                }
+                push_postgres_mam_filters(&mut builder, archive_jid, query, with_filter.as_deref());
                 if let Some(before_id) = query.before_id.as_deref().filter(|id| !id.is_empty()) {
                     builder.push(" AND id < ").push_bind(before_id);
                 }
@@ -862,7 +950,11 @@ impl MamStorage for SqlxMamStorage {
                     .iter()
                     .map(decode_postgres_message_row)
                     .collect::<Result<Vec<_>, _>>()?;
-                Ok(finalize_result(messages, query))
+                Ok(finalize_result(
+                    messages,
+                    query,
+                    Some(u32::try_from(count).unwrap_or(u32::MAX)),
+                ))
             }
         }
     }
@@ -1206,6 +1298,108 @@ mod tests {
         assert_eq!(page_two.messages[0].body, "three");
     }
 
+    #[tokio::test]
+    async fn test_thread_query_filters_before_pagination_and_count() {
+        let storage = create_test_storage().await;
+        let archive = "room@conference.example.com";
+
+        for msg in [
+            ArchivedMessage {
+                id: "a-thread-root".to_string(),
+                body: "root".to_string(),
+                ..archived_groupchat(archive)
+            },
+            ArchivedMessage {
+                id: "b-thread-reply".to_string(),
+                thread_id: Some("a-thread-root".to_string()),
+                body: "reply".to_string(),
+                ..archived_groupchat(archive)
+            },
+            ArchivedMessage {
+                id: "c-legacy-reply".to_string(),
+                reply_to_id: Some("a-thread-root".to_string()),
+                body: "legacy".to_string(),
+                ..archived_groupchat(archive)
+            },
+            ArchivedMessage {
+                id: "unrelated".to_string(),
+                thread_id: Some("other-thread".to_string()),
+                body: "unrelated".to_string(),
+                ..archived_groupchat(archive)
+            },
+        ] {
+            storage.store_message(archive, &msg).await.unwrap();
+        }
+
+        let result = storage
+            .query_messages(
+                archive,
+                &MamQuery {
+                    thread_id: waddle_xmpp_core::mam::ThreadId::new("a-thread-root"),
+                    max: Some(2),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let ids: Vec<&str> = result
+            .messages
+            .iter()
+            .map(|message| message.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["a-thread-root", "b-thread-reply"]);
+        assert_eq!(result.count, Some(3));
+        assert!(!result.complete);
+    }
+
+    #[tokio::test]
+    async fn test_fulltext_query_filters_before_pagination_and_count() {
+        let storage = create_test_storage().await;
+        let archive = "room@conference.example.com";
+
+        for msg in [
+            ArchivedMessage {
+                id: "a-alpha".to_string(),
+                body: "release notes alpha".to_string(),
+                ..archived_groupchat(archive)
+            },
+            ArchivedMessage {
+                id: "b-beta".to_string(),
+                body: "release notes beta".to_string(),
+                ..archived_groupchat(archive)
+            },
+            ArchivedMessage {
+                id: "c-other".to_string(),
+                body: "standup notes".to_string(),
+                ..archived_groupchat(archive)
+            },
+        ] {
+            storage.store_message(archive, &msg).await.unwrap();
+        }
+
+        let result = storage
+            .query_messages(
+                archive,
+                &MamQuery {
+                    fulltext: waddle_xmpp_core::mam::RichText::new("release notes"),
+                    max: Some(1),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let ids: Vec<&str> = result
+            .messages
+            .iter()
+            .map(|message| message.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["a-alpha"]);
+        assert_eq!(result.count, Some(2));
+        assert!(!result.complete);
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn test_sqlite_file_backing_persists() {
         let artifacts = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/test-artifacts");
@@ -1280,5 +1474,15 @@ mod tests {
         let bodies: Vec<&str> = last_page.messages.iter().map(|m| m.body.as_str()).collect();
         assert_eq!(bodies, vec!["four", "five", "six"]);
         assert!(!last_page.complete);
+    }
+
+    fn archived_groupchat(archive: &str) -> ArchivedMessage {
+        ArchivedMessage {
+            timestamp: Utc::now(),
+            from: format!("{archive}/alice"),
+            to: archive.to_string(),
+            message_type: "groupchat".to_string(),
+            ..Default::default()
+        }
     }
 }
