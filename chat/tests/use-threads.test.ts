@@ -42,8 +42,18 @@ describe("useThreads", () => {
   });
 
   test("marks threads as orphan when the root isn't in the loaded window", () => {
+    // Waddle reply whose root scrolled off: the reply has threadId pointing
+    // at the missing root id and a XEP-0461 replyTo pointing at the same id.
+    // The disambiguation rule must NOT promote the child to root just because
+    // it is the only loaded member of the thread.
     const messages = ref<TimelineMessage[]>([
-      makeMessage({ id: "c1", threadId: "missing-root", createdAt: "2026-01-01T00:01:00Z", body: "orphan reply" }),
+      makeMessage({
+        id: "c1",
+        threadId: "missing-root",
+        replyTo: { id: "missing-root", author: "alice" },
+        createdAt: "2026-01-01T00:01:00Z",
+        body: "orphan reply",
+      }),
     ]);
     const { index } = useThreads(messages);
     const entry = index.value.get("missing-root");
@@ -106,5 +116,33 @@ describe("useThreads", () => {
     const { resolveEntry } = useThreads(messages);
     expect(resolveEntry("nope")).toBeUndefined();
     expect(resolveEntry(undefined)).toBeUndefined();
+  });
+
+  test("XEP-0201: resolves the root by chronology when the root id is unrelated to the thread id", () => {
+    // Standard XEP-0201: the thread element carries an arbitrary identifier
+    // that is decoupled from any message id. The root MUST still be the
+    // earliest message bearing the thread id; the legacy id===threadId
+    // shortcut does not apply here.
+    const messages = ref<TimelineMessage[]>([
+      makeMessage({
+        id: "msg-1",
+        threadId: "topic-roadmap",
+        createdAt: "2026-01-01T00:00:00Z",
+        body: "kicking off the roadmap thread",
+      }),
+      makeMessage({
+        id: "msg-2",
+        threadId: "topic-roadmap",
+        createdAt: "2026-01-01T00:05:00Z",
+        body: "agree, let's split it",
+      }),
+    ]);
+    const { index, rootOf } = useThreads(messages);
+    const entry = index.value.get("topic-roadmap");
+    expect(entry).toBeTruthy();
+    expect(entry!.root?.id).toBe("msg-1");
+    expect(entry!.directChildren.map((m) => m.id)).toEqual(["msg-2"]);
+    expect(entry!.count).toBe(1);
+    expect(rootOf(messages.value[1])?.id).toBe("msg-1");
   });
 });

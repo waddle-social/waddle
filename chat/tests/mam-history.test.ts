@@ -371,44 +371,41 @@ describe("MAM history parsing", () => {
     expect(fields.find((field) => field.name === "{urn:xmpp:mam:2}thread")).toBeUndefined();
   });
 
-  test("thread backfill assigns legacy reply without thread only for requested thread", async () => {
-    const xmpp = makeMamAgent([
-      {
-        id: "archive-reply-1",
-        item: {
-          delay: { timestamp: new Date("2024-01-01T00:00:00Z") },
-          message: {
-            id: "reply-1",
-            from: "room@muc.example.com/Waddle",
-            to: "room@muc.example.com",
-            type: "groupchat",
-            body: "provider answer",
-            reply: { id: "thread-42" },
-          },
+  test("XEP-0461 reply without <thread/> never inherits a thread id on MAM replay", async () => {
+    // XEP-0461: a reply identifies the replied-to message; it MUST NOT imply
+    // XEP-0201 thread membership. Even when the user requested a
+    // thread-filtered MAM page, an archived reply that lacks <thread/> stays
+    // standalone — the server now archives <thread parent=...> faithfully, so
+    // anything that should be threaded carries the element on replay.
+    const archivedReply = {
+      id: "archive-reply-1",
+      item: {
+        delay: { timestamp: new Date("2024-01-01T00:00:00Z") },
+        message: {
+          id: "reply-1",
+          from: "room@muc.example.com/Waddle",
+          to: "room@muc.example.com",
+          type: "groupchat",
+          body: "provider answer",
+          reply: { id: "thread-42" },
         },
       },
-    ]);
+    };
 
-    const threadResults = await queryMamByThread(xmpp, "room@muc.example.com", "thread-42", 20);
-    const roomResults = await queryMam(makeMamAgent([
-      {
-        id: "archive-reply-1",
-        item: {
-          delay: { timestamp: new Date("2024-01-01T00:00:00Z") },
-          message: {
-            id: "reply-1",
-            from: "room@muc.example.com/Waddle",
-            to: "room@muc.example.com",
-            type: "groupchat",
-            body: "provider answer",
-            reply: { id: "thread-42" },
-          },
-        },
-      },
-    ]), "room@muc.example.com", 20);
+    const threadResults = await queryMamByThread(
+      makeMamAgent([archivedReply]),
+      "room@muc.example.com",
+      "thread-42",
+      20,
+    );
+    const roomResults = await queryMam(
+      makeMamAgent([archivedReply]),
+      "room@muc.example.com",
+      20,
+    );
 
     expect(threadResults[0].replyTo?.id).toBe("thread-42");
-    expect(threadResults[0].threadId).toBe("thread-42");
+    expect(threadResults[0].threadId).toBeUndefined();
     expect(roomResults[0].replyTo?.id).toBe("thread-42");
     expect(roomResults[0].threadId).toBeUndefined();
   });
