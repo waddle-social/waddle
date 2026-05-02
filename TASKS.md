@@ -105,10 +105,10 @@
 
 - [x] Run multiple adversarial subagent reviews after implementation. Boundary, XEP/privacy, and shipped usability reviews completed and produced actionable findings.
 - [x] Action all real findings and rerun relevant verification.
-- [ ] Push the completed branch.
-- [ ] Update the PR title to accurately describe the final implemented work.
-- [ ] Update the PR description with the actual design, behavior, test coverage, and any justified lint/config exceptions.
-- [ ] Verify the rendered PR body after editing.
+- [x] Push the completed branch.
+- [x] Update the PR title to accurately describe the final implemented work.
+- [x] Update the PR description with the actual design, behavior, test coverage, next steps, and any justified lint/config exceptions.
+- [x] Verify the rendered PR body after editing.
 - [ ] Monitor CI until all checks are green.
 - [ ] Undraft the PR only after the extension is usable and CI is green.
 
