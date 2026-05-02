@@ -497,6 +497,12 @@ schema.#Project & {
 
 					  cargo build --release --locked --target wasm32-wasip2 --target-dir target --manifest-path "extensions/${extension_name}/Cargo.toml"
 					  test -s "${wasm_path}"
+					  if [ "${extension_name}" = "ai-chatbot" ]; then
+					    if grep -aE "AI provider unavailable|WADDLE_AI_PROVIDER|OPENROUTER_API_KEY|OPENAI_API_KEY" "${wasm_path}" >/dev/null; then
+					      echo "Refusing to publish ai-chatbot WASM with legacy server-provider fallback strings" >&2
+					      exit 1
+					    fi
+					  fi
 					  oras push \
 					    --artifact-type "application/vnd.waddle.extension.wasm.v1+wasm" \
 					    "${extension_ref}" \

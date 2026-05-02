@@ -41,6 +41,10 @@ const MAX_CONTEXT_LINE_BYTES: usize = 2048;
 const MAX_CONTEXT_ITEMS_PER_SOURCE: usize = 25;
 #[cfg(not(test))]
 const MAX_PROVIDER_REQUEST_BYTES: usize = 128 * 1024;
+const OPENROUTER_ORIGIN: &str = "https://openrouter.ai";
+const OPENROUTER_REFERER: &str = "https://waddle.chat";
+const OPENROUTER_TITLE: &str = "Waddle";
+const MAX_PROVIDER_ERROR_BODY_BYTES: usize = 512;
 static PROVIDER_CONFIG: OnceLock<Result<ProviderConfig, ProviderConfigError>> = OnceLock::new();
 
 impl exports::waddle::extension::lifecycle::Guest for AiChatbot {
@@ -394,14 +398,47 @@ fn provider_execution_error(error: ProviderExecutionError) -> types::ExtensionEr
         ProviderExecutionError::Http(error) => {
             extension_error(types::ExtensionErrorCode::TemporaryFailure, &error)
         }
-        ProviderExecutionError::HttpStatus(status) => extension_error(
+        ProviderExecutionError::HttpStatus { status, body } => extension_error(
             types::ExtensionErrorCode::TemporaryFailure,
-            &format!("AI provider returned HTTP {status}"),
+            &provider_status_error_message(status, &body),
         ),
         ProviderExecutionError::InvalidResponse(error) => {
             extension_error(types::ExtensionErrorCode::TemporaryFailure, &error)
         }
     }
+}
+
+fn provider_status_error_message(status: u16, body: &str) -> String {
+    let body = provider_error_body_summary(body);
+    if body.is_empty() {
+        return format!("AI provider returned HTTP {status}");
+    }
+    format!("AI provider returned HTTP {status}: {body}")
+}
+
+fn provider_error_body_summary(body: &str) -> String {
+    let summary = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|document| {
+            document
+                .pointer("/error/message")
+                .and_then(serde_json::Value::as_str)
+                .or_else(|| {
+                    document
+                        .pointer("/error")
+                        .and_then(serde_json::Value::as_str)
+                })
+                .or_else(|| document.get("message").and_then(serde_json::Value::as_str))
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| body.trim().to_string());
+    summary
+        .chars()
+        .filter(|character| !character.is_control() || character.is_whitespace())
+        .take(MAX_PROVIDER_ERROR_BODY_BYTES)
+        .collect::<String>()
+        .trim()
+        .to_string()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -554,7 +591,7 @@ struct ProviderAnswer {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ProviderExecutionError {
     Http(String),
-    HttpStatus(u16),
+    HttpStatus { status: u16, body: String },
     InvalidResponse(String),
 }
 
@@ -573,22 +610,16 @@ fn execute_provider_request(
         url: types::Url {
             value: request.endpoint.as_str().to_string(),
         },
-        headers: vec![
-            types::HttpHeader {
-                name: "authorization".to_string(),
-                value: format!("Bearer {}", request.api_key.as_str()),
-            },
-            types::HttpHeader {
-                name: "content-type".to_string(),
-                value: "application/json".to_string(),
-            },
-        ],
+        headers: provider_request_headers(&request),
         body: Some(body),
     })
     .map_err(|error| ProviderExecutionError::Http(error.message.value))?;
 
     if !(200..300).contains(&response.status) {
-        return Err(ProviderExecutionError::HttpStatus(response.status));
+        return Err(ProviderExecutionError::HttpStatus {
+            status: response.status,
+            body: response.body,
+        });
     }
     parse_provider_answer(&response.body)
 }
@@ -619,6 +650,34 @@ fn provider_request_json(request: &ProviderRequest) -> String {
         "temperature": 0.2,
     })
     .to_string()
+}
+
+fn provider_request_headers(request: &ProviderRequest) -> Vec<types::HttpHeader> {
+    let mut headers = vec![
+        types::HttpHeader {
+            name: "authorization".to_string(),
+            value: format!("Bearer {}", request.api_key.as_str()),
+        },
+        types::HttpHeader {
+            name: "content-type".to_string(),
+            value: "application/json".to_string(),
+        },
+    ];
+    if request.endpoint.as_str().starts_with(OPENROUTER_ORIGIN) {
+        headers.push(types::HttpHeader {
+            name: "http-referer".to_string(),
+            value: OPENROUTER_REFERER.to_string(),
+        });
+        headers.push(types::HttpHeader {
+            name: "x-title".to_string(),
+            value: OPENROUTER_TITLE.to_string(),
+        });
+        headers.push(types::HttpHeader {
+            name: "x-openrouter-title".to_string(),
+            value: OPENROUTER_TITLE.to_string(),
+        });
+    }
+    headers
 }
 
 fn parse_provider_answer(input: &str) -> Result<ProviderAnswer, ProviderExecutionError> {
@@ -1301,10 +1360,11 @@ mod tests {
         assemble_provider_request, clean_prompt, command_response_with_config,
         contains_waddle_mention, extension_error, manifest, message_hook_response,
         message_hook_response_with_config, parse_provider_answer, provider_execution_error,
-        provider_request_json, select_host_tools, sent_room_messages, starts_with_ai_command,
-        types, CleanPrompt, ExecutionContext, HostContext, HostTool, NonEmptyString,
-        ProviderAnswer, ProviderConfig, ProviderExecutionError, ProviderExecutor, ProviderRequest,
-        ProviderRole, ResponseTarget, BASELINE_SYSTEM_PROMPT, COMMAND_NODE,
+        provider_request_headers, provider_request_json, select_host_tools, sent_room_messages,
+        starts_with_ai_command, types, CleanPrompt, ExecutionContext, HostContext, HostTool,
+        NonEmptyString, ProviderAnswer, ProviderConfig, ProviderExecutionError, ProviderExecutor,
+        ProviderRequest, ProviderRole, ResponseTarget, BASELINE_SYSTEM_PROMPT, COMMAND_NODE,
+        OPENROUTER_REFERER, OPENROUTER_TITLE,
     };
 
     mod shared_ai_prompt_cases {
@@ -1562,6 +1622,39 @@ mod tests {
     }
 
     #[test]
+    fn adds_openrouter_headers_for_openrouter_endpoint() {
+        let config = ProviderConfig::parse(
+            r#"{"endpoint":"https://openrouter.ai/api/v1/chat/completions","model":"openrouter/auto","api_key":"secret-value"}"#,
+        )
+        .expect("provider config");
+        let request = assemble_provider_request(
+            &config,
+            &execution_context("answer"),
+            HostContext { lines: vec![] },
+            vec![],
+        );
+        let headers = provider_request_headers(&request);
+        assert!(headers
+            .iter()
+            .any(|header| header.name == "authorization" && header.value == "Bearer secret-value"));
+        assert!(headers
+            .iter()
+            .any(|header| header.name == "http-referer" && header.value == OPENROUTER_REFERER));
+        assert!(headers
+            .iter()
+            .any(|header| header.name == "x-openrouter-title" && header.value == OPENROUTER_TITLE));
+    }
+
+    #[test]
+    fn provider_config_trims_secret_file_newline() {
+        let config = ProviderConfig::parse(
+            "{\"endpoint\":\"https://openrouter.ai/api/v1/chat/completions\",\"model\":\"openrouter/auto\",\"api_key\":\"secret-value\\n\"}",
+        )
+        .expect("provider config");
+        assert_eq!(config.api_key.as_str(), "secret-value");
+    }
+
+    #[test]
     fn parses_openai_compatible_provider_answer() {
         let answer = parse_provider_answer(
             r#"{"choices":[{"message":{"content":"extension-owned answer"}}]}"#,
@@ -1572,9 +1665,13 @@ mod tests {
 
     #[test]
     fn maps_provider_http_status_to_temporary_failure() {
-        let error = provider_execution_error(ProviderExecutionError::HttpStatus(429));
+        let error = provider_execution_error(ProviderExecutionError::HttpStatus {
+            status: 429,
+            body: r#"{"error":{"message":"rate limited"}}"#.to_string(),
+        });
         assert_eq!(error.code, types::ExtensionErrorCode::TemporaryFailure);
         assert!(error.message.value.contains("HTTP 429"));
+        assert!(error.message.value.contains("rate limited"));
     }
 
     #[test]
