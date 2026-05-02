@@ -184,6 +184,12 @@ async fn muc_mam_pagination() {
     let page2 = query_mam(&mut client, &mam_query_after_xml(&q2, &room, 2, &last1))
         .await
         .expect("page 2");
+    let page2_bodies: Vec<String> = page2.iter().filter_map(|f| extract_mam_body(f)).collect();
+    assert_eq!(
+        page2_bodies,
+        vec!["page msg 3".to_string(), "page msg 4".to_string()],
+        "Page 2 should contain the next two messages"
+    );
     assert_eq!(
         page2.iter().filter(|f| f.contains("<forwarded")).count(),
         2,
@@ -196,6 +202,12 @@ async fn muc_mam_pagination() {
     let page3 = query_mam(&mut client, &mam_query_after_xml(&q3, &room, 2, &last2))
         .await
         .expect("page 3");
+    let page3_bodies: Vec<String> = page3.iter().filter_map(|f| extract_mam_body(f)).collect();
+    assert_eq!(
+        page3_bodies,
+        vec!["page msg 5".to_string()],
+        "Page 3 should contain only the final message"
+    );
     assert_eq!(
         page3.iter().filter(|f| f.contains("<forwarded")).count(),
         1,
@@ -214,7 +226,16 @@ async fn muc_mam_pagination() {
         .chain(page3.iter())
         .filter_map(|f| extract_mam_body(f))
         .collect();
-    assert_eq!(all_bodies.len(), 5);
+    assert_eq!(
+        all_bodies,
+        vec![
+            "page msg 1".to_string(),
+            "page msg 2".to_string(),
+            "page msg 3".to_string(),
+            "page msg 4".to_string(),
+            "page msg 5".to_string()
+        ]
+    );
 
     client.close().await;
 }

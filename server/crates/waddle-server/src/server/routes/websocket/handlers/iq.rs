@@ -1168,6 +1168,9 @@ pub async fn handle_iq_with_conn_state(
             .await
         {
             Ok(result) => result,
+            Err(waddle_xmpp::mam::MamStorageError::NotFound(_)) => {
+                return vec![build_iq_error_xml(&id, "cancel", "item-not-found")];
+            }
             Err(err) => {
                 warn!(error = %err, target = %target_bare, "MAM query failed");
                 return vec![build_iq_error_xml(&id, "wait", "internal-server-error")];
