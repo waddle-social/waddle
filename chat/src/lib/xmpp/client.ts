@@ -948,10 +948,17 @@ export class BrowserXmppClient {
     body: string,
     opts: messaging.SendGroupMessageOptions = {},
   ): Promise<OutboundSendResult | null> {
-    const { files } = opts;
+    const { files, threadId, threadCreate, threadReply } = opts;
     const text = body.trim();
     const hasFiles = !!files && files.length > 0;
-    if (!text && !hasFiles) return null;
+    // XEP-0201 thread create / thread reply payloads are bodyless. The
+    // gate must let them through; otherwise standard MUC threads can't
+    // leave the browser via the normal client path. messaging.ts already
+    // accepts these shapes — keep the two layers in sync.
+    const hasThreadMetadata = !!threadId?.trim();
+    const hasForumMetadata =
+      !!threadCreate?.title?.trim() || !!threadReply?.threadId?.trim();
+    if (!text && !hasFiles && !hasThreadMetadata && !hasForumMetadata) return null;
 
     const roomJid = this.roomJidForChannel(c);
 

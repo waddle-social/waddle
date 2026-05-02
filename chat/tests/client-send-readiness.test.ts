@@ -101,6 +101,33 @@ describe("client send readiness", () => {
     expect(xmpp.sendMessage).toHaveBeenCalledTimes(1);
   });
 
+  test("XEP-0201: BrowserXmppClient.sendGroupMessage accepts bodyless thread metadata sends", async () => {
+    // XEP-0201 thread create / thread reply payloads are bodyless. The
+    // browser client wrapper must not short-circuit them; otherwise standard
+    // MUC threads can never leave the browser through the regular send path.
+    const xmpp = { sendMessage: mock(() => undefined) };
+    const client = new BrowserXmppClient(session());
+    const roomJid = roomBareJidFor(session(), "c1");
+    (client as unknown as {
+      xmpp: typeof xmpp;
+      connected: boolean;
+      currentRoom: string | null;
+    }).xmpp = xmpp;
+    (client as unknown as { connected: boolean }).connected = true;
+    (client as unknown as { currentRoom: string | null }).currentRoom = roomJid;
+
+    const result = await client.sendGroupMessage("w1", "c1", "", {
+      threadId: "thread-root",
+    });
+
+    expect(result?.state).toBe("sending");
+    expect(typeof result?.id).toBe("string");
+    expect(xmpp.sendMessage).toHaveBeenCalledTimes(1);
+    expect(xmpp.sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ thread: "thread-root", body: "" }),
+    );
+  });
+
   test("room send queues when the room is unavailable", async () => {
     const xmpp = { sendMessage: mock(() => undefined) };
     const client = new BrowserXmppClient(session());
