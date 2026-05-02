@@ -212,3 +212,106 @@ async fn xep_0201_inmemory_mam_storage_also_round_trips_parent() {
         Some("root-thread-m")
     );
 }
+
+/// Helper: build a groupchat `ArchivedMessage` with `stanza_xml` already
+/// serialised (mirrors the post-#233 common case where the archive write
+/// path stores the raw wire XML in the `stanza_xml` column).
+fn nested_thread_groupchat_row_with_stanza_xml(
+    archive_id: &str,
+    nick: &str,
+    body: &str,
+    thread_id: &str,
+    parent_thread_id: Option<&str>,
+) -> ArchivedMessage {
+    let parent_attr = parent_thread_id
+        .map(|p| format!(" parent='{p}'"))
+        .unwrap_or_default();
+    let stanza_xml = format!(
+        "<message xmlns='jabber:client' \
+         from='{ROOM}/{nick}' to='{ROOM}' type='groupchat' id='wire-{archive_id}'>\
+         <body>{body}</body>\
+         <thread{parent_attr}>{thread_id}</thread>\
+         </message>"
+    );
+    ArchivedMessage {
+        id: archive_id.to_string(),
+        timestamp: Utc::now(),
+        from: format!("{ROOM}/{nick}"),
+        to: ROOM.to_string(),
+        body: body.to_string(),
+        stanza_id: Some(format!("wire-{archive_id}")),
+        thread_id: Some(thread_id.to_string()),
+        parent_thread_id: parent_thread_id.and_then(waddle_xmpp::mam::ThreadId::new),
+        reply_to_id: None,
+        reply_to_jid: None,
+        origin_id: None,
+        message_type: "groupchat".to_string(),
+        stanza_xml: Some(stanza_xml),
+        rich: None,
+        nickname_generation: Some(0),
+    }
+}
+
+#[tokio::test]
+async fn xep_0201_groupchat_replay_via_stanza_xml_preserves_thread_parent() {
+    // End-to-end lock for the `stanza_xml` normalisation path:
+    // `normalize_archived_inner_message` previously did a lossy
+    // `Message::try_from` round-trip that stripped the XEP-0201 `parent`
+    // attribute. This test asserts the parent survives the full MAM
+    // projection when `stanza_xml` is set (the post-#233 dominant path
+    // for groupchat archives).
+    let storage = SqlxMamStorage::open_in_memory()
+        .await
+        .expect("open sqlite in-memory");
+    let row = nested_thread_groupchat_row_with_stanza_xml(
+        "archive-stanza",
+        "alice",
+        "nested reply via stanza_xml",
+        "child-thread-s",
+        Some("root-thread-s"),
+    );
+    let archive_id = storage.store_message(ROOM, &row).await.expect("store row");
+
+    let result = storage
+        .query_messages(ROOM, &MamQuery::default())
+        .await
+        .expect("query archive");
+    assert_eq!(result.messages.len(), 1);
+    let retrieved = &result.messages[0];
+    assert_eq!(retrieved.thread_id.as_deref(), Some("child-thread-s"));
+    assert_eq!(
+        retrieved.parent_thread_id.as_ref().map(|t| t.as_str()),
+        Some("root-thread-s")
+    );
+
+    // Build the MAM result envelope and assert the inner `<message>`
+    // carries `<thread parent='root-thread-s'>child-thread-s</thread>`.
+    let envelopes =
+        waddle_xmpp_core::mam::build_result_messages("q2", "alice@example.com", &result.messages);
+    assert_eq!(envelopes.len(), 1);
+    let result_payload = envelopes[0]
+        .payloads
+        .iter()
+        .find(|p| p.name() == "result" && p.ns() == waddle_xmpp_core::mam::MAM_NS)
+        .expect("result payload");
+    let forwarded = result_payload
+        .children()
+        .find(|c| c.name() == "forwarded" && c.ns() == waddle_xmpp_core::mam::FORWARD_NS)
+        .expect("forwarded");
+    let inner_msg = forwarded
+        .children()
+        .find(|c| c.name() == "message")
+        .expect("inner message");
+    let thread_elem = inner_msg
+        .children()
+        .find(|c| c.name() == "thread")
+        .expect("thread element on replay");
+    assert_eq!(thread_elem.text().trim(), "child-thread-s");
+    assert_eq!(
+        thread_elem.attr("parent"),
+        Some("root-thread-s"),
+        "XEP-0201 parent attribute must survive groupchat MAM replay via stanza_xml path"
+    );
+
+    assert_eq!(retrieved.id, archive_id);
+}

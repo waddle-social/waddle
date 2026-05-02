@@ -573,16 +573,9 @@ fn normalize_archived_inner_message(element: Element, archived: &ArchivedMessage
     if archived.message_type != "groupchat" {
         return element;
     }
-
-    if let Ok(mut message) = Message::try_from(element.clone()) {
-        message.to = None;
-        return Element::from(message);
-    }
-
     if element.attr("to").is_none() {
         return element;
     }
-
     let ns = element.ns().to_string();
     let name = element.name().to_string();
     let mut builder = Element::builder(name, &ns);
@@ -1513,5 +1506,36 @@ mod tests {
             "groupchat MAM replay via raw element fallback should not have a 'to' attribute, got: {:?}",
             inner_msg.attr("to")
         );
+    }
+
+    #[test]
+    fn xep_0201_groupchat_replay_with_stanza_xml_preserves_thread_parent() {
+        // Reproduction test for the stanza_xml normalisation path:
+        // `normalize_archived_inner_message` previously did a lossy
+        // `Message::try_from` → `Element::from` round-trip that silently
+        // dropped the XEP-0201 `parent` attribute. Now that path is gone
+        // and the direct element rebuild is the only code path, the parent
+        // attribute must survive replay.
+        let stanza_xml = "<message xmlns='jabber:client' \
+            from='room@conf.example.com/alice' to='room@conf.example.com' \
+            type='groupchat' id='wire-1'><body>nested reply</body>\
+            <thread parent='root-thread'>child-thread</thread></message>";
+        let archived = ArchivedMessage {
+            id: "msg-1".to_string(),
+            timestamp: Utc::now(),
+            from: "room@conf.example.com/alice".to_string(),
+            to: "room@conf.example.com".to_string(),
+            body: "nested reply".to_string(),
+            stanza_id: Some("wire-1".to_string()),
+            thread_id: Some("child-thread".to_string()),
+            parent_thread_id: ThreadId::new("root-thread"),
+            message_type: "groupchat".to_string(),
+            stanza_xml: Some(stanza_xml.to_string()),
+            ..Default::default()
+        };
+        let msgs = build_result_messages("q", "user@example.com", &[archived]);
+        let thread = replay_inner_thread(&msgs[0]);
+        assert_eq!(thread.text().trim(), "child-thread");
+        assert_eq!(thread.attr("parent"), Some("root-thread"));
     }
 }
