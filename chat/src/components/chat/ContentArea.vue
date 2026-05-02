@@ -847,38 +847,36 @@ function dayDividerLabel(createdAt: string): string {
       role="status"
       aria-live="polite"
       aria-atomic="true"
-      class="border-b border-primary/12 bg-primary/8 text-foreground"
+      class="border-b border-primary/12 bg-primary/8 text-foreground flex flex-col gap-3 px-[var(--chat-content-inline)] py-3.5 sm:flex-row sm:items-center sm:justify-between"
     >
-      <div class="chat-message-lane flex flex-col gap-3 px-[var(--chat-content-inline)] py-3.5 sm:flex-row sm:items-center sm:justify-between">
-        <div class="flex min-w-0 items-start gap-3">
-          <div class="mt-0.5 flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full border border-primary/15 bg-background/75 text-primary">
-            <RefreshCw
-              class="h-4 w-4"
-              :class="{ 'motion-safe:animate-spin': isApplyingUpdate }"
-            />
-          </div>
-          <div class="flex min-w-0 flex-col gap-0.5">
-            <p class="type-control">
-              Update ready
-            </p>
-            <p class="type-caption chat-copy-measure text-foreground/75">
-              {{ updateNoticeBody }}
-            </p>
-          </div>
-        </div>
-        <button
-          type="button"
-          class="type-control inline-flex h-8 shrink-0 items-center justify-center gap-1.5 rounded-full bg-primary px-3.5 text-primary-foreground transition-colors hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/35 disabled:cursor-wait disabled:opacity-75"
-          :disabled="isApplyingUpdate"
-          @click="emit('refreshUpdate')"
-        >
+      <div class="chat-message-lane flex min-w-0 items-start gap-3">
+        <div class="mt-0.5 flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full border border-primary/15 bg-background/75 text-primary">
           <RefreshCw
-            class="h-3.5 w-3.5"
+            class="h-4 w-4"
             :class="{ 'motion-safe:animate-spin': isApplyingUpdate }"
           />
-          <span>{{ isApplyingUpdate ? "Refreshing…" : "Refresh" }}</span>
-        </button>
+        </div>
+        <div class="flex min-w-0 flex-col gap-0.5">
+          <p class="type-control">
+            Update ready
+          </p>
+          <p class="type-caption chat-copy-measure text-foreground/75">
+            {{ updateNoticeBody }}
+          </p>
+        </div>
       </div>
+      <button
+        type="button"
+        class="type-control inline-flex h-8 shrink-0 items-center justify-center gap-1.5 rounded-full bg-primary px-3.5 text-primary-foreground transition-colors hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/35 disabled:cursor-wait disabled:opacity-75"
+        :disabled="isApplyingUpdate"
+        @click="emit('refreshUpdate')"
+      >
+        <RefreshCw
+          class="h-3.5 w-3.5"
+          :class="{ 'motion-safe:animate-spin': isApplyingUpdate }"
+        />
+        <span>{{ isApplyingUpdate ? "Refreshing…" : "Refresh" }}</span>
+      </button>
     </div>
 
     <!-- Search bar -->

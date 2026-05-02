@@ -831,14 +831,6 @@
   min-height: var(--chat-header-height);
 }
 
-.chat-pane-header-row {
-  display: flex;
-  min-width: 0;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-md);
-}
-
 .chat-pane-title-group {
   display: grid;
   min-width: 0;
