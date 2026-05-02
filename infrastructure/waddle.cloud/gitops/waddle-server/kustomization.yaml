@@ -9,6 +9,7 @@ resources:
   - xmpp-certificate.yaml
   - external-secret.yaml
   - runtime-external-secret.yaml
+  - openrouter-external-secret.yaml
   - spicedb-external-secret.yaml
   - helmrepository.yaml
   - helmrelease.yaml

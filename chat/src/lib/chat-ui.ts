@@ -125,6 +125,13 @@ export interface TimelineMessage {
   authorRealJid?: string;
   /** XEP-0444 groupchat reaction target: room-assigned XEP-0359 stanza-id. */
   reactionTargetId?: string;
+  /**
+   * XEP-0461 §3.2 replyable id. Absent on groupchat messages that lack a
+   * room-assigned XEP-0359 stanza-id; consumers MUST treat such messages as
+   * non-replyable (disable the action, refuse to send) rather than fall back
+   * to the wire id.
+   */
+  replyableId?: string;
   body: string;
   createdAt: string;
   isSelf: boolean;
@@ -367,7 +374,7 @@ export function extensionSurfaceLabel(kind: ExtensionSurfaceKind): string {
     case "game":
       return "Game";
     case "chat-bot":
-      return "AI bot";
+      return "Chat bot";
     case "dynamic-canvas":
       return "Dynamic canvas";
     case "utility-panel":
@@ -440,8 +447,6 @@ export function extensionCardDetails(annotation: ExtensionAnnotation, limit = 6)
 type ExtensionPresentationKind =
   | "links-task-board"
   | "pub-quiz"
-  | "ai-chatbot"
-  | "ai-assistant-canvas"
   | "decision-polls"
   | "generic";
 
@@ -474,17 +479,12 @@ export function extensionPresentation(annotation: ExtensionAnnotation): Extensio
   if (plugin === "links-task-board" || payload?.namespace === "urn:waddle:links-task-board:1") {
     return linksTaskBoardPresentation(annotation, payload);
   }
-  if (plugin === "ai-chatbot" || payload?.namespace === "urn:waddle:ai-chatbot:1") {
-    return aiChatbotPresentation(annotation, payload);
-  }
-  if (plugin === "ai-assistant-canvas" || payload?.namespace === "urn:waddle:ai-assistant-canvas:1") {
-    return canvasPresentation(annotation, payload);
-  }
+  const summary = genericExtensionSummary(annotation, payload);
   return {
     kind: "generic",
     label: extensionSurfaceLabel(annotation.surfaceKind),
     title: annotation.title,
-    ...(annotation.summary ? { summary: annotation.summary } : {}),
+    ...(summary ? { summary } : {}),
     options: [],
     details: extensionCardDetails(annotation),
   };
@@ -515,6 +515,17 @@ function payloadAttr(payload: ExtensionPayloadElement | undefined, ...names: str
     const value = payload?.attributes[name]?.trim();
     if (value) return value;
   }
+  return undefined;
+}
+
+function genericExtensionSummary(
+  annotation: ExtensionAnnotation,
+  payload: ExtensionPayloadElement | undefined,
+): string | undefined {
+  const summary = annotation.summary?.trim();
+  if (summary && summary !== annotation.payloadNamespace) return summary;
+  const text = payload ? payloadText(payload) : null;
+  if (text && text !== annotation.title) return text;
   return undefined;
 }
 
@@ -575,36 +586,5 @@ function linksTaskBoardPresentation(
     ...(url ? { primaryValue: url } : {}),
     options: [],
     details: extensionCardDetails(annotation, 4),
-  };
-}
-
-function aiChatbotPresentation(
-  annotation: ExtensionAnnotation,
-  payload: ExtensionPayloadElement | undefined,
-): ExtensionPresentation {
-  const answer = childText(payload, "answer") ?? childText(payload, "response") ?? payload?.text?.trim();
-  return {
-    kind: "ai-chatbot",
-    label: "AI answer",
-    title: annotation.title,
-    ...(answer ? { summary: answer } : annotation.summary ? { summary: annotation.summary } : {}),
-    options: [],
-    details: extensionCardDetails(annotation, 3),
-  };
-}
-
-function canvasPresentation(
-  annotation: ExtensionAnnotation,
-  payload: ExtensionPayloadElement | undefined,
-): ExtensionPresentation {
-  const prompt = childText(payload, "prompt") ?? payloadAttr(payload, "prompt") ?? annotation.title;
-  const render = payloadAttr(payload, "render-id", "artifact-digest", "artifact");
-  return {
-    kind: "ai-assistant-canvas",
-    label: "Canvas",
-    title: prompt,
-    ...(render ? { summary: render } : annotation.summary ? { summary: annotation.summary } : {}),
-    options: [],
-    details: extensionCardDetails(annotation, 3),
   };
 }

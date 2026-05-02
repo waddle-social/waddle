@@ -62,6 +62,30 @@
 {{- fail (printf "extensions.modules[%d].configSecretFiles[%s] must be an absolute file path" $index $key) -}}
 {{- end -}}
 {{- end -}}
+{{- if eq $name "ai-chatbot" -}}
+{{- $moduleConfig := default (dict) $module.config -}}
+{{- $endpoint := toString (required (printf "extensions.modules[%d].config.endpoint is required for ai-chatbot" $index) (get $moduleConfig "endpoint")) -}}
+{{- if not (hasPrefix "https://" $endpoint) -}}
+{{- fail (printf "extensions.modules[%d].config.endpoint for ai-chatbot must use HTTPS" $index) -}}
+{{- end -}}
+{{- $_ := required (printf "extensions.modules[%d].config.model is required for ai-chatbot" $index) (get $moduleConfig "model") -}}
+{{- if and (not (get $moduleConfig "api_key")) (not (get $configSecretFiles "api_key")) -}}
+{{- fail (printf "extensions.modules[%d] ai-chatbot requires config.api_key or configSecretFiles.api_key" $index) -}}
+{{- end -}}
+{{- $allowedOrigins := default (list) $module.allowedHttpOrigins -}}
+{{- if eq (len $allowedOrigins) 0 -}}
+{{- fail (printf "extensions.modules[%d].allowedHttpOrigins is required for ai-chatbot" $index) -}}
+{{- end -}}
+{{- $endpointAllowed := false -}}
+{{- range $origin := $allowedOrigins -}}
+{{- if hasPrefix (toString $origin) $endpoint -}}
+{{- $endpointAllowed = true -}}
+{{- end -}}
+{{- end -}}
+{{- if not $endpointAllowed -}}
+{{- fail (printf "extensions.modules[%d].allowedHttpOrigins must include the ai-chatbot provider origin" $index) -}}
+{{- end -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 

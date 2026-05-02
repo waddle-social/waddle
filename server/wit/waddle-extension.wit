@@ -121,7 +121,14 @@ interface types {
     enum extension-capability {
         message-enrich,
         message-observe,
-        bot-groupchat-send,
+        host-channels-read,
+        host-spaces-read,
+        host-members-read,
+        host-presence-read,
+        host-mam-read,
+        host-roster-read,
+        host-message-send,
+        outbound-http-request,
         commands,
         launch,
         pubsub-publish,
@@ -359,6 +366,7 @@ interface types {
 
     record command-invocation {
         waddle-id: waddle-id,
+        requester: full-jid,
         command-node: command-node,
         session-id: option<command-session-id>,
         action: option<command-action>,
@@ -368,7 +376,7 @@ interface types {
 
     record launch-invocation {
         context: launch-context,
-        requester: waddle-id,
+        requester: full-jid,
         launch-id: launch-id,
         session-id: option<command-session-id>,
         action: option<command-action>,
@@ -388,18 +396,12 @@ interface types {
         payload: extension-payload,
     }
 
-    record bot-groupchat-response {
-        body: display-text,
-        room: room-jid,
-        thread-id: option<thread-id>,
-        reply-to: option<reply-target>,
-    }
-
     variant extension-effect {
         enrich-message(extension-envelope),
-        bot-groupchat-response(bot-groupchat-response),
         publish-pubsub(pubsub-publish),
         reference-artifact(artifact-reference),
+        command-form(data-form),
+        host-warning(display-text),
         noop,
     }
 
@@ -418,6 +420,212 @@ interface types {
         code: extension-error-code,
         message: display-text,
     }
+
+    record bare-jid {
+        value: string,
+    }
+
+    record jid {
+        value: string,
+    }
+
+    record channel-summary {
+        room: room-jid,
+        name: option<display-text>,
+        description: option<display-text>,
+    }
+
+    record list-channels-request {
+        reserved: option<string>,
+    }
+
+    record list-channels-response {
+        channels: list<channel-summary>,
+    }
+
+    record space-summary {
+        service: bare-jid,
+        node: pubsub-node,
+        name: option<display-text>,
+        description: option<display-text>,
+        channels: list<room-jid>,
+    }
+
+    record list-spaces-request {
+        reserved: option<string>,
+    }
+
+    record list-spaces-response {
+        spaces: list<space-summary>,
+    }
+
+    enum muc-role {
+        none,
+        visitor,
+        participant,
+        moderator,
+    }
+
+    enum muc-affiliation {
+        none,
+        outcast,
+        member,
+        admin,
+        owner,
+    }
+
+    record room-member {
+        room: room-jid,
+        jid: jid,
+        nick: option<display-text>,
+        role: muc-role,
+        affiliation: muc-affiliation,
+    }
+
+    record list-room-members-request {
+        room: room-jid,
+    }
+
+    record list-room-members-response {
+        members: list<room-member>,
+    }
+
+    enum presence-availability {
+        available,
+        unavailable,
+    }
+
+    enum presence-show {
+        chat,
+        away,
+        xa,
+        dnd,
+    }
+
+    record presence-state {
+        jid: jid,
+        availability: presence-availability,
+        show: option<presence-show>,
+        status: option<display-text>,
+        priority: s32,
+    }
+
+    record get-presence-request {
+        subject: bare-jid,
+    }
+
+    record get-presence-response {
+        resources: list<presence-state>,
+    }
+
+    enum roster-subscription {
+        none,
+        subscribed-to,
+        subscribed-from,
+        both,
+        remove,
+    }
+
+    enum roster-ask {
+        subscribe,
+    }
+
+    record roster-entry {
+        jid: bare-jid,
+        name: option<display-text>,
+        subscription: roster-subscription,
+        ask: option<roster-ask>,
+        groups: list<display-text>,
+    }
+
+    record get-roster-request {
+        owner: bare-jid,
+    }
+
+    record get-roster-response {
+        entries: list<roster-entry>,
+    }
+
+    variant mam-target {
+        room(room-jid),
+        conversation(bare-jid),
+    }
+
+    record mam-query {
+        target: mam-target,
+        start: option<timestamp>,
+        end: option<timestamp>,
+        thread-id: option<thread-id>,
+        sender: option<bare-jid>,
+        text: option<display-text>,
+        max-results: u32,
+    }
+
+    record archived-message {
+        stanza-id: stanza-id,
+        from-jid: jid,
+        to-jid: jid,
+        sent-at: timestamp,
+        body: option<display-text>,
+        thread-id: option<thread-id>,
+        reply-to: option<reply-target>,
+    }
+
+    record mam-query-response {
+        messages: list<archived-message>,
+        complete: bool,
+    }
+
+    variant message-target {
+        muc(room-jid),
+        direct(bare-jid),
+    }
+
+    record send-message-request {
+        target: message-target,
+        body: display-text,
+        thread-id: option<thread-id>,
+        reply-to: option<reply-target>,
+    }
+
+    record send-message-response {
+        stanza-id: stanza-id,
+    }
+
+    enum host-tool-error-code {
+        denied,
+        invalid-request,
+        not-found,
+        unsupported,
+        temporary-failure,
+    }
+
+    record host-tool-error {
+        code: host-tool-error-code,
+        message: display-text,
+    }
+
+    enum http-method {
+        get,
+        post,
+    }
+
+    record http-header {
+        name: string,
+        value: string,
+    }
+
+    record outgoing-http-request {
+        method: http-method,
+        url: url,
+        headers: list<http-header>,
+        body: option<string>,
+    }
+
+    record http-response {
+        status: u16,
+        body: string,
+    }
 }
 
 interface framework {
@@ -430,9 +638,36 @@ interface lifecycle {
     init: func(config: string) -> result<extension-manifest, string>;
 }
 
+interface host-tools {
+    use types.{
+        get-presence-request, get-presence-response, get-roster-request,
+        get-roster-response, host-tool-error, list-channels-request,
+        list-channels-response, list-room-members-request,
+        list-room-members-response, list-spaces-request, list-spaces-response,
+        mam-query, mam-query-response, send-message-request, send-message-response
+    };
+
+    list-channels: func(request: list-channels-request) -> result<list-channels-response, host-tool-error>;
+    list-spaces: func(request: list-spaces-request) -> result<list-spaces-response, host-tool-error>;
+    list-room-members: func(request: list-room-members-request) -> result<list-room-members-response, host-tool-error>;
+    get-presence: func(request: get-presence-request) -> result<get-presence-response, host-tool-error>;
+    get-roster: func(request: get-roster-request) -> result<get-roster-response, host-tool-error>;
+    query-mam: func(query: mam-query) -> result<mam-query-response, host-tool-error>;
+    send-message: func(request: send-message-request) -> result<send-message-response, host-tool-error>;
+}
+
+interface runtime {
+    use types.{host-tool-error, outgoing-http-request, http-response};
+
+    get-config: func() -> string;
+    http-request: func(request: outgoing-http-request) -> result<http-response, host-tool-error>;
+}
+
 world waddle-extension {
     import wasi:logging/logging@0.1.0-draft;
     import wasi:clocks/monotonic-clock@0.2.0;
+    import host-tools;
+    import runtime;
 
     export lifecycle;
     export framework;

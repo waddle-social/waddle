@@ -12,13 +12,11 @@ import {
   MessageSquare,
   Lock,
   AlertCircle,
-  Bot,
   CheckCircle2,
   ClipboardList,
   Gamepad2,
   LayoutDashboard,
   LoaderCircle,
-  Sparkles,
 } from "lucide-vue-next";
 import type { JSONContent } from "@tiptap/core";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
@@ -443,6 +441,10 @@ const isMentioned = computed(() => {
 });
 const isForumTopic = computed(() => props.message.forumPostKind === "topic" && !!props.message.forumTitle);
 const isForumReply = computed(() => props.message.forumPostKind === "reply");
+// XEP-0461 §3.2: groupchat replies require the room-assigned XEP-0359
+// stanza-id. Hide the reply action on messages that lack one rather than
+// surface a button that will refuse on click.
+const canReplyToMessage = computed(() => !!props.message.replyableId);
 const forumThreadLabel = computed(() =>
   props.message.forumPostKind === "topic"
     ? props.message.forumTitle
@@ -878,8 +880,7 @@ watch(
           <span class="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-md bg-background text-foreground ring-1 ring-border">
             <ClipboardList v-if="extensionPresentation(annotation).kind === 'links-task-board' || annotation.surfaceKind === 'board'" class="h-4 w-4 text-primary/80" aria-hidden="true" />
             <Gamepad2 v-else-if="extensionPresentation(annotation).kind === 'pub-quiz' || annotation.surfaceKind === 'game'" class="h-4 w-4 text-success" aria-hidden="true" />
-            <Bot v-else-if="extensionPresentation(annotation).kind === 'ai-chatbot' || annotation.surfaceKind === 'chat-bot'" class="h-4 w-4 text-primary/80" aria-hidden="true" />
-            <Sparkles v-else-if="extensionPresentation(annotation).kind === 'ai-assistant-canvas' || annotation.surfaceKind === 'dynamic-canvas'" class="h-4 w-4 text-warning" aria-hidden="true" />
+            <MessageSquare v-else-if="annotation.surfaceKind === 'chat-bot'" class="h-4 w-4 text-primary/80" aria-hidden="true" />
             <LayoutDashboard v-else class="h-4 w-4" aria-hidden="true" />
           </span>
           <span class="min-w-0 flex-1">
@@ -1255,6 +1256,7 @@ watch(
         />
       </div>
       <button
+        v-if="canReplyToMessage"
         type="button"
         class="h-8 w-8 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-all duration-150"
         title="Reply"
@@ -1354,6 +1356,7 @@ watch(
           </div>
 
           <button
+            v-if="canReplyToMessage"
             type="button"
             class="type-field w-full flex items-center gap-3 px-3 h-12 rounded-lg hover:bg-muted active:bg-muted transition-colors text-left"
             @click="startReplyFromMenu"

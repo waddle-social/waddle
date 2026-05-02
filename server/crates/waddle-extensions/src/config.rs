@@ -4,6 +4,8 @@ use oci_client::Reference;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::types::ExtensionCapability;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExtensionModuleConfig {
     pub name: String,
@@ -23,6 +25,14 @@ pub struct ExtensionModuleConfig {
     pub namespace: String,
     #[serde(default)]
     pub config: Value,
+    /// Host/operator-granted capabilities for this module. The runtime grants
+    /// only the intersection of this list and the extension manifest.
+    #[serde(default, alias = "capabilityGrants")]
+    pub capability_grants: Vec<ExtensionCapability>,
+    /// HTTPS origins allowed for `outbound.http.request`, e.g.
+    /// `https://api.example.com`. Empty means no outbound HTTP targets.
+    #[serde(default, alias = "allowedHttpOrigins")]
+    pub allowed_http_origins: Vec<String>,
     /// Optional map of config key -> file path. Each file is read at startup and
     /// injected into `config` as a string value under the given key.
     ///
@@ -190,6 +200,8 @@ mod tests {
 
     use serde_json::Value;
 
+    use crate::types::ExtensionCapability;
+
     use super::{ExtensionConfig, ExtensionModuleConfig};
 
     const TEST_DIGEST: &str =
@@ -293,7 +305,9 @@ mod tests {
                     "name": "example-extension",
                     "registry": "ghcr.io/waddle-social/waddle/extensions/example-extension",
                     "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                    "namespace": "urn:example:extension:1"
+                    "namespace": "urn:example:extension:1",
+                    "capabilityGrants": ["commands", "outbound.http.request"],
+                    "allowedHttpOrigins": ["https://api.example.test"]
                 }]
             }"#,
         );
@@ -302,6 +316,17 @@ mod tests {
         assert_eq!(config.modules[0].digest.as_deref(), Some(TEST_DIGEST));
         assert!(config.modules[0].tag.is_none());
         assert!(config.modules[0].local_path.is_none());
+        assert_eq!(
+            config.modules[0].capability_grants,
+            vec![
+                ExtensionCapability::Commands,
+                ExtensionCapability::OutboundHttpRequest,
+            ]
+        );
+        assert_eq!(
+            config.modules[0].allowed_http_origins,
+            vec!["https://api.example.test"]
+        );
 
         if let Some(previous) = previous {
             std::env::set_var("WADDLE_EXTENSIONS_JSON", previous);
@@ -319,6 +344,8 @@ mod tests {
             tag: None,
             namespace: "urn:example:extension:1".to_string(),
             config: Value::Object(Default::default()),
+            capability_grants: Vec::new(),
+            allowed_http_origins: Vec::new(),
             config_secret_files: Default::default(),
             local_path: None,
         };
@@ -339,6 +366,8 @@ mod tests {
             tag: None,
             namespace: "urn:example:extension:1".to_string(),
             config: Value::Object(Default::default()),
+            capability_grants: Vec::new(),
+            allowed_http_origins: Vec::new(),
             config_secret_files: Default::default(),
             local_path: None,
         };
@@ -358,6 +387,8 @@ mod tests {
             tag: None,
             namespace: "urn:example:extension:1".to_string(),
             config: Value::Object(Default::default()),
+            capability_grants: Vec::new(),
+            allowed_http_origins: Vec::new(),
             config_secret_files: Default::default(),
             local_path: Some("/srv/waddle/extensions/example-extension.wasm".to_string()),
         };

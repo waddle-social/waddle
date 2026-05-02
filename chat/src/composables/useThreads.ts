@@ -3,7 +3,13 @@ import type { TimelineMessage } from "@/lib/chat-ui";
 
 export interface ThreadEntry {
   threadId: string;
-  /** Message whose id === threadId. Waddle roots don't carry `<thread>`, so we resolve via id lookup. null when the root isn't in the loaded window. */
+  /**
+   * Resolved thread root. Two paths:
+   *   - Waddle's implicit-root convention: the message whose id equals the
+   *     thread id (root carries no `<thread/>`).
+   *   - Standard XEP-0201: the earliest message bearing this thread id.
+   * `null` when the root isn't in the loaded window.
+   */
   root: TimelineMessage | null;
   /** Messages whose threadId === this entry's threadId, in chronological order, excluding the root. */
   directChildren: TimelineMessage[];
@@ -56,9 +62,25 @@ function buildIndex(messages: readonly TimelineMessage[]): ThreadIndex {
   const entries = new Map<string, ThreadEntry>();
   for (const [threadId, group] of byThread) {
     group.sort(byCreatedAt);
-    // Root messages in this codebase don't set `<thread>` — we find them by
-    // matching a child's threadId against any loaded message's id.
-    const root = byId.get(threadId) ?? null;
+    // Resolve the thread root via two paths, in order:
+    //   1. Waddle's implicit-root convention (`root.id === threadId`, no
+    //      `<thread/>` on the root): the loaded message id matches the thread
+    //      id directly.
+    //   2. Standard XEP-0201, where the thread id is an arbitrary identifier
+    //      decoupled from any message id and the root carries
+    //      `<thread>threadId</thread>` itself: the earliest message bearing
+    //      this thread id that is *not* a reply to another member of the
+    //      thread (or to the implicit-root id) is the root candidate.
+    // The fallback chain leaves the root null when only XEP-0461 children of
+    // an unloaded root are visible — never promote a known reply to a root.
+    const groupMembers = new Set(group.map((m) => m.id));
+    const standardRoot = group.find((m) => {
+      const replyId = m.replyTo?.id;
+      if (!replyId) return true;
+      if (replyId === threadId) return false;
+      return !groupMembers.has(replyId);
+    }) ?? null;
+    const root = byId.get(threadId) ?? standardRoot;
     const directChildren = root ? group.filter((m) => m.id !== root.id) : group.slice();
     const lastTs = group[group.length - 1]?.createdAt ?? root?.createdAt ?? "";
     entries.set(threadId, {

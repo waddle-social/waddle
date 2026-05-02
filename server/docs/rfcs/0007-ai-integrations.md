@@ -1,8 +1,14 @@
 # RFC-0007: AI Features
 
+Status: Superseded by the extension-host-tool model in
+[`RFC-0014`](0014-bot-framework.md). AI integrations must live in extensions;
+the server and chat app expose only XMPP-native extension capabilities and must
+not add a deployment-wide AI provider abstraction.
+
 ## Summary
 
-Waddle Social integrates AI capabilities for message summarization, content moderation, translation, and bot/assistant frameworks.
+Waddle Social integrates AI capabilities for message summarization, content
+moderation, translation, and bot/assistant frameworks through extensions.
 
 ## Motivation
 
@@ -16,7 +22,11 @@ AI can enhance communication by:
 
 ### AI Provider Architecture
 
-Abstract AI provider interface supporting multiple backends:
+The server MUST NOT implement this provider abstraction. Provider-specific work
+belongs inside an extension, which can request approved XMPP-native host tools
+for channel discovery, roster/presence, message sending, and MAM context.
+
+Historical sketch, retained only as non-normative context:
 
 ```rust
 trait AIProvider {

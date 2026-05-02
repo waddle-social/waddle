@@ -274,3 +274,75 @@ async fn websocket_blocking_filters_presence_broadcast_to_subscriber() {
     bob.close().await;
     alice.close().await;
 }
+
+#[tokio::test]
+async fn websocket_blocking_filters_presence_broadcast_when_subscriber_blocks_sender() {
+    let (_server, mut alice, mut bob) = connect_alice_bob().await;
+
+    send_roster_get(&mut bob, "bob-presence-roster").await;
+    alice
+        .send(r#"<presence xmlns="jabber:client"/>"#)
+        .await
+        .expect("alice available");
+
+    bob.send(r#"<presence xmlns="jabber:client" type="subscribe" to="alice@localhost"/>"#)
+        .await
+        .expect("send subscribe");
+    let subscribe = alice
+        .recv_matching(|frame| {
+            frame.contains("type=\"subscribe\"") || frame.contains("type='subscribe'")
+        })
+        .await
+        .expect("alice subscribe request");
+    assert!(
+        subscribe.contains("from=\"bob@localhost") || subscribe.contains("from='bob@localhost"),
+        "expected bob subscribe request, got: {subscribe}"
+    );
+
+    alice
+        .send(r#"<presence xmlns="jabber:client" type="subscribed" to="bob@localhost"/>"#)
+        .await
+        .expect("send subscribed");
+    let subscribed = bob
+        .recv_matching(|frame| {
+            frame.contains("type=\"subscribed\"") || frame.contains("type='subscribed'")
+        })
+        .await
+        .expect("bob subscribed response");
+    assert!(
+        subscribed.contains("from=\"alice@localhost")
+            || subscribed.contains("from='alice@localhost"),
+        "expected alice subscribed response, got: {subscribed}"
+    );
+
+    bob.send(
+        r#"<iq xmlns="jabber:client" type="set" id="presence-broadcast-block-alice"><block xmlns="urn:xmpp:blocking"><item jid="alice@localhost"/></block></iq>"#,
+    )
+    .await
+    .expect("send block set");
+    let block_response = bob
+        .recv_matching(|frame| frame.contains("presence-broadcast-block-alice"))
+        .await
+        .expect("blocking set response");
+    assert!(
+        block_response.contains("type=\"result\"") || block_response.contains("type='result'"),
+        "expected blocking result, got: {block_response}"
+    );
+
+    alice
+        .send(
+            r#"<presence xmlns="jabber:client"><show>chat</show><status>blocked by subscriber</status><priority>7</priority></presence>"#,
+        )
+        .await
+        .expect("send available presence");
+    assert_no_frame_matching(
+        &mut bob,
+        Duration::from_millis(250),
+        |frame| frame.contains("blocked by subscriber"),
+        "bob should not receive alice broadcast presence after blocking alice",
+    )
+    .await;
+
+    bob.close().await;
+    alice.close().await;
+}

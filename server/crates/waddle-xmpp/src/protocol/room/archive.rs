@@ -21,9 +21,11 @@ use super::context::RoomContext;
 use super::traits::{RoomHandler, RoomHandlerOutcome};
 use crate::xep::xep0424::{extract_retraction_from_message, RetractionKind};
 use crate::xep::{
-    has_file_sharing, is_moderation_request_message, is_moderation_result_message,
-    is_reaction_message, is_retraction_message, is_sticker_message, should_skip_storage,
+    extract_forum_action, has_file_sharing, is_moderation_request_message,
+    is_moderation_result_message, is_reaction_message, is_retraction_message, is_sticker_message,
+    should_skip_storage,
 };
+use waddle_xmpp_core::xep0201::{thread_info_from_message_in_stanza_ns, CLIENT_STANZA_NS};
 use xmpp_parsers::message::{Message, MessageType};
 
 /// XEP-0313 archive handler for the room handler chain.
@@ -79,6 +81,8 @@ pub fn is_archivable(message: &Message) -> bool {
         || is_retraction_message(message)
         || is_moderation_request_message(message)
         || is_moderation_result_message(message)
+        || thread_info_from_message_in_stanza_ns(message, CLIENT_STANZA_NS).is_some()
+        || extract_forum_action(message).is_some()
         || has_file_sharing(message)
         || is_sticker_message(message)
 }
@@ -184,6 +188,103 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, OutboundEvent::ArchiveGroupchat { .. })),
             "bodyless protocol-event-less message is not archived"
+        );
+    }
+
+    #[test]
+    fn xep_0313_archives_bodyless_forum_thread_create_metadata() {
+        let room = bare("team@conf.example.com");
+        let sender = full("alice@example.com/web");
+        let mut msg = groupchat(&room, &sender, "");
+        crate::xep::xep0508::set_thread_create(
+            &mut msg,
+            &crate::xep::xep0508::ThreadCreate::new("Roadmap"),
+        );
+
+        let events = run(&room, &sender, &mut msg);
+
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, OutboundEvent::ArchiveGroupchat { .. })),
+            "forum metadata is durable thread UI state and must be archived"
+        );
+    }
+
+    #[test]
+    fn xep_0313_archives_bodyless_standard_muc_thread_metadata() {
+        let room = bare("team@conf.example.com");
+        let sender = full("alice@example.com/web");
+        let mut msg = groupchat(&room, &sender, "");
+        waddle_xmpp_core::xep0201::set_thread_id(&mut msg, "topic-root");
+
+        let events = run(&room, &sender, &mut msg);
+
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, OutboundEvent::ArchiveGroupchat { .. })),
+            "XEP-0201 thread metadata is durable MUC UI state and must be archived"
+        );
+    }
+
+    #[test]
+    fn xep_0313_archives_bodyless_forum_thread_reply_metadata() {
+        let room = bare("team@conf.example.com");
+        let sender = full("alice@example.com/web");
+        let mut msg = groupchat(&room, &sender, "");
+        crate::xep::xep0508::set_thread_reply(
+            &mut msg,
+            &crate::xep::xep0508::ThreadReply::new("topic-root"),
+        );
+
+        let events = run(&room, &sender, &mut msg);
+
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, OutboundEvent::ArchiveGroupchat { .. })),
+            "forum reply metadata is durable thread UI state and must be archived"
+        );
+    }
+
+    #[test]
+    fn xep_0313_skips_malformed_bodyless_forum_metadata() {
+        let room = bare("team@conf.example.com");
+        let sender = full("alice@example.com/web");
+        let mut msg = groupchat(&room, &sender, "");
+        msg.payloads
+            .push(Element::builder("thread-create", crate::xep::xep0508::NS_FORUMS).build());
+        msg.payloads.push(
+            Element::builder("thread-create", crate::xep::xep0508::NS_FORUMS)
+                .attr("title", "")
+                .build(),
+        );
+        msg.payloads.push(
+            Element::builder("thread-create", crate::xep::xep0508::NS_FORUMS)
+                .attr("title", "   ")
+                .build(),
+        );
+        msg.payloads
+            .push(Element::builder("thread-reply", crate::xep::xep0508::NS_FORUMS).build());
+        msg.payloads.push(
+            Element::builder("thread-reply", crate::xep::xep0508::NS_FORUMS)
+                .attr("thread-id", "")
+                .build(),
+        );
+        msg.payloads.push(
+            Element::builder("thread-reply", crate::xep::xep0508::NS_FORUMS)
+                .attr("thread-id", "   ")
+                .build(),
+        );
+
+        let events = run(&room, &sender, &mut msg);
+
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, OutboundEvent::ArchiveGroupchat { .. })),
+            "malformed forum metadata must not become durable MAM state"
         );
     }
 }

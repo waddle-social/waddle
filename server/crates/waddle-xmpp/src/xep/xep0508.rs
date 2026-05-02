@@ -167,12 +167,18 @@ pub fn extract_forum_action(msg: &Message) -> Option<ForumAction> {
         }
         match elem.name() {
             "thread-create" => {
-                let title = elem.attr("title").filter(|t| !t.is_empty())?.to_owned();
-                return Some(ForumAction::CreateThread(ThreadCreate::new(title)));
+                if let Some(title) = elem.attr("title").map(str::trim).filter(|t| !t.is_empty()) {
+                    return Some(ForumAction::CreateThread(ThreadCreate::new(title)));
+                }
             }
             "thread-reply" => {
-                let thread_id = elem.attr("thread-id").filter(|t| !t.is_empty())?.to_owned();
-                return Some(ForumAction::Reply(ThreadReply::new(thread_id)));
+                if let Some(thread_id) = elem
+                    .attr("thread-id")
+                    .map(str::trim)
+                    .filter(|t| !t.is_empty())
+                {
+                    return Some(ForumAction::Reply(ThreadReply::new(thread_id)));
+                }
             }
             _ => {}
         }
@@ -251,6 +257,20 @@ mod tests {
     fn test_extract_thread_reply() {
         let xml = "<message xmlns='jabber:client' type='groupchat'>\
                     <body>Great guide!</body>\
+                    <thread-reply xmlns='urn:waddle:forums:0' thread-id='thread-42'/>\
+                    </message>";
+        let msg =
+            Message::try_from(xml.parse::<Element>().expect("valid xml")).expect("valid message");
+
+        let action = extract_forum_action(&msg).expect("has action");
+        assert!(matches!(action, ForumAction::Reply(ref tr) if tr.thread_id == "thread-42"));
+    }
+
+    #[test]
+    fn test_extract_skips_malformed_forum_payloads() {
+        let xml = "<message xmlns='jabber:client' type='groupchat'>\
+                    <thread-create xmlns='urn:waddle:forums:0' title=''/>\
+                    <thread-reply xmlns='urn:waddle:forums:0' thread-id='   '/>\
                     <thread-reply xmlns='urn:waddle:forums:0' thread-id='thread-42'/>\
                     </message>";
         let msg =

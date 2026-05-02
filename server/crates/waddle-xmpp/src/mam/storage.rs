@@ -178,6 +178,26 @@ impl MamStorage for InMemoryMamStorage {
             .filter(|(jid, _)| jid == archive_jid)
             .map(|(_, message)| message.clone())
             .collect();
+        let before_cursor = match query.before_id.as_deref().filter(|id| !id.is_empty()) {
+            Some(before_id) => Some(
+                messages
+                    .iter()
+                    .find(|message| message.id == before_id)
+                    .cloned()
+                    .ok_or_else(|| MamStorageError::NotFound(before_id.to_string()))?,
+            ),
+            None => None,
+        };
+        let after_cursor = match query.after_id.as_deref() {
+            Some(after_id) => Some(
+                messages
+                    .iter()
+                    .find(|message| message.id == after_id)
+                    .cloned()
+                    .ok_or_else(|| MamStorageError::NotFound(after_id.to_string()))?,
+            ),
+            None => None,
+        };
 
         if let Some(start) = query.start {
             messages.retain(|message| message.timestamp >= start);
@@ -197,17 +217,20 @@ impl MamStorage for InMemoryMamStorage {
         }
         let count = Some(u32::try_from(messages.len()).unwrap_or(u32::MAX));
 
-        if let Some(before_id) = query.before_id.as_deref().filter(|id| !id.is_empty()) {
-            messages.retain(|message| message.id.as_str() < before_id);
+        if let Some(cursor) = before_cursor {
+            messages.retain(|message| archive_order_before(message, &cursor));
         }
-        if let Some(after_id) = query.after_id.as_deref() {
-            messages.retain(|message| message.id.as_str() > after_id);
+        if let Some(cursor) = after_cursor {
+            messages.retain(|message| archive_order_after(message, &cursor));
         }
 
+        // XEP-0313 §archive_order: results MUST be in chronological (received)
+        // order. Order by timestamp first; archive id is the tiebreak for
+        // messages that share a timestamp.
         if uses_backward_pagination(query) {
-            messages.sort_by(|a, b| b.id.cmp(&a.id));
+            messages.sort_by(|a, b| b.timestamp.cmp(&a.timestamp).then_with(|| b.id.cmp(&a.id)));
         } else {
-            messages.sort_by(|a, b| a.id.cmp(&b.id));
+            messages.sort_by(|a, b| a.timestamp.cmp(&b.timestamp).then_with(|| a.id.cmp(&b.id)));
         }
 
         let actual_limit = query.max.unwrap_or(100).min(500) as usize;
@@ -679,6 +702,42 @@ fn push_postgres_mam_filters<'args>(
     push_common_mam_filters!(builder, query, with_filter);
 }
 
+async fn fetch_sqlite_cursor(
+    pool: &SqlitePool,
+    archive_jid: &str,
+    cursor_id: &str,
+) -> Result<ArchivedMessage, MamStorageError> {
+    let mut builder = QueryBuilder::<Sqlite>::new(format!(
+        "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE room_jid = "
+    ));
+    builder.push_bind(archive_jid);
+    builder.push(" AND id = ").push_bind(cursor_id);
+
+    let row = builder.build().fetch_optional(pool).await?;
+    row.as_ref()
+        .map(decode_sqlite_message_row)
+        .transpose()?
+        .ok_or_else(|| MamStorageError::NotFound(cursor_id.to_string()))
+}
+
+async fn fetch_postgres_cursor(
+    pool: &PgPool,
+    archive_jid: &str,
+    cursor_id: &str,
+) -> Result<ArchivedMessage, MamStorageError> {
+    let mut builder = QueryBuilder::<Postgres>::new(format!(
+        "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE room_jid = "
+    ));
+    builder.push_bind(archive_jid);
+    builder.push(" AND id = ").push_bind(cursor_id);
+
+    let row = builder.build().fetch_optional(pool).await?;
+    row.as_ref()
+        .map(decode_postgres_message_row)
+        .transpose()?
+        .ok_or_else(|| MamStorageError::NotFound(cursor_id.to_string()))
+}
+
 fn finalize_result(
     mut messages: Vec<ArchivedMessage>,
     query: &MamQuery,
@@ -705,6 +764,16 @@ fn finalize_result(
         last_id,
         count,
     }
+}
+
+fn archive_order_before(message: &ArchivedMessage, cursor: &ArchivedMessage) -> bool {
+    message.timestamp < cursor.timestamp
+        || (message.timestamp == cursor.timestamp && message.id < cursor.id)
+}
+
+fn archive_order_after(message: &ArchivedMessage, cursor: &ArchivedMessage) -> bool {
+    message.timestamp > cursor.timestamp
+        || (message.timestamp == cursor.timestamp && message.id > cursor.id)
 }
 
 fn matches_thread_filter(message: &ArchivedMessage, thread_id: &str) -> bool {
@@ -916,15 +985,33 @@ impl MamStorage for SqlxMamStorage {
                 ));
                 push_sqlite_mam_filters(&mut builder, archive_jid, query, with_filter.as_deref());
                 if let Some(before_id) = query.before_id.as_deref().filter(|id| !id.is_empty()) {
-                    builder.push(" AND id < ").push_bind(before_id);
+                    let cursor = fetch_sqlite_cursor(pool, archive_jid, before_id).await?;
+                    builder
+                        .push(" AND (timestamp < ")
+                        .push_bind(cursor.timestamp.to_rfc3339())
+                        .push(" OR (timestamp = ")
+                        .push_bind(cursor.timestamp.to_rfc3339())
+                        .push(" AND id < ")
+                        .push_bind(cursor.id)
+                        .push("))");
                 }
                 if let Some(after_id) = query.after_id.as_deref() {
-                    builder.push(" AND id > ").push_bind(after_id);
+                    let cursor = fetch_sqlite_cursor(pool, archive_jid, after_id).await?;
+                    builder
+                        .push(" AND (timestamp > ")
+                        .push_bind(cursor.timestamp.to_rfc3339())
+                        .push(" OR (timestamp = ")
+                        .push_bind(cursor.timestamp.to_rfc3339())
+                        .push(" AND id > ")
+                        .push_bind(cursor.id)
+                        .push("))");
                 }
+                // XEP-0313 §archive_order: chronological order primary, archive
+                // id as deterministic tiebreak for tied timestamps.
                 builder.push(if uses_backward_pagination(query) {
-                    " ORDER BY id DESC"
+                    " ORDER BY timestamp DESC, id DESC"
                 } else {
-                    " ORDER BY id ASC"
+                    " ORDER BY timestamp ASC, id ASC"
                 });
                 builder.push(" LIMIT ").push_bind(limit);
 
@@ -959,15 +1046,33 @@ impl MamStorage for SqlxMamStorage {
                 ));
                 push_postgres_mam_filters(&mut builder, archive_jid, query, with_filter.as_deref());
                 if let Some(before_id) = query.before_id.as_deref().filter(|id| !id.is_empty()) {
-                    builder.push(" AND id < ").push_bind(before_id);
+                    let cursor = fetch_postgres_cursor(pool, archive_jid, before_id).await?;
+                    builder
+                        .push(" AND (timestamp < ")
+                        .push_bind(cursor.timestamp)
+                        .push(" OR (timestamp = ")
+                        .push_bind(cursor.timestamp)
+                        .push(" AND id < ")
+                        .push_bind(cursor.id)
+                        .push("))");
                 }
                 if let Some(after_id) = query.after_id.as_deref() {
-                    builder.push(" AND id > ").push_bind(after_id);
+                    let cursor = fetch_postgres_cursor(pool, archive_jid, after_id).await?;
+                    builder
+                        .push(" AND (timestamp > ")
+                        .push_bind(cursor.timestamp)
+                        .push(" OR (timestamp = ")
+                        .push_bind(cursor.timestamp)
+                        .push(" AND id > ")
+                        .push_bind(cursor.id)
+                        .push("))");
                 }
+                // XEP-0313 §archive_order: chronological order primary, archive
+                // id as deterministic tiebreak for tied timestamps.
                 builder.push(if uses_backward_pagination(query) {
-                    " ORDER BY id DESC"
+                    " ORDER BY timestamp DESC, id DESC"
                 } else {
-                    " ORDER BY id ASC"
+                    " ORDER BY timestamp ASC, id ASC"
                 });
                 builder.push(" LIMIT ").push_bind(limit);
 
@@ -1203,6 +1308,7 @@ impl MamStorage for SqlxMamStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Duration as ChronoDuration;
     use std::path::PathBuf;
 
     async fn create_test_storage() -> SqlxMamStorage {
@@ -1368,6 +1474,223 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_sqlite_rsm_after_uses_archive_order_not_lexical_id_order() {
+        let storage = create_test_storage().await;
+        assert_rsm_after_uses_archive_order_not_lexical_id_order(&storage).await;
+    }
+
+    #[tokio::test]
+    async fn test_inmemory_rsm_after_uses_archive_order_not_lexical_id_order() {
+        let storage = InMemoryMamStorage::new();
+        assert_rsm_after_uses_archive_order_not_lexical_id_order(&storage).await;
+    }
+
+    async fn assert_rsm_after_uses_archive_order_not_lexical_id_order(storage: &dyn MamStorage) {
+        let archive = "room@conference.example.com";
+        let base = Utc::now();
+        store_nonlexical_archive_order_messages(storage, archive, base).await;
+
+        let page_one = storage
+            .query_messages(
+                archive,
+                &MamQuery {
+                    max: Some(2),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(bodies(&page_one), vec!["one", "two"]);
+        assert_eq!(page_one.last_id.as_deref(), Some("a-second"));
+
+        let page_two = storage
+            .query_messages(
+                archive,
+                &MamQuery {
+                    max: Some(2),
+                    after_id: page_one.last_id.clone(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(bodies(&page_two), vec!["three", "four"]);
+        assert_eq!(page_two.last_id.as_deref(), Some("b-fourth"));
+
+        let page_three = storage
+            .query_messages(
+                archive,
+                &MamQuery {
+                    max: Some(2),
+                    after_id: page_two.last_id.clone(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(bodies(&page_three), vec!["five"]);
+        assert!(page_three.complete);
+    }
+
+    #[tokio::test]
+    async fn test_sqlite_rsm_before_uses_archive_order_not_lexical_id_order() {
+        let storage = create_test_storage().await;
+        assert_rsm_before_uses_archive_order_not_lexical_id_order(&storage).await;
+    }
+
+    #[tokio::test]
+    async fn test_inmemory_rsm_before_uses_archive_order_not_lexical_id_order() {
+        let storage = InMemoryMamStorage::new();
+        assert_rsm_before_uses_archive_order_not_lexical_id_order(&storage).await;
+    }
+
+    async fn assert_rsm_before_uses_archive_order_not_lexical_id_order(storage: &dyn MamStorage) {
+        let archive = "room@conference.example.com";
+        let base = Utc::now();
+        store_nonlexical_archive_order_messages(storage, archive, base).await;
+
+        let page = storage
+            .query_messages(
+                archive,
+                &MamQuery {
+                    max: Some(2),
+                    before_id: Some("x-fifth".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(bodies(&page), vec!["three", "four"]);
+        assert_eq!(page.first_id.as_deref(), Some("y-third"));
+        assert_eq!(page.last_id.as_deref(), Some("b-fourth"));
+    }
+
+    async fn store_nonlexical_archive_order_messages(
+        storage: &dyn MamStorage,
+        archive: &str,
+        base: DateTime<Utc>,
+    ) {
+        for (offset, id, body) in [
+            (0, "z-first", "one"),
+            (1, "a-second", "two"),
+            (2, "y-third", "three"),
+            (3, "b-fourth", "four"),
+            (4, "x-fifth", "five"),
+        ] {
+            storage
+                .store_message(
+                    archive,
+                    &ArchivedMessage {
+                        id: id.to_string(),
+                        timestamp: base + ChronoDuration::seconds(offset),
+                        from: "user@example.com/device".to_string(),
+                        to: archive.to_string(),
+                        body: body.to_string(),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_sqlite_missing_rsm_cursor_returns_not_found() {
+        let storage = create_test_storage().await;
+        assert_missing_rsm_cursor_returns_not_found(&storage).await;
+    }
+
+    #[tokio::test]
+    async fn test_inmemory_missing_rsm_cursor_returns_not_found() {
+        let storage = InMemoryMamStorage::new();
+        assert_missing_rsm_cursor_returns_not_found(&storage).await;
+    }
+
+    async fn assert_missing_rsm_cursor_returns_not_found(storage: &dyn MamStorage) {
+        let archive = "room@conference.example.com";
+        storage
+            .store_message(
+                archive,
+                &ArchivedMessage {
+                    id: "known-id".to_string(),
+                    timestamp: Utc::now(),
+                    from: "user@example.com/device".to_string(),
+                    to: archive.to_string(),
+                    body: "known".to_string(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let error = storage
+            .query_messages(
+                archive,
+                &MamQuery {
+                    after_id: Some("missing-id".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect_err("missing cursor must be an error");
+
+        assert!(matches!(error, MamStorageError::NotFound(ref id) if id == "missing-id"));
+
+        let error = storage
+            .query_messages(
+                archive,
+                &MamQuery {
+                    before_id: Some("missing-before-id".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect_err("missing before cursor must be an error");
+
+        assert!(matches!(error, MamStorageError::NotFound(ref id) if id == "missing-before-id"));
+    }
+
+    #[tokio::test]
+    async fn test_sqlite_rsm_cursor_outside_query_filters_still_pages() {
+        let storage = create_test_storage().await;
+        assert_rsm_cursor_outside_query_filters_still_pages(&storage).await;
+    }
+
+    #[tokio::test]
+    async fn test_inmemory_rsm_cursor_outside_query_filters_still_pages() {
+        let storage = InMemoryMamStorage::new();
+        assert_rsm_cursor_outside_query_filters_still_pages(&storage).await;
+    }
+
+    async fn assert_rsm_cursor_outside_query_filters_still_pages(storage: &dyn MamStorage) {
+        let archive = "room@conference.example.com";
+        let base = Utc::now();
+        store_nonlexical_archive_order_messages(storage, archive, base).await;
+
+        let result = storage
+            .query_messages(
+                archive,
+                &MamQuery {
+                    start: Some(base + ChronoDuration::seconds(3)),
+                    after_id: Some("a-second".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(bodies(&result), vec!["four", "five"]);
+    }
+
+    fn bodies(result: &MamResult) -> Vec<&str> {
+        result
+            .messages
+            .iter()
+            .map(|message| message.body.as_str())
+            .collect()
+    }
+
+    #[tokio::test]
     async fn test_thread_query_filters_before_pagination_and_count() {
         let storage = create_test_storage().await;
         let archive = "room@conference.example.com";
@@ -1515,11 +1838,15 @@ mod tests {
     async fn test_empty_before_returns_last_page() {
         let storage = create_test_storage().await;
         let archive = "room@conference.example.com";
+        let base = Utc::now();
 
-        for body in ["one", "two", "three", "four", "five", "six"] {
+        for (offset, body) in ["one", "two", "three", "four", "five", "six"]
+            .into_iter()
+            .enumerate()
+        {
             let msg = ArchivedMessage {
                 id: String::new(),
-                timestamp: Utc::now(),
+                timestamp: base + ChronoDuration::seconds(offset as i64),
                 from: "user@example.com/device".to_string(),
                 to: archive.to_string(),
                 body: body.to_string(),
@@ -1703,5 +2030,127 @@ mod tests {
             }
             other => panic!("expected Tombstone, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn xep_0313_sqlx_archive_returns_messages_in_chronological_order() {
+        // XEP-0313 §archive_order: results MUST be returned in the order the
+        // client originally received them (chronological), with id used only
+        // as a tiebreak. Sorting by id alone breaks this if id generation is
+        // ever decoupled from receive time (custom assignment, backfill, etc.).
+        let storage = create_test_storage().await;
+        let archive = "room@conference.example.com";
+        let t0 = chrono::DateTime::parse_from_rfc3339("2026-05-01T10:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let t1 = t0 + chrono::Duration::seconds(10);
+
+        // Earlier message gets the lexicographically *later* id, so id-only
+        // ordering would invert the chronological sequence.
+        let earlier = ArchivedMessage {
+            id: "zzz-earlier".to_string(),
+            timestamp: t0,
+            body: "first".to_string(),
+            ..archived_groupchat(archive)
+        };
+        let later = ArchivedMessage {
+            id: "aaa-later".to_string(),
+            timestamp: t1,
+            body: "second".to_string(),
+            ..archived_groupchat(archive)
+        };
+
+        storage.store_message(archive, &later).await.unwrap();
+        storage.store_message(archive, &earlier).await.unwrap();
+
+        let result = storage
+            .query_messages(archive, &MamQuery::default())
+            .await
+            .unwrap();
+
+        let bodies: Vec<&str> = result.messages.iter().map(|m| m.body.as_str()).collect();
+        assert_eq!(
+            bodies,
+            vec!["first", "second"],
+            "MAM results must be in chronological order, not id order"
+        );
+    }
+
+    #[tokio::test]
+    async fn xep_0313_in_memory_archive_returns_messages_in_chronological_order() {
+        let storage = InMemoryMamStorage::new();
+        let archive = "room@conference.example.com";
+        let t0 = chrono::DateTime::parse_from_rfc3339("2026-05-01T10:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let t1 = t0 + chrono::Duration::seconds(10);
+
+        let earlier = ArchivedMessage {
+            id: "zzz-earlier".to_string(),
+            timestamp: t0,
+            body: "first".to_string(),
+            ..archived_groupchat(archive)
+        };
+        let later = ArchivedMessage {
+            id: "aaa-later".to_string(),
+            timestamp: t1,
+            body: "second".to_string(),
+            ..archived_groupchat(archive)
+        };
+
+        storage.store_message(archive, &later).await.unwrap();
+        storage.store_message(archive, &earlier).await.unwrap();
+
+        let result = storage
+            .query_messages(archive, &MamQuery::default())
+            .await
+            .unwrap();
+
+        let bodies: Vec<&str> = result.messages.iter().map(|m| m.body.as_str()).collect();
+        assert_eq!(
+            bodies,
+            vec!["first", "second"],
+            "in-memory MAM ordering must be chronological"
+        );
+    }
+
+    #[tokio::test]
+    async fn xep_0313_sqlx_archive_uses_id_as_deterministic_tiebreak_when_timestamps_match() {
+        // XEP-0313 §archive_order warns that "multiple messages may share the
+        // same timestamp", so the order MUST still be deterministic. We use
+        // archive id as the secondary key.
+        let storage = create_test_storage().await;
+        let archive = "room@conference.example.com";
+        let t = chrono::DateTime::parse_from_rfc3339("2026-05-01T10:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let first = ArchivedMessage {
+            id: "id-001".to_string(),
+            timestamp: t,
+            body: "first".to_string(),
+            ..archived_groupchat(archive)
+        };
+        let second = ArchivedMessage {
+            id: "id-002".to_string(),
+            timestamp: t,
+            body: "second".to_string(),
+            ..archived_groupchat(archive)
+        };
+
+        // Insert out of id order to make the assertion meaningful.
+        storage.store_message(archive, &second).await.unwrap();
+        storage.store_message(archive, &first).await.unwrap();
+
+        let result = storage
+            .query_messages(archive, &MamQuery::default())
+            .await
+            .unwrap();
+        let ids: Vec<&str> = result.messages.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["id-001", "id-002"],
+            "tied timestamps must be ordered by archive id ascending"
+        );
     }
 }

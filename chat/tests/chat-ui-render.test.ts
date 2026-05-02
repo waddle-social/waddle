@@ -204,4 +204,101 @@ describe("renderStyledBody", () => {
       ],
     });
   });
+
+  test("renders former assistant extension payloads through generic surface presentations", () => {
+    const chatbotAnnotation: ExtensionAnnotation = {
+      extensionId: "ai-chatbot",
+      annotationId: "chatbot-1",
+      surfaceKind: "chat-bot",
+      title: "Answer card",
+      summary: "urn:waddle:ai-chatbot:1",
+      payloadNamespace: "urn:waddle:ai-chatbot:1",
+      fields: {
+        payloadNamespace: "urn:waddle:ai-chatbot:1",
+      },
+      payloads: [{
+        namespace: "urn:waddle:ai-chatbot:1",
+        name: "assistant-answer",
+        attributes: {
+          xmlns: "urn:waddle:ai-chatbot:1",
+        },
+        children: [{
+          namespace: "urn:waddle:ai-chatbot:1",
+          name: "answer",
+          attributes: {},
+          text: "Use the generic card renderer.",
+          children: [],
+        }],
+      }],
+      actions: [],
+    };
+    const canvasAnnotation: ExtensionAnnotation = {
+      extensionId: "ai-assistant-canvas",
+      annotationId: "canvas-1",
+      surfaceKind: "dynamic-canvas",
+      title: "Canvas card",
+      summary: "urn:waddle:ai-assistant-canvas:1",
+      payloadNamespace: "urn:waddle:ai-assistant-canvas:1",
+      fields: {
+        payloadNamespace: "urn:waddle:ai-assistant-canvas:1",
+      },
+      payloads: [{
+        namespace: "urn:waddle:ai-assistant-canvas:1",
+        name: "canvas",
+        attributes: {
+          xmlns: "urn:waddle:ai-assistant-canvas:1",
+        },
+        children: [{
+          namespace: "urn:waddle:ai-assistant-canvas:1",
+          name: "prompt",
+          attributes: {},
+          text: "Sketch a task board.",
+          children: [],
+        }],
+      }],
+      actions: [],
+    };
+
+    expect(extensionPresentation(chatbotAnnotation)).toMatchObject({
+      kind: "generic",
+      label: "Chat bot",
+      title: "Answer card",
+      summary: "Use the generic card renderer.",
+      details: [{ label: "Answer", value: "Use the generic card renderer." }],
+    });
+    expect(extensionPresentation(canvasAnnotation)).toMatchObject({
+      kind: "generic",
+      label: "Dynamic canvas",
+      title: "Canvas card",
+      summary: "Sketch a task board.",
+      details: [{ label: "Prompt", value: "Sketch a task board." }],
+    });
+  });
+
+  test("does not use raw payload namespace as generic summary", () => {
+    const annotation: ExtensionAnnotation = {
+      extensionId: "unknown-extension",
+      annotationId: "generic-1",
+      surfaceKind: "generic",
+      title: "Generic card",
+      summary: "urn:waddle:unknown-extension:1",
+      payloadNamespace: "urn:waddle:unknown-extension:1",
+      fields: {
+        payloadNamespace: "urn:waddle:unknown-extension:1",
+      },
+      payloads: [{
+        namespace: "urn:waddle:unknown-extension:1",
+        name: "payload",
+        attributes: {},
+        children: [],
+      }],
+      actions: [],
+    };
+
+    expect(extensionPresentation(annotation)).toMatchObject({
+      kind: "generic",
+      title: "Generic card",
+    });
+    expect(extensionPresentation(annotation).summary).toBeUndefined();
+  });
 });
