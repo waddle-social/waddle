@@ -1967,7 +1967,7 @@ async fn dispatch_bot_groupchat_response(
             .as_ref()
             .and_then(|to| room_scoped_reply_to_attr(to.as_str(), bot_ctx.room_jid))
         {
-            reply = reply.with_to(&to);
+            reply = reply.with_to(to);
         }
         set_reply_payload(&mut working, &reply);
     }
@@ -2413,7 +2413,7 @@ async fn validate_groupchat_rich_targets(
     }
     if has_malformed_rich_payload(message) {
         return Err(bad_request_error(
-            "Rich-message payload is missing required identifier.",
+            "Rich-message payload is missing a required identifier or contains an invalid JID.",
         ));
     }
     let Some(mam_storage) = deps.mam_storage else {
@@ -2561,7 +2561,10 @@ fn has_malformed_rich_payload(message: &Message) -> bool {
                 && payload.attr("id").is_none_or(str::is_empty))
             || (payload.ns() == NS_REPLY
                 && payload.name() == "reply"
-                && payload.attr("id").is_none_or(str::is_empty))
+                && (payload.attr("id").is_none_or(str::is_empty)
+                    || payload.attr("to").is_some_and(|to| {
+                        to.trim().is_empty() || to.trim().parse::<Jid>().is_err()
+                    })))
             || (payload.ns() == NS_REFERENCE
                 && payload.name() == "reference"
                 && (payload.attr("type").is_none_or(str::is_empty)
@@ -2975,16 +2978,16 @@ fn extract_groupchat_reply_reference(
     };
     let reply_to_jid = reply
         .attr("to")
-        .and_then(|value| room_scoped_reply_to_attr(value, room));
+        .and_then(|value| room_scoped_reply_to_attr(value, room))
+        .map(|jid| jid.to_string());
     (reply.attr("id").map(ToOwned::to_owned), reply_to_jid)
 }
 
-pub(crate) fn room_scoped_reply_to_attr(value: &str, room: &BareJid) -> Option<String> {
+pub(crate) fn room_scoped_reply_to_attr(value: &str, room: &BareJid) -> Option<Jid> {
     value
         .parse::<Jid>()
         .ok()
         .filter(|jid| jid.to_bare() == *room)
-        .map(|jid| jid.to_string())
 }
 
 fn extract_origin_id(message: &Message) -> Option<String> {
@@ -3059,10 +3062,7 @@ fn rich_archive_payload(message: &Message) -> Option<ArchivedRichMessage> {
             })
         });
     let reply = parse_reply_from_message(message).and_then(|reply| {
-        RichMessageId::new(reply.id).map(|id| ArchivedReply {
-            id,
-            to: reply.to.and_then(|to| to.parse().ok()),
-        })
+        RichMessageId::new(reply.id).map(|id| ArchivedReply { id, to: reply.to })
     });
     let references = extract_references_from_message(message)
         .into_iter()
@@ -4568,7 +4568,11 @@ mod tests {
 
         assert_eq!(
             room_scoped_reply_to_attr("chat@muc.example.com/alice", &room),
-            Some("chat@muc.example.com/alice".to_string())
+            Some(
+                "chat@muc.example.com/alice"
+                    .parse::<Jid>()
+                    .expect("occupant jid")
+            )
         );
         assert_eq!(
             room_scoped_reply_to_attr("alice@example.com/web", &room),

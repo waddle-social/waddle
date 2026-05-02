@@ -132,6 +132,36 @@ async fn reply_to_unknown_target_routes_without_error() {
 }
 
 #[tokio::test]
+async fn reply_with_empty_to_jid_returns_bad_request() {
+    // XEP-0461 §Use Cases: if the optional `to` attribute is present it
+    // names the author of the referenced message, so it must be a valid JID.
+    let _guard = TEST_SERIAL.lock().await;
+    let (_server, mut client) = setup().await;
+    let room = format!("reply-bad-to-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
+    join_room(&mut client, &room).await;
+
+    client
+        .send(&format!(
+            r#"<message type="groupchat" to="{room}" id="reply-bad-to">
+                <body>bad reply</body>
+                <reply xmlns="urn:xmpp:reply:0" to=" " id="parent-1"/>
+            </message>"#
+        ))
+        .await
+        .expect("send malformed reply");
+    let error = client
+        .recv_matching(|frame| frame.contains("<bad-request"))
+        .await
+        .expect("bad-request error");
+    assert!(
+        error.contains("type=\"error\""),
+        "not an error stanza: {error}"
+    );
+
+    client.close().await;
+}
+
+#[tokio::test]
 async fn reply_with_fallback_replays_from_mam() {
     let _guard = TEST_SERIAL.lock().await;
     let (_server, mut client) = setup().await;

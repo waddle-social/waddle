@@ -452,8 +452,12 @@ impl ExtensionHostAdapter {
         }
         if let Some(reply_to) = reply_to.as_ref() {
             let mut reply = waddle_xmpp::xep::ReplyReference::new(reply_to.id.as_str());
-            if let Some(to) = reply_to.to.as_ref() {
-                reply = reply.with_to(to.as_str());
+            if let Some(to) = reply_to
+                .to
+                .as_ref()
+                .and_then(|to| to.as_str().parse::<Jid>().ok())
+            {
+                reply = reply.with_to(to);
             }
             waddle_xmpp::xep::set_reply_payload(&mut message, &reply);
         }

@@ -416,7 +416,7 @@ mod tests {
         let local = full("alice@example.com/web");
         let mut msg = chat_with_body("alice@example.com/web", "bob@example.com", "agreed");
         msg.payloads.push(build_reply_element(
-            &ReplyReference::new("stanza-Y").with_to("bob@example.com"),
+            &ReplyReference::new("stanza-Y").with_to("bob@example.com".parse().expect("valid jid")),
         ));
 
         let outcome = run(&local, &mut msg);

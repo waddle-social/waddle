@@ -223,10 +223,7 @@ fn rich_archive_payload(message: &Message) -> Option<ArchivedRichMessage> {
         });
 
     let reply = parse_reply_from_message(message).and_then(|reply| {
-        RichMessageId::new(reply.id).map(|id| ArchivedReply {
-            id,
-            to: reply.to.and_then(|to| to.parse().ok()),
-        })
+        RichMessageId::new(reply.id).map(|id| ArchivedReply { id, to: reply.to })
     });
 
     let references = extract_references_from_message(message)
