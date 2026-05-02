@@ -1,11 +1,10 @@
 <script setup lang="ts">
 import { ref, computed, watch, onBeforeUnmount } from "vue";
-import { Send, Image, Paperclip, FileText, Music4, Puzzle, Sparkles, X } from "lucide-vue-next";
+import { Send, Image, Paperclip, FileText, Music4, Puzzle, X } from "lucide-vue-next";
 import type { JSONContent } from "@tiptap/core";
 import GifPicker from "@/components/chat/GifPicker.vue";
 import ChatEditor from "@/components/chat/ChatEditor.vue";
 import EditorBubbleToolbar from "@/components/chat/EditorBubbleToolbar.vue";
-import { aiComposerCommandResults, type AiComposerCommand } from "@/lib/ai-thread-ux";
 import { searchEmoji } from "@/lib/emoji";
 import { getComposerAutocompleteAction, getComposerEscapeAction } from "@/lib/reply-ux";
 import { tiptapToRichMessage } from "@/lib/rich-message";
@@ -45,7 +44,6 @@ const props = defineProps<{
   slowModeCooldown: number;
   uploadProgress: { uploading: boolean; progress: number; filename: string };
   replyingTo?: { id: string; author: string; preview?: string } | null;
-  aiAssistantEnabled?: boolean;
   isTopPinned?: boolean;
   extensionsOpen?: boolean;
 }>();
@@ -67,10 +65,8 @@ const replyAuthorName = computed(() => {
 const showGifPicker = ref(false);
 const showMentions = ref(false);
 const showEmoji = ref(false);
-const showCommands = ref(false);
 const mentionQuery = ref("");
 const emojiQuery = ref("");
-const commandQuery = ref("");
 const selectedIndex = ref(0);
 const editorRef = ref<InstanceType<typeof ChatEditor> | null>(null);
 const setEditorRef = (instance: InstanceType<typeof ChatEditor> | null) => {
@@ -165,13 +161,11 @@ const mentionResults = computed(() => {
 });
 
 const emojiResults = computed(() => searchEmoji(emojiQuery.value));
-const commandResults = computed(() => aiComposerCommandResults(commandQuery.value, props.aiAssistantEnabled === true).slice(0, 8));
 const showForumTitleInput = computed(() => props.isForumChannel && !props.replyingTo);
 
 const activeResults = computed(() => {
   if (showMentions.value) return mentionResults.value;
   if (showEmoji.value) return emojiResults.value;
-  if (showCommands.value) return commandResults.value;
   return [];
 });
 
@@ -181,8 +175,6 @@ const autocompleteAction = computed(() =>
     mentionCount: mentionResults.value.length,
     showEmoji: showEmoji.value,
     emojiCount: emojiResults.value.length,
-    showCommands: showCommands.value,
-    commandCount: commandResults.value.length,
   }),
 );
 
@@ -217,7 +209,6 @@ function onEditorUpdate(doc: JSONContent) {
 function clearAutocomplete() {
   showMentions.value = false;
   showEmoji.value = false;
-  showCommands.value = false;
   triggerRange.value = null;
 }
 
@@ -240,28 +231,12 @@ function checkAutocompleteFromEditor() {
   const pos = selection.from;
   const textBefore = doc.textBetween(0, pos, "\n", "\uFFFC");
 
-  const commandMatch = textBefore.match(/^\/([a-z]*)$/i);
-  if (commandMatch && props.aiAssistantEnabled === true) {
-    commandQuery.value = commandMatch[1];
-    selectedIndex.value = 0;
-    showCommands.value = true;
-    showMentions.value = false;
-    showEmoji.value = false;
-    triggerRange.value = {
-      from: 0,
-      to: pos,
-    };
-    return;
-  }
-  showCommands.value = false;
-
   const mentionMatch = textBefore.match(/(?:^|\s)@(\S*)$/);
   if (mentionMatch) {
     mentionQuery.value = mentionMatch[1];
     selectedIndex.value = 0;
     showMentions.value = true;
     showEmoji.value = false;
-    showCommands.value = false;
     triggerRange.value = {
       from: pos - mentionMatch[0].trimStart().length,
       to: pos,
@@ -275,7 +250,6 @@ function checkAutocompleteFromEditor() {
     emojiQuery.value = emojiMatch[1];
     selectedIndex.value = 0;
     showEmoji.value = true;
-    showCommands.value = false;
     triggerRange.value = {
       from: pos - emojiMatch[0].trimStart().length,
       to: pos,
@@ -313,19 +287,6 @@ function insertEmoji(emoji: string) {
   triggerRange.value = null;
 }
 
-function insertCommand(command: AiComposerCommand) {
-  const tiptapEditor = getTiptapEditor();
-  if (!tiptapEditor || !triggerRange.value) return;
-
-  tiptapEditor.chain()
-    .focus()
-    .insertContentAt(triggerRange.value, `${command.command} `)
-    .run();
-
-  showCommands.value = false;
-  triggerRange.value = null;
-}
-
 function selectAutocompleteResult(action = autocompleteAction.value): boolean {
   if (action === "select-mention") {
     insertMention(mentionResults.value[selectedIndex.value]);
@@ -334,11 +295,6 @@ function selectAutocompleteResult(action = autocompleteAction.value): boolean {
 
   if (action === "select-emoji") {
     insertEmoji(emojiResults.value[selectedIndex.value].emoji);
-    return true;
-  }
-
-  if (action === "select-command") {
-    insertCommand(commandResults.value[selectedIndex.value]);
     return true;
   }
 
@@ -401,7 +357,6 @@ function onEditorCancel() {
   const action = getComposerEscapeAction({
     showMentions: showMentions.value,
     showEmoji: showEmoji.value,
-    showCommands: showCommands.value,
     isReplyingTo: !!props.replyingTo,
   });
 
@@ -416,7 +371,7 @@ function onEditorCancel() {
 }
 
 function onKeydown(e: KeyboardEvent) {
-  if (activeResults.value.length > 0 && (showMentions.value || showEmoji.value || showCommands.value)) {
+  if (activeResults.value.length > 0 && (showMentions.value || showEmoji.value)) {
     if (e.key === "ArrowDown") {
       e.preventDefault();
       e.stopPropagation();
@@ -620,27 +575,7 @@ watch(
       @close="showGifPicker = false"
     />
 
-    <!-- slash command autocomplete -->
-    <div
-      v-if="showCommands && commandResults.length > 0"
-      class="z-popover chat-composer-popover absolute glass-panel border border-border rounded-lg max-h-56 overflow-auto min-w-0 shadow-xl animate-fade-in p-1"
-      :class="isTopPinned ? 'top-full mt-2' : 'bottom-full mb-2'"
-    >
-      <div class="flex flex-col gap-1">
-        <button
-          v-for="(command, i) in commandResults"
-          :key="command.command"
-          type="button"
-          class="type-control w-full h-11 px-3 py-0 text-left hover:bg-muted transition-colors flex items-center gap-2 rounded-lg"
-          :class="i === selectedIndex ? 'bg-muted' : ''"
-          @mousedown.prevent="insertCommand(command)"
-        >
-          <Sparkles class="h-4 w-4 text-primary" aria-hidden="true" />
-          <span class="type-emphasis">{{ command.command }}</span>
-          <span class="type-caption text-muted-foreground truncate">{{ command.description }}</span>
-        </button>
-      </div>
-    </div>
+
 
     <!-- @mention autocomplete -->
     <div

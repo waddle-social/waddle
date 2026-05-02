@@ -5,7 +5,7 @@ import { isForumChannel as detectForumChannel } from "@/lib/channel-types";
 import { getConnectionNoticeCopy } from "@/lib/connection-notice";
 import { findMessageElementById } from "@/lib/message-targeting";
 import { getReplyJumpNotice } from "@/lib/reply-ux";
-import { filterV1ExtensionPaletteCommands, isAiThreadPromptBody, nextAiThreadRootToOpen } from "@/lib/ai-thread-ux";
+import { findThreadToAutoOpen } from "@/lib/thread-auto-open";
 import {
   getPinnedScrollTop,
   getNewMessagesDividerPlacement,
@@ -73,7 +73,6 @@ const props = defineProps<{
   threadIndex: ThreadIndex;
   xmppClient?: BrowserXmppClient | null;
   reactionMode?: { selectedMessageId: string | null } | null;
-  aiAssistantEnabled?: boolean;
   invokeExtensionAction?: (action: ExtensionAnnotationAction) => Promise<unknown>;
 }>();
 
@@ -123,8 +122,7 @@ const extensionLauncherDetail = ref("");
 const extensionCommandStates = ref<Record<string, { state: "loading" | "success" | "warning" | "error"; detail?: string }>>({});
 const extensionCommandForms = ref<Record<string, { sessionId: string; fields: ExtensionCommandFormField[]; actions?: ExtensionCommandAction[] }>>({});
 const extensionCommandActions = ref<Record<string, ExtensionAnnotationAction[]>>({});
-const pendingAiThreadPromptBodies: string[] = [];
-let seenMessageIdsForAiThread = new Set(props.messages.map((message) => message.id));
+const autoOpenedThreadIds = new Set<string>();
 
 type MessageComposerHandle = {
   addAttachments: (files: Array<File | Blob>) => void;
@@ -203,7 +201,7 @@ async function openExtensionLauncher() {
   extensionLauncherState.value = "loading";
   extensionLauncherDetail.value = "";
   try {
-    extensionCommands.value = filterV1ExtensionPaletteCommands(await props.xmppClient.discoverExtensionCommands());
+    extensionCommands.value = await props.xmppClient.discoverExtensionCommands();
     extensionLauncherState.value = "idle";
     if (extensionCommands.value.length === 0) {
       extensionLauncherDetail.value = "No extension commands discovered.";
@@ -381,9 +379,6 @@ async function scrollToMessage(messageId: string) {
 
 function onSend(body: string, markup: MarkupSpan[], references: MessageReference[], files?: Array<File | Blob>) {
   const pending = replyingTo.value;
-  if (!pending && props.channel && !props.dmPeer && isAiThreadPromptBody(body)) {
-    pendingAiThreadPromptBodies.push(body);
-  }
   emit(
     "send",
     body,
@@ -449,19 +444,38 @@ const conversationScope = computed(() => [
 ].join(":"));
 
 watch(conversationScope, () => {
-  pendingAiThreadPromptBodies.length = 0;
-  seenMessageIdsForAiThread = new Set(props.messages.map((message) => message.id));
+  autoOpenedThreadIds.clear();
 });
 
-watch(() => props.messages, (messages) => {
-  if (pendingAiThreadPromptBodies.length > 0) {
-    const match = nextAiThreadRootToOpen(messages, pendingAiThreadPromptBodies, seenMessageIdsForAiThread);
-    if (match) {
-      pendingAiThreadPromptBodies.splice(match.promptIndex, 1);
-      emit("openThread", match.messageId);
+watch(() => props.messages, (newMessages, oldMessages) => {
+  // On the initial load (messages transition from 0 → N, e.g. MAM backfill),
+  // suppress auto-open for all threads already present in the archive so we
+  // don't pop open a thread panel every time the user enters a room.
+  if (!oldMessages || oldMessages.length === 0) {
+    const byId = new Map(newMessages.map((m) => [m.id, m]));
+    for (const msg of newMessages) {
+      if (!msg.threadId || msg.threadId === msg.id) continue;
+      if (autoOpenedThreadIds.has(msg.threadId)) continue;
+      if (byId.get(msg.threadId)?.isSelf) autoOpenedThreadIds.add(msg.threadId);
     }
+    return;
   }
-  seenMessageIdsForAiThread = new Set(messages.map((message) => message.id));
+  // Don't auto-open when the user is paging backward through older history —
+  // those messages have older timestamps and are not live replies.
+  if (props.isLoadingOlderMessages || props.activeThread) return;
+  const maxOldCreatedAt = oldMessages.reduce(
+    (max, m) => (m.createdAt > max ? m.createdAt : max),
+    "",
+  );
+  const prevIds = new Set(oldMessages.map((m) => m.id));
+  const incoming = newMessages.filter(
+    (m) => !prevIds.has(m.id) && m.createdAt > maxOldCreatedAt,
+  );
+  const threadId = findThreadToAutoOpen(incoming, newMessages, autoOpenedThreadIds);
+  if (threadId) {
+    autoOpenedThreadIds.add(threadId);
+    emit("openThread", threadId);
+  }
 });
 const hasSeenOnline = ref(props.xmppStatus.state === "online");
 const showReconnectedNotice = ref(false);
@@ -927,7 +941,6 @@ function dayDividerLabel(createdAt: string): string {
       :slow-mode-cooldown="slowModeCooldown"
       :upload-progress="uploadProgress"
       :replying-to="replyingTo"
-      :ai-assistant-enabled="aiAssistantEnabled === true"
       :is-top-pinned="true"
       :extensions-open="extensionLauncherOpen"
       @send="onSend"
@@ -1129,7 +1142,6 @@ function dayDividerLabel(createdAt: string): string {
       :slow-mode-cooldown="slowModeCooldown"
       :upload-progress="uploadProgress"
       :replying-to="replyingTo"
-      :ai-assistant-enabled="aiAssistantEnabled === true"
       :extensions-open="extensionLauncherOpen"
       @send="onSend"
       @cancel-reply="cancelReply"

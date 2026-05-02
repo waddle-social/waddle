@@ -133,9 +133,19 @@ struct OpenAiResponseMessage {
     content: String,
 }
 
-pub async fn generate_ai_response(prompt: &str) -> Result<String, AiProviderError> {
+/// A single archived room message used to provide conversation history to the AI.
+#[derive(Debug, Clone)]
+pub struct HistoricalMessage {
+    pub sender_nick: String,
+    pub body: String,
+}
+
+pub async fn generate_ai_response(
+    prompt: &str,
+    history: &[HistoricalMessage],
+) -> Result<String, AiProviderError> {
     let config = AiProviderConfig::from_env()?;
-    generate_ai_response_with_config(ai_http_client()?, &config, prompt).await
+    generate_ai_response_with_config(ai_http_client()?, &config, prompt, history).await
 }
 
 pub fn is_ai_provider_configured() -> bool {
@@ -146,10 +156,11 @@ pub async fn generate_ai_response_with_config(
     client: &reqwest::Client,
     config: &AiProviderConfig,
     prompt: &str,
+    history: &[HistoricalMessage],
 ) -> Result<String, AiProviderError> {
     match config.kind {
         AiProviderKind::OpenAi | AiProviderKind::OpenRouter => {
-            generate_openai_compatible_response(client, config, prompt).await
+            generate_openai_compatible_response(client, config, prompt, history).await
         }
     }
 }
@@ -172,23 +183,36 @@ async fn generate_openai_compatible_response(
     client: &reqwest::Client,
     config: &AiProviderConfig,
     prompt: &str,
+    history: &[HistoricalMessage],
 ) -> Result<String, AiProviderError> {
     let url = format!(
         "{}/v1/chat/completions",
         config.base_url.trim_end_matches('/')
     );
+    let history_bodies: Vec<String> = history
+        .iter()
+        .map(|msg| format!("{}: {}", msg.sender_nick, msg.body))
+        .collect();
+    let history_messages: Vec<OpenAiMessage<'_>> = history_bodies
+        .iter()
+        .map(|body| OpenAiMessage {
+            role: "user",
+            content: body.as_str(),
+        })
+        .collect();
+    let mut messages = Vec::with_capacity(1 + history_messages.len() + 1);
+    messages.push(OpenAiMessage {
+        role: "system",
+        content: "You are Waddle's XMPP-native room assistant. Answer concisely.",
+    });
+    messages.extend(history_messages);
+    messages.push(OpenAiMessage {
+        role: "user",
+        content: prompt,
+    });
     let request = OpenAiChatRequest {
         model: config.model.as_str(),
-        messages: vec![
-            OpenAiMessage {
-                role: "system",
-                content: "You are Waddle's XMPP-native room assistant. Answer concisely.",
-            },
-            OpenAiMessage {
-                role: "user",
-                content: prompt,
-            },
-        ],
+        messages,
     };
 
     let mut builder = client
@@ -289,7 +313,7 @@ fn is_command_boundary(next: Option<&u8>) -> bool {
 mod tests {
     use super::{
         clean_ai_prompt, generate_ai_response_with_config, is_ai_prompt_body, AiProviderConfig,
-        AiProviderError, AiProviderKind,
+        AiProviderError, AiProviderKind, HistoricalMessage,
     };
     use wiremock::matchers::{body_string_contains, header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -321,6 +345,7 @@ mod tests {
                 app_title: None,
             },
             "/ai Who is Rawkode?",
+            &[],
         )
         .await
         .expect("mocked response");
@@ -354,6 +379,7 @@ mod tests {
                 app_title: None,
             },
             "/ai what is the capital of Canada?",
+            &[],
         )
         .await
         .expect("mocked response");
@@ -384,6 +410,7 @@ mod tests {
                 app_title: None,
             },
             "/ai Who is Rawkode?",
+            &[],
         )
         .await
         .expect("provider response");
@@ -411,6 +438,7 @@ mod tests {
                 app_title: None,
             },
             "/ai no fake answers",
+            &[],
         )
         .await
         .expect_err("empty response");
@@ -451,5 +479,76 @@ mod tests {
             assert_eq!(is_ai_prompt_body(body), is_prompt, "{body}");
             assert_eq!(clean_ai_prompt(body), cleaned, "{body}");
         }
+    }
+
+    #[tokio::test]
+    async fn room_history_is_included_in_request_body() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(body_string_contains("alice: Hello everyone"))
+            .and(body_string_contains("bob: How are you"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "choices": [{ "message": { "content": "I see the history." } }]
+            })))
+            .mount(&server)
+            .await;
+
+        let history = vec![
+            HistoricalMessage {
+                sender_nick: "alice".to_string(),
+                body: "Hello everyone".to_string(),
+            },
+            HistoricalMessage {
+                sender_nick: "bob".to_string(),
+                body: "How are you".to_string(),
+            },
+        ];
+
+        let answer = generate_ai_response_with_config(
+            &reqwest::Client::new(),
+            &AiProviderConfig {
+                kind: AiProviderKind::OpenAi,
+                api_key: "test-key".to_string(),
+                model: "gpt-test".to_string(),
+                base_url: server.uri(),
+                http_referer: None,
+                app_title: None,
+            },
+            "/ai summarize",
+            &history,
+        )
+        .await
+        .expect("history response");
+
+        assert_eq!(answer, "I see the history.");
+    }
+
+    #[tokio::test]
+    async fn empty_history_produces_valid_request() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "choices": [{ "message": { "content": "ok" } }]
+            })))
+            .mount(&server)
+            .await;
+
+        generate_ai_response_with_config(
+            &reqwest::Client::new(),
+            &AiProviderConfig {
+                kind: AiProviderKind::OpenAi,
+                api_key: "test-key".to_string(),
+                model: "gpt-test".to_string(),
+                base_url: server.uri(),
+                http_referer: None,
+                app_title: None,
+            },
+            "/ai hello",
+            &[],
+        )
+        .await
+        .expect("empty history request succeeds");
     }
 }
