@@ -12,13 +12,11 @@ import {
   MessageSquare,
   Lock,
   AlertCircle,
-  Bot,
   CheckCircle2,
   ClipboardList,
   Gamepad2,
   LayoutDashboard,
   LoaderCircle,
-  Sparkles,
 } from "lucide-vue-next";
 import type { JSONContent } from "@tiptap/core";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
@@ -878,8 +876,7 @@ watch(
           <span class="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-md bg-background text-foreground ring-1 ring-border">
             <ClipboardList v-if="extensionPresentation(annotation).kind === 'links-task-board' || annotation.surfaceKind === 'board'" class="h-4 w-4 text-primary/80" aria-hidden="true" />
             <Gamepad2 v-else-if="extensionPresentation(annotation).kind === 'pub-quiz' || annotation.surfaceKind === 'game'" class="h-4 w-4 text-success" aria-hidden="true" />
-            <Bot v-else-if="extensionPresentation(annotation).kind === 'ai-chatbot' || annotation.surfaceKind === 'chat-bot'" class="h-4 w-4 text-primary/80" aria-hidden="true" />
-            <Sparkles v-else-if="extensionPresentation(annotation).kind === 'ai-assistant-canvas' || annotation.surfaceKind === 'dynamic-canvas'" class="h-4 w-4 text-warning" aria-hidden="true" />
+            <MessageSquare v-else-if="annotation.surfaceKind === 'chat-bot'" class="h-4 w-4 text-primary/80" aria-hidden="true" />
             <LayoutDashboard v-else class="h-4 w-4" aria-hidden="true" />
           </span>
           <span class="min-w-0 flex-1">
