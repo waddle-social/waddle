@@ -1704,6 +1704,9 @@ async fn fetch_room_history_for_ai(deps: &Deps<'_>, room_jid: &BareJid) -> Vec<H
     };
     let query = waddle_xmpp::mam::MamQuery {
         max: Some(20),
+        // XEP-0059 §2.5: empty <before/> requests the last page (most recent N).
+        // Without this, the query returns the oldest N messages.
+        before_id: Some(String::new()),
         ..Default::default()
     };
     match mam_storage

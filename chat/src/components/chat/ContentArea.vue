@@ -5,6 +5,7 @@ import { isForumChannel as detectForumChannel } from "@/lib/channel-types";
 import { getConnectionNoticeCopy } from "@/lib/connection-notice";
 import { findMessageElementById } from "@/lib/message-targeting";
 import { getReplyJumpNotice } from "@/lib/reply-ux";
+import { findThreadToAutoOpen } from "@/lib/thread-auto-open";
 import {
   getPinnedScrollTop,
   getNewMessagesDividerPlacement,
@@ -446,15 +447,26 @@ watch(conversationScope, () => {
   autoOpenedThreadIds.clear();
 });
 
-watch(() => props.messages, (messages) => {
-  for (const msg of messages) {
-    if (!msg.threadId || msg.threadId === msg.id) continue;
-    if (autoOpenedThreadIds.has(msg.threadId)) continue;
-    const root = messages.find((m) => m.id === msg.threadId);
-    if (!root?.isSelf) continue;
-    autoOpenedThreadIds.add(msg.threadId);
-    emit("openThread", msg.threadId);
-    break;
+watch(() => props.messages, (newMessages, oldMessages) => {
+  // On the initial load (messages transition from 0 → N, e.g. MAM backfill),
+  // suppress auto-open for all threads already present in the archive so we
+  // don't pop open a thread panel every time the user enters a room.
+  if (!oldMessages || oldMessages.length === 0) {
+    for (const msg of newMessages) {
+      if (!msg.threadId || msg.threadId === msg.id) continue;
+      if (autoOpenedThreadIds.has(msg.threadId)) continue;
+      const root = newMessages.find((m) => m.id === msg.threadId);
+      if (root?.isSelf) autoOpenedThreadIds.add(msg.threadId);
+    }
+    return;
+  }
+  if (props.activeThread) return;
+  const prevIds = new Set(oldMessages.map((m) => m.id));
+  const incoming = newMessages.filter((m) => !prevIds.has(m.id));
+  const threadId = findThreadToAutoOpen(incoming, newMessages, autoOpenedThreadIds);
+  if (threadId) {
+    autoOpenedThreadIds.add(threadId);
+    emit("openThread", threadId);
   }
 });
 const hasSeenOnline = ref(props.xmppStatus.state === "online");

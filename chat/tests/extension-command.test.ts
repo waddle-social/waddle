@@ -97,7 +97,7 @@ describe("extension command invocation", () => {
     expect((sent as { command?: { form?: unknown } }).command?.form).toBeUndefined();
   });
 
-  test("hides the AI chatbot command from discovered extension commands for v1", async () => {
+  test("returns all discovered extension commands including the AI chatbot", async () => {
     const xmpp = {
       async getDiscoItems(jid: string, node?: string) {
         if (!node) return { items: [{ jid: "extensions.example.com" }] };
@@ -116,6 +116,7 @@ describe("extension command invocation", () => {
 
     expect(await discoverExtensionCommands(xmpp as any, "alice@example.com/web")).toEqual([
       { serviceJid: "example.com", node: "urn:waddle:extension:poll", name: "Poll" },
+      { serviceJid: "example.com", node: "urn:waddle:extension:1:ai-chatbot", name: "Ask AI Chatbot" },
       { serviceJid: "example.com", node: "urn:waddle:extension:notes", name: "Notes" },
     ]);
   });

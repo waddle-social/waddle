@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { TimelineMessage } from "../src/lib/chat-ui";
+import { findThreadToAutoOpen } from "../src/lib/thread-auto-open";
 
 function message(overrides: Partial<TimelineMessage>): TimelineMessage {
   return {
@@ -12,51 +13,38 @@ function message(overrides: Partial<TimelineMessage>): TimelineMessage {
   };
 }
 
-/**
- * Pure re-implementation of the ContentArea generic thread auto-open logic so
- * the behaviour is independently testable without mounting Vue components.
- */
-function findThreadToAutoOpen(
-  messages: readonly TimelineMessage[],
-  alreadyOpened: ReadonlySet<string>,
-): string | undefined {
-  for (const msg of messages) {
-    if (!msg.threadId || msg.threadId === msg.id) continue;
-    if (alreadyOpened.has(msg.threadId)) continue;
-    const root = messages.find((m) => m.id === msg.threadId);
-    if (!root?.isSelf) continue;
-    return msg.threadId;
-  }
-  return undefined;
-}
-
 describe("generic thread auto-open", () => {
   test("opens a thread when a reply to a self-message arrives", () => {
     const root = message({ id: "root-1", isSelf: true });
     const reply = message({ id: "reply-1", threadId: "root-1", isSelf: false });
-    expect(findThreadToAutoOpen([root, reply], new Set())).toBe("root-1");
+    const msgs = [root, reply];
+    expect(findThreadToAutoOpen(msgs, msgs, new Set())).toBe("root-1");
   });
 
   test("does not open a thread when the root is not a self-message", () => {
     const root = message({ id: "root-2", isSelf: false });
     const reply = message({ id: "reply-2", threadId: "root-2", isSelf: false });
-    expect(findThreadToAutoOpen([root, reply], new Set())).toBeUndefined();
+    const msgs = [root, reply];
+    expect(findThreadToAutoOpen(msgs, msgs, new Set())).toBeUndefined();
   });
 
   test("does not re-open a thread that was already auto-opened", () => {
     const root = message({ id: "root-3", isSelf: true });
     const reply = message({ id: "reply-3", threadId: "root-3", isSelf: false });
-    expect(findThreadToAutoOpen([root, reply], new Set(["root-3"]))).toBeUndefined();
+    const msgs = [root, reply];
+    expect(findThreadToAutoOpen(msgs, msgs, new Set(["root-3"]))).toBeUndefined();
   });
 
   test("skips root-messages (where id === threadId)", () => {
     const root = message({ id: "root-4", threadId: "root-4", isSelf: true });
-    expect(findThreadToAutoOpen([root], new Set())).toBeUndefined();
+    const msgs = [root];
+    expect(findThreadToAutoOpen(msgs, msgs, new Set())).toBeUndefined();
   });
 
   test("skips messages without a threadId", () => {
     const msg = message({ id: "plain-1", isSelf: false });
-    expect(findThreadToAutoOpen([msg], new Set())).toBeUndefined();
+    const msgs = [msg];
+    expect(findThreadToAutoOpen(msgs, msgs, new Set())).toBeUndefined();
   });
 
   test("returns the first eligible thread when multiple replies arrive", () => {
@@ -64,12 +52,26 @@ describe("generic thread auto-open", () => {
     const root2 = message({ id: "root-b", isSelf: true });
     const reply1 = message({ id: "reply-a", threadId: "root-a", isSelf: false });
     const reply2 = message({ id: "reply-b", threadId: "root-b", isSelf: false });
-    const result = findThreadToAutoOpen([root1, root2, reply1, reply2], new Set());
-    expect(result).toBe("root-a");
+    const msgs = [root1, root2, reply1, reply2];
+    expect(findThreadToAutoOpen(msgs, msgs, new Set())).toBe("root-a");
   });
 
   test("does not open a thread when the root message is absent from the loaded timeline", () => {
     const reply = message({ id: "reply-x", threadId: "unknown-root", isSelf: false });
-    expect(findThreadToAutoOpen([reply], new Set())).toBeUndefined();
+    const msgs = [reply];
+    expect(findThreadToAutoOpen(msgs, msgs, new Set())).toBeUndefined();
+  });
+
+  test("candidates and allMessages can differ: finds root in allMessages but only triggers on candidates", () => {
+    const root = message({ id: "root-z", isSelf: true });
+    const historical = message({ id: "hist-z", threadId: "root-z", isSelf: false });
+    const liveReply = message({ id: "live-z", threadId: "root-z", isSelf: false });
+    const allMessages = [root, historical, liveReply];
+    // Only check liveReply as candidate; historical is excluded (simulates initial-load guard)
+    expect(findThreadToAutoOpen([liveReply], allMessages, new Set())).toBe("root-z");
+    // With historical as the only candidate, same result (thread not yet opened)
+    expect(findThreadToAutoOpen([historical], allMessages, new Set())).toBe("root-z");
+    // But if already opened, neither triggers
+    expect(findThreadToAutoOpen([liveReply], allMessages, new Set(["root-z"]))).toBeUndefined();
   });
 });
