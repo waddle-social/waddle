@@ -223,6 +223,56 @@ impl ExtensionManager {
             .collect()
     }
 
+    pub fn collect_ai_tools(&self) -> Vec<(PluginId, crate::types::ToolDefinition)> {
+        self.actors
+            .iter()
+            .flat_map(|actor| {
+                let plugin_id = actor.manifest().id.clone();
+                actor
+                    .manifest()
+                    .tools
+                    .into_iter()
+                    .map(move |tool| (plugin_id.clone(), tool))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    pub async fn dispatch_tool_call(
+        &self,
+        tool_name: &str,
+        call_id: String,
+        arguments_json: String,
+    ) -> Option<String> {
+        let ctx = crate::types::ToolCallContext {
+            call_id: call_id.clone(),
+            tool_name: tool_name.to_string(),
+            arguments_json,
+        };
+        for actor in &self.actors {
+            let manifest = actor.manifest();
+            if !manifest.declares_capability(crate::types::ExtensionCapability::AiTool) {
+                continue;
+            }
+            if !manifest.tools.iter().any(|tool| tool.name == tool_name) {
+                continue;
+            }
+            let event = ExtensionEvent::ToolCall(ctx);
+            let effects = actor.handle_event(event).await;
+            for effect in effects {
+                if let ExtensionEffect::ToolResult(result) = effect {
+                    if result.call_id == call_id {
+                        return Some(result.content);
+                    }
+                }
+            }
+            return Some(format!(
+                "Error: extension returned no tool result for {tool_name}"
+            ));
+        }
+        None
+    }
+
     pub async fn invoke_command(
         &self,
         node: &str,
@@ -446,6 +496,7 @@ impl ExtensionManager {
                         }
                         ExtensionEffect::PublishPubSub(_)
                         | ExtensionEffect::ReferenceArtifact(_)
+                        | ExtensionEffect::ToolResult(_)
                         | ExtensionEffect::HostWarning(_)
                         | ExtensionEffect::Noop => {}
                     }
@@ -481,6 +532,7 @@ impl ExtensionManager {
                 ExtensionEffect::PublishPubSub(_)
                 | ExtensionEffect::BotGroupchatResponse(_)
                 | ExtensionEffect::ReferenceArtifact(_)
+                | ExtensionEffect::ToolResult(_)
                 | ExtensionEffect::HostWarning(_)
                 | ExtensionEffect::Noop => {}
             }
@@ -1098,6 +1150,7 @@ mod tests {
             commands: Vec::new(),
             pubsub_nodes: Vec::new(),
             artifact: None,
+            tools: Vec::new(),
         }
     }
 

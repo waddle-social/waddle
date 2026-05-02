@@ -1657,6 +1657,7 @@ async fn dispatch_to_room(
                     Box::new(RoomToolExecutor {
                         mam_storage: mam_storage.as_ref(),
                         room_jid: &room_jid,
+                        extension_manager: deps.extension_manager,
                     })
                 } else {
                     Box::new(NoopToolExecutor)
@@ -1710,10 +1711,11 @@ fn is_ai_provider_fallback(response: &BotGroupchatResponse) -> bool {
     response.purpose == BotGroupchatResponsePurpose::AiProviderFallback
 }
 
-/// Executes AI tool calls against this room's MAM archive.
+/// Executes AI tool calls against this room's MAM archive and registered extensions.
 struct RoomToolExecutor<'a> {
     mam_storage: &'a dyn MamStorage,
     room_jid: &'a BareJid,
+    extension_manager: Option<&'a Arc<ExtensionManager>>,
 }
 
 #[async_trait]
@@ -1748,8 +1750,19 @@ impl AiToolExecutor for RoomToolExecutor<'_> {
                     self.room_jid,
                 )
             }
-            AiToolRequest::Extension { .. } => {
-                AiToolResult::Error("extension tools not yet available".to_string())
+            AiToolRequest::Extension { name, arguments } => {
+                if let Some(em) = self.extension_manager {
+                    let call_id = uuid::Uuid::new_v4().to_string();
+                    let args_json = arguments.to_string();
+                    match em.dispatch_tool_call(&name, call_id, args_json).await {
+                        Some(content) => AiToolResult::Extension(content),
+                        None => AiToolResult::Error(format!(
+                            "Error: no extension registered tool '{name}'"
+                        )),
+                    }
+                } else {
+                    AiToolResult::Error(format!("Error: no extension registered tool '{name}'"))
+                }
             }
         }
     }

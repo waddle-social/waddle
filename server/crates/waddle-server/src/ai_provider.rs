@@ -135,6 +135,8 @@ pub enum AiToolRequest {
 #[derive(Debug)]
 pub enum AiToolResult {
     Messages(Vec<HistoricalMessage>),
+    /// Opaque string content from a WASM extension tool.
+    Extension(String),
     Error(String),
 }
 
@@ -405,6 +407,7 @@ async fn execute_tool_call(executor: &dyn AiToolExecutor, tool_call: &OpenAiTool
     };
     match executor.execute(request).await {
         AiToolResult::Messages(messages) => format_messages_for_ai(&messages),
+        AiToolResult::Extension(content) => content,
         AiToolResult::Error(error) => format!("Error: {error}"),
     }
 }

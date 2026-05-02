@@ -1451,6 +1451,7 @@ async fn extension_command_result(
                 )));
             }
             ExtensionEffect::BotGroupchatResponse(_) => {}
+            ExtensionEffect::ToolResult(_) => {}
             ExtensionEffect::Noop => {}
         }
     }

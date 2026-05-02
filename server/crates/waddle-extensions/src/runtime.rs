@@ -17,7 +17,8 @@ use crate::types::{
     MessageContext, MessageEnrichment, MessageHook, MessageSource, PayloadNamespace, PayloadRoot,
     PayloadRule, PayloadSurface, PluginId, PluginVersion, PubSubItemId, PubSubNode, PubSubPublish,
     ReplyTarget, RoomJid, Sha256Digest, StanzaId, TextBlock, TextStyle, ThreadId, Timestamp,
-    UiActionId, UiBlock, UiView, UiViewId, Url, WaddleId, XmlAttribute, XmlElement, XmlNode,
+    ToolCallContext, ToolCallResult, ToolDefinition, UiActionId, UiBlock, UiView, UiViewId, Url,
+    WaddleId, XmlAttribute, XmlElement, XmlNode,
 };
 
 wasmtime::component::bindgen!({
@@ -241,6 +242,7 @@ impl TryFrom<wit_exports::lifecycle::ExtensionManifest> for ExtensionManifest {
                 .map(|node| wit_newtype_to_domain!(node, PubSubNode))
                 .collect::<Result<Vec<_>>>()?,
             artifact: value.artifact.map(TryInto::try_into).transpose()?,
+            tools: value.tools.into_iter().map(Into::into).collect(),
         })
     }
 }
@@ -283,6 +285,17 @@ impl From<ExtensionEvent> for wit_types::ExtensionEvent {
             ExtensionEvent::MessageHook(event) => Self::MessageHook(event.into()),
             ExtensionEvent::Command(event) => Self::Command(event.into()),
             ExtensionEvent::Launch(event) => Self::Launch(event.into()),
+            ExtensionEvent::ToolCall(ctx) => Self::ToolCall(ctx.into()),
+        }
+    }
+}
+
+impl From<ToolCallContext> for wit_types::ToolCallContext {
+    fn from(value: ToolCallContext) -> Self {
+        Self {
+            call_id: value.call_id,
+            tool_name: value.tool_name,
+            arguments_json: value.arguments_json,
         }
     }
 }
@@ -599,8 +612,18 @@ impl TryFrom<wit_types::ExtensionEffect> for ExtensionEffect {
             wit_types::ExtensionEffect::ReferenceArtifact(artifact) => {
                 Self::ReferenceArtifact(artifact.try_into()?)
             }
+            wit_types::ExtensionEffect::ToolResult(result) => Self::ToolResult(result.into()),
             wit_types::ExtensionEffect::Noop => Self::Noop,
         })
+    }
+}
+
+impl From<wit_types::ToolCallResult> for ToolCallResult {
+    fn from(value: wit_types::ToolCallResult) -> Self {
+        Self {
+            call_id: value.call_id,
+            content: value.content,
+        }
     }
 }
 
@@ -691,6 +714,17 @@ impl From<wit_types::ExtensionCapability> for ExtensionCapability {
             wit_types::ExtensionCapability::PubsubPublish => Self::PubSubPublish,
             wit_types::ExtensionCapability::ArtifactReference => Self::ArtifactReference,
             wit_types::ExtensionCapability::UiDeclarative => Self::UiDeclarative,
+            wit_types::ExtensionCapability::AiTool => Self::AiTool,
+        }
+    }
+}
+
+impl From<wit_types::ToolDefinition> for ToolDefinition {
+    fn from(value: wit_types::ToolDefinition) -> Self {
+        Self {
+            name: value.name,
+            description: value.description,
+            parameters_schema_json: value.parameters_schema_json,
         }
     }
 }

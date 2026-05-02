@@ -118,6 +118,23 @@ interface types {
         media-type: option<media-type>,
     }
 
+    record tool-definition {
+        name: string,
+        description: string,
+        parameters-schema-json: string,
+    }
+
+    record tool-call-context {
+        call-id: string,
+        tool-name: string,
+        arguments-json: string,
+    }
+
+    record tool-call-result {
+        call-id: string,
+        content: string,
+    }
+
     enum extension-capability {
         message-enrich,
         message-observe,
@@ -127,6 +144,7 @@ interface types {
         pubsub-publish,
         artifact-reference,
         ui-declarative,
+        ai-tool,
     }
 
     record payload-root {
@@ -154,6 +172,7 @@ interface types {
         commands: list<command-descriptor>,
         pubsub-nodes: list<pubsub-node>,
         artifact: option<artifact-reference>,
+        tools: list<tool-definition>,
     }
 
     record command-descriptor {
@@ -380,6 +399,7 @@ interface types {
         message-hook(message-hook),
         command(command-invocation),
         launch(launch-invocation),
+        tool-call(tool-call-context),
     }
 
     record pubsub-publish {
@@ -400,6 +420,7 @@ interface types {
         bot-groupchat-response(bot-groupchat-response),
         publish-pubsub(pubsub-publish),
         reference-artifact(artifact-reference),
+        tool-result(tool-call-result),
         noop,
     }
 

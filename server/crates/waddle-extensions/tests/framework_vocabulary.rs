@@ -84,6 +84,7 @@ fn sample_manifest() -> ExtensionManifest {
             "urn:example:task-widget:1:waddle:{waddle-id}:links"
         )],
         artifact: None,
+        tools: vec![],
     }
 }
 

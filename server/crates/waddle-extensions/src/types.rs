@@ -431,6 +431,8 @@ pub enum ExtensionCapability {
     ArtifactReference,
     #[serde(rename = "ui.declarative")]
     UiDeclarative,
+    #[serde(rename = "ai.tool")]
+    AiTool,
 }
 
 impl ExtensionCapability {
@@ -444,8 +446,29 @@ impl ExtensionCapability {
             Self::PubSubPublish => "pubsub.publish",
             Self::ArtifactReference => "artifact.reference",
             Self::UiDeclarative => "ui.declarative",
+            Self::AiTool => "ai.tool",
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ToolDefinition {
+    pub name: String,
+    pub description: String,
+    pub parameters_schema_json: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ToolCallContext {
+    pub call_id: String,
+    pub tool_name: String,
+    pub arguments_json: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ToolCallResult {
+    pub call_id: String,
+    pub content: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -458,6 +481,7 @@ pub struct ExtensionManifest {
     pub commands: Vec<CommandDescriptor>,
     pub pubsub_nodes: Vec<PubSubNode>,
     pub artifact: Option<ArtifactReference>,
+    pub tools: Vec<ToolDefinition>,
 }
 
 impl ExtensionManifest {
@@ -1165,6 +1189,7 @@ pub enum ExtensionEvent {
     MessageHook(MessageHook),
     Command(CommandInvocation),
     Launch(LaunchInvocation),
+    ToolCall(ToolCallContext),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1267,6 +1292,7 @@ pub enum ExtensionEffect {
     BotGroupchatResponse(BotGroupchatResponse),
     PublishPubSub(PubSubPublish),
     ReferenceArtifact(ArtifactReference),
+    ToolResult(ToolCallResult),
     HostWarning(DisplayText),
     Noop,
 }
@@ -1306,6 +1332,7 @@ impl ExtensionEffect {
             Self::ReferenceArtifact(_) => {
                 manifest.declares_capability(ExtensionCapability::ArtifactReference)
             }
+            Self::ToolResult(_) => manifest.declares_capability(ExtensionCapability::AiTool),
             Self::HostWarning(_) => true,
             Self::Noop => true,
         }
