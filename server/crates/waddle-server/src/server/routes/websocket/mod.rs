@@ -4962,6 +4962,7 @@ mod tests {
         .await;
         let server_response = server_responses.first().expect("server disco response");
         assert!(server_response.contains("urn:xmpp:reply:0"));
+        assert!(!server_response.contains("urn:xmpp:fulltext:0"));
         assert!(!server_response.contains("urn:waddle:test-extension:1"));
 
         let muc_query = disco_info_iq_frame("muc1", "muc.example.com", None);
@@ -4991,7 +4992,23 @@ mod tests {
         let room_response = room_responses.first().expect("room disco response");
         assert!(room_response.contains("urn:xmpp:mam:2"));
         assert!(room_response.contains("urn:xmpp:reply:0"));
+        assert!(room_response.contains("urn:xmpp:fulltext:0"));
         assert!(!room_response.contains("urn:waddle:test-extension:1"));
+
+        let user_jid: FullJid = "alice@example.com/waddle".parse().expect("user jid");
+        let user_query = disco_info_iq_frame("user1", "alice@example.com", None);
+        let user_responses = handle_iq(
+            &user_query,
+            server_domain,
+            muc_domain,
+            state.as_ref(),
+            &None,
+            &ready_phase(&user_jid),
+        )
+        .await;
+        let user_response = user_responses.first().expect("user disco response");
+        assert!(user_response.contains("urn:xmpp:mam:2"));
+        assert!(user_response.contains("urn:xmpp:fulltext:0"));
     }
 
     #[tokio::test]

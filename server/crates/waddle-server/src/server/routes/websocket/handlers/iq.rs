@@ -578,6 +578,22 @@ pub async fn handle_iq_with_conn_state(
             return vec![iq_to_xml(response)];
         }
 
+        if let (Some(target), Some(bound_jid)) = (to.as_deref(), phase.bound_jid()) {
+            if let Ok(target_bare) = target.parse::<BareJid>() {
+                if target_bare == bound_jid.to_bare() {
+                    let identities = vec![Identity::server(Some("Personal Archive"))];
+                    let features = vec![
+                        Feature::disco_info(),
+                        Feature::mam(),
+                        Feature::fulltext_mam(),
+                    ];
+                    let response =
+                        build_disco_info_response(request_iq, &identities, &features, None);
+                    return vec![iq_to_xml(response)];
+                }
+            }
+        }
+
         // Disco info on server. Source the canonical feature catalogue
         // from `waddle-xmpp-core::disco::info::server_features()` so the
         // rich-message XEPs (corrections, retractions, reactions,

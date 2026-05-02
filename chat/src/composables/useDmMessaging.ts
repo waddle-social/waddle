@@ -14,6 +14,7 @@ import type {
   DmDisplayedEvent,
   DmReactionEvent,
   LiveDmMessage,
+  MessageSearchResult,
   SessionLifecycleEvent,
 } from "@/lib/xmpp-client";
 import { barePeerJid } from "@/lib/xmpp-client";
@@ -134,7 +135,7 @@ export function useDmMessaging(
     virtualScroll: timelineEdgeScroller,
   });
   const typingUsers = ref<string[]>([]);
-  const searchResults = ref<{ id: string; nick: string; body: string; createdAt: string }[]>([]);
+  const searchResults = ref<MessageSearchResult[]>([]);
   const isSearching = ref(false);
   const uploadProgress = ref({ uploading: false, progress: 0, filename: "" });
   const firstUnseenId = ref<string | null>(null);
@@ -500,6 +501,9 @@ export function useDmMessaging(
     isLoadingMessages.value = true;
     isLoadingOlderMessages.value = false;
     hasOlderMessages.value = true;
+    searchRequestId++;
+    searchResults.value = [];
+    isSearching.value = false;
     oldestArchiveId = null;
     pinnedEdgeScroller.disconnect();
     firstUnseenId.value = null;
@@ -576,6 +580,36 @@ export function useDmMessaging(
     } finally {
       if (isCurrentRequest()) isLoadingOlderMessages.value = false;
     }
+  }
+
+  async function ensureMessageLoaded(messageId: string): Promise<boolean> {
+    if (findMessageById(messages.value, messageId)) return true;
+    const client = xmppClient.value;
+    const peerJid = activePeerJid.value;
+    if (!client || !peerJid || !("queryPersonalMamPage" in client)) return false;
+
+    let before = oldestArchiveId;
+    while (before && hasOlderMessages.value && !findMessageById(messages.value, messageId)) {
+      const requestId = messageRequestId;
+      const previousBefore = before;
+      const page = await client.queryPersonalMamPage(peerJid, 100, { type: "before", before });
+      if (
+        requestId !== messageRequestId ||
+        xmppClient.value !== client ||
+        activePeerJid.value !== peerJid
+      ) {
+        return false;
+      }
+      const nextBefore = page.firstArchiveId ?? previousBefore;
+      oldestArchiveId = nextBefore;
+      hasOlderMessages.value = !page.complete && !!page.firstArchiveId && page.firstArchiveId !== previousBefore;
+      const withoutQueued = messages.value.filter((m) => !(m.isSelf && m.deliveryStatus === "queued"));
+      messages.value = appendQueuedMessages(buildTimelineFromMamResults(page.messages, withoutQueued), peerJid);
+      if (findMessageById(messages.value, messageId)) return true;
+      if (!page.firstArchiveId || page.firstArchiveId === previousBefore || page.complete) break;
+      before = nextBefore;
+    }
+    return !!findMessageById(messages.value, messageId);
   }
 
   async function sendMessage(
@@ -789,13 +823,17 @@ export function useDmMessaging(
       return;
     }
     isSearching.value = true;
+    clearActionError();
     try {
       const results = await client.searchDmMessages(peerJid, trimmed);
       if (requestId === searchRequestId && xmppClient.value === client && activePeerJid.value === peerJid) {
         searchResults.value = results;
       }
-    } catch {
-      if (requestId === searchRequestId) searchResults.value = [];
+    } catch (e) {
+      if (requestId === searchRequestId) {
+        searchResults.value = [];
+        actionError.value = normalizeError(e);
+      }
     } finally {
       if (requestId === searchRequestId) isSearching.value = false;
     }
@@ -809,6 +847,7 @@ export function useDmMessaging(
 
   function clearMessages() {
     messageRequestId++;
+    searchRequestId++;
     pinnedEdgeScroller.disconnect();
     pendingEchoClientIds.clear();
     initialLatestPagePinned = false;
@@ -817,6 +856,8 @@ export function useDmMessaging(
     isLoadingOlderMessages.value = false;
     messages.value = [];
     isLoadingMessages.value = false;
+    searchResults.value = [];
+    isSearching.value = false;
     firstUnseenId.value = null;
     clearTypingState();
   }
@@ -832,6 +873,7 @@ export function useDmMessaging(
     isLoadingOlderMessages.value = false;
     isLoadingMessages.value = false;
     isSearching.value = false;
+    searchResults.value = [];
     firstUnseenId.value = null;
     clearTypingState();
   }
@@ -917,6 +959,7 @@ export function useDmMessaging(
     isSearching,
     loadMessages,
     loadOlderMessages,
+    ensureMessageLoaded,
     sendMessage,
     uploadProgress,
     editMessage,

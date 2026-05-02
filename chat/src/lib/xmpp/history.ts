@@ -1,10 +1,11 @@
 /** XEP-0313 / XEP-0431: MAM history queries. */
 import type { Agent } from "stanza";
 import type { ReceivedMessage } from "stanza/protocol";
-import type { LiveRoomMessage, MamHistoryPage, MamPageParam } from "./types";
+import type { LiveRoomMessage, MamHistoryPage, MamPageParam, MessageSearchResult } from "./types";
 import { dispatchGroupchat } from "./message-parsing";
 
 const WADDLE_MAM_THREAD_FIELD = "{urn:waddle:mam-thread:0}thread";
+const FULLTEXT_MAM_FIELD = "{urn:xmpp:fulltext:0}fulltext";
 
 function pagingForPageParam(max: number, pageParam: MamPageParam) {
   return pageParam.type === "latest"
@@ -195,7 +196,7 @@ export async function searchMessages(
   roomJid: string,
   query: string,
   max: number,
-): Promise<{ id: string; nick: string; body: string; createdAt: string }[]> {
+): Promise<MessageSearchResult[]> {
   if (!query.trim()) return [];
 
   const result = await xmpp.searchHistory(roomJid, {
@@ -204,27 +205,26 @@ export async function searchMessages(
       type: "submit",
       fields: [
         { name: "FORM_TYPE", type: "hidden", value: "urn:xmpp:mam:2" },
-        { name: "fulltext", value: query.trim() },
+        { name: FULLTEXT_MAM_FIELD, value: query.trim() },
       ],
     },
   });
 
-  const results: { id: string; nick: string; body: string; createdAt: string }[] = [];
-  if (result.results) {
-    for (const mamResult of result.results) {
-      const innerMsg = mamResult.item?.message;
-      if (!innerMsg?.body) continue;
-
-      const from = innerMsg.from ?? "";
-      results.push({
-        id: innerMsg.id ?? mamResult.id ?? crypto.randomUUID(),
-        nick: from.split("/")[1] ?? "unknown",
-        body: innerMsg.body,
-        createdAt: mamResult.item.delay?.timestamp
-          ? mamResult.item.delay.timestamp.toISOString()
-          : new Date().toISOString(),
-      });
-    }
+  const parsed = parseRoomMamResult(result, roomJid).messages;
+  const archiveIds = result.results?.map((mamResult) => mamResult.id).filter(Boolean) ?? [];
+  const results: MessageSearchResult[] = [];
+  for (const [index, message] of parsed.entries()) {
+    if (!message.body) continue;
+    results.push({
+      id: message.id,
+      ...(archiveIds[index] ? { archiveId: archiveIds[index] } : {}),
+      nick: message.nick,
+      body: message.body,
+      createdAt: message.createdAt,
+      ...(message.threadId ? { threadId: message.threadId } : {}),
+      ...(message.parentThreadId ? { parentThreadId: message.parentThreadId } : {}),
+      roomJid: message.roomJid,
+    });
   }
   return results;
 }

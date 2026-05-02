@@ -8,6 +8,7 @@ import {
   barePeerJid,
   roomBareJidFor,
   type LiveRoomMessage,
+  type MessageSearchResult,
   type RoomActivityEvent,
   type SessionLifecycleEvent,
   type ChatStateType,
@@ -334,7 +335,7 @@ export function useMessaging(
   const lastMentionActivity = ref<RoomActivityEvent | null>(null);
   const roomAvatarHashes = ref<Record<string, string>>({});
   const searchQuery = ref("");
-  const searchResults = ref<{ id: string; nick: string; body: string; createdAt: string }[]>([]);
+  const searchResults = ref<MessageSearchResult[]>([]);
   const isSearching = ref(false);
   let slowModeTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -1009,6 +1010,10 @@ export function useMessaging(
     isLoadingMessages.value = true;
     isLoadingOlderMessages.value = false;
     hasOlderMessages.value = true;
+    searchRequestId++;
+    searchQuery.value = "";
+    searchResults.value = [];
+    isSearching.value = false;
     oldestArchiveId = null;
     loadingOlderThreadIds.value = new Set();
     threadHasOlder.value = {};
@@ -1123,6 +1128,41 @@ export function useMessaging(
     } finally {
       if (isCurrentRequest()) isLoadingOlderMessages.value = false;
     }
+  }
+
+  async function ensureMessageLoaded(messageId: string): Promise<boolean> {
+    if (findMessageById(messages.value, messageId)) return true;
+    const client = xmppClient.value;
+    const channelId = activeChannelId.value;
+    if (!client || !channelId || !session.value || !("queryMamPage" in client)) return false;
+
+    let before = oldestArchiveId;
+    while (before && hasOlderMessages.value && !findMessageById(messages.value, messageId)) {
+      const requestId = messageRequestId;
+      const spaceId = activeSpaceId.value ?? "";
+      const previousBefore = before;
+      const page = await client.queryMamPage(spaceId, channelId, 100, { type: "before", before });
+      if (
+        requestId !== messageRequestId ||
+        xmppClient.value !== client ||
+        (activeSpaceId.value ?? "") !== spaceId ||
+        activeChannelId.value !== channelId
+      ) {
+        return false;
+      }
+      const nextBefore = page.firstArchiveId ?? previousBefore;
+      oldestArchiveId = nextBefore;
+      hasOlderMessages.value = !page.complete && !!page.firstArchiveId && page.firstArchiveId !== previousBefore;
+      const withoutQueued = messages.value.filter((m) => !(m.isSelf && m.deliveryStatus === "queued"));
+      messages.value = appendQueuedMessages(
+        buildTimelineFromMamResults(page.messages, withoutQueued),
+        roomBareJidFor(session.value, channelId),
+      );
+      if (findMessageById(messages.value, messageId)) return true;
+      if (!page.firstArchiveId || page.firstArchiveId === previousBefore || page.complete) break;
+      before = nextBefore;
+    }
+    return !!findMessageById(messages.value, messageId);
   }
 
   /**
@@ -1523,11 +1563,14 @@ export function useMessaging(
     clearTypingState();
     isLoadingMessages.value = false;
     isSearching.value = false;
+    searchQuery.value = "";
+    searchResults.value = [];
     firstUnseenId.value = null;
   }
 
   function clearMessages() {
     messageRequestId++;
+    searchRequestId++;
     pinnedEdgeScroller.disconnect();
     pendingEchoClientIds.clear();
     initialLatestPagePinned = false;
@@ -1536,6 +1579,9 @@ export function useMessaging(
     isLoadingOlderMessages.value = false;
     messages.value = [];
     isLoadingMessages.value = false;
+    searchQuery.value = "";
+    searchResults.value = [];
+    isSearching.value = false;
     clearTypingState();
     firstUnseenId.value = null;
   }
@@ -1554,6 +1600,7 @@ export function useMessaging(
       return;
     }
     isSearching.value = true;
+    clearActionError();
     try {
       const results = await client.searchMessages(spaceId, channelId, trimmed);
       if (
@@ -1564,9 +1611,10 @@ export function useMessaging(
       ) {
         searchResults.value = results;
       }
-    } catch {
+    } catch (e) {
       if (requestId === searchRequestId) {
         searchResults.value = [];
+        actionError.value = normalizeError(e);
       }
     } finally {
       if (requestId === searchRequestId) {
@@ -1636,6 +1684,7 @@ export function useMessaging(
     slowModeCooldown,
     loadMessages,
     loadOlderMessages,
+    ensureMessageLoaded,
     backfillThread,
     loadOlderThreadMessages,
     loadingOlderThreadIds,

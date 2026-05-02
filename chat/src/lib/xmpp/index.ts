@@ -16,6 +16,7 @@ export type {
   DmReactionEvent,
   LiveDmMessage,
   LiveRoomMessage,
+  MessageSearchResult,
   OccupantHat,
   OccupantPresence,
   PresenceUpdateEvent,

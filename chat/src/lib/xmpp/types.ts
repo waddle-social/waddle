@@ -28,6 +28,18 @@ export interface MamHistoryPage<T> {
   complete: boolean;
 }
 
+export interface MessageSearchResult {
+  id: string;
+  archiveId?: string;
+  nick: string;
+  body: string;
+  createdAt: string;
+  threadId?: string;
+  parentThreadId?: string;
+  roomJid?: string;
+  peerJid?: string;
+}
+
 /**
  * Transport- or protocol-level failure classification, surfaced via
  * `BrowserXmppClient.onError` for telemetry / diagnostics. Different

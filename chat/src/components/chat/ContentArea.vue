@@ -16,7 +16,7 @@ import { extractFilesFromEvent } from "@/lib/xmpp/file-upload";
 import type { ChannelSummary, SpaceSummary } from "@/lib/chat-types";
 import type { ExtensionAnnotationAction, TimelineMessage, MarkupSpan, MessageReference } from "@/lib/chat-ui";
 import type { MentionCandidate } from "@/lib/mentions";
-import type { BrowserXmppClient, XmppStatusSnapshot, RoomHats, RoomPresence } from "@/lib/xmpp-client";
+import type { BrowserXmppClient, MessageSearchResult, XmppStatusSnapshot, RoomHats, RoomPresence } from "@/lib/xmpp-client";
 import {
   extensionCommandOutcome,
   parseExtensionCommandLaunches,
@@ -67,12 +67,13 @@ const props = defineProps<{
   roomPresence: RoomPresence;
   roomLastSeen: Record<string, number>;
   slowModeCooldown: number;
-  searchResults: { id: string; nick: string; body: string; createdAt: string }[];
+  searchResults: MessageSearchResult[];
   isSearching: boolean;
   uploadProgress: { uploading: boolean; progress: number; filename: string };
   threadIndex: ThreadIndex;
   xmppClient?: BrowserXmppClient | null;
   reactionMode?: { selectedMessageId: string | null } | null;
+  ensureMessageLoaded?: (messageId: string) => Promise<boolean>;
   invokeExtensionAction?: (action: ExtensionAnnotationAction) => Promise<unknown>;
 }>();
 
@@ -95,7 +96,7 @@ const emit = defineEmits<{
   search: [query: string];
   clearSearch: [];
   openDm: [peerJid: string];
-  openThread: [threadId: string];
+  openThread: [threadId: string, targetMessageId?: string];
   refreshUpdate: [];
   loadOlder: [];
 }>();
@@ -349,6 +350,10 @@ function cancelPendingFlash() {
 }
 
 async function scrollToMessage(messageId: string) {
+  if (props.ensureMessageLoaded && !await props.ensureMessageLoaded(messageId)) {
+    showReplyJumpNotice(getReplyJumpNotice(false));
+    return;
+  }
   if (await virtualTimelineRef.value?.scrollToMessageId(messageId, "center")) {
     await nextTick();
   }
@@ -375,6 +380,18 @@ async function scrollToMessage(messageId: string) {
   }
 
   showReplyJumpNotice(notice);
+}
+
+async function openSearchResult(result: MessageSearchResult) {
+  if (result.threadId && result.threadId !== result.id) {
+    if (props.ensureMessageLoaded && !await props.ensureMessageLoaded(result.id)) {
+      showReplyJumpNotice(getReplyJumpNotice(false));
+      return;
+    }
+    emit("openThread", result.threadId, result.id);
+    return;
+  }
+  await scrollToMessage(result.id);
 }
 
 function onSend(body: string, markup: MarkupSpan[], references: MessageReference[], files?: Array<File | Blob>) {
@@ -423,6 +440,7 @@ const setExtensionPaletteRef = (instance: ExtensionPaletteHandle | null) => {
 };
 const showSearch = ref(false);
 const searchInput = ref("");
+const searchSubmitted = ref(false);
 const avatarUrlByAuthor = computed(() => props.avatarUrlByAuthor ?? {});
 const isForumChannel = computed(() => detectForumChannel(props.channel));
 const canShowComposer = computed(() => !!(props.channel || props.dmPeer));
@@ -445,6 +463,10 @@ const conversationScope = computed(() => [
 
 watch(conversationScope, () => {
   autoOpenedThreadIds.clear();
+  showSearch.value = false;
+  searchInput.value = "";
+  searchSubmitted.value = false;
+  emit("clearSearch");
 });
 
 watch(() => props.messages, (newMessages, oldMessages) => {
@@ -579,12 +601,14 @@ async function scrollToPinnedEdge(mode: ScrollDirectionMode) {
 defineExpose({ messagesContainer, scrollToPinnedEdge });
 
 function doSearch() {
+  searchSubmitted.value = !!searchInput.value.trim();
   emit("search", searchInput.value);
 }
 
 function closeSearch() {
   showSearch.value = false;
   searchInput.value = "";
+  searchSubmitted.value = false;
   emit("clearSearch");
 }
 
@@ -881,10 +905,13 @@ function dayDividerLabel(createdAt: string): string {
     </div>
 
     <!-- Search results -->
-    <div v-if="showSearch && (searchResults.length > 0 || isSearching)" class="border-b border-border glass-surface max-h-56 overflow-auto flex-shrink-0">
+    <div v-if="showSearch && (searchSubmitted || isSearching)" class="border-b border-border glass-surface max-h-56 overflow-auto flex-shrink-0">
       <div class="chat-message-lane">
         <div v-if="isSearching" class="type-caption px-[var(--chat-content-inline)] py-3 text-muted-foreground">
           Searching…
+        </div>
+        <div v-else-if="searchResults.length === 0" class="type-caption px-[var(--chat-content-inline)] py-3 text-muted-foreground">
+          No matching messages.
         </div>
         <div v-else class="divide-y divide-border">
           <button
@@ -892,7 +919,7 @@ function dayDividerLabel(createdAt: string): string {
             :key="result.id"
             class="w-full px-[var(--chat-content-inline)] py-3 text-left hover:bg-muted/50 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/25"
             type="button"
-            @click="scrollToMessage(result.id)"
+            @click="openSearchResult(result)"
           >
             <div class="flex items-baseline gap-2">
               <span class="type-control">{{ result.nick }}</span>
