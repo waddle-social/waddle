@@ -1424,6 +1424,9 @@ async fn broadcast_presence_to_subscribers(
         if recipient_blocks_sender(state, &sender_jid.to_bare(), &subscriber_bare).await {
             continue;
         }
+        if recipient_blocks_sender(state, &subscriber_bare, &sender_jid.to_bare()).await {
+            continue;
+        }
         let stanza = if available {
             let show = presence.show.as_ref().map(show_name);
             Stanza::Presence(build_available_presence(

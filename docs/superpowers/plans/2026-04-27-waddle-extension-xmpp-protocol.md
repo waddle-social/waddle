@@ -448,8 +448,14 @@ Use these exact capability names in framework manifest payloads:
 | `pubsub.read` | Plugin may read only declared PubSub nodes. |
 | `pubsub.publish` | Plugin may publish only declared PubSub nodes. |
 | `artifact.reference` | Plugin may reference immutable HTTP(S) artifacts by URI plus hash. |
-| `ai.invoke` | Plugin may use server-side AI provider profiles. No user-supplied provider secrets. |
 | `ui.declarative` | Plugin may expose declarative client surfaces rendered by Waddle clients. |
+| `channels.read` | Plugin may list approved channels and spaces. |
+| `members.read` | Plugin may list approved room members. |
+| `presence.read` | Plugin may read approved room/member presence. |
+| `message.send` | Plugin may send approved MUC, DM, or member messages as its bot identity. |
+| `mam.query` | Plugin may query bounded XEP-0313 history for approved MUC or DM context. |
+| `roster.read` | Plugin may read approved roster entries. |
+| `bot.presence` | Plugin may register bot member/presence surfaces. |
 
 ### Permission Grants
 
@@ -471,7 +477,7 @@ Use these permission names:
 | `pubsub.publish` | Exact node or prefix pattern | Publish only matching typed payloads as server/plugin publisher. |
 | `net.fetch.opengraph` | Host allowlist and byte/time limits | Server-side fetch of OpenGraph metadata for URLs already present in accepted messages. |
 | `artifact.write` | Artifact class and max bytes | Write immutable generated artifacts such as canvas renders. |
-| `ai.invoke` | Server profile IDs and rate limits | Invoke server-owned AI profiles. No user/client/provider secrets. |
+| `extension.provider.config` | Extension-owned provider settings | Configure provider behavior inside the extension. The server does not expose an AI invocation API. |
 
 Permission rules:
 
@@ -712,7 +718,13 @@ Step 1 `execute` returns `status='executing'` and this form:
     <option><value>pubsub.read</value></option>
     <option><value>pubsub.publish</value></option>
     <option><value>artifact.reference</value></option>
-    <option><value>ai.invoke</value></option>
+    <option><value>channels.read</value></option>
+    <option><value>members.read</value></option>
+    <option><value>presence.read</value></option>
+    <option><value>message.send</value></option>
+    <option><value>mam.query</value></option>
+    <option><value>roster.read</value></option>
+    <option><value>bot.presence</value></option>
     <option><value>ui.declarative</value></option>
   </field>
   <field var='waddle#requested_permissions' type='list-multi' label='Permissions'>
@@ -724,7 +736,7 @@ Step 1 `execute` returns `status='executing'` and this form:
     <option><value>pubsub.publish</value></option>
     <option><value>net.fetch.opengraph</value></option>
     <option><value>artifact.write</value></option>
-    <option><value>ai.invoke</value></option>
+    <option><value>extension.provider.config</value></option>
   </field>
 </x>
 ```
@@ -1021,8 +1033,8 @@ Launch:
 ```
 
 Invoke fields: `payload#question` is required for follow-up form submissions.
-The plugin may use server-side AI profiles only. Users never submit model API
-keys or provider tokens.
+Provider integration is owned by the extension. Users never submit model API
+keys or provider tokens through Waddle clients.
 
 The standard chatbot is intentionally plain: one bot persona, mention/reply/DM
 triggers, optional bounded MAM context, text answer messages, and no custom
@@ -1059,16 +1071,14 @@ Invoke fields: `payload#prompt` is required; `payload#style` is optional.
 Completion publishes a render item that references an immutable artifact URI
 and hash. The binary image is not sent over XMPP.
 
-AI integration for this plugin is server-owned only:
+AI integration for this plugin is extension-owned:
 
-- The install/config forms expose `waddle#ai_profile` values such as
-  `image-default` or `diagram-default`; these are server profile IDs, not
-  provider credentials.
-- The WASM component calls an `ai.invoke` host function with a typed prompt,
-  canvas id, style enum, and artifact target. It cannot open a provider HTTP
-  connection itself.
-- The server writes the generated render to immutable artifact storage, records
-  the artifact digest, and publishes the render PubSub item.
+- The install/config forms expose extension-specific provider settings, not
+  provider credentials in Waddle server or chat state.
+- The WASM component performs provider work inside the extension and uses only
+  approved host tools for XMPP-native context and message/artifact operations.
+- Generated render metadata is published as immutable typed extension state
+  with an artifact digest.
 - User clients submit prompt/style text through XEP-0050 only and never see
   provider API keys, OAuth tokens, endpoints, or headers.
 
@@ -1220,8 +1230,8 @@ Sample plugin trigger matrix:
 | --- | --- | --- |
 | Links Task Board | `message.enrich`, `launch`, `commands`, `pubsub.publish`, `artifact.reference`, `ui.declarative` | OpenGraph link enrichment; `/links`; `/board`; `save-link` and `create-task` launches. |
 | Pub Quiz | `commands`, `launch`, `bot.respond`, `pubsub.publish`, `ui.declarative` | `/quiz start`; answer launches; scheduled question close from server state. |
-| Standard AI Chatbot | `commands`, `launch`, `bot.respond`, `message.observe`, `ai.invoke` | Mention, DM, reply, `/ai`; follow-up launch. |
-| AI Assistant Dynamic Canvas | `commands`, `launch`, `bot.respond`, `artifact.reference`, `ai.invoke`, `pubsub.publish`, `ui.declarative` | `/canvas`; remix launch; mention if configured. |
+| Standard AI Chatbot | `commands`, `launch`, `bot.respond`, `message.observe`, `channels.read`, `members.read`, `presence.read`, `message.send`, `mam.query`, `roster.read`, `bot.presence` | Mention, DM, reply, `/ai`; follow-up launch. |
+| AI Assistant Dynamic Canvas | `commands`, `launch`, `bot.respond`, `artifact.reference`, `pubsub.publish`, `ui.declarative` | `/canvas`; remix launch; mention if configured. |
 | Decision Polls | `commands`, `launch`, `bot.respond`, `pubsub.publish`, `ui.declarative` | `/poll`; vote launches; close poll command/timer. |
 
 ## Implementation Work Items

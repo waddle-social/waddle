@@ -102,25 +102,10 @@ extensions:
   enabled: false
   cacheDir: /var/lib/waddle/extensions
   # Extensions are loaded from immutable OCI artifact digests. Release
-  # automation enables and pins the sample modules after publishing their WASM
-  # OCI artifacts.
+  # automation enables and pins modules after publishing their WASM OCI
+  # artifacts. Production wires ai-chatbot provider secrets through
+  # configSecretFiles and a mounted ExternalSecret-backed file.
   modules: []
-  # Optional map per module of config key -> mounted secret file path.
-  configSecretFiles: {}
-
-ai:
-  # Set to "openrouter" or "openai" to enable provider-backed chatbot answers.
-  # Provider API keys must be supplied through secret data:
-  # - OPENROUTER_API_KEY for openrouter
-  # - OPENAI_API_KEY for openai
-  provider: ""
-  # OpenRouter defaults to openrouter/free when this is empty. OpenAI requires
-  # an explicit model.
-  model: ""
-  openaiBaseUrl: ""
-  openrouterBaseUrl: ""
-  openrouterReferer: ""
-  openrouterTitle: ""
 
 config:
   mode: homeserver

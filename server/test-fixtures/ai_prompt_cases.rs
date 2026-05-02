@@ -6,5 +6,5 @@ pub const AI_PROMPT_CASES: &[(&str, bool, &str)] = &[
     ("@waddleBot continue", false, "@waddleBot continue"),
     ("prefix /ai", false, "prefix /ai"),
     ("☃ /ai later", false, "☃ /ai later"),
-    ("/airship @WADDLE", true, "/airship"),
+    ("/airship @WADDLE", true, "/airship @WADDLE"),
 ];

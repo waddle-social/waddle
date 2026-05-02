@@ -331,11 +331,11 @@ schema.#Project & {
 					  .image.digest = strenv(SAMPLE_DIGEST) |
 					  .extensions.enabled = true |
 					  .extensions.modules = [
-					    {"name": "links-task-board", "registry": "ghcr.io/waddle-social/waddle/extensions/links-task-board", "digest": strenv(SAMPLE_DIGEST), "namespace": "urn:waddle:links-task-board:1", "config": {}},
-					    {"name": "pub-quiz", "registry": "ghcr.io/waddle-social/waddle/extensions/pub-quiz", "digest": strenv(SAMPLE_DIGEST), "namespace": "urn:waddle:pub-quiz:1", "config": {}},
-					    {"name": "ai-chatbot", "registry": "ghcr.io/waddle-social/waddle/extensions/ai-chatbot", "digest": strenv(SAMPLE_DIGEST), "namespace": "urn:waddle:ai-chatbot:1", "config": {}},
-					    {"name": "ai-assistant-canvas", "registry": "ghcr.io/waddle-social/waddle/extensions/ai-assistant-canvas", "digest": strenv(SAMPLE_DIGEST), "namespace": "urn:waddle:ai-assistant-canvas:1", "config": {}},
-					    {"name": "decision-polls", "registry": "ghcr.io/waddle-social/waddle/extensions/decision-polls", "digest": strenv(SAMPLE_DIGEST), "namespace": "urn:waddle:decision-polls:1", "config": {}}
+					    {"name": "links-task-board", "registry": "ghcr.io/waddle-social/waddle/extensions/links-task-board", "digest": strenv(SAMPLE_DIGEST), "namespace": "urn:waddle:links-task-board:1", "config": {}, "capabilityGrants": ["message.enrich", "commands", "launch", "pubsub.publish", "artifact.reference", "ui.declarative"]},
+					    {"name": "pub-quiz", "registry": "ghcr.io/waddle-social/waddle/extensions/pub-quiz", "digest": strenv(SAMPLE_DIGEST), "namespace": "urn:waddle:pub-quiz:1", "config": {}, "capabilityGrants": ["message.enrich", "commands", "launch", "pubsub.publish", "ui.declarative"]},
+					    {"name": "ai-chatbot", "registry": "ghcr.io/waddle-social/waddle/extensions/ai-chatbot", "digest": strenv(SAMPLE_DIGEST), "namespace": "urn:waddle:ai-chatbot:1", "config": {"endpoint": "https://openrouter.ai/api/v1/chat/completions", "model": "openrouter/auto"}, "configSecretFiles": {"api_key": "/var/run/secrets/waddle-ai/api_key"}, "capabilityGrants": ["message.enrich", "message.observe", "host.mam.read", "host.members.read", "host.presence.read", "host.roster.read", "host.channels.read", "host.spaces.read", "host.message.send", "outbound.http.request", "commands"], "allowedHttpOrigins": ["https://openrouter.ai"]},
+					    {"name": "ai-assistant-canvas", "registry": "ghcr.io/waddle-social/waddle/extensions/ai-assistant-canvas", "digest": strenv(SAMPLE_DIGEST), "namespace": "urn:waddle:ai-assistant-canvas:1", "config": {}, "capabilityGrants": ["message.enrich", "commands", "launch", "pubsub.publish", "artifact.reference", "ui.declarative"]},
+					    {"name": "decision-polls", "registry": "ghcr.io/waddle-social/waddle/extensions/decision-polls", "digest": strenv(SAMPLE_DIGEST), "namespace": "urn:waddle:decision-polls:1", "config": {}, "capabilityGrants": ["message.enrich", "commands", "launch", "pubsub.publish", "ui.declarative"]}
 					  ]
 					' "${published_values}"
 					helm lint charts/waddle-server -f "${published_values}"
@@ -385,11 +385,11 @@ schema.#Project & {
 		publishContainerImage: schema.#Task & {
 			command: "bash"
 			env: {
-				CI_GITHUB_TOKEN:    schema.#EnvPassthrough & {name: "GITHUB_TOKEN"}
-				CI_GITHUB_ACTOR:    schema.#EnvPassthrough & {name: "GITHUB_ACTOR"}
+				CI_GITHUB_TOKEN: schema.#EnvPassthrough & {name: "GITHUB_TOKEN"}
+				CI_GITHUB_ACTOR: schema.#EnvPassthrough & {name: "GITHUB_ACTOR"}
 				CI_GITHUB_REF_TYPE: schema.#EnvPassthrough & {name: "GITHUB_REF_TYPE"}
 				CI_GITHUB_REF_NAME: schema.#EnvPassthrough & {name: "GITHUB_REF_NAME"}
-				CUENV_ARCH:         "amd64"
+				CUENV_ARCH: "amd64"
 			}
 			args: ["-c", #"""
 					set -euo pipefail
@@ -515,7 +515,38 @@ schema.#Project & {
 					    printf '  registry: ghcr.io/waddle-social/waddle/extensions/%s\n' "${extension_name}"
 					    printf '  digest: %s\n' "${extension_digest}"
 					    printf '  namespace: %s\n' "${namespace}"
-					    printf '  config: {}\n'
+					    if [ "${extension_name}" = "ai-chatbot" ]; then
+					      printf '  config:\n'
+					      printf '    endpoint: https://openrouter.ai/api/v1/chat/completions\n'
+					      printf '    model: openrouter/auto\n'
+					      printf '  configSecretFiles:\n'
+					      printf '    api_key: /var/run/secrets/waddle-ai/api_key\n'
+					      printf '  capabilityGrants:\n'
+					      printf '    - message.enrich\n'
+					      printf '    - message.observe\n'
+					      printf '    - host.mam.read\n'
+					      printf '    - host.members.read\n'
+					      printf '    - host.presence.read\n'
+					      printf '    - host.roster.read\n'
+					      printf '    - host.channels.read\n'
+					      printf '    - host.spaces.read\n'
+					      printf '    - host.message.send\n'
+					      printf '    - outbound.http.request\n'
+					      printf '    - commands\n'
+					      printf '  allowedHttpOrigins:\n'
+					      printf '    - https://openrouter.ai\n'
+					    else
+					      printf '  config: {}\n'
+					      printf '  capabilityGrants:\n'
+					      printf '    - message.enrich\n'
+					      printf '    - commands\n'
+					      printf '    - launch\n'
+					      printf '    - pubsub.publish\n'
+					      printf '    - ui.declarative\n'
+					    fi
+					    if [ "${extension_name}" = "links-task-board" ] || [ "${extension_name}" = "ai-assistant-canvas" ]; then
+					      printf '    - artifact.reference\n'
+					    fi
 					  } >> "${modules_yaml}"
 					done
 

@@ -279,7 +279,7 @@ Trust and safety features plus AI-powered enhancements.
 | Automod rules | ⬜ Not Started | P4 | [RFC-0013](rfcs/0013-moderation.md) |
 | Ban appeals | ⬜ Not Started | P4 | [RFC-0013](rfcs/0013-moderation.md) |
 | **AI Features** |
-| AI provider abstraction | ⬜ Not Started | P4 | [RFC-0007](rfcs/0007-ai-integrations.md) |
+| AI extension host tools | ⬜ Not Started | P4 | [RFC-0014](rfcs/0014-bot-framework.md) |
 | Message summarization | ⬜ Not Started | P4 | [RFC-0007](rfcs/0007-ai-integrations.md) |
 | AI content moderation | ⬜ Not Started | P4 | [RFC-0007](rfcs/0007-ai-integrations.md), [RFC-0013](rfcs/0013-moderation.md) |
 | Translation | ⬜ Not Started | P4 | [RFC-0007](rfcs/0007-ai-integrations.md) |

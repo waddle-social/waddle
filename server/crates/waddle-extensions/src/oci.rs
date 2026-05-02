@@ -358,6 +358,8 @@ mod tests {
             tag: None,
             namespace: "urn:example:extension:1".to_string(),
             config: serde_json::Value::Object(Default::default()),
+            capability_grants: Vec::new(),
+            allowed_http_origins: Vec::new(),
             config_secret_files: Default::default(),
             local_path: None,
         };
@@ -389,6 +391,8 @@ mod tests {
             tag: None,
             namespace: "urn:example:extension:1".to_string(),
             config: serde_json::Value::Object(Default::default()),
+            capability_grants: Vec::new(),
+            allowed_http_origins: Vec::new(),
             config_secret_files: Default::default(),
             local_path: None,
         };
@@ -413,6 +417,8 @@ mod tests {
             tag: Some("latest".to_string()),
             namespace: "urn:example:extension:1".to_string(),
             config: serde_json::Value::Object(Default::default()),
+            capability_grants: Vec::new(),
+            allowed_http_origins: Vec::new(),
             config_secret_files: Default::default(),
             local_path: None,
         };
@@ -513,6 +519,8 @@ mod tests {
             tag: None,
             namespace: "urn:example:extension:1".to_string(),
             config: serde_json::Value::Object(Default::default()),
+            capability_grants: Vec::new(),
+            allowed_http_origins: Vec::new(),
             config_secret_files: Default::default(),
             local_path: None,
         };
@@ -538,6 +546,8 @@ mod tests {
             tag: None,
             namespace: "urn:example:extension:1".to_string(),
             config: serde_json::Value::Object(Default::default()),
+            capability_grants: Vec::new(),
+            allowed_http_origins: Vec::new(),
             config_secret_files: Default::default(),
             local_path: None,
         };

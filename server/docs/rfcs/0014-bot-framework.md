@@ -226,12 +226,13 @@ the host approved for that Waddle.
   install-time grant prompts and passes only approved, scoped handles to the
   plugin.
 - Capabilities describe what the component exports; grants describe which
-  Waddle, room, PubSub node prefix, message stream, AI provider, upload service,
-  or public-network egress the installed instance can use.
+  Waddle, room, PubSub node prefix, message stream, upload service, or
+  public-network egress the installed instance can use.
 - Plugins never receive OAuth client secrets, user access tokens, user refresh
   tokens, browser cookies, raw session tokens, or arbitrary server credentials.
-  If a provider needs credentials, the Waddle deployment config owns them and
-  exposes a narrow host capability such as `ai.invoke.v1`.
+  If a provider needs credentials, the extension owns that integration behind
+  its own configuration and may use only approved XMPP-native host tools for
+  channel discovery, roster/presence, message sending, and MAM context.
 - Structured protocol data must be typed at every boundary. Stanzas use typed
   XMPP values, PubSub payloads use typed XML structs, JIDs use typed JID values,
   and plugin events use typed enums. `String` is allowed only for human-facing
@@ -287,10 +288,12 @@ Capability names for the samples:
 | `command.handle.v1` | Expose XEP-0050 command nodes backed by XEP-0004 forms. |
 | `pubsub.state.v1` | Read or write approved PubSub node prefixes through typed host APIs. |
 | `ui.surface.v1` | Provide declarative UI surface descriptors rendered by first-party Waddle clients. |
-| `ai.invoke.v1` | Request AI work from a deployment-owned provider without seeing provider secrets. |
 | `http.fetch-public.v1` | Fetch anonymous public HTTP(S) metadata with host allowlists, size limits, and timeouts. |
 | `file.upload.v1` | Request first-party XEP-0363 upload slots for plugin-generated assets. |
 | `members.read.v1` | Read approved room member display metadata, never private profile secrets. |
+| `channels.read.v1` | List approved channels and spaces through typed XMPP host state. |
+| `mam.query.v1` | Query bounded XEP-0313 message history for an approved MUC or DM scope. |
+| `roster.read.v1` | Read approved roster entries and subscription state. |
 
 Grant names for the samples:
 
@@ -303,7 +306,9 @@ Grant names for the samples:
 | `pubsub:read:prefix` | Read state under one plugin-owned PubSub node prefix. |
 | `pubsub:write:prefix` | Publish, retract, or purge state under one plugin-owned PubSub node prefix. |
 | `members:read:room` | Read member display names and bare JIDs for configured rooms. |
-| `ai:invoke:deployment` | Invoke the deployment-configured AI provider through host policy. |
+| `channels:read` | Read approved channel and space identity. |
+| `mam:query` | Read bounded XEP-0313 history for approved MUC or DM context. |
+| `roster:read` | Read approved roster entries and subscription state. |
 | `http:fetch:public` | Fetch public HTTP(S) URLs with no cookies, credentials, or private-network access. |
 | `upload:request:room` | Request upload slots from Waddle's XEP-0363 service for plugin output. |
 
@@ -638,18 +643,23 @@ Acceptance tests:
 
 ### AI ChatBot
 
-AI ChatBot responds to mentions and explicit commands using the
-deployment-configured AI provider. The plugin never receives provider API keys
-or user tokens.
+AI ChatBot responds to mentions and explicit commands from inside the extension.
+The server exposes only typed XMPP host tools; model/provider integration and
+provider credentials stay in extension configuration rather than in Waddle
+server or chat code.
 
 Manifest capabilities:
 
 - `command.handle.v1`
 - `message.read-recent.v1`
 - `message.respond.v1`
+- `channels.read.v1`
+- `members.read.v1`
+- `presence.read.v1`
+- `mam.query.v1`
+- `roster.read.v1`
 - `pubsub.state.v1`
 - `ui.surface.v1`
-- `ai.invoke.v1`
 
 Required grants:
 
@@ -658,9 +668,11 @@ Required grants:
 - `messages:write:room` for bot responses.
 - `messages:read:recent` with an explicit message-count and room scope for
   context retrieval.
+- `channels:read` and `members:read:room` for discovery and presence-aware
+  routing.
+- `roster:read` for approved DM/member routing.
 - `pubsub:read:prefix` and `pubsub:write:prefix` under the chatbot
   installation prefix.
-- `ai:invoke:deployment` for host-mediated model calls.
 
 Optional grants:
 
@@ -716,9 +728,9 @@ UI surfaces:
 
 Failure and fallback behavior:
 
-- If `ai:invoke:deployment` is unavailable, commands return a clear error note
-  and mention triggers produce no response unless configured to send a short
-  unavailable message.
+- If the extension's provider configuration is unavailable, commands return a
+  clear error note and mention triggers produce no response unless configured to
+  send a short unavailable message.
 - If recent message context cannot be read, the bot may answer with the prompt
   only and must mark the turn as `completed` with `context_degraded=true`.
 - Recent message context must exclude ephemeral messages and messages from users
@@ -731,15 +743,15 @@ Failure and fallback behavior:
 
 Acceptance tests:
 
-1. `ai_chatbot_manifest_has_ai_grant_but_no_secret_fields`: the manifest
-   declares `ai.invoke.v1`, no external provider key field, and no client-secret
-   configuration.
+1. `ai_chatbot_manifest_has_xmpp_tool_grants_but_no_server_ai_grant`: the
+   manifest declares XMPP host-tool capabilities, no server AI provider grant,
+   and no client-secret configuration.
 2. `ai_chatbot_config_form_redacts_provider_details`: the admin settings
    command returns XEP-0004 fields for response mode and context depth, but not
    API keys, refresh tokens, or model provider secrets.
 3. `ai_chatbot_mention_creates_turn_and_response`: a mention in an allowed room
-   creates a `ChatTurn` with `queued`, invokes the host AI provider, publishes
-   `completed`, and sends one plugin-authored room message.
+   creates a `ChatTurn` with `queued`, invokes the extension-owned AI provider,
+   publishes `completed`, and sends one plugin-authored room message.
 4. `ai_chatbot_context_scope_is_bounded`: the host passes no more than
    `max_context_messages` from the configured room and never includes messages
    from another room.
@@ -751,8 +763,8 @@ Acceptance tests:
    XEP-0060 and leaves an audit event.
 7. `ai_chatbot_unsupported_client_gets_plain_body`: a bot response with custom
    metadata includes a readable body and XEP-0428 fallback markers.
-8. `ai_chatbot_respects_ai_context_exclusions`: recent context passed to
-   `ai.invoke.v1` excludes ephemeral messages, opted-out users' messages, and
+8. `ai_chatbot_respects_context_exclusions`: recent context returned by the MAM
+   host tool excludes ephemeral messages, opted-out users' messages, and
    messages outside the granted room scope.
 
 ### AI Dynamic Canvas
@@ -766,7 +778,6 @@ Manifest capabilities:
 - `message.respond.v1`
 - `pubsub.state.v1`
 - `ui.surface.v1`
-- `ai.invoke.v1`
 - `file.upload.v1`
 
 Required grants:
@@ -777,7 +788,6 @@ Required grants:
 - `messages:write:room` for canvas creation and update messages.
 - `pubsub:read:prefix` and `pubsub:write:prefix` under the canvas
   installation prefix.
-- `ai:invoke:deployment` for prompt-to-patch generation.
 - `upload:request:room` for generated preview images or exports.
 
 Optional grants:
@@ -849,9 +859,9 @@ Failure and fallback behavior:
 
 Acceptance tests:
 
-1. `ai_canvas_manifest_uses_host_ai_and_upload_grants`: the manifest declares
-   `ai.invoke.v1` and `file.upload.v1`, but no provider secret fields and no
-   arbitrary filesystem grants.
+1. `ai_canvas_manifest_uses_upload_grant_without_server_ai`: the manifest
+   declares `file.upload.v1`, but no server AI provider grant, provider secret
+   fields, or arbitrary filesystem grants.
 2. `ai_canvas_create_publishes_document_and_message`: creating a canvas writes
    one `CanvasDocument` item, sends one room message with custom canvas payload,
    readable body, and XEP-0428 fallback.

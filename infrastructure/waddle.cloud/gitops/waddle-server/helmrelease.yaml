@@ -36,17 +36,6 @@ spec:
         - randax
       s3Endpoint: "https://f90cc3950ab5b356ec869fe64c867ea7.r2.cloudflarestorage.com"
       s3Bucket: "waddle-social-files"
-      # Current production chart/server support OpenRouter through the
-      # first-class OpenRouter provider path. These remain in extraEnv so the
-      # rollout is compatible with the currently-installed chart until chart
-      # 0.1.12 is picked up.
-      extraEnv:
-        WADDLE_AI_PROVIDER: openrouter
-        WADDLE_AI_MODEL: openrouter/free
-        WADDLE_OPENAI_BASE_URL: https://openrouter.ai/api
-        WADDLE_OPENROUTER_BASE_URL: https://openrouter.ai/api
-        WADDLE_OPENROUTER_REFERER: https://waddle.chat
-        WADDLE_OPENROUTER_TITLE: Waddle
     database:
       driver: postgres
     spicedb:
@@ -57,6 +46,17 @@ spec:
       - waddle-r2-credentials
       - waddle-spicedb
       - waddle-runtime-secrets
+    extraVolumes:
+      - name: openrouter-api-key
+        secret:
+          secretName: waddle-openrouter
+          items:
+            - key: api_key
+              path: api_key
+    extraVolumeMounts:
+      - name: openrouter-api-key
+        mountPath: /var/run/secrets/waddle-ai
+        readOnly: true
     # Ship traces + OTel-native metrics to Grafana Cloud via the
     # in-cluster Alloy collector. `telemetry.rs` reads these env vars
     # (default endpoint was `localhost:4317`, which silently dropped
@@ -98,7 +98,8 @@ spec:
     service:
       type: ClusterIP
     # Extension modules are enabled by release automation only after their OCI
-    # WASM artifacts have been pushed and digest-pinned.
+    # WASM artifacts have been pushed and digest-pinned. The AI chatbot is
+    # wired to OpenRouter through the waddle-openrouter ExternalSecret above.
     extensions:
       enabled: false
       cacheDir: /var/lib/waddle/extensions
