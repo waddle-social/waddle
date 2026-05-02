@@ -2219,7 +2219,7 @@ impl ToElementString for waddle_xmpp::Stanza {
         use waddle_xmpp::Stanza;
         match self {
             Stanza::Iq(iq) => stanza_to_string(iq.clone()),
-            Stanza::Message(msg) => stanza_to_string(msg.clone()),
+            Stanza::Message(msg) => message_to_string(msg),
             Stanza::Presence(p) => stanza_to_string(p.clone()),
         }
     }
@@ -2540,7 +2540,10 @@ async fn finish_archive_groupchat_message(
     // `reattach_thread_parent` at the inbound boundary so the parent
     // attribute survives `Message::try_from` here.
     let (thread_id, parent_thread_id) =
-        match waddle_xmpp::xep0201::thread_info_from_message(&archive_clone) {
+        match waddle_xmpp::xep0201::thread_info_from_message_in_stanza_ns(
+            &archive_clone,
+            waddle_xmpp::xep0201::CLIENT_STANZA_NS,
+        ) {
             Some(info) => (
                 Some(info.id),
                 info.parent.and_then(waddle_xmpp::mam::ThreadId::new),
@@ -4219,6 +4222,22 @@ mod tests {
         assert_eq!(outcome.frames.len(), 2);
         assert!(outcome.frames[0].contains("id=\"a\""));
         assert!(outcome.frames[1].contains("id=\"b\""));
+    }
+
+    #[tokio::test]
+    async fn send_stanza_preserves_xep_0201_thread_on_wire() {
+        let mut msg = chat_msg("alice@example.com/web", "bob@example.com", "threaded hi");
+        msg.thread = Some(xmpp_parsers::message::Thread("root-thread".to_string()));
+
+        let events = vec![OutboundEvent::SendStanza(Box::new(Stanza::Message(msg)))];
+        let outcome = interpret(events, &Deps::registry_only(&test_registry())).await;
+
+        assert_eq!(outcome.frames.len(), 1);
+        assert!(
+            outcome.frames[0].contains("<thread>root-thread</thread>"),
+            "SendStanza must preserve RFC 6121/XEP-0201 thread on the wire: {}",
+            outcome.frames[0]
+        );
     }
 
     // -----------------------------------------------------------------

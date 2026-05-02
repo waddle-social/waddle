@@ -165,6 +165,86 @@ describe("XEP-0198 session lifecycle catch-up (group chat)", () => {
     expect(clientAny.value.queryMam).toHaveBeenCalledWith("w1", "c1", 100);
   });
 
+  test("fresh session preserves learned thread metadata for matching MAM messages", async () => {
+    const client = makeRoomClient([
+      {
+        id: "thread-42",
+        roomJid: "w1-c1@rooms.example.com",
+        nick: "alice",
+        body: "topic root",
+        createdAt: "2024-01-01T00:00:00Z",
+        type: "message",
+      },
+      {
+        id: "reply-archive",
+        wireIds: ["reply-live"],
+        roomJid: "w1-c1@rooms.example.com",
+        nick: "bob",
+        body: "reply from fresh MAM",
+        createdAt: "2024-01-01T00:01:00Z",
+        type: "message",
+        replyTo: { id: "thread-42" },
+      },
+      {
+        id: "reaction-archive",
+        roomJid: "w1-c1@rooms.example.com",
+        nick: "carol",
+        body: "",
+        createdAt: "2024-01-01T00:02:00Z",
+        type: "subject",
+        _reactionTarget: "reply-live",
+        _reactionEmojis: ["🔥"],
+        _reactionSenderId: "carol@example.com",
+      },
+    ]);
+    const { messaging } = makeRoomMessaging(client);
+
+    messaging.messages.value = [
+      {
+        id: "thread-42",
+        author: "alice",
+        body: "topic root",
+        createdAt: "2024-01-01T00:00:00Z",
+        isSelf: true,
+      },
+      {
+        id: "reply-live",
+        wireIds: ["reply-archive"],
+        reactionTargetId: "reply-live",
+        author: "bob",
+        body: "live reply",
+        createdAt: "2024-01-01T00:01:00Z",
+        isSelf: false,
+        replyTo: {
+          id: "thread-42",
+          author: "alice",
+          preview: "topic root",
+        },
+        threadId: "thread-42",
+        parentThreadId: "parent-thread",
+      },
+    ];
+
+    messaging.onSessionLifecycle({ type: "fresh" });
+    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 0));
+    await nextTick();
+
+    expect(messaging.messages.value).toHaveLength(2);
+    const reply = messaging.messages.value.find((message) => message.id === "reply-archive");
+    expect(reply?.wireIds).toContain("reply-live");
+    expect(reply?.body).toBe("reply from fresh MAM");
+    expect(reply?.threadId).toBe("thread-42");
+    expect(reply?.parentThreadId).toBe("parent-thread");
+    expect(reply?.reactionTargetId).toBe("reply-live");
+    expect(reply?.replyTo).toEqual({
+      id: "thread-42",
+      author: "alice",
+      preview: "topic root",
+    });
+    expect(reply?.reactions).toEqual({ "🔥": ["carol"] });
+  });
+
   test("fresh session is a no-op when no messages are loaded yet", async () => {
     const client = makeRoomClient();
     const { messaging } = makeRoomMessaging(client);

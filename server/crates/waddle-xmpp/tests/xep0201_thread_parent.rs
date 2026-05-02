@@ -52,6 +52,12 @@ fn nested_thread_groupchat_row(
     }
 }
 
+fn element_xml(element: &Element) -> String {
+    let mut bytes = Vec::new();
+    element.write_to(&mut bytes).expect("serialize element");
+    String::from_utf8(bytes).expect("element xml is utf-8")
+}
+
 #[tokio::test]
 async fn xep_0201_nested_thread_round_trips_through_mam() {
     // L4 promise: write a row with `<thread parent='root-thread'>child-thread</thread>`
@@ -102,7 +108,7 @@ async fn xep_0201_nested_thread_round_trips_through_mam() {
         .expect("inner message");
     let thread_elem = inner_msg
         .children()
-        .find(|c| c.name() == "thread")
+        .find(|c| c.name() == "thread" && c.ns() == "jabber:client")
         .expect("thread element on replay");
     assert_eq!(thread_elem.text().trim(), "child-thread");
     assert_eq!(thread_elem.attr("parent"), Some("root-thread"));
@@ -110,6 +116,88 @@ async fn xep_0201_nested_thread_round_trips_through_mam() {
     // Sanity: assert the same archive id was assigned (groupchat
     // canonical-id invariant).
     assert_eq!(retrieved.id, archive_id);
+}
+
+#[test]
+fn xep_0201_groupchat_stanza_xml_replay_preserves_thread_metadata() {
+    // Regression for archived `stanza_xml` replay: normalization must
+    // remove only the per-recipient `to` and keep/reinstall the
+    // XEP-0201 `<thread/>` element.
+    let archived_stanza = Element::builder("message", "jabber:client")
+        .attr("from", "team@conference.example.com/alice")
+        .attr("to", "bob@example.com/web")
+        .attr("type", "groupchat")
+        .attr("id", "wire-archive-xml")
+        .append(
+            Element::builder("body", "jabber:client")
+                .append("threaded reply")
+                .build(),
+        )
+        .append(build_thread_element(
+            &ThreadInfo {
+                id: "stale-thread".to_string(),
+                parent: None,
+            },
+            "jabber:client",
+        ))
+        .append(
+            Element::builder("reply", "urn:xmpp:reply:0")
+                .attr("id", "root-thread")
+                .build(),
+        )
+        .append(
+            Element::builder("thread", "urn:example:other:0")
+                .attr("kind", "extension")
+                .append("not-xep-0201")
+                .build(),
+        )
+        .build();
+    let row = ArchivedMessage {
+        id: "archive-xml".to_string(),
+        timestamp: Utc::now(),
+        from: "team@conference.example.com/alice".to_string(),
+        to: ROOM.to_string(),
+        body: "threaded reply".to_string(),
+        stanza_id: Some("wire-archive-xml".to_string()),
+        thread_id: Some("root-thread".to_string()),
+        parent_thread_id: waddle_xmpp::mam::ThreadId::new("parent-thread"),
+        reply_to_id: Some("root-thread".to_string()),
+        reply_to_jid: None,
+        origin_id: None,
+        message_type: "groupchat".to_string(),
+        stanza_xml: Some(element_xml(&archived_stanza)),
+        rich: None,
+        nickname_generation: Some(0),
+    };
+
+    let envelopes =
+        waddle_xmpp_core::mam::build_result_messages("q-xml", "bob@example.com", &[row]);
+    let result_payload = envelopes[0]
+        .payloads
+        .iter()
+        .find(|p| p.name() == "result" && p.ns() == waddle_xmpp_core::mam::MAM_NS)
+        .expect("result payload");
+    let forwarded = result_payload
+        .children()
+        .find(|c| c.name() == "forwarded" && c.ns() == waddle_xmpp_core::mam::FORWARD_NS)
+        .expect("forwarded");
+    let inner_msg = forwarded
+        .children()
+        .find(|c| c.name() == "message")
+        .expect("inner message");
+    let thread_elem = inner_msg
+        .children()
+        .find(|c| c.name() == "thread" && c.ns() == "jabber:client")
+        .expect("thread element on replay");
+
+    assert_eq!(inner_msg.attr("to"), None);
+    assert_eq!(thread_elem.text().trim(), "root-thread");
+    assert_eq!(thread_elem.attr("parent"), Some("parent-thread"));
+    assert!(inner_msg.children().any(|child| {
+        child.name() == "thread"
+            && child.ns() == "urn:example:other:0"
+            && child.text() == "not-xep-0201"
+    }));
 }
 
 #[tokio::test]

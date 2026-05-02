@@ -139,6 +139,57 @@ function applyForumContext(list: TimelineMessage[]): TimelineMessage[] {
   });
 }
 
+function mergeReplyToMetadata(
+  existing: TimelineMessage["replyTo"],
+  incoming: TimelineMessage["replyTo"],
+): TimelineMessage["replyTo"] {
+  if (!incoming) return existing;
+  if (!existing) return { ...incoming };
+  if (existing.id !== incoming.id) return existing;
+
+  let next = existing;
+  if (!next.author && incoming.author) next = { ...next, author: incoming.author };
+  if (!next.preview && incoming.preview) next = { ...next, preview: incoming.preview };
+  return next;
+}
+
+function sameStringList(a: readonly string[] | undefined, b: readonly string[] | undefined): boolean {
+  const left = a ?? [];
+  const right = b ?? [];
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function mergeMissingThreadMetadata(
+  existing: TimelineMessage,
+  incoming: TimelineMessage,
+): TimelineMessage {
+  let next = existing;
+  const assign = (patch: Partial<TimelineMessage>) => {
+    next = next === existing ? { ...existing, ...patch } : { ...next, ...patch };
+  };
+
+  const ids = mergeMessageIds(next, next.id, [incoming.id, ...(incoming.wireIds ?? [])]);
+  if (ids.id !== next.id || !sameStringList(ids.wireIds, next.wireIds)) next = ids;
+
+  if (!next.threadId && incoming.threadId) assign({ threadId: incoming.threadId });
+  if (!next.parentThreadId && incoming.parentThreadId) assign({ parentThreadId: incoming.parentThreadId });
+  if (!next.correctionTargetId && incoming.correctionTargetId) {
+    assign({ correctionTargetId: incoming.correctionTargetId });
+  }
+  if (!next.reactionTargetId && incoming.reactionTargetId) {
+    assign({ reactionTargetId: incoming.reactionTargetId });
+  }
+
+  const replyTo = mergeReplyToMetadata(next.replyTo, incoming.replyTo);
+  if (replyTo !== next.replyTo) assign({ replyTo });
+
+  return next;
+}
+
+interface TimelineBuildOptions {
+  seedExistingOnly?: boolean;
+}
+
 function queuedRoomMessageToTimeline(
   session: WaddleSession,
   roomJid: string,
@@ -790,6 +841,7 @@ export function useMessaging(
     // Only catch up if we had already loaded this channel; otherwise the
     // standard loadMessages call on channel-select handles it.
     if (messages.value.length === 0) return;
+    const metadataSeed = messages.value;
     const preserved = messages.value.filter(
       (m) =>
         m.isSelf && (
@@ -799,7 +851,7 @@ export function useMessaging(
         ),
     );
     void (async () => {
-      await loadMessages(spaceId ?? "", channelId);
+      await loadMessages(spaceId ?? "", channelId, 0, metadataSeed);
       if (
         preserved.length === 0 ||
         (activeSpaceId.value ?? "") !== (spaceId ?? "") ||
@@ -821,6 +873,7 @@ export function useMessaging(
   function buildTimelineFromMamResults(
     mamResults: LiveRoomMessage[],
     existing: TimelineMessage[] = [],
+    options: TimelineBuildOptions = {},
   ): TimelineMessage[] {
     const regularMessages: LiveRoomMessage[] = [];
     const reactionUpdates: { targetId: string; nick: string; senderId: string; emojis: string[] }[] = [];
@@ -867,10 +920,26 @@ export function useMessaging(
     for (const message of existing) {
       indexMessageByIds(byId, message);
     }
-    const timeline = [...existing];
+    const timeline = options.seedExistingOnly ? [] : [...existing];
     for (const raw of regularMessages) {
-      if (findMessageById(timeline, raw.id)) continue;
       const tm = fromLiveMessage(session.value!, raw, (id) => byId.get(id));
+      const existingMessage = [tm.id, ...(tm.wireIds ?? [])]
+        .map((id) => byId.get(id))
+        .find((message): message is TimelineMessage => !!message);
+      if (existingMessage) {
+        const merged = options.seedExistingOnly
+          ? mergeMissingThreadMetadata(tm, existingMessage)
+          : mergeMissingThreadMetadata(existingMessage, tm);
+        if (options.seedExistingOnly) {
+          indexMessageByIds(byId, merged);
+          timeline.push(merged);
+        } else if (merged !== existingMessage) {
+          const index = timeline.indexOf(existingMessage);
+          if (index !== -1) timeline[index] = merged;
+          indexMessageByIds(byId, merged);
+        }
+        continue;
+      }
       indexMessageByIds(byId, tm);
       timeline.push(tm);
     }
@@ -920,7 +989,12 @@ export function useMessaging(
     return applyForumContext(timeline.sort((a, b) => a.createdAt.localeCompare(b.createdAt)));
   }
 
-  async function loadMessages(spaceId: string, channelId: string, unreadAtLoad = 0) {
+  async function loadMessages(
+    spaceId: string,
+    channelId: string,
+    unreadAtLoad = 0,
+    metadataSeed: TimelineMessage[] = [],
+  ) {
     if (!session.value) return;
 
     const requestId = ++messageRequestId;
@@ -963,7 +1037,12 @@ export function useMessaging(
 
       oldestArchiveId = page?.firstArchiveId ?? mamResults[0]?.id ?? null;
       hasOlderMessages.value = page ? !page.complete && !!page.firstArchiveId : mamResults.length >= 100;
-      const timelineWithQueue = appendQueuedMessages(buildTimelineFromMamResults(mamResults), roomJid);
+      const timelineWithQueue = appendQueuedMessages(
+        buildTimelineFromMamResults(mamResults, metadataSeed, {
+          seedExistingOnly: metadataSeed.length > 0,
+        }),
+        roomJid,
+      );
       messages.value = timelineWithQueue;
       if (requestId === messageRequestId) {
         isLoadingMessages.value = false;
@@ -1071,7 +1150,12 @@ export function useMessaging(
       [threadId]: page ? !page.complete && !!page.firstArchiveId : results.length >= 100,
     };
     const next = buildTimelineFromMamResults(results, messages.value);
-    if (next.length === messages.value.length) return;
+    if (
+      next.length === messages.value.length &&
+      next.every((message, index) => message === messages.value[index])
+    ) {
+      return;
+    }
     messages.value = next;
   }
 

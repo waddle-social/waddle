@@ -31,7 +31,7 @@ use crate::xep::{
     extract_references_from_message, extract_retraction_from_message, parse_reply_from_message,
     RetractionKind, NS_REPLY,
 };
-use waddle_xmpp_core::xep0201::thread_info_from_message;
+use waddle_xmpp_core::xep0201::{thread_info_from_message_in_stanza_ns, CLIENT_STANZA_NS};
 
 /// Build the [`ArchivedMessage`] persisted form of a one-to-one
 /// (chat / normal) `<message/>` for direct MAM storage.
@@ -92,13 +92,14 @@ pub fn build_direct_archived_message(
     // post-reattach payload form. The inbound parse boundary in
     // `protocol::frame::parse_stanza` calls `reattach_thread_parent` so the
     // parent attribute survives `Message::try_from`'s typed lossy parse.
-    let (thread_id, parent_thread_id) = match thread_info_from_message(message) {
-        Some(info) => (
-            Some(info.id),
-            info.parent.and_then(waddle_xmpp_core::mam::ThreadId::new),
-        ),
-        None => (None, None),
-    };
+    let (thread_id, parent_thread_id) =
+        match thread_info_from_message_in_stanza_ns(message, CLIENT_STANZA_NS) {
+            Some(info) => (
+                Some(info.id),
+                info.parent.and_then(waddle_xmpp_core::mam::ThreadId::new),
+            ),
+            None => (None, None),
+        };
 
     ArchivedMessage {
         id,
@@ -440,6 +441,28 @@ mod tests {
             archived.parent_thread_id.as_ref().map(|t| t.as_str()),
             Some("root-1")
         );
+    }
+
+    #[test]
+    fn xep_0201_direct_chat_ignores_wrong_stanza_namespace_payload() {
+        use minidom::Element;
+        let mut msg = chat_with_body("alice@example.com/web", "bob@example.com", "hi");
+        waddle_xmpp_core::xep0201::set_thread_id(&mut msg, "typed-thread");
+        msg.payloads.push(
+            Element::builder("thread", waddle_xmpp_core::xep0201::SERVER_STANZA_NS)
+                .attr("parent", "foreign-root")
+                .append("foreign-thread")
+                .build(),
+        );
+
+        let archived = build_direct_archived_message(
+            "alice@example.com",
+            "alice@example.com",
+            "bob@example.com",
+            &msg,
+        );
+        assert_eq!(archived.thread_id.as_deref(), Some("typed-thread"));
+        assert!(archived.parent_thread_id.is_none());
     }
 
     #[test]

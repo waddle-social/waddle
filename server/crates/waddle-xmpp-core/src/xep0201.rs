@@ -1,8 +1,9 @@
 //! XEP-0201: Best Practices for Message Threads
 //!
-//! The `<thread/>` element is defined by RFC 6121 (no namespace). XEP-0201 is
-//! an Informational XEP that standardises how clients and servers should
-//! generate, propagate, and optionally nest threads via the `parent` attribute.
+//! The `<thread/>` element is defined by RFC 6121 as a child of the message
+//! stanza. XEP-0201 is an Informational XEP that standardises how clients and
+//! servers should generate, propagate, and optionally nest threads via the
+//! `parent` attribute.
 //!
 //! Wire shape:
 //!
@@ -25,6 +26,24 @@ pub const NS_THREAD_FEATURE: &str = "urn:xmpp:threads:0";
 
 /// The RFC 6121 thread element name.
 pub const THREAD_ELEMENT: &str = "thread";
+
+/// Client-to-server stanza namespace for message payloads.
+pub const CLIENT_STANZA_NS: &str = "jabber:client";
+
+/// Server-to-server stanza namespace for message payloads.
+pub const SERVER_STANZA_NS: &str = "jabber:server";
+
+/// Return true for the RFC 6121 `<thread/>` child belonging to `stanza_ns`.
+///
+/// Same-local-name extension payloads in another namespace are not message
+/// thread metadata and must be preserved.
+pub fn is_thread_element_for_stanza(element: &Element, stanza_ns: &str) -> bool {
+    element.name() == THREAD_ELEMENT && element.ns() == stanza_ns
+}
+
+fn is_message_thread_payload_for_stanza(element: &Element, stanza_ns: &str) -> bool {
+    element.name() == THREAD_ELEMENT && element.ns() == stanza_ns
+}
 
 /// Thread identifier plus an optional parent (XEP-0201 nesting).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,9 +73,10 @@ impl ThreadInfo {
 }
 
 fn find_thread_element(msg_xml: &Element) -> Option<&Element> {
+    let stanza_ns = msg_xml.ns();
     msg_xml
         .children()
-        .find(|child| child.name() == THREAD_ELEMENT)
+        .find(|child| is_thread_element_for_stanza(child, &stanza_ns))
 }
 
 /// Parse thread info from a raw message element.
@@ -97,11 +117,15 @@ pub fn parse_thread_info(msg_xml: &Element) -> Option<ThreadInfo> {
 /// field (parent unrecoverable) when no payload thread exists. Callers that
 /// need parent on archive write should ensure `reattach_thread_parent` runs
 /// upstream of this call.
-pub fn thread_info_from_message(msg: &Message) -> Option<ThreadInfo> {
+pub fn thread_info_from_message_in_stanza_ns(
+    msg: &Message,
+    stanza_ns: impl AsRef<str>,
+) -> Option<ThreadInfo> {
+    let stanza_ns = stanza_ns.as_ref();
     if let Some(thread_elem) = msg
         .payloads
         .iter()
-        .find(|elem| elem.name() == THREAD_ELEMENT)
+        .find(|elem| is_message_thread_payload_for_stanza(elem, stanza_ns))
     {
         let text = thread_elem.text();
         let id = text.trim();
@@ -124,6 +148,11 @@ pub fn thread_info_from_message(msg: &Message) -> Option<ThreadInfo> {
     })
 }
 
+/// Read XEP-0201 thread info from a client-stanza parsed `Message`.
+pub fn thread_info_from_message(msg: &Message) -> Option<ThreadInfo> {
+    thread_info_from_message_in_stanza_ns(msg, CLIENT_STANZA_NS)
+}
+
 /// Build a `<thread/>` element with optional `parent` attribute in the given
 /// stanza namespace.
 ///
@@ -141,16 +170,16 @@ pub fn build_thread_element(info: &ThreadInfo, ns: impl AsRef<str>) -> Element {
 /// Replace any `<thread/>` children on a raw message element with one built
 /// from `info`, inheriting the message's namespace.
 pub fn install_thread_element(msg_xml: &mut Element, info: &ThreadInfo) {
-    let stanza_ns = msg_xml.ns();
+    let stanza_ns = msg_xml.ns().to_string();
     let to_remove: Vec<(String, String)> = msg_xml
         .children()
-        .filter(|c| c.name() == THREAD_ELEMENT)
+        .filter(|c| is_thread_element_for_stanza(c, &stanza_ns))
         .map(|c| (c.name().to_owned(), c.ns()))
         .collect();
     for (name, ns) in to_remove {
         msg_xml.remove_child(&name, ns.as_str());
     }
-    msg_xml.append_child(build_thread_element(info, stanza_ns));
+    msg_xml.append_child(build_thread_element(info, &stanza_ns));
 }
 
 /// Read RFC 6121 `<thread/>` identifier from a message.
@@ -160,12 +189,21 @@ pub fn install_thread_element(msg_xml: &mut Element, info: &ThreadInfo) {
 /// callers that constructed messages by appending an element rather than
 /// setting the typed field.
 pub fn thread_id_from_message(msg: &Message) -> Option<String> {
+    thread_id_from_message_in_stanza_ns(msg, CLIENT_STANZA_NS)
+}
+
+/// Read RFC 6121 `<thread/>` identifier from a message in `stanza_ns`.
+pub fn thread_id_from_message_in_stanza_ns(
+    msg: &Message,
+    stanza_ns: impl AsRef<str>,
+) -> Option<String> {
     if let Some(thread) = msg.thread.as_ref() {
         return Some(thread.0.clone());
     }
+    let stanza_ns = stanza_ns.as_ref();
     msg.payloads
         .iter()
-        .find(|elem| elem.name() == THREAD_ELEMENT)
+        .find(|elem| is_message_thread_payload_for_stanza(elem, stanza_ns))
         .map(|elem| elem.text())
         .map(|text| text.trim().to_owned())
         .filter(|text| !text.is_empty())
@@ -214,6 +252,20 @@ mod tests {
         let xml = "<message xmlns='jabber:client'/>"
             .parse::<Element>()
             .expect("valid xml");
+        assert_eq!(parse_thread_info(&xml), None);
+    }
+
+    #[test]
+    fn explicit_empty_namespace_thread_is_not_stanza_thread() {
+        let xml = Element::builder("message", "jabber:client")
+            .append(
+                Element::builder(THREAD_ELEMENT, "")
+                    .attr("parent", "root-1")
+                    .append("not-stanza-thread")
+                    .build(),
+            )
+            .build();
+
         assert_eq!(parse_thread_info(&xml), None);
     }
 
@@ -269,6 +321,57 @@ mod tests {
         let count = xml
             .children()
             .filter(|c| c.name() == THREAD_ELEMENT)
+            .count();
+        assert_eq!(count, 1);
+        let info = parse_thread_info(&xml).expect("thread after install");
+        assert_eq!(info.id, "new");
+        assert_eq!(info.parent.as_deref(), Some("root"));
+    }
+
+    #[test]
+    fn install_thread_element_preserves_unrelated_namespaced_thread_payload() {
+        let mut xml = "<message xmlns='jabber:client'><thread xmlns='urn:example:other:0' kind='extension'>keep me</thread><thread>old</thread></message>"
+            .parse::<Element>()
+            .expect("valid xml");
+        install_thread_element(&mut xml, &ThreadInfo::child("new", "root"));
+
+        assert!(xml.children().any(|c| {
+            c.name() == THREAD_ELEMENT && c.ns() == "urn:example:other:0" && c.text() == "keep me"
+        }));
+        let count = xml
+            .children()
+            .filter(|c| is_thread_element_for_stanza(c, "jabber:client"))
+            .count();
+        assert_eq!(count, 1);
+        let info = parse_thread_info(&xml).expect("thread after install");
+        assert_eq!(info.id, "new");
+        assert_eq!(info.parent.as_deref(), Some("root"));
+    }
+
+    #[test]
+    fn install_thread_element_preserves_explicit_empty_namespace_thread_payload() {
+        let mut xml = Element::builder("message", "jabber:client")
+            .append(
+                Element::builder(THREAD_ELEMENT, "")
+                    .attr("kind", "extension")
+                    .append("keep me")
+                    .build(),
+            )
+            .append(
+                Element::builder(THREAD_ELEMENT, "jabber:client")
+                    .append("old")
+                    .build(),
+            )
+            .build();
+
+        install_thread_element(&mut xml, &ThreadInfo::child("new", "root"));
+
+        assert!(xml
+            .children()
+            .any(|c| c.name() == THREAD_ELEMENT && c.ns().is_empty() && c.text() == "keep me"));
+        let count = xml
+            .children()
+            .filter(|c| is_thread_element_for_stanza(c, "jabber:client"))
             .count();
         assert_eq!(count, 1);
         let info = parse_thread_info(&xml).expect("thread after install");
@@ -344,6 +447,67 @@ mod tests {
         let info = thread_info_from_message(&msg).expect("thread info");
         assert_eq!(info.id, "authoritative-id");
         assert_eq!(info.parent.as_deref(), Some("root-1"));
+    }
+
+    #[test]
+    fn thread_info_from_message_ignores_empty_namespace_payload() {
+        let mut msg = Message::new(None::<jid::Jid>);
+        set_thread_id(&mut msg, "typed-thread");
+        msg.payloads.push(
+            Element::builder(THREAD_ELEMENT, "")
+                .attr("parent", "foreign-root")
+                .append("foreign-thread")
+                .build(),
+        );
+
+        let info = thread_info_from_message(&msg).expect("typed thread");
+        assert_eq!(info.id, "typed-thread");
+        assert_eq!(info.parent, None);
+    }
+
+    #[test]
+    fn thread_info_from_message_ignores_wrong_stanza_namespace_payload() {
+        let mut msg = Message::new(None::<jid::Jid>);
+        set_thread_id(&mut msg, "typed-thread");
+        msg.payloads.push(
+            Element::builder(THREAD_ELEMENT, SERVER_STANZA_NS)
+                .attr("parent", "foreign-root")
+                .append("foreign-thread")
+                .build(),
+        );
+
+        let info = thread_info_from_message(&msg).expect("typed thread");
+        assert_eq!(info.id, "typed-thread");
+        assert_eq!(info.parent, None);
+    }
+
+    #[test]
+    fn thread_info_from_message_can_read_server_stanza_namespace() {
+        let mut msg = Message::new(None::<jid::Jid>);
+        msg.payloads.push(
+            Element::builder(THREAD_ELEMENT, SERVER_STANZA_NS)
+                .attr("parent", "server-root")
+                .append("server-child")
+                .build(),
+        );
+
+        assert_eq!(thread_info_from_message(&msg), None);
+        let info =
+            thread_info_from_message_in_stanza_ns(&msg, SERVER_STANZA_NS).expect("server thread");
+        assert_eq!(info.id, "server-child");
+        assert_eq!(info.parent.as_deref(), Some("server-root"));
+    }
+
+    #[test]
+    fn thread_id_from_message_ignores_empty_namespace_payload() {
+        let mut msg = Message::new(None::<jid::Jid>);
+        msg.payloads.push(
+            Element::builder(THREAD_ELEMENT, "")
+                .append("foreign-thread")
+                .build(),
+        );
+
+        assert_eq!(thread_id_from_message(&msg), None);
     }
 
     #[test]
