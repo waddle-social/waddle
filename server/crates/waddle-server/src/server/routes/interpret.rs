@@ -1648,7 +1648,7 @@ async fn dispatch_to_room(
                 .as_deref()
                 .filter(|body| is_ai_prompt_body(body) && is_ai_provider_fallback(&response))
             {
-                let room_history = fetch_room_history_for_ai(deps, &room_jid).await;
+                let room_history = fetch_room_history_for_ai(deps, &room_jid, prompt).await;
                 match generate_ai_response(prompt, &room_history).await {
                     Ok(answer) => match DisplayText::new(answer) {
                         Ok(answer) => {
@@ -1698,7 +1698,11 @@ fn is_ai_provider_fallback(response: &BotGroupchatResponse) -> bool {
     response.purpose == BotGroupchatResponsePurpose::AiProviderFallback
 }
 
-async fn fetch_room_history_for_ai(deps: &Deps<'_>, room_jid: &BareJid) -> Vec<HistoricalMessage> {
+async fn fetch_room_history_for_ai(
+    deps: &Deps<'_>,
+    room_jid: &BareJid,
+    exclude_prompt: &str,
+) -> Vec<HistoricalMessage> {
     let Some(mam_storage) = deps.mam_storage else {
         return vec![];
     };
@@ -1709,25 +1713,22 @@ async fn fetch_room_history_for_ai(deps: &Deps<'_>, room_jid: &BareJid) -> Vec<H
         before_id: Some(String::new()),
         ..Default::default()
     };
-    match mam_storage
-        .query_messages(&room_jid.to_string(), &query)
-        .await
-    {
+    let archive_jid = room_jid.to_string();
+    match mam_storage.query_messages(&archive_jid, &query).await {
         Ok(result) => result
             .messages
             .into_iter()
             .filter_map(|msg| {
                 let body = msg.body;
-                if body.is_empty() {
+                if body.is_empty() || body == exclude_prompt {
                     return None;
                 }
                 let nick = msg
                     .from
-                    .rsplit('/')
-                    .next()
-                    .filter(|n| !n.is_empty())
-                    .unwrap_or(&msg.from)
-                    .to_string();
+                    .parse::<Jid>()
+                    .ok()
+                    .and_then(|jid| jid.resource().map(|r| r.to_string()))
+                    .unwrap_or_else(|| msg.from.clone());
                 Some(HistoricalMessage {
                     sender_nick: nick,
                     body,

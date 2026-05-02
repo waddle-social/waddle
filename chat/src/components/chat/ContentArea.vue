@@ -452,17 +452,25 @@ watch(() => props.messages, (newMessages, oldMessages) => {
   // suppress auto-open for all threads already present in the archive so we
   // don't pop open a thread panel every time the user enters a room.
   if (!oldMessages || oldMessages.length === 0) {
+    const byId = new Map(newMessages.map((m) => [m.id, m]));
     for (const msg of newMessages) {
       if (!msg.threadId || msg.threadId === msg.id) continue;
       if (autoOpenedThreadIds.has(msg.threadId)) continue;
-      const root = newMessages.find((m) => m.id === msg.threadId);
-      if (root?.isSelf) autoOpenedThreadIds.add(msg.threadId);
+      if (byId.get(msg.threadId)?.isSelf) autoOpenedThreadIds.add(msg.threadId);
     }
     return;
   }
-  if (props.activeThread) return;
+  // Don't auto-open when the user is paging backward through older history —
+  // those messages have older timestamps and are not live replies.
+  if (props.isLoadingOlderMessages || props.activeThread) return;
+  const maxOldCreatedAt = oldMessages.reduce(
+    (max, m) => (m.createdAt > max ? m.createdAt : max),
+    "",
+  );
   const prevIds = new Set(oldMessages.map((m) => m.id));
-  const incoming = newMessages.filter((m) => !prevIds.has(m.id));
+  const incoming = newMessages.filter(
+    (m) => !prevIds.has(m.id) && m.createdAt > maxOldCreatedAt,
+  );
   const threadId = findThreadToAutoOpen(incoming, newMessages, autoOpenedThreadIds);
   if (threadId) {
     autoOpenedThreadIds.add(threadId);
