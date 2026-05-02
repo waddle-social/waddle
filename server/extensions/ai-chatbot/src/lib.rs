@@ -121,7 +121,13 @@ fn manifest() -> types::ExtensionManifest {
             types::ExtensionCapability::MessageObserve,
             types::ExtensionCapability::BotGroupchatSend,
         ],
-        commands: vec![],
+        commands: vec![types::CommandDescriptor {
+            node: types::CommandNode {
+                value: format!("urn:waddle:extension:1:{PLUGIN_ID}"),
+            },
+            name: display("Ask AI Chatbot"),
+            composer_prefix: Some(AI_COMMAND.to_string()),
+        }],
         pubsub_nodes: vec![],
         artifact: None,
     }

@@ -159,6 +159,7 @@ interface types {
     record command-descriptor {
         node: command-node,
         name: display-text,
+        composer-prefix: option<string>,
     }
 
     enum text-style {

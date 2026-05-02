@@ -303,6 +303,7 @@ fn command_descriptor(node: &str, name: &str) -> types::CommandDescriptor {
             value: node.to_string(),
         },
         name: display(name),
+        composer_prefix: None,
     }
 }
 

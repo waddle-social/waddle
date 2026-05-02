@@ -64,8 +64,9 @@ use waddle_xmpp::{
         build_moderation_result_message, build_room_space_metadata_forms, build_search_response,
         build_server_role_form, build_spaces_metadata_form_for_requester, is_last_activity_query,
         is_search_request, is_time_query, is_version_query, parse_command_from_iq,
-        parse_moderation_iq, parse_search_request, ChannelResult, Command, CommandStatus,
-        Searchable, SpaceAffiliation, NODE_COMMANDS, NS_CHANNEL_SEARCH,
+        parse_moderation_iq, parse_search_request, ChannelResult, Command, CommandStatus, DataForm,
+        Field, FormType, IntoElement, Searchable, SpaceAffiliation, NODE_COMMANDS,
+        NS_CHANNEL_SEARCH,
     },
     Affiliation, SpaceDetails, Stanza, StanzaErrorCondition, StanzaErrorType, XmppError,
 };
@@ -525,6 +526,38 @@ pub async fn handle_iq_with_conn_state(
             let response =
                 build_disco_info_response(request_iq, &identities, &features, Some(NODE_COMMANDS));
             return vec![iq_to_xml(response)];
+        }
+
+        // Per-command disco#info: serves XEP-0128 data form with composer-prefix when set
+        if to.as_deref() == Some(domain) {
+            if let Some(node) = query.node.as_deref() {
+                if state.deps.protocol.command_registry.has_command(node).await {
+                    let composer_prefix = state
+                        .deps
+                        .protocol
+                        .command_registry
+                        .command_composer_prefix(node)
+                        .await;
+                    let identities = vec![Identity::automation(Some("Ad-Hoc Command"))];
+                    let features = vec![Feature::disco_info(), Feature::commands()];
+                    let response = if let Some(prefix) = composer_prefix {
+                        let form = DataForm::new(FormType::Result)
+                            .add_field(Field::form_type("urn:waddle:extension:1:command"))
+                            .add_field(Field::text_single("composer-prefix", &prefix))
+                            .into_element();
+                        build_disco_info_response_with_extensions(
+                            request_iq,
+                            &identities,
+                            &features,
+                            Some(node),
+                            &[form],
+                        )
+                    } else {
+                        build_disco_info_response(request_iq, &identities, &features, Some(node))
+                    };
+                    return vec![iq_to_xml(response)];
+                }
+            }
         }
 
         // Disco info on spaces service

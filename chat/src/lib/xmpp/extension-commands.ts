@@ -48,6 +48,7 @@ export interface DiscoveredExtensionCommand {
   serviceJid: string;
   node: string;
   name: string;
+  composerCommand?: { prefix: string };
 }
 
 type ExtensionCommandOutcomeState = "success" | "warning" | "error";
@@ -400,6 +401,8 @@ export async function submitExtensionCommandForm(
   return parseExtensionCommandResult(response);
 }
 
+const NS_WADDLE_EXTENSION_COMMAND = "urn:waddle:extension:1:command";
+
 export async function discoverExtensionCommands(
   xmpp: Agent,
   userJid: string,
@@ -407,16 +410,47 @@ export async function discoverExtensionCommands(
   const serviceJid = await discoverExtensionCommandService(xmpp, userJid);
   const disco = xmpp as unknown as {
     getDiscoItems?: (jid: string, node?: string) => Promise<{ items?: Array<{ jid?: string; node?: string; name?: string }> }>;
+    getDiscoInfo?: (jid: string, node?: string) => Promise<unknown>;
   };
   const response = await disco.getDiscoItems?.(serviceJid, NS_ADHOC_COMMANDS);
   const items = response?.items ?? [];
-  return items
-    .filter((item) => item.node && item.node !== INVOKE_COMMAND_NODE)
-    .map((item) => ({
-      serviceJid: item.jid ?? serviceJid,
-      node: item.node!,
-      name: item.name || item.node!,
-    }));
+  const filtered = items.filter((item) => item.node && item.node !== INVOKE_COMMAND_NODE);
+  return Promise.all(
+    filtered.map(async (item) => {
+      const itemJid = item.jid ?? serviceJid;
+      const composerCommand = await fetchCommandComposerPrefix(disco, itemJid, item.node!);
+      return {
+        serviceJid: itemJid,
+        node: item.node!,
+        name: item.name || item.node!,
+        ...(composerCommand ? { composerCommand } : {}),
+      };
+    }),
+  );
+}
+
+async function fetchCommandComposerPrefix(
+  disco: { getDiscoInfo?: (jid: string, node?: string) => Promise<unknown> },
+  serviceJid: string,
+  node: string,
+): Promise<{ prefix: string } | undefined> {
+  try {
+    const info = await disco.getDiscoInfo?.(serviceJid, node);
+    const extensions = (info as { extensions?: unknown[] } | undefined)?.extensions ?? [];
+    for (const ext of extensions) {
+      const fields = (ext as { fields?: Array<{ name?: string; value?: string | string[] }> } | undefined)?.fields ?? [];
+      const formType = fields.find((f) => f.name === "FORM_TYPE")?.value;
+      if (formType !== NS_WADDLE_EXTENSION_COMMAND) continue;
+      const prefixField = fields.find((f) => f.name === "composer-prefix");
+      const prefix = Array.isArray(prefixField?.value) ? prefixField.value[0] : prefixField?.value;
+      if (prefix && typeof prefix === "string" && prefix.trim()) {
+        return { prefix: prefix.trim() };
+      }
+    }
+  } catch {
+    // Non-fatal: command prefix is optional metadata
+  }
+  return undefined;
 }
 
 function parseFieldOptions(options: unknown): ExtensionCommandFormOption[] {

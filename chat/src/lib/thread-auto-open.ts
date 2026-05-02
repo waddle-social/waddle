@@ -14,12 +14,19 @@ export function findThreadToAutoOpen(
   allMessages: readonly TimelineMessage[],
   alreadyOpened: ReadonlySet<string>,
 ): string | undefined {
+  const byAnyId = new Map<string, TimelineMessage>();
+  for (const m of allMessages) {
+    byAnyId.set(m.id, m);
+    for (const wireId of m.wireIds ?? []) {
+      byAnyId.set(wireId, m);
+    }
+  }
   for (const msg of candidates) {
     if (!msg.threadId || msg.threadId === msg.id) continue;
-    if (alreadyOpened.has(msg.threadId)) continue;
-    const root = allMessages.find((m) => m.id === msg.threadId);
+    const root = byAnyId.get(msg.threadId);
     if (!root?.isSelf) continue;
-    return msg.threadId;
+    if (alreadyOpened.has(root.id)) continue;
+    return root.id;
   }
   return undefined;
 }

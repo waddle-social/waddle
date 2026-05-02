@@ -252,6 +252,7 @@ impl TryFrom<wit_types::CommandDescriptor> for CommandDescriptor {
         Ok(Self {
             node: wit_newtype_to_domain!(value.node, CommandNode)?,
             name: wit_newtype_to_domain!(value.name, DisplayText)?,
+            composer_prefix: value.composer_prefix,
         })
     }
 }

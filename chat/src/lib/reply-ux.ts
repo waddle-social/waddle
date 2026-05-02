@@ -7,9 +7,10 @@ export function getReplyJumpNotice(targetFound: boolean): string {
 export function getComposerEscapeAction(state: {
   showMentions: boolean;
   showEmoji: boolean;
+  showCommands: boolean;
   isReplyingTo: boolean;
 }): "dismiss-autocomplete" | "cancel-reply" | "none" {
-  if (state.showMentions || state.showEmoji) {
+  if (state.showMentions || state.showEmoji || state.showCommands) {
     return "dismiss-autocomplete";
   }
 
@@ -25,13 +26,19 @@ export function getComposerAutocompleteAction(state: {
   mentionCount: number;
   showEmoji: boolean;
   emojiCount: number;
-}): "select-mention" | "select-emoji" | "dismiss-autocomplete" | "none" {
+  showCommands: boolean;
+  commandCount: number;
+}): "select-mention" | "select-emoji" | "select-command" | "dismiss-autocomplete" | "none" {
   if (state.showMentions) {
     return state.mentionCount > 0 ? "select-mention" : "dismiss-autocomplete";
   }
 
   if (state.showEmoji) {
     return state.emojiCount > 0 ? "select-emoji" : "dismiss-autocomplete";
+  }
+
+  if (state.showCommands) {
+    return state.commandCount > 0 ? "select-command" : "dismiss-autocomplete";
   }
 
   return "none";

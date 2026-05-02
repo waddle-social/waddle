@@ -78,6 +78,7 @@ fn sample_manifest() -> ExtensionManifest {
         commands: vec![CommandDescriptor {
             node: CommandNode::new("urn:waddle:extension:1:task-widget").expect("command node"),
             name: text("Task Widget"),
+            composer_prefix: None,
         }],
         pubsub_nodes: vec![id!(
             PubSubNode::new,

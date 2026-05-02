@@ -62,6 +62,16 @@ describe("generic thread auto-open", () => {
     expect(findThreadToAutoOpen(msgs, msgs, new Set())).toBeUndefined();
   });
 
+  test("resolves root via wireId when threadId matches an alternative XMPP id", () => {
+    // Simulates the AI-chatbot case: the server sets <thread> to the XMPP
+    // wire id, but the frontend's primary id for the same message is the MAM
+    // stanza id. The root must still be found and its stable primary id returned.
+    const root = message({ id: "mam-stanza-id", isSelf: true, wireIds: ["xmpp-wire-id"] });
+    const reply = message({ id: "reply-w", threadId: "xmpp-wire-id", isSelf: false });
+    const msgs = [root, reply];
+    expect(findThreadToAutoOpen(msgs, msgs, new Set())).toBe("mam-stanza-id");
+  });
+
   test("candidates and allMessages can differ: finds root in allMessages but only triggers on candidates", () => {
     const root = message({ id: "root-z", isSelf: true });
     const historical = message({ id: "hist-z", threadId: "root-z", isSelf: false });

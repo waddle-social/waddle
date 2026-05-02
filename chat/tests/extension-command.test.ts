@@ -97,7 +97,7 @@ describe("extension command invocation", () => {
     expect((sent as { command?: { form?: unknown } }).command?.form).toBeUndefined();
   });
 
-  test("returns all discovered extension commands including the AI chatbot", async () => {
+  test("returns all discovered extension commands including the AI chatbot with its composer prefix", async () => {
     const xmpp = {
       async getDiscoItems(jid: string, node?: string) {
         if (!node) return { items: [{ jid: "extensions.example.com" }] };
@@ -109,14 +109,25 @@ describe("extension command invocation", () => {
           ],
         };
       },
-      async getDiscoInfo() {
+      async getDiscoInfo(_jid: string, node?: string) {
+        if (node === "urn:waddle:extension:1:ai-chatbot") {
+          return {
+            features: ["http://jabber.org/protocol/commands"],
+            extensions: [{
+              fields: [
+                { name: "FORM_TYPE", value: "urn:waddle:extension:1:command" },
+                { name: "composer-prefix", value: "/ai" },
+              ],
+            }],
+          };
+        }
         return { features: ["http://jabber.org/protocol/commands"] };
       },
     };
 
     expect(await discoverExtensionCommands(xmpp as any, "alice@example.com/web")).toEqual([
       { serviceJid: "example.com", node: "urn:waddle:extension:poll", name: "Poll" },
-      { serviceJid: "example.com", node: "urn:waddle:extension:1:ai-chatbot", name: "Ask AI Chatbot" },
+      { serviceJid: "example.com", node: "urn:waddle:extension:1:ai-chatbot", name: "Ask AI Chatbot", composerCommand: { prefix: "/ai" } },
       { serviceJid: "example.com", node: "urn:waddle:extension:notes", name: "Notes" },
     ]);
   });

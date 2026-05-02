@@ -208,7 +208,7 @@ impl ExtensionManager {
         self.feature_namespaces.clone()
     }
 
-    pub fn command_nodes(&self) -> Vec<(String, String)> {
+    pub fn command_nodes(&self) -> Vec<(String, String, Option<String>)> {
         self.actors
             .iter()
             .flat_map(|actor| {
@@ -217,7 +217,13 @@ impl ExtensionManager {
                     .commands
                     .into_iter()
                     .filter(|command| command.node != CommandNode::invoke())
-                    .map(|command| (command.node.into_string(), command.name.into_string()))
+                    .map(|command| {
+                        (
+                            command.node.into_string(),
+                            command.name.into_string(),
+                            command.composer_prefix,
+                        )
+                    })
                     .collect::<Vec<_>>()
             })
             .collect()

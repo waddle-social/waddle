@@ -452,11 +452,15 @@ watch(() => props.messages, (newMessages, oldMessages) => {
   // suppress auto-open for all threads already present in the archive so we
   // don't pop open a thread panel every time the user enters a room.
   if (!oldMessages || oldMessages.length === 0) {
-    const byId = new Map(newMessages.map((m) => [m.id, m]));
+    const byAnyId = new Map<string, TimelineMessage>();
+    for (const m of newMessages) {
+      byAnyId.set(m.id, m);
+      for (const wireId of m.wireIds ?? []) byAnyId.set(wireId, m);
+    }
     for (const msg of newMessages) {
       if (!msg.threadId || msg.threadId === msg.id) continue;
-      if (autoOpenedThreadIds.has(msg.threadId)) continue;
-      if (byId.get(msg.threadId)?.isSelf) autoOpenedThreadIds.add(msg.threadId);
+      const root = byAnyId.get(msg.threadId);
+      if (root?.isSelf) autoOpenedThreadIds.add(root.id);
     }
     return;
   }
@@ -943,6 +947,7 @@ function dayDividerLabel(createdAt: string): string {
       :replying-to="replyingTo"
       :is-top-pinned="true"
       :extensions-open="extensionLauncherOpen"
+      :commands="extensionCommands"
       @send="onSend"
       @cancel-reply="cancelReply"
       @typing="emit('typing')"
@@ -1143,6 +1148,7 @@ function dayDividerLabel(createdAt: string): string {
       :upload-progress="uploadProgress"
       :replying-to="replyingTo"
       :extensions-open="extensionLauncherOpen"
+      :commands="extensionCommands"
       @send="onSend"
       @cancel-reply="cancelReply"
       @typing="emit('typing')"

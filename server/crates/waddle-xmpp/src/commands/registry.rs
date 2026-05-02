@@ -72,6 +72,8 @@ pub struct CommandMetadata {
     pub node: String,
     /// Human-readable command name
     pub name: String,
+    /// Optional slash-command prefix registered by the extension (e.g. "/ai")
+    pub composer_prefix: Option<String>,
     /// Handler function
     pub handler: CommandHandler,
 }
@@ -153,6 +155,7 @@ impl CommandRegistry {
         let metadata = CommandMetadata {
             node: node.clone(),
             name: name.clone(),
+            composer_prefix: None,
             handler: wrapped,
         };
         self.commands.write().await.insert(node.clone(), metadata);
@@ -168,6 +171,22 @@ impl CommandRegistry {
             .values()
             .map(|cmd| (cmd.node.clone(), cmd.name.clone()))
             .collect()
+    }
+
+    /// Set the composer-prefix for an already-registered command.
+    pub async fn set_command_prefix(&self, node: &str, prefix: String) {
+        if let Some(cmd) = self.commands.write().await.get_mut(node) {
+            cmd.composer_prefix = Some(prefix);
+        }
+    }
+
+    /// Return the composer prefix for a command, if set.
+    pub async fn command_composer_prefix(&self, node: &str) -> Option<String> {
+        self.commands
+            .read()
+            .await
+            .get(node)
+            .and_then(|cmd| cmd.composer_prefix.clone())
     }
 
     /// Check if a command is registered.

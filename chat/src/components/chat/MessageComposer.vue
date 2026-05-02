@@ -18,6 +18,7 @@ import {
   type MarkupSpan,
   type MessageReference,
 } from "@/lib/chat-ui";
+import type { DiscoveredExtensionCommand } from "@/lib/xmpp/extension-commands";
 
 type AttachmentPreviewKind = "image" | "video" | "audio" | "pdf" | "file";
 
@@ -46,6 +47,7 @@ const props = defineProps<{
   replyingTo?: { id: string; author: string; preview?: string } | null;
   isTopPinned?: boolean;
   extensionsOpen?: boolean;
+  commands?: DiscoveredExtensionCommand[];
 }>();
 
 const emit = defineEmits<{
@@ -65,8 +67,10 @@ const replyAuthorName = computed(() => {
 const showGifPicker = ref(false);
 const showMentions = ref(false);
 const showEmoji = ref(false);
+const showCommands = ref(false);
 const mentionQuery = ref("");
 const emojiQuery = ref("");
+const commandQuery = ref("");
 const selectedIndex = ref(0);
 const editorRef = ref<InstanceType<typeof ChatEditor> | null>(null);
 const setEditorRef = (instance: InstanceType<typeof ChatEditor> | null) => {
@@ -163,9 +167,24 @@ const mentionResults = computed(() => {
 const emojiResults = computed(() => searchEmoji(emojiQuery.value));
 const showForumTitleInput = computed(() => props.isForumChannel && !props.replyingTo);
 
+const slashCommands = computed(() =>
+  (props.commands ?? []).filter((c) => !!c.composerCommand),
+);
+
+const commandResults = computed(() => {
+  const q = commandQuery.value.toLowerCase();
+  if (!q) return slashCommands.value;
+  return slashCommands.value.filter(
+    (c) =>
+      c.name.toLowerCase().includes(q) ||
+      c.composerCommand!.prefix.toLowerCase().includes(q),
+  );
+});
+
 const activeResults = computed(() => {
   if (showMentions.value) return mentionResults.value;
   if (showEmoji.value) return emojiResults.value;
+  if (showCommands.value) return commandResults.value;
   return [];
 });
 
@@ -175,6 +194,8 @@ const autocompleteAction = computed(() =>
     mentionCount: mentionResults.value.length,
     showEmoji: showEmoji.value,
     emojiCount: emojiResults.value.length,
+    showCommands: showCommands.value,
+    commandCount: commandResults.value.length,
   }),
 );
 
@@ -209,6 +230,7 @@ function onEditorUpdate(doc: JSONContent) {
 function clearAutocomplete() {
   showMentions.value = false;
   showEmoji.value = false;
+  showCommands.value = false;
   triggerRange.value = null;
 }
 
@@ -250,10 +272,21 @@ function checkAutocompleteFromEditor() {
     emojiQuery.value = emojiMatch[1];
     selectedIndex.value = 0;
     showEmoji.value = true;
+    showCommands.value = false;
     triggerRange.value = {
       from: pos - emojiMatch[0].trimStart().length,
       to: pos,
     };
+    return;
+  }
+  showEmoji.value = false;
+
+  const commandMatch = textBefore.match(/^\/(\S*)$/);
+  if (commandMatch && slashCommands.value.length > 0) {
+    commandQuery.value = commandMatch[1];
+    selectedIndex.value = 0;
+    showCommands.value = true;
+    triggerRange.value = { from: pos - commandMatch[0].length, to: pos };
     return;
   }
   clearAutocomplete();
@@ -287,6 +320,20 @@ function insertEmoji(emoji: string) {
   triggerRange.value = null;
 }
 
+function insertCommand(cmd: DiscoveredExtensionCommand) {
+  const tiptapEditor = getTiptapEditor();
+  if (!tiptapEditor || !triggerRange.value) return;
+
+  const replacement = `${cmd.composerCommand!.prefix} `;
+  tiptapEditor.chain()
+    .focus()
+    .insertContentAt(triggerRange.value, replacement)
+    .run();
+
+  showCommands.value = false;
+  triggerRange.value = null;
+}
+
 function selectAutocompleteResult(action = autocompleteAction.value): boolean {
   if (action === "select-mention") {
     insertMention(mentionResults.value[selectedIndex.value]);
@@ -295,6 +342,11 @@ function selectAutocompleteResult(action = autocompleteAction.value): boolean {
 
   if (action === "select-emoji") {
     insertEmoji(emojiResults.value[selectedIndex.value].emoji);
+    return true;
+  }
+
+  if (action === "select-command") {
+    insertCommand(commandResults.value[selectedIndex.value]);
     return true;
   }
 
@@ -357,6 +409,7 @@ function onEditorCancel() {
   const action = getComposerEscapeAction({
     showMentions: showMentions.value,
     showEmoji: showEmoji.value,
+    showCommands: showCommands.value,
     isReplyingTo: !!props.replyingTo,
   });
 
@@ -371,7 +424,7 @@ function onEditorCancel() {
 }
 
 function onKeydown(e: KeyboardEvent) {
-  if (activeResults.value.length > 0 && (showMentions.value || showEmoji.value)) {
+  if (activeResults.value.length > 0 && (showMentions.value || showEmoji.value || showCommands.value)) {
     if (e.key === "ArrowDown") {
       e.preventDefault();
       e.stopPropagation();
@@ -629,6 +682,27 @@ watch(
         >
           <span>{{ entry.emoji }}</span>
           <span class="type-caption text-muted-foreground">:{{ entry.name }}:</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- /slash command autocomplete -->
+    <div
+      v-if="showCommands && commandResults.length > 0"
+      class="z-popover chat-composer-popover absolute glass-panel border border-border rounded-lg max-h-56 overflow-auto min-w-0 shadow-xl animate-fade-in p-1"
+      :class="isTopPinned ? 'top-full mt-2' : 'bottom-full mb-2'"
+    >
+      <div class="flex flex-col gap-1">
+        <button
+          v-for="(cmd, i) in commandResults"
+          :key="cmd.node"
+          type="button"
+          class="type-control w-full h-9 px-3 py-0 text-left hover:bg-muted transition-colors flex items-center gap-2 rounded-lg"
+          :class="i === selectedIndex ? 'bg-muted' : ''"
+          @mousedown.prevent="insertCommand(cmd)"
+        >
+          <span class="type-emphasis text-primary">{{ cmd.composerCommand!.prefix }}</span>
+          <span class="type-caption text-muted-foreground">{{ cmd.name }}</span>
         </button>
       </div>
     </div>

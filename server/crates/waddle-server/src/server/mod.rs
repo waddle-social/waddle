@@ -1239,13 +1239,13 @@ async fn register_extension_commands(
         })
         .await;
 
-    for (node, name) in extension_manager.command_nodes() {
+    for (node, name, composer_prefix) in extension_manager.command_nodes() {
         let manager = Arc::clone(&extension_manager);
         let storage = Arc::clone(&pubsub_storage);
         let owner = extension_pubsub_owner.clone();
         let registered_node = node.clone();
         command_registry
-            .register(node, name, move |ctx| {
+            .register(node.clone(), name, move |ctx| {
                 let manager = Arc::clone(&manager);
                 let storage = Arc::clone(&storage);
                 let owner = owner.clone();
@@ -1278,6 +1278,9 @@ async fn register_extension_commands(
                 }
             })
             .await;
+        if let Some(prefix) = composer_prefix {
+            command_registry.set_command_prefix(&node, prefix).await;
+        }
     }
 }
 

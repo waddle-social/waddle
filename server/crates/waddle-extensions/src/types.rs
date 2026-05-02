@@ -505,6 +505,7 @@ fn pubsub_node_pattern_matches(pattern: &str, candidate: &str) -> bool {
 pub struct CommandDescriptor {
     pub node: CommandNode,
     pub name: DisplayText,
+    pub composer_prefix: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
