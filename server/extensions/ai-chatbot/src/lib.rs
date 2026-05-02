@@ -127,7 +127,7 @@ fn manifest() -> types::ExtensionManifest {
 fn answer_body(prompt: &str) -> String {
     let prompt = clean_prompt(prompt);
     format!(
-        "AI provider unavailable. Configure the ai-chatbot extension provider settings to answer: {prompt}"
+        "AI chatbot provider execution is not implemented in this extension yet. I cannot answer: {prompt}"
     )
 }
 
@@ -244,8 +244,8 @@ mod tests {
     #[test]
     fn reports_provider_unavailable_without_fake_local_answer() {
         let answer = answer_body("/ai summarize the release notes");
-        assert!(answer.contains("AI provider unavailable"));
-        assert!(answer.contains("ai-chatbot extension provider settings"));
+        assert!(answer.contains("provider execution is not implemented"));
+        assert!(answer.contains("I cannot answer: summarize the release notes"));
         assert!(!answer.contains("simple arithmetic"));
         assert!(!answer.contains("letter-count"));
     }

@@ -429,20 +429,6 @@ pub enum ExtensionCapability {
     ArtifactReference,
     #[serde(rename = "ui.declarative")]
     UiDeclarative,
-    #[serde(rename = "channels.read")]
-    ChannelsRead,
-    #[serde(rename = "members.read")]
-    MembersRead,
-    #[serde(rename = "presence.read")]
-    PresenceRead,
-    #[serde(rename = "message.send")]
-    MessageSend,
-    #[serde(rename = "mam.query")]
-    MamQuery,
-    #[serde(rename = "roster.read")]
-    RosterRead,
-    #[serde(rename = "bot.presence")]
-    BotPresence,
 }
 
 impl ExtensionCapability {
@@ -456,13 +442,6 @@ impl ExtensionCapability {
             Self::PubSubPublish => "pubsub.publish",
             Self::ArtifactReference => "artifact.reference",
             Self::UiDeclarative => "ui.declarative",
-            Self::ChannelsRead => "channels.read",
-            Self::MembersRead => "members.read",
-            Self::PresenceRead => "presence.read",
-            Self::MessageSend => "message.send",
-            Self::MamQuery => "mam.query",
-            Self::RosterRead => "roster.read",
-            Self::BotPresence => "bot.presence",
         }
     }
 }

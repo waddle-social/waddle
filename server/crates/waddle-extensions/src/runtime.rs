@@ -32,7 +32,6 @@ wasmtime::component::bindgen!({
 });
 
 use self::exports::waddle::extension as wit_exports;
-use self::waddle::extension::host_tools as wit_host_tools;
 use self::waddle::extension::types as wit_types;
 use self::wasi::logging::logging::{Host as LoggingHost, Level as LogLevel};
 
@@ -95,61 +94,6 @@ impl LoggingHost for HostState {
     }
 }
 
-impl wit_host_tools::Host for HostState {
-    fn list_channels_and_spaces(
-        &mut self,
-    ) -> wasmtime::Result<Result<wit_host_tools::ChannelSpaceList, wit_host_tools::ToolError>> {
-        Ok(Err(tool_unavailable(
-            "channel and space listing is not wired for this extension invocation",
-        )))
-    }
-
-    fn list_members_and_presence(
-        &mut self,
-        _room: wit_types::RoomJid,
-    ) -> wasmtime::Result<Result<Vec<wit_host_tools::MemberPresence>, wit_host_tools::ToolError>>
-    {
-        Ok(Err(tool_unavailable(
-            "member and presence listing is not wired for this extension invocation",
-        )))
-    }
-
-    fn send_message(
-        &mut self,
-        _message: wit_host_tools::OutboundMessage,
-    ) -> wasmtime::Result<Result<wit_host_tools::SentMessage, wit_host_tools::ToolError>> {
-        Ok(Err(tool_unavailable(
-            "message sending is not wired for this extension invocation",
-        )))
-    }
-
-    fn query_message_history(
-        &mut self,
-        _query: wit_host_tools::MamQuery,
-    ) -> wasmtime::Result<Result<Vec<wit_host_tools::MamMessage>, wit_host_tools::ToolError>> {
-        Ok(Err(tool_unavailable(
-            "MAM history querying is not wired for this extension invocation",
-        )))
-    }
-
-    fn list_roster(
-        &mut self,
-    ) -> wasmtime::Result<Result<Vec<wit_host_tools::RosterItem>, wit_host_tools::ToolError>> {
-        Ok(Err(tool_unavailable(
-            "roster listing is not wired for this extension invocation",
-        )))
-    }
-}
-
-fn tool_unavailable(message: &str) -> wit_host_tools::ToolError {
-    wit_host_tools::ToolError {
-        code: wit_host_tools::ToolErrorCode::Unavailable,
-        message: wit_types::DisplayText {
-            value: message.to_string(),
-        },
-    }
-}
-
 /// Shared wasmtime engine used for all loaded extensions.
 #[derive(Clone, Debug)]
 pub struct WasmRuntime {
@@ -200,9 +144,6 @@ impl LoadedExtension {
         wasi::logging::logging::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)
             .map_err(anyhow::Error::from)
             .context("failed to add wasi:logging linker imports")?;
-        wit_host_tools::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)
-            .map_err(anyhow::Error::from)
-            .context("failed to add extension host-tool linker imports")?;
 
         Ok(Self {
             engine,
@@ -750,13 +691,6 @@ impl From<wit_types::ExtensionCapability> for ExtensionCapability {
             wit_types::ExtensionCapability::PubsubPublish => Self::PubSubPublish,
             wit_types::ExtensionCapability::ArtifactReference => Self::ArtifactReference,
             wit_types::ExtensionCapability::UiDeclarative => Self::UiDeclarative,
-            wit_types::ExtensionCapability::ChannelsRead => Self::ChannelsRead,
-            wit_types::ExtensionCapability::MembersRead => Self::MembersRead,
-            wit_types::ExtensionCapability::PresenceRead => Self::PresenceRead,
-            wit_types::ExtensionCapability::MessageSend => Self::MessageSend,
-            wit_types::ExtensionCapability::MamQuery => Self::MamQuery,
-            wit_types::ExtensionCapability::RosterRead => Self::RosterRead,
-            wit_types::ExtensionCapability::BotPresence => Self::BotPresence,
         }
     }
 }

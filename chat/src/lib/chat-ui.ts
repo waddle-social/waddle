@@ -519,7 +519,7 @@ function genericExtensionSummary(
   if (summary && summary !== annotation.payloadNamespace) return summary;
   const text = payload ? payloadText(payload) : null;
   if (text && text !== annotation.title) return text;
-  return summary || undefined;
+  return undefined;
 }
 
 function payloadOptions(payload: ExtensionPayloadElement | undefined): ExtensionPresentationOption[] {

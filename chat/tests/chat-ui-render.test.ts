@@ -274,4 +274,31 @@ describe("renderStyledBody", () => {
       details: [{ label: "Prompt", value: "Sketch a task board." }],
     });
   });
+
+  test("does not use raw payload namespace as generic summary", () => {
+    const annotation: ExtensionAnnotation = {
+      extensionId: "unknown-extension",
+      annotationId: "generic-1",
+      surfaceKind: "generic",
+      title: "Generic card",
+      summary: "urn:waddle:unknown-extension:1",
+      payloadNamespace: "urn:waddle:unknown-extension:1",
+      fields: {
+        payloadNamespace: "urn:waddle:unknown-extension:1",
+      },
+      payloads: [{
+        namespace: "urn:waddle:unknown-extension:1",
+        name: "payload",
+        attributes: {},
+        children: [],
+      }],
+      actions: [],
+    };
+
+    expect(extensionPresentation(annotation)).toMatchObject({
+      kind: "generic",
+      title: "Generic card",
+    });
+    expect(extensionPresentation(annotation).summary).toBeUndefined();
+  });
 });
