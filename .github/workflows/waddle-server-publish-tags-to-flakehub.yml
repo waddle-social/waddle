@@ -20,15 +20,17 @@ permissions:
 jobs:
   waddle-server-Publish-tags-to-FlakeHub:
     name: waddle-server-Publish tags to FlakeHub
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-linux-x86
     environment: flakehub
     steps:
     - name: Checkout
       uses: actions/checkout@v4
       with:
         fetch-depth: 2
-    - name: Install Nix
-      uses: DeterminateSystems/determinate-nix-action@f4c468f2287f0f14a113841b41f2dc8957119519
+    - name: Install Determinate Nix
+      uses: DeterminateSystems/determinate-nix-action@v3
+      with:
+        extra-conf: accept-flake-config = true
     - name: Checkout tag
       uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
       with:
@@ -43,24 +45,22 @@ jobs:
         name: waddle-social/waddle
         tag: ${{ inputs.tag }}
         visibility: public
-    - name: Setup cuenv (pinned release)
+    - name: Setup FlakeHub Cache
+      uses: DeterminateSystems/flakehub-cache-action@v3
+      with:
+        flakehub-flake-name: waddle-social/waddle
+        use-gha-cache: disabled
+    - name: Setup cuenv (release)
       run: |-
         arch="$(uname -m)"
         case "$arch" in
-          x86_64|amd64)
-            cuenv_asset="cuenv-linux-x64"
-            cuenv_sha256="1bdcea6505d4ededee6fd416e7b5dc071e93db6fc91baaaf680e92f175743312"
-            ;;
-          aarch64|arm64)
-            cuenv_asset="cuenv-linux-arm64"
-            cuenv_sha256="6d56a2864434509270e59b931d97b77b416e5161d60f0928bdf14c25f54b897e"
-            ;;
+          x86_64|amd64) cuenv_asset="cuenv-linux-x64" ;;
+          aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
           *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
         esac
-        curl -sSL -o /usr/local/bin/cuenv "https://github.com/cuenv/cuenv/releases/download/0.41.1/${cuenv_asset}"
-        echo "${cuenv_sha256}  /usr/local/bin/cuenv" | sha256sum -c -
-        chmod +x /usr/local/bin/cuenv
-        /usr/local/bin/cuenv sync -A
+        curl -sSL -o /usr/local/bin/cuenv "https://github.com/cuenv/cuenv/releases/latest/download/${cuenv_asset}" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync -A
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     - name: 'Run pipeline: Publish tags to FlakeHub'
       run: cuenv ci --pipeline Publish tags to FlakeHub --path server
       env:

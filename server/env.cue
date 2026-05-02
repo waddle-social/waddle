@@ -44,41 +44,8 @@ schema.#Project & {
 
 	ci: providers: ["github"]
 	ci: contributors: [
-		schema.#Contributor & {
-			id: "nix"
-			tasks: [{
-				id:       "nix.install"
-				label:    "Install Nix"
-				priority: 0
-				provider: github: uses: "DeterminateSystems/determinate-nix-action@f4c468f2287f0f14a113841b41f2dc8957119519"
-			}]
-		},
-		schema.#Contributor & {
-			id: "cuenv"
-			tasks: [{
-				id:       "cuenv.setup"
-				label:    "Setup cuenv (pinned release)"
-				priority: 10
-				script: """
-					arch="$(uname -m)"
-					case "$arch" in
-					  x86_64|amd64)
-					    cuenv_asset="cuenv-linux-x64"
-					    cuenv_sha256="1bdcea6505d4ededee6fd416e7b5dc071e93db6fc91baaaf680e92f175743312"
-					    ;;
-					  aarch64|arm64)
-					    cuenv_asset="cuenv-linux-arm64"
-					    cuenv_sha256="6d56a2864434509270e59b931d97b77b416e5161d60f0928bdf14c25f54b897e"
-					    ;;
-					  *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
-					esac
-					curl -sSL -o /usr/local/bin/cuenv "https://github.com/cuenv/cuenv/releases/download/0.41.1/${cuenv_asset}"
-					echo "${cuenv_sha256}  /usr/local/bin/cuenv" | sha256sum -c -
-					chmod +x /usr/local/bin/cuenv
-					/usr/local/bin/cuenv sync -A
-					"""
-			}]
-		},
+		c.#FlakeHubCache,
+		c.#CuenvRelease,
 		c.#OnePassword,
 		schema.#Contributor & {
 			id: "flakehub"
@@ -122,6 +89,16 @@ schema.#Project & {
 		},
 	]
 
+	ci: provider: github: {
+		flakehubCache: flakeName: "waddle-social/waddle"
+		runner: "namespace-profile-linux-x86"
+		runners: arch: {
+			"linux-x64":    "namespace-profile-linux-x86"
+			"darwin-arm64": "namespace-profile-darwin-arm64"
+			amd64:          "namespace-profile-linux-x86"
+		}
+	}
+
 	ci: pipelines: {
 		default: {
 			mode: "expanded"
@@ -136,9 +113,6 @@ schema.#Project & {
 					"id-token":      "write"
 					packages:        "write"
 					"pull-requests": "none"
-				}
-				runners: arch: {
-					amd64: "ubuntu-latest"
 				}
 			}
 			tasks: [
@@ -171,32 +145,41 @@ schema.#Project & {
 			when: {
 				pullRequest: true
 			}
+			mode: "expanded"
+			// cuenv currently emits parent-directory inputs as server/../... in
+			// GitHub path filters, which do not reliably match repo-root files.
 			derivePaths: false
 			provider: github: permissions: {
+				"id-token":      "write"
 				contents:        "read"
 				checks:          "write"
 				packages:        "read"
 				"pull-requests": "none"
 			}
-			tasks: [_t.checkCiDrift, _t.fmt, _t.clippy, _t.test, _t.renderDeployment, _t.buildExtensionModules, _t.buildCi]
+			tasks: [_t.checkCiDrift, _t.nixFmt, _t.nixClippy, _t.nixTest, _t.renderDeployment, _t.nixBuildExtensionModules, _t.nixBuildCi]
 		}
 		xmppCompliance: {
+			mode: "expanded"
 			when: {
 				branch: ["main"]
 				defaultBranch: true
 				pullRequest:   true
 				manual:        true
 			}
+			// Keep this broad until cuenv canonicalizes ../ inputs in derived
+			// GitHub path filters; these Nix checks depend on repo-root flake files.
+			derivePaths: false
 			provider: github: permissions: {
+				"id-token":      "write"
 				contents:        "read"
 				checks:          "write"
 				packages:        "read"
 				"pull-requests": "none"
 			}
 			tasks: [
-				_t.xmppUnitTests,
-				_t.xmppServerTests,
-				_t.xmppXepIntegration,
+				_t.nixXmppUnitTests,
+				_t.nixXmppServerTests,
+				_t.nixXmppXepIntegration,
 			]
 		}
 	}
@@ -206,6 +189,36 @@ schema.#Project & {
 			command: "cuenv"
 			args: ["sync", "ci", "--check", "-A"]
 			inputs: ["**/env.cue"]
+		}
+
+		nixFmt: schema.#Task & {
+			command: "nix"
+			args: ["build", "--print-build-logs", "../#checks.x86_64-linux.waddle-server-fmt"]
+			inputs: _nixInputs
+		}
+
+		nixClippy: schema.#Task & {
+			command: "nix"
+			args: ["build", "--print-build-logs", "../#checks.x86_64-linux.waddle-server-clippy"]
+			inputs: _nixInputs
+		}
+
+		nixTest: schema.#Task & {
+			command: "nix"
+			args: ["build", "--print-build-logs", "../#checks.x86_64-linux.waddle-server-test"]
+			inputs: _nixInputs
+		}
+
+		nixBuildCi: schema.#Task & {
+			command: "nix"
+			args: ["build", "--print-build-logs", "../#checks.x86_64-linux.waddle-server-ci-build"]
+			inputs: _nixInputs
+		}
+
+		nixBuildExtensionModules: schema.#Task & {
+			command: "nix"
+			args: ["build", "--print-build-logs", "../#checks.x86_64-linux.waddle-server-extension-modules"]
+			inputs: _nixInputs
 		}
 
 		fmt: xRust.#Fmt & {
@@ -626,6 +639,24 @@ schema.#Project & {
 		}
 
 		// XMPP compliance tasks — run as the xmppCompliance pipeline
+		nixXmppUnitTests: schema.#Task & {
+			command: "nix"
+			args: ["build", "--print-build-logs", "../#checks.x86_64-linux.waddle-server-xmpp-unit-tests"]
+			inputs: _nixInputs
+		}
+
+		nixXmppServerTests: schema.#Task & {
+			command: "nix"
+			args: ["build", "--print-build-logs", "../#checks.x86_64-linux.waddle-server-xmpp-server-tests"]
+			inputs: _nixInputs
+		}
+
+		nixXmppXepIntegration: schema.#Task & {
+			command: "nix"
+			args: ["build", "--print-build-logs", "../#checks.x86_64-linux.waddle-server-xmpp-xep-integration"]
+			inputs: _nixInputs
+		}
+
 		xmppUnitTests: xRust.#Test & {
 			args: ["test", "--package", "waddle-xmpp", "--lib", "--verbose"]
 			inputs: _rustInputs
