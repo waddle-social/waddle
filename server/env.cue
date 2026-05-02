@@ -524,7 +524,7 @@ schema.#Project & {
 					    if [ "${extension_name}" = "ai-chatbot" ]; then
 					      printf '  config:\n'
 					      printf '    endpoint: https://openrouter.ai/api/v1/chat/completions\n'
-					      printf '    model: openrouter/auto\n'
+					      printf '    model: openrouter/free\n'
 					      printf '  configSecretFiles:\n'
 					      printf '    api_key: /var/run/secrets/waddle-ai/api_key\n'
 					      printf '  capabilityGrants:\n'
