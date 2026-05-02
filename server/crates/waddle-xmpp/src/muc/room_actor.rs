@@ -626,7 +626,6 @@ impl kameo::message::Message<ReconcileChannelBackedRoom> for RoomActor {
         let instant_name = msg.room_jid.node().map(|node| node.to_string());
         let mut desired_config = msg.desired_config;
         desired_config.description = self.room.config.description.clone();
-        desired_config.subject = self.room.config.subject.clone();
         if !self.room.config.name.is_empty()
             && instant_name.as_deref() != Some(self.room.config.name.as_str())
         {

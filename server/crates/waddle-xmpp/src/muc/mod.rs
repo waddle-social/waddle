@@ -25,8 +25,8 @@ pub use admin::{
     KickBanInfo, MucStatusCode, RoleChangeResult, NS_MUC_ADMIN, NS_MUC_OWNER,
 };
 pub use messages::{
-    create_broadcast_message, create_subject_message, is_muc_groupchat, looks_like_muc_jid,
-    MessageRouteResult, MucMessage, OutboundMucMessage,
+    create_broadcast_message, is_muc_groupchat, looks_like_muc_jid, MessageRouteResult, MucMessage,
+    OutboundMucMessage,
 };
 pub use owner::{
     apply_config_form, build_config_form, build_config_result, build_destroy_notification,
@@ -45,6 +45,7 @@ pub use room_registry_actor::RoomRegistryError;
 
 use std::collections::HashMap;
 
+use chrono::{DateTime, Utc};
 use jid::{BareJid, FullJid, Jid};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, instrument};
@@ -82,15 +83,38 @@ pub fn is_remote_jid(jid: &FullJid, local_domain: &str) -> bool {
     jid.domain().as_str() != local_domain
 }
 
+/// XEP-0045 §7.2.15 / §8.1 room subject state.
+///
+/// `text` is the literal subject text — an empty string represents an
+/// **explicitly cleared** subject (XEP-0045 §7.2.15 distinguishes this
+/// from "never set", which is represented by `MucRoom.subject == None`).
+/// `setter` and `setter_nick` are the bare JID of the occupant who last
+/// set the subject and the nickname they were using at that moment;
+/// `setter_nick` is frozen here rather than re-resolved at emission so
+/// that historical join-time emissions remain stable across nick
+/// changes and after the setter has left. `set_at` powers the
+/// XEP-0203 `<delay/>` stamp on the join-time emission and the
+/// XEP-0421 occupant-id derivation uses `setter` as the bare-JID input.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubjectState {
+    pub text: String,
+    pub setter: BareJid,
+    pub setter_nick: String,
+    pub set_at: DateTime<Utc>,
+}
+
 /// MUC room configuration.
+///
+/// Configuration knobs only — the live subject (text + setter +
+/// timestamp) is **not** part of `RoomConfig` because it is mutated by
+/// the XEP-0045 §8.1 message-path, not by the owner-config form
+/// (§10.2). It lives on `MucRoom.subject` as `Option<SubjectState>`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoomConfig {
     /// Room name (human-readable)
     pub name: String,
     /// Room description
     pub description: Option<String>,
-    /// Room subject/topic (per XEP-0045)
-    pub subject: Option<String>,
     /// Whether the room is persistent
     pub persistent: bool,
     /// Whether the room is members-only
@@ -118,7 +142,6 @@ impl Default for RoomConfig {
         Self {
             name: String::new(),
             description: None,
-            subject: None,
             persistent: true,
             members_only: true,
             moderated: false,
@@ -159,6 +182,14 @@ pub struct MucRoom {
     pub channel_id: String,
     /// Room configuration
     pub config: RoomConfig,
+    /// XEP-0045 §7.2.15 / §8.1 subject state. `None` = "never set"
+    /// (joiners receive an empty `<subject/>` with no `<delay/>` and no
+    /// `<occupant-id/>`). `Some(SubjectState{text:""})` = "explicitly
+    /// cleared" (joiners receive empty `<subject/>` plus `<delay/>` and
+    /// `<occupant-id/>` for the user who cleared it). The two cases are
+    /// distinguishable on the wire per the §7.2.15 SHOULD that
+    /// `<delay/>` be included for actively-cleared subjects.
+    pub subject: Option<SubjectState>,
     /// Current occupants (nick -> Occupant)
     pub occupants: HashMap<String, Occupant>,
     /// Active sessions for each room nick (nick -> full JIDs).
@@ -198,6 +229,7 @@ impl MucRoom {
             waddle_id,
             channel_id,
             config,
+            subject: None,
             occupants: HashMap::new(),
             occupant_sessions: HashMap::new(),
             affiliation_list: AffiliationList::new(),
@@ -671,28 +703,44 @@ impl MucRoom {
         domains
     }
 
-    // === Subject/Topic Management (XEP-0045) ===
+    // === Subject/Topic Management (XEP-0045 §7.2.15 / §8.1) ===
 
-    /// Get the current room subject/topic.
+    /// Current subject text, if a subject has been set or explicitly
+    /// cleared. Returns `None` only when the room has never had a
+    /// subject (XEP-0045 §7.2.15 distinguishes "never set" from
+    /// "explicitly cleared" via the `<delay/>` SHOULD).
     pub fn get_subject(&self) -> Option<&str> {
-        self.config.subject.as_deref()
+        self.subject.as_ref().map(|s| s.text.as_str())
     }
 
-    /// Set the room subject/topic.
-    ///
-    /// Returns true if the subject was changed, false if it was the same.
-    pub fn set_subject(&mut self, subject: Option<String>) -> bool {
-        if self.config.subject != subject {
-            self.config.subject = subject;
-            true
-        } else {
+    /// Apply a §8.1 subject change. `text == ""` represents an
+    /// explicit clear (still a `Some(SubjectState)` so future joins
+    /// emit `<delay/>` per §7.2.15 SHOULD). Returns `true` if the
+    /// stored state changed (text differs OR setter differs).
+    pub fn set_subject(
+        &mut self,
+        text: String,
+        setter: BareJid,
+        setter_nick: String,
+        set_at: DateTime<Utc>,
+    ) -> bool {
+        let new_state = SubjectState {
+            text,
+            setter,
+            setter_nick,
+            set_at,
+        };
+        if self.subject.as_ref() == Some(&new_state) {
             false
+        } else {
+            self.subject = Some(new_state);
+            true
         }
     }
 
     /// Check if an occupant can change the room subject.
     ///
-    /// Per XEP-0045 Section 8.1:
+    /// Per XEP-0045 §8.1:
     /// - In moderated rooms, only moderators (and above) can change the subject
     /// - In unmoderated rooms, any participant (or above) can change the subject
     /// - Visitors can never change the subject
@@ -706,58 +754,5 @@ impl MucRoom {
         } else {
             false
         }
-    }
-
-    /// Build a subject message for broadcasting to occupants.
-    ///
-    /// Per XEP-0045, subject changes are sent as groupchat messages
-    /// with a <subject/> element but no <body/>. The message is sent
-    /// from room@domain/nick (the subject setter).
-    pub fn build_subject_message(&self, setter_nick: &str) -> Result<Message, XmppError> {
-        let from_room_jid = self
-            .room_jid
-            .with_resource_str(setter_nick)
-            .map_err(|e| XmppError::internal(format!("Invalid nick as resource: {}", e)))?;
-
-        let mut msg = Message::new(None::<Jid>);
-        msg.type_ = MessageType::Groupchat;
-        msg.from = Some(Jid::from(from_room_jid));
-
-        // Add subject element (empty subject clears the topic)
-        let subject_text = self.config.subject.clone().unwrap_or_default();
-        msg.subjects
-            .insert(String::new(), xmpp_parsers::message::Subject(subject_text));
-
-        Ok(msg)
-    }
-
-    /// Broadcast a subject change to all room occupants.
-    ///
-    /// Returns a list of outbound messages to send to each occupant.
-    #[instrument(skip(self), fields(room = %self.room_jid))]
-    pub fn broadcast_subject_change(
-        &self,
-        setter_nick: &str,
-    ) -> Result<Vec<OutboundMucMessage>, XmppError> {
-        let base_msg = self.build_subject_message(setter_nick)?;
-
-        debug!(
-            setter = %setter_nick,
-            occupant_count = self.occupants.len(),
-            "Broadcasting subject change to room occupants"
-        );
-
-        let mut outbound = Vec::with_capacity(self.occupants.len());
-
-        for occupant in self.occupants.values() {
-            for recipient_jid in self.get_occupant_sessions(&occupant.nick) {
-                let mut broadcast_msg = base_msg.clone();
-                broadcast_msg.to = Some(Jid::from(recipient_jid.clone()));
-
-                outbound.push(OutboundMucMessage::new(recipient_jid, broadcast_msg));
-            }
-        }
-
-        Ok(outbound)
     }
 }

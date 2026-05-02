@@ -195,38 +195,6 @@ pub fn create_broadcast_message(
     broadcast
 }
 
-/// Create a subject message for broadcasting to a room.
-///
-/// Per XEP-0045 Section 8.1, subject changes are sent as groupchat
-/// messages with a <subject/> element and no <body/> element.
-///
-/// # Arguments
-/// * `room_jid` - The room's bare JID
-/// * `setter_nick` - The nickname of the user who set the subject
-/// * `subject` - The subject text (empty string clears the subject)
-/// * `to_occupant` - The recipient's full JID
-pub fn create_subject_message(
-    room_jid: &BareJid,
-    setter_nick: &str,
-    subject: &str,
-    to_occupant: FullJid,
-) -> Result<Message, XmppError> {
-    let from_room_jid = room_jid
-        .clone()
-        .with_resource_str(setter_nick)
-        .map_err(|e| XmppError::internal(format!("Invalid nick as resource: {}", e)))?;
-
-    let mut msg = Message::new(Some(Jid::from(to_occupant)));
-    msg.type_ = MessageType::Groupchat;
-    msg.from = Some(Jid::from(from_room_jid));
-    msg.subjects.insert(
-        String::new(),
-        xmpp_parsers::message::Subject(subject.to_string()),
-    );
-
-    Ok(msg)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
