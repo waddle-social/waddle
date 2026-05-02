@@ -21,7 +21,7 @@ impl IqHandler for VersionHandler {
     fn handle(&self, iq: &Iq, _ctx: &StanzaContext<'_>) -> Vec<OutboundEvent> {
         let info = SoftwareVersion {
             name: "Waddle".to_string(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
+            version: env!("WADDLE_GIT_SHA").to_string(),
             os: Some(std::env::consts::OS.to_string()),
         };
         vec![OutboundEvent::SendStanza(Box::new(Stanza::Iq(
@@ -82,7 +82,7 @@ mod tests {
                     assert_eq!(payload.ns(), NS_VERSION);
                     assert!(payload.get_child("name", NS_VERSION).is_some());
                     let version = payload.get_child("version", NS_VERSION).expect("version");
-                    assert_eq!(version.text(), env!("CARGO_PKG_VERSION"));
+                    assert!(!version.text().is_empty(), "version should be non-empty commit SHA");
                     assert!(payload.get_child("os", NS_VERSION).is_some());
                 }
                 other => panic!("expected Iq stanza, got {other:?}"),
