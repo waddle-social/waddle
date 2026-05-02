@@ -804,8 +804,12 @@ fn inbound_to_ffi(msg: InboundMessage) -> WaddleMessage {
 }
 
 /// Convert an archived MAM message into the UniFFI record. Re-parses the
-/// wrapped inner element through the full messaging parser so that replies,
-/// fallback ranges, and nested-thread parents survive history loads.
+/// wrapped inner element through the full messaging parser so that replies
+/// and fallback ranges survive history loads. The XEP-0201 nested-thread
+/// `parent_thread_id` is read directly from the typed `archived` value
+/// (the client parser extracts it via `crate::xep::thread::parse_thread`)
+/// instead of being recovered from the re-parse — closes the parent-leak
+/// path when `inner` is unparseable downstream.
 fn archived_to_ffi(archived: waddle_xmpp_client::ArchivedMessage) -> WaddleArchivedMessage {
     let parsed = match messaging::parse(&archived.inner) {
         Some(MessagingEvent::Message(m)) => Some(m),
@@ -831,7 +835,7 @@ fn archived_to_ffi(archived: waddle_xmpp_client::ArchivedMessage) -> WaddleArchi
             .map(|m| m.reaction_emojis.clone())
             .unwrap_or_default(),
         thread: archived.thread,
-        parent_thread_id: parsed.as_ref().and_then(|m| m.parent_thread_id.clone()),
+        parent_thread_id: archived.parent_thread_id,
         reply_to_id: parsed.as_ref().and_then(|m| m.reply_to_id.clone()),
         reply_to_sender: parsed.as_ref().and_then(|m| m.reply_to_sender.clone()),
         reply_fallback_start: fb_start,

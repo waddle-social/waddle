@@ -187,6 +187,37 @@ pub trait SmSessionRegistry: Send + Sync {
 
     /// Get the number of stored sessions.
     async fn session_count(&self) -> usize;
+
+    /// Remove every unacked outbound `<message/>` stanza in stored
+    /// sessions whose identity matches a XEP-0424 / XEP-0425 tombstone.
+    /// Called when a tombstone is applied so a recipient mid-resume does
+    /// not replay the pre-scrub stanza on the wire.
+    ///
+    /// `target_id` matches either the cached message's wire `id`
+    /// attribute (typical for 1:1 retractions targeting the original
+    /// message id) **or** any XEP-0359 `<stanza-id id='…'/>` child
+    /// (typical for groupchat retractions that key by the room's
+    /// stanza-id per the "archive id == wire stanza-id" invariant).
+    ///
+    /// `archive_jid` scopes the match to a specific conversation: a
+    /// cached message is only removed if its `from` or `to` bare-equals
+    /// `archive_jid`. This prevents cross-conversation collateral
+    /// damage when two clients independently reuse a short message id
+    /// in different chats — without scoping, retracting "msg-1" in one
+    /// chat would silently delete unrelated "msg-1" stanzas queued for
+    /// other recipients.
+    ///
+    /// Returns the number of stanza entries removed across all stored
+    /// sessions. Default impl is a no-op so registry implementations
+    /// can opt in incrementally; the in-memory implementation
+    /// overrides it.
+    async fn scrub_unacked_for_tombstone(
+        &self,
+        _target_id: &str,
+        _archive_jid: &str,
+    ) -> Result<usize, SmRegistryError> {
+        Ok(0)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -338,6 +369,99 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
 
     async fn session_count(&self) -> usize {
         self.sessions.read().map(|s| s.len()).unwrap_or(0)
+    }
+
+    async fn scrub_unacked_for_tombstone(
+        &self,
+        target_id: &str,
+        archive_jid: &str,
+    ) -> Result<usize, SmRegistryError> {
+        let mut removed_total = 0usize;
+        let mut sessions = self
+            .sessions
+            .write()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+        for session in sessions.values_mut() {
+            removed_total += scrub_session_unacked(session, target_id, archive_jid);
+        }
+        drop(sessions);
+        let mut claimed = self
+            .claimed_sessions
+            .write()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+        for session in claimed.values_mut() {
+            removed_total += scrub_session_unacked(session, target_id, archive_jid);
+        }
+        Ok(removed_total)
+    }
+}
+
+/// Strip every unacked outbound `<message/>` entry that matches a
+/// XEP-0424 / XEP-0425 tombstone. Returns the number of entries
+/// removed.
+///
+/// A cached message is removed iff:
+///   1. it is a `<message>` element,
+///   2. its `from` or `to` attribute bare-equals `archive_jid` (scope
+///      guard — prevents cross-conversation collateral damage when
+///      short message ids collide across chats), AND
+///   3. either its wire `id` attribute matches `target_id` (1:1 case)
+///      or any child `<stanza-id id='…'/>` matches `target_id`
+///      (groupchat case where the retraction keyed by the room's
+///      XEP-0359 stamp per the "archive id == wire stanza-id"
+///      invariant).
+///
+/// Parse errors and non-message frames are skipped silently — only
+/// matching messages are removed.
+fn scrub_session_unacked(
+    session: &mut DetachedSession,
+    target_id: &str,
+    archive_jid: &str,
+) -> usize {
+    let before = session.unacked_stanzas.len();
+    session
+        .unacked_stanzas
+        .retain(|(_, xml)| match xml.parse::<minidom::Element>() {
+            Ok(el) => !cached_message_matches_tombstone(&el, target_id, archive_jid),
+            Err(_) => true,
+        });
+    before - session.unacked_stanzas.len()
+}
+
+fn cached_message_matches_tombstone(
+    el: &minidom::Element,
+    target_id: &str,
+    archive_jid: &str,
+) -> bool {
+    if el.name() != "message" {
+        return false;
+    }
+    let in_scope = el
+        .attr("from")
+        .map(|s| jid_bare_equals(s, archive_jid))
+        .unwrap_or(false)
+        || el
+            .attr("to")
+            .map(|s| jid_bare_equals(s, archive_jid))
+            .unwrap_or(false);
+    if !in_scope {
+        return false;
+    }
+    if el.attr("id") == Some(target_id) {
+        return true;
+    }
+    // XEP-0359 §3 scopes `<stanza-id/>` to `urn:xmpp:sid:0`. Match that
+    // namespace explicitly so an unrelated extension element happening
+    // to be named "stanza-id" in a different namespace cannot trigger
+    // a tombstone scrub (Copilot review on PR #305).
+    el.children()
+        .any(|c| c.is("stanza-id", "urn:xmpp:sid:0") && c.attr("id") == Some(target_id))
+}
+
+fn jid_bare_equals(jid_str: &str, archive_jid: &str) -> bool {
+    match jid_str.parse::<jid::Jid>() {
+        Ok(jid) => jid.to_bare().to_string() == archive_jid,
+        Err(_) => false,
     }
 }
 
@@ -990,6 +1114,217 @@ mod tests {
             presence_status: None,
             presence_priority: 0,
         }
+    }
+
+    fn make_test_session_with_unacked(
+        stream_id: &str,
+        unacked: Vec<(u32, String)>,
+    ) -> DetachedSession {
+        let mut s = make_test_session(stream_id);
+        s.unacked_stanzas = unacked;
+        s
+    }
+
+    #[tokio::test]
+    async fn xep_0198_scrub_for_tombstone_removes_matching_1on1_message() {
+        // XEP-0424 §"prevent further distribution" + XEP-0198 resume
+        // safety: when a tombstone is applied, the original
+        // `<message id='target'>` must not replay on a recipient's
+        // resume. Locks the matcher against false negatives (matching
+        // messages must be removed) and false positives (non-matching
+        // messages and non-message frames must be preserved). Scoped
+        // by the recipient's bare JID so the matcher cannot reach
+        // outside the conversation.
+        let registry = InMemorySmSessionRegistry::new();
+        let session = make_test_session_with_unacked(
+            "stream-tomb",
+            vec![
+                (
+                    1,
+                    "<message xmlns='jabber:client' from='alice@example.com/web' to='user@example.com/resource' id='target' type='chat'><body>secret</body><thread parent='root'>child</thread></message>"
+                        .to_string(),
+                ),
+                (
+                    2,
+                    "<message xmlns='jabber:client' from='alice@example.com/web' to='user@example.com/resource' id='other' type='chat'><body>safe</body></message>"
+                        .to_string(),
+                ),
+                (3, "<presence/>".to_string()),
+                (4, "<iq type='result' id='not-a-message'/>".to_string()),
+            ],
+        );
+        registry.store_session(session).await.unwrap();
+
+        let removed = registry
+            .scrub_unacked_for_tombstone("target", "user@example.com")
+            .await
+            .unwrap();
+        assert_eq!(removed, 1, "exactly one matching message should be removed");
+
+        let again = registry
+            .peek_session("stream-tomb")
+            .await
+            .unwrap()
+            .expect("session still present");
+        assert_eq!(again.unacked_stanzas.len(), 3);
+        assert!(
+            !again
+                .unacked_stanzas
+                .iter()
+                .any(|(_, xml)| xml.contains("id='target'")),
+            "scrubbed message must not appear in queue"
+        );
+        assert!(
+            again
+                .unacked_stanzas
+                .iter()
+                .any(|(_, xml)| xml.contains("id='other'")),
+            "non-matching message must remain"
+        );
+        assert!(
+            again
+                .unacked_stanzas
+                .iter()
+                .any(|(_, xml)| xml.contains("<presence")),
+            "presence frame must remain (not a message)"
+        );
+        assert!(
+            again
+                .unacked_stanzas
+                .iter()
+                .any(|(_, xml)| xml.contains("<iq")),
+            "iq frame must remain (not a message)"
+        );
+    }
+
+    #[tokio::test]
+    async fn xep_0198_scrub_for_tombstone_matches_groupchat_stanza_id() {
+        // Groupchat retractions key off the room's XEP-0359 stanza-id
+        // per the "archive id == wire stanza-id" invariant
+        // (`archive_groupchat_message`). The cached reflection
+        // preserves the sender's original `message.id` AND carries
+        // `<stanza-id by='room' id='canonical'/>`; the retraction
+        // request targets `canonical`, not the sender's id. The
+        // matcher must therefore check stanza-id children too —
+        // surfaced by Copilot review on PR #305.
+        let registry = InMemorySmSessionRegistry::new();
+        let session = make_test_session_with_unacked(
+            "stream-muc",
+            vec![(
+                1,
+                "<message xmlns='jabber:client' from='room@conf.example.com/alice' to='user@example.com/resource' id='sender-wire-id' type='groupchat'><body>moderated</body><stanza-id xmlns='urn:xmpp:sid:0' by='room@conf.example.com' id='canonical-archive-id'/></message>"
+                    .to_string(),
+            )],
+        );
+        registry.store_session(session).await.unwrap();
+
+        let removed = registry
+            .scrub_unacked_for_tombstone("canonical-archive-id", "room@conf.example.com")
+            .await
+            .unwrap();
+        assert_eq!(
+            removed, 1,
+            "groupchat tombstone keyed by stanza-id must scrub the reflection"
+        );
+    }
+
+    #[tokio::test]
+    async fn xep_0198_scrub_for_tombstone_does_not_cross_conversations() {
+        // Two clients independently use `id='msg-1'` in different
+        // conversations. Retracting in conversation A must not delete
+        // the queued message in conversation B that happens to share
+        // the same wire id. Codex P1 review on PR #305.
+        let registry = InMemorySmSessionRegistry::new();
+        let session = make_test_session_with_unacked(
+            "stream-cross",
+            vec![
+                (
+                    1,
+                    "<message xmlns='jabber:client' from='alice@example.com/web' to='user@example.com/resource' id='msg-1' type='chat'><body>conv-A</body></message>"
+                        .to_string(),
+                ),
+                (
+                    2,
+                    "<message xmlns='jabber:client' from='carol@elsewhere.com/web' to='user@example.com/resource' id='msg-1' type='chat'><body>conv-B</body></message>"
+                        .to_string(),
+                ),
+            ],
+        );
+        registry.store_session(session).await.unwrap();
+
+        // Tombstone is scoped to alice@example.com (the sender of
+        // conversation A's archive context). The matcher must NOT
+        // remove the carol→user message even though it shares the
+        // wire id, because alice is neither its `from` nor `to`.
+        let removed = registry
+            .scrub_unacked_for_tombstone("msg-1", "alice@example.com")
+            .await
+            .unwrap();
+        assert_eq!(
+            removed, 1,
+            "only the alice-scoped message should be removed"
+        );
+
+        let again = registry
+            .peek_session("stream-cross")
+            .await
+            .unwrap()
+            .expect("session still present");
+        assert!(
+            again
+                .unacked_stanzas
+                .iter()
+                .any(|(_, xml)| xml.contains("conv-B")),
+            "conversation B's message must survive — different scope"
+        );
+    }
+
+    #[tokio::test]
+    async fn xep_0198_scrub_for_tombstone_ignores_non_xep0359_stanza_id_namespace() {
+        // XEP-0359 §3 scopes `<stanza-id/>` to `urn:xmpp:sid:0`. An
+        // unrelated extension element that happens to be named
+        // "stanza-id" in a different namespace must NOT trigger a
+        // tombstone scrub (Copilot review on PR #305).
+        let registry = InMemorySmSessionRegistry::new();
+        let session = make_test_session_with_unacked(
+            "stream-ns",
+            vec![(
+                1,
+                "<message xmlns='jabber:client' from='alice@example.com/web' to='user@example.com/resource' id='wire-id' type='chat'><body>safe</body><stanza-id xmlns='urn:example:other:0' id='target'/></message>"
+                    .to_string(),
+            )],
+        );
+        registry.store_session(session).await.unwrap();
+
+        let removed = registry
+            .scrub_unacked_for_tombstone("target", "user@example.com")
+            .await
+            .unwrap();
+        assert_eq!(
+            removed, 0,
+            "stanza-id in non-XEP-0359 namespace must not be matched"
+        );
+    }
+
+    #[tokio::test]
+    async fn xep_0198_scrub_for_tombstone_handles_no_match() {
+        let registry = InMemorySmSessionRegistry::new();
+        registry
+            .store_session(make_test_session_with_unacked(
+                "stream-nomatch",
+                vec![(
+                    1,
+                    "<message xmlns='jabber:client' from='alice@example.com/web' to='user@example.com' id='other' type='chat'><body>x</body></message>"
+                        .to_string(),
+                )],
+            ))
+            .await
+            .unwrap();
+        let removed = registry
+            .scrub_unacked_for_tombstone("not-here", "user@example.com")
+            .await
+            .unwrap();
+        assert_eq!(removed, 0);
     }
 
     #[tokio::test]

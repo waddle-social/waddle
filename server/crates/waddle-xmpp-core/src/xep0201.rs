@@ -18,9 +18,7 @@
 //! discover thread-aware services/rooms.
 
 use minidom::Element;
-use xmpp_parsers::message::Message;
-
-pub use crate::xep::xep0461::{set_thread_id, thread_id_from_message};
+use xmpp_parsers::message::{Message, Thread};
 
 /// Waddle discovery feature string for XEP-0201 thread support.
 pub const NS_THREAD_FEATURE: &str = "urn:xmpp:threads:0";
@@ -84,14 +82,46 @@ pub fn parse_thread_info(msg_xml: &Element) -> Option<ThreadInfo> {
     })
 }
 
-/// Read the optional thread parent from a parsed `Message`.
+/// Read XEP-0201 thread info from a parsed `Message` (id and optional parent).
 ///
-/// Round-trips through a `minidom::Element` because the typed field drops the
-/// attribute. Returns `None` if there is no `<thread/>` or if `parent=` is
-/// absent/blank.
-pub fn thread_parent_from_message(msg: &Message) -> Option<String> {
-    let xml: Element = Element::from(msg.clone());
-    parse_thread_info(&xml).and_then(|info| info.parent)
+/// `xmpp_parsers::Message::thread` is a typed `Option<Thread(String)>` and
+/// silently drops the XEP-0201 `parent` attribute at parse time. Waddle works
+/// around this with [`super::parser_utils::reattach_thread_parent`], which
+/// moves the `<thread parent='X'>id</thread>` element into `msg.payloads`
+/// (and clears `msg.thread`) at the inbound parse boundary so the parent
+/// survives the rest of the pipeline.
+///
+/// This helper preserves that invariant: it reads the payload form first,
+/// returning `ThreadInfo { id, parent }` if a `<thread/>` element with
+/// non-empty body is present, then falls back to the typed `msg.thread`
+/// field (parent unrecoverable) when no payload thread exists. Callers that
+/// need parent on archive write should ensure `reattach_thread_parent` runs
+/// upstream of this call.
+pub fn thread_info_from_message(msg: &Message) -> Option<ThreadInfo> {
+    if let Some(thread_elem) = msg
+        .payloads
+        .iter()
+        .find(|elem| elem.name() == THREAD_ELEMENT)
+    {
+        let text = thread_elem.text();
+        let id = text.trim();
+        if id.is_empty() {
+            return None;
+        }
+        let parent = thread_elem
+            .attr("parent")
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(ToOwned::to_owned);
+        return Some(ThreadInfo {
+            id: id.to_owned(),
+            parent,
+        });
+    }
+    msg.thread.as_ref().map(|thread| ThreadInfo {
+        id: thread.0.clone(),
+        parent: None,
+    })
 }
 
 /// Build a `<thread/>` element with optional `parent` attribute in the given
@@ -121,6 +151,29 @@ pub fn install_thread_element(msg_xml: &mut Element, info: &ThreadInfo) {
         msg_xml.remove_child(&name, ns.as_str());
     }
     msg_xml.append_child(build_thread_element(info, stanza_ns));
+}
+
+/// Read RFC 6121 `<thread/>` identifier from a message.
+///
+/// Checks both the typed `Message::thread` field and any raw `<thread/>`
+/// payload element — the latter is used to preserve compatibility with
+/// callers that constructed messages by appending an element rather than
+/// setting the typed field.
+pub fn thread_id_from_message(msg: &Message) -> Option<String> {
+    if let Some(thread) = msg.thread.as_ref() {
+        return Some(thread.0.clone());
+    }
+    msg.payloads
+        .iter()
+        .find(|elem| elem.name() == THREAD_ELEMENT)
+        .map(|elem| elem.text())
+        .map(|text| text.trim().to_owned())
+        .filter(|text| !text.is_empty())
+}
+
+/// Set RFC 6121 `<thread/>` identifier on a message.
+pub fn set_thread_id(msg: &mut Message, thread_id: impl Into<String>) {
+    msg.thread = Some(Thread(thread_id.into()));
 }
 
 #[cfg(test)]
@@ -165,6 +218,18 @@ mod tests {
     }
 
     #[test]
+    fn parent_only_with_empty_id_is_rejected() {
+        // XEP-0201: `parent` is meaningful only as a back-reference from a
+        // thread that has its own id. A `<thread parent='X'/>` with no id is
+        // ill-formed; this helper rejects it so the write path never persists
+        // a parent without a thread id.
+        let xml = "<message xmlns='jabber:client'><thread parent='root-1'></thread></message>"
+            .parse::<Element>()
+            .expect("valid xml");
+        assert_eq!(parse_thread_info(&xml), None);
+    }
+
+    #[test]
     fn build_element_with_parent() {
         let info = ThreadInfo::child("child-a", "root-a");
         let elem = build_thread_element(&info, "jabber:client");
@@ -196,14 +261,6 @@ mod tests {
     }
 
     #[test]
-    fn set_thread_id_on_root_message() {
-        let mut msg = Message::new(None::<jid::Jid>);
-        set_thread_id(&mut msg, "abc");
-        assert_eq!(thread_id_from_message(&msg).as_deref(), Some("abc"));
-        assert_eq!(thread_parent_from_message(&msg), None);
-    }
-
-    #[test]
     fn install_thread_element_strips_existing() {
         let mut xml = "<message xmlns='jabber:client'><thread>old</thread></message>"
             .parse::<Element>()
@@ -222,5 +279,87 @@ mod tests {
     #[test]
     fn thread_feature_constant() {
         assert_eq!(NS_THREAD_FEATURE, "urn:xmpp:threads:0");
+    }
+
+    #[test]
+    fn set_and_get_thread_id_round_trip() {
+        let mut msg = Message::new(None::<jid::Jid>);
+        assert_eq!(thread_id_from_message(&msg), None);
+        set_thread_id(&mut msg, "thread-root-1");
+        assert_eq!(
+            thread_id_from_message(&msg).as_deref(),
+            Some("thread-root-1")
+        );
+    }
+
+    #[test]
+    fn set_thread_id_overwrites() {
+        let mut msg = Message::new(None::<jid::Jid>);
+        set_thread_id(&mut msg, "first");
+        set_thread_id(&mut msg, "second");
+        assert_eq!(thread_id_from_message(&msg).as_deref(), Some("second"));
+    }
+
+    #[test]
+    fn thread_info_from_message_recovers_parent_from_payload_form() {
+        // Post-`reattach_thread_parent` invariant: parent attribute lives in
+        // `msg.payloads` as a raw element rather than `msg.thread`, because
+        // `xmpp_parsers::Thread(String)` drops it at parse time.
+        let mut msg = Message::new(None::<jid::Jid>);
+        msg.payloads.push(
+            Element::builder(THREAD_ELEMENT, "jabber:client")
+                .attr("parent", "root-1")
+                .append("child-2")
+                .build(),
+        );
+        let info = thread_info_from_message(&msg).expect("thread info");
+        assert_eq!(info.id, "child-2");
+        assert_eq!(info.parent.as_deref(), Some("root-1"));
+    }
+
+    #[test]
+    fn thread_info_from_message_falls_back_to_typed_field_when_no_payload() {
+        // No payload thread element; the typed field is the only source.
+        // Parent is unrecoverable in this branch by design — `xmpp_parsers`
+        // dropped it at parse time and `reattach_thread_parent` was not run.
+        let mut msg = Message::new(None::<jid::Jid>);
+        set_thread_id(&mut msg, "abc");
+        let info = thread_info_from_message(&msg).expect("thread info");
+        assert_eq!(info.id, "abc");
+        assert_eq!(info.parent, None);
+    }
+
+    #[test]
+    fn thread_info_from_message_payload_takes_precedence_over_typed_field() {
+        // If both forms are present (transient pre-reattach state), the
+        // payload form wins because it carries the parent attribute.
+        let mut msg = Message::new(None::<jid::Jid>);
+        set_thread_id(&mut msg, "stale-id");
+        msg.payloads.push(
+            Element::builder(THREAD_ELEMENT, "jabber:client")
+                .attr("parent", "root-1")
+                .append("authoritative-id")
+                .build(),
+        );
+        let info = thread_info_from_message(&msg).expect("thread info");
+        assert_eq!(info.id, "authoritative-id");
+        assert_eq!(info.parent.as_deref(), Some("root-1"));
+    }
+
+    #[test]
+    fn thread_info_from_message_payload_with_empty_id_is_rejected() {
+        let mut msg = Message::new(None::<jid::Jid>);
+        msg.payloads.push(
+            Element::builder(THREAD_ELEMENT, "jabber:client")
+                .attr("parent", "root-1")
+                .build(),
+        );
+        assert_eq!(thread_info_from_message(&msg), None);
+    }
+
+    #[test]
+    fn thread_info_from_message_returns_none_when_no_thread_at_all() {
+        let msg = Message::new(None::<jid::Jid>);
+        assert_eq!(thread_info_from_message(&msg), None);
     }
 }

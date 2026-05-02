@@ -26,9 +26,9 @@ use super::context::RoomContext;
 use super::traits::{RoomHandler, RoomHandlerOutcome};
 use crate::xep::xep0359::{add_stanza_id, is_stanza_id_element};
 use crate::xep::xep0421::{generate_occupant_id, set_occupant_id_on_message};
-use crate::xep::xep0461::set_thread_id;
 use crate::xep::xep0508::{extract_forum_action, ForumAction};
 use jid::{BareJid, Jid};
+use waddle_xmpp_core::xep0201::set_thread_id;
 use xmpp_parsers::message::Message;
 
 /// XEP-0045 + XEP-0359 + XEP-0421 canonicalize handler for the room

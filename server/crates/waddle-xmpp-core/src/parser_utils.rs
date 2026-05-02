@@ -16,11 +16,15 @@ use xmpp_parsers::message::Message;
 /// - `thread_id`: The thread ID from the parsed Message
 pub fn ensure_thread_element(element: &mut Element, thread_id: Option<&str>) {
     if let Some(id) = thread_id {
-        if id.trim().is_empty() {
+        let trimmed = id.trim();
+        if trimmed.is_empty() {
             // skip empty thread
         } else if !element.children().any(|child| child.name() == "thread") {
-            let thread_elem = Element::builder("thread", element.ns()).append(id).build();
-            element.append_child(thread_elem);
+            let info = crate::xep0201::ThreadInfo {
+                id: trimmed.to_owned(),
+                parent: None,
+            };
+            element.append_child(crate::xep0201::build_thread_element(&info, element.ns()));
         }
     }
 }
@@ -52,7 +56,9 @@ pub fn extract_thread_parent(element: &Element) -> Option<String> {
 ///
 /// After extracting the parent attribute with `extract_thread_parent`, this
 /// function re-attaches it as a raw payload Element so the attribute survives
-/// the round-trip.
+/// the round-trip. Builds the element via the canonical
+/// [`crate::xep0201::build_thread_element`] so the wire shape is defined in
+/// exactly one place.
 ///
 /// ## Arguments
 /// - `msg`: The parsed Message to modify
@@ -60,11 +66,12 @@ pub fn extract_thread_parent(element: &Element) -> Option<String> {
 /// - `stanza_ns`: The namespace for the thread element
 pub fn reattach_thread_parent(msg: &mut Message, thread_parent: String, stanza_ns: &str) {
     if let Some(thread) = msg.thread.take() {
-        let thread_elem = Element::builder("thread", stanza_ns)
-            .attr("parent", thread_parent)
-            .append(thread.0.as_str())
-            .build();
-        msg.payloads.push(thread_elem);
+        let info = crate::xep0201::ThreadInfo {
+            id: thread.0,
+            parent: Some(thread_parent),
+        };
+        msg.payloads
+            .push(crate::xep0201::build_thread_element(&info, stanza_ns));
     }
 }
 

@@ -12,6 +12,7 @@ pub mod pubsub;
 pub mod roster;
 pub mod stanza;
 pub mod types;
+pub mod xep0201;
 
 pub use carbons::{
     build_carbons_result, build_received_carbon, build_sent_carbon, is_carbons_disable,
@@ -50,3 +51,8 @@ pub use pubsub::{
 };
 pub use stanza::Stanza;
 pub use types::{Affiliation, ConnectionState, Role, StanzaType, Transport};
+pub use xep0201::{
+    build_thread_element, install_thread_element, parse_thread_info, set_thread_id,
+    thread_id_from_message, thread_info_from_message, ThreadInfo, NS_THREAD_FEATURE,
+    THREAD_ELEMENT,
+};

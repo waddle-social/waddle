@@ -156,8 +156,11 @@ pub enum ArchivedRichPayload {
     Reactions(ArchivedReactionSet),
     /// In-place tombstone produced by XEP-0424 retraction or
     /// XEP-0425 moderation. The original row's `body` and
-    /// leak-prone fields (`thread_id`, `reply_to_id`, mentions, ...)
-    /// are cleared when this variant is set.
+    /// leak-prone fields (`thread_id`, `parent_thread_id`,
+    /// `reply_to_id`, `reply_to_jid`, `stanza_xml`, mentions, ...)
+    /// are cleared when this variant is set, per XEP-0424 §Tombstones
+    /// / XEP-0425 §Tombstones: "any related elements which might leak
+    /// information about the original message" must be replaced.
     Tombstone(ArchivedTombstone),
 }
 
@@ -200,6 +203,20 @@ pub struct ArchivedMessage {
     pub stanza_id: Option<String>,
     /// RFC 6121 thread identifier for this message.
     pub thread_id: Option<String>,
+    /// XEP-0201 nested-thread parent (the `parent` attribute on
+    /// `<thread/>`). Only meaningful when `thread_id` is `Some`.
+    /// Cleared on XEP-0424 / XEP-0425 tombstones — see the
+    /// [`ArchivedRichPayload::Tombstone`] doc comment for the full
+    /// list of leak-prone fields.
+    ///
+    /// Typed as `ThreadId` (the existing newtype) per the
+    /// typed-payloads hard rule for new struct fields. The companion
+    /// `thread_id: Option<String>` field stays untyped here for now;
+    /// #228 will collapse both into a single `thread:
+    /// Option<xep0201::ThreadInfo>` field when the broader
+    /// retyping of `ArchivedMessage` lands.
+    #[serde(default)]
+    pub parent_thread_id: Option<ThreadId>,
     /// XEP-0461 reply target message ID.
     pub reply_to_id: Option<String>,
     /// XEP-0461 optional original sender JID.
@@ -236,6 +253,7 @@ impl Default for ArchivedMessage {
             body: String::new(),
             stanza_id: None,
             thread_id: None,
+            parent_thread_id: None,
             reply_to_id: None,
             reply_to_jid: None,
             origin_id: None,
@@ -603,12 +621,23 @@ fn build_typed_inner_message(archived: &ArchivedMessage, rich: &ArchivedRichMess
                 .build(),
         );
     }
+    // XEP-0201: emit `<thread parent='X'>id</thread>` via the canonical
+    // typed builder so the optional parent attribute round-trips on
+    // replay. The "parent without id ⇒ no `<thread/>` element" rule is
+    // enforced by gating the entire emission on `thread_id.is_some()`:
+    // a row with `parent_thread_id == Some(_)` and `thread_id == None`
+    // is incoherent (RFC 6121 §5.2.5 — `parent` is meaningful only as a
+    // back-reference from a thread that has its own id) and produces
+    // no `<thread/>` element at all.
     if let Some(thread_id) = archived.thread_id.as_deref() {
-        builder = builder.append(
-            Element::builder("thread", CLIENT_NS)
-                .append(thread_id)
-                .build(),
-        );
+        let info = crate::xep0201::ThreadInfo {
+            id: thread_id.to_owned(),
+            parent: archived
+                .parent_thread_id
+                .as_ref()
+                .map(|t| t.as_str().to_owned()),
+        };
+        builder = builder.append(crate::xep0201::build_thread_element(&info, CLIENT_NS));
     }
     if let Some(origin_id) = archived.origin_id.as_deref() {
         builder = builder.append(
@@ -771,12 +800,19 @@ fn build_legacy_inner_message(archived: &ArchivedMessage) -> Element {
                 .build(),
         );
     }
+    // XEP-0201: same emission rule as `build_typed_inner_message`. Use
+    // the canonical typed builder so parent round-trips, and gate on
+    // `thread_id.is_some()` so a parent-only row never emits a stray
+    // `<thread/>` element (RFC 6121 §5.2.5 incoherence guard).
     if let Some(thread_id) = archived.thread_id.as_deref() {
-        builder = builder.append(
-            Element::builder("thread", CLIENT_NS)
-                .append(thread_id)
-                .build(),
-        );
+        let info = crate::xep0201::ThreadInfo {
+            id: thread_id.to_owned(),
+            parent: archived
+                .parent_thread_id
+                .as_ref()
+                .map(|t| t.as_str().to_owned()),
+        };
+        builder = builder.append(crate::xep0201::build_thread_element(&info, CLIENT_NS));
     }
     if let Some(reply_to_id) = archived.reply_to_id.as_deref() {
         let mut reply = Element::builder("reply", REPLY_NS).attr("id", reply_to_id);
@@ -1092,6 +1128,117 @@ mod tests {
         assert!(inner_msg
             .children()
             .any(|c| c.name() == "origin-id" && c.ns() == STANZA_ID_NS));
+    }
+
+    fn nested_thread_archived_for_replay(stanza_xml: Option<String>) -> ArchivedMessage {
+        ArchivedMessage {
+            id: "msg-thread-nested".to_string(),
+            timestamp: Utc::now(),
+            from: "alice@example.com/web".to_string(),
+            to: "bob@example.com".to_string(),
+            body: "nested reply".to_string(),
+            stanza_id: Some("wire-id-1".to_string()),
+            thread_id: Some("child-thread".to_string()),
+            parent_thread_id: ThreadId::new("root-thread"),
+            origin_id: None,
+            message_type: "chat".to_string(),
+            stanza_xml,
+            ..Default::default()
+        }
+    }
+
+    fn replay_inner_thread(msg: &Message) -> &Element {
+        let result = msg
+            .payloads
+            .iter()
+            .find(|p| p.name() == "result" && p.ns() == MAM_NS)
+            .expect("result payload");
+        let forwarded = result
+            .children()
+            .find(|c| c.name() == "forwarded" && c.ns() == FORWARD_NS)
+            .expect("forwarded element");
+        let inner_msg = forwarded
+            .children()
+            .find(|c| c.name() == "message" && c.ns() == CLIENT_NS)
+            .expect("inner message");
+        inner_msg
+            .children()
+            .find(|c| c.name() == "thread")
+            .expect("thread child on replay")
+    }
+
+    #[test]
+    fn xep_0201_typed_replay_emits_thread_parent() {
+        // Typed reconstruction path: stanza_xml is None and rich is None
+        // so the projection falls through to `build_typed_inner_message`
+        // (with `rich` defaulted) — actually this falls into the legacy
+        // path since `rich.is_none()`. Use a row that exercises the
+        // typed path by setting a rich payload that doesn't carry its
+        // own `<thread/>`.
+        let archived = ArchivedMessage {
+            rich: Some(ArchivedRichMessage {
+                payload: None,
+                reply: None,
+                references: vec![],
+                mentions: vec![],
+            }),
+            ..nested_thread_archived_for_replay(None)
+        };
+        let msgs = build_result_messages("q1", "user@example.com", &[archived]);
+        let thread = replay_inner_thread(&msgs[0]);
+        assert_eq!(thread.text().trim(), "child-thread");
+        assert_eq!(thread.attr("parent"), Some("root-thread"));
+    }
+
+    #[test]
+    fn xep_0201_legacy_replay_emits_thread_parent() {
+        // Legacy reconstruction path: stanza_xml is None AND rich is
+        // None — `build_legacy_inner_message` rebuilds purely from
+        // scalar columns.
+        let archived = nested_thread_archived_for_replay(None);
+        let msgs = build_result_messages("q2", "user@example.com", &[archived]);
+        let thread = replay_inner_thread(&msgs[0]);
+        assert_eq!(thread.text().trim(), "child-thread");
+        assert_eq!(thread.attr("parent"), Some("root-thread"));
+    }
+
+    #[test]
+    fn xep_0201_replay_omits_thread_when_id_missing_even_with_parent() {
+        // RFC 6121 §5.2.5 incoherence guard: parent without id MUST NOT
+        // emit a `<thread/>` element on replay. This locks the rule
+        // against future regressions where parent-only state could be
+        // smuggled past the projection.
+        let archived = ArchivedMessage {
+            id: "msg-incoherent".to_string(),
+            timestamp: Utc::now(),
+            from: "alice@example.com/web".to_string(),
+            to: "bob@example.com".to_string(),
+            body: "body".to_string(),
+            thread_id: None,
+            parent_thread_id: ThreadId::new("root-thread"),
+            message_type: "chat".to_string(),
+            stanza_xml: None,
+            rich: None,
+            ..Default::default()
+        };
+        let msgs = build_result_messages("q3", "user@example.com", &[archived]);
+        let result = msgs[0]
+            .payloads
+            .iter()
+            .find(|p| p.name() == "result" && p.ns() == MAM_NS)
+            .expect("result payload");
+        let forwarded = result
+            .children()
+            .find(|c| c.name() == "forwarded" && c.ns() == FORWARD_NS)
+            .expect("forwarded element");
+        let inner_msg = forwarded
+            .children()
+            .find(|c| c.name() == "message" && c.ns() == CLIENT_NS)
+            .expect("inner message");
+        assert!(
+            !inner_msg.children().any(|c| c.name() == "thread"),
+            "no thread element should be emitted when thread_id is None"
+        );
     }
 
     #[test]

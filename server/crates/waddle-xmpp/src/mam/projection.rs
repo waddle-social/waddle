@@ -31,6 +31,7 @@ use crate::xep::{
     extract_references_from_message, extract_retraction_from_message, parse_reply_from_message,
     RetractionKind, NS_REPLY,
 };
+use waddle_xmpp_core::xep0201::thread_info_from_message;
 
 /// Build the [`ArchivedMessage`] persisted form of a one-to-one
 /// (chat / normal) `<message/>` for direct MAM storage.
@@ -87,6 +88,18 @@ pub fn build_direct_archived_message(
     let canonical_stamp = extract_stanza_id_by(message, archive_jid);
     let id = canonical_stamp.unwrap_or_default();
 
+    // XEP-0201: read the typed thread info (id + optional parent) from the
+    // post-reattach payload form. The inbound parse boundary in
+    // `protocol::frame::parse_stanza` calls `reattach_thread_parent` so the
+    // parent attribute survives `Message::try_from`'s typed lossy parse.
+    let (thread_id, parent_thread_id) = match thread_info_from_message(message) {
+        Some(info) => (
+            Some(info.id),
+            info.parent.and_then(waddle_xmpp_core::mam::ThreadId::new),
+        ),
+        None => (None, None),
+    };
+
     ArchivedMessage {
         id,
         timestamp: Utc::now(),
@@ -94,7 +107,8 @@ pub fn build_direct_archived_message(
         to: to.to_string(),
         body,
         stanza_id: message.id.clone(),
-        thread_id: message.thread.as_ref().map(|thread| thread.0.clone()),
+        thread_id,
+        parent_thread_id,
         reply_to_id,
         reply_to_jid,
         origin_id,
@@ -380,5 +394,64 @@ mod tests {
             }
             other => panic!("expected Correction, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn xep_0201_direct_chat_projects_root_thread_without_parent() {
+        // Root thread, no parent. The `<thread/>` element lives in
+        // `msg.payloads` as if `reattach_thread_parent` had run upstream
+        // (which is what the inbound parse boundary does for inbound
+        // messages). For root threads the typed-field form also works
+        // since there's no parent attribute to preserve.
+        let mut msg = chat_with_body("alice@example.com/web", "bob@example.com", "hi");
+        waddle_xmpp_core::xep0201::set_thread_id(&mut msg, "root-1");
+        let archived = build_direct_archived_message(
+            "alice@example.com",
+            "alice@example.com",
+            "bob@example.com",
+            &msg,
+        );
+        assert_eq!(archived.thread_id.as_deref(), Some("root-1"));
+        assert!(archived.parent_thread_id.is_none());
+    }
+
+    #[test]
+    fn xep_0201_direct_chat_projects_nested_thread_with_parent() {
+        // Nested thread: id `child-2`, parent `root-1`. The post-reattach
+        // payload form is the input shape downstream of
+        // `protocol::frame::parse_stanza`. The projection MUST recover
+        // both id and parent into the archive row.
+        use minidom::Element;
+        let mut msg = chat_with_body("alice@example.com/web", "bob@example.com", "hi");
+        msg.payloads.push(
+            Element::builder("thread", "jabber:client")
+                .attr("parent", "root-1")
+                .append("child-2")
+                .build(),
+        );
+        let archived = build_direct_archived_message(
+            "alice@example.com",
+            "alice@example.com",
+            "bob@example.com",
+            &msg,
+        );
+        assert_eq!(archived.thread_id.as_deref(), Some("child-2"));
+        assert_eq!(
+            archived.parent_thread_id.as_ref().map(|t| t.as_str()),
+            Some("root-1")
+        );
+    }
+
+    #[test]
+    fn xep_0201_direct_chat_no_thread_yields_none() {
+        let msg = chat_with_body("alice@example.com/web", "bob@example.com", "hi");
+        let archived = build_direct_archived_message(
+            "alice@example.com",
+            "alice@example.com",
+            "bob@example.com",
+            &msg,
+        );
+        assert_eq!(archived.thread_id, None);
+        assert!(archived.parent_thread_id.is_none());
     }
 }

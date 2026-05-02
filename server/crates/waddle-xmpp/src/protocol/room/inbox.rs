@@ -110,8 +110,8 @@ mod tests {
     use crate::protocol::room::context::OccupantSnapshot;
     use crate::types::{Affiliation, Role};
     use crate::xep::xep0421::OccupantIdSecret;
-    use crate::xep::xep0461::set_thread_id;
     use jid::{FullJid, Jid};
+    use waddle_xmpp_core::xep0201::set_thread_id;
     use xmpp_parsers::message::{Body, Message, MessageType};
 
     fn full(s: &str) -> FullJid {

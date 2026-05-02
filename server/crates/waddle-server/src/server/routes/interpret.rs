@@ -114,10 +114,10 @@ use waddle_xmpp::xep::{
     extract_correction_from_message, extract_explicit_mentions, extract_forum_action,
     extract_reactions_from_message, extract_references_from_message,
     extract_retraction_from_message, parse_reply_from_message, remove_stanza_ids_by,
-    set_reply_payload, set_thread_id, ForumAction, ReplyReference, RetractionKind,
-    NS_EXPLICIT_MENTIONS, NS_MESSAGE_CORRECT, NS_MESSAGE_RETRACT, NS_REACTIONS, NS_REFERENCE,
-    NS_REPLY,
+    set_reply_payload, ForumAction, ReplyReference, RetractionKind, NS_EXPLICIT_MENTIONS,
+    NS_MESSAGE_CORRECT, NS_MESSAGE_RETRACT, NS_REACTIONS, NS_REFERENCE, NS_REPLY,
 };
+use waddle_xmpp::xep0201::set_thread_id;
 use waddle_xmpp::Stanza;
 use xmpp_parsers::message::{Message, MessageType as XmppMessageType};
 use xmpp_parsers::minidom::Element;
@@ -826,6 +826,7 @@ async fn interpret_with_depth(
                 };
                 apply_groupchat_retraction_tombstone(
                     mam_storage,
+                    deps.sm_session_registry,
                     &room,
                     &target_message_id,
                     &retraction_message,
@@ -930,6 +931,7 @@ async fn interpret_with_depth(
                 {
                     apply_retraction_tombstone(
                         mam_storage,
+                        deps.sm_session_registry,
                         &archive_jid,
                         &retraction.retracts_id,
                         &message,
@@ -1152,6 +1154,7 @@ async fn run_headless_recipient_pass(
 /// authoritative payload after this point.
 async fn apply_retraction_tombstone(
     mam_storage: &Arc<dyn MamStorage>,
+    sm_session_registry: Option<&Arc<InMemorySmSessionRegistry>>,
     archive: &jid::BareJid,
     target_wire_id: &str,
     retraction_message: &Message,
@@ -1215,6 +1218,19 @@ async fn apply_retraction_tombstone(
             );
         }
     }
+    // Drop matching unacked outbound copies from any detached XEP-0198
+    // session queues so a recipient mid-resume does not replay the
+    // pre-scrub stanza on the wire. XEP-0424 §"prevent further
+    // distribution" applies to in-flight as well as archived copies.
+    // Scope by the recipient archive's bare JID so a colliding wire id
+    // in another conversation is not accidentally scrubbed (Codex P1).
+    scrub_unacked_for_tombstone(
+        sm_session_registry,
+        target_wire_id,
+        &archive_str,
+        "ApplyRetractionTombstone",
+    )
+    .await;
 }
 
 /// Deliver a single `Stanza` to a specific full-JID destination as
@@ -2470,6 +2486,19 @@ async fn finish_archive_groupchat_message(
     let rich = rich_archive_payload(&archive_clone);
     let stanza_xml = serialize_groupchat_stanza_xml(&archive_clone);
 
+    // XEP-0201: read the typed thread info (id + optional parent) from the
+    // post-reattach payload form. `protocol::frame::parse_stanza` calls
+    // `reattach_thread_parent` at the inbound boundary so the parent
+    // attribute survives `Message::try_from` here.
+    let (thread_id, parent_thread_id) =
+        match waddle_xmpp::xep0201::thread_info_from_message(&archive_clone) {
+            Some(info) => (
+                Some(info.id),
+                info.parent.and_then(waddle_xmpp::mam::ThreadId::new),
+            ),
+            None => (None, None),
+        };
+
     let archived = MamArchivedMessage {
         id: archive_id,
         timestamp: chrono::Utc::now(),
@@ -2481,7 +2510,8 @@ async fn finish_archive_groupchat_message(
         to: room.to_string(),
         body,
         stanza_id: archive_clone.id.clone(),
-        thread_id: archive_clone.thread.as_ref().map(|thread| thread.0.clone()),
+        thread_id,
+        parent_thread_id,
         reply_to_id,
         reply_to_jid,
         origin_id,
@@ -2510,6 +2540,7 @@ async fn finish_archive_groupchat_message(
 
 async fn apply_groupchat_retraction_tombstone(
     mam_storage: &Arc<dyn MamStorage>,
+    sm_session_registry: Option<&Arc<InMemorySmSessionRegistry>>,
     room: &BareJid,
     target_message_id: &str,
     retraction_message: &Message,
@@ -2562,6 +2593,60 @@ async fn apply_groupchat_retraction_tombstone(
             %error,
             "ApplyGroupchatRetractionTombstone: replace_with_tombstone failed"
         ),
+    }
+    // Drop matching unacked groupchat reflections from detached
+    // XEP-0198 session queues. The reflection is what occupants see;
+    // scrubbing here closes the resume-side replay leak for groupchat
+    // retractions identically to the 1:1 case. Scope by the room JID
+    // so the matcher's stanza-id branch can find groupchat reflections
+    // that key by the room's XEP-0359 stamp, and so a colliding wire
+    // id in another conversation is not accidentally scrubbed
+    // (Codex P1, Copilot review on PR #305).
+    scrub_unacked_for_tombstone(
+        sm_session_registry,
+        target_message_id,
+        &archive_str,
+        "ApplyGroupchatRetractionTombstone",
+    )
+    .await;
+}
+
+/// Walk the SM session registry and drop every unacked outbound
+/// `<message/>` entry that matches a XEP-0424 / XEP-0425 tombstone.
+/// `target_id` is matched against either the cached message's wire
+/// `id` attribute or any XEP-0359 `<stanza-id id='…'/>` child, scoped
+/// to `archive_jid` so cross-conversation collateral damage is
+/// impossible. Returns silently on any registry error (logged at
+/// WARN) — the archive scrub has already happened, and dropping the
+/// in-flight copy is best-effort.
+async fn scrub_unacked_for_tombstone(
+    sm_session_registry: Option<&Arc<InMemorySmSessionRegistry>>,
+    target_id: &str,
+    archive_jid: &str,
+    site: &'static str,
+) {
+    let Some(sm) = sm_session_registry else {
+        return;
+    };
+    use waddle_xmpp::stream_management::SmSessionRegistry as _;
+    match sm.scrub_unacked_for_tombstone(target_id, archive_jid).await {
+        Ok(removed) if removed > 0 => {
+            debug!(
+                target = target_id,
+                archive = archive_jid,
+                removed,
+                "{site}: scrubbed unacked SM queue entries for tombstoned message"
+            );
+        }
+        Ok(_) => {}
+        Err(error) => {
+            warn!(
+                target = target_id,
+                archive = archive_jid,
+                %error,
+                "{site}: scrub_unacked_for_tombstone failed; pre-scrub stanza may still replay on resume"
+            );
+        }
     }
 }
 
@@ -3437,6 +3522,7 @@ mod tests {
             body: "hello".to_string(),
             stanza_id: Some("canon-A1".to_string()),
             thread_id: None,
+            parent_thread_id: None,
             reply_to_id: None,
             reply_to_jid: None,
             origin_id: None,
@@ -3541,6 +3627,7 @@ mod tests {
             body: "from bob".to_string(),
             stanza_id: Some("alice-stamp-bob".to_string()),
             thread_id: None,
+            parent_thread_id: None,
             reply_to_id: None,
             reply_to_jid: None,
             origin_id: Some("collision".to_string()),
@@ -3559,6 +3646,7 @@ mod tests {
             body: "from alice".to_string(),
             stanza_id: Some("alice-stamp-alice".to_string()),
             thread_id: None,
+            parent_thread_id: None,
             reply_to_id: None,
             reply_to_jid: None,
             origin_id: Some("collision".to_string()),
@@ -3628,6 +3716,7 @@ mod tests {
             body: "bob's".to_string(),
             stanza_id: Some("alice-stamp".to_string()),
             thread_id: None,
+            parent_thread_id: None,
             reply_to_id: None,
             reply_to_jid: None,
             origin_id: Some("oid-1".to_string()),
@@ -3689,6 +3778,7 @@ mod tests {
             body: "collide".to_string(),
             stanza_id: Some("real-stamp".to_string()),
             thread_id: None,
+            parent_thread_id: None,
             reply_to_id: None,
             reply_to_jid: None,
             origin_id: Some("queried-id".to_string()),
@@ -3746,6 +3836,7 @@ mod tests {
             body: String::new(),
             stanza_id: Some("tomb-1".to_string()),
             thread_id: None,
+            parent_thread_id: None,
             reply_to_id: None,
             reply_to_jid: None,
             origin_id: None,
