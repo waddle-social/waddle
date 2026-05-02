@@ -144,6 +144,7 @@ const activeFirstUnseenId = computed(() =>
 // Empty stack = panel closed. Only meaningful for channel messages since DMs
 // don't use XEP-0201 threads yet.
 const activeThreadStack = ref<string[]>([]);
+const activeThreadTargetMessageId = ref<string | null>(null);
 const threads = useThreads(activeMessages);
 type ReactionModeTarget = "main" | "thread";
 const reactionModeTarget = ref<ReactionModeTarget | null>(null);
@@ -746,12 +747,14 @@ function sendGif(url: string) {
   void sendActiveMessage(url, [], []);
 }
 
-function openThread(threadId: string) {
+function openThread(threadId: string, targetMessageId?: string) {
   if (!threadId) return;
+  activeThreadTargetMessageId.value = targetMessageId ?? null;
   if (
     activeThreadStack.value.length > 0 &&
     activeThreadStack.value[activeThreadStack.value.length - 1] === threadId
   ) {
+    if (targetMessageId) void messaging.backfillThread(threadId);
     return;
   }
   activeThreadStack.value = [threadId];
@@ -773,6 +776,7 @@ async function onSelectThread(channelId: string, threadId: string) {
 
 function pushThread(threadId: string) {
   if (!threadId) return;
+  activeThreadTargetMessageId.value = null;
   if (
     activeThreadStack.value.length > 0 &&
     activeThreadStack.value[activeThreadStack.value.length - 1] === threadId
@@ -784,6 +788,7 @@ function pushThread(threadId: string) {
 }
 
 function popThreadTo(index: number) {
+  activeThreadTargetMessageId.value = null;
   if (index < 0) {
     activeThreadStack.value = [];
     return;
@@ -792,6 +797,7 @@ function popThreadTo(index: number) {
 }
 
 function closeThreadPanel() {
+  activeThreadTargetMessageId.value = null;
   activeThreadStack.value = [];
 }
 
@@ -833,6 +839,10 @@ function clearActiveSearch() {
 
 function loadOlderActiveMessages() {
   void activeTarget.value.loadOlderMessages();
+}
+
+function ensureActiveMessageLoaded(messageId: string) {
+  return activeTarget.value.ensureMessageLoaded(messageId);
 }
 
 function loadOlderThreadMessages(threadId: string) {
@@ -903,6 +913,7 @@ watch(
   () => {
     // Channel / DM / mode changes close any open thread panel — the ids inside
     // the stack belong to the channel we just left.
+    activeThreadTargetMessageId.value = null;
     activeThreadStack.value = [];
     exitReactionMode();
     updateUrl();
@@ -966,6 +977,7 @@ function onPopState() {
   const route = parseRoute(window.location.pathname, window.location.search);
   ui.activePage.value = route.page;
   if (route.page === "settings") {
+    activeThreadTargetMessageId.value = null;
     activeThreadStack.value = [];
     return;
   }
@@ -974,6 +986,7 @@ function onPopState() {
     dmConversations.closeDm();
     waddles.activeChannelId.value = null;
     messaging.clearMessages();
+    activeThreadTargetMessageId.value = null;
     activeThreadStack.value = [];
     return;
   }
@@ -991,6 +1004,7 @@ function onPopState() {
 async function applyRouteTarget(route: ReturnType<typeof parseRoute>, requestId: number) {
   ui.activePage.value = route.page;
   if (route.page === "settings") {
+    activeThreadTargetMessageId.value = null;
     activeThreadStack.value = [];
     return;
   }
@@ -999,6 +1013,7 @@ async function applyRouteTarget(route: ReturnType<typeof parseRoute>, requestId:
     dmConversations.closeDm();
     waddles.activeChannelId.value = null;
     messaging.clearMessages();
+    activeThreadTargetMessageId.value = null;
     activeThreadStack.value = [];
     if (shouldLoadStructureForRoute(route, waddles.channels.value.length)) {
       await waddles.loadStructure(null, { noChannelSelect: true });
@@ -1039,6 +1054,7 @@ async function applyRouteTarget(route: ReturnType<typeof parseRoute>, requestId:
   // Restore the thread panel from the URL and initialize paging for every
   // visible thread pane. Dedupe in the messaging composable keeps already
   // loaded roots/replies stable.
+  activeThreadTargetMessageId.value = null;
   activeThreadStack.value = route.threadStack;
   for (const threadId of route.threadStack) {
     void messaging.backfillThread(threadId);
@@ -1535,6 +1551,7 @@ onUnmounted(() => {
               :thread-index="threads.index.value"
               :xmpp-client="xmppClient"
               :reaction-mode="reactionModeTarget === 'main' ? reactionModeState : null"
+              :ensure-message-loaded="ensureActiveMessageLoaded"
               @send="sendActiveMessage"
               @typing="notifyActiveComposing"
               @edit-message="editActiveMessage"
@@ -1647,6 +1664,7 @@ onUnmounted(() => {
               :upload-progress="messaging.uploadProgress.value"
               :channel-name="waddles.currentChannel.value?.name ?? ''"
               :reaction-mode="reactionModeTarget === 'thread' ? reactionModeState : null"
+              :target-message-id="activeThreadTargetMessageId"
               @close="closeThreadPanel"
               @pop-to="popThreadTo"
               @push-thread="pushThread"

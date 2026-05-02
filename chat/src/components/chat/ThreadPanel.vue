@@ -41,6 +41,7 @@ const props = defineProps<{
   uploadProgress: { uploading: boolean; progress: number; filename: string };
   channelName: string;
   reactionMode?: { selectedMessageId: string | null } | null;
+  targetMessageId?: string | null;
   /**
    * When true, the composer is hidden but sub-thread navigation stays active.
    * Used to render the parent context pane in the accordion layout.
@@ -163,6 +164,7 @@ type VirtualTimelineHandle = ComponentPublicInstance & {
   scrollElement: HTMLDivElement | null;
   scrollToMessageId: (messageId: string, align?: "start" | "center" | "end") => Promise<boolean>;
 };
+const virtualTimelineRef = ref<VirtualTimelineHandle | null>(null);
 
 function setComposerRef(el: ComposerHandle | null) {
   composerRef.value = el;
@@ -232,6 +234,7 @@ function setScrollContainerRef(el: HTMLElement | null) {
 }
 
 const setVirtualTimelineRef = (instance: VirtualTimelineHandle | null) => {
+  virtualTimelineRef.value = instance;
   setScrollContainerRef(instance?.scrollElement ?? null);
   virtualTimelineEdgeScroller.value = instance
     ? async (mode) => {
@@ -243,14 +246,41 @@ const setVirtualTimelineRef = (instance: VirtualTimelineHandle | null) => {
         );
       }
     : null;
+  void scrollToTargetMessage();
 };
 
 // Switching threads resets composer state and scrolls to the pinned edge.
 watch(activeThreadId, () => {
   replyingTo.value = null;
   draft.value = "";
+  if (props.targetMessageId) {
+    void scrollToTargetMessage();
+    return;
+  }
   void scrollToPinnedEdge();
 });
+
+async function scrollToTargetMessage() {
+  const targetMessageId = props.targetMessageId;
+  if (
+    !targetMessageId
+    || !activeThreadId.value
+    || !orderedThreadMessages.value.some((message) => message.id === targetMessageId)
+  ) {
+    return;
+  }
+  await nextTick();
+  await virtualTimelineRef.value?.scrollToMessageId(targetMessageId, "center");
+  updateCurrentDayMarker();
+}
+
+watch(
+  [() => props.targetMessageId, activeThreadId, () => orderedThreadMessages.value.map((message) => message.id).join("\0")],
+  () => {
+    void scrollToTargetMessage();
+  },
+  { flush: "post" },
+);
 
 watch(scrollDirectionMode, () => {
   void scrollToPinnedEdge();

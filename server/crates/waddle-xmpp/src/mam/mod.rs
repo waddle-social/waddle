@@ -22,5 +22,6 @@ pub use waddle_xmpp_core::mam::{
     is_mam_query_form_request, parse_mam_query, ArchivedMention, ArchivedMessage,
     ArchivedModeration, ArchivedReactionSet, ArchivedReference, ArchivedReply, ArchivedRetraction,
     ArchivedRichMessage, ArchivedRichPayload, ArchivedTombstone, MamQuery, MamResult,
-    RichMessageId, RichText, ThreadId, MAM_NS, RSM_NS, STANZA_ID_NS,
+    RichMessageId, RichText, ThreadId, FULLTEXT_MAM_FIELD, FULLTEXT_MAM_NS, MAM_NS, RSM_NS,
+    STANZA_ID_NS,
 };

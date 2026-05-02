@@ -4,7 +4,10 @@ use minidom::Element;
 use tracing::debug;
 use xmpp_parsers::iq::Iq;
 
-use crate::{mam::WADDLE_MAM_THREAD_NS, CoreError};
+use crate::{
+    mam::{FULLTEXT_MAM_NS, WADDLE_MAM_THREAD_NS},
+    CoreError,
+};
 
 const DATA_FORMS_NS: &str = "jabber:x:data";
 const SERVER_INFO_FORM_TYPE: &str = "urn:xmpp:serverinfo:0";
@@ -94,6 +97,10 @@ impl Feature {
 
     pub fn mam() -> Self {
         Self::new("urn:xmpp:mam:2")
+    }
+
+    pub fn fulltext_mam() -> Self {
+        Self::new(FULLTEXT_MAM_NS)
     }
 
     pub fn waddle_mam_thread() -> Self {
@@ -569,6 +576,7 @@ pub fn muc_room_features(
         Feature::disco_info(),
         Feature::muc(),
         Feature::mam(),
+        Feature::fulltext_mam(),
         Feature::waddle_mam_thread(),
         Feature::stanza_ids(),
         Feature::replies(),
@@ -692,6 +700,7 @@ mod tests {
         let features = server_features();
         assert!(features.contains(&Feature::disco_info()));
         assert!(features.contains(&Feature::carbons()));
+        assert!(!features.contains(&Feature::fulltext_mam()));
         assert!(features.contains(&Feature::server_info()));
     }
 
@@ -702,5 +711,6 @@ mod tests {
         assert!(features.contains(&Feature::muc_persistent()));
         assert!(features.contains(&Feature::muc_membersonly()));
         assert!(features.contains(&Feature::muc_unmoderated()));
+        assert!(features.contains(&Feature::fulltext_mam()));
     }
 }

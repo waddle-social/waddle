@@ -1,8 +1,10 @@
 import type { Agent } from "stanza";
 import type { ReceivedMessage } from "stanza/protocol";
-import type { LiveDmMessage, MamHistoryPage, MamPageParam } from "./types";
+import type { LiveDmMessage, MamHistoryPage, MamPageParam, MessageSearchResult } from "./types";
 import { barePeerJid } from "./jid";
 import { dispatchChat } from "./dm-parsing";
+
+const FULLTEXT_MAM_FIELD = "{urn:xmpp:fulltext:0}fulltext";
 
 function localpart(jid: string): string {
   return barePeerJid(jid).split("@")[0] ?? "unknown";
@@ -182,7 +184,7 @@ export async function searchDmMessages(
   peerBareJid: string,
   query: string,
   max: number,
-): Promise<{ id: string; nick: string; body: string; createdAt: string }[]> {
+): Promise<MessageSearchResult[]> {
   if (!query.trim()) return [];
   const result = await xmpp.searchHistory(selfBareJid, {
     paging: { max },
@@ -191,24 +193,24 @@ export async function searchDmMessages(
       fields: [
         { name: "FORM_TYPE", type: "hidden", value: "urn:xmpp:mam:2" },
         { name: "with", value: peerBareJid },
-        { name: "fulltext", value: query.trim() },
+        { name: FULLTEXT_MAM_FIELD, value: query.trim() },
       ],
     },
   });
-  const results: { id: string; nick: string; body: string; createdAt: string }[] = [];
-  if (!result.results) return results;
-  for (const mamResult of result.results) {
-    const innerMsg = mamResult.item?.message;
-    if (!innerMsg?.body) continue;
-    const fromJid = barePeerJid(innerMsg.from ?? "");
-    if (!fromJid) continue;
+  const parsed = parseDmMamResult(result, selfBareJid, peerBareJid).messages;
+  const archiveIds = result.results?.map((mamResult) => mamResult.id).filter(Boolean) ?? [];
+  const results: MessageSearchResult[] = [];
+  for (const [index, message] of parsed.entries()) {
+    if (!message.body) continue;
     results.push({
-      id: innerMsg.id ?? mamResult.id ?? crypto.randomUUID(),
-      nick: localpart(fromJid),
-      body: innerMsg.body,
-      createdAt: mamResult.item.delay?.timestamp
-        ? mamResult.item.delay.timestamp.toISOString()
-        : new Date().toISOString(),
+      id: message.id,
+      ...(archiveIds[index] ? { archiveId: archiveIds[index] } : {}),
+      nick: message.nick,
+      body: message.body,
+      createdAt: message.createdAt,
+      ...(message.threadId ? { threadId: message.threadId } : {}),
+      ...(message.parentThreadId ? { parentThreadId: message.parentThreadId } : {}),
+      peerJid: message.peerJid,
     });
   }
   return results;

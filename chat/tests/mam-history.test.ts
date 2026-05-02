@@ -2,8 +2,8 @@ import { describe, expect, mock, test } from "bun:test";
 import { nextTick, ref } from "vue";
 import type { Agent } from "stanza";
 import type { ExtensionAnnotation } from "../src/lib/chat-ui";
-import { queryPersonalMam, queryPersonalMamPage } from "../src/lib/xmpp/dm-history";
-import { queryMam, queryMamByThread, queryMamPage, queryMamThreadPage } from "../src/lib/xmpp/history";
+import { queryPersonalMam, queryPersonalMamPage, searchDmMessages } from "../src/lib/xmpp/dm-history";
+import { queryMam, queryMamByThread, queryMamPage, queryMamThreadPage, searchMessages } from "../src/lib/xmpp/history";
 import { useDmMessaging } from "../src/composables/useDmMessaging";
 import { useMessaging } from "../src/composables/useMessaging";
 import { handlerStubs } from "./helpers/xmpp-client-mock";
@@ -23,6 +23,14 @@ function makeMamPageAgent(page: { results?: unknown[]; paging?: unknown; complet
   } as unknown as Agent & {
     searchHistory: ReturnType<typeof mock>;
   };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
 }
 
 function extensionAnnotation(id = "poll-enrichment"): ExtensionAnnotation {
@@ -371,6 +379,46 @@ describe("MAM history parsing", () => {
     expect(fields.find((field) => field.name === "{urn:xmpp:mam:2}thread")).toBeUndefined();
   });
 
+  test("room full-text search uses XEP-0431 Clark-notation field", async () => {
+    const xmpp = makeMamAgent([]);
+
+    const results = await searchMessages(xmpp, "room@muc.example.com", " release notes ", 20);
+
+    expect(results).toEqual([]);
+    const callArgs = xmpp.searchHistory.mock.calls[0];
+    expect(callArgs?.[0]).toBe("room@muc.example.com");
+    const query = callArgs?.[1] as { form?: { type?: string; fields?: { name: string; value?: string }[] } };
+    expect(query.form?.type).toBe("submit");
+    const fields = query.form?.fields ?? [];
+    expect(fields.find((field) => field.name === "FORM_TYPE")?.value).toBe("urn:xmpp:mam:2");
+    expect(fields.find((field) => field.name === "{urn:xmpp:fulltext:0}fulltext")?.value).toBe("release notes");
+    expect(fields.find((field) => field.name === "fulltext")).toBeUndefined();
+  });
+
+  test("DM full-text search combines with filter and XEP-0431 field", async () => {
+    const xmpp = makeMamAgent([]);
+
+    await searchDmMessages(xmpp, "alice@example.com", "bob@example.com", "release notes", 20);
+
+    const callArgs = xmpp.searchHistory.mock.calls[0];
+    expect(callArgs?.[0]).toBe("alice@example.com");
+    const query = callArgs?.[1] as { form?: { type?: string; fields?: { name: string; value?: string }[] } };
+    expect(query.form?.type).toBe("submit");
+    const fields = query.form?.fields ?? [];
+    expect(fields.find((field) => field.name === "FORM_TYPE")?.value).toBe("urn:xmpp:mam:2");
+    expect(fields.find((field) => field.name === "with")?.value).toBe("bob@example.com");
+    expect(fields.find((field) => field.name === "{urn:xmpp:fulltext:0}fulltext")?.value).toBe("release notes");
+    expect(fields.find((field) => field.name === "fulltext")).toBeUndefined();
+  });
+
+  test("full-text search skips whitespace queries without MAM calls", async () => {
+    const xmpp = makeMamAgent([]);
+
+    expect(await searchMessages(xmpp, "room@muc.example.com", "   ", 20)).toEqual([]);
+    expect(await searchDmMessages(xmpp, "alice@example.com", "bob@example.com", "\t", 20)).toEqual([]);
+    expect(xmpp.searchHistory).not.toHaveBeenCalled();
+  });
+
   test("XEP-0461 reply without <thread/> never inherits a thread id on MAM replay", async () => {
     // XEP-0461: a reply identifies the replied-to message; it MUST NOT imply
     // XEP-0201 thread membership. Even when the user requested a
@@ -497,6 +545,186 @@ describe("MAM history parsing", () => {
 });
 
 describe("MAM history application", () => {
+  test("room search ignores stale slower results", async () => {
+    const slow = deferred<{ id: string; nick: string; body: string; createdAt: string }[]>();
+    const fast = deferred<{ id: string; nick: string; body: string; createdAt: string }[]>();
+    const session = ref({
+      username: "alice",
+      jid: "alice@example.com/desktop",
+      domain: "example.com",
+    } as never);
+    const xmppClient = ref({
+      ...handlerStubs(),
+      searchMessages: mock((_spaceId: string, _channelId: string, query: string) =>
+        query === "slow" ? slow.promise : fast.promise
+      ),
+    } as never);
+    const messaging = useMessaging(
+      session,
+      ref(null),
+      xmppClient,
+      ref("w1"),
+      ref("c1"),
+      ref({ id: "c1", name: "general", channel_type: "text" }),
+      String,
+      ref(""),
+      () => {},
+    );
+
+    const slowSearch = messaging.searchMessages("slow");
+    const fastSearch = messaging.searchMessages("fast");
+    fast.resolve([{ id: "fast", nick: "bob", body: "fast result", createdAt: "2024-01-01T00:00:00Z" }]);
+    await fastSearch;
+    expect(messaging.searchResults.value.map((result) => result.id)).toEqual(["fast"]);
+
+    slow.resolve([{ id: "slow", nick: "bob", body: "slow result", createdAt: "2024-01-01T00:00:00Z" }]);
+    await slowSearch;
+    expect(messaging.searchResults.value.map((result) => result.id)).toEqual(["fast"]);
+  });
+
+  test("DM search ignores stale slower results", async () => {
+    const slow = deferred<{ id: string; nick: string; body: string; createdAt: string }[]>();
+    const fast = deferred<{ id: string; nick: string; body: string; createdAt: string }[]>();
+    const session = ref({
+      username: "alice",
+      jid: "alice@example.com/desktop",
+    } as never);
+    const xmppClient = ref({
+      searchDmMessages: mock((_peerJid: string, query: string) =>
+        query === "slow" ? slow.promise : fast.promise
+      ),
+    } as never);
+    const messaging = useDmMessaging(
+      session,
+      xmppClient,
+      ref("bob@example.com"),
+      String,
+      ref(""),
+      () => {},
+    );
+
+    const slowSearch = messaging.searchMessages("slow");
+    const fastSearch = messaging.searchMessages("fast");
+    fast.resolve([{ id: "fast", nick: "bob", body: "fast result", createdAt: "2024-01-01T00:00:00Z" }]);
+    await fastSearch;
+    expect(messaging.searchResults.value.map((result) => result.id)).toEqual(["fast"]);
+
+    slow.resolve([{ id: "slow", nick: "bob", body: "slow result", createdAt: "2024-01-01T00:00:00Z" }]);
+    await slowSearch;
+    expect(messaging.searchResults.value.map((result) => result.id)).toEqual(["fast"]);
+  });
+
+  test("room search navigation backfills older pages before scrolling", async () => {
+    const session = ref({
+      username: "alice",
+      jid: "alice@example.com/desktop",
+      domain: "example.com",
+    } as never);
+    const queryMamPage = mock(async (
+      _spaceId: string,
+      _channelId: string,
+      _max: number,
+      page: { type: "latest" } | { type: "before"; before: string },
+    ) => page.type === "latest"
+      ? {
+          messages: [{
+            id: "newer",
+            roomJid: "c1@muc.example.com",
+            nick: "bob",
+            body: "newer",
+            createdAt: "2024-01-02T00:00:00Z",
+            type: "message" as const,
+          }],
+          firstArchiveId: "archive-newer",
+          complete: false,
+        }
+      : {
+          messages: [{
+            id: "hit",
+            roomJid: "c1@muc.example.com",
+            nick: "bob",
+            body: "older hit",
+            createdAt: "2024-01-01T00:00:00Z",
+            type: "message" as const,
+          }],
+          firstArchiveId: "archive-hit",
+          complete: true,
+        });
+    const xmppClient = ref({ ...handlerStubs(), queryMamPage } as never);
+    const messaging = useMessaging(
+      session,
+      ref(null),
+      xmppClient,
+      ref("w1"),
+      ref("c1"),
+      ref({ id: "c1", name: "general", channel_type: "text" }),
+      String,
+      ref(""),
+      () => {},
+    );
+
+    await messaging.loadMessages("w1", "c1");
+    expect(messaging.messages.value.map((message) => message.id)).toEqual(["newer"]);
+
+    expect(await messaging.ensureMessageLoaded("hit")).toBe(true);
+    expect(queryMamPage.mock.calls[1]?.[3]).toEqual({ type: "before", before: "archive-newer" });
+    expect(messaging.messages.value.map((message) => message.id)).toEqual(["hit", "newer"]);
+  });
+
+  test("DM search navigation backfills older pages before scrolling", async () => {
+    const session = ref({
+      username: "alice",
+      jid: "alice@example.com/desktop",
+    } as never);
+    const queryPersonalMamPage = mock(async (
+      _peerJid: string,
+      _max: number,
+      page: { type: "latest" } | { type: "before"; before: string },
+    ) => page.type === "latest"
+      ? {
+          messages: [{
+            id: "newer",
+            peerJid: "bob@example.com",
+            fromJid: "bob@example.com",
+            nick: "bob",
+            body: "newer",
+            createdAt: "2024-01-02T00:00:00Z",
+            type: "message" as const,
+          }],
+          firstArchiveId: "archive-newer",
+          complete: false,
+        }
+      : {
+          messages: [{
+            id: "hit",
+            peerJid: "bob@example.com",
+            fromJid: "bob@example.com",
+            nick: "bob",
+            body: "older hit",
+            createdAt: "2024-01-01T00:00:00Z",
+            type: "message" as const,
+          }],
+          firstArchiveId: "archive-hit",
+          complete: true,
+        });
+    const xmppClient = ref({ queryPersonalMamPage } as never);
+    const messaging = useDmMessaging(
+      session,
+      xmppClient,
+      ref("bob@example.com"),
+      String,
+      ref(""),
+      () => {},
+    );
+
+    await messaging.loadMessages("bob@example.com");
+    expect(messaging.messages.value.map((message) => message.id)).toEqual(["newer"]);
+
+    expect(await messaging.ensureMessageLoaded("hit")).toBe(true);
+    expect(queryPersonalMamPage.mock.calls[1]?.[2]).toEqual({ type: "before", before: "archive-newer" });
+    expect(messaging.messages.value.map((message) => message.id)).toEqual(["hit", "newer"]);
+  });
+
   test("loads bodyless standard MUC thread rows without forum decoration", async () => {
     const session = ref({
       username: "alice",

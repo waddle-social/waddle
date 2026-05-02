@@ -13,7 +13,7 @@
 //!       <field var='FORM_TYPE' type='hidden'>
 //!         <value>urn:xmpp:mam:2</value>
 //!       </field>
-//!       <field var='fulltext'>
+//!       <field var='{urn:xmpp:fulltext:0}fulltext'>
 //!         <value>search terms</value>
 //!       </field>
 //!     </x>
@@ -22,7 +22,8 @@
 //! ```
 
 /// MAM data form field for full-text search.
-pub const FIELD_FULLTEXT: &str = "fulltext";
+pub const NS_FULLTEXT: &str = waddle_xmpp_core::mam::FULLTEXT_MAM_NS;
+pub const FIELD_FULLTEXT: &str = waddle_xmpp_core::mam::FULLTEXT_MAM_FIELD;
 
 /// A MAM search query with optional filters.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -220,6 +221,7 @@ mod tests {
 
     #[test]
     fn test_field_constant() {
-        assert_eq!(FIELD_FULLTEXT, "fulltext");
+        assert_eq!(NS_FULLTEXT, "urn:xmpp:fulltext:0");
+        assert_eq!(FIELD_FULLTEXT, "{urn:xmpp:fulltext:0}fulltext");
     }
 }

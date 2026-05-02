@@ -24,6 +24,10 @@ pub const MAM_NS: &str = "urn:xmpp:mam:2";
 pub const WADDLE_MAM_THREAD_NS: &str = "urn:waddle:mam-thread:0";
 pub const WADDLE_MAM_THREAD_FIELD: &str = "{urn:waddle:mam-thread:0}thread";
 
+/// Full Text Search in MAM namespace (XEP-0431).
+pub const FULLTEXT_MAM_NS: &str = "urn:xmpp:fulltext:0";
+pub const FULLTEXT_MAM_FIELD: &str = "{urn:xmpp:fulltext:0}fulltext";
+
 /// Result Set Management namespace (XEP-0059).
 pub const RSM_NS: &str = "http://jabber.org/protocol/rsm";
 
@@ -395,7 +399,7 @@ pub fn build_query_form_iq(original_iq: &Iq) -> Iq {
         )
         .append(
             Element::builder("field", DATA_FORMS_NS)
-                .attr("var", "fulltext")
+                .attr("var", FULLTEXT_MAM_FIELD)
                 .attr("type", "text-single")
                 .build(),
         )
@@ -475,7 +479,7 @@ fn parse_data_form(form: &Element, query: &mut MamQuery) -> CoreResult<()> {
             WADDLE_MAM_THREAD_FIELD => {
                 query.thread_id = value.and_then(ThreadId::new);
             }
-            "fulltext" => {
+            FULLTEXT_MAM_FIELD => {
                 query.fulltext = value.and_then(RichText::new);
             }
             _ => {
@@ -907,7 +911,7 @@ mod tests {
                             )
                             .append(
                                 Element::builder("field", DATA_FORMS_NS)
-                                    .attr("var", "fulltext")
+                                    .attr("var", FULLTEXT_MAM_FIELD)
                                     .append(
                                         Element::builder("value", DATA_FORMS_NS)
                                             .append("release notes")
@@ -1020,6 +1024,37 @@ mod tests {
     }
 
     #[test]
+    fn rejects_legacy_bare_fulltext_mam_form_field() {
+        let iq = Iq {
+            from: None,
+            to: None,
+            id: "mam-legacy-fulltext".to_string(),
+            payload: IqType::Set(
+                Element::builder("query", MAM_NS)
+                    .append(
+                        Element::builder("x", DATA_FORMS_NS)
+                            .attr("type", "submit")
+                            .append(
+                                Element::builder("field", DATA_FORMS_NS)
+                                    .attr("var", "fulltext")
+                                    .append(
+                                        Element::builder("value", DATA_FORMS_NS)
+                                            .append("release notes")
+                                            .build(),
+                                    )
+                                    .build(),
+                            )
+                            .build(),
+                    )
+                    .build(),
+            ),
+        };
+
+        let err = parse_mam_query(&iq).expect_err("unsupported MAM field");
+        assert!(matches!(err, CoreError::NotImplemented));
+    }
+
+    #[test]
     fn builds_mam_query_form_with_waddle_thread_field() {
         let iq = Iq {
             from: Some("juliet@example.com/chamber".parse().expect("from jid")),
@@ -1044,7 +1079,8 @@ mod tests {
         assert!(fields.contains(&"start"));
         assert!(fields.contains(&"end"));
         assert!(fields.contains(&WADDLE_MAM_THREAD_FIELD));
-        assert!(fields.contains(&"fulltext"));
+        assert!(fields.contains(&FULLTEXT_MAM_FIELD));
+        assert!(!fields.contains(&"fulltext"));
     }
 
     #[test]
