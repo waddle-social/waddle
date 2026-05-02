@@ -57,7 +57,7 @@ function selectGif(gif: GiphyGif) {
 
 <template>
   <div
-    class="z-popover absolute left-0 right-0 glass-panel border border-border rounded-lg max-h-96 flex flex-col shadow-2xl animate-fade-in overflow-hidden"
+    class="chat-composer-popover z-popover absolute glass-panel border border-border rounded-lg max-h-96 flex flex-col shadow-2xl animate-fade-in overflow-hidden"
     :class="isTopPinned ? 'top-full mt-2' : 'bottom-full mb-2'"
   >
     <!-- Header -->

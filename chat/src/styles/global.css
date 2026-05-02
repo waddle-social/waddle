@@ -101,7 +101,7 @@
   --chat-sidebar-width: clamp(16.5rem, 18vw, 19rem);
   --chat-header-height: 3.5rem;
   --chat-content-inline: clamp(1rem, 2vw, 2rem);
-  --chat-message-lane: clamp(42rem, 68vw, 70rem);
+  --chat-message-lane: clamp(42rem, 68vw, 60rem);
   --chat-copy-measure: 68ch;
   --chat-readable-measure: 72ch;
   --chat-thread-width: clamp(22rem, 32vw, 30rem);
@@ -582,7 +582,8 @@
 
 .chat-message-lane {
   width: min(100%, var(--chat-message-lane));
-  margin-inline: auto;
+  margin-inline-start: 0;
+  margin-inline-end: auto;
 }
 
 .chat-copy-measure {
@@ -800,11 +801,6 @@
   }
 }
 
-.chat-composer > :not(.chat-composer-popover) {
-  width: min(100%, var(--chat-message-lane));
-  margin-inline: auto;
-}
-
 .chat-composer {
   padding: var(--chat-composer-block) var(--chat-content-inline);
   box-shadow: var(--shadow-pane);
@@ -820,9 +816,8 @@
 }
 
 .chat-composer-popover {
-  width: min(calc(100% - var(--chat-content-inline) - var(--chat-content-inline)), var(--chat-message-lane));
-  left: 50%;
-  transform: translateX(-50%);
+  left: var(--chat-content-inline);
+  right: var(--chat-content-inline);
 }
 
 .chat-pane-header {
@@ -830,18 +825,9 @@
   min-height: var(--chat-header-height);
 }
 
-.chat-pane-header-row {
-  display: flex;
-  min-width: 0;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-md);
-}
-
 .chat-pane-title-group {
   display: grid;
   min-width: 0;
-  flex: 1 1 auto;
   grid-template-columns: var(--control-md) minmax(0, 1fr);
   column-gap: var(--space-sm);
   align-items: center;
@@ -918,7 +904,6 @@
   flex-direction: column;
   gap: var(--space-xs);
   align-items: flex-start;
-  max-width: var(--chat-readable-measure);
 }
 
 .chat-message-list {
@@ -1123,8 +1108,6 @@
 
 .chat-current-day-marker__lane {
   display: flex;
-  width: min(100%, var(--chat-message-lane));
-  margin-inline: auto;
   align-items: center;
   gap: var(--space-sm);
   justify-content: center;
@@ -1528,7 +1511,6 @@
 }
 
 .type-message-body {
-  max-width: var(--chat-readable-measure);
   font-size: var(--text-message);
   line-height: var(--leading-message);
   letter-spacing: 0;
