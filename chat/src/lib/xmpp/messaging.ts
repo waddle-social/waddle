@@ -253,7 +253,9 @@ export function sendGroupMessage(
   const text = body;
   const hasText = text.trim().length > 0;
   const hasFiles = !!files && files.length > 0;
-  if (!hasText && !hasFiles) return null;
+  const hasThreadMetadata = !!threadId?.trim();
+  const hasForumMetadata = !!threadCreate?.title?.trim() || !!threadReply?.threadId?.trim();
+  if (!hasText && !hasFiles && !hasThreadMetadata && !hasForumMetadata) return null;
 
   const msgId = id ?? crypto.randomUUID();
   const { prefix, length: prefixLength } = replyTo

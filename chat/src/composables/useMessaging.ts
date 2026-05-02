@@ -100,7 +100,7 @@ export function fromLiveMessage(
   return tm;
 }
 
-function applyForumContext(list: TimelineMessage[]): TimelineMessage[] {
+function applyForumContext(list: TimelineMessage[], inferForumReplies = true): TimelineMessage[] {
   const threadTitles = new Map<string, string>();
 
   for (const message of list) {
@@ -124,13 +124,15 @@ function applyForumContext(list: TimelineMessage[]): TimelineMessage[] {
         next.forumThreadTitle = message.forumTitle;
         changed = true;
       }
-    } else if (threadId && threadTitle) {
-      if (!message.forumPostKind && message.id !== threadId) {
+    } else if (threadId) {
+      if (inferForumReplies && !message.forumPostKind && message.id !== threadId) {
         next.forumPostKind = "reply";
         changed = true;
       }
-      if (message.forumThreadTitle !== threadTitle) {
-        next.forumThreadTitle = threadTitle;
+      const forumThreadTitle = threadTitle
+        ?? (next.forumPostKind === "reply" && !message.body ? `Thread ${threadId}` : undefined);
+      if (forumThreadTitle && message.forumThreadTitle !== forumThreadTitle) {
+        next.forumThreadTitle = forumThreadTitle;
         changed = true;
       }
     }
@@ -910,6 +912,9 @@ export function useMessaging(
         msg.body
         || (msg.sharedFiles && msg.sharedFiles.length > 0)
         || msg.isSticker
+        || msg.threadId
+        || msg.replyTo
+        || msg.forumPostKind
         || (msg.extensionAnnotations && msg.extensionAnnotations.length > 0)
       ) {
         regularMessages.push(msg);
@@ -986,7 +991,7 @@ export function useMessaging(
       }
     }
 
-    return applyForumContext(timeline.sort((a, b) => a.createdAt.localeCompare(b.createdAt)));
+    return applyForumContext(timeline.sort((a, b) => a.createdAt.localeCompare(b.createdAt)), channelIsForum.value);
   }
 
   async function loadMessages(
@@ -1132,10 +1137,25 @@ export function useMessaging(
     const channelId = activeChannelId.value;
     if (!client || !channelId || !threadId || !session.value) return;
     const requestId = messageRequestId;
-    const page = "queryMamThreadPage" in client
-      ? await client.queryMamThreadPage(spaceId ?? "", channelId, threadId, 100, { type: "latest" })
-      : null;
-    const results = page ? page.messages : await client.queryMamByThread(spaceId ?? "", channelId, threadId, 100);
+    let page: { messages: LiveRoomMessage[]; firstArchiveId?: string; complete?: boolean } | null = null;
+    let results: LiveRoomMessage[] = [];
+    try {
+      page = "queryMamThreadPage" in client
+        ? await client.queryMamThreadPage(spaceId ?? "", channelId, threadId, 100, { type: "latest" })
+        : null;
+      results = page ? page.messages : await client.queryMamByThread(spaceId ?? "", channelId, threadId, 100);
+    } catch (e) {
+      if (
+        xmppClient.value === client &&
+        (activeSpaceId.value ?? "") === (spaceId ?? "") &&
+        activeChannelId.value === channelId &&
+        requestId === messageRequestId
+      ) {
+        threadHasOlder.value = { ...threadHasOlder.value, [threadId]: false };
+        actionError.value = normalizeError(e);
+      }
+      return;
+    }
     if (
       xmppClient.value !== client ||
       (activeSpaceId.value ?? "") !== (spaceId ?? "") ||
@@ -1221,8 +1241,10 @@ export function useMessaging(
     const hasFiles = !!files && files.length > 0;
     const isForumPost = channelIsForum.value && !replyTo;
     const resolvedForumTitle = (forumTitle ?? forumPostTitle.value).trim();
+    const hasThreadMetadataIntent = !!threadOverride?.threadId.trim();
+    const hasForumMetadataIntent = (isForumPost && !!resolvedForumTitle) || (channelIsForum.value && !!replyTo);
     if (!client || !channelId) return;
-    if (!bodyText.trim() && !hasFiles) return;
+    if (!bodyText.trim() && !hasFiles && !hasThreadMetadataIntent && !hasForumMetadataIntent) return;
     if (isForumPost && !resolvedForumTitle) {
       actionError.value = "Add a title before posting to this forum.";
       return;

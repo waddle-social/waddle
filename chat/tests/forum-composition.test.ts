@@ -65,6 +65,38 @@ describe("forum composition", () => {
     expect(messaging.forumPostTitle.value).toBe("");
   });
 
+  test("allows bodyless forum topics with title metadata", async () => {
+    const sendGroupMessage = mock(async () => ({ id: "topic-1", state: "sending" as const }));
+    const sendChatState = mock(async () => undefined);
+    const actionError = ref("");
+    const messaging = useMessaging(
+      ref(session()),
+      ref(null),
+      ref({ ...handlerStubs(), sendGroupMessage, sendChatState } as never),
+      ref("w1"),
+      ref("c1"),
+      ref(forumChannel()),
+      String,
+      actionError,
+      () => {
+        actionError.value = "";
+      },
+    );
+
+    messaging.forumPostTitle.value = "Shipping roadmap";
+
+    await messaging.sendMessage("", []);
+
+    expect(sendGroupMessage).toHaveBeenCalledWith(
+      "w1",
+      "c1",
+      "",
+      expect.objectContaining({
+        threadCreate: { title: "Shipping roadmap" },
+      }),
+    );
+  });
+
   test("blocks top-level forum posts without a title", async () => {
     const sendGroupMessage = mock(async () => ({ id: "topic-1", state: "sending" as const }));
     const sendChatState = mock(async () => undefined);
@@ -159,5 +191,51 @@ describe("forum composition", () => {
       threadId: "topic-1",
       forumThreadTitle: "Shipping roadmap",
     });
+  });
+
+  test("allows bodyless forum replies with thread metadata", async () => {
+    const sendGroupMessage = mock(async () => ({ id: "reply-2", state: "sending" as const }));
+    const sendChatState = mock(async () => undefined);
+    const actionError = ref("");
+    const messaging = useMessaging(
+      ref(session()),
+      ref(null),
+      ref({ ...handlerStubs(), sendGroupMessage, sendChatState } as never),
+      ref("w1"),
+      ref("c1"),
+      ref(forumChannel()),
+      String,
+      actionError,
+      () => {
+        actionError.value = "";
+      },
+    );
+    messaging.messages.value = [{
+      id: "topic-1",
+      author: "Bob",
+      authorJid: "c1@muc.example.com/Bob",
+      body: "",
+      createdAt: "2024-01-01T00:00:00Z",
+      isSelf: false,
+      threadId: "topic-1",
+      forumPostKind: "topic",
+      forumTitle: "Shipping roadmap",
+      forumThreadTitle: "Shipping roadmap",
+    }];
+
+    await messaging.sendMessage("", [], [], undefined, {
+      id: "topic-1",
+      author: "Bob",
+    });
+
+    expect(sendGroupMessage).toHaveBeenCalledWith(
+      "w1",
+      "c1",
+      "",
+      expect.objectContaining({
+        threadId: "topic-1",
+        threadReply: { threadId: "topic-1" },
+      }),
+    );
   });
 });

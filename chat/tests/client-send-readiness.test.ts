@@ -362,6 +362,41 @@ describe("optimistic UI waits for successful sends", () => {
     expect(actionError.value).toBe("");
   });
 
+  test("room composer allows bodyless standard MUC thread metadata", async () => {
+    const sendGroupMessage = mock(async () => ({ id: "thread-marker-1", state: "sending" as const }));
+    const sendChatState = mock(async () => undefined);
+    const actionError = ref("");
+    const messaging = useMessaging(
+      ref(session()),
+      ref(null),
+      ref({ ...handlerStubs(), sendGroupMessage, sendChatState } as never),
+      ref("w1"),
+      ref("c1"),
+      ref({ id: "c1", name: "general", channel_type: "text" }),
+      normalizeError,
+      actionError,
+      () => {
+        actionError.value = "";
+      },
+    );
+
+    await messaging.sendMessage("", [], [], undefined, undefined, { threadId: "thread-root" });
+
+    expect(sendGroupMessage).toHaveBeenCalledWith(
+      "w1",
+      "c1",
+      "",
+      expect.objectContaining({
+        threadId: "thread-root",
+      }),
+    );
+    expect(messaging.messages.value.at(-1)).toMatchObject({
+      id: "thread-marker-1",
+      body: "",
+      threadId: "thread-root",
+    });
+  });
+
   test("DM composer keeps queued messages visible and durable", async () => {
     const sendDirectMessage = mock(async () => ({ id: "queued-dm-1", state: "queued" as const }));
     const sendDmChatState = mock(async () => undefined);

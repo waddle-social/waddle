@@ -58,6 +58,19 @@ function hasBodyOrSubject(msg: ReceivedMessage): boolean {
   return !!msg.body || !!msg.subject;
 }
 
+function hasValidForumPayload(msg: ReceivedMessage): boolean {
+  const stanza = ext(msg);
+  const threadCreate = stanza.threadCreate as { title?: string } | undefined;
+  if (typeof threadCreate?.title === "string" && threadCreate.title.trim()) return true;
+  const threadReply = stanza.threadReply as { threadId?: string } | undefined;
+  return typeof threadReply?.threadId === "string" && !!threadReply.threadId.trim();
+}
+
+function hasValidThreadPayload(msg: ReceivedMessage): boolean {
+  const threadId = ext(msg).thread;
+  return typeof threadId === "string" && !!threadId.trim();
+}
+
 /**
  * True when a stanza should be treated as a user-visible message payload even
  * if `<body/>` is omitted (for example, pure file-sharing messages).
@@ -68,7 +81,10 @@ export function hasRenderableMessagePayload(msg: ReceivedMessage): boolean {
   const fileSharing = stanza.fileSharing;
   if (Array.isArray(fileSharing)) return fileSharing.length > 0;
   if (fileSharing) return true;
-  return !!stanza.sticker || extensionAnnotationsFromStanza(stanza).length > 0;
+  return !!stanza.sticker
+    || hasValidThreadPayload(msg)
+    || hasValidForumPayload(msg)
+    || extensionAnnotationsFromStanza(stanza).length > 0;
 }
 
 interface OriginIdPayload {
@@ -494,6 +510,8 @@ function hasNonBodyMessagePayload(msg: ReceivedMessage): boolean {
   const fileSharing = stanza.fileSharing;
   return (Array.isArray(fileSharing) ? fileSharing.length > 0 : !!fileSharing)
     || !!stanza.sticker
+    || hasValidThreadPayload(msg)
+    || hasValidForumPayload(msg)
     || extensionAnnotationsFromStanza(stanza).length > 0;
 }
 
@@ -513,16 +531,18 @@ function extractReplyAndThread(msg: ReceivedMessage, base: MessageExtensionsTarg
   const parentThread = ext(msg).parentThread as string | undefined;
   if (parentThread) base.parentThreadId = parentThread;
   const threadCreate = ext(msg).threadCreate as { title?: string } | undefined;
-  if (threadCreate?.title?.trim()) {
+  const threadCreateTitle = typeof threadCreate?.title === "string" ? threadCreate.title.trim() : "";
+  if (threadCreateTitle) {
     base.forumPostKind = "topic";
-    base.forumTitle = threadCreate.title.trim();
-    base.forumThreadTitle = threadCreate.title.trim();
+    base.forumTitle = threadCreateTitle;
+    base.forumThreadTitle = threadCreateTitle;
     if (!base.threadId && base.id) base.threadId = base.id;
   }
   const threadReply = ext(msg).threadReply as { threadId?: string } | undefined;
-  if (threadReply?.threadId) {
+  const threadReplyId = typeof threadReply?.threadId === "string" ? threadReply.threadId.trim() : "";
+  if (threadReplyId) {
     base.forumPostKind = "reply";
-    if (!base.threadId) base.threadId = threadReply.threadId;
+    base.threadId = threadReplyId;
   }
 }
 

@@ -68,6 +68,89 @@ describe("MAM history parsing", () => {
     expect(older.complete).toBe(false);
   });
 
+  test("parses bodyless archived forum thread metadata as durable messages", async () => {
+    const xmpp = makeMamAgent([
+      {
+        id: "topic-archive-id",
+        item: {
+          delay: { timestamp: new Date("2024-01-01T00:00:00Z") },
+          message: {
+            id: "topic-wire-id",
+            from: "room@muc.example.com/Alice",
+            to: "room@muc.example.com",
+            type: "groupchat",
+            stanzaIds: [{ id: "topic-archive-id", by: "room@muc.example.com" }],
+            thread: "topic-archive-id",
+            threadCreate: { title: "Roadmap" },
+          },
+        },
+      },
+      {
+        id: "reply-archive-id",
+        item: {
+          delay: { timestamp: new Date("2024-01-01T00:01:00Z") },
+          message: {
+            id: "reply-wire-id",
+            from: "room@muc.example.com/Bob",
+            to: "room@muc.example.com",
+            type: "groupchat",
+            stanzaIds: [{ id: "reply-archive-id", by: "room@muc.example.com" }],
+            thread: "topic-archive-id",
+            threadReply: { threadId: "topic-archive-id" },
+          },
+        },
+      },
+    ]);
+
+    const results = await queryMam(xmpp, "room@muc.example.com", 20);
+
+    expect(results).toHaveLength(2);
+    expect(results[0]).toMatchObject({
+      id: "topic-archive-id",
+      body: "",
+      threadId: "topic-archive-id",
+      forumPostKind: "topic",
+      forumTitle: "Roadmap",
+      forumThreadTitle: "Roadmap",
+    });
+    expect(results[1]).toMatchObject({
+      id: "reply-archive-id",
+      body: "",
+      threadId: "topic-archive-id",
+      forumPostKind: "reply",
+    });
+  });
+
+  test("parses bodyless archived standard MUC thread metadata as durable messages", async () => {
+    const xmpp = makeMamAgent([
+      {
+        id: "thread-marker-archive-id",
+        item: {
+          delay: { timestamp: new Date("2024-01-01T00:00:00Z") },
+          message: {
+            id: "thread-marker-wire-id",
+            from: "room@muc.example.com/Alice",
+            to: "room@muc.example.com",
+            type: "groupchat",
+            stanzaIds: [{ id: "thread-marker-archive-id", by: "room@muc.example.com" }],
+            thread: "thread-root",
+            parentThread: "parent-root",
+          },
+        },
+      },
+    ]);
+
+    const results = await queryMam(xmpp, "room@muc.example.com", 20);
+
+    expect(results).toHaveLength(1);
+    expect(results[0]).toMatchObject({
+      id: "thread-marker-archive-id",
+      body: "",
+      threadId: "thread-root",
+      parentThreadId: "parent-root",
+    });
+  });
+
   test("parses archived room reactions, corrections, and retractions with original stanza IDs", async () => {
     const xmpp = makeMamAgent([
       {
@@ -417,6 +500,216 @@ describe("MAM history parsing", () => {
 });
 
 describe("MAM history application", () => {
+  test("loads bodyless standard MUC thread rows without forum decoration", async () => {
+    const session = ref({
+      username: "alice",
+      jid: "alice@example.com/desktop",
+      domain: "example.com",
+    } as never);
+    const xmppClient = ref({
+      ...handlerStubs(),
+      queryMam: mock(async () => [
+        {
+          id: "thread-marker-archive-id",
+          roomJid: "general@muc.example.com",
+          nick: "bob",
+          body: "",
+          createdAt: "2024-01-01T00:01:00Z",
+          type: "message",
+          threadId: "thread-root",
+          parentThreadId: "parent-root",
+        },
+      ] satisfies LiveRoomMessage[]),
+    } as never);
+    const actionError = ref("");
+    const messaging = useMessaging(
+      session,
+      ref(null),
+      xmppClient,
+      ref("w1"),
+      ref("c1"),
+      ref({ id: "c1", name: "general", channel_type: "text" }),
+      String,
+      actionError,
+      () => {
+        actionError.value = "";
+      },
+    );
+
+    await messaging.loadMessages("w1", "c1");
+
+    expect(messaging.messages.value).toHaveLength(1);
+    expect(messaging.messages.value[0]).toMatchObject({
+      id: "thread-marker-archive-id",
+      body: "",
+      threadId: "thread-root",
+      parentThreadId: "parent-root",
+    });
+    expect(messaging.messages.value[0].forumPostKind).toBeUndefined();
+    expect(messaging.messages.value[0].forumThreadTitle).toBeUndefined();
+  });
+
+  test("loads bodyless forum metadata rows from MAM into the timeline", async () => {
+    const session = ref({
+      username: "alice",
+      jid: "alice@example.com/desktop",
+      domain: "example.com",
+    } as never);
+    const xmppClient = ref({
+      ...handlerStubs(),
+      queryMam: mock(async () => [
+        {
+          id: "topic-archive-id",
+          roomJid: "general@muc.example.com",
+          nick: "alice",
+          body: "",
+          createdAt: "2024-01-01T00:00:00Z",
+          type: "message",
+          threadId: "topic-archive-id",
+          forumPostKind: "topic",
+          forumTitle: "Roadmap",
+          forumThreadTitle: "Roadmap",
+        },
+        {
+          id: "reply-archive-id",
+          roomJid: "general@muc.example.com",
+          nick: "bob",
+          body: "",
+          createdAt: "2024-01-01T00:01:00Z",
+          type: "message",
+          threadId: "topic-archive-id",
+          forumPostKind: "reply",
+        },
+      ] satisfies LiveRoomMessage[]),
+    } as never);
+    const actionError = ref("");
+    const messaging = useMessaging(
+      session,
+      ref(null),
+      xmppClient,
+      ref("w1"),
+      ref("c1"),
+      ref({ id: "c1", name: "general", channel_type: "forum" }),
+      String,
+      actionError,
+      () => {
+        actionError.value = "";
+      },
+    );
+
+    await messaging.loadMessages("w1", "c1");
+
+    expect(messaging.messages.value.map((message) => message.id)).toEqual([
+      "topic-archive-id",
+      "reply-archive-id",
+    ]);
+    expect(messaging.messages.value[0]).toMatchObject({
+      threadId: "topic-archive-id",
+      forumPostKind: "topic",
+      forumTitle: "Roadmap",
+    });
+    expect(messaging.messages.value[1]).toMatchObject({
+      threadId: "topic-archive-id",
+      forumPostKind: "reply",
+      forumThreadTitle: "Roadmap",
+    });
+  });
+
+  test("labels bodyless forum replies when MAM omits the topic root", async () => {
+    const session = ref({
+      username: "alice",
+      jid: "alice@example.com/desktop",
+      domain: "example.com",
+    } as never);
+    const xmppClient = ref({
+      ...handlerStubs(),
+      queryMam: mock(async () => [
+        {
+          id: "reply-archive-id",
+          roomJid: "general@muc.example.com",
+          nick: "bob",
+          body: "",
+          createdAt: "2024-01-01T00:01:00Z",
+          type: "message",
+          threadId: "topic-archive-id",
+          forumPostKind: "reply",
+        },
+      ] satisfies LiveRoomMessage[]),
+    } as never);
+    const actionError = ref("");
+    const messaging = useMessaging(
+      session,
+      ref(null),
+      xmppClient,
+      ref("w1"),
+      ref("c1"),
+      ref({ id: "c1", name: "general", channel_type: "forum" }),
+      String,
+      actionError,
+      () => {
+        actionError.value = "";
+      },
+    );
+
+    await messaging.loadMessages("w1", "c1");
+
+    expect(messaging.messages.value).toHaveLength(1);
+    expect(messaging.messages.value[0]).toMatchObject({
+      id: "reply-archive-id",
+      body: "",
+      threadId: "topic-archive-id",
+      forumPostKind: "reply",
+      forumThreadTitle: "Thread topic-archive-id",
+    });
+  });
+
+  test("labels inferred bodyless thread replies when MAM omits forum reply metadata", async () => {
+    const session = ref({
+      username: "alice",
+      jid: "alice@example.com/desktop",
+      domain: "example.com",
+    } as never);
+    const xmppClient = ref({
+      ...handlerStubs(),
+      queryMam: mock(async () => [
+        {
+          id: "reply-archive-id",
+          roomJid: "general@muc.example.com",
+          nick: "bob",
+          body: "",
+          createdAt: "2024-01-01T00:01:00Z",
+          type: "message",
+          threadId: "topic-archive-id",
+        },
+      ] satisfies LiveRoomMessage[]),
+    } as never);
+    const actionError = ref("");
+    const messaging = useMessaging(
+      session,
+      ref(null),
+      xmppClient,
+      ref("w1"),
+      ref("c1"),
+      ref({ id: "c1", name: "general", channel_type: "forum" }),
+      String,
+      actionError,
+      () => {
+        actionError.value = "";
+      },
+    );
+
+    await messaging.loadMessages("w1", "c1");
+
+    expect(messaging.messages.value).toHaveLength(1);
+    expect(messaging.messages.value[0]).toMatchObject({
+      id: "reply-archive-id",
+      body: "",
+      threadId: "topic-archive-id",
+      forumPostKind: "reply",
+      forumThreadTitle: "Thread topic-archive-id",
+    });
+  });
+
   test("applies archived room updates onto the original timeline message", async () => {
     const session = ref({
       username: "alice",

@@ -47,6 +47,23 @@ describe("groupchat replies + threads", () => {
     expect(call.parentThread).toBe("thread-parent");
   });
 
+  test("sends bodyless XEP-0201 thread metadata for standard MUC threads", () => {
+    const xmpp = makeAgent();
+
+    const messageId = sendGroupMessage(xmpp, "general@muc.waddle.social", "", {
+      threadId: "thread-root",
+    });
+
+    expect(typeof messageId).toBe("string");
+    expect(xmpp.sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "groupchat",
+        body: "",
+        thread: "thread-root",
+      }),
+    );
+  });
+
   test("offsets mention references by the reply fallback prefix length", () => {
     const xmpp = makeAgent();
 

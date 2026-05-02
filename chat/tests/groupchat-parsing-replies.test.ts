@@ -267,6 +267,28 @@ describe("groupchat reply + thread parsing", () => {
     expect(h.messages[0].parentThreadId).toBe("thread-root");
   });
 
+  test("keeps bodyless XEP-0201 thread metadata in standard MUC timelines", () => {
+    const h = makeHandlers();
+
+    dispatchGroupchat(
+      makeMsg({
+        id: "thread-marker-1",
+        body: "",
+        thread: "thread-root",
+        parentThread: "parent-root",
+      }),
+      h,
+    );
+
+    expect(h.messages).toHaveLength(1);
+    expect(h.messages[0]).toMatchObject({
+      id: "thread-marker-1",
+      body: "",
+      threadId: "thread-root",
+      parentThreadId: "parent-root",
+    });
+  });
+
   test("extracts forum topic metadata from thread-create", () => {
     const h = makeHandlers();
     dispatchGroupchat(
@@ -299,6 +321,35 @@ describe("groupchat reply + thread parsing", () => {
     expect(h.messages).toHaveLength(1);
     expect(h.messages[0].forumPostKind).toBe("reply");
     expect(h.messages[0].threadId).toBe("topic-1");
+  });
+
+  test("forum reply metadata replaces conflicting XEP thread", () => {
+    const h = makeHandlers();
+    dispatchGroupchat(
+      makeMsg({
+        id: "reply-1",
+        body: "",
+        thread: "conflicting-thread",
+        threadReply: { threadId: "topic-1" },
+      }),
+      h,
+    );
+
+    expect(h.messages).toHaveLength(1);
+    expect(h.messages[0].forumPostKind).toBe("reply");
+    expect(h.messages[0].threadId).toBe("topic-1");
+  });
+
+  test("ignores malformed bodyless forum metadata", () => {
+    const h = makeHandlers();
+
+    dispatchGroupchat(makeMsg({ id: "topic-1", body: "", threadCreate: {} }), h);
+    dispatchGroupchat(makeMsg({ id: "topic-2", body: "", threadCreate: { title: 123 } }), h);
+    dispatchGroupchat(makeMsg({ id: "reply-1", body: "", threadReply: {} }), h);
+    dispatchGroupchat(makeMsg({ id: "reply-2", body: "", threadReply: { threadId: " " } }), h);
+    dispatchGroupchat(makeMsg({ id: "reply-3", body: "", threadReply: { threadId: 123 } }), h);
+
+    expect(h.messages).toHaveLength(0);
   });
 
   test("attaches encrypted file metadata to parsed shared files", () => {
