@@ -66,10 +66,14 @@
 //!   `ValidateOAuthBearer`, `SetTimer`, `CancelTimer`,
 //!   `RegisterConnection` — wired in later migration steps.
 
-use crate::ai_provider::{generate_ai_response, is_ai_prompt_body, HistoricalMessage};
+use crate::ai_provider::{
+    generate_ai_response, is_ai_prompt_body, AiToolExecutor, AiToolRequest, AiToolResult,
+    HistoricalMessage, NoopToolExecutor,
+};
 use crate::auth::Session;
 use crate::permissions::{CheckPermission, Object, ObjectType, Permission, Subject};
 use crate::server::bootstrap_membership::DEPLOYMENT_SERVER_ID;
+use async_trait::async_trait;
 use jid::{BareJid, FullJid, Jid};
 use kameo::actor::ActorRef;
 use std::str::FromStr;
@@ -1648,8 +1652,16 @@ async fn dispatch_to_room(
                 .as_deref()
                 .filter(|body| is_ai_prompt_body(body) && is_ai_provider_fallback(&response))
             {
-                let room_history = fetch_room_history_for_ai(deps, &room_jid, prompt).await;
-                match generate_ai_response(prompt, &room_history).await {
+                let executor: Box<dyn AiToolExecutor> = if let Some(mam_storage) = deps.mam_storage
+                {
+                    Box::new(RoomToolExecutor {
+                        mam_storage: mam_storage.as_ref(),
+                        room_jid: &room_jid,
+                    })
+                } else {
+                    Box::new(NoopToolExecutor)
+                };
+                match generate_ai_response(prompt, executor.as_ref()).await {
                     Ok(answer) => match DisplayText::new(answer) {
                         Ok(answer) => {
                             response.body = answer;
@@ -1698,50 +1710,79 @@ fn is_ai_provider_fallback(response: &BotGroupchatResponse) -> bool {
     response.purpose == BotGroupchatResponsePurpose::AiProviderFallback
 }
 
-async fn fetch_room_history_for_ai(
-    deps: &Deps<'_>,
+/// Executes AI tool calls against this room's MAM archive.
+struct RoomToolExecutor<'a> {
+    mam_storage: &'a dyn MamStorage,
+    room_jid: &'a BareJid,
+}
+
+#[async_trait]
+impl AiToolExecutor for RoomToolExecutor<'_> {
+    async fn execute(&self, request: AiToolRequest) -> AiToolResult {
+        let archive_jid = self.room_jid.to_string();
+        match request {
+            AiToolRequest::SearchChannelHistory { query, max } => {
+                let mam_query = waddle_xmpp::mam::MamQuery {
+                    fulltext: waddle_xmpp::mam::RichText::new(query),
+                    max: Some(max.unwrap_or(10).min(20)),
+                    ..Default::default()
+                };
+                mam_result_to_ai_tool_result(
+                    self.mam_storage
+                        .query_messages(&archive_jid, &mam_query)
+                        .await,
+                    self.room_jid,
+                )
+            }
+            AiToolRequest::GetRecentMessages { max } => {
+                let mam_query = waddle_xmpp::mam::MamQuery {
+                    // XEP-0059 §2.5: empty <before/> requests the last page.
+                    before_id: Some(String::new()),
+                    max: Some(max.unwrap_or(20).min(50)),
+                    ..Default::default()
+                };
+                mam_result_to_ai_tool_result(
+                    self.mam_storage
+                        .query_messages(&archive_jid, &mam_query)
+                        .await,
+                    self.room_jid,
+                )
+            }
+            AiToolRequest::Extension { .. } => {
+                AiToolResult::Error("extension tools not yet available".to_string())
+            }
+        }
+    }
+}
+
+fn mam_result_to_ai_tool_result(
+    result: Result<waddle_xmpp::mam::MamResult, waddle_xmpp::mam::MamStorageError>,
     room_jid: &BareJid,
-    exclude_prompt: &str,
-) -> Vec<HistoricalMessage> {
-    let Some(mam_storage) = deps.mam_storage else {
-        return vec![];
-    };
-    let query = waddle_xmpp::mam::MamQuery {
-        max: Some(20),
-        // XEP-0059 §2.5: empty <before/> requests the last page (most recent N).
-        // Without this, the query returns the oldest N messages.
-        before_id: Some(String::new()),
-        ..Default::default()
-    };
-    let archive_jid = room_jid.to_string();
-    match mam_storage.query_messages(&archive_jid, &query).await {
-        Ok(result) => result
-            .messages
-            .into_iter()
-            .filter_map(|msg| {
-                let body = msg.body;
-                if body.is_empty() || body == exclude_prompt {
-                    return None;
-                }
-                let nick = msg
-                    .from
-                    .parse::<Jid>()
-                    .ok()
-                    .and_then(|jid| jid.resource().map(|r| r.to_string()))
-                    .unwrap_or_else(|| msg.from.clone());
-                Some(HistoricalMessage {
-                    sender_nick: nick,
-                    body,
+) -> AiToolResult {
+    match result {
+        Ok(mam) => AiToolResult::Messages(
+            mam.messages
+                .into_iter()
+                .filter_map(|msg| {
+                    if msg.body.is_empty() {
+                        return None;
+                    }
+                    let nick = msg
+                        .from
+                        .parse::<Jid>()
+                        .ok()
+                        .and_then(|jid| jid.resource().map(|r| r.to_string()))
+                        .unwrap_or_else(|| msg.from.clone());
+                    Some(HistoricalMessage {
+                        sender_nick: nick,
+                        body: msg.body,
+                    })
                 })
-            })
-            .collect(),
+                .collect(),
+        ),
         Err(error) => {
-            warn!(
-                room = %room_jid,
-                %error,
-                "fetch_room_history_for_ai: MAM query failed; proceeding without history"
-            );
-            vec![]
+            warn!(room = %room_jid, %error, "RoomToolExecutor: MAM query failed");
+            AiToolResult::Error("channel history query failed".to_string())
         }
     }
 }
