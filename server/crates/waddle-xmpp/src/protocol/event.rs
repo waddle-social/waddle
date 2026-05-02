@@ -449,7 +449,7 @@ pub enum OutboundEvent {
         /// value represents an explicit clear (still stored as
         /// `Some(SubjectState)` so the next join emits `<delay/>`
         /// per §7.2.15's SHOULD-include-delay-on-cleared).
-        texts: std::collections::BTreeMap<String, String>,
+        texts: crate::muc::RoomSubjectTexts,
         /// Setter's bare JID — input to the XEP-0421 occupant-id HMAC
         /// at next-join emission.
         setter: BareJid,

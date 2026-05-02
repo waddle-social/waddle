@@ -77,6 +77,13 @@ impl RoomHandler for MucSubjectHandler {
             return RoomHandlerOutcome::Continue(Vec::new());
         }
 
+        // Subject-change confirmed. Strip any empty/whitespace-only
+        // body entries the hostile-client guard tolerated for
+        // shape-detection — downstream archive and reflector will
+        // serialize whatever remains in `bodies`, and a §8.1 broadcast
+        // MUST be subject-only on the wire (no `<body/>`).
+        message.bodies.retain(|_, body| !body.0.trim().is_empty());
+
         // Sender snapshot — `OccupancyValidationHandler` runs first and
         // halts when this is missing; defensive Continue if somehow not.
         let Some(sender) = ctx.sender_snapshot() else {
@@ -108,11 +115,7 @@ impl RoomHandler for MucSubjectHandler {
         // `ReflectorHandler` is about to emit. Persisting only the
         // first language would silently lose localized subjects on
         // next-join replay.
-        let texts: std::collections::BTreeMap<String, String> = message
-            .subjects
-            .iter()
-            .map(|(lang, subject)| (lang.clone(), subject.0.clone()))
-            .collect();
+        let texts = crate::muc::RoomSubjectTexts::from_message_subjects(&message.subjects);
 
         // Single dispatch clock (matches the `dispatch_timestamp`
         // sharing precedent in inbox.rs / archive.rs). Conversion
@@ -136,17 +139,18 @@ impl RoomHandler for MucSubjectHandler {
 /// Build the XEP-0045 §8.1 typed `<forbidden type='auth'/>` reply
 /// addressed from the room JID back to the sender.
 ///
-/// Constructs the reply directly rather than going through
-/// `message_error_reply` because by the time this handler runs
-/// `MucCanonicalizeHandler` has already rewritten `incoming.from` to
-/// `room/nick` and cleared `incoming.to` — letting `message_error_reply`
-/// swap those would produce nonsense addresses we'd then need to
-/// override back. Building from `ctx` directly is one canonical pass.
+/// Clones `incoming` so the rejected `<subject/>` and any other
+/// payloads (stanza-id, occupant-id stamped by canonicalize) flow back
+/// to the sender — clients use the original stanza context to
+/// correlate the rejection. Address overrides come last because by
+/// the time this handler runs `MucCanonicalizeHandler` has already
+/// rewritten `incoming.from` to `room/nick` and cleared `incoming.to`,
+/// so a verbatim swap-and-reply would produce nonsense addresses.
 fn forbidden_reply(incoming: &Message, ctx: &RoomContext<'_>) -> Message {
-    let mut reply = Message::new(Some(Jid::from(ctx.sender_full.clone())));
+    let mut reply = incoming.clone();
     reply.from = Some(Jid::from(ctx.room.clone()));
+    reply.to = Some(Jid::from(ctx.sender_full.clone()));
     reply.type_ = MessageType::Error;
-    reply.id = incoming.id.clone();
     let error = StanzaError::new(
         ErrorType::Auth,
         DefinedCondition::Forbidden,
@@ -259,7 +263,7 @@ mod tests {
         };
         assert_eq!(
             texts.get(""),
-            Some(&"New topic".to_string()),
+            Some("New topic"),
             "default-language subject persisted"
         );
         assert_eq!(setter, &sender.to_bare());
@@ -367,9 +371,9 @@ mod tests {
             unreachable!()
         };
         assert_eq!(texts.len(), 3, "every language variant captured");
-        assert_eq!(texts.get(""), Some(&"Default subject".to_string()));
-        assert_eq!(texts.get("en"), Some(&"English subject".to_string()));
-        assert_eq!(texts.get("fr"), Some(&"Sujet français".to_string()));
+        assert_eq!(texts.get(""), Some("Default subject"));
+        assert_eq!(texts.get("en"), Some("English subject"));
+        assert_eq!(texts.get("fr"), Some("Sujet français"));
     }
 
     #[test]

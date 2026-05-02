@@ -470,7 +470,7 @@ fn xep_0045_section_8_1_live_subject_change_chain_stamps_occupant_id() {
         .expect("PersistRoomSubject emitted");
     assert_eq!(
         persist.0.get(""),
-        Some(&"New topic".to_string()),
+        Some("New topic"),
         "default-language subject text persisted"
     );
     assert_eq!(persist.1, alice.to_bare());

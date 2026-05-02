@@ -18,7 +18,8 @@ use super::owner::{apply_config_form, build_destroy_notification, ConfigFormData
 use super::room_registry::RoomInfo;
 use super::{
     build_affiliation_change_presence, build_ban_presence, build_kick_presence,
-    build_role_change_presence, MucRoom, OutboundMucMessage, RoomConfig, SubjectState,
+    build_role_change_presence, MucRoom, OutboundMucMessage, RoomConfig, RoomSubjectTexts,
+    SubjectState,
 };
 use crate::types::{Affiliation, Role};
 use crate::xep::xep0421::OccupantIdentity;
@@ -324,7 +325,7 @@ impl kameo::message::Message<UpdateConfig> for RoomActor {
 /// [`MucRoom::set_subject`], which writes a `SubjectState` onto
 /// `MucRoom.subject` for replay on the next join (XEP-0045 §7.2.15).
 pub struct SetSubject {
-    pub texts: std::collections::BTreeMap<String, String>,
+    pub texts: RoomSubjectTexts,
     pub setter: BareJid,
     pub setter_nick: String,
     pub set_at: DateTime<Utc>,

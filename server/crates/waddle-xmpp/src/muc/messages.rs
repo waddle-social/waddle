@@ -255,9 +255,7 @@ pub fn build_subject_message(
             if state.texts.is_empty() {
                 msg.subjects.insert(String::new(), Subject(String::new()));
             } else {
-                for (lang, text) in &state.texts {
-                    msg.subjects.insert(lang.clone(), Subject(text.clone()));
-                }
+                state.texts.apply_to_message(&mut msg);
             }
             xep0203::add_delay_stamp(&mut msg, state.set_at, &room_jid.to_string());
             let occupant_id = generate_occupant_id(&state.setter, room_jid, secret);
@@ -380,8 +378,7 @@ mod tests {
         OccupantIdSecret::for_testing(b"subject-builder-test-secret".to_vec())
     }
     fn sample_state(text: &str) -> SubjectState {
-        let mut texts = std::collections::BTreeMap::new();
-        texts.insert(String::new(), text.to_string());
+        let texts = crate::muc::RoomSubjectTexts::from_iter([(String::new(), text.to_string())]);
         SubjectState {
             texts,
             setter: "alice@example.com".parse().expect("valid bare jid"),
@@ -520,12 +517,13 @@ mod tests {
         let room = test_room();
         let to = test_recipient();
         let secret = test_secret();
-        let mut texts = std::collections::BTreeMap::new();
-        texts.insert(String::new(), "Default subject".to_string());
-        texts.insert("en".to_string(), "English subject".to_string());
-        texts.insert("fr".to_string(), "Sujet français".to_string());
+        let texts = crate::muc::RoomSubjectTexts::from_iter([
+            (String::new(), "Default subject".to_string()),
+            ("en".to_string(), "English subject".to_string()),
+            ("fr".to_string(), "Sujet français".to_string()),
+        ]);
         let state = SubjectState {
-            texts: texts.clone(),
+            texts,
             setter: "alice@example.com".parse().expect("valid bare jid"),
             setter_nick: "alice-nick".to_string(),
             set_at: chrono::Utc.with_ymd_and_hms(2026, 5, 2, 12, 0, 0).unwrap(),

@@ -4086,9 +4086,10 @@ mod tests {
         let room_actor = get_room_actor(state.as_ref(), &room_jid)
             .await
             .expect("room actor");
-        let mut texts = std::collections::BTreeMap::new();
-        texts.insert(String::new(), "Default subject".to_string());
-        texts.insert("en".to_string(), "English subject".to_string());
+        let texts = waddle_xmpp::muc::RoomSubjectTexts::from_iter([
+            (String::new(), "Default subject".to_string()),
+            ("en".to_string(), "English subject".to_string()),
+        ]);
         let set_at = chrono::Utc.with_ymd_and_hms(2026, 5, 2, 12, 0, 0).unwrap();
         room_actor
             .ask(SetSubject {

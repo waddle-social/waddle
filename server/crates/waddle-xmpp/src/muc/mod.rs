@@ -83,12 +83,88 @@ pub fn is_remote_jid(jid: &FullJid, local_domain: &str) -> bool {
     jid.domain().as_str() != local_domain
 }
 
+/// Typed multi-language subject-text map carried by [`SubjectState`]
+/// and the `OutboundEvent::PersistRoomSubject` / `RoomActor::SetSubject`
+/// payloads.
+///
+/// Newtype around `BTreeMap<xml:lang, subject-text>` per the
+/// typed-payloads hard rule (CLAUDE.md): a generic `BTreeMap<String, String>`
+/// at a protocol boundary makes the xml:lang / subject-text
+/// relationship type-indistinguishable from any other map of strings.
+/// `RoomSubjectTexts` encapsulates that relationship and the
+/// `xmpp_parsers::message::Message::subjects` ↔ persisted-map
+/// conversion in one place so call sites don't reinvent it.
+///
+/// The empty-string key is the default-language entry, mirroring
+/// `xmpp_parsers::message::Message::subjects`'s own
+/// `BTreeMap<Lang, Subject>` shape (where `Lang = String`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoomSubjectTexts(std::collections::BTreeMap<String, String>);
+
+impl RoomSubjectTexts {
+    /// Empty map (no subject elements).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Capture a `Message`'s typed `subjects` field by cloning every
+    /// `xmpp_parsers::message::Subject`'s text and pairing it with
+    /// its `xml:lang` key.
+    pub fn from_message_subjects(
+        subjects: &std::collections::BTreeMap<String, xmpp_parsers::message::Subject>,
+    ) -> Self {
+        Self(
+            subjects
+                .iter()
+                .map(|(lang, subject)| (lang.clone(), subject.0.clone()))
+                .collect(),
+        )
+    }
+
+    /// Insert one `<subject xml:lang='...'>` per persisted entry into
+    /// `msg.subjects`, wrapped in xmpp_parsers' typed `Subject`. Used
+    /// by the join-time replay builder.
+    pub fn apply_to_message(&self, msg: &mut xmpp_parsers::message::Message) {
+        for (lang, text) in &self.0 {
+            msg.subjects
+                .insert(lang.clone(), xmpp_parsers::message::Subject(text.clone()));
+        }
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &String)> {
+        self.0.iter()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn get(&self, lang: &str) -> Option<&str> {
+        self.0.get(lang).map(String::as_str)
+    }
+}
+
+impl From<std::collections::BTreeMap<String, String>> for RoomSubjectTexts {
+    fn from(map: std::collections::BTreeMap<String, String>) -> Self {
+        Self(map)
+    }
+}
+
+impl FromIterator<(String, String)> for RoomSubjectTexts {
+    fn from_iter<I: IntoIterator<Item = (String, String)>>(iter: I) -> Self {
+        Self(iter.into_iter().collect())
+    }
+}
+
 /// XEP-0045 §7.2.15 / §8.1 room subject state.
 ///
 /// `texts` carries every `<subject xml:lang='...'>` variant from the
 /// originating §8.1 message, keyed by `xml:lang` (the empty string is
-/// the default-language entry, matching `xmpp_parsers::message::Message::subjects`'s
-/// own `BTreeMap<Lang, Subject>` shape). All entries with empty values
+/// the default-language entry). All entries with empty values
 /// represent an **explicitly cleared** subject — XEP-0045 §7.2.15
 /// distinguishes this from "never set", which is represented by
 /// `MucRoom.subject == None`. Persisting every language variant rather
@@ -105,7 +181,7 @@ pub fn is_remote_jid(jid: &FullJid, local_domain: &str) -> bool {
 /// XEP-0421 occupant-id derivation uses `setter` as the bare-JID input.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubjectState {
-    pub texts: std::collections::BTreeMap<String, String>,
+    pub texts: RoomSubjectTexts,
     pub setter: BareJid,
     pub setter_nick: String,
     pub set_at: DateTime<Utc>,
@@ -725,7 +801,7 @@ impl MucRoom {
     /// already passed §8.1's role-based gate.
     pub fn set_subject(
         &mut self,
-        texts: std::collections::BTreeMap<String, String>,
+        texts: RoomSubjectTexts,
         setter: BareJid,
         setter_nick: String,
         set_at: DateTime<Utc>,

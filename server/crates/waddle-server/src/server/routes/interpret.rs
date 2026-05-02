@@ -5154,9 +5154,10 @@ mod tests {
         };
 
         let setter: jid::BareJid = "alice@example.com".parse().expect("setter bare jid");
-        let mut texts = std::collections::BTreeMap::new();
-        texts.insert(String::new(), "Default subject".to_string());
-        texts.insert("en".to_string(), "English subject".to_string());
+        let texts = waddle_xmpp::muc::RoomSubjectTexts::from_iter([
+            (String::new(), "Default subject".to_string()),
+            ("en".to_string(), "English subject".to_string()),
+        ]);
         let set_at = chrono::Utc.with_ymd_and_hms(2026, 5, 2, 12, 0, 0).unwrap();
 
         let events = vec![OutboundEvent::PersistRoomSubject {
@@ -5199,8 +5200,8 @@ mod tests {
 
         let room_jid: jid::BareJid = "channel@muc.example.com".parse().expect("bare jid");
         let setter: jid::BareJid = "alice@example.com".parse().expect("setter bare jid");
-        let mut texts = std::collections::BTreeMap::new();
-        texts.insert(String::new(), "ignored".to_string());
+        let texts =
+            waddle_xmpp::muc::RoomSubjectTexts::from_iter([(String::new(), "ignored".to_string())]);
         let events = vec![OutboundEvent::PersistRoomSubject {
             room: room_jid,
             texts,
