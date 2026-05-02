@@ -29,6 +29,7 @@ pub struct DiscoInfoQuery {
 pub struct Identity {
     pub category: String,
     pub type_: String,
+    pub lang: Option<String>,
     pub name: Option<String>,
 }
 
@@ -37,8 +38,14 @@ impl Identity {
         Self {
             category: category.to_string(),
             type_: type_.to_string(),
+            lang: None,
             name: name.map(str::to_string),
         }
+    }
+
+    pub fn with_lang(mut self, lang: Option<&str>) -> Self {
+        self.lang = lang.map(str::to_string);
+        self
     }
 
     pub fn server(name: Option<&str>) -> Self {
@@ -404,6 +411,10 @@ pub fn build_disco_info_response_with_extensions(
             .attr("category", &identity.category)
             .attr("type", &identity.type_);
 
+        if let Some(ref lang) = identity.lang {
+            id_builder = id_builder.attr("xml:lang", lang);
+        }
+
         if let Some(ref name) = identity.name {
             id_builder = id_builder.attr("name", name);
         }
@@ -662,16 +673,21 @@ mod tests {
 
         let response = build_disco_info_response(
             &iq,
-            &[Identity::server(Some("Waddle"))],
+            &[Identity::server(Some("Waddle")).with_lang(Some("en"))],
             &[Feature::disco_info(), Feature::disco_items()],
             None,
         );
 
         assert_eq!(response.id, "disco-1");
-        assert!(matches!(
-            response.payload,
-            xmpp_parsers::iq::IqType::Result(Some(_))
-        ));
+
+        let xmpp_parsers::iq::IqType::Result(Some(query)) = response.payload else {
+            panic!("expected disco#info result payload");
+        };
+        let identity = query
+            .children()
+            .find(|child| child.name() == "identity")
+            .expect("identity should be present");
+        assert_eq!(identity.attr("xml:lang"), Some("en"));
     }
 
     #[test]

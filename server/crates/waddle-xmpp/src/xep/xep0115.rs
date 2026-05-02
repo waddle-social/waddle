@@ -29,6 +29,9 @@ pub const NS_CAPS: &str = "http://jabber.org/protocol/caps";
 /// Default node for Waddle's capabilities.
 pub const WADDLE_CAPS_NODE: &str = "https://waddle.social/caps";
 
+const DATA_FORMS_NS: &str = "jabber:x:data";
+const FORM_TYPE_FIELD: &str = "FORM_TYPE";
+
 /// Entity Capabilities element (`<c xmlns='http://jabber.org/protocol/caps'>`).
 ///
 /// Included in presence stanzas to advertise capabilities via a hash.
@@ -164,12 +167,24 @@ impl CapsCache {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CapsDataForm {
+    form_type: String,
+    fields: Vec<CapsDataField>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CapsDataField {
+    var: String,
+    values: Vec<String>,
+}
+
 /// Compute the capabilities verification string per XEP-0115 Section 5.
 ///
 /// The verification string is computed as:
 /// 1. Sort identities by category/type/lang/name
 /// 2. Sort features alphabetically
-/// 3. Concatenate in a specific format with '<' delimiters
+/// 3. Sort XEP-0128 data forms by FORM_TYPE and append their fields/values
 /// 4. Hash with SHA-1
 /// 5. Base64 encode
 ///
@@ -185,41 +200,60 @@ impl CapsCache {
 /// ## Example
 ///
 /// ```
-/// use waddle_xmpp::disco::info::{Identity, Feature};
+/// use waddle_xmpp::disco::info::{Feature, Identity};
 /// use waddle_xmpp::xep::xep0115::compute_caps_hash;
 ///
 /// let identities = vec![Identity::server(Some("Test Server"))];
-/// let features = vec![
-///     Feature::disco_info(),
-///     Feature::disco_items(),
-/// ];
+/// let features = vec![Feature::disco_info(), Feature::disco_items()];
 /// let hash = compute_caps_hash(&identities, &features);
 /// ```
 pub fn compute_caps_hash(identities: &[Identity], features: &[Feature]) -> String {
-    let verification_string = build_verification_string(identities, features);
+    compute_caps_hash_with_extensions(identities, features, &[])
+}
+
+/// Compute the capabilities verification string including XEP-0128 disco forms.
+pub fn compute_caps_hash_with_extensions(
+    identities: &[Identity],
+    features: &[Feature],
+    extensions: &[Element],
+) -> String {
+    let verification_string =
+        build_verification_string_with_extensions(identities, features, extensions);
     hash_verification_string(&verification_string)
 }
 
-/// Build the verification string from identities and features.
-///
-/// Per XEP-0115 Section 5.1:
-/// 1. For each identity: "category/type/lang/name<"
-/// 2. For each feature: "feature<"
-/// 3. (Extensions omitted for simplicity - add when needed)
-fn build_verification_string(identities: &[Identity], features: &[Feature]) -> String {
+/// Build the verification string from identities, features, and XEP-0128 forms.
+fn build_verification_string_with_extensions(
+    identities: &[Identity],
+    features: &[Feature],
+    extensions: &[Element],
+) -> String {
     let mut s = String::new();
 
-    // Sort and add identities
-    // Format: category/type/lang/name<
     let mut sorted_identities: Vec<_> = identities.iter().collect();
-    sorted_identities
-        .sort_by(|a, b| (&a.category, &a.type_, &a.name).cmp(&(&b.category, &b.type_, &b.name)));
+    sorted_identities.sort_by(|a, b| {
+        (
+            a.category.as_str(),
+            a.type_.as_str(),
+            a.lang.as_deref().unwrap_or(""),
+            a.name.as_deref().unwrap_or(""),
+        )
+            .cmp(&(
+                b.category.as_str(),
+                b.type_.as_str(),
+                b.lang.as_deref().unwrap_or(""),
+                b.name.as_deref().unwrap_or(""),
+            ))
+    });
 
     for id in sorted_identities {
         s.push_str(&id.category);
         s.push('/');
         s.push_str(&id.type_);
-        s.push('/'); // lang (empty for now)
+        s.push('/');
+        if let Some(ref lang) = id.lang {
+            s.push_str(lang);
+        }
         s.push('/');
         if let Some(ref name) = id.name {
             s.push_str(name);
@@ -227,8 +261,7 @@ fn build_verification_string(identities: &[Identity], features: &[Feature]) -> S
         s.push('<');
     }
 
-    // Sort and add features
-    let mut sorted_features: Vec<_> = features.iter().map(|f| &f.0).collect();
+    let mut sorted_features: Vec<_> = features.iter().map(|f| f.0.as_str()).collect();
     sorted_features.sort();
 
     for feat in sorted_features {
@@ -236,7 +269,81 @@ fn build_verification_string(identities: &[Identity], features: &[Feature]) -> S
         s.push('<');
     }
 
+    let mut data_forms: Vec<_> = extensions.iter().filter_map(parse_caps_data_form).collect();
+    data_forms.sort_by(|a, b| a.form_type.cmp(&b.form_type));
+
+    for form in data_forms {
+        s.push_str(&form.form_type);
+        s.push('<');
+
+        let mut fields = form.fields;
+        fields.sort_by(|a, b| a.var.cmp(&b.var));
+
+        for field in fields {
+            s.push_str(&field.var);
+            s.push('<');
+
+            let mut values = field.values;
+            values.sort();
+            if values.is_empty() {
+                s.push('<');
+                continue;
+            }
+
+            for value in values {
+                s.push_str(&value);
+                s.push('<');
+            }
+        }
+    }
+
     s
+}
+
+fn parse_caps_data_form(extension: &Element) -> Option<CapsDataForm> {
+    if extension.name() != "x" || extension.ns() != DATA_FORMS_NS {
+        return None;
+    }
+
+    if extension.attr("type") != Some("result") {
+        return None;
+    }
+
+    let mut form_type = None;
+    let mut fields = Vec::new();
+
+    for field in extension
+        .children()
+        .filter(|child| child.name() == "field" && child.ns() == DATA_FORMS_NS)
+    {
+        let Some(var) = field.attr("var") else {
+            return None;
+        };
+
+        let values = field
+            .children()
+            .filter(|child| child.name() == "value" && child.ns() == DATA_FORMS_NS)
+            .map(Element::text)
+            .collect::<Vec<_>>();
+
+        if var == FORM_TYPE_FIELD {
+            if form_type.is_some() {
+                return None;
+            }
+
+            if field.attr("type") == Some("hidden") {
+                form_type = values.first().cloned();
+            }
+            continue;
+        }
+
+        fields.push(CapsDataField {
+            var: var.to_string(),
+            values,
+        });
+    }
+
+    form_type.map(|form_type| CapsDataForm { form_type, fields })
 }
 
 /// Hash the verification string with SHA-1 and base64 encode.
@@ -259,7 +366,17 @@ fn hash_verification_string(verification_string: &str) -> String {
 ///
 /// A minidom Element containing the `<c>` element with computed hash.
 pub fn build_caps_element(node: &str, identities: &[Identity], features: &[Feature]) -> Element {
-    let ver = compute_caps_hash(identities, features);
+    build_caps_element_with_extensions(node, identities, features, &[])
+}
+
+/// Build a `<c>` caps element whose `ver` accounts for XEP-0128 extensions.
+pub fn build_caps_element_with_extensions(
+    node: &str,
+    identities: &[Identity],
+    features: &[Feature],
+    extensions: &[Element],
+) -> Element {
+    let ver = compute_caps_hash_with_extensions(identities, features, extensions);
     Caps::new(node, &ver).build_element()
 }
 
@@ -317,6 +434,152 @@ pub fn parse_caps_node(node: &str) -> Option<(&str, &str)> {
 mod tests {
     use super::*;
     use crate::disco::info::{Feature, Identity, DISCO_INFO_NS};
+
+    fn data_form_field(var: &str, field_type: Option<&str>, values: &[&str]) -> Element {
+        let mut builder = Element::builder("field", DATA_FORMS_NS).attr("var", var);
+
+        if let Some(field_type) = field_type {
+            builder = builder.attr("type", field_type);
+        }
+
+        for value in values {
+            builder = builder.append(
+                Element::builder("value", DATA_FORMS_NS)
+                    .append(*value)
+                    .build(),
+            );
+        }
+
+        builder.build()
+    }
+
+    fn software_info_form() -> Element {
+        Element::builder("x", DATA_FORMS_NS)
+            .attr("type", "result")
+            .append(data_form_field(
+                FORM_TYPE_FIELD,
+                Some("hidden"),
+                &["urn:xmpp:dataforms:softwareinfo"],
+            ))
+            .append(data_form_field(
+                "ip_version",
+                Some("text-multi"),
+                &["ipv6", "ipv4"],
+            ))
+            .append(data_form_field("os", None, &["Mac"]))
+            .append(data_form_field("os_version", None, &["10.5.1"]))
+            .append(data_form_field("software", None, &["Psi"]))
+            .append(data_form_field("software_version", None, &["0.11"]))
+            .build()
+    }
+
+    fn software_info_form_with_type(form_type: &str) -> Element {
+        let mut form = software_info_form();
+        form.set_attr("type", form_type);
+        form
+    }
+
+    fn software_info_form_with_form_type_field_type(field_type: &str) -> Element {
+        Element::builder("x", DATA_FORMS_NS)
+            .attr("type", "result")
+            .append(data_form_field(
+                FORM_TYPE_FIELD,
+                Some(field_type),
+                &["urn:xmpp:dataforms:softwareinfo"],
+            ))
+            .append(data_form_field("software", None, &["Psi"]))
+            .build()
+    }
+
+    fn software_info_form_with_foreign_children() -> Element {
+        Element::builder("x", DATA_FORMS_NS)
+            .attr("type", "result")
+            .append(data_form_field(
+                FORM_TYPE_FIELD,
+                Some("hidden"),
+                &["urn:xmpp:dataforms:softwareinfo"],
+            ))
+            .append(
+                Element::builder("field", "urn:waddle:test:foreign")
+                    .attr("var", "rogue-field")
+                    .append(
+                        Element::builder("value", "urn:waddle:test:foreign")
+                            .append("rogue")
+                            .build(),
+                    )
+                    .build(),
+            )
+            .append(
+                Element::builder("field", DATA_FORMS_NS)
+                    .attr("var", "software")
+                    .append(
+                        Element::builder("value", DATA_FORMS_NS)
+                            .append("Psi")
+                            .build(),
+                    )
+                    .append(
+                        Element::builder("value", "urn:waddle:test:foreign")
+                            .append("rogue")
+                            .build(),
+                    )
+                    .build(),
+            )
+            .build()
+    }
+
+    fn software_info_form_with_empty_value_field() -> Element {
+        Element::builder("x", DATA_FORMS_NS)
+            .attr("type", "result")
+            .append(data_form_field(
+                FORM_TYPE_FIELD,
+                Some("hidden"),
+                &["urn:xmpp:dataforms:softwareinfo"],
+            ))
+            .append(
+                Element::builder("field", DATA_FORMS_NS)
+                    .attr("var", "software")
+                    .build(),
+            )
+            .build()
+    }
+
+    fn software_info_form_with_duplicate_form_type() -> Element {
+        Element::builder("x", DATA_FORMS_NS)
+            .attr("type", "result")
+            .append(data_form_field(
+                FORM_TYPE_FIELD,
+                Some("hidden"),
+                &["urn:xmpp:dataforms:softwareinfo"],
+            ))
+            .append(data_form_field(
+                FORM_TYPE_FIELD,
+                Some("hidden"),
+                &["urn:xmpp:dataforms:softwareinfo:duplicate"],
+            ))
+            .append(data_form_field("software", None, &["Psi"]))
+            .build()
+    }
+
+    fn software_info_form_with_missing_var() -> Element {
+        Element::builder("x", DATA_FORMS_NS)
+            .attr("type", "result")
+            .append(data_form_field(
+                FORM_TYPE_FIELD,
+                Some("hidden"),
+                &["urn:xmpp:dataforms:softwareinfo"],
+            ))
+            .append(
+                Element::builder("field", DATA_FORMS_NS)
+                    .append(
+                        Element::builder("value", DATA_FORMS_NS)
+                            .append("rogue")
+                            .build(),
+                    )
+                    .build(),
+            )
+            .append(data_form_field("software", None, &["Psi"]))
+            .build()
+    }
 
     #[test]
     fn test_caps_new() {
@@ -454,14 +717,14 @@ mod tests {
 
     #[test]
     fn test_build_verification_string_empty() {
-        let s = build_verification_string(&[], &[]);
+        let s = build_verification_string_with_extensions(&[], &[], &[]);
         assert_eq!(s, "");
     }
 
     #[test]
     fn test_build_verification_string_identity_only() {
         let identities = vec![Identity::server(Some("Test Server"))];
-        let s = build_verification_string(&identities, &[]);
+        let s = build_verification_string_with_extensions(&identities, &[], &[]);
         // Format: category/type/lang/name<
         assert_eq!(s, "server/im//Test Server<");
     }
@@ -469,8 +732,15 @@ mod tests {
     #[test]
     fn test_build_verification_string_identity_no_name() {
         let identities = vec![Identity::server(None)];
-        let s = build_verification_string(&identities, &[]);
+        let s = build_verification_string_with_extensions(&identities, &[], &[]);
         assert_eq!(s, "server/im//<");
+    }
+
+    #[test]
+    fn test_build_verification_string_identity_with_lang() {
+        let identities = vec![Identity::new("client", "pc", Some("Psi")).with_lang(Some("en"))];
+        let s = build_verification_string_with_extensions(&identities, &[], &[]);
+        assert_eq!(s, "client/pc/en/Psi<");
     }
 
     #[test]
@@ -479,7 +749,7 @@ mod tests {
             Feature::new("http://jabber.org/protocol/disco#info"),
             Feature::new("http://jabber.org/protocol/disco#items"),
         ];
-        let s = build_verification_string(&[], &features);
+        let s = build_verification_string_with_extensions(&[], &features, &[]);
         // Features should be sorted alphabetically
         assert_eq!(
             s,
@@ -494,7 +764,7 @@ mod tests {
             Feature::new("a-feature"),
             Feature::new("m-feature"),
         ];
-        let s = build_verification_string(&[], &features);
+        let s = build_verification_string_with_extensions(&[], &features, &[]);
         assert_eq!(s, "a-feature<m-feature<z-feature<");
     }
 
@@ -505,7 +775,7 @@ mod tests {
             Identity::new("client", "pc", Some("MyClient")),
         ];
         let features = vec![Feature::new("feature2"), Feature::new("feature1")];
-        let s = build_verification_string(&identities, &features);
+        let s = build_verification_string_with_extensions(&identities, &features, &[]);
         // Identities sorted by category/type/name, then features sorted
         assert_eq!(s, "client/pc//MyClient<server/im//Test<feature1<feature2<");
     }
@@ -521,14 +791,7 @@ mod tests {
     }
 
     #[test]
-    fn test_compute_caps_hash_example() {
-        // Based on XEP-0115 Section 5.2 example (simplified)
-        // Identity: client/pc/en/Exodus 0.9.1
-        // Features sorted:
-        //   http://jabber.org/protocol/caps
-        //   http://jabber.org/protocol/disco#info
-        //   http://jabber.org/protocol/disco#items
-        //   http://jabber.org/protocol/muc
+    fn test_compute_caps_hash_simple_example() {
         let identities = vec![Identity::new("client", "pc", Some("Exodus 0.9.1"))];
         let features = vec![
             Feature::new(NS_CAPS),
@@ -538,10 +801,126 @@ mod tests {
         ];
 
         let hash = compute_caps_hash(&identities, &features);
+        assert_eq!(hash, "QgayPKawpkPSDYmwT/WM94uAlu0=");
+    }
 
-        // The hash should be a valid base64 string of 28 characters (20 bytes base64 encoded)
-        assert_eq!(hash.len(), 28);
-        assert!(BASE64.decode(&hash).is_ok());
+    #[test]
+    fn test_build_verification_string_with_extensions_complex_example() {
+        let identities = vec![
+            Identity::new("client", "pc", Some("Psi 0.11")).with_lang(Some("en")),
+            Identity::new("client", "pc", Some("\u{03A8} 0.11")).with_lang(Some("el")),
+        ];
+        let features = vec![
+            Feature::new("http://jabber.org/protocol/muc"),
+            Feature::new(DISCO_INFO_NS),
+            Feature::new(NS_CAPS),
+            Feature::new("http://jabber.org/protocol/disco#items"),
+        ];
+        let extensions = vec![software_info_form()];
+
+        let verification_string =
+            build_verification_string_with_extensions(&identities, &features, &extensions);
+
+        assert_eq!(
+            verification_string,
+            "client/pc/el/\u{03A8} 0.11<client/pc/en/Psi 0.11<http://jabber.org/protocol/caps<http://jabber.org/protocol/disco#info<http://jabber.org/protocol/disco#items<http://jabber.org/protocol/muc<urn:xmpp:dataforms:softwareinfo<ip_version<ipv4<ipv6<os<Mac<os_version<10.5.1<software<Psi<software_version<0.11<"
+        );
+    }
+
+    #[test]
+    fn test_compute_caps_hash_with_extensions_complex_example() {
+        let identities = vec![
+            Identity::new("client", "pc", Some("Psi 0.11")).with_lang(Some("en")),
+            Identity::new("client", "pc", Some("\u{03A8} 0.11")).with_lang(Some("el")),
+        ];
+        let features = vec![
+            Feature::new("http://jabber.org/protocol/muc"),
+            Feature::new(DISCO_INFO_NS),
+            Feature::new(NS_CAPS),
+            Feature::new("http://jabber.org/protocol/disco#items"),
+        ];
+        let extensions = vec![software_info_form()];
+
+        let hash = compute_caps_hash_with_extensions(&identities, &features, &extensions);
+        assert_eq!(hash, "q07IKJEyjvHSyhy//CH0CxmKi8w=");
+    }
+
+    #[test]
+    fn test_compute_caps_hash_ignores_non_result_forms() {
+        let identities = vec![Identity::server(Some("Waddle"))];
+        let features = vec![Feature::disco_info(), Feature::disco_items()];
+        let baseline = compute_caps_hash(&identities, &features);
+        let extensions = vec![software_info_form_with_type("submit")];
+
+        let hash = compute_caps_hash_with_extensions(&identities, &features, &extensions);
+        assert_eq!(hash, baseline);
+    }
+
+    #[test]
+    fn test_compute_caps_hash_ignores_forms_without_hidden_form_type() {
+        let identities = vec![Identity::server(Some("Waddle"))];
+        let features = vec![Feature::disco_info(), Feature::disco_items()];
+        let baseline = compute_caps_hash(&identities, &features);
+        let extensions = vec![software_info_form_with_form_type_field_type("text-single")];
+
+        let hash = compute_caps_hash_with_extensions(&identities, &features, &extensions);
+        assert_eq!(hash, baseline);
+    }
+
+    #[test]
+    fn test_compute_caps_hash_ignores_foreign_namespaced_form_children() {
+        let identities = vec![Identity::server(Some("Waddle"))];
+        let features = vec![Feature::disco_info(), Feature::disco_items()];
+        let clean_extensions = vec![Element::builder("x", DATA_FORMS_NS)
+            .attr("type", "result")
+            .append(data_form_field(
+                FORM_TYPE_FIELD,
+                Some("hidden"),
+                &["urn:xmpp:dataforms:softwareinfo"],
+            ))
+            .append(data_form_field("software", None, &["Psi"]))
+            .build()];
+        let baseline = compute_caps_hash_with_extensions(&identities, &features, &clean_extensions);
+        let extensions = vec![software_info_form_with_foreign_children()];
+
+        let hash = compute_caps_hash_with_extensions(&identities, &features, &extensions);
+        assert_eq!(hash, baseline);
+    }
+
+    #[test]
+    fn test_build_verification_string_treats_missing_field_values_as_empty() {
+        let verification_string = build_verification_string_with_extensions(
+            &[Identity::server(Some("Waddle"))],
+            &[Feature::disco_info()],
+            &[software_info_form_with_empty_value_field()],
+        );
+
+        assert_eq!(
+            verification_string,
+            "server/im//Waddle<http://jabber.org/protocol/disco#info<urn:xmpp:dataforms:softwareinfo<software<<"
+        );
+    }
+
+    #[test]
+    fn test_compute_caps_hash_ignores_forms_with_duplicate_form_type_fields() {
+        let identities = vec![Identity::server(Some("Waddle"))];
+        let features = vec![Feature::disco_info(), Feature::disco_items()];
+        let baseline = compute_caps_hash(&identities, &features);
+        let extensions = vec![software_info_form_with_duplicate_form_type()];
+
+        let hash = compute_caps_hash_with_extensions(&identities, &features, &extensions);
+        assert_eq!(hash, baseline);
+    }
+
+    #[test]
+    fn test_compute_caps_hash_ignores_forms_with_missing_var_fields() {
+        let identities = vec![Identity::server(Some("Waddle"))];
+        let features = vec![Feature::disco_info(), Feature::disco_items()];
+        let baseline = compute_caps_hash(&identities, &features);
+        let extensions = vec![software_info_form_with_missing_var()];
+
+        let hash = compute_caps_hash_with_extensions(&identities, &features, &extensions);
+        assert_eq!(hash, baseline);
     }
 
     #[test]
@@ -578,9 +957,32 @@ mod tests {
         assert_eq!(elem.ns(), NS_CAPS);
         assert_eq!(elem.attr("hash"), Some("sha-1"));
         assert_eq!(elem.attr("node"), Some(WADDLE_CAPS_NODE));
-        // ver should be a valid hash
         let ver = elem.attr("ver").unwrap();
         assert!(BASE64.decode(ver).is_ok());
+    }
+
+    #[test]
+    fn test_build_caps_element_with_extensions_uses_extension_hash() {
+        let identities = vec![
+            Identity::new("client", "pc", Some("Psi 0.11")).with_lang(Some("en")),
+            Identity::new("client", "pc", Some("\u{03A8} 0.11")).with_lang(Some("el")),
+        ];
+        let features = vec![
+            Feature::new("http://jabber.org/protocol/muc"),
+            Feature::new(DISCO_INFO_NS),
+            Feature::new(NS_CAPS),
+            Feature::new("http://jabber.org/protocol/disco#items"),
+        ];
+        let extensions = vec![software_info_form()];
+
+        let elem = build_caps_element_with_extensions(
+            WADDLE_CAPS_NODE,
+            &identities,
+            &features,
+            &extensions,
+        );
+
+        assert_eq!(elem.attr("ver"), Some("q07IKJEyjvHSyhy//CH0CxmKi8w="));
     }
 
     #[test]

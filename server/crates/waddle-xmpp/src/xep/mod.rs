@@ -240,7 +240,8 @@ pub use xep0077::{
 };
 
 pub use xep0115::{
-    build_caps_element, build_waddle_caps_element, compute_caps_hash, ensure_caps_payload,
+    build_caps_element, build_caps_element_with_extensions, build_waddle_caps_element,
+    compute_caps_hash, compute_caps_hash_with_extensions, ensure_caps_payload,
     extract_caps_from_presence, is_caps_node_query, parse_caps_node, CachedDiscoInfo, Caps,
     CapsCache, NS_CAPS, WADDLE_CAPS_NODE,
 };
