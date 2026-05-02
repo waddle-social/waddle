@@ -493,6 +493,113 @@ describe("MAM history application", () => {
     expect(messaging.messages.value[0].extensionAnnotations).toBeUndefined();
   });
 
+  test("thread backfill merges missing metadata into an existing room MAM reply", async () => {
+    const session = ref({
+      username: "alice",
+      jid: "alice@example.com/desktop",
+      domain: "example.com",
+    } as never);
+    const xmppClient = ref({
+      ...handlerStubs(),
+      queryMam: mock(async () => [
+        {
+          id: "thread-42",
+          reactionTargetId: "thread-42",
+          roomJid: "general@muc.example.com",
+          nick: "alice",
+          body: "topic root",
+          createdAt: "2024-01-01T00:00:00Z",
+          type: "message",
+        },
+        {
+          id: "stable-reply-1",
+          wireIds: ["reply-1"],
+          roomJid: "general@muc.example.com",
+          nick: "bob",
+          body: "room copy",
+          createdAt: "2024-01-01T00:01:00Z",
+          type: "message",
+          replyTo: { id: "thread-42" },
+        },
+        {
+          id: "edit-1",
+          roomJid: "general@muc.example.com",
+          nick: "bob",
+          body: "room copy, edited",
+          createdAt: "2024-01-01T00:02:00Z",
+          type: "message",
+          replacesId: "stable-reply-1",
+        },
+      ]),
+      queryMamByThread: mock(async () => [
+        {
+          id: "reply-1",
+          wireIds: ["stable-reply-1"],
+          reactionTargetId: "reply-1",
+          roomJid: "general@muc.example.com",
+          nick: "bob",
+          body: "thread copy should not replace existing body",
+          createdAt: "2024-01-01T00:09:00Z",
+          type: "message",
+          replyTo: { id: "thread-42", author: "alice" },
+          threadId: "thread-42",
+          parentThreadId: "parent-thread",
+        },
+        {
+          id: "reaction-1",
+          roomJid: "general@muc.example.com",
+          nick: "dave",
+          body: "",
+          createdAt: "2024-01-01T00:10:00Z",
+          type: "subject",
+          _reactionTarget: "reply-1",
+          _reactionEmojis: ["🔥"],
+          _reactionSenderId: "dave@example.com",
+        },
+      ]),
+    } as never);
+    const actionError = ref("");
+    const messaging = useMessaging(
+      session,
+      ref(null),
+      xmppClient,
+      ref("w1"),
+      ref("c1"),
+      ref({ id: "c1", name: "general", channel_type: "text" }),
+      String,
+      actionError,
+      () => {
+        actionError.value = "";
+      },
+    );
+
+    await messaging.loadMessages("w1", "c1");
+    const loadedReply = messaging.messages.value.find((message) => message.id === "stable-reply-1");
+
+    expect(messaging.messages.value).toHaveLength(2);
+    expect(loadedReply?.threadId).toBeUndefined();
+    expect(loadedReply?.body).toBe("room copy, edited");
+    expect(loadedReply?.isEdited).toBe(true);
+    expect(loadedReply?.reactions).toBeUndefined();
+
+    await messaging.backfillThread("thread-42");
+    const mergedReply = messaging.messages.value.find((message) => message.id === "stable-reply-1");
+
+    expect(messaging.messages.value).toHaveLength(2);
+    expect(mergedReply?.threadId).toBe("thread-42");
+    expect(mergedReply?.parentThreadId).toBe("parent-thread");
+    expect(mergedReply?.wireIds).toContain("reply-1");
+    expect(mergedReply?.replyTo).toEqual({
+      id: "thread-42",
+      author: "alice",
+      preview: "topic root",
+    });
+    expect(mergedReply?.body).toBe("room copy, edited");
+    expect(mergedReply?.createdAt).toBe("2024-01-01T00:01:00Z");
+    expect(mergedReply?.isEdited).toBe(true);
+    expect(mergedReply?.reactions).toEqual({ "🔥": ["dave"] });
+  });
+
   test("ignores archived room reactions that target an alternate wire id", async () => {
     const session = ref({
       username: "alice",

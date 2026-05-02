@@ -1198,6 +1198,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn xep_0198_detached_replay_preserves_xep_0201_thread_metadata() {
+        use xmpp_parsers::message::{Body, Message, MessageType, Thread};
+
+        let registry = InMemorySmSessionRegistry::new();
+        let jid = make_test_jid();
+        let session = make_test_session_for_jid("stream-threaded-replay", jid.clone());
+        registry.store_session(session).await.unwrap();
+
+        let mut msg = Message::new(Some(jid::Jid::from(jid.clone())));
+        msg.from = Some(jid::Jid::from(
+            "sender@example.com/web".parse::<FullJid>().expect("jid"),
+        ));
+        msg.id = Some("detached-threaded-message".to_string());
+        msg.type_ = MessageType::Chat;
+        msg.bodies
+            .insert(String::new(), Body("threaded".to_string()));
+        msg.thread = Some(Thread("conversation-thread".to_string()));
+        msg.payloads.push(
+            minidom::Element::builder("thread", "urn:example:other:0")
+                .attr("kind", "extension")
+                .append("not-xep-0201")
+                .build(),
+        );
+
+        assert!(registry
+            .record_stanza_for_detached_bound_resource(&jid, &Stanza::Message(msg))
+            .await
+            .unwrap());
+        let stored = registry
+            .peek_session("stream-threaded-replay")
+            .await
+            .unwrap()
+            .expect("detached session remains");
+        let replay = stored
+            .unacked_stanzas
+            .last()
+            .map(|(_, xml)| xml)
+            .expect("recorded replay stanza");
+        let element = replay
+            .parse::<minidom::Element>()
+            .expect("valid stanza xml");
+
+        assert!(element.children().any(|child| {
+            child.name() == "thread"
+                && child.ns() == "jabber:client"
+                && child.text() == "conversation-thread"
+        }));
+        assert!(element.children().any(|child| {
+            child.name() == "thread"
+                && child.ns() == "urn:example:other:0"
+                && child.text() == "not-xep-0201"
+        }));
+    }
+
+    #[tokio::test]
     async fn xep_0198_scrub_for_tombstone_matches_groupchat_stanza_id() {
         // Groupchat retractions key off the room's XEP-0359 stanza-id
         // per the "archive id == wire stanza-id" invariant

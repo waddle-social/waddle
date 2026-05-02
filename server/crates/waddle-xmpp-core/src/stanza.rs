@@ -21,7 +21,14 @@ impl Stanza {
     /// Convert the stanza to a minidom Element.
     pub fn to_element(&self) -> minidom::Element {
         match self {
-            Stanza::Message(message) => message.clone().into(),
+            Stanza::Message(message) => {
+                let mut element = message.clone().into();
+                crate::parser_utils::ensure_thread_element(
+                    &mut element,
+                    message.thread.as_ref().map(|thread| thread.0.as_str()),
+                );
+                element
+            }
             Stanza::Presence(presence) => presence.clone().into(),
             Stanza::Iq(iq) => iq.clone().into(),
         }

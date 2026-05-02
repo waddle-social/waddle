@@ -574,27 +574,35 @@ fn normalize_archived_inner_message(element: Element, archived: &ArchivedMessage
         return element;
     }
 
-    if let Ok(mut message) = Message::try_from(element.clone()) {
-        message.to = None;
-        return Element::from(message);
-    }
-
-    if element.attr("to").is_none() {
-        return element;
-    }
-
-    let ns = element.ns().to_string();
-    let name = element.name().to_string();
-    let mut builder = Element::builder(name, &ns);
-    for (key, value) in element.attrs() {
-        if key != "to" {
-            builder = builder.attr(key, value);
+    let mut normalized = if element.attr("to").is_none() {
+        element
+    } else {
+        let ns = element.ns().to_string();
+        let name = element.name().to_string();
+        let mut builder = Element::builder(name, &ns);
+        for (key, value) in element.attrs() {
+            if key != "to" {
+                builder = builder.attr(key, value);
+            }
         }
+        for child in element.children().cloned() {
+            builder = builder.append(child);
+        }
+        builder.build()
+    };
+
+    if let Some(thread_id) = archived.thread_id.as_deref() {
+        let info = crate::xep0201::ThreadInfo {
+            id: thread_id.to_owned(),
+            parent: archived
+                .parent_thread_id
+                .as_ref()
+                .map(|parent| parent.as_str().to_owned()),
+        };
+        crate::xep0201::install_thread_element(&mut normalized, &info);
     }
-    for child in element.children().cloned() {
-        builder = builder.append(child);
-    }
-    builder.build()
+
+    normalized
 }
 
 fn build_typed_inner_message(archived: &ArchivedMessage, rich: &ArchivedRichMessage) -> Element {
@@ -1200,6 +1208,52 @@ mod tests {
         let thread = replay_inner_thread(&msgs[0]);
         assert_eq!(thread.text().trim(), "child-thread");
         assert_eq!(thread.attr("parent"), Some("root-thread"));
+    }
+
+    #[test]
+    fn xep_0201_groupchat_stanza_xml_replay_reinstalls_thread_and_strips_to() {
+        let archived = ArchivedMessage {
+            id: "archive-threaded-reply".to_string(),
+            timestamp: Utc::now(),
+            from: "room@conference.example.com/alice".to_string(),
+            to: "room@conference.example.com".to_string(),
+            body: "threaded reply".to_string(),
+            stanza_id: Some("wire-id-2".to_string()),
+            thread_id: Some("root-thread".to_string()),
+            parent_thread_id: ThreadId::new("parent-thread"),
+            message_type: "groupchat".to_string(),
+            stanza_xml: Some(
+                "<message xmlns='jabber:client' from='room@conference.example.com/alice' to='bob@example.com/web' type='groupchat' id='wire-id-2'><body>threaded reply</body><thread>stale-thread</thread><reply xmlns='urn:xmpp:reply:0' id='root-thread'/></message>"
+                    .to_string(),
+            ),
+            ..Default::default()
+        };
+
+        let msgs = build_result_messages("q-stanza-xml", "bob@example.com/web", &[archived]);
+        let result = msgs[0]
+            .payloads
+            .iter()
+            .find(|p| p.name() == "result" && p.ns() == MAM_NS)
+            .expect("result payload");
+        let forwarded = result
+            .children()
+            .find(|c| c.name() == "forwarded" && c.ns() == FORWARD_NS)
+            .expect("forwarded element");
+        let inner_msg = forwarded
+            .children()
+            .find(|c| c.name() == "message" && c.ns() == CLIENT_NS)
+            .expect("inner message");
+        let thread = inner_msg
+            .children()
+            .find(|c| c.name() == "thread")
+            .expect("thread child on replay");
+
+        assert_eq!(inner_msg.attr("to"), None);
+        assert_eq!(thread.text().trim(), "root-thread");
+        assert_eq!(thread.attr("parent"), Some("parent-thread"));
+        assert!(inner_msg
+            .children()
+            .any(|c| c.name() == "reply" && c.ns() == REPLY_NS));
     }
 
     #[test]

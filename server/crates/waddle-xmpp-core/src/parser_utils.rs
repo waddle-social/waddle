@@ -19,12 +19,19 @@ pub fn ensure_thread_element(element: &mut Element, thread_id: Option<&str>) {
         let trimmed = id.trim();
         if trimmed.is_empty() {
             // skip empty thread
-        } else if !element.children().any(|child| child.name() == "thread") {
+        } else {
+            let stanza_ns = element.ns();
+            if element
+                .children()
+                .any(|child| crate::xep0201::is_thread_element_for_stanza(child, &stanza_ns))
+            {
+                return;
+            }
             let info = crate::xep0201::ThreadInfo {
                 id: trimmed.to_owned(),
                 parent: None,
             };
-            element.append_child(crate::xep0201::build_thread_element(&info, element.ns()));
+            element.append_child(crate::xep0201::build_thread_element(&info, &stanza_ns));
         }
     }
 }
@@ -40,9 +47,10 @@ pub fn ensure_thread_element(element: &mut Element, thread_id: Option<&str>) {
 /// ## Returns
 /// The parent attribute value if present and non-empty, None otherwise.
 pub fn extract_thread_parent(element: &Element) -> Option<String> {
+    let stanza_ns = element.ns();
     element
         .children()
-        .find(|child| child.name() == "thread")
+        .find(|child| crate::xep0201::is_thread_element_for_stanza(child, &stanza_ns))
         .and_then(|child| {
             child
                 .attr("parent")
@@ -117,6 +125,50 @@ mod tests {
     }
 
     #[test]
+    fn test_ensure_thread_element_ignores_unrelated_namespaced_thread() {
+        let mut element = Element::builder("message", "jabber:client")
+            .append(
+                Element::builder("thread", "urn:example:other:0")
+                    .attr("kind", "extension")
+                    .append("not-xep-0201")
+                    .build(),
+            )
+            .build();
+
+        ensure_thread_element(&mut element, Some("thread-123"));
+
+        assert_eq!(
+            element.get_child("thread", "jabber:client").unwrap().text(),
+            "thread-123"
+        );
+        assert!(element
+            .children()
+            .any(|child| child.name() == "thread" && child.ns() == "urn:example:other:0"));
+    }
+
+    #[test]
+    fn test_ensure_thread_element_ignores_explicit_empty_namespace_thread() {
+        let mut element = Element::builder("message", "jabber:client")
+            .append(
+                Element::builder("thread", "")
+                    .attr("kind", "extension")
+                    .append("not-xep-0201")
+                    .build(),
+            )
+            .build();
+
+        ensure_thread_element(&mut element, Some("thread-123"));
+
+        assert_eq!(
+            element.get_child("thread", "jabber:client").unwrap().text(),
+            "thread-123"
+        );
+        assert!(element
+            .children()
+            .any(|child| child.name() == "thread" && child.ns().is_empty()));
+    }
+
+    #[test]
     fn test_extract_thread_parent() {
         let element = Element::builder("message", "jabber:client")
             .append(
@@ -136,6 +188,21 @@ mod tests {
         let element = Element::builder("message", "jabber:client")
             .append(
                 Element::builder("thread", "jabber:client")
+                    .append("thread-456")
+                    .build(),
+            )
+            .build();
+
+        let parent = extract_thread_parent(&element);
+        assert_eq!(parent, None);
+    }
+
+    #[test]
+    fn test_extract_thread_parent_ignores_explicit_empty_namespace_thread() {
+        let element = Element::builder("message", "jabber:client")
+            .append(
+                Element::builder("thread", "")
+                    .attr("parent", "not-a-stanza-parent")
                     .append("thread-456")
                     .build(),
             )
