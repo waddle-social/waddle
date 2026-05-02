@@ -18,7 +18,7 @@ use super::owner::{apply_config_form, build_destroy_notification, ConfigFormData
 use super::room_registry::RoomInfo;
 use super::{
     build_affiliation_change_presence, build_ban_presence, build_kick_presence,
-    build_role_change_presence, MucRoom, OutboundMucMessage, RoomConfig,
+    build_role_change_presence, MucRoom, OutboundMucMessage, RoomConfig, SubjectState,
 };
 use crate::types::{Affiliation, Role};
 use crate::xep::xep0421::OccupantIdentity;
@@ -70,6 +70,12 @@ pub struct JoinOutcome {
     pub occupant_count: usize,
     pub room_jid: BareJid,
     pub is_same_bare_multi_session_join: bool,
+    /// Snapshot of `MucRoom.subject` at join time. Powers the XEP-0045
+    /// §7.2.15 historical-subject emission the WebSocket join handler
+    /// builds via `muc::messages::build_subject_message`. Bundled with
+    /// the rest of the join outcome so the join path needs no second
+    /// actor round-trip.
+    pub subject_state: Option<SubjectState>,
 }
 
 #[derive(Debug, Clone)]
@@ -733,6 +739,8 @@ impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
         let occupant_count = self.room.occupant_count();
         let room_jid = self.room.room_jid.clone();
 
+        let subject_state = self.room.subject.clone();
+
         Ok(JoinOutcome {
             existing_occupants,
             new_occupant_affiliation,
@@ -740,6 +748,7 @@ impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
             occupant_count,
             room_jid,
             is_same_bare_multi_session_join,
+            subject_state,
         })
     }
 }
