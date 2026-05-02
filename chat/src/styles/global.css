@@ -101,7 +101,7 @@
   --chat-sidebar-width: clamp(16.5rem, 18vw, 19rem);
   --chat-header-height: 3.5rem;
   --chat-content-inline: clamp(1rem, 2vw, 2rem);
-  --chat-message-lane: clamp(42rem, 68vw, 70rem);
+  --chat-message-lane: clamp(42rem, 68vw, 60rem);
   --chat-copy-measure: 68ch;
   --chat-readable-measure: 72ch;
   --chat-thread-width: clamp(22rem, 32vw, 30rem);
@@ -582,7 +582,8 @@
 
 .chat-message-lane {
   width: min(100%, var(--chat-message-lane));
-  margin-inline: auto;
+  margin-inline-start: 0;
+  margin-inline-end: auto;
 }
 
 .chat-copy-measure {
@@ -802,7 +803,8 @@
 
 .chat-composer > :not(.chat-composer-popover) {
   width: min(100%, var(--chat-message-lane));
-  margin-inline: auto;
+  margin-inline-start: 0;
+  margin-inline-end: auto;
 }
 
 .chat-composer {
@@ -821,8 +823,7 @@
 
 .chat-composer-popover {
   width: min(calc(100% - var(--chat-content-inline) - var(--chat-content-inline)), var(--chat-message-lane));
-  left: 50%;
-  transform: translateX(-50%);
+  left: var(--chat-content-inline);
 }
 
 .chat-pane-header {
@@ -1124,7 +1125,8 @@
 .chat-current-day-marker__lane {
   display: flex;
   width: min(100%, var(--chat-message-lane));
-  margin-inline: auto;
+  margin-inline-start: 0;
+  margin-inline-end: auto;
   align-items: center;
   gap: var(--space-sm);
   justify-content: center;
