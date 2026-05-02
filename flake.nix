@@ -62,6 +62,7 @@
               ./server/Cargo.lock
               ./server/crates
               ./server/extensions
+              ./server/test-fixtures
               ./server/wit
             ];
           };
@@ -268,6 +269,26 @@
               cargoTestExtraArgs = "--all-targets --no-run";
             }
           );
+          ciServerArtifacts = craneLib.buildDepsOnly (
+            baseArgs
+            // {
+              CARGO_PROFILE = "ci";
+              cargoExtraArgs = "--locked --package waddle-server --bin waddle-server";
+              cargoCheckExtraArgs = "";
+              cargoBuildExtraArgs = "";
+              cargoTestExtraArgs = "";
+            }
+          );
+          extensionWasmArtifacts = craneLib.buildDepsOnly (
+            baseArgs
+            // {
+              CARGO_BUILD_TARGET = "wasm32-wasip2";
+              cargoExtraArgs = "--locked --package ai-assistant-canvas --package ai-chatbot --package decision-polls --package links-task-board --package pub-quiz";
+              cargoCheckExtraArgs = "";
+              cargoBuildExtraArgs = "";
+              cargoTestExtraArgs = "";
+            }
+          );
         in
         {
           waddle-server-fmt = craneLib.cargoFmt {
@@ -290,6 +311,24 @@
               cargoArtifacts = workspaceArtifacts;
               cargoExtraArgs = "--locked --workspace";
               cargoTestExtraArgs = "--lib --tests";
+            }
+          );
+          waddle-server-ci-build = craneLib.cargoBuild (
+            baseArgs
+            // {
+              pname = "waddle-server-ci-build";
+              CARGO_PROFILE = "ci";
+              cargoArtifacts = ciServerArtifacts;
+              cargoExtraArgs = "--locked --package waddle-server --bin waddle-server";
+            }
+          );
+          waddle-server-extension-modules = craneLib.cargoBuild (
+            baseArgs
+            // {
+              pname = "waddle-server-extension-modules";
+              CARGO_BUILD_TARGET = "wasm32-wasip2";
+              cargoArtifacts = extensionWasmArtifacts;
+              cargoExtraArgs = "--locked --package ai-assistant-canvas --package ai-chatbot --package decision-polls --package links-task-board --package pub-quiz";
             }
           );
           waddle-server-xmpp-unit-tests = craneLib.cargoTest (
