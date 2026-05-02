@@ -8,6 +8,7 @@ resources:
   - spicedb-cluster.yaml
   - xmpp-certificate.yaml
   - external-secret.yaml
+  - runtime-external-secret.yaml
   - spicedb-external-secret.yaml
   - helmrepository.yaml
   - helmrelease.yaml

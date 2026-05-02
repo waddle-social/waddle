@@ -130,7 +130,7 @@ fn manifest() -> types::ExtensionManifest {
 fn answer_body(prompt: &str) -> String {
     let prompt = clean_prompt(prompt);
     format!(
-        "AI provider unavailable. Configure WADDLE_AI_PROVIDER=openai, OPENAI_API_KEY, and WADDLE_AI_MODEL on the server to answer: {prompt}"
+        "AI provider unavailable. Configure WADDLE_AI_PROVIDER=openrouter with OPENROUTER_API_KEY, or WADDLE_AI_PROVIDER=openai with OPENAI_API_KEY and WADDLE_AI_MODEL, to answer: {prompt}"
     )
 }
 

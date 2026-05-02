@@ -170,6 +170,41 @@ helm upgrade --install waddle ./charts/waddle-server \
   --set-json secret.authProvidersJson='[{"id":"colony","display_name":"Colony","kind":"oidc","dynamic_client_registration":true,"client_id":"","token_endpoint_auth_method":"none","require_dpop":true,"issuer":"https://colony.waddle.social","scopes":["openid","profile","email"],"subject_claim":"sub","username_claim":"preferred_username","email_claim":"email"}]'
 ```
 
+## AI provider
+
+The AI chatbot extension emits a typed provider-fallback response. The server
+replaces that fallback with a provider answer when AI provider env is valid.
+
+OpenRouter:
+
+```bash
+kubectl -n waddle create secret generic waddle-openrouter \
+  --from-literal=OPENROUTER_API_KEY=sk-or-...
+
+helm upgrade --install waddle ./charts/waddle-server \
+  --namespace waddle \
+  --set ai.provider=openrouter \
+  --set ai.openrouterReferer=https://waddle.chat \
+  --set ai.openrouterTitle=Waddle \
+  --set-json extraSecretRefs='["waddle-openrouter"]'
+```
+
+When `ai.provider=openrouter`, `ai.model` defaults to `openrouter/free`. Set
+`ai.model` to route to a concrete OpenRouter model.
+
+OpenAI:
+
+```bash
+kubectl -n waddle create secret generic waddle-openai \
+  --from-literal=OPENAI_API_KEY=sk-...
+
+helm upgrade --install waddle ./charts/waddle-server \
+  --namespace waddle \
+  --set ai.provider=openai \
+  --set ai.model=<openai-model> \
+  --set-json extraSecretRefs='["waddle-openai"]'
+```
+
 ## Extensions
 
 `extensions.modules` renders into `WADDLE_EXTENSIONS_JSON`. OCI modules must set

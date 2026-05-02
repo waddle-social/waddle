@@ -456,7 +456,12 @@ schema.#Project & {
 					helm_push_log="$(mktemp)"
 					if ! helm push "${chart_package}" oci://ghcr.io/waddle-social/waddle/charts 2>&1 | tee "${helm_push_log}"; then
 					  if grep -Eiq 'already exists|409|conflict' "${helm_push_log}"; then
-					    echo "Chart version already exists, skipping"
+					    if git rev-parse --verify HEAD^ >/dev/null 2>&1 && git diff --quiet HEAD^ HEAD -- charts/waddle-server; then
+					      echo "Chart version already exists and chart files are unchanged, skipping"
+					    else
+					      echo "Chart version already exists but charts/waddle-server changed; bump charts/waddle-server/Chart.yaml version" >&2
+					      exit 1
+					    fi
 					  else
 					    exit 1
 					  fi

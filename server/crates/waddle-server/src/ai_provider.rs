@@ -8,10 +8,15 @@ const AI_HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const AI_HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const AI_COMMAND: &str = "/ai";
 const WADDLE_MENTION: &str = "@waddle";
+const OPENAI_BASE_URL: &str = "https://api.openai.com";
+const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api";
+const OPENROUTER_DEFAULT_MODEL: &str = "openrouter/free";
+const OPENROUTER_DEFAULT_TITLE: &str = "Waddle";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AiProviderKind {
     OpenAi,
+    OpenRouter,
 }
 
 #[derive(Debug, Clone)]
@@ -20,11 +25,15 @@ pub struct AiProviderConfig {
     pub api_key: String,
     pub model: String,
     pub base_url: String,
+    pub http_referer: Option<String>,
+    pub app_title: Option<String>,
 }
 
 #[derive(Debug, Error)]
 pub enum AiProviderError {
-    #[error("AI provider unavailable: set WADDLE_AI_PROVIDER=openai, OPENAI_API_KEY, and WADDLE_AI_MODEL")]
+    #[error(
+        "AI provider unavailable: set WADDLE_AI_PROVIDER=openai with OPENAI_API_KEY and WADDLE_AI_MODEL, or WADDLE_AI_PROVIDER=openrouter with OPENROUTER_API_KEY"
+    )]
     Unavailable,
     #[error("unsupported AI provider {0:?}")]
     UnsupportedProvider(String),
@@ -42,21 +51,59 @@ impl AiProviderConfig {
             std::env::var("WADDLE_AI_PROVIDER").map_err(|_| AiProviderError::Unavailable)?;
         let kind = match provider.as_str() {
             "openai" => AiProviderKind::OpenAi,
+            "openrouter" => AiProviderKind::OpenRouter,
             other => return Err(AiProviderError::UnsupportedProvider(other.to_string())),
         };
-        let api_key = std::env::var("OPENAI_API_KEY").map_err(|_| AiProviderError::Unavailable)?;
-        let model = std::env::var("WADDLE_AI_MODEL").map_err(|_| AiProviderError::Unavailable)?;
-        if api_key.trim().is_empty() || model.trim().is_empty() {
-            return Err(AiProviderError::Unavailable);
-        }
+        let api_key = api_key_from_env(&kind)?;
+        let model = model_from_env(&kind)?;
+        let base_url = base_url_from_env(&kind);
         Ok(Self {
             kind,
             api_key,
             model,
-            base_url: std::env::var("WADDLE_OPENAI_BASE_URL")
-                .unwrap_or_else(|_| "https://api.openai.com".to_string()),
+            base_url,
+            http_referer: optional_env("WADDLE_OPENROUTER_REFERER"),
+            app_title: optional_env("WADDLE_OPENROUTER_TITLE"),
         })
     }
+}
+
+fn api_key_from_env(kind: &AiProviderKind) -> Result<String, AiProviderError> {
+    let key = match kind {
+        AiProviderKind::OpenAi => optional_env("OPENAI_API_KEY"),
+        AiProviderKind::OpenRouter => optional_env("OPENROUTER_API_KEY"),
+    }
+    .ok_or(AiProviderError::Unavailable)?;
+    Ok(key)
+}
+
+fn model_from_env(kind: &AiProviderKind) -> Result<String, AiProviderError> {
+    match kind {
+        AiProviderKind::OpenAi => {
+            optional_env("WADDLE_AI_MODEL").ok_or(AiProviderError::Unavailable)
+        }
+        AiProviderKind::OpenRouter => {
+            Ok(optional_env("WADDLE_AI_MODEL")
+                .unwrap_or_else(|| OPENROUTER_DEFAULT_MODEL.to_string()))
+        }
+    }
+}
+
+fn base_url_from_env(kind: &AiProviderKind) -> String {
+    match kind {
+        AiProviderKind::OpenAi => {
+            optional_env("WADDLE_OPENAI_BASE_URL").unwrap_or_else(|| OPENAI_BASE_URL.to_string())
+        }
+        AiProviderKind::OpenRouter => optional_env("WADDLE_OPENROUTER_BASE_URL")
+            .unwrap_or_else(|| OPENROUTER_BASE_URL.to_string()),
+    }
+}
+
+fn optional_env(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 #[derive(Debug, Serialize)]
@@ -101,7 +148,9 @@ pub async fn generate_ai_response_with_config(
     prompt: &str,
 ) -> Result<String, AiProviderError> {
     match config.kind {
-        AiProviderKind::OpenAi => generate_openai_response(client, config, prompt).await,
+        AiProviderKind::OpenAi | AiProviderKind::OpenRouter => {
+            generate_openai_compatible_response(client, config, prompt).await
+        }
     }
 }
 
@@ -119,7 +168,7 @@ fn ai_http_client() -> Result<&'static reqwest::Client, AiProviderError> {
         .map_err(|error| AiProviderError::HttpClient(error.clone()))
 }
 
-async fn generate_openai_response(
+async fn generate_openai_compatible_response(
     client: &reqwest::Client,
     config: &AiProviderConfig,
     prompt: &str,
@@ -142,10 +191,24 @@ async fn generate_openai_response(
         ],
     };
 
-    let response = client
+    let mut builder = client
         .post(url)
         .bearer_auth(config.api_key.as_str())
-        .json(&request)
+        .json(&request);
+    if config.kind == AiProviderKind::OpenRouter {
+        builder = builder.header(
+            "X-OpenRouter-Title",
+            config
+                .app_title
+                .as_deref()
+                .unwrap_or(OPENROUTER_DEFAULT_TITLE),
+        );
+        if let Some(http_referer) = config.http_referer.as_deref() {
+            builder = builder.header("HTTP-Referer", http_referer);
+        }
+    }
+
+    let response = builder
         .send()
         .await?
         .error_for_status()?
@@ -254,6 +317,8 @@ mod tests {
                 api_key: "test-key".to_string(),
                 model: "gpt-test".to_string(),
                 base_url: server.uri(),
+                http_referer: None,
+                app_title: None,
             },
             "/ai Who is Rawkode?",
         )
@@ -261,6 +326,39 @@ mod tests {
         .expect("mocked response");
 
         assert_eq!(answer, "Rawkode is David Flanagan.");
+    }
+
+    #[tokio::test]
+    async fn mocked_openrouter_response_uses_openai_compatible_endpoint() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(header("authorization", "Bearer router-key"))
+            .and(header("x-openrouter-title", "Waddle"))
+            .and(header("http-referer", "https://waddle.chat"))
+            .and(body_string_contains("openrouter/free"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "choices": [{ "message": { "content": "Ottawa" } }]
+            })))
+            .mount(&server)
+            .await;
+
+        let answer = generate_ai_response_with_config(
+            &reqwest::Client::new(),
+            &AiProviderConfig {
+                kind: AiProviderKind::OpenRouter,
+                api_key: "router-key".to_string(),
+                model: "openrouter/free".to_string(),
+                base_url: server.uri(),
+                http_referer: Some("https://waddle.chat".to_string()),
+                app_title: None,
+            },
+            "/ai what is the capital of Canada?",
+        )
+        .await
+        .expect("mocked response");
+
+        assert_eq!(answer, "Ottawa");
     }
 
     #[tokio::test]
@@ -282,6 +380,8 @@ mod tests {
                 api_key: "test-key".to_string(),
                 model: "gpt-test".to_string(),
                 base_url: server.uri(),
+                http_referer: None,
+                app_title: None,
             },
             "/ai Who is Rawkode?",
         )
@@ -307,6 +407,8 @@ mod tests {
                 api_key: "test-key".to_string(),
                 model: "gpt-test".to_string(),
                 base_url: server.uri(),
+                http_referer: None,
+                app_title: None,
             },
             "/ai no fake answers",
         )

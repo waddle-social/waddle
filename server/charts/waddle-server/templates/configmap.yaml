@@ -23,6 +23,24 @@ data:
   {{- if .Values.config.authProvidersJson }}
   WADDLE_AUTH_PROVIDERS_JSON: {{ .Values.config.authProvidersJson | quote }}
   {{- end }}
+  {{- if .Values.ai.provider }}
+  WADDLE_AI_PROVIDER: {{ .Values.ai.provider | quote }}
+  {{- end }}
+  {{- if .Values.ai.model }}
+  WADDLE_AI_MODEL: {{ .Values.ai.model | quote }}
+  {{- end }}
+  {{- if .Values.ai.openaiBaseUrl }}
+  WADDLE_OPENAI_BASE_URL: {{ .Values.ai.openaiBaseUrl | quote }}
+  {{- end }}
+  {{- if .Values.ai.openrouterBaseUrl }}
+  WADDLE_OPENROUTER_BASE_URL: {{ .Values.ai.openrouterBaseUrl | quote }}
+  {{- end }}
+  {{- if .Values.ai.openrouterReferer }}
+  WADDLE_OPENROUTER_REFERER: {{ .Values.ai.openrouterReferer | quote }}
+  {{- end }}
+  {{- if .Values.ai.openrouterTitle }}
+  WADDLE_OPENROUTER_TITLE: {{ .Values.ai.openrouterTitle | quote }}
+  {{- end }}
   {{- if .Values.database.url }}
   WADDLE_DATABASE_URL: {{ .Values.database.url | quote }}
   {{- end }}
