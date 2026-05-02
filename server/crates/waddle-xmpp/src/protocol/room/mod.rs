@@ -14,8 +14,8 @@
 //! 2. [`canonicalize::MucCanonicalizeHandler`] — XEP-0359 stanza-id
 //!    `by=room`, XEP-0421 occupant-id stamp, `from='room/nick'` rewrite.
 //! 3. [`subject::MucSubjectHandler`] — XEP-0045 §8.1 subject-change
-//!    capture. Mirrors `MucRoom::can_change_subject`; on allow emits
-//!    [`super::event::OutboundEvent::PersistRoomSubject`] for the
+//!    capture. Enforces §8.1 role-based authorization inline; on allow
+//!    emits [`super::event::OutboundEvent::PersistRoomSubject`] for the
 //!    interpreter to land on the room actor; on deny halts with a
 //!    typed `<forbidden/>` reply so neither archive nor reflector run.
 //! 4. [`archive::MucArchiveHandler`] — XEP-0313 §5.1.3 archive-eligibility

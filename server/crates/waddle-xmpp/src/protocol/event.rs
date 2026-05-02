@@ -419,12 +419,24 @@ pub enum OutboundEvent {
     /// XEP-0045 §7.2.15 historical-subject emission with the right
     /// setter, timestamp, and XEP-0421 occupant-id derivation.
     ///
-    /// Eventually-consistent with the live broadcast that
-    /// `ReflectorHandler` emits in the same dispatch — both end up on
-    /// the wire promptly, but in-between joins may briefly observe the
-    /// previous stored subject. That window is acceptable per
-    /// §7.2.15's wire shape (the live broadcast and the historical
-    /// replay are independent stanzas).
+    /// **Ordering invariant.** This event and the live broadcast
+    /// (`OutboundEvent::RouteToConnection` from the same dispatch) are
+    /// emitted into the same outbound stream the interpreter drains in
+    /// order. Both `PersistRoomSubject` and a follow-up `JoinOutcome`
+    /// query traverse the same `RoomActor` mailbox, so a join request
+    /// arriving after the subject change has been persisted is
+    /// guaranteed to observe the new subject. Joins that arrived
+    /// before persistence enqueued get the previous stored subject —
+    /// acceptable per §7.2.15 since the live broadcast they receive in
+    /// real time corrects the gap.
+    ///
+    /// **Failure mode.** If the actor ask fails (mailbox closed, room
+    /// destroyed mid-dispatch) the live broadcast has already gone to
+    /// occupants but the persisted state never updates. The
+    /// interpreter logs and returns; this is an irreducible window for
+    /// any out-of-band persistence path. The alternative — gating the
+    /// broadcast on a successful persist — would couple the live wire
+    /// to the actor's mailbox latency on the hot path.
     PersistRoomSubject {
         /// Room whose state is being mutated.
         room: BareJid,

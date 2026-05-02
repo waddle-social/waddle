@@ -563,22 +563,30 @@ fn xep_0045_section_8_1_visitor_subject_change_halts_with_forbidden_no_broadcast
         "denied subject change MUST NOT archive"
     );
 
-    let send_error = outcome
+    let stanza = outcome
         .events
         .iter()
         .find_map(|e| match e {
-            OutboundEvent::SendStanza(s) => Some(s),
+            OutboundEvent::SendStanza(s) => Some(s.as_ref()),
             _ => None,
         })
         .expect("typed error reply emitted to sender");
-    let error_xml = format!("{send_error:?}");
-    assert!(
-        error_xml.contains("Forbidden") || error_xml.contains("forbidden"),
-        "deny path replies with <forbidden/> per §8.1; got {error_xml}"
+    let Stanza::Message(reply) = stanza else {
+        panic!("expected SendStanza(Message), got {stanza:?}");
+    };
+    assert_eq!(reply.type_, MessageType::Error);
+    let error_elem = reply
+        .payloads
+        .iter()
+        .find(|p| p.name() == "error")
+        .expect("error payload attached");
+    let parsed = StanzaError::try_from(error_elem.clone()).expect("typed StanzaError parse");
+    assert_eq!(parsed.type_, ErrorType::Auth, "§8.1 deny is type='auth'");
+    assert_eq!(
+        parsed.defined_condition,
+        DefinedCondition::Forbidden,
+        "§8.1 deny carries <forbidden/>"
     );
-    // Silence the unused-import lint when no other test in this module
-    // happens to reference the imports we use only here.
-    let _stub = StanzaError::new(ErrorType::Auth, DefinedCondition::Forbidden, "en", "stub");
 }
 
 #[test]

@@ -705,54 +705,26 @@ impl MucRoom {
 
     // === Subject/Topic Management (XEP-0045 §7.2.15 / §8.1) ===
 
-    /// Current subject text, if a subject has been set or explicitly
-    /// cleared. Returns `None` only when the room has never had a
-    /// subject (XEP-0045 §7.2.15 distinguishes "never set" from
-    /// "explicitly cleared" via the `<delay/>` SHOULD).
-    pub fn get_subject(&self) -> Option<&str> {
-        self.subject.as_ref().map(|s| s.text.as_str())
-    }
-
-    /// Apply a §8.1 subject change. `text == ""` represents an
-    /// explicit clear (still a `Some(SubjectState)` so future joins
-    /// emit `<delay/>` per §7.2.15 SHOULD). Returns `true` if the
-    /// stored state changed (text differs OR setter differs).
+    /// Apply a §8.1 subject change. `text == ""` represents an explicit
+    /// clear (still a `Some(SubjectState)` so future joins emit
+    /// `<delay/>` per §7.2.15 SHOULD).
+    ///
+    /// Authorization is enforced upstream by
+    /// `protocol::room::subject::MucSubjectHandler` against the frozen
+    /// `RoomContext` snapshot — this method assumes the change has
+    /// already passed §8.1's role-based gate.
     pub fn set_subject(
         &mut self,
         text: String,
         setter: BareJid,
         setter_nick: String,
         set_at: DateTime<Utc>,
-    ) -> bool {
-        let new_state = SubjectState {
+    ) {
+        self.subject = Some(SubjectState {
             text,
             setter,
             setter_nick,
             set_at,
-        };
-        if self.subject.as_ref() == Some(&new_state) {
-            false
-        } else {
-            self.subject = Some(new_state);
-            true
-        }
-    }
-
-    /// Check if an occupant can change the room subject.
-    ///
-    /// Per XEP-0045 §8.1:
-    /// - In moderated rooms, only moderators (and above) can change the subject
-    /// - In unmoderated rooms, any participant (or above) can change the subject
-    /// - Visitors can never change the subject
-    pub fn can_change_subject(&self, nick: &str) -> bool {
-        if let Some(occupant) = self.occupants.get(nick) {
-            match occupant.role {
-                Role::Moderator => true,
-                Role::Participant => !self.config.moderated,
-                Role::Visitor | Role::None => false,
-            }
-        } else {
-            false
-        }
+        });
     }
 }

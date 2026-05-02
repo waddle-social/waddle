@@ -14,7 +14,8 @@
 //!
 //! 1. Detects the subject-change shape via empty `bodies` + non-empty
 //!    `subjects` (matching `MucMessage::is_subject_change`).
-//! 2. Mirrors `MucRoom::can_change_subject`'s policy against the frozen
+//! 2. Enforces §8.1's role-based policy (moderators always; participants
+//!    only in unmoderated rooms; visitors never) against the frozen
 //!    sender snapshot in [`RoomContext`].
 //! 3. On allow: emits [`OutboundEvent::PersistRoomSubject`] so the
 //!    interpreter writes a `SubjectState` onto the room actor — which
@@ -38,12 +39,13 @@
 //! historical replay are independent stanzas.
 
 use super::super::event::OutboundEvent;
-use super::super::handlers::errors::{message_error_reply, send_message_error};
+use super::super::handlers::errors::send_message_error;
 use super::context::RoomContext;
 use super::traits::{RoomHandler, RoomHandlerOutcome};
 use crate::types::Role;
 use chrono::{DateTime, Utc};
 use jid::Jid;
+use minidom::Element;
 use xmpp_parsers::message::{Message, MessageType};
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
@@ -61,7 +63,16 @@ impl RoomHandler for MucSubjectHandler {
         // <body/> absent. A message with both is a regular groupchat
         // message that happens to have an attached subject element —
         // not a subject change — and passes through untouched.
-        if message.subjects.is_empty() || !message.bodies.is_empty() {
+        //
+        // Hostile-client guard: an empty (or whitespace-only) <body/>
+        // is treated as no-body for shape-detection purposes. Without
+        // this, a visitor can send `<subject>x</subject><body/>` and
+        // skip §8.1 authorization while clients (Conversations, Gajim,
+        // Dino) still render the `<subject>` as a topic change. The
+        // strict §8.1 reading is "no body element at all"; we tighten
+        // to "no body content" because empty bodies have no legitimate
+        // groupchat-message use and are the natural exfiltration path.
+        if message.subjects.is_empty() || message.bodies.values().any(|b| !b.0.trim().is_empty()) {
             return RoomHandlerOutcome::Continue(Vec::new());
         }
 
@@ -71,12 +82,15 @@ impl RoomHandler for MucSubjectHandler {
             return RoomHandlerOutcome::Continue(Vec::new());
         };
 
-        // §8.1 authorization. Mirrors `MucRoom::can_change_subject`'s
-        // policy: moderators always; participants only in unmoderated
-        // rooms; visitors / no-role never. The check is inline rather
-        // than a borrow of `MucRoom` because the chain is stateless
-        // against a frozen snapshot — `RoomContext` already carries
-        // both inputs (`sender.role` and `room_moderated`).
+        // §8.1 authorization: moderators always; participants only in
+        // unmoderated rooms; visitors / no-role never. The chain is
+        // stateless against a frozen snapshot — `RoomContext` already
+        // carries both inputs (`sender.role` and `room_moderated`) so
+        // there is no `&MucRoom` to borrow. `OccupancyValidationHandler`
+        // ahead of this handler ensures the sender's role/affiliation
+        // were materialized into the snapshot at dispatch start, so the
+        // check observes the same role assignment that produced the
+        // canonicalized `from='room/nick'`.
         let allowed = match sender.role {
             Role::Moderator => true,
             Role::Participant => !ctx.room_moderated,
@@ -119,19 +133,25 @@ impl RoomHandler for MucSubjectHandler {
 
 /// Build the XEP-0045 §8.1 typed `<forbidden type='auth'/>` reply
 /// addressed from the room JID back to the sender.
+///
+/// Constructs the reply directly rather than going through
+/// `message_error_reply` because by the time this handler runs
+/// `MucCanonicalizeHandler` has already rewritten `incoming.from` to
+/// `room/nick` and cleared `incoming.to` — letting `message_error_reply`
+/// swap those would produce nonsense addresses we'd then need to
+/// override back. Building from `ctx` directly is one canonical pass.
 fn forbidden_reply(incoming: &Message, ctx: &RoomContext<'_>) -> Message {
-    let mut reply = message_error_reply(
-        incoming,
-        StanzaError::new(
-            ErrorType::Auth,
-            DefinedCondition::Forbidden,
-            "en",
-            "Sender is not permitted to change the room subject.",
-        ),
-    );
+    let mut reply = Message::new(Some(Jid::from(ctx.sender_full.clone())));
     reply.from = Some(Jid::from(ctx.room.clone()));
-    reply.to = Some(Jid::from(ctx.sender_full.clone()));
     reply.type_ = MessageType::Error;
+    reply.id = incoming.id.clone();
+    let error = StanzaError::new(
+        ErrorType::Auth,
+        DefinedCondition::Forbidden,
+        "en",
+        "Sender is not permitted to change the room subject.",
+    );
+    reply.payloads.push(Element::from(error));
     reply
 }
 
@@ -313,6 +333,43 @@ mod tests {
     }
 
     #[test]
+    fn empty_body_does_not_bypass_subject_change_authorization() {
+        // Hostile-client guard: a visitor sending
+        // `<subject>x</subject><body xml:lang="x"></body>` cannot skip
+        // §8.1 authorization just because xmpp_parsers populates the
+        // bodies map with an empty entry. The handler treats whitespace-
+        // only bodies as no-body for shape detection, so this still
+        // halts with <forbidden/>.
+        let room = bare("team@muc.example.com");
+        let sender = full("eve@example.com/web");
+        let mut msg = subject_change(&room, &sender, "Topic via empty-body trick");
+        msg.bodies.insert(String::new(), Body(String::new()));
+        let outcome = run(&mut msg, &room, &sender, "eve-nick", Role::Visitor, false);
+        let RoomHandlerOutcome::Halt(events) = outcome else {
+            panic!(
+                "empty-body must not bypass §8.1 authz; visitor must be denied, got {outcome:?}"
+            );
+        };
+        assert_send_forbidden(&events);
+    }
+
+    #[test]
+    fn whitespace_only_body_does_not_bypass_subject_change_authorization() {
+        // Same hostile-client guard, with whitespace inside the body
+        // instead of an empty string — still no meaningful body content.
+        let room = bare("team@muc.example.com");
+        let sender = full("eve@example.com/web");
+        let mut msg = subject_change(&room, &sender, "Whitespace bypass attempt");
+        msg.bodies
+            .insert(String::new(), Body("   \t\n  ".to_string()));
+        let outcome = run(&mut msg, &room, &sender, "eve-nick", Role::Visitor, false);
+        let RoomHandlerOutcome::Halt(events) = outcome else {
+            panic!("whitespace-only body must not bypass §8.1 authz, got {outcome:?}");
+        };
+        assert_send_forbidden(&events);
+    }
+
+    #[test]
     fn subject_with_body_is_not_a_subject_change() {
         // §8.1 distinguishes subject-changes from regular messages by
         // the presence/absence of <body/>. A message carrying both is
@@ -356,17 +413,34 @@ mod tests {
     }
 
     fn assert_send_forbidden(events: &[OutboundEvent]) {
-        let send = events
+        use crate::Stanza;
+        use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
+        let stanza = events
             .iter()
             .find_map(|e| match e {
-                OutboundEvent::SendStanza(s) => Some(s),
+                OutboundEvent::SendStanza(s) => Some(s.as_ref()),
                 _ => None,
             })
-            .expect("error reply emitted");
-        let stanza_xml = format!("{send:?}");
-        assert!(
-            stanza_xml.contains("Forbidden") || stanza_xml.contains("forbidden"),
-            "deny path must reply with <forbidden/>; got {stanza_xml}"
+            .expect("typed error reply emitted to sender");
+        let Stanza::Message(reply) = stanza else {
+            panic!("expected SendStanza(Message), got {stanza:?}");
+        };
+        assert_eq!(
+            reply.type_,
+            MessageType::Error,
+            "§8.1 deny replies as type='error'"
+        );
+        let error_elem = reply
+            .payloads
+            .iter()
+            .find(|p| p.name() == "error")
+            .expect("error payload attached");
+        let parsed = StanzaError::try_from(error_elem.clone()).expect("typed StanzaError parse");
+        assert_eq!(parsed.type_, ErrorType::Auth, "§8.1 deny is type='auth'");
+        assert_eq!(
+            parsed.defined_condition,
+            DefinedCondition::Forbidden,
+            "§8.1 deny carries <forbidden/>"
         );
     }
 }
