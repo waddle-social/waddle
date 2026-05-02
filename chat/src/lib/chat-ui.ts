@@ -125,6 +125,13 @@ export interface TimelineMessage {
   authorRealJid?: string;
   /** XEP-0444 groupchat reaction target: room-assigned XEP-0359 stanza-id. */
   reactionTargetId?: string;
+  /**
+   * XEP-0461 §3.2 replyable id. Absent on groupchat messages that lack a
+   * room-assigned XEP-0359 stanza-id; consumers MUST treat such messages as
+   * non-replyable (disable the action, refuse to send) rather than fall back
+   * to the wire id.
+   */
+  replyableId?: string;
   body: string;
   createdAt: string;
   isSelf: boolean;

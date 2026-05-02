@@ -117,13 +117,27 @@ function extractMucUserRealJid(msg: ReceivedMessage): string | undefined {
 export function resolveMessageIds(
   msg: ReceivedMessage,
   preferredStanzaBy?: string,
-): { id: string; wireIds?: string[]; correctionTargetId: string; reactionTargetId?: string } {
+): {
+  id: string;
+  wireIds?: string[];
+  correctionTargetId: string;
+  reactionTargetId?: string;
+  replyableId?: string;
+} {
   const extMsg = ext(msg);
   const originId = extMsg.originId as OriginIdPayload | undefined;
   const stanzaIds = asArray(extMsg.stanzaIds as StanzaIdPayload | StanzaIdPayload[] | undefined);
   const preferredStanzaId = preferredStanzaBy
     ? stanzaIds.find((candidate) => candidate.by === preferredStanzaBy)?.id
     : undefined;
+
+  // XEP-0461 §3.2: groupchat replies MUST quote the id assigned by the room
+  // (a stanza-id whose `by` matches the room JID). If absent, the message
+  // cannot be replied to. For non-groupchat, fall back to origin-id then the
+  // stanza @id.
+  const replyableId = preferredStanzaBy
+    ? preferredStanzaId
+    : (originId?.id ?? msg.id ?? undefined);
 
   return {
     ...splitMessageIds(
@@ -132,6 +146,7 @@ export function resolveMessageIds(
     ),
     correctionTargetId: originId?.id ?? msg.id ?? "",
     ...(preferredStanzaId ? { reactionTargetId: preferredStanzaId } : {}),
+    ...(replyableId ? { replyableId } : {}),
   };
 }
 
@@ -552,22 +567,39 @@ interface FallbackPayload {
 }
 
 /**
- * XEP-0428: strip any `urn:xmpp:reply:0` fallback range from the displayed
- * body so the `> quoted` prefix doesn't double-render on top of the reply chip.
+ * XEP-0428 §3: strip the body content covered by a `urn:xmpp:reply:0`
+ * fallback so the `> quoted` prefix doesn't double-render on top of the reply
+ * chip. Three shapes per spec:
+ *   1. `<fallback for=...>` with no children → entire body+subject is fallback.
+ *   2. `<fallback><body/></fallback>` (no start/end) → entire body is fallback.
+ *   3. `<fallback><body start=X end=Y/></fallback>` → only that range.
  */
 function stripReplyFallback(msg: ReceivedMessage, base: MessageExtensionsTarget): void {
   const fallbacks = asArray(ext(msg).fallbacks as FallbackPayload | FallbackPayload[] | undefined);
   if (!fallbacks.length || !base.body) return;
-  const range = fallbacks.find((f) => f.for === "urn:xmpp:reply:0")?.body;
-  if (!range) return;
-  const rawStart = range.start ?? 0;
-  const rawEnd = range.end ?? rawStart;
-  if (!Number.isFinite(rawStart) || !Number.isFinite(rawEnd) || rawStart < 0 || rawEnd < 0) {
-    return;
-  }
+  const fallback = fallbacks.find((f) => f.for === "urn:xmpp:reply:0");
+  if (!fallback) return;
   const bodyLength = codePointLength(base.body);
-  const start = Math.max(0, Math.min(rawStart, bodyLength));
-  const end = Math.max(start, Math.min(rawEnd, bodyLength));
+  const range = fallback.body;
+  // Case 1: no `body` field on the parsed fallback → no `<body/>` child →
+  // whole body is fallback. Case 2: `body` is present but start/end are
+  // omitted → also whole body. Both collapse to "strip 0..length".
+  const wholeBody =
+    range === undefined || (range.start === undefined && range.end === undefined);
+  let start: number;
+  let end: number;
+  if (wholeBody) {
+    start = 0;
+    end = bodyLength;
+  } else {
+    const rawStart = range!.start ?? 0;
+    const rawEnd = range!.end ?? rawStart;
+    if (!Number.isFinite(rawStart) || !Number.isFinite(rawEnd) || rawStart < 0 || rawEnd < 0) {
+      return;
+    }
+    start = Math.max(0, Math.min(rawStart, bodyLength));
+    end = Math.max(start, Math.min(rawEnd, bodyLength));
+  }
   if (end <= start) return;
   const startIndex = codePointToCodeUnitIndex(base.body, start);
   const endIndex = codePointToCodeUnitIndex(base.body, end);
@@ -751,6 +783,7 @@ export function dispatchGroupchat(msg: ReceivedMessage, h: GroupchatHandlers): v
   };
   if (messageIds.correctionTargetId) liveMsg.correctionTargetId = messageIds.correctionTargetId;
   if (messageIds.reactionTargetId) liveMsg.reactionTargetId = messageIds.reactionTargetId;
+  if (messageIds.replyableId) liveMsg.replyableId = messageIds.replyableId;
   const authorRealJid = extractMucUserRealJid(msg);
   if (authorRealJid) liveMsg.authorRealJid = authorRealJid;
   if (messageIds.wireIds?.length) liveMsg.wireIds = messageIds.wireIds;

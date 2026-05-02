@@ -37,6 +37,9 @@ describe("reply addressing", () => {
     messaging.messages.value = [
       {
         id: "parent-1",
+        // XEP-0461 §3.2: groupchat replies require the room-assigned
+        // stanza-id; a typical room-stamped message carries replyableId.
+        replyableId: "parent-1",
         author: "Friendly Bob",
         authorJid: "c1@muc.example.com/Friendly Bob",
         body: "hello there",
@@ -118,6 +121,50 @@ describe("reply addressing", () => {
       author: "Bob",
       preview: "want to grab lunch?",
     });
+  });
+
+  test("XEP-0461: refuses to send a groupchat reply when the parent has no room-assigned stanza-id", async () => {
+    // XEP-0461 §3.2 closing line: "messages without one cannot be replied
+    // to". Refuse the send and surface a non-blocking error rather than
+    // leak a non-conformant id (origin-id or @id).
+    const sendGroupMessage = mock(async () => ({ id: "reply-1", state: "sending" as const }));
+    const sendChatState = mock(async () => undefined);
+    const actionError = ref("");
+    const messaging = useMessaging(
+      ref(session()),
+      ref(null),
+      ref({ ...handlerStubs(), sendGroupMessage, sendChatState } as never),
+      ref("w1"),
+      ref("c1"),
+      ref({ id: "c1", name: "general", channel_type: "text" }),
+      String,
+      actionError,
+      () => {
+        actionError.value = "";
+      },
+    );
+
+    messaging.messages.value = [
+      {
+        // No replyableId: this parent came from a non-conformant room or a
+        // pre-stanza-id history slice.
+        id: "parent-no-stanza-id",
+        author: "Friendly Bob",
+        authorJid: "c1@muc.example.com/Friendly Bob",
+        body: "hello there",
+        createdAt: "2024-01-01T00:00:00Z",
+        isSelf: false,
+      },
+    ];
+
+    await messaging.sendMessage("sounds good", [], [], undefined, {
+      id: "parent-no-stanza-id",
+      author: "Friendly Bob",
+      body: "hello there",
+    });
+
+    expect(sendGroupMessage).not.toHaveBeenCalled();
+    expect(actionError.value).toContain("can't be replied to");
   });
 
   test("room sends drop stale reply context when the parent is not in the active timeline", async () => {

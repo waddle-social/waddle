@@ -59,6 +59,7 @@ export function fromLiveMessage(
   };
   if (msg.correctionTargetId) tm.correctionTargetId = msg.correctionTargetId;
   if (msg.reactionTargetId) tm.reactionTargetId = msg.reactionTargetId;
+  if (msg.replyableId) tm.replyableId = msg.replyableId;
   if (msg.authorRealJid) tm.authorRealJid = msg.authorRealJid;
   if (msg.wireIds && msg.wireIds.length > 0) {
     tm.wireIds = msg.wireIds;
@@ -1277,9 +1278,18 @@ export function useMessaging(
       }
 
       const parent = replyTo ? findMessageById(messages.value, replyTo.id) : undefined;
-      const wireReplyTo = replyTo && parent
+      // XEP-0461 §3.2: groupchat replies MUST quote the room-assigned
+      // XEP-0359 stanza-id. Without one, "messages without one cannot be
+      // replied to"; refuse the send rather than leak a non-conformant id.
+      if (replyTo && parent && !parent.replyableId) {
+        actionError.value =
+          "This message can't be replied to (no room stanza-id). Try reloading the channel.";
+        isSending.value = false;
+        return;
+      }
+      const wireReplyTo = replyTo && parent && parent.replyableId
         ? {
-            id: parent.id,
+            id: parent.replyableId,
             author: parent.authorJid ?? replyTo.author,
             ...(replyTo.body ? { body: replyTo.body } : {}),
           }
@@ -1324,9 +1334,11 @@ export function useMessaging(
           ...(markup && markup.length > 0 ? { markup } : {}),
           ...(references && references.length > 0 ? { references } : {}),
         };
-        if (replyTo && parent) {
+        if (replyTo && parent && parent.replyableId) {
+          // Mirror the wire reply id on the optimistic insert so the local
+          // chip and the eventual MAM round-trip resolve to the same id.
           optimistic.replyTo = {
-            id: parent.id,
+            id: parent.replyableId,
             author: replyTo.author,
             ...(replyTo.body ? { preview: replyTo.body } : {}),
           };

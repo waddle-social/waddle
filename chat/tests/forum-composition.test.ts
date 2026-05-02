@@ -142,6 +142,7 @@ describe("forum composition", () => {
     messaging.messages.value = [
       {
         id: "topic-1",
+        replyableId: "topic-1",
         author: "Bob",
         authorJid: "c1@muc.example.com/Bob",
         body: "Let's map the next release.",
@@ -154,6 +155,7 @@ describe("forum composition", () => {
       },
       {
         id: "reply-1",
+        replyableId: "reply-1",
         author: "Carol",
         authorJid: "c1@muc.example.com/Carol",
         body: "Start with onboarding.",
@@ -212,6 +214,7 @@ describe("forum composition", () => {
     );
     messaging.messages.value = [{
       id: "topic-1",
+      replyableId: "topic-1",
       author: "Bob",
       authorJid: "c1@muc.example.com/Bob",
       body: "",
