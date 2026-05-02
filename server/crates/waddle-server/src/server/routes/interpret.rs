@@ -66,7 +66,7 @@
 //!   `ValidateOAuthBearer`, `SetTimer`, `CancelTimer`,
 //!   `RegisterConnection` — wired in later migration steps.
 
-use crate::ai_provider::{generate_ai_response, is_ai_prompt_body};
+use crate::ai_provider::{generate_ai_response, is_ai_prompt_body, HistoricalMessage};
 use crate::auth::Session;
 use crate::permissions::{CheckPermission, Object, ObjectType, Permission, Subject};
 use crate::server::bootstrap_membership::DEPLOYMENT_SERVER_ID;
@@ -1648,7 +1648,8 @@ async fn dispatch_to_room(
                 .as_deref()
                 .filter(|body| is_ai_prompt_body(body) && is_ai_provider_fallback(&response))
             {
-                match generate_ai_response(prompt).await {
+                let room_history = fetch_room_history_for_ai(deps, &room_jid).await;
+                match generate_ai_response(prompt, &room_history).await {
                     Ok(answer) => match DisplayText::new(answer) {
                         Ok(answer) => {
                             response.body = answer;
@@ -1695,6 +1696,50 @@ async fn dispatch_to_room(
 
 fn is_ai_provider_fallback(response: &BotGroupchatResponse) -> bool {
     response.purpose == BotGroupchatResponsePurpose::AiProviderFallback
+}
+
+async fn fetch_room_history_for_ai(deps: &Deps<'_>, room_jid: &BareJid) -> Vec<HistoricalMessage> {
+    let Some(mam_storage) = deps.mam_storage else {
+        return vec![];
+    };
+    let query = waddle_xmpp::mam::MamQuery {
+        max: Some(20),
+        ..Default::default()
+    };
+    match mam_storage
+        .query_messages(&room_jid.to_string(), &query)
+        .await
+    {
+        Ok(result) => result
+            .messages
+            .into_iter()
+            .filter_map(|msg| {
+                let body = msg.body;
+                if body.is_empty() {
+                    return None;
+                }
+                let nick = msg
+                    .from
+                    .rsplit('/')
+                    .next()
+                    .filter(|n| !n.is_empty())
+                    .unwrap_or(&msg.from)
+                    .to_string();
+                Some(HistoricalMessage {
+                    sender_nick: nick,
+                    body,
+                })
+            })
+            .collect(),
+        Err(error) => {
+            warn!(
+                room = %room_jid,
+                %error,
+                "fetch_room_history_for_ai: MAM query failed; proceeding without history"
+            );
+            vec![]
+        }
+    }
 }
 
 struct BotGroupchatDispatch<'a> {

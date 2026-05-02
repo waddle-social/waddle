@@ -43,7 +43,6 @@ import ConfirmDialog from "@/components/ui/ConfirmDialog.vue";
 import type { MemberSummary } from "@/lib/chat-types";
 import type { ExtensionAnnotationAction, MarkupSpan, MessageReference, TimelineMessage } from "@/lib/chat-ui";
 import { avatarLookupCandidates, mentionAutocompleteCandidates, mentionMatchesUsername, mergeMentionMembers } from "@/lib/mentions";
-import { AI_CHATBOT_FEATURE, withAiAssistantMentionCandidate } from "@/lib/ai-thread-ux";
 import {
   moveReactionSelection,
   preserveReactionSelection,
@@ -378,14 +377,8 @@ watch(authorJidByNick, (value) => {
 }, { immediate: true });
 const fetchedAvatarUrlByJid = ref<Record<string, string | null>>({});
 const avatarFetchStateByJid = ref<Record<string, "pending" | "done">>({});
-const aiAssistantEnabled = computed(() =>
-  waddles.currentChannel.value?.features?.includes(AI_CHATBOT_FEATURE) === true,
-);
 const mentionCandidates = computed(() =>
-  withAiAssistantMentionCandidate(
-    mentionAutocompleteCandidates(mergedMentionMembers.value.members),
-    aiAssistantEnabled.value,
-  ).map((candidate) => {
+  mentionAutocompleteCandidates(mergedMentionMembers.value.members).map((candidate) => {
     if (candidate.kind === "broadcast" || !candidate.jid) return candidate;
     return {
       ...candidate,
@@ -1542,7 +1535,6 @@ onUnmounted(() => {
               :thread-index="threads.index.value"
               :xmpp-client="xmppClient"
               :reaction-mode="reactionModeTarget === 'main' ? reactionModeState : null"
-              :ai-assistant-enabled="aiAssistantEnabled"
               @send="sendActiveMessage"
               @typing="notifyActiveComposing"
               @edit-message="editActiveMessage"
@@ -1616,7 +1608,6 @@ onUnmounted(() => {
               :has-older-replies="messaging.threadHasOlder.value[activeThreadStack[activeThreadStack.length - 2] ?? ''] ?? false"
               :upload-progress="{ uploading: false, progress: 0, filename: '' }"
               :channel-name="waddles.currentChannel.value?.name ?? ''"
-              :ai-assistant-enabled="aiAssistantEnabled"
               :hide-composer="true"
               :reaction-mode="null"
               @close="closeThreadPanel"
@@ -1655,7 +1646,6 @@ onUnmounted(() => {
               :has-older-replies="messaging.threadHasOlder.value[activeThreadStack[activeThreadStack.length - 1] ?? ''] ?? false"
               :upload-progress="messaging.uploadProgress.value"
               :channel-name="waddles.currentChannel.value?.name ?? ''"
-              :ai-assistant-enabled="aiAssistantEnabled"
               :reaction-mode="reactionModeTarget === 'thread' ? reactionModeState : null"
               @close="closeThreadPanel"
               @pop-to="popThreadTo"
