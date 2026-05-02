@@ -29,6 +29,56 @@ function makeMsg(overrides: Record<string, unknown>): ReceivedMessage {
   } as ReceivedMessage;
 }
 
+describe("XEP-0461 replyableId", () => {
+  test("groupchat message with a room-assigned stanza-id is replyable using that id", () => {
+    // XEP-0461 §3.2: in groupchat, the id used in <reply id=...> MUST be the
+    // id assigned by the room (XEP-0359 stanza-id whose `by` matches the
+    // room JID).
+    const h = makeHandlers();
+    dispatchGroupchat(
+      makeMsg({
+        id: "wire-id",
+        body: "hi",
+        stanzaIds: [
+          { id: "room-stanza-id", by: "general@muc.waddle.social" },
+        ],
+      }),
+      h,
+    );
+    expect(h.messages[0].replyableId).toBe("room-stanza-id");
+  });
+
+  test("groupchat message without a room-assigned stanza-id is not replyable", () => {
+    // XEP-0461 §3.2 closing line: "messages without one cannot be replied to".
+    // Falling back to origin-id or the @id attribute would violate the spec.
+    const h = makeHandlers();
+    dispatchGroupchat(
+      makeMsg({
+        id: "wire-id",
+        body: "hi",
+        originId: { id: "origin-only" },
+      }),
+      h,
+    );
+    expect(h.messages[0].replyableId).toBeUndefined();
+  });
+
+  test("groupchat message with a non-room stanza-id is not replyable", () => {
+    // A stanza-id stamped by some other entity (e.g., an upstream archive)
+    // is not the one XEP-0461 wants — only the room's own stamp counts.
+    const h = makeHandlers();
+    dispatchGroupchat(
+      makeMsg({
+        id: "wire-id",
+        body: "hi",
+        stanzaIds: [{ id: "elsewhere-id", by: "archive@example.com" }],
+      }),
+      h,
+    );
+    expect(h.messages[0].replyableId).toBeUndefined();
+  });
+});
+
 describe("groupchat reply + thread parsing", () => {
   test("extracts reply pointer into replyTo", () => {
     const h = makeHandlers();
@@ -62,6 +112,41 @@ describe("groupchat reply + thread parsing", () => {
     expect(h.messages).toHaveLength(1);
     expect(h.messages[0].body).toBe("actual reply");
     expect(h.messages[0].replyTo?.id).toBe("msg-1");
+  });
+
+  test("XEP-0428: <fallback> with no children strips the entire body", () => {
+    // Per XEP-0428 §3 the fallback applies to every <body/> when no children
+    // are present. We treat the merged body+subject text as the displayable
+    // string, so stripping the whole body produces an empty string.
+    const h = makeHandlers();
+    dispatchGroupchat(
+      makeMsg({
+        id: "msg-2",
+        body: "this whole text is fallback",
+        reply: { to: "general@muc.waddle.social/bob", id: "msg-1" },
+        fallbacks: [{ for: "urn:xmpp:reply:0" }],
+      }),
+      h,
+    );
+    expect(h.messages).toHaveLength(1);
+    expect(h.messages[0].body).toBe("");
+  });
+
+  test("XEP-0428: <fallback><body/></fallback> with no start/end strips the entire body", () => {
+    // "If start and end attribute are not supplied, the whole respective
+    // message element should be assumed to be there for fallback purposes."
+    const h = makeHandlers();
+    dispatchGroupchat(
+      makeMsg({
+        id: "msg-2",
+        body: "treat me as fallback",
+        reply: { to: "general@muc.waddle.social/bob", id: "msg-1" },
+        fallbacks: [{ for: "urn:xmpp:reply:0", body: {} }],
+      }),
+      h,
+    );
+    expect(h.messages).toHaveLength(1);
+    expect(h.messages[0].body).toBe("");
   });
 
   test("ignores fallbacks for other namespaces", () => {
@@ -267,6 +352,28 @@ describe("groupchat reply + thread parsing", () => {
     expect(h.messages[0].parentThreadId).toBe("thread-root");
   });
 
+  test("keeps bodyless XEP-0201 thread metadata in standard MUC timelines", () => {
+    const h = makeHandlers();
+
+    dispatchGroupchat(
+      makeMsg({
+        id: "thread-marker-1",
+        body: "",
+        thread: "thread-root",
+        parentThread: "parent-root",
+      }),
+      h,
+    );
+
+    expect(h.messages).toHaveLength(1);
+    expect(h.messages[0]).toMatchObject({
+      id: "thread-marker-1",
+      body: "",
+      threadId: "thread-root",
+      parentThreadId: "parent-root",
+    });
+  });
+
   test("extracts forum topic metadata from thread-create", () => {
     const h = makeHandlers();
     dispatchGroupchat(
@@ -299,6 +406,35 @@ describe("groupchat reply + thread parsing", () => {
     expect(h.messages).toHaveLength(1);
     expect(h.messages[0].forumPostKind).toBe("reply");
     expect(h.messages[0].threadId).toBe("topic-1");
+  });
+
+  test("forum reply metadata replaces conflicting XEP thread", () => {
+    const h = makeHandlers();
+    dispatchGroupchat(
+      makeMsg({
+        id: "reply-1",
+        body: "",
+        thread: "conflicting-thread",
+        threadReply: { threadId: "topic-1" },
+      }),
+      h,
+    );
+
+    expect(h.messages).toHaveLength(1);
+    expect(h.messages[0].forumPostKind).toBe("reply");
+    expect(h.messages[0].threadId).toBe("topic-1");
+  });
+
+  test("ignores malformed bodyless forum metadata", () => {
+    const h = makeHandlers();
+
+    dispatchGroupchat(makeMsg({ id: "topic-1", body: "", threadCreate: {} }), h);
+    dispatchGroupchat(makeMsg({ id: "topic-2", body: "", threadCreate: { title: 123 } }), h);
+    dispatchGroupchat(makeMsg({ id: "reply-1", body: "", threadReply: {} }), h);
+    dispatchGroupchat(makeMsg({ id: "reply-2", body: "", threadReply: { threadId: " " } }), h);
+    dispatchGroupchat(makeMsg({ id: "reply-3", body: "", threadReply: { threadId: 123 } }), h);
+
+    expect(h.messages).toHaveLength(0);
   });
 
   test("attaches encrypted file metadata to parsed shared files", () => {

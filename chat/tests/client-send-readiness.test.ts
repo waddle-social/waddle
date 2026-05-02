@@ -101,6 +101,33 @@ describe("client send readiness", () => {
     expect(xmpp.sendMessage).toHaveBeenCalledTimes(1);
   });
 
+  test("XEP-0201: BrowserXmppClient.sendGroupMessage accepts bodyless thread metadata sends", async () => {
+    // XEP-0201 thread create / thread reply payloads are bodyless. The
+    // browser client wrapper must not short-circuit them; otherwise standard
+    // MUC threads can never leave the browser through the regular send path.
+    const xmpp = { sendMessage: mock(() => undefined) };
+    const client = new BrowserXmppClient(session());
+    const roomJid = roomBareJidFor(session(), "c1");
+    (client as unknown as {
+      xmpp: typeof xmpp;
+      connected: boolean;
+      currentRoom: string | null;
+    }).xmpp = xmpp;
+    (client as unknown as { connected: boolean }).connected = true;
+    (client as unknown as { currentRoom: string | null }).currentRoom = roomJid;
+
+    const result = await client.sendGroupMessage("w1", "c1", "", {
+      threadId: "thread-root",
+    });
+
+    expect(result?.state).toBe("sending");
+    expect(typeof result?.id).toBe("string");
+    expect(xmpp.sendMessage).toHaveBeenCalledTimes(1);
+    expect(xmpp.sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ thread: "thread-root", body: "" }),
+    );
+  });
+
   test("room send queues when the room is unavailable", async () => {
     const xmpp = { sendMessage: mock(() => undefined) };
     const client = new BrowserXmppClient(session());
@@ -360,6 +387,41 @@ describe("optimistic UI waits for successful sends", () => {
     expect(messaging.messages.value).toHaveLength(1);
     expect(messaging.messages.value[0]?.deliveryStatus).toBe("queued");
     expect(actionError.value).toBe("");
+  });
+
+  test("room composer allows bodyless standard MUC thread metadata", async () => {
+    const sendGroupMessage = mock(async () => ({ id: "thread-marker-1", state: "sending" as const }));
+    const sendChatState = mock(async () => undefined);
+    const actionError = ref("");
+    const messaging = useMessaging(
+      ref(session()),
+      ref(null),
+      ref({ ...handlerStubs(), sendGroupMessage, sendChatState } as never),
+      ref("w1"),
+      ref("c1"),
+      ref({ id: "c1", name: "general", channel_type: "text" }),
+      normalizeError,
+      actionError,
+      () => {
+        actionError.value = "";
+      },
+    );
+
+    await messaging.sendMessage("", [], [], undefined, undefined, { threadId: "thread-root" });
+
+    expect(sendGroupMessage).toHaveBeenCalledWith(
+      "w1",
+      "c1",
+      "",
+      expect.objectContaining({
+        threadId: "thread-root",
+      }),
+    );
+    expect(messaging.messages.value.at(-1)).toMatchObject({
+      id: "thread-marker-1",
+      body: "",
+      threadId: "thread-root",
+    });
   });
 
   test("DM composer keeps queued messages visible and durable", async () => {

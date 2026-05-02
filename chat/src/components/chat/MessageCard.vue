@@ -441,6 +441,10 @@ const isMentioned = computed(() => {
 });
 const isForumTopic = computed(() => props.message.forumPostKind === "topic" && !!props.message.forumTitle);
 const isForumReply = computed(() => props.message.forumPostKind === "reply");
+// XEP-0461 §3.2: groupchat replies require the room-assigned XEP-0359
+// stanza-id. Hide the reply action on messages that lack one rather than
+// surface a button that will refuse on click.
+const canReplyToMessage = computed(() => !!props.message.replyableId);
 const forumThreadLabel = computed(() =>
   props.message.forumPostKind === "topic"
     ? props.message.forumTitle
@@ -1252,6 +1256,7 @@ watch(
         />
       </div>
       <button
+        v-if="canReplyToMessage"
         type="button"
         class="h-8 w-8 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-all duration-150"
         title="Reply"
@@ -1351,6 +1356,7 @@ watch(
           </div>
 
           <button
+            v-if="canReplyToMessage"
             type="button"
             class="type-field w-full flex items-center gap-3 px-3 h-12 rounded-lg hover:bg-muted active:bg-muted transition-colors text-left"
             @click="startReplyFromMenu"

@@ -60,7 +60,6 @@ export async function queryMam(
 function parseRoomMamResult(
   result: Awaited<ReturnType<Agent["searchHistory"]>>,
   roomJid: string,
-  requestedThreadId?: string,
 ): MamHistoryPage<LiveRoomMessage> {
   const collected: LiveRoomMessage[] = [];
 
@@ -96,13 +95,12 @@ function parseRoomMamResult(
       });
 
       if (parsedMessage) {
-        if (
-          requestedThreadId
-          && !parsedMessage.threadId
-          && parsedMessage.replyTo?.id === requestedThreadId
-        ) {
-          parsedMessage = { ...parsedMessage, threadId: requestedThreadId };
-        }
+        // XEP-0461 §3: a reply identifies the replied-to message; it does
+        // not imply XEP-0201 thread membership. Threaded messages must
+        // carry their own <thread/>; the server archives <thread parent=...>
+        // faithfully, so anything that should reload as part of a thread
+        // already has the metadata. Do not synthesize a threadId from
+        // <reply id=...> here.
         collected.push(parsedMessage);
         continue;
       }
@@ -166,7 +164,7 @@ export async function queryMamByThread(
       ],
     },
   });
-  return parseRoomMamResult(result, roomJid, threadId).messages;
+  return parseRoomMamResult(result, roomJid).messages;
 }
 
 export async function queryMamThreadPage(
@@ -188,7 +186,7 @@ export async function queryMamThreadPage(
       ],
     },
   });
-  return parseRoomMamResult(result, roomJid, threadId);
+  return parseRoomMamResult(result, roomJid);
 }
 
 /** XEP-0431: Full-text search in MAM. Throws on IQ/transport errors. */

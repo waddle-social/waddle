@@ -28,13 +28,36 @@ use crate::xep::xep0359::{add_stanza_id, is_stanza_id_element};
 use crate::xep::xep0421::{generate_occupant_id, set_occupant_id_on_message};
 use crate::xep::xep0508::{extract_forum_action, ForumAction};
 use jid::{BareJid, Jid};
-use waddle_xmpp_core::xep0201::set_thread_id;
+use waddle_xmpp_core::xep0201::{
+    build_thread_element, is_thread_element_for_stanza, set_thread_id,
+    thread_info_from_message_in_stanza_ns, ThreadInfo, CLIENT_STANZA_NS, SERVER_STANZA_NS,
+};
 use xmpp_parsers::message::Message;
 
 /// XEP-0045 + XEP-0359 + XEP-0421 canonicalize handler for the room
 /// chain.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct MucCanonicalizeHandler;
+
+fn replace_stanza_thread(message: &mut Message, thread_id: impl Into<String>) {
+    let thread_id = thread_id.into();
+    let parent = thread_info_from_message_in_stanza_ns(message, CLIENT_STANZA_NS)
+        .filter(|info| info.id == thread_id)
+        .and_then(|info| info.parent);
+    message.payloads.retain(|element| {
+        !is_thread_element_for_stanza(element, CLIENT_STANZA_NS)
+            && !is_thread_element_for_stanza(element, SERVER_STANZA_NS)
+    });
+    if let Some(parent) = parent {
+        message.thread = None;
+        message.payloads.push(build_thread_element(
+            &ThreadInfo::child(thread_id, parent),
+            CLIENT_STANZA_NS,
+        ));
+    } else {
+        set_thread_id(message, thread_id);
+    }
+}
 
 impl RoomHandler for MucCanonicalizeHandler {
     fn name(&self) -> &'static str {
@@ -64,11 +87,14 @@ impl RoomHandler for MucCanonicalizeHandler {
         // 2. Stamp a fresh stanza-id.
         let id = ctx.id_gen.fresh_stanza_id();
         add_stanza_id(message, &id, &ctx.room.to_string());
-        if matches!(
-            extract_forum_action(message),
-            Some(ForumAction::CreateThread(_))
-        ) {
-            set_thread_id(message, &id);
+        match extract_forum_action(message) {
+            Some(ForumAction::CreateThread(_)) => {
+                replace_stanza_thread(message, &id);
+            }
+            Some(ForumAction::Reply(reply)) => {
+                replace_stanza_thread(message, reply.thread_id);
+            }
+            _ => {}
         }
 
         // 3. Rewrite `from='room/nick'` and drop `to` (the reflector
@@ -111,6 +137,7 @@ mod tests {
     use crate::xep::xep0421::{extract_occupant_id_from_message, OccupantId, OccupantIdSecret};
     use crate::xep::xep0508::{set_thread_create, ThreadCreate};
     use jid::FullJid;
+    use waddle_xmpp_core::xep0201::thread_info_from_message;
     use xmpp_parsers::message::{Body, Message, MessageType};
 
     fn full(s: &str) -> FullJid {
@@ -206,6 +233,110 @@ mod tests {
         assert_eq!(
             msg.thread.as_ref().map(|thread| thread.0.as_str()),
             Some("room-stanza-id")
+        );
+    }
+
+    #[test]
+    fn thread_reply_uses_forum_thread_id_when_xep_thread_missing() {
+        let room = bare("team@conf.example.com");
+        let sender = full("alice@example.com/web");
+        let mut msg = groupchat(&room, &sender, "reply");
+        crate::xep::xep0508::set_thread_reply(
+            &mut msg,
+            &crate::xep::xep0508::ThreadReply::new("topic-root"),
+        );
+
+        run(&room, &sender, "alice-nick", &mut msg, "reply-stanza-id");
+
+        assert_eq!(
+            msg.thread.as_ref().map(|thread| thread.0.as_str()),
+            Some("topic-root")
+        );
+    }
+
+    #[test]
+    fn thread_reply_replaces_conflicting_xep_thread() {
+        let room = bare("team@conf.example.com");
+        let sender = full("alice@example.com/web");
+        let mut msg = groupchat(&room, &sender, "reply");
+        set_thread_id(&mut msg, "explicit-thread");
+        crate::xep::xep0508::set_thread_reply(
+            &mut msg,
+            &crate::xep::xep0508::ThreadReply::new("topic-root"),
+        );
+
+        run(&room, &sender, "alice-nick", &mut msg, "reply-stanza-id");
+
+        assert_eq!(
+            msg.thread.as_ref().map(|thread| thread.0.as_str()),
+            Some("topic-root")
+        );
+    }
+
+    #[test]
+    fn thread_reply_replaces_conflicting_xep_thread_payload() {
+        let room = bare("team@conf.example.com");
+        let sender = full("alice@example.com/web");
+        let mut msg = groupchat(&room, &sender, "reply");
+        set_thread_id(&mut msg, "typed-conflict");
+        msg.payloads.push(build_thread_element(
+            &ThreadInfo::child("payload-conflict", "parent-conflict"),
+            CLIENT_STANZA_NS,
+        ));
+        crate::xep::xep0508::set_thread_reply(
+            &mut msg,
+            &crate::xep::xep0508::ThreadReply::new("topic-root"),
+        );
+
+        run(&room, &sender, "alice-nick", &mut msg, "reply-stanza-id");
+
+        assert_eq!(
+            thread_info_from_message(&msg),
+            Some(ThreadInfo::root("topic-root"))
+        );
+    }
+
+    #[test]
+    fn thread_reply_preserves_matching_xep_thread_parent() {
+        let room = bare("team@conf.example.com");
+        let sender = full("alice@example.com/web");
+        let mut msg = groupchat(&room, &sender, "nested reply");
+        msg.payloads.push(build_thread_element(
+            &ThreadInfo::child("child-thread", "root-thread"),
+            CLIENT_STANZA_NS,
+        ));
+        crate::xep::xep0508::set_thread_reply(
+            &mut msg,
+            &crate::xep::xep0508::ThreadReply::new("child-thread"),
+        );
+
+        run(&room, &sender, "alice-nick", &mut msg, "reply-stanza-id");
+
+        assert_eq!(
+            thread_info_from_message(&msg),
+            Some(ThreadInfo::child("child-thread", "root-thread"))
+        );
+    }
+
+    #[test]
+    fn thread_reply_does_not_promote_server_namespace_thread_parent() {
+        let room = bare("team@conf.example.com");
+        let sender = full("alice@example.com/web");
+        let mut msg = groupchat(&room, &sender, "nested reply");
+        msg.payloads.push(build_thread_element(
+            &ThreadInfo::child("topic-root", "bad-parent"),
+            SERVER_STANZA_NS,
+        ));
+        crate::xep::xep0508::set_thread_reply(
+            &mut msg,
+            &crate::xep::xep0508::ThreadReply::new("topic-root"),
+        );
+
+        run(&room, &sender, "alice-nick", &mut msg, "reply-stanza-id");
+
+        assert_eq!(
+            thread_info_from_message(&msg),
+            Some(ThreadInfo::root("topic-root"))
         );
     }
 
