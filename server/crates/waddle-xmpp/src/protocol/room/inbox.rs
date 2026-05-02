@@ -24,6 +24,7 @@ use crate::inbox::runtime::{preview_text, should_project_message};
 use crate::xep::xep0508::{extract_forum_action, ForumAction};
 use jid::BareJid;
 use std::collections::HashSet;
+use waddle_xmpp_core::xep0201::thread_info_from_message;
 use xmpp_parsers::message::Message;
 
 /// Per-occupant inbox projection handler for the room handler chain.
@@ -83,12 +84,15 @@ impl RoomHandler for MucInboxHandler {
 /// title/author metadata, otherwise a bot or later human reply can overwrite
 /// the root's inbox projection.
 fn thread_projection(message: &Message) -> Option<GroupchatThreadProjection> {
-    let thread = message.thread.as_ref()?;
+    // `parser_utils::reattach_thread_parent` moves `<thread parent=...>` into
+    // payloads and clears `message.thread`, so reading only the typed field
+    // would miss every XEP-0201 child reply on MAM replay.
+    let info = thread_info_from_message(message)?;
     let forum_title = extract_forum_action(message).and_then(|action| match action {
         ForumAction::CreateThread(tc) => Some(tc.title),
         _ => None,
     });
-    let is_thread_root = message.id.as_deref() == Some(thread.0.as_str());
+    let is_thread_root = info.parent.is_none() && message.id.as_deref() == Some(info.id.as_str());
     let title = forum_title.or_else(|| is_thread_root.then(|| preview_text(message)).flatten());
     let author_nick = title.as_ref().and_then(|_| {
         message
@@ -97,7 +101,7 @@ fn thread_projection(message: &Message) -> Option<GroupchatThreadProjection> {
             .and_then(|jid| jid.resource().map(|r| r.to_string()))
     });
     Some(GroupchatThreadProjection {
-        thread_id: thread.0.clone(),
+        thread_id: info.id,
         title,
         author_nick,
     })
@@ -111,7 +115,8 @@ mod tests {
     use crate::types::{Affiliation, Role};
     use crate::xep::xep0421::OccupantIdSecret;
     use jid::{FullJid, Jid};
-    use waddle_xmpp_core::xep0201::set_thread_id;
+    use waddle_xmpp_core::parser_utils::reattach_thread_parent;
+    use waddle_xmpp_core::xep0201::{set_thread_id, CLIENT_STANZA_NS};
     use xmpp_parsers::message::{Body, Message, MessageType};
 
     fn full(s: &str) -> FullJid {
@@ -265,5 +270,30 @@ mod tests {
         assert_eq!(thread.thread_id, "root-stanza");
         assert_eq!(thread.title.as_deref(), Some("Root prompt"));
         assert_eq!(thread.author_nick.as_deref(), Some("alice"));
+    }
+
+    #[test]
+    fn thread_projection_reads_xep_0201_payload_when_typed_thread_is_cleared() {
+        // After reattach_thread_parent runs at the inbound parse boundary,
+        // <thread parent='root-1'>child-2</thread> lives in payloads and
+        // message.thread is None. The inbox must still resolve the thread id.
+        let room = bare("team@conf.example.com");
+        let alice = full("team@conf.example.com/alice");
+        let mut msg = groupchat(&room, &alice, "child reply");
+        msg.id = Some("reply-stanza".to_string());
+        set_thread_id(&mut msg, "child-2");
+        reattach_thread_parent(&mut msg, "root-1".to_string(), CLIENT_STANZA_NS);
+        assert!(
+            msg.thread.is_none(),
+            "reattach_thread_parent must clear the typed thread"
+        );
+
+        let thread = thread_projection(&msg).expect("payload-form thread projection");
+
+        assert_eq!(thread.thread_id, "child-2");
+        // Child replies must never publish title/author metadata, otherwise
+        // they overwrite the root's inbox row on MAM replay.
+        assert_eq!(thread.title, None);
+        assert_eq!(thread.author_nick, None);
     }
 }
