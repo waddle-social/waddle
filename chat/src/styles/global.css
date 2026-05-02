@@ -1512,7 +1512,6 @@
 }
 
 .type-message-body {
-  max-width: var(--chat-readable-measure);
   font-size: var(--text-message);
   line-height: var(--leading-message);
   letter-spacing: 0;
