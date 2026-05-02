@@ -106,6 +106,19 @@ fn optional_env(name: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+/// A single message from the room's recent history, used to give the AI
+/// provider conversational context.
+#[derive(Debug, Clone)]
+pub struct RoomHistoryMessage {
+    /// Nick-portion of the sender's full JID (e.g. `"alice"`).
+    pub nick: String,
+    /// Plain-text message body.
+    pub body: String,
+    /// True when the sender is the bot itself (used to choose the
+    /// `"assistant"` role in the OpenAI messages array).
+    pub is_bot: bool,
+}
+
 #[derive(Debug, Serialize)]
 struct OpenAiChatRequest<'a> {
     model: &'a str,
@@ -133,9 +146,14 @@ struct OpenAiResponseMessage {
     content: String,
 }
 
-pub async fn generate_ai_response(prompt: &str) -> Result<String, AiProviderError> {
+/// Generate an AI response for `prompt`, optionally using `history` as
+/// preceding room context messages (oldest-first).
+pub async fn generate_ai_response(
+    prompt: &str,
+    history: &[RoomHistoryMessage],
+) -> Result<String, AiProviderError> {
     let config = AiProviderConfig::from_env()?;
-    generate_ai_response_with_config(ai_http_client()?, &config, prompt).await
+    generate_ai_response_with_config(ai_http_client()?, &config, prompt, history).await
 }
 
 pub fn is_ai_provider_configured() -> bool {
@@ -146,10 +164,11 @@ pub async fn generate_ai_response_with_config(
     client: &reqwest::Client,
     config: &AiProviderConfig,
     prompt: &str,
+    history: &[RoomHistoryMessage],
 ) -> Result<String, AiProviderError> {
     match config.kind {
         AiProviderKind::OpenAi | AiProviderKind::OpenRouter => {
-            generate_openai_compatible_response(client, config, prompt).await
+            generate_openai_compatible_response(client, config, prompt, history).await
         }
     }
 }
@@ -172,23 +191,33 @@ async fn generate_openai_compatible_response(
     client: &reqwest::Client,
     config: &AiProviderConfig,
     prompt: &str,
+    history: &[RoomHistoryMessage],
 ) -> Result<String, AiProviderError> {
     let url = format!(
         "{}/v1/chat/completions",
         config.base_url.trim_end_matches('/')
     );
+
+    // Build the message list: system prompt → history context → current prompt.
+    let mut messages: Vec<OpenAiMessage<'_>> = Vec::with_capacity(2 + history.len());
+    messages.push(OpenAiMessage {
+        role: "system",
+        content: "You are Waddle's XMPP-native room assistant. Answer concisely.",
+    });
+    for msg in history {
+        messages.push(OpenAiMessage {
+            role: if msg.is_bot { "assistant" } else { "user" },
+            content: msg.body.as_str(),
+        });
+    }
+    messages.push(OpenAiMessage {
+        role: "user",
+        content: prompt,
+    });
+
     let request = OpenAiChatRequest {
         model: config.model.as_str(),
-        messages: vec![
-            OpenAiMessage {
-                role: "system",
-                content: "You are Waddle's XMPP-native room assistant. Answer concisely.",
-            },
-            OpenAiMessage {
-                role: "user",
-                content: prompt,
-            },
-        ],
+        messages,
     };
 
     let mut builder = client
@@ -289,7 +318,7 @@ fn is_command_boundary(next: Option<&u8>) -> bool {
 mod tests {
     use super::{
         clean_ai_prompt, generate_ai_response_with_config, is_ai_prompt_body, AiProviderConfig,
-        AiProviderError, AiProviderKind,
+        AiProviderError, AiProviderKind, RoomHistoryMessage,
     };
     use wiremock::matchers::{body_string_contains, header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -321,6 +350,7 @@ mod tests {
                 app_title: None,
             },
             "/ai Who is Rawkode?",
+            &[],
         )
         .await
         .expect("mocked response");
@@ -354,6 +384,7 @@ mod tests {
                 app_title: None,
             },
             "/ai what is the capital of Canada?",
+            &[],
         )
         .await
         .expect("mocked response");
@@ -384,9 +415,55 @@ mod tests {
                 app_title: None,
             },
             "/ai Who is Rawkode?",
+            &[],
         )
         .await
         .expect("provider response");
+    }
+
+    #[tokio::test]
+    async fn history_messages_are_sent_as_context() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(body_string_contains("earlier context"))
+            .and(body_string_contains("bot answer"))
+            .and(body_string_contains("/ai follow-up"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "choices": [{ "message": { "content": "got context" } }]
+            })))
+            .mount(&server)
+            .await;
+
+        let history = vec![
+            RoomHistoryMessage {
+                nick: "alice".to_string(),
+                body: "earlier context".to_string(),
+                is_bot: false,
+            },
+            RoomHistoryMessage {
+                nick: "bot".to_string(),
+                body: "bot answer".to_string(),
+                is_bot: true,
+            },
+        ];
+        let answer = generate_ai_response_with_config(
+            &reqwest::Client::new(),
+            &AiProviderConfig {
+                kind: AiProviderKind::OpenAi,
+                api_key: "test-key".to_string(),
+                model: "gpt-test".to_string(),
+                base_url: server.uri(),
+                http_referer: None,
+                app_title: None,
+            },
+            "/ai follow-up",
+            &history,
+        )
+        .await
+        .expect("history context response");
+
+        assert_eq!(answer, "got context");
     }
 
     #[tokio::test]
@@ -411,6 +488,7 @@ mod tests {
                 app_title: None,
             },
             "/ai no fake answers",
+            &[],
         )
         .await
         .expect_err("empty response");

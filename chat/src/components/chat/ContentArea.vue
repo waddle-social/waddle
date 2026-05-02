@@ -5,7 +5,7 @@ import { isForumChannel as detectForumChannel } from "@/lib/channel-types";
 import { getConnectionNoticeCopy } from "@/lib/connection-notice";
 import { findMessageElementById } from "@/lib/message-targeting";
 import { getReplyJumpNotice } from "@/lib/reply-ux";
-import { filterV1ExtensionPaletteCommands, isAiThreadPromptBody, nextAiThreadRootToOpen } from "@/lib/ai-thread-ux";
+import { filterV1ExtensionPaletteCommands, findBotReplyThreadToOpen } from "@/lib/ai-thread-ux";
 import {
   getPinnedScrollTop,
   getNewMessagesDividerPlacement,
@@ -123,8 +123,9 @@ const extensionLauncherDetail = ref("");
 const extensionCommandStates = ref<Record<string, { state: "loading" | "success" | "warning" | "error"; detail?: string }>>({});
 const extensionCommandForms = ref<Record<string, { sessionId: string; fields: ExtensionCommandFormField[]; actions?: ExtensionCommandAction[] }>>({});
 const extensionCommandActions = ref<Record<string, ExtensionAnnotationAction[]>>({});
-const pendingAiThreadPromptBodies: string[] = [];
-let seenMessageIdsForAiThread = new Set(props.messages.map((message) => message.id));
+// Track which message IDs we have already seen so that only genuinely live
+// (post-mount) bot replies trigger the generic thread auto-open.
+let seenMessageIds = new Set(props.messages.map((m) => m.id));
 
 type MessageComposerHandle = {
   addAttachments: (files: Array<File | Blob>) => void;
@@ -381,9 +382,6 @@ async function scrollToMessage(messageId: string) {
 
 function onSend(body: string, markup: MarkupSpan[], references: MessageReference[], files?: Array<File | Blob>) {
   const pending = replyingTo.value;
-  if (!pending && props.channel && !props.dmPeer && isAiThreadPromptBody(body)) {
-    pendingAiThreadPromptBodies.push(body);
-  }
   emit(
     "send",
     body,
@@ -449,19 +447,18 @@ const conversationScope = computed(() => [
 ].join(":"));
 
 watch(conversationScope, () => {
-  pendingAiThreadPromptBodies.length = 0;
-  seenMessageIdsForAiThread = new Set(props.messages.map((message) => message.id));
+  seenMessageIds = new Set(props.messages.map((m) => m.id));
 });
 
+// Generic bot-reply thread auto-open: when a live non-self thread reply
+// arrives whose root is a self-authored feed message, open that thread
+// automatically.  This works for any extension bot, not just the AI
+// chatbot.  Only messages that arrive *after* mount (not in seenMessageIds)
+// trigger the open, preventing spurious auto-opens on initial MAM load.
 watch(() => props.messages, (messages) => {
-  if (pendingAiThreadPromptBodies.length > 0) {
-    const match = nextAiThreadRootToOpen(messages, pendingAiThreadPromptBodies, seenMessageIdsForAiThread);
-    if (match) {
-      pendingAiThreadPromptBodies.splice(match.promptIndex, 1);
-      emit("openThread", match.messageId);
-    }
-  }
-  seenMessageIdsForAiThread = new Set(messages.map((message) => message.id));
+  const threadId = findBotReplyThreadToOpen(messages, seenMessageIds);
+  if (threadId) emit("openThread", threadId);
+  seenMessageIds = new Set(messages.map((m) => m.id));
 });
 const hasSeenOnline = ref(props.xmppStatus.state === "online");
 const showReconnectedNotice = ref(false);

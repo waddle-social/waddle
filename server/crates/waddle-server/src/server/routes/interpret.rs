@@ -66,7 +66,7 @@
 //!   `ValidateOAuthBearer`, `SetTimer`, `CancelTimer`,
 //!   `RegisterConnection` — wired in later migration steps.
 
-use crate::ai_provider::{generate_ai_response, is_ai_prompt_body};
+use crate::ai_provider::{generate_ai_response, is_ai_prompt_body, RoomHistoryMessage};
 use crate::auth::Session;
 use crate::permissions::{CheckPermission, Object, ObjectType, Permission, Subject};
 use crate::server::bootstrap_membership::DEPLOYMENT_SERVER_ID;
@@ -89,7 +89,7 @@ use waddle_xmpp::mam::storage::MamStorage;
 use waddle_xmpp::mam::{
     ArchivedMention, ArchivedMessage as MamArchivedMessage, ArchivedReactionSet, ArchivedReference,
     ArchivedReply, ArchivedRetraction, ArchivedRichMessage, ArchivedRichPayload, ArchivedTombstone,
-    RichMessageId, RichText, STANZA_ID_NS,
+    MamQuery, RichMessageId, RichText, STANZA_ID_NS,
 };
 use waddle_xmpp::muc::room_actor::{GetNicknameGeneration, GetRoomSnapshot, RoomActor};
 use waddle_xmpp::muc::room_registry_actor::{GetRoom, RoomRegistryActor};
@@ -1648,7 +1648,13 @@ async fn dispatch_to_room(
                 .as_deref()
                 .filter(|body| is_ai_prompt_body(body) && is_ai_provider_fallback(&response))
             {
-                match generate_ai_response(prompt).await {
+                let history = query_room_history_for_ai(
+                    deps.mam_storage,
+                    &room_jid,
+                    canonical_source_reply.as_ref().map(|r| r.id.as_str()),
+                )
+                .await;
+                match generate_ai_response(prompt, &history).await {
                     Ok(answer) => match DisplayText::new(answer) {
                         Ok(answer) => {
                             response.body = answer;
@@ -1695,6 +1701,61 @@ async fn dispatch_to_room(
 
 fn is_ai_provider_fallback(response: &BotGroupchatResponse) -> bool {
     response.purpose == BotGroupchatResponsePurpose::AiProviderFallback
+}
+
+/// The bot nick used when the server dispatches AI responses on behalf of
+/// the local bot account (`waddle@{muc-domain}/bot`).
+const BOT_RESOURCE: &str = "bot";
+
+/// Maximum number of archived room messages fetched as AI context.
+const AI_HISTORY_CONTEXT_LIMIT: u32 = 10;
+
+/// Query the `AI_HISTORY_CONTEXT_LIMIT` most recent messages from the
+/// room archive that precede the current prompt (identified by
+/// `before_archive_id`).  Returns an empty slice when MAM storage is
+/// unavailable or the query fails.
+async fn query_room_history_for_ai(
+    mam_storage: Option<&Arc<dyn MamStorage>>,
+    room_jid: &BareJid,
+    before_archive_id: Option<&str>,
+) -> Vec<RoomHistoryMessage> {
+    let Some(storage) = mam_storage else {
+        return Vec::new();
+    };
+    let query = MamQuery {
+        max: Some(AI_HISTORY_CONTEXT_LIMIT),
+        before_id: before_archive_id.map(ToOwned::to_owned),
+        ..Default::default()
+    };
+    match storage.query_messages(&room_jid.to_string(), &query).await {
+        Ok(result) => result
+            .messages
+            .into_iter()
+            .filter(|msg| !msg.body.trim().is_empty())
+            .map(|msg| {
+                let nick = msg
+                    .from
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(&msg.from)
+                    .to_string();
+                let is_bot = nick == BOT_RESOURCE;
+                RoomHistoryMessage {
+                    nick,
+                    body: msg.body,
+                    is_bot,
+                }
+            })
+            .collect(),
+        Err(error) => {
+            warn!(
+                room = %room_jid,
+                %error,
+                "AI history query failed; proceeding without context"
+            );
+            Vec::new()
+        }
+    }
 }
 
 struct BotGroupchatDispatch<'a> {

@@ -4,7 +4,6 @@ use jid::{BareJid, FullJid, Jid};
 use std::sync::Arc;
 use tracing::{debug, warn};
 use url::{Host, Url};
-use waddle_extensions::AI_CHATBOT_NAMESPACE;
 use waddle_xmpp::{
     carbons::CARBONS_NS,
     commands::{CommandContext, CommandResult},
@@ -98,9 +97,8 @@ fn extension_features_for_disco(state: &WebSocketState) -> Vec<Feature> {
         .deps
         .protocol
         .extension_manager
-        .extension_features()
+        .advertised_feature_namespaces(ai_provider_configured)
         .into_iter()
-        .filter(|ns| ai_provider_configured || ns != AI_CHATBOT_NAMESPACE)
         .map(|ns| Feature::new(&ns))
         .collect()
 }

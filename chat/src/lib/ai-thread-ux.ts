@@ -24,10 +24,6 @@ const AI_COMPOSER_COMMANDS: readonly AiComposerCommand[] = [
   },
 ];
 
-export function isAiThreadPromptBody(body: string): boolean {
-  return /^\s*\/ai(?:\s|$)/i.test(body) || /@waddle\b/i.test(body);
-}
-
 export function aiComposerCommandResults(query: string, enabled = true): AiComposerCommand[] {
   if (!enabled) return [];
   const normalized = query.trim().replace(/^\/+/, "").toLowerCase();
@@ -57,23 +53,29 @@ export function withAiAssistantMentionCandidate(
   ];
 }
 
-function isAiThreadRootCandidate(message: TimelineMessage, promptBody: string): boolean {
-  return message.isSelf
-    && message.body === promptBody
-    && !message.replyTo
-    && message.deliveryStatus === "delivered"
-    && (!message.threadId || message.threadId === message.id);
-}
-
-export function nextAiThreadRootToOpen(
+/**
+ * Generic bot-reply thread auto-open: scans `messages` for the first
+ * message that is *new* (not in `seenMessageIds`), comes from someone
+ * else (not `isSelf`), is a thread reply (`threadId` set and different
+ * from its own `id`), and whose thread root is a self-authored feed
+ * message.  Returns the root's id so the caller can open that thread.
+ *
+ * This replaces the previous AI-specific pending-prompt mechanism and
+ * works for any extension bot, not just the AI chatbot.
+ */
+export function findBotReplyThreadToOpen(
   messages: readonly TimelineMessage[],
-  pendingPromptBodies: readonly string[],
   seenMessageIds: ReadonlySet<string>,
-): { messageId: string; promptIndex: number } | undefined {
-  for (const message of messages) {
-    if (seenMessageIds.has(message.id)) continue;
-    const promptIndex = pendingPromptBodies.findIndex((body) => isAiThreadRootCandidate(message, body));
-    if (promptIndex >= 0) return { messageId: message.id, promptIndex };
+): string | undefined {
+  for (const msg of messages) {
+    if (seenMessageIds.has(msg.id)) continue;
+    // Only thread replies from others.
+    if (!msg.threadId || msg.isSelf || msg.id === msg.threadId) continue;
+    // Thread root must be a self-authored feed message visible in the timeline.
+    const root = messages.find(
+      (m) => m.id === msg.threadId && m.isSelf && (!m.threadId || m.id === m.threadId),
+    );
+    if (root) return root.id;
   }
   return undefined;
 }

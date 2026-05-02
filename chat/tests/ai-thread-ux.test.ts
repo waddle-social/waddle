@@ -3,14 +3,12 @@ import type { TimelineMessage } from "../src/lib/chat-ui";
 import {
   aiComposerCommandResults,
   filterV1ExtensionPaletteCommands,
-  isAiThreadPromptBody,
-  nextAiThreadRootToOpen,
+  findBotReplyThreadToOpen,
   withAiAssistantMentionCandidate,
 } from "../src/lib/ai-thread-ux";
 
-function message(overrides: Partial<TimelineMessage>): TimelineMessage {
+function message(overrides: Partial<TimelineMessage> & { id: string }): TimelineMessage {
   return {
-    id: "msg-1",
     author: "alice",
     body: "hello",
     createdAt: "2026-05-01T10:00:00.000Z",
@@ -20,50 +18,72 @@ function message(overrides: Partial<TimelineMessage>): TimelineMessage {
 }
 
 describe("AI thread UX", () => {
-  test("detects /ai prompts and @waddle mentions", () => {
-    expect(isAiThreadPromptBody("/ai summarize this")).toBe(true);
-    expect(isAiThreadPromptBody("  /ai")).toBe(true);
-    expect(isAiThreadPromptBody("can @waddle help?")).toBe(true);
-    expect(isAiThreadPromptBody("plain message")).toBe(false);
-    expect(isAiThreadPromptBody("prefix /ai in the middle")).toBe(false);
-  });
+  describe("findBotReplyThreadToOpen", () => {
+    test("opens thread when a live bot reply arrives for a self-authored root", () => {
+      const seen = new Set(["prompt-1"]);
+      const result = findBotReplyThreadToOpen(
+        [
+          message({ id: "prompt-1", isSelf: true }),
+          message({ id: "bot-reply-1", isSelf: false, threadId: "prompt-1" }),
+        ],
+        seen,
+      );
+      expect(result).toBe("prompt-1");
+    });
 
-  test("opens the new self-authored main-feed root for a pending AI prompt", () => {
-    const seen = new Set(["old-ai"]);
-    const result = nextAiThreadRootToOpen(
-      [
-        message({ id: "old-ai", body: "/ai old", deliveryStatus: "delivered" }),
-        message({ id: "new-ai", body: "/ai summarize this", deliveryStatus: "delivered" }),
-      ],
-      ["/ai summarize this"],
-      seen,
-    );
+    test("ignores messages already in seenMessageIds", () => {
+      const seen = new Set(["prompt-1", "bot-reply-1"]);
+      expect(findBotReplyThreadToOpen(
+        [
+          message({ id: "prompt-1", isSelf: true }),
+          message({ id: "bot-reply-1", isSelf: false, threadId: "prompt-1" }),
+        ],
+        seen,
+      )).toBeUndefined();
+    });
 
-    expect(result).toEqual({ messageId: "new-ai", promptIndex: 0 });
-  });
+    test("ignores self-authored replies (only opens for others)", () => {
+      const seen = new Set<string>();
+      expect(findBotReplyThreadToOpen(
+        [
+          message({ id: "root", isSelf: true }),
+          message({ id: "self-reply", isSelf: true, threadId: "root" }),
+        ],
+        seen,
+      )).toBeUndefined();
+    });
 
-  test("does not open threads for replies, thread children, other users, or already-seen messages", () => {
-    const pending = ["@waddle summarize"];
-    const seen = new Set(["seen-root"]);
+    test("ignores thread roots (id === threadId)", () => {
+      const seen = new Set<string>();
+      expect(findBotReplyThreadToOpen(
+        [
+          message({ id: "root", isSelf: false, threadId: "root" }),
+        ],
+        seen,
+      )).toBeUndefined();
+    });
 
-    expect(nextAiThreadRootToOpen([
-      message({ id: "seen-root", body: "@waddle summarize" }),
-      message({ id: "reply", body: "@waddle summarize", deliveryStatus: "delivered", replyTo: { id: "root" } }),
-      message({ id: "child", body: "@waddle summarize", deliveryStatus: "delivered", threadId: "root" }),
-      message({ id: "other-user", body: "@waddle summarize", deliveryStatus: "delivered", isSelf: false }),
-    ], pending, seen)).toBeUndefined();
-  });
+    test("requires the thread root to be self-authored and a feed message", () => {
+      const seen = new Set<string>();
+      // Root is from another user — don't open.
+      expect(findBotReplyThreadToOpen(
+        [
+          message({ id: "other-root", isSelf: false }),
+          message({ id: "bot-reply", isSelf: false, threadId: "other-root" }),
+        ],
+        seen,
+      )).toBeUndefined();
+    });
 
-  test("waits for the canonical delivered self-echo before opening", () => {
-    const pending = ["/ai summarize this"];
-
-    expect(nextAiThreadRootToOpen([
-      message({ id: "client-id", body: "/ai summarize this", deliveryStatus: "sending" }),
-    ], pending, new Set())).toBeUndefined();
-
-    expect(nextAiThreadRootToOpen([
-      message({ id: "canonical-room-id", body: "/ai summarize this", deliveryStatus: "delivered" }),
-    ], pending, new Set(["client-id"]))).toEqual({ messageId: "canonical-room-id", promptIndex: 0 });
+    test("ignores replies when thread root is not in the message list", () => {
+      const seen = new Set<string>();
+      expect(findBotReplyThreadToOpen(
+        [
+          message({ id: "bot-reply", isSelf: false, threadId: "missing-root" }),
+        ],
+        seen,
+      )).toBeUndefined();
+    });
   });
 
   test("hides the AI chatbot command from v1 extension palette discovery", () => {

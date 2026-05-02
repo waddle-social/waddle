@@ -208,6 +208,18 @@ impl ExtensionManager {
         self.feature_namespaces.clone()
     }
 
+    /// Returns the feature namespaces that should be advertised in
+    /// service-discovery responses.  When `ai_provider_available` is
+    /// `false` the AI chatbot feature namespace is suppressed so clients
+    /// do not show the AI UI when no backend provider is configured.
+    pub fn advertised_feature_namespaces(&self, ai_provider_available: bool) -> Vec<String> {
+        self.feature_namespaces
+            .iter()
+            .filter(|ns| ai_provider_available || ns.as_str() != AI_CHATBOT_NAMESPACE)
+            .cloned()
+            .collect()
+    }
+
     pub fn command_nodes(&self) -> Vec<(String, String)> {
         self.actors
             .iter()
