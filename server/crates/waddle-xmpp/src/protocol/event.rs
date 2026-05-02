@@ -17,6 +17,7 @@
 
 use super::frame::InboundFrame;
 use crate::Stanza;
+use chrono::{DateTime, Utc};
 use jid::{BareJid, FullJid};
 use tracing::Level;
 use xmpp_parsers::iq::Iq;
@@ -409,6 +410,57 @@ pub enum OutboundEvent {
         message: Box<Message>,
         archive_ref: StanzaIdRef,
         increment_unread: bool,
+    },
+    /// XEP-0045 §8.1 subject-change persistence. Emitted by the room
+    /// handler chain's subject handler when an authorized occupant has
+    /// successfully changed the room subject. The interpreter forwards
+    /// this to the room actor, which writes a `SubjectState` onto
+    /// `MucRoom.subject`. The replay on next join is what produces the
+    /// XEP-0045 §7.2.15 historical-subject emission with the right
+    /// setter, timestamp, and XEP-0421 occupant-id derivation.
+    ///
+    /// **Ordering.** The room chain emits this event **before** the
+    /// reflector's `OutboundEvent::RouteToConnection` events (handler
+    /// position 3 vs 6). The interpreter drains events sequentially
+    /// and awaits the actor ask, so persistence completes before the
+    /// live broadcast leaves the server. Net result: every observer
+    /// of the live broadcast on this connection's outbound stream is
+    /// guaranteed to see the new subject reflected in any subsequent
+    /// `JoinOutcome.subject_state` snapshot. The added latency is one
+    /// `RoomActor` mailbox round-trip per subject change — subject
+    /// changes are rare, so the simpler ordering is preferred over
+    /// fire-and-forget concurrency.
+    ///
+    /// **Failure mode.** If the actor ask fails (mailbox closed, room
+    /// destroyed mid-dispatch) the interpreter logs and continues
+    /// draining — the live broadcast still goes out, just without a
+    /// matching state update. Future joiners see the previous stored
+    /// subject; the broadcast they missed is gone. This is an
+    /// irreducible window for any out-of-band persistence path; the
+    /// failure rate is bounded by `RoomActor` mailbox availability,
+    /// which is shared with every other room operation.
+    PersistRoomSubject {
+        /// Room whose state is being mutated.
+        room: BareJid,
+        /// New subject texts keyed by `xml:lang` (`""` is the default
+        /// language). Mirrors the originating §8.1 message's
+        /// `<subject xml:lang='...'>` set so localized variants
+        /// survive into the join-time replay. An entry with an empty
+        /// value represents an explicit clear (still stored as
+        /// `Some(SubjectState)` so the next join emits `<delay/>`
+        /// per §7.2.15's SHOULD-include-delay-on-cleared).
+        texts: crate::muc::RoomSubjectTexts,
+        /// Setter's bare JID — input to the XEP-0421 occupant-id HMAC
+        /// at next-join emission.
+        setter: BareJid,
+        /// Setter's nickname at the moment of the change. Frozen here
+        /// rather than re-resolved at emission so historical join-time
+        /// emissions stay stable across nick changes and after the
+        /// setter has left the room.
+        setter_nick: String,
+        /// Wall-clock time of the change (UTC). Becomes the XEP-0203
+        /// `<delay/>` `stamp` attribute on the next join's emission.
+        set_at: DateTime<Utc>,
     },
     /// XEP-0424 §"prevent further distribution" — replace the target
     /// row in a room's MAM archive with a tombstone after a groupchat

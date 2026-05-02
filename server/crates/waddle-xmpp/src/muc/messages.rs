@@ -4,9 +4,12 @@
 
 use jid::{BareJid, FullJid, Jid};
 use tracing::debug;
-use xmpp_parsers::message::{Message, MessageType};
+use xmpp_parsers::message::{Message, MessageType, Subject};
 
+use super::SubjectState;
 use crate::xep::xep0085::{self, ChatStateCarrier};
+use crate::xep::xep0203;
+use crate::xep::xep0421::{generate_occupant_id, set_occupant_id_on_message, OccupantIdSecret};
 use crate::XmppError;
 
 /// Represents a parsed MUC message ready for routing.
@@ -195,36 +198,72 @@ pub fn create_broadcast_message(
     broadcast
 }
 
-/// Create a subject message for broadcasting to a room.
+/// Build the historical room-subject message delivered on join, per
+/// XEP-0045 §7.2.15.
 ///
-/// Per XEP-0045 Section 8.1, subject changes are sent as groupchat
-/// messages with a <subject/> element and no <body/> element.
+/// `state == None` ("never set"): bare-from groupchat message with an
+/// empty `<subject/>` element, no `<delay/>`, no `<occupant-id/>`.
+/// XEP-0421 §3 nominally requires occupant-id on every emitted
+/// message, but the derivation is keyed on the setter's real bare JID
+/// (XEP-0421 §3) — for a never-set room there is no setter input and
+/// the two MUSTs cannot both be satisfied. Established servers
+/// (Prosody, ejabberd, MongooseIM, Openfire) resolve this by
+/// satisfying §7.2.15 and omitting occupant-id; we mirror that.
 ///
-/// # Arguments
-/// * `room_jid` - The room's bare JID
-/// * `setter_nick` - The nickname of the user who set the subject
-/// * `subject` - The subject text (empty string clears the subject)
-/// * `to_occupant` - The recipient's full JID
-pub fn create_subject_message(
+/// `state == Some(SubjectState{..})` (set or explicitly cleared): nick-form
+/// `from='room/setter_nick'` (per the §7.2.15 example), one
+/// `<subject xml:lang='...'>{text}</subject>` per entry in `texts`
+/// (every value empty represents the "cleared" variant — wire-
+/// distinguishable from never-set per §7.2.15's
+/// SHOULD-include-`<delay/>`-on-cleared rule), an XEP-0203
+/// `<delay from='room' stamp='set_at'/>` (delay's `from` MUST be the
+/// room itself per §7.2.15), and an XEP-0421 `<occupant-id/>` derived
+/// from `setter`'s bare JID.
+///
+/// `setter_nick` is used solely for rendering `from`; the XEP-0421
+/// stable identifier is derived from `setter` (bare JID) so it
+/// survives nick changes per XEP-0421 §3's stability requirement.
+pub fn build_subject_message(
     room_jid: &BareJid,
-    setter_nick: &str,
-    subject: &str,
-    to_occupant: FullJid,
-) -> Result<Message, XmppError> {
-    let from_room_jid = room_jid
-        .clone()
-        .with_resource_str(setter_nick)
-        .map_err(|e| XmppError::internal(format!("Invalid nick as resource: {}", e)))?;
-
-    let mut msg = Message::new(Some(Jid::from(to_occupant)));
+    to: &FullJid,
+    state: Option<&SubjectState>,
+    secret: &OccupantIdSecret,
+) -> Message {
+    let mut msg = Message::new(Some(Jid::from(to.clone())));
     msg.type_ = MessageType::Groupchat;
-    msg.from = Some(Jid::from(from_room_jid));
-    msg.subjects.insert(
-        String::new(),
-        xmpp_parsers::message::Subject(subject.to_string()),
-    );
 
-    Ok(msg)
+    match state {
+        None => {
+            msg.from = Some(Jid::from(room_jid.clone()));
+            msg.subjects.insert(String::new(), Subject(String::new()));
+        }
+        Some(state) => {
+            let from = room_jid
+                .clone()
+                .with_resource_str(&state.setter_nick)
+                .map(Jid::from)
+                .unwrap_or_else(|_| Jid::from(room_jid.clone()));
+            msg.from = Some(from);
+            // Replay every persisted language variant so the
+            // join-time stanza matches the live broadcast 1:1. If the
+            // persisted map is somehow empty (defensive — the handler
+            // captures whatever the originating message had, which
+            // §8.1 requires to be at least one `<subject/>`), fall
+            // back to a single empty default-language entry so we
+            // still satisfy §7.2.15's "MUST return an empty
+            // <subject/>" rule.
+            if state.texts.is_empty() {
+                msg.subjects.insert(String::new(), Subject(String::new()));
+            } else {
+                state.texts.apply_to_message(&mut msg);
+            }
+            xep0203::add_delay_stamp(&mut msg, state.set_at, &room_jid.to_string());
+            let occupant_id = generate_occupant_id(&state.setter, room_jid, secret);
+            set_occupant_id_on_message(&mut msg, &occupant_id);
+        }
+    }
+
+    msg
 }
 
 #[cfg(test)]
@@ -321,5 +360,210 @@ mod tests {
         let failure = MessageRouteResult::failure("Room not found");
         assert!(!failure.success);
         assert_eq!(failure.error, Some("Room not found".to_string()));
+    }
+
+    // ── XEP-0045 §7.2.15 join-time subject emission ─────────────────────
+
+    use crate::xep::xep0203::{extract_delay_from_message, has_delay};
+    use crate::xep::xep0421::{extract_occupant_id_from_message, generate_occupant_id};
+    use chrono::TimeZone;
+
+    fn test_room() -> BareJid {
+        "team@muc.example.com".parse().expect("valid bare jid")
+    }
+    fn test_recipient() -> FullJid {
+        "joiner@example.com/web".parse().expect("valid full jid")
+    }
+    fn test_secret() -> OccupantIdSecret {
+        OccupantIdSecret::for_testing(b"subject-builder-test-secret".to_vec())
+    }
+    fn sample_state(text: &str) -> SubjectState {
+        let texts = crate::muc::RoomSubjectTexts::from_iter([(String::new(), text.to_string())]);
+        SubjectState {
+            texts,
+            setter: "alice@example.com".parse().expect("valid bare jid"),
+            setter_nick: "alice-nick".to_string(),
+            set_at: chrono::Utc.with_ymd_and_hms(2026, 5, 2, 12, 0, 0).unwrap(),
+        }
+    }
+
+    #[test]
+    fn build_subject_message_set_state_produces_section_7_2_15_shape() {
+        let room = test_room();
+        let to = test_recipient();
+        let secret = test_secret();
+        let state = sample_state("Fire Burn and Cauldron Bubble!");
+
+        let msg = build_subject_message(&room, &to, Some(&state), &secret);
+
+        assert_eq!(msg.type_, MessageType::Groupchat);
+        assert_eq!(
+            msg.from.as_ref().map(|j| j.to_string()),
+            Some("team@muc.example.com/alice-nick".to_string())
+        );
+        assert_eq!(msg.to.as_ref().map(|j| j.to_string()), Some(to.to_string()));
+        assert_eq!(msg.subjects.len(), 1, "exactly one <subject/> element");
+        assert_eq!(
+            msg.subjects.iter().next().map(|s| s.1 .0.as_str()),
+            Some("Fire Burn and Cauldron Bubble!")
+        );
+        assert!(msg.bodies.is_empty(), "subject message has no <body/>");
+        assert!(has_delay(&msg), "<delay/> SHOULD be present (§7.2.15)");
+        assert!(
+            extract_occupant_id_from_message(&msg).is_some(),
+            "XEP-0421 occupant-id MUST be stamped"
+        );
+    }
+
+    #[test]
+    fn build_subject_message_cleared_state_emits_empty_subject_with_delay() {
+        let room = test_room();
+        let to = test_recipient();
+        let secret = test_secret();
+        let state = sample_state("");
+
+        let msg = build_subject_message(&room, &to, Some(&state), &secret);
+
+        assert_eq!(
+            msg.subjects.iter().next().map(|s| s.1 .0.as_str()),
+            Some(""),
+            "explicitly cleared subject is empty <subject/>"
+        );
+        assert!(
+            has_delay(&msg),
+            "<delay/> SHOULD be included for actively-cleared subjects (§7.2.15)"
+        );
+        assert!(
+            extract_occupant_id_from_message(&msg).is_some(),
+            "occupant-id stamped because we know the user who cleared it"
+        );
+    }
+
+    #[test]
+    fn build_subject_message_never_set_emits_empty_subject_without_delay() {
+        let room = test_room();
+        let to = test_recipient();
+        let secret = test_secret();
+
+        let msg = build_subject_message(&room, &to, None, &secret);
+
+        assert_eq!(msg.type_, MessageType::Groupchat);
+        assert_eq!(
+            msg.from.as_ref().map(|j| j.to_string()),
+            Some("team@muc.example.com".to_string()),
+            "never-set rooms emit bare-from (§7.2.15 allows this; no setter exists)"
+        );
+        assert_eq!(
+            msg.subjects.iter().next().map(|s| s.1 .0.as_str()),
+            Some(""),
+            "MUST return an empty <subject/> (§7.2.15)"
+        );
+        assert!(
+            !has_delay(&msg),
+            "<delay/> MAY be omitted when the subject was never set (§7.2.15)"
+        );
+        assert!(
+            extract_occupant_id_from_message(&msg).is_none(),
+            "no setter means no input for the XEP-0421 HMAC; omitted, matching established servers"
+        );
+    }
+
+    #[test]
+    fn build_subject_message_delay_from_attribute_is_room_jid_not_setter() {
+        // §7.2.15 conditional MUST: "If the <delay/> element is included,
+        // its 'from' attribute MUST be set to the JID of the room itself."
+        let room = test_room();
+        let to = test_recipient();
+        let secret = test_secret();
+        let state = sample_state("hello");
+
+        let msg = build_subject_message(&room, &to, Some(&state), &secret);
+        let delay = extract_delay_from_message(&msg).expect("<delay/> present");
+
+        assert_eq!(
+            delay.from.as_deref(),
+            Some("team@muc.example.com"),
+            "delay.from MUST be the room JID"
+        );
+        assert_ne!(
+            delay.from.as_deref(),
+            Some("team@muc.example.com/alice-nick"),
+            "delay.from MUST NOT be the setter's room/nick"
+        );
+    }
+
+    #[test]
+    fn build_subject_message_occupant_id_is_hmac_of_setter_bare_jid() {
+        let room = test_room();
+        let to = test_recipient();
+        let secret = test_secret();
+        let state = sample_state("hello");
+
+        let msg = build_subject_message(&room, &to, Some(&state), &secret);
+
+        let id = extract_occupant_id_from_message(&msg).expect("occupant-id stamped");
+        let expected = generate_occupant_id(&state.setter, &room, &secret);
+        assert_eq!(id, expected);
+    }
+
+    #[test]
+    fn build_subject_message_preserves_every_persisted_language_variant() {
+        // §8.1 broadcasts (and §7.2.13 archive) carry every
+        // <subject xml:lang='...'> the originating message had.
+        // Join-time replay is built from the persisted state, so it
+        // must reproduce all of them — not just the default-language
+        // entry — otherwise late joiners see a different subject set
+        // than every existing occupant did.
+        let room = test_room();
+        let to = test_recipient();
+        let secret = test_secret();
+        let texts = crate::muc::RoomSubjectTexts::from_iter([
+            (String::new(), "Default subject".to_string()),
+            ("en".to_string(), "English subject".to_string()),
+            ("fr".to_string(), "Sujet français".to_string()),
+        ]);
+        let state = SubjectState {
+            texts,
+            setter: "alice@example.com".parse().expect("valid bare jid"),
+            setter_nick: "alice-nick".to_string(),
+            set_at: chrono::Utc.with_ymd_and_hms(2026, 5, 2, 12, 0, 0).unwrap(),
+        };
+
+        let msg = build_subject_message(&room, &to, Some(&state), &secret);
+
+        assert_eq!(
+            msg.subjects.len(),
+            3,
+            "every persisted language variant must round-trip into the join-time replay"
+        );
+        assert_eq!(
+            msg.subjects.get("").map(|s| s.0.as_str()),
+            Some("Default subject")
+        );
+        assert_eq!(
+            msg.subjects.get("en").map(|s| s.0.as_str()),
+            Some("English subject")
+        );
+        assert_eq!(
+            msg.subjects.get("fr").map(|s| s.0.as_str()),
+            Some("Sujet français")
+        );
+    }
+
+    #[test]
+    fn build_subject_message_delay_stamp_round_trips_as_xep_0082_datetime() {
+        // XEP-0203 + XEP-0082: stamp MUST be a valid dateTime; the
+        // round-trip through chrono confirms our `to_rfc3339()` output
+        // is parseable by any conforming consumer.
+        let room = test_room();
+        let to = test_recipient();
+        let secret = test_secret();
+        let state = sample_state("hello");
+        let original_stamp = state.set_at;
+
+        let msg = build_subject_message(&room, &to, Some(&state), &secret);
+        let delay = extract_delay_from_message(&msg).expect("<delay/> present");
+
+        assert_eq!(delay.stamp, original_stamp);
     }
 }

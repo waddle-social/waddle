@@ -2583,7 +2583,9 @@ mod tests {
     // Types moved out of mod.rs scope but used in tests
     use waddle_extensions::ExtensionConfig;
     use waddle_xmpp::commands::{CommandContext, CommandResult};
-    use waddle_xmpp::muc::room_actor::{ChangeAffiliation, GetSnapshot, JoinWithAffiliation};
+    use waddle_xmpp::muc::room_actor::{
+        ChangeAffiliation, GetSnapshot, JoinWithAffiliation, SetSubject,
+    };
     use waddle_xmpp::registry::BroadcastOutcome;
     use waddle_xmpp::Affiliation;
     use xmpp_parsers::iq::{Iq, IqType};
@@ -4048,6 +4050,129 @@ mod tests {
         assert_eq!(subject_message.name(), "message");
         assert_eq!(subject_message.ns(), waddle_xmpp::ns::JABBER_CLIENT);
         assert_eq!(subject_message.attr("type"), Some("groupchat"));
+    }
+
+    #[tokio::test]
+    async fn xep_0045_section_7_2_15_join_replay_serializes_full_subject_envelope() {
+        // Boundary test for the WebSocket join wiring (Copilot review,
+        // PR #319). Pre-populates `MucRoom.subject` with a multi-language
+        // SubjectState via the production `SetSubject` actor message,
+        // then drives a fresh join through `handle_muc_join` and asserts
+        // the serialized subject message carries every conformance
+        // element: `from='room/setter_nick'`, every persisted
+        // `<subject xml:lang='...'>`, the XEP-0203 `<delay/>` from the
+        // room JID, and the XEP-0421 `<occupant-id/>`.
+        use chrono::TimeZone;
+        let state = create_test_websocket_state().await;
+        let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+        let setter_session = create_test_server_owner_session(state.as_ref(), "setter").await;
+        let room_jid: BareJid = "channel@muc.example.com".parse().expect("room jid");
+        let setter_jid: FullJid = "setter@example.com/web".parse().expect("setter jid");
+        let joiner_jid: FullJid = "alice@example.com/web".parse().expect("joiner jid");
+
+        // Bootstrap the room actor by joining the setter (first joiner
+        // becomes Owner → Moderator), then seed the subject state with
+        // a multi-language `texts` map matching what a real §8.1
+        // dispatch would produce.
+        handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room_jid,
+            &setter_jid,
+            "setter-nick",
+            &Some(setter_session),
+        )
+        .await;
+        let room_actor = get_room_actor(state.as_ref(), &room_jid)
+            .await
+            .expect("room actor");
+        let texts = waddle_xmpp::muc::RoomSubjectTexts::from_iter([
+            (String::new(), "Default subject".to_string()),
+            ("en".to_string(), "English subject".to_string()),
+        ]);
+        let set_at = chrono::Utc.with_ymd_and_hms(2026, 5, 2, 12, 0, 0).unwrap();
+        room_actor
+            .ask(SetSubject {
+                texts,
+                setter: setter_jid.to_bare(),
+                setter_nick: "setter-nick".to_string(),
+                set_at,
+            })
+            .await
+            .expect("SetSubject succeeds");
+
+        let responses = handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room_jid,
+            &joiner_jid,
+            "alice",
+            &Some(owner_session),
+        )
+        .await;
+
+        // 1 existing-occupant presence (setter) + self-presence + subject = 3.
+        assert_eq!(
+            responses.len(),
+            3,
+            "join responses: existing-occupants + self-presence + subject"
+        );
+
+        let subject_msg =
+            Element::from_str(responses.last().expect("subject is last")).expect("subject xml");
+        assert_eq!(subject_msg.name(), "message");
+        assert_eq!(subject_msg.attr("type"), Some("groupchat"));
+        assert_eq!(
+            subject_msg.attr("from"),
+            Some("channel@muc.example.com/setter-nick"),
+            "§7.2.15 nick-form `from` for set room"
+        );
+
+        let subject_children: Vec<&Element> = subject_msg
+            .children()
+            .filter(|c| c.name() == "subject")
+            .collect();
+        assert_eq!(
+            subject_children.len(),
+            2,
+            "every persisted xml:lang variant round-trips into the join replay"
+        );
+        let default_subject = subject_children
+            .iter()
+            .find(|c| c.attr("xml:lang").is_none() || c.attr("xml:lang") == Some(""))
+            .expect("default-language subject present");
+        assert_eq!(default_subject.text(), "Default subject");
+        let en_subject = subject_children
+            .iter()
+            .find(|c| c.attr("xml:lang") == Some("en"))
+            .expect("xml:lang=en subject present");
+        assert_eq!(en_subject.text(), "English subject");
+
+        let delay = subject_msg
+            .get_child("delay", "urn:xmpp:delay")
+            .expect("XEP-0203 <delay/> stamped per §7.2.15 SHOULD");
+        assert_eq!(
+            delay.attr("from"),
+            Some("channel@muc.example.com"),
+            "§7.2.15 conditional MUST: delay's `from` is the room JID"
+        );
+        assert!(
+            delay.attr("stamp").is_some_and(|s| !s.is_empty()),
+            "delay stamp present and non-empty"
+        );
+
+        let occupant_id = subject_msg
+            .get_child("occupant-id", "urn:xmpp:occupant-id:0")
+            .expect("XEP-0421 <occupant-id/> stamped on set-subject replay");
+        assert!(
+            occupant_id.attr("id").is_some_and(|s| !s.is_empty()),
+            "occupant-id `id` attribute present"
+        );
+
+        assert!(
+            subject_msg.children().all(|c| c.name() != "body"),
+            "subject message MUST have no <body/>"
+        );
     }
 
     #[test]

@@ -2,6 +2,7 @@ use jid::{BareJid, FullJid, Jid};
 use tracing::{debug, info, warn};
 use waddle_xmpp::{
     muc::{
+        messages::build_subject_message,
         room_actor::{JoinWithAffiliation, LeaveByRealJid},
         RoomConfig,
     },
@@ -1720,14 +1721,18 @@ pub async fn handle_muc_join(
         true,
     ));
 
-    // Send room subject
-    let room_name = room_jid
-        .node()
-        .map(|n| n.to_string())
-        .unwrap_or_else(|| "Waddle".to_string());
-    responses.push(build_muc_subject_message_xml(
-        room_jid, sender_jid, &room_name,
-    ));
+    // XEP-0045 §7.2.15 historical room subject. The typed builder
+    // produces the conformant envelope: nick-form `from` + `<delay/>`
+    // + XEP-0421 `<occupant-id/>` when a setter is known, or bare-from
+    // empty `<subject/>` for a never-set room (matching the established
+    // resolution of XEP-0421 §3 vs §7.2.15 on never-set rooms).
+    let subject_msg = build_subject_message(
+        room_jid,
+        sender_jid,
+        join_outcome.subject_state.as_ref(),
+        &state.deps.occupant_id_secret,
+    );
+    responses.push(stanza_to_xml(&Stanza::Message(subject_msg)));
 
     responses
 }
@@ -1974,21 +1979,6 @@ fn build_muc_join_error_xml(
             .attr("to", to_jid.to_string())
             .attr("type", "error")
             .append(error_payload)
-            .build(),
-    )
-}
-
-fn build_muc_subject_message_xml(room_jid: &BareJid, to_jid: &FullJid, room_name: &str) -> String {
-    element_to_xml(
-        Element::builder("message", waddle_xmpp::ns::JABBER_CLIENT)
-            .attr("from", room_jid.to_string())
-            .attr("to", to_jid.to_string())
-            .attr("type", "groupchat")
-            .append(
-                Element::builder("subject", waddle_xmpp::ns::JABBER_CLIENT)
-                    .append(format!("Welcome to {}!", room_name))
-                    .build(),
-            )
             .build(),
     )
 }
