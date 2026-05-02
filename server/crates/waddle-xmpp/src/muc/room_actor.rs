@@ -4,6 +4,7 @@
 //! sequentially, removing the need for external `RwLock` synchronisation.
 //! This is part of the Phase 3 actor-model migration.
 
+use chrono::{DateTime, Utc};
 use jid::{BareJid, FullJid};
 use kameo::message::Context;
 use kameo::Actor;
@@ -307,6 +308,32 @@ impl kameo::message::Message<UpdateConfig> for RoomActor {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         self.room.config = msg.config;
+    }
+}
+
+/// Apply a XEP-0045 §8.1 subject change to the room. The interpreter
+/// emits this in response to an `OutboundEvent::PersistRoomSubject`
+/// produced by the room handler chain's subject handler after
+/// authorization passes. The actor delegates to
+/// [`MucRoom::set_subject`], which writes a `SubjectState` onto
+/// `MucRoom.subject` for replay on the next join (XEP-0045 §7.2.15).
+pub struct SetSubject {
+    pub text: String,
+    pub setter: BareJid,
+    pub setter_nick: String,
+    pub set_at: DateTime<Utc>,
+}
+
+impl kameo::message::Message<SetSubject> for RoomActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        msg: SetSubject,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.room
+            .set_subject(msg.text, msg.setter, msg.setter_nick, msg.set_at);
     }
 }
 

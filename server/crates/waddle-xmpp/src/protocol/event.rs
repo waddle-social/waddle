@@ -17,6 +17,7 @@
 
 use super::frame::InboundFrame;
 use crate::Stanza;
+use chrono::{DateTime, Utc};
 use jid::{BareJid, FullJid};
 use tracing::Level;
 use xmpp_parsers::iq::Iq;
@@ -409,6 +410,39 @@ pub enum OutboundEvent {
         message: Box<Message>,
         archive_ref: StanzaIdRef,
         increment_unread: bool,
+    },
+    /// XEP-0045 §8.1 subject-change persistence. Emitted by the room
+    /// handler chain's subject handler when an authorized occupant has
+    /// successfully changed the room subject. The interpreter forwards
+    /// this to the room actor, which writes a `SubjectState` onto
+    /// `MucRoom.subject`. The replay on next join is what produces the
+    /// XEP-0045 §7.2.15 historical-subject emission with the right
+    /// setter, timestamp, and XEP-0421 occupant-id derivation.
+    ///
+    /// Eventually-consistent with the live broadcast that
+    /// `ReflectorHandler` emits in the same dispatch — both end up on
+    /// the wire promptly, but in-between joins may briefly observe the
+    /// previous stored subject. That window is acceptable per
+    /// §7.2.15's wire shape (the live broadcast and the historical
+    /// replay are independent stanzas).
+    PersistRoomSubject {
+        /// Room whose state is being mutated.
+        room: BareJid,
+        /// New subject text. `""` represents an explicit clear (still
+        /// stored as `Some(SubjectState)` so the next join emits
+        /// `<delay/>` per §7.2.15's SHOULD-include-delay-on-cleared).
+        text: String,
+        /// Setter's bare JID — input to the XEP-0421 occupant-id HMAC
+        /// at next-join emission.
+        setter: BareJid,
+        /// Setter's nickname at the moment of the change. Frozen here
+        /// rather than re-resolved at emission so historical join-time
+        /// emissions stay stable across nick changes and after the
+        /// setter has left the room.
+        setter_nick: String,
+        /// Wall-clock time of the change (UTC). Becomes the XEP-0203
+        /// `<delay/>` `stamp` attribute on the next join's emission.
+        set_at: DateTime<Utc>,
     },
     /// XEP-0424 §"prevent further distribution" — replace the target
     /// row in a room's MAM archive with a tombstone after a groupchat

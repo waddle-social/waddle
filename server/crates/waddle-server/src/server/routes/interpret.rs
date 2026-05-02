@@ -91,7 +91,7 @@ use waddle_xmpp::mam::{
     ArchivedReply, ArchivedRetraction, ArchivedRichMessage, ArchivedRichPayload, ArchivedTombstone,
     RichMessageId, RichText, STANZA_ID_NS,
 };
-use waddle_xmpp::muc::room_actor::{GetNicknameGeneration, GetRoomSnapshot, RoomActor};
+use waddle_xmpp::muc::room_actor::{GetNicknameGeneration, GetRoomSnapshot, RoomActor, SetSubject};
 use waddle_xmpp::muc::room_registry_actor::{GetRoom, RoomRegistryActor};
 use waddle_xmpp::parse_managed_room_jid;
 use waddle_xmpp::parser::{message_to_string, stanza_to_string};
@@ -832,6 +832,60 @@ async fn interpret_with_depth(
                     &retraction_message,
                 )
                 .await;
+            }
+            OutboundEvent::PersistRoomSubject {
+                room,
+                text,
+                setter,
+                setter_nick,
+                set_at,
+            } => {
+                let Some(room_registry) = deps.room_registry else {
+                    debug!(
+                        room = %room,
+                        "PersistRoomSubject: no room_registry in Deps; skipping"
+                    );
+                    continue;
+                };
+                let room_actor = match room_registry
+                    .ask(GetRoom {
+                        room_jid: room.clone(),
+                    })
+                    .await
+                {
+                    Ok(Some(actor)) => actor,
+                    Ok(None) => {
+                        debug!(
+                            room = %room,
+                            "PersistRoomSubject: room not registered; skipping"
+                        );
+                        continue;
+                    }
+                    Err(error) => {
+                        warn!(
+                            room = %room,
+                            error = ?error,
+                            "PersistRoomSubject: room registry lookup failed; skipping"
+                        );
+                        continue;
+                    }
+                };
+                if let Err(error) = room_actor
+                    .ask(SetSubject {
+                        text,
+                        setter: setter.clone(),
+                        setter_nick,
+                        set_at,
+                    })
+                    .await
+                {
+                    warn!(
+                        room = %room,
+                        setter = %setter,
+                        error = ?error,
+                        "PersistRoomSubject: SetSubject ask failed; subject left at previous state"
+                    );
+                }
             }
             OutboundEvent::ProjectGroupchatInbox {
                 owner,
