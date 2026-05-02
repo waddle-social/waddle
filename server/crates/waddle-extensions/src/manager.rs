@@ -20,12 +20,11 @@ use crate::config::{ExtensionConfig, ExtensionModuleConfig};
 use crate::oci::OciExtensionPuller;
 use crate::runtime::{LoadedExtension, WasmRuntime};
 use crate::types::{
-    is_official_namespace, message_has_framework_envelope, BotGroupchatResponsePurpose,
-    CommandAction, CommandInvocation, CommandNode, CommandSessionId, DetectedLink, DisplayText,
-    ExtensionEffect, ExtensionEnvelope, ExtensionEvent, ExtensionManifest, FullJidValue,
-    LaunchContext, LaunchId, LaunchInvocation, LinkTarget, MessageContext, MessageHook,
-    PayloadNamespace, PluginId, ReplyTarget, RoomJid, StanzaId, ThreadId, WaddleId,
-    AI_CHATBOT_NAMESPACE, AI_CHATBOT_PLUGIN_ID, FRAMEWORK_NAMESPACE,
+    is_official_namespace, message_has_framework_envelope, CommandAction, CommandInvocation,
+    CommandNode, CommandSessionId, DetectedLink, DisplayText, ExtensionEffect, ExtensionEnvelope,
+    ExtensionEvent, ExtensionManifest, FullJidValue, LaunchContext, LaunchId, LaunchInvocation,
+    LinkTarget, MessageContext, MessageHook, PayloadNamespace, PluginId, ReplyTarget, RoomJid,
+    StanzaId, ThreadId, WaddleId, FRAMEWORK_NAMESPACE,
 };
 
 const MAX_DETECTED_LINKS: usize = 3;
@@ -439,9 +438,7 @@ impl ExtensionManager {
                         ExtensionEffect::EnrichMessage(envelope) => {
                             enrichments.extend(envelope.enrichments);
                         }
-                        ExtensionEffect::BotGroupchatResponse(mut response) => {
-                            response.purpose =
-                                bot_groupchat_response_purpose_for_manifest(&manifest);
+                        ExtensionEffect::BotGroupchatResponse(response) => {
                             emitted_effects.push(ExtensionEffect::BotGroupchatResponse(response));
                         }
                         ExtensionEffect::PublishPubSub(_)
@@ -573,24 +570,9 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
         == 0
 }
 
-fn bot_groupchat_response_purpose_for_manifest(
-    manifest: &ExtensionManifest,
-) -> BotGroupchatResponsePurpose {
-    let is_ai_chatbot = manifest.id.as_str() == AI_CHATBOT_PLUGIN_ID
-        && manifest
-            .payloads
-            .iter()
-            .any(|rule| rule.root.namespace.as_str() == AI_CHATBOT_NAMESPACE);
-    if is_ai_chatbot {
-        BotGroupchatResponsePurpose::AiProviderFallback
-    } else {
-        BotGroupchatResponsePurpose::Message
-    }
-}
-
 fn validate_manifest_against_module(
     module: &ExtensionModuleConfig,
-    manifest: &crate::types::ExtensionManifest,
+    manifest: &ExtensionManifest,
 ) -> Result<()> {
     if manifest.id.as_str() != module.name {
         bail!(
@@ -824,16 +806,10 @@ mod tests {
     use xmpp_parsers::message::{Body, Message};
 
     use super::{
-        bot_groupchat_response_purpose_for_manifest, detect_links, effective_module_config_json,
-        effective_module_config_with_reader, EffectiveModuleConfigError, ExtensionManager,
-        MAX_DETECTED_LINKS,
+        detect_links, effective_module_config_json, effective_module_config_with_reader,
+        EffectiveModuleConfigError, ExtensionManager, MAX_DETECTED_LINKS,
     };
     use crate::config::{ExtensionConfig, ExtensionModuleConfig};
-    use crate::types::{
-        BotGroupchatResponsePurpose, DisplayText, ExtensionCapability, ExtensionManifest,
-        PayloadNamespace, PayloadRoot, PayloadRule, PayloadSurface, PluginId, PluginVersion,
-        AI_CHATBOT_NAMESPACE, AI_CHATBOT_PLUGIN_ID,
-    };
 
     #[test]
     fn detects_urls() {
@@ -1039,27 +1015,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn ai_provider_fallback_purpose_is_scoped_to_ai_chatbot_manifest() {
-        let ai_chatbot = bot_manifest(AI_CHATBOT_PLUGIN_ID, AI_CHATBOT_NAMESPACE);
-        assert_eq!(
-            bot_groupchat_response_purpose_for_manifest(&ai_chatbot),
-            BotGroupchatResponsePurpose::AiProviderFallback
-        );
-
-        let wrong_id = bot_manifest("other-chatbot", AI_CHATBOT_NAMESPACE);
-        assert_eq!(
-            bot_groupchat_response_purpose_for_manifest(&wrong_id),
-            BotGroupchatResponsePurpose::Message
-        );
-
-        let wrong_namespace = bot_manifest(AI_CHATBOT_PLUGIN_ID, "urn:waddle:other-chatbot:1");
-        assert_eq!(
-            bot_groupchat_response_purpose_for_manifest(&wrong_namespace),
-            BotGroupchatResponsePurpose::Message
-        );
-    }
-
     #[tokio::test]
     async fn enrich_message_does_not_fallback_without_loaded_actor() {
         let manager = ExtensionManager {
@@ -1076,29 +1031,6 @@ mod tests {
 
         assert_eq!(manager.enrich_message(&mut msg).await, 0);
         assert!(msg.payloads.is_empty());
-    }
-
-    fn bot_manifest(id: &str, namespace: &str) -> ExtensionManifest {
-        ExtensionManifest {
-            id: PluginId::new(id.to_string()).expect("plugin id"),
-            name: DisplayText::new("test bot").expect("name"),
-            version: PluginVersion::new("0.1.0").expect("version"),
-            payloads: vec![PayloadRule {
-                surface: PayloadSurface::MessageEnrichment,
-                root: PayloadRoot::new(
-                    PayloadNamespace::new(namespace.to_string()).expect("namespace"),
-                    "assistant-answer",
-                )
-                .expect("payload root"),
-            }],
-            capabilities: vec![
-                ExtensionCapability::MessageObserve,
-                ExtensionCapability::BotGroupchatSend,
-            ],
-            commands: Vec::new(),
-            pubsub_nodes: Vec::new(),
-            artifact: None,
-        }
     }
 
     struct TestArtifacts {

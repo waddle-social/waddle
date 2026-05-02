@@ -1,10 +1,8 @@
-use crate::ai_provider::is_ai_provider_configured;
 use chrono;
 use jid::{BareJid, FullJid, Jid};
 use std::sync::Arc;
 use tracing::{debug, warn};
 use url::{Host, Url};
-use waddle_extensions::AI_CHATBOT_NAMESPACE;
 use waddle_xmpp::{
     carbons::CARBONS_NS,
     commands::{CommandContext, CommandResult},
@@ -93,16 +91,11 @@ use crate::server::xmpp_state::{get_xmpp_channel, list_xmpp_channels, XmppChanne
 use crate::vcard::VCardStore;
 
 fn extension_features_for_disco(state: &WebSocketState) -> Vec<Feature> {
-    let ai_provider_configured = is_ai_provider_configured();
-    state
-        .deps
-        .protocol
-        .extension_manager
-        .extension_features()
-        .into_iter()
-        .filter(|ns| ai_provider_configured || ns != AI_CHATBOT_NAMESPACE)
-        .map(|ns| Feature::new(&ns))
-        .collect()
+    extension_namespaces_for_disco(state.deps.protocol.extension_manager.extension_features())
+}
+
+fn extension_namespaces_for_disco(namespaces: Vec<String>) -> Vec<Feature> {
+    namespaces.into_iter().map(|ns| Feature::new(&ns)).collect()
 }
 
 /// Only called from test helpers.
@@ -4790,6 +4783,27 @@ async fn handle_command_iq(
         request_iq,
         &response_command,
     ))]
+}
+
+#[cfg(test)]
+mod extension_disco_tests {
+    use super::*;
+
+    #[test]
+    fn extension_namespaces_are_advertised_without_provider_gate() {
+        let features = extension_namespaces_for_disco(vec![
+            "urn:waddle:bot:1".to_string(),
+            "urn:example:extension:1".to_string(),
+        ]);
+
+        assert_eq!(
+            features,
+            vec![
+                Feature::new("urn:waddle:bot:1"),
+                Feature::new("urn:example:extension:1")
+            ]
+        );
+    }
 }
 
 #[cfg(test)]

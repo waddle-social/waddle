@@ -16,6 +16,5 @@ pub use types::{
     FormFieldValue, FrameworkTypeError, FullJidValue, LaunchContext, LaunchDescriptor, LaunchId,
     LaunchToken, MessageEnrichment, PayloadRoot, PayloadRule, PayloadSurface, PluginId,
     PubSubPublish, ReplyTarget, RoomJid, StanzaId, ThreadId, Timestamp, UiActionId, WaddleId,
-    XmlAttribute, XmlElement, XmlNode, AI_CHATBOT_NAMESPACE, AI_CHATBOT_PLUGIN_ID,
-    INVOKE_COMMAND_NODE,
+    XmlAttribute, XmlElement, XmlNode, INVOKE_COMMAND_NODE,
 };

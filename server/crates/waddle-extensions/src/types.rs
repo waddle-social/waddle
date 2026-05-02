@@ -8,8 +8,6 @@ use xmpp_parsers::message::Message;
 
 pub const FRAMEWORK_NAMESPACE: &str = "urn:waddle:extension:1";
 pub const INVOKE_COMMAND_NODE: &str = "urn:waddle:extension:1:invoke";
-pub const AI_CHATBOT_PLUGIN_ID: &str = "ai-chatbot";
-pub const AI_CHATBOT_NAMESPACE: &str = "urn:waddle:ai-chatbot:1";
 
 const MAX_XML_DEPTH: usize = 16;
 const MAX_XML_ATTRIBUTES: usize = 64;
@@ -1323,8 +1321,6 @@ pub struct PubSubPublish {
 pub enum BotGroupchatResponsePurpose {
     #[serde(rename = "message")]
     Message,
-    #[serde(rename = "ai-provider-fallback")]
-    AiProviderFallback,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -66,7 +66,6 @@
 //!   `ValidateOAuthBearer`, `SetTimer`, `CancelTimer`,
 //!   `RegisterConnection` — wired in later migration steps.
 
-use crate::ai_provider::{generate_ai_response, is_ai_prompt_body, HistoricalMessage};
 use crate::auth::Session;
 use crate::permissions::{CheckPermission, Object, ObjectType, Permission, Subject};
 use crate::server::bootstrap_membership::DEPLOYMENT_SERVER_ID;
@@ -76,9 +75,9 @@ use std::str::FromStr;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 use waddle_extensions::{
-    message_has_framework_envelope, BotGroupchatResponse, BotGroupchatResponsePurpose, DisplayText,
-    ExtensionEffect, ExtensionManager, FullJidValue, ReplyTarget as ExtensionReplyTarget,
-    StanzaId as ExtensionStanzaId, ThreadId as ExtensionThreadId, WaddleId,
+    message_has_framework_envelope, BotGroupchatResponse, ExtensionEffect, ExtensionManager,
+    FullJidValue, ReplyTarget as ExtensionReplyTarget, StanzaId as ExtensionStanzaId,
+    ThreadId as ExtensionThreadId, WaddleId,
 };
 use waddle_xmpp::carbons::{build_received_carbon, build_sent_carbon};
 use waddle_xmpp::inbox::runtime::{direct_message_entry, groupchat_entry, groupchat_thread_entry};
@@ -1621,7 +1620,6 @@ async fn dispatch_to_room(
     }
     outcome.feedback.extend(nested.feedback);
 
-    let source_prompt_body = prototype_body(&working);
     let canonical_source_reply = canonical_reply_target_for_room_message(&working, &room_jid);
     let canonical_source_thread_id = message_thread_id(&working)
         .or(source_thread_id_before_dispatch)
@@ -1633,7 +1631,7 @@ async fn dispatch_to_room(
 
     for effect in extension_outcome.effects {
         if let ExtensionEffect::BotGroupchatResponse(response) = effect {
-            let Some(mut response) = canonicalize_bot_response_target(
+            let Some(response) = canonicalize_bot_response_target(
                 response,
                 canonical_source_thread_id.as_deref(),
                 canonical_source_reply.clone(),
@@ -1644,34 +1642,6 @@ async fn dispatch_to_room(
                 );
                 continue;
             };
-            if let Some(prompt) = source_prompt_body
-                .as_deref()
-                .filter(|body| is_ai_prompt_body(body) && is_ai_provider_fallback(&response))
-            {
-                let room_history = fetch_room_history_for_ai(deps, &room_jid, prompt).await;
-                match generate_ai_response(prompt, &room_history).await {
-                    Ok(answer) => match DisplayText::new(answer) {
-                        Ok(answer) => {
-                            response.body = answer;
-                            response.purpose = BotGroupchatResponsePurpose::Message;
-                        }
-                        Err(error) => {
-                            warn!(
-                                room = %room_jid,
-                                %error,
-                                "AI provider returned an invalid display body; keeping fallback response"
-                            );
-                        }
-                    },
-                    Err(error) => {
-                        warn!(
-                            room = %room_jid,
-                            %error,
-                            "AI provider request failed; keeping explicit fallback response"
-                        );
-                    }
-                }
-            }
             let nested = Box::pin(dispatch_bot_groupchat_response(
                 deps,
                 BotGroupchatDispatch {
@@ -1692,58 +1662,6 @@ async fn dispatch_to_room(
         }
     }
     outcome
-}
-
-fn is_ai_provider_fallback(response: &BotGroupchatResponse) -> bool {
-    response.purpose == BotGroupchatResponsePurpose::AiProviderFallback
-}
-
-async fn fetch_room_history_for_ai(
-    deps: &Deps<'_>,
-    room_jid: &BareJid,
-    exclude_prompt: &str,
-) -> Vec<HistoricalMessage> {
-    let Some(mam_storage) = deps.mam_storage else {
-        return vec![];
-    };
-    let query = waddle_xmpp::mam::MamQuery {
-        max: Some(20),
-        // XEP-0059 §2.5: empty <before/> requests the last page (most recent N).
-        // Without this, the query returns the oldest N messages.
-        before_id: Some(String::new()),
-        ..Default::default()
-    };
-    let archive_jid = room_jid.to_string();
-    match mam_storage.query_messages(&archive_jid, &query).await {
-        Ok(result) => result
-            .messages
-            .into_iter()
-            .filter_map(|msg| {
-                let body = msg.body;
-                if body.is_empty() || body == exclude_prompt {
-                    return None;
-                }
-                let nick = msg
-                    .from
-                    .parse::<Jid>()
-                    .ok()
-                    .and_then(|jid| jid.resource().map(|r| r.to_string()))
-                    .unwrap_or_else(|| msg.from.clone());
-                Some(HistoricalMessage {
-                    sender_nick: nick,
-                    body,
-                })
-            })
-            .collect(),
-        Err(error) => {
-            warn!(
-                room = %room_jid,
-                %error,
-                "fetch_room_history_for_ai: MAM query failed; proceeding without history"
-            );
-            vec![]
-        }
-    }
 }
 
 struct BotGroupchatDispatch<'a> {
@@ -4308,7 +4226,7 @@ mod tests {
         ];
         let response = BotGroupchatResponse {
             purpose: BotGroupchatResponsePurpose::Message,
-            body: DisplayText::new("AI answer").expect("body"),
+            body: DisplayText::new("bot answer").expect("body"),
             room: RoomJid::new(room_jid.to_string()).expect("room"),
             thread_id: Some(ThreadId::new("root-msg").expect("thread")),
             reply_to: Some(ReplyTarget {
@@ -4358,7 +4276,7 @@ mod tests {
         );
         assert_eq!(
             message.bodies.get("").map(|body| body.0.as_str()),
-            Some("AI answer")
+            Some("bot answer")
         );
         let reply = parse_reply_from_message(message).expect("reply payload");
         assert_eq!(reply.id, "root-msg");
@@ -4370,32 +4288,6 @@ mod tests {
                 .any(|payload| payload.ns() == "urn:waddle:forums:0"),
             "plain MUC bot responses must not reuse forum metadata"
         );
-    }
-
-    #[test]
-    fn ai_provider_fallback_detection_uses_typed_purpose() {
-        use waddle_extensions::{
-            BotGroupchatResponse, BotGroupchatResponsePurpose, DisplayText, RoomJid,
-        };
-
-        let response = BotGroupchatResponse {
-            purpose: BotGroupchatResponsePurpose::Message,
-            body: DisplayText::new("AI provider unavailable. Configure WADDLE_AI_PROVIDER=openai")
-                .expect("body"),
-            room: RoomJid::new("chat@muc.example.com").expect("room"),
-            thread_id: None,
-            reply_to: None,
-        };
-        assert!(!is_ai_provider_fallback(&response));
-
-        let fallback = BotGroupchatResponse {
-            purpose: BotGroupchatResponsePurpose::AiProviderFallback,
-            body: DisplayText::new("fallback copy can change").expect("body"),
-            room: RoomJid::new("chat@muc.example.com").expect("room"),
-            thread_id: None,
-            reply_to: None,
-        };
-        assert!(is_ai_provider_fallback(&fallback));
     }
 
     #[test]
@@ -4419,7 +4311,7 @@ mod tests {
         message.type_ = xmpp_parsers::message::MessageType::Groupchat;
         message.bodies.insert(
             String::new(),
-            xmpp_parsers::message::Body("/ai explain this".to_string()),
+            xmpp_parsers::message::Body("explain this".to_string()),
         );
 
         let thread_id = bot_response_source_thread_id(&mut message, true);
@@ -4439,7 +4331,7 @@ mod tests {
 
         let response = BotGroupchatResponse {
             purpose: BotGroupchatResponsePurpose::Message,
-            body: DisplayText::new("AI answer").expect("body"),
+            body: DisplayText::new("bot answer").expect("body"),
             room: RoomJid::new("chat@muc.example.com").expect("room"),
             thread_id: Some(ThreadId::new("client-origin-id").expect("thread")),
             reply_to: None,
