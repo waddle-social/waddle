@@ -44,6 +44,92 @@ async fn assert_no_frame_matching<F>(
     }
 }
 
+async fn connect_alice_bob() -> (TestServer, WsXmppClient, WsXmppClient) {
+    let alice_password = format!("alice-pass-{}", uuid::Uuid::new_v4());
+    let bob_password = format!("bob-pass-{}", uuid::Uuid::new_v4());
+    let server = TestServer::start_with_extra_accounts(&[
+        ("alice", &alice_password),
+        ("bob", &bob_password),
+    ]);
+
+    let alice = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "alice",
+        &alice_password,
+        &format!("alice-{}", uuid::Uuid::new_v4()),
+    )
+    .await
+    .expect("alice connection");
+    let bob = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "bob",
+        &bob_password,
+        &format!("bob-{}", uuid::Uuid::new_v4()),
+    )
+    .await
+    .expect("bob connection");
+
+    (server, alice, bob)
+}
+
+async fn send_roster_get(client: &mut WsXmppClient, id: &str) {
+    client
+        .send(&format!(
+            r#"<iq xmlns="jabber:client" type="get" id="{id}"><query xmlns="jabber:iq:roster"/></iq>"#
+        ))
+        .await
+        .expect("send roster get");
+    let _ = client
+        .recv_matching(|frame| frame.contains(id))
+        .await
+        .expect("roster get result");
+}
+
+async fn establish_subscription_to_alice(alice: &mut WsXmppClient, bob: &mut WsXmppClient) {
+    send_roster_get(alice, "alice-subscription-roster").await;
+    send_roster_get(bob, "bob-subscription-roster").await;
+
+    alice
+        .send(r#"<presence xmlns="jabber:client"/>"#)
+        .await
+        .expect("alice available");
+    bob.send(r#"<presence xmlns="jabber:client" type="subscribe" to="alice@localhost"/>"#)
+        .await
+        .expect("bob subscribes to alice");
+    let subscribe = alice
+        .recv_matching(|frame| {
+            frame.contains("type=\"subscribe\"") || frame.contains("type='subscribe'")
+        })
+        .await
+        .expect("alice receives subscribe");
+    assert!(
+        subscribe.contains("from=\"bob@localhost\"") || subscribe.contains("from='bob@localhost'"),
+        "expected bob subscribe request, got: {subscribe}"
+    );
+
+    alice
+        .send(r#"<presence xmlns="jabber:client" type="subscribed" to="bob@localhost"/>"#)
+        .await
+        .expect("alice approves bob");
+    let subscribed = bob
+        .recv_matching(|frame| {
+            frame.contains("type=\"subscribed\"") || frame.contains("type='subscribed'")
+        })
+        .await
+        .expect("bob receives approval");
+    assert!(
+        subscribed.contains("from=\"alice@localhost\"")
+            || subscribed.contains("from='alice@localhost'"),
+        "expected alice approval, got: {subscribed}"
+    );
+
+    bob.send(r#"<presence xmlns="jabber:client"/>"#)
+        .await
+        .expect("bob available for presence updates");
+}
+
 #[tokio::test]
 async fn websocket_vcard_set_then_get_roundtrips() {
     let (_server, mut client) = setup().await;
@@ -176,6 +262,91 @@ async fn websocket_disco_advertises_blocking() {
     );
 
     client.close().await;
+}
+
+#[tokio::test]
+async fn websocket_blocking_updates_presence_visibility_for_subscribed_contact() {
+    let (_server, mut alice, mut bob) = connect_alice_bob().await;
+
+    establish_subscription_to_alice(&mut alice, &mut bob).await;
+
+    alice
+        .send(
+            r#"<presence xmlns="jabber:client"><show>chat</show><status>visible before block</status><priority>7</priority></presence>"#,
+        )
+        .await
+        .expect("alice sends current presence");
+    let initial_presence = bob
+        .recv_matching(|frame| frame.contains("visible before block"))
+        .await
+        .expect("bob receives initial presence");
+    assert!(
+        initial_presence.contains("from=\"alice@localhost/")
+            || initial_presence.contains("from='alice@localhost/"),
+        "expected alice presence before blocking, got: {initial_presence}"
+    );
+
+    alice
+        .send(
+            r#"<iq xmlns="jabber:client" type="set" id="ws-block-presence"><block xmlns="urn:xmpp:blocking"><item jid="bob@localhost"/></block></iq>"#,
+        )
+        .await
+        .expect("alice blocks bob");
+    let block_response = alice
+        .recv_matching(|frame| frame.contains("ws-block-presence"))
+        .await
+        .expect("blocking response");
+    assert!(
+        block_response.contains("type=\"result\"") || block_response.contains("type='result'"),
+        "expected blocking result, got: {block_response}"
+    );
+    let unavailable = bob
+        .recv_matching(|frame| {
+            (frame.contains("type=\"unavailable\"") || frame.contains("type='unavailable'"))
+                && (frame.contains("from=\"alice@localhost/")
+                    || frame.contains("from='alice@localhost/"))
+        })
+        .await
+        .expect("bob receives unavailable presence after block");
+    assert!(
+        unavailable.contains("to=\"bob@localhost\"") || unavailable.contains("to='bob@localhost'"),
+        "expected unavailable presence addressed to bob, got: {unavailable}"
+    );
+
+    alice
+        .send(
+            r#"<iq xmlns="jabber:client" type="set" id="ws-unblock-presence"><unblock xmlns="urn:xmpp:blocking"><item jid="bob@localhost"/></unblock></iq>"#,
+        )
+        .await
+        .expect("alice unblocks bob");
+    let unblock_response = alice
+        .recv_matching(|frame| frame.contains("ws-unblock-presence"))
+        .await
+        .expect("unblocking response");
+    assert!(
+        unblock_response.contains("type=\"result\"") || unblock_response.contains("type='result'"),
+        "expected unblocking result, got: {unblock_response}"
+    );
+    let restored_presence = bob
+        .recv_matching(|frame| frame.contains("visible before block"))
+        .await
+        .expect("bob receives current presence after unblock");
+    assert!(
+        restored_presence.contains("from=\"alice@localhost/")
+            || restored_presence.contains("from='alice@localhost/"),
+        "expected alice current presence after unblock, got: {restored_presence}"
+    );
+
+    assert_no_frame_matching(
+        &mut bob,
+        Duration::from_millis(250),
+        |frame| frame.contains("type=\"unavailable\"") || frame.contains("type='unavailable'"),
+        "bob should not receive extra unavailable presence after unblock",
+    )
+    .await;
+
+    bob.close().await;
+    alice.close().await;
 }
 
 #[tokio::test]

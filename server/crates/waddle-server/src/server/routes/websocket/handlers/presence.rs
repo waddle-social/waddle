@@ -386,7 +386,7 @@ async fn send_existing_subscription_ack(
     }
 }
 
-async fn send_current_presence_from_user_to_user(
+pub(super) async fn send_current_presence_from_user_to_user(
     state: &WebSocketState,
     from: &BareJid,
     to: &BareJid,
@@ -418,7 +418,7 @@ async fn send_current_presence_from_user_to_user(
     }
 }
 
-async fn send_unavailable_presence_from_user_to_user(
+pub(super) async fn send_unavailable_presence_from_user_to_user(
     state: &WebSocketState,
     from: &BareJid,
     to: &BareJid,

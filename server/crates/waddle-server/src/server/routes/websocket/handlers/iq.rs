@@ -1,6 +1,6 @@
 use chrono;
 use jid::{BareJid, FullJid, Jid};
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 use tracing::{debug, warn};
 use url::{Host, Url};
 use waddle_xmpp::{
@@ -76,7 +76,10 @@ use super::super::{
     build_iq_error_xml, build_iq_error_xml_with_addresses, build_iq_result_xml, destroy_room_actor,
     get_room_actor, iq_to_xml, is_muc_room_jid, stanza_to_xml, WebSocketState,
 };
-use super::presence::get_managed_channel_for_room;
+use super::presence::{
+    get_managed_channel_for_room, send_current_presence_from_user_to_user,
+    send_unavailable_presence_from_user_to_user,
+};
 use crate::auth::{NativeUserStore, Session};
 use crate::db::actor::{DbExecute, DbQuery, DbQueryOne, GetDatabase};
 use crate::db::blocking::DatabaseBlockingStorage;
@@ -3780,6 +3783,7 @@ async fn handle_blocking_iq(
                     "internal-server-error",
                 )];
             }
+            send_blocking_presence_side_effects(state, &user_bare, &jids, true).await;
             send_blocking_pushes(state, &user_bare, true, &jids).await;
             vec![iq_to_xml(
                 waddle_xmpp::xep::xep0191::build_blocking_success(iq),
@@ -3824,6 +3828,7 @@ async fn handle_blocking_iq(
                 }
                 jids
             };
+            send_blocking_presence_side_effects(state, &user_bare, &unblocked_jids, false).await;
             send_blocking_pushes(state, &user_bare, false, &unblocked_jids).await;
             vec![iq_to_xml(
                 waddle_xmpp::xep::xep0191::build_blocking_success(iq),
@@ -3859,6 +3864,63 @@ async fn handle_blocking_iq(
     }
 
     response
+}
+
+async fn send_blocking_presence_side_effects(
+    state: &WebSocketState,
+    user_bare: &BareJid,
+    jids: &[String],
+    blocked: bool,
+) {
+    let storage = match roster_storage_for_state(state).await {
+        Ok(storage) => storage,
+        Err(error) => {
+            warn!(jid = %user_bare, error = %error, "Failed to access roster storage for XEP-0191 presence side effects");
+            return;
+        }
+    };
+    let subscribers = match storage.get_presence_subscribers(user_bare).await {
+        Ok(subscribers) => subscribers,
+        Err(error) => {
+            warn!(jid = %user_bare, error = %error, "Failed to load presence subscribers for XEP-0191 presence side effects");
+            return;
+        }
+    };
+
+    let subscriber_bares: HashSet<BareJid> = subscribers
+        .into_iter()
+        .filter_map(|jid| match jid.parse::<Jid>() {
+            Ok(jid) => Some(jid.to_bare()),
+            Err(error) => {
+                warn!(jid, %error, "Skipping invalid stored roster subscriber JID");
+                None
+            }
+        })
+        .collect();
+
+    let mut targets = Vec::new();
+    let mut seen = HashSet::new();
+    for jid in jids {
+        let Ok(target) = jid.parse::<Jid>() else {
+            warn!(
+                jid,
+                "Skipping invalid XEP-0191 target JID for presence side effects"
+            );
+            continue;
+        };
+        let target_bare = target.to_bare();
+        if subscriber_bares.contains(&target_bare) && seen.insert(target_bare.clone()) {
+            targets.push(target_bare);
+        }
+    }
+
+    for target in targets {
+        if blocked {
+            send_unavailable_presence_from_user_to_user(state, user_bare, &target).await;
+        } else {
+            send_current_presence_from_user_to_user(state, user_bare, &target).await;
+        }
+    }
 }
 
 async fn send_blocking_pushes(
