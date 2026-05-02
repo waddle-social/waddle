@@ -12,8 +12,9 @@
 //! (`<message><subject>...</subject></message>`, no `<body/>`), this
 //! handler:
 //!
-//! 1. Detects the subject-change shape via empty `bodies` + non-empty
-//!    `subjects` (matching `MucMessage::is_subject_change`).
+//! 1. Detects the subject-change shape: non-empty `subjects` plus no
+//!    `<body/>` content (empty/whitespace-only bodies count as no
+//!    body — see the inline rationale on the hostile-client guard).
 //! 2. Enforces §8.1's role-based policy (moderators always; participants
 //!    only in unmoderated rooms; visitors never) against the frozen
 //!    sender snapshot in [`RoomContext`].
@@ -101,16 +102,17 @@ impl RoomHandler for MucSubjectHandler {
             return RoomHandlerOutcome::Halt(vec![send_message_error(reply)]);
         }
 
-        // First subject text wins — multi-language subjects are
-        // §8.1-conformant but we persist a single canonical text for
-        // replay. The `<subject>` elements still flow through to
-        // archive and reflector unchanged.
-        let text = message
+        // Capture every `<subject xml:lang='...'>` variant so the
+        // join-time replay built by `build_subject_message` from the
+        // persisted state matches the live broadcast that
+        // `ReflectorHandler` is about to emit. Persisting only the
+        // first language would silently lose localized subjects on
+        // next-join replay.
+        let texts: std::collections::BTreeMap<String, String> = message
             .subjects
             .iter()
-            .next()
-            .map(|(_, s)| s.0.clone())
-            .unwrap_or_default();
+            .map(|(lang, subject)| (lang.clone(), subject.0.clone()))
+            .collect();
 
         // Single dispatch clock (matches the `dispatch_timestamp`
         // sharing precedent in inbox.rs / archive.rs). Conversion
@@ -122,7 +124,7 @@ impl RoomHandler for MucSubjectHandler {
 
         let event = OutboundEvent::PersistRoomSubject {
             room: ctx.room.clone(),
-            text,
+            texts,
             setter: sender.bare_jid(),
             setter_nick: sender.nick.clone(),
             set_at,
@@ -247,7 +249,7 @@ mod tests {
         };
         let persist = extract_persist(&events).expect("PersistRoomSubject emitted");
         let OutboundEvent::PersistRoomSubject {
-            text,
+            texts,
             setter,
             setter_nick,
             ..
@@ -255,7 +257,11 @@ mod tests {
         else {
             unreachable!()
         };
-        assert_eq!(text, "New topic");
+        assert_eq!(
+            texts.get(""),
+            Some(&"New topic".to_string()),
+            "default-language subject persisted"
+        );
         assert_eq!(setter, &sender.to_bare());
         assert_eq!(setter_nick, "alice-nick");
     }
@@ -330,6 +336,40 @@ mod tests {
             panic!("regular message must Continue, got {outcome:?}");
         };
         assert!(extract_persist(&events).is_none());
+    }
+
+    #[test]
+    fn subject_change_captures_every_xml_lang_variant_into_persist_event() {
+        // Multi-language subjects are §8.1-conformant and the live
+        // broadcast carries every <subject xml:lang='...'>. The
+        // handler must persist every variant so the join-time replay
+        // built by `build_subject_message` matches.
+        let room = bare("team@muc.example.com");
+        let sender = full("alice@example.com/web");
+        let mut msg = subject_change(&room, &sender, "Default subject");
+        msg.subjects
+            .insert("en".to_string(), Subject("English subject".to_string()));
+        msg.subjects
+            .insert("fr".to_string(), Subject("Sujet français".to_string()));
+        let outcome = run(
+            &mut msg,
+            &room,
+            &sender,
+            "alice-nick",
+            Role::Moderator,
+            false,
+        );
+        let RoomHandlerOutcome::Continue(events) = outcome else {
+            panic!("moderator subject change should Continue, got {outcome:?}");
+        };
+        let persist = extract_persist(&events).expect("PersistRoomSubject emitted");
+        let OutboundEvent::PersistRoomSubject { texts, .. } = persist else {
+            unreachable!()
+        };
+        assert_eq!(texts.len(), 3, "every language variant captured");
+        assert_eq!(texts.get(""), Some(&"Default subject".to_string()));
+        assert_eq!(texts.get("en"), Some(&"English subject".to_string()));
+        assert_eq!(texts.get("fr"), Some(&"Sujet français".to_string()));
     }
 
     #[test]

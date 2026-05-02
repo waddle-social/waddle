@@ -539,8 +539,10 @@ mod tests {
         let to: FullJid = "joiner@example.com/web".parse().expect("valid full jid");
         let secret = OccupantIdSecret::for_testing(b"xep0421-subject-test".to_vec());
         let setter: BareJid = "alice@example.com".parse().expect("valid bare jid");
+        let mut texts = std::collections::BTreeMap::new();
+        texts.insert(String::new(), "topic".to_string());
         let state = SubjectState {
-            text: "topic".to_string(),
+            texts,
             setter: setter.clone(),
             setter_nick: "alice-nick".to_string(),
             set_at: chrono::Utc.with_ymd_and_hms(2026, 5, 2, 12, 0, 0).unwrap(),

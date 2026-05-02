@@ -835,7 +835,7 @@ async fn interpret_with_depth(
             }
             OutboundEvent::PersistRoomSubject {
                 room,
-                text,
+                texts,
                 setter,
                 setter_nick,
                 set_at,
@@ -872,7 +872,7 @@ async fn interpret_with_depth(
                 };
                 if let Err(error) = room_actor
                     .ask(SetSubject {
-                        text,
+                        texts,
                         setter: setter.clone(),
                         setter_nick,
                         set_at,

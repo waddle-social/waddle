@@ -324,7 +324,7 @@ impl kameo::message::Message<UpdateConfig> for RoomActor {
 /// [`MucRoom::set_subject`], which writes a `SubjectState` onto
 /// `MucRoom.subject` for replay on the next join (XEP-0045 §7.2.15).
 pub struct SetSubject {
-    pub text: String,
+    pub texts: std::collections::BTreeMap<String, String>,
     pub setter: BareJid,
     pub setter_nick: String,
     pub set_at: DateTime<Utc>,
@@ -339,7 +339,7 @@ impl kameo::message::Message<SetSubject> for RoomActor {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         self.room
-            .set_subject(msg.text, msg.setter, msg.setter_nick, msg.set_at);
+            .set_subject(msg.texts, msg.setter, msg.setter_nick, msg.set_at);
     }
 }
 

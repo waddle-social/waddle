@@ -211,12 +211,14 @@ pub fn create_broadcast_message(
 /// satisfying §7.2.15 and omitting occupant-id; we mirror that.
 ///
 /// `state == Some(SubjectState{..})` (set or explicitly cleared): nick-form
-/// `from='room/setter_nick'` (per the §7.2.15 example), `<subject>{text}</subject>`
-/// (empty when `text == ""` — a wire-distinguishable "cleared" marker
-/// per §7.2.15's SHOULD-include-`<delay/>`-on-cleared rule), an
-/// XEP-0203 `<delay from='room' stamp='set_at'/>` (delay's `from`
-/// MUST be the room itself per §7.2.15), and an XEP-0421
-/// `<occupant-id/>` derived from `setter`'s bare JID.
+/// `from='room/setter_nick'` (per the §7.2.15 example), one
+/// `<subject xml:lang='...'>{text}</subject>` per entry in `texts`
+/// (every value empty represents the "cleared" variant — wire-
+/// distinguishable from never-set per §7.2.15's
+/// SHOULD-include-`<delay/>`-on-cleared rule), an XEP-0203
+/// `<delay from='room' stamp='set_at'/>` (delay's `from` MUST be the
+/// room itself per §7.2.15), and an XEP-0421 `<occupant-id/>` derived
+/// from `setter`'s bare JID.
 ///
 /// `setter_nick` is used solely for rendering `from`; the XEP-0421
 /// stable identifier is derived from `setter` (bare JID) so it
@@ -242,8 +244,21 @@ pub fn build_subject_message(
                 .map(Jid::from)
                 .unwrap_or_else(|_| Jid::from(room_jid.clone()));
             msg.from = Some(from);
-            msg.subjects
-                .insert(String::new(), Subject(state.text.clone()));
+            // Replay every persisted language variant so the
+            // join-time stanza matches the live broadcast 1:1. If the
+            // persisted map is somehow empty (defensive — the handler
+            // captures whatever the originating message had, which
+            // §8.1 requires to be at least one `<subject/>`), fall
+            // back to a single empty default-language entry so we
+            // still satisfy §7.2.15's "MUST return an empty
+            // <subject/>" rule.
+            if state.texts.is_empty() {
+                msg.subjects.insert(String::new(), Subject(String::new()));
+            } else {
+                for (lang, text) in &state.texts {
+                    msg.subjects.insert(lang.clone(), Subject(text.clone()));
+                }
+            }
             xep0203::add_delay_stamp(&mut msg, state.set_at, &room_jid.to_string());
             let occupant_id = generate_occupant_id(&state.setter, room_jid, secret);
             set_occupant_id_on_message(&mut msg, &occupant_id);
@@ -365,8 +380,10 @@ mod tests {
         OccupantIdSecret::for_testing(b"subject-builder-test-secret".to_vec())
     }
     fn sample_state(text: &str) -> SubjectState {
+        let mut texts = std::collections::BTreeMap::new();
+        texts.insert(String::new(), text.to_string());
         SubjectState {
-            text: text.to_string(),
+            texts,
             setter: "alice@example.com".parse().expect("valid bare jid"),
             setter_nick: "alice-nick".to_string(),
             set_at: chrono::Utc.with_ymd_and_hms(2026, 5, 2, 12, 0, 0).unwrap(),
@@ -490,6 +507,49 @@ mod tests {
         let id = extract_occupant_id_from_message(&msg).expect("occupant-id stamped");
         let expected = generate_occupant_id(&state.setter, &room, &secret);
         assert_eq!(id, expected);
+    }
+
+    #[test]
+    fn build_subject_message_preserves_every_persisted_language_variant() {
+        // §8.1 broadcasts (and §7.2.13 archive) carry every
+        // <subject xml:lang='...'> the originating message had.
+        // Join-time replay is built from the persisted state, so it
+        // must reproduce all of them — not just the default-language
+        // entry — otherwise late joiners see a different subject set
+        // than every existing occupant did.
+        let room = test_room();
+        let to = test_recipient();
+        let secret = test_secret();
+        let mut texts = std::collections::BTreeMap::new();
+        texts.insert(String::new(), "Default subject".to_string());
+        texts.insert("en".to_string(), "English subject".to_string());
+        texts.insert("fr".to_string(), "Sujet français".to_string());
+        let state = SubjectState {
+            texts: texts.clone(),
+            setter: "alice@example.com".parse().expect("valid bare jid"),
+            setter_nick: "alice-nick".to_string(),
+            set_at: chrono::Utc.with_ymd_and_hms(2026, 5, 2, 12, 0, 0).unwrap(),
+        };
+
+        let msg = build_subject_message(&room, &to, Some(&state), &secret);
+
+        assert_eq!(
+            msg.subjects.len(),
+            3,
+            "every persisted language variant must round-trip into the join-time replay"
+        );
+        assert_eq!(
+            msg.subjects.get("").map(|s| s.0.as_str()),
+            Some("Default subject")
+        );
+        assert_eq!(
+            msg.subjects.get("en").map(|s| s.0.as_str()),
+            Some("English subject")
+        );
+        assert_eq!(
+            msg.subjects.get("fr").map(|s| s.0.as_str()),
+            Some("Sujet français")
+        );
     }
 
     #[test]

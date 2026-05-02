@@ -419,31 +419,37 @@ pub enum OutboundEvent {
     /// XEP-0045 §7.2.15 historical-subject emission with the right
     /// setter, timestamp, and XEP-0421 occupant-id derivation.
     ///
-    /// **Ordering invariant.** This event and the live broadcast
-    /// (`OutboundEvent::RouteToConnection` from the same dispatch) are
-    /// emitted into the same outbound stream the interpreter drains in
-    /// order. Both `PersistRoomSubject` and a follow-up `JoinOutcome`
-    /// query traverse the same `RoomActor` mailbox, so a join request
-    /// arriving after the subject change has been persisted is
-    /// guaranteed to observe the new subject. Joins that arrived
-    /// before persistence enqueued get the previous stored subject —
-    /// acceptable per §7.2.15 since the live broadcast they receive in
-    /// real time corrects the gap.
+    /// **Ordering.** The room chain emits this event **before** the
+    /// reflector's `OutboundEvent::RouteToConnection` events (handler
+    /// position 3 vs 6). The interpreter drains events sequentially
+    /// and awaits the actor ask, so persistence completes before the
+    /// live broadcast leaves the server. Net result: every observer
+    /// of the live broadcast on this connection's outbound stream is
+    /// guaranteed to see the new subject reflected in any subsequent
+    /// `JoinOutcome.subject_state` snapshot. The added latency is one
+    /// `RoomActor` mailbox round-trip per subject change — subject
+    /// changes are rare, so the simpler ordering is preferred over
+    /// fire-and-forget concurrency.
     ///
     /// **Failure mode.** If the actor ask fails (mailbox closed, room
-    /// destroyed mid-dispatch) the live broadcast has already gone to
-    /// occupants but the persisted state never updates. The
-    /// interpreter logs and returns; this is an irreducible window for
-    /// any out-of-band persistence path. The alternative — gating the
-    /// broadcast on a successful persist — would couple the live wire
-    /// to the actor's mailbox latency on the hot path.
+    /// destroyed mid-dispatch) the interpreter logs and continues
+    /// draining — the live broadcast still goes out, just without a
+    /// matching state update. Future joiners see the previous stored
+    /// subject; the broadcast they missed is gone. This is an
+    /// irreducible window for any out-of-band persistence path; the
+    /// failure rate is bounded by `RoomActor` mailbox availability,
+    /// which is shared with every other room operation.
     PersistRoomSubject {
         /// Room whose state is being mutated.
         room: BareJid,
-        /// New subject text. `""` represents an explicit clear (still
-        /// stored as `Some(SubjectState)` so the next join emits
-        /// `<delay/>` per §7.2.15's SHOULD-include-delay-on-cleared).
-        text: String,
+        /// New subject texts keyed by `xml:lang` (`""` is the default
+        /// language). Mirrors the originating §8.1 message's
+        /// `<subject xml:lang='...'>` set so localized variants
+        /// survive into the join-time replay. An entry with an empty
+        /// value represents an explicit clear (still stored as
+        /// `Some(SubjectState)` so the next join emits `<delay/>`
+        /// per §7.2.15's SHOULD-include-delay-on-cleared).
+        texts: std::collections::BTreeMap<String, String>,
         /// Setter's bare JID — input to the XEP-0421 occupant-id HMAC
         /// at next-join emission.
         setter: BareJid,

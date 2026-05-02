@@ -455,22 +455,26 @@ fn xep_0045_section_8_1_live_subject_change_chain_stamps_occupant_id() {
     let outcome = dispatcher.dispatch(&mut msg, &ctx);
     assert!(!outcome.halted, "moderator subject change must not halt");
 
-    let persist_setter = outcome
+    let persist = outcome
         .events
         .iter()
         .find_map(|e| match e {
             OutboundEvent::PersistRoomSubject {
-                text,
+                texts,
                 setter,
                 setter_nick,
                 ..
-            } => Some((text.clone(), setter.clone(), setter_nick.clone())),
+            } => Some((texts.clone(), setter.clone(), setter_nick.clone())),
             _ => None,
         })
         .expect("PersistRoomSubject emitted");
-    assert_eq!(persist_setter.0, "New topic");
-    assert_eq!(persist_setter.1, alice.to_bare());
-    assert_eq!(persist_setter.2, "alice-nick");
+    assert_eq!(
+        persist.0.get(""),
+        Some(&"New topic".to_string()),
+        "default-language subject text persisted"
+    );
+    assert_eq!(persist.1, alice.to_bare());
+    assert_eq!(persist.2, "alice-nick");
 
     let routes: Vec<&Message> = outcome
         .events

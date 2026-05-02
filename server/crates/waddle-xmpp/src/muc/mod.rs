@@ -85,19 +85,27 @@ pub fn is_remote_jid(jid: &FullJid, local_domain: &str) -> bool {
 
 /// XEP-0045 §7.2.15 / §8.1 room subject state.
 ///
-/// `text` is the literal subject text — an empty string represents an
-/// **explicitly cleared** subject (XEP-0045 §7.2.15 distinguishes this
-/// from "never set", which is represented by `MucRoom.subject == None`).
-/// `setter` and `setter_nick` are the bare JID of the occupant who last
-/// set the subject and the nickname they were using at that moment;
-/// `setter_nick` is frozen here rather than re-resolved at emission so
-/// that historical join-time emissions remain stable across nick
-/// changes and after the setter has left. `set_at` powers the
-/// XEP-0203 `<delay/>` stamp on the join-time emission and the
+/// `texts` carries every `<subject xml:lang='...'>` variant from the
+/// originating §8.1 message, keyed by `xml:lang` (the empty string is
+/// the default-language entry, matching `xmpp_parsers::message::Message::subjects`'s
+/// own `BTreeMap<Lang, Subject>` shape). All entries with empty values
+/// represent an **explicitly cleared** subject — XEP-0045 §7.2.15
+/// distinguishes this from "never set", which is represented by
+/// `MucRoom.subject == None`. Persisting every language variant rather
+/// than a single canonical text avoids losing localized subjects: the
+/// reflected broadcast and the join-time replay would otherwise carry
+/// different `<subject>` element sets.
+///
+/// `setter` and `setter_nick` are the bare JID of the occupant who
+/// last set the subject and the nickname they were using at that
+/// moment; `setter_nick` is frozen here rather than re-resolved at
+/// emission so that historical join-time emissions remain stable
+/// across nick changes and after the setter has left. `set_at` powers
+/// the XEP-0203 `<delay/>` stamp on the join-time emission and the
 /// XEP-0421 occupant-id derivation uses `setter` as the bare-JID input.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubjectState {
-    pub text: String,
+    pub texts: std::collections::BTreeMap<String, String>,
     pub setter: BareJid,
     pub setter_nick: String,
     pub set_at: DateTime<Utc>,
@@ -184,11 +192,12 @@ pub struct MucRoom {
     pub config: RoomConfig,
     /// XEP-0045 §7.2.15 / §8.1 subject state. `None` = "never set"
     /// (joiners receive an empty `<subject/>` with no `<delay/>` and no
-    /// `<occupant-id/>`). `Some(SubjectState{text:""})` = "explicitly
-    /// cleared" (joiners receive empty `<subject/>` plus `<delay/>` and
-    /// `<occupant-id/>` for the user who cleared it). The two cases are
-    /// distinguishable on the wire per the §7.2.15 SHOULD that
-    /// `<delay/>` be included for actively-cleared subjects.
+    /// `<occupant-id/>`). `Some(SubjectState { texts, .. })` where every
+    /// value in `texts` is empty = "explicitly cleared" (joiners
+    /// receive empty `<subject/>` plus `<delay/>` and `<occupant-id/>`
+    /// for the user who cleared it). The two cases are distinguishable
+    /// on the wire per the §7.2.15 SHOULD that `<delay/>` be included
+    /// for actively-cleared subjects.
     pub subject: Option<SubjectState>,
     /// Current occupants (nick -> Occupant)
     pub occupants: HashMap<String, Occupant>,
@@ -705,9 +714,10 @@ impl MucRoom {
 
     // === Subject/Topic Management (XEP-0045 §7.2.15 / §8.1) ===
 
-    /// Apply a §8.1 subject change. `text == ""` represents an explicit
-    /// clear (still a `Some(SubjectState)` so future joins emit
-    /// `<delay/>` per §7.2.15 SHOULD).
+    /// Apply a §8.1 subject change. `texts` mirrors the originating
+    /// message's `<subject xml:lang='...'>` map; an entry whose value
+    /// is empty represents an explicit clear (still a `Some(SubjectState)`
+    /// so future joins emit `<delay/>` per §7.2.15 SHOULD).
     ///
     /// Authorization is enforced upstream by
     /// `protocol::room::subject::MucSubjectHandler` against the frozen
@@ -715,13 +725,13 @@ impl MucRoom {
     /// already passed §8.1's role-based gate.
     pub fn set_subject(
         &mut self,
-        text: String,
+        texts: std::collections::BTreeMap<String, String>,
         setter: BareJid,
         setter_nick: String,
         set_at: DateTime<Utc>,
     ) {
         self.subject = Some(SubjectState {
-            text,
+            texts,
             setter,
             setter_nick,
             set_at,
