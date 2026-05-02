@@ -46,6 +46,17 @@ spec:
       - waddle-r2-credentials
       - waddle-spicedb
       - waddle-runtime-secrets
+    extraVolumes:
+      - name: openrouter-api-key
+        secret:
+          secretName: waddle-openrouter
+          items:
+            - key: api_key
+              path: api_key
+    extraVolumeMounts:
+      - name: openrouter-api-key
+        mountPath: /var/run/secrets/waddle-ai
+        readOnly: true
     # Ship traces + OTel-native metrics to Grafana Cloud via the
     # in-cluster Alloy collector. `telemetry.rs` reads these env vars
     # (default endpoint was `localhost:4317`, which silently dropped
@@ -87,7 +98,8 @@ spec:
     service:
       type: ClusterIP
     # Extension modules are enabled by release automation only after their OCI
-    # WASM artifacts have been pushed and digest-pinned.
+    # WASM artifacts have been pushed and digest-pinned. The AI chatbot is
+    # wired to OpenRouter through the waddle-openrouter ExternalSecret above.
     extensions:
       enabled: false
       cacheDir: /var/lib/waddle/extensions

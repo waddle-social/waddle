@@ -333,6 +333,7 @@ schema.#Project & {
 					  .extensions.modules = [
 					    {"name": "links-task-board", "registry": "ghcr.io/waddle-social/waddle/extensions/links-task-board", "digest": strenv(SAMPLE_DIGEST), "namespace": "urn:waddle:links-task-board:1", "config": {}, "capabilityGrants": ["message.enrich", "commands", "launch", "pubsub.publish", "artifact.reference", "ui.declarative"]},
 					    {"name": "pub-quiz", "registry": "ghcr.io/waddle-social/waddle/extensions/pub-quiz", "digest": strenv(SAMPLE_DIGEST), "namespace": "urn:waddle:pub-quiz:1", "config": {}, "capabilityGrants": ["message.enrich", "commands", "launch", "pubsub.publish", "ui.declarative"]},
+					    {"name": "ai-chatbot", "registry": "ghcr.io/waddle-social/waddle/extensions/ai-chatbot", "digest": strenv(SAMPLE_DIGEST), "namespace": "urn:waddle:ai-chatbot:1", "config": {"endpoint": "https://openrouter.ai/api/v1/chat/completions", "model": "openrouter/auto"}, "configSecretFiles": {"api_key": "/var/run/secrets/waddle-ai/api_key"}, "capabilityGrants": ["message.enrich", "message.observe", "host.mam.read", "host.members.read", "host.presence.read", "host.roster.read", "host.channels.read", "host.spaces.read", "host.message.send", "outbound.http.request", "commands"], "allowedHttpOrigins": ["https://openrouter.ai"]},
 					    {"name": "ai-assistant-canvas", "registry": "ghcr.io/waddle-social/waddle/extensions/ai-assistant-canvas", "digest": strenv(SAMPLE_DIGEST), "namespace": "urn:waddle:ai-assistant-canvas:1", "config": {}, "capabilityGrants": ["message.enrich", "commands", "launch", "pubsub.publish", "artifact.reference", "ui.declarative"]},
 					    {"name": "decision-polls", "registry": "ghcr.io/waddle-social/waddle/extensions/decision-polls", "digest": strenv(SAMPLE_DIGEST), "namespace": "urn:waddle:decision-polls:1", "config": {}, "capabilityGrants": ["message.enrich", "commands", "launch", "pubsub.publish", "ui.declarative"]}
 					  ]
@@ -349,16 +350,16 @@ schema.#Project & {
 					esac
 
 					yq -e '.extensions.enabled == true' "${published_values}" > /dev/null
-					yq -e '.extensions.modules | length == 4' "${published_values}" > /dev/null
+					yq -e '.extensions.modules | length == 5' "${published_values}" > /dev/null
 
-					expected_modules="ai-assistant-canvas decision-polls links-task-board pub-quiz"
+					expected_modules="ai-assistant-canvas ai-chatbot decision-polls links-task-board pub-quiz"
 					actual_modules="$(yq -r '.extensions.modules[].name' "${published_values}" | sort | tr '\n' ' ' | sed 's/ $//')"
 					if [ "${actual_modules}" != "${expected_modules}" ]; then
 					  echo "GitOps extensions.modules must contain exactly: ${expected_modules}; got: ${actual_modules}" >&2
 					  exit 1
 					fi
 
-					for module in links-task-board pub-quiz ai-assistant-canvas decision-polls; do
+					for module in links-task-board pub-quiz ai-chatbot ai-assistant-canvas decision-polls; do
 					  yq -e ".extensions.modules[] | select(.name == \"${module}\") | .registry == \"ghcr.io/waddle-social/waddle/extensions/${module}\"" "${published_values}" > /dev/null
 					  yq -e ".extensions.modules[] | select(.name == \"${module}\") | .digest == \"${sample_digest}\"" "${published_values}" > /dev/null
 					done
@@ -384,11 +385,11 @@ schema.#Project & {
 		publishContainerImage: schema.#Task & {
 			command: "bash"
 			env: {
-				CI_GITHUB_TOKEN:    schema.#EnvPassthrough & {name: "GITHUB_TOKEN"}
-				CI_GITHUB_ACTOR:    schema.#EnvPassthrough & {name: "GITHUB_ACTOR"}
+				CI_GITHUB_TOKEN: schema.#EnvPassthrough & {name: "GITHUB_TOKEN"}
+				CI_GITHUB_ACTOR: schema.#EnvPassthrough & {name: "GITHUB_ACTOR"}
 				CI_GITHUB_REF_TYPE: schema.#EnvPassthrough & {name: "GITHUB_REF_TYPE"}
 				CI_GITHUB_REF_NAME: schema.#EnvPassthrough & {name: "GITHUB_REF_NAME"}
-				CUENV_ARCH:         "amd64"
+				CUENV_ARCH: "amd64"
 			}
 			args: ["-c", #"""
 					set -euo pipefail
@@ -509,22 +510,40 @@ schema.#Project & {
 					    echo "Refusing to pin all-zero digest placeholder for ${extension_name}" >&2
 					    exit 1
 					  fi
-					  if [ "${extension_name}" = "ai-chatbot" ]; then
-					    echo "Published ai-chatbot extension artifact; not auto-enabling without provider config, grants, and allowed HTTP origin" >&2
-					    continue
-					  fi
 					  {
 					    printf -- '- name: %s\n' "${extension_name}"
 					    printf '  registry: ghcr.io/waddle-social/waddle/extensions/%s\n' "${extension_name}"
 					    printf '  digest: %s\n' "${extension_digest}"
 					    printf '  namespace: %s\n' "${namespace}"
-					    printf '  config: {}\n'
-					    printf '  capabilityGrants:\n'
-					    printf '    - message.enrich\n'
-					    printf '    - commands\n'
-					    printf '    - launch\n'
-					    printf '    - pubsub.publish\n'
-					    printf '    - ui.declarative\n'
+					    if [ "${extension_name}" = "ai-chatbot" ]; then
+					      printf '  config:\n'
+					      printf '    endpoint: https://openrouter.ai/api/v1/chat/completions\n'
+					      printf '    model: openrouter/auto\n'
+					      printf '  configSecretFiles:\n'
+					      printf '    api_key: /var/run/secrets/waddle-ai/api_key\n'
+					      printf '  capabilityGrants:\n'
+					      printf '    - message.enrich\n'
+					      printf '    - message.observe\n'
+					      printf '    - host.mam.read\n'
+					      printf '    - host.members.read\n'
+					      printf '    - host.presence.read\n'
+					      printf '    - host.roster.read\n'
+					      printf '    - host.channels.read\n'
+					      printf '    - host.spaces.read\n'
+					      printf '    - host.message.send\n'
+					      printf '    - outbound.http.request\n'
+					      printf '    - commands\n'
+					      printf '  allowedHttpOrigins:\n'
+					      printf '    - https://openrouter.ai\n'
+					    else
+					      printf '  config: {}\n'
+					      printf '  capabilityGrants:\n'
+					      printf '    - message.enrich\n'
+					      printf '    - commands\n'
+					      printf '    - launch\n'
+					      printf '    - pubsub.publish\n'
+					      printf '    - ui.declarative\n'
+					    fi
 					    if [ "${extension_name}" = "links-task-board" ] || [ "${extension_name}" = "ai-assistant-canvas" ]; then
 					      printf '    - artifact.reference\n'
 					    fi
@@ -536,7 +555,7 @@ schema.#Project & {
 					yq -e ".spec.values.image.digest == \"${digest}\"" ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml > /dev/null
 					yq -i ".spec.values.extensions.modules = load(\"${modules_yaml}\")" ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml
 					yq -e ".spec.values.extensions.enabled == true" ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml > /dev/null
-					yq -e ".spec.values.extensions.modules | length == 4" ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml > /dev/null
+					yq -e ".spec.values.extensions.modules | length == 5" ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml > /dev/null
 					if grep -R "${placeholder_digest}" ../infrastructure/waddle.cloud/gitops/waddle-server; then
 					  echo "refusing to publish GitOps with all-zero digest placeholders" >&2
 					  exit 1

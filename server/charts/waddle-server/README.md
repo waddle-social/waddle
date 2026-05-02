@@ -181,11 +181,11 @@ helm upgrade --install waddle ./charts/waddle-server \
 `registry` without a tag and a separate `sha256:<64 hex>` `digest`; chart
 rendering fails for mutable tags, missing digests, all-zero placeholder
 digests, duplicate names, or official XMPP namespaces used as Waddle-specific
-extension namespaces. The chart defaults to no extension modules; release
-automation enables and digest-pins the non-provider sample modules after
-publishing their WASM OCI artifacts. The `ai-chatbot` artifact is also
-published, but release automation intentionally leaves it disabled until the
-deployment supplies provider JSON, `capabilityGrants`, and `allowedHttpOrigins`.
+extension namespaces. The chart defaults to no extension modules; production
+release automation enables and digest-pins the published extension artifacts.
+The production GitOps path wires `ai-chatbot` to OpenRouter through a mounted
+1Password-backed Secret file, explicit `capabilityGrants`, and
+`allowedHttpOrigins`.
 
 An AI chatbot module must grant only the capabilities it actually uses and
 pin the provider origin explicitly, for example:
