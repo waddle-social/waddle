@@ -904,7 +904,6 @@
   flex-direction: column;
   gap: var(--space-xs);
   align-items: flex-start;
-  max-width: var(--chat-readable-measure);
 }
 
 .chat-message-list {
