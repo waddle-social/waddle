@@ -30,7 +30,7 @@ use crate::xep::xep0508::{extract_forum_action, ForumAction};
 use jid::{BareJid, Jid};
 use waddle_xmpp_core::xep0201::{
     build_thread_element, is_thread_element_for_stanza, set_thread_id,
-    thread_info_from_message_in_stanza_ns, CLIENT_STANZA_NS, SERVER_STANZA_NS, ThreadInfo,
+    thread_info_from_message_in_stanza_ns, ThreadInfo, CLIENT_STANZA_NS, SERVER_STANZA_NS,
 };
 use xmpp_parsers::message::Message;
 
@@ -50,9 +50,10 @@ fn replace_stanza_thread(message: &mut Message, thread_id: impl Into<String>) {
     });
     if let Some(parent) = parent {
         message.thread = None;
-        message
-            .payloads
-            .push(build_thread_element(&ThreadInfo::child(thread_id, parent), CLIENT_STANZA_NS));
+        message.payloads.push(build_thread_element(
+            &ThreadInfo::child(thread_id, parent),
+            CLIENT_STANZA_NS,
+        ));
     } else {
         set_thread_id(message, thread_id);
     }

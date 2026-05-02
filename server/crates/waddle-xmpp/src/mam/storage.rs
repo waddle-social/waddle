@@ -204,10 +204,13 @@ impl MamStorage for InMemoryMamStorage {
             messages.retain(|message| message.id.as_str() > after_id);
         }
 
+        // XEP-0313 §archive_order: results MUST be in chronological (received)
+        // order. Order by timestamp first; archive id is the tiebreak for
+        // messages that share a timestamp.
         if uses_backward_pagination(query) {
-            messages.sort_by(|a, b| b.id.cmp(&a.id));
+            messages.sort_by(|a, b| b.timestamp.cmp(&a.timestamp).then_with(|| b.id.cmp(&a.id)));
         } else {
-            messages.sort_by(|a, b| a.id.cmp(&b.id));
+            messages.sort_by(|a, b| a.timestamp.cmp(&b.timestamp).then_with(|| a.id.cmp(&b.id)));
         }
 
         let actual_limit = query.max.unwrap_or(100).min(500) as usize;
@@ -921,10 +924,12 @@ impl MamStorage for SqlxMamStorage {
                 if let Some(after_id) = query.after_id.as_deref() {
                     builder.push(" AND id > ").push_bind(after_id);
                 }
+                // XEP-0313 §archive_order: chronological order primary, archive
+                // id as deterministic tiebreak for tied timestamps.
                 builder.push(if uses_backward_pagination(query) {
-                    " ORDER BY id DESC"
+                    " ORDER BY timestamp DESC, id DESC"
                 } else {
-                    " ORDER BY id ASC"
+                    " ORDER BY timestamp ASC, id ASC"
                 });
                 builder.push(" LIMIT ").push_bind(limit);
 
@@ -964,10 +969,12 @@ impl MamStorage for SqlxMamStorage {
                 if let Some(after_id) = query.after_id.as_deref() {
                     builder.push(" AND id > ").push_bind(after_id);
                 }
+                // XEP-0313 §archive_order: chronological order primary, archive
+                // id as deterministic tiebreak for tied timestamps.
                 builder.push(if uses_backward_pagination(query) {
-                    " ORDER BY id DESC"
+                    " ORDER BY timestamp DESC, id DESC"
                 } else {
-                    " ORDER BY id ASC"
+                    " ORDER BY timestamp ASC, id ASC"
                 });
                 builder.push(" LIMIT ").push_bind(limit);
 
@@ -1703,5 +1710,127 @@ mod tests {
             }
             other => panic!("expected Tombstone, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn xep_0313_sqlx_archive_returns_messages_in_chronological_order() {
+        // XEP-0313 §archive_order: results MUST be returned in the order the
+        // client originally received them (chronological), with id used only
+        // as a tiebreak. Sorting by id alone breaks this if id generation is
+        // ever decoupled from receive time (custom assignment, backfill, etc.).
+        let storage = create_test_storage().await;
+        let archive = "room@conference.example.com";
+        let t0 = chrono::DateTime::parse_from_rfc3339("2026-05-01T10:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let t1 = t0 + chrono::Duration::seconds(10);
+
+        // Earlier message gets the lexicographically *later* id, so id-only
+        // ordering would invert the chronological sequence.
+        let earlier = ArchivedMessage {
+            id: "zzz-earlier".to_string(),
+            timestamp: t0,
+            body: "first".to_string(),
+            ..archived_groupchat(archive)
+        };
+        let later = ArchivedMessage {
+            id: "aaa-later".to_string(),
+            timestamp: t1,
+            body: "second".to_string(),
+            ..archived_groupchat(archive)
+        };
+
+        storage.store_message(archive, &later).await.unwrap();
+        storage.store_message(archive, &earlier).await.unwrap();
+
+        let result = storage
+            .query_messages(archive, &MamQuery::default())
+            .await
+            .unwrap();
+
+        let bodies: Vec<&str> = result.messages.iter().map(|m| m.body.as_str()).collect();
+        assert_eq!(
+            bodies,
+            vec!["first", "second"],
+            "MAM results must be in chronological order, not id order"
+        );
+    }
+
+    #[tokio::test]
+    async fn xep_0313_in_memory_archive_returns_messages_in_chronological_order() {
+        let storage = InMemoryMamStorage::new();
+        let archive = "room@conference.example.com";
+        let t0 = chrono::DateTime::parse_from_rfc3339("2026-05-01T10:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let t1 = t0 + chrono::Duration::seconds(10);
+
+        let earlier = ArchivedMessage {
+            id: "zzz-earlier".to_string(),
+            timestamp: t0,
+            body: "first".to_string(),
+            ..archived_groupchat(archive)
+        };
+        let later = ArchivedMessage {
+            id: "aaa-later".to_string(),
+            timestamp: t1,
+            body: "second".to_string(),
+            ..archived_groupchat(archive)
+        };
+
+        storage.store_message(archive, &later).await.unwrap();
+        storage.store_message(archive, &earlier).await.unwrap();
+
+        let result = storage
+            .query_messages(archive, &MamQuery::default())
+            .await
+            .unwrap();
+
+        let bodies: Vec<&str> = result.messages.iter().map(|m| m.body.as_str()).collect();
+        assert_eq!(
+            bodies,
+            vec!["first", "second"],
+            "in-memory MAM ordering must be chronological"
+        );
+    }
+
+    #[tokio::test]
+    async fn xep_0313_sqlx_archive_uses_id_as_deterministic_tiebreak_when_timestamps_match() {
+        // XEP-0313 §archive_order warns that "multiple messages may share the
+        // same timestamp", so the order MUST still be deterministic. We use
+        // archive id as the secondary key.
+        let storage = create_test_storage().await;
+        let archive = "room@conference.example.com";
+        let t = chrono::DateTime::parse_from_rfc3339("2026-05-01T10:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let first = ArchivedMessage {
+            id: "id-001".to_string(),
+            timestamp: t,
+            body: "first".to_string(),
+            ..archived_groupchat(archive)
+        };
+        let second = ArchivedMessage {
+            id: "id-002".to_string(),
+            timestamp: t,
+            body: "second".to_string(),
+            ..archived_groupchat(archive)
+        };
+
+        // Insert out of id order to make the assertion meaningful.
+        storage.store_message(archive, &second).await.unwrap();
+        storage.store_message(archive, &first).await.unwrap();
+
+        let result = storage
+            .query_messages(archive, &MamQuery::default())
+            .await
+            .unwrap();
+        let ids: Vec<&str> = result.messages.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["id-001", "id-002"],
+            "tied timestamps must be ordered by archive id ascending"
+        );
     }
 }
