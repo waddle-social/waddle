@@ -453,13 +453,23 @@ schema.#Project & {
 
 					echo "${GITHUB_TOKEN}" | helm registry login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
 					chart_package="$(helm package charts/waddle-server -d /tmp/charts | awk '{print $NF}')"
+					chart_version="$(helm show chart "${chart_package}" | awk '$1 == "version:" {print $2; exit}')"
 					helm_push_log="$(mktemp)"
 					if ! helm push "${chart_package}" oci://ghcr.io/waddle-social/waddle/charts 2>&1 | tee "${helm_push_log}"; then
 					  if grep -Eiq 'already exists|409|conflict' "${helm_push_log}"; then
-					    if git rev-parse --verify HEAD^ >/dev/null 2>&1 && git diff --quiet HEAD^ HEAD -- charts/waddle-server; then
-					      echo "Chart version already exists and chart files are unchanged, skipping"
+					    remote_chart_dir="$(mktemp -d)"
+					    local_chart_dir="$(mktemp -d)"
+					    if helm pull oci://ghcr.io/waddle-social/waddle/charts/waddle-server --version "${chart_version}" --destination "${remote_chart_dir}" >/dev/null 2>&1; then
+					      tar -xzf "${chart_package}" -C "${local_chart_dir}"
+					      tar -xzf "${remote_chart_dir}/waddle-server-${chart_version}.tgz" -C "${remote_chart_dir}"
+					      if diff -qr "${local_chart_dir}/waddle-server" "${remote_chart_dir}/waddle-server" >/dev/null; then
+					        echo "Chart version ${chart_version} already exists with identical content, skipping"
+					      else
+					        echo "Chart version ${chart_version} already exists with different content; bump charts/waddle-server/Chart.yaml version" >&2
+					        exit 1
+					      fi
 					    else
-					      echo "Chart version already exists but charts/waddle-server changed; bump charts/waddle-server/Chart.yaml version" >&2
+					      echo "Chart version ${chart_version} already exists but could not pull remote chart for comparison" >&2
 					      exit 1
 					    fi
 					  else

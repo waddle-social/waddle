@@ -91,6 +91,18 @@ Secret name.
 {{- end -}}
 
 {{/*
+Checksum external envFrom Secret contents so Helm reconciles roll pods after
+ExternalSecret-backed key rotation. The Secret values stay hashed; they are not
+rendered into the pod template.
+*/}}
+{{- define "waddle-server.extraSecretChecksum" -}}
+{{- range $name := .Values.extraSecretRefs }}
+{{- $secret := lookup "v1" "Secret" $.Release.Namespace $name -}}
+{{ $name }}={{ if and $secret $secret.data }}{{ toJson $secret.data }}{{ else }}missing{{ end }}
+{{ end -}}
+{{- end -}}
+
+{{/*
 PVC name.
 */}}
 {{- define "waddle-server.pvcName" -}}

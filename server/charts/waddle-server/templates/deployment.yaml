@@ -21,6 +21,12 @@ spec:
         {{- if and .Values.secret.create (not .Values.secret.existingSecret) }}
         checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
         {{- end }}
+        {{- if .Values.extraSecretRefs }}
+        checksum/extra-secrets: {{ include "waddle-server.extraSecretChecksum" . | sha256sum }}
+        {{- end }}
+        {{- if .Values.extraSecretChecksum }}
+        checksum/extra-secret-value: {{ .Values.extraSecretChecksum | quote }}
+        {{- end }}
         {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}

@@ -16,6 +16,12 @@ spec:
         name: waddle-server
         namespace: waddle
       interval: 12h
+  valuesFrom:
+    - kind: Secret
+      name: waddle-runtime-secrets
+      valuesKey: WADDLE_RUNTIME_SECRETS_CHECKSUM
+      targetPath: extraSecretChecksum
+      optional: false
   values:
     image:
       repository: ghcr.io/waddle-social/waddle
@@ -31,12 +37,14 @@ spec:
       s3Endpoint: "https://f90cc3950ab5b356ec869fe64c867ea7.r2.cloudflarestorage.com"
       s3Bucket: "waddle-social-files"
       # Current production chart/server support OpenRouter through the
-      # OpenAI-compatible provider path. The chart also supports first-class
-      # `ai.provider=openrouter` values once chart 0.1.11 is published.
+      # first-class OpenRouter provider path. These remain in extraEnv so the
+      # rollout is compatible with the currently-installed chart until chart
+      # 0.1.12 is picked up.
       extraEnv:
-        WADDLE_AI_PROVIDER: openai
+        WADDLE_AI_PROVIDER: openrouter
         WADDLE_AI_MODEL: openrouter/free
         WADDLE_OPENAI_BASE_URL: https://openrouter.ai/api
+        WADDLE_OPENROUTER_BASE_URL: https://openrouter.ai/api
         WADDLE_OPENROUTER_REFERER: https://waddle.chat
         WADDLE_OPENROUTER_TITLE: Waddle
     database:
@@ -98,6 +106,9 @@ spec:
 
     secret:
       create: true
+      # WADDLE_OCCUPANT_ID_SECRET is owned by the 1Password-backed
+      # waddle-runtime-secrets ExternalSecret referenced above.
+      manageOccupantIdSecret: false
       databaseUrl: "postgresql://postgresql-rw:5432/waddle"
       xmppMamDatabaseUrl: "postgresql://postgresql-rw:5432/waddle"
       xmppInboxDatabaseUrl: "postgresql://postgresql-rw:5432/waddle"

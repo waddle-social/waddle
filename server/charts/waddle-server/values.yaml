@@ -145,6 +145,10 @@ spicedb:
 
 # Additional Kubernetes Secrets to inject as env vars (e.g. R2 credentials from ExternalSecrets).
 extraSecretRefs: []
+# Optional checksum/version value for externally-managed Secrets in
+# extraSecretRefs. Use HelmRelease valuesFrom to wire this from a Secret key so
+# secret rotation changes the pod template and rolls the Deployment.
+extraSecretChecksum: ""
 
 telemetry:
   otlpEndpoint: ""
@@ -155,6 +159,9 @@ secret:
   create: true
   existingSecret: ""
   sessionKey: ""
+  # Set false when WADDLE_OCCUPANT_ID_SECRET is supplied by an external secret
+  # referenced through extraSecretRefs.
+  manageOccupantIdSecret: true
   # Per-deployment HMAC key used to derive XEP-0421 occupant identifiers.
   # Required (≥32 bytes). When `secret.create` is true and this value is
   # empty the chart auto-generates a 64-character alphanumeric secret on

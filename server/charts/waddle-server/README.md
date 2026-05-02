@@ -113,9 +113,14 @@ a clear error.
 ### Default behavior
 
 - `secret.create=true` creates a chart-managed secret
+- `secret.manageOccupantIdSecret=true` makes the chart own `WADDLE_OCCUPANT_ID_SECRET`
 - If `secret.sessionKey` / `secret.occupantIdSecret` is empty:
   - on first install, a random 64-character alphanumeric value is generated
   - on upgrades, the existing in-cluster value is preserved (via `lookup`)
+
+Set `secret.manageOccupantIdSecret=false` only when `WADDLE_OCCUPANT_ID_SECRET`
+is supplied by an external Secret in `extraSecretRefs`; otherwise the server
+will fail startup because the occupant secret is required.
 
 > ⚠️ **Do not rotate `WADDLE_OCCUPANT_ID_SECRET` without an explicit migration plan.**
 > The XEP-0421 occupant identifier is the only stable per-(room, user) handle for
@@ -218,6 +223,10 @@ their WASM OCI artifacts.
 ## Env overrides
 
 This chart supports two extra env mechanisms:
+
+- `extraSecretRefs` injects external Secrets through `envFrom`
+- `extraSecretChecksum` can be set from `HelmRelease.spec.valuesFrom` to roll
+  pods when externally-managed Secret data changes
 
 - `config.extraEnv`:
   - key/value map rendered into the ConfigMap (non-sensitive env)
