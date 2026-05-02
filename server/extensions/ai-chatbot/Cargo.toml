@@ -8,4 +8,5 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
+serde_json = { workspace = true }
 wit-bindgen = "0.57.1"

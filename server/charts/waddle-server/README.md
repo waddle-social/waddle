@@ -182,8 +182,42 @@ helm upgrade --install waddle ./charts/waddle-server \
 rendering fails for mutable tags, missing digests, all-zero placeholder
 digests, duplicate names, or official XMPP namespaces used as Waddle-specific
 extension namespaces. The chart defaults to no extension modules; release
-automation enables and digest-pins the five sample modules after publishing
-their WASM OCI artifacts.
+automation enables and digest-pins the non-provider sample modules after
+publishing their WASM OCI artifacts. The `ai-chatbot` artifact is also
+published, but release automation intentionally leaves it disabled until the
+deployment supplies provider JSON, `capabilityGrants`, and `allowedHttpOrigins`.
+
+An AI chatbot module must grant only the capabilities it actually uses and
+pin the provider origin explicitly, for example:
+
+```yaml
+extensions:
+  enabled: true
+  modules:
+    - name: ai-chatbot
+      registry: ghcr.io/waddle-social/waddle/extensions/ai-chatbot
+      digest: sha256:<published digest>
+      namespace: urn:waddle:ai-chatbot:1
+      config:
+        endpoint: https://api.example.test/v1/chat/completions
+        model: waddle-model
+      configSecretFiles:
+        api_key: /var/run/secrets/waddle-ai/api-key
+      capabilityGrants:
+        - message.enrich
+        - message.observe
+        - host.mam.read
+        - host.members.read
+        - host.presence.read
+        - host.roster.read
+        - host.channels.read
+        - host.spaces.read
+        - host.message.send
+        - outbound.http.request
+        - commands
+      allowedHttpOrigins:
+        - https://api.example.test
+```
 
 ## Env overrides
 

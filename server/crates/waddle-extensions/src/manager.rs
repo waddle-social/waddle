@@ -13,22 +13,33 @@ use std::collections::{HashMap, HashSet};
 use thiserror::Error;
 use tokio::time::timeout;
 use tracing::{debug, warn};
-use xmpp_parsers::message::Message;
+use xmpp_parsers::{jid::BareJid, message::Message};
 
 use crate::actor::WasmExtensionActor;
 use crate::config::{ExtensionConfig, ExtensionModuleConfig};
+use crate::host_tools::{DenyingExtensionHostTools, ExtensionHostTools};
 use crate::oci::OciExtensionPuller;
 use crate::runtime::{LoadedExtension, WasmRuntime};
 use crate::types::{
     is_official_namespace, message_has_framework_envelope, CommandAction, CommandInvocation,
-    CommandNode, CommandSessionId, DetectedLink, DisplayText, ExtensionEffect, ExtensionEnvelope,
-    ExtensionEvent, ExtensionManifest, FullJidValue, LaunchContext, LaunchId, LaunchInvocation,
-    LinkTarget, MessageContext, MessageHook, PayloadNamespace, PluginId, ReplyTarget, RoomJid,
-    StanzaId, ThreadId, WaddleId, FRAMEWORK_NAMESPACE,
+    CommandNode, CommandSessionId, DetectedLink, DisplayText, ExtensionCapability, ExtensionEffect,
+    ExtensionEnvelope, ExtensionEvent, ExtensionManifest, FullJidValue, LaunchContext, LaunchId,
+    LaunchInvocation, LinkTarget, MessageContext, MessageHook, PayloadNamespace, PluginId,
+    ReplyTarget, RoomJid, StanzaId, ThreadId, WaddleId, FRAMEWORK_NAMESPACE,
 };
 
 const MAX_DETECTED_LINKS: usize = 3;
 const EXTENSION_ENRICH_TIMEOUT: Duration = Duration::from_millis(750);
+const EXTENSION_OBSERVE_TIMEOUT: Duration = Duration::from_secs(45);
+const EXTENSION_COMMAND_TIMEOUT: Duration = Duration::from_secs(45);
+const XEP_0359_STANZA_ID_NS: &str = "urn:xmpp:sid:0";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MessageHookMode {
+    All,
+    EnrichOnly,
+    ObserveOnly,
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct MessageExtensionOutcome {
@@ -41,13 +52,23 @@ pub struct LaunchInvocationRequest<'a> {
     pub action_id: &'a str,
     pub launch_id: LaunchId,
     pub context: LaunchContext,
-    pub requester: WaddleId,
+    pub requester: FullJidValue,
     pub session_id: Option<CommandSessionId>,
     pub action: Option<CommandAction>,
     pub fields: Vec<crate::types::FormFieldValue>,
     pub form: Option<crate::types::DataForm>,
     pub expires_at: Option<crate::types::Timestamp>,
     pub launch_token: &'a str,
+}
+
+pub struct CommandInvocationRequest<'a> {
+    pub node: &'a str,
+    pub waddle_id: WaddleId,
+    pub requester: FullJidValue,
+    pub session_id: Option<CommandSessionId>,
+    pub action: Option<CommandAction>,
+    pub fields: Vec<crate::types::FormFieldValue>,
+    pub form: Option<crate::types::DataForm>,
 }
 
 #[derive(Debug, Error)]
@@ -77,6 +98,13 @@ impl ExtensionManager {
     /// Configured extension modules fail fast. Message enrichment itself remains
     /// fail-open so user messages are not lost after startup.
     pub async fn from_config(config: ExtensionConfig) -> Result<Self> {
+        Self::from_config_with_host_tools(config, Arc::new(DenyingExtensionHostTools)).await
+    }
+
+    pub async fn from_config_with_host_tools(
+        config: ExtensionConfig,
+        host_tools: Arc<dyn ExtensionHostTools>,
+    ) -> Result<Self> {
         if !config.enabled {
             return Ok(Self {
                 actors: Vec::new(),
@@ -135,10 +163,15 @@ impl ExtensionManager {
                         error.context(format!("extension init() failed for {}", module.name))
                     );
                 }
-            };
+            }
+            .with_host_tools(Arc::clone(&host_tools));
 
             let manifest = actor.manifest();
             validate_manifest_against_module(module, &manifest)?;
+            validate_ai_chatbot_runtime_config(module, &manifest, &config_json)?;
+            let actor = actor
+                .with_grants(runtime_grants_for_module(module, &manifest))
+                .with_allowed_http_origins(module.allowed_http_origins.clone());
             if !plugin_ids.insert(manifest.id.clone()) {
                 bail!(
                     "extension plugin id {} is declared by multiple modules",
@@ -210,6 +243,7 @@ impl ExtensionManager {
     pub fn command_nodes(&self) -> Vec<(String, String)> {
         self.actors
             .iter()
+            .filter(|actor| actor.has_grant(ExtensionCapability::Commands))
             .flat_map(|actor| {
                 actor
                     .manifest()
@@ -224,19 +258,24 @@ impl ExtensionManager {
 
     pub async fn invoke_command(
         &self,
-        node: &str,
-        waddle_id: WaddleId,
-        session_id: Option<CommandSessionId>,
-        action: Option<CommandAction>,
-        fields: Vec<crate::types::FormFieldValue>,
-        form: Option<crate::types::DataForm>,
+        request: CommandInvocationRequest<'_>,
     ) -> Vec<ExtensionEffect> {
+        let CommandInvocationRequest {
+            node,
+            waddle_id,
+            requester,
+            session_id,
+            action,
+            fields,
+            form,
+        } = request;
         let Ok(command_node) = CommandNode::new(node.to_string()) else {
             return Vec::new();
         };
         let dispatch_node = command_node.clone();
         let event = ExtensionEvent::Command(CommandInvocation {
             waddle_id,
+            requester,
             command_node: dispatch_node,
             session_id,
             action,
@@ -244,8 +283,16 @@ impl ExtensionManager {
             fields,
         });
         for actor in &self.actors {
-            if actor.manifest().declares_command(&command_node) {
-                return self.sign_effects(actor.handle_event(event).await);
+            if actor.has_grant(ExtensionCapability::Commands)
+                && actor.manifest().declares_command(&command_node)
+            {
+                return match timeout(EXTENSION_COMMAND_TIMEOUT, actor.handle_event(event)).await {
+                    Ok(effects) => self.sign_effects(effects),
+                    Err(_) => vec![ExtensionEffect::HostWarning(
+                        DisplayText::new(format!("Extension command {command_node} timed out"))
+                            .expect("timeout warning is non-empty"),
+                    )],
+                };
             }
         }
         Vec::new()
@@ -347,7 +394,63 @@ impl ExtensionManager {
         msg: &mut Message,
         waddle_id: WaddleId,
     ) -> MessageExtensionOutcome {
-        if message_has_framework_envelope(msg) {
+        self.process_message_for_waddle_with_requester(msg, waddle_id, None)
+            .await
+    }
+
+    pub async fn process_message_for_waddle_with_requester(
+        &self,
+        msg: &mut Message,
+        waddle_id: WaddleId,
+        requester: Option<BareJid>,
+    ) -> MessageExtensionOutcome {
+        self.process_message_for_waddle_with_requester_and_mode(
+            msg,
+            waddle_id,
+            requester,
+            MessageHookMode::All,
+        )
+        .await
+    }
+
+    pub async fn process_message_enrichments_for_waddle_with_requester(
+        &self,
+        msg: &mut Message,
+        waddle_id: WaddleId,
+        requester: Option<BareJid>,
+    ) -> MessageExtensionOutcome {
+        self.process_message_for_waddle_with_requester_and_mode(
+            msg,
+            waddle_id,
+            requester,
+            MessageHookMode::EnrichOnly,
+        )
+        .await
+    }
+
+    pub async fn process_message_observers_for_waddle_with_requester(
+        &self,
+        msg: &mut Message,
+        waddle_id: WaddleId,
+        requester: Option<BareJid>,
+    ) -> MessageExtensionOutcome {
+        self.process_message_for_waddle_with_requester_and_mode(
+            msg,
+            waddle_id,
+            requester,
+            MessageHookMode::ObserveOnly,
+        )
+        .await
+    }
+
+    async fn process_message_for_waddle_with_requester_and_mode(
+        &self,
+        msg: &mut Message,
+        waddle_id: WaddleId,
+        requester: Option<BareJid>,
+        mode: MessageHookMode,
+    ) -> MessageExtensionOutcome {
+        if mode != MessageHookMode::ObserveOnly && message_has_framework_envelope(msg) {
             return MessageExtensionOutcome::default();
         }
 
@@ -371,21 +474,22 @@ impl ExtensionManager {
                 .into_iter()
                 .filter_map(|link| LinkTarget::try_from(link).ok())
                 .collect();
-            let source_stanza_id = msg.id.clone().and_then(|id| StanzaId::new(id).ok());
             let room = msg
                 .to
                 .as_ref()
+                .or(msg.from.as_ref())
                 .and_then(|jid| RoomJid::new(jid.to_bare().to_string()).ok());
-            let sender = if room.is_some() {
-                None
-            } else {
-                msg.from
-                    .as_ref()
-                    .and_then(|jid| FullJidValue::new(jid.to_string()).ok())
-            };
+            let source_stanza_id = room
+                .as_ref()
+                .and_then(|room| room_stanza_id_from_payloads(msg, room.as_str()))
+                .or_else(|| msg.id.clone().and_then(|id| StanzaId::new(id).ok()));
+            let sender = msg
+                .from
+                .as_ref()
+                .and_then(|jid| FullJidValue::new(jid.to_string()).ok());
             let event = ExtensionEvent::MessageHook(MessageHook {
                 context: MessageContext {
-                    waddle_id,
+                    waddle_id: waddle_id.clone(),
                     stanza_id: source_stanza_id.clone(),
                     room,
                     sender,
@@ -397,24 +501,52 @@ impl ExtensionManager {
             });
             let enrich_futures = self.actors.iter().filter_map(|actor| {
                 let manifest = actor.manifest();
-                if !manifest.declares_capability(crate::types::ExtensionCapability::MessageEnrich)
-                    && !manifest
-                        .declares_capability(crate::types::ExtensionCapability::MessageObserve)
-                {
+                let declares_enrich =
+                    manifest.declares_capability(crate::types::ExtensionCapability::MessageEnrich);
+                let declares_observe =
+                    manifest.declares_capability(crate::types::ExtensionCapability::MessageObserve);
+                let grants_enrich =
+                    actor.has_grant(crate::types::ExtensionCapability::MessageEnrich);
+                let grants_observe =
+                    actor.has_grant(crate::types::ExtensionCapability::MessageObserve);
+                let selected = match mode {
+                    MessageHookMode::All => {
+                        (declares_enrich && grants_enrich) || (declares_observe && grants_observe)
+                    }
+                    MessageHookMode::EnrichOnly => {
+                        declares_enrich && grants_enrich && !(declares_observe && grants_observe)
+                    }
+                    MessageHookMode::ObserveOnly => declares_observe && grants_observe,
+                };
+                if !selected {
                     return None;
                 }
                 let actor_name = actor.manifest().id.to_string();
                 let manifest = actor.manifest();
                 let actor = Arc::clone(actor);
                 let event = event.clone();
+                let waddle_id = waddle_id.clone();
+                let requester = requester.clone();
                 Some(async move {
-                    match timeout(EXTENSION_ENRICH_TIMEOUT, actor.handle_event(event)).await {
+                    let timeout_duration = if manifest
+                        .declares_capability(crate::types::ExtensionCapability::MessageObserve)
+                    {
+                        EXTENSION_OBSERVE_TIMEOUT
+                    } else {
+                        EXTENSION_ENRICH_TIMEOUT
+                    };
+                    match timeout(
+                        timeout_duration,
+                        actor.handle_event_for_waddle_with_requester(event, waddle_id, requester),
+                    )
+                    .await
+                    {
                         Ok(effects) => (actor_name, manifest, effects),
                         Err(_) => {
                             warn!(
                                 extension = %actor_name,
-                                timeout_secs = EXTENSION_ENRICH_TIMEOUT.as_secs(),
-                                "extension enrichment timed out; continuing fail-open"
+                                timeout_secs = timeout_duration.as_secs(),
+                                "extension message hook timed out; continuing fail-open"
                             );
                             (actor_name, manifest, Vec::new())
                         }
@@ -438,13 +570,13 @@ impl ExtensionManager {
                         ExtensionEffect::EnrichMessage(envelope) => {
                             enrichments.extend(envelope.enrichments);
                         }
-                        ExtensionEffect::BotGroupchatResponse(response) => {
-                            emitted_effects.push(ExtensionEffect::BotGroupchatResponse(response));
-                        }
                         ExtensionEffect::PublishPubSub(_)
                         | ExtensionEffect::ReferenceArtifact(_)
-                        | ExtensionEffect::HostWarning(_)
-                        | ExtensionEffect::Noop => {}
+                        | ExtensionEffect::CommandForm(_) => {}
+                        ExtensionEffect::HostWarning(warning) => {
+                            emitted_effects.push(ExtensionEffect::HostWarning(warning));
+                        }
+                        ExtensionEffect::Noop => {}
                     }
                 }
             }
@@ -476,8 +608,8 @@ impl ExtensionManager {
                     }
                 }
                 ExtensionEffect::PublishPubSub(_)
-                | ExtensionEffect::BotGroupchatResponse(_)
                 | ExtensionEffect::ReferenceArtifact(_)
+                | ExtensionEffect::CommandForm(_)
                 | ExtensionEffect::HostWarning(_)
                 | ExtensionEffect::Noop => {}
             }
@@ -624,7 +756,114 @@ fn validate_manifest_against_module(
             );
         }
     }
+    if manifest.id.as_str() == "ai-chatbot" {
+        for capability in &manifest.capabilities {
+            if !module.capability_grants.contains(capability) {
+                bail!(
+                    "extension {} requires explicit operator grant for declared capability {}",
+                    module.name,
+                    capability.as_str()
+                );
+            }
+        }
+    }
     Ok(())
+}
+
+fn runtime_grants_for_module(
+    module: &ExtensionModuleConfig,
+    manifest: &ExtensionManifest,
+) -> HashSet<ExtensionCapability> {
+    let declared = manifest
+        .capabilities
+        .iter()
+        .copied()
+        .collect::<HashSet<_>>();
+    module
+        .capability_grants
+        .iter()
+        .copied()
+        .filter(|capability| declared.contains(capability))
+        .collect()
+}
+
+fn validate_ai_chatbot_runtime_config(
+    module: &ExtensionModuleConfig,
+    manifest: &ExtensionManifest,
+    config_json: &str,
+) -> Result<()> {
+    if manifest.id.as_str() != "ai-chatbot" {
+        return Ok(());
+    }
+    let config: Value = serde_json::from_str(config_json).map_err(|error| {
+        anyhow::anyhow!(
+            "extension {} provider config is invalid JSON: {error}",
+            module.name
+        )
+    })?;
+    let endpoint = required_ai_config_string(&module.name, &config, "endpoint")?;
+    required_ai_config_string(&module.name, &config, "model")?;
+    required_ai_config_string(&module.name, &config, "api_key")?;
+    let endpoint_url = reqwest::Url::parse(endpoint).map_err(|error| {
+        anyhow::anyhow!(
+            "extension {} provider endpoint must be an absolute HTTPS URL: {error}",
+            module.name
+        )
+    })?;
+    if endpoint_url.scheme() != "https" {
+        bail!("extension {} provider endpoint must use HTTPS", module.name);
+    }
+    let endpoint_origin = runtime_http_origin(&endpoint_url).ok_or_else(|| {
+        anyhow::anyhow!(
+            "extension {} provider endpoint must include a host",
+            module.name
+        )
+    })?;
+    if !module
+        .allowed_http_origins
+        .iter()
+        .any(|origin| origin == &endpoint_origin)
+    {
+        bail!(
+            "extension {} allowedHttpOrigins must include provider origin {}",
+            module.name,
+            endpoint_origin
+        );
+    }
+    Ok(())
+}
+
+fn required_ai_config_string<'a>(
+    module_name: &str,
+    config: &'a Value,
+    key: &str,
+) -> Result<&'a str> {
+    config
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("extension {module_name} provider config must set {key}"))
+}
+
+fn runtime_http_origin(url: &reqwest::Url) -> Option<String> {
+    let host = url.host_str()?;
+    let port = url
+        .port()
+        .map(|port| format!(":{port}"))
+        .unwrap_or_default();
+    Some(format!("{}://{}{}", url.scheme(), host, port))
+}
+
+fn room_stanza_id_from_payloads(msg: &Message, room: &str) -> Option<StanzaId> {
+    msg.payloads
+        .iter()
+        .find(|payload| {
+            payload.name() == "stanza-id"
+                && payload.ns() == XEP_0359_STANZA_ID_NS
+                && payload.attr("by") == Some(room)
+        })
+        .and_then(|payload| payload.attr("id"))
+        .and_then(|id| StanzaId::new(id.to_string()).ok())
 }
 
 fn push_feature_namespace(
@@ -807,9 +1046,11 @@ mod tests {
 
     use super::{
         detect_links, effective_module_config_json, effective_module_config_with_reader,
-        EffectiveModuleConfigError, ExtensionManager, MAX_DETECTED_LINKS,
+        runtime_grants_for_module, EffectiveModuleConfigError, ExtensionManager,
+        MAX_DETECTED_LINKS,
     };
     use crate::config::{ExtensionConfig, ExtensionModuleConfig};
+    use crate::types::{DisplayText, ExtensionCapability, ExtensionManifest, PluginId};
 
     #[test]
     fn detects_urls() {
@@ -861,6 +1102,8 @@ mod tests {
                 "github_token": "from-config",
                 "log_level": "debug"
             }),
+            capability_grants: Vec::new(),
+            allowed_http_origins: Vec::new(),
             config_secret_files,
             local_path: None,
         };
@@ -900,6 +1143,8 @@ mod tests {
             tag: None,
             namespace: "urn:example:extension:1".to_string(),
             config: json!(["not", "an", "object"]),
+            capability_grants: Vec::new(),
+            allowed_http_origins: Vec::new(),
             config_secret_files,
             local_path: None,
         };
@@ -934,6 +1179,8 @@ mod tests {
             tag: None,
             namespace: "urn:example:extension:1".to_string(),
             config: json!({}),
+            capability_grants: Vec::new(),
+            allowed_http_origins: Vec::new(),
             config_secret_files,
             local_path: None,
         };
@@ -955,6 +1202,8 @@ mod tests {
                 tag: Some("latest".to_string()),
                 namespace: "urn:example:extension:1".to_string(),
                 config: json!({}),
+                capability_grants: Vec::new(),
+                allowed_http_origins: Vec::new(),
                 config_secret_files: Default::default(),
                 local_path: Some("missing-example-extension-test.wasm".to_string()),
             }],
@@ -993,6 +1242,8 @@ mod tests {
             tag: None,
             namespace: "urn:waddle:bad:1".to_string(),
             config: json!({}),
+            capability_grants: Vec::new(),
+            allowed_http_origins: Vec::new(),
             config_secret_files: Default::default(),
             local_path: None,
         };
@@ -1013,6 +1264,50 @@ mod tests {
             namespaces,
             vec!["https://example.com/not-waddle", "urn:example:extension:1"]
         );
+    }
+
+    #[test]
+    fn runtime_grants_are_host_configured_and_manifest_bounded() {
+        let module = ExtensionModuleConfig {
+            name: "example-extension".to_string(),
+            registry: "ghcr.io/waddle-social/waddle/extensions/example-extension".to_string(),
+            digest: Some(
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_string(),
+            ),
+            tag: None,
+            namespace: "urn:example:extension:1".to_string(),
+            config: json!({}),
+            capability_grants: vec![
+                ExtensionCapability::Commands,
+                ExtensionCapability::OutboundHttpRequest,
+                ExtensionCapability::HostMessageSend,
+            ],
+            allowed_http_origins: Vec::new(),
+            config_secret_files: Default::default(),
+            local_path: None,
+        };
+        let manifest = ExtensionManifest {
+            id: PluginId::new("example-extension").expect("static plugin id is valid"),
+            name: DisplayText::new("Example Extension").expect("static display text is valid"),
+            version: crate::types::PluginVersion::new("0.1.0")
+                .expect("static plugin version is valid"),
+            payloads: Vec::new(),
+            capabilities: vec![
+                ExtensionCapability::Commands,
+                ExtensionCapability::OutboundHttpRequest,
+            ],
+            commands: Vec::new(),
+            pubsub_nodes: Vec::new(),
+            artifact: None,
+        };
+
+        let grants = runtime_grants_for_module(&module, &manifest);
+
+        assert!(grants.contains(&ExtensionCapability::Commands));
+        assert!(grants.contains(&ExtensionCapability::OutboundHttpRequest));
+        assert!(!grants.contains(&ExtensionCapability::HostMessageSend));
+        assert!(!grants.contains(&ExtensionCapability::HostMamRead));
     }
 
     #[tokio::test]

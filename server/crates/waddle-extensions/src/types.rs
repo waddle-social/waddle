@@ -1,6 +1,8 @@
 use std::fmt;
 
 use minidom::Element;
+use std::collections::HashSet;
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use xmpp_parsers::jid::{BareJid, FullJid};
@@ -417,8 +419,22 @@ pub enum ExtensionCapability {
     MessageEnrich,
     #[serde(rename = "message.observe")]
     MessageObserve,
-    #[serde(rename = "bot.groupchat.send")]
-    BotGroupchatSend,
+    #[serde(rename = "host.channels.read")]
+    HostChannelsRead,
+    #[serde(rename = "host.spaces.read")]
+    HostSpacesRead,
+    #[serde(rename = "host.members.read")]
+    HostMembersRead,
+    #[serde(rename = "host.presence.read")]
+    HostPresenceRead,
+    #[serde(rename = "host.mam.read")]
+    HostMamRead,
+    #[serde(rename = "host.roster.read")]
+    HostRosterRead,
+    #[serde(rename = "host.message.send")]
+    HostMessageSend,
+    #[serde(rename = "outbound.http.request")]
+    OutboundHttpRequest,
     #[serde(rename = "commands")]
     Commands,
     #[serde(rename = "launch")]
@@ -436,7 +452,14 @@ impl ExtensionCapability {
         match self {
             Self::MessageEnrich => "message.enrich",
             Self::MessageObserve => "message.observe",
-            Self::BotGroupchatSend => "bot.groupchat.send",
+            Self::HostChannelsRead => "host.channels.read",
+            Self::HostSpacesRead => "host.spaces.read",
+            Self::HostMembersRead => "host.members.read",
+            Self::HostPresenceRead => "host.presence.read",
+            Self::HostMamRead => "host.mam.read",
+            Self::HostRosterRead => "host.roster.read",
+            Self::HostMessageSend => "host.message.send",
+            Self::OutboundHttpRequest => "outbound.http.request",
             Self::Commands => "commands",
             Self::Launch => "launch",
             Self::PubSubPublish => "pubsub.publish",
@@ -1208,6 +1231,7 @@ impl TryFrom<DetectedLink> for LinkTarget {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CommandInvocation {
     pub waddle_id: WaddleId,
+    pub requester: FullJidValue,
     pub command_node: CommandNode,
     pub session_id: Option<CommandSessionId>,
     pub action: Option<CommandAction>,
@@ -1246,7 +1270,7 @@ impl CommandAction {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LaunchInvocation {
     pub context: LaunchContext,
-    pub requester: WaddleId,
+    pub requester: FullJidValue,
     pub launch_id: LaunchId,
     pub session_id: Option<CommandSessionId>,
     pub action: Option<CommandAction>,
@@ -1262,20 +1286,32 @@ pub struct ExtensionResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ExtensionEffect {
     EnrichMessage(ExtensionEnvelope),
-    BotGroupchatResponse(BotGroupchatResponse),
     PublishPubSub(PubSubPublish),
     ReferenceArtifact(ArtifactReference),
+    CommandForm(DataForm),
     HostWarning(DisplayText),
     Noop,
 }
 
 impl ExtensionEffect {
     pub fn validate_for_manifest(&self, manifest: &ExtensionManifest) -> bool {
+        self.validate_for_manifest_and_grants(
+            manifest,
+            &manifest.capabilities.iter().copied().collect(),
+        )
+    }
+
+    pub fn validate_for_manifest_and_grants(
+        &self,
+        manifest: &ExtensionManifest,
+        grants: &HashSet<ExtensionCapability>,
+    ) -> bool {
         match self {
             Self::EnrichMessage(envelope) => envelope.enrichments.iter().all(|enrichment| {
                 enrichment.plugin == manifest.id
                     && enrichment.capability == ExtensionCapability::MessageEnrich
                     && manifest.declares_capability(ExtensionCapability::MessageEnrich)
+                    && grants.contains(&ExtensionCapability::MessageEnrich)
                     && enrichment.payloads_match_declared_namespace()
                     && enrichment.payloads.iter().all(|payload| {
                         manifest.declares_payload(PayloadSurface::MessageEnrichment, payload)
@@ -1283,6 +1319,7 @@ impl ExtensionEffect {
                     && enrichment.launches.iter().all(|launch| {
                         launch.plugin == manifest.id
                             && manifest.declares_capability(ExtensionCapability::Launch)
+                            && grants.contains(&ExtensionCapability::Launch)
                             && launch.payloads.iter().all(|payload| {
                                 payload.namespace == payload.root.namespace
                                     && manifest
@@ -1294,15 +1331,18 @@ impl ExtensionEffect {
             }),
             Self::PublishPubSub(publish) => {
                 manifest.declares_capability(ExtensionCapability::PubSubPublish)
+                    && grants.contains(&ExtensionCapability::PubSubPublish)
                     && manifest.declares_pubsub_node(&publish.node)
                     && publish.payload.namespace == publish.payload.root.namespace
                     && manifest.declares_payload(PayloadSurface::PubSubItem, &publish.payload)
             }
-            Self::BotGroupchatResponse(_) => {
-                manifest.declares_capability(ExtensionCapability::BotGroupchatSend)
-            }
             Self::ReferenceArtifact(_) => {
                 manifest.declares_capability(ExtensionCapability::ArtifactReference)
+                    && grants.contains(&ExtensionCapability::ArtifactReference)
+            }
+            Self::CommandForm(_) => {
+                manifest.declares_capability(ExtensionCapability::Commands)
+                    && grants.contains(&ExtensionCapability::Commands)
             }
             Self::HostWarning(_) => true,
             Self::Noop => true,
@@ -1315,21 +1355,6 @@ pub struct PubSubPublish {
     pub node: PubSubNode,
     pub item_id: Option<PubSubItemId>,
     pub payload: ExtensionPayload,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-pub enum BotGroupchatResponsePurpose {
-    #[serde(rename = "message")]
-    Message,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct BotGroupchatResponse {
-    pub purpose: BotGroupchatResponsePurpose,
-    pub body: DisplayText,
-    pub room: RoomJid,
-    pub thread_id: Option<ThreadId>,
-    pub reply_to: Option<ReplyTarget>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1363,5 +1388,38 @@ fn validate_xml_local_name(value: String) -> Result<String, FrameworkTypeError> 
         Ok(value)
     } else {
         Err(FrameworkTypeError::InvalidXmlName(value))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn manifest_with(capabilities: Vec<ExtensionCapability>) -> ExtensionManifest {
+        ExtensionManifest {
+            id: PluginId::new("test-extension").expect("plugin id"),
+            name: DisplayText::new("Test Extension").expect("display text"),
+            version: PluginVersion::new("0.1.0").expect("version"),
+            payloads: Vec::new(),
+            capabilities,
+            commands: Vec::new(),
+            pubsub_nodes: Vec::new(),
+            artifact: None,
+        }
+    }
+
+    #[test]
+    fn command_form_effect_requires_manifest_and_operator_grant() {
+        let manifest = manifest_with(vec![ExtensionCapability::Commands]);
+        let effect = ExtensionEffect::CommandForm(DataForm {
+            form_type: DataFormType::Form,
+            title: None,
+            instructions: Vec::new(),
+            fields: Vec::new(),
+        });
+        assert!(!effect.validate_for_manifest_and_grants(&manifest, &HashSet::new()));
+
+        let grants = HashSet::from([ExtensionCapability::Commands]);
+        assert!(effect.validate_for_manifest_and_grants(&manifest, &grants));
     }
 }

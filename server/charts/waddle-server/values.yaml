@@ -102,11 +102,11 @@ extensions:
   enabled: false
   cacheDir: /var/lib/waddle/extensions
   # Extensions are loaded from immutable OCI artifact digests. Release
-  # automation enables and pins the sample modules after publishing their WASM
-  # OCI artifacts.
+  # automation enables and pins sample modules after publishing their WASM OCI
+  # artifacts. The AI chatbot artifact is published too, but it is not
+  # auto-enabled until a deployment supplies provider config, capability grants,
+  # and allowed HTTP origins.
   modules: []
-  # Optional map per module of config key -> mounted secret file path.
-  configSecretFiles: {}
 
 config:
   mode: homeserver

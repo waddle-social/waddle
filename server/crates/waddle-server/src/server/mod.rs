@@ -6,6 +6,7 @@ use crate::inbox::build_inbox_storage;
 use crate::permissions::PermissionActor;
 use crate::pubsub::build_pubsub_storage;
 use anyhow::Result;
+use async_trait::async_trait;
 use axum::{
     extract::State,
     http::{header, HeaderName, Method, StatusCode},
@@ -27,6 +28,7 @@ use rustls_acme::{AcmeConfig, UseChallenge};
 use serde::Serialize;
 use serde_json::json;
 use std::{net::SocketAddr, path::PathBuf, sync::Arc};
+use tokio::sync::OnceCell;
 use tower_http::{
     compression::CompressionLayer,
     cors::CorsLayer,
@@ -35,11 +37,12 @@ use tower_http::{
 use tracing::{info, info_span, warn, Level, Span};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 use waddle_extensions::{
-    CommandAction as ExtensionCommandAction, CommandSessionId, DataForm as ExtensionDataForm,
-    DataFormField as ExtensionDataFormField, DataFormType as ExtensionDataFormType, DataFormValue,
-    ExtensionConfig, ExtensionEffect, ExtensionManager, FormFieldOption,
-    FormFieldType as ExtensionFormFieldType, FormFieldValue, LaunchContext, LaunchId,
-    PubSubPublish, StanzaId, UiActionId, WaddleId, INVOKE_COMMAND_NODE,
+    host_tools as ext_host, CommandAction as ExtensionCommandAction, CommandSessionId,
+    DataForm as ExtensionDataForm, DataFormField as ExtensionDataFormField,
+    DataFormType as ExtensionDataFormType, DataFormValue, ExtensionConfig, ExtensionEffect,
+    ExtensionManager, FormFieldOption, FormFieldType as ExtensionFormFieldType, FormFieldValue,
+    FullJidValue, LaunchContext, LaunchId, PubSubPublish, StanzaId, UiActionId, WaddleId,
+    INVOKE_COMMAND_NODE,
 };
 use waddle_xmpp::inbox::storage::InboxStorage;
 use waddle_xmpp::mam::{MamStorage, SqlxMamStorage};
@@ -47,6 +50,7 @@ use waddle_xmpp::pubsub::{NodeConfig, PubSubItem, PubSubStorage};
 use waddle_xmpp::{muc::room_registry_actor::RoomRegistryActor, registry::ConnectionRegistry};
 
 pub(crate) mod bootstrap_membership;
+pub mod extension_host_adapter;
 mod routes;
 pub mod xmpp_state;
 
@@ -143,6 +147,88 @@ pub fn resolve_server_owner_jids(
         }
     }
     Arc::from(jids)
+}
+
+#[derive(Default)]
+struct DeferredExtensionHostTools {
+    inner: OnceCell<Arc<dyn ext_host::ExtensionHostTools>>,
+}
+
+impl DeferredExtensionHostTools {
+    fn set(&self, tools: Arc<dyn ext_host::ExtensionHostTools>) {
+        let _ = self.inner.set(tools);
+    }
+
+    fn tools(
+        &self,
+    ) -> std::result::Result<&Arc<dyn ext_host::ExtensionHostTools>, ext_host::HostToolError> {
+        self.inner.get().ok_or_else(|| ext_host::HostToolError {
+            code: ext_host::HostToolErrorCode::Unsupported,
+            message: waddle_extensions::DisplayText::new(
+                "extension host tools are not wired into the server",
+            )
+            .expect("static host-tool error is non-empty"),
+        })
+    }
+}
+
+#[async_trait]
+impl ext_host::ExtensionHostTools for DeferredExtensionHostTools {
+    async fn list_channels(
+        &self,
+        context: &ext_host::InvocationContext,
+        request: ext_host::ListChannelsRequest,
+    ) -> std::result::Result<ext_host::ListChannelsResponse, ext_host::HostToolError> {
+        self.tools()?.list_channels(context, request).await
+    }
+
+    async fn list_spaces(
+        &self,
+        context: &ext_host::InvocationContext,
+        request: ext_host::ListSpacesRequest,
+    ) -> std::result::Result<ext_host::ListSpacesResponse, ext_host::HostToolError> {
+        self.tools()?.list_spaces(context, request).await
+    }
+
+    async fn list_room_members(
+        &self,
+        context: &ext_host::InvocationContext,
+        request: ext_host::ListRoomMembersRequest,
+    ) -> std::result::Result<ext_host::ListRoomMembersResponse, ext_host::HostToolError> {
+        self.tools()?.list_room_members(context, request).await
+    }
+
+    async fn get_presence(
+        &self,
+        context: &ext_host::InvocationContext,
+        request: ext_host::GetPresenceRequest,
+    ) -> std::result::Result<ext_host::GetPresenceResponse, ext_host::HostToolError> {
+        self.tools()?.get_presence(context, request).await
+    }
+
+    async fn get_roster(
+        &self,
+        context: &ext_host::InvocationContext,
+        request: ext_host::GetRosterRequest,
+    ) -> std::result::Result<ext_host::GetRosterResponse, ext_host::HostToolError> {
+        self.tools()?.get_roster(context, request).await
+    }
+
+    async fn query_mam(
+        &self,
+        context: &ext_host::InvocationContext,
+        query: ext_host::MamQuery,
+    ) -> std::result::Result<ext_host::MamQueryResponse, ext_host::HostToolError> {
+        self.tools()?.query_mam(context, query).await
+    }
+
+    async fn send_message(
+        &self,
+        context: &ext_host::InvocationContext,
+        request: ext_host::SendMessageRequest,
+    ) -> std::result::Result<ext_host::SendMessageResponse, ext_host::HostToolError> {
+        self.tools()?.send_message(context, request).await
+    }
 }
 
 /// XMPP server configuration loaded from environment variables.
@@ -941,8 +1027,14 @@ async fn create_router(
         .session_key
         .clone()
         .unwrap_or_else(|| format!("development-extension-launch-key:{xmpp_domain}"));
+    let deferred_extension_host_tools = Arc::new(DeferredExtensionHostTools::default());
     let extension_manager = Arc::new(
-        match ExtensionManager::from_config(server_config.extensions.clone()).await {
+        match ExtensionManager::from_config_with_host_tools(
+            server_config.extensions.clone(),
+            Arc::clone(&deferred_extension_host_tools) as Arc<dyn ext_host::ExtensionHostTools>,
+        )
+        .await
+        {
             Ok(mgr) => mgr.with_launch_signing_key(extension_launch_key.as_bytes()),
             Err(error) => {
                 if server_config.extensions.enabled && !server_config.extensions.modules.is_empty()
@@ -952,11 +1044,15 @@ async fn create_router(
                     ));
                 }
                 warn!(error = %error, "Failed to initialize disabled extension manager; continuing without extensions");
-                ExtensionManager::from_config(ExtensionConfig {
-                    enabled: false,
-                    cache_dir: String::new(),
-                    modules: Vec::new(),
-                })
+                ExtensionManager::from_config_with_host_tools(
+                    ExtensionConfig {
+                        enabled: false,
+                        cache_dir: String::new(),
+                        modules: Vec::new(),
+                    },
+                    Arc::clone(&deferred_extension_host_tools)
+                        as Arc<dyn ext_host::ExtensionHostTools>,
+                )
                 .await
                 .map(|mgr| mgr.with_launch_signing_key(extension_launch_key.as_bytes()))
                 .expect("BUG: failed to create disabled ExtensionManager")
@@ -1032,6 +1128,9 @@ async fn create_router(
             occupant_id_secret: server_config.occupant_id_secret.clone(),
         },
     });
+    deferred_extension_host_tools.set(Arc::new(extension_host_adapter::ExtensionHostAdapter::new(
+        Arc::clone(&websocket_state),
+    )));
     // XEP-0198 expired-session janitor. Without this, detached SM sessions
     // whose resume window elapses leave MUC occupants in their rooms forever
     // (ghosts) and the `resumable_sessions` sidecar grows unbounded. Holds a
@@ -1224,7 +1323,7 @@ async fn register_extension_commands(
                         action_id: &action_id,
                         launch_id,
                         context,
-                        requester: WaddleId::new(ctx.from.to_string())
+                        requester: FullJidValue::new(ctx.from.to_string())
                             .expect("requester JID string is non-empty"),
                         session_id: extension_session_id(ctx.command.session_id),
                         action: ctx.command.action.map(extension_command_action),
@@ -1265,14 +1364,27 @@ async fn register_extension_commands(
                     let submitted_form = ctx.command.form.as_ref();
                     let fields = extension_command_fields(submitted_form);
                     let effects = manager
-                        .invoke_command(
-                            &registered_node,
+                        .invoke_command(waddle_extensions::manager::CommandInvocationRequest {
+                            node: &registered_node,
                             waddle_id,
-                            extension_session_id(ctx.command.session_id),
-                            ctx.command.action.map(extension_command_action),
+                            requester: match waddle_extensions::FullJidValue::new(
+                                ctx.from.to_string(),
+                            ) {
+                                Ok(value) => value,
+                                Err(error) => {
+                                    return waddle_xmpp::commands::CommandResult::Completed {
+                                        form: None,
+                                        notes: vec![waddle_xmpp::commands::Note::warn(format!(
+                                            "Invalid requester JID: {error}"
+                                        ))],
+                                    };
+                                }
+                            },
+                            session_id: extension_session_id(ctx.command.session_id),
+                            action: ctx.command.action.map(extension_command_action),
                             fields,
-                            submitted_form.and_then(extension_data_form),
-                        )
+                            form: submitted_form.and_then(extension_data_form),
+                        })
                         .await;
                     extension_command_result(effects, Some((storage, owner))).await
                 }
@@ -1435,6 +1547,13 @@ async fn extension_command_result(
                 let text = format!("Referenced artifact {}", artifact.uri.as_str());
                 notes.push(waddle_xmpp::commands::Note::info(text));
             }
+            ExtensionEffect::CommandForm(form) => {
+                return waddle_xmpp::commands::CommandResult::Executing {
+                    form: extension_data_form_to_xmpp(form),
+                    session_id: String::new(),
+                    notes,
+                };
+            }
             ExtensionEffect::HostWarning(message) => {
                 notes.push(waddle_xmpp::commands::Note::warn(
                     message.as_str().to_string(),
@@ -1445,12 +1564,16 @@ async fn extension_command_result(
                 if result_form.is_none() {
                     result_form = Some(extension_enrichment_result_form(&envelope));
                 }
-                notes.push(waddle_xmpp::commands::Note::info(format!(
-                    "Produced {count} message enrichment{}",
-                    if count == 1 { "" } else { "s" }
-                )));
+                let summaries = extension_enrichment_texts(&envelope);
+                if summaries.is_empty() {
+                    notes.push(waddle_xmpp::commands::Note::info(format!(
+                        "Produced {count} message enrichment{}",
+                        if count == 1 { "" } else { "s" }
+                    )));
+                } else {
+                    notes.extend(summaries.into_iter().map(waddle_xmpp::commands::Note::info));
+                }
             }
-            ExtensionEffect::BotGroupchatResponse(_) => {}
             ExtensionEffect::Noop => {}
         }
     }
@@ -1464,6 +1587,76 @@ async fn extension_command_result(
         form: result_form,
         notes,
     }
+}
+
+fn extension_data_form_to_xmpp(
+    form: waddle_extensions::DataForm,
+) -> waddle_xmpp::xep::xep0004::DataForm {
+    use waddle_xmpp::xep::xep0004::{DataForm, Field, FieldOption, FieldType, FormType};
+
+    let form_type = match form.form_type {
+        ExtensionDataFormType::Form => FormType::Form,
+        ExtensionDataFormType::Submit => FormType::Submit,
+        ExtensionDataFormType::Cancel => FormType::Cancel,
+        ExtensionDataFormType::Result => FormType::Result,
+    };
+    let mut out = DataForm::new(form_type);
+    if let Some(title) = form.title {
+        out = out.with_title(title.into_string());
+    }
+    for instruction in form.instructions {
+        out = out.add_instructions(instruction.into_string());
+    }
+    for field in form.fields {
+        let field_type = match field.field_type {
+            ExtensionFormFieldType::Boolean => FieldType::Boolean,
+            ExtensionFormFieldType::Fixed => FieldType::Fixed,
+            ExtensionFormFieldType::Hidden => FieldType::Hidden,
+            ExtensionFormFieldType::JidMulti => FieldType::JidMulti,
+            ExtensionFormFieldType::JidSingle => FieldType::JidSingle,
+            ExtensionFormFieldType::ListMulti => FieldType::ListMulti,
+            ExtensionFormFieldType::ListSingle => FieldType::ListSingle,
+            ExtensionFormFieldType::TextMulti => FieldType::TextMulti,
+            ExtensionFormFieldType::TextPrivate => FieldType::TextPrivate,
+            ExtensionFormFieldType::TextSingle => FieldType::TextSingle,
+        };
+        let mut xmpp_field = Field::new(field.name.into_string(), field_type);
+        if let Some(label) = field.label {
+            xmpp_field = xmpp_field.with_label(label.into_string());
+        }
+        if field.required {
+            xmpp_field = xmpp_field.with_required();
+        }
+        for value in field.values {
+            xmpp_field.values.push(value.into_string());
+        }
+        for option in field.options {
+            let value = option.value.into_string();
+            let xmpp_option = match option.label {
+                Some(label) => FieldOption::with_label(label.into_string(), value),
+                None => FieldOption::new(value),
+            };
+            xmpp_field = xmpp_field.add_option(xmpp_option);
+        }
+        out = out.add_field(xmpp_field);
+    }
+    out
+}
+
+fn extension_enrichment_texts(envelope: &waddle_extensions::ExtensionEnvelope) -> Vec<String> {
+    envelope
+        .enrichments
+        .iter()
+        .flat_map(|enrichment| enrichment.ui.iter())
+        .flat_map(|view| view.blocks.iter())
+        .filter_map(|block| {
+            if let waddle_extensions::types::UiBlock::Text(text) = block {
+                Some(text.text.as_str().to_string())
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 fn extension_enrichment_result_form(
@@ -1500,6 +1693,16 @@ fn extension_enrichment_result_form(
             "launch-count",
             enrichment.launches.len().to_string(),
         ));
+    for (view_index, view) in enrichment.ui.iter().enumerate() {
+        for (block_index, block) in view.blocks.iter().enumerate() {
+            if let waddle_extensions::types::UiBlock::Text(text) = block {
+                form = form.add_field(Field::text_single(
+                    format!("view#{view_index}#text#{block_index}"),
+                    text.text.as_str(),
+                ));
+            }
+        }
+    }
     for (index, launch) in enrichment.launches.iter().enumerate() {
         let prefix = format!("launch#{index}");
         form = form
