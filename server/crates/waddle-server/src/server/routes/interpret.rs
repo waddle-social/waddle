@@ -5052,4 +5052,113 @@ mod tests {
             "cross-domain bare JID drops without inbox projection"
         );
     }
+
+    // -----------------------------------------------------------------
+    // XEP-0045 §8.1 — PersistRoomSubject interpreter arm
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn xep_0045_persist_room_subject_writes_state_via_room_actor() {
+        // Per-arm coverage for `OutboundEvent::PersistRoomSubject`
+        // (Copilot review, PR #319). Drives the event through
+        // `interpret(...)` against a real `RoomRegistryActor` and a
+        // pre-created room actor, then queries the room snapshot to
+        // confirm the actor wrote `MucRoom.subject` to a `SubjectState`
+        // matching the event payload.
+        use chrono::TimeZone;
+        use waddle_xmpp::muc::room_actor::GetSnapshot;
+        use waddle_xmpp::muc::room_registry_actor::CreateRoom;
+        use waddle_xmpp::muc::RoomConfig;
+        use waddle_xmpp::xep::xep0421::OccupantIdSecret;
+
+        let registry = ConnectionRegistry::new();
+        let room_registry = kameo::spawn(RoomRegistryActor::new(
+            "muc.example.com".to_string(),
+            OccupantIdSecret::new(b"persist-subject-arm-test-secret-32b".to_vec())
+                .expect("test secret meets length floor"),
+        ));
+        let room_jid: jid::BareJid = "channel@muc.example.com".parse().expect("bare jid");
+        let _room_actor = room_registry
+            .ask(CreateRoom {
+                room_jid: room_jid.clone(),
+                waddle_id: "w-1".to_string(),
+                channel_id: "c-1".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("create room");
+
+        let deps = Deps {
+            connection_registry: &registry,
+            sm_session_registry: None,
+            mam_storage: None,
+            inbox_storage: None,
+            extension_manager: None,
+            room_registry: Some(&room_registry),
+            web_socket_state: None,
+            authenticated_session: None,
+            local_domain: "example.com",
+            blocking_storage: None,
+            message_dispatcher: None,
+        };
+
+        let setter: jid::BareJid = "alice@example.com".parse().expect("setter bare jid");
+        let mut texts = std::collections::BTreeMap::new();
+        texts.insert(String::new(), "Default subject".to_string());
+        texts.insert("en".to_string(), "English subject".to_string());
+        let set_at = chrono::Utc.with_ymd_and_hms(2026, 5, 2, 12, 0, 0).unwrap();
+
+        let events = vec![OutboundEvent::PersistRoomSubject {
+            room: room_jid.clone(),
+            texts: texts.clone(),
+            setter: setter.clone(),
+            setter_nick: "alice-nick".to_string(),
+            set_at,
+        }];
+        let _outcome = interpret(events, &deps).await;
+
+        // Verify the room actor wrote `SubjectState` matching the event payload.
+        let actor = room_registry
+            .ask(GetRoom {
+                room_jid: room_jid.clone(),
+            })
+            .await
+            .expect("registry ask")
+            .expect("room actor present");
+        let snapshot = actor.ask(GetSnapshot).await.expect("snapshot");
+        let stored = snapshot
+            .room
+            .subject
+            .expect("PersistRoomSubject must land a SubjectState");
+        assert_eq!(stored.texts, texts);
+        assert_eq!(stored.setter, setter);
+        assert_eq!(stored.setter_nick, "alice-nick");
+        assert_eq!(stored.set_at, set_at);
+    }
+
+    #[tokio::test]
+    async fn xep_0045_persist_room_subject_with_no_registry_is_noop() {
+        // Defensive coverage for the `room_registry: None` skip arm —
+        // a `PersistRoomSubject` arriving in a deployment without a
+        // room registry must be logged-and-skipped, not panicked.
+        use chrono::TimeZone;
+
+        let registry = ConnectionRegistry::new();
+        let deps = Deps::registry_only(&registry);
+
+        let room_jid: jid::BareJid = "channel@muc.example.com".parse().expect("bare jid");
+        let setter: jid::BareJid = "alice@example.com".parse().expect("setter bare jid");
+        let mut texts = std::collections::BTreeMap::new();
+        texts.insert(String::new(), "ignored".to_string());
+        let events = vec![OutboundEvent::PersistRoomSubject {
+            room: room_jid,
+            texts,
+            setter,
+            setter_nick: "alice-nick".to_string(),
+            set_at: chrono::Utc.with_ymd_and_hms(2026, 5, 2, 12, 0, 0).unwrap(),
+        }];
+        let outcome = interpret(events, &deps).await;
+        assert!(outcome.frames.is_empty());
+        assert!(!outcome.close);
+    }
 }
