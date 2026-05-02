@@ -23,7 +23,6 @@ const PLUGIN_NS: &str = "urn:waddle:ai-chatbot:1";
 const VERSION: &str = "0.1.0";
 const AI_COMMAND: &str = "/ai";
 const WADDLE_MENTION: &str = "@waddle";
-
 impl exports::waddle::extension::lifecycle::Guest for AiChatbot {
     fn init(_config: String) -> Result<types::ExtensionManifest, String> {
         Ok(manifest())
@@ -38,9 +37,7 @@ impl exports::waddle::extension::framework::Guest for AiChatbot {
             types::ExtensionEvent::MessageHook(hook) => {
                 message_hook_response(hook).into_iter().collect()
             }
-            types::ExtensionEvent::Command(_) | types::ExtensionEvent::Launch(_) => {
-                vec![types::ExtensionEffect::Noop]
-            }
+            types::ExtensionEvent::Command(_) | types::ExtensionEvent::Launch(_) => vec![],
         };
         Ok(types::ExtensionResponse { effects })
     }
@@ -130,7 +127,7 @@ fn manifest() -> types::ExtensionManifest {
 fn answer_body(prompt: &str) -> String {
     let prompt = clean_prompt(prompt);
     format!(
-        "AI provider unavailable. Configure WADDLE_AI_PROVIDER=openrouter with OPENROUTER_API_KEY, or WADDLE_AI_PROVIDER=openai with OPENAI_API_KEY and WADDLE_AI_MODEL, to answer: {prompt}"
+        "AI provider unavailable. Configure the ai-chatbot extension provider settings to answer: {prompt}"
     )
 }
 
@@ -205,7 +202,7 @@ fn display(value: &str) -> types::DisplayText {
 #[cfg(test)]
 mod tests {
     use super::{
-        answer_body, clean_prompt, contains_waddle_mention, message_hook_response,
+        answer_body, clean_prompt, contains_waddle_mention, manifest, message_hook_response,
         starts_with_ai_command, types,
     };
 
@@ -248,7 +245,7 @@ mod tests {
     fn reports_provider_unavailable_without_fake_local_answer() {
         let answer = answer_body("/ai summarize the release notes");
         assert!(answer.contains("AI provider unavailable"));
-        assert!(answer.contains("WADDLE_AI_MODEL"));
+        assert!(answer.contains("ai-chatbot extension provider settings"));
         assert!(!answer.contains("simple arithmetic"));
         assert!(!answer.contains("letter-count"));
     }
@@ -279,6 +276,19 @@ mod tests {
     fn allows_threaded_followups_with_slash_ai() {
         let hook = message_hook("/ai continue", Some("thread-root"), Some("parent-msg"));
         assert!(message_hook_response(hook).is_some());
+    }
+
+    #[test]
+    fn manifest_stays_with_current_message_hook_capabilities() {
+        let manifest = manifest();
+        assert!(manifest.commands.is_empty());
+        assert_eq!(
+            manifest.capabilities,
+            vec![
+                types::ExtensionCapability::MessageObserve,
+                types::ExtensionCapability::BotGroupchatSend,
+            ]
+        );
     }
 
     fn message_hook(

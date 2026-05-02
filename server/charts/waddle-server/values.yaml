@@ -108,20 +108,6 @@ extensions:
   # Optional map per module of config key -> mounted secret file path.
   configSecretFiles: {}
 
-ai:
-  # Set to "openrouter" or "openai" to enable provider-backed chatbot answers.
-  # Provider API keys must be supplied through secret data:
-  # - OPENROUTER_API_KEY for openrouter
-  # - OPENAI_API_KEY for openai
-  provider: ""
-  # OpenRouter defaults to openrouter/free when this is empty. OpenAI requires
-  # an explicit model.
-  model: ""
-  openaiBaseUrl: ""
-  openrouterBaseUrl: ""
-  openrouterReferer: ""
-  openrouterTitle: ""
-
 config:
   mode: homeserver
   baseUrl: https://waddle.local

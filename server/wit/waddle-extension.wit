@@ -127,6 +127,13 @@ interface types {
         pubsub-publish,
         artifact-reference,
         ui-declarative,
+        channels-read,
+        members-read,
+        presence-read,
+        message-send,
+        mam-query,
+        roster-read,
+        bot-presence,
     }
 
     record payload-root {
@@ -420,6 +427,104 @@ interface types {
     }
 }
 
+interface host-tools {
+    use types.{display-text, full-jid, room-jid, stanza-id, thread-id, timestamp, waddle-id};
+
+    record bare-jid {
+        value: string,
+    }
+
+    record channel-summary {
+        room: room-jid,
+        name: display-text,
+        description: option<display-text>,
+    }
+
+    record space-summary {
+        id: waddle-id,
+        name: display-text,
+        description: option<display-text>,
+    }
+
+    record channel-space-list {
+        channels: list<channel-summary>,
+        spaces: list<space-summary>,
+    }
+
+    record member-presence {
+        member: bare-jid,
+        occupant: option<full-jid>,
+        display-name: option<display-text>,
+        role: option<display-text>,
+        affiliation: option<display-text>,
+        available: bool,
+        show: option<display-text>,
+        status: option<display-text>,
+    }
+
+    variant message-target {
+        muc(room-jid),
+        dm(bare-jid),
+        member(bare-jid),
+    }
+
+    record outbound-message {
+        target: message-target,
+        body: display-text,
+        thread-id: option<thread-id>,
+    }
+
+    record sent-message {
+        stanza-id: option<stanza-id>,
+    }
+
+    variant mam-target {
+        muc(room-jid),
+        dm(bare-jid),
+    }
+
+    record mam-query {
+        target: mam-target,
+        start: option<timestamp>,
+        end: option<timestamp>,
+        search: option<display-text>,
+        max: u32,
+    }
+
+    record mam-message {
+        stanza-id: stanza-id,
+        sender: full-jid,
+        timestamp: timestamp,
+        body: display-text,
+        thread-id: option<thread-id>,
+    }
+
+    record roster-item {
+        jid: bare-jid,
+        name: option<display-text>,
+        subscription: display-text,
+        groups: list<display-text>,
+    }
+
+    enum tool-error-code {
+        denied,
+        unavailable,
+        invalid-request,
+        temporary-failure,
+    }
+
+    record tool-error {
+        code: tool-error-code,
+        message: display-text,
+    }
+
+    list-channels-and-spaces: func() -> result<channel-space-list, tool-error>;
+    list-members-and-presence: func(room: room-jid) -> result<list<member-presence>, tool-error>;
+    send-message: func(message: outbound-message) -> result<sent-message, tool-error>;
+    query-message-history: func(query: mam-query) -> result<list<mam-message>, tool-error>;
+    list-roster: func() -> result<list<roster-item>, tool-error>;
+}
+
 interface framework {
     use types.{extension-error, extension-event, extension-response};
     handle-event: func(event: extension-event) -> result<extension-response, extension-error>;
@@ -433,6 +538,7 @@ interface lifecycle {
 world waddle-extension {
     import wasi:logging/logging@0.1.0-draft;
     import wasi:clocks/monotonic-clock@0.2.0;
+    import host-tools;
 
     export lifecycle;
     export framework;
