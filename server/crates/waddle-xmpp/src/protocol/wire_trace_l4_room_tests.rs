@@ -398,3 +398,280 @@ fn xep_0430_groupchat_message_emits_per_occupant_inbox_projection() {
     assert!(bob_row.1, "non-sender occupants get unread bumped");
     assert!(charlie_row.1, "non-sender occupants get unread bumped");
 }
+
+// ── XEP-0045 §8.1 subject change capture ─────────────────────────────────
+
+use xmpp_parsers::message::Subject;
+
+fn subject_change(room: &BareJid, sender: &FullJid, text: &str) -> Message {
+    let mut m = Message::new(Some(Jid::from(room.clone())));
+    m.from = Some(Jid::from(sender.clone()));
+    m.type_ = MessageType::Groupchat;
+    m.subjects.insert(String::new(), Subject(text.to_string()));
+    m
+}
+
+fn occ_with_role(full_jid: FullJid, nick: &str, role: Role) -> OccupantSnapshot {
+    OccupantSnapshot {
+        full_jid,
+        nick: nick.to_string(),
+        affiliation: Affiliation::Member,
+        role,
+    }
+}
+
+#[test]
+fn xep_0045_section_8_1_live_subject_change_chain_stamps_occupant_id() {
+    // Alice (moderator) sends a subject change. Chain end-to-end:
+    //   - reflected to all occupants with `from='room/alice-nick'`,
+    //     `<stanza-id by='room'>`, `<occupant-id>` HMAC of alice.bare.
+    //   - `PersistRoomSubject` event emitted with the captured fields.
+    //   - `<subject>{text}</subject>` preserved on every reflected copy,
+    //     no `<body/>` injected.
+    let room = bare("team@conf.example.com");
+    let alice = full("alice@example.com/web");
+    let bob = full("bob@example.com/desk");
+    let occupants = vec![
+        occ_with_role(alice.clone(), "alice-nick", Role::Moderator),
+        occ_with_role(bob.clone(), "bob-nick", Role::Participant),
+    ];
+    let id_gen = FixedIdGenerator("subject-stamp-1".to_string());
+    let secret = test_occupant_id_secret();
+    let ctx = RoomContext {
+        room: &room,
+        sender_full: &alice,
+        occupants: &occupants,
+        managed_room_forbidden: false,
+        room_moderated: false,
+        id_gen: &id_gen,
+        occupant_id_secret: &secret,
+        sender_nickname_generation: 0,
+        project_sender_inbox: true,
+        dispatch_timestamp: 1_700_000_000,
+    };
+
+    let mut msg = subject_change(&room, &alice, "New topic");
+    let dispatcher = default_room_dispatcher();
+    let outcome = dispatcher.dispatch(&mut msg, &ctx);
+    assert!(!outcome.halted, "moderator subject change must not halt");
+
+    let persist_setter = outcome
+        .events
+        .iter()
+        .find_map(|e| match e {
+            OutboundEvent::PersistRoomSubject {
+                text,
+                setter,
+                setter_nick,
+                ..
+            } => Some((text.clone(), setter.clone(), setter_nick.clone())),
+            _ => None,
+        })
+        .expect("PersistRoomSubject emitted");
+    assert_eq!(persist_setter.0, "New topic");
+    assert_eq!(persist_setter.1, alice.to_bare());
+    assert_eq!(persist_setter.2, "alice-nick");
+
+    let routes: Vec<&Message> = outcome
+        .events
+        .iter()
+        .filter_map(|e| match e {
+            OutboundEvent::RouteToConnection { stanza, .. } => match stanza.as_ref() {
+                Stanza::Message(m) => Some(m),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        routes.len(),
+        2,
+        "subject change broadcast to both occupants"
+    );
+
+    let expected_occupant_id = generate_occupant_id(&alice.to_bare(), &room, &secret);
+    for route in &routes {
+        assert_eq!(
+            route.from.as_ref().map(|j| j.to_string()),
+            Some("team@conf.example.com/alice-nick".to_string()),
+        );
+        assert!(
+            !route.subjects.is_empty(),
+            "<subject/> preserved on every reflected copy"
+        );
+        assert_eq!(
+            route.subjects.iter().next().map(|s| s.1 .0.as_str()),
+            Some("New topic")
+        );
+        assert!(route.bodies.is_empty(), "subject change has no <body/>");
+        let occupant_id = extract_occupant_id_from_message(route)
+            .expect("XEP-0421 occupant-id stamped on subject reflection");
+        assert_eq!(occupant_id, expected_occupant_id);
+    }
+}
+
+#[test]
+fn xep_0045_section_8_1_visitor_subject_change_halts_with_forbidden_no_broadcast() {
+    // Visitors may never change the subject. Chain halts with a typed
+    // `<forbidden/>` reply; no `RouteToConnection`, no `ArchiveGroupchat`,
+    // no `PersistRoomSubject`.
+    let room = bare("team@conf.example.com");
+    let eve = full("eve@example.com/web");
+    let bob = full("bob@example.com/desk");
+    let occupants = vec![
+        occ_with_role(eve.clone(), "eve-nick", Role::Visitor),
+        occ_with_role(bob.clone(), "bob-nick", Role::Participant),
+    ];
+    let id_gen = FixedIdGenerator("ignored".to_string());
+    let secret = test_occupant_id_secret();
+    let ctx = RoomContext {
+        room: &room,
+        sender_full: &eve,
+        occupants: &occupants,
+        managed_room_forbidden: false,
+        room_moderated: false,
+        id_gen: &id_gen,
+        occupant_id_secret: &secret,
+        sender_nickname_generation: 0,
+        project_sender_inbox: true,
+        dispatch_timestamp: 0,
+    };
+
+    let mut msg = subject_change(&room, &eve, "Forbidden topic");
+    let outcome = default_room_dispatcher().dispatch(&mut msg, &ctx);
+    assert!(outcome.halted, "visitor subject change MUST halt the chain");
+
+    assert!(
+        outcome
+            .events
+            .iter()
+            .all(|e| !matches!(e, OutboundEvent::PersistRoomSubject { .. })),
+        "denied subject change MUST NOT persist"
+    );
+    assert!(
+        outcome
+            .events
+            .iter()
+            .all(|e| !matches!(e, OutboundEvent::RouteToConnection { .. })),
+        "denied subject change MUST NOT broadcast"
+    );
+    assert!(
+        outcome
+            .events
+            .iter()
+            .all(|e| !matches!(e, OutboundEvent::ArchiveGroupchat { .. })),
+        "denied subject change MUST NOT archive"
+    );
+
+    let send_error = outcome
+        .events
+        .iter()
+        .find_map(|e| match e {
+            OutboundEvent::SendStanza(s) => Some(s),
+            _ => None,
+        })
+        .expect("typed error reply emitted to sender");
+    let error_xml = format!("{send_error:?}");
+    assert!(
+        error_xml.contains("Forbidden") || error_xml.contains("forbidden"),
+        "deny path replies with <forbidden/> per §8.1; got {error_xml}"
+    );
+    // Silence the unused-import lint when no other test in this module
+    // happens to reference the imports we use only here.
+    let _stub = StanzaError::new(ErrorType::Auth, DefinedCondition::Forbidden, "en", "stub");
+}
+
+#[test]
+fn xep_0045_section_8_1_participant_in_unmoderated_room_subject_change_allowed() {
+    // §8.1 default policy: in an unmoderated room, any participant may
+    // change the subject. Chain Continues; PersistRoomSubject emitted.
+    let room = bare("team@conf.example.com");
+    let bob = full("bob@example.com/desk");
+    let alice = full("alice@example.com/web");
+    let occupants = vec![
+        occ_with_role(bob.clone(), "bob-nick", Role::Participant),
+        occ_with_role(alice.clone(), "alice-nick", Role::Participant),
+    ];
+    let id_gen = FixedIdGenerator("subject-stamp-2".to_string());
+    let secret = test_occupant_id_secret();
+    let ctx = RoomContext {
+        room: &room,
+        sender_full: &bob,
+        occupants: &occupants,
+        managed_room_forbidden: false,
+        room_moderated: false,
+        id_gen: &id_gen,
+        occupant_id_secret: &secret,
+        sender_nickname_generation: 0,
+        project_sender_inbox: true,
+        dispatch_timestamp: 1_700_000_000,
+    };
+    let mut msg = subject_change(&room, &bob, "Bob's topic");
+    let outcome = default_room_dispatcher().dispatch(&mut msg, &ctx);
+    assert!(!outcome.halted);
+    assert!(
+        outcome
+            .events
+            .iter()
+            .any(|e| matches!(e, OutboundEvent::PersistRoomSubject { .. })),
+        "participant in unmoderated room is allowed to change subject"
+    );
+}
+
+#[test]
+fn xep_0045_section_8_1_subject_with_body_is_not_a_subject_change() {
+    // §8.1 distinguishes subject changes by `<subject/>` AND no
+    // `<body/>`. A message with both is a regular groupchat message
+    // and must not be captured as a subject change — otherwise a
+    // visitor could write to a moderated room by attaching a
+    // `<subject/>` to their `<body/>`.
+    let room = bare("team@conf.example.com");
+    let eve = full("eve@example.com/web");
+    let bob = full("bob@example.com/desk");
+    let occupants = vec![
+        occ_with_role(eve.clone(), "eve-nick", Role::Participant),
+        occ_with_role(bob.clone(), "bob-nick", Role::Participant),
+    ];
+    let id_gen = FixedIdGenerator("subject-stamp-3".to_string());
+    let secret = test_occupant_id_secret();
+    let ctx = RoomContext {
+        room: &room,
+        sender_full: &eve,
+        occupants: &occupants,
+        managed_room_forbidden: false,
+        room_moderated: false,
+        id_gen: &id_gen,
+        occupant_id_secret: &secret,
+        sender_nickname_generation: 0,
+        project_sender_inbox: true,
+        dispatch_timestamp: 0,
+    };
+    let mut msg = subject_change(&room, &eve, "topic-ish");
+    msg.bodies.insert(String::new(), Body("hi".to_string()));
+
+    let outcome = default_room_dispatcher().dispatch(&mut msg, &ctx);
+    assert!(!outcome.halted);
+    assert!(
+        outcome
+            .events
+            .iter()
+            .all(|e| !matches!(e, OutboundEvent::PersistRoomSubject { .. })),
+        "body+subject is not a subject change; no PersistRoomSubject"
+    );
+    // Regular groupchat fan-out + archive still happen (this confirms
+    // the handler is a true passthrough, not a halting filter).
+    assert!(
+        outcome
+            .events
+            .iter()
+            .any(|e| matches!(e, OutboundEvent::RouteToConnection { .. })),
+        "regular message still fans out"
+    );
+    assert!(
+        outcome
+            .events
+            .iter()
+            .any(|e| matches!(e, OutboundEvent::ArchiveGroupchat { .. })),
+        "regular message still archives"
+    );
+}

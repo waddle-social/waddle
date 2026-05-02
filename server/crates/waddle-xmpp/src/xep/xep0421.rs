@@ -519,4 +519,55 @@ mod tests {
         let id = OccupantId::new("display-test");
         assert_eq!(id.to_string(), "display-test");
     }
+
+    // ── XEP-0421 §3 occupant-id on the XEP-0045 §7.2.15 subject message
+    //
+    // The acceptance criterion in #304 is that the subject-message
+    // emission carries an `<occupant-id>` whose id equals the
+    // deterministic HMAC for the setter. Tested at the builder
+    // boundary (`muc::messages::build_subject_message`) which is the
+    // single emission site for the historical join-time subject.
+
+    #[test]
+    fn xep_0421_subject_message_stamps_occupant_id_for_setter() {
+        use crate::muc::messages::build_subject_message;
+        use crate::muc::SubjectState;
+        use chrono::TimeZone;
+        use jid::{BareJid, FullJid};
+
+        let room: BareJid = "team@muc.example.com".parse().expect("valid bare jid");
+        let to: FullJid = "joiner@example.com/web".parse().expect("valid full jid");
+        let secret = OccupantIdSecret::for_testing(b"xep0421-subject-test".to_vec());
+        let setter: BareJid = "alice@example.com".parse().expect("valid bare jid");
+        let state = SubjectState {
+            text: "topic".to_string(),
+            setter: setter.clone(),
+            setter_nick: "alice-nick".to_string(),
+            set_at: chrono::Utc.with_ymd_and_hms(2026, 5, 2, 12, 0, 0).unwrap(),
+        };
+
+        let msg = build_subject_message(&room, &to, Some(&state), &secret);
+        let id = extract_occupant_id_from_message(&msg).expect("occupant-id MUST be present");
+        let expected = generate_occupant_id(&setter, &room, &secret);
+        assert_eq!(id, expected, "id is the deterministic HMAC of the setter");
+    }
+
+    #[test]
+    fn xep_0421_subject_message_omits_occupant_id_when_no_setter_is_known() {
+        // Pins the documented spec-gap: never-set rooms emit empty
+        // <subject/> with no occupant-id, matching established servers.
+        // A future "always stamp" change would silently violate the
+        // unlinkability semantics of XEP-0421 §3 by fabricating input.
+        use crate::muc::messages::build_subject_message;
+        use jid::{BareJid, FullJid};
+
+        let room: BareJid = "team@muc.example.com".parse().expect("valid bare jid");
+        let to: FullJid = "joiner@example.com/web".parse().expect("valid full jid");
+        let secret = OccupantIdSecret::for_testing(b"xep0421-subject-test".to_vec());
+        let msg = build_subject_message(&room, &to, None, &secret);
+        assert!(
+            extract_occupant_id_from_message(&msg).is_none(),
+            "never-set room MUST omit occupant-id (no setter input)"
+        );
+    }
 }
