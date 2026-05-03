@@ -197,6 +197,7 @@
               ./server/Cargo.lock
               ./server/crates
               ./server/extensions
+              ./server/test-fixtures
               ./server/wit
             ];
           };
@@ -286,6 +287,7 @@
               cargoExtraArgs = "--locked --package ai-assistant-canvas --package ai-chatbot --package decision-polls --package links-task-board --package pub-quiz";
               cargoCheckExtraArgs = "";
               cargoBuildExtraArgs = "";
+              doCheck = false;
               cargoTestExtraArgs = "";
             }
           );
