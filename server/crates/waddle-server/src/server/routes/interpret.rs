@@ -3094,7 +3094,7 @@ fn rich_archive_payload(message: &Message) -> Option<ArchivedRichMessage> {
                 ref_type,
                 begin: reference.begin.and_then(|value| value.try_into().ok()),
                 end: reference.end.and_then(|value| value.try_into().ok()),
-                uri: reference.uri.and_then(RichText::new),
+                uri: RichText::new(reference.uri),
                 anchor: reference.anchor.and_then(RichText::new),
             })
         })
