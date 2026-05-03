@@ -316,9 +316,7 @@ fn parse_caps_data_form(extension: &Element) -> Option<CapsDataForm> {
         .children()
         .filter(|child| child.name() == "field" && child.ns() == DATA_FORMS_NS)
     {
-        let Some(var) = field.attr("var") else {
-            return None;
-        };
+        let var = field.attr("var")?;
 
         let values = field
             .children()

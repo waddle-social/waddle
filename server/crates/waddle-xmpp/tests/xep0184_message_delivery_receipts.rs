@@ -52,7 +52,7 @@ fn direct_message(
     message
 }
 
-fn receipt_route<'a>(events: &'a [OutboundEvent]) -> Option<(usize, &'a Jid, &'a Message)> {
+fn receipt_route(events: &[OutboundEvent]) -> Option<(usize, &Jid, &Message)> {
     events
         .iter()
         .enumerate()

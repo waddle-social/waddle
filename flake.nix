@@ -289,6 +289,7 @@
               cargoBuildExtraArgs = "";
               doCheck = false;
               cargoTestExtraArgs = "";
+              doCheck = false;
             }
           );
         in
