@@ -754,7 +754,9 @@ fn parse_presence(el: &Element) -> InboundPresence {
     let muc_role = muc_item
         .and_then(|item| item.attr("role"))
         .and_then(MucRole::from_attr);
-    let muc_jid = muc_item.and_then(|item| item.attr("jid")).map(str::to_string);
+    let muc_jid = muc_item
+        .and_then(|item| item.attr("jid"))
+        .map(str::to_string);
     let vcard_avatar = el
         .get_child("x", NS_VCARD_UPDATE)
         .and_then(|x| x.get_child("photo", NS_VCARD_UPDATE))
@@ -1076,9 +1078,7 @@ pub fn build_outbound_message(
                     .build();
                 if tag_name == "a" {
                     if let Some(uri) = &span.uri {
-                        let link_el = Element::builder("link", NS_MARKUP)
-                            .attr("uri", uri)
-                            .build();
+                        let link_el = Element::builder("link", NS_MARKUP).attr("uri", uri).build();
                         span_el.append_child(link_el);
                     }
                 } else {
@@ -1525,7 +1525,9 @@ mod tests {
             build_outbound_message("room@muc.example", "groupchat", "hello @bob", &options)
                 .unwrap();
 
-        let markups = stanza.get_child("markups", NS_MARKUP).expect("markups child");
+        let markups = stanza
+            .get_child("markups", NS_MARKUP)
+            .expect("markups child");
         let spans = markups
             .children()
             .filter(|child| child.name() == "span")
