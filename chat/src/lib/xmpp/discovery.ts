@@ -202,7 +202,7 @@ export async function discoverChannels(xmpp: HybridClient, jid: string): Promise
 export async function discoverTopology(xmpp: HybridClient, jid: string): Promise<DiscoveredTopology> {
   const domain = jidDomain(jid);
   const services = await discoverComponentServices(xmpp, domain, jid);
-  const rooms = await discoverChannels(xmpp, jid);
+  let rooms = xmpp.list_rooms ? await discoverChannels(xmpp, jid) : [];
   const bookmarkedSpaceIds = new Map<string, string>();
   const spaces: DiscoveredSpace[] = [];
   let serverRole: DiscoveryRole = null;
