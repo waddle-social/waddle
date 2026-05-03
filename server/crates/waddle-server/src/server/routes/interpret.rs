@@ -2707,7 +2707,7 @@ async fn finish_archive_groupchat_message(
     // groupchat messages don't materialize a fake empty body in the
     // archive's denormalized projection.
     let body = prototype_body(&archive_clone).map(|value| value.trim().to_string());
-    let (reply_to_id, reply_to_jid) = extract_groupchat_reply_reference(&archive_clone, room);
+    let reply = extract_groupchat_reply_reference(&archive_clone, room);
     let origin_id = extract_origin_id(&archive_clone);
     let rich = rich_archive_payload(&archive_clone);
     let stanza_xml = serialize_groupchat_stanza_xml(&archive_clone);
@@ -2735,8 +2735,7 @@ async fn finish_archive_groupchat_message(
         body,
         stanza_id: archive_clone.id.clone(),
         thread,
-        reply_to_id,
-        reply_to_jid,
+        reply,
         origin_id,
         message_type: mam_message_type(&archive_clone.type_),
         stanza_xml,
@@ -2965,18 +2964,22 @@ fn mam_message_type(message_type: &XmppMessageType) -> String {
 fn extract_groupchat_reply_reference(
     message: &Message,
     room: &BareJid,
-) -> (Option<String>, Option<String>) {
-    let Some(reply) = message
+) -> Option<waddle_xmpp_core::mam::ArchivedReply> {
+    use waddle_xmpp_core::mam::{ArchivedReply, RichMessageId};
+    let reply = message
         .payloads
         .iter()
-        .find(|payload| payload.name() == "reply" && payload.ns() == NS_REPLY)
-    else {
-        return (None, None);
-    };
-    let reply_to_jid = reply
+        .find(|payload| payload.name() == "reply" && payload.ns() == NS_REPLY)?;
+    let id = RichMessageId::new(reply.attr("id")?)?;
+    // XEP-0461 §3 makes `id` MUST and `to` SHOULD; for groupchat we
+    // additionally restrict `to` to a room-scoped JID. A `to` that
+    // fails the scope check is dropped (the reply still carries the
+    // id) rather than rejecting the entire reply reference.
+    let to = reply
         .attr("to")
-        .and_then(|value| room_scoped_reply_to_attr(value, room));
-    (reply.attr("id").map(ToOwned::to_owned), reply_to_jid)
+        .and_then(|value| room_scoped_reply_to_attr(value, room))
+        .and_then(|value| value.parse::<Jid>().ok());
+    Some(ArchivedReply { id, to })
 }
 
 pub(crate) fn room_scoped_reply_to_attr(value: &str, room: &BareJid) -> Option<String> {
@@ -3758,8 +3761,7 @@ mod tests {
             body: Some("hello".to_string()),
             stanza_id: Some("canon-A1".to_string()),
             thread: None,
-            reply_to_id: None,
-            reply_to_jid: None,
+            reply: None,
             origin_id: None,
             message_type: "chat".to_string(),
             stanza_xml: Some(
@@ -3862,8 +3864,7 @@ mod tests {
             body: Some("from bob".to_string()),
             stanza_id: Some("alice-stamp-bob".to_string()),
             thread: None,
-            reply_to_id: None,
-            reply_to_jid: None,
+            reply: None,
             origin_id: Some("collision".to_string()),
             message_type: "chat".to_string(),
             stanza_xml: None,
@@ -3880,8 +3881,7 @@ mod tests {
             body: Some("from alice".to_string()),
             stanza_id: Some("alice-stamp-alice".to_string()),
             thread: None,
-            reply_to_id: None,
-            reply_to_jid: None,
+            reply: None,
             origin_id: Some("collision".to_string()),
             message_type: "chat".to_string(),
             stanza_xml: None,
@@ -3949,8 +3949,7 @@ mod tests {
             body: Some("bob's".to_string()),
             stanza_id: Some("alice-stamp".to_string()),
             thread: None,
-            reply_to_id: None,
-            reply_to_jid: None,
+            reply: None,
             origin_id: Some("oid-1".to_string()),
             message_type: "chat".to_string(),
             stanza_xml: None,
@@ -4010,8 +4009,7 @@ mod tests {
             body: Some("collide".to_string()),
             stanza_id: Some("real-stamp".to_string()),
             thread: None,
-            reply_to_id: None,
-            reply_to_jid: None,
+            reply: None,
             origin_id: Some("queried-id".to_string()),
             message_type: "chat".to_string(),
             stanza_xml: None,
@@ -4067,8 +4065,7 @@ mod tests {
             body: None,
             stanza_id: Some("tomb-1".to_string()),
             thread: None,
-            reply_to_id: None,
-            reply_to_jid: None,
+            reply: None,
             origin_id: None,
             message_type: "chat".to_string(),
             stanza_xml: None,

@@ -1036,12 +1036,12 @@ fn ext_archived_message(message: MamArchivedMessage) -> Option<ext_host::Archive
             .thread
             .as_ref()
             .and_then(|t| waddle_extensions::ThreadId::new(t.id.as_str()).ok()),
-        reply_to: message.reply_to_id.and_then(|id| {
+        reply_to: message.reply.and_then(|reply| {
             Some(waddle_extensions::ReplyTarget {
-                id: waddle_extensions::StanzaId::new(id).ok()?,
-                to: message
-                    .reply_to_jid
-                    .and_then(|jid| waddle_extensions::FullJidValue::new(jid).ok()),
+                id: waddle_extensions::StanzaId::new(reply.id.as_str().to_string()).ok()?,
+                to: reply
+                    .to
+                    .and_then(|jid| waddle_extensions::FullJidValue::new(jid.to_string()).ok()),
             })
         }),
     })

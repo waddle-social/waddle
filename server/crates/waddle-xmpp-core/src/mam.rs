@@ -161,11 +161,11 @@ pub enum ArchivedRichPayload {
     Reactions(ArchivedReactionSet),
     /// In-place tombstone produced by XEP-0424 retraction or
     /// XEP-0425 moderation. The original row's `body` and
-    /// leak-prone fields (`thread`, `reply_to_id`, `reply_to_jid`,
-    /// `stanza_xml`, mentions, ...) are cleared when this variant is
-    /// set, per XEP-0424 §Tombstones / XEP-0425 §Tombstones: "any
-    /// related elements which might leak information about the
-    /// original message" must be replaced.
+    /// leak-prone fields (`thread`, `reply`, `stanza_xml`,
+    /// mentions, ...) are cleared when this variant is set, per
+    /// XEP-0424 §Tombstones / XEP-0425 §Tombstones: "any related
+    /// elements which might leak information about the original
+    /// message" must be replaced.
     Tombstone(ArchivedTombstone),
 }
 
@@ -238,10 +238,28 @@ pub struct ArchivedMessage {
     /// this struct into the two columns and decode combines them.
     #[serde(default)]
     pub thread: Option<ThreadInfo>,
-    /// XEP-0461 reply target message ID.
-    pub reply_to_id: Option<String>,
-    /// XEP-0461 optional original sender JID.
-    pub reply_to_jid: Option<String>,
+    /// XEP-0461 reply reference: the id of the replied-to message and
+    /// the optional original sender JID (`<reply id='X' to='Y'/>`).
+    ///
+    /// Collapsed from the previous `reply_to_id: Option<String>` and
+    /// `reply_to_jid: Option<String>` pair into a single typed
+    /// [`ArchivedReply`] field. Modelling them together makes the
+    /// "reply target sender without reply target id" invalid state
+    /// unrepresentable (you cannot construct [`ArchivedReply`] with a
+    /// `to` JID and no id), aligning with the typed-payloads hard rule
+    /// and matching the canonical typed shape already used inside
+    /// [`ArchivedRichMessage::reply`].
+    ///
+    /// Cleared on XEP-0424 / XEP-0425 tombstones — see the
+    /// [`ArchivedRichPayload::Tombstone`] doc comment for the full
+    /// list of leak-prone fields.
+    ///
+    /// Storage layout is unchanged: the SQL schema still has two
+    /// columns (`reply_to_id` and `reply_to_jid`) plus the
+    /// `idx_mam_room_reply_to` index; encode splits this struct into
+    /// the two columns and decode combines them.
+    #[serde(default)]
+    pub reply: Option<ArchivedReply>,
     /// XEP-0359 origin-id supplied by client.
     pub origin_id: Option<String>,
     /// Message type ("chat", "groupchat", "normal", etc.).
@@ -274,8 +292,7 @@ impl Default for ArchivedMessage {
             body: None,
             stanza_id: None,
             thread: None,
-            reply_to_id: None,
-            reply_to_jid: None,
+            reply: None,
             origin_id: None,
             message_type: default_message_type(),
             stanza_xml: None,
@@ -831,12 +848,12 @@ fn build_legacy_inner_message(archived: &ArchivedMessage) -> Element {
     if let Some(info) = archived.thread.as_ref() {
         builder = builder.append(crate::xep0201::build_thread_element(info, CLIENT_NS));
     }
-    if let Some(reply_to_id) = archived.reply_to_id.as_deref() {
-        let mut reply = Element::builder("reply", REPLY_NS).attr("id", reply_to_id);
-        if let Some(reply_to_jid) = archived.reply_to_jid.as_deref() {
-            reply = reply.attr("to", reply_to_jid);
+    if let Some(reply) = archived.reply.as_ref() {
+        let mut reply_builder = Element::builder("reply", REPLY_NS).attr("id", reply.id.as_str());
+        if let Some(to) = reply.to.as_ref() {
+            reply_builder = reply_builder.attr("to", to.to_string());
         }
-        builder = builder.append(reply.build());
+        builder = builder.append(reply_builder.build());
     }
     if let Some(origin_id) = archived.origin_id.as_deref() {
         builder = builder.append(
@@ -1151,8 +1168,10 @@ mod tests {
             thread: Some(ThreadInfo::root(
                 ThreadId::new("thread-1").expect("non-empty thread id"),
             )),
-            reply_to_id: Some("parent-1".to_string()),
-            reply_to_jid: Some("alice@example.com".to_string()),
+            reply: Some(ArchivedReply {
+                id: RichMessageId::new("parent-1").expect("non-empty reply id"),
+                to: Some("alice@example.com".parse::<Jid>().expect("valid jid")),
+            }),
             origin_id: Some("origin-1".to_string()),
             ..Default::default()
         };
@@ -1501,8 +1520,14 @@ mod tests {
             stanza_xml: Some(
                 "<message xmlns='jabber:client' from='room@conference.example.com/bob' type='groupchat' id='reply-1'><body>&gt; Alice wrote:\n&gt; Hello!\nI agree!</body><reply xmlns='urn:xmpp:reply:0' id='orig-1' to='room@conference.example.com/alice'/><fallback xmlns='urn:xmpp:fallback:0' for='urn:xmpp:reply:0'><body start='0' end='22'/></fallback></message>".to_string(),
             ),
-            reply_to_id: Some("orig-1".to_string()),
-            reply_to_jid: Some("room@conference.example.com/alice".to_string()),
+            reply: Some(ArchivedReply {
+                id: RichMessageId::new("orig-1").expect("non-empty reply id"),
+                to: Some(
+                    "room@conference.example.com/alice"
+                        .parse::<Jid>()
+                        .expect("valid jid"),
+                ),
+            }),
             rich: Some(ArchivedRichMessage {
                 payload: None,
                 reply: Some(ArchivedReply {

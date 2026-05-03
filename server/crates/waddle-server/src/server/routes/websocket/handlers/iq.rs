@@ -982,8 +982,7 @@ pub async fn handle_iq_with_conn_state(
                 // already cleared by construction (this row is a fresh
                 // tombstone, not a scrub of an existing message).
                 thread: None,
-                reply_to_id: None,
-                reply_to_jid: None,
+                reply: None,
                 origin_id: None,
                 message_type: "groupchat".to_string(),
                 stanza_xml: None,

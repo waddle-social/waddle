@@ -73,7 +73,7 @@ pub fn build_direct_archived_message(
     // denormalized `body` field don't conflate subject-only or
     // reaction-only stanzas with truly empty bodies.
     let body = prototype_body(message).map(|value| value.trim().to_string());
-    let (reply_to_id, reply_to_jid) = extract_reply_reference(message);
+    let reply = extract_reply_reference(message);
     let origin_id = extract_origin_id(message);
     let rich = rich_archive_payload(message);
     let stanza_xml = serialize_message_xml(message);
@@ -108,8 +108,7 @@ pub fn build_direct_archived_message(
         body,
         stanza_id: message.id.clone(),
         thread,
-        reply_to_id,
-        reply_to_jid,
+        reply,
         origin_id,
         message_type: mam_message_type(&message.type_),
         stanza_xml,
@@ -144,18 +143,33 @@ fn extract_origin_id(message: &Message) -> Option<String> {
         .and_then(|origin| origin.attr("id").map(ToOwned::to_owned))
 }
 
-fn extract_reply_reference(message: &Message) -> (Option<String>, Option<String>) {
-    let Some(reply) = message
+/// Extract the XEP-0461 `<reply id='X' to='Y'/>` reference from a
+/// message into a typed [`ArchivedReply`].
+///
+/// XEP-0461 §3 makes `id` MUST and `to` SHOULD; if `to` is present but
+/// fails JID parsing we drop the malformed `to` field and keep the
+/// reply (logging a warning), rather than discarding the entire reply
+/// reference. A reply element with no `id` attribute (or an empty `id`,
+/// which `RichMessageId::new` rejects) is treated as no reply at all.
+fn extract_reply_reference(message: &Message) -> Option<ArchivedReply> {
+    let reply = message
         .payloads
         .iter()
-        .find(|payload| payload.name() == "reply" && payload.ns() == NS_REPLY)
-    else {
-        return (None, None);
-    };
-    (
-        reply.attr("id").map(ToOwned::to_owned),
-        reply.attr("to").map(ToOwned::to_owned),
-    )
+        .find(|payload| payload.name() == "reply" && payload.ns() == NS_REPLY)?;
+    let id = RichMessageId::new(reply.attr("id")?)?;
+    let to = reply.attr("to").and_then(|raw| match raw.parse::<Jid>() {
+        Ok(jid) => Some(jid),
+        Err(error) => {
+            warn!(
+                message_id = message.id.as_deref().unwrap_or(""),
+                reply_to = raw,
+                %error,
+                "XEP-0461 reply reference: malformed `to` JID dropped, keeping reply id only"
+            );
+            None
+        }
+    });
+    Some(ArchivedReply { id, to })
 }
 
 fn serialize_message_xml(message: &Message) -> Option<String> {
