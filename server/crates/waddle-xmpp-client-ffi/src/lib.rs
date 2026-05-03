@@ -17,8 +17,8 @@ use waddle_xmpp_client::{
         reply::{FallbackRange, ReplyMarker},
         thread::ThreadRef,
     },
-    AccessToken, ClientConfig, ClientHandle, ConnectionConfig, LifecycleEvent, MessagingEvent,
-    OAuthBearerConfig, WebSocketConfig,
+    AccessToken, ClientConfig, ClientHandle, ConnectionConfig, LifecycleEvent,
+    MessageDeliveryEvent, MessagingEvent, OAuthBearerConfig, WebSocketConfig,
 };
 use waddle_xmpp_client::{ClientEvent, ClientResource, XmppClient};
 
@@ -234,6 +234,8 @@ pub trait WaddleEventListener: Send + Sync {
     fn on_message(&self, message: WaddleMessage);
     fn on_presence(&self, presence: WaddlePresence);
     fn on_mam_result(&self, message: WaddleArchivedMessage);
+    fn on_message_delivery_acked(&self, stanza_id: String);
+    fn on_message_delivery_failed(&self, stanza_id: String);
     fn on_connected(&self);
     fn on_disconnected(&self);
     fn on_error(&self, description: String);
@@ -691,6 +693,12 @@ fn dispatch_event(event: ClientEvent, listener: &dyn WaddleEventListener) {
         ClientEvent::MamResult(archived) => {
             listener.on_mam_result(archived_to_ffi(archived));
         }
+        ClientEvent::MessageDelivery(MessageDeliveryEvent::Acked { stanza_id }) => {
+            listener.on_message_delivery_acked(stanza_id.to_string());
+        }
+        ClientEvent::MessageDelivery(MessageDeliveryEvent::Failed { stanza_id }) => {
+            listener.on_message_delivery_failed(stanza_id.to_string());
+        }
         _ => {}
     }
 }
@@ -946,6 +954,7 @@ fn send_options_from_ffi(opts: WaddleSendOptions) -> Result<SendMessageOptions, 
         .collect();
 
     Ok(SendMessageOptions {
+        stanza_id: None,
         reply,
         fallback,
         thread,

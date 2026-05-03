@@ -175,6 +175,8 @@ callback interface WaddleEventListener {
     void on_message(WaddleMessage message);
     void on_presence(WaddlePresence presence);
     void on_mam_result(WaddleArchivedMessage message);
+    void on_message_delivery_acked(string stanza_id);
+    void on_message_delivery_failed(string stanza_id);
     void on_connected();
     void on_disconnected();
     void on_error(string description);

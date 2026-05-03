@@ -6,6 +6,7 @@ use crate::bootstrap::{
 use crate::mam::ArchivedMessage;
 use crate::messaging::MessagingEvent;
 use crate::pep::PepItem;
+use crate::request::StanzaId;
 use crate::request::{PendingRequest, RequestCorrelation};
 use crate::state::{SessionBinding, SessionSnapshot};
 use crate::transport::{StreamOpen, TransportEvent, TransportMessage};
@@ -24,6 +25,8 @@ pub enum ClientEvent {
     MamResult(ArchivedMessage),
     /// Typed PEP user-state event (mood, activity, tune).
     PepEvent(PepItem),
+    /// Transport-level delivery status for outbound message stanzas.
+    MessageDelivery(MessageDeliveryEvent),
     /// Correlated IQ result or error for in-flight `send_iq` calls.
     ///
     /// Consumed by the driver to resolve the pending [`tokio::sync::oneshot`];
@@ -68,4 +71,12 @@ pub enum StreamManagementEvent {
     AckRequested,
     Resumed { h: u32 },
     Failed,
+}
+
+/// Delivery status for outbound `<message/>` stanzas tracked through
+/// XEP-0198 stream-management acknowledgements.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MessageDeliveryEvent {
+    Acked { stanza_id: StanzaId },
+    Failed { stanza_id: StanzaId },
 }
