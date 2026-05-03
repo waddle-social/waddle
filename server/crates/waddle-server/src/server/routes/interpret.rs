@@ -1241,11 +1241,20 @@ async fn apply_retraction_tombstone(
             return;
         }
     };
+    let Some(retraction_id) = retraction_message
+        .id
+        .clone()
+        .and_then(waddle_xmpp::mam::RichMessageId::new)
+    else {
+        warn!(
+            archive = %archive,
+            target = target_wire_id,
+            "ApplyRetractionTombstone: retraction stanza missing valid message id; skipping"
+        );
+        return;
+    };
     let tombstone = waddle_xmpp::mam::ArchivedTombstone {
-        retraction_id: retraction_message
-            .id
-            .clone()
-            .and_then(waddle_xmpp::mam::RichMessageId::new),
+        retraction_id: Some(retraction_id),
         stamp: chrono::Utc::now(),
         moderation: None,
     };
@@ -2795,8 +2804,16 @@ async fn apply_groupchat_retraction_tombstone(
             return;
         }
     };
+    let Some(retraction_id) = retraction_message.id.clone().and_then(RichMessageId::new) else {
+        warn!(
+            archive = %room,
+            target = target_message_id,
+            "ApplyGroupchatRetractionTombstone: retraction stanza missing valid message id; skipping"
+        );
+        return;
+    };
     let tombstone = ArchivedTombstone {
-        retraction_id: retraction_message.id.clone().and_then(RichMessageId::new),
+        retraction_id: Some(retraction_id),
         stamp: chrono::Utc::now(),
         moderation: None,
     };
@@ -3041,10 +3058,12 @@ fn rich_archive_payload(message: &Message) -> Option<ArchivedRichMessage> {
                     RichMessageId::new(id).map(|target_id| {
                         ArchivedRichPayload::Retraction(ArchivedRetraction {
                             target_id,
-                            stamp: chrono::DateTime::parse_from_rfc3339(&retracted.stamp)
-                                .ok()
+                            stamp: retracted
+                                .stamp
+                                .as_deref()
+                                .and_then(|stamp| chrono::DateTime::parse_from_rfc3339(stamp).ok())
                                 .map(|stamp| stamp.with_timezone(&chrono::Utc)),
-                            retraction_id: None,
+                            retraction_id: RichMessageId::new(retracted.retraction_id),
                         })
                     })
                 }),

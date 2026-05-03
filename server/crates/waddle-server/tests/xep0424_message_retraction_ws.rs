@@ -106,6 +106,10 @@ async fn retraction_routes_and_replays_from_mam() {
         "tombstone leaked original body: {tombstone}"
     );
     assert!(
+        tombstone.contains("<retracted") && tombstone.contains("id=\"retract-1\""),
+        "tombstone must cite the retraction stanza id: {tombstone}"
+    );
+    assert!(
         frames
             .iter()
             .all(|frame| !frame.contains("<body>remove me</body>")),
@@ -186,9 +190,15 @@ async fn dm_retraction_tombstones_both_archives() {
             .all(|frame| !frame.contains("<body>retract this dm</body>")),
         "recipient archive leaked original body after retraction: {bob_frames:?}"
     );
+    let bob_tombstone = bob_frames
+        .iter()
+        .find(|frame| frame.contains("<retracted "))
+        .unwrap_or_else(|| {
+            panic!("recipient archive missing tombstone for retracted DM: {bob_frames:?}")
+        });
     assert!(
-        bob_frames.iter().any(|frame| frame.contains("<retracted ")),
-        "recipient archive missing tombstone for retracted DM: {bob_frames:?}"
+        bob_tombstone.contains("id=\"dm-retract-1\""),
+        "recipient tombstone must cite the retraction stanza id: {bob_tombstone}"
     );
 
     // Admin's MAM also tombstones.
@@ -208,11 +218,15 @@ async fn dm_retraction_tombstones_both_archives() {
             .all(|frame| !frame.contains("<body>retract this dm</body>")),
         "sender archive leaked original body after retraction: {admin_frames:?}"
     );
+    let admin_tombstone = admin_frames
+        .iter()
+        .find(|frame| frame.contains("<retracted "))
+        .unwrap_or_else(|| {
+            panic!("sender archive missing tombstone for retracted DM: {admin_frames:?}")
+        });
     assert!(
-        admin_frames
-            .iter()
-            .any(|frame| frame.contains("<retracted ")),
-        "sender archive missing tombstone for retracted DM: {admin_frames:?}"
+        admin_tombstone.contains("id=\"dm-retract-1\""),
+        "sender tombstone must cite the retraction stanza id: {admin_tombstone}"
     );
 
     bob.close().await;

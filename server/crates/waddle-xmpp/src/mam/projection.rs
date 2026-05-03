@@ -198,10 +198,12 @@ fn rich_archive_payload(message: &Message) -> Option<ArchivedRichMessage> {
                     RichMessageId::new(id).map(|target_id| {
                         ArchivedRichPayload::Retraction(ArchivedRetraction {
                             target_id,
-                            stamp: chrono::DateTime::parse_from_rfc3339(&retracted.stamp)
-                                .ok()
+                            stamp: retracted
+                                .stamp
+                                .as_deref()
+                                .and_then(|stamp| chrono::DateTime::parse_from_rfc3339(stamp).ok())
                                 .map(|stamp| stamp.with_timezone(&Utc)),
-                            retraction_id: None,
+                            retraction_id: RichMessageId::new(retracted.retraction_id),
                         })
                     })
                 }),
