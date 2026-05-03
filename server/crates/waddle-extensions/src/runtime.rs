@@ -355,6 +355,10 @@ async fn execute_runtime_http_request(
     let client = reqwest::Client::builder()
         .timeout(EXTENSION_HTTP_TIMEOUT)
         .redirect(reqwest::redirect::Policy::none())
+        .no_gzip()
+        .no_brotli()
+        .no_deflate()
+        .no_zstd()
         .build()
         .map_err(|error| HostToolError {
             code: HostToolErrorCode::TemporaryFailure,
@@ -365,21 +369,7 @@ async fn execute_runtime_http_request(
         wit_types::HttpMethod::Get => client.get(&url),
         wit_types::HttpMethod::Post => client.post(&url),
     };
-    for header in request.headers {
-        if header.name.trim().is_empty() {
-            return Err(HostToolError::invalid_request(
-                DisplayText::new("extension HTTP header name must be non-empty")
-                    .expect("static HTTP error is non-empty"),
-            ));
-        }
-        if is_disallowed_extension_http_header(&header.name) {
-            return Err(HostToolError::invalid_request(
-                DisplayText::new("extension HTTP header is controlled by the host")
-                    .expect("static HTTP error is non-empty"),
-            ));
-        }
-        builder = builder.header(header.name, header.value);
-    }
+    builder = apply_runtime_http_headers(builder, request.headers)?;
     if let Some(body) = request.body {
         if body.len() > MAX_EXTENSION_HTTP_REQUEST_BODY_BYTES {
             return Err(HostToolError::invalid_request(
@@ -421,6 +411,29 @@ async fn execute_runtime_http_request(
     Ok(wit_types::HttpResponse { status, body })
 }
 
+fn apply_runtime_http_headers(
+    mut builder: reqwest::RequestBuilder,
+    headers: Vec<wit_types::HttpHeader>,
+) -> std::result::Result<reqwest::RequestBuilder, HostToolError> {
+    builder = builder.header("accept-encoding", "identity");
+    for header in headers {
+        if header.name.trim().is_empty() {
+            return Err(HostToolError::invalid_request(
+                DisplayText::new("extension HTTP header name must be non-empty")
+                    .expect("static HTTP error is non-empty"),
+            ));
+        }
+        if is_disallowed_extension_http_header(&header.name) {
+            return Err(HostToolError::invalid_request(
+                DisplayText::new("extension HTTP header is controlled by the host")
+                    .expect("static HTTP error is non-empty"),
+            ));
+        }
+        builder = builder.header(header.name, header.value);
+    }
+    Ok(builder)
+}
+
 fn http_origin(url: &reqwest::Url) -> Option<String> {
     let host = url.host_str()?;
     let Some(port) = url.port() else {
@@ -448,6 +461,7 @@ fn is_disallowed_extension_http_header(name: &str) -> bool {
             | "trailer"
             | "upgrade"
             | "keep-alive"
+            | "accept-encoding"
             | "proxy-authorization"
             | "proxy-authenticate"
     )
@@ -2071,6 +2085,49 @@ mod host_tool_tests {
         assert!(matches!(error.code, HostToolErrorCode::InvalidRequest));
     }
 
+    #[tokio::test]
+    async fn runtime_http_rejects_accept_encoding_before_network() {
+        let error = execute_runtime_http_request(
+            wit_types::OutgoingHttpRequest {
+                method: wit_types::HttpMethod::Post,
+                url: wit_types::Url {
+                    value: "https://api.example.test/v1/chat".to_string(),
+                },
+                headers: vec![wit_types::HttpHeader {
+                    name: "accept-encoding".to_string(),
+                    value: "gzip".to_string(),
+                }],
+                body: None,
+            },
+            &["https://api.example.test".to_string()],
+        )
+        .await
+        .expect_err("accept-encoding is host-controlled");
+
+        assert!(matches!(error.code, HostToolErrorCode::InvalidRequest));
+    }
+
+    #[test]
+    fn runtime_http_sets_identity_accept_encoding() {
+        let client = reqwest::Client::new();
+        let request = apply_runtime_http_headers(
+            client.post("https://api.example.test/v1/chat"),
+            vec![wit_types::HttpHeader {
+                name: "accept".to_string(),
+                value: "application/json".to_string(),
+            }],
+        )
+        .expect("headers are valid")
+        .build()
+        .expect("request builds");
+
+        assert_eq!(
+            request.headers().get("accept-encoding").unwrap(),
+            "identity"
+        );
+        assert_eq!(request.headers().get("accept").unwrap(), "application/json");
+    }
+
     #[test]
     fn runtime_http_normalizes_allowed_origins() {
         assert_eq!(
@@ -2089,6 +2146,7 @@ mod host_tool_tests {
         assert!(is_disallowed_extension_http_header("Host"));
         assert!(is_disallowed_extension_http_header("content-length"));
         assert!(is_disallowed_extension_http_header("Transfer-Encoding"));
+        assert!(is_disallowed_extension_http_header("Accept-Encoding"));
         assert!(!is_disallowed_extension_http_header("authorization"));
         assert!(!is_disallowed_extension_http_header("content-type"));
     }

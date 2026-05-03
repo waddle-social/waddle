@@ -1201,6 +1201,10 @@ fn provider_request_headers(request: &ProviderRequest) -> Vec<types::HttpHeader>
             name: "content-type".to_string(),
             value: "application/json".to_string(),
         },
+        types::HttpHeader {
+            name: "accept".to_string(),
+            value: "application/json".to_string(),
+        },
     ];
     if request.endpoint.as_str().starts_with(OPENROUTER_ORIGIN) {
         headers.push(types::HttpHeader {
@@ -2202,6 +2206,9 @@ mod tests {
         assert!(headers
             .iter()
             .any(|header| header.name == "authorization" && header.value == "Bearer secret-value"));
+        assert!(headers
+            .iter()
+            .any(|header| header.name == "accept" && header.value == "application/json"));
         assert!(headers
             .iter()
             .any(|header| header.name == "http-referer" && header.value == OPENROUTER_REFERER));
