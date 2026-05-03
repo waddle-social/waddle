@@ -19,7 +19,6 @@ import type { MentionCandidate } from "@/lib/mentions";
 import type { BrowserXmppClient, MessageSearchResult, XmppStatusSnapshot, RoomHats, RoomPresence } from "@/lib/xmpp-client";
 import {
   extensionCommandOutcome,
-  extensionCommandRequiresRoom,
   parseExtensionCommandLaunches,
   parseExtensionCommandForm,
   type DiscoveredExtensionCommand,
@@ -128,7 +127,7 @@ const extensionCommandActions = ref<Record<string, ExtensionAnnotationAction[]>>
 const availableExtensionCommands = computed(() =>
   props.roomJid
     ? extensionCommands.value
-    : extensionCommands.value.filter((command) => !extensionCommandRequiresRoom(command)),
+    : extensionCommands.value.filter((command) => command.scope !== "channel"),
 );
 const autoOpenedThreadIds = new Set<string>();
 

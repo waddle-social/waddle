@@ -6,7 +6,6 @@ import {
   discoverExtensionRoutes,
   extensionCommandOutcome,
   extensionCommandFormBlockedReason,
-  extensionCommandRequiresRoom,
   extensionServiceJidForUserJid,
   fetchExtensionRouteItems,
   invokeExtensionCommand,
@@ -47,17 +46,69 @@ describe("extension command invocation", () => {
     expect(extensionServiceJidForUserJid("alice@example.com/web")).toBe("extensions.example.com");
   });
 
-  test("keeps channel-only extension commands out of DM command pickers", () => {
-    expect(extensionCommandRequiresRoom({
-      serviceJid: "extensions.example.com",
-      node: "urn:waddle:extension:1:decision-polls",
-      name: "Create Decision Poll",
-    })).toBe(true);
-    expect(extensionCommandRequiresRoom({
-      serviceJid: "extensions.example.com",
-      node: "urn:waddle:extension:1:ai-chatbot",
-      name: "Ask AI Chatbot",
-    })).toBe(false);
+  test("reads command scope from XEP-0128 disco metadata when discovering commands", async () => {
+    const xmpp = {
+      async getDiscoItems(jid: string, node?: string) {
+        if (jid === "example.com" && node === undefined) {
+          return { items: [{ jid: "extensions.example.com", name: "Extensions" }] };
+        }
+        expect(jid).toBe("extensions.example.com");
+        expect(node).toBe("http://jabber.org/protocol/commands");
+        return {
+          items: [
+            { jid, node: "urn:waddle:extension:1:decision-polls", name: "Create Decision Poll" },
+            { jid, node: "urn:waddle:extension:1:ai-chatbot", name: "Ask AI Chatbot" },
+          ],
+        };
+      },
+      async getDiscoInfo(jid: string, node?: string) {
+        expect(jid).toBe("extensions.example.com");
+        if (node === undefined) {
+          return { features: ["urn:waddle:extension:1", "http://jabber.org/protocol/commands"] };
+        }
+        if (node === "urn:waddle:extension:1:decision-polls") {
+          return {
+            extensions: [{
+              fields: [
+                { name: "FORM_TYPE", value: "urn:waddle:extension:1:command" },
+                { name: "waddle#plugin_id", value: "decision-polls" },
+                { name: "waddle#command_node", value: "urn:waddle:extension:1:decision-polls" },
+                { name: "waddle#command_label", value: "Create Decision Poll" },
+                { name: "waddle#command_scope", value: "channel" },
+              ],
+            }],
+          };
+        }
+        expect(node).toBe("urn:waddle:extension:1:ai-chatbot");
+        return {
+          extensions: [{
+            fields: [
+              { name: "FORM_TYPE", value: "urn:waddle:extension:1:command" },
+              { name: "waddle#plugin_id", value: "ai-chatbot" },
+              { name: "waddle#command_node", value: "urn:waddle:extension:1:ai-chatbot" },
+              { name: "waddle#command_label", value: "Ask AI Chatbot" },
+              { name: "waddle#command_scope", value: "global" },
+            ],
+          }],
+        };
+      },
+    };
+
+    const commands = await discoverExtensionCommands(xmpp as any, "alice@example.com/web");
+    expect(commands).toEqual([
+      {
+        serviceJid: "extensions.example.com",
+        node: "urn:waddle:extension:1:decision-polls",
+        name: "Create Decision Poll",
+        scope: "channel",
+      },
+      {
+        serviceJid: "extensions.example.com",
+        node: "urn:waddle:extension:1:ai-chatbot",
+        name: "Ask AI Chatbot",
+        scope: "global",
+      },
+    ]);
   });
 
   test("builds a XEP-0050 invoke request from launch metadata", () => {
@@ -137,9 +188,9 @@ describe("extension command invocation", () => {
     };
 
     expect(await discoverExtensionCommands(xmpp as any, "alice@example.com/web")).toEqual([
-      { serviceJid: "extensions.example.com", node: "urn:waddle:extension:poll", name: "Poll" },
-      { serviceJid: "extensions.example.com", node: "urn:waddle:extension:1:ai-chatbot", name: "Ask AI Chatbot" },
-      { serviceJid: "extensions.example.com", node: "urn:waddle:extension:notes", name: "Notes" },
+      { serviceJid: "extensions.example.com", node: "urn:waddle:extension:poll", name: "Poll", scope: "global" },
+      { serviceJid: "extensions.example.com", node: "urn:waddle:extension:1:ai-chatbot", name: "Ask AI Chatbot", scope: "global" },
+      { serviceJid: "extensions.example.com", node: "urn:waddle:extension:notes", name: "Notes", scope: "global" },
     ]);
   });
 
@@ -189,7 +240,7 @@ describe("extension command invocation", () => {
     }]);
   });
 
-  test("fetches channel route items from the resolved PubSub node", async () => {
+  test("parses generic extension-item envelopes from PubSub state nodes", async () => {
     const route = {
       serviceJid: "extensions.example.com",
       pluginId: "link-board",
@@ -209,12 +260,30 @@ describe("extension command invocation", () => {
           items: [{
             id: "https---example-org-post",
             content: {
-              name: "link",
-              attributes: {
-                xmlns: "urn:waddle:link-board:1",
-                url: "https://example.org/post",
-              },
-              children: ["https://example.org/post"],
+              name: "extension-item",
+              attributes: { xmlns: "urn:waddle:extension:1" },
+              children: [
+                {
+                  name: "title",
+                  attributes: { xmlns: "urn:waddle:extension:1" },
+                  children: ["Example Post"],
+                },
+                {
+                  name: "link",
+                  attributes: { xmlns: "urn:waddle:extension:1", href: "https://example.org/post" },
+                  children: [],
+                },
+                {
+                  name: "description",
+                  attributes: { xmlns: "urn:waddle:extension:1" },
+                  children: ["A short summary of the post."],
+                },
+                {
+                  name: "field",
+                  attributes: { xmlns: "urn:waddle:extension:1", name: "saved-at", label: "Saved" },
+                  children: ["2026-04-27T00:00:00Z"],
+                },
+              ],
             },
           }],
         };
@@ -223,18 +292,18 @@ describe("extension command invocation", () => {
 
     expect(resolveExtensionRouteStateNode(route, "general@muc.example.com"))
       .toBe("urn:waddle:link-board:1:channel:general@muc.example.com:links");
-    expect(await fetchExtensionRouteItems(xmpp as any, route, "general@muc.example.com")).toMatchObject([{
+    expect(await fetchExtensionRouteItems(xmpp as any, route, "general@muc.example.com")).toEqual([{
       id: "https---example-org-post",
-      fields: { url: "https://example.org/post" },
-      payload: {
-        namespace: "urn:waddle:link-board:1",
-        name: "link",
-        text: "https://example.org/post",
-      },
+      title: "Example Post",
+      link: { href: "https://example.org/post" },
+      description: "A short summary of the post.",
+      fields: [{ name: "saved-at", label: "Saved", value: "2026-04-27T00:00:00Z" }],
+      options: [],
+      actions: [],
     }]);
   });
 
-  test("normalizes raw XML route payloads for unknown extension route renderers", async () => {
+  test("skips PubSub items that are not Waddle extension-item envelopes", async () => {
     const route = {
       serviceJid: "extensions.example.com",
       pluginId: "unknown-extension",
@@ -266,27 +335,71 @@ describe("extension command invocation", () => {
       },
     };
 
-    expect(await fetchExtensionRouteItems(xmpp as any, route, "general@muc.example.com")).toEqual([{
-      id: "item-1",
-      fields: { url: "https://example.org/raw" },
-      payload: {
-        namespace: "urn:waddle:unknown:1",
-        name: "saved-item",
-        attributes: {
-          xmlns: "urn:waddle:unknown:1",
-          url: "https://example.org/raw",
-        },
-        children: [{
-          namespace: "urn:waddle:unknown:1",
-          name: "title",
-          attributes: {
-            xmlns: "urn:waddle:unknown:1",
-          },
-          text: "Raw item",
-          children: [],
-        }],
+    expect(await fetchExtensionRouteItems(xmpp as any, route, "general@muc.example.com")).toEqual([]);
+  });
+
+  test("parses extension-item envelopes with options and actions for poll-shaped routes", async () => {
+    const route = {
+      serviceJid: "extensions.example.com",
+      pluginId: "decision-polls",
+      routeId: "active-polls",
+      label: "Polls",
+      scope: "channel" as const,
+      surface: "list" as const,
+      stateNode: "urn:waddle:decision-polls:1:channel:{room}:polls",
+      payloadNamespace: "urn:waddle:decision-polls:1",
+    };
+    const xmpp = {
+      async getItems() {
+        return {
+          items: [{
+            id: "poll-42",
+            content: {
+              name: "extension-item",
+              attributes: { xmlns: "urn:waddle:extension:1" },
+              children: [
+                {
+                  name: "title",
+                  attributes: { xmlns: "urn:waddle:extension:1" },
+                  children: ["Lunch tomorrow?"],
+                },
+                {
+                  name: "subtitle",
+                  attributes: { xmlns: "urn:waddle:extension:1" },
+                  children: ["Open"],
+                },
+                {
+                  name: "option",
+                  attributes: { xmlns: "urn:waddle:extension:1", id: "a", label: "Pizza" },
+                  children: [],
+                },
+                {
+                  name: "option",
+                  attributes: { xmlns: "urn:waddle:extension:1", id: "b", label: "Sushi" },
+                  children: [],
+                },
+                {
+                  name: "action",
+                  attributes: { xmlns: "urn:waddle:extension:1", "launch-id": "vote-42", label: "Vote" },
+                  children: [],
+                },
+              ],
+            },
+          }],
+        };
       },
-      raw: expect.any(Object),
+    };
+
+    expect(await fetchExtensionRouteItems(xmpp as any, route, "general@muc.example.com")).toEqual([{
+      id: "poll-42",
+      title: "Lunch tomorrow?",
+      subtitle: "Open",
+      fields: [],
+      options: [
+        { id: "a", label: "Pizza" },
+        { id: "b", label: "Sushi" },
+      ],
+      actions: [{ launchId: "vote-42", label: "Vote" }],
     }]);
   });
 

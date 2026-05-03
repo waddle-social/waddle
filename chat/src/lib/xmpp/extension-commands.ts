@@ -6,6 +6,7 @@ const NS_WADDLE_EXTENSION_1 = "urn:waddle:extension:1";
 const NS_ADHOC_COMMANDS = "http://jabber.org/protocol/commands";
 const INVOKE_COMMAND_NODE = "urn:waddle:extension:1:invoke";
 const EXTENSION_ROUTE_FORM_TYPE = "urn:waddle:extension:1:routes";
+const EXTENSION_COMMAND_FORM_TYPE = "urn:waddle:extension:1:command";
 
 export interface ExtensionCommandNote {
   type?: string;
@@ -45,10 +46,13 @@ export interface ExtensionCommandFormField {
   hidden: boolean;
 }
 
+export type ExtensionCommandScope = "global" | "channel";
+
 export interface DiscoveredExtensionCommand {
   serviceJid: string;
   node: string;
   name: string;
+  scope: ExtensionCommandScope;
 }
 
 export type ExtensionRouteScope = "channel";
@@ -65,11 +69,31 @@ export interface DiscoveredExtensionRoute {
   payloadNamespace: string;
 }
 
+export interface ExtensionItemField {
+  name: string;
+  label?: string;
+  value: string;
+}
+
+export interface ExtensionItemOption {
+  id: string;
+  label: string;
+}
+
+export interface ExtensionItemAction {
+  launchId: string;
+  label: string;
+}
+
 export interface ExtensionRouteItem {
   id?: string;
-  payload?: ExtensionPayloadElement;
-  fields: Record<string, string>;
-  raw: unknown;
+  title?: string;
+  subtitle?: string;
+  link?: { href: string };
+  description?: string;
+  fields: ExtensionItemField[];
+  options: ExtensionItemOption[];
+  actions: ExtensionItemAction[];
 }
 
 type ExtensionCommandOutcomeState = "success" | "warning" | "error";
@@ -127,10 +151,6 @@ export function extensionServiceJidForUserJid(userJid: string): string {
   const domain = jidDomain(userJid);
   if (!domain) throw new Error("Cannot resolve extension service for this XMPP account.");
   return `extensions.${domain}`;
-}
-
-export function extensionCommandRequiresRoom(command: DiscoveredExtensionCommand): boolean {
-  return command.node === "urn:waddle:extension:1:decision-polls";
 }
 
 function requiredLaunchValue(value: string | undefined, label: string): string {
@@ -464,13 +484,41 @@ export async function discoverExtensionCommands(
   const disco = xmpp as unknown as DiscoClient;
   const response = await disco.getDiscoItems?.(serviceJid, NS_ADHOC_COMMANDS);
   const items = response?.items ?? [];
-  return items
-    .filter((item) => item.node && item.node !== INVOKE_COMMAND_NODE)
-    .map((item) => ({
-      serviceJid: item.jid ?? serviceJid,
-      node: item.node!,
-      name: item.name || item.node!,
-    }));
+  const filtered = items.filter((item) => item.node && item.node !== INVOKE_COMMAND_NODE);
+  const commands: DiscoveredExtensionCommand[] = [];
+  for (const item of filtered) {
+    const itemServiceJid = item.jid ?? serviceJid;
+    const node = item.node!;
+    let scope: ExtensionCommandScope = "global";
+    try {
+      const info = await disco.getDiscoInfo?.(itemServiceJid, node);
+      const parsedScope = parseExtensionCommandScope(info?.extensions);
+      if (parsedScope) scope = parsedScope;
+    } catch {
+      // If disco#info is unavailable for the command, fall back to global
+      // scope; the worst case is showing a command that turns out to be
+      // channel-only when invoked.
+    }
+    commands.push({
+      serviceJid: itemServiceJid,
+      node,
+      name: item.name || node,
+      scope,
+    });
+  }
+  return commands;
+}
+
+function parseExtensionCommandScope(extensions: unknown[] | undefined): ExtensionCommandScope | null {
+  if (!Array.isArray(extensions)) return null;
+  for (const form of extensions) {
+    const fields = (form as { fields?: unknown[] } | undefined)?.fields;
+    if (!Array.isArray(fields)) continue;
+    if (formFieldValue(fields, "FORM_TYPE") !== EXTENSION_COMMAND_FORM_TYPE) continue;
+    const value = formFieldValue(fields, "waddle#command_scope");
+    if (value === "global" || value === "channel") return value;
+  }
+  return null;
 }
 
 export async function discoverExtensionRoutes(
@@ -506,15 +554,74 @@ export async function fetchExtensionRouteItems(
   const response = await (xmpp as unknown as {
     getItems?: (jid: string, node: string, opts?: { max?: number }) => Promise<{ items?: Array<{ id?: string; content?: unknown }> }>;
   }).getItems?.(route.serviceJid, node, { max: 100 });
-  return (response?.items ?? []).map((item) => {
-    const payload = normalizeRoutePayload(item.content, route.payloadNamespace, route.routeId);
-    return {
-      ...(item.id ? { id: item.id } : {}),
-      ...(payload ? { payload } : {}),
-      fields: routeItemFields(payload, item.content),
-      raw: item.content,
-    };
+  return (response?.items ?? []).flatMap((item) => {
+    const view = parseExtensionItemView(item.content, item.id);
+    return view ? [view] : [];
   });
+}
+
+function parseExtensionItemView(content: unknown, id: string | undefined): ExtensionRouteItem | null {
+  const root = normalizePayloadElement(content, NS_WADDLE_EXTENSION_1);
+  if (!root) return null;
+  if (root.namespace !== NS_WADDLE_EXTENSION_1) return null;
+  if (root.name !== "extension-item") return null;
+
+  const view: ExtensionRouteItem = {
+    fields: [],
+    options: [],
+    actions: [],
+  };
+  if (id) view.id = id;
+
+  for (const child of root.children) {
+    if (child.namespace !== NS_WADDLE_EXTENSION_1) continue;
+    switch (child.name) {
+      case "title": {
+        const text = (child.text ?? "").trim();
+        if (text) view.title = text;
+        break;
+      }
+      case "subtitle": {
+        const text = (child.text ?? "").trim();
+        if (text) view.subtitle = text;
+        break;
+      }
+      case "description": {
+        const text = (child.text ?? "").trim();
+        if (text) view.description = text;
+        break;
+      }
+      case "link": {
+        const href = child.attributes.href?.trim();
+        if (href) view.link = { href };
+        break;
+      }
+      case "field": {
+        const name = child.attributes.name?.trim();
+        if (!name) break;
+        const value = (child.text ?? "").trim();
+        const label = child.attributes.label?.trim();
+        view.fields.push(label ? { name, label, value } : { name, value });
+        break;
+      }
+      case "option": {
+        const optionId = child.attributes.id?.trim();
+        const label = child.attributes.label?.trim();
+        if (optionId && label) view.options.push({ id: optionId, label });
+        break;
+      }
+      case "action": {
+        const launchId = child.attributes["launch-id"]?.trim();
+        const label = child.attributes.label?.trim();
+        if (launchId && label) view.actions.push({ launchId, label });
+        break;
+      }
+      default:
+        break;
+    }
+  }
+
+  return view;
 }
 
 function parseFieldOptions(options: unknown): ExtensionCommandFormOption[] {
@@ -675,30 +782,6 @@ function formFieldValues(field: FormFieldLike | undefined): string[] {
     .map((value) => String(value));
 }
 
-function normalizeRoutePayload(
-  content: unknown,
-  fallbackNamespace: string,
-  fallbackName: string,
-): ExtensionPayloadElement | undefined {
-  const direct = normalizePayloadElement(content, fallbackNamespace);
-  if (direct) return direct;
-  const wrapped = content && typeof content === "object"
-    ? normalizePayloadElement((content as { payload?: unknown; content?: unknown }).payload ?? (content as { content?: unknown }).content, fallbackNamespace)
-    : null;
-  if (wrapped) return wrapped;
-  const fields = primitiveObjectFields(content);
-  if (Object.keys(fields).length === 0) return undefined;
-  const itemType = typeof (content as { itemType?: unknown } | undefined)?.itemType === "string"
-    ? (content as { itemType: string }).itemType
-    : undefined;
-  return {
-    namespace: itemType && itemType.startsWith("urn:") ? itemType : fallbackNamespace,
-    name: fallbackName,
-    attributes: fields,
-    children: [],
-  };
-}
-
 function normalizePayloadElement(content: unknown, fallbackNamespace: string): ExtensionPayloadElement | null {
   if (!content || typeof content !== "object") return null;
   if (isRawXmlElement(content)) return normalizeRawXmlPayload(content, fallbackNamespace);
@@ -780,17 +863,6 @@ function normalizeRawXmlPayload(xml: RawXmlElement, fallbackNamespace: string): 
       isRawXmlElement(child) ? [normalizeRawXmlPayload(child, namespace)] : []
     ),
   };
-}
-
-function routeItemFields(payload: ExtensionPayloadElement | undefined, raw: unknown): Record<string, string> {
-  if (payload) {
-    return Object.fromEntries(
-      Object.entries(payload.attributes)
-        .filter(([key]) => key !== "xmlns")
-        .map(([key, value]) => [key, value]),
-    );
-  }
-  return primitiveObjectFields(raw);
 }
 
 function firstNonEmpty(values: string[]): string {

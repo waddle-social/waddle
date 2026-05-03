@@ -19,9 +19,9 @@ pub use host_tools::{
 pub use manager::{ExtensionManager, MessageExtensionOutcome};
 pub use types::{
     message_has_framework_envelope, ArtifactReference, CommandAction, CommandDescriptor,
-    CommandInvocation, CommandSessionId, DataForm, DataFormField, DataFormType, DataFormValue,
-    DetectedLink, DisplayText, ExtensionCapability, ExtensionEffect, ExtensionEnvelope,
-    ExtensionEvent, ExtensionManifest, ExtensionPayload, ExtensionResponse,
+    CommandInvocation, CommandScope, CommandSessionId, DataForm, DataFormField, DataFormType,
+    DataFormValue, DetectedLink, DisplayText, ExtensionCapability, ExtensionEffect,
+    ExtensionEnvelope, ExtensionEvent, ExtensionManifest, ExtensionPayload, ExtensionResponse,
     ExtensionRouteDescriptor, ExtensionRouteScope, ExtensionRouteSurface, FormFieldOption,
     FormFieldType, FormFieldValue, FrameworkTypeError, FullJidValue, LaunchContext,
     LaunchDescriptor, LaunchId, LaunchToken, MessageEnrichment, PayloadRoot, PayloadRule,

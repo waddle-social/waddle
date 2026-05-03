@@ -22,6 +22,8 @@ bindings::export!(LinkBoard with_types_in bindings);
 const PLUGIN_ID: &str = "link-board";
 const PLUGIN_NAME: &str = "Link Board";
 const PLUGIN_NS: &str = "urn:waddle:link-board:1";
+const FRAMEWORK_NS: &str = "urn:waddle:extension:1";
+const EXTENSION_ITEM_ROOT: &str = "extension-item";
 const INVOKE_NODE: &str = "urn:waddle:extension:1:invoke";
 const VERSION: &str = "0.1.0";
 
@@ -62,7 +64,11 @@ fn manifest() -> types::ExtensionManifest {
             types::ExtensionCapability::PubsubPublish,
             types::ExtensionCapability::UiDeclarative,
         ],
-        commands: vec![command_descriptor(INVOKE_NODE, "Run Link Board action")],
+        commands: vec![command_descriptor(
+            INVOKE_NODE,
+            "Run Link Board action",
+            types::CommandScope::Channel,
+        )],
         routes: vec![types::ExtensionRouteDescriptor {
             plugin: plugin_id(),
             id: types::RouteId {
@@ -158,16 +164,41 @@ fn save_link(launch: types::LaunchInvocation) -> Vec<types::ExtensionEffect> {
     };
     let normalized = field_value(&launch.fields, "payload#link#normalized-url")
         .unwrap_or_else(|| normalized_url(&url));
-    let source = launch.context.source_stanza_id.as_ref();
     vec![types::ExtensionEffect::PublishPubsub(
         types::PubsubPublish {
             node: links_node(&room),
             item_id: Some(types::PubsubItemId {
                 value: link_item_id(&normalized),
             }),
-            payload: link_payload(&url, &normalized, source, None),
+            payload: saved_link_extension_item(&url, &normalized, timestamp().value.as_str()),
         },
     )]
+}
+
+fn saved_link_extension_item(
+    url: &str,
+    normalized: &str,
+    saved_at: &str,
+) -> types::ExtensionPayload {
+    let title = link_display_title(url);
+    let mut item = ExtensionItem::new();
+    item.with_title(&title);
+    item.with_link(url);
+    item.with_field("saved-at", "Saved", saved_at);
+    if normalized != url {
+        item.with_field("normalized-url", "Normalized URL", normalized);
+    }
+    item.into_payload()
+}
+
+fn link_display_title(url: &str) -> String {
+    if let Some(rest) = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://")) {
+        let host = rest.split('/').next().unwrap_or(rest);
+        if !host.is_empty() {
+            return host.to_string();
+        }
+    }
+    url.to_string()
 }
 
 fn launch(
@@ -289,12 +320,17 @@ fn payload_rule(surface: types::PayloadSurface, root: &str) -> types::PayloadRul
     }
 }
 
-fn command_descriptor(node: &str, name: &str) -> types::CommandDescriptor {
+fn command_descriptor(
+    node: &str,
+    name: &str,
+    scope: types::CommandScope,
+) -> types::CommandDescriptor {
     types::CommandDescriptor {
         node: types::CommandNode {
             value: node.to_string(),
         },
         name: display(name),
+        scope,
     }
 }
 
@@ -367,5 +403,215 @@ fn display(value: &str) -> types::DisplayText {
 fn timestamp() -> types::Timestamp {
     types::Timestamp {
         value: "2026-04-27T00:00:00Z".to_string(),
+    }
+}
+
+/// Builder for the generic `<extension-item xmlns="urn:waddle:extension:1">`
+/// envelope that every Waddle extension publishes for its PubSub state items.
+///
+/// The host renders these items uniformly regardless of which extension
+/// produced them, so the inner element vocabulary is fixed by the framework
+/// (title/subtitle/link/description/field/option/action).
+struct ExtensionItem {
+    children: Vec<types::XmlToken>,
+}
+
+impl ExtensionItem {
+    fn new() -> Self {
+        Self {
+            children: Vec::new(),
+        }
+    }
+
+    fn with_title(&mut self, value: &str) -> &mut Self {
+        self.push_text_element("title", value);
+        self
+    }
+
+    fn with_link(&mut self, href: &str) -> &mut Self {
+        self.push_empty_element("link", vec![("href", href.to_string())]);
+        self
+    }
+
+    fn with_field(&mut self, name: &str, label: &str, value: &str) -> &mut Self {
+        self.push_text_element_with_attrs(
+            "field",
+            vec![
+                ("name", name.to_string()),
+                ("label", label.to_string()),
+            ],
+            value,
+        );
+        self
+    }
+
+    fn into_payload(self) -> types::ExtensionPayload {
+        let namespace = framework_namespace();
+        let mut tokens = Vec::with_capacity(self.children.len() + 2);
+        tokens.push(types::XmlToken::StartElement(types::XmlElement {
+            namespace: namespace.clone(),
+            local_name: EXTENSION_ITEM_ROOT.to_string(),
+            attributes: Vec::new(),
+        }));
+        tokens.extend(self.children);
+        tokens.push(types::XmlToken::EndElement);
+        types::ExtensionPayload {
+            namespace: namespace.clone(),
+            root: types::PayloadRoot {
+                namespace,
+                local_name: EXTENSION_ITEM_ROOT.to_string(),
+            },
+            tokens,
+        }
+    }
+
+    fn push_text_element(&mut self, local_name: &str, text: &str) {
+        self.push_text_element_with_attrs(local_name, Vec::new(), text);
+    }
+
+    fn push_text_element_with_attrs(
+        &mut self,
+        local_name: &str,
+        attrs: Vec<(&str, String)>,
+        text: &str,
+    ) {
+        self.children
+            .push(types::XmlToken::StartElement(framework_xml_element(
+                local_name, attrs,
+            )));
+        self.children.push(types::XmlToken::Text(text.to_string()));
+        self.children.push(types::XmlToken::EndElement);
+    }
+
+    fn push_empty_element(&mut self, local_name: &str, attrs: Vec<(&str, String)>) {
+        self.children
+            .push(types::XmlToken::StartElement(framework_xml_element(
+                local_name, attrs,
+            )));
+        self.children.push(types::XmlToken::EndElement);
+    }
+}
+
+fn framework_xml_element(local_name: &str, attrs: Vec<(&str, String)>) -> types::XmlElement {
+    types::XmlElement {
+        namespace: framework_namespace(),
+        local_name: local_name.to_string(),
+        attributes: attrs
+            .into_iter()
+            .map(|(name, value)| types::XmlAttribute {
+                namespace: None,
+                local_name: name.to_string(),
+                value,
+            })
+            .collect(),
+    }
+}
+
+fn framework_namespace() -> types::PayloadNamespace {
+    types::PayloadNamespace {
+        value: FRAMEWORK_NS.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manifest_declares_link_board_commands_as_channel_scoped() {
+        let manifest = manifest();
+        assert!(!manifest.commands.is_empty());
+        for command in &manifest.commands {
+            assert!(
+                matches!(command.scope, types::CommandScope::Channel),
+                "command {} should require an active channel context",
+                command.node.value,
+            );
+        }
+    }
+
+    fn xml_element_token(token: &types::XmlToken) -> &types::XmlElement {
+        match token {
+            types::XmlToken::StartElement(element) => element,
+            _ => panic!("expected start-element token"),
+        }
+    }
+
+    #[test]
+    fn saved_link_publishes_extension_item_envelope() {
+        let payload = saved_link_extension_item(
+            "https://example.org/post",
+            "https://example.org/post",
+            "2026-04-27T00:00:00Z",
+        );
+
+        assert_eq!(payload.namespace.value, FRAMEWORK_NS);
+        assert_eq!(payload.root.namespace.value, FRAMEWORK_NS);
+        assert_eq!(payload.root.local_name, EXTENSION_ITEM_ROOT);
+
+        let root = xml_element_token(&payload.tokens[0]);
+        assert_eq!(root.namespace.value, FRAMEWORK_NS);
+        assert_eq!(root.local_name, EXTENSION_ITEM_ROOT);
+
+        // Walk the children to confirm the envelope contents.
+        let mut titles: Vec<String> = Vec::new();
+        let mut links: Vec<String> = Vec::new();
+        let mut field_names: Vec<String> = Vec::new();
+        let mut depth = 0;
+        let mut current_local: Option<String> = None;
+        let mut current_attrs: Vec<types::XmlAttribute> = Vec::new();
+        let mut current_text = String::new();
+        for token in payload.tokens.iter().skip(1) {
+            match token {
+                types::XmlToken::StartElement(element) => {
+                    depth += 1;
+                    if depth == 1 {
+                        current_local = Some(element.local_name.clone());
+                        current_attrs = element.attributes.clone();
+                        current_text.clear();
+                    }
+                }
+                types::XmlToken::Text(text) if depth == 1 => current_text.push_str(text),
+                types::XmlToken::Text(_) => {}
+                types::XmlToken::EndElement => {
+                    if depth == 1 {
+                        if let Some(local) = current_local.take() {
+                            match local.as_str() {
+                                "title" => titles.push(current_text.clone()),
+                                "link" => {
+                                    if let Some(href) = current_attrs
+                                        .iter()
+                                        .find(|attr| attr.local_name == "href")
+                                    {
+                                        links.push(href.value.clone());
+                                    }
+                                }
+                                "field" => {
+                                    if let Some(name) = current_attrs
+                                        .iter()
+                                        .find(|attr| attr.local_name == "name")
+                                    {
+                                        field_names.push(name.value.clone());
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        current_attrs.clear();
+                        current_text.clear();
+                    }
+                    depth -= 1;
+                }
+            }
+        }
+        assert_eq!(titles, vec!["example.org".to_string()]);
+        assert_eq!(links, vec!["https://example.org/post".to_string()]);
+        assert_eq!(field_names, vec!["saved-at".to_string()]);
+    }
+
+    #[test]
+    fn link_display_title_falls_back_to_url() {
+        assert_eq!(link_display_title("https://example.org/path"), "example.org");
+        assert_eq!(link_display_title("not-a-url"), "not-a-url");
     }
 }

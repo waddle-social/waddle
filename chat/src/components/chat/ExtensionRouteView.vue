@@ -16,6 +16,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   openNav: [];
+  invokeAction: [action: { launchId: string; label: string }];
 }>();
 
 const items = ref<ExtensionRouteItem[]>([]);
@@ -63,73 +64,22 @@ async function refreshItems() {
 }
 
 function itemTitle(item: ExtensionRouteItem): string {
-  const fields = item.fields;
-  return fields.title
-    || fields.label
-    || fields.question
-    || fields.url
-    || item.payload?.text
-    || item.id
-    || item.payload?.name
-    || "Untitled";
+  return item.title || item.link?.href || item.id || "Untitled";
 }
 
-function itemSubtitle(item: ExtensionRouteItem): string {
-  const fields = item.fields;
-  return fields["closes-at"]
-    || item.payload?.namespace
-    || "";
+function fieldLabel(field: { name: string; label?: string }): string {
+  if (field.label) return field.label;
+  return field.name.replace(/[-_:#]+/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
-function itemUrl(item: ExtensionRouteItem): string | null {
-  const value = item.fields.url;
-  if (!value) return null;
+function safeUrl(href: string | undefined): string | null {
+  if (!href) return null;
   try {
-    const url = new URL(value);
+    const url = new URL(href);
     return url.protocol === "http:" || url.protocol === "https:" ? url.toString() : null;
   } catch {
     return null;
   }
-}
-
-function displayFields(item: ExtensionRouteItem): Array<{ label: string; value: string }> {
-  const hidden = new Set([
-    "url",
-    "normalized-url",
-    "title",
-    "label",
-    "question",
-    "poll-id",
-    "option-count",
-    "source-stanza-id",
-    "body-start",
-    "body-end",
-  ]);
-  return Object.entries(item.fields)
-    .filter(([key, value]) => !hidden.has(key) && !/^option-\d+-(?:id|label)$/.test(key) && value.trim().length > 0)
-    .slice(0, 6)
-    .map(([key, value]) => ({
-      label: key.replace(/[-_:#]+/g, " ").replace(/\b\w/g, (char) => char.toUpperCase()),
-      value,
-    }));
-}
-
-function itemOptions(item: ExtensionRouteItem): Array<{ id: string; label: string }> {
-  const childOptions = item.payload?.children
-    .filter((child) => child.name === "option" || child.name === "answer")
-    .map((child, index) => ({
-      id: child.attributes.id ?? child.attributes["option-id"] ?? String(index),
-      label: child.text?.trim() || child.attributes.label || child.attributes.title || `Option ${index + 1}`,
-    })) ?? [];
-  if (childOptions.length > 0) return childOptions;
-  const options: Array<{ id: string; label: string }> = [];
-  for (let index = 0; index < 50; index += 1) {
-    const label = item.fields[`option-${index}-label`]?.trim();
-    const id = item.fields[`option-${index}-id`]?.trim();
-    if (!label && !id) break;
-    options.push({ id: id || String(index), label: label || `Option ${index + 1}` });
-  }
-  return options;
 }
 
 watch(routeKey, () => {
@@ -192,14 +142,14 @@ watch(routeKey, () => {
           <div class="flex min-w-0 items-start justify-between gap-3">
             <div class="min-w-0">
               <h2 class="type-control type-strong truncate text-card-foreground">{{ itemTitle(item) }}</h2>
-              <p v-if="itemSubtitle(item)" class="type-caption truncate text-muted-foreground">
-                {{ itemSubtitle(item) }}
+              <p v-if="item.subtitle" class="type-caption truncate text-muted-foreground">
+                {{ item.subtitle }}
               </p>
             </div>
             <a
-              v-if="itemUrl(item)"
+              v-if="safeUrl(item.link?.href)"
               class="chat-icon-button chat-icon-button--sm shrink-0"
-              :href="itemUrl(item) ?? '#'"
+              :href="safeUrl(item.link?.href) ?? '#'"
               target="_blank"
               rel="noopener noreferrer"
               aria-label="Open link"
@@ -207,24 +157,38 @@ watch(routeKey, () => {
               <ExternalLink class="h-3.5 w-3.5" />
             </a>
           </div>
-          <dl v-if="displayFields(item).length > 0" class="mt-3 grid gap-1">
+          <p v-if="item.description" class="type-caption mt-2 whitespace-pre-line text-card-foreground">
+            {{ item.description }}
+          </p>
+          <dl v-if="item.fields.length > 0" class="mt-3 grid gap-1">
             <div
-              v-for="field in displayFields(item)"
-              :key="field.label"
+              v-for="field in item.fields"
+              :key="field.name"
               class="grid grid-cols-[minmax(5.5rem,0.45fr)_1fr] gap-2"
             >
-              <dt class="type-caption truncate text-muted-foreground">{{ field.label }}</dt>
+              <dt class="type-caption truncate text-muted-foreground">{{ fieldLabel(field) }}</dt>
               <dd class="type-caption min-w-0 truncate text-card-foreground">{{ field.value }}</dd>
             </div>
           </dl>
-          <div v-if="itemOptions(item).length > 0" class="mt-3 flex flex-wrap gap-1.5">
+          <div v-if="item.options.length > 0" class="mt-3 flex flex-wrap gap-1.5">
             <span
-              v-for="option in itemOptions(item)"
+              v-for="option in item.options"
               :key="option.id"
               class="type-caption rounded-md border border-border bg-muted px-2 py-1 text-muted-foreground"
             >
               {{ option.label }}
             </span>
+          </div>
+          <div v-if="item.actions.length > 0" class="mt-3 flex flex-wrap gap-1.5">
+            <button
+              v-for="action in item.actions"
+              :key="action.launchId"
+              type="button"
+              class="chat-icon-button chat-icon-button--sm"
+              @click="emit('invokeAction', action)"
+            >
+              {{ action.label }}
+            </button>
           </div>
         </article>
       </div>

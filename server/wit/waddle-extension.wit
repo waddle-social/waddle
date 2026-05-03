@@ -177,9 +177,15 @@ interface types {
         artifact: option<artifact-reference>,
     }
 
+    enum command-scope {
+        global,
+        channel,
+    }
+
     record command-descriptor {
         node: command-node,
         name: display-text,
+        scope: command-scope,
     }
 
     record extension-route-descriptor {

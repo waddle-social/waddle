@@ -23,6 +23,8 @@ bindings::export!(DecisionPolls with_types_in bindings);
 const PLUGIN_ID: &str = "decision-polls";
 const PLUGIN_NAME: &str = "Decision Polls";
 const PLUGIN_NS: &str = "urn:waddle:decision-polls:1";
+const FRAMEWORK_NS: &str = "urn:waddle:extension:1";
+const EXTENSION_ITEM_ROOT: &str = "extension-item";
 const INVOKE_NODE: &str = "urn:waddle:extension:1:invoke";
 const COMMAND_NODE: &str = "urn:waddle:extension:1:decision-polls";
 const VERSION: &str = "0.1.0";
@@ -70,8 +72,16 @@ fn manifest() -> types::ExtensionManifest {
             types::ExtensionCapability::UiDeclarative,
         ],
         commands: vec![
-            command_descriptor(COMMAND_NODE, "Create Decision Poll"),
-            command_descriptor(INVOKE_NODE, "Run Decision Poll action"),
+            command_descriptor(
+                COMMAND_NODE,
+                "Create Decision Poll",
+                types::CommandScope::Channel,
+            ),
+            command_descriptor(
+                INVOKE_NODE,
+                "Run Decision Poll action",
+                types::CommandScope::Channel,
+            ),
         ],
         routes: vec![types::ExtensionRouteDescriptor {
             plugin: plugin_id(),
@@ -144,7 +154,7 @@ fn handle_command(
             item_id: Some(types::PubsubItemId {
                 value: poll.poll_id.clone(),
             }),
-            payload: poll_payload(&poll),
+            payload: poll_extension_item(&poll),
         },
     )])
 }
@@ -164,25 +174,14 @@ fn handle_vote(launch: types::LaunchInvocation) -> Vec<types::ExtensionEffect> {
         types::ExtensionEffect::PublishPubsub(types::PubsubPublish {
             node: votes_node(&room, &poll_id),
             item_id: Some(types::PubsubItemId { value: voter }),
-            payload: payload(
-                "vote",
-                vec![
-                    ("poll-id", poll_id.clone()),
-                    ("option-id", option_id.clone()),
-                ],
-                "Vote recorded",
-            ),
+            payload: vote_extension_item(&poll_id, &option_id),
         }),
         types::ExtensionEffect::PublishPubsub(types::PubsubPublish {
             node: results_node(&room),
             item_id: Some(types::PubsubItemId {
                 value: poll_id.clone(),
             }),
-            payload: payload(
-                "results",
-                vec![("poll-id", poll_id), ("latest-option-id", option_id)],
-                "Poll results updated",
-            ),
+            payload: results_extension_item(&poll_id, &option_id),
         }),
     ]
 }
@@ -346,6 +345,34 @@ fn poll_payload(poll: &Poll) -> types::ExtensionPayload {
     payload("poll", attrs, &poll.question)
 }
 
+fn poll_extension_item(poll: &Poll) -> types::ExtensionPayload {
+    let mut item = ExtensionItem::new();
+    item.with_title(&poll.question);
+    item.with_subtitle(&format!("Closes at {}", poll.closes_at));
+    for option in &poll.options {
+        item.with_option(&option.id, &option.label);
+    }
+    item.with_action(&format!("vote-{}", poll.poll_id), "Vote");
+    item.into_payload()
+}
+
+fn vote_extension_item(poll_id: &str, option_id: &str) -> types::ExtensionPayload {
+    let mut item = ExtensionItem::new();
+    item.with_title("Vote recorded");
+    item.with_field("poll-id", "Poll", poll_id);
+    item.with_field("option-id", "Choice", option_id);
+    item.into_payload()
+}
+
+fn results_extension_item(poll_id: &str, latest_option_id: &str) -> types::ExtensionPayload {
+    let mut item = ExtensionItem::new();
+    item.with_title(&format!("Results for {poll_id}"));
+    item.with_subtitle(&format!("Latest vote: {latest_option_id}"));
+    item.with_field("poll-id", "Poll", poll_id);
+    item.with_field("latest-option-id", "Latest choice", latest_option_id);
+    item.into_payload()
+}
+
 fn option_key(index: usize, field: &str) -> &'static str {
     match (index, field) {
         (0, "id") => "option-0-id",
@@ -483,12 +510,17 @@ fn payload_rule(surface: types::PayloadSurface, root: &str) -> types::PayloadRul
     }
 }
 
-fn command_descriptor(node: &str, name: &str) -> types::CommandDescriptor {
+fn command_descriptor(
+    node: &str,
+    name: &str,
+    scope: types::CommandScope,
+) -> types::CommandDescriptor {
     types::CommandDescriptor {
         node: types::CommandNode {
             value: node.to_string(),
         },
         name: display(name),
+        scope,
     }
 }
 
@@ -611,9 +643,147 @@ fn extension_error_from_host_tool(error: types::HostToolError) -> types::Extensi
     }
 }
 
+/// Builder for the generic `<extension-item xmlns="urn:waddle:extension:1">`
+/// envelope that every Waddle extension publishes for its PubSub state items.
+struct ExtensionItem {
+    children: Vec<types::XmlToken>,
+}
+
+impl ExtensionItem {
+    fn new() -> Self {
+        Self {
+            children: Vec::new(),
+        }
+    }
+
+    fn with_title(&mut self, value: &str) -> &mut Self {
+        self.push_text_element("title", value);
+        self
+    }
+
+    fn with_subtitle(&mut self, value: &str) -> &mut Self {
+        self.push_text_element("subtitle", value);
+        self
+    }
+
+    fn with_field(&mut self, name: &str, label: &str, value: &str) -> &mut Self {
+        self.push_text_element_with_attrs(
+            "field",
+            vec![
+                ("name", name.to_string()),
+                ("label", label.to_string()),
+            ],
+            value,
+        );
+        self
+    }
+
+    fn with_option(&mut self, id: &str, label: &str) -> &mut Self {
+        self.push_empty_element(
+            "option",
+            vec![
+                ("id", id.to_string()),
+                ("label", label.to_string()),
+            ],
+        );
+        self
+    }
+
+    fn with_action(&mut self, launch_id_value: &str, label: &str) -> &mut Self {
+        self.push_empty_element(
+            "action",
+            vec![
+                ("launch-id", launch_id_value.to_string()),
+                ("label", label.to_string()),
+            ],
+        );
+        self
+    }
+
+    fn into_payload(self) -> types::ExtensionPayload {
+        let namespace = framework_namespace();
+        let mut tokens = Vec::with_capacity(self.children.len() + 2);
+        tokens.push(types::XmlToken::StartElement(types::XmlElement {
+            namespace: namespace.clone(),
+            local_name: EXTENSION_ITEM_ROOT.to_string(),
+            attributes: Vec::new(),
+        }));
+        tokens.extend(self.children);
+        tokens.push(types::XmlToken::EndElement);
+        types::ExtensionPayload {
+            namespace: namespace.clone(),
+            root: types::PayloadRoot {
+                namespace,
+                local_name: EXTENSION_ITEM_ROOT.to_string(),
+            },
+            tokens,
+        }
+    }
+
+    fn push_text_element(&mut self, local_name: &str, text: &str) {
+        self.push_text_element_with_attrs(local_name, Vec::new(), text);
+    }
+
+    fn push_text_element_with_attrs(
+        &mut self,
+        local_name: &str,
+        attrs: Vec<(&str, String)>,
+        text: &str,
+    ) {
+        self.children
+            .push(types::XmlToken::StartElement(framework_xml_element(
+                local_name, attrs,
+            )));
+        self.children.push(types::XmlToken::Text(text.to_string()));
+        self.children.push(types::XmlToken::EndElement);
+    }
+
+    fn push_empty_element(&mut self, local_name: &str, attrs: Vec<(&str, String)>) {
+        self.children
+            .push(types::XmlToken::StartElement(framework_xml_element(
+                local_name, attrs,
+            )));
+        self.children.push(types::XmlToken::EndElement);
+    }
+}
+
+fn framework_xml_element(local_name: &str, attrs: Vec<(&str, String)>) -> types::XmlElement {
+    types::XmlElement {
+        namespace: framework_namespace(),
+        local_name: local_name.to_string(),
+        attributes: attrs
+            .into_iter()
+            .map(|(name, value)| types::XmlAttribute {
+                namespace: None,
+                local_name: name.to_string(),
+                value,
+            })
+            .collect(),
+    }
+}
+
+fn framework_namespace() -> types::PayloadNamespace {
+    types::PayloadNamespace {
+        value: FRAMEWORK_NS.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn manifest_declares_decision_poll_commands_as_channel_scoped() {
+        let manifest = manifest();
+        assert_eq!(manifest.commands.len(), 2);
+        for command in &manifest.commands {
+            assert!(
+                matches!(command.scope, types::CommandScope::Channel),
+                "command {} should require an active channel context",
+                command.node.value,
+            );
+        }
+    }
 
     #[test]
     fn poll_options_accept_multiple_xep0004_values() {

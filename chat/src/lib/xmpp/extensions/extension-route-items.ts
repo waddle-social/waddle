@@ -1,6 +1,18 @@
-/** PubSub item payloads retained by Waddle extension routes. */
+/**
+ * Stanza/jxt registration for the generic Waddle extension PubSub item envelope.
+ *
+ * Every Waddle extension publishes its PubSub state items wrapped in a single
+ * `<extension-item xmlns="urn:waddle:extension:1">` element with a fixed
+ * vocabulary of generic UI primitives (title/subtitle/link/description/
+ * field/option/action). The host renders these uniformly regardless of which
+ * extension produced them, so this file registers exactly one parser — there
+ * are no per-extension entries.
+ */
 import type { DefinitionOptions, FieldDefinition, JSONElement } from "stanza/jxt";
 import { pubsubItemContentAliases, staticValue, text } from "stanza/jxt";
+
+const EXTENSION_FRAMEWORK_NAMESPACE = "urn:waddle:extension:1";
+const EXTENSION_ITEM_ELEMENT = "extension-item";
 
 type RawXmlElement = {
   getNamespace: () => string;
@@ -63,27 +75,20 @@ function rawChildElements(): FieldDefinition<JSONElement[]> {
   };
 }
 
-function extensionPayload(namespace: string, root: string): DefinitionOptions {
-  return {
-    aliases: pubsubItemContentAliases(),
-    element: root,
-    fields: {
-      name: staticValue(root),
-      namespace: staticValue(namespace),
-      itemType: staticValue(`${namespace}:${root}`),
-      attributes: rawAttributes(namespace),
-      children: rawChildElements(),
-      text: text(),
-    },
-    namespace,
-  };
-}
+const extensionItemDefinition: DefinitionOptions = {
+  aliases: pubsubItemContentAliases(),
+  element: EXTENSION_ITEM_ELEMENT,
+  fields: {
+    name: staticValue(EXTENSION_ITEM_ELEMENT),
+    namespace: staticValue(EXTENSION_FRAMEWORK_NAMESPACE),
+    itemType: staticValue(`${EXTENSION_FRAMEWORK_NAMESPACE}:${EXTENSION_ITEM_ELEMENT}`),
+    attributes: rawAttributes(EXTENSION_FRAMEWORK_NAMESPACE),
+    children: rawChildElements(),
+    text: text(),
+  },
+  namespace: EXTENSION_FRAMEWORK_NAMESPACE,
+};
 
-const definitions: DefinitionOptions[] = [
-  extensionPayload("urn:waddle:link-board:1", "link"),
-  extensionPayload("urn:waddle:decision-polls:1", "poll"),
-  extensionPayload("urn:waddle:decision-polls:1", "results"),
-  extensionPayload("urn:waddle:decision-polls:1", "vote"),
-];
+const definitions: DefinitionOptions[] = [extensionItemDefinition];
 
 export default definitions;

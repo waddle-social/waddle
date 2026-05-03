@@ -9,6 +9,14 @@ use xmpp_parsers::jid::{BareJid, FullJid};
 use xmpp_parsers::message::Message;
 
 pub const FRAMEWORK_NAMESPACE: &str = "urn:waddle:extension:1";
+
+/// Local name of the generic Waddle extension PubSub item envelope.
+///
+/// Every extension publishes its PubSub state items as
+/// `<extension-item xmlns="urn:waddle:extension:1">…</extension-item>` with a
+/// fixed UI-primitive vocabulary. The host renders these uniformly without
+/// per-extension knowledge.
+pub const EXTENSION_ITEM_LOCAL_NAME: &str = "extension-item";
 pub const INVOKE_COMMAND_NODE: &str = "urn:waddle:extension:1:invoke";
 
 const MAX_XML_DEPTH: usize = 16;
@@ -27,8 +35,6 @@ pub enum FrameworkTypeError {
     InvalidPayloadNamespace(String),
     #[error("official XMPP namespace {0:?} cannot carry Waddle extension semantics")]
     OfficialNamespace(String),
-    #[error("framework namespace {0:?} is reserved for Waddle control payloads")]
-    ReservedFrameworkNamespace(String),
     #[error("command node {0:?} must be under urn:waddle:extension:1")]
     InvalidCommandNode(String),
     #[error("sha256 digest {0:?} must be exactly 64 hexadecimal characters")]
@@ -238,9 +244,6 @@ impl PayloadNamespace {
         if is_official_namespace(&value) {
             return Err(FrameworkTypeError::OfficialNamespace(value));
         }
-        if value == FRAMEWORK_NAMESPACE {
-            return Err(FrameworkTypeError::ReservedFrameworkNamespace(value));
-        }
         if value.starts_with("urn:") || value.starts_with("https://") {
             Ok(Self(value))
         } else {
@@ -250,6 +253,10 @@ impl PayloadNamespace {
 
     pub fn framework() -> Self {
         Self(FRAMEWORK_NAMESPACE.to_string())
+    }
+
+    pub fn is_framework(&self) -> bool {
+        self.0 == FRAMEWORK_NAMESPACE
     }
 
     pub fn as_str(&self) -> &str {
@@ -532,6 +539,23 @@ fn pubsub_node_pattern_matches(pattern: &str, candidate: &str) -> bool {
 pub struct CommandDescriptor {
     pub node: CommandNode,
     pub name: DisplayText,
+    pub scope: CommandScope,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "kebab-case")]
+pub enum CommandScope {
+    Global,
+    Channel,
+}
+
+impl CommandScope {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Global => "global",
+            Self::Channel => "channel",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -1122,6 +1146,16 @@ impl ExtensionPayload {
         self.root.to_minidom()
     }
 
+    /// Returns true when this payload is the framework-defined
+    /// `<extension-item>` PubSub envelope. The host accepts these from any
+    /// extension that has been granted `PubSubPublish`, without requiring the
+    /// manifest to declare the framework namespace.
+    pub fn is_framework_item(&self) -> bool {
+        self.namespace.is_framework()
+            && self.root.namespace.is_framework()
+            && self.root.local_name == EXTENSION_ITEM_LOCAL_NAME
+    }
+
     fn serialized_len(&self) -> usize {
         self.root.serialized_len()
     }
@@ -1386,7 +1420,8 @@ impl ExtensionEffect {
                     && grants.contains(&ExtensionCapability::PubSubPublish)
                     && manifest.declares_pubsub_node(&publish.node)
                     && publish.payload.namespace == publish.payload.root.namespace
-                    && manifest.declares_payload(PayloadSurface::PubSubItem, &publish.payload)
+                    && (publish.payload.is_framework_item()
+                        || manifest.declares_payload(PayloadSurface::PubSubItem, &publish.payload))
             }
             Self::ReferenceArtifact(_) => {
                 manifest.declares_capability(ExtensionCapability::ArtifactReference)
@@ -1474,5 +1509,83 @@ mod tests {
 
         let grants = HashSet::from([ExtensionCapability::Commands]);
         assert!(effect.validate_for_manifest_and_grants(&manifest, &grants));
+    }
+
+    #[test]
+    fn payload_namespace_accepts_framework_namespace() {
+        let namespace = PayloadNamespace::new(FRAMEWORK_NAMESPACE).expect("framework namespace");
+        assert!(namespace.is_framework());
+        assert_eq!(namespace.as_str(), FRAMEWORK_NAMESPACE);
+    }
+
+    #[test]
+    fn pubsub_publish_accepts_framework_extension_item_without_manifest_payload_rule() {
+        let manifest = ExtensionManifest {
+            id: PluginId::new("test-extension").expect("plugin id"),
+            name: DisplayText::new("Test Extension").expect("display text"),
+            version: PluginVersion::new("0.1.0").expect("version"),
+            payloads: Vec::new(),
+            capabilities: vec![ExtensionCapability::PubSubPublish],
+            commands: Vec::new(),
+            routes: Vec::new(),
+            pubsub_nodes: vec![
+                PubSubNode::new("urn:waddle:test-extension:1:items").expect("node"),
+            ],
+            artifact: None,
+        };
+        let framework_namespace = PayloadNamespace::framework();
+        let payload = ExtensionPayload::new(
+            framework_namespace.clone(),
+            XmlElement {
+                namespace: framework_namespace,
+                local_name: EXTENSION_ITEM_LOCAL_NAME.to_string(),
+                attributes: Vec::new(),
+                children: Vec::new(),
+            },
+        )
+        .expect("framework extension-item payload");
+        let effect = ExtensionEffect::PublishPubSub(PubSubPublish {
+            node: PubSubNode::new("urn:waddle:test-extension:1:items").expect("node"),
+            item_id: None,
+            payload,
+        });
+        let grants = HashSet::from([ExtensionCapability::PubSubPublish]);
+        assert!(effect.validate_for_manifest_and_grants(&manifest, &grants));
+    }
+
+    #[test]
+    fn pubsub_publish_in_extension_namespace_still_requires_manifest_payload_rule() {
+        let manifest = ExtensionManifest {
+            id: PluginId::new("test-extension").expect("plugin id"),
+            name: DisplayText::new("Test Extension").expect("display text"),
+            version: PluginVersion::new("0.1.0").expect("version"),
+            payloads: Vec::new(),
+            capabilities: vec![ExtensionCapability::PubSubPublish],
+            commands: Vec::new(),
+            routes: Vec::new(),
+            pubsub_nodes: vec![
+                PubSubNode::new("urn:waddle:test-extension:1:items").expect("node"),
+            ],
+            artifact: None,
+        };
+        let extension_namespace =
+            PayloadNamespace::new("urn:waddle:test-extension:1").expect("extension namespace");
+        let payload = ExtensionPayload::new(
+            extension_namespace.clone(),
+            XmlElement {
+                namespace: extension_namespace,
+                local_name: "custom-item".to_string(),
+                attributes: Vec::new(),
+                children: Vec::new(),
+            },
+        )
+        .expect("custom payload");
+        let effect = ExtensionEffect::PublishPubSub(PubSubPublish {
+            node: PubSubNode::new("urn:waddle:test-extension:1:items").expect("node"),
+            item_id: None,
+            payload,
+        });
+        let grants = HashSet::from([ExtensionCapability::PubSubPublish]);
+        assert!(!effect.validate_for_manifest_and_grants(&manifest, &grants));
     }
 }

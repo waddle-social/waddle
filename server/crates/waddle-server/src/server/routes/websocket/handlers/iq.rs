@@ -94,6 +94,7 @@ use crate::server::xmpp_state::{get_xmpp_channel, list_xmpp_channels, XmppChanne
 use crate::vcard::VCardStore;
 
 const EXTENSION_ROUTE_FORM_TYPE: &str = "urn:waddle:extension:1:routes";
+const EXTENSION_COMMAND_FORM_TYPE: &str = "urn:waddle:extension:1:command";
 
 fn is_extension_command_node(node: &str) -> bool {
     node == waddle_extensions::INVOKE_COMMAND_NODE || node.starts_with("urn:waddle:extension:1:")
@@ -168,6 +169,30 @@ fn extension_route_metadata_form(route: &waddle_extensions::ExtensionRouteDescri
         .add_field(Field::text_single(
             "waddle#payload_ns",
             route.payload_namespace.as_str(),
+        ))
+        .into_element()
+}
+
+fn extension_command_metadata_form(
+    plugin: &waddle_extensions::PluginId,
+    descriptor: &waddle_extensions::CommandDescriptor,
+) -> Element {
+    use waddle_xmpp::xep::xep0004::{DataForm, Field, FormType, IntoElement};
+
+    DataForm::new(FormType::Result)
+        .add_field(Field::form_type(EXTENSION_COMMAND_FORM_TYPE))
+        .add_field(Field::text_single("waddle#plugin_id", plugin.as_str()))
+        .add_field(Field::text_single(
+            "waddle#command_node",
+            descriptor.node.as_str(),
+        ))
+        .add_field(Field::text_single(
+            "waddle#command_label",
+            descriptor.name.as_str(),
+        ))
+        .add_field(Field::text_single(
+            "waddle#command_scope",
+            descriptor.scope.as_str(),
         ))
         .into_element()
 }
@@ -630,15 +655,38 @@ pub async fn handle_iq_with_conn_state(
 
             if let Some(node) = query.node.as_deref() {
                 let commands = state.deps.protocol.command_registry.list_commands().await;
-                if let Some(name) = command_name_by_boundary(&commands, node, true) {
-                    let identities = vec![Identity::automation(Some(name))];
+                if command_name_by_boundary(&commands, node, true).is_some() {
+                    let Some((plugin, descriptor)) = state
+                        .deps
+                        .protocol
+                        .extension_manager
+                        .command_descriptors()
+                        .into_iter()
+                        .find(|(_, descriptor)| descriptor.node.as_str() == node)
+                    else {
+                        return vec![build_iq_error_xml_with_addresses(
+                            &id,
+                            response_from,
+                            response_to,
+                            "cancel",
+                            "item-not-found",
+                        )];
+                    };
+                    let identities = vec![Identity::automation(Some(descriptor.name.as_str()))];
                     let features = vec![
                         Feature::disco_info(),
                         Feature::commands(),
                         Feature::new(DATA_FORMS_NS),
+                        Feature::new(EXTENSION_COMMAND_FORM_TYPE),
                     ];
-                    let response =
-                        build_disco_info_response(request_iq, &identities, &features, Some(node));
+                    let form = extension_command_metadata_form(&plugin, &descriptor);
+                    let response = build_disco_info_response_with_extensions(
+                        request_iq,
+                        &identities,
+                        &features,
+                        Some(node),
+                        &[form],
+                    );
                     return vec![iq_to_xml(response)];
                 }
 

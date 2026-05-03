@@ -192,7 +192,6 @@ impl ExtensionManager {
 
             let manifest = actor.manifest();
             validate_manifest_against_module(module, &manifest)?;
-            validate_ai_chatbot_runtime_config(module, &manifest, &config_json)?;
             let actor = actor
                 .with_grants(runtime_grants_for_module(module, &manifest))
                 .with_allowed_http_origins(module.allowed_http_origins.clone());
@@ -281,6 +280,25 @@ impl ExtensionManager {
                     .into_iter()
                     .filter(|command| command.node != CommandNode::invoke())
                     .map(|command| (command.node.into_string(), command.name.into_string()))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    pub fn command_descriptors(
+        &self,
+    ) -> Vec<(crate::types::PluginId, crate::types::CommandDescriptor)> {
+        self.actors
+            .iter()
+            .filter(|actor| actor.has_grant(ExtensionCapability::Commands))
+            .flat_map(|actor| {
+                let manifest = actor.manifest();
+                let plugin = manifest.id.clone();
+                manifest
+                    .commands
+                    .into_iter()
+                    .filter(|command| command.node != CommandNode::invoke())
+                    .map(move |command| (plugin.clone(), command))
                     .collect::<Vec<_>>()
             })
             .collect()
@@ -383,7 +401,9 @@ impl ExtensionManager {
             fields,
         });
         for actor in &self.actors {
-            if actor.manifest().id.as_str() == plugin_name {
+            if actor.has_grant(ExtensionCapability::Launch)
+                && actor.manifest().id.as_str() == plugin_name
+            {
                 return self.sign_effects(actor.handle_event(event).await);
             }
         }
@@ -991,17 +1011,16 @@ fn validate_manifest_against_module(
             );
         }
     }
-    if manifest.id.as_str() == "ai-chatbot" {
-        for capability in &manifest.capabilities {
-            if !module.capability_grants.contains(capability) {
-                bail!(
-                    "extension {} requires explicit operator grant for declared capability {}",
-                    module.name,
-                    capability.as_str()
-                );
-            }
+    for capability in &manifest.capabilities {
+        if !module.capability_grants.contains(capability) {
+            bail!(
+                "extension {} requires explicit operator grant for declared capability {}",
+                module.name,
+                capability.as_str()
+            );
         }
     }
+    validate_outbound_http_origins(module, manifest)?;
     Ok(())
 }
 
@@ -1022,71 +1041,42 @@ fn runtime_grants_for_module(
         .collect()
 }
 
-fn validate_ai_chatbot_runtime_config(
+fn validate_outbound_http_origins(
     module: &ExtensionModuleConfig,
     manifest: &ExtensionManifest,
-    config_json: &str,
 ) -> Result<()> {
-    if manifest.id.as_str() != "ai-chatbot" {
+    let declares_outbound_http =
+        manifest.declares_capability(ExtensionCapability::OutboundHttpRequest);
+    if !declares_outbound_http {
+        if !module.allowed_http_origins.is_empty() {
+            bail!(
+                "extension {} configured allowedHttpOrigins without declaring the outbound-http-request capability",
+                module.name
+            );
+        }
         return Ok(());
     }
-    let config: Value = serde_json::from_str(config_json).map_err(|error| {
-        anyhow::anyhow!(
-            "extension {} provider config is invalid JSON: {error}",
-            module.name
-        )
-    })?;
-    let endpoint = required_ai_config_string(&module.name, &config, "endpoint")?;
-    required_ai_config_string(&module.name, &config, "model")?;
-    required_ai_config_string(&module.name, &config, "api_key")?;
-    let endpoint_url = reqwest::Url::parse(endpoint).map_err(|error| {
-        anyhow::anyhow!(
-            "extension {} provider endpoint must be an absolute HTTPS URL: {error}",
-            module.name
-        )
-    })?;
-    if endpoint_url.scheme() != "https" {
-        bail!("extension {} provider endpoint must use HTTPS", module.name);
-    }
-    let endpoint_origin = runtime_http_origin(&endpoint_url).ok_or_else(|| {
-        anyhow::anyhow!(
-            "extension {} provider endpoint must include a host",
-            module.name
-        )
-    })?;
-    if !module
-        .allowed_http_origins
-        .iter()
-        .any(|origin| origin == &endpoint_origin)
-    {
-        bail!(
-            "extension {} allowedHttpOrigins must include provider origin {}",
-            module.name,
-            endpoint_origin
-        );
+    for origin in &module.allowed_http_origins {
+        let url = reqwest::Url::parse(origin).map_err(|error| {
+            anyhow::anyhow!(
+                "extension {} allowedHttpOrigins entry {origin} is not a valid URL: {error}",
+                module.name
+            )
+        })?;
+        if url.scheme() != "https" {
+            bail!(
+                "extension {} allowedHttpOrigins entry {origin} must use HTTPS",
+                module.name
+            );
+        }
+        if url.host_str().is_none() {
+            bail!(
+                "extension {} allowedHttpOrigins entry {origin} must include a host",
+                module.name
+            );
+        }
     }
     Ok(())
-}
-
-fn required_ai_config_string<'a>(
-    module_name: &str,
-    config: &'a Value,
-    key: &str,
-) -> Result<&'a str> {
-    config
-        .get(key)
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| anyhow::anyhow!("extension {module_name} provider config must set {key}"))
-}
-
-fn runtime_http_origin(url: &reqwest::Url) -> Option<String> {
-    let host = url.host_str()?;
-    let port = url
-        .port()
-        .map(|port| format!(":{port}"))
-        .unwrap_or_default();
-    Some(format!("{}://{}{}", url.scheme(), host, port))
 }
 
 fn room_stanza_id_from_payloads(msg: &Message, room: &str) -> Option<StanzaId> {

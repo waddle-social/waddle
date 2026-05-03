@@ -20,8 +20,8 @@ use crate::host_tools::{
 };
 use crate::types::{
     ActionBlock, ActionId, ArtifactReference, BodyRange, CommandAction, CommandDescriptor,
-    CommandInvocation, CommandNode, CommandSessionId, DataForm, DataFormField, DataFormType,
-    DataFormValue, DisplayText, EnrichmentId, ExtensionCapability, ExtensionEffect,
+    CommandInvocation, CommandNode, CommandScope, CommandSessionId, DataForm, DataFormField,
+    DataFormType, DataFormValue, DisplayText, EnrichmentId, ExtensionCapability, ExtensionEffect,
     ExtensionEnvelope, ExtensionEvent, ExtensionManifest, ExtensionPayload, ExtensionResponse,
     ExtensionRouteDescriptor, ExtensionRouteScope, ExtensionRouteSurface, FormFieldOption,
     FormFieldType, FormFieldValue, FullJidValue, ImageBlock, LaunchContext, LaunchDescriptor,
@@ -649,7 +649,17 @@ impl TryFrom<wit_types::CommandDescriptor> for CommandDescriptor {
         Ok(Self {
             node: wit_newtype_to_domain!(value.node, CommandNode)?,
             name: wit_newtype_to_domain!(value.name, DisplayText)?,
+            scope: value.scope.into(),
         })
+    }
+}
+
+impl From<wit_types::CommandScope> for CommandScope {
+    fn from(value: wit_types::CommandScope) -> Self {
+        match value {
+            wit_types::CommandScope::Global => CommandScope::Global,
+            wit_types::CommandScope::Channel => CommandScope::Channel,
+        }
     }
 }
 
