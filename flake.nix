@@ -62,7 +62,6 @@
               ./server/Cargo.lock
               ./server/crates
               ./server/extensions
-              ./server/test-fixtures
               ./server/wit
             ];
           };
@@ -197,7 +196,6 @@
               ./server/Cargo.lock
               ./server/crates
               ./server/extensions
-              ./server/test-fixtures
               ./server/wit
             ];
           };
