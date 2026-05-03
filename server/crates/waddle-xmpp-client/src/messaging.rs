@@ -1061,31 +1061,65 @@ pub fn build_outbound_message(
     if !options.markup_spans.is_empty() {
         let mut markups = Element::builder("markups", NS_MARKUP).build();
         for span in &options.markup_spans {
-            let tag = match span.span_type.as_str() {
-                "bold" => Some("strong"),
-                "italic" => Some("emphasis"),
-                "strikethrough" => Some("deleted"),
-                "code" => Some("code"),
-                "code_block" => Some("code"),
-                "blockquote" => Some("blockquote"),
-                "link" => Some("a"),
-                _ => None,
-            };
-            if let Some(tag_name) = tag {
-                let mut span_el = Element::builder("span", NS_MARKUP)
+            // XEP-0394: inline spans use <span start="..." end="..."><child/></span>;
+            // block-level elements (bcode, bquote) are siblings of span, not wrapped in it;
+            // links use <span start="..." end="..." uri="..."/> with no child element.
+            let el = match span.span_type.as_str() {
+                "bold" => {
+                    let mut el = Element::builder("span", NS_MARKUP)
+                        .attr("start", span.start.to_string())
+                        .attr("end", span.end.to_string())
+                        .build();
+                    el.append_child(Element::builder("strong", NS_MARKUP).build());
+                    el
+                }
+                "italic" => {
+                    let mut el = Element::builder("span", NS_MARKUP)
+                        .attr("start", span.start.to_string())
+                        .attr("end", span.end.to_string())
+                        .build();
+                    el.append_child(Element::builder("emphasis", NS_MARKUP).build());
+                    el
+                }
+                "strikethrough" => {
+                    let mut el = Element::builder("span", NS_MARKUP)
+                        .attr("start", span.start.to_string())
+                        .attr("end", span.end.to_string())
+                        .build();
+                    el.append_child(Element::builder("deleted", NS_MARKUP).build());
+                    el
+                }
+                "code" => {
+                    let mut el = Element::builder("span", NS_MARKUP)
+                        .attr("start", span.start.to_string())
+                        .attr("end", span.end.to_string())
+                        .build();
+                    el.append_child(Element::builder("code", NS_MARKUP).build());
+                    el
+                }
+                // Block-level: <bcode start="..." end="..."/> — sibling of <span>, never wrapped
+                "code_block" => Element::builder("bcode", NS_MARKUP)
                     .attr("start", span.start.to_string())
                     .attr("end", span.end.to_string())
-                    .build();
-                if tag_name == "a" {
+                    .build(),
+                // Block-level: <bquote start="..." end="..."/> — sibling of <span>, never wrapped
+                "blockquote" => Element::builder("bquote", NS_MARKUP)
+                    .attr("start", span.start.to_string())
+                    .attr("end", span.end.to_string())
+                    .build(),
+                // Link: <span start="..." end="..." uri="..."/> — attribute on span, no child
+                "link" => {
+                    let mut b = Element::builder("span", NS_MARKUP)
+                        .attr("start", span.start.to_string())
+                        .attr("end", span.end.to_string());
                     if let Some(uri) = &span.uri {
-                        let link_el = Element::builder("link", NS_MARKUP).attr("uri", uri).build();
-                        span_el.append_child(link_el);
+                        b = b.attr("uri", uri);
                     }
-                } else {
-                    span_el.append_child(Element::builder(tag_name, NS_MARKUP).build());
+                    b.build()
                 }
-                markups.append_child(span_el);
-            }
+                _ => continue,
+            };
+            markups.append_child(el);
         }
         builder = builder.append(markups);
     }
@@ -1505,6 +1539,7 @@ mod tests {
                     end: 5,
                     uri: None,
                 },
+                // XEP-0394: links use <span uri="..."/> attribute, no child element
                 MarkupSpanData {
                     span_type: "link".to_string(),
                     start: 6,
@@ -1533,13 +1568,11 @@ mod tests {
             .filter(|child| child.name() == "span")
             .collect::<Vec<_>>();
         assert_eq!(spans.len(), 2);
+        // Bold: <span start="0" end="5"><strong/></span>
         assert!(spans[0].get_child("strong", NS_MARKUP).is_some());
-        assert_eq!(
-            spans[1]
-                .get_child("link", NS_MARKUP)
-                .and_then(|link| link.attr("uri")),
-            Some("xmpp:bob@example.com")
-        );
+        // Link: <span start="6" end="10" uri="xmpp:bob@example.com"/> — uri as attribute, no child
+        assert_eq!(spans[1].attr("uri"), Some("xmpp:bob@example.com"));
+        assert!(spans[1].get_child("link", NS_MARKUP).is_none());
         let reference = stanza
             .get_child("reference", NS_REFERENCES)
             .expect("reference child");
@@ -1547,6 +1580,59 @@ mod tests {
         assert_eq!(reference.attr("begin"), Some("6"));
         assert_eq!(reference.attr("end"), Some("10"));
         assert_eq!(reference.attr("uri"), Some("xmpp:bob@example.com"));
+    }
+
+    #[test]
+    fn build_outbound_message_block_markup_uses_xep0394_elements() {
+        // XEP-0394: code blocks use <bcode/> and blockquotes use <bquote/> as
+        // siblings of <span>, not wrapped inside a <span> element.
+        let options = SendMessageOptions {
+            markup_spans: vec![
+                MarkupSpanData {
+                    span_type: "code_block".to_string(),
+                    start: 0,
+                    end: 20,
+                    uri: None,
+                },
+                MarkupSpanData {
+                    span_type: "blockquote".to_string(),
+                    start: 21,
+                    end: 45,
+                    uri: None,
+                },
+            ],
+            ..Default::default()
+        };
+
+        let (_, stanza) = build_outbound_message(
+            "room@muc.example",
+            "groupchat",
+            "```code``` > quote",
+            &options,
+        )
+        .unwrap();
+
+        let markups = stanza
+            .get_child("markups", NS_MARKUP)
+            .expect("markups child");
+        // Block elements must NOT be wrapped in <span>
+        assert_eq!(
+            markups.children().filter(|c| c.name() == "span").count(),
+            0,
+            "code_block and blockquote must not be wrapped in <span>"
+        );
+        // <bcode start="0" end="20"/>
+        let bcode = markups
+            .get_child("bcode", NS_MARKUP)
+            .expect("bcode element");
+        assert_eq!(bcode.attr("start"), Some("0"));
+        assert_eq!(bcode.attr("end"), Some("20"));
+        // <bquote start="21" end="45"/>
+        let bquote = markups
+            .get_child("bquote", NS_MARKUP)
+            .expect("bquote element");
+        assert_eq!(bquote.attr("start"), Some("21"));
+        assert_eq!(bquote.attr("end"), Some("45"));
     }
 
     #[test]
