@@ -21,6 +21,7 @@ const NS_STANZA_ID: &str = "urn:xmpp:sid:0";
 const NS_ORIGIN_ID: &str = "urn:xmpp:origin-id:0";
 pub const NS_REACTIONS: &str = "urn:xmpp:reactions:0";
 const NS_MARKUP: &str = "urn:xmpp:markup:0";
+const NS_WADDLE_MARKUP: &str = "urn:waddle:markup:0";
 pub const NS_CHAT_STATES: &str = "http://jabber.org/protocol/chatstates";
 pub const NS_CHAT_MARKERS: &str = "urn:xmpp:chat-markers:0";
 const NS_REFERENCES: &str = "urn:xmpp:reference:0";
@@ -376,7 +377,7 @@ fn parse_message(el: &Element) -> InboundMessage {
     let reply_fallback = xep_reply::parse_fallback(el).map(|r| (r.start, r.end));
 
     let markup_spans = el
-        .get_child("markups", NS_MARKUP)
+        .get_child("markup", NS_MARKUP)
         .map(parse_markup_spans)
         .unwrap_or_default();
 
@@ -593,11 +594,11 @@ pub fn parse_correction_payload(element: &Element) -> Option<CorrectionPayload> 
 }
 
 fn parse_markup_spans(markups_el: &Element) -> Vec<MarkupSpan> {
-    // XEP-0394: direct children of <markups> are:
-    //   <span start="..." end="..."><emphasis/|<strong/>|<code/>|<deleted/></span>  — inline
-    //   <span start="..." end="..." uri="..."/>                                     — link
-    //   <bcode start="..." end="..."/>                                              — code block
-    //   <bquote start="..." end="..."/>                                             — blockquote
+    // XEP-0394: direct children of <markup> are:
+    //   <span start="..." end="..."><emphasis/|<strong/>|<code/>|<deleted/></span>  — inline (NS_MARKUP)
+    //   <span start="..." end="..." uri="..."/>                                     — link (NS_WADDLE_MARKUP)
+    //   <bcode start="..." end="..."/>                                              — code block (NS_MARKUP)
+    //   <bquote start="..." end="..."/>                                             — blockquote (NS_MARKUP)
     markups_el
         .children()
         .filter_map(|child| match child.name() {
@@ -1093,7 +1094,7 @@ pub fn build_outbound_message(
         builder = builder.append(xep_thread::build_thread_element(thread));
     }
     if !options.markup_spans.is_empty() {
-        let mut markups = Element::builder("markups", NS_MARKUP).build();
+        let mut markups = Element::builder("markup", NS_MARKUP).build();
         for span in &options.markup_spans {
             // XEP-0394: inline spans use <span start="..." end="..."><child/></span>;
             // block-level elements (bcode, bquote) are siblings of span, not wrapped in it;
@@ -1141,9 +1142,11 @@ pub fn build_outbound_message(
                     .attr("start", span.start.to_string())
                     .attr("end", span.end.to_string())
                     .build(),
-                // Link: <span start="..." end="..." uri="..."/> — attribute on span, no child
+                // Link: <span start="..." end="..." uri="..."/> in urn:waddle:markup:0 —
+                // XEP-0394 does not define a link span; use custom namespace to avoid
+                // polluting the official markup namespace.
                 "link" => {
-                    let mut b = Element::builder("span", NS_MARKUP)
+                    let mut b = Element::builder("span", NS_WADDLE_MARKUP)
                         .attr("start", span.start.to_string())
                         .attr("end", span.end.to_string());
                     if let Some(uri) = &span.uri {
@@ -1595,7 +1598,7 @@ mod tests {
                 .unwrap();
 
         let markups = stanza
-            .get_child("markups", NS_MARKUP)
+            .get_child("markup", NS_MARKUP)
             .expect("markups child");
         let spans = markups
             .children()
@@ -1604,7 +1607,8 @@ mod tests {
         assert_eq!(spans.len(), 2);
         // Bold: <span start="0" end="5"><strong/></span>
         assert!(spans[0].get_child("strong", NS_MARKUP).is_some());
-        // Link: <span start="6" end="10" uri="xmpp:bob@example.com"/> — uri as attribute, no child
+        // Link: <span start="6" end="10" uri="xmpp:bob@example.com"/> in urn:waddle:markup:0
+        assert_eq!(spans[1].ns(), NS_WADDLE_MARKUP);
         assert_eq!(spans[1].attr("uri"), Some("xmpp:bob@example.com"));
         assert!(spans[1].get_child("link", NS_MARKUP).is_none());
         let reference = stanza
@@ -1647,7 +1651,7 @@ mod tests {
         .unwrap();
 
         let markups = stanza
-            .get_child("markups", NS_MARKUP)
+            .get_child("markup", NS_MARKUP)
             .expect("markups child");
         // Block elements must NOT be wrapped in <span>
         assert_eq!(
@@ -1725,7 +1729,7 @@ mod tests {
             build_outbound_message("alice@example.com", "chat", "hello world", &options).unwrap();
 
         // Parse back using parse_markup_spans
-        let markups_el = stanza.get_child("markups", NS_MARKUP).expect("markups");
+        let markups_el = stanza.get_child("markup", NS_MARKUP).expect("markups");
         let parsed = parse_markup_spans(markups_el);
 
         assert_eq!(parsed.len(), 7);
@@ -1797,7 +1801,7 @@ mod tests {
         .expect("correction stanza");
 
         assert!(stanza.get_child("replace", NS_MESSAGE_CORRECT).is_some());
-        assert!(stanza.get_child("markups", NS_MARKUP).is_some());
+        assert!(stanza.get_child("markup", NS_MARKUP).is_some());
         assert!(stanza.get_child("reference", NS_REFERENCES).is_some());
     }
 

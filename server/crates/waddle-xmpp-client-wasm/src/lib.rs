@@ -1416,12 +1416,14 @@ const NS_PUBSUB: &str = "http://jabber.org/protocol/pubsub";
 
 /// Build an XEP-0060 pubsub `<items>` IQ directed at `to` for `node`.
 fn build_pubsub_items_iq(to: &str, node: &str) -> Element {
+    let id = format!("pubsub-items-{}", uuid::Uuid::new_v4());
     let items = Element::builder("items", NS_PUBSUB)
         .attr("node", node)
         .build();
     let pubsub = Element::builder("pubsub", NS_PUBSUB).append(items).build();
     Element::builder("iq", NS_CLIENT)
         .attr("type", "get")
+        .attr("id", id)
         .attr("to", to)
         .append(pubsub)
         .build()
