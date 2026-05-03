@@ -35,8 +35,8 @@
 use crate::protocol::message_context::MessageContext;
 use crate::protocol::session_state::Locality;
 use crate::protocol::traits::{HandlerOutcome, MessageHandler};
-use crate::xep::xep0359::{add_stanza_id, is_stanza_id_element};
-use jid::BareJid;
+use jid::{BareJid, Jid};
+use waddle_xmpp_core::xep0359::{add_stanza_id, is_stanza_id_element};
 use xmpp_parsers::message::{Message, MessageType};
 
 /// XEP-0359 strip-and-stamp handler for the message pipeline.
@@ -63,7 +63,7 @@ impl MessageHandler for CanonicalizeHandler {
         }
 
         let local_archive = ctx.full_jid.to_bare();
-        let by = local_archive.to_string();
+        let by_jid = Jid::from(local_archive.clone());
 
         // Strip any pre-existing `<stanza-id>` siblings whose `by=`
         // matches this archive (XEP-0359 §5). Compare via typed
@@ -85,7 +85,7 @@ impl MessageHandler for CanonicalizeHandler {
 
         // Stamp a fresh stanza-id from the injected entropy source.
         let id = ctx.id_gen.fresh_stanza_id();
-        add_stanza_id(message, &id, &by);
+        add_stanza_id(message, &id, &by_jid);
 
         HandlerOutcome::Continue(Vec::new())
     }
@@ -97,11 +97,15 @@ mod tests {
     use crate::protocol::id_gen::FixedIdGenerator;
     use crate::protocol::message_context::MessageContextEnv;
     use crate::protocol::session_state::{Blocklist, CarbonsState, MucOccupancy};
-    use crate::xep::xep0359::{
+    use jid::FullJid;
+    use waddle_xmpp_core::xep0359::{
         build_origin_id_element, build_stanza_id_element, extract_origin_id_str, extract_stanza_ids,
     };
-    use jid::FullJid;
     use xmpp_parsers::message::{Message, MessageType};
+
+    fn jid(s: &str) -> Jid {
+        s.parse().expect("valid jid")
+    }
 
     fn full(s: &str) -> FullJid {
         s.parse().expect("valid full jid")
@@ -141,17 +145,17 @@ mod tests {
         let local = full("alice@example.com/web");
         let mut msg = chat_msg("alice@example.com/web", "bob@example.com");
         // Client-supplied claim with the same `by=` as the local archive.
-        msg.payloads
-            .push(build_stanza_id_element("spoofed", "alice@example.com"));
+        msg.payloads.push(build_stanza_id_element(
+            "spoofed",
+            &jid("alice@example.com"),
+        ));
 
         run_with_id(&local, &mut msg, "fresh-id-1");
 
         let stamps = extract_stanza_ids(&msg);
         // Expect exactly one stanza-id with by=alice@example.com and id=fresh-id-1.
-        let alice_stamps: Vec<_> = stamps
-            .iter()
-            .filter(|s| s.by == "alice@example.com")
-            .collect();
+        let alice = jid("alice@example.com");
+        let alice_stamps: Vec<_> = stamps.iter().filter(|s| s.by == alice).collect();
         assert_eq!(alice_stamps.len(), 1);
         assert_eq!(alice_stamps[0].id, "fresh-id-1");
     }
@@ -162,19 +166,19 @@ mod tests {
         // must be preserved; Bob's fresh stamp (by=bob@…) is added.
         let local = full("bob@example.com/desk");
         let mut msg = chat_msg("alice@example.com/web", "bob@example.com");
-        msg.payloads
-            .push(build_stanza_id_element("alice-A1", "alice@example.com"));
+        msg.payloads.push(build_stanza_id_element(
+            "alice-A1",
+            &jid("alice@example.com"),
+        ));
 
         run_with_id(&local, &mut msg, "bob-B1");
 
         let stamps = extract_stanza_ids(&msg);
         assert_eq!(stamps.len(), 2);
-        assert!(stamps
-            .iter()
-            .any(|s| s.by == "alice@example.com" && s.id == "alice-A1"));
-        assert!(stamps
-            .iter()
-            .any(|s| s.by == "bob@example.com" && s.id == "bob-B1"));
+        let alice = jid("alice@example.com");
+        let bob = jid("bob@example.com");
+        assert!(stamps.iter().any(|s| s.by == alice && s.id == "alice-A1"));
+        assert!(stamps.iter().any(|s| s.by == bob && s.id == "bob-B1"));
     }
 
     #[test]
@@ -196,24 +200,27 @@ mod tests {
     fn xep_0359_preserves_multiple_cross_archive_stamps() {
         let local = full("bob@example.com/desk");
         let mut msg = chat_msg("alice@example.com/web", "bob@example.com");
-        msg.payloads
-            .push(build_stanza_id_element("alice-A1", "alice@example.com"));
-        msg.payloads
-            .push(build_stanza_id_element("charlie-C1", "charlie@example.com"));
+        msg.payloads.push(build_stanza_id_element(
+            "alice-A1",
+            &jid("alice@example.com"),
+        ));
+        msg.payloads.push(build_stanza_id_element(
+            "charlie-C1",
+            &jid("charlie@example.com"),
+        ));
 
         run_with_id(&local, &mut msg, "bob-B1");
 
         let stamps = extract_stanza_ids(&msg);
         assert_eq!(stamps.len(), 3);
+        let alice = jid("alice@example.com");
+        let charlie = jid("charlie@example.com");
+        let bob = jid("bob@example.com");
+        assert!(stamps.iter().any(|s| s.by == alice && s.id == "alice-A1"));
         assert!(stamps
             .iter()
-            .any(|s| s.by == "alice@example.com" && s.id == "alice-A1"));
-        assert!(stamps
-            .iter()
-            .any(|s| s.by == "charlie@example.com" && s.id == "charlie-C1"));
-        assert!(stamps
-            .iter()
-            .any(|s| s.by == "bob@example.com" && s.id == "bob-B1"));
+            .any(|s| s.by == charlie && s.id == "charlie-C1"));
+        assert!(stamps.iter().any(|s| s.by == bob && s.id == "bob-B1"));
     }
 
     #[test]
@@ -225,8 +232,10 @@ mod tests {
         // strip catches it.
         let local = full("alice@example.com/web");
         let mut msg = chat_msg("alice@example.com/web", "bob@example.com");
-        msg.payloads
-            .push(build_stanza_id_element("spoofed", "alice@EXAMPLE.com"));
+        msg.payloads.push(build_stanza_id_element(
+            "spoofed",
+            &jid("alice@EXAMPLE.com"),
+        ));
 
         run_with_id(&local, &mut msg, "fresh-id");
 
@@ -244,15 +253,13 @@ mod tests {
         let local = full("bob@example.com/desk");
         let mut msg = chat_msg("alice@example.com/web", "bob@example.com");
         msg.payloads
-            .push(build_stanza_id_element("spoofed", "bob@example.com"));
+            .push(build_stanza_id_element("spoofed", &jid("bob@example.com")));
 
         run_with_id(&local, &mut msg, "real-bob-id");
 
         let stamps = extract_stanza_ids(&msg);
-        let bob_stamps: Vec<_> = stamps
-            .iter()
-            .filter(|s| s.by == "bob@example.com")
-            .collect();
+        let bob = jid("bob@example.com");
+        let bob_stamps: Vec<_> = stamps.iter().filter(|s| s.by == bob).collect();
         assert_eq!(bob_stamps.len(), 1);
         assert_eq!(bob_stamps[0].id, "real-bob-id");
     }

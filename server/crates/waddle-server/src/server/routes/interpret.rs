@@ -938,7 +938,7 @@ async fn interpret_with_depth(
                 // typed message, so the projection serializer captures
                 // it for replay.
                 let archived = build_direct_archived_message(
-                    &archive_jid.to_string(),
+                    &jid::Jid::from(archive_jid.clone()),
                     &from.to_string(),
                     &to.to_string(),
                     &message,
@@ -1439,7 +1439,7 @@ async fn dispatch_to_room(
     // Strip any client-claimed `<stanza-id by='room'/>` so the chain's
     // canonicalize handler stamps the canonical value. Mirrors the
     // legacy `remove_stanza_ids_by` call.
-    remove_stanza_ids_by(&mut prototype, &room_jid.to_string());
+    remove_stanza_ids_by(&mut prototype, &jid::Jid::from(room_jid.clone()));
     // 2. Look up the room actor + snapshot in one round-trip each.
     let room_actor = match room_registry
         .ask(GetRoom {
@@ -3442,7 +3442,7 @@ mod tests {
         use waddle_xmpp::inbox::storage::InMemoryInboxStorage;
         use waddle_xmpp::mam::storage::InMemoryMamStorage;
         use waddle_xmpp::protocol::event::{StanzaIdRef, StanzaIdValue};
-        use waddle_xmpp::xep::xep0359::build_stanza_id_element;
+        use waddle_xmpp_core::xep0359::build_stanza_id_element;
         let registry = ConnectionRegistry::new();
         let mam: Arc<dyn MamStorage> = Arc::new(InMemoryMamStorage::new());
         let inbox_concrete = Arc::new(InMemoryInboxStorage::new());
@@ -3457,8 +3457,10 @@ mod tests {
         // under alice's archive — the same id InboxHandler will
         // emit as `archive_ref`.
         let canonical_id = "alice-canonical-1";
-        msg.payloads
-            .push(build_stanza_id_element(canonical_id, "alice@example.com"));
+        msg.payloads.push(build_stanza_id_element(
+            canonical_id,
+            &jid::Jid::from(alice.clone()),
+        ));
 
         let events = vec![
             OutboundEvent::ArchiveDirect {

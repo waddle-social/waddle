@@ -3250,9 +3250,9 @@ mod tests {
         // alice's (XEP-0359 §5 cross-archive preservation).
         peer_msg
             .payloads
-            .push(waddle_xmpp::xep::xep0359::build_stanza_id_element(
+            .push(waddle_xmpp_core::xep0359::build_stanza_id_element(
                 "alice-A1",
-                "alice@example.com",
+                &"alice@example.com".parse::<jid::Jid>().expect("jid"),
             ));
 
         let events = sm.handle(InboundEvent::StanzaFromPeer(Box::new(Stanza::Message(
@@ -3368,9 +3368,9 @@ mod tests {
         );
         peer_msg
             .payloads
-            .push(waddle_xmpp::xep::xep0359::build_stanza_id_element(
+            .push(waddle_xmpp_core::xep0359::build_stanza_id_element(
                 "alice-A1",
-                "alice@example.com",
+                &"alice@example.com".parse::<jid::Jid>().expect("jid"),
             ));
 
         let (tx, mut rx) = mpsc::channel::<OutboundStanza>(4);

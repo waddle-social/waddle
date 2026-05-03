@@ -5877,6 +5877,7 @@ dependencies = [
  "waddle-ecdysis",
  "waddle-extensions",
  "waddle-xmpp",
+ "waddle-xmpp-core",
  "wiremock",
  "xmpp-parsers",
 ]

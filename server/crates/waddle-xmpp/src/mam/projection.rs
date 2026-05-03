@@ -16,6 +16,7 @@
 //! [`OutboundEvent::ArchiveDirect`]: super::super::protocol::event::OutboundEvent::ArchiveDirect
 
 use chrono::Utc;
+use jid::Jid;
 use tracing::warn;
 use xmpp_parsers::message::{Message, MessageType};
 
@@ -25,13 +26,13 @@ use super::{
     STANZA_ID_NS,
 };
 use crate::parser::message_to_string;
-use crate::xep::xep0359::extract_stanza_id_by;
 use crate::xep::{
     extract_correction_from_message, extract_explicit_mentions, extract_reactions_from_message,
     extract_references_from_message, extract_retraction_from_message, parse_reply_from_message,
     RetractionKind, NS_REPLY,
 };
 use waddle_xmpp_core::xep0201::{thread_info_from_message_in_stanza_ns, CLIENT_STANZA_NS};
+use waddle_xmpp_core::xep0359::extract_stanza_id_by;
 
 /// Build the [`ArchivedMessage`] persisted form of a one-to-one
 /// (chat / normal) `<message/>` for direct MAM storage.
@@ -61,7 +62,7 @@ use waddle_xmpp_core::xep0201::{thread_info_from_message_in_stanza_ns, CLIENT_ST
 /// `CanonicalizeHandler` before `ArchiveHandler` per the locked
 /// Q2(a) order, so this fallback is defensive only.
 pub fn build_direct_archived_message(
-    archive_jid: &str,
+    archive_jid: &Jid,
     from: &str,
     to: &str,
     message: &Message,
@@ -293,7 +294,7 @@ mod tests {
         // No XEP-0359 stamp on the message — defensive fallback path.
         let msg = chat_with_body("alice@example.com/web", "bob@example.com", "hi");
         let archived = build_direct_archived_message(
-            "alice@example.com",
+            &"alice@example.com".parse::<Jid>().expect("jid"),
             "alice@example.com",
             "bob@example.com",
             &msg,
@@ -330,13 +331,15 @@ mod tests {
         // `MessageRef::StanzaId` arm queries via
         // `get_message_by_message_id`) keep working. Inbox->MAM
         // pivot uses the canonical stamp via `id`.
-        use crate::xep::xep0359::build_stanza_id_element;
+        use waddle_xmpp_core::xep0359::build_stanza_id_element;
         let mut msg = chat_with_body("alice@example.com/web", "bob@example.com", "hi");
         msg.id = Some("wire-id-1".to_string());
-        msg.payloads
-            .push(build_stanza_id_element("canon-1", "alice@example.com"));
+        msg.payloads.push(build_stanza_id_element(
+            "canon-1",
+            &"alice@example.com".parse::<Jid>().expect("jid"),
+        ));
         let archived = build_direct_archived_message(
-            "alice@example.com",
+            &"alice@example.com".parse::<Jid>().expect("jid"),
             "alice@example.com",
             "bob@example.com",
             &msg,
@@ -359,15 +362,19 @@ mod tests {
         // — Bob's, since this is Bob's archive write — and uses it
         // as the storage primary key. `stanza_id` continues to track
         // the wire `id` attribute for legacy-style retraction lookups.
-        use crate::xep::xep0359::build_stanza_id_element;
+        use waddle_xmpp_core::xep0359::build_stanza_id_element;
         let mut msg = chat_with_body("alice@example.com/web", "bob@example.com", "hi");
         msg.id = Some("wire-id-2".to_string());
-        msg.payloads
-            .push(build_stanza_id_element("alice-A1", "alice@example.com"));
-        msg.payloads
-            .push(build_stanza_id_element("bob-B1", "bob@example.com"));
+        msg.payloads.push(build_stanza_id_element(
+            "alice-A1",
+            &"alice@example.com".parse::<Jid>().expect("jid"),
+        ));
+        msg.payloads.push(build_stanza_id_element(
+            "bob-B1",
+            &"bob@example.com".parse::<Jid>().expect("jid"),
+        ));
         let archived = build_direct_archived_message(
-            "bob@example.com",
+            &"bob@example.com".parse::<Jid>().expect("jid"),
             "alice@example.com",
             "bob@example.com",
             &msg,
@@ -383,7 +390,7 @@ mod tests {
         let from: jid::Jid = "alice@example.com/web".parse().expect("jid");
         let msg = build_correction_message(Some(to), Some(from), "fixed text", "old-id");
         let archived = build_direct_archived_message(
-            "alice@example.com",
+            &"alice@example.com".parse::<Jid>().expect("jid"),
             "alice@example.com",
             "bob@example.com",
             &msg,
@@ -407,7 +414,7 @@ mod tests {
         let mut msg = chat_with_body("alice@example.com/web", "bob@example.com", "hi");
         waddle_xmpp_core::xep0201::set_thread_id(&mut msg, "root-1");
         let archived = build_direct_archived_message(
-            "alice@example.com",
+            &"alice@example.com".parse::<Jid>().expect("jid"),
             "alice@example.com",
             "bob@example.com",
             &msg,
@@ -431,7 +438,7 @@ mod tests {
                 .build(),
         );
         let archived = build_direct_archived_message(
-            "alice@example.com",
+            &"alice@example.com".parse::<Jid>().expect("jid"),
             "alice@example.com",
             "bob@example.com",
             &msg,
@@ -456,7 +463,7 @@ mod tests {
         );
 
         let archived = build_direct_archived_message(
-            "alice@example.com",
+            &"alice@example.com".parse::<Jid>().expect("jid"),
             "alice@example.com",
             "bob@example.com",
             &msg,
@@ -469,7 +476,7 @@ mod tests {
     fn xep_0201_direct_chat_no_thread_yields_none() {
         let msg = chat_with_body("alice@example.com/web", "bob@example.com", "hi");
         let archived = build_direct_archived_message(
-            "alice@example.com",
+            &"alice@example.com".parse::<Jid>().expect("jid"),
             "alice@example.com",
             "bob@example.com",
             &msg,

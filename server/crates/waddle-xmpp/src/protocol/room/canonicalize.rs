@@ -24,7 +24,6 @@
 
 use super::context::RoomContext;
 use super::traits::{RoomHandler, RoomHandlerOutcome};
-use crate::xep::xep0359::{add_stanza_id, is_stanza_id_element};
 use crate::xep::xep0421::{generate_occupant_id, set_occupant_id_on_message};
 use crate::xep::xep0508::{extract_forum_action, ForumAction};
 use jid::{BareJid, Jid};
@@ -32,6 +31,7 @@ use waddle_xmpp_core::xep0201::{
     build_thread_element, is_thread_element_for_stanza, set_thread_id,
     thread_info_from_message_in_stanza_ns, ThreadInfo, CLIENT_STANZA_NS, SERVER_STANZA_NS,
 };
+use waddle_xmpp_core::xep0359::{add_stanza_id, is_stanza_id_element};
 use xmpp_parsers::message::Message;
 
 /// XEP-0045 + XEP-0359 + XEP-0421 canonicalize handler for the room
@@ -86,7 +86,8 @@ impl RoomHandler for MucCanonicalizeHandler {
 
         // 2. Stamp a fresh stanza-id.
         let id = ctx.id_gen.fresh_stanza_id();
-        add_stanza_id(message, &id, &ctx.room.to_string());
+        let by_jid = Jid::from(ctx.room.clone());
+        add_stanza_id(message, &id, &by_jid);
         match extract_forum_action(message) {
             Some(ForumAction::CreateThread(_)) => {
                 replace_stanza_thread(message, &id);
@@ -133,12 +134,16 @@ mod tests {
     use crate::protocol::id_gen::FixedIdGenerator;
     use crate::protocol::room::context::OccupantSnapshot;
     use crate::types::{Affiliation, Role};
-    use crate::xep::xep0359::{build_stanza_id_element, extract_stanza_ids};
     use crate::xep::xep0421::{extract_occupant_id_from_message, OccupantId, OccupantIdSecret};
     use crate::xep::xep0508::{set_thread_create, ThreadCreate};
     use jid::FullJid;
     use waddle_xmpp_core::xep0201::thread_info_from_message;
+    use waddle_xmpp_core::xep0359::{build_stanza_id_element, extract_stanza_ids};
     use xmpp_parsers::message::{Body, Message, MessageType};
+
+    fn jid(s: &str) -> Jid {
+        s.parse().expect("valid jid")
+    }
 
     fn full(s: &str) -> FullJid {
         s.parse().expect("valid full jid")
@@ -194,15 +199,15 @@ mod tests {
         let sender = full("alice@example.com/web");
         let mut msg = groupchat(&room, &sender, "hi");
         // Client-supplied claim with same `by=room`.
-        msg.payloads
-            .push(build_stanza_id_element("spoofed", "team@conf.example.com"));
+        msg.payloads.push(build_stanza_id_element(
+            "spoofed",
+            &jid("team@conf.example.com"),
+        ));
         run(&room, &sender, "alice-nick", &mut msg, "fresh-room-id");
 
         let stamps = extract_stanza_ids(&msg);
-        let room_stamps: Vec<_> = stamps
-            .iter()
-            .filter(|s| s.by == "team@conf.example.com")
-            .collect();
+        let room_jid = jid("team@conf.example.com");
+        let room_stamps: Vec<_> = stamps.iter().filter(|s| s.by == room_jid).collect();
         assert_eq!(room_stamps.len(), 1);
         assert_eq!(room_stamps[0].id, "fresh-room-id");
     }
@@ -214,9 +219,8 @@ mod tests {
         let mut msg = groupchat(&room, &sender, "hi");
         run(&room, &sender, "alice-nick", &mut msg, "stamp-1");
         let stamps = extract_stanza_ids(&msg);
-        assert!(stamps
-            .iter()
-            .any(|s| s.by == "team@conf.example.com" && s.id == "stamp-1"));
+        let room_jid = jid("team@conf.example.com");
+        assert!(stamps.iter().any(|s| s.by == room_jid && s.id == "stamp-1"));
     }
 
     #[test]
@@ -346,16 +350,16 @@ mod tests {
         let room = bare("team@conf.example.com");
         let sender = full("alice@example.com/web");
         let mut msg = groupchat(&room, &sender, "hi");
-        msg.payloads
-            .push(build_stanza_id_element("alice-A1", "alice@example.com"));
+        msg.payloads.push(build_stanza_id_element(
+            "alice-A1",
+            &jid("alice@example.com"),
+        ));
         run(&room, &sender, "alice-nick", &mut msg, "stamp-1");
         let stamps = extract_stanza_ids(&msg);
-        assert!(stamps
-            .iter()
-            .any(|s| s.by == "alice@example.com" && s.id == "alice-A1"));
-        assert!(stamps
-            .iter()
-            .any(|s| s.by == "team@conf.example.com" && s.id == "stamp-1"));
+        let alice = jid("alice@example.com");
+        let room_jid = jid("team@conf.example.com");
+        assert!(stamps.iter().any(|s| s.by == alice && s.id == "alice-A1"));
+        assert!(stamps.iter().any(|s| s.by == room_jid && s.id == "stamp-1"));
     }
 
     #[test]

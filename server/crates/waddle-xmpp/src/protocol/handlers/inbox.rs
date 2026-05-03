@@ -35,8 +35,8 @@ use crate::protocol::event::{OutboundEvent, StanzaIdRef, StanzaIdValue};
 use crate::protocol::message_context::MessageContext;
 use crate::protocol::session_state::Locality;
 use crate::protocol::traits::{HandlerOutcome, MessageHandler};
-use crate::xep::xep0359::extract_stanza_id_by;
-use jid::BareJid;
+use jid::{BareJid, Jid};
+use waddle_xmpp_core::xep0359::extract_stanza_id_by;
 use xmpp_parsers::message::{Message, MessageType};
 
 /// Inbox projection handler.
@@ -54,6 +54,7 @@ impl MessageHandler for InboxHandler {
         }
 
         let owner = ctx.full_jid.to_bare();
+        let owner_jid = Jid::from(owner.clone());
         // Skip projection if CanonicalizeHandler hasn't stamped under
         // the local archive — an empty XEP-0359 stanza-id is not a
         // meaningful reference and would create inbox rows clients
@@ -61,7 +62,7 @@ impl MessageHandler for InboxHandler {
         // CanonicalizeHandler runs before InboxHandler for chat/normal,
         // but a misconfigured dispatcher (e.g. tests building a custom
         // chain) shouldn't silently produce malformed projections.
-        let Some(local_archive_id) = extract_stanza_id_by(message, &owner.to_string()) else {
+        let Some(local_archive_id) = extract_stanza_id_by(message, &owner_jid) else {
             return HandlerOutcome::Continue(Vec::new());
         };
         let from_bare = message.from.as_ref().map(|j| j.to_bare());
@@ -148,13 +149,17 @@ mod tests {
     use crate::protocol::message_context::MessageContextEnv;
     use crate::protocol::session_state::{Blocklist, CarbonsState, MucOccupancy};
     use crate::xep::xep0334::Hint;
-    use crate::xep::xep0359::build_stanza_id_element;
     use jid::FullJid;
     use minidom::Element;
+    use waddle_xmpp_core::xep0359::build_stanza_id_element;
     use xmpp_parsers::message::{Body, Message, MessageType};
 
     fn full(s: &str) -> FullJid {
         s.parse().expect("valid full jid")
+    }
+
+    fn jid(s: &str) -> Jid {
+        s.parse().expect("valid jid")
     }
 
     fn bare(s: &str) -> BareJid {
@@ -231,8 +236,10 @@ mod tests {
         let local = full("alice@example.com/web");
         let mut msg = chat_with_body("alice@example.com/web", "bob@example.com", "hi");
         // Pretend canonicalize ran and stamped the local archive id.
-        msg.payloads
-            .push(build_stanza_id_element("alice-A1", "alice@example.com"));
+        msg.payloads.push(build_stanza_id_element(
+            "alice-A1",
+            &jid("alice@example.com"),
+        ));
         let outcome = run(&local, &mut msg);
         let inbox = extract_inbox(&outcome);
         assert_eq!(inbox.len(), 1);
@@ -246,7 +253,7 @@ mod tests {
         let local = full("bob@example.com/desk");
         let mut msg = chat_with_body("alice@example.com/web", "bob@example.com", "hi");
         msg.payloads
-            .push(build_stanza_id_element("bob-B1", "bob@example.com"));
+            .push(build_stanza_id_element("bob-B1", &jid("bob@example.com")));
         let outcome = run(&local, &mut msg);
         let inbox = extract_inbox(&outcome);
         assert_eq!(inbox.len(), 1);
@@ -269,8 +276,10 @@ mod tests {
         // bump for their own outgoing copy.
         let local = full("alice@example.com/web");
         let mut msg = chat_with_body("alice@example.com/web", "bob@example.com", "hi");
-        msg.payloads
-            .push(build_stanza_id_element("alice-A1", "alice@example.com"));
+        msg.payloads.push(build_stanza_id_element(
+            "alice-A1",
+            &jid("alice@example.com"),
+        ));
         let outcome = run(&local, &mut msg);
         assert_eq!(extract_inbox_increments(&outcome), vec![false]);
     }
@@ -282,7 +291,7 @@ mod tests {
         let local = full("bob@example.com/desk");
         let mut msg = chat_with_body("alice@example.com/web", "bob@example.com", "hi");
         msg.payloads
-            .push(build_stanza_id_element("bob-B1", "bob@example.com"));
+            .push(build_stanza_id_element("bob-B1", &jid("bob@example.com")));
         let outcome = run(&local, &mut msg);
         assert_eq!(extract_inbox_increments(&outcome), vec![true]);
     }
@@ -293,8 +302,10 @@ mod tests {
         // unread (matches legacy parity for messages you sent yourself).
         let local = full("alice@example.com/web");
         let mut msg = chat_with_body("alice@example.com/web", "alice@example.com/web", "echo");
-        msg.payloads
-            .push(build_stanza_id_element("alice-self", "alice@example.com"));
+        msg.payloads.push(build_stanza_id_element(
+            "alice-self",
+            &jid("alice@example.com"),
+        ));
         let outcome = run(&local, &mut msg);
         assert_eq!(extract_inbox_increments(&outcome), vec![false]);
     }
@@ -305,8 +316,10 @@ mod tests {
         // with owner == peer.
         let local = full("alice@example.com/web");
         let mut msg = chat_with_body("alice@example.com/web", "alice@example.com/web", "echo");
-        msg.payloads
-            .push(build_stanza_id_element("alice-self", "alice@example.com"));
+        msg.payloads.push(build_stanza_id_element(
+            "alice-self",
+            &jid("alice@example.com"),
+        ));
         let outcome = run(&local, &mut msg);
         let inbox = extract_inbox(&outcome);
         assert_eq!(inbox.len(), 1);
@@ -382,8 +395,10 @@ mod tests {
         msg.type_ = MessageType::Chat;
         msg.payloads
             .push(crate::xep::xep0424::build_retract_element("stanza-X"));
-        msg.payloads
-            .push(build_stanza_id_element("alice-A1", "alice@example.com"));
+        msg.payloads.push(build_stanza_id_element(
+            "alice-A1",
+            &jid("alice@example.com"),
+        ));
         let outcome = run(&local, &mut msg);
         let inbox = extract_inbox(&outcome);
         assert_eq!(inbox.len(), 1);

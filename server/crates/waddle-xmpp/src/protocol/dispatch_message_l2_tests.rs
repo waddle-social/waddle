@@ -25,10 +25,10 @@ use super::id_gen::FixedIdGenerator;
 use super::message_context::{MessageContext, MessageContextEnv};
 use super::session_state::{Blocklist, CarbonsState, MucOccupancy};
 use super::traits::{HandlerOutcome, MessageHandler};
-use crate::xep::xep0359::extract_stanza_id_by;
-use jid::{BareJid, FullJid};
+use jid::{BareJid, FullJid, Jid};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use waddle_xmpp_core::xep0359::extract_stanza_id_by;
 use xmpp_parsers::message::{Body, Message, MessageType};
 
 // ---------------------------------------------------------------------
@@ -72,7 +72,7 @@ impl MessageHandler for ArchiveProbe {
 /// Probe that records the stanza-id stamped under `by=` for assertion
 /// in the stamping invariant test.
 struct StampReader {
-    by: String,
+    by: Jid,
     captured: Arc<Mutex<Option<String>>>,
 }
 
@@ -244,7 +244,7 @@ fn dispatch_message_canonicalize_stamp_visible_to_later_handlers() {
     dispatcher.register_message(Arc::new(CanonicalizeHandler));
     let captured = Arc::new(Mutex::new(None::<String>));
     dispatcher.register_message(Arc::new(StampReader {
-        by: "alice@example.com".to_string(),
+        by: "alice@example.com".parse::<Jid>().expect("valid jid"),
         captured: captured.clone(),
     }));
 
@@ -274,7 +274,7 @@ fn dispatch_message_canonicalize_stamp_visible_after_blocking_filter_passthrough
     dispatcher.register_message(Arc::new(CanonicalizeHandler));
     let captured = Arc::new(Mutex::new(None::<String>));
     dispatcher.register_message(Arc::new(StampReader {
-        by: "alice@example.com".to_string(),
+        by: "alice@example.com".parse::<Jid>().expect("valid jid"),
         captured: captured.clone(),
     }));
 
