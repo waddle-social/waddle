@@ -46,13 +46,17 @@ import * as inboxApi from "./inbox";
 import * as pep from "./pep-publications";
 import {
   discoverExtensionCommands,
+  discoverExtensionRoutes,
+  fetchExtensionRouteItems,
   invokeExtensionCommand,
   invokeExtensionLaunch,
   submitExtensionCommandForm,
   type DiscoveredExtensionCommand,
+  type DiscoveredExtensionRoute,
   type ExtensionCommandAction,
   type ExtensionCommandFormField,
   type ExtensionCommandResult,
+  type ExtensionRouteItem,
 } from "./extension-commands";
 import { ReconnectCatchup } from "./reconnect-catchup";
 import { mergeOccupantHats, roleHatsForOccupant } from "./occupant-badges";
@@ -1102,6 +1106,16 @@ export class BrowserXmppClient {
     return discoverExtensionCommands(xmpp, this.session.jid);
   }
 
+  async discoverExtensionRoutes(): Promise<DiscoveredExtensionRoute[]> {
+    const xmpp = await this.requireConnectedXmpp();
+    return discoverExtensionRoutes(xmpp, this.session.jid);
+  }
+
+  async fetchExtensionRouteItems(route: DiscoveredExtensionRoute, roomJid: string): Promise<ExtensionRouteItem[]> {
+    const xmpp = await this.requireConnectedXmpp();
+    return fetchExtensionRouteItems(xmpp, route, roomJid);
+  }
+
   async invokeExtensionCommand(command: DiscoveredExtensionCommand): Promise<ExtensionCommandResult> {
     const xmpp = await this.requireConnectedXmpp();
     return invokeExtensionCommand(xmpp, this.session.jid, command);
@@ -1112,9 +1126,10 @@ export class BrowserXmppClient {
     sessionId: string,
     fields: ExtensionCommandFormField[],
     action?: ExtensionCommandAction,
+    roomJid?: string,
   ): Promise<ExtensionCommandResult> {
     const xmpp = await this.requireConnectedXmpp();
-    return submitExtensionCommandForm(xmpp, command, sessionId, fields, action);
+    return submitExtensionCommandForm(xmpp, command, sessionId, fields, action, roomJid);
   }
 
   async enablePushNotifications(opts: {

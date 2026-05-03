@@ -1,9 +1,11 @@
 import type { ChannelSummary } from "@/lib/chat-types";
 
 interface RouteState {
-  page: "dashboard" | "chat" | "settings";
+  page: "dashboard" | "chat" | "settings" | "extension";
   channelSlug: string | null;
   dmUsername: string | null;
+  extensionPluginId: string | null;
+  extensionRouteId: string | null;
   /** XEP-0201 thread stack from `?thread=rootId,childId,...`. Empty = panel closed. */
   threadStack: string[];
 }
@@ -48,6 +50,8 @@ export function parseRoute(pathname: string, search?: string): RouteState {
       page: "dashboard",
       channelSlug: null,
       dmUsername: null,
+      extensionPluginId: null,
+      extensionRouteId: null,
       threadStack: [],
     };
   }
@@ -56,14 +60,28 @@ export function parseRoute(pathname: string, search?: string): RouteState {
       page: "settings",
       channelSlug: null,
       dmUsername: null,
+      extensionPluginId: null,
+      extensionRouteId: null,
       threadStack: [],
     };
   }
   if (segments[0] === "r") {
+    if (segments[2] === "x" && segments[3] && segments[4]) {
+      return {
+        page: "extension",
+        channelSlug: segments[1] ? decodeURIComponent(segments[1]) : null,
+        dmUsername: null,
+        extensionPluginId: decodeURIComponent(segments[3]),
+        extensionRouteId: decodeURIComponent(segments[4]),
+        threadStack: [],
+      };
+    }
     return {
       page: "chat",
       channelSlug: segments[1] ? decodeURIComponent(segments[1]) : null,
       dmUsername: null,
+      extensionPluginId: null,
+      extensionRouteId: null,
       threadStack,
     };
   }
@@ -72,6 +90,8 @@ export function parseRoute(pathname: string, search?: string): RouteState {
       page: "chat",
       channelSlug: null,
       dmUsername: segments[1] ? decodeURIComponent(segments[1]) : null,
+      extensionPluginId: null,
+      extensionRouteId: null,
       threadStack,
     };
   }
@@ -79,6 +99,8 @@ export function parseRoute(pathname: string, search?: string): RouteState {
     page: "dashboard",
     channelSlug: null,
     dmUsername: null,
+    extensionPluginId: null,
+    extensionRouteId: null,
     threadStack: [],
   };
 }
@@ -91,7 +113,7 @@ export function shouldLoadStructureForRoute(
   route: RouteState,
   channelCount: number,
 ): boolean {
-  return (route.page === "dashboard" || (route.page === "chat" && !route.dmUsername)) && channelCount === 0;
+  return (route.page === "dashboard" || route.page === "extension" || (route.page === "chat" && !route.dmUsername)) && channelCount === 0;
 }
 
 export function buildPath(
@@ -100,6 +122,15 @@ export function buildPath(
 ): string {
   const search = buildSearch(threadStack);
   return channel ? `/r/${encodeURIComponent(channel.id)}${search}` : "/";
+}
+
+export function buildExtensionRoutePath(
+  channel: ChannelSummary | null,
+  pluginId: string | null | undefined,
+  routeId: string | null | undefined,
+): string {
+  if (!channel || !pluginId || !routeId) return "/";
+  return `/r/${encodeURIComponent(channel.id)}/x/${encodeURIComponent(pluginId)}/${encodeURIComponent(routeId)}`;
 }
 
 export function buildDmPath(username: string | null, threadStack?: string[]): string {
@@ -134,5 +165,17 @@ export function pushSettingsRoute(origin: "app" | "direct" = "app") {
   const current = window.location.pathname + window.location.search;
   if (current !== SETTINGS_PATH) {
     window.history.pushState({ waddlePage: "settings", origin }, "", SETTINGS_PATH);
+  }
+}
+
+export function pushExtensionRoute(
+  channel: ChannelSummary | null,
+  pluginId: string | null | undefined,
+  routeId: string | null | undefined,
+) {
+  const path = buildExtensionRoutePath(channel, pluginId, routeId);
+  const current = window.location.pathname + window.location.search;
+  if (current !== path) {
+    window.history.pushState({ waddlePage: "extension" }, "", path);
   }
 }

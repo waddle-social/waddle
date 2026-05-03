@@ -14,9 +14,9 @@ describe("Waddle extension framework JXT", () => {
     const envelope = parse(`
       <extensions xmlns='urn:waddle:extension:1' version='1'>
         <enrichment id='enrich-1'
-                    plugin='links-task-board'
+                    plugin='link-board'
                     capability='message.enrich'
-                    payload-ns='urn:waddle:links-task-board:1'
+                    payload-ns='urn:waddle:link-board:1'
                     surface='message-card'
                     created='2026-04-27T10:00:00Z'>
           <source stanza-id='archive-id-456'
@@ -24,13 +24,13 @@ describe("Waddle extension framework JXT", () => {
                   body-start='5'
                   body-end='29'/>
           <payload>
-            <link xmlns='urn:waddle:links-task-board:1'
+            <link xmlns='urn:waddle:link-board:1'
                   url='https://example.org/post'
                   title='Example Post'
                   site='Example'/>
           </payload>
           <launch id='save-link'
-                  plugin='links-task-board'
+                  plugin='link-board'
                   action='save-link'
                   command-node='urn:waddle:extension:1:invoke'
                   token='launch-token-save-link'
@@ -40,7 +40,7 @@ describe("Waddle extension framework JXT", () => {
                      room='pub@muc.example.com'
                      stanza-id='archive-id-456'/>
             <payload>
-              <save-link xmlns='urn:waddle:links-task-board:1'
+              <save-link xmlns='urn:waddle:link-board:1'
                          url='https://example.org/post'/>
             </payload>
           </launch>
@@ -74,9 +74,9 @@ describe("Waddle extension framework JXT", () => {
     });
     expect(enrichment?.surface).toBe("message-card");
     expect(enrichment?.payload?.elements?.[0]?.name).toBe("link");
-    expect(enrichment?.payload?.elements?.[0]?.attributes?.xmlns).toBe("urn:waddle:links-task-board:1");
+    expect(enrichment?.payload?.elements?.[0]?.attributes?.xmlns).toBe("urn:waddle:link-board:1");
     expect(enrichment?.payload?.elements?.[0]?.attributes?.title).toBe("Example Post");
-    expect(enrichment?.launches?.[0]?.plugin).toBe("links-task-board");
+    expect(enrichment?.launches?.[0]?.plugin).toBe("link-board");
     expect(enrichment?.launches?.[0]?.action).toBe("save-link");
     expect(enrichment?.launches?.[0]?.commandNode).toBe("urn:waddle:extension:1:invoke");
     expect(enrichment?.launches?.[0]?.token).toBe("launch-token-save-link");

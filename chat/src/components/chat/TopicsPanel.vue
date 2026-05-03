@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed, watch } from "vue";
-import { Hash, MessagesSquare, Plus, Settings, Users, ChevronDown, MessageCircle } from "lucide-vue-next";
+import { Hash, LayoutDashboard, MessagesSquare, Plus, Settings, Users, ChevronDown, MessageCircle } from "lucide-vue-next";
 import { isForumChannel as detectForumChannel } from "@/lib/channel-types";
 import type { ChannelSummary, SpaceSummary } from "@/lib/chat-types";
 import type { ThreadInboxEntry } from "@/composables/useChannelUnread";
 import { groupChannelsBySpace } from "@/lib/channel-grouping";
+import type { DiscoveredExtensionRoute } from "@/lib/xmpp/extension-commands";
 
 const props = defineProps<{
   waddle: SpaceSummary | null;
@@ -20,6 +21,8 @@ const props = defineProps<{
   channelUnreadMap?: Record<string, { unread: number; mentions: number }>;
   threadEntriesFn?: (roomJid: string) => ThreadInboxEntry[];
   roomAvatarHashes?: Record<string, string>;
+  extensionRoutes?: DiscoveredExtensionRoute[];
+  activeExtensionRoute?: { channelId: string; pluginId: string; routeId: string } | null;
 }>();
 
 function hasActivity(channelId: string): boolean {
@@ -110,6 +113,25 @@ function channelThreads(channel: ChannelSummary): ThreadInboxEntry[] {
   return [];
 }
 
+function channelExtensionRoutes(_channel: ChannelSummary): DiscoveredExtensionRoute[] {
+  return props.extensionRoutes?.filter((route) => route.scope === "channel") ?? [];
+}
+
+function isActiveExtensionRoute(channel: ChannelSummary, route: DiscoveredExtensionRoute): boolean {
+  return props.activeExtensionRoute?.channelId === channel.id
+    && props.activeExtensionRoute.pluginId === route.pluginId
+    && props.activeExtensionRoute.routeId === route.routeId;
+}
+
+function isActiveChannelPage(channel: ChannelSummary): boolean {
+  return props.activeChannelId === channel.id && !props.activeExtensionRoute;
+}
+
+function extensionRouteRowLabel(channel: ChannelSummary, route: DiscoveredExtensionRoute): string {
+  const state = isActiveExtensionRoute(channel, route) ? "selected" : "not selected";
+  return `${route.label}, ${channel.name}, extension route, ${state}`;
+}
+
 function truncateTitle(title: string | undefined, maxLen = 28): string {
   if (!title) return "Untitled thread";
   return title.length > maxLen ? title.slice(0, maxLen) + "…" : title;
@@ -118,6 +140,7 @@ function truncateTitle(title: string | undefined, maxLen = 28): string {
 const emit = defineEmits<{
   selectChannel: [id: string];
   selectThread: [channelId: string, threadId: string];
+  selectExtensionRoute: [channelId: string, route: DiscoveredExtensionRoute];
   createChannel: [];
   createChannelInSpace: [spaceId: string | null];
   openSettings: [];
@@ -274,24 +297,24 @@ watch(
               <template v-for="{ channel, unread } in group.channels" :key="channel.id">
               <button
                 class="chat-list-row w-full min-h-10 flex items-center gap-2.5 px-3 py-2 text-left group"
-                :class="activeChannelId === channel.id
+                :class="isActiveChannelPage(channel)
                   ? 'bg-sidebar-accent text-sidebar-foreground'
                   : 'text-sidebar-muted hover:bg-sidebar-accent/50 hover:text-sidebar-foreground'"
-                :aria-current="activeChannelId === channel.id ? 'page' : undefined"
-                :aria-label="channelRowLabel(channel, unread, activeChannelId === channel.id)"
+                :aria-current="isActiveChannelPage(channel) ? 'page' : undefined"
+                :aria-label="channelRowLabel(channel, unread, isActiveChannelPage(channel))"
                 type="button"
                 @click="emit('selectChannel', channel.id)"
               >
                 <component
                   :is="channelIcon(channel)"
                   class="w-3.5 h-3.5 flex-shrink-0 transition-colors duration-200"
-                  :class="activeChannelId === channel.id ? 'text-primary' : 'opacity-40 group-hover:opacity-70'"
+                  :class="isActiveChannelPage(channel) ? 'text-primary' : 'opacity-40 group-hover:opacity-70'"
                 />
                 <span
                   class="type-control truncate flex-1"
                   :class="[
-                    activeChannelId === channel.id ? 'type-emphasis' : '',
-                    (unread.unread > 0 || hasActivity(channel.id)) && activeChannelId !== channel.id ? 'type-strong text-sidebar-foreground' : '',
+                    isActiveChannelPage(channel) ? 'type-emphasis' : '',
+                    (unread.unread > 0 || hasActivity(channel.id)) && !isActiveChannelPage(channel) ? 'type-strong text-sidebar-foreground' : '',
                   ]"
                 >{{ channel.name }}</span>
                 <span
@@ -301,20 +324,38 @@ watch(
                   Forum
                 </span>
                 <span
-                  v-if="unread.mentions > 0 && activeChannelId !== channel.id"
+                  v-if="unread.mentions > 0 && !isActiveChannelPage(channel)"
                   class="type-count-badge inline-flex min-w-[18px] h-[18px] px-1 items-center justify-center rounded-full bg-destructive text-destructive-foreground"
                   aria-hidden="true"
                 >{{ unread.mentions }}</span>
                 <span
-                  v-else-if="unread.unread > 0 && activeChannelId !== channel.id"
+                  v-else-if="unread.unread > 0 && !isActiveChannelPage(channel)"
                   class="type-count-badge inline-flex min-w-[18px] h-[18px] px-1 items-center justify-center rounded-full bg-primary text-primary-foreground"
                   aria-hidden="true"
                 >{{ unread.unread }}</span>
                 <span
-                  v-else-if="hasActivity(channel.id) && activeChannelId !== channel.id"
+                  v-else-if="hasActivity(channel.id) && !isActiveChannelPage(channel)"
                   class="w-2 h-2 bg-primary rounded-full flex-shrink-0 shadow-[0_0_6px_var(--glow-strong)]"
                   aria-hidden="true"
                 />
+              </button>
+
+              <!-- Channel extension routes -->
+              <button
+                v-for="route in channelExtensionRoutes(channel)"
+                :key="`${channel.id}:${route.pluginId}:${route.routeId}`"
+                class="chat-channel-thread-row chat-list-row flex items-center gap-2 px-2.5 py-2 text-left text-sidebar-muted hover:bg-sidebar-accent/50 hover:text-sidebar-foreground group"
+                :class="isActiveExtensionRoute(channel, route) ? 'bg-sidebar-accent text-sidebar-foreground' : ''"
+                type="button"
+                :aria-current="isActiveExtensionRoute(channel, route) ? 'page' : undefined"
+                :aria-label="extensionRouteRowLabel(channel, route)"
+                @click="emit('selectExtensionRoute', channel.id, route)"
+              >
+                <LayoutDashboard
+                  class="w-3 h-3 flex-shrink-0 opacity-40 group-hover:opacity-70"
+                  :class="isActiveExtensionRoute(channel, route) ? 'text-primary opacity-90' : ''"
+                />
+                <span class="type-caption truncate flex-1">{{ route.label }}</span>
               </button>
 
               <!-- Active threads for this channel -->

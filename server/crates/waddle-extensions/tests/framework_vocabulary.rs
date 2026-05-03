@@ -78,7 +78,9 @@ fn sample_manifest() -> ExtensionManifest {
         commands: vec![CommandDescriptor {
             node: CommandNode::new("urn:waddle:extension:1:task-widget").expect("command node"),
             name: text("Task Widget"),
+            scope: CommandScope::Global,
         }],
+        routes: Vec::new(),
         pubsub_nodes: vec![id!(
             PubSubNode::new,
             "urn:example:task-widget:1:waddle:{waddle-id}:links"
@@ -92,7 +94,14 @@ fn payload_namespaces_allow_third_party_but_reject_official_xmpp() {
     assert!(PayloadNamespace::new("urn:waddle:sample:1").is_ok());
     assert!(PayloadNamespace::new("https://plugins.example.com/ns/tasks").is_ok());
     assert!(PayloadNamespace::new("urn:example:tasks:1").is_ok());
-    assert!(PayloadNamespace::new(FRAMEWORK_NAMESPACE).is_err());
+    // The framework namespace is allowed because every extension publishes
+    // PubSub state items wrapped in the framework-defined `<extension-item>`
+    // envelope. Manifest payload rules in the framework namespace remain
+    // forbidden by `validate_manifest_against_module`, so extensions cannot
+    // claim ownership of framework wire shapes.
+    let framework = PayloadNamespace::new(FRAMEWORK_NAMESPACE)
+        .expect("framework namespace is a valid payload namespace");
+    assert!(framework.is_framework());
     assert!(matches!(
         PayloadNamespace::new("urn:xmpp:sid:0"),
         Err(FrameworkTypeError::OfficialNamespace(_))
@@ -228,6 +237,7 @@ fn framework_envelope_builds_generic_payload_and_fallback_ui() {
             label: text("Save link"),
             context: LaunchContext {
                 waddle_id: id!(WaddleId::new, "waddle-123"),
+                room: None,
                 source_stanza_id: Some(id!(StanzaId::new, "archive-id-456")),
             },
             payloads: Vec::new(),
@@ -299,6 +309,7 @@ fn extension_effect_validation_is_manifest_authoritative() {
             label: text("Save link"),
             context: LaunchContext {
                 waddle_id: id!(WaddleId::new, "waddle-123"),
+                room: None,
                 source_stanza_id: None,
             },
             payloads: Vec::new(),

@@ -72,6 +72,7 @@ pub struct XmppServiceDomains {
     pub muc: String,
     pub spaces: String,
     pub upload: String,
+    pub extensions: String,
 }
 
 impl XmppServiceDomains {
@@ -80,6 +81,7 @@ impl XmppServiceDomains {
             muc: format!("muc.{component_parent_domain}"),
             spaces: format!("spaces.{component_parent_domain}"),
             upload: format!("upload.{xmpp_domain}"),
+            extensions: format!("extensions.{component_parent_domain}"),
         }
     }
 }
@@ -2706,6 +2708,7 @@ mod tests {
                     muc: "muc.example.com".to_string(),
                     spaces: "spaces.example.com".to_string(),
                     upload: "upload.example.com".to_string(),
+                    extensions: "extensions.example.com".to_string(),
                 },
                 protocol: ProtocolServices {
                     connection_registry: Arc::new(ConnectionRegistry::new()),

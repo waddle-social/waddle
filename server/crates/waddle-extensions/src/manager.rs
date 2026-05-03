@@ -8,7 +8,7 @@ use futures::future::join_all;
 use hmac::{Hmac, Mac};
 use regex::Regex;
 use serde_json::Value;
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use thiserror::Error;
 use tokio::time::timeout;
@@ -61,9 +61,30 @@ pub struct LaunchInvocationRequest<'a> {
     pub launch_token: &'a str,
 }
 
+pub struct LaunchValidationRequest<'a> {
+    pub plugin_name: &'a str,
+    pub action_id: &'a str,
+    pub launch_id: &'a LaunchId,
+    pub context: &'a LaunchContext,
+    pub fields: &'a [crate::types::FormFieldValue],
+    pub expires_at: Option<&'a crate::types::Timestamp>,
+    pub launch_token: &'a str,
+}
+
+struct LaunchTokenVerification<'a> {
+    plugin: &'a PluginId,
+    action: &'a crate::types::ActionId,
+    launch_id: &'a LaunchId,
+    context: &'a LaunchContext,
+    fields: &'a [crate::types::FormFieldValue],
+    expires_at: Option<&'a crate::types::Timestamp>,
+    token: &'a str,
+}
+
 pub struct CommandInvocationRequest<'a> {
     pub node: &'a str,
     pub waddle_id: WaddleId,
+    pub room: Option<RoomJid>,
     pub requester: FullJidValue,
     pub session_id: Option<CommandSessionId>,
     pub action: Option<CommandAction>,
@@ -89,6 +110,7 @@ enum EffectiveModuleConfigError {
 pub struct ExtensionManager {
     actors: Vec<Arc<WasmExtensionActor>>,
     feature_namespaces: Vec<String>,
+    route_descriptors: Vec<crate::types::ExtensionRouteDescriptor>,
     launch_signing_key: Option<Vec<u8>>,
 }
 
@@ -109,6 +131,7 @@ impl ExtensionManager {
             return Ok(Self {
                 actors: Vec::new(),
                 feature_namespaces: Vec::new(),
+                route_descriptors: Vec::new(),
                 launch_signing_key: None,
             });
         }
@@ -118,6 +141,7 @@ impl ExtensionManager {
         let puller = OciExtensionPuller::new(&config.cache_dir);
         let mut actors = Vec::new();
         let mut feature_namespaces = Vec::new();
+        let mut route_descriptors = Vec::new();
         let mut plugin_ids = HashSet::new();
         let mut command_nodes = HashSet::new();
         let mut payload_namespaces: HashMap<PayloadNamespace, PluginId> = HashMap::new();
@@ -168,7 +192,6 @@ impl ExtensionManager {
 
             let manifest = actor.manifest();
             validate_manifest_against_module(module, &manifest)?;
-            validate_ai_chatbot_runtime_config(module, &manifest, &config_json)?;
             let actor = actor
                 .with_grants(runtime_grants_for_module(module, &manifest))
                 .with_allowed_http_origins(module.allowed_http_origins.clone());
@@ -208,6 +231,11 @@ impl ExtensionManager {
                     rule.root.namespace.as_str(),
                 );
             }
+            if manifest.declares_capability(ExtensionCapability::UiDeclarative)
+                && actor.has_grant(ExtensionCapability::UiDeclarative)
+            {
+                route_descriptors.extend(manifest.routes.iter().cloned());
+            }
 
             actors.push(Arc::new(actor));
         }
@@ -215,6 +243,7 @@ impl ExtensionManager {
         Ok(Self {
             actors,
             feature_namespaces,
+            route_descriptors,
             launch_signing_key: None,
         })
     }
@@ -256,6 +285,29 @@ impl ExtensionManager {
             .collect()
     }
 
+    pub fn command_descriptors(
+        &self,
+    ) -> Vec<(crate::types::PluginId, crate::types::CommandDescriptor)> {
+        self.actors
+            .iter()
+            .filter(|actor| actor.has_grant(ExtensionCapability::Commands))
+            .flat_map(|actor| {
+                let manifest = actor.manifest();
+                let plugin = manifest.id.clone();
+                manifest
+                    .commands
+                    .into_iter()
+                    .filter(|command| command.node != CommandNode::invoke())
+                    .map(move |command| (plugin.clone(), command))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    pub fn route_descriptors(&self) -> &[crate::types::ExtensionRouteDescriptor] {
+        &self.route_descriptors
+    }
+
     pub async fn invoke_command(
         &self,
         request: CommandInvocationRequest<'_>,
@@ -263,6 +315,7 @@ impl ExtensionManager {
         let CommandInvocationRequest {
             node,
             waddle_id,
+            room,
             requester,
             session_id,
             action,
@@ -275,6 +328,7 @@ impl ExtensionManager {
         let dispatch_node = command_node.clone();
         let event = ExtensionEvent::Command(CommandInvocation {
             waddle_id,
+            room,
             requester,
             command_node: dispatch_node,
             session_id,
@@ -321,14 +375,15 @@ impl ExtensionManager {
         let Ok(action_id) = crate::types::ActionId::new(action_id.to_string()) else {
             return Vec::new();
         };
-        if !self.verify_launch_token(
-            &plugin_id,
-            &action_id,
-            &launch_id,
-            &context,
-            expires_at.as_ref(),
-            launch_token,
-        ) {
+        if !self.verify_launch_token(LaunchTokenVerification {
+            plugin: &plugin_id,
+            action: &action_id,
+            launch_id: &launch_id,
+            context: &context,
+            fields: &fields,
+            expires_at: expires_at.as_ref(),
+            token: launch_token,
+        }) {
             warn!(
                 plugin = %plugin_name,
                 launch_id = %launch_id,
@@ -346,36 +401,31 @@ impl ExtensionManager {
             fields,
         });
         for actor in &self.actors {
-            if actor.manifest().id.as_str() == plugin_name {
+            if actor.has_grant(ExtensionCapability::Launch)
+                && actor.manifest().id.as_str() == plugin_name
+            {
                 return self.sign_effects(actor.handle_event(event).await);
             }
         }
         Vec::new()
     }
 
-    pub fn validates_launch_invocation(
-        &self,
-        plugin_name: &str,
-        action_id: &str,
-        launch_id: &LaunchId,
-        context: &LaunchContext,
-        expires_at: Option<&crate::types::Timestamp>,
-        launch_token: &str,
-    ) -> bool {
-        let Ok(plugin_id) = PluginId::new(plugin_name.to_string()) else {
+    pub fn validates_launch_invocation(&self, request: LaunchValidationRequest<'_>) -> bool {
+        let Ok(plugin_id) = PluginId::new(request.plugin_name.to_string()) else {
             return false;
         };
-        let Ok(action_id) = crate::types::ActionId::new(action_id.to_string()) else {
+        let Ok(action_id) = crate::types::ActionId::new(request.action_id.to_string()) else {
             return false;
         };
-        self.verify_launch_token(
-            &plugin_id,
-            &action_id,
-            launch_id,
-            context,
-            expires_at,
-            launch_token,
-        )
+        self.verify_launch_token(LaunchTokenVerification {
+            plugin: &plugin_id,
+            action: &action_id,
+            launch_id: request.launch_id,
+            context: request.context,
+            fields: request.fields,
+            expires_at: request.expires_at,
+            token: request.launch_token,
+        })
     }
 
     pub async fn enrich_message(&self, msg: &mut Message) -> usize {
@@ -479,6 +529,7 @@ impl ExtensionManager {
                 .as_ref()
                 .or(msg.from.as_ref())
                 .and_then(|jid| RoomJid::new(jid.to_bare().to_string()).ok());
+            let hook_room = room.clone();
             let source_stanza_id = room
                 .as_ref()
                 .and_then(|room| room_stanza_id_from_payloads(msg, room.as_str()))
@@ -559,6 +610,13 @@ impl ExtensionManager {
             let mut emitted_effects = Vec::new();
             for (actor_name, manifest, effects) in results {
                 for effect in self.sign_effects(effects) {
+                    if !message_hook_effect_launches_match_room(&effect, hook_room.as_ref()) {
+                        warn!(
+                            extension = %actor_name,
+                            "extension emitted a message-hook launch outside the hook room; dropping"
+                        );
+                        continue;
+                    }
                     if !effect.validate_for_manifest(&manifest) {
                         warn!(
                             extension = %actor_name,
@@ -601,11 +659,7 @@ impl ExtensionManager {
         for effect in &mut effects {
             match effect {
                 ExtensionEffect::EnrichMessage(envelope) => {
-                    for enrichment in &mut envelope.enrichments {
-                        for launch in &mut enrichment.launches {
-                            self.sign_launch(launch);
-                        }
-                    }
+                    self.sign_envelope(envelope);
                 }
                 ExtensionEffect::PublishPubSub(_)
                 | ExtensionEffect::ReferenceArtifact(_)
@@ -617,6 +671,40 @@ impl ExtensionManager {
         effects
     }
 
+    pub fn sign_envelope(&self, envelope: &mut ExtensionEnvelope) {
+        for enrichment in &mut envelope.enrichments {
+            for launch in &mut enrichment.launches {
+                self.sign_launch(launch);
+            }
+        }
+    }
+
+    pub fn validate_envelope_for_plugin(
+        &self,
+        plugin: &PluginId,
+        envelope: &ExtensionEnvelope,
+    ) -> bool {
+        self.actors
+            .iter()
+            .find(|actor| actor.manifest().id == *plugin)
+            .is_some_and(|actor| {
+                actor.validate_effect(&ExtensionEffect::EnrichMessage(envelope.clone()))
+            })
+    }
+
+    pub fn room_for_pubsub_node(&self, node: &crate::types::PubSubNode) -> Option<RoomJid> {
+        for actor in &self.actors {
+            let manifest = actor.manifest();
+            if let Some(room) = manifest.pubsub_nodes.iter().find_map(|pattern| {
+                pubsub_node_placeholder_value(pattern.as_str(), node.as_str(), "room")
+                    .and_then(|room| RoomJid::new(room).ok())
+            }) {
+                return Some(room);
+            }
+        }
+        None
+    }
+
     fn sign_launch(&self, launch: &mut crate::types::LaunchDescriptor) {
         let Some(key) = self.launch_signing_key.as_deref() else {
             return;
@@ -624,6 +712,7 @@ impl ExtensionManager {
         let expires_at = launch
             .expires_at
             .get_or_insert_with(|| default_launch_expiry().expect("generated expiry is valid"));
+        let payload_digest = launch_payload_digest(&launch.payloads);
         let token = sign_launch_token(
             key,
             &launch.plugin,
@@ -631,23 +720,16 @@ impl ExtensionManager {
             &launch.id,
             &launch.context,
             Some(expires_at),
+            &payload_digest,
         );
         launch.token = crate::types::LaunchToken::new(token).ok();
     }
 
-    fn verify_launch_token(
-        &self,
-        plugin: &PluginId,
-        action: &crate::types::ActionId,
-        launch_id: &LaunchId,
-        context: &LaunchContext,
-        expires_at: Option<&crate::types::Timestamp>,
-        token: &str,
-    ) -> bool {
+    fn verify_launch_token(&self, request: LaunchTokenVerification<'_>) -> bool {
         let Some(key) = self.launch_signing_key.as_deref() else {
             return false;
         };
-        if let Some(expires_at) = expires_at {
+        if let Some(expires_at) = request.expires_at {
             let Ok(expires_at) = DateTime::parse_from_rfc3339(expires_at.as_str()) else {
                 return false;
             };
@@ -655,9 +737,39 @@ impl ExtensionManager {
                 return false;
             }
         }
-        let expected = sign_launch_token(key, plugin, action, launch_id, context, expires_at);
-        constant_time_eq(expected.as_bytes(), token.as_bytes())
+        let payload_digest = submitted_launch_payload_digest(request.fields);
+        let expected = sign_launch_token(
+            key,
+            request.plugin,
+            request.action,
+            request.launch_id,
+            request.context,
+            request.expires_at,
+            &payload_digest,
+        );
+        constant_time_eq(expected.as_bytes(), request.token.as_bytes())
     }
+}
+
+fn message_hook_effect_launches_match_room(
+    effect: &ExtensionEffect,
+    source_room: Option<&RoomJid>,
+) -> bool {
+    let ExtensionEffect::EnrichMessage(envelope) = effect else {
+        return true;
+    };
+    envelope.enrichments.iter().all(|enrichment| {
+        enrichment.launches.iter().all(|launch| {
+            let Some(source_room) = source_room else {
+                return false;
+            };
+            launch
+                .context
+                .room
+                .as_ref()
+                .is_some_and(|launch_room| launch_room == source_room)
+        })
+    })
 }
 
 fn sign_launch_token(
@@ -667,6 +779,7 @@ fn sign_launch_token(
     launch_id: &LaunchId,
     context: &LaunchContext,
     expires_at: Option<&crate::types::Timestamp>,
+    payload_digest: &str,
 ) -> String {
     type HmacSha256 = Hmac<Sha256>;
     let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key length");
@@ -678,14 +791,112 @@ fn sign_launch_token(
     mac.update(b"\0");
     mac.update(context.waddle_id.as_str().as_bytes());
     mac.update(b"\0");
+    if let Some(room) = &context.room {
+        mac.update(room.as_str().as_bytes());
+    }
+    mac.update(b"\0");
     if let Some(stanza_id) = &context.source_stanza_id {
         mac.update(stanza_id.as_str().as_bytes());
     }
+    mac.update(b"\0");
+    mac.update(payload_digest.as_bytes());
     mac.update(b"\0");
     if let Some(expires_at) = expires_at {
         mac.update(expires_at.as_str().as_bytes());
     }
     hex::encode(mac.finalize().into_bytes())
+}
+
+fn launch_payload_digest(payloads: &[crate::types::ExtensionPayload]) -> String {
+    digest_launch_payload_fields(launch_payload_fields(payloads))
+}
+
+fn submitted_launch_payload_digest(fields: &[crate::types::FormFieldValue]) -> String {
+    let pairs = fields
+        .iter()
+        .filter(|field| field.name.as_str().starts_with("payload#"))
+        .map(|field| {
+            (
+                field.name.as_str().to_string(),
+                field
+                    .values
+                    .iter()
+                    .map(|value| value.as_str().to_string())
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect();
+    digest_launch_payload_fields(pairs)
+}
+
+fn launch_payload_fields(
+    payloads: &[crate::types::ExtensionPayload],
+) -> Vec<(String, Vec<String>)> {
+    let mut fields = Vec::new();
+    for payload in payloads {
+        let prefix = format!("payload#{}", payload.root.local_name);
+        for attribute in &payload.root.attributes {
+            if attribute.namespace.is_none() && attribute.local_name != "xmlns" {
+                fields.push((
+                    format!("{prefix}#{}", attribute.local_name),
+                    vec![attribute.value.clone()],
+                ));
+            }
+        }
+        let text = payload
+            .root
+            .children
+            .iter()
+            .filter_map(|child| match child {
+                crate::types::XmlNode::Text(text) => Some(text.as_str()),
+                crate::types::XmlNode::Element(_) => None,
+            })
+            .collect::<String>()
+            .trim()
+            .to_string();
+        if !text.is_empty() {
+            fields.push((prefix, vec![text]));
+        }
+    }
+    fields
+}
+
+fn digest_launch_payload_fields(mut fields: Vec<(String, Vec<String>)>) -> String {
+    fields.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+    let mut hasher = Sha256::new();
+    for (name, values) in fields {
+        hasher.update(name.as_bytes());
+        hasher.update([0]);
+        for value in values {
+            hasher.update(value.as_bytes());
+            hasher.update([0]);
+        }
+        hasher.update([0xff]);
+    }
+    hex::encode(hasher.finalize())
+}
+
+fn pubsub_node_placeholder_value(
+    pattern: &str,
+    candidate: &str,
+    placeholder: &str,
+) -> Option<String> {
+    let pattern_parts = pattern.split(':').collect::<Vec<_>>();
+    let candidate_parts = candidate.split(':').collect::<Vec<_>>();
+    if pattern_parts.len() != candidate_parts.len() {
+        return None;
+    }
+    let mut value = None;
+    for (pattern_part, candidate_part) in pattern_parts.iter().zip(candidate_parts) {
+        if pattern_part.starts_with('{') && pattern_part.ends_with('}') {
+            if &pattern_part[1..pattern_part.len() - 1] == placeholder {
+                value = Some(candidate_part.to_string());
+            }
+        } else if *pattern_part != candidate_part {
+            return None;
+        }
+    }
+    value
 }
 
 fn default_launch_expiry() -> Option<crate::types::Timestamp> {
@@ -756,17 +967,60 @@ fn validate_manifest_against_module(
             );
         }
     }
-    if manifest.id.as_str() == "ai-chatbot" {
-        for capability in &manifest.capabilities {
-            if !module.capability_grants.contains(capability) {
-                bail!(
-                    "extension {} requires explicit operator grant for declared capability {}",
-                    module.name,
-                    capability.as_str()
-                );
-            }
+    if !manifest.routes.is_empty()
+        && !manifest.declares_capability(ExtensionCapability::UiDeclarative)
+    {
+        bail!(
+            "extension {} declared UI routes without ui.declarative capability",
+            module.name
+        );
+    }
+    let mut route_ids = HashSet::new();
+    for route in &manifest.routes {
+        if route.plugin != manifest.id {
+            bail!(
+                "extension {} declared route {} for plugin {}; route plugin must match manifest id {}",
+                module.name,
+                route.id,
+                route.plugin,
+                manifest.id
+            );
+        }
+        if !route_ids.insert(route.id.clone()) {
+            bail!(
+                "extension {} declared duplicate route id {}",
+                module.name,
+                route.id
+            );
+        }
+        if route.payload_namespace != expected_namespace {
+            bail!(
+                "extension {} declared route {} payload namespace {}; expected configured namespace {}",
+                module.name,
+                route.id,
+                route.payload_namespace,
+                expected_namespace
+            );
+        }
+        if !manifest.declares_pubsub_node(&route.state_node) {
+            bail!(
+                "extension {} declared route {} state node {} without a matching PubSub node declaration",
+                module.name,
+                route.id,
+                route.state_node
+            );
         }
     }
+    for capability in &manifest.capabilities {
+        if !module.capability_grants.contains(capability) {
+            bail!(
+                "extension {} requires explicit operator grant for declared capability {}",
+                module.name,
+                capability.as_str()
+            );
+        }
+    }
+    validate_outbound_http_origins(module, manifest)?;
     Ok(())
 }
 
@@ -787,71 +1041,42 @@ fn runtime_grants_for_module(
         .collect()
 }
 
-fn validate_ai_chatbot_runtime_config(
+fn validate_outbound_http_origins(
     module: &ExtensionModuleConfig,
     manifest: &ExtensionManifest,
-    config_json: &str,
 ) -> Result<()> {
-    if manifest.id.as_str() != "ai-chatbot" {
+    let declares_outbound_http =
+        manifest.declares_capability(ExtensionCapability::OutboundHttpRequest);
+    if !declares_outbound_http {
+        if !module.allowed_http_origins.is_empty() {
+            bail!(
+                "extension {} configured allowedHttpOrigins without declaring the outbound-http-request capability",
+                module.name
+            );
+        }
         return Ok(());
     }
-    let config: Value = serde_json::from_str(config_json).map_err(|error| {
-        anyhow::anyhow!(
-            "extension {} provider config is invalid JSON: {error}",
-            module.name
-        )
-    })?;
-    let endpoint = required_ai_config_string(&module.name, &config, "endpoint")?;
-    required_ai_config_string(&module.name, &config, "model")?;
-    required_ai_config_string(&module.name, &config, "api_key")?;
-    let endpoint_url = reqwest::Url::parse(endpoint).map_err(|error| {
-        anyhow::anyhow!(
-            "extension {} provider endpoint must be an absolute HTTPS URL: {error}",
-            module.name
-        )
-    })?;
-    if endpoint_url.scheme() != "https" {
-        bail!("extension {} provider endpoint must use HTTPS", module.name);
-    }
-    let endpoint_origin = runtime_http_origin(&endpoint_url).ok_or_else(|| {
-        anyhow::anyhow!(
-            "extension {} provider endpoint must include a host",
-            module.name
-        )
-    })?;
-    if !module
-        .allowed_http_origins
-        .iter()
-        .any(|origin| origin == &endpoint_origin)
-    {
-        bail!(
-            "extension {} allowedHttpOrigins must include provider origin {}",
-            module.name,
-            endpoint_origin
-        );
+    for origin in &module.allowed_http_origins {
+        let url = reqwest::Url::parse(origin).map_err(|error| {
+            anyhow::anyhow!(
+                "extension {} allowedHttpOrigins entry {origin} is not a valid URL: {error}",
+                module.name
+            )
+        })?;
+        if url.scheme() != "https" {
+            bail!(
+                "extension {} allowedHttpOrigins entry {origin} must use HTTPS",
+                module.name
+            );
+        }
+        if url.host_str().is_none() {
+            bail!(
+                "extension {} allowedHttpOrigins entry {origin} must include a host",
+                module.name
+            );
+        }
     }
     Ok(())
-}
-
-fn required_ai_config_string<'a>(
-    module_name: &str,
-    config: &'a Value,
-    key: &str,
-) -> Result<&'a str> {
-    config
-        .get(key)
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| anyhow::anyhow!("extension {module_name} provider config must set {key}"))
-}
-
-fn runtime_http_origin(url: &reqwest::Url) -> Option<String> {
-    let host = url.host_str()?;
-    let port = url
-        .port()
-        .map(|port| format!(":{port}"))
-        .unwrap_or_default();
-    Some(format!("{}://{}{}", url.scheme(), host, port))
 }
 
 fn room_stanza_id_from_payloads(msg: &Message, room: &str) -> Option<StanzaId> {
@@ -1046,11 +1271,16 @@ mod tests {
 
     use super::{
         detect_links, effective_module_config_json, effective_module_config_with_reader,
-        runtime_grants_for_module, EffectiveModuleConfigError, ExtensionManager,
-        MAX_DETECTED_LINKS,
+        message_hook_effect_launches_match_room, runtime_grants_for_module, sign_launch_token,
+        EffectiveModuleConfigError, ExtensionManager, LaunchValidationRequest, MAX_DETECTED_LINKS,
     };
     use crate::config::{ExtensionConfig, ExtensionModuleConfig};
-    use crate::types::{DisplayText, ExtensionCapability, ExtensionManifest, PluginId};
+    use crate::types::{
+        ActionId, CommandNode, DataFormValue, DisplayText, EnrichmentId, ExtensionCapability,
+        ExtensionEffect, ExtensionEnvelope, ExtensionManifest, ExtensionPayload, FormFieldValue,
+        LaunchContext, LaunchDescriptor, LaunchId, MessageEnrichment, PayloadNamespace, PluginId,
+        RoomJid, Timestamp, UiActionId, WaddleId, XmlAttribute, XmlElement, XmlNode,
+    };
 
     #[test]
     fn detects_urls() {
@@ -1075,6 +1305,153 @@ mod tests {
         let links = detect_links(body);
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].url, "https://github.com/waddle-social/waddle");
+    }
+
+    #[test]
+    fn launch_tokens_cover_payload_fields() {
+        let key = b"payload-signing-key";
+        let manager = ExtensionManager {
+            actors: Vec::new(),
+            feature_namespaces: Vec::new(),
+            route_descriptors: Vec::new(),
+            launch_signing_key: Some(key.to_vec()),
+        };
+        let plugin = PluginId::new("link-board").expect("plugin id");
+        let action = ActionId::new("save-link").expect("action id");
+        let launch_id = LaunchId::new("save-link-1").expect("launch id");
+        let context = LaunchContext {
+            waddle_id: WaddleId::new("alice@example.com").expect("waddle id"),
+            room: None,
+            source_stanza_id: None,
+        };
+        let namespace = PayloadNamespace::new("urn:waddle:link-board:1").expect("namespace");
+        let payload = ExtensionPayload::new(
+            namespace.clone(),
+            XmlElement::new(
+                namespace,
+                "link",
+                vec![XmlAttribute {
+                    namespace: None,
+                    local_name: "url".to_string(),
+                    value: "https://example.com/a".to_string(),
+                }],
+                vec![XmlNode::Text("https://example.com/a".to_string())],
+            )
+            .expect("xml element"),
+        )
+        .expect("payload");
+        let payload_digest = super::launch_payload_digest(&[payload]);
+        let token = sign_launch_token(
+            key,
+            &plugin,
+            &action,
+            &launch_id,
+            &context,
+            None,
+            &payload_digest,
+        );
+        let fields = vec![
+            FormFieldValue {
+                name: UiActionId::new("payload#link#url").expect("field"),
+                values: vec![DataFormValue::new("https://example.com/a")],
+            },
+            FormFieldValue {
+                name: UiActionId::new("payload#link").expect("field"),
+                values: vec![DataFormValue::new("https://example.com/a")],
+            },
+        ];
+        assert!(
+            manager.validates_launch_invocation(LaunchValidationRequest {
+                plugin_name: plugin.as_str(),
+                action_id: action.as_str(),
+                launch_id: &launch_id,
+                context: &context,
+                fields: &fields,
+                expires_at: None,
+                launch_token: &token,
+            })
+        );
+
+        let tampered_fields = vec![FormFieldValue {
+            name: UiActionId::new("payload#link#url").expect("field"),
+            values: vec![DataFormValue::new("https://example.com/b")],
+        }];
+        assert!(
+            !manager.validates_launch_invocation(LaunchValidationRequest {
+                plugin_name: plugin.as_str(),
+                action_id: action.as_str(),
+                launch_id: &launch_id,
+                context: &context,
+                fields: &tampered_fields,
+                expires_at: None,
+                launch_token: &token,
+            })
+        );
+
+        let room_context = LaunchContext {
+            waddle_id: WaddleId::new("alice@example.com").expect("waddle id"),
+            room: Some(RoomJid::new("pub@muc.example.com").expect("room jid")),
+            source_stanza_id: None,
+        };
+        assert!(
+            !manager.validates_launch_invocation(LaunchValidationRequest {
+                plugin_name: plugin.as_str(),
+                action_id: action.as_str(),
+                launch_id: &launch_id,
+                context: &room_context,
+                fields: &fields,
+                expires_at: None,
+                launch_token: &token,
+            })
+        );
+    }
+
+    #[test]
+    fn message_hook_launches_must_stay_in_source_room() {
+        let source_room = RoomJid::new("pub@muc.example.com").expect("room jid");
+
+        assert!(message_hook_effect_launches_match_room(
+            &enrich_effect_with_launch_room(Some("pub@muc.example.com")),
+            Some(&source_room),
+        ));
+        assert!(!message_hook_effect_launches_match_room(
+            &enrich_effect_with_launch_room(Some("other@muc.example.com")),
+            Some(&source_room),
+        ));
+        assert!(!message_hook_effect_launches_match_room(
+            &enrich_effect_with_launch_room(None),
+            Some(&source_room),
+        ));
+    }
+
+    fn enrich_effect_with_launch_room(room: Option<&str>) -> ExtensionEffect {
+        let namespace = PayloadNamespace::new("urn:waddle:decision-polls:1").expect("namespace");
+        ExtensionEffect::EnrichMessage(ExtensionEnvelope::new(vec![MessageEnrichment {
+            id: EnrichmentId::new("enrichment-1").expect("enrichment id"),
+            plugin: PluginId::new("decision-polls").expect("plugin id"),
+            capability: ExtensionCapability::MessageEnrich,
+            payload_namespace: namespace,
+            created_at: Timestamp::new("2026-04-27T12:00:00Z").expect("timestamp"),
+            source: None,
+            ui: Vec::new(),
+            payloads: Vec::new(),
+            launches: vec![LaunchDescriptor {
+                id: LaunchId::new("vote-yes").expect("launch id"),
+                plugin: PluginId::new("decision-polls").expect("plugin id"),
+                action: ActionId::new("vote").expect("action id"),
+                command_node: CommandNode::invoke(),
+                label: DisplayText::new("Vote yes").expect("label"),
+                context: LaunchContext {
+                    waddle_id: WaddleId::new("waddle-1").expect("waddle id"),
+                    room: room.map(|value| RoomJid::new(value).expect("room jid")),
+                    source_stanza_id: None,
+                },
+                payloads: Vec::new(),
+                fallback: None,
+                expires_at: None,
+                token: None,
+            }],
+        }]))
     }
 
     #[test]
@@ -1298,6 +1675,7 @@ mod tests {
                 ExtensionCapability::OutboundHttpRequest,
             ],
             commands: Vec::new(),
+            routes: Vec::new(),
             pubsub_nodes: Vec::new(),
             artifact: None,
         };
@@ -1315,6 +1693,7 @@ mod tests {
         let manager = ExtensionManager {
             actors: Vec::new(),
             feature_namespaces: vec!["urn:example:extension:1".to_string()],
+            route_descriptors: Vec::new(),
             launch_signing_key: None,
         };
 

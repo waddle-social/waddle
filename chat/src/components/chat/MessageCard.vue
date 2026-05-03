@@ -13,8 +13,6 @@ import {
   Lock,
   AlertCircle,
   CheckCircle2,
-  ClipboardList,
-  Gamepad2,
   LayoutDashboard,
   LoaderCircle,
 } from "lucide-vue-next";
@@ -878,9 +876,7 @@ watch(
           class="chat-extension-card flex min-w-0 items-start gap-3 rounded-lg border border-border bg-muted/25 p-3 text-left"
         >
           <span class="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-md bg-background text-foreground ring-1 ring-border">
-            <ClipboardList v-if="extensionPresentation(annotation).kind === 'links-task-board' || annotation.surfaceKind === 'board'" class="h-4 w-4 text-primary/80" aria-hidden="true" />
-            <Gamepad2 v-else-if="extensionPresentation(annotation).kind === 'pub-quiz' || annotation.surfaceKind === 'game'" class="h-4 w-4 text-success" aria-hidden="true" />
-            <MessageSquare v-else-if="annotation.surfaceKind === 'chat-bot'" class="h-4 w-4 text-primary/80" aria-hidden="true" />
+            <MessageSquare v-if="annotation.surfaceKind === 'chat-bot'" class="h-4 w-4 text-primary/80" aria-hidden="true" />
             <LayoutDashboard v-else class="h-4 w-4" aria-hidden="true" />
           </span>
           <span class="min-w-0 flex-1">
@@ -907,7 +903,7 @@ watch(
               </span>
             </span>
             <dl
-              v-if="extensionPresentation(annotation).kind === 'generic' && extensionCardDetails(annotation).length > 0"
+              v-if="extensionCardDetails(annotation).length > 0"
               class="mt-2 grid min-w-0 grid-cols-[max-content_minmax(0,1fr)] gap-x-2 gap-y-1"
             >
               <template

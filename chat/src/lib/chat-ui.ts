@@ -423,14 +423,14 @@ export function extensionCardDetails(annotation: ExtensionAnnotation, limit = 6)
   };
 
   for (const [key, value] of Object.entries(annotation.fields)) {
-    if (key === "surface" || key === "payloadNamespace") continue;
+    if (isInternalExtensionDetailKey(key)) continue;
     add(humanizeExtensionKey(key), value);
   }
 
   const payload = annotation.payloads?.[0];
   if (payload) {
     for (const [key, value] of Object.entries(payload.attributes)) {
-      if (key === "xmlns") continue;
+      if (isInternalExtensionDetailKey(key)) continue;
       add(humanizeExtensionKey(key), value);
       if (details.length >= limit) return details.slice(0, limit);
     }
@@ -444,11 +444,20 @@ export function extensionCardDetails(annotation: ExtensionAnnotation, limit = 6)
   return details.slice(0, limit);
 }
 
-type ExtensionPresentationKind =
-  | "links-task-board"
-  | "pub-quiz"
-  | "decision-polls"
-  | "generic";
+function isInternalExtensionDetailKey(key: string): boolean {
+  return key === "surface"
+    || key === "payloadNamespace"
+    || key === "xmlns"
+    || key === "poll-id"
+    || key === "option-count"
+    || key === "normalized-url"
+    || key === "source-stanza-id"
+    || key === "body-start"
+    || key === "body-end"
+    || /^option-\d+-(?:id|label)$/.test(key);
+}
+
+type ExtensionPresentationKind = "generic";
 
 interface ExtensionPresentationOption {
   id: string;
@@ -469,23 +478,13 @@ interface ExtensionPresentation {
 
 export function extensionPresentation(annotation: ExtensionAnnotation): ExtensionPresentation {
   const payload = annotation.payloads?.[0];
-  const plugin = annotation.extensionId;
-  if (plugin === "decision-polls" || payload?.namespace === "urn:waddle:decision-polls:1") {
-    return decisionPollPresentation(annotation, payload);
-  }
-  if (plugin === "pub-quiz" || payload?.namespace === "urn:waddle:pub-quiz:1") {
-    return pubQuizPresentation(annotation, payload);
-  }
-  if (plugin === "links-task-board" || payload?.namespace === "urn:waddle:links-task-board:1") {
-    return linksTaskBoardPresentation(annotation, payload);
-  }
   const summary = genericExtensionSummary(annotation, payload);
   return {
     kind: "generic",
     label: extensionSurfaceLabel(annotation.surfaceKind),
     title: annotation.title,
     ...(summary ? { summary } : {}),
-    options: [],
+    options: payloadOptions(payload),
     details: extensionCardDetails(annotation),
   };
 }
@@ -505,19 +504,6 @@ export function extensionActionStatusLabel(state?: "loading" | "success" | "warn
   }
 }
 
-function childText(payload: ExtensionPayloadElement | undefined, name: string): string | undefined {
-  const text = payload?.children.find((child) => child.name === name)?.text?.trim();
-  return text || undefined;
-}
-
-function payloadAttr(payload: ExtensionPayloadElement | undefined, ...names: string[]): string | undefined {
-  for (const name of names) {
-    const value = payload?.attributes[name]?.trim();
-    if (value) return value;
-  }
-  return undefined;
-}
-
 function genericExtensionSummary(
   annotation: ExtensionAnnotation,
   payload: ExtensionPayloadElement | undefined,
@@ -530,61 +516,28 @@ function genericExtensionSummary(
 }
 
 function payloadOptions(payload: ExtensionPayloadElement | undefined): ExtensionPresentationOption[] {
-  return payload?.children
+  if (!payload) return [];
+  const childOptions = payload.children
     .filter((child) => child.name === "option" || child.name === "answer")
     .map((child, index) => ({
       id: child.attributes.id ?? child.attributes["option-id"] ?? String(index),
       label: child.text?.trim() || child.attributes.label || child.attributes.title || `Option ${index + 1}`,
       ...(Number.isFinite(Number(child.attributes.votes)) ? { value: Number(child.attributes.votes) } : {}),
-    })) ?? [];
+    }));
+  if (childOptions.length > 0) return childOptions;
+  return attributeOptions(payload);
 }
 
-function decisionPollPresentation(
-  annotation: ExtensionAnnotation,
-  payload: ExtensionPayloadElement | undefined,
-): ExtensionPresentation {
-  const question = childText(payload, "question") ?? payloadAttr(payload, "question") ?? annotation.title;
-  const status = payloadAttr(payload, "status", "state") ?? payloadAttr(payload, "closes-at");
-  return {
-    kind: "decision-polls",
-    label: "Poll",
-    title: question,
-    ...(status ? { summary: status } : annotation.summary ? { summary: annotation.summary } : {}),
-    options: payloadOptions(payload),
-    details: extensionCardDetails(annotation, 3),
-  };
-}
-
-function pubQuizPresentation(
-  annotation: ExtensionAnnotation,
-  payload: ExtensionPayloadElement | undefined,
-): ExtensionPresentation {
-  const question = childText(payload, "question") ?? payloadAttr(payload, "question") ?? annotation.title;
-  const round = payloadAttr(payload, "round", "round-id");
-  return {
-    kind: "pub-quiz",
-    label: "Quiz",
-    title: question,
-    ...(round ? { summary: `Round ${round}` } : annotation.summary ? { summary: annotation.summary } : {}),
-    options: payloadOptions(payload),
-    details: extensionCardDetails(annotation, 3),
-  };
-}
-
-function linksTaskBoardPresentation(
-  annotation: ExtensionAnnotation,
-  payload: ExtensionPayloadElement | undefined,
-): ExtensionPresentation {
-  const title = payloadAttr(payload, "title", "name") ?? childText(payload, "title") ?? annotation.title;
-  const url = payloadAttr(payload, "url", "href");
-  const site = payloadAttr(payload, "site", "host");
-  return {
-    kind: "links-task-board",
-    label: payload?.name === "task" ? "Task" : "Link",
-    title,
-    ...(site || url ? { summary: site ?? url } : annotation.summary ? { summary: annotation.summary } : {}),
-    ...(url ? { primaryValue: url } : {}),
-    options: [],
-    details: extensionCardDetails(annotation, 4),
-  };
+function attributeOptions(payload: ExtensionPayloadElement): ExtensionPresentationOption[] {
+  const options: ExtensionPresentationOption[] = [];
+  for (let index = 0; index < 50; index += 1) {
+    const label = payload.attributes[`option-${index}-label`]?.trim();
+    const id = payload.attributes[`option-${index}-id`]?.trim();
+    if (!label && !id) break;
+    options.push({
+      id: id || String(index),
+      label: label || `Option ${index + 1}`,
+    });
+  }
+  return options;
 }

@@ -1,5 +1,5 @@
 [package]
-name = "links-task-board"
+name = "link-board"
 version = "0.1.0"
 edition = "2021"
 publish = false
@@ -8,4 +8,5 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
+sha2 = "0.10"
 wit-bindgen = "0.57.1"

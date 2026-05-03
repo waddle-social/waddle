@@ -140,7 +140,6 @@ describe("renderStyledBody", () => {
 
     expect(extensionCardDetails(annotation)).toEqual([
       { label: "Capability", value: "launch" },
-      { label: "Poll Id", value: "poll-1" },
       { label: "Mode", value: "single" },
       { label: "Closes At", value: "2026-04-27T11:00:00Z" },
       { label: "Question", value: "Ship the extension framework this week?" },
@@ -148,7 +147,7 @@ describe("renderStyledBody", () => {
     ]);
   });
 
-  test("renders decision poll extensions as member-facing poll presentations", () => {
+  test("renders decision poll extensions through generic presentations", () => {
     const annotation: ExtensionAnnotation = {
       extensionId: "decision-polls",
       annotationId: "poll-1",
@@ -194,18 +193,56 @@ describe("renderStyledBody", () => {
     };
 
     expect(extensionPresentation(annotation)).toMatchObject({
-      kind: "decision-polls",
-      label: "Poll",
+      kind: "generic",
+      label: "Utility",
       title: "Ship it?",
-      summary: "open",
       options: [
         { id: "yes", label: "Yes", value: 2 },
         { id: "no", label: "No", value: 1 },
       ],
     });
+    expect(extensionPresentation(annotation).summary).toBeUndefined();
   });
 
-  test("renders former assistant extension payloads through generic surface presentations", () => {
+  test("renders poll options stored as payload attributes without exposing internal fields", () => {
+    const annotation: ExtensionAnnotation = {
+      extensionId: "decision-polls",
+      annotationId: "poll-1",
+      surfaceKind: "utility-panel",
+      title: "Ship it?",
+      summary: "urn:waddle:decision-polls:1",
+      payloadNamespace: "urn:waddle:decision-polls:1",
+      fields: {
+        payloadNamespace: "urn:waddle:decision-polls:1",
+      },
+      payloads: [{
+        namespace: "urn:waddle:decision-polls:1",
+        name: "poll",
+        attributes: {
+          xmlns: "urn:waddle:decision-polls:1",
+          "poll-id": "poll-1",
+          "option-count": "2",
+          "option-0-id": "yes",
+          "option-0-label": "Yes",
+          "option-1-id": "no",
+          "option-1-label": "No",
+        },
+        children: [],
+      }],
+      actions: [],
+    };
+
+    expect(extensionPresentation(annotation)).toMatchObject({
+      kind: "generic",
+      options: [
+        { id: "yes", label: "Yes" },
+        { id: "no", label: "No" },
+      ],
+      details: [],
+    });
+  });
+
+  test("renders active extension payloads through generic surface presentations", () => {
     const chatbotAnnotation: ExtensionAnnotation = {
       extensionId: "ai-chatbot",
       annotationId: "chatbot-1",
@@ -232,29 +269,25 @@ describe("renderStyledBody", () => {
       }],
       actions: [],
     };
-    const canvasAnnotation: ExtensionAnnotation = {
-      extensionId: "ai-assistant-canvas",
-      annotationId: "canvas-1",
-      surfaceKind: "dynamic-canvas",
-      title: "Canvas card",
-      summary: "urn:waddle:ai-assistant-canvas:1",
-      payloadNamespace: "urn:waddle:ai-assistant-canvas:1",
+    const linkAnnotation: ExtensionAnnotation = {
+      extensionId: "link-board",
+      annotationId: "link-1",
+      surfaceKind: "message-card",
+      title: "Link Board",
+      summary: "urn:waddle:link-board:1",
+      payloadNamespace: "urn:waddle:link-board:1",
       fields: {
-        payloadNamespace: "urn:waddle:ai-assistant-canvas:1",
+        payloadNamespace: "urn:waddle:link-board:1",
       },
       payloads: [{
-        namespace: "urn:waddle:ai-assistant-canvas:1",
-        name: "canvas",
+        namespace: "urn:waddle:link-board:1",
+        name: "link",
         attributes: {
-          xmlns: "urn:waddle:ai-assistant-canvas:1",
+          xmlns: "urn:waddle:link-board:1",
+          url: "https://example.org/post",
         },
-        children: [{
-          namespace: "urn:waddle:ai-assistant-canvas:1",
-          name: "prompt",
-          attributes: {},
-          text: "Sketch a task board.",
-          children: [],
-        }],
+        text: "https://example.org/post",
+        children: [],
       }],
       actions: [],
     };
@@ -266,12 +299,12 @@ describe("renderStyledBody", () => {
       summary: "Use the generic card renderer.",
       details: [{ label: "Answer", value: "Use the generic card renderer." }],
     });
-    expect(extensionPresentation(canvasAnnotation)).toMatchObject({
+    expect(extensionPresentation(linkAnnotation)).toMatchObject({
       kind: "generic",
-      label: "Dynamic canvas",
-      title: "Canvas card",
-      summary: "Sketch a task board.",
-      details: [{ label: "Prompt", value: "Sketch a task board." }],
+      label: "Extension",
+      title: "Link Board",
+      summary: "https://example.org/post",
+      details: [{ label: "Url", value: "https://example.org/post" }],
     });
   });
 
@@ -279,7 +312,7 @@ describe("renderStyledBody", () => {
     const annotation: ExtensionAnnotation = {
       extensionId: "unknown-extension",
       annotationId: "generic-1",
-      surfaceKind: "generic",
+      surfaceKind: "message-card",
       title: "Generic card",
       summary: "urn:waddle:unknown-extension:1",
       payloadNamespace: "urn:waddle:unknown-extension:1",

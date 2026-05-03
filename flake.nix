@@ -62,7 +62,6 @@
               ./server/Cargo.lock
               ./server/crates
               ./server/extensions
-              ./server/test-fixtures
               ./server/wit
             ];
           };
@@ -197,7 +196,6 @@
               ./server/Cargo.lock
               ./server/crates
               ./server/extensions
-              ./server/test-fixtures
               ./server/wit
             ];
           };
@@ -284,7 +282,7 @@
             baseArgs
             // {
               CARGO_BUILD_TARGET = "wasm32-wasip2";
-              cargoExtraArgs = "--locked --package ai-assistant-canvas --package ai-chatbot --package decision-polls --package links-task-board --package pub-quiz";
+              cargoExtraArgs = "--locked --package ai-chatbot --package decision-polls --package link-board";
               cargoCheckExtraArgs = "";
               cargoBuildExtraArgs = "";
               cargoTestExtraArgs = "";
@@ -330,7 +328,7 @@
               pname = "waddle-server-extension-modules";
               CARGO_BUILD_TARGET = "wasm32-wasip2";
               cargoArtifacts = extensionWasmArtifacts;
-              cargoExtraArgs = "--locked --package ai-assistant-canvas --package ai-chatbot --package decision-polls --package links-task-board --package pub-quiz";
+              cargoExtraArgs = "--locked --package ai-chatbot --package decision-polls --package link-board";
             }
           );
           waddle-server-xmpp-unit-tests = craneLib.cargoTest (
