@@ -13,8 +13,8 @@
 //!   sets via `<set>` elements with max, after, before, index, first, last, count.
 //! - **XEP-0085**: Chat State Notifications - Typing indicators and
 //!   conversational state (active, composing, paused, inactive, gone).
-//! - **XEP-0092**: Software Version - Name, package version, and host OS
-//!   reported via `jabber:iq:version`.
+//! - **XEP-0092**: Software Version - Name and package version reported via
+//!   `jabber:iq:version`, with the optional OS field omitted by default.
 //! - **XEP-0184**: Message Delivery Receipts - Request and acknowledge
 //!   message delivery with `<request/>` and `<received/>` elements.
 //! - **XEP-0106**: JID Escaping - Escape/unescape special characters
@@ -37,8 +37,8 @@
 //!   MUC occupants via `<hats/>` in presence, with well-known URIs.
 //! - **XEP-0319**: Last User Interaction in Presence - Idle detection
 //!   via `<idle since='...'/>` in presence stanzas.
-//! - **XEP-0333**: Displayed Markers - Read receipts via `<markable/>`,
-//!   `<displayed/>`, `<received/>`, and `<acknowledged/>` elements.
+//! - **XEP-0333**: Displayed Markers - `<markable/>` requests and
+//!   `<displayed/>` updates for messages that have been shown.
 //! - **XEP-0372**: References - Structured @mentions and data references
 //!   via `<reference/>` elements with type, position, and URI.
 //! - **XEP-0377**: Spam Reporting - Abuse/spam reports with reasons
@@ -240,7 +240,8 @@ pub use xep0077::{
 };
 
 pub use xep0115::{
-    build_caps_element, build_waddle_caps_element, compute_caps_hash, ensure_caps_payload,
+    build_caps_element, build_caps_element_with_extensions, build_waddle_caps_element,
+    compute_caps_hash, compute_caps_hash_with_extensions, ensure_caps_payload,
     extract_caps_from_presence, is_caps_node_query, parse_caps_node, CachedDiscoInfo, Caps,
     CapsCache, NS_CAPS, WADDLE_CAPS_NODE,
 };
@@ -307,7 +308,8 @@ pub use xep0172::{
 };
 
 pub use xep0202::{
-    build_time_response, build_time_response_utc, is_time_query, parse_time_response, NS_TIME,
+    build_current_time_response, build_time_response, is_time_query, parse_time_response,
+    EntityTime, NS_TIME,
 };
 
 pub use xep0203::{
@@ -334,8 +336,9 @@ pub use xep0297::{
 
 pub use xep0308::{
     build_correction_message, build_replace_element, extract_correction_from_message,
-    extract_replaces_id, is_correction_message, is_replace_element, set_correction,
-    strip_correction, Correction, CorrectionCarrier, CorrectionError, NS_MESSAGE_CORRECT,
+    extract_replaces_id, is_correction_message, is_replace_element, parse_correction_from_message,
+    set_correction, strip_correction, Correction, CorrectionCarrier, CorrectionError,
+    NS_MESSAGE_CORRECT,
 };
 
 pub use xep0317::{
@@ -349,10 +352,9 @@ pub use xep0319::{
 };
 
 pub use xep0333::{
-    add_markable, build_acknowledged_element, build_displayed_element, build_displayed_message,
-    build_markable_element, build_received_element, extract_marker_from_message, extract_marker_id,
-    has_markable, has_marker, is_marker_element, is_standalone_marker, strip_markers, Marker,
-    MarkerCarrier, MarkerError, NS_CHAT_MARKERS,
+    add_markable, build_displayed_element, build_displayed_message, build_markable_element,
+    extract_marker_from_message, extract_marker_id, has_markable, has_marker, is_marker_element,
+    is_standalone_marker, strip_markers, Marker, MarkerCarrier, MarkerError, NS_CHAT_MARKERS,
 };
 
 pub use xep0334::{

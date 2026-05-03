@@ -40,6 +40,9 @@ pub enum ReferenceError {
     /// Missing required `type` attribute.
     #[error("reference missing type attribute")]
     MissingType,
+    /// Missing required `uri` attribute.
+    #[error("reference missing uri attribute")]
+    MissingUri,
     /// Invalid begin/end range.
     #[error("invalid reference range: begin={begin}, end={end}")]
     InvalidRange { begin: usize, end: usize },
@@ -88,8 +91,8 @@ pub struct Reference {
     pub begin: Option<usize>,
     /// The end index (exclusive) in the body text.
     pub end: Option<usize>,
-    /// The URI of the referenced entity (e.g., `xmpp:alice@example.com`).
-    pub uri: Option<String>,
+    /// The required URI of the referenced entity (e.g., `xmpp:alice@example.com`).
+    pub uri: String,
     /// Optional anchor text (for display if body range unavailable).
     pub anchor: Option<String>,
 }
@@ -101,7 +104,7 @@ impl Reference {
             ref_type: ReferenceType::Mention,
             begin: None,
             end: None,
-            uri: Some(uri.into()),
+            uri: uri.into(),
             anchor: None,
         }
     }
@@ -112,7 +115,7 @@ impl Reference {
             ref_type: ReferenceType::Mention,
             begin: Some(begin),
             end: Some(end),
-            uri: Some(uri.into()),
+            uri: uri.into(),
             anchor: None,
         }
     }
@@ -123,7 +126,7 @@ impl Reference {
             ref_type: ReferenceType::Data,
             begin: None,
             end: None,
-            uri: Some(uri.into()),
+            uri: uri.into(),
             anchor: None,
         }
     }
@@ -141,7 +144,7 @@ impl Reference {
 
     /// Extract the bare JID from the URI (strips `xmpp:` prefix).
     pub fn bare_jid(&self) -> Option<&str> {
-        self.uri.as_deref().and_then(|u| u.strip_prefix("xmpp:"))
+        self.uri.strip_prefix("xmpp:")
     }
 }
 
@@ -163,7 +166,7 @@ pub trait ReferenceCarrier {
         let xmpp_uri = format!("xmpp:{jid}");
         self.references()
             .iter()
-            .any(|r| r.is_mention() && r.uri.as_deref() == Some(&xmpp_uri))
+            .any(|r| r.is_mention() && r.uri == xmpp_uri)
     }
 
     /// Returns `true` if this carrier has any references.
@@ -217,8 +220,9 @@ pub fn parse_reference_element(elem: &Element) -> Result<Reference, ReferenceErr
     let end = elem.attr("end").and_then(|s| s.parse().ok());
     let uri = elem
         .attr("uri")
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_owned());
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.to_owned())
+        .ok_or(ReferenceError::MissingUri)?;
     let anchor = elem
         .attr("anchor")
         .filter(|s| !s.is_empty())
@@ -238,7 +242,7 @@ pub fn extract_mention_uris(msg: &Message) -> Vec<String> {
     extract_references_from_message(msg)
         .into_iter()
         .filter(|r| r.is_mention())
-        .filter_map(|r| r.uri)
+        .map(|r| r.uri)
         .collect()
 }
 
@@ -264,9 +268,7 @@ pub fn build_reference_element(reference: &Reference) -> Element {
     if let Some(end) = reference.end {
         builder = builder.attr("end", end.to_string());
     }
-    if let Some(ref uri) = reference.uri {
-        builder = builder.attr("uri", uri.as_str());
-    }
+    builder = builder.attr("uri", reference.uri.as_str());
     if let Some(ref anchor) = reference.anchor {
         builder = builder.attr("anchor", anchor.as_str());
     }
@@ -317,7 +319,7 @@ mod tests {
         assert!(refs[0].is_mention());
         assert_eq!(refs[0].begin, Some(6));
         assert_eq!(refs[0].end, Some(12));
-        assert_eq!(refs[0].uri.as_deref(), Some("xmpp:alice@example.com"));
+        assert_eq!(refs[0].uri, "xmpp:alice@example.com");
         assert_eq!(refs[0].bare_jid(), Some("alice@example.com"));
     }
 
@@ -350,6 +352,54 @@ mod tests {
         let msg =
             Message::try_from(xml.parse::<Element>().expect("valid xml")).expect("valid message");
         // Missing type → skipped (not an error, just ignored)
+        assert!(extract_references_from_message(&msg).is_empty());
+    }
+
+    #[test]
+    fn test_parse_reference_requires_uri() {
+        let elem = Element::builder("reference", NS_REFERENCE)
+            .attr("type", "mention")
+            .build();
+
+        assert!(matches!(
+            parse_reference_element(&elem),
+            Err(ReferenceError::MissingUri)
+        ));
+    }
+
+    #[test]
+    fn test_reference_missing_uri_skipped() {
+        let xml = "<message xmlns='jabber:client' type='groupchat'>\
+                    <body>Hello</body>\
+                    <reference xmlns='urn:xmpp:reference:0' type='mention'/>\
+                    </message>";
+        let msg =
+            Message::try_from(xml.parse::<Element>().expect("valid xml")).expect("valid message");
+
+        assert!(extract_references_from_message(&msg).is_empty());
+    }
+
+    #[test]
+    fn test_reference_empty_uri_skipped() {
+        let xml = "<message xmlns='jabber:client' type='groupchat'>\
+                    <body>Hello</body>\
+                    <reference xmlns='urn:xmpp:reference:0' type='mention' uri=''/>\
+                    </message>";
+        let msg =
+            Message::try_from(xml.parse::<Element>().expect("valid xml")).expect("valid message");
+
+        assert!(extract_references_from_message(&msg).is_empty());
+    }
+
+    #[test]
+    fn test_reference_whitespace_uri_skipped() {
+        let xml = "<message xmlns='jabber:client' type='groupchat'>\
+                    <body>Hello</body>\
+                    <reference xmlns='urn:xmpp:reference:0' type='mention' uri='   '/>\
+                    </message>";
+        let msg =
+            Message::try_from(xml.parse::<Element>().expect("valid xml")).expect("valid message");
+
         assert!(extract_references_from_message(&msg).is_empty());
     }
 

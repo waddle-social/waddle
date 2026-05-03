@@ -198,10 +198,12 @@ fn rich_archive_payload(message: &Message) -> Option<ArchivedRichMessage> {
                     RichMessageId::new(id).map(|target_id| {
                         ArchivedRichPayload::Retraction(ArchivedRetraction {
                             target_id,
-                            stamp: chrono::DateTime::parse_from_rfc3339(&retracted.stamp)
-                                .ok()
+                            stamp: retracted
+                                .stamp
+                                .as_deref()
+                                .and_then(|stamp| chrono::DateTime::parse_from_rfc3339(stamp).ok())
                                 .map(|stamp| stamp.with_timezone(&Utc)),
-                            retraction_id: None,
+                            retraction_id: RichMessageId::new(retracted.retraction_id),
                         })
                     })
                 }),
@@ -223,10 +225,7 @@ fn rich_archive_payload(message: &Message) -> Option<ArchivedRichMessage> {
         });
 
     let reply = parse_reply_from_message(message).and_then(|reply| {
-        RichMessageId::new(reply.id).map(|id| ArchivedReply {
-            id,
-            to: reply.to.and_then(|to| to.parse().ok()),
-        })
+        RichMessageId::new(reply.id).map(|id| ArchivedReply { id, to: reply.to })
     });
 
     let references = extract_references_from_message(message)
@@ -237,7 +236,7 @@ fn rich_archive_payload(message: &Message) -> Option<ArchivedRichMessage> {
                 ref_type,
                 begin: reference.begin.and_then(|value| value.try_into().ok()),
                 end: reference.end.and_then(|value| value.try_into().ok()),
-                uri: reference.uri.and_then(RichText::new),
+                uri: RichText::new(reference.uri),
                 anchor: reference.anchor.and_then(RichText::new),
             })
         })

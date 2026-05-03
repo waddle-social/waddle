@@ -135,8 +135,10 @@ fn has_substantive_body(message: &Message) -> bool {
 fn has_archivable_payload(message: &Message) -> bool {
     use crate::xep::{xep0308, xep0424};
     xep0308::is_correction_message(message)
-        || xep0424::is_retraction_message(message)
-        || xep0424::is_tombstone_message(message)
+        || matches!(
+            xep0424::extract_retraction_from_message(message),
+            Some(xep0424::RetractionKind::Request(_))
+        )
 }
 
 #[cfg(test)]
@@ -176,6 +178,7 @@ mod tests {
             blocklist: &bl,
             carbons: CarbonsState::Disabled,
             muc_occupancy: &occ,
+            has_live_transport: true,
             id_gen: &gen,
         };
         let ctx = MessageContext::derive(env, msg);
@@ -254,6 +257,26 @@ mod tests {
         let outcome = run(&local, &mut msg);
         let archives = extract_archive_events(&outcome);
         assert_eq!(archives.len(), 1);
+    }
+
+    #[test]
+    fn xep_0424_tombstones_are_not_archived_as_inbound_messages() {
+        let local = full("alice@example.com/web");
+        let mut msg = Message::new(Some(jid::Jid::from(bare("bob@example.com"))));
+        msg.from = Some(jid::Jid::from(local.clone()));
+        msg.type_ = MessageType::Chat;
+        msg.payloads.push(
+            Element::builder("retracted", crate::xep::xep0424::NS_MESSAGE_RETRACT)
+                .attr("id", "retract-1")
+                .attr("stamp", "2024-06-01T09:00:00Z")
+                .build(),
+        );
+
+        let outcome = run(&local, &mut msg);
+        assert!(
+            extract_archive_events(&outcome).is_empty(),
+            "archive-side tombstones must not be treated as inbound archivable messages"
+        );
     }
 
     #[test]

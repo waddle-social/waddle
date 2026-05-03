@@ -41,6 +41,8 @@ pub struct MessageContext<'a> {
     pub carbons: CarbonsState,
     /// Snapshot of the local connection's XEP-0045 occupancy.
     pub muc_occupancy: &'a MucOccupancy,
+    /// Whether this dispatch represents a live client transport.
+    pub has_live_transport: bool,
     /// Source of fresh, opaque XEP-0359 stanza-id values.
     pub id_gen: &'a dyn IdGenerator,
 }
@@ -56,6 +58,7 @@ impl<'a> MessageContext<'a> {
             blocklist: env.blocklist,
             carbons: env.carbons,
             muc_occupancy: env.muc_occupancy,
+            has_live_transport: env.has_live_transport,
             id_gen: env.id_gen,
         }
     }
@@ -79,6 +82,8 @@ pub struct MessageContextEnv<'a> {
     pub carbons: CarbonsState,
     /// Snapshot of the local connection's XEP-0045 occupancy.
     pub muc_occupancy: &'a MucOccupancy,
+    /// Whether this dispatch represents a live client transport.
+    pub has_live_transport: bool,
     /// Source of fresh, opaque XEP-0359 stanza-id values.
     pub id_gen: &'a dyn IdGenerator,
 }
@@ -106,6 +111,7 @@ mod tests {
             blocklist: &bl,
             carbons: CarbonsState::Enabled,
             muc_occupancy: &occ,
+            has_live_transport: true,
             id_gen: &gen,
         };
 

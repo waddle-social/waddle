@@ -28,6 +28,7 @@
 //! - Clients MUST NOT trust `<stanza-id/>` from other clients; only the
 //!   `by` entity that matches the server/MUC JID is authoritative.
 
+use jid::BareJid;
 use minidom::Element;
 use xmpp_parsers::message::Message;
 
@@ -53,6 +54,22 @@ impl StanzaId {
     }
 }
 
+fn stanza_id_by_matches(existing: &str, by: &str) -> bool {
+    match (existing.parse::<BareJid>().ok(), by.parse::<BareJid>().ok()) {
+        (Some(existing), Some(expected)) => existing == expected,
+        _ => existing == by,
+    }
+}
+
+fn stanza_id_matches_by(elem: &Element, by: &str) -> bool {
+    if !is_stanza_id_element(elem) {
+        return false;
+    }
+
+    elem.attr("by")
+        .is_some_and(|existing| stanza_id_by_matches(existing, by))
+}
+
 /// A client-assigned origin ID.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OriginId {
@@ -76,7 +93,7 @@ pub trait StanzaIdCarrier {
     fn stanza_id_by(&self, by: &str) -> Option<String> {
         self.stanza_ids()
             .into_iter()
-            .find(|sid| sid.by == by)
+            .find(|sid| stanza_id_by_matches(&sid.by, by))
             .map(|sid| sid.id)
     }
 
@@ -140,7 +157,7 @@ pub fn extract_stanza_ids(msg: &Message) -> Vec<StanzaId> {
 pub fn extract_stanza_id_by(msg: &Message, by: &str) -> Option<String> {
     extract_stanza_ids(msg)
         .into_iter()
-        .find(|sid| sid.by == by)
+        .find(|sid| stanza_id_by_matches(&sid.by, by))
         .map(|sid| sid.id)
 }
 
@@ -181,6 +198,7 @@ pub fn build_origin_id_element(id: &str) -> Element {
 /// This is the primary function used by the server when archiving messages.
 /// Multiple stanza-ids from different entities may coexist.
 pub fn add_stanza_id(msg: &mut Message, id: &str, by: &str) {
+    remove_stanza_ids_by(msg, by);
     msg.payloads.push(build_stanza_id_element(id, by));
 }
 
@@ -193,8 +211,7 @@ pub fn add_origin_id(msg: &mut Message, id: &str) {
 
 /// Remove all stanza-id elements assigned by a specific entity.
 pub fn remove_stanza_ids_by(msg: &mut Message, by: &str) {
-    msg.payloads
-        .retain(|e| !(is_stanza_id_element(e) && e.attr("by") == Some(by)));
+    msg.payloads.retain(|e| !stanza_id_matches_by(e, by));
 }
 
 /// Strip all stanza-id and origin-id elements from a message.
@@ -277,6 +294,25 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_stanza_id_by_matches_case_folded_bare_jid() {
+        let xml = "<message xmlns='jabber:client' type='groupchat'>\
+                    <body>Hello</body>\
+                    <stanza-id xmlns='urn:xmpp:sid:0' id='arc-1' by='room@muc.example.COM'/>\
+                    </message>";
+        let msg =
+            Message::try_from(xml.parse::<Element>().expect("valid xml")).expect("valid message");
+
+        assert_eq!(
+            extract_stanza_id_by(&msg, "room@muc.example.com"),
+            Some("arc-1".to_owned())
+        );
+        assert_eq!(
+            msg.stanza_id_by("room@muc.example.com"),
+            Some("arc-1".to_owned())
+        );
+    }
+
+    #[test]
     fn test_extract_origin_id() {
         let xml = "<message xmlns='jabber:client' type='chat'>\
                     <body>Hello</body>\
@@ -337,6 +373,19 @@ mod tests {
     }
 
     #[test]
+    fn test_add_stanza_id_replaces_existing_same_by() {
+        let mut msg = Message::new(None::<jid::Jid>);
+        msg.payloads
+            .push(build_stanza_id_element("spoofed", "alice@example.com"));
+
+        add_stanza_id(&mut msg, "fresh", "alice@example.com");
+
+        let ids = extract_stanza_ids(&msg);
+        assert_eq!(ids.len(), 1);
+        assert_eq!(ids[0], StanzaId::new("fresh", "alice@example.com"));
+    }
+
+    #[test]
     fn test_add_origin_id() {
         let mut msg = Message::new(None::<jid::Jid>);
         add_origin_id(&mut msg, "client-1");
@@ -358,6 +407,20 @@ mod tests {
         let mut msg = Message::new(None::<jid::Jid>);
         add_stanza_id(&mut msg, "arc-1", "room@muc.example.com");
         add_stanza_id(&mut msg, "arc-2", "example.com");
+
+        remove_stanza_ids_by(&mut msg, "room@muc.example.com");
+        let ids = extract_stanza_ids(&msg);
+        assert_eq!(ids.len(), 1);
+        assert_eq!(ids[0].by, "example.com");
+    }
+
+    #[test]
+    fn test_remove_stanza_ids_by_matches_case_folded_bare_jid() {
+        let mut msg = Message::new(None::<jid::Jid>);
+        msg.payloads
+            .push(build_stanza_id_element("arc-1", "room@muc.example.COM"));
+        msg.payloads
+            .push(build_stanza_id_element("arc-2", "example.com"));
 
         remove_stanza_ids_by(&mut msg, "room@muc.example.com");
         let ids = extract_stanza_ids(&msg);

@@ -452,8 +452,12 @@ impl ExtensionHostAdapter {
         }
         if let Some(reply_to) = reply_to.as_ref() {
             let mut reply = waddle_xmpp::xep::ReplyReference::new(reply_to.id.as_str());
-            if let Some(to) = reply_to.to.as_ref() {
-                reply = reply.with_to(to.as_str());
+            if let Some(to) = reply_to
+                .to
+                .as_ref()
+                .and_then(|to| to.as_str().parse::<Jid>().ok())
+            {
+                reply = reply.with_to(to);
             }
             waddle_xmpp::xep::set_reply_payload(&mut message, &reply);
         }
@@ -847,6 +851,9 @@ impl ext_host::ExtensionHostTools for ExtensionHostAdapter {
                 .text
                 .and_then(|text| waddle_xmpp::mam::RichText::new(text.into_string())),
             max: Some(query.max_results),
+            filter_before_id: None,
+            filter_after_id: None,
+            ids: Vec::new(),
             before_id: Some(String::new()),
             after_id: None,
         };

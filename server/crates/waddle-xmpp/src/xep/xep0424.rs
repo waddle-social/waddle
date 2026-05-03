@@ -16,7 +16,7 @@
 //! Tombstone (server-side replacement in archives):
 //! ```xml
 //! <message type='groupchat' from='room@muc.example.com/nick' id='original-msg-id'>
-//!   <retracted stamp='2024-01-15T12:00:00Z' xmlns='urn:xmpp:message-retract:1'/>
+//!   <retracted xmlns='urn:xmpp:message-retract:1' id='retract-1' stamp='2024-01-15T12:00:00Z'/>
 //! </message>
 //! ```
 //!
@@ -41,9 +41,9 @@ pub enum RetractionError {
     /// A `<retract/>` element is missing its required `id` attribute.
     #[error("retract element missing id attribute")]
     MissingId,
-    /// A `<retracted/>` element is missing its required `stamp` attribute.
-    #[error("retracted element missing stamp attribute")]
-    MissingStamp,
+    /// A `<retracted/>` element is missing its required `id` attribute.
+    #[error("retracted element missing retraction id attribute")]
+    MissingRetractionId,
 }
 
 /// A message retraction request.
@@ -65,15 +65,18 @@ impl Retraction {
 /// A tombstone indicating a message was retracted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Retracted {
+    /// The id of the retraction message that produced this tombstone.
+    pub retraction_id: String,
     /// The timestamp when the message was retracted (ISO 8601 / XEP-0082).
-    pub stamp: String,
+    pub stamp: Option<String>,
 }
 
 impl Retracted {
     /// Create a new retracted tombstone.
-    pub fn new(stamp: impl Into<String>) -> Self {
+    pub fn new(retraction_id: impl Into<String>, stamp: Option<String>) -> Self {
         Self {
-            stamp: stamp.into(),
+            retraction_id: retraction_id.into(),
+            stamp,
         }
     }
 }
@@ -155,9 +158,12 @@ pub fn extract_retraction_from_message(msg: &Message) -> Option<RetractionKind> 
                 }
             }
             "retracted" => {
-                let stamp = elem.attr("stamp").unwrap_or("").to_owned();
-                if !stamp.is_empty() {
-                    return Some(RetractionKind::Tombstone(Retracted::new(stamp)));
+                let retraction_id = elem.attr("id").unwrap_or("").to_owned();
+                if !retraction_id.is_empty() {
+                    return Some(RetractionKind::Tombstone(Retracted::new(
+                        retraction_id,
+                        elem.attr("stamp").map(ToOwned::to_owned),
+                    )));
                 }
             }
             _ => {}
@@ -185,11 +191,13 @@ pub fn build_retract_element(original_id: &str) -> Element {
         .build()
 }
 
-/// Build a `<retracted stamp='...' xmlns='urn:xmpp:message-retract:1'/>` tombstone element.
-pub fn build_retracted_element(stamp: &str) -> Element {
-    Element::builder("retracted", NS_MESSAGE_RETRACT)
-        .attr("stamp", stamp)
-        .build()
+/// Build a `<retracted id='...' xmlns='urn:xmpp:message-retract:1'/>` tombstone element.
+pub fn build_retracted_element(retraction_id: &str, stamp: Option<&str>) -> Element {
+    let mut builder = Element::builder("retracted", NS_MESSAGE_RETRACT).attr("id", retraction_id);
+    if let Some(stamp) = stamp {
+        builder = builder.attr("stamp", stamp);
+    }
+    builder.build()
 }
 
 /// Build a retraction request message.
@@ -219,13 +227,15 @@ pub fn build_tombstone_message(
     to: impl Into<Option<jid::Jid>>,
     from: impl Into<Option<jid::Jid>>,
     original_id: &str,
-    stamp: &str,
+    retraction_id: &str,
+    stamp: Option<&str>,
 ) -> Message {
     let mut msg = Message::new(to.into());
     msg.from = from.into();
     msg.type_ = xmpp_parsers::message::MessageType::Groupchat;
     msg.id = Some(original_id.to_owned());
-    msg.payloads.push(build_retracted_element(stamp));
+    msg.payloads
+        .push(build_retracted_element(retraction_id, stamp));
     msg
 }
 
@@ -264,6 +274,7 @@ mod tests {
     #[test]
     fn test_is_retracted_element() {
         let retracted = Element::builder("retracted", NS_MESSAGE_RETRACT)
+            .attr("id", "retract-1")
             .attr("stamp", "2024-01-15T12:00:00Z")
             .build();
         assert!(is_retracted_element(&retracted));
@@ -287,7 +298,7 @@ mod tests {
     #[test]
     fn test_is_tombstone_message() {
         let xml = "<message xmlns='jabber:client' type='groupchat' id='orig-1'>\
-                    <retracted xmlns='urn:xmpp:message-retract:1' stamp='2024-01-15T12:00:00Z'/>\
+                    <retracted xmlns='urn:xmpp:message-retract:1' id='retract-1' stamp='2024-01-15T12:00:00Z'/>\
                     </message>";
         let msg =
             Message::try_from(xml.parse::<Element>().expect("valid xml")).expect("valid message");
@@ -311,7 +322,7 @@ mod tests {
     #[test]
     fn test_extract_retraction_tombstone() {
         let xml = "<message xmlns='jabber:client' type='groupchat'>\
-                    <retracted xmlns='urn:xmpp:message-retract:1' stamp='2024-06-01T09:00:00Z'/>\
+                    <retracted xmlns='urn:xmpp:message-retract:1' id='retract-7' stamp='2024-06-01T09:00:00Z'/>\
                     </message>";
         let msg =
             Message::try_from(xml.parse::<Element>().expect("valid xml")).expect("valid message");
@@ -319,7 +330,10 @@ mod tests {
         let kind = extract_retraction_from_message(&msg).expect("has retraction");
         assert_eq!(
             kind,
-            RetractionKind::Tombstone(Retracted::new("2024-06-01T09:00:00Z"))
+            RetractionKind::Tombstone(Retracted::new(
+                "retract-7",
+                Some("2024-06-01T09:00:00Z".to_owned()),
+            ))
         );
     }
 
@@ -337,6 +351,29 @@ mod tests {
         let msg =
             Message::try_from(xml.parse::<Element>().expect("valid xml")).expect("valid message");
         assert!(extract_retraction_from_message(&msg).is_none());
+    }
+
+    #[test]
+    fn test_extract_tombstone_missing_id_ignored() {
+        let xml = "<message xmlns='jabber:client' type='groupchat'>\
+                    <retracted xmlns='urn:xmpp:message-retract:1' stamp='2024-06-01T09:00:00Z'/>\
+                    </message>";
+        let msg =
+            Message::try_from(xml.parse::<Element>().expect("valid xml")).expect("valid message");
+        assert!(extract_retraction_from_message(&msg).is_none());
+    }
+
+    #[test]
+    fn test_extract_tombstone_without_stamp() {
+        let xml = "<message xmlns='jabber:client' type='groupchat'>\
+                    <retracted xmlns='urn:xmpp:message-retract:1' id='retract-8'/>\
+                    </message>";
+        let msg =
+            Message::try_from(xml.parse::<Element>().expect("valid xml")).expect("valid message");
+        assert_eq!(
+            extract_retraction_from_message(&msg),
+            Some(RetractionKind::Tombstone(Retracted::new("retract-8", None)))
+        );
     }
 
     #[test]
@@ -359,9 +396,10 @@ mod tests {
 
     #[test]
     fn test_build_retracted_element() {
-        let elem = build_retracted_element("2024-01-15T12:00:00Z");
+        let elem = build_retracted_element("retract-1", Some("2024-01-15T12:00:00Z"));
         assert_eq!(elem.name(), "retracted");
         assert_eq!(elem.ns(), NS_MESSAGE_RETRACT);
+        assert_eq!(elem.attr("id"), Some("retract-1"));
         assert_eq!(elem.attr("stamp"), Some("2024-01-15T12:00:00Z"));
     }
 
@@ -385,14 +423,16 @@ mod tests {
             None::<jid::Jid>,
             None::<jid::Jid>,
             "orig-1",
-            "2024-01-15T12:00:00Z",
+            "retract-1",
+            Some("2024-01-15T12:00:00Z"),
         );
 
         assert_eq!(msg.id.as_deref(), Some("orig-1"));
         assert!(is_tombstone_message(&msg));
         match extract_retraction_from_message(&msg) {
             Some(RetractionKind::Tombstone(t)) => {
-                assert_eq!(t.stamp, "2024-01-15T12:00:00Z");
+                assert_eq!(t.retraction_id, "retract-1");
+                assert_eq!(t.stamp.as_deref(), Some("2024-01-15T12:00:00Z"));
             }
             other => panic!("Expected tombstone, got {:?}", other),
         }
@@ -443,7 +483,7 @@ mod tests {
 
         // Tombstone
         let xml2 = "<message xmlns='jabber:client' type='groupchat'>\
-                     <retracted xmlns='urn:xmpp:message-retract:1' stamp='2024-01-01T00:00:00Z'/>\
+                     <retracted xmlns='urn:xmpp:message-retract:1' id='retract-1' stamp='2024-01-01T00:00:00Z'/>\
                      </message>";
         let msg2 =
             Message::try_from(xml2.parse::<Element>().expect("valid xml")).expect("valid message");
@@ -465,7 +505,8 @@ mod tests {
 
     #[test]
     fn test_retracted_new() {
-        let t = Retracted::new("2024-06-01T00:00:00Z");
-        assert_eq!(t.stamp, "2024-06-01T00:00:00Z");
+        let t = Retracted::new("retract-9", Some("2024-06-01T00:00:00Z".to_owned()));
+        assert_eq!(t.retraction_id, "retract-9");
+        assert_eq!(t.stamp.as_deref(), Some("2024-06-01T00:00:00Z"));
     }
 }

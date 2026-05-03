@@ -41,7 +41,7 @@ async fn websocket_disco_advertises_software_version() {
 }
 
 #[tokio::test]
-async fn websocket_version_query_returns_name_version_and_os() {
+async fn websocket_version_query_returns_name_and_version_without_os() {
     let (_server, mut client) = setup().await;
 
     let response = version_query(&mut client, DOMAIN, "ws-version-1")
@@ -61,8 +61,8 @@ async fn websocket_version_query_returns_name_version_and_os() {
         "expected <version/> child, got: {response}"
     );
     assert!(
-        extract_element_text(&response, "os").is_some(),
-        "expected <os/> child, got: {response}"
+        extract_element_text(&response, "os").is_none(),
+        "XEP-0092 leaves <os/> optional and Waddle should not disclose it by default: {response}"
     );
     assert!(
         response.contains("ws-version-1"),

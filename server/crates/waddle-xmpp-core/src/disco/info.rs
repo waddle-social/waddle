@@ -11,8 +11,10 @@ use crate::{
 
 const DATA_FORMS_NS: &str = "jabber:x:data";
 const SERVER_INFO_FORM_TYPE: &str = "urn:xmpp:serverinfo:0";
+const NS_CHATSTATES: &str = "http://jabber.org/protocol/chatstates";
 const NS_COMMANDS: &str = "http://jabber.org/protocol/commands";
 const NS_FORUMS: &str = "urn:xmpp:forums:0";
+const NS_MUC_SELF_PING_OPTIMIZATION: &str = "http://jabber.org/protocol/muc#self-ping-optimization";
 
 /// Service Discovery info namespace (XEP-0030).
 pub const DISCO_INFO_NS: &str = "http://jabber.org/protocol/disco#info";
@@ -29,6 +31,7 @@ pub struct DiscoInfoQuery {
 pub struct Identity {
     pub category: String,
     pub type_: String,
+    pub lang: Option<String>,
     pub name: Option<String>,
 }
 
@@ -37,8 +40,14 @@ impl Identity {
         Self {
             category: category.to_string(),
             type_: type_.to_string(),
+            lang: None,
             name: name.map(str::to_string),
         }
+    }
+
+    pub fn with_lang(mut self, lang: Option<&str>) -> Self {
+        self.lang = lang.map(str::to_string);
+        self
     }
 
     pub fn server(name: Option<&str>) -> Self {
@@ -99,6 +108,10 @@ impl Feature {
         Self::new("urn:xmpp:mam:2")
     }
 
+    pub fn mam_extended() -> Self {
+        Self::new("urn:xmpp:mam:2#extended")
+    }
+
     pub fn fulltext_mam() -> Self {
         Self::new(FULLTEXT_MAM_NS)
     }
@@ -117,6 +130,18 @@ impl Feature {
 
     pub fn message_correction() -> Self {
         Self::new("urn:xmpp:message-correct:0")
+    }
+
+    pub fn chat_markers() -> Self {
+        Self::new("urn:xmpp:chat-markers:0")
+    }
+
+    pub fn chat_states() -> Self {
+        Self::new(NS_CHATSTATES)
+    }
+
+    pub fn receipts() -> Self {
+        Self::new("urn:xmpp:receipts")
     }
 
     pub fn message_retraction() -> Self {
@@ -208,7 +233,7 @@ impl Feature {
     }
 
     pub fn muc_self_ping_optimization() -> Self {
-        Self::new("urn:xmpp:muc-selfping:0")
+        Self::new(NS_MUC_SELF_PING_OPTIMIZATION)
     }
 
     pub fn pubsub() -> Self {
@@ -404,6 +429,10 @@ pub fn build_disco_info_response_with_extensions(
             .attr("category", &identity.category)
             .attr("type", &identity.type_);
 
+        if let Some(ref lang) = identity.lang {
+            id_builder = id_builder.attr("xml:lang", lang);
+        }
+
         if let Some(ref name) = identity.name {
             id_builder = id_builder.attr("name", name);
         }
@@ -476,10 +505,13 @@ pub fn server_features() -> Vec<Feature> {
         Feature::caps(),
         Feature::roster_versioning(),
         Feature::mam(),
+        Feature::mam_extended(),
         Feature::waddle_mam_thread(),
         Feature::stanza_ids(),
         Feature::replies(),
         Feature::message_correction(),
+        Feature::chat_markers(),
+        Feature::receipts(),
         Feature::message_retraction(),
         Feature::reactions(),
         Feature::references(),
@@ -561,7 +593,6 @@ pub fn muc_service_features() -> Vec<Feature> {
         Feature::disco_info(),
         Feature::disco_items(),
         Feature::muc(),
-        Feature::muc_self_ping_optimization(),
     ]
 }
 
@@ -575,12 +606,16 @@ pub fn muc_room_features(
     let mut features = vec![
         Feature::disco_info(),
         Feature::muc(),
+        Feature::muc_self_ping_optimization(),
         Feature::mam(),
+        Feature::mam_extended(),
         Feature::fulltext_mam(),
         Feature::waddle_mam_thread(),
         Feature::stanza_ids(),
         Feature::replies(),
         Feature::message_correction(),
+        Feature::chat_markers(),
+        Feature::chat_states(),
         Feature::message_retraction(),
         Feature::message_moderation(),
         Feature::reactions(),
@@ -662,16 +697,21 @@ mod tests {
 
         let response = build_disco_info_response(
             &iq,
-            &[Identity::server(Some("Waddle"))],
+            &[Identity::server(Some("Waddle")).with_lang(Some("en"))],
             &[Feature::disco_info(), Feature::disco_items()],
             None,
         );
 
         assert_eq!(response.id, "disco-1");
-        assert!(matches!(
-            response.payload,
-            xmpp_parsers::iq::IqType::Result(Some(_))
-        ));
+
+        let xmpp_parsers::iq::IqType::Result(Some(query)) = response.payload else {
+            panic!("expected disco#info result payload");
+        };
+        let identity = query
+            .children()
+            .find(|child| child.name() == "identity")
+            .expect("identity should be present");
+        assert_eq!(identity.attr("xml:lang"), Some("en"));
     }
 
     #[test]
@@ -700,6 +740,8 @@ mod tests {
         let features = server_features();
         assert!(features.contains(&Feature::disco_info()));
         assert!(features.contains(&Feature::carbons()));
+        assert!(features.contains(&Feature::receipts()));
+        assert!(features.contains(&Feature::mam_extended()));
         assert!(!features.contains(&Feature::fulltext_mam()));
         assert!(features.contains(&Feature::server_info()));
     }
@@ -711,6 +753,20 @@ mod tests {
         assert!(features.contains(&Feature::muc_persistent()));
         assert!(features.contains(&Feature::muc_membersonly()));
         assert!(features.contains(&Feature::muc_unmoderated()));
+        assert!(features.contains(&Feature::muc_self_ping_optimization()));
+        assert!(features.contains(&Feature::mam_extended()));
         assert!(features.contains(&Feature::fulltext_mam()));
+        assert!(features.contains(&Feature::chat_states()));
+        assert_eq!(Feature::chat_states().0, NS_CHATSTATES);
+    }
+
+    #[test]
+    fn test_muc_service_features_exclude_xep_0410_feature() {
+        let features = muc_service_features();
+        assert!(!features.contains(&Feature::muc_self_ping_optimization()));
+        assert_eq!(
+            Feature::muc_self_ping_optimization().0,
+            NS_MUC_SELF_PING_OPTIMIZATION
+        );
     }
 }

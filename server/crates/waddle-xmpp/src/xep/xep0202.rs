@@ -1,7 +1,7 @@
 //! XEP-0202: Entity Time
 //!
 //! Provides helpers for detecting entity time queries and building responses.
-//! Allows clients to query the server's current time and timezone.
+//! Allows clients to query the server's current UTC time and local timezone offset.
 //!
 //! ## XML Format
 //!
@@ -26,27 +26,79 @@
 //!
 //! The server advertises `urn:xmpp:time` as a feature in disco#info.
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, FixedOffset, Local, Offset, SecondsFormat, Utc};
 use minidom::Element;
 use xmpp_parsers::iq::{Iq, IqType};
 
 /// Namespace for XEP-0202 Entity Time.
 pub const NS_TIME: &str = "urn:xmpp:time";
 
+/// Parsed entity time payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntityTime {
+    pub utc: DateTime<Utc>,
+    pub tzo: FixedOffset,
+}
+
+impl EntityTime {
+    /// Capture the current UTC timestamp and the host's local timezone offset.
+    pub fn now() -> Self {
+        let local = Local::now();
+        Self {
+            utc: local.with_timezone(&Utc),
+            tzo: local.offset().fix(),
+        }
+    }
+}
+
 /// Check if an IQ stanza is an entity time query.
 pub fn is_time_query(iq: &Iq) -> bool {
     matches!(&iq.payload, IqType::Get(elem) if elem.name() == "time" && elem.ns() == NS_TIME)
 }
 
-/// Build an entity time response IQ.
-///
-/// Returns the current UTC time and timezone offset.
-pub fn build_time_response(original_iq: &Iq, now: DateTime<Utc>, tzo: &str) -> Iq {
-    let utc_str = now.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+fn format_time_zone_offset(offset: FixedOffset) -> String {
+    let total_seconds = offset.local_minus_utc();
+    let sign = if total_seconds < 0 { '-' } else { '+' };
+    let absolute_seconds = total_seconds.abs();
+    let hours = absolute_seconds / 3600;
+    let minutes = (absolute_seconds % 3600) / 60;
+    format!("{sign}{hours:02}:{minutes:02}")
+}
 
+fn parse_time_zone_offset(value: &str) -> Option<FixedOffset> {
+    let bytes = value.as_bytes();
+    if bytes.len() != 6 || bytes[3] != b':' {
+        return None;
+    }
+
+    let sign = match bytes[0] {
+        b'+' => 1,
+        b'-' => -1,
+        _ => return None,
+    };
+
+    let hours = value[1..3].parse::<i32>().ok()?;
+    let minutes = value[4..6].parse::<i32>().ok()?;
+    if hours > 15 || minutes > 59 {
+        return None;
+    }
+
+    FixedOffset::east_opt(sign * (hours * 3600 + minutes * 60))
+}
+
+/// Build an entity time response IQ.
+pub fn build_time_response(original_iq: &Iq, entity_time: &EntityTime) -> Iq {
     let time_elem = Element::builder("time", NS_TIME)
-        .append(Element::builder("tzo", NS_TIME).append(tzo).build())
-        .append(Element::builder("utc", NS_TIME).append(utc_str).build())
+        .append(
+            Element::builder("tzo", NS_TIME)
+                .append(format_time_zone_offset(entity_time.tzo))
+                .build(),
+        )
+        .append(
+            Element::builder("utc", NS_TIME)
+                .append(entity_time.utc.to_rfc3339_opts(SecondsFormat::Secs, true))
+                .build(),
+        )
         .build();
 
     Iq {
@@ -57,15 +109,13 @@ pub fn build_time_response(original_iq: &Iq, now: DateTime<Utc>, tzo: &str) -> I
     }
 }
 
-/// Build an entity time response with the current UTC time and +00:00 offset.
-///
-/// Convenience wrapper for servers running in UTC.
-pub fn build_time_response_utc(original_iq: &Iq) -> Iq {
-    build_time_response(original_iq, Utc::now(), "+00:00")
+/// Build an entity time response with the current UTC time and host timezone offset.
+pub fn build_current_time_response(original_iq: &Iq) -> Iq {
+    build_time_response(original_iq, &EntityTime::now())
 }
 
-/// Parse a time response to extract UTC timestamp and timezone offset.
-pub fn parse_time_response(iq: &Iq) -> Option<(String, String)> {
+/// Parse a time response into typed UTC and timezone offset values.
+pub fn parse_time_response(iq: &Iq) -> Option<EntityTime> {
     let elem = match &iq.payload {
         IqType::Result(Some(elem)) if elem.name() == "time" && elem.ns() == NS_TIME => elem,
         _ => return None,
@@ -74,14 +124,22 @@ pub fn parse_time_response(iq: &Iq) -> Option<(String, String)> {
     let tzo = elem
         .children()
         .find(|c| c.is("tzo", NS_TIME))
-        .map(|c| c.text())?;
+        .map(|c| c.text())
+        .and_then(|value| parse_time_zone_offset(&value))?;
 
     let utc = elem
         .children()
         .find(|c| c.is("utc", NS_TIME))
-        .map(|c| c.text())?;
+        .map(|c| c.text())
+        .and_then(|value| DateTime::parse_from_rfc3339(&value).ok())?;
+    if utc.offset().local_minus_utc() != 0 {
+        return None;
+    }
 
-    Some((utc, tzo))
+    Some(EntityTime {
+        utc: utc.with_timezone(&Utc),
+        tzo,
+    })
 }
 
 #[cfg(test)]
@@ -96,6 +154,16 @@ mod tests {
             to: Some("example.com".parse().expect("valid jid")),
             id: "time-1".to_string(),
             payload: IqType::Get(time_elem),
+        }
+    }
+
+    fn sample_time(offset_seconds: i32) -> EntityTime {
+        EntityTime {
+            utc: Utc
+                .with_ymd_and_hms(2024, 6, 1, 12, 0, 0)
+                .single()
+                .expect("valid test date"),
+            tzo: FixedOffset::east_opt(offset_seconds).expect("valid offset"),
         }
     }
 
@@ -132,11 +200,7 @@ mod tests {
     #[test]
     fn test_build_time_response() {
         let query = make_time_query();
-        let now = Utc
-            .with_ymd_and_hms(2024, 6, 1, 12, 0, 0)
-            .single()
-            .expect("valid test date");
-        let result = build_time_response(&query, now, "+00:00");
+        let result = build_time_response(&query, &sample_time(0));
 
         assert_eq!(result.id, "time-1");
         assert_eq!(result.from, query.to);
@@ -165,11 +229,7 @@ mod tests {
     #[test]
     fn test_build_time_response_with_offset() {
         let query = make_time_query();
-        let now = Utc
-            .with_ymd_and_hms(2024, 1, 15, 18, 30, 0)
-            .single()
-            .expect("valid test date");
-        let result = build_time_response(&query, now, "-06:00");
+        let result = build_time_response(&query, &sample_time(-6 * 3600));
 
         if let IqType::Result(Some(elem)) = &result.payload {
             let tzo = elem
@@ -183,42 +243,22 @@ mod tests {
     }
 
     #[test]
-    fn test_build_time_response_utc() {
+    fn test_build_current_time_response() {
         let query = make_time_query();
-        let result = build_time_response_utc(&query);
+        let result = build_current_time_response(&query);
 
         assert_eq!(result.id, "time-1");
-        if let IqType::Result(Some(elem)) = &result.payload {
-            let tzo = elem
-                .children()
-                .find(|c| c.is("tzo", NS_TIME))
-                .expect("tzo present");
-            assert_eq!(tzo.text(), "+00:00");
-
-            let utc = elem
-                .children()
-                .find(|c| c.is("utc", NS_TIME))
-                .expect("utc present");
-            // Just verify it looks like an ISO timestamp
-            assert!(utc.text().contains('T'));
-            assert!(utc.text().ends_with('Z'));
-        } else {
-            panic!("Expected Result with payload");
-        }
+        let parsed = parse_time_response(&result).expect("parseable current entity time");
+        assert_eq!(parsed.tzo, EntityTime::now().tzo);
     }
 
     #[test]
     fn test_parse_time_response() {
         let query = make_time_query();
-        let now = Utc
-            .with_ymd_and_hms(2024, 6, 1, 12, 0, 0)
-            .single()
-            .expect("valid test date");
-        let result = build_time_response(&query, now, "-05:00");
+        let result = build_time_response(&query, &sample_time(-5 * 3600));
 
-        let (utc, tzo) = parse_time_response(&result).expect("parseable");
-        assert_eq!(utc, "2024-06-01T12:00:00Z");
-        assert_eq!(tzo, "-05:00");
+        let parsed = parse_time_response(&result).expect("parseable");
+        assert_eq!(parsed, sample_time(-5 * 3600));
     }
 
     #[test]
@@ -228,10 +268,51 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_time_response_rejects_invalid_tzo() {
+        let iq = Iq {
+            from: None,
+            to: None,
+            id: "tzo-invalid".to_string(),
+            payload: IqType::Result(Some(
+                Element::builder("time", NS_TIME)
+                    .append(Element::builder("tzo", NS_TIME).append("+16:00").build())
+                    .append(
+                        Element::builder("utc", NS_TIME)
+                            .append("2024-06-01T12:00:00Z")
+                            .build(),
+                    )
+                    .build(),
+            )),
+        };
+
+        assert!(parse_time_response(&iq).is_none());
+    }
+
+    #[test]
+    fn test_parse_time_response_rejects_non_utc_timestamp() {
+        let iq = Iq {
+            from: None,
+            to: None,
+            id: "utc-invalid".to_string(),
+            payload: IqType::Result(Some(
+                Element::builder("time", NS_TIME)
+                    .append(Element::builder("tzo", NS_TIME).append("-05:00").build())
+                    .append(
+                        Element::builder("utc", NS_TIME)
+                            .append("2024-06-01T12:00:00-05:00")
+                            .build(),
+                    )
+                    .build(),
+            )),
+        };
+
+        assert!(parse_time_response(&iq).is_none());
+    }
+
+    #[test]
     fn test_build_time_response_swaps_to_from() {
         let query = make_time_query();
-        let now = Utc::now();
-        let result = build_time_response(&query, now, "+00:00");
+        let result = build_time_response(&query, &EntityTime::now());
 
         assert_eq!(result.from, query.to);
         assert_eq!(result.to, query.from);

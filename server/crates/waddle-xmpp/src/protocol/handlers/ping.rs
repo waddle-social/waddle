@@ -1,7 +1,7 @@
 //! XEP-0199 — XMPP Ping.
 //!
-//! The simplest possible handler: takes a `<ping>` IQ-get, emits the
-//! corresponding IQ-result with swapped `to`/`from` addresses.
+//! Validates incoming ping IQs and emits either a conformant pong reply
+//! or a typed `<bad-request/>` error for malformed requests.
 
 use crate::protocol::event::{OutboundEvent, StanzaContext};
 use crate::protocol::traits::IqHandler;
@@ -18,9 +18,14 @@ impl IqHandler for PingHandler {
         xep0199::NS_PING
     }
 
-    fn handle(&self, iq: &Iq, _ctx: &StanzaContext<'_>) -> Vec<OutboundEvent> {
-        let result = xep0199::build_ping_result(iq);
-        vec![OutboundEvent::SendStanza(Box::new(Stanza::Iq(result)))]
+    fn handle(&self, iq: &Iq, ctx: &StanzaContext<'_>) -> Vec<OutboundEvent> {
+        let session_bare = ctx.full_jid.to_bare();
+        let reply = if xep0199::is_ping(iq) {
+            xep0199::build_ping_result(iq, ctx.domain, &session_bare)
+        } else {
+            xep0199::build_ping_bad_request(iq, ctx.domain, &session_bare)
+        };
+        vec![OutboundEvent::SendStanza(Box::new(Stanza::Iq(reply)))]
     }
 }
 
@@ -29,6 +34,7 @@ mod tests {
     use super::*;
     use minidom::Element;
     use xmpp_parsers::iq::{Iq, IqType};
+    use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType};
 
     fn test_ctx_jid() -> jid::FullJid {
         "alice@waddle.social/web".parse().expect("valid test JID")
@@ -70,6 +76,84 @@ mod tests {
                         reply.to.as_ref().map(|j| j.to_string()),
                         Some("alice@waddle.social/web".to_string())
                     );
+                }
+                other => panic!("expected Iq stanza, got {other:?}"),
+            },
+            other => panic!("expected SendStanza, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ping_without_to_uses_server_domain_in_result() {
+        let ping_elem = Element::builder("ping", xep0199::NS_PING).build();
+        let iq = Iq {
+            from: Some("alice@waddle.social/web".parse().expect("valid jid")),
+            to: None,
+            id: "p2".to_string(),
+            payload: IqType::Get(ping_elem),
+        };
+        let jid = test_ctx_jid();
+        let ctx = StanzaContext {
+            domain: "waddle.social",
+            full_jid: &jid,
+        };
+
+        let events = PingHandler.handle(&iq, &ctx);
+
+        match &events[0] {
+            OutboundEvent::SendStanza(stanza) => match stanza.as_ref() {
+                Stanza::Iq(reply) => {
+                    assert_eq!(
+                        reply.from.as_ref().map(|j| j.to_string()),
+                        Some("waddle.social".into())
+                    );
+                    assert_eq!(
+                        reply.to.as_ref().map(|j| j.to_string()),
+                        Some("alice@waddle.social/web".into())
+                    );
+                    assert!(matches!(reply.payload, IqType::Result(_)));
+                }
+                other => panic!("expected Iq stanza, got {other:?}"),
+            },
+            other => panic!("expected SendStanza, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn malformed_ping_produces_bad_request_error() {
+        let ping_elem = Element::builder("ping", xep0199::NS_PING)
+            .append(Element::builder("extra", xep0199::NS_PING).build())
+            .build();
+        let iq = Iq {
+            from: Some("alice@waddle.social/web".parse().expect("valid jid")),
+            to: None,
+            id: "p3".to_string(),
+            payload: IqType::Get(ping_elem),
+        };
+        let jid = test_ctx_jid();
+        let ctx = StanzaContext {
+            domain: "waddle.social",
+            full_jid: &jid,
+        };
+
+        let events = PingHandler.handle(&iq, &ctx);
+
+        match &events[0] {
+            OutboundEvent::SendStanza(stanza) => match stanza.as_ref() {
+                Stanza::Iq(reply) => {
+                    assert_eq!(
+                        reply.from.as_ref().map(|j| j.to_string()),
+                        Some("waddle.social".into())
+                    );
+                    assert_eq!(
+                        reply.to.as_ref().map(|j| j.to_string()),
+                        Some("alice@waddle.social/web".into())
+                    );
+                    let IqType::Error(error) = &reply.payload else {
+                        panic!("expected error reply")
+                    };
+                    assert_eq!(error.type_, ErrorType::Modify);
+                    assert_eq!(error.defined_condition, DefinedCondition::BadRequest);
                 }
                 other => panic!("expected Iq stanza, got {other:?}"),
             },

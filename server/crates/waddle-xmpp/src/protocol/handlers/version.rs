@@ -1,9 +1,10 @@
 //! XEP-0092 — Software Version.
 //!
-//! Responds with the git commit SHA and optional host OS so clients can display
-//! deployment state. The SHA is read at runtime from the `WADDLE_GIT_SHA`
-//! environment variable (set by the deployment environment); local runs fall
-//! back to the Cargo package version.
+//! Responds with the git commit SHA while omitting the optional operating-system
+//! field, which keeps the server compliant with XEP-0092's OS privacy guidance.
+//! The SHA is read at runtime from the `WADDLE_GIT_SHA` environment variable
+//! (set by the deployment environment); local runs fall back to the Cargo
+//! package version.
 
 use crate::protocol::event::{OutboundEvent, StanzaContext};
 use crate::protocol::traits::IqHandler;
@@ -46,7 +47,7 @@ impl IqHandler for VersionHandler {
         let info = SoftwareVersion {
             name: "Waddle".to_string(),
             version,
-            os: include_os_version().then(|| std::env::consts::OS.to_string()),
+            os: None,
         };
         vec![send_iq(build_version_response(iq, &info))]
     }
@@ -71,13 +72,6 @@ fn server_version() -> String {
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string())
-}
-
-fn include_os_version() -> bool {
-    std::env::var("WADDLE_XMPP_VERSION_INCLUDE_OS")
-        .map(|value| value.trim().eq_ignore_ascii_case("false"))
-        .map(|disabled| !disabled)
-        .unwrap_or(true)
 }
 
 #[cfg(test)]
@@ -114,11 +108,8 @@ mod tests {
         }
     }
 
-    fn capture_version_env() -> (EnvGuard, EnvGuard) {
-        (
-            EnvGuard::capture("WADDLE_GIT_SHA"),
-            EnvGuard::capture("WADDLE_XMPP_VERSION_INCLUDE_OS"),
-        )
+    fn capture_version_env() -> EnvGuard {
+        EnvGuard::capture("WADDLE_GIT_SHA")
     }
 
     fn test_ctx_jid() -> jid::FullJid {
@@ -141,12 +132,10 @@ mod tests {
     }
 
     #[test]
-    fn version_query_produces_result_with_name_version_and_os() {
+    fn version_query_produces_result_without_os() {
         let _guard = ENV_LOCK.lock().unwrap();
         let _env = capture_version_env();
-        // Inject a known SHA so the assertion is precise.
         std::env::set_var("WADDLE_GIT_SHA", "  deadbeef1234567890abcdef  ");
-        std::env::remove_var("WADDLE_XMPP_VERSION_INCLUDE_OS");
 
         let query = Element::builder("query", NS_VERSION).build();
         let iq = Iq {
@@ -184,7 +173,7 @@ mod tests {
                     assert!(payload.get_child("name", NS_VERSION).is_some());
                     let version = payload.get_child("version", NS_VERSION).expect("version");
                     assert_eq!(version.text(), "deadbeef1234567890abcdef");
-                    assert!(payload.get_child("os", NS_VERSION).is_some());
+                    assert!(payload.get_child("os", NS_VERSION).is_none());
                 }
                 other => panic!("expected Iq stanza, got {other:?}"),
             },
@@ -197,7 +186,6 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap();
         let _env = capture_version_env();
         std::env::remove_var("WADDLE_GIT_SHA");
-        std::env::remove_var("WADDLE_XMPP_VERSION_INCLUDE_OS");
 
         let query = Element::builder("query", NS_VERSION).build();
         let iq = Iq {
@@ -223,42 +211,6 @@ mod tests {
                     };
                     let version = payload.get_child("version", NS_VERSION).expect("version");
                     assert_eq!(version.text(), env!("CARGO_PKG_VERSION"));
-                }
-                other => panic!("expected Iq stanza, got {other:?}"),
-            },
-            other => panic!("expected SendStanza, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn version_query_omits_os_when_disabled() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let _env = capture_version_env();
-        std::env::set_var("WADDLE_GIT_SHA", "deadbeef1234567890abcdef");
-        std::env::set_var("WADDLE_XMPP_VERSION_INCLUDE_OS", "false");
-
-        let query = Element::builder("query", NS_VERSION).build();
-        let iq = Iq {
-            from: Some("alice@waddle.social/web".parse().expect("valid jid")),
-            to: Some("waddle.social".parse().expect("valid jid")),
-            id: "v3".to_string(),
-            payload: IqType::Get(query),
-        };
-        let jid = test_ctx_jid();
-        let ctx = StanzaContext {
-            domain: "waddle.social",
-            full_jid: &jid,
-        };
-
-        let events = VersionHandler.handle(&iq, &ctx);
-
-        match &events[0] {
-            OutboundEvent::SendStanza(stanza) => match stanza.as_ref() {
-                Stanza::Iq(reply) => {
-                    let IqType::Result(Some(payload)) = &reply.payload else {
-                        panic!("expected version result payload");
-                    };
-                    assert!(payload.get_child("os", NS_VERSION).is_none());
                 }
                 other => panic!("expected Iq stanza, got {other:?}"),
             },

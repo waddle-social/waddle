@@ -34,6 +34,8 @@
 //! The server transparently routes reaction messages. They should not be
 //! archived as regular messages but may be stored for reaction aggregation.
 
+use std::collections::HashSet;
+
 use minidom::Element;
 use thiserror::Error;
 use xmpp_parsers::message::Message;
@@ -63,7 +65,7 @@ impl ReactionSet {
     pub fn new(message_id: impl Into<String>, emojis: Vec<String>) -> Self {
         Self {
             message_id: message_id.into(),
-            emojis,
+            emojis: normalize_reactions(emojis),
         }
     }
 
@@ -114,11 +116,10 @@ pub fn extract_reactions_from_message(msg: &Message) -> Option<ReactionSet> {
     let elem = msg.payloads.iter().find(|e| is_reactions_element(e))?;
     let id = elem.attr("id").filter(|s| !s.is_empty())?.to_owned();
 
-    let emojis: Vec<String> = elem
+    let emojis = elem
         .children()
         .filter(|child| child.name() == "reaction" && child.ns() == NS_REACTIONS)
         .map(|child| child.text())
-        .filter(|text| !text.is_empty())
         .collect();
 
     Some(ReactionSet::new(id, emojis))
@@ -143,13 +144,36 @@ pub fn build_reaction_element(emoji: &str) -> Element {
     elem
 }
 
+fn normalize_reactions<I, S>(emojis: I) -> Vec<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut seen = HashSet::new();
+    let mut normalized = Vec::new();
+
+    for emoji in emojis {
+        let emoji = emoji.as_ref().trim();
+        if emoji.is_empty() {
+            continue;
+        }
+
+        let emoji = emoji.to_owned();
+        if seen.insert(emoji.clone()) {
+            normalized.push(emoji);
+        }
+    }
+
+    normalized
+}
+
 /// Build a `<reactions id='...'><reaction>...</reaction>...</reactions>` element.
 pub fn build_reactions_element(message_id: &str, emojis: &[&str]) -> Element {
     let mut reactions = Element::builder("reactions", NS_REACTIONS)
         .attr("id", message_id)
         .build();
-    for emoji in emojis {
-        reactions.append_child(build_reaction_element(emoji));
+    for emoji in normalize_reactions(emojis.iter().copied()) {
+        reactions.append_child(build_reaction_element(&emoji));
     }
     reactions
 }
@@ -191,10 +215,7 @@ pub fn strip_reactions(msg: &mut Message) {
 
 impl From<xmpp_parsers::reactions::Reactions> for ReactionSet {
     fn from(r: xmpp_parsers::reactions::Reactions) -> Self {
-        Self {
-            message_id: r.id,
-            emojis: r.reactions.into_iter().map(|rx| rx.emoji).collect(),
-        }
+        Self::new(r.id, r.reactions.into_iter().map(|rx| rx.emoji).collect())
     }
 }
 
@@ -242,9 +263,7 @@ mod tests {
 
         let set = extract_reactions_from_message(&msg).expect("has reactions");
         assert_eq!(set.message_id, "msg-42");
-        assert_eq!(set.emojis.len(), 2);
-        assert!(set.emojis.contains(&"👍".to_owned()));
-        assert!(set.emojis.contains(&"❤️".to_owned()));
+        assert_eq!(set.emojis, vec!["👍", "❤️"]);
         assert!(!set.is_removal());
     }
 
@@ -260,6 +279,24 @@ mod tests {
         assert_eq!(set.message_id, "msg-1");
         assert!(set.emojis.is_empty());
         assert!(set.is_removal());
+    }
+
+    #[test]
+    fn test_extract_reactions_deduplicates_duplicates() {
+        let xml = "<message xmlns='jabber:client' type='groupchat'>\
+                    <reactions xmlns='urn:xmpp:reactions:0' id='msg-42'>\
+                      <reaction> 👍 </reaction>\
+                      <reaction>👍</reaction>\
+                      <reaction>❤️</reaction>\
+                      <reaction>👍</reaction>\
+                      <reaction>   </reaction>\
+                    </reactions>\
+                    </message>";
+        let msg =
+            Message::try_from(xml.parse::<Element>().expect("valid xml")).expect("valid message");
+
+        let set = extract_reactions_from_message(&msg).expect("has reactions");
+        assert_eq!(set.emojis, vec!["👍", "❤️"]);
     }
 
     #[test]
@@ -306,6 +343,15 @@ mod tests {
         assert_eq!(elem.name(), "reactions");
         assert_eq!(elem.ns(), NS_REACTIONS);
         assert_eq!(elem.attr("id"), Some("msg-99"));
+        let children: Vec<_> = elem.children().collect();
+        assert_eq!(children.len(), 2);
+        assert_eq!(children[0].text(), "👍");
+        assert_eq!(children[1].text(), "❤️");
+    }
+
+    #[test]
+    fn test_build_reactions_element_deduplicates_duplicates() {
+        let elem = build_reactions_element("msg-99", &["👍", " 👍 ", "", "❤️", "👍"]);
         let children: Vec<_> = elem.children().collect();
         assert_eq!(children.len(), 2);
         assert_eq!(children[0].text(), "👍");
@@ -394,8 +440,17 @@ mod tests {
 
     #[test]
     fn test_reaction_set_new() {
-        let set = ReactionSet::new("msg-1", vec!["👍".to_owned()]);
+        let set = ReactionSet::new(
+            "msg-1",
+            vec![
+                "👍".to_owned(),
+                " 👍 ".to_owned(),
+                "❤️".to_owned(),
+                "   ".to_owned(),
+            ],
+        );
         assert_eq!(set.message_id, "msg-1");
+        assert_eq!(set.emojis, vec!["👍", "❤️"]);
         assert!(!set.is_removal());
 
         let empty = ReactionSet::new("msg-2", vec![]);
@@ -407,6 +462,9 @@ mod tests {
         let parser_reactions = xmpp_parsers::reactions::Reactions {
             id: "msg-1".to_owned(),
             reactions: vec![
+                xmpp_parsers::reactions::Reaction {
+                    emoji: "👍".to_owned(),
+                },
                 xmpp_parsers::reactions::Reaction {
                     emoji: "👍".to_owned(),
                 },

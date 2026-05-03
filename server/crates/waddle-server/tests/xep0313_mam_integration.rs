@@ -5,7 +5,7 @@
 mod ws_common;
 
 use tokio::sync::Mutex;
-use ws_common::{TestServer, WsXmppClient};
+use ws_common::{disco_info_query, TestServer, WsXmppClient};
 
 const DOMAIN: &str = "localhost";
 const USERNAME: &str = "admin";
@@ -38,6 +38,16 @@ fn mam_query_after_xml(id: &str, archive_jid: &str, max: u32, after: &str) -> St
     )
 }
 
+fn mam_query_ids_xml(id: &str, archive_jid: &str, ids: &[&str]) -> String {
+    let id_values = ids
+        .iter()
+        .map(|archive_id| format!(r#"<value>{archive_id}</value>"#))
+        .collect::<String>();
+    format!(
+        r#"<iq type="set" id="{id}" to="{archive_jid}"><query xmlns="urn:xmpp:mam:2"><x xmlns="jabber:x:data" type="submit"><field var="FORM_TYPE" type="hidden"><value>urn:xmpp:mam:2</value></field><field var="ids">{id_values}</field></x></query></iq>"#
+    )
+}
+
 async fn query_mam(client: &mut WsXmppClient, query_xml: &str) -> Result<Vec<String>, String> {
     client.send(query_xml).await?;
     client
@@ -49,6 +59,19 @@ fn extract_mam_body(frame: &str) -> Option<String> {
     let start = frame.find("<body>")?;
     let end = frame.find("</body>")?;
     Some(frame[start + 6..end].to_string())
+}
+
+fn extract_result_id(frame: &str) -> Option<String> {
+    let result = &frame[frame.find("<result")?..];
+    if let Some(start) = result.find(" id=\"") {
+        let value = &result[start + 5..];
+        return Some(value[..value.find('"')?].to_string());
+    }
+    if let Some(start) = result.find(" id='") {
+        let value = &result[start + 5..];
+        return Some(value[..value.find('\'')?].to_string());
+    }
+    None
 }
 
 fn extract_fin_last(frame: &str) -> Option<String> {
@@ -235,6 +258,164 @@ async fn muc_mam_pagination() {
             "page msg 4".to_string(),
             "page msg 5".to_string()
         ]
+    );
+
+    client.close().await;
+}
+
+#[tokio::test]
+async fn personal_archive_disco_advertises_extended_mam_feature() {
+    let _guard = TEST_SERIAL.lock().await;
+    let (_server, mut client) = setup().await;
+    let archive_jid = format!("{USERNAME}@{DOMAIN}");
+
+    let response = disco_info_query(&mut client, &archive_jid, "mam-disco-personal")
+        .await
+        .expect("personal archive disco#info response");
+
+    assert!(
+        response.contains("urn:xmpp:mam:2#extended"),
+        "personal archive disco missing urn:xmpp:mam:2#extended: {response}"
+    );
+
+    client.close().await;
+}
+
+#[tokio::test]
+async fn personal_archive_mam_form_includes_extended_fields() {
+    let _guard = TEST_SERIAL.lock().await;
+    let (_server, mut client) = setup().await;
+    let archive_jid = format!("{USERNAME}@{DOMAIN}");
+
+    client
+        .send(&format!(
+            r#"<iq type="get" id="mam-form-personal" to="{archive_jid}"><query xmlns="urn:xmpp:mam:2"/></iq>"#
+        ))
+        .await
+        .expect("send mam form request");
+    let response = client
+        .recv_matching(|frame| frame.contains("mam-form-personal"))
+        .await
+        .expect("mam form response");
+
+    for field in ["before-id", "after-id", "ids"] {
+        assert!(
+            response.contains(&format!("var=\"{field}\""))
+                || response.contains(&format!("var='{field}'")),
+            "mam form missing {field}: {response}"
+        );
+    }
+    assert!(
+        response.contains("http://jabber.org/protocol/xdata-validate"),
+        "mam form missing XEP-0122 validation namespace: {response}"
+    );
+    assert!(
+        response.contains("datatype=\"xs:string\"") || response.contains("datatype='xs:string'"),
+        "mam form missing ids datatype: {response}"
+    );
+    assert!(response.contains("<open") || response.contains("<open/>"));
+
+    client.close().await;
+}
+
+#[tokio::test]
+async fn room_disco_advertises_extended_mam_feature() {
+    let _guard = TEST_SERIAL.lock().await;
+    let (_server, mut client) = setup().await;
+    let room = format!("mam-disco-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
+
+    client
+        .send(&format!(
+            r#"<presence to="{room}/{USERNAME}"><x xmlns="http://jabber.org/protocol/muc"/></presence>"#
+        ))
+        .await
+        .expect("send join");
+    client
+        .recv_until(|frame| frame.contains("<subject"))
+        .await
+        .expect("join responses");
+
+    let response = disco_info_query(&mut client, &room, "mam-disco-room")
+        .await
+        .expect("room disco#info response");
+
+    assert!(
+        response.contains("urn:xmpp:mam:2#extended"),
+        "room disco missing urn:xmpp:mam:2#extended: {response}"
+    );
+
+    client.close().await;
+}
+
+#[tokio::test]
+async fn room_mam_ids_query_returns_only_requested_messages() {
+    let _guard = TEST_SERIAL.lock().await;
+    let (_server, mut client) = setup().await;
+    let room = format!("mam-ids-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
+
+    client
+        .send(&format!(
+            r#"<presence to="{room}/{USERNAME}"><x xmlns="http://jabber.org/protocol/muc"/></presence>"#
+        ))
+        .await
+        .expect("send join");
+    client
+        .recv_until(|frame| frame.contains("<subject"))
+        .await
+        .expect("join responses");
+
+    let bodies = ["ids one", "ids two", "ids three"];
+    for body in &bodies {
+        client
+            .send(&format!(
+                r#"<message type="groupchat" to="{room}"><body>{body}</body></message>"#
+            ))
+            .await
+            .expect("send message");
+        client
+            .recv_matching(|frame| frame.contains(body))
+            .await
+            .expect("echo");
+    }
+
+    let initial = query_mam(
+        &mut client,
+        &mam_query_xml(
+            &format!("ids-seed-{}", uuid::Uuid::new_v4()),
+            &room,
+            Some(10),
+        ),
+    )
+    .await
+    .expect("seed mam query");
+    let result_frames: Vec<&str> = initial
+        .iter()
+        .map(|frame| frame.as_str())
+        .filter(|frame| frame.contains("<forwarded"))
+        .collect();
+    let selected_ids = [
+        extract_result_id(result_frames[2]).expect("third archive id"),
+        extract_result_id(result_frames[0]).expect("first archive id"),
+    ];
+
+    let filtered = query_mam(
+        &mut client,
+        &mam_query_ids_xml(
+            &format!("ids-filter-{}", uuid::Uuid::new_v4()),
+            &room,
+            &[selected_ids[0].as_str(), selected_ids[1].as_str()],
+        ),
+    )
+    .await
+    .expect("ids mam query");
+    let filtered_bodies: Vec<String> = filtered
+        .iter()
+        .filter_map(|frame| extract_mam_body(frame))
+        .collect();
+
+    assert_eq!(
+        filtered_bodies,
+        vec!["ids one".to_string(), "ids three".to_string()]
     );
 
     client.close().await;

@@ -287,8 +287,8 @@
               cargoExtraArgs = "--locked --package ai-assistant-canvas --package ai-chatbot --package decision-polls --package links-task-board --package pub-quiz";
               cargoCheckExtraArgs = "";
               cargoBuildExtraArgs = "";
-              doCheck = false;
               cargoTestExtraArgs = "";
+              doCheck = false;
             }
           );
         in

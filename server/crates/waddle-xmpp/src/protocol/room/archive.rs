@@ -22,8 +22,7 @@ use super::traits::{RoomHandler, RoomHandlerOutcome};
 use crate::xep::xep0424::{extract_retraction_from_message, RetractionKind};
 use crate::xep::{
     extract_forum_action, has_file_sharing, is_moderation_request_message,
-    is_moderation_result_message, is_reaction_message, is_retraction_message, is_sticker_message,
-    should_skip_storage,
+    is_moderation_result_message, is_reaction_message, is_sticker_message, should_skip_storage,
 };
 use waddle_xmpp_core::xep0201::{thread_info_from_message_in_stanza_ns, CLIENT_STANZA_NS};
 use xmpp_parsers::message::{Message, MessageType};
@@ -78,7 +77,10 @@ pub fn is_archivable(message: &Message) -> bool {
         return true;
     }
     is_reaction_message(message)
-        || is_retraction_message(message)
+        || matches!(
+            extract_retraction_from_message(message),
+            Some(RetractionKind::Request(_))
+        )
         || is_moderation_request_message(message)
         || is_moderation_result_message(message)
         || thread_info_from_message_in_stanza_ns(message, CLIENT_STANZA_NS).is_some()
@@ -188,6 +190,27 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, OutboundEvent::ArchiveGroupchat { .. })),
             "bodyless protocol-event-less message is not archived"
+        );
+    }
+
+    #[test]
+    fn xep_0424_skips_inbound_groupchat_tombstones() {
+        let room = bare("team@conf.example.com");
+        let sender = full("alice@example.com/web");
+        let mut msg = groupchat(&room, &sender, "");
+        msg.payloads.push(
+            Element::builder("retracted", crate::xep::xep0424::NS_MESSAGE_RETRACT)
+                .attr("id", "retract-1")
+                .attr("stamp", "2024-06-01T09:00:00Z")
+                .build(),
+        );
+
+        let events = run(&room, &sender, &mut msg);
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, OutboundEvent::ArchiveGroupchat { .. })),
+            "archive-side tombstones must not be treated as inbound groupchat messages"
         );
     }
 

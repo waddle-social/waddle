@@ -13,6 +13,7 @@ use sqlx::sqlite::{
     SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions, SqliteRow,
 };
 use sqlx::{Postgres, QueryBuilder, Row, Sqlite};
+use std::collections::HashSet;
 use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -178,6 +179,29 @@ impl MamStorage for InMemoryMamStorage {
             .filter(|(jid, _)| jid == archive_jid)
             .map(|(_, message)| message.clone())
             .collect();
+        let filter_before_cursor = match query.filter_before_id.as_deref() {
+            Some(before_id) => Some(
+                messages
+                    .iter()
+                    .find(|message| message.id == before_id)
+                    .cloned()
+                    .ok_or_else(|| MamStorageError::NotFound(before_id.to_string()))?,
+            ),
+            None => None,
+        };
+        let filter_after_cursor = match query.filter_after_id.as_deref() {
+            Some(after_id) => Some(
+                messages
+                    .iter()
+                    .find(|message| message.id == after_id)
+                    .cloned()
+                    .ok_or_else(|| MamStorageError::NotFound(after_id.to_string()))?,
+            ),
+            None => None,
+        };
+        if let Some(missing_id) = missing_requested_id(&messages, &query.ids) {
+            return Err(MamStorageError::NotFound(missing_id));
+        }
         let before_cursor = match query.before_id.as_deref().filter(|id| !id.is_empty()) {
             Some(before_id) => Some(
                 messages
@@ -209,11 +233,21 @@ impl MamStorage for InMemoryMamStorage {
             messages
                 .retain(|message| message.from.starts_with(with) || message.to.starts_with(with));
         }
+        if !query.ids.is_empty() {
+            let requested_ids = query.ids.iter().map(String::as_str).collect::<HashSet<_>>();
+            messages.retain(|message| requested_ids.contains(message.id.as_str()));
+        }
         if let Some(thread_id) = query.thread_id.as_ref() {
             messages.retain(|message| matches_thread_filter(message, thread_id.as_str()));
         }
         if let Some(fulltext) = query.fulltext.as_ref() {
             messages.retain(|message| matches_fulltext(message.body.as_str(), fulltext.as_str()));
+        }
+        if let Some(cursor) = filter_before_cursor.as_ref() {
+            messages.retain(|message| archive_order_before(message, cursor));
+        }
+        if let Some(cursor) = filter_after_cursor.as_ref() {
+            messages.retain(|message| archive_order_after(message, cursor));
         }
         let count = Some(u32::try_from(messages.len()).unwrap_or(u32::MAX));
 
@@ -634,6 +668,28 @@ fn uses_backward_pagination(query: &MamQuery) -> bool {
     query.before_id.is_some()
 }
 
+fn missing_requested_id_in_set(
+    available_ids: &HashSet<&str>,
+    requested_ids: &[String],
+) -> Option<String> {
+    requested_ids
+        .iter()
+        .find(|id| !available_ids.contains(id.as_str()))
+        .cloned()
+}
+
+fn missing_requested_id(messages: &[ArchivedMessage], requested_ids: &[String]) -> Option<String> {
+    if requested_ids.is_empty() {
+        return None;
+    }
+
+    let available_ids = messages
+        .iter()
+        .map(|message| message.id.as_str())
+        .collect::<HashSet<_>>();
+    missing_requested_id_in_set(&available_ids, requested_ids)
+}
+
 macro_rules! push_common_mam_filters {
     ($builder:expr, $query:expr, $with_filter:expr) => {{
         if let Some(with) = $with_filter {
@@ -643,6 +699,14 @@ macro_rules! push_common_mam_filters {
                 .push(" OR to_jid LIKE ")
                 .push_bind(with)
                 .push(")");
+        }
+        if !$query.ids.is_empty() {
+            $builder.push(" AND id IN (");
+            let mut ids = $builder.separated(", ");
+            for id in &$query.ids {
+                ids.push_bind(id.as_str());
+            }
+            ids.push_unseparated(")");
         }
         if let Some(thread_id) = $query.thread_id.as_ref() {
             $builder
@@ -671,6 +735,8 @@ fn push_sqlite_mam_filters<'args>(
     archive_jid: &'args str,
     query: &'args MamQuery,
     with_filter: Option<&'args str>,
+    filter_before: Option<&'args ArchivedMessage>,
+    filter_after: Option<&'args ArchivedMessage>,
 ) {
     builder.push_bind(archive_jid);
     if let Some(start) = query.start {
@@ -683,6 +749,26 @@ fn push_sqlite_mam_filters<'args>(
             .push(" AND timestamp <= ")
             .push_bind(end.to_rfc3339());
     }
+    if let Some(cursor) = filter_before {
+        builder
+            .push(" AND (timestamp < ")
+            .push_bind(cursor.timestamp.to_rfc3339())
+            .push(" OR (timestamp = ")
+            .push_bind(cursor.timestamp.to_rfc3339())
+            .push(" AND id < ")
+            .push_bind(cursor.id.as_str())
+            .push("))");
+    }
+    if let Some(cursor) = filter_after {
+        builder
+            .push(" AND (timestamp > ")
+            .push_bind(cursor.timestamp.to_rfc3339())
+            .push(" OR (timestamp = ")
+            .push_bind(cursor.timestamp.to_rfc3339())
+            .push(" AND id > ")
+            .push_bind(cursor.id.as_str())
+            .push("))");
+    }
     push_common_mam_filters!(builder, query, with_filter);
 }
 
@@ -691,6 +777,8 @@ fn push_postgres_mam_filters<'args>(
     archive_jid: &'args str,
     query: &'args MamQuery,
     with_filter: Option<&'args str>,
+    filter_before: Option<&'args ArchivedMessage>,
+    filter_after: Option<&'args ArchivedMessage>,
 ) {
     builder.push_bind(archive_jid);
     if let Some(start) = query.start {
@@ -698,6 +786,26 @@ fn push_postgres_mam_filters<'args>(
     }
     if let Some(end) = query.end {
         builder.push(" AND timestamp <= ").push_bind(end);
+    }
+    if let Some(cursor) = filter_before {
+        builder
+            .push(" AND (timestamp < ")
+            .push_bind(cursor.timestamp)
+            .push(" OR (timestamp = ")
+            .push_bind(cursor.timestamp)
+            .push(" AND id < ")
+            .push_bind(cursor.id.as_str())
+            .push("))");
+    }
+    if let Some(cursor) = filter_after {
+        builder
+            .push(" AND (timestamp > ")
+            .push_bind(cursor.timestamp)
+            .push(" OR (timestamp = ")
+            .push_bind(cursor.timestamp)
+            .push(" AND id > ")
+            .push_bind(cursor.id.as_str())
+            .push("))");
     }
     push_common_mam_filters!(builder, query, with_filter);
 }
@@ -736,6 +844,73 @@ async fn fetch_postgres_cursor(
         .map(decode_postgres_message_row)
         .transpose()?
         .ok_or_else(|| MamStorageError::NotFound(cursor_id.to_string()))
+}
+
+async fn ensure_sqlite_requested_ids_exist(
+    pool: &SqlitePool,
+    archive_jid: &str,
+    requested_ids: &[String],
+) -> Result<(), MamStorageError> {
+    if requested_ids.is_empty() {
+        return Ok(());
+    }
+
+    let mut builder = QueryBuilder::<Sqlite>::new("SELECT id FROM mam_messages WHERE room_jid = ");
+    builder.push_bind(archive_jid);
+    builder.push(" AND id IN (");
+    let mut ids = builder.separated(", ");
+    for id in requested_ids {
+        ids.push_bind(id.as_str());
+    }
+    ids.push_unseparated(")");
+
+    let available_ids = builder
+        .build_query_scalar::<String>()
+        .fetch_all(pool)
+        .await?;
+    let available_ids = available_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    if let Some(missing_id) = missing_requested_id_in_set(&available_ids, requested_ids) {
+        return Err(MamStorageError::NotFound(missing_id));
+    }
+
+    Ok(())
+}
+
+async fn ensure_postgres_requested_ids_exist(
+    pool: &PgPool,
+    archive_jid: &str,
+    requested_ids: &[String],
+) -> Result<(), MamStorageError> {
+    if requested_ids.is_empty() {
+        return Ok(());
+    }
+
+    let mut builder =
+        QueryBuilder::<Postgres>::new("SELECT id FROM mam_messages WHERE room_jid = ");
+    builder.push_bind(archive_jid);
+    builder.push(" AND id IN (");
+    let mut ids = builder.separated(", ");
+    for id in requested_ids {
+        ids.push_bind(id.as_str());
+    }
+    ids.push_unseparated(")");
+
+    let available_ids = builder
+        .build_query_scalar::<String>()
+        .fetch_all(pool)
+        .await?;
+    let available_ids = available_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    if let Some(missing_id) = missing_requested_id_in_set(&available_ids, requested_ids) {
+        return Err(MamStorageError::NotFound(missing_id));
+    }
+
+    Ok(())
 }
 
 fn finalize_result(
@@ -966,6 +1141,18 @@ impl MamStorage for SqlxMamStorage {
 
         match &self.backend {
             MamDatabaseBackend::Sqlite(pool) => {
+                let filter_before_cursor = match query.filter_before_id.as_deref() {
+                    Some(before_id) => {
+                        Some(fetch_sqlite_cursor(pool, archive_jid, before_id).await?)
+                    }
+                    None => None,
+                };
+                let filter_after_cursor = match query.filter_after_id.as_deref() {
+                    Some(after_id) => Some(fetch_sqlite_cursor(pool, archive_jid, after_id).await?),
+                    None => None,
+                };
+                ensure_sqlite_requested_ids_exist(pool, archive_jid, &query.ids).await?;
+
                 let mut count_builder = QueryBuilder::<Sqlite>::new(
                     "SELECT COUNT(*) FROM mam_messages WHERE room_jid = ",
                 );
@@ -974,6 +1161,8 @@ impl MamStorage for SqlxMamStorage {
                     archive_jid,
                     query,
                     with_filter.as_deref(),
+                    filter_before_cursor.as_ref(),
+                    filter_after_cursor.as_ref(),
                 );
                 let count = count_builder
                     .build_query_scalar::<i64>()
@@ -983,7 +1172,14 @@ impl MamStorage for SqlxMamStorage {
                 let mut builder = QueryBuilder::<Sqlite>::new(format!(
                     "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE room_jid = "
                 ));
-                push_sqlite_mam_filters(&mut builder, archive_jid, query, with_filter.as_deref());
+                push_sqlite_mam_filters(
+                    &mut builder,
+                    archive_jid,
+                    query,
+                    with_filter.as_deref(),
+                    filter_before_cursor.as_ref(),
+                    filter_after_cursor.as_ref(),
+                );
                 if let Some(before_id) = query.before_id.as_deref().filter(|id| !id.is_empty()) {
                     let cursor = fetch_sqlite_cursor(pool, archive_jid, before_id).await?;
                     builder
@@ -1027,6 +1223,20 @@ impl MamStorage for SqlxMamStorage {
                 ))
             }
             MamDatabaseBackend::Postgres(pool) => {
+                let filter_before_cursor = match query.filter_before_id.as_deref() {
+                    Some(before_id) => {
+                        Some(fetch_postgres_cursor(pool, archive_jid, before_id).await?)
+                    }
+                    None => None,
+                };
+                let filter_after_cursor = match query.filter_after_id.as_deref() {
+                    Some(after_id) => {
+                        Some(fetch_postgres_cursor(pool, archive_jid, after_id).await?)
+                    }
+                    None => None,
+                };
+                ensure_postgres_requested_ids_exist(pool, archive_jid, &query.ids).await?;
+
                 let mut count_builder = QueryBuilder::<Postgres>::new(
                     "SELECT COUNT(*) FROM mam_messages WHERE room_jid = ",
                 );
@@ -1035,6 +1245,8 @@ impl MamStorage for SqlxMamStorage {
                     archive_jid,
                     query,
                     with_filter.as_deref(),
+                    filter_before_cursor.as_ref(),
+                    filter_after_cursor.as_ref(),
                 );
                 let count = count_builder
                     .build_query_scalar::<i64>()
@@ -1044,7 +1256,14 @@ impl MamStorage for SqlxMamStorage {
                 let mut builder = QueryBuilder::<Postgres>::new(format!(
                     "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE room_jid = "
                 ));
-                push_postgres_mam_filters(&mut builder, archive_jid, query, with_filter.as_deref());
+                push_postgres_mam_filters(
+                    &mut builder,
+                    archive_jid,
+                    query,
+                    with_filter.as_deref(),
+                    filter_before_cursor.as_ref(),
+                    filter_after_cursor.as_ref(),
+                );
                 if let Some(before_id) = query.before_id.as_deref().filter(|id| !id.is_empty()) {
                     let cursor = fetch_postgres_cursor(pool, archive_jid, before_id).await?;
                     builder
@@ -1565,6 +1784,78 @@ mod tests {
         assert_eq!(page.last_id.as_deref(), Some("b-fourth"));
     }
 
+    #[tokio::test]
+    async fn test_sqlite_extended_before_id_filters_without_flipping_order() {
+        let storage = create_test_storage().await;
+        assert_extended_before_id_filters_without_flipping_order(&storage).await;
+    }
+
+    #[tokio::test]
+    async fn test_inmemory_extended_before_id_filters_without_flipping_order() {
+        let storage = InMemoryMamStorage::new();
+        assert_extended_before_id_filters_without_flipping_order(&storage).await;
+    }
+
+    async fn assert_extended_before_id_filters_without_flipping_order(storage: &dyn MamStorage) {
+        let archive = "room@conference.example.com";
+        let base = Utc::now();
+        store_nonlexical_archive_order_messages(storage, archive, base).await;
+
+        let result = storage
+            .query_messages(
+                archive,
+                &MamQuery {
+                    filter_before_id: Some("x-fifth".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(bodies(&result), vec!["one", "two", "three", "four"]);
+        assert_eq!(result.first_id.as_deref(), Some("z-first"));
+        assert_eq!(result.last_id.as_deref(), Some("b-fourth"));
+        assert_eq!(result.count, Some(4));
+    }
+
+    #[tokio::test]
+    async fn test_sqlite_extended_ids_query_returns_specific_messages() {
+        let storage = create_test_storage().await;
+        assert_extended_ids_query_returns_specific_messages(&storage).await;
+    }
+
+    #[tokio::test]
+    async fn test_inmemory_extended_ids_query_returns_specific_messages() {
+        let storage = InMemoryMamStorage::new();
+        assert_extended_ids_query_returns_specific_messages(&storage).await;
+    }
+
+    async fn assert_extended_ids_query_returns_specific_messages(storage: &dyn MamStorage) {
+        let archive = "room@conference.example.com";
+        let base = Utc::now();
+        store_nonlexical_archive_order_messages(storage, archive, base).await;
+
+        let result = storage
+            .query_messages(
+                archive,
+                &MamQuery {
+                    ids: vec!["x-fifth".to_string(), "a-second".to_string()],
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let ids: Vec<&str> = result
+            .messages
+            .iter()
+            .map(|message| message.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["a-second", "x-fifth"]);
+        assert_eq!(bodies(&result), vec!["two", "five"]);
+        assert_eq!(result.count, Some(2));
+    }
+
     async fn store_nonlexical_archive_order_messages(
         storage: &dyn MamStorage,
         archive: &str,
@@ -1648,6 +1939,49 @@ mod tests {
             .expect_err("missing before cursor must be an error");
 
         assert!(matches!(error, MamStorageError::NotFound(ref id) if id == "missing-before-id"));
+
+        let error = storage
+            .query_messages(
+                archive,
+                &MamQuery {
+                    filter_before_id: Some("missing-filter-before-id".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect_err("missing extended before-id must be an error");
+
+        assert!(
+            matches!(error, MamStorageError::NotFound(ref id) if id == "missing-filter-before-id")
+        );
+
+        let error = storage
+            .query_messages(
+                archive,
+                &MamQuery {
+                    filter_after_id: Some("missing-filter-after-id".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect_err("missing extended after-id must be an error");
+
+        assert!(
+            matches!(error, MamStorageError::NotFound(ref id) if id == "missing-filter-after-id")
+        );
+
+        let error = storage
+            .query_messages(
+                archive,
+                &MamQuery {
+                    ids: vec!["known-id".to_string(), "missing-query-id".to_string()],
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect_err("missing ids entry must be an error");
+
+        assert!(matches!(error, MamStorageError::NotFound(ref id) if id == "missing-query-id"));
     }
 
     #[tokio::test]

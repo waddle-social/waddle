@@ -1106,8 +1106,9 @@ async fn interpret_with_depth(
 /// incoming-block enforcement and risk persisting blocked messages
 /// into the recipient's MAM / inbox.
 ///
-/// The synthetic full-JID resource is a static literal
-/// (`"offline-recipient-pass"`) because the recipient-pass
+/// The synthetic full-JID resource is the shared
+/// [`waddle_xmpp::protocol::HEADLESS_RECIPIENT_RESOURCE`] constant because
+/// the recipient-pass
 /// [`waddle_xmpp::protocol::session_state::Locality`] derivation
 /// matches `to` against the bound bare JID — the resource value is
 /// irrelevant for locality, and the synthetic resource never reaches
@@ -1130,18 +1131,19 @@ async fn run_headless_recipient_pass(
     // Synthetic FullJid for `transition_to_ready`. The resource value
     // is irrelevant — the recipient pass derives `Locality::Recipient`
     // from bare-as-bare matching when `to` is bare.
-    let synthetic_resource = match jid::ResourcePart::new("offline-recipient-pass") {
-        Ok(rp) => rp,
-        Err(error) => {
-            warn!(
-                bare_jid = %recipient_bare,
-                %error,
-                "headless recipient-pass: synthetic resource part rejected; \
-                 skipping (should not happen — static literal)"
-            );
-            return;
-        }
-    };
+    let synthetic_resource =
+        match jid::ResourcePart::new(waddle_xmpp::protocol::HEADLESS_RECIPIENT_RESOURCE) {
+            Ok(rp) => rp,
+            Err(error) => {
+                warn!(
+                    bare_jid = %recipient_bare,
+                    %error,
+                    "headless recipient-pass: synthetic resource part rejected; \
+                     skipping (should not happen — static literal)"
+                );
+                return;
+            }
+        };
     let synthetic_full = recipient_bare.with_resource(&synthetic_resource);
 
     // Fail-closed on blocklist load error (Copilot review on PR #275).
@@ -1170,6 +1172,7 @@ async fn run_headless_recipient_pass(
     };
 
     let mut transient = XmppStateMachine::new(deps.local_domain, (**dispatcher).clone());
+    transient.set_has_live_transport(false);
     transient.transition_to_ready(synthetic_full, false);
     transient.set_blocklist(blocklist);
 
@@ -1238,11 +1241,20 @@ async fn apply_retraction_tombstone(
             return;
         }
     };
+    let Some(retraction_id) = retraction_message
+        .id
+        .clone()
+        .and_then(waddle_xmpp::mam::RichMessageId::new)
+    else {
+        warn!(
+            archive = %archive,
+            target = target_wire_id,
+            "ApplyRetractionTombstone: retraction stanza missing valid message id; skipping"
+        );
+        return;
+    };
     let tombstone = waddle_xmpp::mam::ArchivedTombstone {
-        retraction_id: retraction_message
-            .id
-            .clone()
-            .and_then(waddle_xmpp::mam::RichMessageId::new),
+        retraction_id: Some(retraction_id),
         stamp: chrono::Utc::now(),
         moderation: None,
     };
@@ -1967,7 +1979,7 @@ async fn dispatch_bot_groupchat_response(
             .as_ref()
             .and_then(|to| room_scoped_reply_to_attr(to.as_str(), bot_ctx.room_jid))
         {
-            reply = reply.with_to(&to);
+            reply = reply.with_to(to);
         }
         set_reply_payload(&mut working, &reply);
     }
@@ -2413,7 +2425,7 @@ async fn validate_groupchat_rich_targets(
     }
     if has_malformed_rich_payload(message) {
         return Err(bad_request_error(
-            "Rich-message payload is missing required identifier.",
+            "Rich-message payload is missing a required identifier or contains an invalid JID.",
         ));
     }
     let Some(mam_storage) = deps.mam_storage else {
@@ -2561,7 +2573,10 @@ fn has_malformed_rich_payload(message: &Message) -> bool {
                 && payload.attr("id").is_none_or(str::is_empty))
             || (payload.ns() == NS_REPLY
                 && payload.name() == "reply"
-                && payload.attr("id").is_none_or(str::is_empty))
+                && (payload.attr("id").is_none_or(str::is_empty)
+                    || payload.attr("to").is_some_and(|to| {
+                        to.trim().is_empty() || to.trim().parse::<Jid>().is_err()
+                    })))
             || (payload.ns() == NS_REFERENCE
                 && payload.name() == "reference"
                 && (payload.attr("type").is_none_or(str::is_empty)
@@ -2789,8 +2804,16 @@ async fn apply_groupchat_retraction_tombstone(
             return;
         }
     };
+    let Some(retraction_id) = retraction_message.id.clone().and_then(RichMessageId::new) else {
+        warn!(
+            archive = %room,
+            target = target_message_id,
+            "ApplyGroupchatRetractionTombstone: retraction stanza missing valid message id; skipping"
+        );
+        return;
+    };
     let tombstone = ArchivedTombstone {
-        retraction_id: retraction_message.id.clone().and_then(RichMessageId::new),
+        retraction_id: Some(retraction_id),
         stamp: chrono::Utc::now(),
         moderation: None,
     };
@@ -2975,16 +2998,16 @@ fn extract_groupchat_reply_reference(
     };
     let reply_to_jid = reply
         .attr("to")
-        .and_then(|value| room_scoped_reply_to_attr(value, room));
+        .and_then(|value| room_scoped_reply_to_attr(value, room))
+        .map(|jid| jid.to_string());
     (reply.attr("id").map(ToOwned::to_owned), reply_to_jid)
 }
 
-pub(crate) fn room_scoped_reply_to_attr(value: &str, room: &BareJid) -> Option<String> {
+pub(crate) fn room_scoped_reply_to_attr(value: &str, room: &BareJid) -> Option<Jid> {
     value
         .parse::<Jid>()
         .ok()
         .filter(|jid| jid.to_bare() == *room)
-        .map(|jid| jid.to_string())
 }
 
 fn extract_origin_id(message: &Message) -> Option<String> {
@@ -3035,10 +3058,12 @@ fn rich_archive_payload(message: &Message) -> Option<ArchivedRichMessage> {
                     RichMessageId::new(id).map(|target_id| {
                         ArchivedRichPayload::Retraction(ArchivedRetraction {
                             target_id,
-                            stamp: chrono::DateTime::parse_from_rfc3339(&retracted.stamp)
-                                .ok()
+                            stamp: retracted
+                                .stamp
+                                .as_deref()
+                                .and_then(|stamp| chrono::DateTime::parse_from_rfc3339(stamp).ok())
                                 .map(|stamp| stamp.with_timezone(&chrono::Utc)),
-                            retraction_id: None,
+                            retraction_id: RichMessageId::new(retracted.retraction_id),
                         })
                     })
                 }),
@@ -3059,10 +3084,7 @@ fn rich_archive_payload(message: &Message) -> Option<ArchivedRichMessage> {
             })
         });
     let reply = parse_reply_from_message(message).and_then(|reply| {
-        RichMessageId::new(reply.id).map(|id| ArchivedReply {
-            id,
-            to: reply.to.and_then(|to| to.parse().ok()),
-        })
+        RichMessageId::new(reply.id).map(|id| ArchivedReply { id, to: reply.to })
     });
     let references = extract_references_from_message(message)
         .into_iter()
@@ -3072,7 +3094,7 @@ fn rich_archive_payload(message: &Message) -> Option<ArchivedRichMessage> {
                 ref_type,
                 begin: reference.begin.and_then(|value| value.try_into().ok()),
                 end: reference.end.and_then(|value| value.try_into().ok()),
-                uri: reference.uri.and_then(RichText::new),
+                uri: RichText::new(reference.uri),
                 anchor: reference.anchor.and_then(RichText::new),
             })
         })
@@ -4568,7 +4590,11 @@ mod tests {
 
         assert_eq!(
             room_scoped_reply_to_attr("chat@muc.example.com/alice", &room),
-            Some("chat@muc.example.com/alice".to_string())
+            Some(
+                "chat@muc.example.com/alice"
+                    .parse::<Jid>()
+                    .expect("occupant jid")
+            )
         );
         assert_eq!(
             room_scoped_reply_to_attr("alice@example.com/web", &room),
