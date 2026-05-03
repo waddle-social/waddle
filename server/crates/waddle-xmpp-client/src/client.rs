@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, RwLock};
 
 use minidom::Element;
@@ -7,8 +7,8 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use crate::command::XmppCommand;
 use crate::config::ClientConfig;
 use crate::error::{parse_stanza_error, ClientError, ClientResult};
-use crate::event::{ClientEvent, ConnectionEvent};
-use crate::request::ClientRequest;
+use crate::event::{ClientEvent, ConnectionEvent, MessageDeliveryEvent, StreamManagementEvent};
+use crate::request::{ClientRequest, StanzaId};
 use crate::runtime::XmppRuntime;
 use crate::state::{ClientState, SessionSnapshot};
 use crate::transport::{
@@ -181,6 +181,9 @@ where
             events: evt_tx,
             state,
             pending_iqs: HashMap::new(),
+            sm_delivery_tracking_enabled: false,
+            outbound_h: 0,
+            pending_message_deliveries: VecDeque::new(),
         };
 
         tokio::spawn(task.run());
@@ -197,6 +200,15 @@ struct DriverTask {
     events: broadcast::Sender<ClientEvent>,
     state: Arc<RwLock<SessionSnapshot>>,
     pending_iqs: HashMap<String, oneshot::Sender<ClientResult<Element>>>,
+    sm_delivery_tracking_enabled: bool,
+    outbound_h: u32,
+    pending_message_deliveries: VecDeque<TrackedMessageDelivery>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TrackedMessageDelivery {
+    stanza_id: StanzaId,
+    h: u32,
 }
 
 impl DriverTask {
@@ -234,11 +246,19 @@ impl DriverTask {
                 cmd = self.commands.recv() => {
                     match cmd {
                         Some(XmppCommand::SendStanza(el)) => {
-                            let _ = self.transport.send(TransportMessage::Element(el)).await;
+                            let maybe_message_id = message_delivery_stanza_id(&el);
+                            match self.send_transport_message(TransportMessage::Element(el)).await {
+                                Ok(()) => {}
+                                Err(_) => {
+                                    if let Some(stanza_id) = maybe_message_id {
+                                        self.emit_message_delivery_failed(stanza_id);
+                                    }
+                                }
+                            }
                         }
                         Some(XmppCommand::SendIq { stanza, responder }) => {
                             let id = stanza.attr("id").map(|s| s.to_string());
-                            match self.transport.send(TransportMessage::Element(stanza)).await {
+                            match self.send_transport_message(TransportMessage::Element(stanza)).await {
                                 Err(_) => {
                                     let _ = responder.send(Err(ClientError::Disconnected));
                                 }
@@ -281,15 +301,16 @@ impl DriverTask {
 
         for evt in client_events {
             if let Some(msg) = self.dispatch_client_event(evt) {
-                let result = match msg {
-                    TransportMessage::Close(_) => self.transport.close().await,
-                    other => self.transport.send(other).await,
-                };
-                if result.is_err() {
+                if self.send_transport_message(msg).await.is_err() {
+                    self.fail_all_pending_message_deliveries();
                     *self.state.write().unwrap() = self.runtime.snapshot().clone();
                     return false;
                 }
             }
+        }
+
+        if is_terminal {
+            self.fail_all_pending_message_deliveries();
         }
 
         *self.state.write().unwrap() = self.runtime.snapshot().clone();
@@ -313,6 +334,54 @@ impl DriverTask {
                         )));
                 Some(msg_clone)
             }
+            ClientEvent::Connection(ConnectionEvent::StreamManagement(
+                StreamManagementEvent::Enabled { previd },
+            )) => {
+                self.sm_delivery_tracking_enabled = true;
+                self.outbound_h = 0;
+                let _ =
+                    self.events
+                        .send(ClientEvent::Connection(ConnectionEvent::StreamManagement(
+                            StreamManagementEvent::Enabled { previd },
+                        )));
+                None
+            }
+            ClientEvent::Connection(ConnectionEvent::StreamManagement(
+                StreamManagementEvent::Resumed { h },
+            )) => {
+                self.sm_delivery_tracking_enabled = true;
+                self.outbound_h = h;
+                let _ =
+                    self.events
+                        .send(ClientEvent::Connection(ConnectionEvent::StreamManagement(
+                            StreamManagementEvent::Resumed { h },
+                        )));
+                self.emit_acked_message_deliveries(h);
+                None
+            }
+            ClientEvent::Connection(ConnectionEvent::StreamManagement(
+                StreamManagementEvent::AckReceived { h },
+            )) => {
+                let _ =
+                    self.events
+                        .send(ClientEvent::Connection(ConnectionEvent::StreamManagement(
+                            StreamManagementEvent::AckReceived { h },
+                        )));
+                self.emit_acked_message_deliveries(h);
+                None
+            }
+            ClientEvent::Connection(ConnectionEvent::StreamManagement(
+                StreamManagementEvent::Failed,
+            )) => {
+                self.sm_delivery_tracking_enabled = false;
+                let _ =
+                    self.events
+                        .send(ClientEvent::Connection(ConnectionEvent::StreamManagement(
+                            StreamManagementEvent::Failed,
+                        )));
+                self.fail_all_pending_message_deliveries();
+                None
+            }
             ClientEvent::IqResult { id, element } => {
                 if let Some(responder) = self.pending_iqs.remove(&id) {
                     let type_attr = element.attr("type").unwrap_or("").to_string();
@@ -331,6 +400,81 @@ impl DriverTask {
             }
         }
     }
+
+    async fn send_transport_message(&mut self, message: TransportMessage) -> ClientResult<()> {
+        match message {
+            TransportMessage::Close(_) => self.transport.close().await,
+            TransportMessage::Element(element) => {
+                self.transport
+                    .send(TransportMessage::Element(element.clone()))
+                    .await?;
+                self.record_outbound_element(&element);
+                Ok(())
+            }
+            other => self.transport.send(other).await,
+        }
+    }
+
+    fn record_outbound_element(&mut self, element: &Element) {
+        if !self.sm_delivery_tracking_enabled {
+            return;
+        }
+
+        if !matches!(element.name(), "iq" | "message" | "presence") {
+            return;
+        }
+
+        self.outbound_h = self.outbound_h.wrapping_add(1);
+        if let Some(stanza_id) = message_delivery_stanza_id(element) {
+            self.pending_message_deliveries
+                .push_back(TrackedMessageDelivery {
+                    stanza_id,
+                    h: self.outbound_h,
+                });
+        }
+    }
+
+    fn emit_acked_message_deliveries(&mut self, h: u32) {
+        loop {
+            let should_ack = self
+                .pending_message_deliveries
+                .front()
+                .is_some_and(|pending| pending.h <= h);
+            if !should_ack {
+                break;
+            }
+
+            if let Some(pending) = self.pending_message_deliveries.pop_front() {
+                let _ =
+                    self.events
+                        .send(ClientEvent::MessageDelivery(MessageDeliveryEvent::Acked {
+                            stanza_id: pending.stanza_id,
+                        }));
+            }
+        }
+    }
+
+    fn fail_all_pending_message_deliveries(&mut self) {
+        while let Some(pending) = self.pending_message_deliveries.pop_front() {
+            self.emit_message_delivery_failed(pending.stanza_id);
+        }
+    }
+
+    fn emit_message_delivery_failed(&self, stanza_id: StanzaId) {
+        let _ = self
+            .events
+            .send(ClientEvent::MessageDelivery(MessageDeliveryEvent::Failed {
+                stanza_id,
+            }));
+    }
+}
+
+fn message_delivery_stanza_id(element: &Element) -> Option<StanzaId> {
+    if element.name() != "message" {
+        return None;
+    }
+
+    element.attr("id").and_then(|id| StanzaId::new(id).ok())
 }
 
 #[cfg(test)]
@@ -350,7 +494,7 @@ mod tests {
     use crate::command::XmppCommand;
     use crate::config::{AccessToken, ClientResource, OAuthBearerConfig, WebSocketConfig};
     use crate::error::ClientError;
-    use crate::event::{ClientEvent, LifecycleEvent};
+    use crate::event::{ClientEvent, LifecycleEvent, MessageDeliveryEvent, StreamManagementEvent};
     use crate::state::{SessionBinding, SessionPhase, SessionSnapshot};
     use crate::transport::{
         StreamClose, StreamOpen, TransportEvent, TransportMessage, TransportState,
@@ -390,6 +534,9 @@ mod tests {
             events: evt_tx,
             state,
             pending_iqs: HashMap::new(),
+            sm_delivery_tracking_enabled: false,
+            outbound_h: 0,
+            pending_message_deliveries: VecDeque::new(),
         };
         (task, cmd_tx, evt_rx)
     }
@@ -515,6 +662,76 @@ mod tests {
 
         let result = handle.send_iq(iq).await.unwrap();
         assert_eq!(result.attr("type"), Some("result"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn stream_management_ack_emits_message_delivery_ack() {
+        let (mut task, _cmd_tx, mut rx) = make_driver_task(MockTransport::new(
+            vec![],
+            vec![],
+            MockTransportShared::default(),
+        ));
+
+        let message = Element::builder("message", crate::NS_CLIENT)
+            .attr("id", "out-1")
+            .attr("type", "chat")
+            .build();
+        task.sm_delivery_tracking_enabled = true;
+        task.record_outbound_element(&message);
+
+        task.dispatch_client_event(ClientEvent::Connection(ConnectionEvent::StreamManagement(
+            StreamManagementEvent::AckReceived { h: 1 },
+        )));
+
+        let mut got_ack = false;
+        for _ in 0..2 {
+            match rx.try_recv() {
+                Ok(ClientEvent::MessageDelivery(MessageDeliveryEvent::Acked { stanza_id }))
+                    if stanza_id.as_str() == "out-1" =>
+                {
+                    got_ack = true
+                }
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+        assert!(got_ack, "expected delivery ack event for out-1");
+        assert!(task.pending_message_deliveries.is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn stream_management_failure_emits_message_delivery_failed() {
+        let (mut task, _cmd_tx, mut rx) = make_driver_task(MockTransport::new(
+            vec![],
+            vec![],
+            MockTransportShared::default(),
+        ));
+
+        let message = Element::builder("message", crate::NS_CLIENT)
+            .attr("id", "out-2")
+            .attr("type", "groupchat")
+            .build();
+        task.sm_delivery_tracking_enabled = true;
+        task.record_outbound_element(&message);
+
+        task.dispatch_client_event(ClientEvent::Connection(ConnectionEvent::StreamManagement(
+            StreamManagementEvent::Failed,
+        )));
+
+        let mut got_failed = false;
+        for _ in 0..2 {
+            match rx.try_recv() {
+                Ok(ClientEvent::MessageDelivery(MessageDeliveryEvent::Failed { stanza_id }))
+                    if stanza_id.as_str() == "out-2" =>
+                {
+                    got_failed = true
+                }
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+        assert!(got_failed, "expected delivery failure event for out-2");
+        assert!(task.pending_message_deliveries.is_empty());
     }
 
     // ── full bootstrap integration tests ─────────────────────────────────────

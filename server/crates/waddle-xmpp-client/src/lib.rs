@@ -32,7 +32,9 @@ pub use config::{
     SessionConfig, StreamManagementConfig, WebSocketConfig,
 };
 pub use error::{ClientError, ClientResult, StanzaError, StanzaErrorType};
-pub use event::{ClientEvent, ConnectionEvent, LifecycleEvent, StreamManagementEvent};
+pub use event::{
+    ClientEvent, ConnectionEvent, LifecycleEvent, MessageDeliveryEvent, StreamManagementEvent,
+};
 pub use mam::{ArchivedMessage, MamExt, MamPage, RsmPageInfo};
 pub use messaging::{InboundMessage, InboundPresence, MessagingEvent, MessagingExt};
 pub use pep::{PepExt, PepItem, UserActivity, UserMood, UserTune};
