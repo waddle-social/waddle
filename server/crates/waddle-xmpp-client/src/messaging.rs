@@ -593,28 +593,62 @@ pub fn parse_correction_payload(element: &Element) -> Option<CorrectionPayload> 
 }
 
 fn parse_markup_spans(markups_el: &Element) -> Vec<MarkupSpan> {
+    // XEP-0394: direct children of <markups> are:
+    //   <span start="..." end="..."><emphasis/|<strong/>|<code/>|<deleted/></span>  — inline
+    //   <span start="..." end="..." uri="..."/>                                     — link
+    //   <bcode start="..." end="..."/>                                              — code block
+    //   <bquote start="..." end="..."/>                                             — blockquote
     markups_el
         .children()
-        .filter_map(|child| {
-            let span_type = match child.name() {
-                "strong" => MarkupSpanType::Bold,
-                "emphasis" => MarkupSpanType::Italic,
-                "strike" => MarkupSpanType::Strikethrough,
-                "code" => MarkupSpanType::Code,
-                "codex" => MarkupSpanType::CodeBlock,
-                "blockquote" => MarkupSpanType::Blockquote,
-                "span" if child.attr("uri").is_some() => MarkupSpanType::Link,
-                _ => return None,
-            };
-            let start: usize = child.attr("start")?.parse().ok()?;
-            let end: usize = child.attr("end")?.parse().ok()?;
-            let uri = child.attr("uri").map(String::from);
-            Some(MarkupSpan {
-                span_type,
-                start,
-                end,
-                uri,
-            })
+        .filter_map(|child| match child.name() {
+            "span" => {
+                let start: usize = child.attr("start")?.parse().ok()?;
+                let end: usize = child.attr("end")?.parse().ok()?;
+                // Link: <span uri="..."/> with no inline child element
+                if let Some(uri) = child.attr("uri") {
+                    return Some(MarkupSpan {
+                        span_type: MarkupSpanType::Link,
+                        start,
+                        end,
+                        uri: Some(uri.to_string()),
+                    });
+                }
+                // Inline markup: inspect the single child element
+                let span_type = child.children().find_map(|inner| match inner.name() {
+                    "strong" => Some(MarkupSpanType::Bold),
+                    "emphasis" => Some(MarkupSpanType::Italic),
+                    "deleted" => Some(MarkupSpanType::Strikethrough),
+                    "code" => Some(MarkupSpanType::Code),
+                    _ => None,
+                })?;
+                Some(MarkupSpan {
+                    span_type,
+                    start,
+                    end,
+                    uri: None,
+                })
+            }
+            "bcode" => {
+                let start: usize = child.attr("start")?.parse().ok()?;
+                let end: usize = child.attr("end")?.parse().ok()?;
+                Some(MarkupSpan {
+                    span_type: MarkupSpanType::CodeBlock,
+                    start,
+                    end,
+                    uri: None,
+                })
+            }
+            "bquote" => {
+                let start: usize = child.attr("start")?.parse().ok()?;
+                let end: usize = child.attr("end")?.parse().ok()?;
+                Some(MarkupSpan {
+                    span_type: MarkupSpanType::Blockquote,
+                    start,
+                    end,
+                    uri: None,
+                })
+            }
+            _ => None,
         })
         .collect()
 }
@@ -1633,6 +1667,83 @@ mod tests {
             .expect("bquote element");
         assert_eq!(bquote.attr("start"), Some("21"));
         assert_eq!(bquote.attr("end"), Some("45"));
+    }
+
+    #[test]
+    fn xep0394_markup_roundtrip_parse_and_build() {
+        // Build a message with all markup types, then parse the resulting stanza
+        // and verify the roundtrip produces the same MarkupSpan values.
+        let options = SendMessageOptions {
+            markup_spans: vec![
+                MarkupSpanData {
+                    span_type: "bold".to_string(),
+                    start: 0,
+                    end: 4,
+                    uri: None,
+                },
+                MarkupSpanData {
+                    span_type: "italic".to_string(),
+                    start: 5,
+                    end: 9,
+                    uri: None,
+                },
+                MarkupSpanData {
+                    span_type: "strikethrough".to_string(),
+                    start: 10,
+                    end: 14,
+                    uri: None,
+                },
+                MarkupSpanData {
+                    span_type: "code".to_string(),
+                    start: 15,
+                    end: 19,
+                    uri: None,
+                },
+                MarkupSpanData {
+                    span_type: "code_block".to_string(),
+                    start: 20,
+                    end: 39,
+                    uri: None,
+                },
+                MarkupSpanData {
+                    span_type: "blockquote".to_string(),
+                    start: 40,
+                    end: 59,
+                    uri: None,
+                },
+                MarkupSpanData {
+                    span_type: "link".to_string(),
+                    start: 60,
+                    end: 64,
+                    uri: Some("https://example.com".to_string()),
+                },
+            ],
+            ..Default::default()
+        };
+
+        let (_, stanza) =
+            build_outbound_message("alice@example.com", "chat", "hello world", &options).unwrap();
+
+        // Parse back using parse_markup_spans
+        let markups_el = stanza.get_child("markups", NS_MARKUP).expect("markups");
+        let parsed = parse_markup_spans(markups_el);
+
+        assert_eq!(parsed.len(), 7);
+        assert!(matches!(parsed[0].span_type, MarkupSpanType::Bold));
+        assert_eq!((parsed[0].start, parsed[0].end), (0, 4));
+        assert!(matches!(parsed[1].span_type, MarkupSpanType::Italic));
+        assert_eq!((parsed[1].start, parsed[1].end), (5, 9));
+        assert!(matches!(parsed[2].span_type, MarkupSpanType::Strikethrough));
+        assert_eq!((parsed[2].start, parsed[2].end), (10, 14));
+        assert!(matches!(parsed[3].span_type, MarkupSpanType::Code));
+        assert_eq!((parsed[3].start, parsed[3].end), (15, 19));
+        assert!(matches!(parsed[4].span_type, MarkupSpanType::CodeBlock));
+        assert_eq!((parsed[4].start, parsed[4].end), (20, 39));
+        assert!(matches!(parsed[5].span_type, MarkupSpanType::Blockquote));
+        assert_eq!((parsed[5].start, parsed[5].end), (40, 59));
+        assert!(matches!(parsed[6].span_type, MarkupSpanType::Link));
+        assert_eq!(parsed[6].uri.as_deref(), Some("https://example.com"));
+        assert_eq!((parsed[6].start, parsed[6].end), (60, 64));
     }
 
     #[test]
