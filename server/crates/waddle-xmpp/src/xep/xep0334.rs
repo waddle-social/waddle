@@ -178,8 +178,12 @@ pub fn strip_hints(msg: &mut Message) {
 // ── Convenience queries ──────────────────────────────────────────────
 
 /// Returns `true` if the message should NOT be carbon-copied (XEP-0280).
+///
+/// XEP-0334 limits `<no-copy/>` to messages addressed to full JIDs; for
+/// bare-JID targets the hint does not override the normal RFC 6121 routing
+/// rules that may fan a stanza out to multiple resources.
 pub fn should_skip_carbons(msg: &Message) -> bool {
-    has_hint(msg, Hint::NoCopy)
+    has_hint(msg, Hint::NoCopy) && msg.to.as_ref().and_then(|jid| jid.resource()).is_some()
 }
 
 /// Returns `true` if the message should NOT be archived (MAM/offline).
@@ -336,8 +340,8 @@ mod tests {
     }
 
     #[test]
-    fn test_should_skip_carbons() {
-        let xml = "<message xmlns='jabber:client' type='chat'>\
+    fn test_should_skip_carbons_for_full_jid_target() {
+        let xml = "<message xmlns='jabber:client' type='chat' to='juliet@example.com/phone'>\
                     <body>Secret</body>\
                     <no-copy xmlns='urn:xmpp:hints'/>\
                     </message>";
@@ -347,6 +351,17 @@ mod tests {
 
         let plain = Message::new(None::<jid::Jid>);
         assert!(!should_skip_carbons(&plain));
+    }
+
+    #[test]
+    fn test_should_not_skip_carbons_for_bare_jid_target() {
+        let xml = "<message xmlns='jabber:client' type='chat' to='juliet@example.com'>\
+                    <body>Secret</body>\
+                    <no-copy xmlns='urn:xmpp:hints'/>\
+                    </message>";
+        let msg =
+            Message::try_from(xml.parse::<Element>().expect("valid xml")).expect("valid message");
+        assert!(!should_skip_carbons(&msg));
     }
 
     #[test]

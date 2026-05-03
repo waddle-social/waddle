@@ -118,7 +118,10 @@ mod tests {
 
         strip_client_authored_delay(&mut message);
 
-        assert!(message.payloads.iter().all(|payload| payload.ns() != NS_DELAY));
+        assert!(message
+            .payloads
+            .iter()
+            .all(|payload| payload.ns() != NS_DELAY));
         assert!(message
             .payloads
             .iter()

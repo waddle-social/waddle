@@ -214,14 +214,27 @@ mod tests {
     // -----------------------------------------------------------------
 
     #[test]
-    fn xep_0334_no_copy_hint_suppresses_carbons() {
+    fn xep_0334_no_copy_hint_suppresses_carbons_for_full_jid_targets() {
+        let local = full("alice@example.com/web");
+        let mut msg = chat_with_body("alice@example.com/web", "bob@example.com/phone", "shh");
+        msg.payloads.push(
+            Element::builder(Hint::NoCopy.element_name(), crate::xep::xep0334::NS_HINTS).build(),
+        );
+        let outcome = run(&local, CarbonsState::Enabled, &mut msg);
+        assert!(extract_carbons(&outcome).is_empty());
+    }
+
+    #[test]
+    fn xep_0334_no_copy_hint_does_not_override_bare_jid_routing() {
         let local = full("alice@example.com/web");
         let mut msg = chat_with_body("alice@example.com/web", "bob@example.com", "shh");
         msg.payloads.push(
             Element::builder(Hint::NoCopy.element_name(), crate::xep::xep0334::NS_HINTS).build(),
         );
         let outcome = run(&local, CarbonsState::Enabled, &mut msg);
-        assert!(extract_carbons(&outcome).is_empty());
+        let carbons = extract_carbons(&outcome);
+        assert_eq!(carbons.len(), 1);
+        assert_eq!(carbons[0].1, CarbonKind::Sent);
     }
 
     // -----------------------------------------------------------------

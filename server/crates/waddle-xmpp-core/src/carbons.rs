@@ -34,6 +34,16 @@ fn is_instant_messaging_payload(payload: &Element) -> bool {
     )
 }
 
+fn has_no_copy_hint(msg: &Message) -> bool {
+    msg.payloads
+        .iter()
+        .any(|payload| payload.name() == "no-copy" && payload.ns() == HINTS_NS)
+}
+
+fn no_copy_suppresses_carbons(msg: &Message) -> bool {
+    has_no_copy_hint(msg) && msg.to.as_ref().and_then(|jid| jid.resource()).is_some()
+}
+
 /// Check if an IQ is a carbons enable request.
 pub fn is_carbons_enable(iq: &Iq) -> bool {
     match &iq.payload {
@@ -64,12 +74,8 @@ pub fn build_carbons_result(original_iq: &Iq) -> Iq {
 pub fn should_copy_message(msg: &Message) -> bool {
     use xmpp_parsers::message::MessageType;
 
-    if msg
-        .payloads
-        .iter()
-        .any(|payload| payload.name() == "no-copy" && payload.ns() == HINTS_NS)
-    {
-        debug!("Message has <no-copy/> hint, skipping carbon");
+    if no_copy_suppresses_carbons(msg) {
+        debug!("Message has <no-copy/> hint for a full-JID target, skipping carbon");
         return false;
     }
 
@@ -294,8 +300,8 @@ mod tests {
     }
 
     #[test]
-    fn test_should_not_copy_with_no_copy_hint() {
-        let mut msg = Message::new(Some("recipient@example.com".parse().unwrap()));
+    fn test_should_not_copy_with_no_copy_hint_to_full_jid() {
+        let mut msg = Message::new(Some("recipient@example.com/phone".parse().unwrap()));
         msg.type_ = MessageType::Chat;
         msg.bodies.insert(
             String::new(),
@@ -305,6 +311,20 @@ mod tests {
             .push(Element::builder("no-copy", HINTS_NS).build());
 
         assert!(!should_copy_message(&msg));
+    }
+
+    #[test]
+    fn test_should_copy_with_no_copy_hint_to_bare_jid() {
+        let mut msg = Message::new(Some("recipient@example.com".parse().unwrap()));
+        msg.type_ = MessageType::Chat;
+        msg.bodies.insert(
+            String::new(),
+            xmpp_parsers::message::Body("Hello".to_string()),
+        );
+        msg.payloads
+            .push(Element::builder("no-copy", HINTS_NS).build());
+
+        assert!(should_copy_message(&msg));
     }
 
     #[test]

@@ -66,7 +66,8 @@ fn stanza_id_matches_by(elem: &Element, by: &str) -> bool {
         return false;
     }
 
-    elem.attr("by").is_some_and(|existing| stanza_id_by_matches(existing, by))
+    elem.attr("by")
+        .is_some_and(|existing| stanza_id_by_matches(existing, by))
 }
 
 /// A client-assigned origin ID.
@@ -305,7 +306,10 @@ mod tests {
             extract_stanza_id_by(&msg, "room@muc.example.com"),
             Some("arc-1".to_owned())
         );
-        assert_eq!(msg.stanza_id_by("room@muc.example.com"), Some("arc-1".to_owned()));
+        assert_eq!(
+            msg.stanza_id_by("room@muc.example.com"),
+            Some("arc-1".to_owned())
+        );
     }
 
     #[test]
