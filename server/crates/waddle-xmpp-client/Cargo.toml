@@ -7,17 +7,21 @@ authors.workspace = true
 repository.workspace = true
 description = "Native XMPP client scaffold for Waddle"
 
+[features]
+default = ["native"]
+native = ["dep:futures", "dep:reqwest", "dep:tokio", "dep:tokio-tungstenite"]
+
 [dependencies]
 base64 = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
-futures = { workspace = true }
+futures = { workspace = true, optional = true }
 jid = { workspace = true }
 minidom = { workspace = true }
-reqwest = { workspace = true }
+reqwest = { workspace = true, optional = true }
 thiserror = { workspace = true }
-tokio = { workspace = true }
-tokio-tungstenite = { workspace = true }
+tokio = { workspace = true, optional = true }
+tokio-tungstenite = { workspace = true, optional = true }
 tracing = { workspace = true }
 url = { workspace = true }
 waddle-xmpp-core = { path = "../waddle-xmpp-core" }

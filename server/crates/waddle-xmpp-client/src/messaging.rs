@@ -7,6 +7,7 @@ use chrono::{DateTime, Utc};
 use minidom::Element;
 use uuid::Uuid;
 
+#[cfg(feature = "native")]
 use crate::client::ClientHandle;
 use crate::error::ClientResult;
 use crate::request::StanzaId;
@@ -30,6 +31,7 @@ const NS_SFS: &str = "urn:xmpp:sfs:0";
 const NS_FILE_METADATA: &str = "urn:xmpp:file:metadata:0";
 const NS_URL_DATA: &str = "http://jabber.org/protocol/url-data";
 const NS_CLIENT: &str = "jabber:client";
+#[cfg(feature = "native")]
 const NS_MUC: &str = "http://jabber.org/protocol/muc";
 const NS_MUC_USER: &str = "http://jabber.org/protocol/muc#user";
 const NS_STICKERS: &str = "urn:xmpp:stickers:0";
@@ -631,6 +633,7 @@ fn parse_presence(el: &Element) -> InboundPresence {
 
 // ─── Outbound trait ───────────────────────────────────────────────────────
 
+#[cfg(feature = "native")]
 pub trait MessagingExt {
     fn join_room<'a>(
         &'a self,
@@ -679,6 +682,7 @@ pub trait MessagingExt {
     ) -> impl std::future::Future<Output = ClientResult<()>> + Send + 'a;
 }
 
+#[cfg(feature = "native")]
 impl MessagingExt for ClientHandle {
     async fn join_room(&self, room_jid: &str, nick: &str) -> ClientResult<()> {
         let to = format!("{}/{}", room_jid, nick);
@@ -794,7 +798,7 @@ impl MessagingExt for ClientHandle {
 /// Build a `<message/>` stanza carrying the body plus any XEP payloads from
 /// `options`. All XML construction goes through typed `minidom::Element`
 /// builders — never `format!` — per the project XML hard rule.
-fn build_outbound_message(
+pub fn build_outbound_message(
     to: &str,
     message_type: &str,
     body: &str,
@@ -825,7 +829,7 @@ fn build_outbound_message(
     Ok((stanza_id, builder.build()))
 }
 
-fn build_file_sharing_element(file: &SharedFile) -> Element {
+pub fn build_file_sharing_element(file: &SharedFile) -> Element {
     let mut file_sharing = Element::builder("file-sharing", NS_SFS)
         .attr("disposition", file.disposition.as_str())
         .build();

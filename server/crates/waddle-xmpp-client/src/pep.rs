@@ -3,10 +3,13 @@
 //! Covers XEP-0107 (User Mood), XEP-0108 (User Activity), XEP-0118 (User Tune).
 
 use minidom::Element;
-use uuid::Uuid;
 
+#[cfg(feature = "native")]
 use crate::client::ClientHandle;
+#[cfg(feature = "native")]
 use crate::error::ClientResult;
+#[cfg(feature = "native")]
+use uuid::Uuid;
 
 pub const NS_MOOD: &str = "http://jabber.org/protocol/mood";
 pub const NS_ACTIVITY: &str = "http://jabber.org/protocol/activity";
@@ -255,6 +258,7 @@ pub fn build_pep_clear_iq(id: &str, node: &str) -> Element {
 
 // ── PepExt trait on ClientHandle ─────────────────────────────────────────────
 
+#[cfg(feature = "native")]
 pub trait PepExt {
     fn publish_mood<'a>(
         &'a self,
@@ -279,6 +283,7 @@ pub trait PepExt {
     fn clear_tune(&self) -> impl std::future::Future<Output = ClientResult<()>> + Send + '_;
 }
 
+#[cfg(feature = "native")]
 impl PepExt for ClientHandle {
     async fn publish_mood(&self, mood: &str, text: Option<&str>) -> ClientResult<()> {
         let id = Uuid::new_v4().to_string();
