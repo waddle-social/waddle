@@ -163,7 +163,10 @@ fn build_form_field(var: &str, value: &str) -> Element {
         .build()
 }
 
-#[expect(clippy::too_many_arguments, reason = "Phase 3 API shape is required by the wasm bindings and TS parity")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Phase 3 API shape is required by the wasm bindings and TS parity"
+)]
 pub fn build_mam_iq_extended(
     iq_id: &str,
     query_id: &str,
@@ -681,10 +684,19 @@ mod tests {
         assert!(fields.contains(&("with".to_string(), "alice@example.com".to_string())));
         assert!(fields.contains(&(WADDLE_MAM_THREAD_FIELD.to_string(), "thread-42".to_string())));
         assert!(fields.contains(&(FULLTEXT_MAM_FIELD.to_string(), "needle".to_string())));
-        assert!(fields.contains(&(MAM_START_FIELD.to_string(), "2024-01-01T00:00:00Z".to_string())));
-        assert!(fields.contains(&(MAM_END_FIELD.to_string(), "2024-01-31T23:59:59Z".to_string())));
+        assert!(fields.contains(&(
+            MAM_START_FIELD.to_string(),
+            "2024-01-01T00:00:00Z".to_string()
+        )));
+        assert!(fields.contains(&(
+            MAM_END_FIELD.to_string(),
+            "2024-01-31T23:59:59Z".to_string()
+        )));
         let set = query.get_child("set", RSM_NS).expect("rsm set");
-        assert_eq!(set.get_child("after", RSM_NS).map(|child| child.text()), Some("after-1".to_string()));
+        assert_eq!(
+            set.get_child("after", RSM_NS).map(|child| child.text()),
+            Some("after-1".to_string())
+        );
         assert_eq!(iq.attr("to"), Some("room@muc.example.com"));
     }
 
@@ -713,10 +725,20 @@ mod tests {
 
     #[test]
     fn build_mam_iq_preserves_existing_before_behavior() {
-        let iq = build_mam_iq("iq-3", "query-3", 50, Some("last-id"), Some("bob@example.com"), None);
+        let iq = build_mam_iq(
+            "iq-3",
+            "query-3",
+            50,
+            Some("last-id"),
+            Some("bob@example.com"),
+            None,
+        );
         let query = iq.get_child("query", MAM_NS).expect("query child");
         let set = query.get_child("set", RSM_NS).expect("set child");
-        assert_eq!(set.get_child("before", RSM_NS).map(|child| child.text()), Some("last-id".to_string()));
+        assert_eq!(
+            set.get_child("before", RSM_NS).map(|child| child.text()),
+            Some("last-id".to_string())
+        );
         let fields: Vec<(String, String)> = query
             .get_child("x", DATA_FORMS_NS)
             .expect("form child")

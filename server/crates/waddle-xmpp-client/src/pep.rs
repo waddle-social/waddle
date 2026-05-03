@@ -117,7 +117,9 @@ fn parse_activity_payload(element: &Element) -> Option<UserActivity> {
         .children()
         .find(|child| child.ns() == NS_ACTIVITY)
         .map(|child| child.name().to_string());
-    let text = element.get_child("text", NS_ACTIVITY).map(|child| child.text());
+    let text = element
+        .get_child("text", NS_ACTIVITY)
+        .map(|child| child.text());
     Some(UserActivity {
         activity: general.name().to_string(),
         specific,
@@ -127,16 +129,24 @@ fn parse_activity_payload(element: &Element) -> Option<UserActivity> {
 
 fn parse_tune_payload(element: &Element) -> Option<UserTune> {
     let tune = UserTune {
-        artist: element.get_child("artist", NS_TUNE).map(|child| child.text()),
-        title: element.get_child("title", NS_TUNE).map(|child| child.text()),
-        source: element.get_child("source", NS_TUNE).map(|child| child.text()),
+        artist: element
+            .get_child("artist", NS_TUNE)
+            .map(|child| child.text()),
+        title: element
+            .get_child("title", NS_TUNE)
+            .map(|child| child.text()),
+        source: element
+            .get_child("source", NS_TUNE)
+            .map(|child| child.text()),
         length: element
             .get_child("length", NS_TUNE)
             .and_then(|child| child.text().parse::<u32>().ok()),
         rating: element
             .get_child("rating", NS_TUNE)
             .and_then(|child| child.text().parse::<u8>().ok()),
-        track: element.get_child("track", NS_TUNE).map(|child| child.text()),
+        track: element
+            .get_child("track", NS_TUNE)
+            .map(|child| child.text()),
         uri: element.get_child("uri", NS_TUNE).map(|child| child.text()),
     };
     if tune.artist.is_none()
@@ -154,7 +164,8 @@ fn parse_tune_payload(element: &Element) -> Option<UserTune> {
 }
 
 pub fn build_mood_element(mood: &str, text: Option<&str>) -> Element {
-    let mut builder = Element::builder("mood", NS_MOOD).append(Element::builder(mood, NS_MOOD).build());
+    let mut builder =
+        Element::builder("mood", NS_MOOD).append(Element::builder(mood, NS_MOOD).build());
     if let Some(text) = text {
         builder = builder.append(Element::builder("text", NS_MOOD).append(text).build());
     }
@@ -318,13 +329,22 @@ pub fn build_pep_items_iq(target_jid: &str, node: &str) -> Element {
         .attr("id", "pep-items")
         .append(
             Element::builder("pubsub", NS_PUBSUB)
-                .append(Element::builder("items", NS_PUBSUB).attr("node", node).build())
+                .append(
+                    Element::builder("items", NS_PUBSUB)
+                        .attr("node", node)
+                        .build(),
+                )
                 .build(),
         )
         .build()
 }
 
-fn find_pep_iq_payload<'a>(iq: &'a Element, node: &str, name: &str, ns: &str) -> Option<&'a Element> {
+fn find_pep_iq_payload<'a>(
+    iq: &'a Element,
+    node: &str,
+    name: &str,
+    ns: &str,
+) -> Option<&'a Element> {
     iq.get_child("pubsub", NS_PUBSUB)?
         .get_child("items", NS_PUBSUB)
         .filter(|items| items.attr("node") == Some(node))?
@@ -337,7 +357,12 @@ pub fn parse_pep_mood(iq: &Element) -> Option<UserMood> {
 }
 
 pub fn parse_pep_activity(iq: &Element) -> Option<UserActivity> {
-    parse_activity_payload(find_pep_iq_payload(iq, NS_ACTIVITY, "activity", NS_ACTIVITY)?)
+    parse_activity_payload(find_pep_iq_payload(
+        iq,
+        NS_ACTIVITY,
+        "activity",
+        NS_ACTIVITY,
+    )?)
 }
 
 pub fn parse_pep_tune(iq: &Element) -> Option<UserTune> {
@@ -373,8 +398,12 @@ pub trait PepExt {
 impl PepExt for ClientHandle {
     async fn publish_mood(&self, mood: &str, text: Option<&str>) -> ClientResult<()> {
         let id = Uuid::new_v4().to_string();
-        self.send_stanza(build_pep_publish_iq(&id, NS_MOOD, build_mood_element(mood, text)))
-            .await
+        self.send_stanza(build_pep_publish_iq(
+            &id,
+            NS_MOOD,
+            build_mood_element(mood, text),
+        ))
+        .await
     }
 
     async fn clear_mood(&self) -> ClientResult<()> {
@@ -475,7 +504,11 @@ mod tests {
     fn parse_activity_with_specific_and_text() {
         let msg = make_pep_message(
             NS_ACTIVITY,
-            build_activity_element_with_specific("working", Some("coding"), Some("rewriting waddle")),
+            build_activity_element_with_specific(
+                "working",
+                Some("coding"),
+                Some("rewriting waddle"),
+            ),
         );
         assert_eq!(
             parse(&msg),
@@ -531,7 +564,10 @@ mod tests {
             .and_then(|item| item.get_child("mood", NS_MOOD))
             .expect("mood payload");
         assert!(mood.get_child("content", NS_MOOD).is_some());
-        assert_eq!(mood.get_child("text", NS_MOOD).map(|child| child.text()), Some("steady".to_string()));
+        assert_eq!(
+            mood.get_child("text", NS_MOOD).map(|child| child.text()),
+            Some("steady".to_string())
+        );
     }
 
     #[test]
@@ -563,8 +599,14 @@ mod tests {
             .and_then(|publish| publish.get_child("item", NS_PUBSUB))
             .and_then(|item| item.get_child("tune", NS_TUNE))
             .expect("tune payload");
-        assert_eq!(tune.get_child("rating", NS_TUNE).map(|child| child.text()), Some("9".to_string()));
-        assert_eq!(tune.get_child("track", NS_TUNE).map(|child| child.text()), Some("1".to_string()));
+        assert_eq!(
+            tune.get_child("rating", NS_TUNE).map(|child| child.text()),
+            Some("9".to_string())
+        );
+        assert_eq!(
+            tune.get_child("track", NS_TUNE).map(|child| child.text()),
+            Some("1".to_string())
+        );
     }
 
     #[test]
@@ -617,7 +659,11 @@ mod tests {
                             .append(
                                 Element::builder("item", NS_PUBSUB)
                                     .attr("id", "current")
-                                    .append(build_activity_element_with_specific("working", Some("coding"), Some("flow")))
+                                    .append(build_activity_element_with_specific(
+                                        "working",
+                                        Some("coding"),
+                                        Some("flow"),
+                                    ))
                                     .build(),
                             )
                             .build(),

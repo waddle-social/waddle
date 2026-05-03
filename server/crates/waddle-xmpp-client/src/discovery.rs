@@ -682,8 +682,8 @@ pub fn build_waddle_inbox_query_iq(to: &str, query: &WaddleInboxQuery) -> Elemen
 
 pub fn build_waddle_inbox_mark_read_iq(to: &str, mark_read: &WaddleInboxMarkRead) -> Element {
     let id = format!("waddle-mark-read-{}", next_id());
-    let mut builder = Element::builder("mark-read", WADDLE_INBOX_NS)
-        .attr("partner", mark_read.partner.as_str());
+    let mut builder =
+        Element::builder("mark-read", WADDLE_INBOX_NS).attr("partner", mark_read.partner.as_str());
     if let Some(thread) = mark_read.thread.as_deref() {
         builder = builder.attr("thread", thread);
     }
@@ -697,7 +697,9 @@ pub fn build_waddle_inbox_mark_read_iq(to: &str, mark_read: &WaddleInboxMarkRead
 
 pub fn parse_waddle_inbox_result(iq: &Element) -> Option<WaddleInboxResult> {
     let query = iq.get_child("query", WADDLE_INBOX_NS)?;
-    let total_unread = query.attr("total-unread").and_then(|value| value.parse().ok());
+    let total_unread = query
+        .attr("total-unread")
+        .and_then(|value| value.parse().ok());
     let conversations = query
         .children()
         .filter(|child| child.name() == "conversation" && child.ns() == WADDLE_INBOX_NS)
@@ -716,7 +718,9 @@ pub fn parse_waddle_inbox_result(iq: &Element) -> Option<WaddleInboxResult> {
                     .attr("last-updated")
                     .and_then(|value| value.parse().ok()),
                 unread,
-                preview: conversation.get_child("preview", WADDLE_INBOX_NS).map(|child| child.text()),
+                preview: conversation
+                    .get_child("preview", WADDLE_INBOX_NS)
+                    .map(|child| child.text()),
                 thread: conversation.attr("thread").map(str::to_string),
                 thread_title: conversation.attr("thread-title").map(str::to_string),
                 reply_count: conversation
@@ -803,7 +807,10 @@ pub fn parse_user_search_form(iq: &Element) -> Option<UserSearchForm> {
         .filter(|child| child.ns() == USER_SEARCH_NS && child.name() != "instructions")
         .map(|child| child.name().to_string())
         .collect();
-    Some(UserSearchForm { instructions, fields })
+    Some(UserSearchForm {
+        instructions,
+        fields,
+    })
 }
 
 pub fn parse_user_search_result(iq: &Element) -> Option<UserSearchResult> {
@@ -815,10 +822,18 @@ pub fn parse_user_search_result(iq: &Element) -> Option<UserSearchResult> {
             let jid = item.attr("jid")?.to_string();
             Some(UserSearchItem {
                 jid,
-                nick: item.get_child("nick", USER_SEARCH_NS).map(|child| child.text()),
-                email: item.get_child("email", USER_SEARCH_NS).map(|child| child.text()),
-                first: item.get_child("first", USER_SEARCH_NS).map(|child| child.text()),
-                last: item.get_child("last", USER_SEARCH_NS).map(|child| child.text()),
+                nick: item
+                    .get_child("nick", USER_SEARCH_NS)
+                    .map(|child| child.text()),
+                email: item
+                    .get_child("email", USER_SEARCH_NS)
+                    .map(|child| child.text()),
+                first: item
+                    .get_child("first", USER_SEARCH_NS)
+                    .map(|child| child.text()),
+                last: item
+                    .get_child("last", USER_SEARCH_NS)
+                    .map(|child| child.text()),
             })
         })
         .collect();
@@ -877,7 +892,9 @@ pub fn build_muc_admin_affiliation_set_iq(
         .build()
 }
 
-pub fn parse_muc_admin_affiliation_query(element: &Element) -> Option<Vec<MucAdminAffiliationItem>> {
+pub fn parse_muc_admin_affiliation_query(
+    element: &Element,
+) -> Option<Vec<MucAdminAffiliationItem>> {
     let query = element.get_child("query", MUC_ADMIN_NS)?;
     Some(
         query
@@ -886,10 +903,10 @@ pub fn parse_muc_admin_affiliation_query(element: &Element) -> Option<Vec<MucAdm
             .map(|item| MucAdminAffiliationItem {
                 jid: item.attr("jid").map(str::to_string),
                 nick: item.attr("nick").map(str::to_string),
-                affiliation: item
-                    .attr("affiliation")
-                    .and_then(MucAffiliation::from_attr),
-                reason: item.get_child("reason", MUC_ADMIN_NS).map(|child| child.text()),
+                affiliation: item.attr("affiliation").and_then(MucAffiliation::from_attr),
+                reason: item
+                    .get_child("reason", MUC_ADMIN_NS)
+                    .map(|child| child.text()),
             })
             .collect(),
     )
@@ -1568,7 +1585,6 @@ mod tests {
         assert!(!result.has_feature("urn:xmpp:nonexistent"));
     }
 
-
     #[test]
     fn build_and_parse_waddle_inbox_round_trip() {
         let iq = build_waddle_inbox_query_iq(
@@ -1624,7 +1640,9 @@ mod tests {
                 thread: Some("thread-42".to_string()),
             },
         );
-        let mark_read = iq.get_child("mark-read", WADDLE_INBOX_NS).expect("mark-read");
+        let mark_read = iq
+            .get_child("mark-read", WADDLE_INBOX_NS)
+            .expect("mark-read");
         assert_eq!(mark_read.attr("partner"), Some("room@muc.example.com"));
         assert_eq!(mark_read.attr("thread"), Some("thread-42"));
     }
@@ -1645,7 +1663,11 @@ mod tests {
                             .attr("jid", "alice@example.com")
                             .attr("name", "Alice")
                             .attr("subscription", "both")
-                            .append(Element::builder("group", ROSTER_NS).append("Friends").build())
+                            .append(
+                                Element::builder("group", ROSTER_NS)
+                                    .append("Friends")
+                                    .build(),
+                            )
                             .build(),
                     )
                     .build(),
@@ -1705,7 +1727,11 @@ mod tests {
                     .append(
                         Element::builder("item", USER_SEARCH_NS)
                             .attr("jid", "admin@localhost")
-                            .append(Element::builder("nick", USER_SEARCH_NS).append("admin").build())
+                            .append(
+                                Element::builder("nick", USER_SEARCH_NS)
+                                    .append("admin")
+                                    .build(),
+                            )
                             .append(
                                 Element::builder("email", USER_SEARCH_NS)
                                     .append("admin@localhost")
@@ -1723,7 +1749,8 @@ mod tests {
 
     #[test]
     fn build_and_parse_muc_admin_affiliation_queries() {
-        let list = build_muc_admin_affiliation_list_iq("room@muc.example.com", MucAffiliation::Member);
+        let list =
+            build_muc_admin_affiliation_list_iq("room@muc.example.com", MucAffiliation::Member);
         assert_eq!(list.attr("type"), Some("get"));
         assert_eq!(
             list.get_child("query", MUC_ADMIN_NS)

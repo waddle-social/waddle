@@ -325,14 +325,18 @@ fn parse_message(el: &Element) -> InboundMessage {
         .map(String::from);
 
     let correction = parse_correction_payload(el);
-    let replaces_id = correction.as_ref().map(|payload| payload.replaces_id.clone());
+    let replaces_id = correction
+        .as_ref()
+        .map(|payload| payload.replaces_id.clone());
 
     let moderation = parse_moderation_payload(el);
     let moderation_target_id = moderation.as_ref().map(|payload| payload.target_id.clone());
     let moderated_by = moderation
         .as_ref()
         .map(|payload| payload.moderated_by.clone());
-    let moderation_reason = moderation.as_ref().and_then(|payload| payload.reason.clone());
+    let moderation_reason = moderation
+        .as_ref()
+        .and_then(|payload| payload.reason.clone());
 
     let retraction = parse_retraction_payload(el);
     let retracts_id = moderation_target_id
@@ -478,9 +482,9 @@ fn parse_message(el: &Element) -> InboundMessage {
 fn validate_chat_state(state: &str) -> ClientResult<&str> {
     match state {
         "active" | "composing" | "paused" | "inactive" | "gone" => Ok(state),
-        _ => Err(ClientError::Core(waddle_xmpp_core::CoreError::bad_request(Some(
-            format!("invalid chat state `{state}`"),
-        )))),
+        _ => Err(ClientError::Core(waddle_xmpp_core::CoreError::bad_request(
+            Some(format!("invalid chat state `{state}`")),
+        ))),
     }
 }
 
@@ -877,15 +881,17 @@ impl MessagingExt for ClientHandle {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
 
-pub fn build_chat_state_message(to: &str, state: &str, message_type: &str) -> ClientResult<Element> {
+pub fn build_chat_state_message(
+    to: &str,
+    state: &str,
+    message_type: &str,
+) -> ClientResult<Element> {
     let state = validate_chat_state(state)?;
-    Ok(
-        Element::builder("message", NS_CLIENT)
-            .attr("to", to)
-            .attr("type", message_type)
-            .append(Element::builder(state, NS_CHAT_STATES).build())
-            .build(),
-    )
+    Ok(Element::builder("message", NS_CLIENT)
+        .attr("to", to)
+        .attr("type", message_type)
+        .append(Element::builder(state, NS_CHAT_STATES).build())
+        .build())
 }
 
 pub fn build_displayed_message(to: &str, message_id: &str, message_type: &str) -> Element {
@@ -1233,14 +1239,16 @@ mod tests {
 
     #[test]
     fn parse_message_with_moderation() {
-        let e = el("<message xmlns='jabber:client' type='groupchat' from='room@muc.example'>\
+        let e = el(
+            "<message xmlns='jabber:client' type='groupchat' from='room@muc.example'>\
              <apply-to xmlns='urn:xmpp:fasten:0' id='old-msg-id'>\
                  <moderated xmlns='urn:xmpp:message-moderate:0'>\
                      <retract xmlns='urn:xmpp:message-retract:0'/>\
                      <reason>cleanup</reason>\
                  </moderated>\
              </apply-to>\
-             </message>");
+             </message>",
+        );
         let MessagingEvent::Message(msg) = parse(&e).unwrap() else {
             panic!("expected Message");
         };
@@ -1440,7 +1448,9 @@ mod tests {
     fn build_reaction_message_has_expected_shape() {
         let emojis = vec!["👍".to_string(), "❤️".to_string()];
         let stanza = build_reaction_message("room@muc.example", "groupchat", "msg-1", &emojis);
-        let reactions = stanza.get_child("reactions", NS_REACTIONS).expect("reactions child");
+        let reactions = stanza
+            .get_child("reactions", NS_REACTIONS)
+            .expect("reactions child");
         assert_eq!(reactions.attr("id"), Some("msg-1"));
         let values: Vec<String> = reactions
             .children()
@@ -1461,7 +1471,9 @@ mod tests {
             Some("msg-1")
         );
         assert_eq!(
-            stanza.get_child("body", NS_CLIENT).map(|child| child.text()),
+            stanza
+                .get_child("body", NS_CLIENT)
+                .map(|child| child.text()),
             Some("This person attempted to retract a previous message.".to_string())
         );
         assert!(stanza.get_child("store", NS_HINTS).is_some());
@@ -1469,9 +1481,12 @@ mod tests {
 
     #[test]
     fn build_moderation_message_has_expected_shape() {
-        let stanza = build_moderation_message("room@muc.example", "groupchat", "msg-1", Some("cleanup"));
+        let stanza =
+            build_moderation_message("room@muc.example", "groupchat", "msg-1", Some("cleanup"));
         assert_eq!(stanza.attr("to"), Some("room@muc.example"));
-        let apply_to = stanza.get_child("apply-to", NS_FASTEN).expect("apply-to child");
+        let apply_to = stanza
+            .get_child("apply-to", NS_FASTEN)
+            .expect("apply-to child");
         assert_eq!(apply_to.attr("id"), Some("msg-1"));
         let moderated = apply_to
             .get_child("moderated", NS_MESSAGE_MODERATE)
@@ -1493,7 +1508,9 @@ mod tests {
         assert_eq!(stanza.attr("to"), Some("alice@example.com"));
         assert_eq!(stanza.attr("id"), Some(message_id.as_str()));
         assert_eq!(
-            stanza.get_child("body", NS_CLIENT).map(|child| child.text()),
+            stanza
+                .get_child("body", NS_CLIENT)
+                .map(|child| child.text()),
             Some("fixed".to_string())
         );
         assert_eq!(

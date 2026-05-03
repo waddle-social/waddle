@@ -13,13 +13,12 @@ use waddle_xmpp_client::avatar::{
     build_data_request_iq, build_metadata_request_iq, parse_data_response, parse_metadata_response,
 };
 use waddle_xmpp_client::discovery::{
-    self, build_disco_info_iq, build_disco_items_iq, build_disable_push_iq,
-    build_enable_push_iq, build_muc_admin_affiliation_list_iq,
-    build_muc_admin_affiliation_set_iq, build_roster_get_iq, build_upload_slot_iq,
-    build_user_search_iq, build_waddle_inbox_mark_read_iq, build_waddle_inbox_query_iq,
-    parse_muc_admin_affiliation_query, parse_roster_result, parse_user_search_result,
-    parse_waddle_inbox_result, MucAdminAffiliationItem, UserSearchQuery, WaddleInboxMarkRead,
-    WaddleInboxQuery,
+    self, build_disable_push_iq, build_disco_info_iq, build_disco_items_iq, build_enable_push_iq,
+    build_muc_admin_affiliation_list_iq, build_muc_admin_affiliation_set_iq, build_roster_get_iq,
+    build_upload_slot_iq, build_user_search_iq, build_waddle_inbox_mark_read_iq,
+    build_waddle_inbox_query_iq, parse_muc_admin_affiliation_query, parse_roster_result,
+    parse_user_search_result, parse_waddle_inbox_result, MucAdminAffiliationItem, UserSearchQuery,
+    WaddleInboxMarkRead, WaddleInboxQuery,
 };
 use waddle_xmpp_client::error::parse_stanza_error;
 use waddle_xmpp_client::mam::{self, build_mam_iq, build_mam_iq_extended};
@@ -30,9 +29,9 @@ use waddle_xmpp_client::messaging::{
     SendMessageOptions, SharedFileDisposition,
 };
 use waddle_xmpp_client::pep::{
-    build_pep_items_iq, build_publish_activity_iq, build_publish_mood_iq,
-    build_publish_tune_iq, build_retract_activity_iq, build_retract_mood_iq,
-    build_retract_tune_iq, parse_pep_activity, parse_pep_mood, parse_pep_tune,
+    build_pep_items_iq, build_publish_activity_iq, build_publish_mood_iq, build_publish_tune_iq,
+    build_retract_activity_iq, build_retract_mood_iq, build_retract_tune_iq, parse_pep_activity,
+    parse_pep_mood, parse_pep_tune,
 };
 use waddle_xmpp_client::transport::{
     StreamClose, TransportEvent, TransportMessage, TransportState,
@@ -588,12 +587,7 @@ impl WaddleClient {
         })
     }
 
-    pub fn send_retraction(
-        &self,
-        to: String,
-        msg_type: String,
-        retracts_id: String,
-    ) -> Promise {
+    pub fn send_retraction(&self, to: String, msg_type: String, retracts_id: String) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
             let _ = (NS_RETRACT, NS_HINTS);
@@ -629,7 +623,8 @@ impl WaddleClient {
         let inner = self.inner.clone();
         future_to_promise(async move {
             let _ = NS_REPLACE;
-            let (message_id, stanza) = build_correction_message(&to, &msg_type, &body, &replaces_id);
+            let (message_id, stanza) =
+                build_correction_message(&to, &msg_type, &body, &replaces_id);
             send_stanza_command(inner, stanza).await?;
             Ok(JsValue::from_str(&message_id))
         })
@@ -691,8 +686,12 @@ impl WaddleClient {
                 return Ok(JsValue::NULL);
             };
             let version = WaddleServerVersion {
-                name: query.get_child("name", NS_VERSION).map(|child| child.text()),
-                version: query.get_child("version", NS_VERSION).map(|child| child.text()),
+                name: query
+                    .get_child("name", NS_VERSION)
+                    .map(|child| child.text()),
+                version: query
+                    .get_child("version", NS_VERSION)
+                    .map(|child| child.text()),
                 os: query.get_child("os", NS_VERSION).map(|child| child.text()),
             };
             to_js_value(&version)
@@ -709,10 +708,12 @@ impl WaddleClient {
             let members = parse_muc_admin_affiliation_query(&result)
                 .unwrap_or_default()
                 .into_iter()
-                .filter_map(|item| Some(WaddleRoomMember {
-                    jid: item.jid?,
-                    affiliation: item.affiliation.map(muc_affiliation_to_string)?,
-                }))
+                .filter_map(|item| {
+                    Some(WaddleRoomMember {
+                        jid: item.jid?,
+                        affiliation: item.affiliation.map(muc_affiliation_to_string)?,
+                    })
+                })
                 .collect::<Vec<_>>();
             to_js_value(&members)
         })
@@ -816,8 +817,8 @@ impl WaddleClient {
     pub fn publish_mood(&self, mood_json: JsValue) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
-            let mood: WaddleMoodOpts =
-                serde_wasm_bindgen::from_value(mood_json).map_err(|err| js_error(err.to_string()))?;
+            let mood: WaddleMoodOpts = serde_wasm_bindgen::from_value(mood_json)
+                .map_err(|err| js_error(err.to_string()))?;
             let iq = build_publish_mood_iq(&mood.kind, mood.text.as_deref());
             let _ = send_iq_command(inner, iq).await?;
             Ok(JsValue::UNDEFINED)
@@ -858,8 +859,8 @@ impl WaddleClient {
     pub fn publish_tune(&self, tune_json: JsValue) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
-            let tune: WaddleTuneOpts =
-                serde_wasm_bindgen::from_value(tune_json).map_err(|err| js_error(err.to_string()))?;
+            let tune: WaddleTuneOpts = serde_wasm_bindgen::from_value(tune_json)
+                .map_err(|err| js_error(err.to_string()))?;
             let iq = build_publish_tune_iq(
                 tune.artist.as_deref(),
                 tune.title.as_deref(),
@@ -885,14 +886,17 @@ impl WaddleClient {
     pub fn fetch_user_pep_profile(&self, jid: String) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
-            let mood = send_iq_command(inner.clone(), build_pep_items_iq(&jid, waddle_xmpp_client::pep::NS_MOOD))
-                .await
-                .ok()
-                .and_then(|result| parse_pep_mood(&result))
-                .map(|mood| WaddleMoodResult {
-                    kind: mood.mood,
-                    text: mood.text,
-                });
+            let mood = send_iq_command(
+                inner.clone(),
+                build_pep_items_iq(&jid, waddle_xmpp_client::pep::NS_MOOD),
+            )
+            .await
+            .ok()
+            .and_then(|result| parse_pep_mood(&result))
+            .map(|mood| WaddleMoodResult {
+                kind: mood.mood,
+                text: mood.text,
+            });
             let activity = send_iq_command(
                 inner.clone(),
                 build_pep_items_iq(&jid, waddle_xmpp_client::pep::NS_ACTIVITY),
@@ -905,20 +909,27 @@ impl WaddleClient {
                 specific: activity.specific,
                 text: activity.text,
             });
-            let tune = send_iq_command(inner, build_pep_items_iq(&jid, waddle_xmpp_client::pep::NS_TUNE))
-                .await
-                .ok()
-                .and_then(|result| parse_pep_tune(&result))
-                .map(|tune| WaddleTuneResult {
-                    artist: tune.artist,
-                    title: tune.title,
-                    source: tune.source,
-                    length: tune.length,
-                    rating: tune.rating,
-                    track: tune.track,
-                    uri: tune.uri,
-                });
-            let profile = WaddlePepProfile { mood, activity, tune };
+            let tune = send_iq_command(
+                inner,
+                build_pep_items_iq(&jid, waddle_xmpp_client::pep::NS_TUNE),
+            )
+            .await
+            .ok()
+            .and_then(|result| parse_pep_tune(&result))
+            .map(|tune| WaddleTuneResult {
+                artist: tune.artist,
+                title: tune.title,
+                source: tune.source,
+                length: tune.length,
+                rating: tune.rating,
+                track: tune.track,
+                uri: tune.uri,
+            });
+            let profile = WaddlePepProfile {
+                mood,
+                activity,
+                tune,
+            };
             to_js_value(&profile)
         })
     }
@@ -998,7 +1009,12 @@ impl WaddleClient {
         })
     }
 
-    pub fn fetch_room_history_page(&self, room_jid: String, max: u32, page_param: JsValue) -> Promise {
+    pub fn fetch_room_history_page(
+        &self,
+        room_jid: String,
+        max: u32,
+        page_param: JsValue,
+    ) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
             let page: WaddleMamPageParam = serde_wasm_bindgen::from_value(page_param)
@@ -1028,7 +1044,12 @@ impl WaddleClient {
         })
     }
 
-    pub fn fetch_dm_history_page(&self, peer_jid: String, max: u32, page_param: JsValue) -> Promise {
+    pub fn fetch_dm_history_page(
+        &self,
+        peer_jid: String,
+        max: u32,
+        page_param: JsValue,
+    ) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
             let page: WaddleMamPageParam = serde_wasm_bindgen::from_value(page_param)
@@ -2174,7 +2195,10 @@ fn bare_jid(jid: &str) -> String {
 
 fn jid_domain(jid: &str) -> String {
     let bare = bare_jid(jid);
-    bare.split('@').next_back().unwrap_or(bare.as_str()).to_string()
+    bare.split('@')
+        .next_back()
+        .unwrap_or(bare.as_str())
+        .to_string()
 }
 
 fn parse_muc_affiliation(value: &str) -> Result<MucAffiliation, JsValue> {
