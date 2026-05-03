@@ -3,7 +3,7 @@
 mod ws_common;
 
 use std::time::Duration;
-use ws_common::{TestServer, WsXmppClient};
+use ws_common::{disco_info_query, TestServer, WsXmppClient};
 
 const DOMAIN: &str = "localhost";
 const USERNAME: &str = "admin";
@@ -862,6 +862,43 @@ async fn websocket_muc_self_ping_succeeds_for_joined_occupant() {
     assert!(
         response.contains("type=\"result\"") || response.contains("type='result'"),
         "expected MUC self-ping result, got: {response}"
+    );
+
+    client.close().await;
+}
+
+#[tokio::test]
+async fn websocket_muc_room_disco_advertises_self_ping_optimization_only_on_rooms() {
+    let (_server, mut client) = setup().await;
+    let room = format!("self-ping-disco-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
+    let muc_service = format!("muc.{DOMAIN}");
+    let feature = "http://jabber.org/protocol/muc#self-ping-optimization";
+
+    client
+        .send(&format!(
+            r#"<presence xmlns="jabber:client" to="{room}/admin"><x xmlns="http://jabber.org/protocol/muc"/></presence>"#
+        ))
+        .await
+        .expect("send join");
+    client
+        .recv_until(|frame| frame.contains("<subject"))
+        .await
+        .expect("join responses");
+
+    let service_response = disco_info_query(&mut client, &muc_service, "ws-muc-self-ping-svc")
+        .await
+        .expect("service disco#info response");
+    assert!(
+        !service_response.contains(feature),
+        "muc service disco must not advertise XEP-0410 room feature: {service_response}"
+    );
+
+    let room_response = disco_info_query(&mut client, &room, "ws-muc-self-ping-room")
+        .await
+        .expect("room disco#info response");
+    assert!(
+        room_response.contains(feature),
+        "muc room disco missing XEP-0410 feature: {room_response}"
     );
 
     client.close().await;

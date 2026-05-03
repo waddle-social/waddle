@@ -13,6 +13,7 @@ const DATA_FORMS_NS: &str = "jabber:x:data";
 const SERVER_INFO_FORM_TYPE: &str = "urn:xmpp:serverinfo:0";
 const NS_COMMANDS: &str = "http://jabber.org/protocol/commands";
 const NS_FORUMS: &str = "urn:xmpp:forums:0";
+const NS_MUC_SELF_PING_OPTIMIZATION: &str = "http://jabber.org/protocol/muc#self-ping-optimization";
 
 /// Service Discovery info namespace (XEP-0030).
 pub const DISCO_INFO_NS: &str = "http://jabber.org/protocol/disco#info";
@@ -223,7 +224,7 @@ impl Feature {
     }
 
     pub fn muc_self_ping_optimization() -> Self {
-        Self::new("urn:xmpp:muc-selfping:0")
+        Self::new(NS_MUC_SELF_PING_OPTIMIZATION)
     }
 
     pub fn pubsub() -> Self {
@@ -582,7 +583,6 @@ pub fn muc_service_features() -> Vec<Feature> {
         Feature::disco_info(),
         Feature::disco_items(),
         Feature::muc(),
-        Feature::muc_self_ping_optimization(),
     ]
 }
 
@@ -596,6 +596,7 @@ pub fn muc_room_features(
     let mut features = vec![
         Feature::disco_info(),
         Feature::muc(),
+        Feature::muc_self_ping_optimization(),
         Feature::mam(),
         Feature::fulltext_mam(),
         Feature::waddle_mam_thread(),
@@ -739,6 +740,17 @@ mod tests {
         assert!(features.contains(&Feature::muc_persistent()));
         assert!(features.contains(&Feature::muc_membersonly()));
         assert!(features.contains(&Feature::muc_unmoderated()));
+        assert!(features.contains(&Feature::muc_self_ping_optimization()));
         assert!(features.contains(&Feature::fulltext_mam()));
+    }
+
+    #[test]
+    fn test_muc_service_features_exclude_xep_0410_feature() {
+        let features = muc_service_features();
+        assert!(!features.contains(&Feature::muc_self_ping_optimization()));
+        assert_eq!(
+            Feature::muc_self_ping_optimization().0,
+            NS_MUC_SELF_PING_OPTIMIZATION
+        );
     }
 }

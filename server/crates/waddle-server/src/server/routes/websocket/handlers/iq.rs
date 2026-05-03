@@ -411,7 +411,6 @@ pub async fn handle_iq_with_conn_state(
             let mut features = vec![
                 Feature::muc(),
                 Feature::replies(),
-                Feature::muc_self_ping_optimization(),
                 Feature::new(NS_CHANNEL_SEARCH),
             ];
             features.extend(extension_features_for_disco(state));
