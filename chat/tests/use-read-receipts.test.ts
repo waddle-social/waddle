@@ -185,4 +185,28 @@ describe("useReadReceipts", () => {
     expect(h.markChannelRead).toHaveBeenLastCalledWith("room-b@chat.example.com");
     h.stop();
   });
+
+  test("clears channel unread when latestId is null (e.g. reaction-only or backlog bump)", async () => {
+    const h = makeHarness();
+    h.activeKind.value = "channel";
+    h.activeRoomJid.value = "room@chat.example.com";
+    h.latestRemoteMessageId.value = null;
+    h.unreadCountForActive.value = 1;
+    await Promise.resolve();
+    expect(h.markChannelRead).toHaveBeenCalledWith("room@chat.example.com");
+    expect(h.markDisplayed).not.toHaveBeenCalled();
+    h.stop();
+  });
+
+  test("clears DM unread when latestId is null", async () => {
+    const h = makeHarness();
+    h.activeKind.value = "dm";
+    h.activePeerJid.value = "bob@example.com";
+    h.latestRemoteMessageId.value = null;
+    h.unreadCountForActive.value = 2;
+    await Promise.resolve();
+    expect(h.markDmRead).toHaveBeenCalledWith("bob@example.com");
+    expect(h.markDisplayed).not.toHaveBeenCalled();
+    h.stop();
+  });
 });
