@@ -21,9 +21,10 @@ pub use types::{
     message_has_framework_envelope, ArtifactReference, CommandAction, CommandDescriptor,
     CommandInvocation, CommandSessionId, DataForm, DataFormField, DataFormType, DataFormValue,
     DetectedLink, DisplayText, ExtensionCapability, ExtensionEffect, ExtensionEnvelope,
-    ExtensionEvent, ExtensionManifest, ExtensionPayload, ExtensionResponse, FormFieldOption,
+    ExtensionEvent, ExtensionManifest, ExtensionPayload, ExtensionResponse,
+    ExtensionRouteDescriptor, ExtensionRouteScope, ExtensionRouteSurface, FormFieldOption,
     FormFieldType, FormFieldValue, FrameworkTypeError, FullJidValue, LaunchContext,
     LaunchDescriptor, LaunchId, LaunchToken, MessageEnrichment, PayloadRoot, PayloadRule,
-    PayloadSurface, PluginId, PubSubPublish, ReplyTarget, RoomJid, StanzaId, ThreadId, Timestamp,
-    UiActionId, WaddleId, XmlAttribute, XmlElement, XmlNode, INVOKE_COMMAND_NODE,
+    PayloadSurface, PluginId, PubSubPublish, ReplyTarget, RoomJid, RouteId, StanzaId, ThreadId,
+    Timestamp, UiActionId, WaddleId, XmlAttribute, XmlElement, XmlNode, INVOKE_COMMAND_NODE,
 };

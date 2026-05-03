@@ -3,7 +3,9 @@ use crate::config::ServerConfig;
 use crate::db::actor::{DbExecute, DbQueryOne};
 use crate::db::{DatabasePool, PoolHealth};
 use crate::inbox::build_inbox_storage;
-use crate::permissions::PermissionActor;
+use crate::permissions::{
+    CheckPermission, Object, ObjectType, Permission, PermissionActor, Subject,
+};
 use crate::pubsub::build_pubsub_storage;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -41,8 +43,8 @@ use waddle_extensions::{
     DataForm as ExtensionDataForm, DataFormField as ExtensionDataFormField,
     DataFormType as ExtensionDataFormType, DataFormValue, ExtensionConfig, ExtensionEffect,
     ExtensionManager, FormFieldOption, FormFieldType as ExtensionFormFieldType, FormFieldValue,
-    FullJidValue, LaunchContext, LaunchId, PubSubPublish, StanzaId, UiActionId, WaddleId,
-    INVOKE_COMMAND_NODE,
+    FullJidValue, LaunchContext, LaunchId, PubSubPublish, RoomJid as ExtensionRoomJid, StanzaId,
+    UiActionId, WaddleId, INVOKE_COMMAND_NODE,
 };
 use waddle_xmpp::inbox::storage::InboxStorage;
 use waddle_xmpp::mam::{MamStorage, SqlxMamStorage};
@@ -1073,12 +1075,13 @@ async fn create_router(
 
     // Shared durable PubSub/PEP storage for the WebSocket transport (XEP-0060/0163).
     let pubsub_storage = build_pubsub_storage(xmpp_config.pubsub_database_url.clone()).await?;
-    let extension_pubsub_owner: jid::BareJid = format!("extensions@{xmpp_domain}").parse()?;
+    let extension_pubsub_owner: jid::BareJid = service_domains.extensions.parse()?;
     register_extension_commands(
         Arc::clone(&extension_manager),
         Arc::clone(&websocket_command_registry),
         Arc::clone(&pubsub_storage),
         extension_pubsub_owner,
+        Arc::clone(&state),
     )
     .await;
     if let Err(error) =
@@ -1254,15 +1257,18 @@ async fn register_extension_commands(
     command_registry: Arc<waddle_xmpp::commands::CommandRegistry>,
     pubsub_storage: Arc<dyn PubSubStorage>,
     extension_pubsub_owner: jid::BareJid,
+    app_state: Arc<AppState>,
 ) {
     let launch_manager = Arc::clone(&extension_manager);
     let launch_storage = Arc::clone(&pubsub_storage);
     let launch_owner = extension_pubsub_owner.clone();
+    let launch_app_state = Arc::clone(&app_state);
     command_registry
         .register(INVOKE_COMMAND_NODE, "Invoke extension action", move |ctx| {
             let manager = Arc::clone(&launch_manager);
             let storage = Arc::clone(&launch_storage);
             let owner = launch_owner.clone();
+            let app_state = Arc::clone(&launch_app_state);
             async move {
                 let submitted_form = ctx.command.form.as_ref();
                 let fields = extension_command_fields(submitted_form);
@@ -1295,6 +1301,9 @@ async fn register_extension_commands(
                 let Ok(waddle_id) = WaddleId::new(waddle_id) else {
                     return extension_warning_result("Extension launch waddle id is invalid");
                 };
+                let room = extension_field_value(&fields, "room")
+                    .or_else(|| extension_field_value(&fields, "waddle#room_jid"))
+                    .and_then(|value| ExtensionRoomJid::new(value).ok());
                 let source_stanza_id = extension_field_value(&fields, "source-stanza-id")
                     .or_else(|| extension_field_value(&fields, "waddle#message_stanza_id"))
                     .and_then(|value| StanzaId::new(value).ok());
@@ -1303,15 +1312,19 @@ async fn register_extension_commands(
                     .and_then(|value| waddle_extensions::Timestamp::new(value).ok());
                 let context = LaunchContext {
                     waddle_id,
+                    room,
                     source_stanza_id,
                 };
                 if !manager.validates_launch_invocation(
-                    &plugin,
-                    &action_id,
-                    &launch_id,
-                    &context,
-                    expires_at.as_ref(),
-                    &launch_token,
+                    waddle_extensions::manager::LaunchValidationRequest {
+                        plugin_name: &plugin,
+                        action_id: &action_id,
+                        launch_id: &launch_id,
+                        context: &context,
+                        fields: &fields,
+                        expires_at: expires_at.as_ref(),
+                        launch_token: &launch_token,
+                    },
                 ) {
                     return extension_warning_result(
                         "Extension launch token is missing, expired, or invalid",
@@ -1333,7 +1346,17 @@ async fn register_extension_commands(
                         launch_token: &launch_token,
                     })
                     .await;
-                extension_command_result(effects, Some((storage, owner))).await
+                extension_command_result(
+                    effects,
+                    Some(ExtensionPubSubContext {
+                        storage,
+                        owner,
+                        app_state,
+                        extension_manager: manager,
+                        authenticated_user_id: ctx.authenticated_user_id,
+                    }),
+                )
+                .await
             }
         })
         .await;
@@ -1342,12 +1365,14 @@ async fn register_extension_commands(
         let manager = Arc::clone(&extension_manager);
         let storage = Arc::clone(&pubsub_storage);
         let owner = extension_pubsub_owner.clone();
+        let app_state = Arc::clone(&app_state);
         let registered_node = node.clone();
         command_registry
             .register(node, name, move |ctx| {
                 let manager = Arc::clone(&manager);
                 let storage = Arc::clone(&storage);
                 let owner = owner.clone();
+                let app_state = Arc::clone(&app_state);
                 let registered_node = registered_node.clone();
                 async move {
                     let waddle_id = match WaddleId::new(ctx.from.to_string()) {
@@ -1363,10 +1388,14 @@ async fn register_extension_commands(
                     };
                     let submitted_form = ctx.command.form.as_ref();
                     let fields = extension_command_fields(submitted_form);
+                    let room = extension_field_value(&fields, "room")
+                        .or_else(|| extension_field_value(&fields, "waddle#room_jid"))
+                        .and_then(|value| ExtensionRoomJid::new(value).ok());
                     let effects = manager
                         .invoke_command(waddle_extensions::manager::CommandInvocationRequest {
                             node: &registered_node,
                             waddle_id,
+                            room,
                             requester: match waddle_extensions::FullJidValue::new(
                                 ctx.from.to_string(),
                             ) {
@@ -1386,7 +1415,17 @@ async fn register_extension_commands(
                             form: submitted_form.and_then(extension_data_form),
                         })
                         .await;
-                    extension_command_result(effects, Some((storage, owner))).await
+                    extension_command_result(
+                        effects,
+                        Some(ExtensionPubSubContext {
+                            storage,
+                            owner,
+                            app_state,
+                            extension_manager: manager,
+                            authenticated_user_id: ctx.authenticated_user_id,
+                        }),
+                    )
+                    .await
                 }
             })
             .await;
@@ -1520,17 +1559,89 @@ fn extension_warning_result(message: &str) -> waddle_xmpp::commands::CommandResu
     }
 }
 
+struct ExtensionPubSubContext {
+    storage: Arc<dyn PubSubStorage>,
+    owner: jid::BareJid,
+    app_state: Arc<AppState>,
+    extension_manager: Arc<ExtensionManager>,
+    authenticated_user_id: Option<String>,
+}
+
+async fn authorize_extension_pubsub_publish(
+    context: &ExtensionPubSubContext,
+    node: &waddle_extensions::types::PubSubNode,
+) -> Result<(), String> {
+    let Some(user_id) = context.authenticated_user_id.as_deref() else {
+        return Err("authenticated user required".to_string());
+    };
+    let Some(room) = context.extension_manager.room_for_pubsub_node(node) else {
+        return Err("PubSub node is not bound to a channel".to_string());
+    };
+    let room_jid: jid::BareJid = room
+        .as_str()
+        .parse()
+        .map_err(|error| format!("invalid channel JID in PubSub node: {error}"))?;
+    let Some(channel_id) = waddle_xmpp::parse_managed_room_jid(&room_jid) else {
+        return Err("PubSub node is not bound to a managed channel".to_string());
+    };
+    let object = Object::new(ObjectType::Channel, channel_id);
+    let subject = Subject::user(user_id);
+    let outcast = context
+        .app_state
+        .permission_actor
+        .ask(CheckPermission {
+            subject: subject.clone(),
+            permission: Permission::Custom("outcast".into()),
+            object: object.clone(),
+        })
+        .await
+        .map_err(|error| format!("permission check failed: {error}"))?;
+    if outcast.allowed {
+        return Err("requester is not allowed in this channel".to_string());
+    }
+    let send = context
+        .app_state
+        .permission_actor
+        .ask(CheckPermission {
+            subject,
+            permission: Permission::SendMessage,
+            object,
+        })
+        .await
+        .map_err(|error| format!("permission check failed: {error}"))?;
+    if send.allowed {
+        Ok(())
+    } else {
+        Err("requester cannot write extension state for this channel".to_string())
+    }
+}
+
 async fn extension_command_result(
     effects: Vec<ExtensionEffect>,
-    pubsub: Option<(Arc<dyn PubSubStorage>, jid::BareJid)>,
+    pubsub: Option<ExtensionPubSubContext>,
 ) -> waddle_xmpp::commands::CommandResult {
     let mut notes = Vec::new();
     let mut result_form = None;
     for effect in effects {
         match effect {
             ExtensionEffect::PublishPubSub(publish) => match pubsub.as_ref() {
-                Some((storage, owner)) => {
-                    match publish_extension_pubsub(storage.as_ref(), owner, publish).await {
+                Some(context) => {
+                    match authorize_extension_pubsub_publish(context, &publish.node).await {
+                        Ok(()) => {}
+                        Err(error) => {
+                            notes.push(waddle_xmpp::commands::Note::warn(format!(
+                                "PubSub publish denied: {error}"
+                            )));
+                            continue;
+                        }
+                    }
+                    match publish_extension_pubsub(
+                        context.storage.as_ref(),
+                        &context.owner,
+                        publish,
+                    )
+                    .await
+                    {
                         Ok(item_id) => notes.push(waddle_xmpp::commands::Note::info(format!(
                             "Published PubSub item {item_id}"
                         ))),
@@ -1781,19 +1892,44 @@ fn extension_enrichment_result_form(
     form
 }
 
+const MAX_EXTENSION_PUBSUB_ITEMS: u32 = 500;
+
 async fn publish_extension_pubsub(
     storage: &dyn PubSubStorage,
     owner: &jid::BareJid,
     publish: PubSubPublish,
 ) -> Result<String, waddle_xmpp::XmppError> {
+    ensure_extension_pubsub_node(storage, owner, publish.node.as_str()).await?;
     let item = PubSubItem::new(
         publish.item_id.map(|item_id| item_id.into_string()),
         Some(publish.payload.to_minidom()),
     );
     let result = storage
-        .publish_item(owner, publish.node.as_str(), &item, Some(owner), true)
+        .publish_item(owner, publish.node.as_str(), &item, Some(owner), false)
         .await?;
     Ok(result.item_id)
+}
+
+async fn ensure_extension_pubsub_node(
+    storage: &dyn PubSubStorage,
+    owner: &jid::BareJid,
+    node: &str,
+) -> Result<(), waddle_xmpp::XmppError> {
+    let config = extension_pubsub_node_config();
+    let (existing, _) = storage.get_or_create_node(owner, node).await?;
+    if existing.config != config {
+        storage.update_node_config(owner, node, &config).await?;
+    }
+    storage
+        .set_affiliation(owner, node, owner, waddle_xmpp::pubsub::Affiliation::Owner)
+        .await?;
+    Ok(())
+}
+
+fn extension_pubsub_node_config() -> NodeConfig {
+    let mut config = NodeConfig::spaces_private();
+    config.max_items = MAX_EXTENSION_PUBSUB_ITEMS;
+    config
 }
 
 /// Build the per-request `tracing` span and attach the inbound W3C

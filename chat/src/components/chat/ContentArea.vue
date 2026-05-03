@@ -19,6 +19,7 @@ import type { MentionCandidate } from "@/lib/mentions";
 import type { BrowserXmppClient, MessageSearchResult, XmppStatusSnapshot, RoomHats, RoomPresence } from "@/lib/xmpp-client";
 import {
   extensionCommandOutcome,
+  extensionCommandRequiresRoom,
   parseExtensionCommandLaunches,
   parseExtensionCommandForm,
   type DiscoveredExtensionCommand,
@@ -42,6 +43,7 @@ const forumTitle = defineModel<string>("forumTitle", { default: "" });
 const props = defineProps<{
   waddle: SpaceSummary | null;
   channel: ChannelSummary | null;
+  roomJid?: string | null;
   dmPeer?: { peerJid: string; peerUsername: string; presenceShow?: string } | null;
   sidebarMode?: "channels" | "dms";
   messages: TimelineMessage[];
@@ -123,6 +125,11 @@ const extensionLauncherDetail = ref("");
 const extensionCommandStates = ref<Record<string, { state: "loading" | "success" | "warning" | "error"; detail?: string }>>({});
 const extensionCommandForms = ref<Record<string, { sessionId: string; fields: ExtensionCommandFormField[]; actions?: ExtensionCommandAction[] }>>({});
 const extensionCommandActions = ref<Record<string, ExtensionAnnotationAction[]>>({});
+const availableExtensionCommands = computed(() =>
+  props.roomJid
+    ? extensionCommands.value
+    : extensionCommands.value.filter((command) => !extensionCommandRequiresRoom(command)),
+);
 const autoOpenedThreadIds = new Set<string>();
 
 type MessageComposerHandle = {
@@ -264,7 +271,7 @@ async function submitExtensionCommandForm(command: DiscoveredExtensionCommand, a
   if (!form) return;
   extensionCommandStates.value = { ...extensionCommandStates.value, [key]: { state: "loading" } };
   try {
-    const result = await props.xmppClient.submitExtensionCommandForm(command, form.sessionId, form.fields, action);
+    const result = await props.xmppClient.submitExtensionCommandForm(command, form.sessionId, form.fields, action, props.roomJid ?? undefined);
     const outcome = extensionCommandOutcome(result);
     storeExtensionResultSurfaces(key, result);
     extensionCommandStates.value = { ...extensionCommandStates.value, [key]: outcome };
@@ -982,7 +989,7 @@ function dayDividerLabel(createdAt: string): string {
       :ref="setExtensionPaletteRef"
       :state="extensionLauncherState"
       :detail="extensionLauncherDetail"
-      :commands="extensionCommands"
+      :commands="availableExtensionCommands"
       :command-states="extensionCommandStates"
       :command-forms="extensionCommandForms"
       :command-actions="extensionCommandActions"
@@ -1181,7 +1188,7 @@ function dayDividerLabel(createdAt: string): string {
       :ref="setExtensionPaletteRef"
       :state="extensionLauncherState"
       :detail="extensionLauncherDetail"
-      :commands="extensionCommands"
+      :commands="availableExtensionCommands"
       :command-states="extensionCommandStates"
       :command-forms="extensionCommandForms"
       :command-actions="extensionCommandActions"

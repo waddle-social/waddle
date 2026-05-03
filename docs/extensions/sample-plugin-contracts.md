@@ -2,7 +2,7 @@
 
 This is the implementation companion to
 `docs/superpowers/plans/2026-04-27-waddle-extension-xmpp-protocol.md`.
-It intentionally defines exactly five sample plugins for the first extension
+It intentionally defines exactly three sample plugins for the first extension
 framework slice. Each sample uses the typed `urn:waddle:extension:1`
 framework path directly; there is no compatibility bridge or legacy plugin
 contract.
@@ -28,8 +28,8 @@ Every sample plugin fixture should include these manifest fields:
 {
   "framework": "urn:waddle:extension:1",
   "witWorld": "waddle:extension@1.0.0#world:waddle-extension",
-  "pluginId": "links-task-board",
-  "payloadNamespace": "urn:waddle:links-task-board:1",
+  "pluginId": "link-board",
+  "payloadNamespace": "urn:waddle:link-board:1",
   "wasmDigest": "sha256:...",
   "capabilities": [],
   "permissions": [],
@@ -46,13 +46,11 @@ and payload namespaces outside the entries declared by each plugin manifest.
 
 | Plugin | Plugin ID | Payload Namespace | Primary Surface |
 | --- | --- | --- | --- |
-| Links Task Board | `links-task-board` | `urn:waddle:links-task-board:1` | Declarative task board with OpenGraph link enrichment. |
-| Pub Quiz | `pub-quiz` | `urn:waddle:pub-quiz:1` | Host-led quiz rounds with launchable answer buttons. |
+| Link Board | `link-board` | `urn:waddle:link-board:1` | Declarative task board with OpenGraph link enrichment. |
 | Standard AI Chatbot | `ai-chatbot` | `urn:waddle:ai-chatbot:1` | Assistant-style typed enrichment with launchable follow-ups. |
-| AI Assistant Dynamic Canvas | `ai-assistant-canvas` | `urn:waddle:ai-assistant-canvas:1` | Deterministic canvas artifact references and immutable render metadata. |
-| Decision Polls | `decision-polls` | `urn:waddle:decision-polls:1` | Fifth useful example: lightweight decisions with private votes and public aggregates. |
+| Decision Polls | `decision-polls` | `urn:waddle:decision-polls:1` | Lightweight decisions with private votes and public aggregates. |
 
-## Links Task Board
+## Link Board
 
 Capabilities:
 `message.enrich`, `launch`, `commands`, `pubsub.publish`,
@@ -79,31 +77,6 @@ Tests:
 - Board route rejects iframe/HTML/JS/CSS descriptors.
 - Direct user PubSub publish to board nodes is forbidden.
 
-## Pub Quiz
-
-Capabilities:
-`commands`, `launch`, `message.enrich`, `pubsub.publish`, `ui.declarative`.
-
-Permissions:
-`pubsub.publish`.
-
-Routes:
-
-- `quiz-host`: admin view for active game, current question, and close action.
-- `leaderboard`: member view for current aggregate scores.
-
-Actions:
-
-- `start-game`: command action behind `/quiz start`.
-- `answer`: launch action from answer buttons.
-- `close-question`: host or scheduled action.
-
-Tests:
-
-- `/quiz start` returns a visible typed message enrichment.
-- Answer launch writes admin-only submission state.
-- Member leaderboard omits answer secrets until a question closes.
-
 ## Standard AI Chatbot
 
 Capabilities:
@@ -128,35 +101,6 @@ Tests:
 - Unrelated room messages do not trigger a passive answer.
 - No provider credential or model configuration is exposed through the sample
   extension API.
-
-## AI Assistant Dynamic Canvas
-
-Capabilities:
-`commands`, `launch`, `message.enrich`, `artifact.reference`,
-`pubsub.publish`, `ui.declarative`.
-
-Permissions:
-`pubsub.publish`, `artifact.write`.
-
-Routes:
-
-- `canvas`: member view for canvas state and latest immutable render.
-- `render-history`: member view of previous render artifacts.
-
-Actions:
-
-- `create-canvas`: command action behind `/canvas`.
-- `remix`: launch action from an existing canvas message.
-
-Tests:
-
-- User prompt/style enters through XEP-0050 only.
-- The sample emits a deterministic artifact reference; provider-backed AI
-  generation requires a future host capability and is intentionally not exposed
-  by this PR.
-- Render output is written to immutable artifact storage by digest.
-- No client or user secret appears in message payloads, PubSub items, route
-  descriptors, or static artifacts.
 
 ## Decision Polls
 

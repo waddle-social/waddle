@@ -81,6 +81,10 @@ impl Identity {
     pub fn automation(name: Option<&str>) -> Self {
         Self::new("automation", "command-node", name)
     }
+
+    pub fn command_list(name: Option<&str>) -> Self {
+        Self::new("automation", "command-list", name)
+    }
 }
 
 /// Feature element for disco#info response.

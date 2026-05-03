@@ -106,6 +106,7 @@ typed_non_empty_string!(MediaType, "media type");
 typed_non_empty_string!(PluginVersion, "plugin version");
 typed_non_empty_string!(PubSubItemId, "pubsub item id");
 typed_non_empty_string!(PubSubNode, "pubsub node");
+typed_non_empty_string!(RouteId, "route id");
 typed_non_empty_string!(StanzaId, "stanza id");
 typed_non_empty_string!(Timestamp, "timestamp");
 typed_non_empty_string!(ThreadId, "thread id");
@@ -477,6 +478,7 @@ pub struct ExtensionManifest {
     pub payloads: Vec<PayloadRule>,
     pub capabilities: Vec<ExtensionCapability>,
     pub commands: Vec<CommandDescriptor>,
+    pub routes: Vec<ExtensionRouteDescriptor>,
     pub pubsub_nodes: Vec<PubSubNode>,
     pub artifact: Option<ArtifactReference>,
 }
@@ -504,6 +506,10 @@ impl ExtensionManifest {
             .iter()
             .any(|declared| pubsub_node_pattern_matches(declared.as_str(), node.as_str()))
     }
+
+    pub fn route_descriptors(&self) -> &[ExtensionRouteDescriptor] {
+        &self.routes
+    }
 }
 
 fn pubsub_node_pattern_matches(pattern: &str, candidate: &str) -> bool {
@@ -526,6 +532,47 @@ fn pubsub_node_pattern_matches(pattern: &str, candidate: &str) -> bool {
 pub struct CommandDescriptor {
     pub node: CommandNode,
     pub name: DisplayText,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "kebab-case")]
+pub enum ExtensionRouteScope {
+    Channel,
+}
+
+impl ExtensionRouteScope {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Channel => "channel",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "kebab-case")]
+pub enum ExtensionRouteSurface {
+    Gallery,
+    List,
+}
+
+impl ExtensionRouteSurface {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Gallery => "gallery",
+            Self::List => "list",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExtensionRouteDescriptor {
+    pub plugin: PluginId,
+    pub id: RouteId,
+    pub label: DisplayText,
+    pub scope: ExtensionRouteScope,
+    pub surface: ExtensionRouteSurface,
+    pub state_node: PubSubNode,
+    pub payload_namespace: PayloadNamespace,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -660,6 +707,7 @@ impl MessageSource {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LaunchContext {
     pub waddle_id: WaddleId,
+    pub room: Option<RoomJid>,
     pub source_stanza_id: Option<StanzaId>,
 }
 
@@ -667,6 +715,9 @@ impl LaunchContext {
     fn to_minidom(&self) -> Element {
         let mut builder = Element::builder("context", FRAMEWORK_NAMESPACE)
             .attr("waddle-id", self.waddle_id.as_str());
+        if let Some(room) = &self.room {
+            builder = builder.attr("room", room.as_str());
+        }
         if let Some(stanza_id) = &self.source_stanza_id {
             builder = builder.attr("stanza-id", stanza_id.as_str());
         }
@@ -1231,6 +1282,7 @@ impl TryFrom<DetectedLink> for LinkTarget {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CommandInvocation {
     pub waddle_id: WaddleId,
+    pub room: Option<RoomJid>,
     pub requester: FullJidValue,
     pub command_node: CommandNode,
     pub session_id: Option<CommandSessionId>,
@@ -1403,6 +1455,7 @@ mod tests {
             payloads: Vec::new(),
             capabilities,
             commands: Vec::new(),
+            routes: Vec::new(),
             pubsub_nodes: Vec::new(),
             artifact: None,
         }

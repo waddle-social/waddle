@@ -23,13 +23,14 @@ use crate::types::{
     CommandInvocation, CommandNode, CommandSessionId, DataForm, DataFormField, DataFormType,
     DataFormValue, DisplayText, EnrichmentId, ExtensionCapability, ExtensionEffect,
     ExtensionEnvelope, ExtensionEvent, ExtensionManifest, ExtensionPayload, ExtensionResponse,
-    FormFieldOption, FormFieldType, FormFieldValue, FullJidValue, ImageBlock, LaunchContext,
-    LaunchDescriptor, LaunchId, LaunchInvocation, LinkTarget, ListId, ListItem, ListItemId,
-    ListView, MediaType, MessageContext, MessageEnrichment, MessageHook, MessageSource,
-    PayloadNamespace, PayloadRoot, PayloadRule, PayloadSurface, PluginId, PluginVersion,
-    PubSubItemId, PubSubNode, PubSubPublish, ReplyTarget, RoomJid, Sha256Digest, StanzaId,
-    TextBlock, TextStyle, ThreadId, Timestamp, UiActionId, UiBlock, UiView, UiViewId, Url,
-    WaddleId, XmlAttribute, XmlElement, XmlNode,
+    ExtensionRouteDescriptor, ExtensionRouteScope, ExtensionRouteSurface, FormFieldOption,
+    FormFieldType, FormFieldValue, FullJidValue, ImageBlock, LaunchContext, LaunchDescriptor,
+    LaunchId, LaunchInvocation, LinkTarget, ListId, ListItem, ListItemId, ListView, MediaType,
+    MessageContext, MessageEnrichment, MessageHook, MessageSource, PayloadNamespace, PayloadRoot,
+    PayloadRule, PayloadSurface, PluginId, PluginVersion, PubSubItemId, PubSubNode, PubSubPublish,
+    ReplyTarget, RoomJid, RouteId, Sha256Digest, StanzaId, TextBlock, TextStyle, ThreadId,
+    Timestamp, UiActionId, UiBlock, UiView, UiViewId, Url, WaddleId, XmlAttribute, XmlElement,
+    XmlNode,
 };
 
 wasmtime::component::bindgen!({
@@ -91,6 +92,7 @@ impl HostState {
                 plugin_id: PluginId::new("initializing-extension")
                     .expect("static plugin id is valid"),
                 requester: None,
+                source_room: None,
                 kind: InvocationKind::Launch,
             },
             String::new(),
@@ -625,6 +627,11 @@ impl TryFrom<wit_exports::lifecycle::ExtensionManifest> for ExtensionManifest {
                 .into_iter()
                 .map(TryInto::try_into)
                 .collect::<Result<Vec<_>>>()?,
+            routes: value
+                .routes
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<Vec<_>>>()?,
             pubsub_nodes: value
                 .pubsub_nodes
                 .into_iter()
@@ -643,6 +650,39 @@ impl TryFrom<wit_types::CommandDescriptor> for CommandDescriptor {
             node: wit_newtype_to_domain!(value.node, CommandNode)?,
             name: wit_newtype_to_domain!(value.name, DisplayText)?,
         })
+    }
+}
+
+impl TryFrom<wit_types::ExtensionRouteDescriptor> for ExtensionRouteDescriptor {
+    type Error = anyhow::Error;
+
+    fn try_from(value: wit_types::ExtensionRouteDescriptor) -> Result<Self> {
+        Ok(Self {
+            plugin: wit_newtype_to_domain!(value.plugin, PluginId)?,
+            id: wit_newtype_to_domain!(value.id, RouteId)?,
+            label: wit_newtype_to_domain!(value.label, DisplayText)?,
+            scope: value.scope.into(),
+            surface: value.surface.into(),
+            state_node: wit_newtype_to_domain!(value.state_node, PubSubNode)?,
+            payload_namespace: wit_newtype_to_domain!(value.payload_namespace, PayloadNamespace)?,
+        })
+    }
+}
+
+impl From<wit_types::ExtensionRouteScope> for ExtensionRouteScope {
+    fn from(value: wit_types::ExtensionRouteScope) -> Self {
+        match value {
+            wit_types::ExtensionRouteScope::Channel => Self::Channel,
+        }
+    }
+}
+
+impl From<wit_types::ExtensionRouteSurface> for ExtensionRouteSurface {
+    fn from(value: wit_types::ExtensionRouteSurface) -> Self {
+        match value {
+            wit_types::ExtensionRouteSurface::Gallery => Self::Gallery,
+            wit_types::ExtensionRouteSurface::ListView => Self::List,
+        }
     }
 }
 
@@ -725,6 +765,7 @@ impl From<CommandInvocation> for wit_types::CommandInvocation {
     fn from(value: CommandInvocation) -> Self {
         Self {
             waddle_id: value.waddle_id.into(),
+            room: value.room.map(Into::into),
             requester: value.requester.into(),
             command_node: value.command_node.into(),
             session_id: value.session_id.map(Into::into),
@@ -774,6 +815,7 @@ impl From<LaunchContext> for wit_types::LaunchContext {
     fn from(value: LaunchContext) -> Self {
         Self {
             waddle_id: value.waddle_id.into(),
+            room: value.room.map(Into::into),
             source_stanza_id: value.source_stanza_id.map(Into::into),
         }
     }
@@ -1404,6 +1446,16 @@ impl TryFrom<wit_types::SendMessageRequest> for host_domain::SendMessageRequest 
                     )
                 },
             )?,
+            extensions: value
+                .extensions
+                .map(TryInto::try_into)
+                .transpose()
+                .map_err(|error: anyhow::Error| {
+                    HostToolError::invalid_request(
+                        DisplayText::new(error.to_string())
+                            .expect("type error message is non-empty"),
+                    )
+                })?,
         })
     }
 }
@@ -1519,6 +1571,10 @@ impl TryFrom<wit_types::LaunchContext> for LaunchContext {
     fn try_from(value: wit_types::LaunchContext) -> Result<Self> {
         Ok(Self {
             waddle_id: wit_newtype_to_domain!(value.waddle_id, WaddleId)?,
+            room: value
+                .room
+                .map(|room| wit_newtype_to_domain!(room, RoomJid))
+                .transpose()?,
             source_stanza_id: value
                 .source_stanza_id
                 .map(|stanza_id| wit_newtype_to_domain!(stanza_id, StanzaId))
@@ -2014,6 +2070,7 @@ mod host_tool_tests {
                 },
                 thread_id: None,
                 reply_to: None,
+                extensions: None,
             },
         )
         .await
@@ -2158,6 +2215,7 @@ mod host_tool_tests {
                 waddle_id: WaddleId::new("test").expect("waddle id"),
                 plugin_id: PluginId::new("test-extension").expect("plugin id"),
                 requester: Some("alice@example.com".parse().expect("requester jid")),
+                source_room: Some("room@muc.example.com".parse().expect("room jid")),
                 kind: InvocationKind::Command,
             },
             "{}".to_string(),

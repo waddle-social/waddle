@@ -80,9 +80,7 @@ fn handle_event_with_executor(
     executor: &dyn ProviderExecutor,
 ) -> Result<types::ExtensionResponse, types::ExtensionError> {
     let effects = match event {
-        types::ExtensionEvent::MessageHook(hook) => message_hook_response(hook, executor)
-            .map(|effect| vec![effect])
-            .unwrap_or_default(),
+        types::ExtensionEvent::MessageHook(_) => vec![],
         types::ExtensionEvent::Command(command) => {
             return command_response(command, executor).map(|effect| types::ExtensionResponse {
                 effects: effect.into_iter().collect(),
@@ -130,7 +128,8 @@ fn command_response_with_config(
             "the /ai command requires a prompt field",
         )
     })?;
-    let context = ExecutionContext::command(command.requester, prompt);
+    let response_target = command_response_target(&command)?;
+    let context = ExecutionContext::command(command.requester, prompt, response_target);
     execute_for_context_with_config(context, executor, config).map(Some)
 }
 
@@ -139,16 +138,43 @@ fn prompt_command_form() -> types::DataForm {
         form_type: types::DataFormType::Form,
         title: Some(display("Ask AI")),
         instructions: vec![display("Enter a prompt for the AI extension.")],
-        fields: vec![types::DataFormField {
-            name: types::UiActionId {
-                value: "prompt".to_string(),
+        fields: vec![
+            types::DataFormField {
+                name: types::UiActionId {
+                    value: "prompt".to_string(),
+                },
+                field_type: types::FormFieldType::TextMulti,
+                label: Some(display("Prompt")),
+                required: true,
+                values: vec![],
+                options: vec![],
             },
-            field_type: types::FormFieldType::TextMulti,
-            label: Some(display("Prompt")),
-            required: true,
-            values: vec![],
-            options: vec![],
-        }],
+            types::DataFormField {
+                name: types::UiActionId {
+                    value: "output".to_string(),
+                },
+                field_type: types::FormFieldType::ListSingle,
+                label: Some(display("Output")),
+                required: true,
+                values: vec![types::DataFormValue {
+                    value: "private".to_string(),
+                }],
+                options: vec![
+                    types::FormFieldOption {
+                        label: Some(display("Private")),
+                        value: types::DataFormValue {
+                            value: "private".to_string(),
+                        },
+                    },
+                    types::FormFieldOption {
+                        label: Some(display("Post to channel")),
+                        value: types::DataFormValue {
+                            value: "channel".to_string(),
+                        },
+                    },
+                ],
+            },
+        ],
     }
 }
 
@@ -244,6 +270,39 @@ fn command_prompt(command: &types::CommandInvocation) -> Option<CleanPrompt> {
         .and_then(|value| CleanPrompt::new(clean_prompt(&value.value)))
 }
 
+fn command_response_target(
+    command: &types::CommandInvocation,
+) -> Result<Option<ResponseTarget>, types::ExtensionError> {
+    let output = command
+        .fields
+        .iter()
+        .find(|field| field.name.value == "output")
+        .and_then(|field| field.values.first())
+        .map(|value| value.value.as_str())
+        .unwrap_or("private");
+    match output {
+        "private" => Ok(None),
+        "channel" => {
+            let Some(room) = command.room.clone() else {
+                return Err(extension_error(
+                    types::ExtensionErrorCode::InvalidRequest,
+                    "posting an AI answer to a channel requires an active channel",
+                ));
+            };
+            Ok(Some(ResponseTarget {
+                room,
+                thread_id: None,
+                reply_to: None,
+                focus_thread: false,
+            }))
+        }
+        _ => Err(extension_error(
+            types::ExtensionErrorCode::InvalidRequest,
+            "unsupported AI output target",
+        )),
+    }
+}
+
 fn response_effect(
     target: Option<ResponseTarget>,
     answer: ProviderAnswer,
@@ -275,6 +334,7 @@ fn room_message_request(
         body,
         thread_id: target.thread_id.clone(),
         reply_to: target.reply_to.clone(),
+        extensions: None,
     }
 }
 
@@ -558,11 +618,15 @@ struct ExecutionContext {
 }
 
 impl ExecutionContext {
-    fn command(requester: types::FullJid, prompt: CleanPrompt) -> Self {
+    fn command(
+        requester: types::FullJid,
+        prompt: CleanPrompt,
+        response_target: Option<ResponseTarget>,
+    ) -> Self {
         Self {
             requester: bare_jid_from_full(&requester.value),
             prompt,
-            response_target: None,
+            response_target,
         }
     }
 }
@@ -1432,7 +1496,6 @@ fn manifest() -> types::ExtensionManifest {
         )],
         capabilities: vec![
             types::ExtensionCapability::MessageEnrich,
-            types::ExtensionCapability::MessageObserve,
             types::ExtensionCapability::HostMamRead,
             types::ExtensionCapability::HostMembersRead,
             types::ExtensionCapability::HostPresenceRead,
@@ -1444,6 +1507,7 @@ fn manifest() -> types::ExtensionManifest {
             types::ExtensionCapability::Commands,
         ],
         commands: vec![command_descriptor(COMMAND_NODE, AI_COMMAND)],
+        routes: vec![],
         pubsub_nodes: vec![],
         artifact: None,
     }
@@ -1692,7 +1756,6 @@ mod tests {
             manifest.capabilities,
             vec![
                 types::ExtensionCapability::MessageEnrich,
-                types::ExtensionCapability::MessageObserve,
                 types::ExtensionCapability::HostMamRead,
                 types::ExtensionCapability::HostMembersRead,
                 types::ExtensionCapability::HostPresenceRead,
@@ -2487,6 +2550,7 @@ mod tests {
             waddle_id: types::WaddleId {
                 value: "space".to_string(),
             },
+            room: None,
             requester: types::FullJid {
                 value: "alice@example.com/work".to_string(),
             },

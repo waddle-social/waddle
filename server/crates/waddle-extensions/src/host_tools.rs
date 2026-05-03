@@ -3,13 +3,16 @@ use chrono::{DateTime, Utc};
 use thiserror::Error;
 use xmpp_parsers::jid::{BareJid, FullJid, Jid};
 
-use crate::types::{DisplayText, PubSubNode, ReplyTarget, RoomJid, StanzaId, ThreadId};
+use crate::types::{
+    DisplayText, ExtensionEnvelope, PubSubNode, ReplyTarget, RoomJid, StanzaId, ThreadId,
+};
 
 #[derive(Debug, Clone)]
 pub struct InvocationContext {
     pub waddle_id: crate::types::WaddleId,
     pub plugin_id: crate::types::PluginId,
     pub requester: Option<BareJid>,
+    pub source_room: Option<BareJid>,
     pub kind: InvocationKind,
 }
 
@@ -200,6 +203,7 @@ pub struct SendMessageRequest {
     pub body: DisplayText,
     pub thread_id: Option<ThreadId>,
     pub reply_to: Option<ReplyTarget>,
+    pub extensions: Option<ExtensionEnvelope>,
 }
 
 #[derive(Debug, Clone)]

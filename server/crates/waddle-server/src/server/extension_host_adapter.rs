@@ -55,6 +55,8 @@ pub struct ExtensionHostAdapter {
 pub struct ExtensionInvocation {
     pub session: Session,
     pub actor_jid: FullJid,
+    pub plugin_id: waddle_extensions::PluginId,
+    pub source_room: Option<BareJid>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -147,6 +149,7 @@ pub struct HostSendMessage {
     pub body: String,
     pub thread_id: Option<ThreadId>,
     pub reply_to: Option<ReplyTarget>,
+    pub extensions: Option<waddle_extensions::ExtensionEnvelope>,
 }
 
 #[derive(Debug, Error)]
@@ -395,8 +398,37 @@ impl ExtensionHostAdapter {
     ) -> Result<StanzaId, ExtensionHostAdapterError> {
         match request.target {
             HostMessageTarget::Room(room) => {
+                if invocation
+                    .source_room
+                    .as_ref()
+                    .is_some_and(|source_room| source_room != &room)
+                {
+                    return Err(ExtensionHostAdapterError::NotAuthorized);
+                }
                 self.authorize_room(invocation, &room, Permission::SendMessage)
                     .await?;
+                let mut extensions = request.extensions;
+                if let Some(envelope) = extensions.as_mut() {
+                    if envelope_has_cross_room_launch(envelope, &room)
+                        || envelope_has_roomless_launch(envelope)
+                    {
+                        return Err(ExtensionHostAdapterError::NotAuthorized);
+                    }
+                    if !self
+                        .state
+                        .deps
+                        .protocol
+                        .extension_manager
+                        .validate_envelope_for_plugin(&invocation.plugin_id, envelope)
+                    {
+                        return Err(ExtensionHostAdapterError::NotAuthorized);
+                    }
+                    self.state
+                        .deps
+                        .protocol
+                        .extension_manager
+                        .sign_envelope(envelope);
+                }
                 let response = interpret::ExtensionRoomMessage {
                     room: RoomJid::new(room.to_string())
                         .map_err(|error| ExtensionHostAdapterError::Protocol(error.to_string()))?,
@@ -405,6 +437,7 @@ impl ExtensionHostAdapter {
                     stanza_id: Some(request.stanza_id),
                     thread_id: request.thread_id,
                     reply_to: request.reply_to,
+                    extensions,
                 };
                 let deps = self.interpret_deps(Some(&invocation.session));
                 let result =
@@ -901,6 +934,7 @@ impl ext_host::ExtensionHostTools for ExtensionHostAdapter {
                     body: request.body.into_string(),
                     thread_id: request.thread_id,
                     reply_to: request.reply_to,
+                    extensions: request.extensions,
                 },
             )
             .await
@@ -917,12 +951,19 @@ impl ExtensionHostAdapter {
         let Some(requester) = context.requester.as_ref() else {
             return Err(host_tool_error(ExtensionHostAdapterError::NotAuthorized));
         };
-        self.invocation_for_requester(requester).await
+        self.invocation_for_requester(
+            requester,
+            context.plugin_id.clone(),
+            context.source_room.clone(),
+        )
+        .await
     }
 
     async fn invocation_for_requester(
         &self,
         requester: &BareJid,
+        plugin_id: waddle_extensions::PluginId,
+        source_room: Option<BareJid>,
     ) -> Result<ExtensionInvocation, ext_host::HostToolError> {
         let Some(localpart) = requester.node() else {
             return Err(host_tool_error(ExtensionHostAdapterError::NotAuthorized));
@@ -968,6 +1009,8 @@ impl ExtensionHostAdapter {
         Ok(ExtensionInvocation {
             session: Session::new(&user_id, &username, &xmpp_localpart),
             actor_jid,
+            plugin_id,
+            source_room,
         })
     }
 }
@@ -1068,6 +1111,31 @@ fn host_muc_role(role: waddle_xmpp::Role) -> HostMucRole {
     }
 }
 
+fn envelope_has_cross_room_launch(
+    envelope: &waddle_extensions::ExtensionEnvelope,
+    room: &BareJid,
+) -> bool {
+    let room = room.to_string();
+    envelope.enrichments.iter().any(|enrichment| {
+        enrichment.launches.iter().any(|launch| {
+            launch
+                .context
+                .room
+                .as_ref()
+                .is_some_and(|launch_room| launch_room.as_str() != room)
+        })
+    })
+}
+
+fn envelope_has_roomless_launch(envelope: &waddle_extensions::ExtensionEnvelope) -> bool {
+    envelope.enrichments.iter().any(|enrichment| {
+        enrichment
+            .launches
+            .iter()
+            .any(|launch| launch.context.room.is_none())
+    })
+}
+
 fn host_presence_show(show: Show) -> HostPresenceShow {
     match show {
         Show::Chat => HostPresenceShow::Chat,
@@ -1139,5 +1207,56 @@ mod tests {
         assert_eq!(mapped.subscription, HostRosterSubscription::Both);
         assert_eq!(mapped.ask, Some(HostRosterAsk::Subscribe));
         assert_eq!(mapped.groups, vec!["Friends"]);
+    }
+
+    #[test]
+    fn detects_roomless_and_cross_room_launches_in_host_sent_envelopes() {
+        let room: BareJid = "pub@muc.example.com".parse().expect("room jid");
+
+        let same_room = envelope_with_launch_room(Some("pub@muc.example.com"));
+        assert!(!envelope_has_cross_room_launch(&same_room, &room));
+        assert!(!envelope_has_roomless_launch(&same_room));
+
+        let other_room = envelope_with_launch_room(Some("other@muc.example.com"));
+        assert!(envelope_has_cross_room_launch(&other_room, &room));
+        assert!(!envelope_has_roomless_launch(&other_room));
+
+        let roomless = envelope_with_launch_room(None);
+        assert!(!envelope_has_cross_room_launch(&roomless, &room));
+        assert!(envelope_has_roomless_launch(&roomless));
+    }
+
+    fn envelope_with_launch_room(room: Option<&str>) -> waddle_extensions::ExtensionEnvelope {
+        let namespace =
+            waddle_extensions::types::PayloadNamespace::new("urn:waddle:decision-polls:1")
+                .expect("namespace");
+        waddle_extensions::ExtensionEnvelope::new(vec![waddle_extensions::MessageEnrichment {
+            id: waddle_extensions::types::EnrichmentId::new("enrichment-1").expect("enrichment id"),
+            plugin: waddle_extensions::PluginId::new("decision-polls").expect("plugin id"),
+            capability: waddle_extensions::ExtensionCapability::MessageEnrich,
+            payload_namespace: namespace,
+            created_at: waddle_extensions::Timestamp::new("2026-04-27T12:00:00Z")
+                .expect("timestamp"),
+            source: None,
+            ui: Vec::new(),
+            payloads: Vec::new(),
+            launches: vec![waddle_extensions::LaunchDescriptor {
+                id: waddle_extensions::LaunchId::new("vote-yes").expect("launch id"),
+                plugin: waddle_extensions::PluginId::new("decision-polls").expect("plugin id"),
+                action: waddle_extensions::types::ActionId::new("vote").expect("action id"),
+                command_node: waddle_extensions::types::CommandNode::invoke(),
+                label: waddle_extensions::DisplayText::new("Vote yes").expect("label"),
+                context: waddle_extensions::LaunchContext {
+                    waddle_id: waddle_extensions::WaddleId::new("waddle-1").expect("waddle id"),
+                    room: room
+                        .map(|value| waddle_extensions::RoomJid::new(value).expect("room jid")),
+                    source_stanza_id: None,
+                },
+                payloads: Vec::new(),
+                fallback: None,
+                expires_at: None,
+                token: None,
+            }],
+        }])
     }
 }

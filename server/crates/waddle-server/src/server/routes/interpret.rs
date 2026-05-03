@@ -75,8 +75,8 @@ use std::str::FromStr;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 use waddle_extensions::{
-    message_has_framework_envelope, DisplayText, ExtensionEffect, ExtensionManager, ReplyTarget,
-    RoomJid, StanzaId, ThreadId, WaddleId,
+    message_has_framework_envelope, DisplayText, ExtensionEffect, ExtensionEnvelope,
+    ExtensionManager, ReplyTarget, RoomJid, StanzaId, ThreadId, WaddleId,
 };
 use waddle_xmpp::carbons::{build_received_carbon, build_sent_carbon};
 use waddle_xmpp::inbox::runtime::{direct_message_entry, groupchat_entry, groupchat_thread_entry};
@@ -1983,6 +1983,9 @@ async fn dispatch_bot_groupchat_response(
         }
         set_reply_payload(&mut working, &reply);
     }
+    if let Some(extensions) = response.extensions.as_ref() {
+        working.payloads.push(extensions.to_minidom());
+    }
 
     if let Some(room_actor) = bot_ctx.room_actor {
         if let Err(stanza_error) = validate_groupchat_rich_targets(
@@ -2040,6 +2043,7 @@ pub(crate) struct ExtensionRoomMessage {
     pub stanza_id: Option<StanzaId>,
     pub thread_id: Option<ThreadId>,
     pub reply_to: Option<ReplyTarget>,
+    pub extensions: Option<ExtensionEnvelope>,
 }
 
 pub(crate) struct ExtensionRoomDispatchResult {
@@ -4525,6 +4529,7 @@ mod tests {
                 id: StanzaId::new("root-msg").expect("reply id"),
                 to: Some(FullJidValue::new(alice.to_string()).expect("reply to")),
             }),
+            extensions: None,
         };
 
         let test_secret = waddle_xmpp::xep::xep0421::OccupantIdSecret::new(

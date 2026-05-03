@@ -79,6 +79,7 @@ fn sample_manifest() -> ExtensionManifest {
             node: CommandNode::new("urn:waddle:extension:1:task-widget").expect("command node"),
             name: text("Task Widget"),
         }],
+        routes: Vec::new(),
         pubsub_nodes: vec![id!(
             PubSubNode::new,
             "urn:example:task-widget:1:waddle:{waddle-id}:links"
@@ -228,6 +229,7 @@ fn framework_envelope_builds_generic_payload_and_fallback_ui() {
             label: text("Save link"),
             context: LaunchContext {
                 waddle_id: id!(WaddleId::new, "waddle-123"),
+                room: None,
                 source_stanza_id: Some(id!(StanzaId::new, "archive-id-456")),
             },
             payloads: Vec::new(),
@@ -299,6 +301,7 @@ fn extension_effect_validation_is_manifest_authoritative() {
             label: text("Save link"),
             context: LaunchContext {
                 waddle_id: id!(WaddleId::new, "waddle-123"),
+                room: None,
                 source_stanza_id: None,
             },
             payloads: Vec::new(),
