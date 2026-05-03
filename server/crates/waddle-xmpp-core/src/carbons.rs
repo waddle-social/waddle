@@ -16,6 +16,23 @@ pub const FORWARDED_NS: &str = "urn:xmpp:forward:0";
 pub const DELAY_NS: &str = "urn:xmpp:delay";
 
 const HINTS_NS: &str = "urn:xmpp:hints";
+const CHAT_STATES_NS: &str = "http://jabber.org/protocol/chatstates";
+const RECEIPTS_NS: &str = "urn:xmpp:receipts";
+const CHAT_MARKERS_NS: &str = "urn:xmpp:chat-markers:0";
+
+fn is_instant_messaging_payload(payload: &Element) -> bool {
+    matches!(
+        (payload.ns().as_str(), payload.name()),
+        (
+            CHAT_STATES_NS,
+            "active" | "composing" | "paused" | "inactive" | "gone"
+        ) | (RECEIPTS_NS, "request" | "received")
+            | (
+                CHAT_MARKERS_NS,
+                "markable" | "received" | "displayed" | "acknowledged"
+            )
+    )
+}
 
 /// Check if an IQ is a carbons enable request.
 pub fn is_carbons_enable(iq: &Iq) -> bool {
@@ -43,14 +60,9 @@ pub fn build_carbons_result(original_iq: &Iq) -> Iq {
     }
 }
 
-/// Check if a message should be excluded from carbon copying.
+/// Check whether a message is eligible for XEP-0280 carbon copying.
 pub fn should_copy_message(msg: &Message) -> bool {
     use xmpp_parsers::message::MessageType;
-
-    match msg.type_ {
-        MessageType::Groupchat | MessageType::Error => return false,
-        _ => {}
-    }
 
     if msg
         .payloads
@@ -70,12 +82,25 @@ pub fn should_copy_message(msg: &Message) -> bool {
         return false;
     }
 
-    if msg.bodies.is_empty() {
-        debug!("Message has no body, skipping carbon");
+    if matches!(msg.type_, MessageType::Groupchat | MessageType::Error) {
+        debug!("Message type is not eligible for carbons");
         return false;
     }
 
-    true
+    if matches!(msg.type_, MessageType::Chat) {
+        return true;
+    }
+
+    if matches!(msg.type_, MessageType::Normal) && !msg.bodies.is_empty() {
+        return true;
+    }
+
+    if msg.payloads.iter().any(is_instant_messaging_payload) {
+        return true;
+    }
+
+    debug!("Message is not XEP-0280 eligible, skipping carbon");
+    false
 }
 
 /// Build a "sent" carbon message wrapper.
@@ -211,9 +236,47 @@ mod tests {
     }
 
     #[test]
-    fn test_should_not_copy_no_body() {
-        let msg = Message::new(Some("recipient@example.com".parse().unwrap()));
+    fn test_should_copy_bodyless_chat() {
+        let mut msg = Message::new(Some("recipient@example.com".parse().unwrap()));
+        msg.type_ = MessageType::Chat;
+        assert!(should_copy_message(&msg));
+    }
+
+    #[test]
+    fn test_should_not_copy_bodyless_normal_without_im_payload() {
+        let mut msg = Message::new(Some("recipient@example.com".parse().unwrap()));
+        msg.type_ = MessageType::Normal;
         assert!(!should_copy_message(&msg));
+    }
+
+    #[test]
+    fn test_should_copy_bodyless_with_chat_state_payload() {
+        let mut msg = Message::new(Some("recipient@example.com".parse().unwrap()));
+        msg.type_ = MessageType::Normal;
+        msg.payloads
+            .push(Element::builder("composing", CHAT_STATES_NS).build());
+        assert!(should_copy_message(&msg));
+    }
+
+    #[test]
+    fn test_should_copy_bodyless_with_receipt_payload() {
+        let mut msg = Message::new(Some("recipient@example.com".parse().unwrap()));
+        msg.type_ = MessageType::Normal;
+        msg.payloads
+            .push(Element::builder("request", RECEIPTS_NS).build());
+        assert!(should_copy_message(&msg));
+    }
+
+    #[test]
+    fn test_should_copy_bodyless_with_chat_marker_payload() {
+        let mut msg = Message::new(Some("recipient@example.com".parse().unwrap()));
+        msg.type_ = MessageType::Normal;
+        msg.payloads.push(
+            Element::builder("displayed", CHAT_MARKERS_NS)
+                .attr("id", "msg-1")
+                .build(),
+        );
+        assert!(should_copy_message(&msg));
     }
 
     #[test]

@@ -11,7 +11,8 @@
 //! - `<message type='groupchat'>` MUST NOT be carboned (§6.2).
 //! - `<private xmlns='urn:xmpp:carbons:2'/>` MUST suppress carbons (§6.1).
 //! - XEP-0334 `<no-copy xmlns='urn:xmpp:hints'/>` MUST suppress carbons.
-//! - Body-less messages SHOULD NOT be carboned (`should_copy_message`).
+//! - `type='chat'` messages remain eligible even without a `<body/>` (§6.1).
+//! - Body-less XEP-0085 / XEP-0184 / XEP-0333 payloads remain eligible (§6.1).
 //! - Error stanzas are not carboned.
 //!
 //! Locality / `kind` mapping:
@@ -227,11 +228,23 @@ mod tests {
     // -----------------------------------------------------------------
 
     #[test]
-    fn xep_0280_body_less_message_is_not_carboned() {
+    fn xep_0280_body_less_chat_message_is_carboned() {
         let local = full("alice@example.com/web");
         let mut msg = Message::new(Some("bob@example.com".parse().expect("jid")));
         msg.from = Some("alice@example.com/web".parse().expect("jid"));
         msg.type_ = MessageType::Chat;
+        let outcome = run(&local, CarbonsState::Enabled, &mut msg);
+        let carbons = extract_carbons(&outcome);
+        assert_eq!(carbons.len(), 1);
+        assert_eq!(carbons[0].1, CarbonKind::Sent);
+    }
+
+    #[test]
+    fn xep_0280_body_less_normal_message_without_im_payload_is_not_carboned() {
+        let local = full("alice@example.com/web");
+        let mut msg = Message::new(Some("bob@example.com".parse().expect("jid")));
+        msg.from = Some("alice@example.com/web".parse().expect("jid"));
+        msg.type_ = MessageType::Normal;
         let outcome = run(&local, CarbonsState::Enabled, &mut msg);
         assert!(extract_carbons(&outcome).is_empty());
     }
