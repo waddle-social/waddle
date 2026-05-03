@@ -37,8 +37,8 @@
 //!   MUC occupants via `<hats/>` in presence, with well-known URIs.
 //! - **XEP-0319**: Last User Interaction in Presence - Idle detection
 //!   via `<idle since='...'/>` in presence stanzas.
-//! - **XEP-0333**: Displayed Markers - Read receipts via `<markable/>`,
-//!   `<displayed/>`, `<received/>`, and `<acknowledged/>` elements.
+//! - **XEP-0333**: Displayed Markers - `<markable/>` requests and
+//!   `<displayed/>` updates for messages that have been shown.
 //! - **XEP-0372**: References - Structured @mentions and data references
 //!   via `<reference/>` elements with type, position, and URI.
 //! - **XEP-0377**: Spam Reporting - Abuse/spam reports with reasons
@@ -350,10 +350,9 @@ pub use xep0319::{
 };
 
 pub use xep0333::{
-    add_markable, build_acknowledged_element, build_displayed_element, build_displayed_message,
-    build_markable_element, build_received_element, extract_marker_from_message, extract_marker_id,
-    has_markable, has_marker, is_marker_element, is_standalone_marker, strip_markers, Marker,
-    MarkerCarrier, MarkerError, NS_CHAT_MARKERS,
+    add_markable, build_displayed_element, build_displayed_message, build_markable_element,
+    extract_marker_from_message, extract_marker_id, has_markable, has_marker, is_marker_element,
+    is_standalone_marker, strip_markers, Marker, MarkerCarrier, MarkerError, NS_CHAT_MARKERS,
 };
 
 pub use xep0334::{

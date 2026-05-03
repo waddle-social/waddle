@@ -126,6 +126,10 @@ impl Feature {
         Self::new("urn:xmpp:message-correct:0")
     }
 
+    pub fn chat_markers() -> Self {
+        Self::new("urn:xmpp:chat-markers:0")
+    }
+
     pub fn message_retraction() -> Self {
         Self::new("urn:xmpp:message-retract:1")
     }
@@ -491,6 +495,7 @@ pub fn server_features() -> Vec<Feature> {
         Feature::stanza_ids(),
         Feature::replies(),
         Feature::message_correction(),
+        Feature::chat_markers(),
         Feature::message_retraction(),
         Feature::reactions(),
         Feature::references(),
@@ -592,6 +597,7 @@ pub fn muc_room_features(
         Feature::stanza_ids(),
         Feature::replies(),
         Feature::message_correction(),
+        Feature::chat_markers(),
         Feature::message_retraction(),
         Feature::message_moderation(),
         Feature::reactions(),
