@@ -67,9 +67,12 @@ pub fn build_direct_archived_message(
     to: &str,
     message: &Message,
 ) -> ArchivedMessage {
-    let body = prototype_body(message)
-        .map(|value| value.trim().to_string())
-        .unwrap_or_default();
+    // RFC 6121 §5.2.3: `<body>` is optional. Preserve the wire-fidelity
+    // distinction between "no `<body>` element on the wire" (`None`) and
+    // "empty `<body></body>`" (`Some("")`) so consumers reading the
+    // denormalized `body` field don't conflate subject-only or
+    // reaction-only stanzas with truly empty bodies.
+    let body = prototype_body(message).map(|value| value.trim().to_string());
     let (reply_to_id, reply_to_jid) = extract_reply_reference(message);
     let origin_id = extract_origin_id(message);
     let rich = rich_archive_payload(message);
@@ -302,7 +305,7 @@ mod tests {
         );
         assert_eq!(archived.from, "alice@example.com");
         assert_eq!(archived.to, "bob@example.com");
-        assert_eq!(archived.body, "hi");
+        assert_eq!(archived.body.as_deref(), Some("hi"));
         assert_eq!(
             archived.stanza_id.as_deref(),
             Some("orig-1"),

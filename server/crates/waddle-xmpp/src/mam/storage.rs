@@ -213,7 +213,13 @@ impl MamStorage for InMemoryMamStorage {
             messages.retain(|message| matches_thread_filter(message, thread_id.as_str()));
         }
         if let Some(fulltext) = query.fulltext.as_ref() {
-            messages.retain(|message| matches_fulltext(message.body.as_str(), fulltext.as_str()));
+            // None body matches no fulltext query — there's no text to
+            // search. Treat absent body as empty for the matcher's
+            // purposes; the matcher's existing semantics for "" are
+            // unchanged.
+            messages.retain(|message| {
+                matches_fulltext(message.body.as_deref().unwrap_or(""), fulltext.as_str())
+            });
         }
         let count = Some(u32::try_from(messages.len()).unwrap_or(u32::MAX));
 
@@ -355,7 +361,10 @@ fn apply_tombstone(
     // (it identifies the parent thread of the retracted message and so
     // leaks the conversation tree the message participated in), and is
     // scrubbed alongside `thread_id`/`reply_to_*`/`stanza_xml`/`body`.
-    message.body.clear();
+    // Tombstones drop the body entirely (XEP-0424 §Tombstones) — None
+    // is the correct "no body element" wire form for the replayed
+    // tombstone stanza.
+    message.body = None;
     message.stanza_xml = None;
     message.thread_id = None;
     message.parent_thread_id = None;
@@ -468,6 +477,11 @@ impl SqlxMamStorage {
 const SELECT_COLUMNS: &str =
     "id, room_jid, timestamp, from_jid, to_jid, body, stanza_id, thread_id, reply_to_id, reply_to_jid, origin_id, message_type, stanza_xml, rich_payload, nickname_generation, parent_thread_id";
 
+// RFC 6121 §5.2.3 / XEP-0313 §3: `body` is nullable here. NULL means
+// no `<body>` element on the archived stanza; the empty string means
+// an empty `<body></body>` element. Earlier schemas had `body TEXT NOT
+// NULL` and collapsed both via `.unwrap_or_default()` in the
+// projection, losing the distinction.
 const SQLITE_MAM_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS mam_messages (
     id TEXT PRIMARY KEY,
@@ -475,7 +489,7 @@ CREATE TABLE IF NOT EXISTS mam_messages (
     timestamp TEXT NOT NULL,
     from_jid TEXT NOT NULL,
     to_jid TEXT NOT NULL,
-    body TEXT NOT NULL,
+    body TEXT,
     stanza_id TEXT,
     thread_id TEXT,
     reply_to_id TEXT,
@@ -500,6 +514,7 @@ CREATE INDEX IF NOT EXISTS idx_mam_room_reply_to
     ON mam_messages(room_jid, reply_to_id, timestamp DESC);
 "#;
 
+// See `SQLITE_MAM_SCHEMA` for the body-nullability rationale.
 const POSTGRES_MAM_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS mam_messages (
     id TEXT PRIMARY KEY,
@@ -507,7 +522,7 @@ CREATE TABLE IF NOT EXISTS mam_messages (
     timestamp TIMESTAMPTZ NOT NULL,
     from_jid TEXT NOT NULL,
     to_jid TEXT NOT NULL,
-    body TEXT NOT NULL,
+    body TEXT,
     stanza_id TEXT,
     thread_id TEXT,
     reply_to_id TEXT,
@@ -795,7 +810,11 @@ fn decode_sqlite_message_row(row: &SqliteRow) -> Result<ArchivedMessage, MamStor
         timestamp,
         from: row.try_get(3)?,
         to: row.try_get(4)?,
-        body: row.try_get(5)?,
+        // Nullable TEXT — preserves the wire-fidelity distinction
+        // between `NULL` (no `<body>` element) and `''` (empty
+        // `<body></body>`). Explicit type to avoid ambiguity with
+        // sqlx's inference.
+        body: row.try_get::<Option<String>, _>(5)?,
         stanza_id: row.try_get(6)?,
         thread_id: row.try_get(7)?,
         parent_thread_id: row
@@ -819,7 +838,9 @@ fn decode_postgres_message_row(row: &PgRow) -> Result<ArchivedMessage, MamStorag
         timestamp: row.try_get(2)?,
         from: row.try_get(3)?,
         to: row.try_get(4)?,
-        body: row.try_get(5)?,
+        // See `decode_sqlite_message_row` — nullable, explicit type
+        // for the wire-fidelity NULL/'' distinction.
+        body: row.try_get::<Option<String>, _>(5)?,
         stanza_id: row.try_get(6)?,
         thread_id: row.try_get(7)?,
         parent_thread_id: row
@@ -910,7 +931,7 @@ impl MamStorage for SqlxMamStorage {
                         .push_bind(message.timestamp.to_rfc3339())
                         .push_bind(message.from.as_str())
                         .push_bind(message.to.as_str())
-                        .push_bind(message.body.as_str())
+                        .push_bind(message.body.as_deref())
                         .push_bind(message.stanza_id.as_deref())
                         .push_bind(message.thread_id.as_deref())
                         .push_bind(message.reply_to_id.as_deref())
@@ -935,7 +956,7 @@ impl MamStorage for SqlxMamStorage {
                         .push_bind(message.timestamp)
                         .push_bind(message.from.as_str())
                         .push_bind(message.to.as_str())
-                        .push_bind(message.body.as_str())
+                        .push_bind(message.body.as_deref())
                         .push_bind(message.stanza_id.as_deref())
                         .push_bind(message.thread_id.as_deref())
                         .push_bind(message.reply_to_id.as_deref())
@@ -1273,10 +1294,15 @@ impl MamStorage for SqlxMamStorage {
         let encoded = serde_json::to_string(&payload)
             .map_err(|error| MamStorageError::Serialization(error.to_string()))?;
 
+        // XEP-0424 §Tombstones / XEP-0425 §Tombstones: drop the body
+        // entirely on tombstone. With the new wire-fidelity body
+        // semantics (`Option<String>`), the correct "no body element
+        // on the wire" form is SQL NULL (`None`), not `''` (which is
+        // now the distinct "empty `<body></body>`" form).
         let rows = match &self.backend {
             MamDatabaseBackend::Sqlite(pool) => {
                 let mut builder = QueryBuilder::<Sqlite>::new(
-                    "UPDATE mam_messages SET body = '', stanza_xml = NULL, thread_id = NULL, parent_thread_id = NULL, reply_to_id = NULL, reply_to_jid = NULL, rich_payload = ",
+                    "UPDATE mam_messages SET body = NULL, stanza_xml = NULL, thread_id = NULL, parent_thread_id = NULL, reply_to_id = NULL, reply_to_jid = NULL, rich_payload = ",
                 );
                 builder
                     .push_bind(encoded.as_str())
@@ -1286,7 +1312,7 @@ impl MamStorage for SqlxMamStorage {
             }
             MamDatabaseBackend::Postgres(pool) => {
                 let mut builder = QueryBuilder::<Postgres>::new(
-                    "UPDATE mam_messages SET body = '', stanza_xml = NULL, thread_id = NULL, parent_thread_id = NULL, reply_to_id = NULL, reply_to_jid = NULL, rich_payload = ",
+                    "UPDATE mam_messages SET body = NULL, stanza_xml = NULL, thread_id = NULL, parent_thread_id = NULL, reply_to_id = NULL, reply_to_jid = NULL, rich_payload = ",
                 );
                 builder
                     .push_bind(encoded.as_str())
@@ -1324,7 +1350,7 @@ mod tests {
             timestamp: Utc::now(),
             from: "user@example.com/nick".to_string(),
             to: "room@conference.example.com".to_string(),
-            body: "Hello, world!".to_string(),
+            body: Some("Hello, world!".to_string()),
             stanza_id: Some("abc123".to_string()),
             ..Default::default()
         };
@@ -1340,7 +1366,7 @@ mod tests {
 
         let retrieved = retrieved.unwrap();
         assert_eq!(retrieved.id, archive_id);
-        assert_eq!(retrieved.body, "Hello, world!");
+        assert_eq!(retrieved.body.as_deref(), Some("Hello, world!"));
         assert_eq!(retrieved.stanza_id, Some("abc123".to_string()));
     }
 
@@ -1353,7 +1379,7 @@ mod tests {
             timestamp: Utc::now(),
             from: "room@conference.example.com/alice".to_string(),
             to: "room@conference.example.com".to_string(),
-            body: "Reply body".to_string(),
+            body: Some("Reply body".to_string()),
             stanza_id: Some("archive-stanza-1".to_string()),
             thread_id: Some("thread-root-1".to_string()),
             parent_thread_id: None,
@@ -1398,7 +1424,7 @@ mod tests {
             timestamp: Utc::now(),
             from: "room@conference.example.com/alice".to_string(),
             to: "room@conference.example.com".to_string(),
-            body: "Nested-thread reply".to_string(),
+            body: Some("Nested-thread reply".to_string()),
             stanza_id: Some("archive-stanza-2".to_string()),
             thread_id: Some("child-thread".to_string()),
             parent_thread_id: waddle_xmpp_core::mam::ThreadId::new("root-thread"),
@@ -1440,7 +1466,7 @@ mod tests {
                 timestamp: Utc::now(),
                 from: "user@example.com/device".to_string(),
                 to: archive.to_string(),
-                body: body.to_string(),
+                body: Some(body.to_string()),
                 ..Default::default()
             };
             storage.store_message(archive, &msg).await.unwrap();
@@ -1470,7 +1496,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(page_two.messages.len(), 1);
-        assert_eq!(page_two.messages[0].body, "three");
+        assert_eq!(page_two.messages[0].body.as_deref(), Some("three"));
     }
 
     #[tokio::test]
@@ -1585,7 +1611,7 @@ mod tests {
                         timestamp: base + ChronoDuration::seconds(offset),
                         from: "user@example.com/device".to_string(),
                         to: archive.to_string(),
-                        body: body.to_string(),
+                        body: Some(body.to_string()),
                         ..Default::default()
                     },
                 )
@@ -1616,7 +1642,7 @@ mod tests {
                     timestamp: Utc::now(),
                     from: "user@example.com/device".to_string(),
                     to: archive.to_string(),
-                    body: "known".to_string(),
+                    body: Some("known".to_string()),
                     ..Default::default()
                 },
             )
@@ -1686,7 +1712,7 @@ mod tests {
         result
             .messages
             .iter()
-            .map(|message| message.body.as_str())
+            .map(|message| message.body.as_deref().unwrap_or(""))
             .collect()
     }
 
@@ -1698,25 +1724,25 @@ mod tests {
         for msg in [
             ArchivedMessage {
                 id: "a-thread-root".to_string(),
-                body: "root".to_string(),
+                body: Some("root".to_string()),
                 ..archived_groupchat(archive)
             },
             ArchivedMessage {
                 id: "b-thread-reply".to_string(),
                 thread_id: Some("a-thread-root".to_string()),
-                body: "reply".to_string(),
+                body: Some("reply".to_string()),
                 ..archived_groupchat(archive)
             },
             ArchivedMessage {
                 id: "c-legacy-reply".to_string(),
                 reply_to_id: Some("a-thread-root".to_string()),
-                body: "legacy".to_string(),
+                body: Some("legacy".to_string()),
                 ..archived_groupchat(archive)
             },
             ArchivedMessage {
                 id: "unrelated".to_string(),
                 thread_id: Some("other-thread".to_string()),
-                body: "unrelated".to_string(),
+                body: Some("unrelated".to_string()),
                 ..archived_groupchat(archive)
             },
         ] {
@@ -1753,17 +1779,17 @@ mod tests {
         for msg in [
             ArchivedMessage {
                 id: "a-alpha".to_string(),
-                body: "release notes alpha".to_string(),
+                body: Some("release notes alpha".to_string()),
                 ..archived_groupchat(archive)
             },
             ArchivedMessage {
                 id: "b-beta".to_string(),
-                body: "release notes beta".to_string(),
+                body: Some("release notes beta".to_string()),
                 ..archived_groupchat(archive)
             },
             ArchivedMessage {
                 id: "c-other".to_string(),
-                body: "standup notes".to_string(),
+                body: Some("standup notes".to_string()),
                 ..archived_groupchat(archive)
             },
         ] {
@@ -1807,7 +1833,7 @@ mod tests {
                 timestamp: Utc::now(),
                 from: "user@example.com/device".to_string(),
                 to: archive.to_string(),
-                body: "persisted".to_string(),
+                body: Some("persisted".to_string()),
                 ..Default::default()
             };
             storage.store_message(archive, &msg).await.expect("store");
@@ -1819,7 +1845,7 @@ mod tests {
             .await
             .expect("query");
         assert_eq!(result.messages.len(), 1);
-        assert_eq!(result.messages[0].body, "persisted");
+        assert_eq!(result.messages[0].body.as_deref(), Some("persisted"));
 
         for cleanup in [
             path.clone(),
@@ -1849,7 +1875,7 @@ mod tests {
                 timestamp: base + ChronoDuration::seconds(offset as i64),
                 from: "user@example.com/device".to_string(),
                 to: archive.to_string(),
-                body: body.to_string(),
+                body: Some(body.to_string()),
                 ..Default::default()
             };
             storage.store_message(archive, &msg).await.unwrap();
@@ -1867,7 +1893,11 @@ mod tests {
             .await
             .unwrap();
 
-        let bodies: Vec<&str> = last_page.messages.iter().map(|m| m.body.as_str()).collect();
+        let bodies: Vec<&str> = last_page
+            .messages
+            .iter()
+            .map(|m| m.body.as_deref().unwrap_or(""))
+            .collect();
         assert_eq!(bodies, vec!["four", "five", "six"]);
         assert!(!last_page.complete);
     }
@@ -1896,7 +1926,7 @@ mod tests {
             timestamp: Utc::now(),
             from: format!("{archive_jid}/alice"),
             to: archive_jid.to_string(),
-            body: "secret thread content".to_string(),
+            body: Some("secret thread content".to_string()),
             stanza_id: Some("wire-id-1".to_string()),
             thread_id: Some("child-thread".to_string()),
             parent_thread_id: waddle_xmpp_core::mam::ThreadId::new("root-thread"),
@@ -1929,7 +1959,7 @@ mod tests {
             .unwrap()
             .expect("tombstone row");
 
-        assert!(row.body.is_empty(), "body must be cleared");
+        assert!(row.body.is_none(), "body must be cleared");
         assert!(
             row.stanza_xml.is_none(),
             "stanza_xml must be cleared so the original wire form does not leak"
@@ -1975,7 +2005,7 @@ mod tests {
             timestamp: Utc::now(),
             from: format!("{archive_jid}/alice"),
             to: archive_jid.to_string(),
-            body: "moderated content".to_string(),
+            body: Some("moderated content".to_string()),
             stanza_id: Some("wire-id-2".to_string()),
             thread_id: Some("child-thread".to_string()),
             parent_thread_id: waddle_xmpp_core::mam::ThreadId::new("root-thread"),
@@ -2015,7 +2045,7 @@ mod tests {
 
         assert_eq!(row.thread_id, None);
         assert_eq!(row.parent_thread_id, None);
-        assert!(row.body.is_empty());
+        assert!(row.body.is_none());
         assert!(row.stanza_xml.is_none());
 
         // Verify the tombstone is the moderation variant (covers the
@@ -2050,13 +2080,13 @@ mod tests {
         let earlier = ArchivedMessage {
             id: "zzz-earlier".to_string(),
             timestamp: t0,
-            body: "first".to_string(),
+            body: Some("first".to_string()),
             ..archived_groupchat(archive)
         };
         let later = ArchivedMessage {
             id: "aaa-later".to_string(),
             timestamp: t1,
-            body: "second".to_string(),
+            body: Some("second".to_string()),
             ..archived_groupchat(archive)
         };
 
@@ -2068,7 +2098,11 @@ mod tests {
             .await
             .unwrap();
 
-        let bodies: Vec<&str> = result.messages.iter().map(|m| m.body.as_str()).collect();
+        let bodies: Vec<&str> = result
+            .messages
+            .iter()
+            .map(|m| m.body.as_deref().unwrap_or(""))
+            .collect();
         assert_eq!(
             bodies,
             vec!["first", "second"],
@@ -2088,13 +2122,13 @@ mod tests {
         let earlier = ArchivedMessage {
             id: "zzz-earlier".to_string(),
             timestamp: t0,
-            body: "first".to_string(),
+            body: Some("first".to_string()),
             ..archived_groupchat(archive)
         };
         let later = ArchivedMessage {
             id: "aaa-later".to_string(),
             timestamp: t1,
-            body: "second".to_string(),
+            body: Some("second".to_string()),
             ..archived_groupchat(archive)
         };
 
@@ -2106,7 +2140,11 @@ mod tests {
             .await
             .unwrap();
 
-        let bodies: Vec<&str> = result.messages.iter().map(|m| m.body.as_str()).collect();
+        let bodies: Vec<&str> = result
+            .messages
+            .iter()
+            .map(|m| m.body.as_deref().unwrap_or(""))
+            .collect();
         assert_eq!(
             bodies,
             vec!["first", "second"],
@@ -2128,13 +2166,13 @@ mod tests {
         let first = ArchivedMessage {
             id: "id-001".to_string(),
             timestamp: t,
-            body: "first".to_string(),
+            body: Some("first".to_string()),
             ..archived_groupchat(archive)
         };
         let second = ArchivedMessage {
             id: "id-002".to_string(),
             timestamp: t,
-            body: "second".to_string(),
+            body: Some("second".to_string()),
             ..archived_groupchat(archive)
         };
 

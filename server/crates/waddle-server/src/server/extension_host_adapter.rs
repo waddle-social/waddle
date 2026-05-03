@@ -1027,7 +1027,11 @@ fn ext_archived_message(message: MamArchivedMessage) -> Option<ext_host::Archive
         from: message.from.parse().ok()?,
         to: message.to.parse().ok()?,
         sent_at: message.timestamp,
-        body: DisplayText::new(message.body).ok(),
+        // RFC 6121 §5.2.3: archived `body` is `Option<String>` —
+        // `None` means no `<body>` element on the wire (subject-only,
+        // reaction-only). `DisplayText::new` rejects empty strings, so
+        // an empty `Some("")` collapses to `None` here as well.
+        body: message.body.and_then(|value| DisplayText::new(value).ok()),
         thread_id: message
             .thread_id
             .and_then(|thread| waddle_extensions::ThreadId::new(thread.as_str()).ok()),

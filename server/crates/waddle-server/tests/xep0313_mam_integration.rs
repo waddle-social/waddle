@@ -240,6 +240,202 @@ async fn muc_mam_pagination() {
     client.close().await;
 }
 
+/// Returns the contents of the inner `<message>`'s `<body>` element
+/// inside a single MAM `<forwarded>` frame, distinguishing three
+/// wire shapes:
+///
+/// - `Some(Some(text))` — `<body>text</body>` (or self-closing
+///   `<body/>` parses as the empty string).
+/// - `Some(None)` — no `<body>` element on the inner message at all.
+/// - `None` — the frame has no inner `<message>` at all (caller bug).
+///
+/// Operates only on the **inner** `<message>` element of a MAM result
+/// frame so it isn't fooled by the outer `<message>` wrapper. Hand-rolled
+/// rather than pulling in a full XML parser to keep the integration test
+/// dependency-light, mirroring the existing `extract_mam_body` helper.
+fn extract_inner_body_presence(frame: &str) -> Option<Option<String>> {
+    let forwarded_start = frame.find("<forwarded")?;
+    let inner_msg_start = frame[forwarded_start..]
+        .find("<message")
+        .map(|i| i + forwarded_start)?;
+    let inner_msg_end = frame[inner_msg_start..]
+        .find("</message>")
+        .map(|i| i + inner_msg_start + "</message>".len())?;
+    let inner = &frame[inner_msg_start..inner_msg_end];
+
+    // Look for `<body` with either `>` (open) or `/>` (self-closing) or
+    // attributes. Distinguish from a nested `<body/>` inside another
+    // namespace (e.g. XEP-0428 `<fallback>` carries its own
+    // `<body start='..' end='..'/>`); restrict to direct children of the
+    // inner `<message>` by requiring the tag to live at depth-1.
+    //
+    // Cheap depth tracking: scan forward and count nesting depth, only
+    // matching `<body` when depth == 0.
+    let mut depth: i32 = 0;
+    let mut idx = 0usize;
+    let bytes = inner.as_bytes();
+    while idx < bytes.len() {
+        if bytes[idx] == b'<' {
+            // Closing tag drops depth before we read a new one.
+            if idx + 1 < bytes.len() && bytes[idx + 1] == b'/' {
+                depth -= 1;
+                idx += 1;
+                continue;
+            }
+            // The outermost `<message ...>` itself opens at depth 0
+            // — only inspect children (depth == 1 after we step in).
+            if depth == 1 && inner[idx..].starts_with("<body") {
+                let after_tag = idx + "<body".len();
+                // Find end of the body open tag.
+                let close_rel = inner[after_tag..].find('>')?;
+                let close = after_tag + close_rel;
+                let is_self_close = bytes[close - 1] == b'/';
+                if is_self_close {
+                    // `<body/>` — empty body element.
+                    return Some(Some(String::new()));
+                }
+                let text_start = close + 1;
+                let text_end_rel = inner[text_start..].find("</body>")?;
+                return Some(Some(
+                    inner[text_start..text_start + text_end_rel].to_owned(),
+                ));
+            }
+            depth += 1;
+        }
+        idx += 1;
+    }
+    Some(None)
+}
+
+#[tokio::test]
+async fn xep_0313_archives_preserve_body_presence_distinction() {
+    // RFC 6121 §5.2.3 / XEP-0313 §3 wire fidelity: the MAM archive must
+    // distinguish three body wire shapes when a row is replayed:
+    //
+    //   1. `<body>text</body>` -> Some("text")
+    //   2. `<body></body>` (or `<body/>`) -> Some("")
+    //   3. no `<body>` element at all -> None
+    //
+    // Earlier denormalization collapsed (2) and (3) into the empty
+    // string via `.unwrap_or_default()`, so consumers reading the
+    // typed `body` field saw a misleading "empty body" for stanzas
+    // that had no `<body>` element at all (subject-only,
+    // reaction-only, etc.). This test locks the wire-level
+    // distinction end-to-end through the MUC archive.
+    let _guard = TEST_SERIAL.lock().await;
+    let (_server, mut client) = setup().await;
+    let room = format!("body-fidelity-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
+
+    // Join MUC.
+    client
+        .send(&format!(
+            r#"<presence to="{room}/{USERNAME}"><x xmlns="http://jabber.org/protocol/muc"/></presence>"#
+        ))
+        .await
+        .expect("send join");
+    client
+        .recv_until(|f| f.contains("<subject"))
+        .await
+        .expect("join responses");
+
+    // Distinct id-prefix per case so we can pick out the right frame.
+    // Reactions need a target message id — the textual root msg gives
+    // the reaction-only frames a stable target.
+    let id_text = format!("body-text-{}", uuid::Uuid::new_v4());
+    let id_empty = format!("body-empty-{}", uuid::Uuid::new_v4());
+    let id_absent = format!("body-absent-{}", uuid::Uuid::new_v4());
+    let body_text = format!("hello-{}", uuid::Uuid::new_v4());
+
+    // Case 1: text body.
+    client
+        .send(&format!(
+            r#"<message type="groupchat" to="{room}" id="{id_text}"><body>{body_text}</body></message>"#
+        ))
+        .await
+        .expect("send text-body message");
+    client
+        .recv_matching(|f| f.contains(&body_text))
+        .await
+        .expect("echo text-body");
+
+    // Case 2: empty body element on the wire. `is_archivable` for
+    // groupchat treats any non-empty `bodies` collection as
+    // archivable (XEP-0313 §5.1.3 allowance for groupchat), so an
+    // empty `<body></body>` round-trips as Some("").
+    client
+        .send(&format!(
+            r#"<message type="groupchat" to="{room}" id="{id_empty}"><body></body></message>"#
+        ))
+        .await
+        .expect("send empty-body message");
+    client
+        .recv_matching(|f| f.contains(&id_empty))
+        .await
+        .expect("echo empty-body");
+
+    // Case 3: no `<body>` element at all. A reaction is the simplest
+    // bodyless archivable groupchat message (XEP-0444; the room
+    // archive treats reactions as archivable per `is_archivable`).
+    client
+        .send(&format!(
+            r#"<message type="groupchat" to="{room}" id="{id_absent}"><reactions xmlns="urn:xmpp:reactions:0" id="{id_text}"><reaction>👍</reaction></reactions></message>"#
+        ))
+        .await
+        .expect("send reaction-only message");
+    client
+        .recv_matching(|f| f.contains(&id_absent))
+        .await
+        .expect("echo reaction-only");
+
+    // Query the room archive.
+    let q_id = format!("body-fid-q-{}", uuid::Uuid::new_v4());
+    let frames = query_mam(&mut client, &mam_query_xml(&q_id, &room, Some(50)))
+        .await
+        .expect("MAM query");
+
+    let result_frames: Vec<&str> = frames
+        .iter()
+        .map(String::as_str)
+        .filter(|f| f.contains("<forwarded"))
+        .collect();
+    assert!(
+        result_frames.len() >= 3,
+        "Expected at least 3 MAM result frames, got {}: {result_frames:?}",
+        result_frames.len()
+    );
+
+    let frame_text = result_frames
+        .iter()
+        .find(|f| f.contains(&id_text))
+        .unwrap_or_else(|| panic!("text-body frame not found in {result_frames:?}"));
+    let frame_empty = result_frames
+        .iter()
+        .find(|f| f.contains(&id_empty))
+        .unwrap_or_else(|| panic!("empty-body frame not found in {result_frames:?}"));
+    let frame_absent = result_frames
+        .iter()
+        .find(|f| f.contains(&id_absent))
+        .unwrap_or_else(|| panic!("reaction-only frame not found in {result_frames:?}"));
+
+    assert_eq!(
+        extract_inner_body_presence(frame_text),
+        Some(Some(body_text.clone())),
+        "Case 1 (text body) must replay as <body>{body_text}</body>: {frame_text}"
+    );
+    assert_eq!(
+        extract_inner_body_presence(frame_empty),
+        Some(Some(String::new())),
+        "Case 2 (empty body element) must replay as <body></body> (or <body/>), not be dropped: {frame_empty}"
+    );
+    assert_eq!(
+        extract_inner_body_presence(frame_absent),
+        Some(None),
+        "Case 3 (no <body> element) must replay with NO <body> element on the inner message; bug: it was being materialized as an empty body. Frame: {frame_absent}"
+    );
+
+    client.close().await;
+}
+
 // =========================================================================
 // DM MAM
 // =========================================================================

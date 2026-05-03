@@ -974,7 +974,9 @@ pub async fn handle_iq_with_conn_state(
                 timestamp: chrono::Utc::now(),
                 from: room_jid.to_string(),
                 to: room_jid.to_string(),
-                body: String::new(),
+                // XEP-0425 moderation tombstone has no `<body>` — `None`
+                // is the wire-faithful "no body element" form.
+                body: None,
                 stanza_id: moderation.id.clone(),
                 thread_id: None,
                 // XEP-0425 moderation tombstone: leak-prone fields are

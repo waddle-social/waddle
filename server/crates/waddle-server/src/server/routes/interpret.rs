@@ -2345,9 +2345,13 @@ fn fallback_archived_message(row: &MamArchivedMessage) -> Message {
     let mut msg = Message::new(to);
     msg.from = from;
     msg.id = row.stanza_id.clone();
-    if !row.body.is_empty() {
+    // RFC 6121 §5.2.3: only emit `<body>` if the archived row recorded
+    // one. `Some("")` round-trips as an empty `<body></body>` element;
+    // `None` produces no `<body>` element at all (subject-only,
+    // reaction-only, etc.).
+    if let Some(body) = row.body.as_deref() {
         msg.bodies
-            .insert(String::new(), xmpp_parsers::message::Body(row.body.clone()));
+            .insert(String::new(), xmpp_parsers::message::Body(body.to_owned()));
     }
     msg
 }
@@ -2698,9 +2702,11 @@ async fn finish_archive_groupchat_message(
     archive_id: String,
     sender_nickname_generation: u64,
 ) -> Option<String> {
-    let body = prototype_body(&archive_clone)
-        .map(|value| value.trim().to_string())
-        .unwrap_or_default();
+    // RFC 6121 §5.2.3: `<body>` is optional. Preserve the
+    // None-vs-empty distinction so subject-only / reaction-only
+    // groupchat messages don't materialize a fake empty body in the
+    // archive's denormalized projection.
+    let body = prototype_body(&archive_clone).map(|value| value.trim().to_string());
     let (reply_to_id, reply_to_jid) = extract_groupchat_reply_reference(&archive_clone, room);
     let origin_id = extract_origin_id(&archive_clone);
     let rich = rich_archive_payload(&archive_clone);
@@ -3421,7 +3427,7 @@ mod tests {
         let row = &stored.messages[0];
         assert_eq!(row.from, "alice@example.com");
         assert_eq!(row.to, "bob@example.com");
-        assert_eq!(row.body, "hello");
+        assert_eq!(row.body.as_deref(), Some("hello"));
         assert_eq!(row.stanza_id.as_deref(), Some("orig-1"));
     }
 
@@ -3495,7 +3501,7 @@ mod tests {
             .expect("mam lookup")
             .expect("MAM row keyed by canonical stanza-id");
         assert_eq!(row.id, canonical_id);
-        assert_eq!(row.body, "pivot test");
+        assert_eq!(row.body.as_deref(), Some("pivot test"));
     }
 
     #[tokio::test]
@@ -3752,7 +3758,7 @@ mod tests {
             timestamp: chrono::Utc::now(),
             from: "alice@example.com".to_string(),
             to: "bob@example.com".to_string(),
-            body: "hello".to_string(),
+            body: Some("hello".to_string()),
             stanza_id: Some("canon-A1".to_string()),
             thread_id: None,
             parent_thread_id: None,
@@ -3857,7 +3863,7 @@ mod tests {
             timestamp: chrono::Utc::now(),
             from: "bob@example.com".to_string(),
             to: "alice@example.com".to_string(),
-            body: "from bob".to_string(),
+            body: Some("from bob".to_string()),
             stanza_id: Some("alice-stamp-bob".to_string()),
             thread_id: None,
             parent_thread_id: None,
@@ -3876,7 +3882,7 @@ mod tests {
             timestamp: chrono::Utc::now(),
             from: "alice@example.com".to_string(),
             to: "bob@example.com".to_string(),
-            body: "from alice".to_string(),
+            body: Some("from alice".to_string()),
             stanza_id: Some("alice-stamp-alice".to_string()),
             thread_id: None,
             parent_thread_id: None,
@@ -3946,7 +3952,7 @@ mod tests {
             timestamp: chrono::Utc::now(),
             from: "bob@example.com".to_string(),
             to: "alice@example.com".to_string(),
-            body: "bob's".to_string(),
+            body: Some("bob's".to_string()),
             stanza_id: Some("alice-stamp".to_string()),
             thread_id: None,
             parent_thread_id: None,
@@ -4008,7 +4014,7 @@ mod tests {
             timestamp: chrono::Utc::now(),
             from: "alice@example.com".to_string(),
             to: "bob@example.com".to_string(),
-            body: "collide".to_string(),
+            body: Some("collide".to_string()),
             stanza_id: Some("real-stamp".to_string()),
             thread_id: None,
             parent_thread_id: None,
@@ -4066,7 +4072,7 @@ mod tests {
             timestamp: chrono::Utc::now(),
             from: "alice@example.com".to_string(),
             to: "bob@example.com".to_string(),
-            body: String::new(),
+            body: None,
             stanza_id: Some("tomb-1".to_string()),
             thread_id: None,
             parent_thread_id: None,
@@ -4706,7 +4712,7 @@ mod tests {
             1,
             "headless recipient pass writes one archive entry under bob's bare"
         );
-        assert_eq!(bob_archive.messages[0].body, "hello bob");
+        assert_eq!(bob_archive.messages[0].body.as_deref(), Some("hello bob"));
     }
 
     #[tokio::test]

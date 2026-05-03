@@ -201,8 +201,19 @@ pub struct ArchivedMessage {
     pub from: String,
     /// Recipient JID (room JID for MUC, or contact bare JID for 1:1).
     pub to: String,
-    /// Message body.
-    pub body: String,
+    /// Message body, preserving the wire-fidelity distinction between
+    /// "no `<body>` element on the wire" (`None`) and "an empty
+    /// `<body></body>` element" (`Some("")`).
+    ///
+    /// RFC 6121 §5.2.3 makes `<body>` optional: subject-only,
+    /// reaction-only, and other annotation-only messages may omit it
+    /// entirely. Earlier denormalizations collapsed both cases to the
+    /// empty string, so consumers reading this field directly (rather
+    /// than re-parsing `stanza_xml`) saw a misleading "empty body" for
+    /// stanzas that had no `<body>` element at all. Preserving the
+    /// distinction restores XEP-0313 §3 archive fidelity for the
+    /// denormalized projection.
+    pub body: Option<String>,
     /// Original stanza ID (if present).
     pub stanza_id: Option<String>,
     /// RFC 6121 thread identifier for this message.
@@ -254,7 +265,7 @@ impl Default for ArchivedMessage {
             timestamp: Utc::now(),
             from: String::new(),
             to: String::new(),
-            body: String::new(),
+            body: None,
             stanza_id: None,
             thread_id: None,
             parent_thread_id: None,
@@ -627,10 +638,15 @@ fn build_typed_inner_message(archived: &ArchivedMessage, rich: &ArchivedRichMess
     if let Some(stanza_id) = archived.stanza_id.as_deref() {
         builder = builder.attr("id", stanza_id);
     }
-    if !archived.body.is_empty() {
+    // RFC 6121 §5.2.3 / XEP-0313 §3: emit `<body/>` exactly when the
+    // archived row recorded one on the wire. `Some("")` is a real
+    // empty `<body></body>` element and MUST round-trip as such;
+    // `None` MUST emit no `<body/>` element at all (subject-only,
+    // reaction-only, and other annotation-only stanzas).
+    if let Some(body) = archived.body.as_deref() {
         builder = builder.append(
             Element::builder("body", CLIENT_NS)
-                .append(archived.body.clone())
+                .append(body.to_owned())
                 .build(),
         );
     }
@@ -807,10 +823,13 @@ fn build_legacy_inner_message(archived: &ArchivedMessage) -> Element {
     if let Some(stanza_id) = archived.stanza_id.as_deref() {
         builder = builder.attr("id", stanza_id);
     }
-    if !archived.body.is_empty() {
+    // RFC 6121 §5.2.3 / XEP-0313 §3: see `build_typed_inner_message`
+    // — `Some("")` round-trips as `<body></body>`, `None` omits the
+    // element entirely.
+    if let Some(body) = archived.body.as_deref() {
         builder = builder.append(
             Element::builder("body", CLIENT_NS)
-                .append(archived.body.clone())
+                .append(body.to_owned())
                 .build(),
         );
     }
@@ -1145,7 +1164,7 @@ mod tests {
             timestamp: Utc::now(),
             from: "user@example.com/nick".to_string(),
             to: "room@conference.example.com".to_string(),
-            body: "Hello, world!".to_string(),
+            body: Some("Hello, world!".to_string()),
             thread_id: Some("thread-1".to_string()),
             reply_to_id: Some("parent-1".to_string()),
             reply_to_jid: Some("alice@example.com".to_string()),
@@ -1183,7 +1202,7 @@ mod tests {
             timestamp: Utc::now(),
             from: "alice@example.com/web".to_string(),
             to: "bob@example.com".to_string(),
-            body: "nested reply".to_string(),
+            body: Some("nested reply".to_string()),
             stanza_id: Some("wire-id-1".to_string()),
             thread_id: Some("child-thread".to_string()),
             parent_thread_id: ThreadId::new("root-thread"),
@@ -1256,7 +1275,7 @@ mod tests {
             timestamp: Utc::now(),
             from: "room@conference.example.com/alice".to_string(),
             to: "room@conference.example.com".to_string(),
-            body: "threaded reply".to_string(),
+            body: Some("threaded reply".to_string()),
             stanza_id: Some("wire-id-2".to_string()),
             thread_id: Some("root-thread".to_string()),
             parent_thread_id: ThreadId::new("parent-thread"),
@@ -1306,7 +1325,7 @@ mod tests {
             timestamp: Utc::now(),
             from: "alice@example.com/web".to_string(),
             to: "bob@example.com".to_string(),
-            body: "body".to_string(),
+            body: Some("body".to_string()),
             thread_id: None,
             parent_thread_id: ThreadId::new("root-thread"),
             message_type: "chat".to_string(),
@@ -1341,7 +1360,7 @@ mod tests {
             timestamp: Utc::now(),
             from: "room@conference.example.com/alice".to_string(),
             to: "room@conference.example.com".to_string(),
-            body: String::new(),
+            body: None,
             message_type: "groupchat".to_string(),
             stanza_xml: Some(
                 "<message xmlns='jabber:client' from='room@conference.example.com/alice' to='room@conference.example.com' type='groupchat' id='reaction-1'><reactions xmlns='urn:xmpp:reactions:0' id='msg-1'><reaction>👍</reaction></reactions></message>".to_string(),
@@ -1435,7 +1454,7 @@ mod tests {
             timestamp: Utc::now(),
             from: "room@conference.example.com/alice".to_string(),
             to: "room@conference.example.com".to_string(),
-            body: "typed body".to_string(),
+            body: Some("typed body".to_string()),
             message_type: "groupchat".to_string(),
             stanza_xml: Some(
                 "<message xmlns='jabber:client' from='room@conference.example.com/alice' type='groupchat' id='live-1'><body>live body with extension payload</body><item xmlns='urn:example:task-widget:1' id='task-123' status='open'/></message>".to_string(),
@@ -1483,7 +1502,7 @@ mod tests {
             timestamp: Utc::now(),
             from: "room@conference.example.com/bob".to_string(),
             to: "room@conference.example.com".to_string(),
-            body: "> Alice wrote:\n> Hello!\nI agree!".to_string(),
+            body: Some("> Alice wrote:\n> Hello!\nI agree!".to_string()),
             message_type: "groupchat".to_string(),
             stanza_xml: Some(
                 "<message xmlns='jabber:client' from='room@conference.example.com/bob' type='groupchat' id='reply-1'><body>&gt; Alice wrote:\n&gt; Hello!\nI agree!</body><reply xmlns='urn:xmpp:reply:0' id='orig-1' to='room@conference.example.com/alice'/><fallback xmlns='urn:xmpp:fallback:0' for='urn:xmpp:reply:0'><body start='0' end='22'/></fallback></message>".to_string(),
@@ -1542,7 +1561,7 @@ mod tests {
             timestamp: Utc::now(),
             from: "room@conference.example.com/alice".to_string(),
             to: "room@conference.example.com".to_string(),
-            body: "Hello!".to_string(),
+            body: Some("Hello!".to_string()),
             message_type: "groupchat".to_string(),
             stanza_xml: Some(
                 "<message xmlns='jabber:client' from='room@conference.example.com/alice' to='room@conference.example.com' type='groupchat' id='msg-1'><body>Hello!</body></message>".to_string(),
@@ -1580,7 +1599,7 @@ mod tests {
             timestamp: Utc::now(),
             from: "room@conf.example.com/alice".to_string(),
             to: "room@conf.example.com".to_string(),
-            body: "test".to_string(),
+            body: Some("test".to_string()),
             message_type: "groupchat".to_string(),
             stanza_xml: Some(stanza_xml.to_string()),
             ..Default::default()
