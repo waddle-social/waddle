@@ -338,7 +338,6 @@ impl DriverTask {
                 StreamManagementEvent::Enabled { previd },
             )) => {
                 self.sm_delivery_tracking_enabled = true;
-                self.outbound_h = 0;
                 let _ =
                     self.events
                         .send(ClientEvent::Connection(ConnectionEvent::StreamManagement(
@@ -350,7 +349,6 @@ impl DriverTask {
                 StreamManagementEvent::Resumed { h },
             )) => {
                 self.sm_delivery_tracking_enabled = true;
-                self.outbound_h = h;
                 let _ =
                     self.events
                         .send(ClientEvent::Connection(ConnectionEvent::StreamManagement(
@@ -416,6 +414,13 @@ impl DriverTask {
     }
 
     fn record_outbound_element(&mut self, element: &Element) {
+        if is_stream_management_enable(element) {
+            self.sm_delivery_tracking_enabled = true;
+            self.outbound_h = 0;
+            self.pending_message_deliveries.clear();
+            return;
+        }
+
         if !self.sm_delivery_tracking_enabled {
             return;
         }
@@ -475,6 +480,10 @@ fn message_delivery_stanza_id(element: &Element) -> Option<StanzaId> {
     }
 
     element.attr("id").and_then(|id| StanzaId::new(id).ok())
+}
+
+fn is_stream_management_enable(element: &Element) -> bool {
+    element.name() == "enable" && element.ns() == crate::stream_management::NS_SM
 }
 
 #[cfg(test)]
@@ -697,6 +706,73 @@ mod tests {
         }
         assert!(got_ack, "expected delivery ack event for out-1");
         assert!(task.pending_message_deliveries.is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn stream_management_tracking_starts_when_enable_is_sent() {
+        let (mut task, _cmd_tx, mut rx) = make_driver_task(MockTransport::new(
+            vec![],
+            vec![],
+            MockTransportShared::default(),
+        ));
+
+        let enable = crate::stream_management::SmState::build_enable(true);
+        task.record_outbound_element(&enable);
+        assert!(task.sm_delivery_tracking_enabled);
+        assert_eq!(task.outbound_h, 0);
+
+        let message = Element::builder("message", crate::NS_CLIENT)
+            .attr("id", "out-before-enabled")
+            .attr("type", "chat")
+            .build();
+        task.record_outbound_element(&message);
+
+        task.dispatch_client_event(ClientEvent::Connection(ConnectionEvent::StreamManagement(
+            StreamManagementEvent::AckReceived { h: 1 },
+        )));
+
+        let mut got_ack = false;
+        for _ in 0..2 {
+            match rx.try_recv() {
+                Ok(ClientEvent::MessageDelivery(MessageDeliveryEvent::Acked { stanza_id }))
+                    if stanza_id.as_str() == "out-before-enabled" =>
+                {
+                    got_ack = true
+                }
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+        assert!(got_ack, "message sent after <enable/> must be tracked");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn stream_management_resume_does_not_reset_outbound_counter() {
+        let (mut task, _cmd_tx, _rx) = make_driver_task(MockTransport::new(
+            vec![],
+            vec![],
+            MockTransportShared::default(),
+        ));
+
+        task.sm_delivery_tracking_enabled = true;
+        task.outbound_h = 2;
+
+        task.dispatch_client_event(ClientEvent::Connection(ConnectionEvent::StreamManagement(
+            StreamManagementEvent::Resumed { h: 1 },
+        )));
+
+        let message = Element::builder("message", crate::NS_CLIENT)
+            .attr("id", "after-resume")
+            .attr("type", "chat")
+            .build();
+        task.record_outbound_element(&message);
+
+        assert_eq!(task.outbound_h, 3);
+        assert!(matches!(
+            task.pending_message_deliveries.back(),
+            Some(TrackedMessageDelivery { stanza_id, h: 3 })
+                if stanza_id.as_str() == "after-resume"
+        ));
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -1,15 +1,19 @@
 //! Service discovery (XEP-0030), HTTP upload (XEP-0363), inbox (XEP-0430),
 //! push notifications, and XEP-0503 Spaces topology discovery.
 
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
-
 use jid::BareJid;
 use minidom::Element;
 
+#[cfg(feature = "native")]
 use crate::client::ClientHandle;
+#[cfg(feature = "native")]
 use crate::error::{ClientError, ClientResult, StanzaError, StanzaErrorType};
+#[cfg(feature = "native")]
 use crate::event::ClientEvent;
+#[cfg(feature = "native")]
+use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(feature = "native")]
+use std::time::Duration;
 
 // ── Namespace constants ───────────────────────────────────────────────────────
 
@@ -29,8 +33,10 @@ pub const WADDLE_ROOM_METADATA_FORM_TYPE: &str = "urn:waddle:room:0";
 
 // ── ID generation ────────────────────────────────────────────────────────────
 
+#[cfg(feature = "native")]
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
+#[cfg(feature = "native")]
 fn next_id() -> u64 {
     NEXT_ID.fetch_add(1, Ordering::Relaxed)
 }
@@ -434,6 +440,7 @@ fn extract_forwarded_body(result_el: &Element) -> Option<String> {
 
 // ── IQ builders ──────────────────────────────────────────────────────────────
 
+#[cfg(feature = "native")]
 fn build_disco_info_iq(to: &str, node: Option<&str>) -> Element {
     let id = format!("disco-info-{}", next_id());
     let mut query_builder = Element::builder("query", DISCO_INFO_NS);
@@ -448,6 +455,7 @@ fn build_disco_info_iq(to: &str, node: Option<&str>) -> Element {
         .build()
 }
 
+#[cfg(feature = "native")]
 fn build_disco_items_iq(to: &str, node: Option<&str>) -> Element {
     let id = format!("disco-items-{}", next_id());
     let mut query_builder = Element::builder("query", DISCO_ITEMS_NS);
@@ -480,6 +488,7 @@ fn build_pubsub_items_iq(to: &BareJid, node: &SpaceNode) -> Element {
         .build()
 }
 
+#[cfg(feature = "native")]
 fn build_upload_slot_iq(
     service_jid: &str,
     filename: &str,
@@ -501,6 +510,7 @@ fn build_upload_slot_iq(
         .build()
 }
 
+#[cfg(feature = "native")]
 fn build_inbox_iq(bare_jid: &str, query_id: &str, max: u32) -> Element {
     let id = format!("inbox-{}", next_id());
     Element::builder("iq", CLIENT_NS)
@@ -520,6 +530,7 @@ fn build_inbox_iq(bare_jid: &str, query_id: &str, max: u32) -> Element {
         .build()
 }
 
+#[cfg(feature = "native")]
 fn build_enable_push_iq(push_service_jid: &str, node: &str, token: &str) -> Element {
     let id = format!("push-enable-{}", next_id());
     let form = Element::builder("x", DATA_FORMS_NS)
@@ -558,6 +569,7 @@ fn build_enable_push_iq(push_service_jid: &str, node: &str, token: &str) -> Elem
         .build()
 }
 
+#[cfg(feature = "native")]
 fn build_disable_push_iq(push_service_jid: &str, node: &str) -> Element {
     let id = format!("push-disable-{}", next_id());
     Element::builder("iq", CLIENT_NS)
@@ -574,6 +586,7 @@ fn build_disable_push_iq(push_service_jid: &str, node: &str) -> Element {
 
 // ── Private helpers ───────────────────────────────────────────────────────────
 
+#[cfg(feature = "native")]
 fn parse_error() -> ClientError {
     ClientError::StanzaError(StanzaError {
         error_type: StanzaErrorType::Cancel,
@@ -585,6 +598,7 @@ fn parse_error() -> ClientError {
 // ── Extension trait ──────────────────────────────────────────────────────────
 
 #[allow(async_fn_in_trait)]
+#[cfg(feature = "native")]
 pub trait DiscoveryExt {
     /// Query `disco#info` for a JID, optionally scoped to a node.
     async fn discover_info(&self, jid: &str, node: Option<&str>) -> ClientResult<DiscoInfoResult>;
@@ -645,6 +659,7 @@ pub trait DiscoveryExt {
 
 // ── Implementation ────────────────────────────────────────────────────────────
 
+#[cfg(feature = "native")]
 impl DiscoveryExt for ClientHandle {
     async fn discover_info(&self, jid: &str, node: Option<&str>) -> ClientResult<DiscoInfoResult> {
         let iq = build_disco_info_iq(jid, node);

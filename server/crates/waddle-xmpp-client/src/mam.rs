@@ -1,9 +1,9 @@
 //! MAM (XEP-0313) history queries for room and DM history.
 //!
-//! Implements [`MamExt`] on [`ClientHandle`] to send MAM IQ queries,
-//! collect the resulting `<message>` stanzas from the event stream, and
-//! return a structured [`MamPage`] when the server signals completion via
-//! the IQ result `<fin/>`.
+//! Exposes MAM parsers and page types for every build. With the `native`
+//! feature enabled, also implements the MAM query helper on the native client
+//! handle to send IQ queries, collect result stanzas, and return a structured
+//! [`MamPage`] when the server signals completion via `<fin/>`.
 
 use chrono::{DateTime, Utc};
 use minidom::Element;

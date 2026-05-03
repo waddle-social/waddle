@@ -8,7 +8,6 @@ pub mod client;
 #[cfg(feature = "native")]
 pub mod command;
 pub mod config;
-#[cfg(feature = "native")]
 pub mod discovery;
 pub mod error;
 pub mod event;
@@ -39,9 +38,10 @@ pub use config::{
     SessionConfig, StreamManagementConfig, WebSocketConfig,
 };
 #[cfg(feature = "native")]
+pub use discovery::DiscoveryExt;
 pub use discovery::{
     DiscoFeature, DiscoIdentity, DiscoInfoResult, DiscoItem, DiscoveredChannel, DiscoveredWaddle,
-    DiscoveryExt, InboxEntry, UploadSlot,
+    InboxEntry, UploadSlot,
 };
 pub use error::{ClientError, ClientResult, StanzaError, StanzaErrorType};
 pub use event::{
