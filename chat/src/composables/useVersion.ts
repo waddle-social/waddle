@@ -1,7 +1,9 @@
-import { ref, watch, type Ref } from "vue";
+import { onScopeDispose, ref, watch, type Ref } from "vue";
 import type { BrowserXmppClient } from "@/lib/xmpp-client";
 
 const WEB_COMMIT_SHA = (import.meta.env.PUBLIC_COMMIT_SHA ?? "unknown").trim() || "unknown";
+const SERVER_VERSION_RETRY_DELAY_MS = 5_000;
+const SERVER_VERSION_MAX_ATTEMPTS = 3;
 
 export interface ServerVersion {
   name?: string;
@@ -18,33 +20,77 @@ export function useVersion(xmppClient: Ref<BrowserXmppClient | null>) {
   const serverVersion = ref<ServerVersion | null>(null);
 
   let fetchedForClient: BrowserXmppClient | null = null;
+  let fetchGeneration = 0;
+  let retryTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const clearRetry = () => {
+    if (retryTimer) {
+      clearTimeout(retryTimer);
+      retryTimer = null;
+    }
+  };
+
+  const fetchServerVersion = (client: BrowserXmppClient, generation: number, attempt: number) => {
+    void client
+      .getServerVersion()
+      .then((info) => {
+        if (fetchedForClient !== client || fetchGeneration !== generation) return;
+        serverVersion.value = info;
+        if (!info && attempt < SERVER_VERSION_MAX_ATTEMPTS) {
+          retryTimer = setTimeout(
+            () => fetchServerVersion(client, generation, attempt + 1),
+            SERVER_VERSION_RETRY_DELAY_MS,
+          );
+        }
+      })
+      .catch(() => {
+        if (fetchedForClient !== client || fetchGeneration !== generation) return;
+        serverVersion.value = null;
+        if (attempt < SERVER_VERSION_MAX_ATTEMPTS) {
+          retryTimer = setTimeout(
+            () => fetchServerVersion(client, generation, attempt + 1),
+            SERVER_VERSION_RETRY_DELAY_MS,
+          );
+        }
+      });
+  };
 
   watch(
     xmppClient,
     (client) => {
       if (!client) {
+        clearRetry();
+        fetchGeneration += 1;
         fetchedForClient = null;
         serverVersion.value = null;
         return;
       }
       if (client === fetchedForClient) return;
+      clearRetry();
+      fetchGeneration += 1;
       fetchedForClient = client;
-      void client.getServerVersion().then((info) => {
-        if (fetchedForClient === client) {
-          serverVersion.value = info;
-        }
-      });
+      fetchServerVersion(client, fetchGeneration, 1);
     },
     { immediate: true },
   );
 
+  onScopeDispose(() => {
+    clearRetry();
+    fetchGeneration += 1;
+    fetchedForClient = null;
+  });
+
   return { webCommitSha, serverVersion };
 }
 
-/** Extract a short commit SHA from a server version string like "0.1.0 (abc123def456)". */
+const RAW_SHA_PATTERN = /^[0-9a-f]{6,}$/i;
+
+/** Extract a commit SHA from a raw XEP-0092 version or a legacy "0.1.0 (sha)" value. */
 export function extractServerSha(version: ServerVersion | null): string | null {
   if (!version?.version) return null;
-  const match = version.version.match(/\(([0-9a-f]{6,})\)/i);
+  const raw = version.version.trim();
+  if (RAW_SHA_PATTERN.test(raw)) return raw;
+  const match = raw.match(/\(([0-9a-f]{6,})\)/i);
   return match ? match[1] : null;
 }
 

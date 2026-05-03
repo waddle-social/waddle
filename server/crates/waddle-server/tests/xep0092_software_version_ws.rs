@@ -2,7 +2,9 @@
 
 mod ws_common;
 
-use ws_common::{disco_info_query, extract_element_text, version_query, TestServer, WsXmppClient};
+use ws_common::{
+    disco_info_query, extract_element_text, version_query, TestServer, WsXmppClient, TEST_GIT_SHA,
+};
 
 const DOMAIN: &str = "localhost";
 const USERNAME: &str = "admin";
@@ -55,7 +57,7 @@ async fn websocket_version_query_returns_name_version_and_os() {
         Some("Waddle")
     );
     assert!(
-        extract_element_text(&response, "version").is_some(),
+        extract_element_text(&response, "version").as_deref() == Some(TEST_GIT_SHA),
         "expected <version/> child, got: {response}"
     );
     assert!(

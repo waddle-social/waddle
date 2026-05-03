@@ -342,6 +342,7 @@ schema.#Project & {
 					cp "${gitops_values}" "${published_values}"
 					SAMPLE_DIGEST="${sample_digest}" yq -i '
 					  .image.digest = strenv(SAMPLE_DIGEST) |
+					  .containerExtraEnv = ((.containerExtraEnv // []) | map(select(.name != "WADDLE_GIT_SHA"))) + [{"name": "WADDLE_GIT_SHA", "value": "1111111111111111111111111111111111111111"}] |
 					  .extensions.enabled = true |
 					  .extensions.modules = [
 					    {"name": "links-task-board", "registry": "ghcr.io/waddle-social/waddle/extensions/links-task-board", "digest": strenv(SAMPLE_DIGEST), "namespace": "urn:waddle:links-task-board:1", "config": {}, "capabilityGrants": ["message.enrich", "commands", "launch", "pubsub.publish", "artifact.reference", "ui.declarative"]},
@@ -360,6 +361,11 @@ schema.#Project & {
 					case "${rendered_image}" in
 					  ghcr.io/waddle-social/waddle@sha256:1111111111111111111111111111111111111111111111111111111111111111) ;;
 					  *) echo "published GitOps render must pin the server image by digest, got: ${rendered_image}" >&2; exit 1 ;;
+					esac
+					rendered_git_sha="$(yq -r 'select(.kind == "Deployment") | .spec.template.spec.containers[] | select(.name == "waddle-server") | (.env // [])[] | select(.name == "WADDLE_GIT_SHA") | .value' "${published_render}")"
+					case "${rendered_git_sha}" in
+					  1111111111111111111111111111111111111111) ;;
+					  *) echo "published GitOps render must set WADDLE_GIT_SHA, got: ${rendered_git_sha:-<missing>}" >&2; exit 1 ;;
 					esac
 
 					yq -e '.extensions.enabled == true' "${published_values}" > /dev/null
@@ -569,9 +575,10 @@ schema.#Project & {
 					  } >> "${modules_yaml}"
 					done
 
-					yq -i ".spec.values.image.tag = \"sha-${SHORT_SHA}\" | .spec.values.image.digest = \"${digest}\" | .spec.values.extensions.enabled = true" ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml
+					FULL_SHA="${FULL_SHA}" yq -i ".spec.values.image.tag = \"sha-${SHORT_SHA}\" | .spec.values.image.digest = \"${digest}\" | .spec.values.containerExtraEnv = ((.spec.values.containerExtraEnv // []) | map(select(.name != \"WADDLE_GIT_SHA\"))) + [{\"name\": \"WADDLE_GIT_SHA\", \"value\": strenv(FULL_SHA)}] | .spec.values.extensions.enabled = true" ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml
 					yq -e ".spec.values.image.tag == \"sha-${SHORT_SHA}\"" ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml > /dev/null
 					yq -e ".spec.values.image.digest == \"${digest}\"" ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml > /dev/null
+					yq -e ".spec.values.containerExtraEnv[] | select(.name == \"WADDLE_GIT_SHA\") | .value == \"${FULL_SHA}\"" ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml > /dev/null
 					yq -i ".spec.values.extensions.modules = load(\"${modules_yaml}\")" ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml
 					yq -e ".spec.values.extensions.enabled == true" ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml > /dev/null
 					yq -e ".spec.values.extensions.modules | length == 5" ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml > /dev/null
@@ -593,6 +600,11 @@ schema.#Project & {
 					case "${rendered_image}" in
 					  ghcr.io/waddle-social/waddle@"${digest}") ;;
 					  *) echo "published GitOps render must pin the server image digest ${digest}, got: ${rendered_image}" >&2; exit 1 ;;
+					esac
+					rendered_git_sha="$(yq -r 'select(.kind == "Deployment") | .spec.template.spec.containers[] | select(.name == "waddle-server") | (.env // [])[] | select(.name == "WADDLE_GIT_SHA") | .value' "${gitops_render}")"
+					case "${rendered_git_sha}" in
+					  "${FULL_SHA}") ;;
+					  *) echo "published GitOps render must set WADDLE_GIT_SHA=${FULL_SHA}, got: ${rendered_git_sha:-<missing>}" >&2; exit 1 ;;
 					esac
 					flux push artifact oci://ghcr.io/waddle-social/waddle/gitops-waddle-server:latest \
 					  --path=../infrastructure/waddle.cloud/gitops/waddle-server \

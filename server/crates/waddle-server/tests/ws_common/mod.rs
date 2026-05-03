@@ -17,6 +17,7 @@ use tokio_tungstenite::{connect_async, tungstenite};
 type HmacSha256 = Hmac<Sha256>;
 
 const RECV_TIMEOUT: Duration = Duration::from_secs(10);
+pub const TEST_GIT_SHA: &str = "feedface1234567890abcdef";
 // Each test spawns a fresh waddle-server binary; startup includes
 // ephemeral cert generation (CPU-bound ring keygen) before listeners
 // bind. Under `cargo test --test-threads=N` several servers race for
@@ -80,6 +81,7 @@ impl TestServer {
             .env("WADDLE_XMPP_MAM_DATABASE_URL", "sqlite::memory:")
             .env("WADDLE_XMPP_INBOX_DATABASE_URL", "sqlite::memory:")
             .env("WADDLE_XMPP_PUBSUB_DATABASE_URL", "sqlite::memory:")
+            .env("WADDLE_GIT_SHA", TEST_GIT_SHA)
             .env(
                 "WADDLE_OCCUPANT_ID_SECRET",
                 "integration-test-occupant-id-secret-32-bytes-long",
