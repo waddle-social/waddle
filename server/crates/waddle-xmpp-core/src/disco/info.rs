@@ -130,6 +130,10 @@ impl Feature {
         Self::new("urn:xmpp:chat-markers:0")
     }
 
+    pub fn receipts() -> Self {
+        Self::new("urn:xmpp:receipts")
+    }
+
     pub fn message_retraction() -> Self {
         Self::new("urn:xmpp:message-retract:1")
     }
@@ -496,6 +500,7 @@ pub fn server_features() -> Vec<Feature> {
         Feature::replies(),
         Feature::message_correction(),
         Feature::chat_markers(),
+        Feature::receipts(),
         Feature::message_retraction(),
         Feature::reactions(),
         Feature::references(),
@@ -722,6 +727,7 @@ mod tests {
         let features = server_features();
         assert!(features.contains(&Feature::disco_info()));
         assert!(features.contains(&Feature::carbons()));
+        assert!(features.contains(&Feature::receipts()));
         assert!(!features.contains(&Feature::fulltext_mam()));
         assert!(features.contains(&Feature::server_info()));
     }

@@ -35,6 +35,10 @@ pub mod room;
 pub mod session_state;
 pub mod traits;
 
+/// Synthetic resource used by the offline headless recipient pass in
+/// `waddle-server`.
+pub const HEADLESS_RECIPIENT_RESOURCE: &str = "offline-recipient-pass";
+
 #[cfg(test)]
 mod dispatch_message_l2_tests;
 #[cfg(test)]

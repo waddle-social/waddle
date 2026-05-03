@@ -1106,8 +1106,9 @@ async fn interpret_with_depth(
 /// incoming-block enforcement and risk persisting blocked messages
 /// into the recipient's MAM / inbox.
 ///
-/// The synthetic full-JID resource is a static literal
-/// (`"offline-recipient-pass"`) because the recipient-pass
+/// The synthetic full-JID resource is the shared
+/// [`waddle_xmpp::protocol::HEADLESS_RECIPIENT_RESOURCE`] constant because
+/// the recipient-pass
 /// [`waddle_xmpp::protocol::session_state::Locality`] derivation
 /// matches `to` against the bound bare JID — the resource value is
 /// irrelevant for locality, and the synthetic resource never reaches
@@ -1130,18 +1131,19 @@ async fn run_headless_recipient_pass(
     // Synthetic FullJid for `transition_to_ready`. The resource value
     // is irrelevant — the recipient pass derives `Locality::Recipient`
     // from bare-as-bare matching when `to` is bare.
-    let synthetic_resource = match jid::ResourcePart::new("offline-recipient-pass") {
-        Ok(rp) => rp,
-        Err(error) => {
-            warn!(
-                bare_jid = %recipient_bare,
-                %error,
-                "headless recipient-pass: synthetic resource part rejected; \
-                 skipping (should not happen — static literal)"
-            );
-            return;
-        }
-    };
+    let synthetic_resource =
+        match jid::ResourcePart::new(waddle_xmpp::protocol::HEADLESS_RECIPIENT_RESOURCE) {
+            Ok(rp) => rp,
+            Err(error) => {
+                warn!(
+                    bare_jid = %recipient_bare,
+                    %error,
+                    "headless recipient-pass: synthetic resource part rejected; \
+                     skipping (should not happen — static literal)"
+                );
+                return;
+            }
+        };
     let synthetic_full = recipient_bare.with_resource(&synthetic_resource);
 
     // Fail-closed on blocklist load error (Copilot review on PR #275).
@@ -1170,6 +1172,7 @@ async fn run_headless_recipient_pass(
     };
 
     let mut transient = XmppStateMachine::new(deps.local_domain, (**dispatcher).clone());
+    transient.set_has_live_transport(false);
     transient.transition_to_ready(synthetic_full, false);
     transient.set_blocklist(blocklist);
 

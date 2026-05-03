@@ -33,6 +33,7 @@ pub mod enrichment_dispatch;
 pub mod errors;
 pub mod inbox;
 pub mod ping;
+pub mod receipts;
 pub mod rich_target_validation;
 pub mod route;
 pub mod session;
@@ -80,9 +81,12 @@ pub fn register_default_handlers(dispatcher: &mut StanzaDispatcher) {
 ///    user.
 /// 7. [`inbox::InboxHandler`] — project the conversation into the
 ///    Waddle inbox.
-/// 8. [`route::RouteHandler`] — final stage: route 1:1 to the
-///    destination connection, dispatch groupchat to the room chain,
-///    or write to the local wire on the recipient pass.
+/// 8. [`route::RouteHandler`] — final stage for the content stanza:
+///    route 1:1 to the destination connection, dispatch groupchat to
+///    the room chain, or write to the local wire on the recipient pass.
+/// 9. [`receipts::ReceiptsHandler`] (XEP-0184) — after the content
+///    stanza is queued for delivery, emit a separate receipt route for
+///    eligible direct messages that requested one.
 pub fn register_default_message_handlers(dispatcher: &mut StanzaDispatcher) {
     dispatcher.register_message(Arc::new(blocking_filter::BlockingFilterHandler));
     dispatcher.register_message(Arc::new(
@@ -94,6 +98,7 @@ pub fn register_default_message_handlers(dispatcher: &mut StanzaDispatcher) {
     dispatcher.register_message(Arc::new(carbons_message::CarbonsMessageHandler));
     dispatcher.register_message(Arc::new(inbox::InboxHandler));
     dispatcher.register_message(Arc::new(route::RouteHandler));
+    dispatcher.register_message(Arc::new(receipts::ReceiptsHandler));
 }
 
 /// Build an empty `type="result"` IQ with `from`/`to` swapped relative to

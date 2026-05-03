@@ -162,6 +162,10 @@ pub struct XmppStateMachine {
     /// handler; read by `RouteHandler`'s groupchat branch via
     /// [`MessageContext`].
     muc_occupancy: MucOccupancy,
+    /// Whether this state machine currently represents a live client
+    /// transport. Headless offline-recipient passes flip this to `false`
+    /// so delivery-only XEPs do not fire.
+    has_live_transport: bool,
     /// Source of fresh, opaque XEP-0359 stanza-ids stamped by message
     /// handlers. Defaults to UUIDv4; tests can override.
     id_gen: Arc<dyn IdGenerator>,
@@ -192,6 +196,7 @@ impl XmppStateMachine {
             blocklist: Blocklist::empty(),
             carbons: CarbonsState::Disabled,
             muc_occupancy: MucOccupancy::empty(),
+            has_live_transport: true,
             id_gen,
         }
     }
@@ -258,6 +263,12 @@ impl XmppStateMachine {
     pub fn transition_to_closing(&mut self) {
         let bound = self.phase.bound_jid().cloned();
         self.phase = ConnectionPhase::closing(bound);
+    }
+
+    /// Mark whether this machine currently represents a live client
+    /// transport.
+    pub fn set_has_live_transport(&mut self, has_live_transport: bool) {
+        self.has_live_transport = has_live_transport;
     }
 
     /// Replace the per-connection XEP-0191 blocklist snapshot.
@@ -583,6 +594,7 @@ impl XmppStateMachine {
                         blocklist: &self.blocklist,
                         carbons: self.carbons,
                         muc_occupancy: &self.muc_occupancy,
+                        has_live_transport: self.has_live_transport,
                         id_gen: self.id_gen.as_ref(),
                     };
                     let mctx = MessageContext::derive(env, &message);
@@ -712,6 +724,7 @@ impl XmppStateMachine {
                 blocklist: &snapshot.blocklist,
                 carbons: snapshot.carbons,
                 muc_occupancy: &snapshot.muc_occupancy,
+                has_live_transport: self.has_live_transport,
                 id_gen: self.id_gen.as_ref(),
             };
             let mctx = MessageContext::derive(env, &message);
@@ -760,6 +773,7 @@ impl XmppStateMachine {
                         blocklist: &self.blocklist,
                         carbons: self.carbons,
                         muc_occupancy: &self.muc_occupancy,
+                        has_live_transport: self.has_live_transport,
                         id_gen: self.id_gen.as_ref(),
                     };
                     // Peer stanzas are by definition recipient-pass —
@@ -856,6 +870,7 @@ fn infer_resume_kind(
                         blocklist: &blocklist,
                         carbons: CarbonsState::Disabled,
                         muc_occupancy: &muc_occupancy,
+                        has_live_transport: true,
                         id_gen: &id_gen,
                     },
                 )?;
@@ -930,6 +945,7 @@ pub(crate) mod test_support {
             blocklist: Blocklist::empty(),
             carbons: CarbonsState::Disabled,
             muc_occupancy: MucOccupancy::empty(),
+            has_live_transport: true,
             id_gen,
         }
     }

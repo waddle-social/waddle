@@ -303,6 +303,7 @@ mod tests {
             blocklist: bl,
             carbons: CarbonsState::Disabled,
             muc_occupancy: occ,
+            has_live_transport: true,
             id_gen: gen,
         };
         MessageContext::derive(env, msg)
