@@ -6,7 +6,6 @@ import type { WaddleSession } from "@/lib/server-auth";
 import {
   BrowserXmppClient,
   barePeerJid,
-  roomBareJidFor,
   type LiveRoomMessage,
   type MessageSearchResult,
   type RoomActivityEvent,
@@ -42,6 +41,7 @@ import {
 } from "@/lib/outbound-queue-store";
 import { mentionMatchesUsername } from "@/lib/mentions";
 import { useScrollDirection } from "@/composables/useScrollDirection";
+import { roomJidForChannelSummary } from "@/lib/channel-room";
 
 export function fromLiveMessage(
   session: WaddleSession,
@@ -356,9 +356,18 @@ export function useMessaging(
 
   const currentRoomJid = computed(() => {
     if (!session.value || !activeChannelId.value) return null;
-    return roomBareJidFor(session.value, activeChannelId.value);
+    return roomJidForChannel(activeChannelId.value);
   });
   const channelIsForum = computed(() => isForumChannel(currentChannel.value));
+
+  function roomJidForChannel(channelId: string): string | null {
+    const currentSession = session.value;
+    if (!currentSession) return null;
+    const channel = currentChannel.value?.id === channelId
+      ? currentChannel.value
+      : { id: channelId };
+    return roomJidForChannelSummary(currentSession, channel);
+  }
 
   function queuedMessagesForRoom(roomJid: string): TimelineMessage[] {
     const currentSession = session.value;
@@ -1005,7 +1014,8 @@ export function useMessaging(
     if (!session.value) return;
 
     const requestId = ++messageRequestId;
-    const roomJid = roomBareJidFor(session.value, channelId);
+    const roomJid = roomJidForChannel(channelId);
+    if (!roomJid) return;
     initialLatestPagePinned = false;
     isLoadingMessages.value = true;
     isLoadingOlderMessages.value = false;
@@ -1118,7 +1128,9 @@ export function useMessaging(
       oldestArchiveId = page.firstArchiveId ?? oldestArchiveId;
       hasOlderMessages.value = !page.complete && !!page.firstArchiveId && page.firstArchiveId !== before;
       const withoutQueued = messages.value.filter((m) => !(m.isSelf && m.deliveryStatus === "queued"));
-      messages.value = appendQueuedMessages(buildTimelineFromMamResults(page.messages, withoutQueued), roomBareJidFor(session.value!, channelId));
+      const roomJid = roomJidForChannel(channelId);
+      if (!roomJid) return;
+      messages.value = appendQueuedMessages(buildTimelineFromMamResults(page.messages, withoutQueued), roomJid);
       await nextTick();
       if (el && !isTopPinnedScrollDirection(scrollDirection.value)) {
         el.scrollTop = previousTop + (el.scrollHeight - previousHeight);
@@ -1135,6 +1147,8 @@ export function useMessaging(
     const client = xmppClient.value;
     const channelId = activeChannelId.value;
     if (!client || !channelId || !session.value || !("queryMamPage" in client)) return false;
+    const roomJid = roomJidForChannel(channelId);
+    if (!roomJid) return false;
 
     let before = oldestArchiveId;
     while (before && hasOlderMessages.value && !findMessageById(messages.value, messageId)) {
@@ -1156,7 +1170,7 @@ export function useMessaging(
       const withoutQueued = messages.value.filter((m) => !(m.isSelf && m.deliveryStatus === "queued"));
       messages.value = appendQueuedMessages(
         buildTimelineFromMamResults(page.messages, withoutQueued),
-        roomBareJidFor(session.value, channelId),
+        roomJid,
       );
       if (findMessageById(messages.value, messageId)) return true;
       if (!page.firstArchiveId || page.firstArchiveId === previousBefore || page.complete) break;
