@@ -385,6 +385,7 @@ final class AppModel: ObservableObject {
         let options = sharedFiles.isEmpty
             ? nil
             : WaddleSendOptions(
+                stanzaId: nil,
                 reply: nil,
                 fallback: nil,
                 thread: nil,
@@ -941,6 +942,10 @@ final class AppModel: ObservableObject {
             handleIncomingMessage(message)
         case .presence(let presence):
             handleIncomingPresence(presence)
+        case .messageDeliveryAcked(let stanzaID):
+            dlog(" messageDeliveryAcked: \(stanzaID)")
+        case .messageDeliveryFailed(let stanzaID):
+            dlog(" messageDeliveryFailed: \(stanzaID)")
         case .authenticationFailed(let detail):
             let message = detail ?? "The server rejected the XMPP bearer token."
             dlog(" authenticationFailed: \(message)")
@@ -1151,6 +1156,7 @@ final class AppModel: ObservableObject {
         let hasOptions = replyTarget != nil || fallbackOpt != nil || threadTarget != nil || !sharedFiles.isEmpty
         let options: WaddleSendOptions? = hasOptions
             ? WaddleSendOptions(
+                stanzaId: nil,
                 reply: replyTarget,
                 fallback: fallbackOpt,
                 thread: threadTarget,

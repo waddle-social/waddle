@@ -274,21 +274,35 @@ typedef void (*UniffiCallbackInterfaceWaddleEventListenerMethod2)(uint64_t, Rust
 #endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_WADDLE_EVENT_LISTENER_METHOD3
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_WADDLE_EVENT_LISTENER_METHOD3
-typedef void (*UniffiCallbackInterfaceWaddleEventListenerMethod3)(uint64_t, void* _Nonnull, 
+typedef void (*UniffiCallbackInterfaceWaddleEventListenerMethod3)(uint64_t, RustBuffer, void* _Nonnull, 
         RustCallStatus *_Nonnull uniffiCallStatus
     );
 
 #endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_WADDLE_EVENT_LISTENER_METHOD4
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_WADDLE_EVENT_LISTENER_METHOD4
-typedef void (*UniffiCallbackInterfaceWaddleEventListenerMethod4)(uint64_t, void* _Nonnull, 
+typedef void (*UniffiCallbackInterfaceWaddleEventListenerMethod4)(uint64_t, RustBuffer, void* _Nonnull, 
         RustCallStatus *_Nonnull uniffiCallStatus
     );
 
 #endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_WADDLE_EVENT_LISTENER_METHOD5
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_WADDLE_EVENT_LISTENER_METHOD5
-typedef void (*UniffiCallbackInterfaceWaddleEventListenerMethod5)(uint64_t, RustBuffer, void* _Nonnull, 
+typedef void (*UniffiCallbackInterfaceWaddleEventListenerMethod5)(uint64_t, void* _Nonnull, 
+        RustCallStatus *_Nonnull uniffiCallStatus
+    );
+
+#endif
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_WADDLE_EVENT_LISTENER_METHOD6
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_WADDLE_EVENT_LISTENER_METHOD6
+typedef void (*UniffiCallbackInterfaceWaddleEventListenerMethod6)(uint64_t, void* _Nonnull, 
+        RustCallStatus *_Nonnull uniffiCallStatus
+    );
+
+#endif
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_WADDLE_EVENT_LISTENER_METHOD7
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_WADDLE_EVENT_LISTENER_METHOD7
+typedef void (*UniffiCallbackInterfaceWaddleEventListenerMethod7)(uint64_t, RustBuffer, void* _Nonnull, 
         RustCallStatus *_Nonnull uniffiCallStatus
     );
 
@@ -299,9 +313,11 @@ typedef struct UniffiVTableCallbackInterfaceWaddleEventListener {
     UniffiCallbackInterfaceWaddleEventListenerMethod0 _Nonnull onMessage;
     UniffiCallbackInterfaceWaddleEventListenerMethod1 _Nonnull onPresence;
     UniffiCallbackInterfaceWaddleEventListenerMethod2 _Nonnull onMamResult;
-    UniffiCallbackInterfaceWaddleEventListenerMethod3 _Nonnull onConnected;
-    UniffiCallbackInterfaceWaddleEventListenerMethod4 _Nonnull onDisconnected;
-    UniffiCallbackInterfaceWaddleEventListenerMethod5 _Nonnull onError;
+    UniffiCallbackInterfaceWaddleEventListenerMethod3 _Nonnull onMessageDeliveryAcked;
+    UniffiCallbackInterfaceWaddleEventListenerMethod4 _Nonnull onMessageDeliveryFailed;
+    UniffiCallbackInterfaceWaddleEventListenerMethod5 _Nonnull onConnected;
+    UniffiCallbackInterfaceWaddleEventListenerMethod6 _Nonnull onDisconnected;
+    UniffiCallbackInterfaceWaddleEventListenerMethod7 _Nonnull onError;
     UniffiCallbackInterfaceFree _Nonnull uniffiFree;
 } UniffiVTableCallbackInterfaceWaddleEventListener;
 
@@ -770,6 +786,18 @@ uint16_t uniffi_waddle_xmpp_client_ffi_checksum_method_waddleeventlistener_on_pr
 #ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLEEVENTLISTENER_ON_MAM_RESULT
 #define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLEEVENTLISTENER_ON_MAM_RESULT
 uint16_t uniffi_waddle_xmpp_client_ffi_checksum_method_waddleeventlistener_on_mam_result(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLEEVENTLISTENER_ON_MESSAGE_DELIVERY_ACKED
+#define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLEEVENTLISTENER_ON_MESSAGE_DELIVERY_ACKED
+uint16_t uniffi_waddle_xmpp_client_ffi_checksum_method_waddleeventlistener_on_message_delivery_acked(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLEEVENTLISTENER_ON_MESSAGE_DELIVERY_FAILED
+#define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLEEVENTLISTENER_ON_MESSAGE_DELIVERY_FAILED
+uint16_t uniffi_waddle_xmpp_client_ffi_checksum_method_waddleeventlistener_on_message_delivery_failed(void
     
 );
 #endif

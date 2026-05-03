@@ -1,7 +1,8 @@
 //! Inbound/outbound XMPP messaging, MUC, and presence operations.
 //!
-//! Exposes a [`parse`] function for runtime dispatch and a [`MessagingExt`]
-//! trait implemented on [`ClientHandle`] for all outbound operations.
+//! Exposes a [`parse`] function for runtime dispatch and typed outbound stanza
+//! builders. With the `native` feature enabled, also exposes a convenience
+//! trait for sending those stanzas through the native client handle.
 
 use chrono::{DateTime, Utc};
 use minidom::Element;

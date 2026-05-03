@@ -8,10 +8,13 @@ use crate::transport::{StreamClose, StreamOpen, TransportEvent, TransportMessage
 use crate::{
     bootstrap::{
         AuthMechanism, AuthenticationRequest, BootstrapElement, RequiredStreamFeature,
-        ResourceBindingRequest,
+        ResourceBindingRequest, NS_STREAMS,
     },
     AuthenticationConfig,
 };
+use minidom::Element;
+
+const NS_STREAM_ERRORS: &str = "urn:ietf:params:xml:ns:xmpp-streams";
 
 /// High-level lifecycle of the scaffolded runtime wrapper.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -166,11 +169,15 @@ impl XmppRuntime {
             TransportEvent::MessageReceived(TransportMessage::Element(element)) => {
                 self.handle_received_element(element, events)?;
             }
+            TransportEvent::MessageSent(TransportMessage::Element(element)) => {
+                self.handle_sent_element(&element);
+            }
             TransportEvent::MessageReceived(TransportMessage::Close(_))
             | TransportEvent::StateChanged(TransportState::Closed)
             | TransportEvent::Closed => {
                 self.snapshot.binding = None;
                 self.bootstrap = BootstrapState::Idle;
+                self.sm_state.stop();
                 self.set_phase(SessionPhase::Disconnected)?;
             }
             TransportEvent::StateChanged(TransportState::Closing) => {
@@ -182,6 +189,18 @@ impl XmppRuntime {
         }
 
         Ok(())
+    }
+
+    fn handle_sent_element(&mut self, element: &Element) {
+        if element.ns() == crate::stream_management::NS_SM && element.name() == "enable" {
+            self.sm_state.start_outbound();
+            return;
+        }
+
+        if self.sm_state.outbound_enabled && matches!(element.name(), "iq" | "message" | "presence")
+        {
+            self.sm_state.record_sent(1);
+        }
     }
 
     fn handle_stream_open(
@@ -257,6 +276,10 @@ impl XmppRuntime {
                 StreamManagementEvent::AckRequested,
             )));
         } else if let Some(h) = SmState::parse_ack_h(element) {
+            if h > self.sm_state.outbound_count {
+                self.handle_sm_handled_count_too_high(h, events);
+                return Ok(());
+            }
             self.sm_state.process_ack(h);
             events.push(ClientEvent::Connection(ConnectionEvent::StreamManagement(
                 StreamManagementEvent::AckReceived { h },
@@ -270,19 +293,46 @@ impl XmppRuntime {
             )));
         } else if element.name() == "resumed" {
             let h = element.attr("h").and_then(|v| v.parse().ok()).unwrap_or(0);
+            if h > self.sm_state.outbound_count {
+                self.handle_sm_handled_count_too_high(h, events);
+                return Ok(());
+            }
+            self.sm_state.process_ack(h);
             self.sm_state.previd = element.attr("previd").map(|s| s.to_string());
             self.sm_state.enabled = true;
             events.push(ClientEvent::Connection(ConnectionEvent::StreamManagement(
                 StreamManagementEvent::Resumed { h },
             )));
         } else if element.name() == "failed" {
-            self.sm_state.enabled = false;
+            self.sm_state.stop();
             events.push(ClientEvent::Connection(ConnectionEvent::StreamManagement(
                 StreamManagementEvent::Failed,
             )));
         }
 
         Ok(())
+    }
+
+    fn handle_sm_handled_count_too_high(&mut self, h: u32, events: &mut Vec<ClientEvent>) {
+        let error = Element::builder("error", NS_STREAMS)
+            .append(Element::builder("undefined-condition", NS_STREAM_ERRORS).build())
+            .append(
+                Element::builder("handled-count-too-high", crate::stream_management::NS_SM)
+                    .attr("h", h.to_string())
+                    .attr("send-count", self.sm_state.outbound_count.to_string())
+                    .build(),
+            )
+            .build();
+        self.sm_state.stop();
+        events.push(ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+            TransportMessage::Element(error),
+        )));
+        events.push(ClientEvent::Connection(ConnectionEvent::StreamManagement(
+            StreamManagementEvent::Failed,
+        )));
+        events.push(ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+            TransportMessage::Close(StreamClose),
+        )));
     }
 
     fn handle_stream_features(
@@ -341,7 +391,6 @@ impl XmppRuntime {
                 events.push(ClientEvent::Connection(ConnectionEvent::OutboundMessage(
                     request.to_transport_message(),
                 )));
-                self.sm_state.record_sent(1);
             }
             _ => {}
         }
@@ -699,6 +748,69 @@ mod tests {
             ClientEvent::Lifecycle(LifecycleEvent::SessionReady(binding))
                 if binding.jid == FullJid::from_str("alice@example.com/macbook").unwrap()
         )));
+    }
+
+    #[test]
+    fn runtime_counts_outbound_stanzas_after_enable_is_sent() {
+        let mut runtime = XmppRuntime::new(config()).unwrap();
+
+        runtime
+            .apply_transport_event(TransportEvent::MessageSent(TransportMessage::Element(
+                SmState::build_enable(true),
+            )))
+            .unwrap();
+
+        let message = Element::builder("message", crate::NS_CLIENT)
+            .attr("id", "out-1")
+            .build();
+        runtime
+            .apply_transport_event(TransportEvent::MessageSent(TransportMessage::Element(
+                message,
+            )))
+            .unwrap();
+
+        assert!(runtime.sm_state.outbound_enabled);
+        assert_eq!(runtime.sm_state.outbound_count, 1);
+    }
+
+    #[test]
+    fn runtime_rejects_sm_ack_above_sent_count() {
+        let mut runtime = XmppRuntime::new(config()).unwrap();
+        runtime
+            .apply_transport_event(TransportEvent::MessageSent(TransportMessage::Element(
+                SmState::build_enable(true),
+            )))
+            .unwrap();
+
+        let ack = Element::builder("a", crate::stream_management::NS_SM)
+            .attr("h", "1")
+            .build();
+        let events = runtime
+            .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+                ack,
+            )))
+            .unwrap();
+
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ClientEvent::Connection(ConnectionEvent::StreamManagement(
+                StreamManagementEvent::Failed
+            ))
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+                TransportMessage::Element(element)
+            )) if element.name() == "error"
+                && element
+                    .get_child("handled-count-too-high", crate::stream_management::NS_SM)
+                    .is_some()
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ClientEvent::Connection(ConnectionEvent::OutboundMessage(TransportMessage::Close(_)))
+        )));
+        assert_eq!(runtime.sm_state.server_h, 0);
     }
 
     #[test]

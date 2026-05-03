@@ -29,8 +29,8 @@ pub enum ClientEvent {
     MessageDelivery(MessageDeliveryEvent),
     /// Correlated IQ result or error for in-flight `send_iq` calls.
     ///
-    /// Consumed by the driver to resolve the pending [`tokio::sync::oneshot`];
-    /// never broadcast on the public event bus.
+    /// Consumed by the native driver to resolve the pending IQ request; never
+    /// broadcast on the public event bus.
     IqResult {
         id: String,
         element: Element,

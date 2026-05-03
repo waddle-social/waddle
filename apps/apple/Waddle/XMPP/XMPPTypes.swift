@@ -238,6 +238,8 @@ enum XMPPEvent: Sendable, Equatable {
     case sessionReady
     case message(XMPPMessageEvent)
     case presence(XMPPPresenceEvent)
+    case messageDeliveryAcked(stanzaID: String)
+    case messageDeliveryFailed(stanzaID: String)
     case streamError(name: String, text: String?)
     case error(String)
     case disconnected
