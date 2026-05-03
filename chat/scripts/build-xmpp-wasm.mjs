@@ -12,12 +12,12 @@ const jsPath = resolve(outDir, "waddle_xmpp_client_wasm.js");
 const dtsPath = resolve(outDir, "waddle_xmpp_client_wasm.d.ts");
 const wasmPath = resolve(outDir, "waddle_xmpp_client_wasm_bg.wasm");
 
-// Skip wasm-pack compilation when the committed artifact is already present and
-// SKIP_WASM_BUILD is set (or CI=true without an explicit override). This lets
-// the chat lint/build pipeline use the pre-built artifact without needing a
-// wasm32-unknown-unknown Rust toolchain in CI.
+// Skip wasm-pack compilation when the committed artifact is already present.
+// The wasm-pkg is committed to the repository so CI can use the pre-built
+// artifact without needing a wasm32-unknown-unknown Rust toolchain.
+// To force a rebuild (e.g. after changing Rust source), run: REBUILD_WASM=1 bun run wasm:build
 const artifactPresent = existsSync(wasmPath);
-const skipBuild = artifactPresent && (process.env.SKIP_WASM_BUILD === "1" || (process.env.CI === "true" && process.env.REBUILD_WASM !== "1"));
+const skipBuild = artifactPresent && process.env.REBUILD_WASM !== "1";
 
 if (!skipBuild) {
   execFileSync(
@@ -26,7 +26,7 @@ if (!skipBuild) {
     { cwd: crateDir, stdio: "inherit" },
   );
 } else {
-  console.log("[wasm-pack] Skipping build: pre-built artifact present (CI mode). Set REBUILD_WASM=1 to force rebuild.");
+  console.log("[wasm-pack] Using committed WASM artifact. Set REBUILD_WASM=1 to recompile.");
 }
 
 const pkg = JSON.parse(readFileSync(pkgJsonPath, "utf8"));
