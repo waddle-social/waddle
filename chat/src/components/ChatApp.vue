@@ -17,7 +17,8 @@ import { useReadReceipts } from "@/composables/useReadReceipts";
 import { useVersion } from "@/composables/useVersion";
 import { useRosterContacts } from "@/composables/useRosterContacts";
 import { buildDmPath, buildPath, buildSettingsPath, parseRoute, pushDmRoute, pushRoute, pushSettingsRoute, resolveChannel, shouldLoadStructureForRoute } from "@/composables/useRouting";
-import { barePeerJid, jidDomain, parseManagedRoomBareJid, roomBareJidFor } from "@/lib/xmpp-client";
+import { barePeerJid, jidDomain, parseManagedRoomBareJid } from "@/lib/xmpp-client";
+import { roomJidForChannelId as resolveRoomJidForChannelId } from "@/lib/channel-room";
 import { mergeRoomHats, roomHatsFromMembers } from "@/lib/xmpp/occupant-badges";
 import { connectionStore } from "@/lib/connection-store";
 import LandingState from "@/components/chat/LandingState.vue";
@@ -431,7 +432,7 @@ const readReceiptsActiveRoomJid = computed<string | null>(() => {
   const channelId = waddles.activeChannelId.value;
   const sess = session.value;
   if (!channelId || !sess) return null;
-  return roomBareJidFor(sess, channelId);
+  return resolveRoomJidForChannelId(sess, waddles.channels.value, channelId);
 });
 const readReceiptsActivePeerJid = computed<string | null>(() =>
   readReceiptsKind.value === "dm" ? dmConversations.activePeerJid.value : null,
@@ -761,14 +762,20 @@ function openThread(threadId: string, targetMessageId?: string) {
   void messaging.backfillThread(threadId);
 }
 
+function roomJidForChannelId(channelId: string): string | null {
+  const sess = connectionStore.session;
+  if (!sess) return null;
+  return resolveRoomJidForChannelId(sess, waddles.channels.value, channelId);
+}
+
 async function onSelectThread(channelId: string, threadId: string) {
   // Navigate to the channel if not already there
   if (waddles.activeChannelId.value !== channelId) {
     await selectChannel(channelId);
   }
   // Mark thread as read
-  if (connectionStore.session) {
-    const roomJid = roomBareJidFor(connectionStore.session, channelId);
+  const roomJid = roomJidForChannelId(channelId);
+  if (roomJid) {
     channelUnread.markThreadRead(roomJid, threadId);
   }
   openThread(threadId);
@@ -1121,8 +1128,8 @@ async function selectChannel(channelId: string) {
   void waddles.reloadChannelMembers(channelId);
   messaging.clearMessages();
   // XEP-0502: Clear activity indicator for this channel
-  if (connectionStore.session) {
-    const roomJid = roomBareJidFor(connectionStore.session, channelId);
+  const roomJid = roomJidForChannelId(channelId);
+  if (roomJid) {
     messaging.clearChannelActivity(roomJid);
   }
   const unreadAtLoad = computedChannelUnreadMap.value[channelId]?.unread ?? 0;

@@ -1021,7 +1021,7 @@ describe("scroll direction preference", () => {
     expect(timelineEl.scrollTop).toBe(0);
   });
 
-  test("live room messages pin through the virtual timeline edge scroller when available", async () => {
+  test("live room messages from discovered MUC JIDs pin through the virtual timeline edge scroller", async () => {
     let liveHandler: ((msg: LiveRoomMessage) => void) | null = null;
     const virtualScroll = mock(async () => true);
     const actionError = ref("");
@@ -1036,7 +1036,7 @@ describe("scroll direction preference", () => {
       } as never) as never,
       ref("w1"),
       ref("c1"),
-      ref({ id: "c1", name: "general", channel_type: "text" }),
+      ref({ id: "c1", name: "general", jid: "c1@conference.example.net", channel_type: "text" }),
       String,
       actionError,
       () => {
@@ -1049,7 +1049,7 @@ describe("scroll direction preference", () => {
 
     liveHandler?.({
       id: "room-live",
-      roomJid: "c1@muc.example.com",
+      roomJid: "c1@conference.example.net",
       nick: "bob",
       body: "from room",
       createdAt: "2024-01-01T00:00:00Z",
@@ -1059,6 +1059,7 @@ describe("scroll direction preference", () => {
     await nextTick();
 
     expect(virtualScroll).toHaveBeenCalledWith("chat");
+    expect(messaging.messages.value.at(-1)?.id).toBe("room-live");
     expect(timelineEl.scrollTop).toBe(240);
   });
 
