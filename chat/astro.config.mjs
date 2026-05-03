@@ -40,7 +40,7 @@ export default defineConfig({
       },
     },
     optimizeDeps: {
-      include: ["events", "stanza"],
+      include: ["events", "@waddle/xmpp-client-wasm"],
     },
   },
 

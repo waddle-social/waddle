@@ -12,6 +12,7 @@
     - If ./xeps doesn't exist, clone xsf/xeps into ./xeps
 - Divide work up, use sub-agents and role specific agents to achieve our task.
 - After you are finished, use multiple adverserial personas subagents to review our changes; repeat until they find no real and actionable issues.
+- Always update the PR title and desc to desc the complete work done, with the plan; and remove draft status
 - Our job doesn't stop after we push, we always monitor CI and fix it until all checks are green
 - XMPP Native, Never use out of band non-XMPP APIs.
 - XEP conformance hard rule:

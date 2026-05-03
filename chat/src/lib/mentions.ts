@@ -40,7 +40,7 @@ function inferLocalUserJid(nick: string, selfDomain: string): string | null {
   return `${canonical}@${selfDomain}`;
 }
 
-export function isBroadcastMention(value: string): boolean {
+function isBroadcastMention(value: string): boolean {
   return BROADCAST_MENTION_SET.has(canonicalMentionIdentifier(value));
 }
 

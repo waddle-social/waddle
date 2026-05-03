@@ -16,6 +16,15 @@ export class WaddleClient {
     fetch_room_history_by_thread(room_jid: string, thread_id: string, max: number, before_id?: string | null): Promise<any>;
     fetch_room_history_page(room_jid: string, max: number, page_param: any): Promise<any>;
     fetch_user_pep_profile(jid: string): Promise<any>;
+    /**
+     * Query pubsub items from a node (XEP-0060).
+     *
+     * Returns an array of `{ jid, name }` objects extracted from the `<item>`
+     * elements in the result IQ.  The item `id` attribute is used as the JID;
+     * the optional `name` attribute on a `<conference>` child (XEP-0402) is
+     * used as the human-readable name.
+     */
+    get_pubsub_items(to: string, node: string): Promise<any>;
     get_server_version(): Promise<any>;
     join_room(room_jid: string, nick: string): Promise<any>;
     leave_room(room_jid: string, nick: string): Promise<any>;
@@ -52,7 +61,7 @@ export class WaddleClient {
     set_on_message_delivery_acked(cb: Function): void;
     set_on_message_delivery_failed(cb: Function): void;
     set_on_presence(cb: Function): void;
-    set_on_session_lifecycle(cb: (event: string) => void): void;
+    set_on_session_lifecycle(cb: Function): void;
     set_room_affiliation(room_jid: string, jid: string, affiliation: string): Promise<any>;
     subscribe_to_presence(peer_jid: string): Promise<any>;
 }
@@ -63,95 +72,4 @@ export class WaddleConfig {
     constructor(server_url: string, jid: string, access_token: string, resource: string);
 }
 
-export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
-
-export interface InitOutput {
-    readonly memory: WebAssembly.Memory;
-    readonly __wbg_waddleclient_free: (a: number, b: number) => void;
-    readonly __wbg_waddleconfig_free: (a: number, b: number) => void;
-    readonly waddleclient_connect: (a: number) => number;
-    readonly waddleclient_disable_push_notifications: (a: number, b: number, c: number, d: number, e: number) => number;
-    readonly waddleclient_disconnect: (a: number) => number;
-    readonly waddleclient_discover_upload_service: (a: number) => number;
-    readonly waddleclient_enable_push_notifications: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => number;
-    readonly waddleclient_fetch_dm_history: (a: number, b: number, c: number, d: number, e: number, f: number) => number;
-    readonly waddleclient_fetch_dm_history_page: (a: number, b: number, c: number, d: number, e: number) => number;
-    readonly waddleclient_fetch_inbox: (a: number, b: number) => number;
-    readonly waddleclient_fetch_room_history: (a: number, b: number, c: number, d: number, e: number, f: number) => number;
-    readonly waddleclient_fetch_room_history_by_thread: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => number;
-    readonly waddleclient_fetch_room_history_page: (a: number, b: number, c: number, d: number, e: number) => number;
-    readonly waddleclient_fetch_user_pep_profile: (a: number, b: number, c: number) => number;
-    readonly waddleclient_get_server_version: (a: number) => number;
-    readonly waddleclient_join_room: (a: number, b: number, c: number, d: number, e: number) => number;
-    readonly waddleclient_leave_room: (a: number, b: number, c: number, d: number, e: number) => number;
-    readonly waddleclient_list_room_members: (a: number, b: number, c: number, d: number, e: number) => number;
-    readonly waddleclient_list_rooms: (a: number) => number;
-    readonly waddleclient_list_roster_contacts: (a: number) => number;
-    readonly waddleclient_mark_inbox_read: (a: number, b: number, c: number, d: number, e: number) => number;
-    readonly waddleclient_new: (a: number) => number;
-    readonly waddleclient_publish_activity: (a: number, b: number) => number;
-    readonly waddleclient_publish_mood: (a: number, b: number) => number;
-    readonly waddleclient_publish_tune: (a: number, b: number) => number;
-    readonly waddleclient_request_avatar: (a: number, b: number, c: number) => number;
-    readonly waddleclient_request_upload_slot: (a: number, b: number, c: number, d: number, e: number, f: bigint, g: number, h: number) => number;
-    readonly waddleclient_retract_activity: (a: number) => number;
-    readonly waddleclient_retract_mood: (a: number) => number;
-    readonly waddleclient_retract_tune: (a: number) => number;
-    readonly waddleclient_search_dm_history: (a: number, b: number, c: number, d: number, e: number, f: number) => number;
-    readonly waddleclient_search_room_history: (a: number, b: number, c: number, d: number, e: number, f: number) => number;
-    readonly waddleclient_search_users: (a: number, b: number, c: number) => number;
-    readonly waddleclient_send_chat_message: (a: number, b: number, c: number, d: number, e: number, f: number) => number;
-    readonly waddleclient_send_chat_state: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => number;
-    readonly waddleclient_send_correction: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => number;
-    readonly waddleclient_send_displayed: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => number;
-    readonly waddleclient_send_groupchat_message: (a: number, b: number, c: number, d: number, e: number, f: number) => number;
-    readonly waddleclient_send_moderation: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => number;
-    readonly waddleclient_send_presence: (a: number, b: number, c: number, d: number, e: number) => number;
-    readonly waddleclient_send_raw_iq: (a: number, b: number, c: number) => number;
-    readonly waddleclient_send_reaction: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => number;
-    readonly waddleclient_send_retraction: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => number;
-    readonly waddleclient_set_on_connected: (a: number, b: number) => void;
-    readonly waddleclient_set_on_disconnected: (a: number, b: number) => void;
-    readonly waddleclient_set_on_error: (a: number, b: number) => void;
-    readonly waddleclient_set_on_message: (a: number, b: number) => void;
-    readonly waddleclient_set_on_message_delivery_acked: (a: number, b: number) => void;
-    readonly waddleclient_set_on_message_delivery_failed: (a: number, b: number) => void;
-    readonly waddleclient_set_on_presence: (a: number, b: number) => void;
-    readonly waddleclient_set_on_session_lifecycle: (a: number, b: number) => void;
-    readonly waddleclient_set_room_affiliation: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => number;
-    readonly waddleclient_subscribe_to_presence: (a: number, b: number, c: number) => number;
-    readonly waddleconfig_new: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => number;
-    readonly __wasm_bindgen_func_elem_2647: (a: number, b: number, c: number, d: number) => void;
-    readonly __wasm_bindgen_func_elem_2653: (a: number, b: number, c: number, d: number) => void;
-    readonly __wasm_bindgen_func_elem_1511: (a: number, b: number, c: number) => void;
-    readonly __wasm_bindgen_func_elem_1511_2: (a: number, b: number, c: number) => void;
-    readonly __wasm_bindgen_func_elem_1511_3: (a: number, b: number, c: number) => void;
-    readonly __wasm_bindgen_func_elem_1510: (a: number, b: number) => void;
-    readonly __wbindgen_export: (a: number, b: number) => number;
-    readonly __wbindgen_export2: (a: number, b: number, c: number, d: number) => number;
-    readonly __wbindgen_export3: (a: number) => void;
-    readonly __wbindgen_export4: (a: number, b: number) => void;
-    readonly __wbindgen_add_to_stack_pointer: (a: number) => number;
-}
-
-export type SyncInitInput = BufferSource | WebAssembly.Module;
-
-/**
- * Instantiates the given `module`, which can either be bytes or
- * a precompiled `WebAssembly.Module`.
- *
- * @param {{ module: SyncInitInput }} module - Passing `SyncInitInput` directly is deprecated.
- *
- * @returns {InitOutput}
- */
-export function initSync(module: { module: SyncInitInput } | SyncInitInput): InitOutput;
-
-/**
- * If `module_or_path` is {RequestInfo} or {URL}, makes a request and
- * for everything else, calls `WebAssembly.instantiate` directly.
- *
- * @param {{ module_or_path: InitInput | Promise<InitInput> }} module_or_path - Passing `InitInput` directly is deprecated.
- *
- * @returns {Promise<InitOutput>}
- */
-export default function __wbg_init (module_or_path?: { module_or_path: InitInput | Promise<InitInput> } | InitInput | Promise<InitInput>): Promise<InitOutput>;
+export default function init(): Promise<void>;

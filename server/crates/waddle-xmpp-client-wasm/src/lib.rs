@@ -490,6 +490,7 @@ pub struct WaddleReference {
 #[serde(default)]
 pub struct WaddleSendOptions {
     pub stanza_id: Option<String>,
+    pub subject: Option<String>,
     pub reply: Option<WaddleReplyTarget>,
     pub fallback: Option<WaddleFallbackRange>,
     pub thread: Option<WaddleThreadTarget>,
@@ -2135,6 +2136,7 @@ fn send_options_from_js(options: JsValue) -> Result<SendMessageOptions, JsValue>
 
     Ok(SendMessageOptions {
         stanza_id,
+        subject: options.subject,
         reply,
         fallback: options.fallback.map(|range| FallbackRange {
             start: range.start,

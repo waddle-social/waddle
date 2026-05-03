@@ -14,11 +14,13 @@
   "files": [
     "waddle_xmpp_client_wasm_bg.wasm",
     "waddle_xmpp_client_wasm.js",
+    "waddle_xmpp_client_wasm_bg.js",
     "waddle_xmpp_client_wasm.d.ts"
   ],
   "main": "waddle_xmpp_client_wasm.js",
   "types": "waddle_xmpp_client_wasm.d.ts",
   "sideEffects": [
+    "./waddle_xmpp_client_wasm.js",
     "./snippets/*"
   ]
 }

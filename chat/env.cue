@@ -55,6 +55,21 @@ schema.#Project & {
 	}
 
 	tasks: {
+		buildWasm: schema.#Task & {
+			command: "bun"
+			args: ["run", "wasm:build"]
+			inputs: [
+				"../server/Cargo.toml",
+				"../server/Cargo.lock",
+				"../server/crates/waddle-xmpp-client/**",
+				"../server/crates/waddle-xmpp-client-wasm/**",
+				"scripts/build-xmpp-wasm.mjs",
+			]
+			outputs: [
+				"../server/wasm-pkg/waddle-xmpp-client-wasm/**",
+			]
+		}
+
 		generateTypes: schema.#Task & {
 			command: "bun"
 			args: ["run", "generate-types"]
@@ -72,7 +87,7 @@ schema.#Project & {
 		lint: schema.#Task & {
 			command: "bun"
 			args: ["run", "lint"]
-			dependsOn: [generateTypes]
+			dependsOn: [buildWasm, generateTypes]
 			inputs: [
 				"../package.json",
 				"../bun.lock",
@@ -95,7 +110,7 @@ schema.#Project & {
 		build: schema.#Task & {
 			command: "bun"
 			args: ["run", "build"]
-			dependsOn: [generateTypes]
+			dependsOn: [buildWasm, generateTypes]
 			inputs: [
 				"../package.json",
 				"../bun.lock",

@@ -13,22 +13,7 @@
     "scripts/**/*.mjs",
     "tests/**/*.ts"
   ],
-  "ignore": [
-    "src/lib/xmpp/extensions/fallback.ts",
-    "src/lib/xmpp/extensions/file-sharing.ts",
-    "src/lib/xmpp/extensions/forums.ts",
-    "src/lib/xmpp/extensions/hats.ts",
-    "src/lib/xmpp/extensions/index.ts",
-    "src/lib/xmpp/extensions/markup.ts",
-    "src/lib/xmpp/extensions/mentions.ts",
-    "src/lib/xmpp/extensions/push.ts",
-    "src/lib/xmpp/extensions/reactions.ts",
-    "src/lib/xmpp/extensions/references.ts",
-    "src/lib/xmpp/extensions/replies.ts",
-    "src/lib/xmpp/extensions/retraction.ts",
-    "src/lib/xmpp/extensions/stanza-ids.ts",
-    "src/lib/xmpp/extensions/stickers.ts"
-  ],
+  "ignore": [],
   "astro": true,
   "ignoreDependencies": [
     "@fontsource-variable/jetbrains-mono",

@@ -435,43 +435,61 @@ function buildCommandIqXml(to: string, node: string, action: string, fields?: Da
   return `<iq type="set" id="${crypto.randomUUID()}" to="${escapeXml(to)}"><command xmlns="${NS_ADHOC_COMMANDS}" node="${escapeXml(node)}" action="${escapeXml(action)}"${sessionAttr}>${formXml}</command></iq>`;
 }
 
+function decodeXml(text: string): string {
+  return text
+    .replaceAll("&lt;", "<")
+    .replaceAll("&gt;", ">")
+    .replaceAll("&quot;", '"')
+    .replaceAll("&apos;", "'")
+    .replaceAll("&amp;", "&");
+}
+
+function readXmlAttr(attrs: string, name: string): string | undefined {
+  const match = attrs.match(new RegExp(`${name}=["']([^"']*)["']`));
+  return match?.[1] ? decodeXml(match[1]) : undefined;
+}
+
 function parseCommandIqResponse(xml: string): ExtensionCommandResult {
-  const doc = new DOMParser().parseFromString(xml, "text/xml");
-  const command = doc.querySelector(`command[xmlns="${NS_ADHOC_COMMANDS}"]`);
-  if (!command) return { notes: [] };
-  const status = command.getAttribute("status") ?? undefined;
-  const sessionId = command.getAttribute("sessionid") ?? command.getAttribute("sid") ?? undefined;
-  const notes: ExtensionCommandNote[] = Array.from(command.querySelectorAll("note"))
-    .map((note) => ({ type: note.getAttribute("type") ?? undefined, value: note.textContent ?? "" }))
+  const commandMatch = xml.match(/<command\b([^>]*)>([\s\S]*?)<\/command>|<command\b([^>]*)\/>/);
+  const commandAttrs = commandMatch?.[1] ?? commandMatch?.[3] ?? "";
+  if (!commandMatch) return { notes: [] };
+  const commandBody = commandMatch[2] ?? "";
+  const status = readXmlAttr(commandAttrs, "status");
+  const sessionId = readXmlAttr(commandAttrs, "sessionid") ?? readXmlAttr(commandAttrs, "sid");
+  const notes: ExtensionCommandNote[] = Array.from(commandBody.matchAll(/<note\b([^>]*)>([\s\S]*?)<\/note>/g))
+    .map(([, attrs, value]) => ({ type: readXmlAttr(attrs, "type"), value: decodeXml(value).trim() }))
     .filter((note) => note.value.length > 0);
-  const actionsEl = command.querySelector("actions");
-  const actions = actionsEl ? {
-    execute: actionsEl.getAttribute("execute") ?? undefined,
-    next: !!actionsEl.querySelector("next") || undefined,
-    prev: !!actionsEl.querySelector("prev") || !!actionsEl.querySelector("previous") || undefined,
-    complete: !!actionsEl.querySelector("complete") || undefined,
-    cancel: !!actionsEl.querySelector("cancel") || undefined,
+  const actionsMatch = commandBody.match(/<actions\b([^>]*)>([\s\S]*?)<\/actions>/);
+  const actions = actionsMatch ? {
+    execute: readXmlAttr(actionsMatch[1], "execute"),
+    next: actionsMatch[2].includes("<next") || undefined,
+    prev: actionsMatch[2].includes("<prev") || actionsMatch[2].includes("<previous") || undefined,
+    complete: actionsMatch[2].includes("<complete") || undefined,
+    cancel: actionsMatch[2].includes("<cancel") || undefined,
   } : undefined;
-  const formEl = command.querySelector(`x[xmlns="jabber:x:data"]`);
-  const form = formEl ? { type: formEl.getAttribute("type") ?? "form", fields: Array.from(formEl.querySelectorAll("field")).map((field) => ({
-    name: field.getAttribute("var") ?? "",
-    var: field.getAttribute("var") ?? "",
-    type: field.getAttribute("type") ?? "text-single",
-    label: field.getAttribute("label") ?? undefined,
-    desc: field.querySelector("desc")?.textContent ?? undefined,
-    value: field.querySelector("value")?.textContent ?? "",
-    values: Array.from(field.querySelectorAll("value")).map((v) => v.textContent ?? ""),
-    required: !!field.querySelector("required"),
-    options: Array.from(field.querySelectorAll("option")).map((opt) => ({
-      label: opt.getAttribute("label") ?? undefined,
-      value: opt.querySelector("value")?.textContent ?? "",
+  const formMatch = commandBody.match(/<x\b([^>]*)>([\s\S]*?)<\/x>/);
+  const form = formMatch ? {
+    type: readXmlAttr(formMatch[1], "type") ?? "form",
+    fields: Array.from(formMatch[2].matchAll(/<field\b([^>]*)>([\s\S]*?)<\/field>/g)).map(([, attrs, body]) => ({
+      name: readXmlAttr(attrs, "var") ?? "",
+      var: readXmlAttr(attrs, "var") ?? "",
+      type: readXmlAttr(attrs, "type") ?? "text-single",
+      label: readXmlAttr(attrs, "label"),
+      desc: body.match(/<desc>([\s\S]*?)<\/desc>/)?.[1] ? decodeXml(body.match(/<desc>([\s\S]*?)<\/desc>/)![1]) : undefined,
+      value: decodeXml(body.match(/<value>([\s\S]*?)<\/value>/)?.[1] ?? ""),
+      values: Array.from(body.matchAll(/<value>([\s\S]*?)<\/value>/g)).map(([, value]) => decodeXml(value)),
+      required: body.includes("<required"),
+      options: Array.from(body.matchAll(/<option\b([^>]*)>([\s\S]*?)<\/option>/g)).map(([, optionAttrs, optionBody]) => ({
+        label: readXmlAttr(optionAttrs, "label"),
+        value: decodeXml(optionBody.match(/<value>([\s\S]*?)<\/value>/)?.[1] ?? ""),
+      })),
     })),
-  })) } : undefined;
+  } : undefined;
   return {
     ...(status ? { status } : {}),
     ...(sessionId ? { sessionId } : {}),
     notes,
-    ...(actions ? { actions: parseCommandActions(actions, status, !!actionsEl) } : {}),
+    ...(actions ? { actions: parseCommandActions(actions, status, !!actionsMatch) } : {}),
     ...(form ? { form } : {}),
   };
 }
@@ -480,11 +498,10 @@ async function rawDiscoItems(xmpp: XmppSendIq, jid: string, node?: string): Prom
   const nodeAttr = node ? ` node="${escapeXml(node)}"` : "";
   try {
     const responseXml = await xmpp.send_raw_iq(`<iq type="get" id="${crypto.randomUUID()}" to="${escapeXml(jid)}"><query xmlns="http://jabber.org/protocol/disco#items"${nodeAttr}/></iq>`);
-    const doc = new DOMParser().parseFromString(responseXml, "text/xml");
-    return Array.from(doc.querySelectorAll(`query[xmlns="http://jabber.org/protocol/disco#items"] > item`)).map((item) => ({
-      jid: item.getAttribute("jid") ?? undefined,
-      node: item.getAttribute("node") ?? undefined,
-      name: item.getAttribute("name") ?? undefined,
+    return Array.from(responseXml.matchAll(/<item\b([^>]*)\/?>(?:<\/item>)?/g)).map(([, attrs]) => ({
+      jid: readXmlAttr(attrs, "jid"),
+      node: readXmlAttr(attrs, "node"),
+      name: readXmlAttr(attrs, "name"),
     }));
   } catch {
     return [];
@@ -493,9 +510,8 @@ async function rawDiscoItems(xmpp: XmppSendIq, jid: string, node?: string): Prom
 
 async function rawDiscoInfo(xmpp: XmppSendIq, jid: string): Promise<{ features: string[] }> {
   const responseXml = await xmpp.send_raw_iq(`<iq type="get" id="${crypto.randomUUID()}" to="${escapeXml(jid)}"><query xmlns="http://jabber.org/protocol/disco#info"/></iq>`);
-  const doc = new DOMParser().parseFromString(responseXml, "text/xml");
-  const features = Array.from(doc.querySelectorAll(`query[xmlns="http://jabber.org/protocol/disco#info"] > feature`))
-    .map((f) => f.getAttribute("var") ?? "")
+  const features = Array.from(responseXml.matchAll(/<feature\b[^>]*var=["']([^"']+)["'][^>]*\/?>(?:<\/feature>)?/g))
+    .map(([, value]) => decodeXml(value))
     .filter(Boolean);
   return { features };
 }
@@ -508,7 +524,7 @@ export async function invokeExtensionLaunch(
   const serviceJid = await discoverExtensionCommandService(xmpp, userJid);
   const iq = buildExtensionLaunchInvokeIq(userJid, launch, serviceJid);
   const fields = iq.command.form?.fields ?? [];
-  const responseXml = await buildCommandIqXml(serviceJid, iq.command.node, iq.command.action, fields);
+  const responseXml = buildCommandIqXml(serviceJid, iq.command.node, iq.command.action, fields);
   return parseCommandIqResponse(await xmpp.send_raw_iq(responseXml));
 }
 

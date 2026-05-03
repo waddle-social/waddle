@@ -167,6 +167,7 @@ export interface WasmPepProfile {
 /** Options for send_groupchat_message / send_chat_message. */
 export interface WasmSendOptions {
   stanza_id?: string;
+  subject?: string;
   reply?: { author_jid: string; message_id: string };
   fallback?: { start: number; end: number };
   thread?: { id: string; parent?: string };

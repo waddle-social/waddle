@@ -362,6 +362,7 @@ function buildWasmSendOptions(opts: SendGroupMessageOptions | SendDirectMessageO
     if (replyFallbackLength > 0) wasmOpts.fallback = { start: 0, end: replyFallbackLength };
   }
   if (maybeGroupOpts.threadCreate) {
+    wasmOpts.subject = maybeGroupOpts.threadCreate.title;
     wasmOpts.thread = { id: generatedId, parent: maybeGroupOpts.parentThreadId };
   } else if (maybeGroupOpts.threadReply) {
     wasmOpts.thread = { id: maybeGroupOpts.threadReply.threadId, parent: maybeGroupOpts.parentThreadId };
@@ -836,7 +837,7 @@ export class BrowserXmppClient {
     const wasmOpts = buildWasmSendOptions({ ...opts, markup: rebasedMarkup }, replyFallbackLength);
     if (xmpp.send_groupchat_message) return await xmpp.send_groupchat_message(roomJid, effectiveBody, wasmOpts) as string;
     if (xmpp.sendMessage) {
-      xmpp.sendMessage({ id: wasmOpts.stanza_id, to: roomJid, type: "groupchat", body: effectiveBody, ...(opts.threadId ? { thread: opts.threadId } : {}), ...(opts.threadCreate ? { threadCreate: opts.threadCreate } : {}), ...(opts.threadReply ? { threadReply: opts.threadReply } : {}) });
+      xmpp.sendMessage({ id: wasmOpts.stanza_id, to: roomJid, type: "groupchat", body: effectiveBody, ...(wasmOpts.subject ? { subject: wasmOpts.subject } : {}), ...(opts.threadId ? { thread: opts.threadId } : {}), ...(opts.threadCreate ? { threadCreate: opts.threadCreate } : {}), ...(opts.threadReply ? { threadReply: opts.threadReply } : {}) });
       return wasmOpts.stanza_id ?? null;
     }
     throw new Error("XMPP session is not ready");
@@ -1196,7 +1197,7 @@ export class BrowserXmppClient {
   }
   private wireEvents(xmpp: CompatXmpp & { enableKeepAlive?: (opts: { interval: number; timeout: number }) => void; disableKeepAlive?: () => void }) {
     xmpp.set_on_connected?.(() => { if (this.xmpp !== xmpp) return; void this.enableCarbons(xmpp); });
-    xmpp.set_on_session_lifecycle?.((event) => { if (event === "resumed") this.handleSessionReady(xmpp, { type: "resumed" }); else this.handleSessionReady(xmpp, { type: "fresh" }); });
+    xmpp.set_on_session_lifecycle?.((event: string) => { if (event === "resumed") this.handleSessionReady(xmpp, { type: "resumed" }); else this.handleSessionReady(xmpp, { type: "fresh" }); });
     xmpp.set_on_disconnected?.(() => this.handleDisconnected(xmpp));
     xmpp.set_on_error?.((detail: string) => this.emitError({ kind: "stream", recoverable: !this.destroying, detail }));
     xmpp.set_on_message?.((message: WasmMessage) => this.handleMessage(message));

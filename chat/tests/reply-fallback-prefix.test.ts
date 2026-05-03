@@ -1,5 +1,5 @@
 import { describe, test, expect } from "bun:test";
-import { buildReplyFallbackPrefix } from "../src/lib/xmpp/messaging";
+import { buildReplyFallbackPrefix } from "../src/lib/xmpp/send-types";
 import { codePointLength } from "../src/lib/text-offsets";
 
 describe("buildReplyFallbackPrefix", () => {

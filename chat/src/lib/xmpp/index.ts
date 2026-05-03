@@ -5,9 +5,9 @@ export {
   parseManagedRoomBareJid,
   roomBareJidFor,
 } from "./jid";
-export type { OutboundFileAttachment } from "./messaging";
-export type { InboxEntry } from "./inbox";
-export type { UserPepProfile } from "./pep-publications";
+export type { OutboundFileAttachment } from "./send-types";
+export type { InboxEntry } from "./inbox-types";
+export type { UserPepProfile } from "./pep-types";
 export type {
   ChatStateType,
   DmChatStateEvent,
