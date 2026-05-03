@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 use minidom::Element;
 use uuid::Uuid;
 
-#[cfg(feature = "native")]
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 use crate::client::ClientHandle;
 use crate::error::ClientResult;
 use crate::request::StanzaId;
@@ -32,7 +32,7 @@ const NS_SFS: &str = "urn:xmpp:sfs:0";
 const NS_FILE_METADATA: &str = "urn:xmpp:file:metadata:0";
 const NS_URL_DATA: &str = "http://jabber.org/protocol/url-data";
 const NS_CLIENT: &str = "jabber:client";
-#[cfg(feature = "native")]
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 const NS_MUC: &str = "http://jabber.org/protocol/muc";
 const NS_MUC_USER: &str = "http://jabber.org/protocol/muc#user";
 const NS_STICKERS: &str = "urn:xmpp:stickers:0";
@@ -634,7 +634,7 @@ fn parse_presence(el: &Element) -> InboundPresence {
 
 // ─── Outbound trait ───────────────────────────────────────────────────────
 
-#[cfg(feature = "native")]
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 pub trait MessagingExt {
     fn join_room<'a>(
         &'a self,
@@ -683,7 +683,7 @@ pub trait MessagingExt {
     ) -> impl std::future::Future<Output = ClientResult<()>> + Send + 'a;
 }
 
-#[cfg(feature = "native")]
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 impl MessagingExt for ClientHandle {
     async fn join_room(&self, room_jid: &str, nick: &str) -> ClientResult<()> {
         let to = format!("{}/{}", room_jid, nick);

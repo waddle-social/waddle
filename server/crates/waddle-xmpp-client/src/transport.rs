@@ -7,25 +7,25 @@ use crate::config::ClientConfig;
 use crate::error::{ClientError, ClientResult};
 use crate::state::StreamId;
 
-#[cfg(feature = "native")]
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 use futures::future::BoxFuture;
-#[cfg(feature = "native")]
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 use futures::stream::{SplitSink, SplitStream};
-#[cfg(feature = "native")]
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 use futures::{SinkExt, StreamExt};
-#[cfg(feature = "native")]
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 use std::collections::VecDeque;
-#[cfg(feature = "native")]
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 use tokio::net::TcpStream;
-#[cfg(feature = "native")]
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 use tokio::time::timeout;
-#[cfg(feature = "native")]
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 use tokio_tungstenite::tungstenite::handshake::client::generate_key;
-#[cfg(feature = "native")]
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 use tokio_tungstenite::tungstenite::http::Request;
-#[cfg(feature = "native")]
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 use tokio_tungstenite::tungstenite::Message;
-#[cfg(feature = "native")]
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 
 const NS_XMPP_FRAMING: &str = "urn:ietf:params:xml:ns:xmpp-framing";
@@ -132,7 +132,7 @@ impl TransportEvent {
 }
 
 /// Runtime-owned factory for a WebSocket transport implementation.
-#[cfg(feature = "native")]
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 pub trait WebSocketTransportFactory: Send + Sync {
     fn connect<'a>(
         &'a self,
@@ -141,7 +141,7 @@ pub trait WebSocketTransportFactory: Send + Sync {
 }
 
 /// Minimal async boundary for the WebSocket transport layer.
-#[cfg(feature = "native")]
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 pub trait WebSocketTransport: Send + Sync {
     fn kind(&self) -> TransportKind {
         TransportKind::WebSocket
@@ -161,11 +161,11 @@ pub trait WebSocketTransport: Send + Sync {
 }
 
 /// Default runtime factory for the concrete WebSocket transport.
-#[cfg(feature = "native")]
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 #[derive(Debug, Default, Clone, Copy)]
 pub struct DefaultTransportFactory;
 
-#[cfg(feature = "native")]
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 impl WebSocketTransportFactory for DefaultTransportFactory {
     fn connect<'a>(
         &'a self,
@@ -185,14 +185,14 @@ impl WebSocketTransportFactory for DefaultTransportFactory {
     }
 }
 
-#[cfg(feature = "native")]
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 type ClientWebSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
-#[cfg(feature = "native")]
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 type ClientWebSocketSink = SplitSink<ClientWebSocket, Message>;
-#[cfg(feature = "native")]
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 type ClientWebSocketStream = SplitStream<ClientWebSocket>;
 
-#[cfg(feature = "native")]
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 #[derive(Debug)]
 struct ConnectedWebSocketTransport {
     sink: ClientWebSocketSink,
@@ -201,7 +201,7 @@ struct ConnectedWebSocketTransport {
     pending_events: VecDeque<TransportEvent>,
 }
 
-#[cfg(feature = "native")]
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 impl ConnectedWebSocketTransport {
     fn new(socket: ClientWebSocket) -> Self {
         let mut pending_events = VecDeque::with_capacity(2);
@@ -236,7 +236,7 @@ impl ConnectedWebSocketTransport {
     }
 }
 
-#[cfg(feature = "native")]
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 impl WebSocketTransport for ConnectedWebSocketTransport {
     fn drain_events(&mut self) -> Vec<TransportEvent> {
         self.pending_events.drain(..).collect()
@@ -327,7 +327,7 @@ impl WebSocketTransport for ConnectedWebSocketTransport {
     }
 }
 
-#[cfg(feature = "native")]
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 fn websocket_request(config: &ClientConfig) -> ClientResult<Request<()>> {
     let host = websocket_host_header(&config.transport.endpoint)?;
     let mut builder = Request::builder()
@@ -348,7 +348,7 @@ fn websocket_request(config: &ClientConfig) -> ClientResult<Request<()>> {
         .map_err(ClientError::InvalidWebSocketRequest)
 }
 
-#[cfg(feature = "native")]
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 fn websocket_host_header(endpoint: &url::Url) -> ClientResult<String> {
     let host = endpoint
         .host_str()
@@ -591,22 +591,22 @@ mod tests {
     use super::*;
     use std::str::FromStr;
 
-    #[cfg(feature = "native")]
+    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
     use crate::config::{AccessToken, ClientResource, OAuthBearerConfig, WebSocketConfig};
-    #[cfg(feature = "native")]
+    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
     use crate::ConnectionConfig;
-    #[cfg(feature = "native")]
+    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
     use futures::{SinkExt, StreamExt};
-    #[cfg(feature = "native")]
+    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
     use tokio::net::TcpListener;
-    #[cfg(feature = "native")]
+    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
     use tokio_tungstenite::accept_hdr_async;
-    #[cfg(feature = "native")]
+    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
     use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
-    #[cfg(feature = "native")]
+    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
     use url::Url;
 
-    #[cfg(feature = "native")]
+    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
     fn config() -> ClientConfig {
         ClientConfig::new(
             ConnectionConfig::new(BareJid::from_str("waddle.example").unwrap()),
@@ -621,7 +621,7 @@ mod tests {
         .unwrap()
     }
 
-    #[cfg(feature = "native")]
+    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
     #[expect(
         clippy::result_large_err,
         reason = "tungstenite fixes the handshake callback error type as a large ErrorResponse"
@@ -685,7 +685,7 @@ mod tests {
         assert_eq!(element.ns(), NS_CLIENT);
     }
 
-    #[cfg(feature = "native")]
+    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
     #[tokio::test(flavor = "current_thread")]
     async fn concrete_transport_connects_and_emits_typed_frames() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

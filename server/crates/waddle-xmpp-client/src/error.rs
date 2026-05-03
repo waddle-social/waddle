@@ -49,12 +49,12 @@ pub enum ClientError {
     #[error("server rejected SASL authentication with condition `{condition}`")]
     AuthenticationRejected { condition: SaslFailureCondition },
     #[error("websocket transport request could not be built")]
-    #[cfg(feature = "native")]
+    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
     InvalidWebSocketRequest(#[source] tokio_tungstenite::tungstenite::http::Error),
     #[error("websocket connection timed out after {timeout:?}")]
     WebSocketConnectTimeout { timeout: Duration },
     #[error("websocket transport failed")]
-    #[cfg(feature = "native")]
+    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
     WebSocket(#[source] Box<tokio_tungstenite::tungstenite::Error>),
     #[error("websocket transport received an empty XMPP frame")]
     EmptyTransportFrame,
@@ -78,7 +78,7 @@ pub enum ClientError {
     StanzaError(#[from] StanzaError),
 }
 
-#[cfg(feature = "native")]
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 impl From<tokio_tungstenite::tungstenite::Error> for ClientError {
     fn from(error: tokio_tungstenite::tungstenite::Error) -> Self {
         Self::WebSocket(Box::new(error))

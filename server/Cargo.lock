@@ -719,6 +719,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "cast"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "37b2a672a2cb129a2e41c10b1224bb368f9f37a2b16b612598138befd7b37eb5"
+
+[[package]]
 name = "castaway"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2823,6 +2829,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
 
 [[package]]
+name = "minicov"
+version = "0.3.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4869b6a491569605d66d3952bcdf03df789e5b536e5f0cf7758a7f08a55ae24d"
+dependencies = [
+ "cc",
+ "walkdir",
+]
+
+[[package]]
 name = "minidom"
 version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3105,6 +3121,12 @@ name = "once_cell_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
+
+[[package]]
+name = "oorandom"
+version = "11.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d6790f58c7ff633d8771f42965289203411a5e5c68388703c06e14f24770b41e"
 
 [[package]]
 name = "openssl"
@@ -4332,6 +4354,17 @@ checksum = "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e"
 dependencies = [
  "serde_core",
  "serde_derive",
+]
+
+[[package]]
+name = "serde-wasm-bindgen"
+version = "0.6.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8302e169f0eddcc139c70f139d19d6467353af16f9fce27e8c30158036a1e16b"
+dependencies = [
+ "js-sys",
+ "serde",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -5918,7 +5951,9 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "futures",
+ "getrandom 0.2.17",
  "jid",
+ "js-sys",
  "minidom",
  "reqwest",
  "thiserror 2.0.18",
@@ -5928,6 +5963,9 @@ dependencies = [
  "url",
  "uuid",
  "waddle-xmpp-core",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
  "xmpp-parsers",
 ]
 
@@ -5940,6 +5978,29 @@ dependencies = [
  "uniffi",
  "url",
  "waddle-xmpp-client",
+]
+
+[[package]]
+name = "waddle-xmpp-client-wasm"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "chrono",
+ "futures",
+ "getrandom 0.2.17",
+ "jid",
+ "js-sys",
+ "minidom",
+ "serde",
+ "serde-wasm-bindgen",
+ "thiserror 2.0.18",
+ "tracing",
+ "uuid",
+ "waddle-xmpp-client",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "wasm-bindgen-test",
+ "web-sys",
 ]
 
 [[package]]
@@ -6059,6 +6120,45 @@ checksum = "49757b3c82ebf16c57d69365a142940b384176c24df52a087fb748e2085359ea"
 dependencies = [
  "unicode-ident",
 ]
+
+[[package]]
+name = "wasm-bindgen-test"
+version = "0.3.68"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6bb55e2540ad1c56eec35fd63e2aea15f83b11ce487fd2de9ad11578dfc047ea"
+dependencies = [
+ "async-trait",
+ "cast",
+ "js-sys",
+ "libm",
+ "minicov",
+ "nu-ansi-term",
+ "num-traits",
+ "oorandom",
+ "serde",
+ "serde_json",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "wasm-bindgen-test-macro",
+ "wasm-bindgen-test-shared",
+]
+
+[[package]]
+name = "wasm-bindgen-test-macro"
+version = "0.3.68"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "caf0ca1bd612b988616bac1ab34c4e4290ef18f7148a1d8b7f31c150080e9295"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
+name = "wasm-bindgen-test-shared"
+version = "0.2.118"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "23cda5ecc67248c48d3e705d3e03e00af905769b78b9d2a1678b663b8b9d4472"
 
 [[package]]
 name = "wasm-compose"

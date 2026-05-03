@@ -10,19 +10,27 @@ description = "Native XMPP client scaffold for Waddle"
 [features]
 default = ["native"]
 native = ["dep:futures", "dep:reqwest", "dep:tokio", "dep:tokio-tungstenite"]
+wasm = ["dep:futures", "dep:getrandom", "dep:js-sys", "dep:wasm-bindgen", "dep:wasm-bindgen-futures", "dep:web-sys"]
 
 [dependencies]
 base64 = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
 futures = { workspace = true, optional = true }
+getrandom = { version = "0.2", features = ["js"], optional = true }
 jid = { workspace = true }
+js-sys = { version = "0.3", optional = true }
 minidom = { workspace = true }
-reqwest = { workspace = true, optional = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, optional = true }
-tokio-tungstenite = { workspace = true, optional = true }
 tracing = { workspace = true }
 url = { workspace = true }
+wasm-bindgen = { version = "0.2", optional = true }
+wasm-bindgen-futures = { version = "0.4", optional = true }
+web-sys = { version = "0.3", features = ["BinaryType", "CloseEvent", "ErrorEvent", "Event", "MessageEvent", "WebSocket", "console"], optional = true }
 waddle-xmpp-core = { path = "../waddle-xmpp-core" }
 xmpp-parsers = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+reqwest = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+tokio-tungstenite = { workspace = true, optional = true }

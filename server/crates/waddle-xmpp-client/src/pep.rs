@@ -4,11 +4,11 @@
 
 use minidom::Element;
 
-#[cfg(feature = "native")]
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 use crate::client::ClientHandle;
-#[cfg(feature = "native")]
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 use crate::error::ClientResult;
-#[cfg(feature = "native")]
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 use uuid::Uuid;
 
 pub const NS_MOOD: &str = "http://jabber.org/protocol/mood";
@@ -258,7 +258,7 @@ pub fn build_pep_clear_iq(id: &str, node: &str) -> Element {
 
 // ── PepExt trait on ClientHandle ─────────────────────────────────────────────
 
-#[cfg(feature = "native")]
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 pub trait PepExt {
     fn publish_mood<'a>(
         &'a self,
@@ -283,7 +283,7 @@ pub trait PepExt {
     fn clear_tune(&self) -> impl std::future::Future<Output = ClientResult<()>> + Send + '_;
 }
 
-#[cfg(feature = "native")]
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 impl PepExt for ClientHandle {
     async fn publish_mood(&self, mood: &str, text: Option<&str>) -> ClientResult<()> {
         let id = Uuid::new_v4().to_string();

@@ -9,24 +9,23 @@ use chrono::{DateTime, Utc};
 use minidom::Element;
 use waddle_xmpp_core::mam::{DELAY_NS, FORWARD_NS, MAM_NS, RSM_NS};
 
-#[cfg(feature = "native")]
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 use std::time::Duration;
-#[cfg(feature = "native")]
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 use tokio::sync::broadcast;
-#[cfg(feature = "native")]
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 use tokio::time::timeout;
-#[cfg(feature = "native")]
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 use uuid::Uuid;
 
-#[cfg(feature = "native")]
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 use crate::client::ClientHandle;
-#[cfg(feature = "native")]
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 use crate::error::{ClientError, ClientResult};
-#[cfg(feature = "native")]
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 use crate::event::ClientEvent;
 
 const CLIENT_NS: &str = "jabber:client";
-#[cfg(feature = "native")]
 const DATA_FORMS_NS: &str = "jabber:x:data";
 
 /// A page of archived messages plus RSM pagination info.
@@ -72,7 +71,7 @@ pub struct RsmPageInfo {
 
 // ── Extension trait ──────────────────────────────────────────────────────────
 
-#[cfg(feature = "native")]
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 pub trait MamExt {
     /// Fetch archived messages for a MUC room.
     fn fetch_room_history<'a>(
@@ -91,7 +90,7 @@ pub trait MamExt {
     ) -> impl std::future::Future<Output = ClientResult<MamPage>> + Send + 'a;
 }
 
-#[cfg(feature = "native")]
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 impl MamExt for ClientHandle {
     async fn fetch_room_history(
         &self,
@@ -126,8 +125,7 @@ impl MamExt for ClientHandle {
 ///
 /// * `with_jid` — set as the `<with>` data form field (DM queries).
 /// * `to_jid`   — set as the `to` attribute on the IQ (room queries).
-#[cfg(feature = "native")]
-fn build_mam_iq(
+pub fn build_mam_iq(
     iq_id: &str,
     query_id: &str,
     max: u32,
@@ -208,7 +206,7 @@ fn build_mam_iq(
 /// buffered in the receiver — the driver dispatches transport events in order,
 /// so by the time `<fin/>` reaches us every prior MAM result is already in our
 /// receiver's ring.
-#[cfg(feature = "native")]
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 async fn run_mam_query(
     handle: &ClientHandle,
     iq: Element,
@@ -276,8 +274,7 @@ async fn run_mam_query(
 }
 
 /// Extract RSM and completeness from the IQ result element wrapping `<fin/>`.
-#[cfg(feature = "native")]
-fn parse_fin_from_iq_result(iq_result: &Element) -> (RsmPageInfo, bool) {
+pub fn parse_fin_from_iq_result(iq_result: &Element) -> (RsmPageInfo, bool) {
     // The result may be the raw <fin/> (if send_iq returns it directly) or
     // an <iq type='result'> wrapping a <fin/> child.
     let fin = if iq_result.name() == "fin" && iq_result.ns() == MAM_NS {
@@ -618,7 +615,7 @@ mod tests {
 
     // ── Query orchestration integration tests ────────────────────────────────
 
-    #[cfg(feature = "native")]
+    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
     mod query {
         use std::sync::{Arc, RwLock};
         use std::time::Duration;

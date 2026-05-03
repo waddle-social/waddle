@@ -1,11 +1,10 @@
 //! Native XMPP client scaffold for Waddle.
 
-#[cfg(feature = "native")]
 pub mod avatar;
 pub mod bootstrap;
-#[cfg(feature = "native")]
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 pub mod client;
-#[cfg(feature = "native")]
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 pub mod command;
 pub mod config;
 pub mod discovery;
@@ -19,25 +18,28 @@ pub mod runtime;
 pub mod state;
 pub mod stream_management;
 pub mod transport;
+#[cfg(feature = "wasm")]
+pub mod transport_wasm;
 pub mod xep;
 
-#[cfg(feature = "native")]
-pub use avatar::{Avatar, AvatarExt, AvatarInfo};
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+pub use avatar::AvatarExt;
+pub use avatar::{Avatar, AvatarInfo};
 pub use bootstrap::{
     AuthMechanism, AuthenticationRequest, BootstrapElement, OAuthBearerRequest,
     RequiredStreamFeature, ResourceBindingRequest, ResourceBindingResult, SaslFailure,
     SaslFailureCondition, StreamFeatures, NS_BIND, NS_CLIENT, NS_SASL, NS_SESSION, NS_SM,
     NS_STREAMS,
 };
-#[cfg(feature = "native")]
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 pub use client::{ClientDriver, ClientHandle, XmppClient};
-#[cfg(feature = "native")]
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 pub use command::XmppCommand;
 pub use config::{
     AccessToken, AuthenticationConfig, ClientConfig, ClientResource, OAuthBearerConfig,
     SessionConfig, StreamManagementConfig, WebSocketConfig,
 };
-#[cfg(feature = "native")]
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 pub use discovery::DiscoveryExt;
 pub use discovery::{
     DiscoFeature, DiscoIdentity, DiscoInfoResult, DiscoItem, DiscoveredChannel, DiscoveredWaddle,
@@ -47,13 +49,13 @@ pub use error::{ClientError, ClientResult, StanzaError, StanzaErrorType};
 pub use event::{
     ClientEvent, ConnectionEvent, LifecycleEvent, MessageDeliveryEvent, StreamManagementEvent,
 };
-#[cfg(feature = "native")]
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 pub use mam::MamExt;
 pub use mam::{ArchivedMessage, MamPage, RsmPageInfo};
-#[cfg(feature = "native")]
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 pub use messaging::MessagingExt;
 pub use messaging::{InboundMessage, InboundPresence, MessagingEvent};
-#[cfg(feature = "native")]
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 pub use pep::PepExt;
 pub use pep::{PepItem, UserActivity, UserMood, UserTune};
 pub use request::{
@@ -66,6 +68,8 @@ pub use transport::{
     decode_message, encode_message, StreamClose, StreamOpen, TransportCapabilities, TransportEvent,
     TransportKind, TransportMessage, TransportState,
 };
-#[cfg(feature = "native")]
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 pub use transport::{DefaultTransportFactory, WebSocketTransport, WebSocketTransportFactory};
+#[cfg(feature = "wasm")]
+pub use transport_wasm::{WasmTransportEvent, WasmWebSocket};
 pub use waddle_xmpp_core::ConnectionConfig;
