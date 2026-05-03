@@ -317,6 +317,10 @@ impl RuntimeHost for HostState {
         };
         Ok(result.map_err(Into::into))
     }
+
+    async fn current_timestamp(&mut self) -> wasmtime::Result<String> {
+        Ok(Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+    }
 }
 
 async fn execute_runtime_http_request(

@@ -318,9 +318,7 @@ fn command_answer_effect(answer: ProviderAnswer) -> types::ExtensionEffect {
             plugin: plugin_id(),
             capability: types::ExtensionCapability::MessageEnrich,
             payload_namespace: payload_namespace(),
-            created_at: types::Timestamp {
-                value: "1970-01-01T00:00:00Z".to_string(),
-            },
+            created_at: timestamp(),
             source: None,
             ui: vec![types::UiView {
                 id: types::UiViewId {
@@ -1491,6 +1489,22 @@ fn display(value: &str) -> types::DisplayText {
     types::DisplayText {
         value: value.to_string(),
     }
+}
+
+fn timestamp() -> types::Timestamp {
+    types::Timestamp {
+        value: current_timestamp_value(),
+    }
+}
+
+#[cfg(not(test))]
+fn current_timestamp_value() -> String {
+    runtime::current_timestamp()
+}
+
+#[cfg(test)]
+fn current_timestamp_value() -> String {
+    "1970-01-01T00:00:00Z".to_string()
 }
 
 fn extension_error(code: types::ExtensionErrorCode, message: &str) -> types::ExtensionError {

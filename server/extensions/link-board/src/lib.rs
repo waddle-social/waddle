@@ -11,6 +11,8 @@ mod bindings {
 }
 
 use bindings::exports;
+#[cfg(not(test))]
+use bindings::waddle::extension::runtime;
 use bindings::waddle::extension::types;
 use core::fmt::Write as _;
 use sha2::{Digest, Sha256};
@@ -405,8 +407,18 @@ fn display(value: &str) -> types::DisplayText {
 
 fn timestamp() -> types::Timestamp {
     types::Timestamp {
-        value: "2026-04-27T00:00:00Z".to_string(),
+        value: current_timestamp_value(),
     }
+}
+
+#[cfg(not(test))]
+fn current_timestamp_value() -> String {
+    runtime::current_timestamp()
+}
+
+#[cfg(test)]
+fn current_timestamp_value() -> String {
+    "2026-04-27T00:00:00Z".to_string()
 }
 
 /// Builder for the generic `<extension-item xmlns="urn:waddle:extension:1">`

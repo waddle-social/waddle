@@ -694,6 +694,12 @@ interface runtime {
 
     get-config: func() -> string;
     http-request: func(request: outgoing-http-request) -> result<http-response, host-tool-error>;
+
+    /// Current wall-clock time, formatted as an RFC 3339 / ISO 8601 string in
+    /// UTC. Extensions call this when populating `created_at`, `expires_at`,
+    /// `saved-at` and similar fields so that wall-clock authority stays on the
+    /// host and every published item gets a fresh timestamp.
+    current-timestamp: func() -> string;
 }
 
 world waddle-extension {
