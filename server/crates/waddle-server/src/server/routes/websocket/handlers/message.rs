@@ -3,6 +3,7 @@ use waddle_xmpp::{
     parser::stanza_to_string,
     protocol::handlers::errors::bad_request_reply,
     protocol::{frame::InboundFrame, InboundEvent, XmppStateMachine},
+    xep::NS_DELAY,
     Stanza,
 };
 
@@ -39,7 +40,7 @@ use waddle_xmpp::protocol::ConnectionPhase;
 ///
 /// [`OutboundEvent::DispatchToRoom`]: waddle_xmpp::protocol::OutboundEvent::DispatchToRoom
 pub async fn handle_message(
-    incoming: xmpp_parsers::message::Message,
+    mut incoming: xmpp_parsers::message::Message,
     state: &WebSocketState,
     phase: &ConnectionPhase,
     state_machine: Option<&mut XmppStateMachine>,
@@ -56,6 +57,8 @@ pub async fn handle_message(
         );
         return vec![];
     };
+
+    strip_client_authored_delay(&mut incoming);
 
     if incoming.type_ != xmpp_parsers::message::MessageType::Groupchat
         && incoming.type_ != xmpp_parsers::message::MessageType::Error
@@ -85,8 +88,40 @@ pub async fn handle_message(
     frames
 }
 
+fn strip_client_authored_delay(message: &mut xmpp_parsers::message::Message) {
+    message
+        .payloads
+        .retain(|payload| !(payload.name() == "delay" && payload.ns() == NS_DELAY));
+}
+
 fn remove_framework_envelopes(message: &mut xmpp_parsers::message::Message) {
     message
         .payloads
         .retain(|payload| !payload.ns().starts_with("urn:waddle:"));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use xmpp_parsers::message::Message;
+    use xmpp_parsers::minidom::Element;
+
+    #[test]
+    fn strips_client_supplied_delay_without_touching_other_payloads() {
+        let xml = "<message xmlns='jabber:client' type='chat'>\
+                    <body>Hello</body>\
+                    <delay xmlns='urn:xmpp:delay' from='evil.example' stamp='2024-06-01T09:30:00Z'>forged</delay>\
+                    <envelope xmlns='urn:waddle:test'/>\
+                    </message>";
+        let mut message =
+            Message::try_from(xml.parse::<Element>().expect("valid xml")).expect("message");
+
+        strip_client_authored_delay(&mut message);
+
+        assert!(message.payloads.iter().all(|payload| payload.ns() != NS_DELAY));
+        assert!(message
+            .payloads
+            .iter()
+            .any(|payload| payload.ns().starts_with("urn:waddle:")));
+    }
 }
