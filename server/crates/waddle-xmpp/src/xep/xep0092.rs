@@ -1,8 +1,9 @@
 //! XEP-0092: Software Version
 //!
 //! Allows clients to query the server (or any entity) for its software
-//! name, version, and host operating system. Waddle reports the package version
-//! here so cache keys do not depend on per-commit build metadata.
+//! name and version, with optional operating-system disclosure. Waddle keeps
+//! the helper generic, while the server omits OS details by default so cache
+//! keys do not depend on per-commit build metadata.
 //!
 //! ## XML Format
 //!
@@ -19,7 +20,6 @@
 //!   <query xmlns='jabber:iq:version'>
 //!     <name>Waddle</name>
 //!     <version>0.1.0</version>
-//!     <os>Linux</os>
 //!   </query>
 //! </iq>
 //! ```

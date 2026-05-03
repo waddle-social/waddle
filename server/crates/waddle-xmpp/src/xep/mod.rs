@@ -13,8 +13,8 @@
 //!   sets via `<set>` elements with max, after, before, index, first, last, count.
 //! - **XEP-0085**: Chat State Notifications - Typing indicators and
 //!   conversational state (active, composing, paused, inactive, gone).
-//! - **XEP-0092**: Software Version - Name, package version, and host OS
-//!   reported via `jabber:iq:version`.
+//! - **XEP-0092**: Software Version - Name and package version reported via
+//!   `jabber:iq:version`, with the optional OS field omitted by default.
 //! - **XEP-0184**: Message Delivery Receipts - Request and acknowledge
 //!   message delivery with `<request/>` and `<received/>` elements.
 //! - **XEP-0106**: JID Escaping - Escape/unescape special characters
