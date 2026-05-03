@@ -1033,8 +1033,9 @@ fn ext_archived_message(message: MamArchivedMessage) -> Option<ext_host::Archive
         // an empty `Some("")` collapses to `None` here as well.
         body: message.body.and_then(|value| DisplayText::new(value).ok()),
         thread_id: message
-            .thread_id
-            .and_then(|thread| waddle_extensions::ThreadId::new(thread.as_str()).ok()),
+            .thread
+            .as_ref()
+            .and_then(|t| waddle_extensions::ThreadId::new(t.id.as_str()).ok()),
         reply_to: message.reply_to_id.and_then(|id| {
             Some(waddle_extensions::ReplyTarget {
                 id: waddle_extensions::StanzaId::new(id).ok()?,

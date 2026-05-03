@@ -96,11 +96,9 @@ pub fn build_direct_archived_message(
     // post-reattach payload form. The inbound parse boundary in
     // `protocol::frame::parse_stanza` calls `reattach_thread_parent` so the
     // parent attribute survives `Message::try_from`'s typed lossy parse.
-    let (thread_id, parent_thread_id) =
-        match thread_info_from_message_in_stanza_ns(message, CLIENT_STANZA_NS) {
-            Some(info) => (Some(info.id.as_str().to_owned()), info.parent),
-            None => (None, None),
-        };
+    // The collapsed `Option<ThreadInfo>` field on `ArchivedMessage` accepts
+    // the helper's result directly — no flattening required.
+    let thread = thread_info_from_message_in_stanza_ns(message, CLIENT_STANZA_NS);
 
     ArchivedMessage {
         id,
@@ -109,8 +107,7 @@ pub fn build_direct_archived_message(
         to: to.to_string(),
         body,
         stanza_id: message.id.clone(),
-        thread_id,
-        parent_thread_id,
+        thread,
         reply_to_id,
         reply_to_jid,
         origin_id,
@@ -419,8 +416,9 @@ mod tests {
             "bob@example.com",
             &msg,
         );
-        assert_eq!(archived.thread_id.as_deref(), Some("root-1"));
-        assert!(archived.parent_thread_id.is_none());
+        let thread = archived.thread.as_ref().expect("root thread present");
+        assert_eq!(thread.id.as_str(), "root-1");
+        assert!(thread.parent.is_none());
     }
 
     #[test]
@@ -443,11 +441,9 @@ mod tests {
             "bob@example.com",
             &msg,
         );
-        assert_eq!(archived.thread_id.as_deref(), Some("child-2"));
-        assert_eq!(
-            archived.parent_thread_id.as_ref().map(|t| t.as_str()),
-            Some("root-1")
-        );
+        let thread = archived.thread.as_ref().expect("nested thread present");
+        assert_eq!(thread.id.as_str(), "child-2");
+        assert_eq!(thread.parent.as_ref().map(|t| t.as_str()), Some("root-1"));
     }
 
     #[test]
@@ -468,8 +464,9 @@ mod tests {
             "bob@example.com",
             &msg,
         );
-        assert_eq!(archived.thread_id.as_deref(), Some("typed-thread"));
-        assert!(archived.parent_thread_id.is_none());
+        let thread = archived.thread.as_ref().expect("typed thread present");
+        assert_eq!(thread.id.as_str(), "typed-thread");
+        assert!(thread.parent.is_none());
     }
 
     #[test]
@@ -481,7 +478,6 @@ mod tests {
             "bob@example.com",
             &msg,
         );
-        assert_eq!(archived.thread_id, None);
-        assert!(archived.parent_thread_id.is_none());
+        assert!(archived.thread.is_none());
     }
 }

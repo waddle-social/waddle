@@ -82,8 +82,8 @@ pub trait MamStorage: Send + Sync {
     ) -> Result<Option<ArchivedMessage>, MamStorageError>;
 
     /// Replace an archived message with a XEP-0424 / XEP-0425 tombstone in
-    /// place. Clears `body`, `stanza_xml`, `thread_id`, `parent_thread_id`,
-    /// `reply_to_id`, `reply_to_jid`, and overwrites `rich_payload` with
+    /// place. Clears `body`, `stanza_xml`, `thread` (id and optional
+    /// parent), `reply_to_id`, `reply_to_jid`, and overwrites `rich_payload` with
     /// the typed `ArchivedRichPayload::Tombstone(...)` value, per
     /// XEP-0424 §Tombstones / XEP-0425 §Tombstones: "any related
     /// elements which might leak information about the original message".
@@ -357,17 +357,17 @@ fn apply_tombstone(
     // XEP-0424 §Tombstones / XEP-0425 §Tombstones: replace the original
     // contents — `<body/>` AND any related elements which might leak
     // information about the original message — with a `<retracted/>`
-    // tombstone. The XEP-0201 `parent_thread_id` falls under that rule
-    // (it identifies the parent thread of the retracted message and so
-    // leaks the conversation tree the message participated in), and is
-    // scrubbed alongside `thread_id`/`reply_to_*`/`stanza_xml`/`body`.
+    // tombstone. The XEP-0201 thread reference (id + optional parent)
+    // falls under that rule — both halves identify the conversation
+    // tree the retracted message participated in and so leak — and is
+    // scrubbed via `message.thread = None` alongside
+    // `reply_to_*`/`stanza_xml`/`body`.
     // Tombstones drop the body entirely (XEP-0424 §Tombstones) — None
     // is the correct "no body element" wire form for the replayed
     // tombstone stanza.
     message.body = None;
     message.stanza_xml = None;
-    message.thread_id = None;
-    message.parent_thread_id = None;
+    message.thread = None;
     message.reply_to_id = None;
     message.reply_to_jid = None;
     message.rich = Some(ArchivedRichMessage {
@@ -435,6 +435,41 @@ impl SqlxMamStorage {
 
     pub async fn open_in_memory() -> Result<Self, MamStorageError> {
         Self::open("sqlite::memory:").await
+    }
+
+    /// Test-only escape hatch that inserts a row directly via raw SQL,
+    /// bypassing the typed encode path. Used to construct deliberately
+    /// malformed rows (e.g. orphan `parent_thread_id` with NULL
+    /// `thread_id`) so the decode-side hard-error contract can be
+    /// tested. Only available in test builds; sqlite-only.
+    #[doc(hidden)]
+    #[cfg(any(test, debug_assertions))]
+    pub async fn insert_raw_thread_columns_for_test(
+        &self,
+        archive_jid: &str,
+        archive_id: &str,
+        thread_id: Option<&str>,
+        parent_thread_id: Option<&str>,
+    ) -> Result<(), MamStorageError> {
+        let MamDatabaseBackend::Sqlite(pool) = &self.backend else {
+            return Err(MamStorageError::Database(
+                "insert_raw_thread_columns_for_test is sqlite-only".to_string(),
+            ));
+        };
+        sqlx::query(
+            "INSERT INTO mam_messages (id, room_jid, timestamp, from_jid, to_jid, body, stanza_id, thread_id, reply_to_id, reply_to_jid, origin_id, message_type, stanza_xml, rich_payload, nickname_generation, parent_thread_id) VALUES (?, ?, ?, ?, ?, NULL, NULL, ?, NULL, NULL, NULL, ?, NULL, NULL, NULL, ?)",
+        )
+        .bind(archive_id)
+        .bind(archive_jid)
+        .bind(Utc::now().to_rfc3339())
+        .bind(archive_jid)
+        .bind(archive_jid)
+        .bind(thread_id)
+        .bind("chat")
+        .bind(parent_thread_id)
+        .execute(pool)
+        .await?;
+        Ok(())
     }
 
     async fn initialize(&self) -> Result<(), MamStorageError> {
@@ -792,10 +827,11 @@ fn archive_order_after(message: &ArchivedMessage, cursor: &ArchivedMessage) -> b
 }
 
 fn matches_thread_filter(message: &ArchivedMessage, thread_id: &str) -> bool {
+    let archived_thread_id = message.thread.as_ref().map(|t| t.id.as_str());
     message.id == thread_id
         || message.stanza_id.as_deref() == Some(thread_id)
-        || message.thread_id.as_deref() == Some(thread_id)
-        || (message.thread_id.is_none() && message.reply_to_id.as_deref() == Some(thread_id))
+        || archived_thread_id == Some(thread_id)
+        || (archived_thread_id.is_none() && message.reply_to_id.as_deref() == Some(thread_id))
 }
 
 fn decode_sqlite_message_row(row: &SqliteRow) -> Result<ArchivedMessage, MamStorageError> {
@@ -805,6 +841,9 @@ fn decode_sqlite_message_row(row: &SqliteRow) -> Result<ArchivedMessage, MamStor
 
     let rich_payload: Option<String> = row.try_get(13)?;
     let nickname_generation = decode_nickname_generation(row.try_get::<Option<i64>, _>(14)?)?;
+    let thread_id_raw: Option<String> = row.try_get(7)?;
+    let parent_thread_id_raw: Option<String> = row.try_get(15)?;
+    let thread = decode_thread_columns(thread_id_raw, parent_thread_id_raw)?;
     Ok(ArchivedMessage {
         id: row.try_get(0)?,
         timestamp,
@@ -816,10 +855,7 @@ fn decode_sqlite_message_row(row: &SqliteRow) -> Result<ArchivedMessage, MamStor
         // sqlx's inference.
         body: row.try_get::<Option<String>, _>(5)?,
         stanza_id: row.try_get(6)?,
-        thread_id: row.try_get(7)?,
-        parent_thread_id: row
-            .try_get::<Option<String>, _>(15)?
-            .and_then(waddle_xmpp_core::mam::ThreadId::new),
+        thread,
         reply_to_id: row.try_get(8)?,
         reply_to_jid: row.try_get(9)?,
         origin_id: row.try_get(10)?,
@@ -833,6 +869,9 @@ fn decode_sqlite_message_row(row: &SqliteRow) -> Result<ArchivedMessage, MamStor
 fn decode_postgres_message_row(row: &PgRow) -> Result<ArchivedMessage, MamStorageError> {
     let rich_payload: Option<String> = row.try_get(13)?;
     let nickname_generation = decode_nickname_generation(row.try_get::<Option<i64>, _>(14)?)?;
+    let thread_id_raw: Option<String> = row.try_get(7)?;
+    let parent_thread_id_raw: Option<String> = row.try_get(15)?;
+    let thread = decode_thread_columns(thread_id_raw, parent_thread_id_raw)?;
     Ok(ArchivedMessage {
         id: row.try_get(0)?,
         timestamp: row.try_get(2)?,
@@ -842,10 +881,7 @@ fn decode_postgres_message_row(row: &PgRow) -> Result<ArchivedMessage, MamStorag
         // for the wire-fidelity NULL/'' distinction.
         body: row.try_get::<Option<String>, _>(5)?,
         stanza_id: row.try_get(6)?,
-        thread_id: row.try_get(7)?,
-        parent_thread_id: row
-            .try_get::<Option<String>, _>(15)?
-            .and_then(waddle_xmpp_core::mam::ThreadId::new),
+        thread,
         reply_to_id: row.try_get(8)?,
         reply_to_jid: row.try_get(9)?,
         origin_id: row.try_get(10)?,
@@ -854,6 +890,34 @@ fn decode_postgres_message_row(row: &PgRow) -> Result<ArchivedMessage, MamStorag
         rich: decode_rich_payload(rich_payload.as_deref())?,
         nickname_generation,
     })
+}
+
+/// Combine the raw `thread_id` / `parent_thread_id` columns into a
+/// typed [`waddle_xmpp_core::xep0201::ThreadInfo`].
+///
+/// SQL schema preserves the two columns; the in-memory representation
+/// is collapsed (#228 commit 4). A row with `parent_thread_id` set
+/// but `thread_id` NULL is malformed (RFC 6121 §5.2.5: parent is
+/// meaningful only as a back-reference from a thread that has its own
+/// id) and the typed shape would otherwise paper over the corruption,
+/// so we hard-reject it as a serialization error rather than silently
+/// dropping the parent.
+fn decode_thread_columns(
+    thread_id: Option<String>,
+    parent_thread_id: Option<String>,
+) -> Result<Option<waddle_xmpp_core::xep0201::ThreadInfo>, MamStorageError> {
+    use waddle_xmpp_core::mam::ThreadId;
+    use waddle_xmpp_core::xep0201::ThreadInfo;
+
+    if thread_id.is_none() && parent_thread_id.is_some() {
+        return Err(MamStorageError::Serialization(
+            "orphan parent_thread_id without thread_id".to_string(),
+        ));
+    }
+    Ok(thread_id.and_then(ThreadId::new).map(|id| ThreadInfo {
+        id,
+        parent: parent_thread_id.and_then(ThreadId::new),
+    }))
 }
 
 fn encode_rich_payload(message: &ArchivedMessage) -> Result<Option<String>, MamStorageError> {
@@ -933,7 +997,7 @@ impl MamStorage for SqlxMamStorage {
                         .push_bind(message.to.as_str())
                         .push_bind(message.body.as_deref())
                         .push_bind(message.stanza_id.as_deref())
-                        .push_bind(message.thread_id.as_deref())
+                        .push_bind(message.thread.as_ref().map(|t| t.id.as_str()))
                         .push_bind(message.reply_to_id.as_deref())
                         .push_bind(message.reply_to_jid.as_deref())
                         .push_bind(message.origin_id.as_deref())
@@ -941,7 +1005,13 @@ impl MamStorage for SqlxMamStorage {
                         .push_bind(message.stanza_xml.as_deref())
                         .push_bind(rich_payload.as_deref())
                         .push_bind(nickname_generation)
-                        .push_bind(message.parent_thread_id.as_ref().map(|t| t.as_str()));
+                        .push_bind(
+                            message
+                                .thread
+                                .as_ref()
+                                .and_then(|t| t.parent.as_ref())
+                                .map(|p| p.as_str()),
+                        );
                 });
                 query.build().execute(pool).await?;
             }
@@ -958,7 +1028,7 @@ impl MamStorage for SqlxMamStorage {
                         .push_bind(message.to.as_str())
                         .push_bind(message.body.as_deref())
                         .push_bind(message.stanza_id.as_deref())
-                        .push_bind(message.thread_id.as_deref())
+                        .push_bind(message.thread.as_ref().map(|t| t.id.as_str()))
                         .push_bind(message.reply_to_id.as_deref())
                         .push_bind(message.reply_to_jid.as_deref())
                         .push_bind(message.origin_id.as_deref())
@@ -966,7 +1036,13 @@ impl MamStorage for SqlxMamStorage {
                         .push_bind(message.stanza_xml.as_deref())
                         .push_bind(rich_payload.as_deref())
                         .push_bind(nickname_generation)
-                        .push_bind(message.parent_thread_id.as_ref().map(|t| t.as_str()));
+                        .push_bind(
+                            message
+                                .thread
+                                .as_ref()
+                                .and_then(|t| t.parent.as_ref())
+                                .map(|p| p.as_str()),
+                        );
                 });
                 query.build().execute(pool).await?;
             }
@@ -1381,8 +1457,9 @@ mod tests {
             to: "room@conference.example.com".to_string(),
             body: Some("Reply body".to_string()),
             stanza_id: Some("archive-stanza-1".to_string()),
-            thread_id: Some("thread-root-1".to_string()),
-            parent_thread_id: None,
+            thread: Some(waddle_xmpp_core::xep0201::ThreadInfo::root(
+                waddle_xmpp_core::mam::ThreadId::new("thread-root-1").expect("thread id"),
+            )),
             reply_to_id: Some("parent-message-1".to_string()),
             reply_to_jid: Some("bob@example.com".to_string()),
             origin_id: Some("origin-abc".to_string()),
@@ -1405,7 +1482,10 @@ mod tests {
             .unwrap()
             .expect("archived message");
 
-        assert_eq!(retrieved.thread_id.as_deref(), Some("thread-root-1"));
+        assert_eq!(
+            retrieved.thread.as_ref().map(|t| t.id.as_str()),
+            Some("thread-root-1")
+        );
         assert_eq!(retrieved.reply_to_id.as_deref(), Some("parent-message-1"));
         assert_eq!(retrieved.reply_to_jid.as_deref(), Some("bob@example.com"));
         assert_eq!(retrieved.origin_id.as_deref(), Some("origin-abc"));
@@ -1426,8 +1506,10 @@ mod tests {
             to: "room@conference.example.com".to_string(),
             body: Some("Nested-thread reply".to_string()),
             stanza_id: Some("archive-stanza-2".to_string()),
-            thread_id: Some("child-thread".to_string()),
-            parent_thread_id: waddle_xmpp_core::mam::ThreadId::new("root-thread"),
+            thread: Some(waddle_xmpp_core::xep0201::ThreadInfo::child(
+                waddle_xmpp_core::mam::ThreadId::new("child-thread").expect("thread id"),
+                waddle_xmpp_core::mam::ThreadId::new("root-thread").expect("parent id"),
+            )),
             reply_to_id: None,
             reply_to_jid: None,
             origin_id: None,
@@ -1448,9 +1530,10 @@ mod tests {
             .unwrap()
             .expect("archived message");
 
-        assert_eq!(retrieved.thread_id.as_deref(), Some("child-thread"));
+        let thread = retrieved.thread.as_ref().expect("thread present");
+        assert_eq!(thread.id.as_str(), "child-thread");
         assert_eq!(
-            retrieved.parent_thread_id.as_ref().map(|t| t.as_str()),
+            thread.parent.as_ref().map(|t| t.as_str()),
             Some("root-thread")
         );
     }
@@ -1729,7 +1812,9 @@ mod tests {
             },
             ArchivedMessage {
                 id: "b-thread-reply".to_string(),
-                thread_id: Some("a-thread-root".to_string()),
+                thread: Some(waddle_xmpp_core::xep0201::ThreadInfo::root(
+                    waddle_xmpp_core::mam::ThreadId::new("a-thread-root").expect("thread id"),
+                )),
                 body: Some("reply".to_string()),
                 ..archived_groupchat(archive)
             },
@@ -1741,7 +1826,9 @@ mod tests {
             },
             ArchivedMessage {
                 id: "unrelated".to_string(),
-                thread_id: Some("other-thread".to_string()),
+                thread: Some(waddle_xmpp_core::xep0201::ThreadInfo::root(
+                    waddle_xmpp_core::mam::ThreadId::new("other-thread").expect("thread id"),
+                )),
                 body: Some("unrelated".to_string()),
                 ..archived_groupchat(archive)
             },
@@ -1928,8 +2015,10 @@ mod tests {
             to: archive_jid.to_string(),
             body: Some("secret thread content".to_string()),
             stanza_id: Some("wire-id-1".to_string()),
-            thread_id: Some("child-thread".to_string()),
-            parent_thread_id: waddle_xmpp_core::mam::ThreadId::new("root-thread"),
+            thread: Some(waddle_xmpp_core::xep0201::ThreadInfo::child(
+                waddle_xmpp_core::mam::ThreadId::new("child-thread").expect("thread id"),
+                waddle_xmpp_core::mam::ThreadId::new("root-thread").expect("parent id"),
+            )),
             reply_to_id: None,
             reply_to_jid: None,
             origin_id: None,
@@ -1964,13 +2053,9 @@ mod tests {
             row.stanza_xml.is_none(),
             "stanza_xml must be cleared so the original wire form does not leak"
         );
-        assert_eq!(
-            row.thread_id, None,
-            "thread_id is leak-prone (identifies the conversation), must be NULL"
-        );
-        assert_eq!(
-            row.parent_thread_id, None,
-            "parent_thread_id is leak-prone (identifies the parent conversation tree), must be NULL"
+        assert!(
+            row.thread.is_none(),
+            "thread (id and optional parent) is leak-prone, must be cleared"
         );
         assert_eq!(row.reply_to_id, None);
         assert_eq!(row.reply_to_jid, None);
@@ -2007,8 +2092,10 @@ mod tests {
             to: archive_jid.to_string(),
             body: Some("moderated content".to_string()),
             stanza_id: Some("wire-id-2".to_string()),
-            thread_id: Some("child-thread".to_string()),
-            parent_thread_id: waddle_xmpp_core::mam::ThreadId::new("root-thread"),
+            thread: Some(waddle_xmpp_core::xep0201::ThreadInfo::child(
+                waddle_xmpp_core::mam::ThreadId::new("child-thread").expect("thread id"),
+                waddle_xmpp_core::mam::ThreadId::new("root-thread").expect("parent id"),
+            )),
             reply_to_id: None,
             reply_to_jid: None,
             origin_id: None,
@@ -2043,8 +2130,7 @@ mod tests {
             .unwrap()
             .expect("tombstone row");
 
-        assert_eq!(row.thread_id, None);
-        assert_eq!(row.parent_thread_id, None);
+        assert!(row.thread.is_none());
         assert!(row.body.is_none());
         assert!(row.stanza_xml.is_none());
 

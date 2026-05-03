@@ -11,6 +11,7 @@ use uuid::Uuid;
 use xmpp_parsers::iq::{Iq, IqType};
 use xmpp_parsers::message::{Message, MessageType};
 
+use crate::xep0201::ThreadInfo;
 use crate::{CoreError, CoreResult};
 
 /// MAM XML namespace (XEP-0313 v2).
@@ -160,11 +161,11 @@ pub enum ArchivedRichPayload {
     Reactions(ArchivedReactionSet),
     /// In-place tombstone produced by XEP-0424 retraction or
     /// XEP-0425 moderation. The original row's `body` and
-    /// leak-prone fields (`thread_id`, `parent_thread_id`,
-    /// `reply_to_id`, `reply_to_jid`, `stanza_xml`, mentions, ...)
-    /// are cleared when this variant is set, per XEP-0424 §Tombstones
-    /// / XEP-0425 §Tombstones: "any related elements which might leak
-    /// information about the original message" must be replaced.
+    /// leak-prone fields (`thread`, `reply_to_id`, `reply_to_jid`,
+    /// `stanza_xml`, mentions, ...) are cleared when this variant is
+    /// set, per XEP-0424 §Tombstones / XEP-0425 §Tombstones: "any
+    /// related elements which might leak information about the
+    /// original message" must be replaced.
     Tombstone(ArchivedTombstone),
 }
 
@@ -216,22 +217,27 @@ pub struct ArchivedMessage {
     pub body: Option<String>,
     /// Original stanza ID (if present).
     pub stanza_id: Option<String>,
-    /// RFC 6121 thread identifier for this message.
-    pub thread_id: Option<String>,
-    /// XEP-0201 nested-thread parent (the `parent` attribute on
-    /// `<thread/>`). Only meaningful when `thread_id` is `Some`.
+    /// XEP-0201 thread reference (RFC 6121 `<thread/>` id plus
+    /// optional nested-thread `parent` attribute).
+    ///
+    /// Collapsed from the previous `thread_id: Option<String>` and
+    /// `parent_thread_id: Option<ThreadId>` pair into a single typed
+    /// field: `thread.id` is the RFC 6121 thread id and
+    /// `thread.parent` is the optional XEP-0201 nested-thread parent.
+    /// Modelling them together makes the "parent without id" invalid
+    /// state unrepresentable (you cannot construct
+    /// [`ThreadInfo`] with a parent and no id), aligning with the
+    /// typed-payloads hard rule.
+    ///
     /// Cleared on XEP-0424 / XEP-0425 tombstones — see the
     /// [`ArchivedRichPayload::Tombstone`] doc comment for the full
     /// list of leak-prone fields.
     ///
-    /// Typed as `ThreadId` (the existing newtype) per the
-    /// typed-payloads hard rule for new struct fields. The companion
-    /// `thread_id: Option<String>` field stays untyped here for now;
-    /// #228 will collapse both into a single `thread:
-    /// Option<xep0201::ThreadInfo>` field when the broader
-    /// retyping of `ArchivedMessage` lands.
+    /// Storage layout is unchanged: the SQL schema still has two
+    /// columns (`thread_id` and `parent_thread_id`); encode splits
+    /// this struct into the two columns and decode combines them.
     #[serde(default)]
-    pub parent_thread_id: Option<ThreadId>,
+    pub thread: Option<ThreadInfo>,
     /// XEP-0461 reply target message ID.
     pub reply_to_id: Option<String>,
     /// XEP-0461 optional original sender JID.
@@ -267,8 +273,7 @@ impl Default for ArchivedMessage {
             to: String::new(),
             body: None,
             stanza_id: None,
-            thread_id: None,
-            parent_thread_id: None,
+            thread: None,
             reply_to_id: None,
             reply_to_jid: None,
             origin_id: None,
@@ -606,16 +611,8 @@ fn normalize_archived_inner_message(element: Element, archived: &ArchivedMessage
         builder.build()
     };
 
-    if let Some(id) = archived
-        .thread_id
-        .as_deref()
-        .and_then(|raw| ThreadId::new(raw.to_owned()))
-    {
-        let info = crate::xep0201::ThreadInfo {
-            id,
-            parent: archived.parent_thread_id.clone(),
-        };
-        crate::xep0201::install_thread_element(&mut normalized, &info);
+    if let Some(info) = archived.thread.as_ref() {
+        crate::xep0201::install_thread_element(&mut normalized, info);
     }
 
     normalized
@@ -653,21 +650,14 @@ fn build_typed_inner_message(archived: &ArchivedMessage, rich: &ArchivedRichMess
     // XEP-0201: emit `<thread parent='X'>id</thread>` via the canonical
     // typed builder so the optional parent attribute round-trips on
     // replay. The "parent without id ⇒ no `<thread/>` element" rule is
-    // enforced by gating the entire emission on `thread_id.is_some()`:
-    // a row with `parent_thread_id == Some(_)` and `thread_id == None`
-    // is incoherent (RFC 6121 §5.2.5 — `parent` is meaningful only as a
-    // back-reference from a thread that has its own id) and produces
-    // no `<thread/>` element at all.
-    if let Some(id) = archived
-        .thread_id
-        .as_deref()
-        .and_then(|raw| ThreadId::new(raw.to_owned()))
-    {
-        let info = crate::xep0201::ThreadInfo {
-            id,
-            parent: archived.parent_thread_id.clone(),
-        };
-        builder = builder.append(crate::xep0201::build_thread_element(&info, CLIENT_NS));
+    // enforced at the type level by collapsing the previous two flat
+    // fields into `Option<ThreadInfo>`: you cannot construct
+    // [`ThreadInfo`] with a parent and no id, so a row that was
+    // ever decoded into `archived.thread` already carries a coherent
+    // shape. A row with no thread metadata at all is `None` and emits
+    // nothing.
+    if let Some(info) = archived.thread.as_ref() {
+        builder = builder.append(crate::xep0201::build_thread_element(info, CLIENT_NS));
     }
     if let Some(origin_id) = archived.origin_id.as_deref() {
         builder = builder.append(
@@ -834,19 +824,12 @@ fn build_legacy_inner_message(archived: &ArchivedMessage) -> Element {
         );
     }
     // XEP-0201: same emission rule as `build_typed_inner_message`. Use
-    // the canonical typed builder so parent round-trips, and gate on
-    // `thread_id.is_some()` so a parent-only row never emits a stray
-    // `<thread/>` element (RFC 6121 §5.2.5 incoherence guard).
-    if let Some(id) = archived
-        .thread_id
-        .as_deref()
-        .and_then(|raw| ThreadId::new(raw.to_owned()))
-    {
-        let info = crate::xep0201::ThreadInfo {
-            id,
-            parent: archived.parent_thread_id.clone(),
-        };
-        builder = builder.append(crate::xep0201::build_thread_element(&info, CLIENT_NS));
+    // the canonical typed builder so parent round-trips. The "parent
+    // without id" incoherence (RFC 6121 §5.2.5) is unrepresentable in
+    // [`ThreadInfo`], so emission is simply gated on the entire
+    // `archived.thread` being `Some`.
+    if let Some(info) = archived.thread.as_ref() {
+        builder = builder.append(crate::xep0201::build_thread_element(info, CLIENT_NS));
     }
     if let Some(reply_to_id) = archived.reply_to_id.as_deref() {
         let mut reply = Element::builder("reply", REPLY_NS).attr("id", reply_to_id);
@@ -1165,7 +1148,9 @@ mod tests {
             from: "user@example.com/nick".to_string(),
             to: "room@conference.example.com".to_string(),
             body: Some("Hello, world!".to_string()),
-            thread_id: Some("thread-1".to_string()),
+            thread: Some(ThreadInfo::root(
+                ThreadId::new("thread-1").expect("non-empty thread id"),
+            )),
             reply_to_id: Some("parent-1".to_string()),
             reply_to_jid: Some("alice@example.com".to_string()),
             origin_id: Some("origin-1".to_string()),
@@ -1204,8 +1189,10 @@ mod tests {
             to: "bob@example.com".to_string(),
             body: Some("nested reply".to_string()),
             stanza_id: Some("wire-id-1".to_string()),
-            thread_id: Some("child-thread".to_string()),
-            parent_thread_id: ThreadId::new("root-thread"),
+            thread: Some(ThreadInfo::child(
+                ThreadId::new("child-thread").expect("non-empty thread id"),
+                ThreadId::new("root-thread").expect("non-empty parent id"),
+            )),
             origin_id: None,
             message_type: "chat".to_string(),
             stanza_xml,
@@ -1277,8 +1264,10 @@ mod tests {
             to: "room@conference.example.com".to_string(),
             body: Some("threaded reply".to_string()),
             stanza_id: Some("wire-id-2".to_string()),
-            thread_id: Some("root-thread".to_string()),
-            parent_thread_id: ThreadId::new("parent-thread"),
+            thread: Some(ThreadInfo::child(
+                ThreadId::new("root-thread").expect("non-empty thread id"),
+                ThreadId::new("parent-thread").expect("non-empty parent id"),
+            )),
             message_type: "groupchat".to_string(),
             stanza_xml: Some(
                 "<message xmlns='jabber:client' from='room@conference.example.com/alice' to='bob@example.com/web' type='groupchat' id='wire-id-2'><body>threaded reply</body><thread>stale-thread</thread><reply xmlns='urn:xmpp:reply:0' id='root-thread'/></message>"
@@ -1326,8 +1315,13 @@ mod tests {
             from: "alice@example.com/web".to_string(),
             to: "bob@example.com".to_string(),
             body: Some("body".to_string()),
-            thread_id: None,
-            parent_thread_id: ThreadId::new("root-thread"),
+            // The collapsed `thread: Option<ThreadInfo>` field makes
+            // "parent without id" unrepresentable; the closest legal
+            // analog of the previous parent-only state is `None`,
+            // which (still) emits no `<thread/>` element. This test
+            // continues to pin that emission rule for the no-thread
+            // case.
+            thread: None,
             message_type: "chat".to_string(),
             stanza_xml: None,
             rich: None,

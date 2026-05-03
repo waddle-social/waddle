@@ -20,6 +20,7 @@
 
 use crate::mam::ThreadId;
 use minidom::Element;
+use serde::{Deserialize, Serialize};
 use xmpp_parsers::message::{Message, Thread};
 
 /// Waddle discovery feature string for XEP-0201 thread support.
@@ -47,7 +48,13 @@ fn is_message_thread_payload_for_stanza(element: &Element, stanza_ns: &str) -> b
 }
 
 /// Thread identifier plus an optional parent (XEP-0201 nesting).
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Derives `Serialize`/`Deserialize` so it can flow through any
+/// container that owns it (notably `mam::ArchivedMessage.thread`,
+/// which is serialized as part of the rich-payload JSON snapshot).
+/// The on-the-wire shape is `<thread parent='X'>id</thread>`; the
+/// JSON shape is `{ "id": "...", "parent": "..." | null }`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThreadInfo {
     /// The thread identifier (element text content).
     pub id: ThreadId,

@@ -2715,15 +2715,13 @@ async fn finish_archive_groupchat_message(
     // XEP-0201: read the typed thread info (id + optional parent) from the
     // post-reattach payload form. `protocol::frame::parse_stanza` calls
     // `reattach_thread_parent` at the inbound boundary so the parent
-    // attribute survives `Message::try_from` here.
-    let (thread_id, parent_thread_id) =
-        match waddle_xmpp::xep0201::thread_info_from_message_in_stanza_ns(
-            &archive_clone,
-            waddle_xmpp::xep0201::CLIENT_STANZA_NS,
-        ) {
-            Some(info) => (Some(info.id.as_str().to_owned()), info.parent),
-            None => (None, None),
-        };
+    // attribute survives `Message::try_from` here. The collapsed
+    // `Option<ThreadInfo>` field on `ArchivedMessage` accepts the
+    // helper's result directly.
+    let thread = waddle_xmpp::xep0201::thread_info_from_message_in_stanza_ns(
+        &archive_clone,
+        waddle_xmpp::xep0201::CLIENT_STANZA_NS,
+    );
 
     let archived = MamArchivedMessage {
         id: archive_id,
@@ -2736,8 +2734,7 @@ async fn finish_archive_groupchat_message(
         to: room.to_string(),
         body,
         stanza_id: archive_clone.id.clone(),
-        thread_id,
-        parent_thread_id,
+        thread,
         reply_to_id,
         reply_to_jid,
         origin_id,
@@ -3760,8 +3757,7 @@ mod tests {
             to: "bob@example.com".to_string(),
             body: Some("hello".to_string()),
             stanza_id: Some("canon-A1".to_string()),
-            thread_id: None,
-            parent_thread_id: None,
+            thread: None,
             reply_to_id: None,
             reply_to_jid: None,
             origin_id: None,
@@ -3865,8 +3861,7 @@ mod tests {
             to: "alice@example.com".to_string(),
             body: Some("from bob".to_string()),
             stanza_id: Some("alice-stamp-bob".to_string()),
-            thread_id: None,
-            parent_thread_id: None,
+            thread: None,
             reply_to_id: None,
             reply_to_jid: None,
             origin_id: Some("collision".to_string()),
@@ -3884,8 +3879,7 @@ mod tests {
             to: "bob@example.com".to_string(),
             body: Some("from alice".to_string()),
             stanza_id: Some("alice-stamp-alice".to_string()),
-            thread_id: None,
-            parent_thread_id: None,
+            thread: None,
             reply_to_id: None,
             reply_to_jid: None,
             origin_id: Some("collision".to_string()),
@@ -3954,8 +3948,7 @@ mod tests {
             to: "alice@example.com".to_string(),
             body: Some("bob's".to_string()),
             stanza_id: Some("alice-stamp".to_string()),
-            thread_id: None,
-            parent_thread_id: None,
+            thread: None,
             reply_to_id: None,
             reply_to_jid: None,
             origin_id: Some("oid-1".to_string()),
@@ -4016,8 +4009,7 @@ mod tests {
             to: "bob@example.com".to_string(),
             body: Some("collide".to_string()),
             stanza_id: Some("real-stamp".to_string()),
-            thread_id: None,
-            parent_thread_id: None,
+            thread: None,
             reply_to_id: None,
             reply_to_jid: None,
             origin_id: Some("queried-id".to_string()),
@@ -4074,8 +4066,7 @@ mod tests {
             to: "bob@example.com".to_string(),
             body: None,
             stanza_id: Some("tomb-1".to_string()),
-            thread_id: None,
-            parent_thread_id: None,
+            thread: None,
             reply_to_id: None,
             reply_to_jid: None,
             origin_id: None,

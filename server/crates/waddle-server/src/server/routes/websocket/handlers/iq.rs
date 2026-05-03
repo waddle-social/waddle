@@ -978,11 +978,10 @@ pub async fn handle_iq_with_conn_state(
                 // is the wire-faithful "no body element" form.
                 body: None,
                 stanza_id: moderation.id.clone(),
-                thread_id: None,
                 // XEP-0425 moderation tombstone: leak-prone fields are
                 // already cleared by construction (this row is a fresh
                 // tombstone, not a scrub of an existing message).
-                parent_thread_id: None,
+                thread: None,
                 reply_to_id: None,
                 reply_to_jid: None,
                 origin_id: None,
