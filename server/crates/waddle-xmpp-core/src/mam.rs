@@ -595,13 +595,14 @@ fn normalize_archived_inner_message(element: Element, archived: &ArchivedMessage
         builder.build()
     };
 
-    if let Some(thread_id) = archived.thread_id.as_deref() {
+    if let Some(id) = archived
+        .thread_id
+        .as_deref()
+        .and_then(|raw| ThreadId::new(raw.to_owned()))
+    {
         let info = crate::xep0201::ThreadInfo {
-            id: thread_id.to_owned(),
-            parent: archived
-                .parent_thread_id
-                .as_ref()
-                .map(|parent| parent.as_str().to_owned()),
+            id,
+            parent: archived.parent_thread_id.clone(),
         };
         crate::xep0201::install_thread_element(&mut normalized, &info);
     }
@@ -641,13 +642,14 @@ fn build_typed_inner_message(archived: &ArchivedMessage, rich: &ArchivedRichMess
     // is incoherent (RFC 6121 §5.2.5 — `parent` is meaningful only as a
     // back-reference from a thread that has its own id) and produces
     // no `<thread/>` element at all.
-    if let Some(thread_id) = archived.thread_id.as_deref() {
+    if let Some(id) = archived
+        .thread_id
+        .as_deref()
+        .and_then(|raw| ThreadId::new(raw.to_owned()))
+    {
         let info = crate::xep0201::ThreadInfo {
-            id: thread_id.to_owned(),
-            parent: archived
-                .parent_thread_id
-                .as_ref()
-                .map(|t| t.as_str().to_owned()),
+            id,
+            parent: archived.parent_thread_id.clone(),
         };
         builder = builder.append(crate::xep0201::build_thread_element(&info, CLIENT_NS));
     }
@@ -816,13 +818,14 @@ fn build_legacy_inner_message(archived: &ArchivedMessage) -> Element {
     // the canonical typed builder so parent round-trips, and gate on
     // `thread_id.is_some()` so a parent-only row never emits a stray
     // `<thread/>` element (RFC 6121 §5.2.5 incoherence guard).
-    if let Some(thread_id) = archived.thread_id.as_deref() {
+    if let Some(id) = archived
+        .thread_id
+        .as_deref()
+        .and_then(|raw| ThreadId::new(raw.to_owned()))
+    {
         let info = crate::xep0201::ThreadInfo {
-            id: thread_id.to_owned(),
-            parent: archived
-                .parent_thread_id
-                .as_ref()
-                .map(|t| t.as_str().to_owned()),
+            id,
+            parent: archived.parent_thread_id.clone(),
         };
         builder = builder.append(crate::xep0201::build_thread_element(&info, CLIENT_NS));
     }

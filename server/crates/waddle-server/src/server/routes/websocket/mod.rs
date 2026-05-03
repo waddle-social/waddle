@@ -1384,13 +1384,16 @@ pub(crate) fn stanza_to_xml(stanza: &Stanza) -> String {
                 child.name() == "thread" && (child.ns() == stanza_ns || child.ns().is_empty())
             });
             if !has_thread {
-                let info = waddle_xmpp::xep0201::ThreadInfo {
-                    id: thread.0.clone(),
-                    parent: None,
-                };
-                element.append_child(waddle_xmpp::xep0201::build_thread_element(
-                    &info, &stanza_ns,
-                ));
+                // Skip the reattach if the typed `Thread` body is
+                // empty: the wire shape requires a non-empty body
+                // (`<thread></thread>` is malformed per RFC 6121
+                // §5.2.5 / XEP-0201). `ThreadId::new` is the gate.
+                if let Some(id) = waddle_xmpp::mam::ThreadId::new(thread.0.clone()) {
+                    let info = waddle_xmpp::xep0201::ThreadInfo::root(id);
+                    element.append_child(waddle_xmpp::xep0201::build_thread_element(
+                        &info, &stanza_ns,
+                    ));
+                }
             }
         }
     }

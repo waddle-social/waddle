@@ -550,8 +550,8 @@ mod tests {
         assert!(msg.thread.is_none(), "typed thread field should be cleared");
         let info = waddle_xmpp_core::xep0201::thread_info_from_message(&msg)
             .expect("thread info recoverable from payload form");
-        assert_eq!(info.id, "child-2");
-        assert_eq!(info.parent.as_deref(), Some("root-1"));
+        assert_eq!(info.id.as_str(), "child-2");
+        assert_eq!(info.parent.as_ref().map(|t| t.as_str()), Some("root-1"));
     }
 
     #[test]
@@ -570,7 +570,7 @@ mod tests {
         };
         let info = waddle_xmpp_core::xep0201::thread_info_from_message(&msg)
             .expect("thread info recoverable");
-        assert_eq!(info.id, "root-only");
+        assert_eq!(info.id.as_str(), "root-only");
         assert_eq!(info.parent, None);
     }
 

@@ -95,10 +95,7 @@ pub fn build_direct_archived_message(
     // parent attribute survives `Message::try_from`'s typed lossy parse.
     let (thread_id, parent_thread_id) =
         match thread_info_from_message_in_stanza_ns(message, CLIENT_STANZA_NS) {
-            Some(info) => (
-                Some(info.id),
-                info.parent.and_then(waddle_xmpp_core::mam::ThreadId::new),
-            ),
+            Some(info) => (Some(info.id.as_str().to_owned()), info.parent),
             None => (None, None),
         };
 

@@ -27,6 +27,7 @@ use super::traits::{RoomHandler, RoomHandlerOutcome};
 use crate::xep::xep0421::{generate_occupant_id, set_occupant_id_on_message};
 use crate::xep::xep0508::{extract_forum_action, ForumAction};
 use jid::{BareJid, Jid};
+use waddle_xmpp_core::mam::ThreadId;
 use waddle_xmpp_core::xep0201::{
     build_thread_element, is_thread_element_for_stanza, set_thread_id,
     thread_info_from_message_in_stanza_ns, ThreadInfo, CLIENT_STANZA_NS, SERVER_STANZA_NS,
@@ -41,6 +42,13 @@ pub struct MucCanonicalizeHandler;
 
 fn replace_stanza_thread(message: &mut Message, thread_id: impl Into<String>) {
     let thread_id = thread_id.into();
+    // An empty `thread_id` would emit a malformed `<thread></thread>`
+    // (XEP-0201/RFC 6121 implicitly require a non-empty body). Refuse
+    // the rewrite — `ThreadInfo` enforces non-empty via `ThreadId`, and
+    // there is no meaningful canonicalization for an empty thread.
+    let Some(thread_id) = ThreadId::new(thread_id) else {
+        return;
+    };
     let parent = thread_info_from_message_in_stanza_ns(message, CLIENT_STANZA_NS)
         .filter(|info| info.id == thread_id)
         .and_then(|info| info.parent);
@@ -55,7 +63,7 @@ fn replace_stanza_thread(message: &mut Message, thread_id: impl Into<String>) {
             CLIENT_STANZA_NS,
         ));
     } else {
-        set_thread_id(message, thread_id);
+        set_thread_id(message, thread_id.as_str());
     }
 }
 
@@ -150,6 +158,9 @@ mod tests {
     }
     fn bare(s: &str) -> BareJid {
         s.parse().expect("valid bare jid")
+    }
+    fn tid(s: &str) -> ThreadId {
+        ThreadId::new(s).expect("non-empty")
     }
 
     fn groupchat(room: &BareJid, sender: &FullJid, body: &str) -> Message {
@@ -284,7 +295,7 @@ mod tests {
         let mut msg = groupchat(&room, &sender, "reply");
         set_thread_id(&mut msg, "typed-conflict");
         msg.payloads.push(build_thread_element(
-            &ThreadInfo::child("payload-conflict", "parent-conflict"),
+            &ThreadInfo::child(tid("payload-conflict"), tid("parent-conflict")),
             CLIENT_STANZA_NS,
         ));
         crate::xep::xep0508::set_thread_reply(
@@ -296,7 +307,7 @@ mod tests {
 
         assert_eq!(
             thread_info_from_message(&msg),
-            Some(ThreadInfo::root("topic-root"))
+            Some(ThreadInfo::root(tid("topic-root")))
         );
     }
 
@@ -306,7 +317,7 @@ mod tests {
         let sender = full("alice@example.com/web");
         let mut msg = groupchat(&room, &sender, "nested reply");
         msg.payloads.push(build_thread_element(
-            &ThreadInfo::child("child-thread", "root-thread"),
+            &ThreadInfo::child(tid("child-thread"), tid("root-thread")),
             CLIENT_STANZA_NS,
         ));
         crate::xep::xep0508::set_thread_reply(
@@ -318,7 +329,7 @@ mod tests {
 
         assert_eq!(
             thread_info_from_message(&msg),
-            Some(ThreadInfo::child("child-thread", "root-thread"))
+            Some(ThreadInfo::child(tid("child-thread"), tid("root-thread")))
         );
     }
 
@@ -328,7 +339,7 @@ mod tests {
         let sender = full("alice@example.com/web");
         let mut msg = groupchat(&room, &sender, "nested reply");
         msg.payloads.push(build_thread_element(
-            &ThreadInfo::child("topic-root", "bad-parent"),
+            &ThreadInfo::child(tid("topic-root"), tid("bad-parent")),
             SERVER_STANZA_NS,
         ));
         crate::xep::xep0508::set_thread_reply(
@@ -340,7 +351,7 @@ mod tests {
 
         assert_eq!(
             thread_info_from_message(&msg),
-            Some(ThreadInfo::root("topic-root"))
+            Some(ThreadInfo::root(tid("topic-root")))
         );
     }
 

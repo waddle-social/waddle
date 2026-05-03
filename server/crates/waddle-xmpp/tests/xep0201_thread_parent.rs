@@ -135,7 +135,7 @@ fn xep_0201_groupchat_stanza_xml_replay_preserves_thread_metadata() {
         )
         .append(build_thread_element(
             &ThreadInfo {
-                id: "stale-thread".to_string(),
+                id: waddle_xmpp::mam::ThreadId::new("stale-thread").expect("non-empty"),
                 parent: None,
             },
             "jabber:client",
@@ -260,14 +260,17 @@ fn xep_0201_parent_only_input_is_rejected_at_parser() {
 #[test]
 fn xep_0201_build_thread_element_round_trips_through_parse_thread_info() {
     // Sanity: builder + parser are inverses on the wire shape.
-    let info = ThreadInfo::child("child-2", "root-1");
+    let info = ThreadInfo::child(
+        waddle_xmpp::mam::ThreadId::new("child-2").expect("non-empty"),
+        waddle_xmpp::mam::ThreadId::new("root-1").expect("non-empty"),
+    );
     let elem = build_thread_element(&info, "jabber:client");
     let wrapped = Element::builder("message", "jabber:client")
         .append(elem)
         .build();
     let parsed = parse_thread_info(&wrapped).expect("parse should succeed");
-    assert_eq!(parsed.id, "child-2");
-    assert_eq!(parsed.parent.as_deref(), Some("root-1"));
+    assert_eq!(parsed.id.as_str(), "child-2");
+    assert_eq!(parsed.parent.as_ref().map(|t| t.as_str()), Some("root-1"));
 }
 
 #[tokio::test]

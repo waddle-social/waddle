@@ -101,7 +101,7 @@ fn thread_projection(message: &Message) -> Option<GroupchatThreadProjection> {
             .and_then(|jid| jid.resource().map(|r| r.to_string()))
     });
     Some(GroupchatThreadProjection {
-        thread_id: info.id,
+        thread_id: info.id.as_str().to_owned(),
         title,
         author_nick,
     })

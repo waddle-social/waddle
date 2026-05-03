@@ -2715,10 +2715,7 @@ async fn finish_archive_groupchat_message(
             &archive_clone,
             waddle_xmpp::xep0201::CLIENT_STANZA_NS,
         ) {
-            Some(info) => (
-                Some(info.id),
-                info.parent.and_then(waddle_xmpp::mam::ThreadId::new),
-            ),
+            Some(info) => (Some(info.id.as_str().to_owned()), info.parent),
             None => (None, None),
         };
 

@@ -18,6 +18,7 @@
 //! Waddle advertises `urn:xmpp:threads:0` in disco#info so that clients can
 //! discover thread-aware services/rooms.
 
+use crate::mam::ThreadId;
 use minidom::Element;
 use xmpp_parsers::message::{Message, Thread};
 
@@ -49,25 +50,22 @@ fn is_message_thread_payload_for_stanza(element: &Element, stanza_ns: &str) -> b
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ThreadInfo {
     /// The thread identifier (element text content).
-    pub id: String,
+    pub id: ThreadId,
     /// Optional parent thread (XEP-0201 `parent=` attribute).
-    pub parent: Option<String>,
+    pub parent: Option<ThreadId>,
 }
 
 impl ThreadInfo {
     /// Build a root thread with no parent.
-    pub fn root(id: impl Into<String>) -> Self {
-        Self {
-            id: id.into(),
-            parent: None,
-        }
+    pub fn root(id: ThreadId) -> Self {
+        Self { id, parent: None }
     }
 
     /// Build a nested thread with a parent id.
-    pub fn child(id: impl Into<String>, parent: impl Into<String>) -> Self {
+    pub fn child(id: ThreadId, parent: ThreadId) -> Self {
         Self {
-            id: id.into(),
-            parent: Some(parent.into()),
+            id,
+            parent: Some(parent),
         }
     }
 }
@@ -86,20 +84,12 @@ fn find_thread_element(msg_xml: &Element) -> Option<&Element> {
 /// element-level helper.
 pub fn parse_thread_info(msg_xml: &Element) -> Option<ThreadInfo> {
     let thread_elem = find_thread_element(msg_xml)?;
-    let text = thread_elem.text();
-    let id = text.trim();
-    if id.is_empty() {
-        return None;
-    }
+    let id = ThreadId::new(thread_elem.text().trim().to_owned())?;
     let parent = thread_elem
         .attr("parent")
         .map(str::trim)
-        .filter(|v| !v.is_empty())
-        .map(ToOwned::to_owned);
-    Some(ThreadInfo {
-        id: id.to_owned(),
-        parent,
-    })
+        .and_then(ThreadId::new);
+    Some(ThreadInfo { id, parent })
 }
 
 /// Read XEP-0201 thread info from a parsed `Message` (id and optional parent).
@@ -127,25 +117,17 @@ pub fn thread_info_from_message_in_stanza_ns(
         .iter()
         .find(|elem| is_message_thread_payload_for_stanza(elem, stanza_ns))
     {
-        let text = thread_elem.text();
-        let id = text.trim();
-        if id.is_empty() {
-            return None;
-        }
+        let id = ThreadId::new(thread_elem.text().trim().to_owned())?;
         let parent = thread_elem
             .attr("parent")
             .map(str::trim)
-            .filter(|v| !v.is_empty())
-            .map(ToOwned::to_owned);
-        return Some(ThreadInfo {
-            id: id.to_owned(),
-            parent,
-        });
+            .and_then(ThreadId::new);
+        return Some(ThreadInfo { id, parent });
     }
-    msg.thread.as_ref().map(|thread| ThreadInfo {
-        id: thread.0.clone(),
-        parent: None,
-    })
+    msg.thread
+        .as_ref()
+        .and_then(|thread| ThreadId::new(thread.0.clone()))
+        .map(ThreadInfo::root)
 }
 
 /// Read XEP-0201 thread info from a client-stanza parsed `Message`.
@@ -161,7 +143,7 @@ pub fn thread_info_from_message(msg: &Message) -> Option<ThreadInfo> {
 /// so the serializer does not emit a spurious `xmlns=""`.
 pub fn build_thread_element(info: &ThreadInfo, ns: impl AsRef<str>) -> Element {
     let mut builder = Element::builder(THREAD_ELEMENT, ns.as_ref());
-    if let Some(parent) = info.parent.as_deref() {
+    if let Some(parent) = info.parent.as_ref().map(ThreadId::as_str) {
         builder = builder.attr("parent", parent);
     }
     builder.append(info.id.as_str()).build()
@@ -224,7 +206,7 @@ mod tests {
             .parse::<Element>()
             .expect("valid xml");
         let info = parse_thread_info(&xml).expect("thread");
-        assert_eq!(info.id, "root-1");
+        assert_eq!(info.id.as_str(), "root-1");
         assert_eq!(info.parent, None);
     }
 
@@ -235,8 +217,8 @@ mod tests {
                 .parse::<Element>()
                 .expect("valid xml");
         let info = parse_thread_info(&xml).expect("thread");
-        assert_eq!(info.id, "child-2");
-        assert_eq!(info.parent.as_deref(), Some("root-1"));
+        assert_eq!(info.id.as_str(), "child-2");
+        assert_eq!(info.parent.as_ref().map(ThreadId::as_str), Some("root-1"));
     }
 
     #[test]
@@ -281,9 +263,13 @@ mod tests {
         assert_eq!(parse_thread_info(&xml), None);
     }
 
+    fn tid(value: &str) -> ThreadId {
+        ThreadId::new(value).expect("non-empty")
+    }
+
     #[test]
     fn build_element_with_parent() {
-        let info = ThreadInfo::child("child-a", "root-a");
+        let info = ThreadInfo::child(tid("child-a"), tid("root-a"));
         let elem = build_thread_element(&info, "jabber:client");
         assert_eq!(elem.name(), THREAD_ELEMENT);
         assert_eq!(elem.ns(), "jabber:client");
@@ -293,7 +279,7 @@ mod tests {
 
     #[test]
     fn build_element_without_parent() {
-        let info = ThreadInfo::root("root-a");
+        let info = ThreadInfo::root(tid("root-a"));
         let elem = build_thread_element(&info, "jabber:client");
         assert_eq!(elem.attr("parent"), None);
         assert_eq!(elem.text(), "root-a");
@@ -304,7 +290,7 @@ mod tests {
         let mut xml = "<message xmlns='jabber:client'/>"
             .parse::<Element>()
             .expect("valid xml");
-        install_thread_element(&mut xml, &ThreadInfo::child("c", "r"));
+        install_thread_element(&mut xml, &ThreadInfo::child(tid("c"), tid("r")));
         let thread = xml
             .children()
             .find(|c| c.name() == THREAD_ELEMENT)
@@ -317,15 +303,15 @@ mod tests {
         let mut xml = "<message xmlns='jabber:client'><thread>old</thread></message>"
             .parse::<Element>()
             .expect("valid xml");
-        install_thread_element(&mut xml, &ThreadInfo::child("new", "root"));
+        install_thread_element(&mut xml, &ThreadInfo::child(tid("new"), tid("root")));
         let count = xml
             .children()
             .filter(|c| c.name() == THREAD_ELEMENT)
             .count();
         assert_eq!(count, 1);
         let info = parse_thread_info(&xml).expect("thread after install");
-        assert_eq!(info.id, "new");
-        assert_eq!(info.parent.as_deref(), Some("root"));
+        assert_eq!(info.id.as_str(), "new");
+        assert_eq!(info.parent.as_ref().map(ThreadId::as_str), Some("root"));
     }
 
     #[test]
@@ -333,7 +319,7 @@ mod tests {
         let mut xml = "<message xmlns='jabber:client'><thread xmlns='urn:example:other:0' kind='extension'>keep me</thread><thread>old</thread></message>"
             .parse::<Element>()
             .expect("valid xml");
-        install_thread_element(&mut xml, &ThreadInfo::child("new", "root"));
+        install_thread_element(&mut xml, &ThreadInfo::child(tid("new"), tid("root")));
 
         assert!(xml.children().any(|c| {
             c.name() == THREAD_ELEMENT && c.ns() == "urn:example:other:0" && c.text() == "keep me"
@@ -344,8 +330,8 @@ mod tests {
             .count();
         assert_eq!(count, 1);
         let info = parse_thread_info(&xml).expect("thread after install");
-        assert_eq!(info.id, "new");
-        assert_eq!(info.parent.as_deref(), Some("root"));
+        assert_eq!(info.id.as_str(), "new");
+        assert_eq!(info.parent.as_ref().map(ThreadId::as_str), Some("root"));
     }
 
     #[test]
@@ -364,7 +350,7 @@ mod tests {
             )
             .build();
 
-        install_thread_element(&mut xml, &ThreadInfo::child("new", "root"));
+        install_thread_element(&mut xml, &ThreadInfo::child(tid("new"), tid("root")));
 
         assert!(xml
             .children()
@@ -375,8 +361,8 @@ mod tests {
             .count();
         assert_eq!(count, 1);
         let info = parse_thread_info(&xml).expect("thread after install");
-        assert_eq!(info.id, "new");
-        assert_eq!(info.parent.as_deref(), Some("root"));
+        assert_eq!(info.id.as_str(), "new");
+        assert_eq!(info.parent.as_ref().map(ThreadId::as_str), Some("root"));
     }
 
     #[test]
@@ -416,8 +402,8 @@ mod tests {
                 .build(),
         );
         let info = thread_info_from_message(&msg).expect("thread info");
-        assert_eq!(info.id, "child-2");
-        assert_eq!(info.parent.as_deref(), Some("root-1"));
+        assert_eq!(info.id.as_str(), "child-2");
+        assert_eq!(info.parent.as_ref().map(ThreadId::as_str), Some("root-1"));
     }
 
     #[test]
@@ -428,7 +414,7 @@ mod tests {
         let mut msg = Message::new(None::<jid::Jid>);
         set_thread_id(&mut msg, "abc");
         let info = thread_info_from_message(&msg).expect("thread info");
-        assert_eq!(info.id, "abc");
+        assert_eq!(info.id.as_str(), "abc");
         assert_eq!(info.parent, None);
     }
 
@@ -445,8 +431,8 @@ mod tests {
                 .build(),
         );
         let info = thread_info_from_message(&msg).expect("thread info");
-        assert_eq!(info.id, "authoritative-id");
-        assert_eq!(info.parent.as_deref(), Some("root-1"));
+        assert_eq!(info.id.as_str(), "authoritative-id");
+        assert_eq!(info.parent.as_ref().map(ThreadId::as_str), Some("root-1"));
     }
 
     #[test]
@@ -461,7 +447,7 @@ mod tests {
         );
 
         let info = thread_info_from_message(&msg).expect("typed thread");
-        assert_eq!(info.id, "typed-thread");
+        assert_eq!(info.id.as_str(), "typed-thread");
         assert_eq!(info.parent, None);
     }
 
@@ -477,7 +463,7 @@ mod tests {
         );
 
         let info = thread_info_from_message(&msg).expect("typed thread");
-        assert_eq!(info.id, "typed-thread");
+        assert_eq!(info.id.as_str(), "typed-thread");
         assert_eq!(info.parent, None);
     }
 
@@ -494,8 +480,11 @@ mod tests {
         assert_eq!(thread_info_from_message(&msg), None);
         let info =
             thread_info_from_message_in_stanza_ns(&msg, SERVER_STANZA_NS).expect("server thread");
-        assert_eq!(info.id, "server-child");
-        assert_eq!(info.parent.as_deref(), Some("server-root"));
+        assert_eq!(info.id.as_str(), "server-child");
+        assert_eq!(
+            info.parent.as_ref().map(ThreadId::as_str),
+            Some("server-root")
+        );
     }
 
     #[test]
