@@ -977,6 +977,7 @@ fn send_options_from_ffi(opts: WaddleSendOptions) -> Result<SendMessageOptions, 
         fallback,
         thread,
         shared_files,
+        subject: None,
         markup_spans: vec![],
         references: vec![],
     })
