@@ -116,6 +116,15 @@ impl MessageHandler for RichTargetValidationHandler {
         if matches!(message.type_, MessageType::Groupchat) {
             return HandlerOutcome::Continue(Vec::new());
         }
+        if let Err(xep0308::CorrectionError::MissingId) =
+            xep0308::parse_correction_from_message(message)
+        {
+            let reply = bad_request_reply(
+                message,
+                "Message correction payload is missing the required id attribute.",
+            );
+            return HandlerOutcome::Halt(vec![send_message_error(reply)]);
+        }
         let Some(detected) = detect(message, ctx) else {
             return HandlerOutcome::Continue(Vec::new());
         };
@@ -389,6 +398,35 @@ mod tests {
             }
             other => panic!("expected OriginId ref, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn xep_0308_malformed_correction_emits_bad_request() {
+        let local = full("alice@example.com/web");
+        let mut msg = chat_with_body("alice@example.com/web", "bob@example.com", "fixed text");
+        msg.payloads
+            .push(xmpp_parsers::message_correct::Replace { id: String::new() }.into());
+
+        let outcome = run(&local, &mut msg);
+        let parsed = extract_error_payload(&outcome);
+        assert_eq!(parsed.type_, ErrorType::Modify);
+        assert_eq!(parsed.defined_condition, DefinedCondition::BadRequest);
+    }
+
+    #[test]
+    fn xep_0308_malformed_groupchat_correction_is_skipped_user_side() {
+        let local = full("alice@example.com/web");
+        let mut msg = chat_with_body(
+            "alice@example.com/web",
+            "room@conf.example.com",
+            "fixed text",
+        );
+        msg.type_ = MessageType::Groupchat;
+        msg.payloads
+            .push(xmpp_parsers::message_correct::Replace { id: String::new() }.into());
+
+        let outcome = run(&local, &mut msg);
+        assert!(matches!(outcome, HandlerOutcome::Continue(ref e) if e.is_empty()));
     }
 
     #[test]

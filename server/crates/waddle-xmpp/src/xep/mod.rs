@@ -336,8 +336,9 @@ pub use xep0297::{
 
 pub use xep0308::{
     build_correction_message, build_replace_element, extract_correction_from_message,
-    extract_replaces_id, is_correction_message, is_replace_element, set_correction,
-    strip_correction, Correction, CorrectionCarrier, CorrectionError, NS_MESSAGE_CORRECT,
+    extract_replaces_id, is_correction_message, is_replace_element, parse_correction_from_message,
+    set_correction, strip_correction, Correction, CorrectionCarrier, CorrectionError,
+    NS_MESSAGE_CORRECT,
 };
 
 pub use xep0317::{
