@@ -308,7 +308,8 @@ pub use xep0172::{
 };
 
 pub use xep0202::{
-    build_time_response, build_time_response_utc, is_time_query, parse_time_response, NS_TIME,
+    build_current_time_response, build_time_response, is_time_query, parse_time_response,
+    EntityTime, NS_TIME,
 };
 
 pub use xep0203::{

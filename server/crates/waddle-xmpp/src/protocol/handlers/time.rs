@@ -2,7 +2,7 @@
 
 use crate::protocol::event::{OutboundEvent, StanzaContext};
 use crate::protocol::traits::IqHandler;
-use crate::xep::xep0202::{build_time_response_utc, NS_TIME};
+use crate::xep::xep0202::{build_current_time_response, NS_TIME};
 use crate::Stanza;
 use xmpp_parsers::iq::Iq;
 
@@ -17,7 +17,7 @@ impl IqHandler for TimeHandler {
 
     fn handle(&self, iq: &Iq, _ctx: &StanzaContext<'_>) -> Vec<OutboundEvent> {
         vec![OutboundEvent::SendStanza(Box::new(Stanza::Iq(
-            build_time_response_utc(iq),
+            build_current_time_response(iq),
         )))]
     }
 }

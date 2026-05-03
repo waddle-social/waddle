@@ -34,4 +34,3 @@ fn xep0333_markable_with_message_id_is_detected() {
     assert!(has_markable(&msg));
     assert_eq!(extract_marker_from_message(&msg), Some(Marker::Markable));
 }
-
