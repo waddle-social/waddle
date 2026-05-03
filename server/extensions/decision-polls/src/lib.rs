@@ -669,10 +669,7 @@ impl ExtensionItem {
     fn with_field(&mut self, name: &str, label: &str, value: &str) -> &mut Self {
         self.push_text_element_with_attrs(
             "field",
-            vec![
-                ("name", name.to_string()),
-                ("label", label.to_string()),
-            ],
+            vec![("name", name.to_string()), ("label", label.to_string())],
             value,
         );
         self
@@ -681,10 +678,7 @@ impl ExtensionItem {
     fn with_option(&mut self, id: &str, label: &str) -> &mut Self {
         self.push_empty_element(
             "option",
-            vec![
-                ("id", id.to_string()),
-                ("label", label.to_string()),
-            ],
+            vec![("id", id.to_string()), ("label", label.to_string())],
         );
         self
     }

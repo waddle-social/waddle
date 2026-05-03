@@ -99,8 +99,8 @@ fn payload_namespaces_allow_third_party_but_reject_official_xmpp() {
     // envelope. Manifest payload rules in the framework namespace remain
     // forbidden by `validate_manifest_against_module`, so extensions cannot
     // claim ownership of framework wire shapes.
-    let framework =
-        PayloadNamespace::new(FRAMEWORK_NAMESPACE).expect("framework namespace is a valid payload namespace");
+    let framework = PayloadNamespace::new(FRAMEWORK_NAMESPACE)
+        .expect("framework namespace is a valid payload namespace");
     assert!(framework.is_framework());
     assert!(matches!(
         PayloadNamespace::new("urn:xmpp:sid:0"),

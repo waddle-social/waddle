@@ -51,7 +51,9 @@ impl exports::waddle::extension::lifecycle::Guest for AiChatbot {
     fn init(config: String) -> Result<types::ExtensionManifest, String> {
         let parsed = ProviderConfig::parse(&config);
         if let Err(error) = parsed.as_ref() {
-            return Err(format!("ai-chatbot provider configuration is invalid: {error}"));
+            return Err(format!(
+                "ai-chatbot provider configuration is invalid: {error}"
+            ));
         }
         let _ = PROVIDER_CONFIG.set(parsed);
         Ok(manifest())
@@ -1502,14 +1504,14 @@ fn extension_error(code: types::ExtensionErrorCode, message: &str) -> types::Ext
 mod tests {
     use super::{
         assemble_provider_request, clean_prompt, command_response_with_config,
-        execute_provider_request_with_runtime, extension_error, format_archived_messages,
-        manifest, parse_provider_answer, provider_execution_error, provider_request_headers,
+        execute_provider_request_with_runtime, extension_error, format_archived_messages, manifest,
+        parse_provider_answer, provider_execution_error, provider_request_headers,
         provider_request_json, provider_request_json_from_parts, provider_tool_mam_query,
-        select_host_tools, types, CleanPrompt, ExecutionContext, HostTool,
-        NonEmptyString, ProviderAnswer, ProviderConfig, ProviderExecutionError, ProviderExecutor,
-        ProviderRequest, ProviderRole, ResponseTarget, BASELINE_SYSTEM_PROMPT, COMMAND_NODE,
-        MAX_CONTEXT_BYTES, MAX_CONTEXT_LINE_BYTES, MAX_PROVIDER_TOOL_CALLS_PER_ROUND,
-        OPENROUTER_REFERER, OPENROUTER_TITLE,
+        select_host_tools, types, CleanPrompt, ExecutionContext, HostTool, NonEmptyString,
+        ProviderAnswer, ProviderConfig, ProviderExecutionError, ProviderExecutor, ProviderRequest,
+        ProviderRole, ResponseTarget, BASELINE_SYSTEM_PROMPT, COMMAND_NODE, MAX_CONTEXT_BYTES,
+        MAX_CONTEXT_LINE_BYTES, MAX_PROVIDER_TOOL_CALLS_PER_ROUND, OPENROUTER_REFERER,
+        OPENROUTER_TITLE,
     };
 
     struct FakeExecutor {
@@ -2299,5 +2301,4 @@ mod tests {
             }],
         }
     }
-
 }

@@ -1528,9 +1528,7 @@ mod tests {
             capabilities: vec![ExtensionCapability::PubSubPublish],
             commands: Vec::new(),
             routes: Vec::new(),
-            pubsub_nodes: vec![
-                PubSubNode::new("urn:waddle:test-extension:1:items").expect("node"),
-            ],
+            pubsub_nodes: vec![PubSubNode::new("urn:waddle:test-extension:1:items").expect("node")],
             artifact: None,
         };
         let framework_namespace = PayloadNamespace::framework();
@@ -1563,9 +1561,7 @@ mod tests {
             capabilities: vec![ExtensionCapability::PubSubPublish],
             commands: Vec::new(),
             routes: Vec::new(),
-            pubsub_nodes: vec![
-                PubSubNode::new("urn:waddle:test-extension:1:items").expect("node"),
-            ],
+            pubsub_nodes: vec![PubSubNode::new("urn:waddle:test-extension:1:items").expect("node")],
             artifact: None,
         };
         let extension_namespace =

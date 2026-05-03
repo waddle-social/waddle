@@ -192,7 +192,10 @@ fn saved_link_extension_item(
 }
 
 fn link_display_title(url: &str) -> String {
-    if let Some(rest) = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://")) {
+    if let Some(rest) = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+    {
         let host = rest.split('/').next().unwrap_or(rest);
         if !host.is_empty() {
             return host.to_string();
@@ -436,10 +439,7 @@ impl ExtensionItem {
     fn with_field(&mut self, name: &str, label: &str, value: &str) -> &mut Self {
         self.push_text_element_with_attrs(
             "field",
-            vec![
-                ("name", name.to_string()),
-                ("label", label.to_string()),
-            ],
+            vec![("name", name.to_string()), ("label", label.to_string())],
             value,
         );
         self
@@ -579,17 +579,15 @@ mod tests {
                             match local.as_str() {
                                 "title" => titles.push(current_text.clone()),
                                 "link" => {
-                                    if let Some(href) = current_attrs
-                                        .iter()
-                                        .find(|attr| attr.local_name == "href")
+                                    if let Some(href) =
+                                        current_attrs.iter().find(|attr| attr.local_name == "href")
                                     {
                                         links.push(href.value.clone());
                                     }
                                 }
                                 "field" => {
-                                    if let Some(name) = current_attrs
-                                        .iter()
-                                        .find(|attr| attr.local_name == "name")
+                                    if let Some(name) =
+                                        current_attrs.iter().find(|attr| attr.local_name == "name")
                                     {
                                         field_names.push(name.value.clone());
                                     }
@@ -611,7 +609,10 @@ mod tests {
 
     #[test]
     fn link_display_title_falls_back_to_url() {
-        assert_eq!(link_display_title("https://example.org/path"), "example.org");
+        assert_eq!(
+            link_display_title("https://example.org/path"),
+            "example.org"
+        );
         assert_eq!(link_display_title("not-a-url"), "not-a-url");
     }
 }
