@@ -13,10 +13,10 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 base64 = { workspace = true }
 waddle-xmpp-client = { path = "../waddle-xmpp-client", default-features = false, features = ["wasm"] }
-wasm-bindgen = "0.2"
-wasm-bindgen-futures = "0.4"
-js-sys = "0.3"
-web-sys = { version = "0.3", features = ["Response", "Window", "console"] }
+wasm-bindgen = "=0.2.120"
+wasm-bindgen-futures = "=0.4.70"
+js-sys = "=0.3.97"
+web-sys = { version = "=0.3.97", features = ["Response", "Window", "console"] }
 futures = "0.3"
 minidom = "0.16"
 jid = { workspace = true }
@@ -27,9 +27,6 @@ tracing = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde-wasm-bindgen = "0.6"
 getrandom = { version = "0.2", features = ["js"] }
-
-[dev-dependencies]
-wasm-bindgen-test = "0.3"
 
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = false
