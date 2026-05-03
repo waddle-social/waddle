@@ -61,7 +61,6 @@ pub use mam::{
     build_mam_iq, build_mam_iq_extended, ArchivedMessage, MamPage, RsmPageInfo, MAM_END_FIELD,
     MAM_START_FIELD,
 };
-pub use messaging::{MarkupSpan, MarkupSpanType};
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 pub use messaging::MessagingExt;
 pub use messaging::{
@@ -74,6 +73,7 @@ pub use messaging::{
     RetractionPayload, NS_CHAT_MARKERS, NS_CHAT_STATES, NS_MESSAGE_CORRECT, NS_MESSAGE_MODERATE,
     NS_MESSAGE_RETRACT, NS_REACTIONS,
 };
+pub use messaging::{MarkupSpan, MarkupSpanType};
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 pub use pep::PepExt;
 pub use pep::{

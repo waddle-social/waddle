@@ -553,7 +553,11 @@ mod tests {
         let inner = Element::builder("message", CLIENT_NS)
             .attr("from", "room@muc.example.com/alice")
             .attr("type", "groupchat")
-            .append(Element::builder("body", CLIENT_NS).append("Hello world").build())
+            .append(
+                Element::builder("body", CLIENT_NS)
+                    .append("Hello world")
+                    .build(),
+            )
             .append(
                 Element::builder("x", NS_MUC_USER)
                     .append(
@@ -576,11 +580,16 @@ mod tests {
             .attr("queryid", "qid-43")
             .append(forwarded)
             .build();
-        let el = Element::builder("message", CLIENT_NS).append(result).build();
+        let el = Element::builder("message", CLIENT_NS)
+            .append(result)
+            .build();
 
         let archived = parse_mam_result(&el).expect("should parse");
 
-        assert_eq!(archived.author_real_jid.as_deref(), Some("alice@example.com"));
+        assert_eq!(
+            archived.author_real_jid.as_deref(),
+            Some("alice@example.com")
+        );
     }
 
     #[test]
