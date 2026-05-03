@@ -587,6 +587,7 @@ pub async fn handle_iq_with_conn_state(
                     let features = vec![
                         Feature::disco_info(),
                         Feature::mam(),
+                        Feature::mam_extended(),
                         Feature::fulltext_mam(),
                     ];
                     let response =

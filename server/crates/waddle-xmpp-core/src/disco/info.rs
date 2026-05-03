@@ -108,6 +108,10 @@ impl Feature {
         Self::new("urn:xmpp:mam:2")
     }
 
+    pub fn mam_extended() -> Self {
+        Self::new("urn:xmpp:mam:2#extended")
+    }
+
     pub fn fulltext_mam() -> Self {
         Self::new(FULLTEXT_MAM_NS)
     }
@@ -501,6 +505,7 @@ pub fn server_features() -> Vec<Feature> {
         Feature::caps(),
         Feature::roster_versioning(),
         Feature::mam(),
+        Feature::mam_extended(),
         Feature::waddle_mam_thread(),
         Feature::stanza_ids(),
         Feature::replies(),
@@ -603,6 +608,7 @@ pub fn muc_room_features(
         Feature::muc(),
         Feature::muc_self_ping_optimization(),
         Feature::mam(),
+        Feature::mam_extended(),
         Feature::fulltext_mam(),
         Feature::waddle_mam_thread(),
         Feature::stanza_ids(),
@@ -735,6 +741,7 @@ mod tests {
         assert!(features.contains(&Feature::disco_info()));
         assert!(features.contains(&Feature::carbons()));
         assert!(features.contains(&Feature::receipts()));
+        assert!(features.contains(&Feature::mam_extended()));
         assert!(!features.contains(&Feature::fulltext_mam()));
         assert!(features.contains(&Feature::server_info()));
     }
@@ -747,6 +754,7 @@ mod tests {
         assert!(features.contains(&Feature::muc_membersonly()));
         assert!(features.contains(&Feature::muc_unmoderated()));
         assert!(features.contains(&Feature::muc_self_ping_optimization()));
+        assert!(features.contains(&Feature::mam_extended()));
         assert!(features.contains(&Feature::fulltext_mam()));
         assert!(features.contains(&Feature::chat_states()));
         assert_eq!(Feature::chat_states().0, NS_CHATSTATES);

@@ -851,6 +851,9 @@ impl ext_host::ExtensionHostTools for ExtensionHostAdapter {
                 .text
                 .and_then(|text| waddle_xmpp::mam::RichText::new(text.into_string())),
             max: Some(query.max_results),
+            filter_before_id: None,
+            filter_after_id: None,
+            ids: Vec::new(),
             before_id: Some(String::new()),
             after_id: None,
         };

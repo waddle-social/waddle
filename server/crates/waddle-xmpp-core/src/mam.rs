@@ -51,6 +51,7 @@ const MESSAGE_MODERATE_NS: &str = "urn:xmpp:message-moderate:1";
 const REACTIONS_NS: &str = "urn:xmpp:reactions:0";
 const REFERENCE_NS: &str = "urn:xmpp:reference:0";
 const MENTIONS_NS: &str = "urn:xmpp:mentions:0";
+const XDATA_VALIDATE_NS: &str = "http://jabber.org/protocol/xdata-validate";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RichMessageId(pub String);
@@ -284,9 +285,15 @@ pub struct MamQuery {
     pub fulltext: Option<RichText>,
     /// Maximum results to return.
     pub max: Option<u32>,
-    /// Pagination: before this ID.
+    /// Extended MAM filter: only messages before this archive ID.
+    pub filter_before_id: Option<String>,
+    /// Extended MAM filter: only messages after this archive ID.
+    pub filter_after_id: Option<String>,
+    /// Extended MAM filter: only these archive IDs.
+    pub ids: Vec<String>,
+    /// RSM pagination cursor: before this ID.
     pub before_id: Option<String>,
-    /// Pagination: after this ID.
+    /// RSM pagination cursor: after this ID.
     pub after_id: Option<String>,
 }
 
@@ -393,6 +400,30 @@ pub fn build_query_form_iq(original_iq: &Iq) -> Iq {
         )
         .append(
             Element::builder("field", DATA_FORMS_NS)
+                .attr("var", "before-id")
+                .attr("type", "text-single")
+                .build(),
+        )
+        .append(
+            Element::builder("field", DATA_FORMS_NS)
+                .attr("var", "after-id")
+                .attr("type", "text-single")
+                .build(),
+        )
+        .append(
+            Element::builder("field", DATA_FORMS_NS)
+                .attr("var", "ids")
+                .attr("type", "list-multi")
+                .append(
+                    Element::builder("validate", XDATA_VALIDATE_NS)
+                        .attr("datatype", "xs:string")
+                        .append(Element::builder("open", XDATA_VALIDATE_NS).build())
+                        .build(),
+                )
+                .build(),
+        )
+        .append(
+            Element::builder("field", DATA_FORMS_NS)
                 .attr("var", WADDLE_MAM_THREAD_FIELD)
                 .attr("type", "text-single")
                 .build(),
@@ -456,25 +487,39 @@ fn parse_data_form(form: &Element, query: &mut MamQuery) -> CoreResult<()> {
         }
 
         let var = field.attr("var").unwrap_or("");
-        let value = field
+        let values = field
             .children()
-            .find(|c| c.name() == "value")
-            .map(|value| value.text());
+            .filter(|child| child.name() == "value")
+            .map(Element::text)
+            .collect::<Vec<_>>();
+        let value = values.iter().find(|value| !value.is_empty()).cloned();
 
         match var {
             "" | "FORM_TYPE" => {}
             "start" => {
-                if let Some(value) = value.filter(|value| !value.is_empty()) {
+                if let Some(value) = value {
                     query.start = Some(parse_datetime(&value)?);
                 }
             }
             "end" => {
-                if let Some(value) = value.filter(|value| !value.is_empty()) {
+                if let Some(value) = value {
                     query.end = Some(parse_datetime(&value)?);
                 }
             }
             "with" => {
-                query.with = value.filter(|value| !value.is_empty());
+                query.with = value;
+            }
+            "before-id" => {
+                query.filter_before_id = value;
+            }
+            "after-id" => {
+                query.filter_after_id = value;
+            }
+            "ids" => {
+                query.ids = values
+                    .into_iter()
+                    .filter(|value| !value.is_empty())
+                    .collect();
             }
             WADDLE_MAM_THREAD_FIELD => {
                 query.thread_id = value.and_then(ThreadId::new);
@@ -911,6 +956,41 @@ mod tests {
                             )
                             .append(
                                 Element::builder("field", DATA_FORMS_NS)
+                                    .attr("var", "before-id")
+                                    .append(
+                                        Element::builder("value", DATA_FORMS_NS)
+                                            .append("msg-20")
+                                            .build(),
+                                    )
+                                    .build(),
+                            )
+                            .append(
+                                Element::builder("field", DATA_FORMS_NS)
+                                    .attr("var", "after-id")
+                                    .append(
+                                        Element::builder("value", DATA_FORMS_NS)
+                                            .append("msg-2")
+                                            .build(),
+                                    )
+                                    .build(),
+                            )
+                            .append(
+                                Element::builder("field", DATA_FORMS_NS)
+                                    .attr("var", "ids")
+                                    .append(
+                                        Element::builder("value", DATA_FORMS_NS)
+                                            .append("msg-5")
+                                            .build(),
+                                    )
+                                    .append(
+                                        Element::builder("value", DATA_FORMS_NS)
+                                            .append("msg-7")
+                                            .build(),
+                                    )
+                                    .build(),
+                            )
+                            .append(
+                                Element::builder("field", DATA_FORMS_NS)
                                     .attr("var", FULLTEXT_MAM_FIELD)
                                     .append(
                                         Element::builder("value", DATA_FORMS_NS)
@@ -936,6 +1016,9 @@ mod tests {
         assert_eq!(query_id, "query-1");
         assert_eq!(query.max, Some(10));
         assert_eq!(query.after_id.as_deref(), Some("msg-9"));
+        assert_eq!(query.filter_before_id.as_deref(), Some("msg-20"));
+        assert_eq!(query.filter_after_id.as_deref(), Some("msg-2"));
+        assert_eq!(query.ids, vec!["msg-5", "msg-7"]);
         assert_eq!(query.with.as_deref(), Some("juliet@example.com"));
         assert_eq!(
             query.fulltext.as_ref().map(RichText::as_str),
@@ -1078,9 +1161,22 @@ mod tests {
         assert!(fields.contains(&"with"));
         assert!(fields.contains(&"start"));
         assert!(fields.contains(&"end"));
+        assert!(fields.contains(&"before-id"));
+        assert!(fields.contains(&"after-id"));
+        assert!(fields.contains(&"ids"));
         assert!(fields.contains(&WADDLE_MAM_THREAD_FIELD));
         assert!(fields.contains(&FULLTEXT_MAM_FIELD));
         assert!(!fields.contains(&"fulltext"));
+
+        let ids_field = form
+            .children()
+            .find(|field| field.attr("var") == Some("ids"))
+            .expect("ids field");
+        let validate = ids_field
+            .get_child("validate", XDATA_VALIDATE_NS)
+            .expect("ids field validate element");
+        assert_eq!(validate.attr("datatype"), Some("xs:string"));
+        assert!(validate.get_child("open", XDATA_VALIDATE_NS).is_some());
     }
 
     #[test]
