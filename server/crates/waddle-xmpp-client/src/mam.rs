@@ -7,7 +7,9 @@
 
 use chrono::{DateTime, Utc};
 use minidom::Element;
-use waddle_xmpp_core::mam::{DELAY_NS, FORWARD_NS, MAM_NS, RSM_NS};
+use waddle_xmpp_core::mam::{
+    DELAY_NS, FORWARD_NS, FULLTEXT_MAM_FIELD, MAM_NS, RSM_NS, WADDLE_MAM_THREAD_FIELD,
+};
 
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 use std::time::Duration;
@@ -27,6 +29,8 @@ use crate::event::ClientEvent;
 
 const CLIENT_NS: &str = "jabber:client";
 const DATA_FORMS_NS: &str = "jabber:x:data";
+pub const MAM_START_FIELD: &str = "start";
+pub const MAM_END_FIELD: &str = "end";
 
 /// A page of archived messages plus RSM pagination info.
 #[derive(Debug, Clone)]
@@ -133,67 +137,101 @@ pub fn build_mam_iq(
     with_jid: Option<&str>,
     to_jid: Option<&str>,
 ) -> Element {
-    // <set xmlns='http://jabber.org/protocol/rsm'>
-    let before_el = Element::builder("before", RSM_NS)
-        .append(before.unwrap_or(""))
-        .build();
+    build_mam_iq_extended(
+        iq_id,
+        query_id,
+        max,
+        before.or(Some("")),
+        None,
+        with_jid,
+        to_jid,
+        None,
+        None,
+        None,
+        None,
+    )
+}
 
-    let rsm = Element::builder("set", RSM_NS)
-        .append(
-            Element::builder("max", RSM_NS)
-                .append(max.to_string())
-                .build(),
-        )
-        .append(before_el)
-        .build();
-
-    // <x xmlns='jabber:x:data' type='submit'>
-    let form_type_field = Element::builder("field", DATA_FORMS_NS)
-        .attr("var", "FORM_TYPE")
-        .attr("type", "hidden")
+fn build_form_field(var: &str, value: &str) -> Element {
+    Element::builder("field", DATA_FORMS_NS)
+        .attr("var", var)
         .append(
             Element::builder("value", DATA_FORMS_NS)
-                .append(MAM_NS)
+                .append(value)
                 .build(),
         )
-        .build();
+        .build()
+}
 
-    let mut form_builder = Element::builder("x", DATA_FORMS_NS)
-        .attr("type", "submit")
-        .append(form_type_field);
-
-    if let Some(with) = with_jid {
-        let with_field = Element::builder("field", DATA_FORMS_NS)
-            .attr("var", "with")
-            .append(
-                Element::builder("value", DATA_FORMS_NS)
-                    .append(with)
-                    .build(),
-            )
-            .build();
-        form_builder = form_builder.append(with_field);
+#[expect(clippy::too_many_arguments, reason = "Phase 3 API shape is required by the wasm bindings and TS parity")]
+pub fn build_mam_iq_extended(
+    iq_id: &str,
+    query_id: &str,
+    max: u32,
+    before: Option<&str>,
+    after: Option<&str>,
+    with_jid: Option<&str>,
+    to_jid: Option<&str>,
+    thread_id: Option<&str>,
+    fulltext: Option<&str>,
+    start: Option<&str>,
+    end: Option<&str>,
+) -> Element {
+    let mut rsm = Element::builder("set", RSM_NS).append(
+        Element::builder("max", RSM_NS)
+            .append(max.to_string())
+            .build(),
+    );
+    if let Some(before) = before {
+        rsm = rsm.append(Element::builder("before", RSM_NS).append(before).build());
+    }
+    if let Some(after) = after {
+        rsm = rsm.append(Element::builder("after", RSM_NS).append(after).build());
     }
 
-    let form = form_builder.build();
+    let mut form = Element::builder("x", DATA_FORMS_NS)
+        .attr("type", "submit")
+        .append(
+            Element::builder("field", DATA_FORMS_NS)
+                .attr("var", "FORM_TYPE")
+                .attr("type", "hidden")
+                .append(
+                    Element::builder("value", DATA_FORMS_NS)
+                        .append(MAM_NS)
+                        .build(),
+                )
+                .build(),
+        );
+    if let Some(with_jid) = with_jid {
+        form = form.append(build_form_field("with", with_jid));
+    }
+    if let Some(thread_id) = thread_id {
+        form = form.append(build_form_field(WADDLE_MAM_THREAD_FIELD, thread_id));
+    }
+    if let Some(fulltext) = fulltext {
+        form = form.append(build_form_field(FULLTEXT_MAM_FIELD, fulltext));
+    }
+    if let Some(start) = start {
+        form = form.append(build_form_field(MAM_START_FIELD, start));
+    }
+    if let Some(end) = end {
+        form = form.append(build_form_field(MAM_END_FIELD, end));
+    }
 
-    // <query xmlns='urn:xmpp:mam:2' queryid='...'>
     let query = Element::builder("query", MAM_NS)
         .attr("queryid", query_id)
-        .append(form)
-        .append(rsm)
+        .append(form.build())
+        .append(rsm.build())
         .build();
 
-    // <iq type='set' id='...' xmlns='jabber:client'>
-    let mut iq_builder = Element::builder("iq", CLIENT_NS)
+    let mut iq = Element::builder("iq", CLIENT_NS)
         .attr("type", "set")
         .attr("id", iq_id)
         .append(query);
-
-    if let Some(to) = to_jid {
-        iq_builder = iq_builder.attr("to", to);
+    if let Some(to_jid) = to_jid {
+        iq = iq.attr("to", to_jid);
     }
-
-    iq_builder.build()
+    iq.build()
 }
 
 /// Subscribe to the event bus, send the IQ, collect MAM result messages until
@@ -611,6 +649,87 @@ mod tests {
         assert!(info.count.is_none());
         assert!(info.index.is_none());
         assert!(!info.is_complete);
+    }
+
+    #[test]
+    fn build_mam_iq_extended_supports_thread_fulltext_and_after() {
+        let iq = build_mam_iq_extended(
+            "iq-1",
+            "query-1",
+            25,
+            None,
+            Some("after-1"),
+            Some("alice@example.com"),
+            Some("room@muc.example.com"),
+            Some("thread-42"),
+            Some("needle"),
+            Some("2024-01-01T00:00:00Z"),
+            Some("2024-01-31T23:59:59Z"),
+        );
+        let query = iq.get_child("query", MAM_NS).expect("query child");
+        let form = query.get_child("x", DATA_FORMS_NS).expect("form child");
+        let fields: Vec<(String, String)> = form
+            .children()
+            .filter(|child| child.name() == "field" && child.ns() == DATA_FORMS_NS)
+            .filter_map(|child| {
+                Some((
+                    child.attr("var")?.to_string(),
+                    child.get_child("value", DATA_FORMS_NS)?.text(),
+                ))
+            })
+            .collect();
+        assert!(fields.contains(&("with".to_string(), "alice@example.com".to_string())));
+        assert!(fields.contains(&(WADDLE_MAM_THREAD_FIELD.to_string(), "thread-42".to_string())));
+        assert!(fields.contains(&(FULLTEXT_MAM_FIELD.to_string(), "needle".to_string())));
+        assert!(fields.contains(&(MAM_START_FIELD.to_string(), "2024-01-01T00:00:00Z".to_string())));
+        assert!(fields.contains(&(MAM_END_FIELD.to_string(), "2024-01-31T23:59:59Z".to_string())));
+        let set = query.get_child("set", RSM_NS).expect("rsm set");
+        assert_eq!(set.get_child("after", RSM_NS).map(|child| child.text()), Some("after-1".to_string()));
+        assert_eq!(iq.attr("to"), Some("room@muc.example.com"));
+    }
+
+    #[test]
+    fn build_mam_iq_extended_supports_latest_before_marker() {
+        let iq = build_mam_iq_extended(
+            "iq-2",
+            "query-2",
+            10,
+            Some(""),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        let before = iq
+            .get_child("query", MAM_NS)
+            .and_then(|query| query.get_child("set", RSM_NS))
+            .and_then(|set| set.get_child("before", RSM_NS))
+            .expect("before child");
+        assert_eq!(before.text(), "");
+    }
+
+    #[test]
+    fn build_mam_iq_preserves_existing_before_behavior() {
+        let iq = build_mam_iq("iq-3", "query-3", 50, Some("last-id"), Some("bob@example.com"), None);
+        let query = iq.get_child("query", MAM_NS).expect("query child");
+        let set = query.get_child("set", RSM_NS).expect("set child");
+        assert_eq!(set.get_child("before", RSM_NS).map(|child| child.text()), Some("last-id".to_string()));
+        let fields: Vec<(String, String)> = query
+            .get_child("x", DATA_FORMS_NS)
+            .expect("form child")
+            .children()
+            .filter(|child| child.name() == "field" && child.ns() == DATA_FORMS_NS)
+            .filter_map(|child| {
+                Some((
+                    child.attr("var")?.to_string(),
+                    child.get_child("value", DATA_FORMS_NS)?.text(),
+                ))
+            })
+            .collect();
+        assert!(fields.contains(&("with".to_string(), "bob@example.com".to_string())));
     }
 
     // ── Query orchestration integration tests ────────────────────────────────

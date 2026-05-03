@@ -42,8 +42,15 @@ pub use config::{
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 pub use discovery::DiscoveryExt;
 pub use discovery::{
-    DiscoFeature, DiscoIdentity, DiscoInfoResult, DiscoItem, DiscoveredChannel, DiscoveredWaddle,
-    InboxEntry, UploadSlot,
+    build_muc_admin_affiliation_list_iq, build_muc_admin_affiliation_set_iq,
+    build_roster_get_iq, build_user_search_form_iq, build_user_search_iq,
+    build_waddle_inbox_mark_read_iq, build_waddle_inbox_query_iq, parse_muc_admin_affiliation_query,
+    parse_roster_result, parse_user_search_form, parse_user_search_result,
+    parse_waddle_inbox_result, DiscoFeature, DiscoIdentity, DiscoInfoResult, DiscoItem,
+    DiscoveredChannel, DiscoveredWaddle, InboxEntry, MucAdminAffiliationItem, RosterResult,
+    UploadSlot, UserSearchForm, UserSearchItem, UserSearchQuery, UserSearchResult,
+    WaddleInboxConversation, WaddleInboxMarkRead, WaddleInboxQuery, WaddleInboxResult,
+    MUC_ADMIN_NS, USER_SEARCH_NS, WADDLE_INBOX_NS,
 };
 pub use error::{ClientError, ClientResult, StanzaError, StanzaErrorType};
 pub use event::{
@@ -51,13 +58,30 @@ pub use event::{
 };
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 pub use mam::MamExt;
-pub use mam::{ArchivedMessage, MamPage, RsmPageInfo};
+pub use mam::{
+    build_mam_iq, build_mam_iq_extended, ArchivedMessage, MamPage, RsmPageInfo,
+    MAM_END_FIELD, MAM_START_FIELD,
+};
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 pub use messaging::MessagingExt;
-pub use messaging::{InboundMessage, InboundPresence, MessagingEvent};
+pub use messaging::{
+    build_chat_state_message, build_correction_message, build_displayed_message,
+    build_moderation_message, build_outbound_message, build_reaction_message,
+    build_retraction_message, parse_chat_state_payload, parse_correction_payload,
+    parse_displayed_marker_payload, parse_moderation_payload, parse_reaction_payload,
+    parse_retraction_payload, ChatStatePayload, CorrectionPayload, DisplayedMarkerPayload,
+    InboundMessage, InboundPresence, MessagingEvent, ModerationPayload, ReactionPayload,
+    RetractionPayload, NS_CHAT_MARKERS, NS_CHAT_STATES, NS_MESSAGE_CORRECT,
+    NS_MESSAGE_MODERATE, NS_MESSAGE_RETRACT, NS_REACTIONS,
+};
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 pub use pep::PepExt;
-pub use pep::{PepItem, UserActivity, UserMood, UserTune};
+pub use pep::{
+    build_pep_items_iq, build_publish_activity_iq, build_publish_mood_iq,
+    build_publish_tune_iq, build_retract_activity_iq, build_retract_mood_iq,
+    build_retract_tune_iq, parse_pep_activity, parse_pep_mood, parse_pep_tune,
+    PepItem, UserActivity, UserMood, UserTune, NS_ACTIVITY, NS_MOOD, NS_TUNE,
+};
 pub use request::{
     ClientRequest, PendingRequest, RequestCorrelation, RequestId, RequestKind, RequestTracker,
     StanzaId,
@@ -72,4 +96,8 @@ pub use transport::{
 pub use transport::{DefaultTransportFactory, WebSocketTransport, WebSocketTransportFactory};
 #[cfg(feature = "wasm")]
 pub use transport_wasm::{WasmTransportEvent, WasmWebSocket};
-pub use waddle_xmpp_core::ConnectionConfig;
+pub use waddle_xmpp_core::roster::{AskType, RosterItem, Subscription, ROSTER_NS};
+pub use waddle_xmpp_core::{
+    mam::{FULLTEXT_MAM_FIELD, WADDLE_MAM_THREAD_FIELD},
+    ConnectionConfig,
+};

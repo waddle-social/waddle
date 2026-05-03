@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 use crate::client::ClientHandle;
-use crate::error::ClientResult;
+use crate::error::{ClientError, ClientResult};
 use crate::request::StanzaId;
 use crate::xep::{reply as xep_reply, thread as xep_thread};
 
@@ -19,13 +19,16 @@ use crate::xep::{reply as xep_reply, thread as xep_thread};
 const NS_DELAY: &str = "urn:xmpp:delay";
 const NS_STANZA_ID: &str = "urn:xmpp:sid:0";
 const NS_ORIGIN_ID: &str = "urn:xmpp:origin-id:0";
-const NS_REACTIONS: &str = "urn:xmpp:reactions:0";
+pub const NS_REACTIONS: &str = "urn:xmpp:reactions:0";
 const NS_MARKUP: &str = "urn:xmpp:markup:0";
-const NS_CHAT_STATE: &str = "http://jabber.org/protocol/chatstates";
-const NS_MARKERS: &str = "urn:xmpp:chat-markers:0";
+pub const NS_CHAT_STATES: &str = "http://jabber.org/protocol/chatstates";
+pub const NS_CHAT_MARKERS: &str = "urn:xmpp:chat-markers:0";
 const NS_REFERENCES: &str = "urn:xmpp:reference:0";
-const NS_RETRACT: &str = "urn:xmpp:message-retract:0";
-const NS_REPLACE: &str = "urn:xmpp:message-correct:0";
+pub const NS_MESSAGE_RETRACT: &str = "urn:xmpp:message-retract:0";
+pub const NS_MESSAGE_MODERATE: &str = "urn:xmpp:message-moderate:0";
+pub const NS_MESSAGE_CORRECT: &str = "urn:xmpp:message-correct:0";
+const NS_FASTEN: &str = "urn:xmpp:fasten:0";
+const NS_HINTS: &str = "urn:xmpp:hints";
 const NS_HATS: &str = "urn:xmpp:hats:0";
 const NS_SIMS: &str = "urn:xmpp:sims:1";
 const NS_SFS: &str = "urn:xmpp:sfs:0";
@@ -106,6 +109,39 @@ pub struct SharedFile {
     pub disposition: SharedFileDisposition,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatStatePayload {
+    pub state: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DisplayedMarkerPayload {
+    pub id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReactionPayload {
+    pub target_id: String,
+    pub emojis: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetractionPayload {
+    pub target_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModerationPayload {
+    pub target_id: String,
+    pub moderated_by: String,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CorrectionPayload {
+    pub replaces_id: String,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct InboundMessage {
     pub from: Option<String>,
@@ -120,6 +156,9 @@ pub struct InboundMessage {
     pub timestamp: Option<DateTime<Utc>>,
     pub replaces_id: Option<String>,
     pub retracts_id: Option<String>,
+    pub moderation_target_id: Option<String>,
+    pub moderated_by: Option<String>,
+    pub moderation_reason: Option<String>,
     pub reaction_target_id: Option<String>,
     pub reaction_emojis: Vec<String>,
     pub reply_to_id: Option<String>,
@@ -269,14 +308,12 @@ fn parse_message(el: &Element) -> InboundMessage {
     let subject = el.get_child("subject", NS_CLIENT).map(|e| e.text());
     let thread = el.get_child("thread", NS_CLIENT).map(|e| e.text());
 
-    // XEP-0203: Delayed Delivery
     let timestamp = el
         .get_child("delay", NS_DELAY)
         .and_then(|d| d.attr("stamp"))
         .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
         .map(|dt| dt.with_timezone(&Utc));
 
-    // XEP-0359: Unique and Stable Stanza IDs
     let stanza_id = el
         .get_child("stanza-id", NS_STANZA_ID)
         .and_then(|e| e.attr("id"))
@@ -287,59 +324,37 @@ fn parse_message(el: &Element) -> InboundMessage {
         .and_then(|e| e.attr("id"))
         .map(String::from);
 
-    // XEP-0308: Last Message Correction
-    let replaces_id = el
-        .get_child("replace", NS_REPLACE)
-        .and_then(|e| e.attr("id"))
-        .map(String::from);
+    let correction = parse_correction_payload(el);
+    let replaces_id = correction.as_ref().map(|payload| payload.replaces_id.clone());
 
-    // XEP-0424: Message Retraction
-    let retracts_id = el
-        .get_child("retract", NS_RETRACT)
-        .and_then(|e| e.attr("id"))
-        .map(String::from)
-        .or_else(|| {
-            // server-side retraction uses <retracted>
-            el.get_child("retracted", NS_RETRACT)
-                .and_then(|e| e.attr("id"))
-                .map(String::from)
-        });
+    let moderation = parse_moderation_payload(el);
+    let moderation_target_id = moderation.as_ref().map(|payload| payload.target_id.clone());
+    let moderated_by = moderation
+        .as_ref()
+        .map(|payload| payload.moderated_by.clone());
+    let moderation_reason = moderation.as_ref().and_then(|payload| payload.reason.clone());
 
-    // XEP-0444: Message Reactions
-    let reactions_el = el.get_child("reactions", NS_REACTIONS);
-    let reaction_target_id = reactions_el.and_then(|e| e.attr("id")).map(String::from);
-    let reaction_emojis = reactions_el
-        .map(|e| {
-            e.children()
-                .filter(|c| c.name() == "reaction")
-                .map(|c| c.text())
-                .collect()
-        })
-        .unwrap_or_default();
+    let retraction = parse_retraction_payload(el);
+    let retracts_id = moderation_target_id
+        .clone()
+        .or_else(|| retraction.as_ref().map(|payload| payload.target_id.clone()));
 
-    // XEP-0461: Message Replies + XEP-0428: Fallback Indication
+    let reaction = parse_reaction_payload(el);
+    let reaction_target_id = reaction.as_ref().map(|payload| payload.target_id.clone());
+    let reaction_emojis = reaction.map(|payload| payload.emojis).unwrap_or_default();
+
     let reply_marker = xep_reply::parse_reply(el);
     let reply_to_id = reply_marker.as_ref().map(|m| m.id.clone());
     let reply_to_sender = reply_marker.as_ref().map(|m| m.to.to_string());
     let reply_fallback = xep_reply::parse_fallback(el).map(|r| (r.start, r.end));
 
-    // XEP-0394: Message Markup
     let markup_spans = el
         .get_child("markups", NS_MARKUP)
         .map(parse_markup_spans)
         .unwrap_or_default();
 
-    // XEP-0085: Chat State Notifications
-    let chat_state = el
-        .children()
-        .find(|c| c.ns() == NS_CHAT_STATE)
-        .map(|c| c.name().to_string());
-
-    // XEP-0333: Displayed Markers
-    let displayed_marker_id = el
-        .get_child("displayed", NS_MARKERS)
-        .and_then(|e| e.attr("id"))
-        .map(String::from);
+    let chat_state = parse_chat_state_payload(el).map(|payload| payload.state);
+    let displayed_marker_id = parse_displayed_marker_payload(el).map(|payload| payload.id);
 
     // XEP-0372: References (mentions and data)
     let mut mention_uris: Vec<String> = Vec::new();
@@ -438,6 +453,9 @@ fn parse_message(el: &Element) -> InboundMessage {
         timestamp,
         replaces_id,
         retracts_id,
+        moderation_target_id,
+        moderated_by,
+        moderation_reason,
         reaction_target_id,
         reaction_emojis,
         reply_to_id,
@@ -455,6 +473,96 @@ fn parse_message(el: &Element) -> InboundMessage {
         parent_thread_id,
         is_sticker,
     }
+}
+
+fn validate_chat_state(state: &str) -> ClientResult<&str> {
+    match state {
+        "active" | "composing" | "paused" | "inactive" | "gone" => Ok(state),
+        _ => Err(ClientError::Core(waddle_xmpp_core::CoreError::bad_request(Some(
+            format!("invalid chat state `{state}`"),
+        )))),
+    }
+}
+
+pub fn parse_chat_state_payload(element: &Element) -> Option<ChatStatePayload> {
+    element
+        .children()
+        .find(|child| child.ns() == NS_CHAT_STATES)
+        .and_then(|child| validate_chat_state(child.name()).ok())
+        .map(|state| ChatStatePayload {
+            state: state.to_string(),
+        })
+}
+
+pub fn parse_displayed_marker_payload(element: &Element) -> Option<DisplayedMarkerPayload> {
+    element
+        .get_child("displayed", NS_CHAT_MARKERS)
+        .and_then(|child| child.attr("id"))
+        .filter(|id| !id.is_empty())
+        .map(|id| DisplayedMarkerPayload { id: id.to_string() })
+}
+
+pub fn parse_reaction_payload(element: &Element) -> Option<ReactionPayload> {
+    let reactions = element.get_child("reactions", NS_REACTIONS)?;
+    let target_id = reactions.attr("id")?.trim();
+    if target_id.is_empty() {
+        return None;
+    }
+    let emojis = reactions
+        .children()
+        .filter(|child| child.name() == "reaction" && child.ns() == NS_REACTIONS)
+        .map(|child| child.text())
+        .filter(|emoji| !emoji.is_empty())
+        .collect();
+    Some(ReactionPayload {
+        target_id: target_id.to_string(),
+        emojis,
+    })
+}
+
+pub fn parse_retraction_payload(element: &Element) -> Option<RetractionPayload> {
+    element
+        .get_child("retract", NS_MESSAGE_RETRACT)
+        .and_then(|child| child.attr("id"))
+        .or_else(|| {
+            element
+                .get_child("retracted", NS_MESSAGE_RETRACT)
+                .and_then(|child| child.attr("id"))
+        })
+        .filter(|id| !id.is_empty())
+        .map(|id| RetractionPayload {
+            target_id: id.to_string(),
+        })
+}
+
+pub fn parse_moderation_payload(element: &Element) -> Option<ModerationPayload> {
+    let apply_to = element.get_child("apply-to", NS_FASTEN)?;
+    let target_id = apply_to.attr("id")?.trim();
+    if target_id.is_empty() {
+        return None;
+    }
+    let moderated = apply_to.get_child("moderated", NS_MESSAGE_MODERATE)?;
+    moderated.get_child("retract", NS_MESSAGE_RETRACT)?;
+    let moderated_by = moderated.attr("by").unwrap_or_default().to_string();
+    let reason = moderated
+        .get_child("reason", NS_MESSAGE_MODERATE)
+        .map(|child| child.text())
+        .filter(|text| !text.trim().is_empty());
+    Some(ModerationPayload {
+        target_id: target_id.to_string(),
+        moderated_by,
+        reason,
+    })
+}
+
+pub fn parse_correction_payload(element: &Element) -> Option<CorrectionPayload> {
+    element
+        .get_child("replace", NS_MESSAGE_CORRECT)
+        .and_then(|child| child.attr("id"))
+        .filter(|id| !id.is_empty())
+        .map(|id| CorrectionPayload {
+            replaces_id: id.to_string(),
+        })
 }
 
 fn parse_markup_spans(markups_el: &Element) -> Vec<MarkupSpan> {
@@ -742,11 +850,7 @@ impl MessagingExt for ClientHandle {
         state: &str,
         message_type: &str,
     ) -> ClientResult<()> {
-        let stanza = Element::builder("message", NS_CLIENT)
-            .attr("to", jid)
-            .attr("type", message_type)
-            .append(Element::builder(state, NS_CHAT_STATE).build())
-            .build();
+        let stanza = build_chat_state_message(jid, state, message_type)?;
         self.send_stanza(stanza).await
     }
 
@@ -756,15 +860,7 @@ impl MessagingExt for ClientHandle {
         message_id: &str,
         message_type: &str,
     ) -> ClientResult<()> {
-        let stanza = Element::builder("message", NS_CLIENT)
-            .attr("to", jid)
-            .attr("type", message_type)
-            .append(
-                Element::builder("displayed", NS_MARKERS)
-                    .attr("id", message_id)
-                    .build(),
-            )
-            .build();
+        let stanza = build_displayed_message(jid, message_id, message_type);
         self.send_stanza(stanza).await
     }
 
@@ -774,27 +870,131 @@ impl MessagingExt for ClientHandle {
         message_id: &str,
         message_type: &str,
     ) -> ClientResult<()> {
-        let id = Uuid::new_v4().to_string();
-        let stanza = Element::builder("message", NS_CLIENT)
-            .attr("to", jid)
-            .attr("type", message_type)
-            .attr("id", id.as_str())
-            .append(
-                Element::builder("retract", NS_RETRACT)
-                    .attr("id", message_id)
-                    .build(),
-            )
-            .append(
-                Element::builder("body", NS_CLIENT)
-                    .append("This message was retracted.")
-                    .build(),
-            )
-            .build();
+        let stanza = build_retraction_message(jid, message_type, message_id);
         self.send_stanza(stanza).await
     }
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
+
+pub fn build_chat_state_message(to: &str, state: &str, message_type: &str) -> ClientResult<Element> {
+    let state = validate_chat_state(state)?;
+    Ok(
+        Element::builder("message", NS_CLIENT)
+            .attr("to", to)
+            .attr("type", message_type)
+            .append(Element::builder(state, NS_CHAT_STATES).build())
+            .build(),
+    )
+}
+
+pub fn build_displayed_message(to: &str, message_id: &str, message_type: &str) -> Element {
+    Element::builder("message", NS_CLIENT)
+        .attr("to", to)
+        .attr("type", message_type)
+        .append(
+            Element::builder("displayed", NS_CHAT_MARKERS)
+                .attr("id", message_id)
+                .build(),
+        )
+        .build()
+}
+
+pub fn build_reaction_message(
+    to: &str,
+    message_type: &str,
+    target_id: &str,
+    emojis: &[String],
+) -> Element {
+    let mut reactions = Element::builder("reactions", NS_REACTIONS)
+        .attr("id", target_id)
+        .build();
+    for emoji in emojis {
+        reactions.append_child(
+            Element::builder("reaction", NS_REACTIONS)
+                .append(emoji.as_str())
+                .build(),
+        );
+    }
+
+    Element::builder("message", NS_CLIENT)
+        .attr("to", to)
+        .attr("type", message_type)
+        .attr("id", Uuid::new_v4().to_string())
+        .append(reactions)
+        .append(Element::builder("store", NS_HINTS).build())
+        .build()
+}
+
+pub fn build_retraction_message(to: &str, message_type: &str, retracts_id: &str) -> Element {
+    Element::builder("message", NS_CLIENT)
+        .attr("to", to)
+        .attr("type", message_type)
+        .attr("id", Uuid::new_v4().to_string())
+        .append(
+            Element::builder("retract", NS_MESSAGE_RETRACT)
+                .attr("id", retracts_id)
+                .build(),
+        )
+        .append(
+            Element::builder("body", NS_CLIENT)
+                .append("This person attempted to retract a previous message.")
+                .build(),
+        )
+        .append(Element::builder("store", NS_HINTS).build())
+        .build()
+}
+
+pub fn build_moderation_message(
+    to: &str,
+    message_type: &str,
+    target_id: &str,
+    reason: Option<&str>,
+) -> Element {
+    let mut moderated = Element::builder("moderated", NS_MESSAGE_MODERATE)
+        .append(Element::builder("retract", NS_MESSAGE_RETRACT).build());
+    if let Some(reason) = reason {
+        moderated = moderated.append(
+            Element::builder("reason", NS_MESSAGE_MODERATE)
+                .append(reason)
+                .build(),
+        );
+    }
+
+    Element::builder("message", NS_CLIENT)
+        .attr("to", to)
+        .attr("type", message_type)
+        .attr("id", Uuid::new_v4().to_string())
+        .append(
+            Element::builder("apply-to", NS_FASTEN)
+                .attr("id", target_id)
+                .append(moderated.build())
+                .build(),
+        )
+        .append(Element::builder("store", NS_HINTS).build())
+        .build()
+}
+
+pub fn build_correction_message(
+    to: &str,
+    message_type: &str,
+    body: &str,
+    replaces_id: &str,
+) -> (String, Element) {
+    let id = Uuid::new_v4().to_string();
+    let stanza = Element::builder("message", NS_CLIENT)
+        .attr("to", to)
+        .attr("type", message_type)
+        .attr("id", id.as_str())
+        .append(Element::builder("body", NS_CLIENT).append(body).build())
+        .append(
+            Element::builder("replace", NS_MESSAGE_CORRECT)
+                .attr("id", replaces_id)
+                .build(),
+        )
+        .build();
+    (id, stanza)
+}
 
 /// Build a `<message/>` stanza carrying the body plus any XEP payloads from
 /// `options`. All XML construction goes through typed `minidom::Element`
@@ -1020,6 +1220,37 @@ mod tests {
     }
 
     #[test]
+    fn parse_message_with_correction() {
+        let e = el("<message xmlns='jabber:client' type='chat'>\
+             <body>fixed</body>\
+             <replace xmlns='urn:xmpp:message-correct:0' id='old-msg-id'/>\
+             </message>");
+        let MessagingEvent::Message(msg) = parse(&e).unwrap() else {
+            panic!("expected Message");
+        };
+        assert_eq!(msg.replaces_id.as_deref(), Some("old-msg-id"));
+    }
+
+    #[test]
+    fn parse_message_with_moderation() {
+        let e = el("<message xmlns='jabber:client' type='groupchat' from='room@muc.example'>\
+             <apply-to xmlns='urn:xmpp:fasten:0' id='old-msg-id'>\
+                 <moderated xmlns='urn:xmpp:message-moderate:0'>\
+                     <retract xmlns='urn:xmpp:message-retract:0'/>\
+                     <reason>cleanup</reason>\
+                 </moderated>\
+             </apply-to>\
+             </message>");
+        let MessagingEvent::Message(msg) = parse(&e).unwrap() else {
+            panic!("expected Message");
+        };
+        assert_eq!(msg.retracts_id.as_deref(), Some("old-msg-id"));
+        assert_eq!(msg.moderation_target_id.as_deref(), Some("old-msg-id"));
+        assert_eq!(msg.moderated_by.as_deref(), Some(""));
+        assert_eq!(msg.moderation_reason.as_deref(), Some("cleanup"));
+    }
+
+    #[test]
     fn parse_message_with_reactions() {
         let e = el("<message xmlns='jabber:client' type='groupchat'>\
              <reactions xmlns='urn:xmpp:reactions:0' id='target-msg'>\
@@ -1180,6 +1411,97 @@ mod tests {
 
         assert_eq!(returned_id, stanza_id);
         assert_eq!(stanza.attr("id"), Some("client-visible-1"));
+    }
+
+    #[test]
+    fn build_chat_state_message_validates_state() {
+        let stanza = build_chat_state_message("alice@example.com", "composing", "chat")
+            .expect("valid chat state");
+        assert_eq!(stanza.attr("to"), Some("alice@example.com"));
+        assert_eq!(stanza.attr("type"), Some("chat"));
+        assert!(stanza.get_child("composing", NS_CHAT_STATES).is_some());
+        assert!(build_chat_state_message("alice@example.com", "typing", "chat").is_err());
+    }
+
+    #[test]
+    fn build_displayed_message_has_expected_shape() {
+        let stanza = build_displayed_message("room@muc.example", "msg-1", "groupchat");
+        assert_eq!(stanza.attr("to"), Some("room@muc.example"));
+        assert!(stanza.get_child("displayed", NS_CHAT_MARKERS).is_some());
+        assert_eq!(
+            stanza
+                .get_child("displayed", NS_CHAT_MARKERS)
+                .and_then(|child| child.attr("id")),
+            Some("msg-1")
+        );
+    }
+
+    #[test]
+    fn build_reaction_message_has_expected_shape() {
+        let emojis = vec!["👍".to_string(), "❤️".to_string()];
+        let stanza = build_reaction_message("room@muc.example", "groupchat", "msg-1", &emojis);
+        let reactions = stanza.get_child("reactions", NS_REACTIONS).expect("reactions child");
+        assert_eq!(reactions.attr("id"), Some("msg-1"));
+        let values: Vec<String> = reactions
+            .children()
+            .filter(|child| child.name() == "reaction" && child.ns() == NS_REACTIONS)
+            .map(|child| child.text())
+            .collect();
+        assert_eq!(values, vec!["👍", "❤️"]);
+        assert!(stanza.get_child("store", NS_HINTS).is_some());
+    }
+
+    #[test]
+    fn build_retraction_message_has_expected_shape() {
+        let stanza = build_retraction_message("room@muc.example", "groupchat", "msg-1");
+        assert_eq!(
+            stanza
+                .get_child("retract", NS_MESSAGE_RETRACT)
+                .and_then(|child| child.attr("id")),
+            Some("msg-1")
+        );
+        assert_eq!(
+            stanza.get_child("body", NS_CLIENT).map(|child| child.text()),
+            Some("This person attempted to retract a previous message.".to_string())
+        );
+        assert!(stanza.get_child("store", NS_HINTS).is_some());
+    }
+
+    #[test]
+    fn build_moderation_message_has_expected_shape() {
+        let stanza = build_moderation_message("room@muc.example", "groupchat", "msg-1", Some("cleanup"));
+        assert_eq!(stanza.attr("to"), Some("room@muc.example"));
+        let apply_to = stanza.get_child("apply-to", NS_FASTEN).expect("apply-to child");
+        assert_eq!(apply_to.attr("id"), Some("msg-1"));
+        let moderated = apply_to
+            .get_child("moderated", NS_MESSAGE_MODERATE)
+            .expect("moderated child");
+        assert!(moderated.get_child("retract", NS_MESSAGE_RETRACT).is_some());
+        assert_eq!(
+            moderated
+                .get_child("reason", NS_MESSAGE_MODERATE)
+                .map(|child| child.text()),
+            Some("cleanup".to_string())
+        );
+        assert!(stanza.get_child("store", NS_HINTS).is_some());
+    }
+
+    #[test]
+    fn build_correction_message_has_expected_shape() {
+        let (message_id, stanza) =
+            build_correction_message("alice@example.com", "chat", "fixed", "msg-1");
+        assert_eq!(stanza.attr("to"), Some("alice@example.com"));
+        assert_eq!(stanza.attr("id"), Some(message_id.as_str()));
+        assert_eq!(
+            stanza.get_child("body", NS_CLIENT).map(|child| child.text()),
+            Some("fixed".to_string())
+        );
+        assert_eq!(
+            stanza
+                .get_child("replace", NS_MESSAGE_CORRECT)
+                .and_then(|child| child.attr("id")),
+            Some("msg-1")
+        );
     }
 
     #[test]

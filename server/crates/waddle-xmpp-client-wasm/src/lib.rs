@@ -13,13 +13,26 @@ use waddle_xmpp_client::avatar::{
     build_data_request_iq, build_metadata_request_iq, parse_data_response, parse_metadata_response,
 };
 use waddle_xmpp_client::discovery::{
-    self, build_disco_info_iq, build_disco_items_iq, build_upload_slot_iq,
+    self, build_disco_info_iq, build_disco_items_iq, build_disable_push_iq,
+    build_enable_push_iq, build_muc_admin_affiliation_list_iq,
+    build_muc_admin_affiliation_set_iq, build_roster_get_iq, build_upload_slot_iq,
+    build_user_search_iq, build_waddle_inbox_mark_read_iq, build_waddle_inbox_query_iq,
+    parse_muc_admin_affiliation_query, parse_roster_result, parse_user_search_result,
+    parse_waddle_inbox_result, MucAdminAffiliationItem, UserSearchQuery, WaddleInboxMarkRead,
+    WaddleInboxQuery,
 };
 use waddle_xmpp_client::error::parse_stanza_error;
-use waddle_xmpp_client::mam::{self, build_mam_iq};
+use waddle_xmpp_client::mam::{self, build_mam_iq, build_mam_iq_extended};
 use waddle_xmpp_client::messaging::{
-    self, build_outbound_message, InboundMessage, InboundPresence, MucAffiliation, MucRole,
+    self, build_chat_state_message, build_correction_message, build_displayed_message,
+    build_moderation_message, build_outbound_message, build_reaction_message,
+    build_retraction_message, InboundMessage, InboundPresence, MucAffiliation, MucRole,
     SendMessageOptions, SharedFileDisposition,
+};
+use waddle_xmpp_client::pep::{
+    build_pep_items_iq, build_publish_activity_iq, build_publish_mood_iq,
+    build_publish_tune_iq, build_retract_activity_iq, build_retract_mood_iq,
+    build_retract_tune_iq, parse_pep_activity, parse_pep_mood, parse_pep_tune,
 };
 use waddle_xmpp_client::transport::{
     StreamClose, TransportEvent, TransportMessage, TransportState,
@@ -39,6 +52,18 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::{future_to_promise, spawn_local, JsFuture};
 
 const NS_CLIENT: &str = "jabber:client";
+const NS_CHAT_STATES: &str = "http://jabber.org/protocol/chatstates";
+const NS_CHAT_MARKERS: &str = "urn:xmpp:chat-markers:0";
+const NS_REACTIONS: &str = "urn:xmpp:reactions:0";
+const NS_RETRACT: &str = "urn:xmpp:message-retract:0";
+const NS_REPLACE: &str = "urn:xmpp:message-correct:0";
+const NS_FASTEN: &str = "urn:xmpp:fasten:0";
+const NS_MODERATE: &str = "urn:xmpp:message-moderate:0";
+const NS_HINTS: &str = "urn:xmpp:hints";
+const NS_ROSTER: &str = "jabber:iq:roster";
+const NS_MUC_ADMIN: &str = "http://jabber.org/protocol/muc#admin";
+const NS_VERSION: &str = "jabber:iq:version";
+const NS_USER_SEARCH: &str = "jabber:iq:search";
 const NS_MUC: &str = "http://jabber.org/protocol/muc";
 
 type DriverResult<T> = Result<T, ClientError>;
@@ -125,9 +150,13 @@ enum WasmCommand {
 }
 
 enum DriverEvent {
-    Client(ClientEvent),
+    Client(Box<ClientEvent>),
     Error(String),
     Disconnected,
+}
+
+fn client_driver_event(event: ClientEvent) -> DriverEvent {
+    DriverEvent::Client(Box::new(event))
 }
 
 struct PendingMamQuery {
@@ -166,6 +195,11 @@ pub struct WaddleMessage {
     pub origin_id: Option<String>,
     pub replaces_id: Option<String>,
     pub retracts_id: Option<String>,
+    pub moderation_target_id: Option<String>,
+    pub moderated_by: Option<String>,
+    pub moderation_reason: Option<String>,
+    pub chat_state: Option<String>,
+    pub displayed_marker_id: Option<String>,
     pub reaction_target_id: Option<String>,
     pub reaction_emojis: Vec<String>,
     pub is_muc: bool,
@@ -263,6 +297,125 @@ pub struct WaddleUploadSlot {
     pub put_url: String,
     pub get_url: String,
     pub put_headers: Vec<WaddleUploadHeader>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WaddleServerVersion {
+    pub name: Option<String>,
+    pub version: Option<String>,
+    pub os: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WaddleRoomMember {
+    pub jid: String,
+    pub affiliation: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct WaddleInboxConversation {
+    pub partner: String,
+    pub kind: String,
+    pub last_stanza_id: String,
+    pub last_updated: i64,
+    pub unread: u32,
+    pub preview: Option<String>,
+    pub thread: Option<String>,
+    pub thread_title: Option<String>,
+    pub reply_count: Option<u32>,
+    pub author: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WaddleInboxResult {
+    pub total_unread: u32,
+    pub conversations: Vec<WaddleInboxConversation>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct WaddleFetchInboxOptions {
+    pub since: Option<i64>,
+    pub only_unread: bool,
+    pub room: Option<String>,
+    pub threads: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WaddleRosterContact {
+    pub jid: String,
+    pub name: Option<String>,
+    pub subscription: Option<String>,
+    pub groups: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WaddleUserSearchResult {
+    pub jid: String,
+    pub username: String,
+    pub display_name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct WaddleMoodOpts {
+    pub kind: String,
+    pub text: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct WaddleActivityOpts {
+    pub general: String,
+    pub specific: Option<String>,
+    pub text: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct WaddleTuneOpts {
+    pub artist: Option<String>,
+    pub title: Option<String>,
+    pub source: Option<String>,
+    pub length: Option<u32>,
+    pub rating: Option<u8>,
+    pub track: Option<String>,
+    pub uri: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WaddleMoodResult {
+    pub kind: String,
+    pub text: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WaddleActivityResult {
+    pub general: String,
+    pub specific: Option<String>,
+    pub text: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WaddleTuneResult {
+    pub artist: Option<String>,
+    pub title: Option<String>,
+    pub source: Option<String>,
+    pub length: Option<u32>,
+    pub rating: Option<u8>,
+    pub track: Option<String>,
+    pub uri: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WaddlePepProfile {
+    pub mood: Option<WaddleMoodResult>,
+    pub activity: Option<WaddleActivityResult>,
+    pub tune: Option<WaddleTuneResult>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct WaddleMamPageParam {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub before: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -398,6 +551,549 @@ impl WaddleClient {
         })
     }
 
+    pub fn send_chat_state(&self, to: String, msg_type: String, state: String) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let _ = NS_CHAT_STATES;
+            let stanza = build_chat_state_message(&to, &state, &msg_type)
+                .map_err(|err| js_error(err.to_string()))?;
+            send_stanza_command(inner, stanza).await?;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
+    pub fn send_displayed(&self, to: String, msg_type: String, message_id: String) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let _ = NS_CHAT_MARKERS;
+            let stanza = build_displayed_message(&to, &message_id, &msg_type);
+            send_stanza_command(inner, stanza).await?;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
+    pub fn send_reaction(
+        &self,
+        to: String,
+        msg_type: String,
+        target_id: String,
+        emojis: Vec<String>,
+    ) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let _ = (NS_REACTIONS, NS_HINTS);
+            let stanza = build_reaction_message(&to, &msg_type, &target_id, &emojis);
+            send_stanza_command(inner, stanza).await?;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
+    pub fn send_retraction(
+        &self,
+        to: String,
+        msg_type: String,
+        retracts_id: String,
+    ) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let _ = (NS_RETRACT, NS_HINTS);
+            let stanza = build_retraction_message(&to, &msg_type, &retracts_id);
+            send_stanza_command(inner, stanza).await?;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
+    pub fn send_moderation(
+        &self,
+        to: String,
+        msg_type: String,
+        target_id: String,
+        reason: Option<String>,
+    ) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let _ = (NS_FASTEN, NS_MODERATE, NS_RETRACT, NS_HINTS);
+            let stanza = build_moderation_message(&to, &msg_type, &target_id, reason.as_deref());
+            send_stanza_command(inner, stanza).await?;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
+    pub fn send_correction(
+        &self,
+        to: String,
+        msg_type: String,
+        body: String,
+        replaces_id: String,
+    ) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let _ = NS_REPLACE;
+            let (message_id, stanza) = build_correction_message(&to, &msg_type, &body, &replaces_id);
+            send_stanza_command(inner, stanza).await?;
+            Ok(JsValue::from_str(&message_id))
+        })
+    }
+
+    pub fn subscribe_to_presence(&self, peer_jid: String) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let stanza = Element::builder("presence", NS_CLIENT)
+                .attr("type", "subscribe")
+                .attr("to", peer_jid.as_str())
+                .build();
+            send_stanza_command(inner, stanza).await?;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
+    pub fn enable_push_notifications(
+        &self,
+        service_jid: String,
+        node: String,
+        token: String,
+    ) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let iq = build_enable_push_iq(&service_jid, &node, &token);
+            let _ = send_iq_command(inner, iq).await?;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
+    pub fn disable_push_notifications(&self, service_jid: String, node: String) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let iq = build_disable_push_iq(&service_jid, &node);
+            let _ = send_iq_command(inner, iq).await?;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
+    pub fn get_server_version(&self) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let domain = {
+                let stored = inner.borrow().config.clone();
+                jid_domain(&stored.jid)
+            };
+            let iq = Element::builder("iq", NS_CLIENT)
+                .attr("type", "get")
+                .attr("to", domain.as_str())
+                .attr("id", uuid::Uuid::new_v4().to_string())
+                .append(Element::builder("query", NS_VERSION).build())
+                .build();
+            let result = match send_iq_command(inner, iq).await {
+                Ok(result) => result,
+                Err(_) => return Ok(JsValue::NULL),
+            };
+            let Some(query) = result.get_child("query", NS_VERSION) else {
+                return Ok(JsValue::NULL);
+            };
+            let version = WaddleServerVersion {
+                name: query.get_child("name", NS_VERSION).map(|child| child.text()),
+                version: query.get_child("version", NS_VERSION).map(|child| child.text()),
+                os: query.get_child("os", NS_VERSION).map(|child| child.text()),
+            };
+            to_js_value(&version)
+        })
+    }
+
+    pub fn list_room_members(&self, room_jid: String, affiliation: String) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let _ = NS_MUC_ADMIN;
+            let affiliation = parse_muc_affiliation(&affiliation)?;
+            let iq = build_muc_admin_affiliation_list_iq(&room_jid, affiliation);
+            let result = send_iq_command(inner, iq).await?;
+            let members = parse_muc_admin_affiliation_query(&result)
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|item| Some(WaddleRoomMember {
+                    jid: item.jid?,
+                    affiliation: item.affiliation.map(muc_affiliation_to_string)?,
+                }))
+                .collect::<Vec<_>>();
+            to_js_value(&members)
+        })
+    }
+
+    pub fn set_room_affiliation(
+        &self,
+        room_jid: String,
+        jid: String,
+        affiliation: String,
+    ) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let _ = NS_MUC_ADMIN;
+            let item = MucAdminAffiliationItem {
+                jid: Some(jid),
+                nick: None,
+                affiliation: Some(parse_muc_affiliation(&affiliation)?),
+                reason: None,
+            };
+            let iq = build_muc_admin_affiliation_set_iq(&room_jid, &[item]);
+            let _ = send_iq_command(inner, iq).await?;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
+    pub fn fetch_inbox(&self, opts: JsValue) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let opts = if opts.is_null() || opts.is_undefined() {
+                WaddleFetchInboxOptions::default()
+            } else {
+                serde_wasm_bindgen::from_value(opts).map_err(|err| js_error(err.to_string()))?
+            };
+            let bare_jid = {
+                let stored = inner.borrow().config.clone();
+                bare_jid(&stored.jid)
+            };
+            let iq = build_waddle_inbox_query_iq(
+                bare_jid.as_str(),
+                &WaddleInboxQuery {
+                    since: opts.since.and_then(|value| u64::try_from(value).ok()),
+                    only_unread: opts.only_unread,
+                    room: opts.room,
+                    threads: opts.threads,
+                },
+            );
+            let result = send_iq_command(inner, iq).await?;
+            let inbox = parse_waddle_inbox_result(&result)
+                .map(inbox_result_to_js)
+                .unwrap_or(WaddleInboxResult {
+                    total_unread: 0,
+                    conversations: Vec::new(),
+                });
+            to_js_value(&inbox)
+        })
+    }
+
+    pub fn mark_inbox_read(&self, partner_jid: String, thread_id: Option<String>) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let bare_jid = {
+                let stored = inner.borrow().config.clone();
+                bare_jid(&stored.jid)
+            };
+            let iq = build_waddle_inbox_mark_read_iq(
+                bare_jid.as_str(),
+                &WaddleInboxMarkRead {
+                    partner: partner_jid,
+                    thread: thread_id,
+                },
+            );
+            let _ = send_iq_command(inner, iq).await?;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
+    pub fn list_roster_contacts(&self) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let _ = NS_ROSTER;
+            let result = send_iq_command(inner, build_roster_get_iq(None, None)).await?;
+            let contacts = parse_roster_result(&result)
+                .map(|roster| {
+                    roster
+                        .items
+                        .into_iter()
+                        .map(|item| WaddleRosterContact {
+                            jid: item.jid.to_string(),
+                            name: item.name,
+                            subscription: Some(item.subscription.to_string()),
+                            groups: item.groups,
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            to_js_value(&contacts)
+        })
+    }
+
+    pub fn publish_mood(&self, mood_json: JsValue) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let mood: WaddleMoodOpts =
+                serde_wasm_bindgen::from_value(mood_json).map_err(|err| js_error(err.to_string()))?;
+            let iq = build_publish_mood_iq(&mood.kind, mood.text.as_deref());
+            let _ = send_iq_command(inner, iq).await?;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
+    pub fn retract_mood(&self) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let _ = send_iq_command(inner, build_retract_mood_iq()).await?;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
+    pub fn publish_activity(&self, activity_json: JsValue) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let activity: WaddleActivityOpts = serde_wasm_bindgen::from_value(activity_json)
+                .map_err(|err| js_error(err.to_string()))?;
+            let iq = build_publish_activity_iq(
+                &activity.general,
+                activity.specific.as_deref(),
+                activity.text.as_deref(),
+            );
+            let _ = send_iq_command(inner, iq).await?;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
+    pub fn retract_activity(&self) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let _ = send_iq_command(inner, build_retract_activity_iq()).await?;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
+    pub fn publish_tune(&self, tune_json: JsValue) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let tune: WaddleTuneOpts =
+                serde_wasm_bindgen::from_value(tune_json).map_err(|err| js_error(err.to_string()))?;
+            let iq = build_publish_tune_iq(
+                tune.artist.as_deref(),
+                tune.title.as_deref(),
+                tune.source.as_deref(),
+                tune.length,
+                tune.rating,
+                tune.track.as_deref(),
+                tune.uri.as_deref(),
+            );
+            let _ = send_iq_command(inner, iq).await?;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
+    pub fn retract_tune(&self) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let _ = send_iq_command(inner, build_retract_tune_iq()).await?;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
+    pub fn fetch_user_pep_profile(&self, jid: String) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let mood = send_iq_command(inner.clone(), build_pep_items_iq(&jid, waddle_xmpp_client::pep::NS_MOOD))
+                .await
+                .ok()
+                .and_then(|result| parse_pep_mood(&result))
+                .map(|mood| WaddleMoodResult {
+                    kind: mood.mood,
+                    text: mood.text,
+                });
+            let activity = send_iq_command(
+                inner.clone(),
+                build_pep_items_iq(&jid, waddle_xmpp_client::pep::NS_ACTIVITY),
+            )
+            .await
+            .ok()
+            .and_then(|result| parse_pep_activity(&result))
+            .map(|activity| WaddleActivityResult {
+                general: activity.activity,
+                specific: activity.specific,
+                text: activity.text,
+            });
+            let tune = send_iq_command(inner, build_pep_items_iq(&jid, waddle_xmpp_client::pep::NS_TUNE))
+                .await
+                .ok()
+                .and_then(|result| parse_pep_tune(&result))
+                .map(|tune| WaddleTuneResult {
+                    artist: tune.artist,
+                    title: tune.title,
+                    source: tune.source,
+                    length: tune.length,
+                    rating: tune.rating,
+                    track: tune.track,
+                    uri: tune.uri,
+                });
+            let profile = WaddlePepProfile { mood, activity, tune };
+            to_js_value(&profile)
+        })
+    }
+
+    pub fn fetch_room_history_by_thread(
+        &self,
+        room_jid: String,
+        thread_id: String,
+        max: u32,
+        before_id: Option<String>,
+    ) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let query_id = uuid::Uuid::new_v4().to_string();
+            let iq_id = uuid::Uuid::new_v4().to_string();
+            let iq = build_mam_iq_extended(
+                &iq_id,
+                &query_id,
+                max,
+                before_id.as_deref(),
+                None,
+                None,
+                Some(&room_jid),
+                Some(&thread_id),
+                None,
+                None,
+                None,
+            );
+            let page = send_mam_query_command(inner, iq, query_id).await?;
+            to_js_value(&mam_page_to_js(page))
+        })
+    }
+
+    pub fn search_room_history(&self, room_jid: String, query: String, max: u32) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let query_id = uuid::Uuid::new_v4().to_string();
+            let iq_id = uuid::Uuid::new_v4().to_string();
+            let iq = build_mam_iq_extended(
+                &iq_id,
+                &query_id,
+                max,
+                Some(""),
+                None,
+                None,
+                Some(&room_jid),
+                None,
+                Some(&query),
+                None,
+                None,
+            );
+            let page = send_mam_query_command(inner, iq, query_id).await?;
+            to_js_value(&mam_page_to_js(page))
+        })
+    }
+
+    pub fn search_dm_history(&self, peer_jid: String, query: String, max: u32) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let query_id = uuid::Uuid::new_v4().to_string();
+            let iq_id = uuid::Uuid::new_v4().to_string();
+            let iq = build_mam_iq_extended(
+                &iq_id,
+                &query_id,
+                max,
+                Some(""),
+                None,
+                Some(&peer_jid),
+                None,
+                None,
+                Some(&query),
+                None,
+                None,
+            );
+            let page = send_mam_query_command(inner, iq, query_id).await?;
+            to_js_value(&mam_page_to_js(page))
+        })
+    }
+
+    pub fn fetch_room_history_page(&self, room_jid: String, max: u32, page_param: JsValue) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let page: WaddleMamPageParam = serde_wasm_bindgen::from_value(page_param)
+                .map_err(|err| js_error(err.to_string()))?;
+            let before = match page.kind.as_str() {
+                "latest" => Some(String::new()),
+                "before" => page.before,
+                _ => return Err(js_error("invalid page param type")),
+            };
+            let query_id = uuid::Uuid::new_v4().to_string();
+            let iq_id = uuid::Uuid::new_v4().to_string();
+            let iq = build_mam_iq_extended(
+                &iq_id,
+                &query_id,
+                max,
+                before.as_deref(),
+                None,
+                None,
+                Some(&room_jid),
+                None,
+                None,
+                None,
+                None,
+            );
+            let result = send_mam_query_command(inner, iq, query_id).await?;
+            to_js_value(&mam_page_to_js(result))
+        })
+    }
+
+    pub fn fetch_dm_history_page(&self, peer_jid: String, max: u32, page_param: JsValue) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let page: WaddleMamPageParam = serde_wasm_bindgen::from_value(page_param)
+                .map_err(|err| js_error(err.to_string()))?;
+            let before = match page.kind.as_str() {
+                "latest" => Some(String::new()),
+                "before" => page.before,
+                _ => return Err(js_error("invalid page param type")),
+            };
+            let query_id = uuid::Uuid::new_v4().to_string();
+            let iq_id = uuid::Uuid::new_v4().to_string();
+            let iq = build_mam_iq_extended(
+                &iq_id,
+                &query_id,
+                max,
+                before.as_deref(),
+                None,
+                Some(&peer_jid),
+                None,
+                None,
+                None,
+                None,
+                None,
+            );
+            let result = send_mam_query_command(inner, iq, query_id).await?;
+            to_js_value(&mam_page_to_js(result))
+        })
+    }
+
+    pub fn search_users(&self, query: String) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let _ = NS_USER_SEARCH;
+            let domain = {
+                let stored = inner.borrow().config.clone();
+                jid_domain(&stored.jid)
+            };
+            let iq = build_user_search_iq(
+                &domain,
+                &UserSearchQuery {
+                    nick: Some(query),
+                    ..UserSearchQuery::default()
+                },
+            );
+            let result = send_iq_command(inner, iq).await?;
+            let users = parse_user_search_result(&result)
+                .map(|results| {
+                    results
+                        .items
+                        .into_iter()
+                        .filter_map(|item| {
+                            item.nick.as_ref()?;
+                            Some(WaddleUserSearchResult {
+                                jid: item.jid,
+                                username: item.nick.unwrap_or_default(),
+                                display_name: item.first.or(item.last),
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            to_js_value(&users)
+        })
+    }
+
     pub fn fetch_room_history(
         &self,
         room_jid: String,
@@ -417,8 +1113,7 @@ impl WaddleClient {
                 Some(&room_jid),
             );
             let page = send_mam_query_command(inner, iq, query_id).await?;
-            Ok(serde_wasm_bindgen::to_value(&mam_page_to_js(page))
-                .map_err(|err| js_error(err.to_string()))?)
+            to_js_value(&mam_page_to_js(page))
         })
     }
 
@@ -441,8 +1136,7 @@ impl WaddleClient {
                 None,
             );
             let page = send_mam_query_command(inner, iq, query_id).await?;
-            Ok(serde_wasm_bindgen::to_value(&mam_page_to_js(page))
-                .map_err(|err| js_error(err.to_string()))?)
+            to_js_value(&mam_page_to_js(page))
         })
     }
 
@@ -528,7 +1222,7 @@ impl WaddleClient {
                 mime_type: info.mime_type,
                 data,
             };
-            Ok(serde_wasm_bindgen::to_value(&avatar).map_err(|err| js_error(err.to_string()))?)
+            to_js_value(&avatar)
         })
     }
 
@@ -537,7 +1231,7 @@ impl WaddleClient {
         future_to_promise(async move {
             let domain = {
                 let stored = inner.borrow().config.clone();
-                jid_domain(&stored.jid).to_string()
+                jid_domain(&stored.jid)
             };
             let items_iq = build_disco_items_iq(&domain, None);
             let items_result = send_iq_command(inner.clone(), items_iq).await?;
@@ -571,8 +1265,7 @@ impl WaddleClient {
             let result = send_iq_command(inner, iq).await?;
             let slot = discovery::parse_upload_slot(&result)
                 .ok_or_else(|| js_error("could not parse upload slot"))?;
-            Ok(serde_wasm_bindgen::to_value(&upload_slot_to_js(slot))
-                .map_err(|err| js_error(err.to_string()))?)
+            to_js_value(&upload_slot_to_js(slot))
         })
     }
 
@@ -589,8 +1282,7 @@ impl WaddleClient {
             let Some(space) = discovery::parse_disco_items_result(&space_items)
                 .and_then(|items| items.into_iter().next())
             else {
-                return Ok(serde_wasm_bindgen::to_value(&Vec::<WaddleRoom>::new())
-                    .map_err(|err| js_error(err.to_string()))?);
+                return to_js_value(&Vec::<WaddleRoom>::new());
             };
             let space_node = space.node.unwrap_or_else(|| space.jid.clone());
             let rooms_result = send_iq_command(
@@ -608,7 +1300,7 @@ impl WaddleClient {
                     position: 0,
                 })
                 .collect::<Vec<_>>();
-            Ok(serde_wasm_bindgen::to_value(&rooms).map_err(|err| js_error(err.to_string()))?)
+            to_js_value(&rooms)
         })
     }
 }
@@ -862,7 +1554,7 @@ impl WasmDriverTask {
                 let _ = self
                     .event_tx
                     .clone()
-                    .send(DriverEvent::Client(ClientEvent::Connection(
+                    .send(client_driver_event(ClientEvent::Connection(
                         ConnectionEvent::OutboundMessage(message.clone()),
                     )))
                     .await;
@@ -875,7 +1567,7 @@ impl WasmDriverTask {
                 let _ = self
                     .event_tx
                     .clone()
-                    .send(DriverEvent::Client(ClientEvent::Connection(
+                    .send(client_driver_event(ClientEvent::Connection(
                         ConnectionEvent::StreamManagement(StreamManagementEvent::Enabled {
                             previd,
                         }),
@@ -890,7 +1582,7 @@ impl WasmDriverTask {
                 let _ = self
                     .event_tx
                     .clone()
-                    .send(DriverEvent::Client(ClientEvent::Connection(
+                    .send(client_driver_event(ClientEvent::Connection(
                         ConnectionEvent::StreamManagement(StreamManagementEvent::Resumed { h }),
                     )))
                     .await;
@@ -903,7 +1595,7 @@ impl WasmDriverTask {
                 let _ = self
                     .event_tx
                     .clone()
-                    .send(DriverEvent::Client(ClientEvent::Connection(
+                    .send(client_driver_event(ClientEvent::Connection(
                         ConnectionEvent::StreamManagement(StreamManagementEvent::AckReceived { h }),
                     )))
                     .await;
@@ -917,7 +1609,7 @@ impl WasmDriverTask {
                 let _ = self
                     .event_tx
                     .clone()
-                    .send(DriverEvent::Client(ClientEvent::Connection(
+                    .send(client_driver_event(ClientEvent::Connection(
                         ConnectionEvent::StreamManagement(StreamManagementEvent::Failed),
                     )))
                     .await;
@@ -961,7 +1653,7 @@ impl WasmDriverTask {
                 None
             }
             other => {
-                let _ = self.event_tx.clone().send(DriverEvent::Client(other)).await;
+                let _ = self.event_tx.clone().send(client_driver_event(other)).await;
                 None
             }
         }
@@ -1023,7 +1715,7 @@ impl WasmDriverTask {
                 let _ = self
                     .event_tx
                     .clone()
-                    .send(DriverEvent::Client(ClientEvent::MessageDelivery(
+                    .send(client_driver_event(ClientEvent::MessageDelivery(
                         MessageDeliveryEvent::Acked {
                             stanza_id: pending.stanza_id,
                         },
@@ -1043,7 +1735,7 @@ impl WasmDriverTask {
         let _ = self
             .event_tx
             .clone()
-            .send(DriverEvent::Client(ClientEvent::MessageDelivery(
+            .send(client_driver_event(ClientEvent::MessageDelivery(
                 MessageDeliveryEvent::Failed { stanza_id },
             )))
             .await;
@@ -1077,7 +1769,7 @@ async fn event_dispatch_loop(
 ) {
     while let Some(event) = event_rx.next().await {
         match event {
-            DriverEvent::Client(client_event) => dispatch_client_event(&inner, client_event),
+            DriverEvent::Client(client_event) => dispatch_client_event(&inner, *client_event),
             DriverEvent::Error(description) => emit_error_callback(&inner, &description),
             DriverEvent::Disconnected => {
                 inner.borrow_mut().cmd_tx = None;
@@ -1098,14 +1790,14 @@ fn dispatch_client_event(inner: &Rc<RefCell<WaddleClientInner>>, event: ClientEv
         }
         ClientEvent::Messaging(waddle_xmpp_client::MessagingEvent::Message(message)) => {
             if let Some(callback) = inner.borrow().on_message.as_ref() {
-                if let Ok(value) = serde_wasm_bindgen::to_value(&inbound_to_js(*message)) {
+                if let Ok(value) = to_js_value(&inbound_to_js(*message)) {
                     let _ = callback.call1(&JsValue::NULL, &value);
                 }
             }
         }
         ClientEvent::Messaging(waddle_xmpp_client::MessagingEvent::Presence(presence)) => {
             if let Some(callback) = inner.borrow().on_presence.as_ref() {
-                if let Ok(value) = serde_wasm_bindgen::to_value(&presence_to_js(presence)) {
+                if let Ok(value) = to_js_value(&presence_to_js(presence)) {
                     let _ = callback.call1(&JsValue::NULL, &value);
                 }
             }
@@ -1315,6 +2007,11 @@ fn inbound_to_js(message: InboundMessage) -> WaddleMessage {
         origin_id: message.origin_id,
         replaces_id: message.replaces_id,
         retracts_id: message.retracts_id,
+        moderation_target_id: message.moderation_target_id,
+        moderated_by: message.moderated_by,
+        moderation_reason: message.moderation_reason,
+        chat_state: message.chat_state,
+        displayed_marker_id: message.displayed_marker_id,
         reaction_target_id: message.reaction_target_id,
         reaction_emojis: message.reaction_emojis,
         is_muc: message.message_type == "groupchat",
@@ -1392,6 +2089,30 @@ fn mam_page_to_js(page: waddle_xmpp_client::MamPage) -> WaddleMamPage {
     }
 }
 
+fn inbox_result_to_js(result: discovery::WaddleInboxResult) -> WaddleInboxResult {
+    WaddleInboxResult {
+        total_unread: result.total_unread.unwrap_or(0),
+        conversations: result
+            .conversations
+            .into_iter()
+            .filter_map(|conversation| {
+                Some(WaddleInboxConversation {
+                    partner: conversation.partner,
+                    kind: conversation.kind,
+                    last_stanza_id: conversation.last_stanza_id?,
+                    last_updated: i64::try_from(conversation.last_updated?).ok()?,
+                    unread: conversation.unread,
+                    preview: conversation.preview,
+                    thread: conversation.thread,
+                    thread_title: conversation.thread_title,
+                    reply_count: conversation.reply_count,
+                    author: conversation.author,
+                })
+            })
+            .collect(),
+    }
+}
+
 fn shared_file_to_js(file: messaging::SharedFile) -> WaddleSharedFile {
     WaddleSharedFile {
         url: file.url,
@@ -1447,8 +2168,24 @@ fn muc_role_to_string(value: MucRole) -> String {
     .to_string()
 }
 
-fn jid_domain(jid: &str) -> &str {
-    jid.split('@').next_back().unwrap_or(jid)
+fn bare_jid(jid: &str) -> String {
+    jid.split('/').next().unwrap_or(jid).to_string()
+}
+
+fn jid_domain(jid: &str) -> String {
+    let bare = bare_jid(jid);
+    bare.split('@').next_back().unwrap_or(bare.as_str()).to_string()
+}
+
+fn parse_muc_affiliation(value: &str) -> Result<MucAffiliation, JsValue> {
+    match value {
+        "owner" => Ok(MucAffiliation::Owner),
+        "admin" => Ok(MucAffiliation::Admin),
+        "member" => Ok(MucAffiliation::Member),
+        "outcast" => Ok(MucAffiliation::Outcast),
+        "none" => Ok(MucAffiliation::None),
+        _ => Err(js_error(format!("invalid affiliation: {value}"))),
+    }
 }
 
 async fn fetch_avatar_url(url: &str) -> Result<Vec<u8>, JsValue> {
@@ -1488,6 +2225,10 @@ fn message_delivery_stanza_id(element: &Element) -> Option<StanzaId> {
 
 fn is_stream_management_enable(element: &Element) -> bool {
     element.name() == "enable" && element.ns() == waddle_xmpp_client::stream_management::NS_SM
+}
+
+fn to_js_value<T: Serialize + ?Sized>(value: &T) -> Result<JsValue, JsValue> {
+    serde_wasm_bindgen::to_value(value).map_err(|err| js_error(err.to_string()))
 }
 
 fn js_error(message: impl ToString) -> JsValue {

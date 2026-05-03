@@ -3,6 +3,9 @@
 
 use jid::BareJid;
 use minidom::Element;
+use waddle_xmpp_core::roster::{RosterItem, ROSTER_NS};
+
+use crate::messaging::MucAffiliation;
 
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 use crate::client::ClientHandle;
@@ -20,6 +23,7 @@ pub const DISCO_INFO_NS: &str = "http://jabber.org/protocol/disco#info";
 pub const DISCO_ITEMS_NS: &str = "http://jabber.org/protocol/disco#items";
 pub const UPLOAD_NS: &str = "urn:xmpp:http:upload:0";
 pub const INBOX_NS: &str = "erlang-solutions.com:xmpp:inbox:0";
+pub const WADDLE_INBOX_NS: &str = "urn:waddle:inbox:0";
 pub const PUSH_NS: &str = "urn:xmpp:push:0";
 pub const CLIENT_NS: &str = "jabber:client";
 pub const DATA_FORMS_NS: &str = "jabber:x:data";
@@ -29,6 +33,8 @@ pub const PUBSUB_METADATA_FORM_TYPE: &str = "http://jabber.org/protocol/pubsub#m
 pub const BOOKMARKS_NS: &str = "urn:xmpp:bookmarks:1";
 pub const SPACES_NS: &str = "urn:xmpp:spaces:0";
 pub const WADDLE_ROOM_METADATA_FORM_TYPE: &str = "urn:waddle:room:0";
+pub const USER_SEARCH_NS: &str = "jabber:iq:search";
+pub const MUC_ADMIN_NS: &str = "http://jabber.org/protocol/muc#admin";
 
 // ── ID generation ────────────────────────────────────────────────────────────
 
@@ -187,6 +193,82 @@ pub struct DiscoveredChannel {
 pub struct DiscoveredTopology {
     pub spaces: Vec<DiscoveredSpace>,
     pub channels: Vec<DiscoveredChannel>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WaddleInboxQuery {
+    pub since: Option<u64>,
+    pub only_unread: bool,
+    pub room: Option<String>,
+    pub threads: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WaddleInboxMarkRead {
+    pub partner: String,
+    pub thread: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WaddleInboxConversation {
+    pub partner: String,
+    pub kind: String,
+    pub last_stanza_id: Option<String>,
+    pub last_updated: Option<u64>,
+    pub unread: u32,
+    pub preview: Option<String>,
+    pub thread: Option<String>,
+    pub thread_title: Option<String>,
+    pub reply_count: Option<u32>,
+    pub author: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WaddleInboxResult {
+    pub total_unread: Option<u32>,
+    pub conversations: Vec<WaddleInboxConversation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RosterResult {
+    pub ver: Option<String>,
+    pub items: Vec<RosterItem>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UserSearchQuery {
+    pub nick: Option<String>,
+    pub email: Option<String>,
+    pub first: Option<String>,
+    pub last: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserSearchForm {
+    pub instructions: Option<String>,
+    pub fields: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserSearchItem {
+    pub jid: String,
+    pub nick: Option<String>,
+    pub email: Option<String>,
+    pub first: Option<String>,
+    pub last: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserSearchResult {
+    pub items: Vec<UserSearchItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MucAdminAffiliationItem {
+    pub jid: Option<String>,
+    pub nick: Option<String>,
+    pub affiliation: Option<MucAffiliation>,
+    pub reason: Option<String>,
 }
 
 // ── Parse helpers ─────────────────────────────────────────────────────────────
@@ -573,6 +655,244 @@ pub fn build_disable_push_iq(push_service_jid: &str, node: &str) -> Element {
                 .build(),
         )
         .build()
+}
+
+pub fn build_waddle_inbox_query_iq(to: &str, query: &WaddleInboxQuery) -> Element {
+    let id = format!("waddle-inbox-{}", next_id());
+    let mut builder = Element::builder("query", WADDLE_INBOX_NS);
+    if let Some(since) = query.since {
+        builder = builder.attr("since", since.to_string());
+    }
+    if query.only_unread {
+        builder = builder.attr("only-unread", "true");
+    }
+    if let Some(room) = query.room.as_deref() {
+        builder = builder.attr("room", room);
+    }
+    if query.threads {
+        builder = builder.attr("threads", "true");
+    }
+    Element::builder("iq", CLIENT_NS)
+        .attr("type", "get")
+        .attr("to", to)
+        .attr("id", id)
+        .append(builder.build())
+        .build()
+}
+
+pub fn build_waddle_inbox_mark_read_iq(to: &str, mark_read: &WaddleInboxMarkRead) -> Element {
+    let id = format!("waddle-mark-read-{}", next_id());
+    let mut builder = Element::builder("mark-read", WADDLE_INBOX_NS)
+        .attr("partner", mark_read.partner.as_str());
+    if let Some(thread) = mark_read.thread.as_deref() {
+        builder = builder.attr("thread", thread);
+    }
+    Element::builder("iq", CLIENT_NS)
+        .attr("type", "set")
+        .attr("to", to)
+        .attr("id", id)
+        .append(builder.build())
+        .build()
+}
+
+pub fn parse_waddle_inbox_result(iq: &Element) -> Option<WaddleInboxResult> {
+    let query = iq.get_child("query", WADDLE_INBOX_NS)?;
+    let total_unread = query.attr("total-unread").and_then(|value| value.parse().ok());
+    let conversations = query
+        .children()
+        .filter(|child| child.name() == "conversation" && child.ns() == WADDLE_INBOX_NS)
+        .filter_map(|conversation| {
+            let partner = conversation.attr("partner")?.to_string();
+            let kind = conversation.attr("kind").unwrap_or("direct").to_string();
+            let unread = conversation
+                .attr("unread")
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0);
+            Some(WaddleInboxConversation {
+                partner,
+                kind,
+                last_stanza_id: conversation.attr("last-stanza-id").map(str::to_string),
+                last_updated: conversation
+                    .attr("last-updated")
+                    .and_then(|value| value.parse().ok()),
+                unread,
+                preview: conversation.get_child("preview", WADDLE_INBOX_NS).map(|child| child.text()),
+                thread: conversation.attr("thread").map(str::to_string),
+                thread_title: conversation.attr("thread-title").map(str::to_string),
+                reply_count: conversation
+                    .attr("reply-count")
+                    .and_then(|value| value.parse().ok()),
+                author: conversation.attr("author").map(str::to_string),
+            })
+        })
+        .collect();
+    Some(WaddleInboxResult {
+        total_unread,
+        conversations,
+    })
+}
+
+pub fn build_roster_get_iq(to: Option<&str>, ver: Option<&str>) -> Element {
+    let id = format!("roster-{}", next_id());
+    let mut query = Element::builder("query", ROSTER_NS);
+    if let Some(ver) = ver {
+        query = query.attr("ver", ver);
+    }
+    let mut iq = Element::builder("iq", CLIENT_NS)
+        .attr("type", "get")
+        .attr("id", id)
+        .append(query.build());
+    if let Some(to) = to {
+        iq = iq.attr("to", to);
+    }
+    iq.build()
+}
+
+pub fn parse_roster_result(iq: &Element) -> Option<RosterResult> {
+    let query = iq.get_child("query", ROSTER_NS)?;
+    let items = query
+        .children()
+        .filter(|child| child.name() == "item" && child.ns() == ROSTER_NS)
+        .map(RosterItem::from_element)
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+    Some(RosterResult {
+        ver: query.attr("ver").map(str::to_string),
+        items,
+    })
+}
+
+pub fn build_user_search_form_iq(to: &str) -> Element {
+    let id = format!("user-search-form-{}", next_id());
+    Element::builder("iq", CLIENT_NS)
+        .attr("type", "get")
+        .attr("to", to)
+        .attr("id", id)
+        .append(Element::builder("query", USER_SEARCH_NS).build())
+        .build()
+}
+
+pub fn build_user_search_iq(to: &str, query: &UserSearchQuery) -> Element {
+    let id = format!("user-search-{}", next_id());
+    let mut search = Element::builder("query", USER_SEARCH_NS);
+    for (name, value) in [
+        ("nick", query.nick.as_deref()),
+        ("email", query.email.as_deref()),
+        ("first", query.first.as_deref()),
+        ("last", query.last.as_deref()),
+    ] {
+        if let Some(value) = value {
+            search = search.append(Element::builder(name, USER_SEARCH_NS).append(value).build());
+        }
+    }
+    Element::builder("iq", CLIENT_NS)
+        .attr("type", "set")
+        .attr("to", to)
+        .attr("id", id)
+        .append(search.build())
+        .build()
+}
+
+pub fn parse_user_search_form(iq: &Element) -> Option<UserSearchForm> {
+    let query = iq.get_child("query", USER_SEARCH_NS)?;
+    let instructions = query
+        .get_child("instructions", USER_SEARCH_NS)
+        .map(|child| child.text());
+    let fields = query
+        .children()
+        .filter(|child| child.ns() == USER_SEARCH_NS && child.name() != "instructions")
+        .map(|child| child.name().to_string())
+        .collect();
+    Some(UserSearchForm { instructions, fields })
+}
+
+pub fn parse_user_search_result(iq: &Element) -> Option<UserSearchResult> {
+    let query = iq.get_child("query", USER_SEARCH_NS)?;
+    let items = query
+        .children()
+        .filter(|child| child.name() == "item" && child.ns() == USER_SEARCH_NS)
+        .filter_map(|item| {
+            let jid = item.attr("jid")?.to_string();
+            Some(UserSearchItem {
+                jid,
+                nick: item.get_child("nick", USER_SEARCH_NS).map(|child| child.text()),
+                email: item.get_child("email", USER_SEARCH_NS).map(|child| child.text()),
+                first: item.get_child("first", USER_SEARCH_NS).map(|child| child.text()),
+                last: item.get_child("last", USER_SEARCH_NS).map(|child| child.text()),
+            })
+        })
+        .collect();
+    Some(UserSearchResult { items })
+}
+
+pub fn build_muc_admin_affiliation_list_iq(room_jid: &str, affiliation: MucAffiliation) -> Element {
+    let id = format!("muc-admin-list-{}", next_id());
+    Element::builder("iq", CLIENT_NS)
+        .attr("type", "get")
+        .attr("to", room_jid)
+        .attr("id", id)
+        .append(
+            Element::builder("query", MUC_ADMIN_NS)
+                .append(
+                    Element::builder("item", MUC_ADMIN_NS)
+                        .attr("affiliation", affiliation.as_str())
+                        .build(),
+                )
+                .build(),
+        )
+        .build()
+}
+
+pub fn build_muc_admin_affiliation_set_iq(
+    room_jid: &str,
+    items: &[MucAdminAffiliationItem],
+) -> Element {
+    let id = format!("muc-admin-set-{}", next_id());
+    let mut query = Element::builder("query", MUC_ADMIN_NS);
+    for item in items {
+        let mut item_builder = Element::builder("item", MUC_ADMIN_NS);
+        if let Some(jid) = item.jid.as_deref() {
+            item_builder = item_builder.attr("jid", jid);
+        }
+        if let Some(nick) = item.nick.as_deref() {
+            item_builder = item_builder.attr("nick", nick);
+        }
+        if let Some(affiliation) = item.affiliation {
+            item_builder = item_builder.attr("affiliation", affiliation.as_str());
+        }
+        if let Some(reason) = item.reason.as_deref() {
+            item_builder = item_builder.append(
+                Element::builder("reason", MUC_ADMIN_NS)
+                    .append(reason)
+                    .build(),
+            );
+        }
+        query = query.append(item_builder.build());
+    }
+    Element::builder("iq", CLIENT_NS)
+        .attr("type", "set")
+        .attr("to", room_jid)
+        .attr("id", id)
+        .append(query.build())
+        .build()
+}
+
+pub fn parse_muc_admin_affiliation_query(element: &Element) -> Option<Vec<MucAdminAffiliationItem>> {
+    let query = element.get_child("query", MUC_ADMIN_NS)?;
+    Some(
+        query
+            .children()
+            .filter(|child| child.name() == "item" && child.ns() == MUC_ADMIN_NS)
+            .map(|item| MucAdminAffiliationItem {
+                jid: item.attr("jid").map(str::to_string),
+                nick: item.attr("nick").map(str::to_string),
+                affiliation: item
+                    .attr("affiliation")
+                    .and_then(MucAffiliation::from_attr),
+                reason: item.get_child("reason", MUC_ADMIN_NS).map(|child| child.text()),
+            })
+            .collect(),
+    )
 }
 
 // ── Private helpers ───────────────────────────────────────────────────────────
@@ -1246,6 +1566,186 @@ mod tests {
         assert!(result.has_feature(UPLOAD_NS));
         assert!(result.has_feature("jabber:iq:ping"));
         assert!(!result.has_feature("urn:xmpp:nonexistent"));
+    }
+
+
+    #[test]
+    fn build_and_parse_waddle_inbox_round_trip() {
+        let iq = build_waddle_inbox_query_iq(
+            "me@example.com",
+            &WaddleInboxQuery {
+                since: Some(1700000),
+                only_unread: true,
+                room: Some("room@muc.example.com".to_string()),
+                threads: true,
+            },
+        );
+        let query = iq.get_child("query", WADDLE_INBOX_NS).expect("inbox query");
+        assert_eq!(query.attr("since"), Some("1700000"));
+        assert_eq!(query.attr("only-unread"), Some("true"));
+        assert_eq!(query.attr("room"), Some("room@muc.example.com"));
+        assert_eq!(query.attr("threads"), Some("true"));
+
+        let result = Element::builder("iq", CLIENT_NS)
+            .attr("type", "result")
+            .append(
+                Element::builder("query", WADDLE_INBOX_NS)
+                    .attr("total-unread", "3")
+                    .append(
+                        Element::builder("conversation", WADDLE_INBOX_NS)
+                            .attr("partner", "alice@example.com")
+                            .attr("kind", "direct")
+                            .attr("last-stanza-id", "sid-1")
+                            .attr("last-updated", "1700001")
+                            .attr("unread", "2")
+                            .append(
+                                Element::builder("preview", WADDLE_INBOX_NS)
+                                    .append("hi there")
+                                    .build(),
+                            )
+                            .build(),
+                    )
+                    .build(),
+            )
+            .build();
+        let parsed = parse_waddle_inbox_result(&result).expect("parse inbox result");
+        assert_eq!(parsed.total_unread, Some(3));
+        assert_eq!(parsed.conversations.len(), 1);
+        assert_eq!(parsed.conversations[0].partner, "alice@example.com");
+        assert_eq!(parsed.conversations[0].preview.as_deref(), Some("hi there"));
+    }
+
+    #[test]
+    fn build_waddle_inbox_mark_read_supports_thread() {
+        let iq = build_waddle_inbox_mark_read_iq(
+            "me@example.com",
+            &WaddleInboxMarkRead {
+                partner: "room@muc.example.com".to_string(),
+                thread: Some("thread-42".to_string()),
+            },
+        );
+        let mark_read = iq.get_child("mark-read", WADDLE_INBOX_NS).expect("mark-read");
+        assert_eq!(mark_read.attr("partner"), Some("room@muc.example.com"));
+        assert_eq!(mark_read.attr("thread"), Some("thread-42"));
+    }
+
+    #[test]
+    fn build_and_parse_roster_result() {
+        let get = build_roster_get_iq(None, Some("ver-1"));
+        let query = get.get_child("query", ROSTER_NS).expect("roster query");
+        assert_eq!(query.attr("ver"), Some("ver-1"));
+
+        let result = Element::builder("iq", CLIENT_NS)
+            .attr("type", "result")
+            .append(
+                Element::builder("query", ROSTER_NS)
+                    .attr("ver", "ver-2")
+                    .append(
+                        Element::builder("item", ROSTER_NS)
+                            .attr("jid", "alice@example.com")
+                            .attr("name", "Alice")
+                            .attr("subscription", "both")
+                            .append(Element::builder("group", ROSTER_NS).append("Friends").build())
+                            .build(),
+                    )
+                    .build(),
+            )
+            .build();
+        let parsed = parse_roster_result(&result).expect("parse roster");
+        assert_eq!(parsed.ver.as_deref(), Some("ver-2"));
+        assert_eq!(parsed.items.len(), 1);
+        assert_eq!(parsed.items[0].jid.to_string(), "alice@example.com");
+        assert_eq!(parsed.items[0].name.as_deref(), Some("Alice"));
+    }
+
+    #[test]
+    fn build_and_parse_user_search_queries() {
+        let form_iq = build_user_search_form_iq("localhost");
+        assert!(form_iq.get_child("query", USER_SEARCH_NS).is_some());
+
+        let search_iq = build_user_search_iq(
+            "localhost",
+            &UserSearchQuery {
+                nick: Some("admin".to_string()),
+                email: None,
+                first: None,
+                last: None,
+            },
+        );
+        assert_eq!(
+            search_iq
+                .get_child("query", USER_SEARCH_NS)
+                .and_then(|query| query.get_child("nick", USER_SEARCH_NS))
+                .map(|child| child.text()),
+            Some("admin".to_string())
+        );
+
+        let form_result = Element::builder("iq", CLIENT_NS)
+            .attr("type", "result")
+            .append(
+                Element::builder("query", USER_SEARCH_NS)
+                    .append(
+                        Element::builder("instructions", USER_SEARCH_NS)
+                            .append("Search users")
+                            .build(),
+                    )
+                    .append(Element::builder("nick", USER_SEARCH_NS).build())
+                    .append(Element::builder("email", USER_SEARCH_NS).build())
+                    .build(),
+            )
+            .build();
+        let parsed_form = parse_user_search_form(&form_result).expect("parse form");
+        assert_eq!(parsed_form.instructions.as_deref(), Some("Search users"));
+        assert_eq!(parsed_form.fields, vec!["nick", "email"]);
+
+        let result = Element::builder("iq", CLIENT_NS)
+            .attr("type", "result")
+            .append(
+                Element::builder("query", USER_SEARCH_NS)
+                    .append(
+                        Element::builder("item", USER_SEARCH_NS)
+                            .attr("jid", "admin@localhost")
+                            .append(Element::builder("nick", USER_SEARCH_NS).append("admin").build())
+                            .append(
+                                Element::builder("email", USER_SEARCH_NS)
+                                    .append("admin@localhost")
+                                    .build(),
+                            )
+                            .build(),
+                    )
+                    .build(),
+            )
+            .build();
+        let parsed = parse_user_search_result(&result).expect("parse search result");
+        assert_eq!(parsed.items[0].jid, "admin@localhost");
+        assert_eq!(parsed.items[0].nick.as_deref(), Some("admin"));
+    }
+
+    #[test]
+    fn build_and_parse_muc_admin_affiliation_queries() {
+        let list = build_muc_admin_affiliation_list_iq("room@muc.example.com", MucAffiliation::Member);
+        assert_eq!(list.attr("type"), Some("get"));
+        assert_eq!(
+            list.get_child("query", MUC_ADMIN_NS)
+                .and_then(|query| query.get_child("item", MUC_ADMIN_NS))
+                .and_then(|item| item.attr("affiliation")),
+            Some("member")
+        );
+
+        let set = build_muc_admin_affiliation_set_iq(
+            "room@muc.example.com",
+            &[MucAdminAffiliationItem {
+                jid: Some("alice@example.com".to_string()),
+                nick: None,
+                affiliation: Some(MucAffiliation::Admin),
+                reason: Some("promoted".to_string()),
+            }],
+        );
+        let parsed = parse_muc_admin_affiliation_query(&set).expect("parse admin set");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].jid.as_deref(), Some("alice@example.com"));
+        assert_eq!(parsed[0].affiliation, Some(MucAffiliation::Admin));
+        assert_eq!(parsed[0].reason.as_deref(), Some("promoted"));
     }
 
     #[test]
