@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -10,12 +10,24 @@ const outDir = resolve(repoRoot, "server/wasm-pkg/waddle-xmpp-client-wasm");
 const pkgJsonPath = resolve(outDir, "package.json");
 const jsPath = resolve(outDir, "waddle_xmpp_client_wasm.js");
 const dtsPath = resolve(outDir, "waddle_xmpp_client_wasm.d.ts");
+const wasmPath = resolve(outDir, "waddle_xmpp_client_wasm_bg.wasm");
 
-execFileSync(
-  "wasm-pack",
-  ["build", "--target", "bundler", "--out-dir", "../../wasm-pkg/waddle-xmpp-client-wasm"],
-  { cwd: crateDir, stdio: "inherit" },
-);
+// Skip wasm-pack compilation when the committed artifact is already present and
+// SKIP_WASM_BUILD is set (or CI=true without an explicit override). This lets
+// the chat lint/build pipeline use the pre-built artifact without needing a
+// wasm32-unknown-unknown Rust toolchain in CI.
+const artifactPresent = existsSync(wasmPath);
+const skipBuild = artifactPresent && (process.env.SKIP_WASM_BUILD === "1" || (process.env.CI === "true" && process.env.REBUILD_WASM !== "1"));
+
+if (!skipBuild) {
+  execFileSync(
+    "wasm-pack",
+    ["build", "--target", "bundler", "--out-dir", "../../wasm-pkg/waddle-xmpp-client-wasm"],
+    { cwd: crateDir, stdio: "inherit" },
+  );
+} else {
+  console.log("[wasm-pack] Skipping build: pre-built artifact present (CI mode). Set REBUILD_WASM=1 to force rebuild.");
+}
 
 const pkg = JSON.parse(readFileSync(pkgJsonPath, "utf8"));
 pkg.name = "@waddle/xmpp-client-wasm";

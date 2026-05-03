@@ -1087,7 +1087,11 @@ pub fn build_outbound_message(
         .append(Element::builder("body", NS_CLIENT).append(body).build());
 
     if let Some(subject) = options.subject.as_deref() {
-        builder = builder.append(Element::builder("subject", NS_CLIENT).append(subject).build());
+        builder = builder.append(
+            Element::builder("subject", NS_CLIENT)
+                .append(subject)
+                .build(),
+        );
     }
     if let Some(marker) = options.reply.as_ref() {
         builder = builder.append(xep_reply::build_reply_element(marker));
