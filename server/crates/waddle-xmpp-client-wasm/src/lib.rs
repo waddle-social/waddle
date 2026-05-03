@@ -1394,6 +1394,69 @@ impl WaddleClient {
             to_js_value(&rooms)
         })
     }
+
+    /// Query pubsub items from a node (XEP-0060).
+    ///
+    /// Returns an array of `{ jid, name }` objects extracted from the `<item>`
+    /// elements in the result IQ.  The item `id` attribute is used as the JID;
+    /// the optional `name` attribute on a `<conference>` child (XEP-0402) is
+    /// used as the human-readable name.
+    pub fn get_pubsub_items(&self, to: String, node: String) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let iq = build_pubsub_items_iq(&to, &node);
+            let result = send_iq_command(inner, iq).await?;
+            let items = parse_pubsub_items_result(&result);
+            to_js_value(&items)
+        })
+    }
+}
+
+const NS_PUBSUB: &str = "http://jabber.org/protocol/pubsub";
+
+/// Build an XEP-0060 pubsub `<items>` IQ directed at `to` for `node`.
+fn build_pubsub_items_iq(to: &str, node: &str) -> Element {
+    let items = Element::builder("items", NS_PUBSUB)
+        .attr("node", node)
+        .build();
+    let pubsub = Element::builder("pubsub", NS_PUBSUB).append(items).build();
+    Element::builder("iq", NS_CLIENT)
+        .attr("type", "get")
+        .attr("to", to)
+        .append(pubsub)
+        .build()
+}
+
+#[derive(Debug, Serialize)]
+struct PubsubItem {
+    jid: Option<String>,
+    name: Option<String>,
+}
+
+/// Parse the `<item>` children from an XEP-0060 items IQ result.
+///
+/// The item `id` attribute is used as the JID.  An optional `name` attribute
+/// on a `<conference xmlns='urn:xmpp:bookmarks:1'>` child element is used as
+/// the human-readable name.
+fn parse_pubsub_items_result(iq: &Element) -> Vec<PubsubItem> {
+    let Some(pubsub) = iq.get_child("pubsub", NS_PUBSUB) else {
+        return Vec::new();
+    };
+    let Some(items) = pubsub.get_child("items", NS_PUBSUB) else {
+        return Vec::new();
+    };
+    items
+        .children()
+        .filter(|el| el.name() == "item")
+        .map(|item| {
+            let jid = item.attr("id").map(String::from);
+            let name = item
+                .children()
+                .find(|c| c.name() == "conference")
+                .and_then(|conf| conf.attr("name").map(String::from));
+            PubsubItem { jid, name }
+        })
+        .collect()
 }
 
 async fn driver_loop(

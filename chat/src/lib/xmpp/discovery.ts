@@ -134,8 +134,13 @@ async function sendDiscoItems(xmpp: HybridClient, to: string, node?: string): Pr
   return (await legacyClient(xmpp).getDiscoItems?.(to, node))?.items ?? [];
 }
 
-async function sendPubsubItems(_xmpp: HybridClient, _to: string, _node: string): Promise<Array<{ jid?: string; name?: string }>> {
-  return [];
+async function sendPubsubItems(xmpp: HybridClient, to: string, node: string): Promise<Array<{ jid?: string; name?: string }>> {
+  if (xmpp.get_pubsub_items) {
+    return (await xmpp.get_pubsub_items(to, node)) as Array<{ jid?: string; name?: string }>;
+  }
+  // Legacy stanza.js path: items are keyed by id (which is the room JID).
+  const result = await legacyClient(xmpp).getItems?.(to, node);
+  return (result?.items ?? []).map((item) => ({ jid: item.id, name: item.content?.name }));
 }
 
 export function spacesServiceDomain(jid: string): string { return `spaces.${jidDomain(jid)}`; }
