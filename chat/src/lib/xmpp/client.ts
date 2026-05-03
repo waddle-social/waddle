@@ -17,6 +17,7 @@ import type {
   DmChatStateEvent,
   DmDisplayedEvent,
   DmReactionEvent,
+  DiscoveredTopology,
   ListRoomMembersOptions,
   LiveDmMessage,
   LiveRoomMessage,
@@ -31,6 +32,7 @@ import type {
   RoomPresence,
   RosterContact,
   SessionLifecycleEvent,
+  SharedFileInfo,
   XmppErrorEvent,
   XmppStatusSnapshot,
 } from "./types";
@@ -80,7 +82,6 @@ import type {
 
 type WasmModule = typeof import("@waddle/xmpp-client-wasm");
 type WasmClient = import("@waddle/xmpp-client-wasm").WaddleClient;
-type WasmConfig = import("@waddle/xmpp-client-wasm").WaddleConfig;
 
 type CompatEmitter = {
   on?: (event: string, handler: (...args: any[]) => void) => void;
@@ -151,30 +152,21 @@ function avatarDataUrl(data: Uint8Array, mediaType?: string | null): string | nu
   return `data:${mediaType || "image/png"};base64,${bufferLikeToBase64(data)}`;
 }
 
-function markupTypeToWasmType(type: string): string {
-  const map: Record<string, string> = {
-    strong: "bold",
-    em: "italic",
-    del: "strikethrough",
-    code: "code",
-    pre: "code_block",
-    blockquote: "blockquote",
-    a: "link",
-  };
-  return map[type] ?? type;
-}
 
-function wasmSpanToMarkupSpan(span: WasmMessage["markup_spans"][number]) {
-  const typeMap: Record<string, string> = {
+function wasmSpanToMarkupSpan(span: WasmMessage["markup_spans"][number]): import("@/lib/rich-message").MarkupSpan | null {
+  type MarkupSpan = import("@/lib/rich-message").MarkupSpan;
+  type RichInlineStyle = import("@/lib/rich-message").RichInlineStyle;
+  const styleMap: Record<string, RichInlineStyle> = {
     bold: "strong",
-    italic: "em",
-    strikethrough: "del",
+    italic: "emphasis",
+    strikethrough: "deleted",
     code: "code",
-    code_block: "pre",
-    blockquote: "blockquote",
-    link: "a",
   };
-  return { type: typeMap[span.span_type] ?? span.span_type, start: span.start, end: span.end, uri: span.uri };
+  const style = styleMap[span.span_type];
+  if (style) return { type: "span", start: span.start, end: span.end, styles: [style] } satisfies MarkupSpan;
+  if (span.span_type === "code_block") return { type: "bcode", start: span.start, end: span.end } satisfies MarkupSpan;
+  if (span.span_type === "blockquote") return { type: "bquote", start: span.start, end: span.end } satisfies MarkupSpan;
+  return null;
 }
 
 function rebaseOffsetAfterRemoval(offset: number, start: number, end: number): number {
@@ -206,7 +198,7 @@ function stripReplyFallback<T extends { body: string; markup?: Array<{ start: nu
   return { ...message, body: strippedBody, ...(markup?.length ? { markup } : {}) };
 }
 
-function sharedFileFromWasm(file: WasmSharedFile) {
+function sharedFileFromWasm(file: WasmSharedFile): SharedFileInfo {
   return {
     url: file.url,
     disposition: file.disposition === "attachment" ? "attachment" : "inline",
@@ -272,7 +264,7 @@ function roomMessageFromArchived(message: WasmArchivedMessage): LiveRoomMessage 
     ...(message.reaction_target_id ? { reactionTargetId: message.reaction_target_id } : {}),
     ...(mentionUris.length ? { mentions: mentionUris.map((uri) => uri.replace(/^xmpp:/, "")) } : {}),
     ...(message.broadcast_mention === "here" || message.broadcast_mention === "everyone" ? { broadcastMention: message.broadcast_mention } : {}),
-    ...(markupSpans.length ? { markup: markupSpans.map(wasmSpanToMarkupSpan) } : {}),
+    ...(markupSpans.length ? { markup: markupSpans.flatMap((s) => { const m = wasmSpanToMarkupSpan(s); return m ? [m] : []; }) } : {}),
     ...(sharedFiles.length ? { sharedFiles: sharedFiles.map(sharedFileFromWasm) } : {}),
     ...(message.is_sticker ? { isSticker: true } : {}),
     ...(message.stanza_id ?? message.origin_id ? { correctionTargetId: message.origin_id ?? message.id ?? "" } : {}),
@@ -335,7 +327,7 @@ function dmMessageFromArchived(message: WasmArchivedMessage, selfBareJid: string
     ...(message.forum_title ? { forumTitle: message.forum_title } : {}),
     ...(message.forum_thread_title ? { forumThreadTitle: message.forum_thread_title } : {}),
     ...(mentionUris.length ? { mentions: mentionUris.map((uri) => uri.replace(/^xmpp:/, "")) } : {}),
-    ...(markupSpans.length ? { markup: markupSpans.map(wasmSpanToMarkupSpan) } : {}),
+    ...(markupSpans.length ? { markup: markupSpans.flatMap((s) => { const m = wasmSpanToMarkupSpan(s); return m ? [m] : []; }) } : {}),
     ...(sharedFiles.length ? { sharedFiles: sharedFiles.map(sharedFileFromWasm) } : {}),
     ...(message.is_sticker ? { isSticker: true } : {}),
     ...(message.origin_id || message.id ? { correctionTargetId: message.origin_id ?? message.id ?? "" } : {}),
@@ -388,12 +380,14 @@ function buildWasmSendOptions(opts: SendGroupMessageOptions | SendDirectMessageO
     }));
   }
   if (opts.markup?.length) {
-    wasmOpts.markup_spans = opts.markup.map((span) => ({
-      span_type: markupTypeToWasmType(span.type),
-      start: span.start,
-      end: span.end,
-      ...(span.uri ? { uri: span.uri } : {}),
-    }));
+    type RichInlineStyle = import("@/lib/rich-message").RichInlineStyle;
+    const styleToWasm: Record<RichInlineStyle, string> = { strong: "bold", emphasis: "italic", deleted: "strikethrough", code: "code" };
+    wasmOpts.markup_spans = opts.markup.flatMap((span) => {
+      if (span.type === "span") return span.styles.map((style) => ({ span_type: styleToWasm[style] ?? style, start: span.start, end: span.end }));
+      if (span.type === "bcode") return [{ span_type: "code_block", start: span.start, end: span.end }];
+      if (span.type === "bquote") return [{ span_type: "blockquote", start: span.start, end: span.end }];
+      return [];
+    });
   }
   if (opts.references?.length) {
     wasmOpts.references = opts.references.map((reference) => ({
@@ -620,15 +614,13 @@ export class BrowserXmppClient {
 
   private async doConnect(): Promise<void> {
     const mod = await loadWasmModule();
-    const WaddleConfigCtor = mod.WaddleConfig as unknown as typeof WasmConfig;
-    const WaddleClientCtor = mod.WaddleClient as unknown as typeof WasmClient;
-    const config = new WaddleConfigCtor(
+    const config = new mod.WaddleConfig(
       this.session.xmpp_websocket_url,
       this.session.jid,
       this.session.session_id,
       this.resource,
     );
-    const xmpp = new WaddleClientCtor(config) as unknown as CompatXmpp;
+    const xmpp = new mod.WaddleClient(config) as unknown as CompatXmpp;
     this.xmpp = xmpp;
     this.wireEvents(xmpp);
     await xmpp.connect?.();
@@ -1095,7 +1087,7 @@ export class BrowserXmppClient {
   async listRosterContacts(): Promise<RosterContact[]> { const xmpp = await this.requireConnectedXmpp(); const roster = await xmpp.list_roster_contacts?.() as WasmRosterContact[]; return (roster ?? []).map((item) => { const jid = barePeerJid(item.jid); return { jid, name: item.name, username: item.name?.trim() || jid.split("@")[0] || jid, subscription: (item.subscription ?? "none") as RosterContact["subscription"], groups: item.groups ?? [] }; }); }
   async getServerVersion(): Promise<WasmServerVersion | null> { const xmpp = await this.requireConnectedXmpp(); return await xmpp.get_server_version?.() as WasmServerVersion | null; }
   async discoverSpaceChannels(): Promise<any[]> { const xmpp = await this.requireConnectedXmpp(); return discoverChannels(xmpp as WasmClient, this.session.jid); }
-  async discoverTopology(): Promise<any> { const xmpp = await this.requireConnectedXmpp(); const topology = await discoverTopology(xmpp as WasmClient, this.session.jid); this.discoveredRoomJids = new Map(topology.rooms.flatMap((room) => room.jid ? [[room.id, room.jid] as const] : [])); return topology; }
+  async discoverTopology(): Promise<DiscoveredTopology> { const xmpp = await this.requireConnectedXmpp(); const topology = await discoverTopology(xmpp as WasmClient, this.session.jid); this.discoveredRoomJids = new Map(topology.rooms.flatMap((room) => room.jid ? [[room.id, room.jid] as const] : [])); return topology; }
   async listRoomMembers(channelId: string, options?: ListRoomMembersOptions): Promise<MemberSummary[]> {
     const xmpp = await this.requireConnectedXmpp(); const roomJid = options?.roomJid ?? this.roomJidForChannel(channelId);
     const listMembers = xmpp.list_room_members
@@ -1206,11 +1198,11 @@ export class BrowserXmppClient {
     xmpp.set_on_connected?.(() => { if (this.xmpp !== xmpp) return; void this.enableCarbons(xmpp); });
     xmpp.set_on_session_lifecycle?.((event) => { if (event === "resumed") this.handleSessionReady(xmpp, { type: "resumed" }); else this.handleSessionReady(xmpp, { type: "fresh" }); });
     xmpp.set_on_disconnected?.(() => this.handleDisconnected(xmpp));
-    xmpp.set_on_error?.((detail) => this.emitError({ kind: "stream", recoverable: !this.destroying, detail }));
-    xmpp.set_on_message?.((message) => this.handleMessage(message));
-    xmpp.set_on_presence?.((presence) => this.handlePresence(presence));
-    xmpp.set_on_message_delivery_acked?.((id) => this.handleMessageAck(id));
-    xmpp.set_on_message_delivery_failed?.((id) => this.handleMessageFailed(id));
+    xmpp.set_on_error?.((detail: string) => this.emitError({ kind: "stream", recoverable: !this.destroying, detail }));
+    xmpp.set_on_message?.((message: WasmMessage) => this.handleMessage(message));
+    xmpp.set_on_presence?.((presence: WasmPresence) => this.handlePresence(presence));
+    xmpp.set_on_message_delivery_acked?.((id: string) => this.handleMessageAck(id));
+    xmpp.set_on_message_delivery_failed?.((id: string) => this.handleMessageFailed(id));
     xmpp.on?.("session:started", () => { xmpp.disableKeepAlive?.(); xmpp.enableKeepAlive?.({ interval: 30, timeout: 15 }); this.handleSessionReady(xmpp, { type: "fresh" }); });
     xmpp.on?.("stream:management:resumed", () => this.handleSessionReady(xmpp, { type: "resumed" }));
     xmpp.on?.("disconnected", (error?: Error) => { xmpp.disableKeepAlive?.(); this.handleDisconnected(xmpp, error); });

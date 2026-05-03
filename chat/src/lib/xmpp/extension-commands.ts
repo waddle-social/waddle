@@ -1,7 +1,12 @@
-import type { Agent } from "stanza";
-import type { ExtensionAnnotationAction, ExtensionLaunchDescriptor, ExtensionPayloadElement } from "@/lib/chat-ui";
-import { jidDomain } from "./jid";
+import type { ExtensionAnnotationAction, ExtensionLaunchDescriptor } from "@/lib/chat-ui";import { jidDomain } from "./jid";
 
+interface XmppSendIq {
+  send_raw_iq(xml: string): Promise<string>;
+}
+
+function escapeXml(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;");
+}
 const NS_WADDLE_EXTENSION_1 = "urn:waddle:extension:1";
 const NS_ADHOC_COMMANDS = "http://jabber.org/protocol/commands";
 const INVOKE_COMMAND_NODE = "urn:waddle:extension:1:invoke";
@@ -416,68 +421,123 @@ function commandNotesDetail(notes: ExtensionCommandNote[], types: string[]): str
   return values.length > 0 ? values.join(" ") : undefined;
 }
 
+function dataFieldXml(name: string, type: string | undefined, value: string | string[] | boolean): string {
+  const typeAttr = type ? ` type="${escapeXml(type)}"` : "";
+  const values = Array.isArray(value) ? value : [String(value)];
+  return `<field var="${escapeXml(name)}"${typeAttr}>${values.map((v) => `<value>${escapeXml(String(v))}</value>`).join("")}</field>`;
+}
+
+function buildCommandIqXml(to: string, node: string, action: string, fields?: DataFormField[], sessionId?: string): string {
+  const sessionAttr = sessionId ? ` sessionid="${escapeXml(sessionId)}"` : "";
+  const formXml = fields?.length
+    ? `<x xmlns="jabber:x:data" type="submit">${fields.map((f) => dataFieldXml(f.name, typeof f.value === "boolean" ? "boolean" : undefined, f.value)).join("")}</x>`
+    : "";
+  return `<iq type="set" id="${crypto.randomUUID()}" to="${escapeXml(to)}"><command xmlns="${NS_ADHOC_COMMANDS}" node="${escapeXml(node)}" action="${escapeXml(action)}"${sessionAttr}>${formXml}</command></iq>`;
+}
+
+function parseCommandIqResponse(xml: string): ExtensionCommandResult {
+  const doc = new DOMParser().parseFromString(xml, "text/xml");
+  const command = doc.querySelector(`command[xmlns="${NS_ADHOC_COMMANDS}"]`);
+  if (!command) return { notes: [] };
+  const status = command.getAttribute("status") ?? undefined;
+  const sessionId = command.getAttribute("sessionid") ?? command.getAttribute("sid") ?? undefined;
+  const notes: ExtensionCommandNote[] = Array.from(command.querySelectorAll("note"))
+    .map((note) => ({ type: note.getAttribute("type") ?? undefined, value: note.textContent ?? "" }))
+    .filter((note) => note.value.length > 0);
+  const actionsEl = command.querySelector("actions");
+  const actions = actionsEl ? {
+    execute: actionsEl.getAttribute("execute") ?? undefined,
+    next: !!actionsEl.querySelector("next") || undefined,
+    prev: !!actionsEl.querySelector("prev") || !!actionsEl.querySelector("previous") || undefined,
+    complete: !!actionsEl.querySelector("complete") || undefined,
+    cancel: !!actionsEl.querySelector("cancel") || undefined,
+  } : undefined;
+  const formEl = command.querySelector(`x[xmlns="jabber:x:data"]`);
+  const form = formEl ? { type: formEl.getAttribute("type") ?? "form", fields: Array.from(formEl.querySelectorAll("field")).map((field) => ({
+    name: field.getAttribute("var") ?? "",
+    var: field.getAttribute("var") ?? "",
+    type: field.getAttribute("type") ?? "text-single",
+    label: field.getAttribute("label") ?? undefined,
+    desc: field.querySelector("desc")?.textContent ?? undefined,
+    value: field.querySelector("value")?.textContent ?? "",
+    values: Array.from(field.querySelectorAll("value")).map((v) => v.textContent ?? ""),
+    required: !!field.querySelector("required"),
+    options: Array.from(field.querySelectorAll("option")).map((opt) => ({
+      label: opt.getAttribute("label") ?? undefined,
+      value: opt.querySelector("value")?.textContent ?? "",
+    })),
+  })) } : undefined;
+  return {
+    ...(status ? { status } : {}),
+    ...(sessionId ? { sessionId } : {}),
+    notes,
+    ...(actions ? { actions: parseCommandActions(actions, status, !!actionsEl) } : {}),
+    ...(form ? { form } : {}),
+  };
+}
+
+async function rawDiscoItems(xmpp: XmppSendIq, jid: string, node?: string): Promise<Array<{ jid?: string; node?: string; name?: string }>> {
+  const nodeAttr = node ? ` node="${escapeXml(node)}"` : "";
+  try {
+    const responseXml = await xmpp.send_raw_iq(`<iq type="get" id="${crypto.randomUUID()}" to="${escapeXml(jid)}"><query xmlns="http://jabber.org/protocol/disco#items"${nodeAttr}/></iq>`);
+    const doc = new DOMParser().parseFromString(responseXml, "text/xml");
+    return Array.from(doc.querySelectorAll(`query[xmlns="http://jabber.org/protocol/disco#items"] > item`)).map((item) => ({
+      jid: item.getAttribute("jid") ?? undefined,
+      node: item.getAttribute("node") ?? undefined,
+      name: item.getAttribute("name") ?? undefined,
+    }));
+  } catch {
+    return [];
+  }
+}
+
+async function rawDiscoInfo(xmpp: XmppSendIq, jid: string): Promise<{ features: string[] }> {
+  const responseXml = await xmpp.send_raw_iq(`<iq type="get" id="${crypto.randomUUID()}" to="${escapeXml(jid)}"><query xmlns="http://jabber.org/protocol/disco#info"/></iq>`);
+  const doc = new DOMParser().parseFromString(responseXml, "text/xml");
+  const features = Array.from(doc.querySelectorAll(`query[xmlns="http://jabber.org/protocol/disco#info"] > feature`))
+    .map((f) => f.getAttribute("var") ?? "")
+    .filter(Boolean);
+  return { features };
+}
+
 export async function invokeExtensionLaunch(
-  xmpp: Agent,
+  xmpp: XmppSendIq,
   userJid: string,
   launch: ExtensionLaunchDescriptor,
 ): Promise<ExtensionCommandResult> {
   const serviceJid = await discoverExtensionCommandService(xmpp, userJid);
-  const response = await xmpp.sendIQ(
-    buildExtensionLaunchInvokeIq(userJid, launch, serviceJid) as unknown as Parameters<Agent["sendIQ"]>[0],
-  );
-  return parseExtensionCommandResult(response);
+  const iq = buildExtensionLaunchInvokeIq(userJid, launch, serviceJid);
+  const fields = iq.command.form?.fields ?? [];
+  const responseXml = await buildCommandIqXml(serviceJid, iq.command.node, iq.command.action, fields);
+  return parseCommandIqResponse(await xmpp.send_raw_iq(responseXml));
 }
 
 export async function invokeExtensionCommand(
-  xmpp: Agent,
+  xmpp: XmppSendIq,
   userJid: string,
   command: DiscoveredExtensionCommand,
 ): Promise<ExtensionCommandResult> {
   const serviceJid = command.serviceJid || await discoverExtensionCommandService(xmpp, userJid);
-  const response = await xmpp.sendIQ(
-    buildExtensionCommandExecuteIq(serviceJid, command.node) as unknown as Parameters<Agent["sendIQ"]>[0],
-  );
-  return parseExtensionCommandResult(response);
+  const responseXml = await xmpp.send_raw_iq(buildCommandIqXml(serviceJid, command.node, "execute"));
+  return parseCommandIqResponse(responseXml);
 }
 
 export async function submitExtensionCommandForm(
-  xmpp: Agent,
+  xmpp: XmppSendIq,
   command: DiscoveredExtensionCommand,
   sessionId: string,
   fields: ExtensionCommandFormField[],
   action: ExtensionCommandAction = "complete",
   roomJid?: string,
 ): Promise<ExtensionCommandResult> {
-  const submitFields = fields
+  const dataFields: DataFormField[] = (action === "cancel" || action === "prev") ? [] : fields
     .filter((field) => field.type !== "fixed")
-    .map((field) => ({
-      name: field.name,
-      type: field.type,
-      value: dataFormFieldValue(field),
-    }));
-  if (roomJid && !submitFields.some((field) => field.name === "room" || field.name === "waddle#room_jid")) {
-    submitFields.push({ name: "waddle#room_jid", type: "hidden", value: roomJid });
-  }
-  const response = await xmpp.sendIQ({
-    type: "set",
-    to: command.serviceJid,
-    command: {
-      node: command.node,
-      sid: sessionId,
-      action,
-      ...(action === "cancel" || action === "prev" ? {} : {
-          form: {
-            type: "submit",
-            fields: submitFields,
-          },
-        }),
-    },
-  } as unknown as Parameters<Agent["sendIQ"]>[0]);
-  return parseExtensionCommandResult(response);
-}
+    .map((field) => ({ name: field.name, value: dataFormFieldValue(field) }));
+  const responseXml = await xmpp.send_raw_iq(buildCommandIqXml(command.serviceJid, command.node, action, dataFields, sessionId));
+  return parseCommandIqResponse(responseXml);}
 
 export async function discoverExtensionCommands(
-  xmpp: Agent,
+  xmpp: XmppSendIq,
   userJid: string,
 ): Promise<DiscoveredExtensionCommand[]> {
   const serviceJid = await discoverExtensionCommandService(xmpp, userJid);
@@ -664,7 +724,7 @@ function parseExtensionItemView(content: unknown, id: string | undefined): Exten
   }
 
   return view;
-}
+} 2750256 (fix(chat): resolve TypeScript build errors in WASM client migration)
 
 function parseFieldOptions(options: unknown): ExtensionCommandFormOption[] {
   if (!Array.isArray(options)) return [];
@@ -728,17 +788,20 @@ function isForbiddenExtensionCommandField(name: string, type: string): boolean {
   return /(?:^|[#:_-])(secret|token|password|api[_-]?key|apikey|credential)(?:$|[#:_-])/i.test(name);
 }
 
-async function discoverExtensionServiceJid(xmpp: Agent, userJid: string): Promise<string> {
-  const fallbackServiceJid = extensionServiceJidForUserJid(userJid);
-  const domain = jidDomain(userJid);
+async function discoverExtensionCommandService(xmpp: XmppSendIq, userJid: string): Promise<string> {  const domain = jidDomain(userJid);
   const disco = xmpp as unknown as DiscoClient;
   const candidates: string[] = [];
 
   try {
-    const domainItems = await disco.getDiscoItems?.(domain);
-    for (const item of domainItems?.items ?? []) {
-      if (item.jid && !candidates.includes(item.jid)) candidates.push(item.jid);
-    }
+    const items = await rawDiscoItems(xmpp, domain);
+    const candidates = items.map((item) => item.jid).filter((jid): jid is string => !!jid);
+    for (const candidate of [domain, fallback, ...candidates.filter((jid) => jid !== fallback && jid !== domain)]) {
+      try {
+        const info = await rawDiscoInfo(xmpp, candidate);
+        if (info.features.some((feature) => feature === NS_ADHOC_COMMANDS)) return candidate;
+      } catch {
+        // Try the next discovered component.
+      }    }
   } catch {
     // Fall through to direct disco#info on the conventional component JID.
   }

@@ -8,7 +8,7 @@ const NS_SPACES_0 = "urn:xmpp:spaces:0";
 const NS_MUC_ROOMCONFIG = "http://jabber.org/protocol/muc#roomconfig";
 const NS_PUBSUB_NODE_CONFIG = "http://jabber.org/protocol/pubsub#node_config";
 
-type HybridClient = WaddleClient & {
+type HybridClient = Partial<WaddleClient> & {
   sendIQ?: (iq: Record<string, unknown>) => Promise<unknown>;
   joinRoom?: (roomJid: string, nick: string, opts?: unknown) => Promise<void>;
   leaveRoom?: (roomJid: string, nick: string) => Promise<void>;

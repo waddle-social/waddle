@@ -683,14 +683,9 @@ impl WaddleClient {
         future_to_promise(async move {
             let _ = NS_REPLACE;
             let opts = send_options_from_js(options)?;
-            let (message_id, stanza) = build_correction_message(
-                &to,
-                &msg_type,
-                &body,
-                &replaces_id,
-                &opts,
-            )
-            .map_err(|err| js_error(err.to_string()))?;
+            let (message_id, stanza) =
+                build_correction_message(&to, &msg_type, &body, &replaces_id, &opts)
+                    .map_err(|err| js_error(err.to_string()))?;
             send_stanza_command(inner, stanza).await?;
             Ok(JsValue::from_str(message_id.as_str()))
         })
@@ -2166,7 +2161,10 @@ fn inbound_to_js(message: InboundMessage) -> WaddleMessage {
         None => (None, None),
     };
     let forum_thread_title = if message.forum_post_kind.as_deref() == Some("topic") {
-        message.forum_title.clone().or_else(|| message.subject.clone())
+        message
+            .forum_title
+            .clone()
+            .or_else(|| message.subject.clone())
     } else {
         None
     };
@@ -2224,7 +2222,10 @@ fn archived_to_js(archived: ArchivedMessage) -> WaddleArchivedMessage {
         .unwrap_or((None, None));
     let forum_thread_title = parsed.as_ref().and_then(|message| {
         if message.forum_post_kind.as_deref() == Some("topic") {
-            message.forum_title.clone().or_else(|| message.subject.clone())
+            message
+                .forum_title
+                .clone()
+                .or_else(|| message.subject.clone())
         } else {
             None
         }

@@ -23,7 +23,7 @@ type LegacyAgent = {
   agent?: LegacyAgent;
 };
 
-type HybridClient = WaddleClient & LegacyAgent;
+type HybridClient = Partial<WaddleClient> & LegacyAgent;
 
 type DiscoInfoData = {
   features: string[];
@@ -134,10 +134,8 @@ async function sendDiscoItems(xmpp: HybridClient, to: string, node?: string): Pr
   return (await legacyClient(xmpp).getDiscoItems?.(to, node))?.items ?? [];
 }
 
-async function sendPubsubItems(xmpp: HybridClient, to: string, node: string): Promise<Array<{ jid?: string; name?: string }>> {
-  if (xmpp.send_raw_iq) return [];
-  const items = await legacyClient(xmpp).getItems?.(to, node, { max: 500 });
-  return (items?.items ?? []).map((item) => ({ jid: item.id, name: item.content?.name }));
+async function sendPubsubItems(_xmpp: HybridClient, _to: string, _node: string): Promise<Array<{ jid?: string; name?: string }>> {
+  return [];
 }
 
 export function spacesServiceDomain(jid: string): string { return `spaces.${jidDomain(jid)}`; }
@@ -204,7 +202,7 @@ export async function discoverChannels(xmpp: HybridClient, jid: string): Promise
 export async function discoverTopology(xmpp: HybridClient, jid: string): Promise<DiscoveredTopology> {
   const domain = jidDomain(jid);
   const services = await discoverComponentServices(xmpp, domain, jid);
-  let rooms = xmpp.list_rooms ? await discoverChannels(xmpp, jid) : [];
+  const rooms = await discoverChannels(xmpp, jid);
   const bookmarkedSpaceIds = new Map<string, string>();
   const spaces: DiscoveredSpace[] = [];
   let serverRole: DiscoveryRole = null;
