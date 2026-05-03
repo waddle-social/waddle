@@ -11,6 +11,7 @@ use crate::{
 
 const DATA_FORMS_NS: &str = "jabber:x:data";
 const SERVER_INFO_FORM_TYPE: &str = "urn:xmpp:serverinfo:0";
+const NS_CHATSTATES: &str = "http://jabber.org/protocol/chatstates";
 const NS_COMMANDS: &str = "http://jabber.org/protocol/commands";
 const NS_FORUMS: &str = "urn:xmpp:forums:0";
 const NS_MUC_SELF_PING_OPTIMIZATION: &str = "http://jabber.org/protocol/muc#self-ping-optimization";
@@ -129,6 +130,10 @@ impl Feature {
 
     pub fn chat_markers() -> Self {
         Self::new("urn:xmpp:chat-markers:0")
+    }
+
+    pub fn chat_states() -> Self {
+        Self::new(NS_CHATSTATES)
     }
 
     pub fn receipts() -> Self {
@@ -604,6 +609,7 @@ pub fn muc_room_features(
         Feature::replies(),
         Feature::message_correction(),
         Feature::chat_markers(),
+        Feature::chat_states(),
         Feature::message_retraction(),
         Feature::message_moderation(),
         Feature::reactions(),
@@ -742,6 +748,8 @@ mod tests {
         assert!(features.contains(&Feature::muc_unmoderated()));
         assert!(features.contains(&Feature::muc_self_ping_optimization()));
         assert!(features.contains(&Feature::fulltext_mam()));
+        assert!(features.contains(&Feature::chat_states()));
+        assert_eq!(Feature::chat_states().0, NS_CHATSTATES);
     }
 
     #[test]
