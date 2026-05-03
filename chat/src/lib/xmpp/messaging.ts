@@ -65,11 +65,11 @@ export function buildReplyFallbackPrefix(parentBody: string | undefined): { pref
   return { prefix, length: codePointLength(prefix) };
 }
 
-export function sendChatState(xmpp: Agent, roomJid: string, state: ChatStateType): void {
+function sendChatState(xmpp: Agent, roomJid: string, state: ChatStateType): void {
   xmpp.sendMessage({ to: roomJid, type: "groupchat", chatState: state });
 }
 
-export function sendDisplayed(xmpp: Agent, roomJid: string, messageId: string): void {
+function sendDisplayed(xmpp: Agent, roomJid: string, messageId: string): void {
   xmpp.sendMessage({
     to: roomJid,
     type: "groupchat",
@@ -207,7 +207,7 @@ export function sendCorrection(
   return msgId;
 }
 
-export interface SendGroupMessageOptions {
+interface SendGroupMessageOptions {
   markup?: MarkupSpan[];
   references?: MessageReference[];
   mentionJidsByNick?: Readonly<Record<string, string>>;

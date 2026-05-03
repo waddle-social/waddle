@@ -25,8 +25,8 @@ use waddle_xmpp_client::mam::{self, build_mam_iq, build_mam_iq_extended};
 use waddle_xmpp_client::messaging::{
     self, build_chat_state_message, build_correction_message, build_displayed_message,
     build_moderation_message, build_outbound_message, build_reaction_message,
-    build_retraction_message, InboundMessage, InboundPresence, MucAffiliation, MucRole,
-    SendMessageOptions, SharedFileDisposition,
+    build_retraction_message, InboundMessage, InboundPresence, MarkupSpanData, MarkupSpanType,
+    MucAffiliation, MucRole, ReferenceData, SendMessageOptions, SharedFileDisposition,
 };
 use waddle_xmpp_client::pep::{
     build_pep_items_iq, build_publish_activity_iq, build_publish_mood_iq, build_publish_tune_iq,
@@ -123,6 +123,7 @@ struct WaddleClientInner {
     on_message: Option<Function>,
     on_presence: Option<Function>,
     on_connected: Option<Function>,
+    on_session_lifecycle: Option<Function>,
     on_disconnected: Option<Function>,
     on_error: Option<Function>,
     on_message_delivery_acked: Option<Function>,
@@ -183,11 +184,20 @@ struct WasmDriverTask {
 }
 
 #[derive(Debug, Serialize)]
+pub struct WaddleMarkupSpan {
+    pub span_type: String,
+    pub start: usize,
+    pub end: usize,
+    pub uri: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
 pub struct WaddleMessage {
     pub id: Option<String>,
     pub from: Option<String>,
     pub to: Option<String>,
     pub body: Option<String>,
+    pub subject: Option<String>,
     pub message_type: String,
     pub timestamp: Option<String>,
     pub stanza_id: Option<String>,
@@ -208,6 +218,13 @@ pub struct WaddleMessage {
     pub reply_to_sender: Option<String>,
     pub reply_fallback_start: Option<u32>,
     pub reply_fallback_end: Option<u32>,
+    pub markup_spans: Vec<WaddleMarkupSpan>,
+    pub broadcast_mention: Option<String>,
+    pub mention_uris: Vec<String>,
+    pub forum_post_kind: Option<String>,
+    pub forum_title: Option<String>,
+    pub forum_thread_title: Option<String>,
+    pub is_sticker: bool,
     pub shared_files: Vec<WaddleSharedFile>,
 }
 
@@ -221,6 +238,12 @@ pub struct WaddleArchivedMessage {
     pub to: Option<String>,
     pub message_type: String,
     pub body: Option<String>,
+    pub subject: Option<String>,
+    pub replaces_id: Option<String>,
+    pub retracts_id: Option<String>,
+    pub moderation_target_id: Option<String>,
+    pub moderated_by: Option<String>,
+    pub moderation_reason: Option<String>,
     pub reaction_target_id: Option<String>,
     pub reaction_emojis: Vec<String>,
     pub thread: Option<String>,
@@ -229,6 +252,14 @@ pub struct WaddleArchivedMessage {
     pub reply_to_sender: Option<String>,
     pub reply_fallback_start: Option<u32>,
     pub reply_fallback_end: Option<u32>,
+    pub markup_spans: Vec<WaddleMarkupSpan>,
+    pub broadcast_mention: Option<String>,
+    pub mention_uris: Vec<String>,
+    pub forum_post_kind: Option<String>,
+    pub forum_title: Option<String>,
+    pub forum_thread_title: Option<String>,
+    pub is_sticker: bool,
+    pub author_real_jid: Option<String>,
     pub shared_files: Vec<WaddleSharedFile>,
 }
 
@@ -256,6 +287,8 @@ pub struct WaddlePresence {
     pub hats: Vec<WaddlePresenceHat>,
     pub muc_affiliation: Option<String>,
     pub muc_role: Option<String>,
+    pub muc_jid: Option<String>,
+    pub vcard_avatar: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -435,6 +468,24 @@ pub struct WaddleThreadTarget {
     pub parent: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct WaddleMarkupSpanInput {
+    pub span_type: String,
+    pub start: u32,
+    pub end: u32,
+    pub uri: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct WaddleReference {
+    pub ref_type: String,
+    pub uri: String,
+    pub begin: u32,
+    pub end: u32,
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct WaddleSendOptions {
@@ -443,6 +494,8 @@ pub struct WaddleSendOptions {
     pub fallback: Option<WaddleFallbackRange>,
     pub thread: Option<WaddleThreadTarget>,
     pub shared_files: Vec<WaddleSharedFile>,
+    pub markup_spans: Vec<WaddleMarkupSpanInput>,
+    pub references: Vec<WaddleReference>,
 }
 
 #[wasm_bindgen]
@@ -456,6 +509,7 @@ impl WaddleClient {
                 on_message: None,
                 on_presence: None,
                 on_connected: None,
+                on_session_lifecycle: None,
                 on_disconnected: None,
                 on_error: None,
                 on_message_delivery_acked: None,
@@ -474,6 +528,10 @@ impl WaddleClient {
 
     pub fn set_on_connected(&mut self, cb: Function) {
         self.inner.borrow_mut().on_connected = Some(cb);
+    }
+
+    pub fn set_on_session_lifecycle(&mut self, cb: Function) {
+        self.inner.borrow_mut().on_session_lifecycle = Some(cb);
     }
 
     pub fn set_on_disconnected(&mut self, cb: Function) {
@@ -619,14 +677,31 @@ impl WaddleClient {
         msg_type: String,
         body: String,
         replaces_id: String,
+        options: JsValue,
     ) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
             let _ = NS_REPLACE;
-            let (message_id, stanza) =
-                build_correction_message(&to, &msg_type, &body, &replaces_id);
+            let opts = send_options_from_js(options)?;
+            let (message_id, stanza) = build_correction_message(
+                &to,
+                &msg_type,
+                &body,
+                &replaces_id,
+                &opts,
+            )
+            .map_err(|err| js_error(err.to_string()))?;
             send_stanza_command(inner, stanza).await?;
-            Ok(JsValue::from_str(&message_id))
+            Ok(JsValue::from_str(message_id.as_str()))
+        })
+    }
+
+    pub fn send_raw_iq(&self, xml: String) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let stanza = parse_raw_iq(&xml)?;
+            let result = send_iq_command(inner, stanza).await?;
+            Ok(JsValue::from_str(&element_to_xml_string(&result)?))
         })
     }
 
@@ -1805,8 +1880,19 @@ async fn event_dispatch_loop(
 fn dispatch_client_event(inner: &Rc<RefCell<WaddleClientInner>>, event: ClientEvent) {
     match event {
         ClientEvent::Lifecycle(LifecycleEvent::SessionReady(_)) => {
-            if let Some(callback) = inner.borrow().on_connected.as_ref() {
+            let borrowed = inner.borrow();
+            if let Some(callback) = borrowed.on_connected.as_ref() {
                 let _ = callback.call0(&JsValue::NULL);
+            }
+            if let Some(callback) = borrowed.on_session_lifecycle.as_ref() {
+                let _ = callback.call1(&JsValue::NULL, &JsValue::from_str("fresh"));
+            }
+        }
+        ClientEvent::Connection(ConnectionEvent::StreamManagement(
+            StreamManagementEvent::Resumed { .. },
+        )) => {
+            if let Some(callback) = inner.borrow().on_session_lifecycle.as_ref() {
+                let _ = callback.call1(&JsValue::NULL, &JsValue::from_str("resumed"));
             }
         }
         ClientEvent::Messaging(waddle_xmpp_client::MessagingEvent::Message(message)) => {
@@ -1945,6 +2031,24 @@ fn build_client_config(config: &StoredConfig) -> Result<ClientConfig, JsValue> {
         .map_err(|err| js_error(err.to_string()))
 }
 
+fn parse_raw_iq(xml: &str) -> Result<Element, JsValue> {
+    let stanza = xml
+        .parse::<Element>()
+        .map_err(|err| js_error(format!("invalid IQ XML: {err}")))?;
+    if stanza.name() != "iq" {
+        return Err(js_error("raw stanza must be an <iq/> element"));
+    }
+    Ok(stanza)
+}
+
+fn element_to_xml_string(element: &Element) -> Result<String, JsValue> {
+    let mut buffer = Vec::new();
+    element
+        .write_to(&mut buffer)
+        .map_err(|err| js_error(format!("failed to serialize IQ XML: {err}")))?;
+    String::from_utf8(buffer).map_err(|err| js_error(format!("IQ XML was not UTF-8: {err}")))
+}
+
 fn send_options_from_js(options: JsValue) -> Result<SendMessageOptions, JsValue> {
     let options = if options.is_null() || options.is_undefined() {
         WaddleSendOptions::default()
@@ -1980,6 +2084,26 @@ fn send_options_from_js(options: JsValue) -> Result<SendMessageOptions, JsValue>
             id: thread.id,
             parent: thread.parent,
         }),
+        markup_spans: options
+            .markup_spans
+            .into_iter()
+            .map(|span| MarkupSpanData {
+                span_type: span.span_type,
+                start: span.start,
+                end: span.end,
+                uri: span.uri,
+            })
+            .collect(),
+        references: options
+            .references
+            .into_iter()
+            .map(|reference| ReferenceData {
+                ref_type: reference.ref_type,
+                uri: reference.uri,
+                begin: reference.begin,
+                end: reference.end,
+            })
+            .collect(),
         shared_files: options
             .shared_files
             .into_iter()
@@ -2011,10 +2135,40 @@ fn upload_slot_to_js(slot: discovery::UploadSlot) -> WaddleUploadSlot {
     }
 }
 
+fn markup_span_type_to_string(span_type: MarkupSpanType) -> String {
+    match span_type {
+        MarkupSpanType::Bold => "bold",
+        MarkupSpanType::Italic => "italic",
+        MarkupSpanType::Strikethrough => "strikethrough",
+        MarkupSpanType::Code => "code",
+        MarkupSpanType::CodeBlock => "code_block",
+        MarkupSpanType::Blockquote => "blockquote",
+        MarkupSpanType::Link => "link",
+    }
+    .to_string()
+}
+
+fn markup_spans_to_js(spans: Vec<messaging::MarkupSpan>) -> Vec<WaddleMarkupSpan> {
+    spans
+        .into_iter()
+        .map(|span| WaddleMarkupSpan {
+            span_type: markup_span_type_to_string(span.span_type),
+            start: span.start,
+            end: span.end,
+            uri: span.uri,
+        })
+        .collect()
+}
+
 fn inbound_to_js(message: InboundMessage) -> WaddleMessage {
     let (reply_fallback_start, reply_fallback_end) = match message.reply_fallback {
         Some((start, end)) => (Some(start), Some(end)),
         None => (None, None),
+    };
+    let forum_thread_title = if message.forum_post_kind.as_deref() == Some("topic") {
+        message.forum_title.clone().or_else(|| message.subject.clone())
+    } else {
+        None
     };
 
     WaddleMessage {
@@ -2022,6 +2176,7 @@ fn inbound_to_js(message: InboundMessage) -> WaddleMessage {
         from: message.from,
         to: message.to,
         body: message.body,
+        subject: message.subject,
         message_type: message.message_type.clone(),
         timestamp: message.timestamp.map(|timestamp| timestamp.to_rfc3339()),
         stanza_id: message.stanza_id,
@@ -2042,6 +2197,13 @@ fn inbound_to_js(message: InboundMessage) -> WaddleMessage {
         reply_to_sender: message.reply_to_sender,
         reply_fallback_start,
         reply_fallback_end,
+        markup_spans: markup_spans_to_js(message.markup_spans),
+        broadcast_mention: message.broadcast_mention,
+        mention_uris: message.mention_uris,
+        forum_post_kind: message.forum_post_kind,
+        forum_title: message.forum_title,
+        forum_thread_title,
+        is_sticker: message.is_sticker,
         shared_files: message
             .shared_files
             .into_iter()
@@ -2060,6 +2222,13 @@ fn archived_to_js(archived: ArchivedMessage) -> WaddleArchivedMessage {
         .and_then(|message| message.reply_fallback)
         .map(|(start, end)| (Some(start), Some(end)))
         .unwrap_or((None, None));
+    let forum_thread_title = parsed.as_ref().and_then(|message| {
+        if message.forum_post_kind.as_deref() == Some("topic") {
+            message.forum_title.clone().or_else(|| message.subject.clone())
+        } else {
+            None
+        }
+    });
 
     WaddleArchivedMessage {
         mam_id: archived.mam_id,
@@ -2070,6 +2239,22 @@ fn archived_to_js(archived: ArchivedMessage) -> WaddleArchivedMessage {
         to: archived.to,
         message_type: archived.message_type,
         body: archived.body,
+        subject: parsed.as_ref().and_then(|message| message.subject.clone()),
+        replaces_id: parsed
+            .as_ref()
+            .and_then(|message| message.replaces_id.clone()),
+        retracts_id: parsed
+            .as_ref()
+            .and_then(|message| message.retracts_id.clone()),
+        moderation_target_id: parsed
+            .as_ref()
+            .and_then(|message| message.moderation_target_id.clone()),
+        moderated_by: parsed
+            .as_ref()
+            .and_then(|message| message.moderated_by.clone()),
+        moderation_reason: parsed
+            .as_ref()
+            .and_then(|message| message.moderation_reason.clone()),
         reaction_target_id: parsed
             .as_ref()
             .and_then(|message| message.reaction_target_id.clone()),
@@ -2087,6 +2272,26 @@ fn archived_to_js(archived: ArchivedMessage) -> WaddleArchivedMessage {
             .and_then(|message| message.reply_to_sender.clone()),
         reply_fallback_start,
         reply_fallback_end,
+        markup_spans: parsed
+            .as_ref()
+            .map(|message| markup_spans_to_js(message.markup_spans.clone()))
+            .unwrap_or_default(),
+        broadcast_mention: parsed
+            .as_ref()
+            .and_then(|message| message.broadcast_mention.clone()),
+        mention_uris: parsed
+            .as_ref()
+            .map(|message| message.mention_uris.clone())
+            .unwrap_or_default(),
+        forum_post_kind: parsed
+            .as_ref()
+            .and_then(|message| message.forum_post_kind.clone()),
+        forum_title: parsed
+            .as_ref()
+            .and_then(|message| message.forum_title.clone()),
+        forum_thread_title,
+        is_sticker: parsed.as_ref().is_some_and(|message| message.is_sticker),
+        author_real_jid: archived.author_real_jid,
         shared_files: parsed
             .as_ref()
             .map(|message| {
@@ -2165,6 +2370,8 @@ fn presence_to_js(presence: InboundPresence) -> WaddlePresence {
             .collect(),
         muc_affiliation: presence.muc_affiliation.map(muc_affiliation_to_string),
         muc_role: presence.muc_role.map(muc_role_to_string),
+        muc_jid: presence.muc_jid,
+        vcard_avatar: presence.vcard_avatar,
     }
 }
 

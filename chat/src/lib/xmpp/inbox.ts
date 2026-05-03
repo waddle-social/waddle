@@ -17,12 +17,12 @@ export interface InboxEntry {
   author?: string;
 }
 
-export interface InboxResult {
+interface InboxResult {
   totalUnread: number;
   conversations: InboxEntry[];
 }
 
-export interface FetchInboxOptions {
+interface FetchInboxOptions {
   since?: number;
   onlyUnread?: boolean;
   /** When set with `threads: true`, return thread-level entries for this room. */

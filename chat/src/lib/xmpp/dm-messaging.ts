@@ -12,11 +12,11 @@ import type { MarkupSpan, MessageReference } from "@/lib/chat-ui";
 import { shiftMarkupSpans } from "./extensions/markup";
 import { codePointLength } from "@/lib/text-offsets";
 
-export function sendDmChatState(xmpp: Agent, peerJid: string, state: ChatStateType): void {
+function sendDmChatState(xmpp: Agent, peerJid: string, state: ChatStateType): void {
   xmpp.sendMessage({ to: peerJid, type: "chat", chatState: state, processingHints: { noStore: true } });
 }
 
-export function sendDmDisplayed(xmpp: Agent, peerJid: string, messageId: string): void {
+function sendDmDisplayed(xmpp: Agent, peerJid: string, messageId: string): void {
   xmpp.sendMessage({
     to: peerJid,
     type: "chat",
@@ -25,7 +25,7 @@ export function sendDmDisplayed(xmpp: Agent, peerJid: string, messageId: string)
   });
 }
 
-export function sendDmReaction(xmpp: Agent, peerJid: string, messageId: string, emojis: string[]): void {
+function sendDmReaction(xmpp: Agent, peerJid: string, messageId: string, emojis: string[]): void {
   xmpp.sendMessage({
     id: crypto.randomUUID(),
     to: peerJid,
@@ -35,7 +35,7 @@ export function sendDmReaction(xmpp: Agent, peerJid: string, messageId: string, 
   } as Record<string, unknown>);
 }
 
-export function sendDmRetraction(xmpp: Agent, peerJid: string, retractsId: string): void {
+function sendDmRetraction(xmpp: Agent, peerJid: string, retractsId: string): void {
   xmpp.sendMessage({
     id: crypto.randomUUID(),
     to: peerJid,
@@ -64,7 +64,7 @@ function toStanzaReferences(references: readonly MessageReference[]): Array<Reco
   }));
 }
 
-export function sendDmCorrection(
+function sendDmCorrection(
   xmpp: Agent,
   peerJid: string,
   body: string,
@@ -88,7 +88,7 @@ export function sendDmCorrection(
   return msgId;
 }
 
-export interface SendDirectMessageOptions {
+interface SendDirectMessageOptions {
   markup?: MarkupSpan[];
   references?: MessageReference[];
   files?: OutboundFileAttachment[];

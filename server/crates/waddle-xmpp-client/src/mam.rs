@@ -29,6 +29,7 @@ use crate::event::ClientEvent;
 
 const CLIENT_NS: &str = "jabber:client";
 const DATA_FORMS_NS: &str = "jabber:x:data";
+const NS_MUC_USER: &str = "http://jabber.org/protocol/muc#user";
 pub const MAM_START_FIELD: &str = "start";
 pub const MAM_END_FIELD: &str = "end";
 
@@ -59,6 +60,8 @@ pub struct ArchivedMessage {
     /// `crate::xep::thread::parse_thread` helper. `None` for root
     /// threads or messages without a `<thread/>`.
     pub parent_thread_id: Option<String>,
+    /// XEP-0045 MUC real JID from archived `<x><item jid='...'/></x>` payloads.
+    pub author_real_jid: Option<String>,
     /// Raw inner `<message>` element for full parsing by the messaging module.
     pub inner: Element,
 }
@@ -161,6 +164,18 @@ fn build_form_field(var: &str, value: &str) -> Element {
                 .build(),
         )
         .build()
+}
+
+fn bare_jid(value: &str) -> &str {
+    value.split('/').next().unwrap_or(value)
+}
+
+fn parse_archived_author_real_jid(inner: &Element) -> Option<String> {
+    inner
+        .get_child("x", NS_MUC_USER)
+        .and_then(|payload| payload.get_child("item", NS_MUC_USER))
+        .and_then(|item| item.attr("jid"))
+        .map(|jid| bare_jid(jid).to_string())
 }
 
 #[expect(
@@ -380,6 +395,7 @@ pub fn parse_mam_result(element: &Element) -> Option<ArchivedMessage> {
         .get_child("stanza-id", "urn:xmpp:sid:0")
         .and_then(|s| s.attr("id"))
         .map(str::to_string);
+    let author_real_jid = parse_archived_author_real_jid(&inner);
 
     Some(ArchivedMessage {
         mam_id,
@@ -392,6 +408,7 @@ pub fn parse_mam_result(element: &Element) -> Option<ArchivedMessage> {
         body,
         thread,
         parent_thread_id,
+        author_real_jid,
         inner,
     })
 }
@@ -529,6 +546,41 @@ mod tests {
         assert!(archived.timestamp.is_some());
         let ts = archived.timestamp.unwrap();
         assert_eq!(ts.year(), 2024);
+    }
+
+    #[test]
+    fn parse_mam_result_extracts_archived_author_real_jid() {
+        let inner = Element::builder("message", CLIENT_NS)
+            .attr("from", "room@muc.example.com/alice")
+            .attr("type", "groupchat")
+            .append(Element::builder("body", CLIENT_NS).append("Hello world").build())
+            .append(
+                Element::builder("x", NS_MUC_USER)
+                    .append(
+                        Element::builder("item", NS_MUC_USER)
+                            .attr("jid", "alice@example.com/phone")
+                            .build(),
+                    )
+                    .build(),
+            )
+            .build();
+        let delay = Element::builder("delay", DELAY_NS)
+            .attr("stamp", "2024-01-01T12:00:00Z")
+            .build();
+        let forwarded = Element::builder("forwarded", FORWARD_NS)
+            .append(delay)
+            .append(inner)
+            .build();
+        let result = Element::builder("result", MAM_NS)
+            .attr("id", "mam-id-2")
+            .attr("queryid", "qid-43")
+            .append(forwarded)
+            .build();
+        let el = Element::builder("message", CLIENT_NS).append(result).build();
+
+        let archived = parse_mam_result(&el).expect("should parse");
+
+        assert_eq!(archived.author_real_jid.as_deref(), Some("alice@example.com"));
     }
 
     #[test]
@@ -796,6 +848,7 @@ mod tests {
                 message_type: "groupchat".to_string(),
                 body: Some(body.to_string()),
                 thread: None,
+                author_real_jid: None,
                 inner: Element::builder("message", CLIENT_NS).build(),
             }
         }

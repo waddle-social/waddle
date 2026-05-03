@@ -1,8 +1,9 @@
 /** XEP-0363: HTTP File Upload for sharing images and files in chat. */
-import type { Agent } from "stanza";
+import type { WaddleClient } from "@waddle/xmpp-client-wasm";
 import { reportError } from "@/lib/telemetry";
+import type { WasmUploadSlot } from "./wasm-types";
 
-export const MAX_FILE_UPLOAD_BYTES = 10 * 1024 * 1024; // 10 MB
+export const MAX_FILE_UPLOAD_BYTES = 10 * 1024 * 1024;
 
 interface UploadResult {
   getUrl: string;
@@ -22,80 +23,12 @@ interface SlotInfo {
   getUrl: string;
 }
 
-const UPLOAD_FEATURE = "urn:xmpp:http:upload:0";
-
-function hasUploadFeature(info: { features?: any[] }): boolean {
-  return (
-    info.features?.some(
-      (f: any) => f === UPLOAD_FEATURE || f.var === UPLOAD_FEATURE,
-    ) ?? false
-  );
+export async function discoverUploadService(xmpp: WaddleClient): Promise<string | null> {
+  return await xmpp.discover_upload_service();
 }
 
-/**
- * Discover the HTTP Upload service JID via disco#items.
- * Looks for a service advertising urn:xmpp:http:upload:0.
- * Falls back to querying upload.{domain} directly if standard discovery fails.
- * Returns null if not found.
- */
-export async function discoverUploadService(xmpp: Agent, domain: string): Promise<string | null> {
-  // Primary path: standard XEP-0030 disco#items discovery
-  try {
-    const items = await xmpp.getDiscoItems(domain);
-    const discoItems = items.items ?? [];
-
-    if (discoItems.length === 0) {
-      console.warn("[file-upload] disco#items to", domain, "returned zero items");
-    }
-
-    const results = await Promise.allSettled(
-      discoItems.map(async (item) => {
-        const info = await xmpp.getDiscoInfo(item.jid);
-        return hasUploadFeature(info) ? item.jid : null;
-      }),
-    );
-
-    for (const r of results) {
-      if (r.status === "fulfilled" && r.value) return r.value;
-    }
-
-    const rejected = results.filter((r) => r.status === "rejected");
-    if (rejected.length > 0) {
-      console.warn(
-        "[file-upload] disco#info failed for",
-        rejected.length,
-        "of",
-        discoItems.length,
-        "items:",
-        rejected.map((r) => (r as PromiseRejectedResult).reason),
-      );
-    }
-  } catch (err) {
-    console.warn("[file-upload] disco#items discovery failed:", err);
-  }
-
-  // Fallback: directly query upload.{domain} (known server convention)
-  const fallbackJid = `upload.${domain}`;
-  try {
-    const info = await xmpp.getDiscoInfo(fallbackJid);
-    if (hasUploadFeature(info)) return fallbackJid;
-    console.warn("[file-upload] fallback", fallbackJid, "lacks upload feature");
-  } catch (err) {
-    console.warn("[file-upload] fallback", fallbackJid, "failed:", err);
-  }
-
-  return null;
-}
-
-/**
- * Upload a file via XEP-0363 HTTP File Upload.
- *
- * 1. Requests an upload slot via XMPP IQ
- * 2. Uploads the file via HTTP PUT
- * 3. Returns the download URL
- */
 export async function uploadFile(
-  xmpp: Agent,
+  xmpp: WaddleClient,
   file: File | Blob,
   uploadDomain: string,
   onProgress?: (progress: UploadProgress) => void,
@@ -103,51 +36,28 @@ export async function uploadFile(
   const filename = file instanceof File ? file.name : `attachment-${Date.now()}.bin`;
   const contentType = file.type || "application/octet-stream";
   const size = file.size;
+  if (size === 0) throw new Error("Cannot upload an empty file");
 
-  if (size === 0) {
-    throw new Error("Cannot upload an empty file");
-  }
-
-  // Request upload slot via XEP-0363 IQ
-  const slotResponse = await xmpp.sendIQ({
-    to: uploadDomain,
-    type: "get",
-    httpUpload: {
-      type: "request",
-      name: filename,
-      size,
-      mediaType: contentType,
-    },
-  } as any);
-
-  const slot = parseSlotResponse(slotResponse);
-
+  const slot = parseSlotResponse(
+    await xmpp.request_upload_slot(uploadDomain, filename, BigInt(size), contentType) as WasmUploadSlot,
+  );
   await uploadToSlot(file, slot.putUrl, slot.putHeaders, contentType, onProgress);
-
-  return {
-    getUrl: slot.getUrl,
-    filename,
-    contentType,
-    size,
-  };
+  return { getUrl: slot.getUrl, filename, contentType, size };
 }
 
-/** Extract files from a paste or drop event. Paste stays image-only. */
 export function extractFilesFromEvent(event: ClipboardEvent | DragEvent): File[] {
   const out: File[] = [];
   if (event instanceof ClipboardEvent) {
     const items = event.clipboardData?.items;
     if (!items) return out;
-    for (let i = 0; i < items.length; i++) {
-      const f = items[i].getAsFile();
-      if (f && f.type.startsWith("image/")) out.push(f);
+    for (let i = 0; i < items.length; i += 1) {
+      const file = items[i].getAsFile();
+      if (file && file.type.startsWith("image/")) out.push(file);
     }
   } else if (event instanceof DragEvent) {
     const files = event.dataTransfer?.files;
     if (!files) return out;
-    for (let i = 0; i < files.length; i++) {
-      out.push(files[i]);
-    }
+    for (let i = 0; i < files.length; i += 1) out.push(files[i]);
   }
   return out;
 }
@@ -156,38 +66,15 @@ export function extractImagesFromClipboardEvent(event: ClipboardEvent): File[] {
   return extractFilesFromEvent(event).filter((file) => file.type.startsWith("image/"));
 }
 
-function parseSlotResponse(response: any): SlotInfo {
-  // stanza.js may parse the slot under httpUpload or the raw element tree
-  const slot = response?.httpUpload ?? response?.slot;
-  if (!slot) {
-    throw new Error("Upload slot response missing: server did not return a valid slot");
-  }
-
-  // stanza.js XEP-0363 mapping:
-  //   <put url="...">  -> slot.upload.url  (with headers at slot.upload.headers)
-  //   <get url="..."/> -> slot.download     (plain string)
-  // Fall back to raw XML property names (slot.put / slot.get) for other parsers.
-  const putUrl: string | undefined =
-    slot.upload?.url ?? slot.put?.url ?? (typeof slot.put === "string" ? slot.put : undefined);
-  const getUrl: string | undefined =
-    (typeof slot.download === "string" ? slot.download : undefined) ??
-    slot.get?.url ?? (typeof slot.get === "string" ? slot.get : undefined);
-
-  if (!putUrl || !getUrl) {
-    throw new Error("Upload slot missing PUT or GET URL");
-  }
-
-  // Extract optional headers the server requires on the PUT request
-  const putHeaders: Array<[string, string]> = [];
-  const rawHeaders = slot.upload?.headers ?? slot.put?.headers ?? slot.put?.header ?? [];
-  const headerList = Array.isArray(rawHeaders) ? rawHeaders : [rawHeaders];
-  for (const h of headerList) {
-    if (h && typeof h.name === "string" && typeof h.value === "string") {
-      putHeaders.push([h.name, h.value]);
-    }
-  }
-
-  return { putUrl, getUrl, putHeaders };
+function parseSlotResponse(response: WasmUploadSlot): SlotInfo {
+  if (!response.put_url || !response.get_url) throw new Error("Upload slot missing PUT or GET URL");
+  return {
+    putUrl: response.put_url,
+    getUrl: response.get_url,
+    putHeaders: (response.put_headers ?? [])
+      .filter((header) => header.name && header.value)
+      .map((header) => [header.name, header.value]),
+  };
 }
 
 async function uploadToSlot(
@@ -197,43 +84,29 @@ async function uploadToSlot(
   contentType: string,
   onProgress?: (progress: UploadProgress) => void,
 ): Promise<void> {
-  // Use XMLHttpRequest for progress reporting
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open("PUT", putUrl);
     xhr.setRequestHeader("Content-Type", contentType);
-    for (const [name, value] of headers) {
-      xhr.setRequestHeader(name, value);
-    }
-
+    for (const [name, value] of headers) xhr.setRequestHeader(name, value);
     if (onProgress) {
-      xhr.upload.onprogress = (e) => {
-        if (e.lengthComputable) {
-          onProgress({ loaded: e.loaded, total: e.total });
-        }
+      xhr.upload.onprogress = (event) => {
+        if (event.lengthComputable) onProgress({ loaded: event.loaded, total: event.total });
       };
     }
-
     xhr.onload = () => {
       if (xhr.status >= 200 && xhr.status < 300) {
         resolve();
-      } else {
-        const err = new Error(`Upload failed: ${xhr.status} ${xhr.statusText}`);
-        reportError("upload", err, {
-          recoverable: false,
-          detail: "XEP-0363 PUT failed",
-          status: xhr.status,
-        });
-        reject(err);
+        return;
       }
+      const error = new Error(`Upload failed: ${xhr.status} ${xhr.statusText}`);
+      reportError("upload", error, { recoverable: false, detail: "XEP-0363 PUT failed", status: xhr.status });
+      reject(error);
     };
     xhr.onerror = () => {
-      const err = new Error("Upload failed: network error");
-      reportError("upload", err, {
-        recoverable: false,
-        detail: "XEP-0363 PUT network error",
-      });
-      reject(err);
+      const error = new Error("Upload failed: network error");
+      reportError("upload", error, { recoverable: false, detail: "XEP-0363 PUT network error" });
+      reject(error);
     };
     xhr.send(file);
   });

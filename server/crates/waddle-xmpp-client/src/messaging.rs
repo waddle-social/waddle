@@ -39,6 +39,7 @@ const NS_CLIENT: &str = "jabber:client";
 const NS_MUC: &str = "http://jabber.org/protocol/muc";
 const NS_MUC_USER: &str = "http://jabber.org/protocol/muc#user";
 const NS_STICKERS: &str = "urn:xmpp:stickers:0";
+const NS_VCARD_UPDATE: &str = "vcard-temp:x:update";
 
 // ─── Inbound types ────────────────────────────────────────────────────────
 
@@ -255,6 +256,8 @@ pub struct InboundPresence {
     pub hats: Vec<PresenceHat>,
     pub muc_affiliation: Option<MucAffiliation>,
     pub muc_role: Option<MucRole>,
+    pub muc_jid: Option<String>,
+    pub vcard_avatar: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -280,8 +283,28 @@ pub struct SendMessageOptions {
     pub fallback: Option<xep_reply::FallbackRange>,
     /// XEP-0201 thread reference (with optional parent for nested threads).
     pub thread: Option<xep_thread::ThreadRef>,
+    /// XEP-0394 message styling spans.
+    pub markup_spans: Vec<MarkupSpanData>,
+    /// XEP-0372 references such as mentions.
+    pub references: Vec<ReferenceData>,
     /// XEP-0446 / XEP-0447 shared files attached to the message.
     pub shared_files: Vec<SharedFile>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MarkupSpanData {
+    pub span_type: String,
+    pub start: u32,
+    pub end: u32,
+    pub uri: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReferenceData {
+    pub ref_type: String,
+    pub uri: String,
+    pub begin: u32,
+    pub end: u32,
 }
 
 // ─── Parse entry point ────────────────────────────────────────────────────
@@ -731,6 +754,12 @@ fn parse_presence(el: &Element) -> InboundPresence {
     let muc_role = muc_item
         .and_then(|item| item.attr("role"))
         .and_then(MucRole::from_attr);
+    let muc_jid = muc_item.and_then(|item| item.attr("jid")).map(str::to_string);
+    let vcard_avatar = el
+        .get_child("x", NS_VCARD_UPDATE)
+        .and_then(|x| x.get_child("photo", NS_VCARD_UPDATE))
+        .map(|photo| photo.text())
+        .filter(|hash| !hash.is_empty());
 
     InboundPresence {
         from,
@@ -741,6 +770,8 @@ fn parse_presence(el: &Element) -> InboundPresence {
         hats,
         muc_affiliation,
         muc_role,
+        muc_jid,
+        vcard_avatar,
     }
 }
 
@@ -986,20 +1017,15 @@ pub fn build_correction_message(
     message_type: &str,
     body: &str,
     replaces_id: &str,
-) -> (String, Element) {
-    let id = Uuid::new_v4().to_string();
-    let stanza = Element::builder("message", NS_CLIENT)
-        .attr("to", to)
-        .attr("type", message_type)
-        .attr("id", id.as_str())
-        .append(Element::builder("body", NS_CLIENT).append(body).build())
-        .append(
-            Element::builder("replace", NS_MESSAGE_CORRECT)
-                .attr("id", replaces_id)
-                .build(),
-        )
-        .build();
-    (id, stanza)
+    options: &SendMessageOptions,
+) -> ClientResult<(StanzaId, Element)> {
+    let (stanza_id, mut stanza) = build_outbound_message(to, message_type, body, options)?;
+    stanza.append_child(
+        Element::builder("replace", NS_MESSAGE_CORRECT)
+            .attr("id", replaces_id)
+            .build(),
+    );
+    Ok((stanza_id, stanza))
 }
 
 /// Build a `<message/>` stanza carrying the body plus any XEP payloads from
@@ -1029,6 +1055,49 @@ pub fn build_outbound_message(
     }
     if let Some(thread) = options.thread.as_ref() {
         builder = builder.append(xep_thread::build_thread_element(thread));
+    }
+    if !options.markup_spans.is_empty() {
+        let mut markups = Element::builder("markups", NS_MARKUP).build();
+        for span in &options.markup_spans {
+            let tag = match span.span_type.as_str() {
+                "bold" => Some("strong"),
+                "italic" => Some("emphasis"),
+                "strikethrough" => Some("deleted"),
+                "code" => Some("code"),
+                "code_block" => Some("code"),
+                "blockquote" => Some("blockquote"),
+                "link" => Some("a"),
+                _ => None,
+            };
+            if let Some(tag_name) = tag {
+                let mut span_el = Element::builder("span", NS_MARKUP)
+                    .attr("start", span.start.to_string())
+                    .attr("end", span.end.to_string())
+                    .build();
+                if tag_name == "a" {
+                    if let Some(uri) = &span.uri {
+                        let link_el = Element::builder("link", NS_MARKUP)
+                            .attr("uri", uri)
+                            .build();
+                        span_el.append_child(link_el);
+                    }
+                } else {
+                    span_el.append_child(Element::builder(tag_name, NS_MARKUP).build());
+                }
+                markups.append_child(span_el);
+            }
+        }
+        builder = builder.append(markups);
+    }
+    for reference in &options.references {
+        builder = builder.append(
+            Element::builder("reference", NS_REFERENCES)
+                .attr("type", reference.ref_type.as_str())
+                .attr("begin", reference.begin.to_string())
+                .attr("end", reference.end.to_string())
+                .attr("uri", reference.uri.as_str())
+                .build(),
+        );
     }
     for file in &options.shared_files {
         builder = builder.append(build_file_sharing_element(file));
@@ -1357,7 +1426,10 @@ mod tests {
         let e = el(
             "<presence xmlns='jabber:client' from='room@muc.example/alice'>\
              <x xmlns='http://jabber.org/protocol/muc#user'>\
-             <item affiliation='owner' role='moderator'/>\
+             <item affiliation='owner' role='moderator' jid='alice@example.com/phone'/>\
+             </x>\
+             <x xmlns='vcard-temp:x:update'>\
+             <photo>room-avatar-hash</photo>\
              </x>\
              </presence>",
         );
@@ -1366,6 +1438,8 @@ mod tests {
         };
         assert_eq!(p.muc_affiliation, Some(MucAffiliation::Owner));
         assert_eq!(p.muc_role, Some(MucRole::Moderator));
+        assert_eq!(p.muc_jid.as_deref(), Some("alice@example.com/phone"));
+        assert_eq!(p.vcard_avatar.as_deref(), Some("room-avatar-hash"));
     }
 
     #[test]
@@ -1422,6 +1496,58 @@ mod tests {
     }
 
     #[test]
+    fn build_outbound_message_with_markup_spans_and_references() {
+        let options = SendMessageOptions {
+            markup_spans: vec![
+                MarkupSpanData {
+                    span_type: "bold".to_string(),
+                    start: 0,
+                    end: 5,
+                    uri: None,
+                },
+                MarkupSpanData {
+                    span_type: "link".to_string(),
+                    start: 6,
+                    end: 10,
+                    uri: Some("xmpp:bob@example.com".to_string()),
+                },
+            ],
+            references: vec![ReferenceData {
+                ref_type: "mention".to_string(),
+                uri: "xmpp:bob@example.com".to_string(),
+                begin: 6,
+                end: 10,
+            }],
+            ..Default::default()
+        };
+
+        let (_, stanza) =
+            build_outbound_message("room@muc.example", "groupchat", "hello @bob", &options)
+                .unwrap();
+
+        let markups = stanza.get_child("markups", NS_MARKUP).expect("markups child");
+        let spans = markups
+            .children()
+            .filter(|child| child.name() == "span")
+            .collect::<Vec<_>>();
+        assert_eq!(spans.len(), 2);
+        assert!(spans[0].get_child("strong", NS_MARKUP).is_some());
+        assert_eq!(
+            spans[1]
+                .get_child("link", NS_MARKUP)
+                .and_then(|link| link.attr("uri")),
+            Some("xmpp:bob@example.com")
+        );
+        let reference = stanza
+            .get_child("reference", NS_REFERENCES)
+            .expect("reference child");
+        assert_eq!(reference.attr("type"), Some("mention"));
+        assert_eq!(reference.attr("begin"), Some("6"));
+        assert_eq!(reference.attr("end"), Some("10"));
+        assert_eq!(reference.attr("uri"), Some("xmpp:bob@example.com"));
+    }
+
+    #[test]
     fn build_chat_state_message_validates_state() {
         let stanza = build_chat_state_message("alice@example.com", "composing", "chat")
             .expect("valid chat state");
@@ -1442,6 +1568,38 @@ mod tests {
                 .and_then(|child| child.attr("id")),
             Some("msg-1")
         );
+    }
+
+    #[test]
+    fn build_correction_message_with_markup_spans() {
+        let options = SendMessageOptions {
+            markup_spans: vec![MarkupSpanData {
+                span_type: "bold".to_string(),
+                start: 0,
+                end: 5,
+                uri: None,
+            }],
+            references: vec![ReferenceData {
+                ref_type: "mention".to_string(),
+                uri: "xmpp:bob@example.com".to_string(),
+                begin: 6,
+                end: 10,
+            }],
+            ..Default::default()
+        };
+
+        let (_, stanza) = build_correction_message(
+            "room@muc.example",
+            "groupchat",
+            "hello @bob",
+            "orig-1",
+            &options,
+        )
+        .expect("correction stanza");
+
+        assert!(stanza.get_child("replace", NS_MESSAGE_CORRECT).is_some());
+        assert!(stanza.get_child("markups", NS_MARKUP).is_some());
+        assert!(stanza.get_child("reference", NS_REFERENCES).is_some());
     }
 
     #[test]
@@ -1503,20 +1661,26 @@ mod tests {
 
     #[test]
     fn build_correction_message_has_expected_shape() {
-        let (message_id, stanza) =
-            build_correction_message("alice@example.com", "chat", "fixed", "msg-1");
+        let (message_id, stanza) = build_correction_message(
+            "alice@example.com",
+            "chat",
+            "fixed",
+            "msg-1",
+            &SendMessageOptions::default(),
+        )
+        .expect("correction stanza");
         assert_eq!(stanza.attr("to"), Some("alice@example.com"));
         assert_eq!(stanza.attr("id"), Some(message_id.as_str()));
         assert_eq!(
             stanza
                 .get_child("body", NS_CLIENT)
-                .map(|child| child.text()),
+                .map(minidom::Element::text),
             Some("fixed".to_string())
         );
         assert_eq!(
             stanza
                 .get_child("replace", NS_MESSAGE_CORRECT)
-                .and_then(|child| child.attr("id")),
+                .and_then(|child: &minidom::Element| child.attr("id")),
             Some("msg-1")
         );
     }

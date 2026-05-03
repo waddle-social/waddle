@@ -207,7 +207,7 @@ async function fetchTune(xmpp: Agent, jid: string): Promise<TunePublication | nu
   }
 }
 
-export async function fetchUserPepProfile(xmpp: Agent, jid: string): Promise<UserPepProfile> {
+async function fetchUserPepProfile(xmpp: Agent, jid: string): Promise<UserPepProfile> {
   const [moodResult, activityResult, tuneResult] = await Promise.allSettled([
     fetchMood(xmpp, jid),
     fetchActivity(xmpp, jid),
