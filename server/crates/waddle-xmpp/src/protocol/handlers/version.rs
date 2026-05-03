@@ -21,8 +21,7 @@ impl IqHandler for VersionHandler {
     }
 
     fn handle(&self, iq: &Iq, _ctx: &StanzaContext<'_>) -> Vec<OutboundEvent> {
-        let version =
-            std::env::var("WADDLE_GIT_SHA").unwrap_or_else(|_| "unknown".to_string());
+        let version = std::env::var("WADDLE_GIT_SHA").unwrap_or_else(|_| "unknown".to_string());
         let info = SoftwareVersion {
             name: "Waddle".to_string(),
             version,
