@@ -12,6 +12,7 @@ use xmpp_parsers::iq::{Iq, IqType};
 use xmpp_parsers::message::{Message, MessageType};
 
 use crate::xep0201::ThreadInfo;
+use crate::xep0359::{OriginId, StanzaId};
 use crate::{CoreError, CoreResult};
 
 /// MAM XML namespace (XEP-0313 v2).
@@ -225,8 +226,17 @@ pub struct ArchivedMessage {
     /// distinction restores XEP-0313 §3 archive fidelity for the
     /// denormalized projection.
     pub body: Option<String>,
-    /// Original stanza ID (if present).
-    pub stanza_id: Option<String>,
+    /// XEP-0359 stanza id captured for the archived row.
+    ///
+    /// Typed as [`xep0359::StanzaId`] (`{ id, by }`) so the
+    /// `by` attribute (REQUIRED per XEP-0359 §3) is structurally
+    /// inseparable from the id value. The `by` JID is reconstructed
+    /// from the storage row's archive JID at decode time per the
+    /// locked Q4 design — there is no separate `by` column in the
+    /// SQL schema.
+    ///
+    /// [`xep0359::StanzaId`]: crate::xep0359::StanzaId
+    pub stanza_id: Option<StanzaId>,
     /// XEP-0201 thread reference (RFC 6121 `<thread/>` id plus
     /// optional nested-thread `parent` attribute).
     ///
@@ -271,7 +281,13 @@ pub struct ArchivedMessage {
     #[serde(default)]
     pub reply: Option<ArchivedReply>,
     /// XEP-0359 origin-id supplied by client.
-    pub origin_id: Option<String>,
+    ///
+    /// Typed as [`xep0359::OriginId`] for symmetry with
+    /// [`Self::stanza_id`]. The newtype carries only the id value
+    /// (XEP-0359 origin-ids have no `by` attribute).
+    ///
+    /// [`xep0359::OriginId`]: crate::xep0359::OriginId
+    pub origin_id: Option<OriginId>,
     /// Message type ("chat", "groupchat", "normal", etc.).
     #[serde(default = "default_message_type")]
     pub message_type: String,
@@ -509,15 +525,6 @@ pub fn build_fin_iq(original_iq: &Iq, result: &MamResult) -> Iq {
     }
 }
 
-/// Add a stanza-id extension to a message for MAM compliance.
-pub fn add_stanza_id(message: &mut Message, archive_id: &str, by: &str) {
-    let stanza_id = Element::builder("stanza-id", STANZA_ID_NS)
-        .attr("id", archive_id)
-        .attr("by", by)
-        .build();
-    message.payloads.push(stanza_id);
-}
-
 fn parse_data_form(form: &Element, query: &mut MamQuery) -> CoreResult<()> {
     for field in form.children() {
         if field.name() != "field" {
@@ -686,8 +693,8 @@ fn build_typed_inner_message(archived: &ArchivedMessage, rich: &ArchivedRichMess
         builder = builder.attr("to", archived.to.to_string());
     }
 
-    if let Some(stanza_id) = archived.stanza_id.as_deref() {
-        builder = builder.attr("id", stanza_id);
+    if let Some(sid) = archived.stanza_id.as_ref() {
+        builder = builder.attr("id", sid.id.as_str());
     }
     // RFC 6121 §5.2.3 / XEP-0313 §3: emit `<body/>` exactly when the
     // archived row recorded one on the wire. `Some("")` is a real
@@ -713,10 +720,10 @@ fn build_typed_inner_message(archived: &ArchivedMessage, rich: &ArchivedRichMess
     if let Some(info) = archived.thread.as_ref() {
         builder = builder.append(crate::xep0201::build_thread_element(info, CLIENT_NS));
     }
-    if let Some(origin_id) = archived.origin_id.as_deref() {
+    if let Some(oid) = archived.origin_id.as_ref() {
         builder = builder.append(
             Element::builder("origin-id", STANZA_ID_NS)
-                .attr("id", origin_id)
+                .attr("id", oid.id.as_str())
                 .build(),
         );
     }
@@ -864,8 +871,8 @@ fn build_legacy_inner_message(archived: &ArchivedMessage) -> Element {
         builder = builder.attr("to", archived.to.to_string());
     }
 
-    if let Some(stanza_id) = archived.stanza_id.as_deref() {
-        builder = builder.attr("id", stanza_id);
+    if let Some(sid) = archived.stanza_id.as_ref() {
+        builder = builder.attr("id", sid.id.as_str());
     }
     // RFC 6121 §5.2.3 / XEP-0313 §3: see `build_typed_inner_message`
     // — `Some("")` round-trips as `<body></body>`, `None` omits the
@@ -892,10 +899,10 @@ fn build_legacy_inner_message(archived: &ArchivedMessage) -> Element {
         }
         builder = builder.append(reply_builder.build());
     }
-    if let Some(origin_id) = archived.origin_id.as_deref() {
+    if let Some(oid) = archived.origin_id.as_ref() {
         builder = builder.append(
             Element::builder("origin-id", STANZA_ID_NS)
-                .attr("id", origin_id)
+                .attr("id", oid.id.as_str())
                 .build(),
         );
     }
@@ -1212,7 +1219,7 @@ mod tests {
                 id: RichMessageId::new("parent-1").expect("non-empty reply id"),
                 to: Some("alice@example.com".parse::<Jid>().expect("valid jid")),
             }),
-            origin_id: Some("origin-1".to_string()),
+            origin_id: Some(OriginId::new("origin-1")),
             body: Some("Hello, world!".to_string()),
             ..ArchivedMessage::for_test(
                 jid("user@example.com/nick"),
@@ -1248,7 +1255,10 @@ mod tests {
         ArchivedMessage {
             id: "msg-thread-nested".to_string(),
             body: Some("nested reply".to_string()),
-            stanza_id: Some("wire-id-1".to_string()),
+            stanza_id: Some(StanzaId::new(
+                "wire-id-1",
+                "bob@example.com".parse::<Jid>().expect("valid jid"),
+            )),
             thread: Some(ThreadInfo::child(
                 ThreadId::new("child-thread").expect("non-empty thread id"),
                 ThreadId::new("root-thread").expect("non-empty parent id"),
@@ -1319,7 +1329,12 @@ mod tests {
         let archived = ArchivedMessage {
             id: "archive-threaded-reply".to_string(),
             body: Some("threaded reply".to_string()),
-            stanza_id: Some("wire-id-2".to_string()),
+            stanza_id: Some(StanzaId::new(
+                "wire-id-2",
+                "room@conference.example.com"
+                    .parse::<Jid>()
+                    .expect("valid jid"),
+            )),
             thread: Some(ThreadInfo::child(
                 ThreadId::new("root-thread").expect("non-empty thread id"),
                 ThreadId::new("parent-thread").expect("non-empty parent id"),
@@ -1480,21 +1495,6 @@ mod tests {
             set.get_child("count", RSM_NS).map(|child| child.text()),
             Some("2".to_string())
         );
-    }
-
-    #[test]
-    fn adds_stanza_id_payload() {
-        let mut message = Message::new(Some(jid("juliet@example.com")));
-
-        add_stanza_id(&mut message, "archive-1", "room@example.com");
-
-        let stanza_id = message
-            .payloads
-            .iter()
-            .find(|payload| payload.name() == "stanza-id" && payload.ns() == STANZA_ID_NS)
-            .expect("stanza-id payload");
-        assert_eq!(stanza_id.attr("id"), Some("archive-1"));
-        assert_eq!(stanza_id.attr("by"), Some("room@example.com"));
     }
 
     #[test]

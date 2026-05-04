@@ -225,7 +225,10 @@ fn reply_archived_row(
             .expect("valid full jid"),
         to: STORAGE_ARCHIVE.parse::<jid::Jid>().expect("valid bare jid"),
         body: Some(body.to_string()),
-        stanza_id: Some(format!("wire-{archive_id}")),
+        stanza_id: Some(waddle_xmpp_core::xep0359::StanzaId::new(
+            format!("wire-{archive_id}"),
+            STORAGE_ARCHIVE.parse::<jid::Jid>().expect("valid jid"),
+        )),
         thread: None,
         reply,
         origin_id: None,

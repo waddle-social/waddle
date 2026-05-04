@@ -15,10 +15,9 @@ use waddle_xmpp::{
     inbox::runtime::filter_query,
     isr::{build_isr_token_error, build_isr_token_result, is_isr_token_request, IsrToken, ISR_NS},
     mam::{
-        add_stanza_id as add_mam_stanza_id, build_fin_iq, build_query_form_iq,
-        build_result_messages, is_mam_query, is_mam_query_form_request, parse_mam_query,
-        ArchivedMessage, ArchivedModeration, ArchivedRichMessage, ArchivedRichPayload,
-        RichMessageId, RichText,
+        build_fin_iq, build_query_form_iq, build_result_messages, is_mam_query,
+        is_mam_query_form_request, parse_mam_query, ArchivedMessage, ArchivedModeration,
+        ArchivedRichMessage, ArchivedRichPayload, RichMessageId, RichText,
     },
     muc::{
         admin::{
@@ -58,12 +57,13 @@ use waddle_xmpp::{
         parse_mark_read,
     },
     xep::{
-        build_command_items, build_command_result, build_last_activity_response,
-        build_moderation_result_message, build_room_space_metadata_forms, build_search_response,
-        build_server_role_form, build_spaces_metadata_form_for_requester, is_last_activity_query,
-        is_search_request, is_time_query, is_version_query, parse_command_from_iq,
-        parse_moderation_iq, parse_search_request, ChannelResult, Command, CommandStatus,
-        Searchable, SpaceAffiliation, NODE_COMMANDS, NS_CHANNEL_SEARCH,
+        add_stanza_id_xep0359, build_command_items, build_command_result,
+        build_last_activity_response, build_moderation_result_message,
+        build_room_space_metadata_forms, build_search_response, build_server_role_form,
+        build_spaces_metadata_form_for_requester, is_last_activity_query, is_search_request,
+        is_time_query, is_version_query, parse_command_from_iq, parse_moderation_iq,
+        parse_search_request, ChannelResult, Command, CommandStatus, Searchable, SpaceAffiliation,
+        Xep0359StanzaId, NODE_COMMANDS, NS_CHANNEL_SEARCH,
     },
     Affiliation, SpaceDetails, Stanza, StanzaErrorCondition, StanzaErrorType, XmppError,
 };
@@ -963,7 +963,11 @@ pub async fn handle_iq_with_conn_state(
             request.reason.as_deref(),
         );
         let archive_id = uuid::Uuid::now_v7().to_string();
-        add_mam_stanza_id(&mut moderation, archive_id.as_str(), &room_jid.to_string());
+        let room_jid_full = jid::Jid::from(room_jid.clone());
+        add_stanza_id_xep0359(
+            &mut moderation,
+            &Xep0359StanzaId::new(archive_id.as_str(), room_jid_full.clone()),
+        );
 
         if let (Some(target_id), Ok(moderator_jid)) = (
             RichMessageId::new(request.target_id.clone()),
@@ -977,7 +981,10 @@ pub async fn handle_iq_with_conn_state(
                 // XEP-0425 moderation tombstone has no `<body>` — `None`
                 // is the wire-faithful "no body element" form.
                 body: None,
-                stanza_id: moderation.id.clone(),
+                stanza_id: moderation
+                    .id
+                    .clone()
+                    .map(|id| Xep0359StanzaId::new(id, room_jid_full.clone())),
                 // XEP-0425 moderation tombstone: leak-prone fields are
                 // already cleared by construction (this row is a fresh
                 // tombstone, not a scrub of an existing message).
@@ -1024,7 +1031,7 @@ pub async fn handle_iq_with_conn_state(
                 Ok(Some(original)) if original.to.to_string() == room_jid.to_string() => {
                     // Use the moderation message's server-assigned
                     // archive id (XEP-0359 stanza-id stamped via
-                    // `add_mam_stanza_id` above). That's the id
+                    // `add_stanza_id_xep0359` above). That's the id
                     // clients see on the live moderation broadcast
                     // and need to correlate against the tombstone —
                     // `moderation.id` is the client message-id

@@ -23,7 +23,6 @@ use xmpp_parsers::message::{Message, MessageType};
 use super::{
     ArchivedMention, ArchivedMessage, ArchivedReactionSet, ArchivedReference, ArchivedReply,
     ArchivedRetraction, ArchivedRichMessage, ArchivedRichPayload, RichMessageId, RichText,
-    STANZA_ID_NS,
 };
 use crate::parser::message_to_string;
 use crate::xep::{
@@ -32,7 +31,7 @@ use crate::xep::{
     RetractionKind, NS_REPLY,
 };
 use waddle_xmpp_core::xep0201::{thread_info_from_message_in_stanza_ns, CLIENT_STANZA_NS};
-use waddle_xmpp_core::xep0359::extract_stanza_id_by;
+use waddle_xmpp_core::xep0359::{extract_origin_id, extract_stanza_id_by, StanzaId};
 
 /// Build the [`ArchivedMessage`] persisted form of a one-to-one
 /// (chat / normal) `<message/>` for direct MAM storage.
@@ -81,6 +80,17 @@ pub fn build_direct_archived_message(
     let origin_id = extract_origin_id(message);
     let rich = rich_archive_payload(message);
     let stanza_xml = serialize_message_xml(message);
+    // XEP-0359 §3 makes the `by` attribute REQUIRED on every
+    // `<stanza-id/>`. The wire `id` attribute on the `<message/>`
+    // element does not carry a `by` of its own — it's the message's
+    // local identifier — so when we project it into the typed
+    // `Option<StanzaId>` field we attribute it to the archive
+    // (`archive_jid`). This matches the storage decode contract,
+    // which reconstructs `StanzaId.by` from the row's archive jid.
+    let stanza_id = message
+        .id
+        .clone()
+        .map(|id| StanzaId::new(id, archive_jid.clone()));
 
     // Storage shape mirrors the legacy `archive_direct_message`:
     // `id` is the canonical XEP-0359 stamp (the archive's primary
@@ -110,7 +120,7 @@ pub fn build_direct_archived_message(
         from,
         to,
         body,
-        stanza_id: message.id.clone(),
+        stanza_id,
         thread,
         reply,
         origin_id,
@@ -137,14 +147,6 @@ fn prototype_body(message: &Message) -> Option<String> {
         .get("")
         .or_else(|| message.bodies.values().next())
         .map(|body| body.0.clone())
-}
-
-fn extract_origin_id(message: &Message) -> Option<String> {
-    message
-        .payloads
-        .iter()
-        .find(|payload| payload.name() == "origin-id" && payload.ns() == STANZA_ID_NS)
-        .and_then(|origin| origin.attr("id").map(ToOwned::to_owned))
 }
 
 /// Extract the XEP-0461 `<reply id='X' to='Y'/>` reference from a
@@ -326,9 +328,14 @@ mod tests {
         assert_eq!(archived.to, jid("bob@example.com"));
         assert_eq!(archived.body.as_deref(), Some("hi"));
         assert_eq!(
-            archived.stanza_id.as_deref(),
+            archived.stanza_id.as_ref().map(|s| s.id.as_str()),
             Some("orig-1"),
             "fallback stanza_id is the wire <message id=...>"
+        );
+        assert_eq!(
+            archived.stanza_id.as_ref().map(|s| s.by.clone()),
+            Some(jid("alice@example.com")),
+            "stanza_id.by is reconstructed from the archive jid"
         );
         assert_eq!(archived.message_type, "chat");
         assert!(archived.rich.is_none());
@@ -368,7 +375,7 @@ mod tests {
             "canonical XEP-0359 stamp becomes the storage primary key"
         );
         assert_eq!(
-            archived.stanza_id.as_deref(),
+            archived.stanza_id.as_ref().map(|s| s.id.as_str()),
             Some("wire-id-1"),
             "stanza_id mirrors the wire id attribute for retraction-by-wire-id lookups"
         );
@@ -397,7 +404,10 @@ mod tests {
             &msg,
         );
         assert_eq!(archived.id, "bob-B1");
-        assert_eq!(archived.stanza_id.as_deref(), Some("wire-id-2"));
+        assert_eq!(
+            archived.stanza_id.as_ref().map(|s| s.id.as_str()),
+            Some("wire-id-2")
+        );
     }
 
     #[test]

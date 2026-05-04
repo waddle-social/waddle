@@ -32,7 +32,7 @@ use waddle_xmpp_core::xep0201::{
     build_thread_element, is_thread_element_for_stanza, set_thread_id,
     thread_info_from_message_in_stanza_ns, ThreadInfo, CLIENT_STANZA_NS, SERVER_STANZA_NS,
 };
-use waddle_xmpp_core::xep0359::{add_stanza_id, is_stanza_id_element};
+use waddle_xmpp_core::xep0359::{add_stanza_id, is_stanza_id_element, StanzaId};
 use xmpp_parsers::message::Message;
 
 /// XEP-0045 + XEP-0359 + XEP-0421 canonicalize handler for the room
@@ -95,7 +95,7 @@ impl RoomHandler for MucCanonicalizeHandler {
         // 2. Stamp a fresh stanza-id.
         let id = ctx.id_gen.fresh_stanza_id();
         let by_jid = Jid::from(ctx.room.clone());
-        add_stanza_id(message, &id, &by_jid);
+        add_stanza_id(message, &StanzaId::new(id.clone(), by_jid));
         match extract_forum_action(message) {
             Some(ForumAction::CreateThread(_)) => {
                 replace_stanza_thread(message, &id);

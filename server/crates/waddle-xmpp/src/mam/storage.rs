@@ -306,8 +306,8 @@ impl MamStorage for InMemoryMamStorage {
             .iter()
             .find(|(jid, message)| {
                 jid == &archive_jid_str
-                    && (message.stanza_id.as_deref() == Some(stanza_id)
-                        || message.origin_id.as_deref() == Some(stanza_id))
+                    && (message.stanza_id.as_ref().map(|s| s.id.as_str()) == Some(stanza_id)
+                        || message.origin_id.as_ref().map(|o| o.id.as_str()) == Some(stanza_id))
             })
             .map(|(_, message)| message.clone()))
     }
@@ -322,7 +322,8 @@ impl MamStorage for InMemoryMamStorage {
         Ok(entries
             .iter()
             .find(|(jid, message)| {
-                jid == &archive_jid_str && message.stanza_id.as_deref() == Some(message_id)
+                jid == &archive_jid_str
+                    && message.stanza_id.as_ref().map(|s| s.id.as_str()) == Some(message_id)
             })
             .map(|(_, message)| message.clone()))
     }
@@ -338,7 +339,8 @@ impl MamStorage for InMemoryMamStorage {
             .iter()
             .find(|(jid, message)| {
                 jid == &archive_jid_str
-                    && (message.id == stanza_id || message.stanza_id.as_deref() == Some(stanza_id))
+                    && (message.id == stanza_id
+                        || message.stanza_id.as_ref().map(|s| s.id.as_str()) == Some(stanza_id))
             })
             .map(|(_, message)| message.clone()))
     }
@@ -935,8 +937,9 @@ fn archive_order_after(message: &ArchivedMessage, cursor: &ArchivedMessage) -> b
 fn matches_thread_filter(message: &ArchivedMessage, thread_id: &str) -> bool {
     let archived_thread_id = message.thread.as_ref().map(|t| t.id.as_str());
     let archived_reply_id = message.reply.as_ref().map(|r| r.id.as_str());
+    let archived_stanza_id = message.stanza_id.as_ref().map(|s| s.id.as_str());
     message.id == thread_id
-        || message.stanza_id.as_deref() == Some(thread_id)
+        || archived_stanza_id == Some(thread_id)
         || archived_thread_id == Some(thread_id)
         || (archived_thread_id.is_none() && archived_reply_id == Some(thread_id))
 }
@@ -956,6 +959,10 @@ fn decode_sqlite_message_row(row: &SqliteRow) -> Result<ArchivedMessage, MamStor
     let reply = decode_reply_columns(reply_to_id_raw, reply_to_jid_raw)?;
     let from_raw: String = row.try_get(3)?;
     let to_raw: String = row.try_get(4)?;
+    let archive_jid_raw: String = row.try_get(1)?;
+    let archive_jid_for_decode = parse_archived_addressing("room_jid", &archive_jid_raw)?;
+    let stanza_id_raw: Option<String> = row.try_get(6)?;
+    let origin_id_raw: Option<String> = row.try_get(10)?;
     Ok(ArchivedMessage {
         id: row.try_get(0)?,
         timestamp,
@@ -966,10 +973,11 @@ fn decode_sqlite_message_row(row: &SqliteRow) -> Result<ArchivedMessage, MamStor
         // `<body></body>`). Explicit type to avoid ambiguity with
         // sqlx's inference.
         body: row.try_get::<Option<String>, _>(5)?,
-        stanza_id: row.try_get(6)?,
+        stanza_id: stanza_id_raw
+            .map(|id| waddle_xmpp_core::xep0359::StanzaId::new(id, archive_jid_for_decode.clone())),
         thread,
         reply,
-        origin_id: row.try_get(10)?,
+        origin_id: origin_id_raw.map(waddle_xmpp_core::xep0359::OriginId::new),
         message_type: row.try_get(11)?,
         stanza_xml: row.try_get(12)?,
         rich: decode_rich_payload(rich_payload.as_deref())?,
@@ -988,6 +996,10 @@ fn decode_postgres_message_row(row: &PgRow) -> Result<ArchivedMessage, MamStorag
     let reply = decode_reply_columns(reply_to_id_raw, reply_to_jid_raw)?;
     let from_raw: String = row.try_get(3)?;
     let to_raw: String = row.try_get(4)?;
+    let archive_jid_raw: String = row.try_get(1)?;
+    let archive_jid_for_decode = parse_archived_addressing("room_jid", &archive_jid_raw)?;
+    let stanza_id_raw: Option<String> = row.try_get(6)?;
+    let origin_id_raw: Option<String> = row.try_get(10)?;
     Ok(ArchivedMessage {
         id: row.try_get(0)?,
         timestamp: row.try_get(2)?,
@@ -996,10 +1008,11 @@ fn decode_postgres_message_row(row: &PgRow) -> Result<ArchivedMessage, MamStorag
         // See `decode_sqlite_message_row` — nullable, explicit type
         // for the wire-fidelity NULL/'' distinction.
         body: row.try_get::<Option<String>, _>(5)?,
-        stanza_id: row.try_get(6)?,
+        stanza_id: stanza_id_raw
+            .map(|id| waddle_xmpp_core::xep0359::StanzaId::new(id, archive_jid_for_decode.clone())),
         thread,
         reply,
-        origin_id: row.try_get(10)?,
+        origin_id: origin_id_raw.map(waddle_xmpp_core::xep0359::OriginId::new),
         message_type: row.try_get(11)?,
         stanza_xml: row.try_get(12)?,
         rich: decode_rich_payload(rich_payload.as_deref())?,
@@ -1177,11 +1190,11 @@ impl MamStorage for SqlxMamStorage {
                         .push_bind(from_jid_str.as_str())
                         .push_bind(to_jid_str.as_str())
                         .push_bind(message.body.as_deref())
-                        .push_bind(message.stanza_id.as_deref())
+                        .push_bind(message.stanza_id.as_ref().map(|s| s.id.as_str()))
                         .push_bind(message.thread.as_ref().map(|t| t.id.as_str()))
                         .push_bind(reply_to_id_bind)
                         .push_bind(reply_to_jid_owned.as_deref())
-                        .push_bind(message.origin_id.as_deref())
+                        .push_bind(message.origin_id.as_ref().map(|o| o.id.as_str()))
                         .push_bind(message_type)
                         .push_bind(message.stanza_xml.as_deref())
                         .push_bind(rich_payload.as_deref())
@@ -1208,11 +1221,11 @@ impl MamStorage for SqlxMamStorage {
                         .push_bind(from_jid_str.as_str())
                         .push_bind(to_jid_str.as_str())
                         .push_bind(message.body.as_deref())
-                        .push_bind(message.stanza_id.as_deref())
+                        .push_bind(message.stanza_id.as_ref().map(|s| s.id.as_str()))
                         .push_bind(message.thread.as_ref().map(|t| t.id.as_str()))
                         .push_bind(reply_to_id_bind)
                         .push_bind(reply_to_jid_owned.as_deref())
-                        .push_bind(message.origin_id.as_deref())
+                        .push_bind(message.origin_id.as_ref().map(|o| o.id.as_str()))
                         .push_bind(message_type)
                         .push_bind(message.stanza_xml.as_deref())
                         .push_bind(rich_payload.as_deref())
@@ -1642,19 +1655,20 @@ mod tests {
     async fn test_store_and_retrieve_message() {
         let storage = create_test_storage().await;
 
+        let archive = bare("room@conference.example.com");
         let msg = ArchivedMessage {
             body: Some("Hello, world!".to_string()),
-            stanza_id: Some("abc123".to_string()),
+            stanza_id: Some(waddle_xmpp_core::xep0359::StanzaId::new(
+                "abc123",
+                jid(&archive.to_string()),
+            )),
             ..ArchivedMessage::for_test(
                 jid("user@example.com/nick"),
                 jid("room@conference.example.com"),
             )
         };
 
-        let archive_id = storage
-            .store_message(&bare("room@conference.example.com"), &msg)
-            .await
-            .unwrap();
+        let archive_id = storage.store_message(&archive, &msg).await.unwrap();
         assert!(!archive_id.is_empty());
 
         let retrieved = storage.get_message(&archive_id).await.unwrap();
@@ -1663,7 +1677,9 @@ mod tests {
         let retrieved = retrieved.unwrap();
         assert_eq!(retrieved.id, archive_id);
         assert_eq!(retrieved.body.as_deref(), Some("Hello, world!"));
-        assert_eq!(retrieved.stanza_id, Some("abc123".to_string()));
+        let sid = retrieved.stanza_id.expect("stanza_id round-trips");
+        assert_eq!(sid.id, "abc123");
+        assert_eq!(sid.by, jid(&archive.to_string()));
     }
 
     #[tokio::test]
@@ -1672,7 +1688,10 @@ mod tests {
 
         let msg = ArchivedMessage {
             body: Some("Reply body".to_string()),
-            stanza_id: Some("archive-stanza-1".to_string()),
+            stanza_id: Some(waddle_xmpp_core::xep0359::StanzaId::new(
+                "archive-stanza-1",
+                jid("room@conference.example.com"),
+            )),
             thread: Some(waddle_xmpp_core::xep0201::ThreadInfo::root(
                 waddle_xmpp_core::mam::ThreadId::new("thread-root-1").expect("thread id"),
             )),
@@ -1681,7 +1700,7 @@ mod tests {
                     .expect("non-empty reply id"),
                 to: Some(jid("bob@example.com")),
             }),
-            origin_id: Some("origin-abc".to_string()),
+            origin_id: Some(waddle_xmpp_core::xep0359::OriginId::new("origin-abc")),
             message_type: "groupchat".to_string(),
             stanza_xml: Some(
                 "<message xmlns='jabber:client' from='room@conference.example.com/alice' to='room@conference.example.com' type='groupchat' id='archive-stanza-1'><body>Reply body</body></message>".to_string(),
@@ -1713,7 +1732,10 @@ mod tests {
             reply.to.as_ref().map(|jid| jid.to_string()),
             Some("bob@example.com".to_string())
         );
-        assert_eq!(retrieved.origin_id.as_deref(), Some("origin-abc"));
+        assert_eq!(
+            retrieved.origin_id.as_ref().map(|o| o.id.as_str()),
+            Some("origin-abc")
+        );
         assert_eq!(retrieved.message_type, "groupchat");
         assert!(retrieved.stanza_xml.is_some());
     }
@@ -1726,7 +1748,10 @@ mod tests {
         let storage = create_test_storage().await;
         let msg = ArchivedMessage {
             body: Some("Nested-thread reply".to_string()),
-            stanza_id: Some("archive-stanza-2".to_string()),
+            stanza_id: Some(waddle_xmpp_core::xep0359::StanzaId::new(
+                "archive-stanza-2",
+                jid("room@conference.example.com"),
+            )),
             thread: Some(waddle_xmpp_core::xep0201::ThreadInfo::child(
                 waddle_xmpp_core::mam::ThreadId::new("child-thread").expect("thread id"),
                 waddle_xmpp_core::mam::ThreadId::new("root-thread").expect("parent id"),
@@ -2220,7 +2245,10 @@ mod tests {
         let archive_jid = jid("room@conference.example.com");
         let msg = ArchivedMessage {
             body: Some("secret thread content".to_string()),
-            stanza_id: Some("wire-id-1".to_string()),
+            stanza_id: Some(waddle_xmpp_core::xep0359::StanzaId::new(
+                "wire-id-1",
+                archive_jid.clone(),
+            )),
             thread: Some(waddle_xmpp_core::xep0201::ThreadInfo::child(
                 waddle_xmpp_core::mam::ThreadId::new("child-thread").expect("thread id"),
                 waddle_xmpp_core::mam::ThreadId::new("root-thread").expect("parent id"),
@@ -2292,7 +2320,10 @@ mod tests {
         let archive_jid = jid("room@conference.example.com");
         let msg = ArchivedMessage {
             body: Some("moderated content".to_string()),
-            stanza_id: Some("wire-id-2".to_string()),
+            stanza_id: Some(waddle_xmpp_core::xep0359::StanzaId::new(
+                "wire-id-2",
+                archive_jid.clone(),
+            )),
             thread: Some(waddle_xmpp_core::xep0201::ThreadInfo::child(
                 waddle_xmpp_core::mam::ThreadId::new("child-thread").expect("thread id"),
                 waddle_xmpp_core::mam::ThreadId::new("root-thread").expect("parent id"),

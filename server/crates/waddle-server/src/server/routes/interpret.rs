@@ -2235,7 +2235,7 @@ fn row_matches_origin_id(
     expected_sender: &jid::BareJid,
     expected_origin_id: &str,
 ) -> bool {
-    if row.origin_id.as_deref() != Some(expected_origin_id) {
+    if row.origin_id.as_ref().map(|o| o.id.as_str()) != Some(expected_origin_id) {
         return false;
     }
     row.from.to_bare() == *expected_sender
@@ -2251,7 +2251,7 @@ fn row_matches_wire_id(
     expected_sender: &jid::BareJid,
     expected_wire_id: &str,
 ) -> bool {
-    if row.stanza_id.as_deref() != Some(expected_wire_id) {
+    if row.stanza_id.as_ref().map(|s| s.id.as_str()) != Some(expected_wire_id) {
         return false;
     }
     row.from.to_bare() == *expected_sender
@@ -2281,7 +2281,8 @@ fn project_archived_row(
 
     let stamp_id = row
         .stanza_id
-        .clone()
+        .as_ref()
+        .map(|s| s.id.clone())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| row.id.clone());
     let stanza_id = StanzaIdRef {
@@ -2330,7 +2331,7 @@ fn parse_archived_message_xml(xml: Option<&str>) -> Option<Message> {
 fn fallback_archived_message(row: &MamArchivedMessage) -> Message {
     let mut msg = Message::new(Some(row.to.clone()));
     msg.from = Some(row.from.clone());
-    msg.id = row.stanza_id.clone();
+    msg.id = row.stanza_id.as_ref().map(|s| s.id.clone());
     // RFC 6121 §5.2.3: only emit `<body>` if the archived row recorded
     // one. `Some("")` round-trips as an empty `<body></body>` element;
     // `None` produces no `<body>` element at all (subject-only,
@@ -2724,13 +2725,18 @@ async fn finish_archive_groupchat_message(
         );
         return None;
     };
+    let room_jid_full = jid::Jid::from(room.clone());
+    let stanza_id = archive_clone
+        .id
+        .clone()
+        .map(|id| waddle_xmpp_core::xep0359::StanzaId::new(id, room_jid_full.clone()));
     let archived = MamArchivedMessage {
         id: archive_id,
         timestamp: chrono::Utc::now(),
         from: from_jid,
-        to: jid::Jid::from(room.clone()),
+        to: room_jid_full,
         body,
-        stanza_id: archive_clone.id.clone(),
+        stanza_id,
         thread,
         reply,
         origin_id,
@@ -2982,12 +2988,8 @@ pub(crate) fn room_scoped_reply_to_attr(value: &str, room: &BareJid) -> Option<S
         .map(|jid| jid.to_string())
 }
 
-fn extract_origin_id(message: &Message) -> Option<String> {
-    message
-        .payloads
-        .iter()
-        .find(|payload| payload.name() == "origin-id" && payload.ns() == STANZA_ID_NS)
-        .and_then(|origin| origin.attr("id").map(ToOwned::to_owned))
+fn extract_origin_id(message: &Message) -> Option<waddle_xmpp_core::xep0359::OriginId> {
+    waddle_xmpp_core::xep0359::extract_origin_id(message)
 }
 
 fn prototype_body(message: &Message) -> Option<String> {
@@ -3420,7 +3422,10 @@ mod tests {
         assert_eq!(row.from.to_string(), "alice@example.com");
         assert_eq!(row.to.to_string(), "bob@example.com");
         assert_eq!(row.body.as_deref(), Some("hello"));
-        assert_eq!(row.stanza_id.as_deref(), Some("orig-1"));
+        assert_eq!(
+            row.stanza_id.as_ref().map(|s| s.id.as_str()),
+            Some("orig-1")
+        );
     }
 
     #[tokio::test]
@@ -3751,7 +3756,10 @@ mod tests {
             from: "alice@example.com".parse().expect("jid"),
             to: "bob@example.com".parse().expect("jid"),
             body: Some("hello".to_string()),
-            stanza_id: Some("canon-A1".to_string()),
+            stanza_id: Some(waddle_xmpp_core::xep0359::StanzaId::new(
+                "canon-A1",
+                jid::Jid::from(archive_jid.clone()),
+            )),
             thread: None,
             reply: None,
             origin_id: None,
@@ -3852,10 +3860,13 @@ mod tests {
             from: "bob@example.com".parse().expect("jid"),
             to: "alice@example.com".parse().expect("jid"),
             body: Some("from bob".to_string()),
-            stanza_id: Some("alice-stamp-bob".to_string()),
+            stanza_id: Some(waddle_xmpp_core::xep0359::StanzaId::new(
+                "alice-stamp-bob",
+                jid::Jid::from(archive_jid.clone()),
+            )),
             thread: None,
             reply: None,
-            origin_id: Some("collision".to_string()),
+            origin_id: Some(waddle_xmpp_core::xep0359::OriginId::new("collision")),
             message_type: "chat".to_string(),
             stanza_xml: None,
             rich: None,
@@ -3869,10 +3880,13 @@ mod tests {
             from: "alice@example.com".parse().expect("jid"),
             to: "bob@example.com".parse().expect("jid"),
             body: Some("from alice".to_string()),
-            stanza_id: Some("alice-stamp-alice".to_string()),
+            stanza_id: Some(waddle_xmpp_core::xep0359::StanzaId::new(
+                "alice-stamp-alice",
+                jid::Jid::from(archive_jid.clone()),
+            )),
             thread: None,
             reply: None,
-            origin_id: Some("collision".to_string()),
+            origin_id: Some(waddle_xmpp_core::xep0359::OriginId::new("collision")),
             message_type: "chat".to_string(),
             stanza_xml: None,
             rich: None,
@@ -3937,10 +3951,13 @@ mod tests {
             from: "bob@example.com".parse().expect("jid"),
             to: "alice@example.com".parse().expect("jid"),
             body: Some("bob's".to_string()),
-            stanza_id: Some("alice-stamp".to_string()),
+            stanza_id: Some(waddle_xmpp_core::xep0359::StanzaId::new(
+                "alice-stamp",
+                jid::Jid::from(archive_jid.clone()),
+            )),
             thread: None,
             reply: None,
-            origin_id: Some("oid-1".to_string()),
+            origin_id: Some(waddle_xmpp_core::xep0359::OriginId::new("oid-1")),
             message_type: "chat".to_string(),
             stanza_xml: None,
             rich: None,
@@ -3995,10 +4012,13 @@ mod tests {
             from: "alice@example.com".parse().expect("jid"),
             to: "bob@example.com".parse().expect("jid"),
             body: Some("collide".to_string()),
-            stanza_id: Some("real-stamp".to_string()),
+            stanza_id: Some(waddle_xmpp_core::xep0359::StanzaId::new(
+                "real-stamp",
+                jid::Jid::from(archive_jid.clone()),
+            )),
             thread: None,
             reply: None,
-            origin_id: Some("queried-id".to_string()),
+            origin_id: Some(waddle_xmpp_core::xep0359::OriginId::new("queried-id")),
             message_type: "chat".to_string(),
             stanza_xml: None,
             rich: None,
@@ -4051,7 +4071,10 @@ mod tests {
             from: "alice@example.com".parse().expect("jid"),
             to: "bob@example.com".parse().expect("jid"),
             body: None,
-            stanza_id: Some("tomb-1".to_string()),
+            stanza_id: Some(waddle_xmpp_core::xep0359::StanzaId::new(
+                "tomb-1",
+                jid::Jid::from(archive_jid.clone()),
+            )),
             thread: None,
             reply: None,
             origin_id: None,

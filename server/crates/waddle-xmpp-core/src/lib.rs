@@ -34,8 +34,8 @@ pub use domain::{
 };
 pub use error::{CoreError, CoreResult};
 pub use mam::{
-    add_stanza_id, build_fin_iq, build_result_messages, is_mam_query, parse_mam_query,
-    ArchivedMessage, MamQuery, MamResult, DATA_FORMS_NS, FORWARD_NS, MAM_NS, RSM_NS, STANZA_ID_NS,
+    build_fin_iq, build_result_messages, is_mam_query, parse_mam_query, ArchivedMessage, MamQuery,
+    MamResult, DATA_FORMS_NS, FORWARD_NS, MAM_NS, RSM_NS, STANZA_ID_NS,
 };
 pub use parser_utils::{ensure_thread_element, extract_thread_parent, reattach_thread_parent};
 pub use presence::{

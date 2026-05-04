@@ -29,13 +29,14 @@
 //!   `by` entity that matches the server/MUC JID is authoritative.
 
 use minidom::Element;
+use serde::{Deserialize, Serialize};
 use xmpp_parsers::message::Message;
 
 /// Namespace for XEP-0359 Unique and Stable Stanza IDs.
 pub const NS_SID: &str = "urn:xmpp:sid:0";
 
 /// A server-assigned stable stanza ID.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StanzaId {
     /// The stable ID assigned by the server/service.
     pub id: String,
@@ -51,7 +52,7 @@ impl StanzaId {
 }
 
 /// A client-assigned origin ID.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OriginId {
     /// The unique ID assigned by the originating client.
     pub id: String,
@@ -182,8 +183,12 @@ pub fn build_origin_id_element(id: &str) -> Element {
 ///
 /// This is the primary function used by the server when archiving messages.
 /// Multiple stanza-ids from different entities may coexist.
-pub fn add_stanza_id(msg: &mut Message, id: &str, by: &jid::Jid) {
-    msg.payloads.push(build_stanza_id_element(id, by));
+///
+/// Takes a typed [`StanzaId`] so callers cannot accidentally emit a
+/// `<stanza-id id='...'/>` element without the XEP-0359 §3 REQUIRED
+/// `by` attribute — the typed value carries both fields together.
+pub fn add_stanza_id(msg: &mut Message, sid: &StanzaId) {
+    msg.payloads.push(build_stanza_id_element(&sid.id, &sid.by));
 }
 
 /// Add an `<origin-id/>` to a message (no-op if already present).
@@ -359,8 +364,8 @@ mod tests {
         let mut msg = Message::new(None::<jid::Jid>);
         let room: jid::Jid = "room@muc.example.com".parse().expect("valid jid");
         let server: jid::Jid = "example.com".parse().expect("valid jid");
-        add_stanza_id(&mut msg, "arc-1", &room);
-        add_stanza_id(&mut msg, "arc-2", &server);
+        add_stanza_id(&mut msg, &StanzaId::new("arc-1", room));
+        add_stanza_id(&mut msg, &StanzaId::new("arc-2", server));
 
         let ids = extract_stanza_ids(&msg);
         assert_eq!(ids.len(), 2);
@@ -388,8 +393,8 @@ mod tests {
         let mut msg = Message::new(None::<jid::Jid>);
         let room: jid::Jid = "room@muc.example.com".parse().expect("valid jid");
         let server: jid::Jid = "example.com".parse().expect("valid jid");
-        add_stanza_id(&mut msg, "arc-1", &room);
-        add_stanza_id(&mut msg, "arc-2", &server);
+        add_stanza_id(&mut msg, &StanzaId::new("arc-1", room.clone()));
+        add_stanza_id(&mut msg, &StanzaId::new("arc-2", server.clone()));
 
         remove_stanza_ids_by(&mut msg, &room);
         let ids = extract_stanza_ids(&msg);
@@ -401,7 +406,7 @@ mod tests {
     fn test_strip_all_ids() {
         let mut msg = Message::new(None::<jid::Jid>);
         let server: jid::Jid = "example.com".parse().expect("valid jid");
-        add_stanza_id(&mut msg, "arc-1", &server);
+        add_stanza_id(&mut msg, &StanzaId::new("arc-1", server));
         add_origin_id(&mut msg, "client-1");
         msg.payloads
             .push(Element::builder("body", "jabber:client").build());

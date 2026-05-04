@@ -536,7 +536,10 @@ async fn xep_0313_full_jid_from_round_trips_through_mam_without_resource_truncat
         from: from_full.clone(),
         to: to_room.clone(),
         body: Some("typed full from".to_string()),
-        stanza_id: Some("wire-full-from".to_string()),
+        stanza_id: Some(waddle_xmpp_core::xep0359::StanzaId::new(
+            "wire-full-from",
+            ARCHIVE.parse::<jid::Jid>().expect("valid jid"),
+        )),
         thread: None,
         reply: None,
         origin_id: None,
@@ -583,7 +586,10 @@ async fn xep_0313_bare_jid_to_round_trips_through_mam() {
         from,
         to: to_bare.clone(),
         body: Some("typed bare to".to_string()),
-        stanza_id: Some("wire-bare-to".to_string()),
+        stanza_id: Some(waddle_xmpp_core::xep0359::StanzaId::new(
+            "wire-bare-to",
+            ARCHIVE.parse::<jid::Jid>().expect("valid jid"),
+        )),
         thread: None,
         reply: None,
         origin_id: None,

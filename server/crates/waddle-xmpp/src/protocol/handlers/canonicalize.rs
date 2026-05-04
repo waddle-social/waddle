@@ -36,7 +36,7 @@ use crate::protocol::message_context::MessageContext;
 use crate::protocol::session_state::Locality;
 use crate::protocol::traits::{HandlerOutcome, MessageHandler};
 use jid::{BareJid, Jid};
-use waddle_xmpp_core::xep0359::{add_stanza_id, is_stanza_id_element};
+use waddle_xmpp_core::xep0359::{add_stanza_id, is_stanza_id_element, StanzaId};
 use xmpp_parsers::message::{Message, MessageType};
 
 /// XEP-0359 strip-and-stamp handler for the message pipeline.
@@ -85,7 +85,7 @@ impl MessageHandler for CanonicalizeHandler {
 
         // Stamp a fresh stanza-id from the injected entropy source.
         let id = ctx.id_gen.fresh_stanza_id();
-        add_stanza_id(message, &id, &by_jid);
+        add_stanza_id(message, &StanzaId::new(id, by_jid));
 
         HandlerOutcome::Continue(Vec::new())
     }

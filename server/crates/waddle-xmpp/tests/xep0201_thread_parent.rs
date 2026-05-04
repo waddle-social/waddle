@@ -54,7 +54,10 @@ fn nested_thread_groupchat_row(
         from: jid_lit(&format!("{ROOM}/{nick}")),
         to: jid_lit(ROOM),
         body: Some(body.to_string()),
-        stanza_id: Some(format!("wire-{archive_id}")),
+        stanza_id: Some(waddle_xmpp_core::xep0359::StanzaId::new(
+            format!("wire-{archive_id}"),
+            jid_lit(ROOM),
+        )),
         thread,
         reply: None,
         origin_id: None,
@@ -175,7 +178,10 @@ fn xep_0201_groupchat_stanza_xml_replay_preserves_thread_metadata() {
         from: jid_lit("team@conference.example.com/alice"),
         to: jid_lit(ROOM),
         body: Some("threaded reply".to_string()),
-        stanza_id: Some("wire-archive-xml".to_string()),
+        stanza_id: Some(waddle_xmpp_core::xep0359::StanzaId::new(
+            "wire-archive-xml",
+            jid_lit(ROOM),
+        )),
         thread: Some(ThreadInfo::child(
             ThreadId::new("root-thread").expect("thread id"),
             ThreadId::new("parent-thread").expect("parent id"),
@@ -418,7 +424,10 @@ async fn xep_0201_collapsed_thread_field_round_trips_no_thread_through_storage()
         from: jid_lit(&format!("{ROOM}/alice")),
         to: jid_lit(ROOM),
         body: Some("plain body".to_string()),
-        stanza_id: Some("wire-no-thread".to_string()),
+        stanza_id: Some(waddle_xmpp_core::xep0359::StanzaId::new(
+            "wire-no-thread",
+            jid_lit(ROOM),
+        )),
         thread: None,
         reply: None,
         origin_id: None,
