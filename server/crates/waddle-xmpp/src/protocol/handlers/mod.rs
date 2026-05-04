@@ -32,6 +32,7 @@ pub mod carbons_message;
 pub mod enrichment_dispatch;
 pub mod errors;
 pub mod inbox;
+pub mod offline_delivery;
 pub mod ping;
 pub mod receipts;
 pub mod rich_target_validation;
@@ -95,6 +96,7 @@ pub fn register_default_message_handlers(dispatcher: &mut StanzaDispatcher) {
     dispatcher.register_message(Arc::new(canonicalize::CanonicalizeHandler));
     dispatcher.register_message(Arc::new(enrichment_dispatch::EnrichmentDispatchHandler));
     dispatcher.register_message(Arc::new(archive::ArchiveHandler));
+    dispatcher.register_message(Arc::new(offline_delivery::OfflineDeliveryHandler));
     dispatcher.register_message(Arc::new(carbons_message::CarbonsMessageHandler));
     dispatcher.register_message(Arc::new(inbox::InboxHandler));
     dispatcher.register_message(Arc::new(route::RouteHandler));

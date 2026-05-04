@@ -356,6 +356,7 @@ fn outbound_variant_name(event: &OutboundEvent) -> &'static str {
         OutboundEvent::LookupArchivedMessage { .. } => "LookupArchivedMessage",
         OutboundEvent::SetTimer { .. } => "SetTimer",
         OutboundEvent::CancelTimer(_) => "CancelTimer",
+        OutboundEvent::QueueOfflineDelivery { .. } => "QueueOfflineDelivery",
     }
 }
 
