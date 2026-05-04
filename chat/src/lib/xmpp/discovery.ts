@@ -2,7 +2,6 @@ import type { WaddleClient } from "@waddle/xmpp-client-wasm";
 import { normalizeChannelType } from "@/lib/channel-types";
 import type { DiscoveredChannel, DiscoveredSpace, DiscoveredTopology } from "./types";
 import { barePeerJid, jidDomain } from "./jid";
-import type { WasmRoom } from "./wasm-types";
 
 const NS_FORUMS_0 = "urn:xmpp:forums:0";
 const NS_MUC = "http://jabber.org/protocol/muc";
@@ -190,12 +189,6 @@ async function hydrateRoomInfo(xmpp: HybridClient, room: DiscoveredChannel): Pro
 }
 
 export async function discoverChannels(xmpp: HybridClient, jid: string): Promise<DiscoveredChannel[]> {
-  if (xmpp.list_rooms) {
-    const rooms = await xmpp.list_rooms() as WasmRoom[];
-    const hydrated = await Promise.all(rooms.map((room, position) => hydrateRoomInfo(xmpp, channelFromRoom(room, position))));
-    return hydrated.map((room, position) => ({ ...room, position }));
-  }
-
   const spaces = await sendDiscoItems(xmpp, spacesServiceDomain(jid));
   const spaceNode = spaces[0]?.node;
   if (!spaceNode) return [];
@@ -207,7 +200,7 @@ export async function discoverChannels(xmpp: HybridClient, jid: string): Promise
 export async function discoverTopology(xmpp: HybridClient, jid: string): Promise<DiscoveredTopology> {
   const domain = jidDomain(jid);
   const services = await discoverComponentServices(xmpp, domain, jid);
-  let rooms = xmpp.list_rooms ? await discoverChannels(xmpp, jid) : [];
+  let rooms: DiscoveredChannel[] = [];
   const bookmarkedSpaceIds = new Map<string, string>();
   const spaces: DiscoveredSpace[] = [];
   let serverRole: DiscoveryRole = null;
@@ -238,11 +231,9 @@ export async function discoverTopology(xmpp: HybridClient, jid: string): Promise
     }
   } catch {}
 
-  if (!xmpp.list_rooms) {
-    const mucRooms = await sendDiscoItems(xmpp, services.muc);
-    const hydrated = await Promise.all(mucRooms.map((room, position) => hydrateRoomInfo(xmpp, channelFromRoom({ jid: room.jid ?? "", name: room.name }, position))));
-    rooms = hydrated.map((room, position) => ({ ...room, position, ...(room.jid && bookmarkedSpaceIds.get(barePeerJid(room.jid)) ? { spaceId: bookmarkedSpaceIds.get(barePeerJid(room.jid)), standalone: false } : {}) }));
-  }
+  const mucRooms = await sendDiscoItems(xmpp, services.muc);
+  const hydrated = await Promise.all(mucRooms.map((room, position) => hydrateRoomInfo(xmpp, channelFromRoom({ jid: room.jid ?? "", name: room.name }, position))));
+  rooms = hydrated.map((room, position) => ({ ...room, position, ...(room.jid && bookmarkedSpaceIds.get(barePeerJid(room.jid)) ? { spaceId: bookmarkedSpaceIds.get(barePeerJid(room.jid)), standalone: false } : {}) }));
 
   const roomSpaceIds = new Map(rooms.flatMap((room) => room.jid ? [[barePeerJid(room.jid), room.spaceId]] as const : []));
   return {

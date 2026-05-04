@@ -130,13 +130,6 @@ export interface WasmServerVersion {
   os?: string;
 }
 
-export interface WasmRoom {
-  jid: string;
-  name: string;
-  channel_type: string;
-  position: number;
-}
-
 export interface WasmRoomMember {
   jid: string;
   affiliation: string;
