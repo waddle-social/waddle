@@ -599,20 +599,6 @@ export class BrowserXmppClient {
     try { await xmpp.send_raw_iq(`<iq type="set" id="${crypto.randomUUID()}"><enable xmlns="urn:xmpp:carbons:2"/></iq>`); } catch {}
   }
 
-  private async refreshRosterPresenceSubscriptions(xmpp: CompatXmpp & { getRoster?: () => Promise<{ items?: Array<{ jid: string }> }> }) {
-    try {
-      if (xmpp.list_roster_contacts && xmpp.subscribe_to_presence) {
-        const contacts = await xmpp.list_roster_contacts() as WasmRosterContact[];
-        await Promise.all(contacts.map((contact) => xmpp.subscribe_to_presence?.(contact.jid)));
-        return;
-      }
-      if (xmpp.getRoster && xmpp.subscribe_to_presence) {
-        const roster = await xmpp.getRoster();
-        await Promise.all((roster.items ?? []).map((contact) => xmpp.subscribe_to_presence?.(contact.jid)));
-      }
-    } catch {}
-  }
-
   private async doConnect(): Promise<void> {
     const mod = await loadWasmModule();
     const config = new mod.WaddleConfig(
@@ -1146,7 +1132,7 @@ export class BrowserXmppClient {
     if (this.xmpp !== xmpp) return;
     this.connected = true; this.reconnectAttempt = 0;
     this.emitStatus({ state: "online", detail: countQueuedMessages(this.queueScope) > 0 ? lifecycle.type === "fresh" ? "Reconnected — replaying queued messages" : "Connection resumed — replaying queued messages" : lifecycle.type === "fresh" ? "Connection ready" : "Connection resumed" });
-    if (lifecycle.type === "fresh") { this.inflightQueuedIds.clear(); void this.enableCarbons(xmpp); void this.refreshRosterPresenceSubscriptions(xmpp); }
+    if (lifecycle.type === "fresh") { this.inflightQueuedIds.clear(); void this.enableCarbons(xmpp); }
     else {
       const catchupTargets = this.catchup.onSessionStarted();
       if (catchupTargets.length > 0 && (xmpp as CompatXmpp & { searchHistory?: (jid: string, opts: { paging: { max: number } }) => Promise<unknown> }).searchHistory) {

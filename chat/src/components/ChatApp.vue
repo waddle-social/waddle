@@ -651,8 +651,12 @@ watch(xmppClient, (client) => {
   client.setSessionLifecycleHandler((event) => {
     messaging.onSessionLifecycle(event);
     dmMessaging.onSessionLifecycle(event);
-    void dmConversations.hydrateFromInbox();
-    void channelUnread.hydrateFromInbox();
+    // Only re-hydrate inbox on resumptions (reconnect after brief disconnect).
+    // Fresh connections are handled by onConnectionReady() after appState → "ready".
+    if (event.type === "resumed") {
+      void dmConversations.hydrateFromInbox();
+      void channelUnread.hydrateFromInbox();
+    }
   });
 }, { immediate: true });
 
