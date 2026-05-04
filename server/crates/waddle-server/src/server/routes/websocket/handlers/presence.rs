@@ -1704,15 +1704,16 @@ pub async fn handle_muc_join(
         .filter(|existing| existing.nick != nick)
         .filter(|existing| replayed_nicks.insert(existing.nick.clone()))
     {
-        responses.push(build_muc_join_presence_xml(
+        responses.push(build_muc_join_presence_xml(MucJoinPresence {
+            occupant_id_secret: &state.deps.occupant_id_secret,
             room_jid,
-            &existing.nick,
-            sender_jid,
-            affiliation_str(existing.affiliation),
-            role_str(existing.role),
-            &existing.jid,
-            false,
-        ));
+            nick: &existing.nick,
+            to_jid: sender_jid,
+            affiliation: existing.affiliation,
+            role: existing.role,
+            real_jid: &existing.jid,
+            include_self_status: false,
+        }));
     }
 
     // Broadcast the new occupant's presence to all existing occupants.
@@ -1742,15 +1743,16 @@ pub async fn handle_muc_join(
     }
 
     // Send self-presence to the joining user (with status code 110)
-    responses.push(build_muc_join_presence_xml(
+    responses.push(build_muc_join_presence_xml(MucJoinPresence {
+        occupant_id_secret: &state.deps.occupant_id_secret,
         room_jid,
         nick,
-        sender_jid,
-        affiliation_str(join_outcome.new_occupant_affiliation),
-        role_str(join_outcome.new_occupant_role),
-        sender_jid,
-        true,
-    ));
+        to_jid: sender_jid,
+        affiliation: join_outcome.new_occupant_affiliation,
+        role: join_outcome.new_occupant_role,
+        real_jid: sender_jid,
+        include_self_status: true,
+    }));
 
     // XEP-0045 §7.2.15 historical room subject. The typed builder
     // produces the conformant envelope: nick-form `from` + `<delay/>`
@@ -1910,57 +1912,41 @@ pub async fn handle_muc_leave(
     )]
 }
 
-fn build_muc_join_presence_xml(
-    room_jid: &BareJid,
-    nick: &str,
-    to_jid: &FullJid,
-    affiliation: &str,
-    role: &str,
-    real_jid: &FullJid,
+struct MucJoinPresence<'a> {
+    occupant_id_secret: &'a waddle_xmpp::xep::xep0421::OccupantIdSecret,
+    room_jid: &'a BareJid,
+    nick: &'a str,
+    to_jid: &'a FullJid,
+    affiliation: Affiliation,
+    role: Role,
+    real_jid: &'a FullJid,
     include_self_status: bool,
-) -> String {
-    let from_jid = room_jid
+}
+
+fn build_muc_join_presence_xml(params: MucJoinPresence<'_>) -> String {
+    let presence = build_muc_join_presence_stanza(params);
+    stanza_to_xml(&Stanza::Presence(presence))
+}
+
+fn build_muc_join_presence_stanza(params: MucJoinPresence<'_>) -> xmpp_parsers::presence::Presence {
+    let from_jid = params
+        .room_jid
         .clone()
-        .with_resource_str(nick)
-        .unwrap_or_else(|_| to_jid.clone());
-
-    let mut user_payload = Element::builder("x", "http://jabber.org/protocol/muc#user")
-        .append(
-            Element::builder("item", "http://jabber.org/protocol/muc#user")
-                .attr("affiliation", affiliation)
-                .attr("role", role)
-                .attr("jid", real_jid.to_string())
-                .build(),
-        )
-        .append(
-            Element::builder("status", "http://jabber.org/protocol/muc#user")
-                .attr("code", "100")
-                .build(),
-        );
-
-    if include_self_status {
-        user_payload = user_payload.append(
-            Element::builder("status", "http://jabber.org/protocol/muc#user")
-                .attr("code", "110")
-                .build(),
-        );
-    }
-
-    let mut hats = waddle_xmpp::xep::xep0317::hats_from_affiliation(affiliation);
-    if role == "moderator" && !hats.has_uri(waddle_xmpp::xep::xep0317::well_known::MODERATOR) {
-        hats = hats.with_hat(waddle_xmpp::xep::xep0317::Hat::moderator());
-    }
-
-    let mut presence = Element::builder("presence", waddle_xmpp::ns::JABBER_CLIENT)
-        .attr("from", from_jid.to_string())
-        .attr("to", to_jid.to_string())
-        .append(user_payload.build());
-
-    if !hats.is_empty() {
-        presence = presence.append(waddle_xmpp::xep::xep0317::build_hats_element(&hats));
-    }
-
-    element_to_xml(presence.build())
+        .with_resource_str(params.nick)
+        .unwrap_or_else(|_| params.to_jid.clone());
+    let real_bare = params.real_jid.to_bare();
+    waddle_xmpp::muc::build_occupant_presence(
+        &from_jid,
+        params.to_jid,
+        params.affiliation,
+        params.role,
+        params.include_self_status,
+        &waddle_xmpp::xep::xep0421::OccupantIdentity {
+            bare_jid: &real_bare,
+            real_jid: Some(params.real_jid),
+            secret: params.occupant_id_secret,
+        },
+    )
 }
 
 /// XEP-0045 §7.2.9 conflict presence: the requested nick is already in use
@@ -2074,45 +2060,16 @@ fn create_presence_stanza(
     affiliation: Affiliation,
     role: Role,
 ) -> xmpp_parsers::presence::Presence {
-    let from_jid = room_jid
-        .clone()
-        .with_resource_str(nick)
-        .unwrap_or_else(|_| real_jid.clone());
-
-    let real_bare = real_jid.to_bare();
-    waddle_xmpp::muc::build_occupant_presence(
-        &from_jid,
+    build_muc_join_presence_stanza(MucJoinPresence {
+        occupant_id_secret: &state.deps.occupant_id_secret,
+        room_jid,
+        nick,
         to_jid,
         affiliation,
         role,
-        false,
-        &waddle_xmpp::xep::xep0421::OccupantIdentity {
-            bare_jid: &real_bare,
-            real_jid: Some(real_jid),
-            secret: &state.deps.occupant_id_secret,
-        },
-    )
-}
-
-/// Convert Affiliation to string
-fn affiliation_str(affiliation: Affiliation) -> &'static str {
-    match affiliation {
-        Affiliation::Owner => "owner",
-        Affiliation::Admin => "admin",
-        Affiliation::Member => "member",
-        Affiliation::Outcast => "outcast",
-        Affiliation::None => "none",
-    }
-}
-
-/// Convert Role to string
-fn role_str(role: Role) -> &'static str {
-    match role {
-        Role::Moderator => "moderator",
-        Role::Participant => "participant",
-        Role::Visitor => "visitor",
-        Role::None => "none",
-    }
+        real_jid,
+        include_self_status: false,
+    })
 }
 
 /// Derive the single-space id and channel id from a room's bare JID node.
@@ -2143,19 +2100,24 @@ mod tests {
 
     #[test]
     fn muc_join_presence_includes_owner_and_moderator_hats() {
+        let secret = waddle_xmpp::xep::xep0421::OccupantIdSecret::new(
+            b"join-presence-handler-test-secret".to_vec(),
+        )
+        .expect("test secret meets length floor");
         let room_jid: BareJid = "chat@muc.example.com".parse().unwrap();
         let to_jid: FullJid = "alice@example.com/web".parse().unwrap();
         let real_jid: FullJid = "bob@example.com/mobile".parse().unwrap();
 
-        let xml = build_muc_join_presence_xml(
-            &room_jid,
-            "bob",
-            &to_jid,
-            "owner",
-            "moderator",
-            &real_jid,
-            false,
-        );
+        let xml = build_muc_join_presence_xml(MucJoinPresence {
+            occupant_id_secret: &secret,
+            room_jid: &room_jid,
+            nick: "bob",
+            to_jid: &to_jid,
+            affiliation: Affiliation::Owner,
+            role: Role::Moderator,
+            real_jid: &real_jid,
+            include_self_status: false,
+        });
 
         assert!(
             xml.contains("xmlns=\"urn:xmpp:hats:0\"") || xml.contains("xmlns='urn:xmpp:hats:0'")
@@ -2167,6 +2129,10 @@ mod tests {
         assert!(
             xml.contains("uri=\"urn:xmpp:hats:moderator\"")
                 || xml.contains("uri='urn:xmpp:hats:moderator'")
+        );
+        assert!(
+            xml.contains("<occupant-id") && xml.contains("urn:xmpp:occupant-id:0"),
+            "typed join presence builder must stamp XEP-0421 occupant-id: {xml}"
         );
     }
 }
