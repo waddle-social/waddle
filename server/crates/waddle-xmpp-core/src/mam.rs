@@ -199,9 +199,19 @@ pub struct ArchivedMessage {
     /// Timestamp when the message was received.
     pub timestamp: DateTime<Utc>,
     /// Sender JID.
-    pub from: String,
+    ///
+    /// Typed as `jid::Jid` (not `String`) per the typed-payloads hard
+    /// rule. Carries either a bare or full JID — the projection
+    /// preserves the wire form (full JID for groupchat occupants,
+    /// bare/full as appropriate for 1:1) so replay round-trips
+    /// resource and domain components without lossy reparse.
+    pub from: Jid,
     /// Recipient JID (room JID for MUC, or contact bare JID for 1:1).
-    pub to: String,
+    ///
+    /// Typed as `jid::Jid` for the same reason as [`Self::from`]. The
+    /// archive write site supplies the canonical addressing tuple
+    /// upstream of this struct.
+    pub to: Jid,
     /// Message body, preserving the wire-fidelity distinction between
     /// "no `<body>` element on the wire" (`None`) and "an empty
     /// `<body></body>` element" (`Some("")`).
@@ -282,13 +292,29 @@ fn default_message_type() -> String {
     "chat".to_string()
 }
 
-impl Default for ArchivedMessage {
-    fn default() -> Self {
+impl ArchivedMessage {
+    /// Test-only constructor that stamps `timestamp = Utc::now()` and
+    /// fills every other optional field with its no-op default. Pulled
+    /// in to replace `..Default::default()` ergonomics in test fixtures
+    /// after the `Default` impl was dropped (no sensible default for
+    /// [`Jid`]).
+    ///
+    /// `from` and `to` are mandatory because they have no safe
+    /// fallback — the previous `Default::default()` returned an empty
+    /// `String` which silently bypassed JID validity. Callers must
+    /// supply real typed JIDs.
+    ///
+    /// Exported (`pub`) and gated `#[cfg(any(test, debug_assertions))]`
+    /// so test fixtures in dependent crates (e.g. `waddle-xmpp`,
+    /// `waddle-server`) can use it without the test feature flag.
+    #[doc(hidden)]
+    #[cfg(any(test, debug_assertions))]
+    pub fn for_test(from: Jid, to: Jid) -> Self {
         Self {
             id: String::new(),
             timestamp: Utc::now(),
-            from: String::new(),
-            to: String::new(),
+            from,
+            to,
             body: None,
             stanza_id: None,
             thread: None,
@@ -309,8 +335,12 @@ pub struct MamQuery {
     pub start: Option<DateTime<Utc>>,
     /// End time filter.
     pub end: Option<DateTime<Utc>>,
-    /// Filter by sender.
-    pub with: Option<String>,
+    /// Filter by sender or recipient JID per XEP-0313 §4.1.5 `with`
+    /// field. Typed as `jid::Jid` (not `String`) per the typed-payloads
+    /// hard rule; parsing happens once at the IQ-form parse boundary
+    /// inside [`parse_data_form`] and a malformed value is rejected as
+    /// `bad-request` rather than silently substituted.
+    pub with: Option<Jid>,
     /// Filter by Waddle thread root id.
     pub thread_id: Option<ThreadId>,
     /// XEP-0431 full-text search terms.
@@ -447,9 +477,15 @@ pub fn build_query_form_iq(original_iq: &Iq) -> Iq {
 }
 
 /// Build MAM result messages for each archived message.
+///
+/// `to_jid` is typed as `&jid::Jid` so the recipient address is a
+/// validated value flowing in from the IQ wire-parse boundary; the
+/// previous string-typed parameter forced an internal `parse()` whose
+/// only failure mode was the `parse_message_jid` "unknown@invalid"
+/// fallback (a hot-path data-loss bug).
 pub fn build_result_messages(
     query_id: &str,
-    to_jid: &str,
+    to_jid: &Jid,
     messages: &[ArchivedMessage],
 ) -> Vec<Message> {
     messages
@@ -507,7 +543,14 @@ fn parse_data_form(form: &Element, query: &mut MamQuery) -> CoreResult<()> {
                 }
             }
             "with" => {
-                query.with = value.filter(|value| !value.is_empty());
+                if let Some(value) = value.filter(|value| !value.is_empty()) {
+                    let parsed = value.parse::<Jid>().map_err(|error| {
+                        CoreError::bad_request(Some(format!(
+                            "Invalid `with` JID in MAM query: {error}"
+                        )))
+                    })?;
+                    query.with = Some(parsed);
+                }
             }
             WADDLE_MAM_THREAD_FIELD => {
                 query.thread_id = value.and_then(ThreadId::new);
@@ -557,7 +600,7 @@ fn parse_datetime(value: &str) -> CoreResult<DateTime<Utc>> {
         .map_err(|error| CoreError::bad_request(Some(format!("Invalid datetime: {}", error))))
 }
 
-fn build_result_message(query_id: &str, to_jid: &str, archived: &ArchivedMessage) -> Message {
+fn build_result_message(query_id: &str, to_jid: &Jid, archived: &ArchivedMessage) -> Message {
     let inner_msg = archived_inner_message(archived);
     let delay = Element::builder("delay", DELAY_NS)
         .attr("stamp", archived.timestamp.to_rfc3339())
@@ -572,17 +615,11 @@ fn build_result_message(query_id: &str, to_jid: &str, archived: &ArchivedMessage
         .append(forwarded)
         .build();
 
-    let mut msg = Message::new(Some(parse_message_jid(to_jid)));
+    let mut msg = Message::new(Some(to_jid.clone()));
     msg.id = Some(Uuid::now_v7().to_string());
     msg.type_ = MessageType::Normal;
     msg.payloads.push(result);
     msg
-}
-
-fn parse_message_jid(to_jid: &str) -> Jid {
-    to_jid
-        .parse()
-        .unwrap_or_else(|_| Jid::from(BareJid::new("unknown").expect("valid fallback JID")))
 }
 
 fn archived_inner_message(archived: &ArchivedMessage) -> Element {
@@ -643,10 +680,10 @@ fn build_typed_inner_message(archived: &ArchivedMessage, rich: &ArchivedRichMess
     };
 
     let mut builder = Element::builder("message", CLIENT_NS)
-        .attr("from", &archived.from)
+        .attr("from", archived.from.to_string())
         .attr("type", msg_type);
     if msg_type != "groupchat" {
-        builder = builder.attr("to", &archived.to);
+        builder = builder.attr("to", archived.to.to_string());
     }
 
     if let Some(stanza_id) = archived.stanza_id.as_deref() {
@@ -683,11 +720,11 @@ fn build_typed_inner_message(archived: &ArchivedMessage, rich: &ArchivedRichMess
                 .build(),
         );
     }
-    if msg_type == "groupchat" && !archived.id.is_empty() && !archived.to.is_empty() {
+    if msg_type == "groupchat" && !archived.id.is_empty() {
         builder = builder.append(
             Element::builder("stanza-id", STANZA_ID_NS)
                 .attr("id", &archived.id)
-                .attr("by", &archived.to)
+                .attr("by", archived.to.to_string())
                 .build(),
         );
     }
@@ -821,10 +858,10 @@ fn build_legacy_inner_message(archived: &ArchivedMessage) -> Element {
     };
 
     let mut builder = Element::builder("message", CLIENT_NS)
-        .attr("from", &archived.from)
+        .attr("from", archived.from.to_string())
         .attr("type", msg_type);
     if msg_type != "groupchat" {
-        builder = builder.attr("to", &archived.to);
+        builder = builder.attr("to", archived.to.to_string());
     }
 
     if let Some(stanza_id) = archived.stanza_id.as_deref() {
@@ -862,11 +899,11 @@ fn build_legacy_inner_message(archived: &ArchivedMessage) -> Element {
                 .build(),
         );
     }
-    if msg_type == "groupchat" && !archived.id.is_empty() && !archived.to.is_empty() {
+    if msg_type == "groupchat" && !archived.id.is_empty() {
         builder = builder.append(
             Element::builder("stanza-id", STANZA_ID_NS)
                 .attr("id", &archived.id)
-                .attr("by", &archived.to)
+                .attr("by", archived.to.to_string())
                 .build(),
         );
     }
@@ -898,6 +935,10 @@ fn build_rsm_response_element(result: &MamResult) -> Element {
 mod tests {
     use super::*;
     use chrono::Datelike;
+
+    fn jid(value: &str) -> Jid {
+        value.parse::<Jid>().expect("valid jid literal")
+    }
 
     #[test]
     fn parses_mam_query_with_form_and_rsm() {
@@ -958,7 +999,10 @@ mod tests {
         assert_eq!(query_id, "query-1");
         assert_eq!(query.max, Some(10));
         assert_eq!(query.after_id.as_deref(), Some("msg-9"));
-        assert_eq!(query.with.as_deref(), Some("juliet@example.com"));
+        assert_eq!(
+            query.with.as_ref().map(Jid::to_string).as_deref(),
+            Some("juliet@example.com")
+        );
         assert_eq!(
             query.fulltext.as_ref().map(RichText::as_str),
             Some("release notes")
@@ -1161,10 +1205,6 @@ mod tests {
     fn builds_result_message_from_legacy_fields() {
         let archived = ArchivedMessage {
             id: "msg-123".to_string(),
-            timestamp: Utc::now(),
-            from: "user@example.com/nick".to_string(),
-            to: "room@conference.example.com".to_string(),
-            body: Some("Hello, world!".to_string()),
             thread: Some(ThreadInfo::root(
                 ThreadId::new("thread-1").expect("non-empty thread id"),
             )),
@@ -1173,10 +1213,14 @@ mod tests {
                 to: Some("alice@example.com".parse::<Jid>().expect("valid jid")),
             }),
             origin_id: Some("origin-1".to_string()),
-            ..Default::default()
+            body: Some("Hello, world!".to_string()),
+            ..ArchivedMessage::for_test(
+                jid("user@example.com/nick"),
+                jid("room@conference.example.com"),
+            )
         };
 
-        let msg = build_result_messages("query-1", "user@example.com", &[archived]);
+        let msg = build_result_messages("query-1", &jid("user@example.com"), &[archived]);
         let result = msg[0]
             .payloads
             .iter()
@@ -1203,19 +1247,15 @@ mod tests {
     fn nested_thread_archived_for_replay(stanza_xml: Option<String>) -> ArchivedMessage {
         ArchivedMessage {
             id: "msg-thread-nested".to_string(),
-            timestamp: Utc::now(),
-            from: "alice@example.com/web".to_string(),
-            to: "bob@example.com".to_string(),
             body: Some("nested reply".to_string()),
             stanza_id: Some("wire-id-1".to_string()),
             thread: Some(ThreadInfo::child(
                 ThreadId::new("child-thread").expect("non-empty thread id"),
                 ThreadId::new("root-thread").expect("non-empty parent id"),
             )),
-            origin_id: None,
             message_type: "chat".to_string(),
             stanza_xml,
-            ..Default::default()
+            ..ArchivedMessage::for_test(jid("alice@example.com/web"), jid("bob@example.com"))
         }
     }
 
@@ -1256,7 +1296,7 @@ mod tests {
             }),
             ..nested_thread_archived_for_replay(None)
         };
-        let msgs = build_result_messages("q1", "user@example.com", &[archived]);
+        let msgs = build_result_messages("q1", &jid("user@example.com"), &[archived]);
         let thread = replay_inner_thread(&msgs[0]);
         assert_eq!(thread.text().trim(), "child-thread");
         assert_eq!(thread.attr("parent"), Some("root-thread"));
@@ -1268,7 +1308,7 @@ mod tests {
         // None — `build_legacy_inner_message` rebuilds purely from
         // scalar columns.
         let archived = nested_thread_archived_for_replay(None);
-        let msgs = build_result_messages("q2", "user@example.com", &[archived]);
+        let msgs = build_result_messages("q2", &jid("user@example.com"), &[archived]);
         let thread = replay_inner_thread(&msgs[0]);
         assert_eq!(thread.text().trim(), "child-thread");
         assert_eq!(thread.attr("parent"), Some("root-thread"));
@@ -1278,9 +1318,6 @@ mod tests {
     fn xep_0201_groupchat_stanza_xml_replay_reinstalls_thread_and_strips_to() {
         let archived = ArchivedMessage {
             id: "archive-threaded-reply".to_string(),
-            timestamp: Utc::now(),
-            from: "room@conference.example.com/alice".to_string(),
-            to: "room@conference.example.com".to_string(),
             body: Some("threaded reply".to_string()),
             stanza_id: Some("wire-id-2".to_string()),
             thread: Some(ThreadInfo::child(
@@ -1292,10 +1329,13 @@ mod tests {
                 "<message xmlns='jabber:client' from='room@conference.example.com/alice' to='bob@example.com/web' type='groupchat' id='wire-id-2'><body>threaded reply</body><thread>stale-thread</thread><reply xmlns='urn:xmpp:reply:0' id='root-thread'/></message>"
                     .to_string(),
             ),
-            ..Default::default()
+            ..ArchivedMessage::for_test(
+                jid("room@conference.example.com/alice"),
+                jid("room@conference.example.com"),
+            )
         };
 
-        let msgs = build_result_messages("q-stanza-xml", "bob@example.com/web", &[archived]);
+        let msgs = build_result_messages("q-stanza-xml", &jid("bob@example.com/web"), &[archived]);
         let result = msgs[0]
             .payloads
             .iter()
@@ -1330,9 +1370,6 @@ mod tests {
         // smuggled past the projection.
         let archived = ArchivedMessage {
             id: "msg-incoherent".to_string(),
-            timestamp: Utc::now(),
-            from: "alice@example.com/web".to_string(),
-            to: "bob@example.com".to_string(),
             body: Some("body".to_string()),
             // The collapsed `thread: Option<ThreadInfo>` field makes
             // "parent without id" unrepresentable; the closest legal
@@ -1344,9 +1381,9 @@ mod tests {
             message_type: "chat".to_string(),
             stanza_xml: None,
             rich: None,
-            ..Default::default()
+            ..ArchivedMessage::for_test(jid("alice@example.com/web"), jid("bob@example.com"))
         };
-        let msgs = build_result_messages("q3", "user@example.com", &[archived]);
+        let msgs = build_result_messages("q3", &jid("user@example.com"), &[archived]);
         let result = msgs[0]
             .payloads
             .iter()
@@ -1370,18 +1407,18 @@ mod tests {
     fn preserves_archived_stanza_payload() {
         let archived = ArchivedMessage {
             id: "msg-124".to_string(),
-            timestamp: Utc::now(),
-            from: "room@conference.example.com/alice".to_string(),
-            to: "room@conference.example.com".to_string(),
             body: None,
             message_type: "groupchat".to_string(),
             stanza_xml: Some(
                 "<message xmlns='jabber:client' from='room@conference.example.com/alice' to='room@conference.example.com' type='groupchat' id='reaction-1'><reactions xmlns='urn:xmpp:reactions:0' id='msg-1'><reaction>👍</reaction></reactions></message>".to_string(),
             ),
-            ..Default::default()
+            ..ArchivedMessage::for_test(
+                jid("room@conference.example.com/alice"),
+                jid("room@conference.example.com"),
+            )
         };
 
-        let msg = build_result_messages("query-2", "user@example.com", &[archived]);
+        let msg = build_result_messages("query-2", &jid("user@example.com"), &[archived]);
         let result = msg[0]
             .payloads
             .iter()
@@ -1407,8 +1444,8 @@ mod tests {
     #[test]
     fn builds_fin_iq_with_rsm_metadata() {
         let original = Iq {
-            from: Some(parse_message_jid("romeo@example.com/orchard")),
-            to: Some(parse_message_jid("juliet@example.com/balcony")),
+            from: Some(jid("romeo@example.com/orchard")),
+            to: Some(jid("juliet@example.com/balcony")),
             id: "iq-1".to_string(),
             payload: IqType::Get(Element::builder("query", MAM_NS).build()),
         };
@@ -1447,7 +1484,7 @@ mod tests {
 
     #[test]
     fn adds_stanza_id_payload() {
-        let mut message = Message::new(Some(parse_message_jid("juliet@example.com")));
+        let mut message = Message::new(Some(jid("juliet@example.com")));
 
         add_stanza_id(&mut message, "archive-1", "room@example.com");
 
@@ -1464,9 +1501,6 @@ mod tests {
     fn stanza_xml_preferred_over_rich_payload() {
         let archived = ArchivedMessage {
             id: "msg-priority".to_string(),
-            timestamp: Utc::now(),
-            from: "room@conference.example.com/alice".to_string(),
-            to: "room@conference.example.com".to_string(),
             body: Some("typed body".to_string()),
             message_type: "groupchat".to_string(),
             stanza_xml: Some(
@@ -1478,10 +1512,13 @@ mod tests {
                 references: vec![],
                 mentions: vec![],
             }),
-            ..Default::default()
+            ..ArchivedMessage::for_test(
+                jid("room@conference.example.com/alice"),
+                jid("room@conference.example.com"),
+            )
         };
 
-        let msg = build_result_messages("query-priority", "user@example.com", &[archived]);
+        let msg = build_result_messages("query-priority", &jid("user@example.com"), &[archived]);
         let result = msg[0]
             .payloads
             .iter()
@@ -1512,9 +1549,6 @@ mod tests {
     fn stanza_xml_preserves_reply_fallback() {
         let archived = ArchivedMessage {
             id: "msg-fallback".to_string(),
-            timestamp: Utc::now(),
-            from: "room@conference.example.com/bob".to_string(),
-            to: "room@conference.example.com".to_string(),
             body: Some("> Alice wrote:\n> Hello!\nI agree!".to_string()),
             message_type: "groupchat".to_string(),
             stanza_xml: Some(
@@ -1522,25 +1556,24 @@ mod tests {
             ),
             reply: Some(ArchivedReply {
                 id: RichMessageId::new("orig-1").expect("non-empty reply id"),
-                to: Some(
-                    "room@conference.example.com/alice"
-                        .parse::<Jid>()
-                        .expect("valid jid"),
-                ),
+                to: Some(jid("room@conference.example.com/alice")),
             }),
             rich: Some(ArchivedRichMessage {
                 payload: None,
                 reply: Some(ArchivedReply {
                     id: RichMessageId("orig-1".to_string()),
-                    to: Some("room@conference.example.com/alice".parse().unwrap()),
+                    to: Some(jid("room@conference.example.com/alice")),
                 }),
                 references: vec![],
                 mentions: vec![],
             }),
-            ..Default::default()
+            ..ArchivedMessage::for_test(
+                jid("room@conference.example.com/bob"),
+                jid("room@conference.example.com"),
+            )
         };
 
-        let msg = build_result_messages("query-fallback", "user@example.com", &[archived]);
+        let msg = build_result_messages("query-fallback", &jid("user@example.com"), &[archived]);
         let result = msg[0]
             .payloads
             .iter()
@@ -1577,18 +1610,18 @@ mod tests {
     fn stanza_xml_strips_to_for_groupchat() {
         let archived = ArchivedMessage {
             id: "msg-strip-to".to_string(),
-            timestamp: Utc::now(),
-            from: "room@conference.example.com/alice".to_string(),
-            to: "room@conference.example.com".to_string(),
             body: Some("Hello!".to_string()),
             message_type: "groupchat".to_string(),
             stanza_xml: Some(
                 "<message xmlns='jabber:client' from='room@conference.example.com/alice' to='room@conference.example.com' type='groupchat' id='msg-1'><body>Hello!</body></message>".to_string(),
             ),
-            ..Default::default()
+            ..ArchivedMessage::for_test(
+                jid("room@conference.example.com/alice"),
+                jid("room@conference.example.com"),
+            )
         };
 
-        let msg = build_result_messages("query-strip-to", "user@example.com", &[archived]);
+        let msg = build_result_messages("query-strip-to", &jid("user@example.com"), &[archived]);
         let result = msg[0]
             .payloads
             .iter()
@@ -1615,16 +1648,16 @@ mod tests {
         let stanza_xml = "<message xmlns='jabber:client' from='room@conf.example.com/alice' to='room@conf.example.com' type='groupchat' id='msg-x'><body>test</body><custom xmlns='urn:example:unknown'/></message>";
         let archived = ArchivedMessage {
             id: "msg-strip-raw".to_string(),
-            timestamp: Utc::now(),
-            from: "room@conf.example.com/alice".to_string(),
-            to: "room@conf.example.com".to_string(),
             body: Some("test".to_string()),
             message_type: "groupchat".to_string(),
             stanza_xml: Some(stanza_xml.to_string()),
-            ..Default::default()
+            ..ArchivedMessage::for_test(
+                jid("room@conf.example.com/alice"),
+                jid("room@conf.example.com"),
+            )
         };
 
-        let msg = build_result_messages("query-strip-raw", "user@example.com", &[archived]);
+        let msg = build_result_messages("query-strip-raw", &jid("user@example.com"), &[archived]);
         let result = msg[0]
             .payloads
             .iter()

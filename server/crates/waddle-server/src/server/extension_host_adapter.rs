@@ -839,7 +839,7 @@ impl ext_host::ExtensionHostTools for ExtensionHostAdapter {
         let xmpp_query = MamQuery {
             start: query.start,
             end: query.end,
-            with: with.map(|jid| jid.to_string()),
+            with: with.map(jid::Jid::from),
             thread_id: query
                 .thread_id
                 .and_then(|thread_id| waddle_xmpp::mam::ThreadId::new(thread_id.as_str())),
@@ -855,7 +855,7 @@ impl ext_host::ExtensionHostTools for ExtensionHostAdapter {
             .deps
             .protocol
             .mam_storage
-            .query_messages(archive.to_string().as_str(), &xmpp_query)
+            .query_messages(&archive, &xmpp_query)
             .await
             .map_err(|error| {
                 host_tool_error(ExtensionHostAdapterError::Storage(error.to_string()))
@@ -1024,8 +1024,8 @@ fn ext_roster_subscription(subscription: HostRosterSubscription) -> ext_host::Ro
 fn ext_archived_message(message: MamArchivedMessage) -> Option<ext_host::ArchivedMessage> {
     Some(ext_host::ArchivedMessage {
         stanza_id: waddle_extensions::StanzaId::new(message.id).ok()?,
-        from: message.from.parse().ok()?,
-        to: message.to.parse().ok()?,
+        from: message.from,
+        to: message.to,
         sent_at: message.timestamp,
         // RFC 6121 §5.2.3: archived `body` is `Option<String>` —
         // `None` means no `<body>` element on the wire (subject-only,

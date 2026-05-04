@@ -8,6 +8,7 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use jid::BareJid;
 use sqlx::postgres::{PgPool, PgPoolOptions, PgRow};
 use sqlx::sqlite::{
     SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions, SqliteRow,
@@ -47,6 +48,15 @@ impl From<sqlx::Error> for MamStorageError {
 }
 
 /// Trait for MAM message storage backends.
+///
+/// Per XEP-0313 §4.1, archive addressing is normatively a **bare JID**
+/// — the user's bare JID for personal archives, the room's bare JID
+/// for MUC archives. Typing `archive_jid: &BareJid` (not `&str`) makes
+/// that invariant load-bearing in the type system: a caller cannot
+/// accidentally pass a full JID with a resource part and silently
+/// land in the wrong archive bucket. Internal SQL bindings serialize
+/// to `String` once at the bind site (the SQL boundary is the only
+/// place untyped textual representation is allowed).
 #[async_trait]
 pub trait MamStorage: Send + Sync {
     /// Store a message in the archive.
@@ -58,7 +68,7 @@ pub trait MamStorage: Send + Sync {
     /// Returns the unique archive ID assigned to the message.
     async fn store_message(
         &self,
-        archive_jid: &str,
+        archive_jid: &BareJid,
         message: &ArchivedMessage,
     ) -> Result<String, MamStorageError>;
 
@@ -71,7 +81,7 @@ pub trait MamStorage: Send + Sync {
     /// Supports filtering by time range, sender, and RSM pagination.
     async fn query_messages(
         &self,
-        archive_jid: &str,
+        archive_jid: &BareJid,
         query: &MamQuery,
     ) -> Result<MamResult, MamStorageError>;
 
@@ -101,33 +111,33 @@ pub trait MamStorage: Send + Sync {
     /// Get a single message by its original message/stanza id inside an archive.
     async fn get_message_by_stanza_id(
         &self,
-        archive_jid: &str,
+        archive_jid: &BareJid,
         stanza_id: &str,
     ) -> Result<Option<ArchivedMessage>, MamStorageError>;
 
     /// Get a message by its wire message id inside an archive.
     async fn get_message_by_message_id(
         &self,
-        archive_jid: &str,
+        archive_jid: &BareJid,
         message_id: &str,
     ) -> Result<Option<ArchivedMessage>, MamStorageError>;
 
     /// Get a message by server archive id or stanza id, excluding client origin-id.
     async fn get_message_by_archive_or_stanza_id(
         &self,
-        archive_jid: &str,
+        archive_jid: &BareJid,
         stanza_id: &str,
     ) -> Result<Option<ArchivedMessage>, MamStorageError>;
 
     /// Get the total count of messages in an archive (for RSM).
-    async fn count_messages(&self, room_jid: &str) -> Result<u32, MamStorageError>;
+    async fn count_messages(&self, room_jid: &BareJid) -> Result<u32, MamStorageError>;
 
     /// Delete messages older than a given timestamp.
     ///
     /// Used for archive maintenance/cleanup.
     async fn delete_before(
         &self,
-        room_jid: &str,
+        room_jid: &BareJid,
         before: DateTime<Utc>,
     ) -> Result<u64, MamStorageError>;
 }
@@ -151,7 +161,7 @@ impl InMemoryMamStorage {
 impl MamStorage for InMemoryMamStorage {
     async fn store_message(
         &self,
-        archive_jid: &str,
+        archive_jid: &BareJid,
         message: &ArchivedMessage,
     ) -> Result<String, MamStorageError> {
         let archive_id = if message.id.is_empty() {
@@ -170,13 +180,14 @@ impl MamStorage for InMemoryMamStorage {
 
     async fn query_messages(
         &self,
-        archive_jid: &str,
+        archive_jid: &BareJid,
         query: &MamQuery,
     ) -> Result<MamResult, MamStorageError> {
+        let archive_jid_str = archive_jid.to_string();
         let entries = self.entries.read().await;
         let mut messages: Vec<ArchivedMessage> = entries
             .iter()
-            .filter(|(jid, _)| jid == archive_jid)
+            .filter(|(jid, _)| jid == &archive_jid_str)
             .map(|(_, message)| message.clone())
             .collect();
         let before_cursor = match query.before_id.as_deref().filter(|id| !id.is_empty()) {
@@ -206,9 +217,20 @@ impl MamStorage for InMemoryMamStorage {
         if let Some(end) = query.end {
             messages.retain(|message| message.timestamp <= end);
         }
-        if let Some(with) = query.with.as_deref() {
-            messages
-                .retain(|message| message.from.starts_with(with) || message.to.starts_with(with));
+        if let Some(with) = query.with.as_ref() {
+            // XEP-0313 §4.1.5: `with` matches sender or recipient. The
+            // wire form is a single JID — bare matches the
+            // counterparty's bare JID and full matches the exact
+            // resource. Compare via the JID's textual form so a bare
+            // `with` matches both bare and full archived JIDs (the
+            // resource on the archived JID is a strict suffix); a
+            // full `with` matches only the exact full JID.
+            let with_str = with.to_string();
+            messages.retain(|message| {
+                let from_str = message.from.to_string();
+                let to_str = message.to.to_string();
+                from_str.starts_with(&with_str) || to_str.starts_with(&with_str)
+            });
         }
         if let Some(thread_id) = query.thread_id.as_ref() {
             messages.retain(|message| matches_thread_filter(message, thread_id.as_str()));
@@ -275,14 +297,15 @@ impl MamStorage for InMemoryMamStorage {
 
     async fn get_message_by_stanza_id(
         &self,
-        archive_jid: &str,
+        archive_jid: &BareJid,
         stanza_id: &str,
     ) -> Result<Option<ArchivedMessage>, MamStorageError> {
+        let archive_jid_str = archive_jid.to_string();
         let entries = self.entries.read().await;
         Ok(entries
             .iter()
             .find(|(jid, message)| {
-                jid == archive_jid
+                jid == &archive_jid_str
                     && (message.stanza_id.as_deref() == Some(stanza_id)
                         || message.origin_id.as_deref() == Some(stanza_id))
             })
@@ -291,46 +314,53 @@ impl MamStorage for InMemoryMamStorage {
 
     async fn get_message_by_message_id(
         &self,
-        archive_jid: &str,
+        archive_jid: &BareJid,
         message_id: &str,
     ) -> Result<Option<ArchivedMessage>, MamStorageError> {
+        let archive_jid_str = archive_jid.to_string();
         let entries = self.entries.read().await;
         Ok(entries
             .iter()
             .find(|(jid, message)| {
-                jid == archive_jid && message.stanza_id.as_deref() == Some(message_id)
+                jid == &archive_jid_str && message.stanza_id.as_deref() == Some(message_id)
             })
             .map(|(_, message)| message.clone()))
     }
 
     async fn get_message_by_archive_or_stanza_id(
         &self,
-        archive_jid: &str,
+        archive_jid: &BareJid,
         stanza_id: &str,
     ) -> Result<Option<ArchivedMessage>, MamStorageError> {
+        let archive_jid_str = archive_jid.to_string();
         let entries = self.entries.read().await;
         Ok(entries
             .iter()
             .find(|(jid, message)| {
-                jid == archive_jid
+                jid == &archive_jid_str
                     && (message.id == stanza_id || message.stanza_id.as_deref() == Some(stanza_id))
             })
             .map(|(_, message)| message.clone()))
     }
 
-    async fn count_messages(&self, room_jid: &str) -> Result<u32, MamStorageError> {
+    async fn count_messages(&self, room_jid: &BareJid) -> Result<u32, MamStorageError> {
+        let room_jid_str = room_jid.to_string();
         let entries = self.entries.read().await;
-        Ok(entries.iter().filter(|(jid, _)| jid == room_jid).count() as u32)
+        Ok(entries
+            .iter()
+            .filter(|(jid, _)| jid == &room_jid_str)
+            .count() as u32)
     }
 
     async fn delete_before(
         &self,
-        room_jid: &str,
+        room_jid: &BareJid,
         before: DateTime<Utc>,
     ) -> Result<u64, MamStorageError> {
+        let room_jid_str = room_jid.to_string();
         let mut entries = self.entries.write().await;
         let previous_len = entries.len();
-        entries.retain(|(jid, message)| !(jid == room_jid && message.timestamp < before));
+        entries.retain(|(jid, message)| !(jid == &room_jid_str && message.timestamp < before));
         Ok((previous_len - entries.len()) as u64)
     }
 
@@ -447,7 +477,7 @@ impl SqlxMamStorage {
     #[cfg(any(test, debug_assertions))]
     pub async fn insert_raw_thread_columns_for_test(
         &self,
-        archive_jid: &str,
+        archive_jid: &BareJid,
         archive_id: &str,
         thread_id: Option<&str>,
         parent_thread_id: Option<&str>,
@@ -457,17 +487,54 @@ impl SqlxMamStorage {
                 "insert_raw_thread_columns_for_test is sqlite-only".to_string(),
             ));
         };
+        let archive_jid_str = archive_jid.to_string();
         sqlx::query(
             "INSERT INTO mam_messages (id, room_jid, timestamp, from_jid, to_jid, body, stanza_id, thread_id, reply_to_id, reply_to_jid, origin_id, message_type, stanza_xml, rich_payload, nickname_generation, parent_thread_id) VALUES (?, ?, ?, ?, ?, NULL, NULL, ?, NULL, NULL, NULL, ?, NULL, NULL, NULL, ?)",
         )
         .bind(archive_id)
-        .bind(archive_jid)
+        .bind(archive_jid_str.as_str())
         .bind(Utc::now().to_rfc3339())
-        .bind(archive_jid)
-        .bind(archive_jid)
+        .bind(archive_jid_str.as_str())
+        .bind(archive_jid_str.as_str())
         .bind(thread_id)
         .bind("chat")
         .bind(parent_thread_id)
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Test-only escape hatch that inserts a row with a deliberately
+    /// malformed `from_jid` text column, bypassing the typed encode
+    /// path. Used to construct rows that exercise the decode-side
+    /// hard-error contract for `parse_archived_addressing` (a parse
+    /// failure surfaces as `MamStorageError::Serialization` rather
+    /// than collapsing to a sentinel JID, the data-loss bug
+    /// `parse_message_jid` papered over). Only available in test
+    /// builds; sqlite-only.
+    #[doc(hidden)]
+    #[cfg(any(test, debug_assertions))]
+    pub async fn insert_raw_from_jid_for_test(
+        &self,
+        archive_jid: &BareJid,
+        archive_id: &str,
+        raw_from: &str,
+    ) -> Result<(), MamStorageError> {
+        let MamDatabaseBackend::Sqlite(pool) = &self.backend else {
+            return Err(MamStorageError::Database(
+                "insert_raw_from_jid_for_test is sqlite-only".to_string(),
+            ));
+        };
+        let archive_jid_str = archive_jid.to_string();
+        sqlx::query(
+            "INSERT INTO mam_messages (id, room_jid, timestamp, from_jid, to_jid, body, stanza_id, thread_id, reply_to_id, reply_to_jid, origin_id, message_type, stanza_xml, rich_payload, nickname_generation, parent_thread_id) VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, ?, NULL, NULL, NULL, NULL)",
+        )
+        .bind(archive_id)
+        .bind(archive_jid_str.as_str())
+        .bind(Utc::now().to_rfc3339())
+        .bind(raw_from)
+        .bind(archive_jid_str.as_str())
+        .bind("chat")
         .execute(pool)
         .await?;
         Ok(())
@@ -484,7 +551,7 @@ impl SqlxMamStorage {
     #[cfg(any(test, debug_assertions))]
     pub async fn insert_raw_reply_columns_for_test(
         &self,
-        archive_jid: &str,
+        archive_jid: &BareJid,
         archive_id: &str,
         reply_to_id: Option<&str>,
         reply_to_jid: Option<&str>,
@@ -494,14 +561,15 @@ impl SqlxMamStorage {
                 "insert_raw_reply_columns_for_test is sqlite-only".to_string(),
             ));
         };
+        let archive_jid_str = archive_jid.to_string();
         sqlx::query(
             "INSERT INTO mam_messages (id, room_jid, timestamp, from_jid, to_jid, body, stanza_id, thread_id, reply_to_id, reply_to_jid, origin_id, message_type, stanza_xml, rich_payload, nickname_generation, parent_thread_id) VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, NULL, ?, NULL, NULL, NULL, NULL)",
         )
         .bind(archive_id)
-        .bind(archive_jid)
+        .bind(archive_jid_str.as_str())
         .bind(Utc::now().to_rfc3339())
-        .bind(archive_jid)
-        .bind(archive_jid)
+        .bind(archive_jid_str.as_str())
+        .bind(archive_jid_str.as_str())
         .bind(reply_to_id)
         .bind(reply_to_jid)
         .bind("chat")
@@ -792,13 +860,13 @@ fn push_postgres_mam_filters<'args>(
 
 async fn fetch_sqlite_cursor(
     pool: &SqlitePool,
-    archive_jid: &str,
+    archive_jid: &BareJid,
     cursor_id: &str,
 ) -> Result<ArchivedMessage, MamStorageError> {
     let mut builder = QueryBuilder::<Sqlite>::new(format!(
         "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE room_jid = "
     ));
-    builder.push_bind(archive_jid);
+    builder.push_bind(archive_jid.to_string());
     builder.push(" AND id = ").push_bind(cursor_id);
 
     let row = builder.build().fetch_optional(pool).await?;
@@ -810,13 +878,13 @@ async fn fetch_sqlite_cursor(
 
 async fn fetch_postgres_cursor(
     pool: &PgPool,
-    archive_jid: &str,
+    archive_jid: &BareJid,
     cursor_id: &str,
 ) -> Result<ArchivedMessage, MamStorageError> {
     let mut builder = QueryBuilder::<Postgres>::new(format!(
         "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE room_jid = "
     ));
-    builder.push_bind(archive_jid);
+    builder.push_bind(archive_jid.to_string());
     builder.push(" AND id = ").push_bind(cursor_id);
 
     let row = builder.build().fetch_optional(pool).await?;
@@ -886,11 +954,13 @@ fn decode_sqlite_message_row(row: &SqliteRow) -> Result<ArchivedMessage, MamStor
     let reply_to_id_raw: Option<String> = row.try_get(8)?;
     let reply_to_jid_raw: Option<String> = row.try_get(9)?;
     let reply = decode_reply_columns(reply_to_id_raw, reply_to_jid_raw)?;
+    let from_raw: String = row.try_get(3)?;
+    let to_raw: String = row.try_get(4)?;
     Ok(ArchivedMessage {
         id: row.try_get(0)?,
         timestamp,
-        from: row.try_get(3)?,
-        to: row.try_get(4)?,
+        from: parse_archived_addressing("from_jid", &from_raw)?,
+        to: parse_archived_addressing("to_jid", &to_raw)?,
         // Nullable TEXT — preserves the wire-fidelity distinction
         // between `NULL` (no `<body>` element) and `''` (empty
         // `<body></body>`). Explicit type to avoid ambiguity with
@@ -916,11 +986,13 @@ fn decode_postgres_message_row(row: &PgRow) -> Result<ArchivedMessage, MamStorag
     let reply_to_id_raw: Option<String> = row.try_get(8)?;
     let reply_to_jid_raw: Option<String> = row.try_get(9)?;
     let reply = decode_reply_columns(reply_to_id_raw, reply_to_jid_raw)?;
+    let from_raw: String = row.try_get(3)?;
+    let to_raw: String = row.try_get(4)?;
     Ok(ArchivedMessage {
         id: row.try_get(0)?,
         timestamp: row.try_get(2)?,
-        from: row.try_get(3)?,
-        to: row.try_get(4)?,
+        from: parse_archived_addressing("from_jid", &from_raw)?,
+        to: parse_archived_addressing("to_jid", &to_raw)?,
         // See `decode_sqlite_message_row` — nullable, explicit type
         // for the wire-fidelity NULL/'' distinction.
         body: row.try_get::<Option<String>, _>(5)?,
@@ -999,6 +1071,21 @@ fn decode_reply_columns(
     }
 }
 
+/// Parse a `from_jid` / `to_jid` SQL column value into a typed
+/// [`jid::Jid`]. Per the typed-decode hard-error policy, an
+/// unparseable value is surfaced as `MamStorageError::Serialization`
+/// — never silently substituted with a sentinel JID. This closes the
+/// `parse_message_jid` "unknown@invalid" data-loss bug at the
+/// storage decode boundary as well.
+fn parse_archived_addressing(
+    column: &'static str,
+    value: &str,
+) -> Result<jid::Jid, MamStorageError> {
+    value.parse::<jid::Jid>().map_err(|error| {
+        MamStorageError::Serialization(format!("Invalid {column} value '{value}': {error}"))
+    })
+}
+
 fn encode_rich_payload(message: &ArchivedMessage) -> Result<Option<String>, MamStorageError> {
     message
         .rich
@@ -1046,7 +1133,7 @@ impl MamStorage for SqlxMamStorage {
     #[instrument(skip(self, message), fields(archive = %archive_jid))]
     async fn store_message(
         &self,
-        archive_jid: &str,
+        archive_jid: &BareJid,
         message: &ArchivedMessage,
     ) -> Result<String, MamStorageError> {
         let archive_id = if message.id.is_empty() {
@@ -1064,7 +1151,13 @@ impl MamStorage for SqlxMamStorage {
 
         // `Jid::to_string` produces an owned String; build the
         // optional binding once outside the QueryBuilder closure so we
-        // can hand sqlx an `Option<&str>` via `.as_deref()`.
+        // can hand sqlx an `Option<&str>` via `.as_deref()`. The
+        // archive addressing JIDs are also serialized once here so the
+        // bind site sees `&str` and not a fresh allocation per closure
+        // capture.
+        let archive_jid_str = archive_jid.to_string();
+        let from_jid_str = message.from.to_string();
+        let to_jid_str = message.to.to_string();
         let reply_to_id_bind = message.reply.as_ref().map(|r| r.id.as_str());
         let reply_to_jid_owned: Option<String> = message
             .reply
@@ -1079,10 +1172,10 @@ impl MamStorage for SqlxMamStorage {
                 query.push_values(std::iter::once(()), |mut builder, _| {
                     builder
                         .push_bind(&archive_id)
-                        .push_bind(archive_jid)
+                        .push_bind(archive_jid_str.as_str())
                         .push_bind(message.timestamp.to_rfc3339())
-                        .push_bind(message.from.as_str())
-                        .push_bind(message.to.as_str())
+                        .push_bind(from_jid_str.as_str())
+                        .push_bind(to_jid_str.as_str())
                         .push_bind(message.body.as_deref())
                         .push_bind(message.stanza_id.as_deref())
                         .push_bind(message.thread.as_ref().map(|t| t.id.as_str()))
@@ -1110,10 +1203,10 @@ impl MamStorage for SqlxMamStorage {
                 query.push_values(std::iter::once(()), |mut builder, _| {
                     builder
                         .push_bind(&archive_id)
-                        .push_bind(archive_jid)
+                        .push_bind(archive_jid_str.as_str())
                         .push_bind(message.timestamp)
-                        .push_bind(message.from.as_str())
-                        .push_bind(message.to.as_str())
+                        .push_bind(from_jid_str.as_str())
+                        .push_bind(to_jid_str.as_str())
                         .push_bind(message.body.as_deref())
                         .push_bind(message.stanza_id.as_deref())
                         .push_bind(message.thread.as_ref().map(|t| t.id.as_str()))
@@ -1143,11 +1236,17 @@ impl MamStorage for SqlxMamStorage {
     #[instrument(skip(self), fields(archive = %archive_jid))]
     async fn query_messages(
         &self,
-        archive_jid: &str,
+        archive_jid: &BareJid,
         query: &MamQuery,
     ) -> Result<MamResult, MamStorageError> {
         let limit = i64::from(query.max.unwrap_or(100).min(500)) + 1;
-        let with_filter = query.with.as_deref().map(|with| format!("{with}%"));
+        // XEP-0313 §4.1.5 `with` filter: storage compares the wire
+        // textual form so a bare `with` matches both bare and full
+        // archived JIDs, and a full `with` matches only the exact
+        // resource. The string is stable for sqlx's bind lifetime
+        // requirements.
+        let with_filter = query.with.as_ref().map(|with| format!("{with}%"));
+        let archive_jid_str = archive_jid.to_string();
 
         match &self.backend {
             MamDatabaseBackend::Sqlite(pool) => {
@@ -1156,7 +1255,7 @@ impl MamStorage for SqlxMamStorage {
                 );
                 push_sqlite_mam_filters(
                     &mut count_builder,
-                    archive_jid,
+                    archive_jid_str.as_str(),
                     query,
                     with_filter.as_deref(),
                 );
@@ -1168,7 +1267,12 @@ impl MamStorage for SqlxMamStorage {
                 let mut builder = QueryBuilder::<Sqlite>::new(format!(
                     "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE room_jid = "
                 ));
-                push_sqlite_mam_filters(&mut builder, archive_jid, query, with_filter.as_deref());
+                push_sqlite_mam_filters(
+                    &mut builder,
+                    archive_jid_str.as_str(),
+                    query,
+                    with_filter.as_deref(),
+                );
                 if let Some(before_id) = query.before_id.as_deref().filter(|id| !id.is_empty()) {
                     let cursor = fetch_sqlite_cursor(pool, archive_jid, before_id).await?;
                     builder
@@ -1217,7 +1321,7 @@ impl MamStorage for SqlxMamStorage {
                 );
                 push_postgres_mam_filters(
                     &mut count_builder,
-                    archive_jid,
+                    archive_jid_str.as_str(),
                     query,
                     with_filter.as_deref(),
                 );
@@ -1229,7 +1333,12 @@ impl MamStorage for SqlxMamStorage {
                 let mut builder = QueryBuilder::<Postgres>::new(format!(
                     "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE room_jid = "
                 ));
-                push_postgres_mam_filters(&mut builder, archive_jid, query, with_filter.as_deref());
+                push_postgres_mam_filters(
+                    &mut builder,
+                    archive_jid_str.as_str(),
+                    query,
+                    with_filter.as_deref(),
+                );
                 if let Some(before_id) = query.before_id.as_deref().filter(|id| !id.is_empty()) {
                     let cursor = fetch_postgres_cursor(pool, archive_jid, before_id).await?;
                     builder
@@ -1302,15 +1411,16 @@ impl MamStorage for SqlxMamStorage {
 
     async fn get_message_by_stanza_id(
         &self,
-        archive_jid: &str,
+        archive_jid: &BareJid,
         stanza_id: &str,
     ) -> Result<Option<ArchivedMessage>, MamStorageError> {
+        let archive_jid_str = archive_jid.to_string();
         match &self.backend {
             MamDatabaseBackend::Sqlite(pool) => {
                 let row = sqlx::query(&format!(
                     "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE room_jid = ? AND (stanza_id = ? OR origin_id = ?) ORDER BY timestamp DESC LIMIT 1"
                 ))
-                .bind(archive_jid)
+                .bind(archive_jid_str.as_str())
                 .bind(stanza_id)
                 .bind(stanza_id)
                 .fetch_optional(pool)
@@ -1321,7 +1431,7 @@ impl MamStorage for SqlxMamStorage {
                 let row = sqlx::query(&format!(
                     "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE room_jid = $1 AND (stanza_id = $2 OR origin_id = $2) ORDER BY timestamp DESC LIMIT 1"
                 ))
-                .bind(archive_jid)
+                .bind(archive_jid_str.as_str())
                 .bind(stanza_id)
                 .fetch_optional(pool)
                 .await?;
@@ -1332,15 +1442,16 @@ impl MamStorage for SqlxMamStorage {
 
     async fn get_message_by_message_id(
         &self,
-        archive_jid: &str,
+        archive_jid: &BareJid,
         message_id: &str,
     ) -> Result<Option<ArchivedMessage>, MamStorageError> {
+        let archive_jid_str = archive_jid.to_string();
         match &self.backend {
             MamDatabaseBackend::Sqlite(pool) => {
                 let row = sqlx::query(&format!(
                     "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE room_jid = ? AND stanza_id = ? ORDER BY timestamp DESC LIMIT 1"
                 ))
-                .bind(archive_jid)
+                .bind(archive_jid_str.as_str())
                 .bind(message_id)
                 .fetch_optional(pool)
                 .await?;
@@ -1350,7 +1461,7 @@ impl MamStorage for SqlxMamStorage {
                 let row = sqlx::query(&format!(
                     "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE room_jid = $1 AND stanza_id = $2 ORDER BY timestamp DESC LIMIT 1"
                 ))
-                .bind(archive_jid)
+                .bind(archive_jid_str.as_str())
                 .bind(message_id)
                 .fetch_optional(pool)
                 .await?;
@@ -1361,15 +1472,16 @@ impl MamStorage for SqlxMamStorage {
 
     async fn get_message_by_archive_or_stanza_id(
         &self,
-        archive_jid: &str,
+        archive_jid: &BareJid,
         stanza_id: &str,
     ) -> Result<Option<ArchivedMessage>, MamStorageError> {
+        let archive_jid_str = archive_jid.to_string();
         match &self.backend {
             MamDatabaseBackend::Sqlite(pool) => {
                 let row = sqlx::query(&format!(
                     "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE room_jid = ? AND (id = ? OR stanza_id = ?) ORDER BY timestamp DESC LIMIT 1"
                 ))
-                .bind(archive_jid)
+                .bind(archive_jid_str.as_str())
                 .bind(stanza_id)
                 .bind(stanza_id)
                 .fetch_optional(pool)
@@ -1380,7 +1492,7 @@ impl MamStorage for SqlxMamStorage {
                 let row = sqlx::query(&format!(
                     "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE room_jid = $1 AND (id = $2 OR stanza_id = $2) ORDER BY timestamp DESC LIMIT 1"
                 ))
-                .bind(archive_jid)
+                .bind(archive_jid_str.as_str())
                 .bind(stanza_id)
                 .fetch_optional(pool)
                 .await?;
@@ -1390,20 +1502,21 @@ impl MamStorage for SqlxMamStorage {
     }
 
     #[instrument(skip(self))]
-    async fn count_messages(&self, room_jid: &str) -> Result<u32, MamStorageError> {
+    async fn count_messages(&self, room_jid: &BareJid) -> Result<u32, MamStorageError> {
+        let room_jid_str = room_jid.to_string();
         let count = match &self.backend {
             MamDatabaseBackend::Sqlite(pool) => {
                 let mut builder = QueryBuilder::<Sqlite>::new(
                     "SELECT COUNT(*) FROM mam_messages WHERE room_jid = ",
                 );
-                builder.push_bind(room_jid);
+                builder.push_bind(room_jid_str.as_str());
                 builder.build_query_scalar::<i64>().fetch_one(pool).await?
             }
             MamDatabaseBackend::Postgres(pool) => {
                 let mut builder = QueryBuilder::<Postgres>::new(
                     "SELECT COUNT(*) FROM mam_messages WHERE room_jid = ",
                 );
-                builder.push_bind(room_jid);
+                builder.push_bind(room_jid_str.as_str());
                 builder.build_query_scalar::<i64>().fetch_one(pool).await?
             }
         };
@@ -1414,15 +1527,16 @@ impl MamStorage for SqlxMamStorage {
     #[instrument(skip(self))]
     async fn delete_before(
         &self,
-        room_jid: &str,
+        room_jid: &BareJid,
         before: DateTime<Utc>,
     ) -> Result<u64, MamStorageError> {
+        let room_jid_str = room_jid.to_string();
         let deleted = match &self.backend {
             MamDatabaseBackend::Sqlite(pool) => {
                 let mut builder =
                     QueryBuilder::<Sqlite>::new("DELETE FROM mam_messages WHERE room_jid = ");
                 builder
-                    .push_bind(room_jid)
+                    .push_bind(room_jid_str.as_str())
                     .push(" AND timestamp < ")
                     .push_bind(before.to_rfc3339());
                 builder.build().execute(pool).await?.rows_affected()
@@ -1431,7 +1545,7 @@ impl MamStorage for SqlxMamStorage {
                 let mut builder =
                     QueryBuilder::<Postgres>::new("DELETE FROM mam_messages WHERE room_jid = ");
                 builder
-                    .push_bind(room_jid)
+                    .push_bind(room_jid_str.as_str())
                     .push(" AND timestamp < ")
                     .push_bind(before);
                 builder.build().execute(pool).await?.rows_affected()
@@ -1499,10 +1613,29 @@ impl MamStorage for SqlxMamStorage {
 mod tests {
     use super::*;
     use chrono::Duration as ChronoDuration;
+    use jid::Jid;
     use std::path::PathBuf;
 
     async fn create_test_storage() -> SqlxMamStorage {
         SqlxMamStorage::open_in_memory().await.unwrap()
+    }
+
+    fn jid(value: &str) -> Jid {
+        value.parse::<Jid>().expect("valid jid literal")
+    }
+
+    fn bare(value: &str) -> BareJid {
+        value.parse::<BareJid>().expect("valid bare jid literal")
+    }
+
+    fn user_device() -> Jid {
+        jid("user@example.com/device")
+    }
+
+    fn archive_alice(archive: &BareJid) -> Jid {
+        format!("{archive}/alice")
+            .parse::<Jid>()
+            .expect("valid jid")
     }
 
     #[tokio::test]
@@ -1510,17 +1643,16 @@ mod tests {
         let storage = create_test_storage().await;
 
         let msg = ArchivedMessage {
-            id: String::new(),
-            timestamp: Utc::now(),
-            from: "user@example.com/nick".to_string(),
-            to: "room@conference.example.com".to_string(),
             body: Some("Hello, world!".to_string()),
             stanza_id: Some("abc123".to_string()),
-            ..Default::default()
+            ..ArchivedMessage::for_test(
+                jid("user@example.com/nick"),
+                jid("room@conference.example.com"),
+            )
         };
 
         let archive_id = storage
-            .store_message("room@conference.example.com", &msg)
+            .store_message(&bare("room@conference.example.com"), &msg)
             .await
             .unwrap();
         assert!(!archive_id.is_empty());
@@ -1539,10 +1671,6 @@ mod tests {
         let storage = create_test_storage().await;
 
         let msg = ArchivedMessage {
-            id: String::new(),
-            timestamp: Utc::now(),
-            from: "room@conference.example.com/alice".to_string(),
-            to: "room@conference.example.com".to_string(),
             body: Some("Reply body".to_string()),
             stanza_id: Some("archive-stanza-1".to_string()),
             thread: Some(waddle_xmpp_core::xep0201::ThreadInfo::root(
@@ -1551,19 +1679,21 @@ mod tests {
             reply: Some(waddle_xmpp_core::mam::ArchivedReply {
                 id: waddle_xmpp_core::mam::RichMessageId::new("parent-message-1")
                     .expect("non-empty reply id"),
-                to: Some("bob@example.com".parse::<jid::Jid>().expect("valid jid")),
+                to: Some(jid("bob@example.com")),
             }),
             origin_id: Some("origin-abc".to_string()),
             message_type: "groupchat".to_string(),
             stanza_xml: Some(
                 "<message xmlns='jabber:client' from='room@conference.example.com/alice' to='room@conference.example.com' type='groupchat' id='archive-stanza-1'><body>Reply body</body></message>".to_string(),
             ),
-            rich: None,
-            nickname_generation: None,
+            ..ArchivedMessage::for_test(
+                jid("room@conference.example.com/alice"),
+                jid("room@conference.example.com"),
+            )
         };
 
         let archive_id = storage
-            .store_message("room@conference.example.com", &msg)
+            .store_message(&bare("room@conference.example.com"), &msg)
             .await
             .unwrap();
 
@@ -1595,26 +1725,21 @@ mod tests {
         // mam.rs replay-builder tests in commit 4.
         let storage = create_test_storage().await;
         let msg = ArchivedMessage {
-            id: String::new(),
-            timestamp: Utc::now(),
-            from: "room@conference.example.com/alice".to_string(),
-            to: "room@conference.example.com".to_string(),
             body: Some("Nested-thread reply".to_string()),
             stanza_id: Some("archive-stanza-2".to_string()),
             thread: Some(waddle_xmpp_core::xep0201::ThreadInfo::child(
                 waddle_xmpp_core::mam::ThreadId::new("child-thread").expect("thread id"),
                 waddle_xmpp_core::mam::ThreadId::new("root-thread").expect("parent id"),
             )),
-            reply: None,
-            origin_id: None,
             message_type: "groupchat".to_string(),
-            stanza_xml: None,
-            rich: None,
-            nickname_generation: None,
+            ..ArchivedMessage::for_test(
+                jid("room@conference.example.com/alice"),
+                jid("room@conference.example.com"),
+            )
         };
 
         let archive_id = storage
-            .store_message("room@conference.example.com", &msg)
+            .store_message(&bare("room@conference.example.com"), &msg)
             .await
             .unwrap();
 
@@ -1635,23 +1760,20 @@ mod tests {
     #[tokio::test]
     async fn test_query_with_pagination() {
         let storage = create_test_storage().await;
-        let archive = "room@conference.example.com";
+        let archive = bare("room@conference.example.com");
+        let archive_jid = jid("room@conference.example.com");
 
         for body in ["one", "two", "three"] {
             let msg = ArchivedMessage {
-                id: String::new(),
-                timestamp: Utc::now(),
-                from: "user@example.com/device".to_string(),
-                to: archive.to_string(),
                 body: Some(body.to_string()),
-                ..Default::default()
+                ..ArchivedMessage::for_test(user_device(), archive_jid.clone())
             };
-            storage.store_message(archive, &msg).await.unwrap();
+            storage.store_message(&archive, &msg).await.unwrap();
         }
 
         let page_one = storage
             .query_messages(
-                archive,
+                &archive,
                 &MamQuery {
                     max: Some(2),
                     ..Default::default()
@@ -1664,7 +1786,7 @@ mod tests {
 
         let page_two = storage
             .query_messages(
-                archive,
+                &archive,
                 &MamQuery {
                     after_id: page_one.last_id.clone(),
                     ..Default::default()
@@ -1689,13 +1811,13 @@ mod tests {
     }
 
     async fn assert_rsm_after_uses_archive_order_not_lexical_id_order(storage: &dyn MamStorage) {
-        let archive = "room@conference.example.com";
+        let archive = bare("room@conference.example.com");
         let base = Utc::now();
-        store_nonlexical_archive_order_messages(storage, archive, base).await;
+        store_nonlexical_archive_order_messages(storage, &archive, base).await;
 
         let page_one = storage
             .query_messages(
-                archive,
+                &archive,
                 &MamQuery {
                     max: Some(2),
                     ..Default::default()
@@ -1708,7 +1830,7 @@ mod tests {
 
         let page_two = storage
             .query_messages(
-                archive,
+                &archive,
                 &MamQuery {
                     max: Some(2),
                     after_id: page_one.last_id.clone(),
@@ -1722,7 +1844,7 @@ mod tests {
 
         let page_three = storage
             .query_messages(
-                archive,
+                &archive,
                 &MamQuery {
                     max: Some(2),
                     after_id: page_two.last_id.clone(),
@@ -1748,13 +1870,13 @@ mod tests {
     }
 
     async fn assert_rsm_before_uses_archive_order_not_lexical_id_order(storage: &dyn MamStorage) {
-        let archive = "room@conference.example.com";
+        let archive = bare("room@conference.example.com");
         let base = Utc::now();
-        store_nonlexical_archive_order_messages(storage, archive, base).await;
+        store_nonlexical_archive_order_messages(storage, &archive, base).await;
 
         let page = storage
             .query_messages(
-                archive,
+                &archive,
                 &MamQuery {
                     max: Some(2),
                     before_id: Some("x-fifth".to_string()),
@@ -1770,9 +1892,10 @@ mod tests {
 
     async fn store_nonlexical_archive_order_messages(
         storage: &dyn MamStorage,
-        archive: &str,
+        archive: &BareJid,
         base: DateTime<Utc>,
     ) {
+        let archive_jid = jid(&archive.to_string());
         for (offset, id, body) in [
             (0, "z-first", "one"),
             (1, "a-second", "two"),
@@ -1786,10 +1909,8 @@ mod tests {
                     &ArchivedMessage {
                         id: id.to_string(),
                         timestamp: base + ChronoDuration::seconds(offset),
-                        from: "user@example.com/device".to_string(),
-                        to: archive.to_string(),
                         body: Some(body.to_string()),
-                        ..Default::default()
+                        ..ArchivedMessage::for_test(user_device(), archive_jid.clone())
                     },
                 )
                 .await
@@ -1810,17 +1931,15 @@ mod tests {
     }
 
     async fn assert_missing_rsm_cursor_returns_not_found(storage: &dyn MamStorage) {
-        let archive = "room@conference.example.com";
+        let archive = bare("room@conference.example.com");
+        let archive_jid = jid("room@conference.example.com");
         storage
             .store_message(
-                archive,
+                &archive,
                 &ArchivedMessage {
                     id: "known-id".to_string(),
-                    timestamp: Utc::now(),
-                    from: "user@example.com/device".to_string(),
-                    to: archive.to_string(),
                     body: Some("known".to_string()),
-                    ..Default::default()
+                    ..ArchivedMessage::for_test(user_device(), archive_jid)
                 },
             )
             .await
@@ -1828,7 +1947,7 @@ mod tests {
 
         let error = storage
             .query_messages(
-                archive,
+                &archive,
                 &MamQuery {
                     after_id: Some("missing-id".to_string()),
                     ..Default::default()
@@ -1841,7 +1960,7 @@ mod tests {
 
         let error = storage
             .query_messages(
-                archive,
+                &archive,
                 &MamQuery {
                     before_id: Some("missing-before-id".to_string()),
                     ..Default::default()
@@ -1866,13 +1985,13 @@ mod tests {
     }
 
     async fn assert_rsm_cursor_outside_query_filters_still_pages(storage: &dyn MamStorage) {
-        let archive = "room@conference.example.com";
+        let archive = bare("room@conference.example.com");
         let base = Utc::now();
-        store_nonlexical_archive_order_messages(storage, archive, base).await;
+        store_nonlexical_archive_order_messages(storage, &archive, base).await;
 
         let result = storage
             .query_messages(
-                archive,
+                &archive,
                 &MamQuery {
                     start: Some(base + ChronoDuration::seconds(3)),
                     after_id: Some("a-second".to_string()),
@@ -1896,13 +2015,13 @@ mod tests {
     #[tokio::test]
     async fn test_thread_query_filters_before_pagination_and_count() {
         let storage = create_test_storage().await;
-        let archive = "room@conference.example.com";
+        let archive = bare("room@conference.example.com");
 
         for msg in [
             ArchivedMessage {
                 id: "a-thread-root".to_string(),
                 body: Some("root".to_string()),
-                ..archived_groupchat(archive)
+                ..archived_groupchat(&archive)
             },
             ArchivedMessage {
                 id: "b-thread-reply".to_string(),
@@ -1910,7 +2029,7 @@ mod tests {
                     waddle_xmpp_core::mam::ThreadId::new("a-thread-root").expect("thread id"),
                 )),
                 body: Some("reply".to_string()),
-                ..archived_groupchat(archive)
+                ..archived_groupchat(&archive)
             },
             ArchivedMessage {
                 id: "c-legacy-reply".to_string(),
@@ -1920,7 +2039,7 @@ mod tests {
                     to: None,
                 }),
                 body: Some("legacy".to_string()),
-                ..archived_groupchat(archive)
+                ..archived_groupchat(&archive)
             },
             ArchivedMessage {
                 id: "unrelated".to_string(),
@@ -1928,15 +2047,15 @@ mod tests {
                     waddle_xmpp_core::mam::ThreadId::new("other-thread").expect("thread id"),
                 )),
                 body: Some("unrelated".to_string()),
-                ..archived_groupchat(archive)
+                ..archived_groupchat(&archive)
             },
         ] {
-            storage.store_message(archive, &msg).await.unwrap();
+            storage.store_message(&archive, &msg).await.unwrap();
         }
 
         let result = storage
             .query_messages(
-                archive,
+                &archive,
                 &MamQuery {
                     thread_id: waddle_xmpp_core::mam::ThreadId::new("a-thread-root"),
                     max: Some(2),
@@ -1959,31 +2078,31 @@ mod tests {
     #[tokio::test]
     async fn test_fulltext_query_filters_before_pagination_and_count() {
         let storage = create_test_storage().await;
-        let archive = "room@conference.example.com";
+        let archive = bare("room@conference.example.com");
 
         for msg in [
             ArchivedMessage {
                 id: "a-alpha".to_string(),
                 body: Some("release notes alpha".to_string()),
-                ..archived_groupchat(archive)
+                ..archived_groupchat(&archive)
             },
             ArchivedMessage {
                 id: "b-beta".to_string(),
                 body: Some("release notes beta".to_string()),
-                ..archived_groupchat(archive)
+                ..archived_groupchat(&archive)
             },
             ArchivedMessage {
                 id: "c-other".to_string(),
                 body: Some("standup notes".to_string()),
-                ..archived_groupchat(archive)
+                ..archived_groupchat(&archive)
             },
         ] {
-            storage.store_message(archive, &msg).await.unwrap();
+            storage.store_message(&archive, &msg).await.unwrap();
         }
 
         let result = storage
             .query_messages(
-                archive,
+                &archive,
                 &MamQuery {
                     fulltext: waddle_xmpp_core::mam::RichText::new("release notes"),
                     max: Some(1),
@@ -2009,24 +2128,21 @@ mod tests {
         std::fs::create_dir_all(&artifacts).expect("artifacts dir");
         let path = artifacts.join(format!("mam-{}.db", uuid::Uuid::new_v4()));
         let database_url = format!("sqlite://{}", path.display());
-        let archive = "room@conference.example.com";
+        let archive = bare("room@conference.example.com");
+        let archive_jid = jid("room@conference.example.com");
 
         {
             let storage = SqlxMamStorage::open(&database_url).await.expect("storage");
             let msg = ArchivedMessage {
-                id: String::new(),
-                timestamp: Utc::now(),
-                from: "user@example.com/device".to_string(),
-                to: archive.to_string(),
                 body: Some("persisted".to_string()),
-                ..Default::default()
+                ..ArchivedMessage::for_test(user_device(), archive_jid.clone())
             };
-            storage.store_message(archive, &msg).await.expect("store");
+            storage.store_message(&archive, &msg).await.expect("store");
         }
 
         let reopened = SqlxMamStorage::open(&database_url).await.expect("reopen");
         let result = reopened
-            .query_messages(archive, &MamQuery::default())
+            .query_messages(&archive, &MamQuery::default())
             .await
             .expect("query");
         assert_eq!(result.messages.len(), 1);
@@ -2048,7 +2164,8 @@ mod tests {
     #[tokio::test]
     async fn test_empty_before_returns_last_page() {
         let storage = create_test_storage().await;
-        let archive = "room@conference.example.com";
+        let archive = bare("room@conference.example.com");
+        let archive_jid = jid("room@conference.example.com");
         let base = Utc::now();
 
         for (offset, body) in ["one", "two", "three", "four", "five", "six"]
@@ -2056,19 +2173,16 @@ mod tests {
             .enumerate()
         {
             let msg = ArchivedMessage {
-                id: String::new(),
                 timestamp: base + ChronoDuration::seconds(offset as i64),
-                from: "user@example.com/device".to_string(),
-                to: archive.to_string(),
                 body: Some(body.to_string()),
-                ..Default::default()
+                ..ArchivedMessage::for_test(user_device(), archive_jid.clone())
             };
-            storage.store_message(archive, &msg).await.unwrap();
+            storage.store_message(&archive, &msg).await.unwrap();
         }
 
         let last_page = storage
             .query_messages(
-                archive,
+                &archive,
                 &MamQuery {
                     max: Some(3),
                     before_id: Some(String::new()),
@@ -2087,13 +2201,10 @@ mod tests {
         assert!(!last_page.complete);
     }
 
-    fn archived_groupchat(archive: &str) -> ArchivedMessage {
+    fn archived_groupchat(archive: &BareJid) -> ArchivedMessage {
         ArchivedMessage {
-            timestamp: Utc::now(),
-            from: format!("{archive}/alice"),
-            to: archive.to_string(),
             message_type: "groupchat".to_string(),
-            ..Default::default()
+            ..ArchivedMessage::for_test(archive_alice(archive), jid(&archive.to_string()))
         }
     }
 
@@ -2105,28 +2216,22 @@ mod tests {
         use waddle_xmpp_core::mam::{ArchivedRichMessage, ArchivedTombstone, RichMessageId};
 
         let storage = create_test_storage().await;
-        let archive_jid = "room@conference.example.com";
+        let archive = bare("room@conference.example.com");
+        let archive_jid = jid("room@conference.example.com");
         let msg = ArchivedMessage {
-            id: String::new(),
-            timestamp: Utc::now(),
-            from: format!("{archive_jid}/alice"),
-            to: archive_jid.to_string(),
             body: Some("secret thread content".to_string()),
             stanza_id: Some("wire-id-1".to_string()),
             thread: Some(waddle_xmpp_core::xep0201::ThreadInfo::child(
                 waddle_xmpp_core::mam::ThreadId::new("child-thread").expect("thread id"),
                 waddle_xmpp_core::mam::ThreadId::new("root-thread").expect("parent id"),
             )),
-            reply: None,
-            origin_id: None,
             message_type: "groupchat".to_string(),
             stanza_xml: Some(
                 "<message xmlns='jabber:client'><body>secret</body><thread parent='root-thread'>child-thread</thread></message>".to_string(),
             ),
-            rich: None,
-            nickname_generation: None,
+            ..ArchivedMessage::for_test(archive_alice(&archive), archive_jid.clone())
         };
-        let archive_id = storage.store_message(archive_jid, &msg).await.unwrap();
+        let archive_id = storage.store_message(&archive, &msg).await.unwrap();
 
         let tombstone = ArchivedTombstone {
             retraction_id: Some(RichMessageId::new("retract-1").expect("rich id")),
@@ -2183,28 +2288,22 @@ mod tests {
         use waddle_xmpp_core::mam::{ArchivedModeration, ArchivedTombstone, RichMessageId};
 
         let storage = create_test_storage().await;
-        let archive_jid = "room@conference.example.com";
+        let archive = bare("room@conference.example.com");
+        let archive_jid = jid("room@conference.example.com");
         let msg = ArchivedMessage {
-            id: String::new(),
-            timestamp: Utc::now(),
-            from: format!("{archive_jid}/alice"),
-            to: archive_jid.to_string(),
             body: Some("moderated content".to_string()),
             stanza_id: Some("wire-id-2".to_string()),
             thread: Some(waddle_xmpp_core::xep0201::ThreadInfo::child(
                 waddle_xmpp_core::mam::ThreadId::new("child-thread").expect("thread id"),
                 waddle_xmpp_core::mam::ThreadId::new("root-thread").expect("parent id"),
             )),
-            reply: None,
-            origin_id: None,
             message_type: "groupchat".to_string(),
             stanza_xml: Some(
                 "<message xmlns='jabber:client'><body>x</body><thread parent='root-thread'>child-thread</thread></message>".to_string(),
             ),
-            rich: None,
-            nickname_generation: None,
+            ..ArchivedMessage::for_test(archive_alice(&archive), archive_jid.clone())
         };
-        let archive_id = storage.store_message(archive_jid, &msg).await.unwrap();
+        let archive_id = storage.store_message(&archive, &msg).await.unwrap();
 
         let moderator: jid::Jid = "mod@example.com".parse().expect("jid");
         let tombstone = ArchivedTombstone {
@@ -2253,7 +2352,7 @@ mod tests {
         // as a tiebreak. Sorting by id alone breaks this if id generation is
         // ever decoupled from receive time (custom assignment, backfill, etc.).
         let storage = create_test_storage().await;
-        let archive = "room@conference.example.com";
+        let archive = bare("room@conference.example.com");
         let t0 = chrono::DateTime::parse_from_rfc3339("2026-05-01T10:00:00Z")
             .unwrap()
             .with_timezone(&Utc);
@@ -2265,20 +2364,20 @@ mod tests {
             id: "zzz-earlier".to_string(),
             timestamp: t0,
             body: Some("first".to_string()),
-            ..archived_groupchat(archive)
+            ..archived_groupchat(&archive)
         };
         let later = ArchivedMessage {
             id: "aaa-later".to_string(),
             timestamp: t1,
             body: Some("second".to_string()),
-            ..archived_groupchat(archive)
+            ..archived_groupchat(&archive)
         };
 
-        storage.store_message(archive, &later).await.unwrap();
-        storage.store_message(archive, &earlier).await.unwrap();
+        storage.store_message(&archive, &later).await.unwrap();
+        storage.store_message(&archive, &earlier).await.unwrap();
 
         let result = storage
-            .query_messages(archive, &MamQuery::default())
+            .query_messages(&archive, &MamQuery::default())
             .await
             .unwrap();
 
@@ -2297,7 +2396,7 @@ mod tests {
     #[tokio::test]
     async fn xep_0313_in_memory_archive_returns_messages_in_chronological_order() {
         let storage = InMemoryMamStorage::new();
-        let archive = "room@conference.example.com";
+        let archive = bare("room@conference.example.com");
         let t0 = chrono::DateTime::parse_from_rfc3339("2026-05-01T10:00:00Z")
             .unwrap()
             .with_timezone(&Utc);
@@ -2307,20 +2406,20 @@ mod tests {
             id: "zzz-earlier".to_string(),
             timestamp: t0,
             body: Some("first".to_string()),
-            ..archived_groupchat(archive)
+            ..archived_groupchat(&archive)
         };
         let later = ArchivedMessage {
             id: "aaa-later".to_string(),
             timestamp: t1,
             body: Some("second".to_string()),
-            ..archived_groupchat(archive)
+            ..archived_groupchat(&archive)
         };
 
-        storage.store_message(archive, &later).await.unwrap();
-        storage.store_message(archive, &earlier).await.unwrap();
+        storage.store_message(&archive, &later).await.unwrap();
+        storage.store_message(&archive, &earlier).await.unwrap();
 
         let result = storage
-            .query_messages(archive, &MamQuery::default())
+            .query_messages(&archive, &MamQuery::default())
             .await
             .unwrap();
 
@@ -2342,7 +2441,7 @@ mod tests {
         // same timestamp", so the order MUST still be deterministic. We use
         // archive id as the secondary key.
         let storage = create_test_storage().await;
-        let archive = "room@conference.example.com";
+        let archive = bare("room@conference.example.com");
         let t = chrono::DateTime::parse_from_rfc3339("2026-05-01T10:00:00Z")
             .unwrap()
             .with_timezone(&Utc);
@@ -2351,21 +2450,21 @@ mod tests {
             id: "id-001".to_string(),
             timestamp: t,
             body: Some("first".to_string()),
-            ..archived_groupchat(archive)
+            ..archived_groupchat(&archive)
         };
         let second = ArchivedMessage {
             id: "id-002".to_string(),
             timestamp: t,
             body: Some("second".to_string()),
-            ..archived_groupchat(archive)
+            ..archived_groupchat(&archive)
         };
 
         // Insert out of id order to make the assertion meaningful.
-        storage.store_message(archive, &second).await.unwrap();
-        storage.store_message(archive, &first).await.unwrap();
+        storage.store_message(&archive, &second).await.unwrap();
+        storage.store_message(&archive, &first).await.unwrap();
 
         let result = storage
-            .query_messages(archive, &MamQuery::default())
+            .query_messages(&archive, &MamQuery::default())
             .await
             .unwrap();
         let ids: Vec<&str> = result.messages.iter().map(|m| m.id.as_str()).collect();

@@ -918,7 +918,7 @@ pub async fn handle_iq_with_conn_state(
             .get_message(&request.target_id)
             .await
         {
-            Ok(Some(message)) if message.to == room_jid.to_string() => {}
+            Ok(Some(message)) if message.to.to_string() == room_jid.to_string() => {}
             Ok(Some(_)) => {
                 return vec![build_iq_error_xml_with_addresses(
                     &id,
@@ -972,8 +972,8 @@ pub async fn handle_iq_with_conn_state(
             let archived = ArchivedMessage {
                 id: archive_id.clone(),
                 timestamp: chrono::Utc::now(),
-                from: room_jid.to_string(),
-                to: room_jid.to_string(),
+                from: jid::Jid::from(room_jid.clone()),
+                to: jid::Jid::from(room_jid.clone()),
                 // XEP-0425 moderation tombstone has no `<body>` — `None`
                 // is the wire-faithful "no body element" form.
                 body: None,
@@ -1003,7 +1003,7 @@ pub async fn handle_iq_with_conn_state(
                 .deps
                 .protocol
                 .mam_storage
-                .store_message(&room_jid.to_string(), &archived)
+                .store_message(&room_jid, &archived)
                 .await
             {
                 warn!(room = %room_jid, target = %request.target_id, error = %error, "Failed to archive moderation event");
@@ -1021,7 +1021,7 @@ pub async fn handle_iq_with_conn_state(
                 .get_message(&request.target_id)
                 .await;
             match original_lookup {
-                Ok(Some(original)) if original.to == room_jid.to_string() => {
+                Ok(Some(original)) if original.to.to_string() == room_jid.to_string() => {
                     // Use the moderation message's server-assigned
                     // archive id (XEP-0359 stanza-id stamped via
                     // `add_mam_stanza_id` above). That's the id
@@ -1168,12 +1168,11 @@ pub async fn handle_iq_with_conn_state(
             }
         };
 
-        let archive_jid = target_bare.to_string();
         let mut result = match state
             .deps
             .protocol
             .mam_storage
-            .query_messages(archive_jid.as_str(), &query)
+            .query_messages(&target_bare, &query)
             .await
         {
             Ok(result) => result,
@@ -1191,20 +1190,29 @@ pub async fn handle_iq_with_conn_state(
                 .deps
                 .protocol
                 .mam_storage
-                .count_messages(archive_jid.as_str())
+                .count_messages(&target_bare)
                 .await
                 .ok();
         }
 
-        let recipient_jid = request_iq
+        // XEP-0313 §5.1: result `<message/>` envelopes are addressed to
+        // the requesting client. Prefer the IQ's `from` (the client JID
+        // it stamped on the request) and fall back to the bound JID.
+        // Both are typed `Jid` already; the prior `to_string()` /
+        // `parse_message_jid` round-trip with an "unknown@localhost"
+        // fallback was a hot-path data-loss bug for unauthenticated /
+        // unbound edge cases. Reject the request here instead — a MAM
+        // query without an addressable recipient is ill-formed.
+        let Some(recipient_jid) = request_iq
             .from
-            .as_ref()
-            .map(|jid| jid.to_string())
-            .or_else(|| phase.bound_jid().map(ToString::to_string))
-            .unwrap_or_else(|| "unknown@localhost".to_string());
+            .clone()
+            .or_else(|| phase.bound_jid().cloned().map(jid::Jid::from))
+        else {
+            return vec![build_iq_error_xml(&id, "modify", "bad-request")];
+        };
 
         let mut responses: Vec<String> =
-            build_result_messages(&query_id, recipient_jid.as_str(), &result.messages)
+            build_result_messages(&query_id, &recipient_jid, &result.messages)
                 .into_iter()
                 .map(|message| stanza_to_xml(&Stanza::Message(message)))
                 .collect();

@@ -50,10 +50,14 @@ use waddle_xmpp_core::xep0359::extract_stanza_id_by;
 /// - [`super::storage::MamStorage::get_message_by_stanza_id`] resolves
 ///   that same id against `archive_jid`.
 ///
-/// `from` and `to` are the canonical bare-JID tuple for the archive
+/// `from` and `to` are the canonical addressing tuple for the archive
 /// row — the caller (interpreter) supplies them so the projection
 /// does not duplicate the pass-aware logic that lives in
-/// [`super::super::protocol::handlers::archive::ArchiveHandler`].
+/// [`super::super::protocol::handlers::archive::ArchiveHandler`]. They
+/// are typed as [`Jid`] (not `&str`) per the typed-payloads hard
+/// rule; the archive write path now flows typed values end-to-end
+/// from the wire-parse boundary down through MAM storage with no
+/// intermediate string detour.
 ///
 /// If the canonical stamp is missing (test fixture or misconfigured
 /// chain), the row falls back to an empty `id` (the storage backend
@@ -63,8 +67,8 @@ use waddle_xmpp_core::xep0359::extract_stanza_id_by;
 /// Q2(a) order, so this fallback is defensive only.
 pub fn build_direct_archived_message(
     archive_jid: &Jid,
-    from: &str,
-    to: &str,
+    from: Jid,
+    to: Jid,
     message: &Message,
 ) -> ArchivedMessage {
     // RFC 6121 §5.2.3: `<body>` is optional. Preserve the wire-fidelity
@@ -103,8 +107,8 @@ pub fn build_direct_archived_message(
     ArchivedMessage {
         id,
         timestamp: Utc::now(),
-        from: from.to_string(),
-        to: to.to_string(),
+        from,
+        to,
         body,
         stanza_id: message.id.clone(),
         thread,
@@ -291,6 +295,10 @@ mod tests {
     use super::*;
     use xmpp_parsers::message::{Body, MessageType};
 
+    fn jid(value: &str) -> Jid {
+        value.parse::<Jid>().expect("valid jid literal")
+    }
+
     fn chat_with_body(from: &str, to: &str, body: &str) -> Message {
         let mut m = Message::new(Some(to.parse().expect("jid")));
         m.from = Some(from.parse().expect("jid"));
@@ -305,17 +313,17 @@ mod tests {
         // No XEP-0359 stamp on the message — defensive fallback path.
         let msg = chat_with_body("alice@example.com/web", "bob@example.com", "hi");
         let archived = build_direct_archived_message(
-            &"alice@example.com".parse::<Jid>().expect("jid"),
-            "alice@example.com",
-            "bob@example.com",
+            &jid("alice@example.com"),
+            jid("alice@example.com"),
+            jid("bob@example.com"),
             &msg,
         );
         assert!(
             archived.id.is_empty(),
             "no canonical stamp -> storage assigns id at write"
         );
-        assert_eq!(archived.from, "alice@example.com");
-        assert_eq!(archived.to, "bob@example.com");
+        assert_eq!(archived.from, jid("alice@example.com"));
+        assert_eq!(archived.to, jid("bob@example.com"));
         assert_eq!(archived.body.as_deref(), Some("hi"));
         assert_eq!(
             archived.stanza_id.as_deref(),
@@ -347,12 +355,12 @@ mod tests {
         msg.id = Some("wire-id-1".to_string());
         msg.payloads.push(build_stanza_id_element(
             "canon-1",
-            &"alice@example.com".parse::<Jid>().expect("jid"),
+            &jid("alice@example.com"),
         ));
         let archived = build_direct_archived_message(
-            &"alice@example.com".parse::<Jid>().expect("jid"),
-            "alice@example.com",
-            "bob@example.com",
+            &jid("alice@example.com"),
+            jid("alice@example.com"),
+            jid("bob@example.com"),
             &msg,
         );
         assert_eq!(
@@ -378,16 +386,14 @@ mod tests {
         msg.id = Some("wire-id-2".to_string());
         msg.payloads.push(build_stanza_id_element(
             "alice-A1",
-            &"alice@example.com".parse::<Jid>().expect("jid"),
+            &jid("alice@example.com"),
         ));
-        msg.payloads.push(build_stanza_id_element(
-            "bob-B1",
-            &"bob@example.com".parse::<Jid>().expect("jid"),
-        ));
+        msg.payloads
+            .push(build_stanza_id_element("bob-B1", &jid("bob@example.com")));
         let archived = build_direct_archived_message(
-            &"bob@example.com".parse::<Jid>().expect("jid"),
-            "alice@example.com",
-            "bob@example.com",
+            &jid("bob@example.com"),
+            jid("alice@example.com"),
+            jid("bob@example.com"),
             &msg,
         );
         assert_eq!(archived.id, "bob-B1");
@@ -401,9 +407,9 @@ mod tests {
         let from: jid::Jid = "alice@example.com/web".parse().expect("jid");
         let msg = build_correction_message(Some(to), Some(from), "fixed text", "old-id");
         let archived = build_direct_archived_message(
-            &"alice@example.com".parse::<Jid>().expect("jid"),
-            "alice@example.com",
-            "bob@example.com",
+            &jid("alice@example.com"),
+            jid("alice@example.com"),
+            jid("bob@example.com"),
             &msg,
         );
         let rich = archived.rich.expect("correction projects rich payload");
@@ -425,9 +431,9 @@ mod tests {
         let mut msg = chat_with_body("alice@example.com/web", "bob@example.com", "hi");
         waddle_xmpp_core::xep0201::set_thread_id(&mut msg, "root-1");
         let archived = build_direct_archived_message(
-            &"alice@example.com".parse::<Jid>().expect("jid"),
-            "alice@example.com",
-            "bob@example.com",
+            &jid("alice@example.com"),
+            jid("alice@example.com"),
+            jid("bob@example.com"),
             &msg,
         );
         let thread = archived.thread.as_ref().expect("root thread present");
@@ -450,9 +456,9 @@ mod tests {
                 .build(),
         );
         let archived = build_direct_archived_message(
-            &"alice@example.com".parse::<Jid>().expect("jid"),
-            "alice@example.com",
-            "bob@example.com",
+            &jid("alice@example.com"),
+            jid("alice@example.com"),
+            jid("bob@example.com"),
             &msg,
         );
         let thread = archived.thread.as_ref().expect("nested thread present");
@@ -473,9 +479,9 @@ mod tests {
         );
 
         let archived = build_direct_archived_message(
-            &"alice@example.com".parse::<Jid>().expect("jid"),
-            "alice@example.com",
-            "bob@example.com",
+            &jid("alice@example.com"),
+            jid("alice@example.com"),
+            jid("bob@example.com"),
             &msg,
         );
         let thread = archived.thread.as_ref().expect("typed thread present");
@@ -487,9 +493,9 @@ mod tests {
     fn xep_0201_direct_chat_no_thread_yields_none() {
         let msg = chat_with_body("alice@example.com/web", "bob@example.com", "hi");
         let archived = build_direct_archived_message(
-            &"alice@example.com".parse::<Jid>().expect("jid"),
-            "alice@example.com",
-            "bob@example.com",
+            &jid("alice@example.com"),
+            jid("alice@example.com"),
+            jid("bob@example.com"),
             &msg,
         );
         assert!(archived.thread.is_none());

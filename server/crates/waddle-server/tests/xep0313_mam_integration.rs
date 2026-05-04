@@ -4,7 +4,9 @@
 
 mod ws_common;
 
+use jid::Jid;
 use tokio::sync::Mutex;
+use waddle_xmpp::mam::{ArchivedMessage, MamQuery, MamStorage, MamStorageError, SqlxMamStorage};
 use ws_common::{TestServer, WsXmppClient};
 
 const DOMAIN: &str = "localhost";
@@ -481,4 +483,176 @@ async fn dm_archived_in_sender_personal_archive() {
     );
 
     client.close().await;
+}
+
+// =========================================================================
+// Typed-JID round-trip (#228 commit 6)
+// =========================================================================
+//
+// These tests bypass the WebSocket I/O boundary and exercise
+// `SqlxMamStorage` directly. The point is to lock the typed-JID
+// invariants on the MAM storage surface — `ArchivedMessage.from`/`.to`
+// as `jid::Jid` and the storage trait's `archive_jid` as `&BareJid` —
+// so a future regression that reverts to stringly-typed payloads can't
+// land silently. The decode-error case mirrors the
+// `xep0201_thread_parent.rs` orphan-column escape hatch pattern from
+// commit 4 / commit 5: deliberately insert a malformed row via raw
+// SQL, then assert that the typed decode boundary surfaces a
+// `MamStorageError::Serialization` rather than papering over the
+// corruption with a sentinel JID (the prior `parse_message_jid`
+// "unknown@invalid" data-loss bug).
+
+const ARCHIVE: &str = "room@conference.example.com";
+
+fn archive_bare() -> jid::BareJid {
+    ARCHIVE
+        .parse::<jid::BareJid>()
+        .expect("valid bare jid literal")
+}
+
+fn jid_lit(value: &str) -> Jid {
+    value.parse::<Jid>().expect("valid jid literal")
+}
+
+#[tokio::test]
+async fn xep_0313_full_jid_from_round_trips_through_mam_without_resource_truncation() {
+    // Locks the contract that `ArchivedMessage.from`'s typed `Jid`
+    // preserves the resource part end-to-end. Pre-commit-6 the field
+    // was `String` and the typed projection was lossy via
+    // `parse_message_jid`; with `from: Jid` the encoder serializes
+    // with `to_string()` once at the SQL bind site and the decoder
+    // re-parses via `parse_archived_addressing` once at the row
+    // boundary. A regression that truncates to bare JID (e.g. via
+    // `to_bare()` on the write side) would fail this test.
+    let storage = SqlxMamStorage::open_in_memory()
+        .await
+        .expect("open sqlite in-memory");
+    let archive = archive_bare();
+    let from_full = jid_lit("alice@example.com/laptop");
+    let to_room = jid_lit(ARCHIVE);
+    let row = ArchivedMessage {
+        id: "archive-full-from".to_string(),
+        timestamp: chrono::Utc::now(),
+        from: from_full.clone(),
+        to: to_room.clone(),
+        body: Some("typed full from".to_string()),
+        stanza_id: Some("wire-full-from".to_string()),
+        thread: None,
+        reply: None,
+        origin_id: None,
+        message_type: "groupchat".to_string(),
+        stanza_xml: None,
+        rich: None,
+        nickname_generation: None,
+    };
+    storage.store_message(&archive, &row).await.expect("store");
+
+    let result = storage
+        .query_messages(&archive, &MamQuery::default())
+        .await
+        .expect("query");
+    assert_eq!(result.messages.len(), 1);
+    let retrieved = &result.messages[0];
+    assert_eq!(
+        retrieved.from, from_full,
+        "full JID `from` (with resource) must round-trip exactly — no bare-ification, no reparse loss"
+    );
+    assert_eq!(
+        retrieved.from.resource().map(|r| r.to_string()).as_deref(),
+        Some("laptop"),
+        "resource part survives the round-trip"
+    );
+}
+
+#[tokio::test]
+async fn xep_0313_bare_jid_to_round_trips_through_mam() {
+    // Mirror of the full-JID test on the `to` side. MUC archive rows
+    // typically carry the room's bare JID as `to`; locking the typed
+    // round-trip ensures the encoder doesn't accidentally append a
+    // resource (e.g. by formatting the writer's full JID instead) and
+    // the decoder doesn't split-and-reattach incorrectly.
+    let storage = SqlxMamStorage::open_in_memory()
+        .await
+        .expect("open sqlite in-memory");
+    let archive = archive_bare();
+    let from = jid_lit(&format!("{ARCHIVE}/alice"));
+    let to_bare = jid_lit(ARCHIVE);
+    let row = ArchivedMessage {
+        id: "archive-bare-to".to_string(),
+        timestamp: chrono::Utc::now(),
+        from,
+        to: to_bare.clone(),
+        body: Some("typed bare to".to_string()),
+        stanza_id: Some("wire-bare-to".to_string()),
+        thread: None,
+        reply: None,
+        origin_id: None,
+        message_type: "groupchat".to_string(),
+        stanza_xml: None,
+        rich: None,
+        nickname_generation: None,
+    };
+    storage.store_message(&archive, &row).await.expect("store");
+
+    let result = storage
+        .query_messages(&archive, &MamQuery::default())
+        .await
+        .expect("query");
+    assert_eq!(result.messages.len(), 1);
+    assert_eq!(
+        result.messages[0].to, to_bare,
+        "bare JID `to` must round-trip exactly"
+    );
+    assert!(
+        result.messages[0].to.resource().is_none(),
+        "bare JID must decode without a resource — no spurious resource attachment"
+    );
+}
+
+#[tokio::test]
+async fn xep_0313_decode_rejects_unparseable_from_jid_row() {
+    // Q7 / typed-decode hard-error policy: a malformed row whose
+    // `from_jid` SQL column does not parse as a [`jid::Jid`] MUST
+    // surface as `MamStorageError::Serialization` at the decode
+    // boundary. The pre-commit-6 code path collapsed any parse
+    // failure to a sentinel `unknown@invalid` JID via
+    // `parse_message_jid` — a hot-path data-loss bug that pushed
+    // silent garbage into MAM result XML output. Deleting that
+    // helper and tightening the storage decode to surface the parse
+    // error means DB corruption is visible at the boundary instead
+    // of being papered over.
+    let storage = SqlxMamStorage::open_in_memory()
+        .await
+        .expect("open sqlite in-memory");
+    let archive = archive_bare();
+    // A value with whitespace + a leading slash is invalid per RFC
+    // 7622 (the JID grammar disallows leading slash in resourcepart and
+    // bans whitespace anywhere), so this row's `from_jid` will fail
+    // typed parse. The value is also obviously corrupt to a human
+    // reader of the panic — a real DB-corruption signature, not an
+    // edge case of the parser.
+    let bad_from = "/not a valid jid/";
+    storage
+        .insert_raw_from_jid_for_test(&archive, "archive-bad-from", bad_from)
+        .await
+        .expect("raw insert");
+
+    let result = storage.query_messages(&archive, &MamQuery::default()).await;
+    match result {
+        Err(MamStorageError::Serialization(message)) => {
+            assert!(
+                message.contains("from_jid"),
+                "decode error must reference the `from_jid` column; got: {message}"
+            );
+            assert!(
+                message.contains(bad_from),
+                "decode error must echo the bad value; got: {message}"
+            );
+        }
+        Err(other) => panic!("expected Serialization error, got: {other:?}"),
+        Ok(result) => panic!(
+            "decode of unparseable from_jid row must hard-error; got rows: {:?}",
+            result.messages
+        ),
+    }
 }

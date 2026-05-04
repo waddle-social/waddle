@@ -206,6 +206,12 @@ async fn reply_with_fallback_replays_from_mam() {
 
 const STORAGE_ARCHIVE: &str = "room@conference.example.com";
 
+fn storage_archive_bare() -> jid::BareJid {
+    STORAGE_ARCHIVE
+        .parse::<jid::BareJid>()
+        .expect("valid bare jid literal")
+}
+
 fn reply_archived_row(
     archive_id: &str,
     body: &str,
@@ -214,8 +220,10 @@ fn reply_archived_row(
     ArchivedMessage {
         id: archive_id.to_string(),
         timestamp: chrono::Utc::now(),
-        from: format!("{STORAGE_ARCHIVE}/alice"),
-        to: STORAGE_ARCHIVE.to_string(),
+        from: format!("{STORAGE_ARCHIVE}/alice")
+            .parse::<jid::Jid>()
+            .expect("valid full jid"),
+        to: STORAGE_ARCHIVE.parse::<jid::Jid>().expect("valid bare jid"),
         body: Some(body.to_string()),
         stanza_id: Some(format!("wire-{archive_id}")),
         thread: None,
@@ -246,12 +254,12 @@ async fn xep_0461_collapsed_reply_field_round_trips_bare_to_jid_through_storage(
     };
     let row = reply_archived_row("archive-bare-to", "bare to", Some(original.clone()));
     storage
-        .store_message(STORAGE_ARCHIVE, &row)
+        .store_message(&storage_archive_bare(), &row)
         .await
         .expect("store row");
 
     let result = storage
-        .query_messages(STORAGE_ARCHIVE, &MamQuery::default())
+        .query_messages(&storage_archive_bare(), &MamQuery::default())
         .await
         .expect("query");
     assert_eq!(result.messages.len(), 1);
@@ -280,12 +288,12 @@ async fn xep_0461_collapsed_reply_field_round_trips_full_to_jid_through_storage(
     };
     let row = reply_archived_row("archive-full-to", "full to", Some(original.clone()));
     storage
-        .store_message(STORAGE_ARCHIVE, &row)
+        .store_message(&storage_archive_bare(), &row)
         .await
         .expect("store row");
 
     let result = storage
-        .query_messages(STORAGE_ARCHIVE, &MamQuery::default())
+        .query_messages(&storage_archive_bare(), &MamQuery::default())
         .await
         .expect("query");
     assert_eq!(result.messages.len(), 1);
@@ -315,12 +323,12 @@ async fn xep_0461_collapsed_reply_field_round_trips_no_to_jid_through_storage() 
     };
     let row = reply_archived_row("archive-no-to", "no to", Some(original.clone()));
     storage
-        .store_message(STORAGE_ARCHIVE, &row)
+        .store_message(&storage_archive_bare(), &row)
         .await
         .expect("store row");
 
     let result = storage
-        .query_messages(STORAGE_ARCHIVE, &MamQuery::default())
+        .query_messages(&storage_archive_bare(), &MamQuery::default())
         .await
         .expect("query");
     assert_eq!(result.messages.len(), 1);
@@ -352,7 +360,7 @@ async fn xep_0461_decode_rejects_orphan_reply_to_jid_row() {
         .expect("open sqlite in-memory");
     storage
         .insert_raw_reply_columns_for_test(
-            STORAGE_ARCHIVE,
+            &storage_archive_bare(),
             "archive-orphan-reply",
             None,
             Some("juliet@capulet.lit"),
@@ -361,7 +369,7 @@ async fn xep_0461_decode_rejects_orphan_reply_to_jid_row() {
         .expect("raw insert");
 
     let result = storage
-        .query_messages(STORAGE_ARCHIVE, &MamQuery::default())
+        .query_messages(&storage_archive_bare(), &MamQuery::default())
         .await;
     match result {
         Err(MamStorageError::Serialization(message)) => {

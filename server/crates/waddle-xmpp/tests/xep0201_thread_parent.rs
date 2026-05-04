@@ -16,6 +16,7 @@
 //! `waddle-xmpp-core/src/xep0201.rs`.
 
 use chrono::Utc;
+use jid::{BareJid, Jid};
 use minidom::Element;
 use waddle_xmpp::mam::{ArchivedMessage, MamQuery, MamStorage};
 use waddle_xmpp::mam::{InMemoryMamStorage, MamStorageError, SqlxMamStorage};
@@ -26,6 +27,14 @@ use waddle_xmpp_core::xep0201::{
 use xmpp_parsers::message::Message;
 
 const ROOM: &str = "team@conference.example.com";
+
+fn room_bare() -> BareJid {
+    ROOM.parse::<BareJid>().expect("valid bare jid")
+}
+
+fn jid_lit(value: &str) -> Jid {
+    value.parse::<Jid>().expect("valid jid literal")
+}
 
 fn nested_thread_groupchat_row(
     archive_id: &str,
@@ -42,8 +51,8 @@ fn nested_thread_groupchat_row(
     ArchivedMessage {
         id: archive_id.to_string(),
         timestamp: Utc::now(),
-        from: format!("{ROOM}/{nick}"),
-        to: ROOM.to_string(),
+        from: jid_lit(&format!("{ROOM}/{nick}")),
+        to: jid_lit(ROOM),
         body: Some(body.to_string()),
         stanza_id: Some(format!("wire-{archive_id}")),
         thread,
@@ -77,11 +86,14 @@ async fn xep_0201_nested_thread_round_trips_through_mam() {
         "child-thread",
         Some("root-thread"),
     );
-    let archive_id = storage.store_message(ROOM, &row).await.expect("store row");
+    let archive_id = storage
+        .store_message(&room_bare(), &row)
+        .await
+        .expect("store row");
 
     let query = MamQuery::default();
     let result = storage
-        .query_messages(ROOM, &query)
+        .query_messages(&room_bare(), &query)
         .await
         .expect("query archive");
     assert_eq!(result.messages.len(), 1);
@@ -95,8 +107,11 @@ async fn xep_0201_nested_thread_round_trips_through_mam() {
 
     // Build the MAM result envelope and assert the inner `<message>`
     // carries `<thread parent='root-thread'>child-thread</thread>`.
-    let envelopes =
-        waddle_xmpp_core::mam::build_result_messages("q1", "alice@example.com", &result.messages);
+    let envelopes = waddle_xmpp_core::mam::build_result_messages(
+        "q1",
+        &jid_lit("alice@example.com"),
+        &result.messages,
+    );
     assert_eq!(envelopes.len(), 1);
     let result_payload = envelopes[0]
         .payloads
@@ -157,8 +172,8 @@ fn xep_0201_groupchat_stanza_xml_replay_preserves_thread_metadata() {
     let row = ArchivedMessage {
         id: "archive-xml".to_string(),
         timestamp: Utc::now(),
-        from: "team@conference.example.com/alice".to_string(),
-        to: ROOM.to_string(),
+        from: jid_lit("team@conference.example.com/alice"),
+        to: jid_lit(ROOM),
         body: Some("threaded reply".to_string()),
         stanza_id: Some("wire-archive-xml".to_string()),
         thread: Some(ThreadInfo::child(
@@ -178,7 +193,7 @@ fn xep_0201_groupchat_stanza_xml_replay_preserves_thread_metadata() {
     };
 
     let envelopes =
-        waddle_xmpp_core::mam::build_result_messages("q-xml", "bob@example.com", &[row]);
+        waddle_xmpp_core::mam::build_result_messages("q-xml", &jid_lit("bob@example.com"), &[row]);
     let result_payload = envelopes[0]
         .payloads
         .iter()
@@ -225,10 +240,13 @@ async fn xep_0201_cross_archive_parent_thread_id_round_trips_without_validation(
         "child-thread-a",
         Some("parent-not-in-this-archive"),
     );
-    storage.store_message(ROOM, &row).await.expect("store row");
+    storage
+        .store_message(&room_bare(), &row)
+        .await
+        .expect("store row");
 
     let result = storage
-        .query_messages(ROOM, &MamQuery::default())
+        .query_messages(&room_bare(), &MamQuery::default())
         .await
         .expect("query");
     assert_eq!(result.messages.len(), 1);
@@ -295,11 +313,11 @@ async fn xep_0201_inmemory_mam_storage_also_round_trips_parent() {
         Some("root-thread-m"),
     );
     storage
-        .store_message(ROOM, &row)
+        .store_message(&room_bare(), &row)
         .await
         .expect("store in-memory");
     let result = storage
-        .query_messages(ROOM, &MamQuery::default())
+        .query_messages(&room_bare(), &MamQuery::default())
         .await
         .expect("query in-memory");
     assert_eq!(result.messages.len(), 1);
@@ -336,10 +354,13 @@ async fn xep_0201_collapsed_thread_field_round_trips_nested_through_storage() {
         Some("r-collapse"),
     );
     row.thread = Some(original.clone());
-    storage.store_message(ROOM, &row).await.expect("store row");
+    storage
+        .store_message(&room_bare(), &row)
+        .await
+        .expect("store row");
 
     let result = storage
-        .query_messages(ROOM, &MamQuery::default())
+        .query_messages(&room_bare(), &MamQuery::default())
         .await
         .expect("query");
     assert_eq!(result.messages.len(), 1);
@@ -362,10 +383,13 @@ async fn xep_0201_collapsed_thread_field_round_trips_root_only_through_storage()
     let mut row =
         nested_thread_groupchat_row("archive-root-only", "alice", "root only", "root-only", None);
     row.thread = Some(original.clone());
-    storage.store_message(ROOM, &row).await.expect("store row");
+    storage
+        .store_message(&room_bare(), &row)
+        .await
+        .expect("store row");
 
     let result = storage
-        .query_messages(ROOM, &MamQuery::default())
+        .query_messages(&room_bare(), &MamQuery::default())
         .await
         .expect("query");
     assert_eq!(result.messages.len(), 1);
@@ -391,8 +415,8 @@ async fn xep_0201_collapsed_thread_field_round_trips_no_thread_through_storage()
     let row = ArchivedMessage {
         id: "archive-no-thread".to_string(),
         timestamp: Utc::now(),
-        from: format!("{ROOM}/alice"),
-        to: ROOM.to_string(),
+        from: jid_lit(&format!("{ROOM}/alice")),
+        to: jid_lit(ROOM),
         body: Some("plain body".to_string()),
         stanza_id: Some("wire-no-thread".to_string()),
         thread: None,
@@ -403,10 +427,13 @@ async fn xep_0201_collapsed_thread_field_round_trips_no_thread_through_storage()
         rich: None,
         nickname_generation: Some(0),
     };
-    storage.store_message(ROOM, &row).await.expect("store row");
+    storage
+        .store_message(&room_bare(), &row)
+        .await
+        .expect("store row");
 
     let result = storage
-        .query_messages(ROOM, &MamQuery::default())
+        .query_messages(&room_bare(), &MamQuery::default())
         .await
         .expect("query");
     assert_eq!(result.messages.len(), 1);
@@ -429,11 +456,18 @@ async fn xep_0201_decode_rejects_orphan_parent_thread_id_row() {
         .await
         .expect("open sqlite in-memory");
     storage
-        .insert_raw_thread_columns_for_test(ROOM, "archive-orphan", None, Some("orphan-parent"))
+        .insert_raw_thread_columns_for_test(
+            &room_bare(),
+            "archive-orphan",
+            None,
+            Some("orphan-parent"),
+        )
         .await
         .expect("raw insert");
 
-    let result = storage.query_messages(ROOM, &MamQuery::default()).await;
+    let result = storage
+        .query_messages(&room_bare(), &MamQuery::default())
+        .await;
     match result {
         Err(MamStorageError::Serialization(message)) => {
             assert!(
