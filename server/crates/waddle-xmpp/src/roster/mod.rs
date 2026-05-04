@@ -45,10 +45,9 @@
 //! </iq>
 //! ```
 
-pub mod storage;
-
-pub use storage::RosterStorage;
-pub use waddle_xmpp_core::roster::{AskType, RosterItem, Subscription, ROSTER_NS};
+pub use waddle_xmpp_core::roster::{
+    AskType, RosterItem, RosterVersion, RosterVersionRequest, Subscription, ROSTER_NS,
+};
 
 use jid::{BareJid, FullJid, Jid};
 use minidom::Element;
@@ -61,8 +60,8 @@ use crate::XmppError;
 /// Parsed roster query.
 #[derive(Debug, Clone)]
 pub struct RosterQuery {
-    /// Optional version for roster versioning (XEP-0237).
-    pub ver: Option<String>,
+    /// Inbound `ver` attribute, classified per XEP-0237 §2.5.
+    pub ver: RosterVersionRequest,
     /// Items in the query (for set operations).
     pub items: Vec<RosterItem>,
 }
@@ -71,14 +70,17 @@ impl RosterQuery {
     /// Create an empty roster query (for get operations).
     pub fn empty() -> Self {
         Self {
-            ver: None,
+            ver: RosterVersionRequest::Absent,
             items: Vec::new(),
         }
     }
 
     /// Create a roster query with items (for set operations).
     pub fn with_items(items: Vec<RosterItem>) -> Self {
-        Self { ver: None, items }
+        Self {
+            ver: RosterVersionRequest::Absent,
+            items,
+        }
     }
 }
 
@@ -133,7 +135,7 @@ pub fn parse_roster_get(iq: &Iq) -> Result<RosterQuery, XmppError> {
         }
     };
 
-    let ver = query_elem.attr("ver").map(|s| s.to_string());
+    let ver = RosterVersionRequest::from_attr(query_elem.attr("ver"));
 
     debug!(ver = ?ver, "Parsed roster get query");
 
@@ -165,7 +167,7 @@ pub fn parse_roster_set(iq: &Iq) -> Result<RosterQuery, XmppError> {
         }
     };
 
-    let ver = query_elem.attr("ver").map(|s| s.to_string());
+    let ver = RosterVersionRequest::from_attr(query_elem.attr("ver"));
 
     // Parse item elements. For roster set operations, client-provided
     // subscription/ask values are ignored except for subscription='remove'
@@ -261,12 +263,16 @@ fn parse_roster_set_item(elem: &Element) -> Result<RosterItem, XmppError> {
 ///   </query>
 /// </iq>
 /// ```
-pub fn build_roster_result(original_iq: &Iq, items: &[RosterItem], ver: Option<&str>) -> Iq {
+pub fn build_roster_result(
+    original_iq: &Iq,
+    items: &[RosterItem],
+    ver: Option<&RosterVersion>,
+) -> Iq {
     let mut query_builder = Element::builder("query", ROSTER_NS);
 
     // Add version if roster versioning is supported
     if let Some(v) = ver {
-        query_builder = query_builder.attr("ver", v);
+        query_builder = query_builder.attr("ver", v.as_str());
     }
 
     // Add all roster items
@@ -315,12 +321,12 @@ pub fn build_roster_push(
     from_jid: &BareJid,
     to_jid: &FullJid,
     item: &RosterItem,
-    ver: Option<&str>,
+    ver: Option<&RosterVersion>,
 ) -> Iq {
     let mut query_builder = Element::builder("query", ROSTER_NS);
 
     if let Some(v) = ver {
-        query_builder = query_builder.attr("ver", v);
+        query_builder = query_builder.attr("ver", v.as_str());
     }
 
     query_builder = query_builder.append(item.to_element());
@@ -574,7 +580,10 @@ mod tests {
         };
 
         let query = parse_roster_get(&iq).unwrap();
-        assert_eq!(query.ver, Some("abc123".to_string()));
+        match query.ver {
+            RosterVersionRequest::Cached(v) => assert_eq!(v.as_str(), "abc123"),
+            other => panic!("expected Cached, got {:?}", other),
+        }
         assert!(query.items.is_empty());
     }
 
@@ -735,7 +744,8 @@ mod tests {
                 .set_subscription(Subscription::To),
         ];
 
-        let response = build_roster_result(&original_iq, &items, Some("ver123"));
+        let ver: RosterVersion = "ver123".parse().unwrap();
+        let response = build_roster_result(&original_iq, &items, Some(&ver));
 
         assert_eq!(response.id, "roster-1");
         assert!(matches!(
@@ -776,7 +786,8 @@ mod tests {
 
         let from_jid: BareJid = "user@example.com".parse().unwrap();
         let to_jid: FullJid = "user@example.com/resource".parse().unwrap();
-        let push = build_roster_push("push-1", &from_jid, &to_jid, &item, Some("ver456"));
+        let ver: RosterVersion = "ver456".parse().unwrap();
+        let push = build_roster_push("push-1", &from_jid, &to_jid, &item, Some(&ver));
 
         assert_eq!(push.id, "push-1");
         assert_eq!(

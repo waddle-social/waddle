@@ -15,6 +15,101 @@ use crate::error::CoreError;
 /// Namespace for RFC 6121 Roster Management.
 pub const ROSTER_NS: &str = "jabber:iq:roster";
 
+/// Server-generated, opaque roster version identifier (XEP-0237 §2.5).
+///
+/// The wire form is a non-empty string. The value is opaque to the client.
+/// Construct only via [`RosterVersion::generate`] (UUID v4) or
+/// [`RosterVersion::from_str`] (rejects empty input — the empty-string case
+/// on the wire means "client wants to bootstrap" and is modelled by
+/// [`RosterVersionRequest::Bootstrap`], not by an empty `RosterVersion`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct RosterVersion(String);
+
+impl RosterVersion {
+    /// Generate a fresh opaque version identifier.
+    pub fn generate() -> Self {
+        Self(uuid::Uuid::new_v4().to_string())
+    }
+
+    /// Borrow the wire form for serialisation at the I/O boundary.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for RosterVersion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl FromStr for RosterVersion {
+    type Err = CoreError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.is_empty() {
+            return Err(CoreError::bad_request(Some(
+                "Roster version must not be empty (use RosterVersionRequest::Bootstrap)"
+                    .to_string(),
+            )));
+        }
+        Ok(Self(s.to_string()))
+    }
+}
+
+/// Inbound `ver` attribute on a roster get, classified per XEP-0237 §2.5.
+///
+/// XEP-0237 distinguishes three cases on the wire:
+///
+/// | Wire shape | Meaning |
+/// | --- | --- |
+/// | no `ver` attribute | client does not support roster versioning |
+/// | `ver=""` | client supports versioning; cache is absent or corrupt — bootstrap |
+/// | `ver="<id>"` | client claims its cache is at `<id>` |
+///
+/// Collapsing these distinctions on parse loses information the wire carries,
+/// so we preserve them at the type level. Per the Waddle typed-payloads rule,
+/// untyped input is parsed exactly once and the untyped form is dropped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RosterVersionRequest {
+    /// Inbound query had no `ver` attribute. Client does not support
+    /// roster versioning (or chose not to participate this round).
+    Absent,
+    /// Inbound query had `ver=""`. Client wants to bootstrap; treat as a
+    /// stale cache (full roster + fresh `ver` in the response).
+    Bootstrap,
+    /// Inbound query had `ver="<id>"`. Compare against the user's current
+    /// roster version and return either an empty result (matching) or the
+    /// full roster with a fresh `ver` (stale).
+    Cached(RosterVersion),
+}
+
+impl RosterVersionRequest {
+    /// Parse an inbound `ver` attribute value, where `None` means the
+    /// attribute was absent and `Some(s)` carries its (possibly empty) value.
+    pub fn from_attr(attr: Option<&str>) -> Self {
+        match attr {
+            None => Self::Absent,
+            Some("") => Self::Bootstrap,
+            Some(s) => Self::Cached(RosterVersion(s.to_string())),
+        }
+    }
+
+    /// Whether the request signals roster-versioning support at all.
+    /// `Absent` is the only case where it does not.
+    pub fn signals_support(&self) -> bool {
+        !matches!(self, Self::Absent)
+    }
+
+    /// Return the cached version, if present.
+    pub fn cached(&self) -> Option<&RosterVersion> {
+        match self {
+            Self::Cached(v) => Some(v),
+            _ => None,
+        }
+    }
+}
+
 /// A roster item representing a contact in the user's roster.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RosterItem {
@@ -403,6 +498,43 @@ mod tests {
         let query = iq.children().next().unwrap();
         assert_eq!(query.name(), "query");
         assert_eq!(query.ns(), ROSTER_NS);
+    }
+
+    #[test]
+    fn test_roster_version_generate_is_non_empty_and_unique() {
+        let a = RosterVersion::generate();
+        let b = RosterVersion::generate();
+        assert!(!a.as_str().is_empty());
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn test_roster_version_from_str_rejects_empty() {
+        assert!("".parse::<RosterVersion>().is_err());
+        assert_eq!("ver14".parse::<RosterVersion>().unwrap().as_str(), "ver14");
+    }
+
+    #[test]
+    fn test_roster_version_request_from_attr() {
+        assert_eq!(
+            RosterVersionRequest::from_attr(None),
+            RosterVersionRequest::Absent
+        );
+        assert_eq!(
+            RosterVersionRequest::from_attr(Some("")),
+            RosterVersionRequest::Bootstrap
+        );
+        match RosterVersionRequest::from_attr(Some("ver42")) {
+            RosterVersionRequest::Cached(v) => assert_eq!(v.as_str(), "ver42"),
+            other => panic!("expected Cached, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_roster_version_request_signals_support() {
+        assert!(!RosterVersionRequest::Absent.signals_support());
+        assert!(RosterVersionRequest::Bootstrap.signals_support());
+        assert!(RosterVersionRequest::Cached(RosterVersion::generate()).signals_support());
     }
 
     #[test]

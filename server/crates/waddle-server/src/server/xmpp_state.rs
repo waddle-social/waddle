@@ -965,24 +965,30 @@ impl waddle_xmpp::AppState for XmppAppState {
         user_jid: &jid::BareJid,
         item: &waddle_xmpp::roster::RosterItem,
     ) -> Result<waddle_xmpp::roster::RosterSetResult, XmppError> {
-        use crate::db::roster::DatabaseRosterStorage;
+        use crate::db::roster::{DatabaseRosterStorage, RosterRowChange, RosterRowMutationKind};
 
         debug!(user = %user_jid, contact = %item.jid, "Setting roster item");
 
         let db = self.global_database().await?;
         let storage = DatabaseRosterStorage::new(db);
 
-        let row = roster_item_to_row(item);
-        let is_new = storage.set_roster_item(user_jid, &row).await.map_err(|e| {
-            warn!(user = %user_jid, contact = %item.jid, error = %e, "Failed to set roster item");
-            XmppError::internal(format!("Database error: {}", e))
-        })?;
+        let mutation = storage
+            .apply_roster_change(user_jid, RosterRowChange::Upsert(roster_item_to_row(item)))
+            .await
+            .map_err(|e| {
+                warn!(user = %user_jid, contact = %item.jid, error = %e, "Failed to set roster item");
+                XmppError::internal(format!("Database error: {}", e))
+            })?;
 
-        if is_new {
-            Ok(waddle_xmpp::roster::RosterSetResult::Added(item.clone()))
-        } else {
-            Ok(waddle_xmpp::roster::RosterSetResult::Updated(item.clone()))
-        }
+        Ok(match mutation.kind {
+            RosterRowMutationKind::Added(_) => {
+                waddle_xmpp::roster::RosterSetResult::Added(item.clone())
+            }
+            RosterRowMutationKind::Updated(_) => {
+                waddle_xmpp::roster::RosterSetResult::Updated(item.clone())
+            }
+            RosterRowMutationKind::Removed(_) => unreachable!("Upsert never reports Removed"),
+        })
     }
 
     /// Remove a roster item.
@@ -991,17 +997,24 @@ impl waddle_xmpp::AppState for XmppAppState {
         user_jid: &jid::BareJid,
         contact_jid: &jid::BareJid,
     ) -> Result<bool, XmppError> {
-        use crate::db::roster::DatabaseRosterStorage;
+        use crate::db::roster::{DatabaseRosterStorage, RosterRowChange, RosterStorageError};
 
         debug!(user = %user_jid, contact = %contact_jid, "Removing roster item");
 
         let db = self.global_database().await?;
         let storage = DatabaseRosterStorage::new(db);
 
-        storage.remove_roster_item(user_jid, contact_jid).await.map_err(|e| {
-            warn!(user = %user_jid, contact = %contact_jid, error = %e, "Failed to remove roster item");
-            XmppError::internal(format!("Database error: {}", e))
-        })
+        match storage
+            .apply_roster_change(user_jid, RosterRowChange::Remove(contact_jid.clone()))
+            .await
+        {
+            Ok(_) => Ok(true),
+            Err(RosterStorageError::QueryFailed(msg)) if msg == "Item not found" => Ok(false),
+            Err(e) => {
+                warn!(user = %user_jid, contact = %contact_jid, error = %e, "Failed to remove roster item");
+                Err(XmppError::internal(format!("Database error: {}", e)))
+            }
+        }
     }
 
     /// Get the current roster version for a user.
@@ -1030,7 +1043,7 @@ impl waddle_xmpp::AppState for XmppAppState {
         subscription: waddle_xmpp::roster::Subscription,
         ask: Option<waddle_xmpp::roster::AskType>,
     ) -> Result<waddle_xmpp::roster::RosterItem, XmppError> {
-        use crate::db::roster::DatabaseRosterStorage;
+        use crate::db::roster::{DatabaseRosterStorage, RosterRowMutationKind};
 
         debug!(
             user = %user_jid,
@@ -1046,8 +1059,8 @@ impl waddle_xmpp::AppState for XmppAppState {
         let subscription_str = subscription.as_str();
         let ask_str = ask.map(|a| a.as_str());
 
-        let row = storage
-            .update_subscription(user_jid, contact_jid, subscription_str, ask_str)
+        let mutation = storage
+            .apply_subscription_update(user_jid, contact_jid, subscription_str, ask_str)
             .await
             .map_err(|e| {
                 warn!(
@@ -1058,6 +1071,13 @@ impl waddle_xmpp::AppState for XmppAppState {
                 );
                 XmppError::internal(format!("Database error: {}", e))
             })?;
+
+        let row = match mutation.kind {
+            RosterRowMutationKind::Added(row) | RosterRowMutationKind::Updated(row) => row,
+            RosterRowMutationKind::Removed(_) => {
+                unreachable!("apply_subscription_update never reports Removed")
+            }
+        };
 
         row_to_roster_item(&row).map_err(|e| {
             warn!(user = %user_jid, contact = %contact_jid, error = %e, "Failed to convert roster item");

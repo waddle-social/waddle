@@ -41,7 +41,8 @@ use waddle_xmpp::{
     registry::BroadcastOutcome,
     roster::{
         build_roster_push, build_roster_result, build_roster_result_empty, parse_roster_get,
-        parse_roster_set, AskType, RosterItem, RosterSetResult, Subscription, ROSTER_NS,
+        parse_roster_set, AskType, RosterItem, RosterSetResult, RosterVersion, Subscription,
+        ROSTER_NS,
     },
     xep::xep0054::{VCard, VCardPhoto},
     xep::xep0357::{
@@ -83,7 +84,10 @@ use super::presence::{
 use crate::auth::{NativeUserStore, Session};
 use crate::db::actor::{DbExecute, DbQuery, DbQueryOne, GetDatabase};
 use crate::db::blocking::DatabaseBlockingStorage;
-use crate::db::roster::{DatabaseRosterStorage, RosterItemRow, RosterStorageError};
+use crate::db::roster::{
+    DatabaseRosterStorage, RosterItemRow, RosterRowChange, RosterRowMutationKind,
+    RosterStorageError,
+};
 use crate::db::{row_value, Database, Value, ValueExt};
 use crate::permissions::{
     CheckPermission, Object, ObjectType, Permission, PermissionError, Relation, Subject,
@@ -3081,8 +3085,12 @@ async fn handle_roster_get(
         .connection_registry
         .mark_roster_interested(full_jid);
     *roster_interested = true;
-    if query.ver.as_deref() == Some(version.as_str()) {
-        return vec![iq_to_xml(build_roster_result_empty(iq))];
+    // XEP-0237 §2.6: matching ver -> empty <iq type='result'/> (no <query>);
+    // anything else (Absent, Bootstrap, Cached(stale)) -> full roster + ver.
+    if let Some(cached) = query.ver.cached() {
+        if cached == &version {
+            return vec![iq_to_xml(build_roster_result_empty(iq))];
+        }
     }
     vec![iq_to_xml(build_roster_result(iq, &items, Some(&version)))]
 }
@@ -3104,7 +3112,8 @@ async fn handle_roster_set(
         .expect("parse_roster_set guarantees one item");
 
     let mut removed_item = None;
-    let set_result = if requested.subscription.is_remove() {
+    let (set_result, version) = if requested.subscription.is_remove() {
+        // Snapshot the item before delete so we can run subscription side effects.
         removed_item = match storage.get_roster_item(user_jid, &requested.jid).await {
             Ok(Some(row)) => match roster_row_to_item(row) {
                 Ok(item) => Some(item),
@@ -3125,9 +3134,15 @@ async fn handle_roster_set(
                 )];
             }
         };
-        match storage.remove_roster_item(user_jid, &requested.jid).await {
-            Ok(true) => RosterSetResult::Removed(requested.jid.clone()),
-            Ok(false) => {
+        match storage
+            .apply_roster_change(user_jid, RosterRowChange::Remove(requested.jid.clone()))
+            .await
+        {
+            Ok(mutation) => (
+                RosterSetResult::Removed(requested.jid.clone()),
+                mutation.version,
+            ),
+            Err(RosterStorageError::QueryFailed(msg)) if msg == "Item not found" => {
                 return vec![build_xmpp_error_response(
                     iq,
                     XmppError::item_not_found(None),
@@ -3166,11 +3181,20 @@ async fn handle_roster_set(
         item.name = requested.name.clone();
         item.groups = requested.groups.clone();
 
-        let is_new = match storage
-            .set_roster_item(user_jid, &roster_item_to_row(&item))
+        match storage
+            .apply_roster_change(user_jid, RosterRowChange::Upsert(roster_item_to_row(&item)))
             .await
         {
-            Ok(is_new) => is_new,
+            Ok(mutation) => {
+                let result = match mutation.kind {
+                    RosterRowMutationKind::Added(_) => RosterSetResult::Added(item),
+                    RosterRowMutationKind::Updated(_) => RosterSetResult::Updated(item),
+                    RosterRowMutationKind::Removed(_) => {
+                        unreachable!("Upsert never reports Removed")
+                    }
+                };
+                (result, mutation.version)
+            }
             Err(error) => {
                 warn!(user = %user_jid, contact = %item.jid, error = %error, "Failed to store roster item");
                 return vec![build_xmpp_error_response(
@@ -3178,22 +3202,6 @@ async fn handle_roster_set(
                     XmppError::internal_server_error(None),
                 )];
             }
-        };
-        if is_new {
-            RosterSetResult::Added(item)
-        } else {
-            RosterSetResult::Updated(item)
-        }
-    };
-
-    let version = match storage.get_or_create_roster_version(user_jid).await {
-        Ok(version) => version,
-        Err(error) => {
-            warn!(user = %user_jid, error = %error, "Failed to read roster version after set");
-            return vec![build_xmpp_error_response(
-                iq,
-                XmppError::internal_server_error(None),
-            )];
         }
     };
 
@@ -3275,13 +3283,17 @@ async fn send_roster_remove_subscription_stanza(
                     }
                     SubscriptionType::Subscribe | SubscriptionType::Subscribed => {}
                 }
-                if let Err(error) = storage
-                    .set_roster_item(to, &roster_item_to_row(&item))
+                match storage
+                    .apply_roster_change(to, RosterRowChange::Upsert(roster_item_to_row(&item)))
                     .await
                 {
-                    warn!(error = %error, user = %to, contact = %from, "Failed to update contact roster after removal side effect");
-                } else if let Ok(version) = storage.get_or_create_roster_version(to).await {
-                    send_roster_push_to_all_resources(state, to, &item, &version).await;
+                    Ok(mutation) => {
+                        send_roster_push_to_all_resources(state, to, &item, &mutation.version)
+                            .await;
+                    }
+                    Err(error) => {
+                        warn!(error = %error, user = %to, contact = %from, "Failed to update contact roster after removal side effect");
+                    }
                 }
             }
             Err(error) => {
@@ -3359,7 +3371,7 @@ async fn send_roster_push_to_all_resources(
     state: &WebSocketState,
     user_jid: &BareJid,
     item: &RosterItem,
-    version: &str,
+    version: &RosterVersion,
 ) {
     let live_resources = state
         .deps
@@ -3463,7 +3475,7 @@ async fn send_roster_push_to_sibling_resources(
     user_jid: &BareJid,
     source_jid: &FullJid,
     item: &RosterItem,
-    version: &str,
+    version: &RosterVersion,
 ) {
     let live_resources: Vec<_> = state
         .deps

@@ -11,7 +11,7 @@ use waddle_xmpp::{
         parse_subscription_presence, PresenceAction, SubscriptionStateMachine, SubscriptionType,
     },
     registry::BroadcastOutcome,
-    roster::{build_roster_push, AskType, RosterItem, Subscription},
+    roster::{build_roster_push, AskType, RosterItem, RosterVersion, Subscription},
     xep::NS_DELAY,
     Affiliation, Role, Stanza,
 };
@@ -23,7 +23,9 @@ use super::super::{
 use crate::auth::Session;
 use crate::db::actor::GetDatabase;
 use crate::db::blocking::DatabaseBlockingStorage;
-use crate::db::roster::{DatabaseRosterStorage, RosterItemRow, RosterStorageError};
+use crate::db::roster::{
+    DatabaseRosterStorage, RosterItemRow, RosterRowChange, RosterStorageError,
+};
 use crate::permissions::{CheckPermission, Object, ObjectType, Permission, Subject};
 use crate::server::bootstrap_membership::DEPLOYMENT_SERVER_ID;
 use crate::server::xmpp_state::{get_xmpp_channel, XmppChannelRecord};
@@ -939,35 +941,41 @@ async fn update_subscription_roster_state(
             }
         }
     }
-    if store_from_item {
-        storage
-            .set_roster_item(&request.from, &roster_item_to_row(&from_item))
+    let from_push = if store_from_item {
+        let mutation = storage
+            .apply_roster_change(
+                &request.from,
+                RosterRowChange::Upsert(roster_item_to_row(&from_item)),
+            )
             .await?;
-    }
-    if let Some(to_item) = to_item.as_ref() {
-        storage
-            .set_roster_item(&request.to, &roster_item_to_row(to_item))
-            .await?;
-    }
-
-    Ok(Some(SubscriptionRosterUpdate {
-        from_push: if store_from_item {
+        Some(SubscriptionRosterPush {
+            user: request.from.clone(),
+            item: from_item,
+            version: mutation.version,
+        })
+    } else {
+        None
+    };
+    let to_push = match to_item {
+        Some(to_item) => {
+            let mutation = storage
+                .apply_roster_change(
+                    &request.to,
+                    RosterRowChange::Upsert(roster_item_to_row(&to_item)),
+                )
+                .await?;
             Some(SubscriptionRosterPush {
-                user: request.from.clone(),
-                item: from_item,
-                version: storage.get_or_create_roster_version(&request.from).await?,
-            })
-        } else {
-            None
-        },
-        to_push: match to_item {
-            Some(to_item) => Some(SubscriptionRosterPush {
                 user: request.to.clone(),
                 item: to_item,
-                version: storage.get_or_create_roster_version(&request.to).await?,
-            }),
-            None => None,
-        },
+                version: mutation.version,
+            })
+        }
+        None => None,
+    };
+
+    Ok(Some(SubscriptionRosterUpdate {
+        from_push,
+        to_push,
         send_unavailable_before_unsubscribed,
         auto_approve_subscribe,
         forward_subscription_stanza,
@@ -985,7 +993,7 @@ struct SubscriptionRosterUpdate {
 struct SubscriptionRosterPush {
     user: BareJid,
     item: RosterItem,
-    version: String,
+    version: RosterVersion,
 }
 
 async fn send_subscription_roster_pushes(state: &WebSocketState, update: SubscriptionRosterUpdate) {
@@ -1002,7 +1010,7 @@ async fn send_roster_push_to_resources(
     state: &WebSocketState,
     user_jid: &BareJid,
     item: &RosterItem,
-    version: &str,
+    version: &RosterVersion,
 ) {
     let live_resources = state
         .deps

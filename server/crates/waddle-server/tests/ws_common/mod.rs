@@ -52,6 +52,22 @@ impl TestServer {
 
     /// Start a waddle-server and seed additional native users.
     pub fn start_with_extra_accounts(extra_accounts: &[(&str, &str)]) -> Self {
+        Self::spawn(extra_accounts, None)
+    }
+
+    /// Start a waddle-server pointed at a persistent SQLite file. Used by tests
+    /// that need state to survive a server restart (e.g. XEP-0237 T5).
+    /// `database_url` is passed verbatim as `WADDLE_DATABASE_URL`, e.g.
+    /// `format!("sqlite://{}?mode=rwc", path.display())`.
+    #[allow(dead_code)]
+    pub fn start_persistent_with_extra_accounts(
+        database_url: &str,
+        extra_accounts: &[(&str, &str)],
+    ) -> Self {
+        Self::spawn(extra_accounts, Some(database_url.to_string()))
+    }
+
+    fn spawn(extra_accounts: &[(&str, &str)], database_url: Option<String>) -> Self {
         let bin = env!("CARGO_BIN_EXE_waddle-server");
         let fixed_account_password = format!("ws-test-password-{}", uuid::Uuid::new_v4());
         let extra_accounts_env = extra_accounts
@@ -64,7 +80,8 @@ impl TestServer {
         let port_file =
             std::env::temp_dir().join(format!("waddle-test-port-{}", uuid::Uuid::new_v4()));
 
-        let child = Command::new(bin)
+        let mut command = Command::new(bin);
+        command
             .env("WADDLE_CERTS_EPHEMERAL", "true")
             .env("WADDLE_TEST_FIXED_ACCOUNT_ENABLED", "true")
             .env(
@@ -88,7 +105,11 @@ impl TestServer {
             )
             .env("WADDLE_HTTP_PORT_FILE", &port_file)
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::null());
+        if let Some(url) = database_url {
+            command.env("WADDLE_DATABASE_URL", url);
+        }
+        let child = command
             .spawn()
             .unwrap_or_else(|e| panic!("Failed to start waddle-server at {bin}: {e}"));
 
