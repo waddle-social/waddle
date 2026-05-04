@@ -2740,7 +2740,10 @@ async fn finish_archive_groupchat_message(
         thread,
         reply,
         origin_id,
-        message_type: mam_message_type(&archive_clone.type_),
+        // Typed propagation: see #228 commit 8 — `ArchivedMessage.message_type`
+        // is now `xmpp_parsers::message::MessageType`, not `String`. The
+        // wire-typed value flows directly through; no lossy stringifier.
+        message_type: archive_clone.type_.clone(),
         stanza_xml,
         rich,
         nickname_generation: Some(sender_nickname_generation),
@@ -2946,16 +2949,6 @@ async fn push_inbox_update(
         let _ = connection_registry
             .send_to(&resource_jid, Stanza::Message(msg))
             .await;
-    }
-}
-
-fn mam_message_type(message_type: &XmppMessageType) -> String {
-    match message_type {
-        XmppMessageType::Chat => "chat".to_string(),
-        XmppMessageType::Error => "error".to_string(),
-        XmppMessageType::Groupchat => "groupchat".to_string(),
-        XmppMessageType::Headline => "headline".to_string(),
-        XmppMessageType::Normal => "normal".to_string(),
     }
 }
 
@@ -3763,7 +3756,7 @@ mod tests {
             thread: None,
             reply: None,
             origin_id: None,
-            message_type: "chat".to_string(),
+            message_type: XmppMessageType::Chat,
             stanza_xml: Some(
                 r#"<message xmlns='jabber:client' type='chat' from='alice@example.com/web' to='bob@example.com'><body>hello</body></message>"#.to_string(),
             ),
@@ -3867,7 +3860,7 @@ mod tests {
             thread: None,
             reply: None,
             origin_id: Some(waddle_xmpp_core::xep0359::OriginId::new("collision")),
-            message_type: "chat".to_string(),
+            message_type: XmppMessageType::Chat,
             stanza_xml: None,
             rich: None,
             nickname_generation: None,
@@ -3887,7 +3880,7 @@ mod tests {
             thread: None,
             reply: None,
             origin_id: Some(waddle_xmpp_core::xep0359::OriginId::new("collision")),
-            message_type: "chat".to_string(),
+            message_type: XmppMessageType::Chat,
             stanza_xml: None,
             rich: None,
             nickname_generation: None,
@@ -3958,7 +3951,7 @@ mod tests {
             thread: None,
             reply: None,
             origin_id: Some(waddle_xmpp_core::xep0359::OriginId::new("oid-1")),
-            message_type: "chat".to_string(),
+            message_type: XmppMessageType::Chat,
             stanza_xml: None,
             rich: None,
             nickname_generation: None,
@@ -4019,7 +4012,7 @@ mod tests {
             thread: None,
             reply: None,
             origin_id: Some(waddle_xmpp_core::xep0359::OriginId::new("queried-id")),
-            message_type: "chat".to_string(),
+            message_type: XmppMessageType::Chat,
             stanza_xml: None,
             rich: None,
             nickname_generation: None,
@@ -4078,7 +4071,7 @@ mod tests {
             thread: None,
             reply: None,
             origin_id: None,
-            message_type: "chat".to_string(),
+            message_type: XmppMessageType::Chat,
             stanza_xml: None,
             rich: Some(ArchivedRichMessage {
                 payload: Some(ArchivedRichPayload::Tombstone(ArchivedTombstone {

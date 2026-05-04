@@ -8,7 +8,7 @@ use ws_common::{disco_info_query, TestServer, WsXmppClient};
 use jid::{BareJid, Jid};
 use waddle_xmpp::mam::{ArchivedMessage, InMemoryMamStorage, MamQuery, MamStorage};
 use waddle_xmpp_core::xep0359::{add_stanza_id, OriginId, StanzaId};
-use xmpp_parsers::message::Message;
+use xmpp_parsers::message::{Message, MessageType};
 
 const DOMAIN: &str = "localhost";
 const USERNAME: &str = "admin";
@@ -174,7 +174,7 @@ async fn xep_0359_query_filter_finds_row_by_typed_stanza_id() {
         id: "row-thread-via-stanza-id".to_string(),
         body: Some("root".to_string()),
         stanza_id: Some(StanzaId::new("thread-by-stanza-id", archive_jid.clone())),
-        message_type: "groupchat".to_string(),
+        message_type: MessageType::Groupchat,
         ..ArchivedMessage::for_test(
             "room@conference.example.com/alice"
                 .parse()

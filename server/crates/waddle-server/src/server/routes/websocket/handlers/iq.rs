@@ -991,7 +991,7 @@ pub async fn handle_iq_with_conn_state(
                 thread: None,
                 reply: None,
                 origin_id: None,
-                message_type: "groupchat".to_string(),
+                message_type: xmpp_parsers::message::MessageType::Groupchat,
                 stanza_xml: None,
                 rich: Some(ArchivedRichMessage {
                     payload: Some(ArchivedRichPayload::Moderation(ArchivedModeration {

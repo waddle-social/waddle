@@ -6,6 +6,7 @@ use tokio::sync::Mutex;
 use waddle_xmpp::mam::{ArchivedMessage, MamQuery, MamStorage, MamStorageError, SqlxMamStorage};
 use waddle_xmpp_core::mam::{ArchivedReply, RichMessageId};
 use ws_common::{extract_attr_after, TestServer, WsXmppClient};
+use xmpp_parsers::message::MessageType;
 
 const DOMAIN: &str = "localhost";
 const USERNAME: &str = "admin";
@@ -232,7 +233,7 @@ fn reply_archived_row(
         thread: None,
         reply,
         origin_id: None,
-        message_type: "groupchat".to_string(),
+        message_type: MessageType::Groupchat,
         stanza_xml: None,
         rich: None,
         nickname_generation: Some(0),

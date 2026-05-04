@@ -18,7 +18,7 @@
 use chrono::Utc;
 use jid::Jid;
 use tracing::warn;
-use xmpp_parsers::message::{Message, MessageType};
+use xmpp_parsers::message::Message;
 
 use super::{
     ArchivedMention, ArchivedMessage, ArchivedReactionSet, ArchivedReference, ArchivedReply,
@@ -124,20 +124,17 @@ pub fn build_direct_archived_message(
         thread,
         reply,
         origin_id,
-        message_type: mam_message_type(&message.type_),
+        // Typed propagation: the wire-parsed `MessageType` flows
+        // straight from `Message::type_` into the archive row. Pre-#228
+        // commit 8 this went through a lossy
+        // `mam_message_type(&MessageType) -> String` stringifier that
+        // round-tripped a typed value through a string and back; with
+        // the typed `ArchivedMessage.message_type` field that helper
+        // is gone and the value moves intact.
+        message_type: message.type_.clone(),
         stanza_xml,
         rich,
         nickname_generation: None,
-    }
-}
-
-fn mam_message_type(message_type: &MessageType) -> String {
-    match message_type {
-        MessageType::Chat => "chat".to_string(),
-        MessageType::Error => "error".to_string(),
-        MessageType::Groupchat => "groupchat".to_string(),
-        MessageType::Headline => "headline".to_string(),
-        MessageType::Normal => "normal".to_string(),
     }
 }
 
@@ -337,7 +334,7 @@ mod tests {
             Some(jid("alice@example.com")),
             "stanza_id.by is reconstructed from the archive jid"
         );
-        assert_eq!(archived.message_type, "chat");
+        assert_eq!(archived.message_type, MessageType::Chat);
         assert!(archived.rich.is_none());
         assert!(
             archived.stanza_xml.is_some(),

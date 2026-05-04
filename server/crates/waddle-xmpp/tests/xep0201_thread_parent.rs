@@ -24,7 +24,7 @@ use waddle_xmpp_core::mam::ThreadId;
 use waddle_xmpp_core::xep0201::{
     build_thread_element, parse_thread_info, thread_info_from_message, ThreadInfo,
 };
-use xmpp_parsers::message::Message;
+use xmpp_parsers::message::{Message, MessageType};
 
 const ROOM: &str = "team@conference.example.com";
 
@@ -61,7 +61,7 @@ fn nested_thread_groupchat_row(
         thread,
         reply: None,
         origin_id: None,
-        message_type: "groupchat".to_string(),
+        message_type: MessageType::Groupchat,
         stanza_xml: None,
         rich: None,
         nickname_generation: Some(0),
@@ -192,7 +192,7 @@ fn xep_0201_groupchat_stanza_xml_replay_preserves_thread_metadata() {
             to: None,
         }),
         origin_id: None,
-        message_type: "groupchat".to_string(),
+        message_type: MessageType::Groupchat,
         stanza_xml: Some(element_xml(&archived_stanza)),
         rich: None,
         nickname_generation: Some(0),
@@ -431,7 +431,7 @@ async fn xep_0201_collapsed_thread_field_round_trips_no_thread_through_storage()
         thread: None,
         reply: None,
         origin_id: None,
-        message_type: "groupchat".to_string(),
+        message_type: MessageType::Groupchat,
         stanza_xml: None,
         rich: None,
         nickname_generation: Some(0),

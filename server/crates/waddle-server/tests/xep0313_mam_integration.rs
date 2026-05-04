@@ -8,6 +8,7 @@ use jid::Jid;
 use tokio::sync::Mutex;
 use waddle_xmpp::mam::{ArchivedMessage, MamQuery, MamStorage, MamStorageError, SqlxMamStorage};
 use ws_common::{TestServer, WsXmppClient};
+use xmpp_parsers::message::MessageType;
 
 const DOMAIN: &str = "localhost";
 const USERNAME: &str = "admin";
@@ -543,7 +544,7 @@ async fn xep_0313_full_jid_from_round_trips_through_mam_without_resource_truncat
         thread: None,
         reply: None,
         origin_id: None,
-        message_type: "groupchat".to_string(),
+        message_type: MessageType::Groupchat,
         stanza_xml: None,
         rich: None,
         nickname_generation: None,
@@ -593,7 +594,7 @@ async fn xep_0313_bare_jid_to_round_trips_through_mam() {
         thread: None,
         reply: None,
         origin_id: None,
-        message_type: "groupchat".to_string(),
+        message_type: MessageType::Groupchat,
         stanza_xml: None,
         rich: None,
         nickname_generation: None,
@@ -658,6 +659,55 @@ async fn xep_0313_decode_rejects_unparseable_from_jid_row() {
         Err(other) => panic!("expected Serialization error, got: {other:?}"),
         Ok(result) => panic!(
             "decode of unparseable from_jid row must hard-error; got rows: {:?}",
+            result.messages
+        ),
+    }
+}
+
+#[tokio::test]
+async fn xep_0313_decode_rejects_unknown_message_type_row() {
+    // Q7 / typed-decode hard-error policy applied to `message_type`
+    // (#228 commit 8). RFC 6121 §5.2.2 makes the `type` attribute a
+    // closed set: `chat`, `error`, `groupchat`, `headline`, `normal`.
+    // A row whose `message_type` SQL column is outside that set MUST
+    // surface as `MamStorageError::Serialization` at the decode
+    // boundary rather than silently substituting a default. This test
+    // mirrors the from_jid / thread / reply decode-error patterns
+    // from commits 4, 5, 6: insert a deliberately malformed row via
+    // the raw-insert escape hatch, assert the typed decoder rejects
+    // it.
+    //
+    // Pre-commit-8 the field was `String` and any value round-tripped
+    // verbatim into the `ArchivedMessage` struct, including obvious
+    // garbage like `"invalid"` — downstream code that compared the
+    // string to the wire literal `"groupchat"` etc. would silently
+    // misclassify the message. Typing the field as `MessageType` and
+    // hard-erroring at the decode boundary makes corruption visible.
+    let storage = SqlxMamStorage::open_in_memory()
+        .await
+        .expect("open sqlite in-memory");
+    let archive = archive_bare();
+    let bad_message_type = "invalid";
+    storage
+        .insert_raw_message_type_for_test(&archive, "archive-bad-mtype", bad_message_type)
+        .await
+        .expect("raw insert");
+
+    let result = storage.query_messages(&archive, &MamQuery::default()).await;
+    match result {
+        Err(MamStorageError::Serialization(message)) => {
+            assert!(
+                message.contains("message_type"),
+                "decode error must reference the `message_type` column; got: {message}"
+            );
+            assert!(
+                message.contains(bad_message_type),
+                "decode error must echo the bad value; got: {message}"
+            );
+        }
+        Err(other) => panic!("expected Serialization error, got: {other:?}"),
+        Ok(result) => panic!(
+            "decode of unknown message_type row must hard-error; got rows: {:?}",
             result.messages
         ),
     }

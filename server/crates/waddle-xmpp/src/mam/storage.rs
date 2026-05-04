@@ -580,6 +580,42 @@ impl SqlxMamStorage {
         Ok(())
     }
 
+    /// Test-only escape hatch mirroring
+    /// [`Self::insert_raw_thread_columns_for_test`] for the
+    /// `message_type` column. Used to construct rows whose
+    /// `message_type` SQL value is outside the closed RFC 6121
+    /// §5.2.2 set (`chat`, `error`, `groupchat`, `headline`,
+    /// `normal`) so the decode-side hard-error contract for the
+    /// typed [`xmpp_parsers::message::MessageType`] field can be
+    /// tested. Only available in test builds; sqlite-only.
+    #[doc(hidden)]
+    #[cfg(any(test, debug_assertions))]
+    pub async fn insert_raw_message_type_for_test(
+        &self,
+        archive_jid: &BareJid,
+        archive_id: &str,
+        raw_message_type: &str,
+    ) -> Result<(), MamStorageError> {
+        let MamDatabaseBackend::Sqlite(pool) = &self.backend else {
+            return Err(MamStorageError::Database(
+                "insert_raw_message_type_for_test is sqlite-only".to_string(),
+            ));
+        };
+        let archive_jid_str = archive_jid.to_string();
+        sqlx::query(
+            "INSERT INTO mam_messages (id, room_jid, timestamp, from_jid, to_jid, body, stanza_id, thread_id, reply_to_id, reply_to_jid, origin_id, message_type, stanza_xml, rich_payload, nickname_generation, parent_thread_id) VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, ?, NULL, NULL, NULL, NULL)",
+        )
+        .bind(archive_id)
+        .bind(archive_jid_str.as_str())
+        .bind(Utc::now().to_rfc3339())
+        .bind(archive_jid_str.as_str())
+        .bind(archive_jid_str.as_str())
+        .bind(raw_message_type)
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
     async fn initialize(&self) -> Result<(), MamStorageError> {
         match &self.backend {
             MamDatabaseBackend::Sqlite(pool) => {
@@ -625,6 +661,15 @@ const SELECT_COLUMNS: &str =
 // an empty `<body></body>` element. Earlier schemas had `body TEXT NOT
 // NULL` and collapsed both via `.unwrap_or_default()` in the
 // projection, losing the distinction.
+//
+// RFC 6121 §5.2.2 ("Type Attribute"): "If absent, the message is
+// implicitly of type `normal`." The column DEFAULT is `'normal'` to
+// match. Pre-#228 commit 8 the default was `'chat'`, mirroring the
+// removed `default_message_type() = "chat"` helper — a latent
+// conformance bug. Production rows always bind an explicit value
+// (the typed `MessageType` field on `ArchivedMessage`); the column
+// DEFAULT only fires for direct INSERTs that omit the column, but
+// fixing it removes the schema-level mismatch.
 const SQLITE_MAM_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS mam_messages (
     id TEXT PRIMARY KEY,
@@ -638,7 +683,7 @@ CREATE TABLE IF NOT EXISTS mam_messages (
     reply_to_id TEXT,
     reply_to_jid TEXT,
     origin_id TEXT,
-    message_type TEXT NOT NULL DEFAULT 'chat',
+    message_type TEXT NOT NULL DEFAULT 'normal',
     stanza_xml TEXT,
     rich_payload TEXT,
     nickname_generation INTEGER,
@@ -671,7 +716,7 @@ CREATE TABLE IF NOT EXISTS mam_messages (
     reply_to_id TEXT,
     reply_to_jid TEXT,
     origin_id TEXT,
-    message_type TEXT NOT NULL DEFAULT 'chat',
+    message_type TEXT NOT NULL DEFAULT 'normal',
     stanza_xml TEXT,
     rich_payload TEXT,
     nickname_generation BIGINT,
@@ -963,6 +1008,7 @@ fn decode_sqlite_message_row(row: &SqliteRow) -> Result<ArchivedMessage, MamStor
     let archive_jid_for_decode = parse_archived_addressing("room_jid", &archive_jid_raw)?;
     let stanza_id_raw: Option<String> = row.try_get(6)?;
     let origin_id_raw: Option<String> = row.try_get(10)?;
+    let message_type_raw: String = row.try_get(11)?;
     Ok(ArchivedMessage {
         id: row.try_get(0)?,
         timestamp,
@@ -978,7 +1024,7 @@ fn decode_sqlite_message_row(row: &SqliteRow) -> Result<ArchivedMessage, MamStor
         thread,
         reply,
         origin_id: origin_id_raw.map(waddle_xmpp_core::xep0359::OriginId::new),
-        message_type: row.try_get(11)?,
+        message_type: parse_archived_message_type(&message_type_raw)?,
         stanza_xml: row.try_get(12)?,
         rich: decode_rich_payload(rich_payload.as_deref())?,
         nickname_generation,
@@ -1000,6 +1046,7 @@ fn decode_postgres_message_row(row: &PgRow) -> Result<ArchivedMessage, MamStorag
     let archive_jid_for_decode = parse_archived_addressing("room_jid", &archive_jid_raw)?;
     let stanza_id_raw: Option<String> = row.try_get(6)?;
     let origin_id_raw: Option<String> = row.try_get(10)?;
+    let message_type_raw: String = row.try_get(11)?;
     Ok(ArchivedMessage {
         id: row.try_get(0)?,
         timestamp: row.try_get(2)?,
@@ -1013,7 +1060,7 @@ fn decode_postgres_message_row(row: &PgRow) -> Result<ArchivedMessage, MamStorag
         thread,
         reply,
         origin_id: origin_id_raw.map(waddle_xmpp_core::xep0359::OriginId::new),
-        message_type: row.try_get(11)?,
+        message_type: parse_archived_message_type(&message_type_raw)?,
         stanza_xml: row.try_get(12)?,
         rich: decode_rich_payload(rich_payload.as_deref())?,
         nickname_generation,
@@ -1099,6 +1146,28 @@ fn parse_archived_addressing(
     })
 }
 
+/// Decode a stored `message_type` column value into the typed
+/// [`xmpp_parsers::message::MessageType`] enum.
+///
+/// `xmpp-parsers` generates `FromStr` for `MessageType` via the
+/// `generate_attribute!` macro (variants: `chat`, `error`,
+/// `groupchat`, `headline`, `normal`). Any value outside that closed
+/// set is database corruption — a write site bypassed the typed
+/// encoder (`message_type_wire_str`) or the column was edited
+/// manually. Per the typed-decode hard-error policy (#228 Q7) we
+/// surface these as `MamStorageError::Serialization` rather than
+/// papering over with a sentinel default. The error message echoes
+/// the bad value and the column name so DB-corruption signatures are
+/// visible at the boundary, mirroring `parse_archived_addressing`'s
+/// pattern for `from_jid` / `to_jid`.
+fn parse_archived_message_type(
+    value: &str,
+) -> Result<xmpp_parsers::message::MessageType, MamStorageError> {
+    xmpp_parsers::message::MessageType::from_str(value).map_err(|error| {
+        MamStorageError::Serialization(format!("Invalid message_type value '{value}': {error}"))
+    })
+}
+
 fn encode_rich_payload(message: &ArchivedMessage) -> Result<Option<String>, MamStorageError> {
     message
         .rich
@@ -1154,11 +1223,15 @@ impl MamStorage for SqlxMamStorage {
         } else {
             message.id.clone()
         };
-        let message_type = if message.message_type.is_empty() {
-            "chat"
-        } else {
-            message.message_type.as_str()
-        };
+        // Typed-payloads boundary: convert the closed `MessageType`
+        // enum to its canonical wire literal exactly once, here at
+        // the SQL bind site. `message_type_wire_str` is a total
+        // mapping over the five RFC 6121 §5.2.2 variants, so the
+        // bind value is always one of `chat`/`error`/`groupchat`/
+        // `headline`/`normal` — never an empty string and never an
+        // unknown value, which is what makes the decode-side hard
+        // error meaningful.
+        let message_type = waddle_xmpp_core::mam::message_type_wire_str(&message.message_type);
         let rich_payload = encode_rich_payload(message)?;
         let nickname_generation = encode_nickname_generation(message.nickname_generation)?;
 
@@ -1701,7 +1774,7 @@ mod tests {
                 to: Some(jid("bob@example.com")),
             }),
             origin_id: Some(waddle_xmpp_core::xep0359::OriginId::new("origin-abc")),
-            message_type: "groupchat".to_string(),
+            message_type: xmpp_parsers::message::MessageType::Groupchat,
             stanza_xml: Some(
                 "<message xmlns='jabber:client' from='room@conference.example.com/alice' to='room@conference.example.com' type='groupchat' id='archive-stanza-1'><body>Reply body</body></message>".to_string(),
             ),
@@ -1736,7 +1809,10 @@ mod tests {
             retrieved.origin_id.as_ref().map(|o| o.id.as_str()),
             Some("origin-abc")
         );
-        assert_eq!(retrieved.message_type, "groupchat");
+        assert_eq!(
+            retrieved.message_type,
+            xmpp_parsers::message::MessageType::Groupchat
+        );
         assert!(retrieved.stanza_xml.is_some());
     }
 
@@ -1756,7 +1832,7 @@ mod tests {
                 waddle_xmpp_core::mam::ThreadId::new("child-thread").expect("thread id"),
                 waddle_xmpp_core::mam::ThreadId::new("root-thread").expect("parent id"),
             )),
-            message_type: "groupchat".to_string(),
+            message_type: xmpp_parsers::message::MessageType::Groupchat,
             ..ArchivedMessage::for_test(
                 jid("room@conference.example.com/alice"),
                 jid("room@conference.example.com"),
@@ -2228,7 +2304,7 @@ mod tests {
 
     fn archived_groupchat(archive: &BareJid) -> ArchivedMessage {
         ArchivedMessage {
-            message_type: "groupchat".to_string(),
+            message_type: xmpp_parsers::message::MessageType::Groupchat,
             ..ArchivedMessage::for_test(archive_alice(archive), jid(&archive.to_string()))
         }
     }
@@ -2253,7 +2329,7 @@ mod tests {
                 waddle_xmpp_core::mam::ThreadId::new("child-thread").expect("thread id"),
                 waddle_xmpp_core::mam::ThreadId::new("root-thread").expect("parent id"),
             )),
-            message_type: "groupchat".to_string(),
+            message_type: xmpp_parsers::message::MessageType::Groupchat,
             stanza_xml: Some(
                 "<message xmlns='jabber:client'><body>secret</body><thread parent='root-thread'>child-thread</thread></message>".to_string(),
             ),
@@ -2328,7 +2404,7 @@ mod tests {
                 waddle_xmpp_core::mam::ThreadId::new("child-thread").expect("thread id"),
                 waddle_xmpp_core::mam::ThreadId::new("root-thread").expect("parent id"),
             )),
-            message_type: "groupchat".to_string(),
+            message_type: xmpp_parsers::message::MessageType::Groupchat,
             stanza_xml: Some(
                 "<message xmlns='jabber:client'><body>x</body><thread parent='root-thread'>child-thread</thread></message>".to_string(),
             ),
