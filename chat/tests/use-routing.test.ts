@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { buildDmPath, buildPath, buildSettingsPath, parseRoute, resolveChannel, shouldLoadStructureForRoute } from "../src/composables/useRouting";
+import { buildDmPath, buildExtensionRoutePath, buildPath, buildSettingsPath, parseRoute, resolveChannel, shouldLoadStructureForRoute } from "../src/composables/useRouting";
 import type { ChannelSummary } from "../src/lib/chat-types";
 
 const channel: ChannelSummary = {
@@ -61,6 +61,19 @@ describe("parseRoute / buildPath threadStack", () => {
     expect(buildPath({ ...channel, id: "space-b-general", name: "general" })).toBe("/r/space-b-general");
   });
 
+  test("buildExtensionRoutePath targets a route under the channel", () => {
+    const path = buildExtensionRoutePath(channel, "link-board", "saved-links");
+    expect(path).toBe("/r/room-id-1/x/link-board/saved-links");
+    const route = parseRoute(path);
+    expect(route).toMatchObject({
+      page: "extension",
+      channelSlug: "room-id-1",
+      extensionPluginId: "link-board",
+      extensionRouteId: "saved-links",
+      threadStack: [],
+    });
+  });
+
   test("resolveChannel uses channel ids only", () => {
     const channels = [
       { ...channel, id: "space-a-general", name: "general" },
@@ -111,6 +124,10 @@ describe("parseRoute / buildPath threadStack", () => {
 describe("shouldLoadStructureForRoute", () => {
   test("loads topology on a cold direct channel refresh", () => {
     expect(shouldLoadStructureForRoute(parseRoute("/r/room-id-1"), 0)).toBe(true);
+  });
+
+  test("loads topology on a cold direct extension route refresh", () => {
+    expect(shouldLoadStructureForRoute(parseRoute("/r/room-id-1/x/link-board/saved-links"), 0)).toBe(true);
   });
 
   test("loads topology on the dashboard route when nothing is hydrated", () => {

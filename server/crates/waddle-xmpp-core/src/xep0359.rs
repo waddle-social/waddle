@@ -187,7 +187,13 @@ pub fn build_origin_id_element(id: &str) -> Element {
 /// Takes a typed [`StanzaId`] so callers cannot accidentally emit a
 /// `<stanza-id id='...'/>` element without the XEP-0359 §3 REQUIRED
 /// `by` attribute — the typed value carries both fields together.
+///
+/// Pre-existing `<stanza-id/>` elements with the same `by` are removed
+/// first so a new authoritative stamp from `by` overwrites any
+/// spoofed value the upstream sender may have included (XEP-0359 §3:
+/// clients MUST NOT trust foreign-stamped `<stanza-id/>` elements).
 pub fn add_stanza_id(msg: &mut Message, sid: &StanzaId) {
+    remove_stanza_ids_by(msg, &sid.by);
     msg.payloads.push(build_stanza_id_element(&sid.id, &sid.by));
 }
 
@@ -199,10 +205,26 @@ pub fn add_origin_id(msg: &mut Message, id: &str) {
 }
 
 /// Remove all stanza-id elements assigned by a specific entity.
+///
+/// Compares the element's `by` attribute as a JID where possible (so
+/// `room@muc.example.COM` matches `room@muc.example.com` per RFC 7622
+/// case-folding rules). Falls back to byte-exact comparison for
+/// elements whose `by` attribute does not parse as a JID.
 pub fn remove_stanza_ids_by(msg: &mut Message, by: &jid::Jid) {
-    let by_str = by.to_string();
-    msg.payloads
-        .retain(|e| !(is_stanza_id_element(e) && e.attr("by") == Some(by_str.as_str())));
+    msg.payloads.retain(|e| !stanza_id_matches_by(e, by));
+}
+
+fn stanza_id_matches_by(elem: &Element, by: &jid::Jid) -> bool {
+    if !is_stanza_id_element(elem) {
+        return false;
+    }
+    let Some(existing) = elem.attr("by") else {
+        return false;
+    };
+    match existing.parse::<jid::Jid>() {
+        Ok(existing_jid) => &existing_jid == by,
+        Err(_) => existing == by.to_string(),
+    }
 }
 
 /// Strip all stanza-id and origin-id elements from a message.
@@ -293,6 +315,23 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_stanza_id_by_matches_case_folded_bare_jid() {
+        let xml = "<message xmlns='jabber:client' type='groupchat'>\
+                    <body>Hello</body>\
+                    <stanza-id xmlns='urn:xmpp:sid:0' id='arc-1' by='room@muc.example.COM'/>\
+                    </message>";
+        let msg =
+            Message::try_from(xml.parse::<Element>().expect("valid xml")).expect("valid message");
+
+        let lookup: jid::Jid = "room@muc.example.com".parse().expect("valid jid");
+        assert_eq!(
+            extract_stanza_id_by(&msg, &lookup),
+            Some("arc-1".to_owned())
+        );
+        assert_eq!(msg.stanza_id_by(&lookup), Some("arc-1".to_owned()));
+    }
+
+    #[test]
     fn test_extract_origin_id() {
         let xml = "<message xmlns='jabber:client' type='chat'>\
                     <body>Hello</body>\
@@ -372,6 +411,19 @@ mod tests {
     }
 
     #[test]
+    fn test_add_stanza_id_replaces_existing_same_by() {
+        let mut msg = Message::new(None::<jid::Jid>);
+        let alice: jid::Jid = "alice@example.com".parse().expect("valid jid");
+        msg.payloads.push(build_stanza_id_element("spoofed", &alice));
+
+        add_stanza_id(&mut msg, &StanzaId::new("fresh", alice.clone()));
+
+        let ids = extract_stanza_ids(&msg);
+        assert_eq!(ids.len(), 1);
+        assert_eq!(ids[0], StanzaId::new("fresh", alice));
+    }
+
+    #[test]
     fn test_add_origin_id() {
         let mut msg = Message::new(None::<jid::Jid>);
         add_origin_id(&mut msg, "client-1");
@@ -397,6 +449,23 @@ mod tests {
         add_stanza_id(&mut msg, &StanzaId::new("arc-2", server.clone()));
 
         remove_stanza_ids_by(&mut msg, &room);
+        let ids = extract_stanza_ids(&msg);
+        assert_eq!(ids.len(), 1);
+        assert_eq!(ids[0].by, server);
+    }
+
+    #[test]
+    fn test_remove_stanza_ids_by_matches_case_folded_bare_jid() {
+        let mut msg = Message::new(None::<jid::Jid>);
+        let room_uppercase: jid::Jid = "room@muc.example.COM".parse().expect("valid jid");
+        let server: jid::Jid = "example.com".parse().expect("valid jid");
+        msg.payloads
+            .push(build_stanza_id_element("arc-1", &room_uppercase));
+        msg.payloads
+            .push(build_stanza_id_element("arc-2", &server));
+
+        let room_lookup: jid::Jid = "room@muc.example.com".parse().expect("valid jid");
+        remove_stanza_ids_by(&mut msg, &room_lookup);
         let ids = extract_stanza_ids(&msg);
         assert_eq!(ids.len(), 1);
         assert_eq!(ids[0].by, server);

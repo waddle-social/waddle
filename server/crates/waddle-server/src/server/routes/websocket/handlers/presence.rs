@@ -12,6 +12,7 @@ use waddle_xmpp::{
     },
     registry::BroadcastOutcome,
     roster::{build_roster_push, AskType, RosterItem, Subscription},
+    xep::NS_DELAY,
     Affiliation, Role, Stanza,
 };
 use xmpp_parsers::minidom::Element;
@@ -29,13 +30,14 @@ use crate::server::xmpp_state::{get_xmpp_channel, XmppChannelRecord};
 use waddle_xmpp::protocol::ConnectionPhase;
 
 pub async fn handle_presence(
-    presence: xmpp_parsers::presence::Presence,
+    mut presence: xmpp_parsers::presence::Presence,
     domain: &str,
     muc_domain: &str,
     state: &WebSocketState,
     phase: &ConnectionPhase,
     _authenticated_session: &Option<Session>,
 ) -> Vec<String> {
+    strip_client_authored_delay(&mut presence);
     let is_unavailable = presence.type_ == xmpp_parsers::presence::Type::Unavailable;
 
     // Check if this is a MUC presence (to room@muc.domain/nick)
@@ -109,6 +111,12 @@ pub async fn handle_presence(
     vec![]
 }
 
+fn strip_client_authored_delay(presence: &mut xmpp_parsers::presence::Presence) {
+    presence
+        .payloads
+        .retain(|payload| !(payload.name() == "delay" && payload.ns() == NS_DELAY));
+}
+
 fn is_directed_presence_update(presence: &xmpp_parsers::presence::Presence) -> bool {
     presence.to.is_some()
         && !matches!(
@@ -119,6 +127,29 @@ fn is_directed_presence_update(presence: &xmpp_parsers::presence::Presence) -> b
                 | xmpp_parsers::presence::Type::Unsubscribed
                 | xmpp_parsers::presence::Type::Probe
         )
+}
+
+#[cfg(test)]
+mod delay_strip_tests {
+    use super::*;
+
+    #[test]
+    fn strips_client_supplied_delay_payload() {
+        let xml = "<presence xmlns='jabber:client' from='alice@example.com/web'>\
+                    <delay xmlns='urn:xmpp:delay' from='evil.example' stamp='2024-06-01T09:30:00Z'/>\
+                    <status>ready</status>\
+                    </presence>";
+        let mut presence =
+            xmpp_parsers::presence::Presence::try_from(xml.parse::<Element>().expect("valid xml"))
+                .expect("presence");
+
+        strip_client_authored_delay(&mut presence);
+
+        assert!(presence
+            .payloads
+            .iter()
+            .all(|payload| !(payload.name() == "delay" && payload.ns() == NS_DELAY)));
+    }
 }
 
 async fn roster_storage(state: &WebSocketState) -> Option<DatabaseRosterStorage> {
@@ -386,7 +417,7 @@ async fn send_existing_subscription_ack(
     }
 }
 
-async fn send_current_presence_from_user_to_user(
+pub(super) async fn send_current_presence_from_user_to_user(
     state: &WebSocketState,
     from: &BareJid,
     to: &BareJid,
@@ -418,7 +449,7 @@ async fn send_current_presence_from_user_to_user(
     }
 }
 
-async fn send_unavailable_presence_from_user_to_user(
+pub(super) async fn send_unavailable_presence_from_user_to_user(
     state: &WebSocketState,
     from: &BareJid,
     to: &BareJid,

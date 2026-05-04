@@ -92,10 +92,8 @@ jobs:
       with:
         name: buildExtensionModules-artifacts
         path: |-
-          server/target/wasm32-wasip2/release/links_task_board.wasm
-          server/target/wasm32-wasip2/release/pub_quiz.wasm
+          server/target/wasm32-wasip2/release/link_board.wasm
           server/target/wasm32-wasip2/release/ai_chatbot.wasm
-          server/target/wasm32-wasip2/release/ai_assistant_canvas.wasm
           server/target/wasm32-wasip2/release/decision_polls.wasm
         if-no-files-found: ignore
         include-hidden-files: true

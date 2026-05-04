@@ -70,6 +70,7 @@ impl Fixture {
             blocklist: &self.blocklist,
             carbons: CarbonsState::Disabled,
             muc_occupancy: &self.occupancy,
+            has_live_transport: true,
             id_gen: &self.id_gen,
         };
         MessageContext::derive(env, message)

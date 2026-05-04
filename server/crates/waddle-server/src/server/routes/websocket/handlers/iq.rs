@@ -1,6 +1,6 @@
 use chrono;
 use jid::{BareJid, FullJid, Jid};
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 use tracing::{debug, warn};
 use url::{Host, Url};
 use waddle_xmpp::{
@@ -76,7 +76,10 @@ use super::super::{
     build_iq_error_xml, build_iq_error_xml_with_addresses, build_iq_result_xml, destroy_room_actor,
     get_room_actor, iq_to_xml, is_muc_room_jid, stanza_to_xml, WebSocketState,
 };
-use super::presence::get_managed_channel_for_room;
+use super::presence::{
+    get_managed_channel_for_room, send_current_presence_from_user_to_user,
+    send_unavailable_presence_from_user_to_user,
+};
 use crate::auth::{NativeUserStore, Session};
 use crate::db::actor::{DbExecute, DbQuery, DbQueryOne, GetDatabase};
 use crate::db::blocking::DatabaseBlockingStorage;
@@ -90,12 +93,108 @@ use crate::server::bootstrap_membership::DEPLOYMENT_SERVER_ID;
 use crate::server::xmpp_state::{get_xmpp_channel, list_xmpp_channels, XmppChannelRecord};
 use crate::vcard::VCardStore;
 
+const EXTENSION_ROUTE_FORM_TYPE: &str = "urn:waddle:extension:1:routes";
+const EXTENSION_COMMAND_FORM_TYPE: &str = "urn:waddle:extension:1:command";
+
+fn is_extension_command_node(node: &str) -> bool {
+    node == waddle_extensions::INVOKE_COMMAND_NODE || node.starts_with("urn:waddle:extension:1:")
+}
+
+fn command_refs_by_boundary(
+    commands: &[(String, String)],
+    extension_boundary: bool,
+) -> Vec<(&str, &str)> {
+    commands
+        .iter()
+        .filter(|(node, _)| is_extension_command_node(node) == extension_boundary)
+        .map(|(node, name)| (node.as_str(), name.as_str()))
+        .collect()
+}
+
+fn command_name_by_boundary<'a>(
+    commands: &'a [(String, String)],
+    node: &str,
+    extension_boundary: bool,
+) -> Option<&'a str> {
+    commands
+        .iter()
+        .find(|(command_node, _)| {
+            command_node == node && is_extension_command_node(command_node) == extension_boundary
+        })
+        .map(|(_, name)| name.as_str())
+}
+
+fn extension_route_disco_node(route: &waddle_extensions::ExtensionRouteDescriptor) -> String {
+    format!(
+        "urn:waddle:extension:1:route:{}:{}",
+        route.plugin.as_str(),
+        route.id.as_str()
+    )
+}
+
 fn extension_features_for_disco(state: &WebSocketState) -> Vec<Feature> {
     extension_namespaces_for_disco(state.deps.protocol.extension_manager.extension_features())
 }
 
 fn extension_namespaces_for_disco(namespaces: Vec<String>) -> Vec<Feature> {
     namespaces.into_iter().map(|ns| Feature::new(&ns)).collect()
+}
+
+fn extension_route_metadata_form(route: &waddle_extensions::ExtensionRouteDescriptor) -> Element {
+    use waddle_xmpp::xep::xep0004::{DataForm, Field, FormType, IntoElement};
+
+    DataForm::new(FormType::Result)
+        .add_field(Field::form_type(EXTENSION_ROUTE_FORM_TYPE))
+        .add_field(Field::text_single(
+            "waddle#plugin_id",
+            route.plugin.as_str(),
+        ))
+        .add_field(Field::text_single("waddle#route_id", route.id.as_str()))
+        .add_field(Field::text_single(
+            "waddle#route_label",
+            route.label.as_str(),
+        ))
+        .add_field(Field::text_single(
+            "waddle#route_scope",
+            route.scope.as_str(),
+        ))
+        .add_field(Field::text_single(
+            "waddle#route_surface",
+            route.surface.as_str(),
+        ))
+        .add_field(Field::text_single(
+            "waddle#state_node",
+            route.state_node.as_str(),
+        ))
+        .add_field(Field::text_single(
+            "waddle#payload_ns",
+            route.payload_namespace.as_str(),
+        ))
+        .into_element()
+}
+
+fn extension_command_metadata_form(
+    plugin: &waddle_extensions::PluginId,
+    descriptor: &waddle_extensions::CommandDescriptor,
+) -> Element {
+    use waddle_xmpp::xep::xep0004::{DataForm, Field, FormType, IntoElement};
+
+    DataForm::new(FormType::Result)
+        .add_field(Field::form_type(EXTENSION_COMMAND_FORM_TYPE))
+        .add_field(Field::text_single("waddle#plugin_id", plugin.as_str()))
+        .add_field(Field::text_single(
+            "waddle#command_node",
+            descriptor.node.as_str(),
+        ))
+        .add_field(Field::text_single(
+            "waddle#command_label",
+            descriptor.name.as_str(),
+        ))
+        .add_field(Field::text_single(
+            "waddle#command_scope",
+            descriptor.scope.as_str(),
+        ))
+        .into_element()
 }
 
 /// Only called from test helpers.
@@ -166,6 +265,7 @@ pub async fn handle_iq_with_conn_state(
 ) -> Vec<String> {
     let spaces_domain = state.deps.service_domains.spaces.clone();
     let upload_domain = state.deps.service_domains.upload.clone();
+    let extensions_domain = state.deps.service_domains.extensions.clone();
 
     let id = iq.id.clone();
     let to = iq.to.as_ref().map(|jid| jid.to_string());
@@ -408,7 +508,6 @@ pub async fn handle_iq_with_conn_state(
             let mut features = vec![
                 Feature::muc(),
                 Feature::replies(),
-                Feature::muc_self_ping_optimization(),
                 Feature::new(NS_CHANNEL_SEARCH),
             ];
             features.extend(extension_features_for_disco(state));
@@ -509,7 +608,7 @@ pub async fn handle_iq_with_conn_state(
         }
 
         if to.as_deref() == Some(domain) && query.node.as_deref() == Some(NODE_COMMANDS) {
-            let identities = vec![Identity::automation(Some("Ad-Hoc Commands"))];
+            let identities = vec![Identity::command_list(Some("Ad-Hoc Commands"))];
             let features = vec![
                 Feature::disco_info(),
                 Feature::disco_items(),
@@ -517,6 +616,129 @@ pub async fn handle_iq_with_conn_state(
             ];
             let response =
                 build_disco_info_response(request_iq, &identities, &features, Some(NODE_COMMANDS));
+            return vec![iq_to_xml(response)];
+        }
+
+        if to.as_deref() == Some(domain) {
+            if let Some(node) = query.node.as_deref() {
+                let commands = state.deps.protocol.command_registry.list_commands().await;
+                if let Some(name) = command_name_by_boundary(&commands, node, false) {
+                    let identities = vec![Identity::automation(Some(name))];
+                    let features = vec![
+                        Feature::disco_info(),
+                        Feature::commands(),
+                        Feature::new(DATA_FORMS_NS),
+                    ];
+                    let response =
+                        build_disco_info_response(request_iq, &identities, &features, Some(node));
+                    return vec![iq_to_xml(response)];
+                }
+            }
+        }
+
+        if to.as_deref() == Some(extensions_domain.as_str()) {
+            if query.node.as_deref() == Some(NODE_COMMANDS) {
+                let identities = vec![Identity::command_list(Some("Extension Commands"))];
+                let features = vec![
+                    Feature::disco_info(),
+                    Feature::disco_items(),
+                    Feature::commands(),
+                ];
+                let response = build_disco_info_response(
+                    request_iq,
+                    &identities,
+                    &features,
+                    Some(NODE_COMMANDS),
+                );
+                return vec![iq_to_xml(response)];
+            }
+
+            if let Some(node) = query.node.as_deref() {
+                let commands = state.deps.protocol.command_registry.list_commands().await;
+                if command_name_by_boundary(&commands, node, true).is_some() {
+                    let Some((plugin, descriptor)) = state
+                        .deps
+                        .protocol
+                        .extension_manager
+                        .command_descriptors()
+                        .into_iter()
+                        .find(|(_, descriptor)| descriptor.node.as_str() == node)
+                    else {
+                        return vec![build_iq_error_xml_with_addresses(
+                            &id,
+                            response_from,
+                            response_to,
+                            "cancel",
+                            "item-not-found",
+                        )];
+                    };
+                    let identities = vec![Identity::automation(Some(descriptor.name.as_str()))];
+                    let features = vec![
+                        Feature::disco_info(),
+                        Feature::commands(),
+                        Feature::new(DATA_FORMS_NS),
+                        Feature::new(EXTENSION_COMMAND_FORM_TYPE),
+                    ];
+                    let form = extension_command_metadata_form(&plugin, &descriptor);
+                    let response = build_disco_info_response_with_extensions(
+                        request_iq,
+                        &identities,
+                        &features,
+                        Some(node),
+                        &[form],
+                    );
+                    return vec![iq_to_xml(response)];
+                }
+
+                let Some(route) = state
+                    .deps
+                    .protocol
+                    .extension_manager
+                    .route_descriptors()
+                    .iter()
+                    .find(|route| extension_route_disco_node(route) == node)
+                else {
+                    return vec![build_iq_error_xml_with_addresses(
+                        &id,
+                        response_from,
+                        response_to,
+                        "cancel",
+                        "item-not-found",
+                    )];
+                };
+                let identities = vec![Identity::new(
+                    "waddle",
+                    "extension-route",
+                    Some(route.label.as_str()),
+                )];
+                let features = vec![
+                    Feature::disco_info(),
+                    Feature::new("urn:waddle:extension:1"),
+                    Feature::new(EXTENSION_ROUTE_FORM_TYPE),
+                    Feature::new(route.payload_namespace.as_str()),
+                ];
+                let form = extension_route_metadata_form(route);
+                let response = build_disco_info_response_with_extensions(
+                    request_iq,
+                    &identities,
+                    &features,
+                    Some(node),
+                    &[form],
+                );
+                return vec![iq_to_xml(response)];
+            }
+
+            let identities = vec![Identity::pubsub_service(Some("Waddle Extensions"))];
+            let mut features = vec![
+                Feature::disco_info(),
+                Feature::disco_items(),
+                Feature::commands(),
+                Feature::pubsub(),
+                Feature::pubsub_retrieve_items(),
+                Feature::new("urn:waddle:extension:1"),
+            ];
+            features.extend(extension_features_for_disco(state));
+            let response = build_disco_info_response(request_iq, &identities, &features, None);
             return vec![iq_to_xml(response)];
         }
 
@@ -585,6 +807,7 @@ pub async fn handle_iq_with_conn_state(
                     let features = vec![
                         Feature::disco_info(),
                         Feature::mam(),
+                        Feature::mam_extended(),
                         Feature::fulltext_mam(),
                     ];
                     let response =
@@ -641,11 +864,57 @@ pub async fn handle_iq_with_conn_state(
 
         if to.as_deref() == Some(domain) && query.node.as_deref() == Some(NODE_COMMANDS) {
             let commands = state.deps.protocol.command_registry.list_commands().await;
-            let command_refs: Vec<(&str, &str)> = commands
-                .iter()
-                .map(|(node, name)| (node.as_str(), name.as_str()))
-                .collect();
+            let command_refs = command_refs_by_boundary(&commands, false);
             let response = build_command_items(request_iq, &command_refs, domain);
+            return vec![iq_to_xml(response)];
+        }
+
+        if to.as_deref() == Some(extensions_domain.as_str())
+            && query.node.as_deref() == Some(NODE_COMMANDS)
+        {
+            let commands = state.deps.protocol.command_registry.list_commands().await;
+            let command_refs = command_refs_by_boundary(&commands, true);
+            let response = build_command_items(request_iq, &command_refs, &extensions_domain);
+            return vec![iq_to_xml(response)];
+        }
+
+        if to.as_deref() == Some(extensions_domain.as_str()) {
+            if let Some(node) = query.node.as_deref() {
+                let known_route_node = state
+                    .deps
+                    .protocol
+                    .extension_manager
+                    .route_descriptors()
+                    .iter()
+                    .any(|route| extension_route_disco_node(route) == node);
+                if !known_route_node {
+                    return vec![build_iq_error_xml_with_addresses(
+                        &id,
+                        response_from,
+                        response_to,
+                        "cancel",
+                        "item-not-found",
+                    )];
+                }
+                let response = build_disco_items_response(request_iq, &[], Some(node));
+                return vec![iq_to_xml(response)];
+            }
+            let items = state
+                .deps
+                .protocol
+                .extension_manager
+                .route_descriptors()
+                .iter()
+                .map(|route| {
+                    let node = extension_route_disco_node(route);
+                    DiscoItem::new(
+                        &extensions_domain,
+                        Some(route.label.as_str()),
+                        Some(node.as_str()),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let response = build_disco_items_response(request_iq, &items, None);
             return vec![iq_to_xml(response)];
         }
 
@@ -688,13 +957,22 @@ pub async fn handle_iq_with_conn_state(
             DiscoItem::muc_service(muc_domain, Some("Chatrooms")),
             DiscoItem::upload_service(&upload_domain, Some("HTTP File Upload")),
             DiscoItem::spaces_service(&spaces_domain, Some("Spaces")),
+            DiscoItem::pubsub_service(&extensions_domain, Some("Extensions")),
         ];
         let response = build_disco_items_response(request_iq, &items, None);
         return vec![iq_to_xml(response)];
     }
 
     if payload_ns == "http://jabber.org/protocol/commands" {
-        return handle_command_iq(&iq, state, authenticated_session, phase.bound_jid()).await;
+        return handle_command_iq(
+            &iq,
+            state,
+            domain,
+            &extensions_domain,
+            authenticated_session,
+            phase.bound_jid(),
+        )
+        .await;
     }
 
     if payload_ns == "http://jabber.org/protocol/muc#admin" && is_muc_admin_iq(&iq, muc_domain) {
@@ -1550,6 +1828,24 @@ pub async fn handle_iq_with_conn_state(
                         &node,
                         max_items,
                         &item_ids,
+                    )
+                    .await;
+                }
+
+                if target_jid.to_string() == extensions_domain {
+                    let request = PubSubItemsRead {
+                        target_jid: &target_jid,
+                        requester_jid: &user_jid,
+                        node: &node,
+                        max_items,
+                        item_ids: &item_ids,
+                    };
+                    return handle_extension_route_items(
+                        &iq,
+                        state,
+                        muc_domain,
+                        authenticated_session.as_ref(),
+                        request,
                     )
                     .await;
                 }
@@ -3795,6 +4091,7 @@ async fn handle_blocking_iq(
                     "internal-server-error",
                 )];
             }
+            send_blocking_presence_side_effects(state, &user_bare, &jids, true).await;
             send_blocking_pushes(state, &user_bare, true, &jids).await;
             vec![iq_to_xml(
                 waddle_xmpp::xep::xep0191::build_blocking_success(iq),
@@ -3839,6 +4136,7 @@ async fn handle_blocking_iq(
                 }
                 jids
             };
+            send_blocking_presence_side_effects(state, &user_bare, &unblocked_jids, false).await;
             send_blocking_pushes(state, &user_bare, false, &unblocked_jids).await;
             vec![iq_to_xml(
                 waddle_xmpp::xep::xep0191::build_blocking_success(iq),
@@ -3874,6 +4172,63 @@ async fn handle_blocking_iq(
     }
 
     response
+}
+
+async fn send_blocking_presence_side_effects(
+    state: &WebSocketState,
+    user_bare: &BareJid,
+    jids: &[String],
+    blocked: bool,
+) {
+    let storage = match roster_storage_for_state(state).await {
+        Ok(storage) => storage,
+        Err(error) => {
+            warn!(jid = %user_bare, error = %error, "Failed to access roster storage for XEP-0191 presence side effects");
+            return;
+        }
+    };
+    let subscribers = match storage.get_presence_subscribers(user_bare).await {
+        Ok(subscribers) => subscribers,
+        Err(error) => {
+            warn!(jid = %user_bare, error = %error, "Failed to load presence subscribers for XEP-0191 presence side effects");
+            return;
+        }
+    };
+
+    let subscriber_bares: HashSet<BareJid> = subscribers
+        .into_iter()
+        .filter_map(|jid| match jid.parse::<Jid>() {
+            Ok(jid) => Some(jid.to_bare()),
+            Err(error) => {
+                warn!(jid, %error, "Skipping invalid stored roster subscriber JID");
+                None
+            }
+        })
+        .collect();
+
+    let mut targets = Vec::new();
+    let mut seen = HashSet::new();
+    for jid in jids {
+        let Ok(target) = jid.parse::<Jid>() else {
+            warn!(
+                jid,
+                "Skipping invalid XEP-0191 target JID for presence side effects"
+            );
+            continue;
+        };
+        let target_bare = target.to_bare();
+        if subscriber_bares.contains(&target_bare) && seen.insert(target_bare.clone()) {
+            targets.push(target_bare);
+        }
+    }
+
+    for target in targets {
+        if blocked {
+            send_unavailable_presence_from_user_to_user(state, user_bare, &target).await;
+        } else {
+            send_current_presence_from_user_to_user(state, user_bare, &target).await;
+        }
+    }
 }
 
 async fn send_blocking_pushes(
@@ -4344,6 +4699,46 @@ fn channels_to_disco_items(channels: Vec<XmppChannelRecord>, muc_domain: &str) -
         .collect()
 }
 
+fn extension_route_room_for_node(state: &WebSocketState, node: &str) -> Option<BareJid> {
+    state
+        .deps
+        .protocol
+        .extension_manager
+        .route_descriptors()
+        .iter()
+        .find_map(|route| {
+            extension_route_placeholder_value(route.state_node.as_str(), node, "room")
+                .and_then(|room| room.parse::<BareJid>().ok())
+        })
+}
+
+fn extension_route_placeholder_value(
+    pattern: &str,
+    candidate: &str,
+    placeholder: &str,
+) -> Option<String> {
+    let pattern_parts: Vec<_> = pattern.split(':').collect();
+    let candidate_parts: Vec<_> = candidate.split(':').collect();
+    if pattern_parts.len() != candidate_parts.len() {
+        return None;
+    }
+    let placeholder = format!("{{{placeholder}}}");
+    let mut value = None;
+    for (pattern_part, candidate_part) in pattern_parts.iter().zip(candidate_parts) {
+        if *pattern_part == placeholder {
+            if candidate_part.is_empty() {
+                return None;
+            }
+            value = Some(candidate_part.to_string());
+            continue;
+        }
+        if *pattern_part != candidate_part {
+            return None;
+        }
+    }
+    value
+}
+
 async fn canonical_channel_disco_items(
     state: &WebSocketState,
     muc_domain: &str,
@@ -4405,6 +4800,126 @@ async fn handle_spaces_items(
         }
         Err(error) => {
             warn!(node, error = %error, "Failed to retrieve Spaces items");
+            vec![iq_to_xml(build_pubsub_error(iq, PubSubError::NodeNotFound))]
+        }
+    }
+}
+
+struct PubSubItemsRead<'a> {
+    target_jid: &'a BareJid,
+    requester_jid: &'a BareJid,
+    node: &'a str,
+    max_items: Option<u32>,
+    item_ids: &'a [String],
+}
+
+async fn handle_extension_route_items(
+    iq: &xmpp_parsers::iq::Iq,
+    state: &WebSocketState,
+    muc_domain: &str,
+    session: Option<&Session>,
+    request: PubSubItemsRead<'_>,
+) -> Vec<String> {
+    let node = request.node;
+    let Some(room_jid) = extension_route_room_for_node(state, node) else {
+        return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::NodeNotFound))];
+    };
+    if room_jid.domain().as_str() != muc_domain {
+        return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::InvalidJid))];
+    }
+    let Some(channel_id) = waddle_xmpp::parse_managed_room_jid(&room_jid) else {
+        return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::InvalidJid))];
+    };
+    let channel = Object::new(ObjectType::Channel, channel_id);
+    match permission_allowed(
+        state,
+        session,
+        channel.clone(),
+        Permission::Custom("outcast".into()),
+    )
+    .await
+    {
+        Ok(true) => return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))],
+        Ok(false) => {}
+        Err(error) => {
+            warn!(node, error = %error, "Failed to check extension route outcast state");
+            return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))];
+        }
+    }
+    match permission_allowed(state, session, channel, Permission::View).await {
+        Ok(true) => {}
+        Ok(false) => return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))],
+        Err(error) => {
+            warn!(node, error = %error, "Failed to authorize extension route read");
+            return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))];
+        }
+    }
+    match state
+        .deps
+        .protocol
+        .pubsub_storage
+        .get_node(request.target_jid, request.node)
+        .await
+    {
+        Ok(Some(_)) => {}
+        Ok(None) => return vec![iq_to_xml(build_pubsub_items_result(iq, node, &[]))],
+        Err(error) => {
+            warn!(node, error = %error, "Failed to retrieve extension route PubSub node");
+            return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::NodeNotFound))];
+        }
+    }
+    if let Err(error) = state
+        .deps
+        .protocol
+        .pubsub_storage
+        .set_affiliation(
+            request.target_jid,
+            request.node,
+            request.requester_jid,
+            waddle_xmpp::pubsub::Affiliation::Member,
+        )
+        .await
+    {
+        warn!(node, error = %error, "Failed to sync extension route PubSub affiliation");
+        return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))];
+    }
+    match crate::pubsub_authz::can_subscribe(
+        &state.deps.protocol.pubsub_storage,
+        request.target_jid,
+        request.node,
+        request.requester_jid,
+        false,
+    )
+    .await
+    {
+        Ok(true) => {}
+        Ok(false) => return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))],
+        Err(error) => {
+            warn!(node, error = %error, "Failed to authorize extension route PubSub access");
+            return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))];
+        }
+    }
+    match state
+        .deps
+        .protocol
+        .pubsub_storage
+        .get_items(
+            request.target_jid,
+            request.node,
+            request.max_items,
+            request.item_ids,
+        )
+        .await
+    {
+        Ok(stored_items) => {
+            let items: Vec<_> = stored_items
+                .iter()
+                .map(|item| item.to_pubsub_item())
+                .collect();
+            vec![iq_to_xml(build_pubsub_items_result(iq, node, &items))]
+        }
+        Err(error) => {
+            warn!(node, error = %error, "Failed to retrieve extension route PubSub items");
             vec![iq_to_xml(build_pubsub_error(iq, PubSubError::NodeNotFound))]
         }
     }
@@ -4747,6 +5262,8 @@ async fn apply_muc_owner_config(
 async fn handle_command_iq(
     request_iq: &xmpp_parsers::iq::Iq,
     state: &WebSocketState,
+    domain: &str,
+    extensions_domain: &str,
     authenticated_session: &Option<Session>,
     bound_jid: Option<&FullJid>,
 ) -> Vec<String> {
@@ -4771,6 +5288,25 @@ async fn handle_command_iq(
     };
 
     let node = command.node.clone();
+    let target = request_iq
+        .to
+        .as_ref()
+        .map(|jid| jid.to_bare().to_string())
+        .unwrap_or_else(|| domain.to_string());
+    let extension_command = is_extension_command_node(&node);
+    let allowed_target = if extension_command {
+        Some(extensions_domain)
+    } else {
+        Some(domain)
+    };
+    if Some(target.as_str()) != allowed_target {
+        return vec![build_xmpp_error_response(
+            request_iq,
+            XmppError::service_unavailable(Some(
+                "Command is not available on this service".to_string(),
+            )),
+        )];
+    }
     let session_id = command.session_id.clone();
     let ctx = CommandContext {
         from: sender_jid,

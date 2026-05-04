@@ -51,21 +51,23 @@ export function useReadReceipts(options: UseReadReceiptsOptions) {
 
       if (!state.focused || !state.pinned) return;
       if (!state.kind) return;
-      if (!state.latestId) return;
 
       const target = state.kind === "channel" ? state.roomJid : state.peerJid;
       if (!target) return;
 
-      const idChanged = state.latestId !== lastDispatchedDisplayedId;
-      const hasUnread = state.unread > 0;
-      if (!idChanged && !hasUnread) return;
-
-      if (idChanged) {
+      // XEP-0333 displayed markers need a message id to point at, so they
+      // only fire when latestId is known and has advanced. Inbox mark-read
+      // (urn:waddle:inbox:0) doesn't take a message id — clear it whenever
+      // the active conversation has unread, regardless of latestId. Without
+      // this split, body-less server projections (reactions on own
+      // messages, retractions, backlog older than MAM) would leave the
+      // unread badge stuck.
+      if (state.latestId && state.latestId !== lastDispatchedDisplayedId) {
         lastDispatchedDisplayedId = state.latestId;
         options.markDisplayed(state.latestId);
       }
 
-      if (hasUnread) {
+      if (state.unread > 0) {
         if (state.kind === "channel") {
           options.markChannelRead(target);
         } else {

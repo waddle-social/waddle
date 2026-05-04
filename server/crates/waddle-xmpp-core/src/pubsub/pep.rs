@@ -82,7 +82,7 @@ pub fn pep_features() -> Vec<Feature> {
         Feature::pubsub_retrieve_items(),
         Feature::pubsub_subscribe(),
         Feature::mam(),
-        Feature::new("urn:xmpp:mam:2#extended"),
+        Feature::mam_extended(),
         Feature::new("urn:xmpp:push:0"),
         Feature::new("urn:xmpp:pep-vcard-conversion:0"),
         Feature::bookmarks_compat(),

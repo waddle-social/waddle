@@ -1,15 +1,13 @@
-//! XEP-0333: Displayed Markers (Chat Markers)
+//! XEP-0333: Displayed Markers
 //!
-//! Provides helpers for detecting, parsing, and building chat marker
-//! elements within XMPP message stanzas. Chat markers allow clients
-//! to signal message receipt and display status ("read receipts").
+//! Provides helpers for detecting, parsing, and building displayed marker
+//! elements within XMPP message stanzas. Displayed markers allow entities
+//! to signal that messages have been displayed up to a certain point.
 //!
 //! ## Marker Types
 //!
-//! - **`<markable/>`**: Included in outgoing messages to request markers.
-//! - **`<received id='...'/>`**: The message was received by the client.
-//! - **`<displayed id='...'/>`**: The message was displayed to the user.
-//! - **`<acknowledged id='...'/>`**: The message was explicitly acknowledged.
+//! - **`<markable/>`**: Included in outgoing messages to request displayed markers.
+//! - **`<displayed id='...'/>`**: The message identified by `id` was displayed.
 //!
 //! ## XML Format
 //!
@@ -21,7 +19,7 @@
 //! </message>
 //! ```
 //!
-//! Send a "displayed" marker:
+//! Send a displayed marker:
 //! ```xml
 //! <message type='chat' to='juliet@example.com'>
 //!   <displayed xmlns='urn:xmpp:chat-markers:0' id='msg-1'/>
@@ -30,18 +28,18 @@
 //!
 //! ## Server Behavior
 //!
-//! The server transparently routes marker messages. Standalone markers
-//! (body-less messages with only a marker element) should not be archived
+//! The server transparently routes displayed marker messages. Standalone markers
+//! (body-less messages with only a `<displayed/>` element) should not be archived
 //! but must be routed to the recipient.
 
 use minidom::Element;
 use thiserror::Error;
 use xmpp_parsers::message::Message;
 
-/// Namespace for XEP-0333 Chat Markers.
+/// Namespace for XEP-0333 Displayed Markers.
 pub const NS_CHAT_MARKERS: &str = "urn:xmpp:chat-markers:0";
 
-/// Errors that can occur when parsing chat marker elements.
+/// Errors that can occur when parsing displayed marker elements.
 #[derive(Debug, Error)]
 pub enum MarkerError {
     /// A marker element is missing its required `id` attribute.
@@ -49,17 +47,13 @@ pub enum MarkerError {
     MissingId,
 }
 
-/// Chat marker types defined by XEP-0333.
+/// Displayed marker types defined by XEP-0333.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Marker {
-    /// Request that the recipient send markers for this message.
+    /// Request that the recipient send displayed markers for this message.
     Markable,
-    /// The message was received by the client.
-    Received(String),
-    /// The message was displayed to the user (read receipt).
+    /// The message was displayed to the user.
     Displayed(String),
-    /// The message was explicitly acknowledged.
-    Acknowledged(String),
 }
 
 impl Marker {
@@ -67,17 +61,15 @@ impl Marker {
     pub fn element_name(&self) -> &'static str {
         match self {
             Self::Markable => "markable",
-            Self::Received(_) => "received",
             Self::Displayed(_) => "displayed",
-            Self::Acknowledged(_) => "acknowledged",
         }
     }
 
-    /// Returns the referenced message id, if this is a status marker.
+    /// Returns the referenced message id, if this is a displayed marker.
     pub fn referenced_id(&self) -> Option<&str> {
         match self {
             Self::Markable => None,
-            Self::Received(id) | Self::Displayed(id) | Self::Acknowledged(id) => Some(id),
+            Self::Displayed(id) => Some(id),
         }
     }
 
@@ -86,13 +78,13 @@ impl Marker {
         matches!(self, Self::Markable)
     }
 
-    /// Returns `true` if this is a `<displayed/>` marker (read receipt).
+    /// Returns `true` if this is a `<displayed/>` marker.
     pub fn is_displayed(&self) -> bool {
         matches!(self, Self::Displayed(_))
     }
 }
 
-/// Trait for types that can carry chat marker elements.
+/// Trait for types that can carry displayed marker elements.
 pub trait MarkerCarrier {
     /// Extract the marker from this carrier, if present.
     fn marker(&self) -> Option<Marker>;
@@ -105,7 +97,7 @@ pub trait MarkerCarrier {
     /// Returns `true` if this carrier is a standalone marker (no body).
     fn is_standalone_marker(&self) -> bool;
 
-    /// Returns the referenced message id if this is a status marker.
+    /// Returns the referenced message id if this is a displayed marker.
     fn marker_ref_id(&self) -> Option<String> {
         self.marker()
             .and_then(|m| m.referenced_id().map(|s| s.to_owned()))
@@ -118,38 +110,40 @@ impl MarkerCarrier for Message {
     }
 
     fn is_standalone_marker(&self) -> bool {
-        self.bodies.is_empty() && self.marker().is_some() && !self.is_markable()
+        is_standalone_marker(self)
     }
+}
+
+fn message_has_id(msg: &Message) -> bool {
+    msg.id.as_deref().is_some_and(|id| !id.is_empty())
 }
 
 // ── Detection ────────────────────────────────────────────────────────
 
-/// Check if an element is a chat marker element.
+/// Check if an element is a displayed marker element.
 pub fn is_marker_element(elem: &Element) -> bool {
-    elem.ns() == NS_CHAT_MARKERS
-        && matches!(
-            elem.name(),
-            "markable" | "received" | "displayed" | "acknowledged"
-        )
+    elem.ns() == NS_CHAT_MARKERS && matches!(elem.name(), "markable" | "displayed")
 }
 
-/// Check if a message contains any chat marker element.
+/// Check if a message contains any displayed marker element.
 pub fn has_marker(msg: &Message) -> bool {
     msg.payloads.iter().any(is_marker_element)
 }
 
-/// Check if a message requests markers (`<markable/>`).
+/// Check if a message validly requests displayed markers (`<markable/>`).
 pub fn has_markable(msg: &Message) -> bool {
-    msg.payloads
-        .iter()
-        .any(|e| e.ns() == NS_CHAT_MARKERS && e.name() == "markable")
+    message_has_id(msg)
+        && msg
+            .payloads
+            .iter()
+            .any(|e| e.ns() == NS_CHAT_MARKERS && e.name() == "markable")
 }
 
 // ── Extraction ───────────────────────────────────────────────────────
 
-/// Extract the chat marker from a message's payloads.
+/// Extract the displayed marker from a message's payloads.
 ///
-/// Prefers status markers (received/displayed/acknowledged) over markable.
+/// Prefers `<displayed/>` over `<markable/>` when both are present.
 pub fn extract_marker_from_message(msg: &Message) -> Option<Marker> {
     let mut markable = false;
 
@@ -159,29 +153,24 @@ pub fn extract_marker_from_message(msg: &Message) -> Option<Marker> {
         }
         match elem.name() {
             "markable" => markable = true,
-            "received" | "displayed" | "acknowledged" => {
+            "displayed" => {
                 let id = elem.attr("id").unwrap_or("").to_owned();
                 if id.is_empty() {
                     continue;
                 }
-                return Some(match elem.name() {
-                    "received" => Marker::Received(id),
-                    "displayed" => Marker::Displayed(id),
-                    "acknowledged" => Marker::Acknowledged(id),
-                    _ => unreachable!(),
-                });
+                return Some(Marker::Displayed(id));
             }
             _ => {}
         }
     }
 
-    if markable {
+    if markable && message_has_id(msg) {
         return Some(Marker::Markable);
     }
     None
 }
 
-/// Extract the referenced message id from a status marker.
+/// Extract the referenced message id from a displayed marker.
 pub fn extract_marker_id(msg: &Message) -> Option<String> {
     extract_marker_from_message(msg).and_then(|m| m.referenced_id().map(|s| s.to_owned()))
 }
@@ -200,21 +189,7 @@ pub fn build_displayed_element(id: &str) -> Element {
         .build()
 }
 
-/// Build a `<received xmlns='urn:xmpp:chat-markers:0' id='...'>` element.
-pub fn build_received_element(id: &str) -> Element {
-    Element::builder("received", NS_CHAT_MARKERS)
-        .attr("id", id)
-        .build()
-}
-
-/// Build a `<acknowledged xmlns='urn:xmpp:chat-markers:0' id='...'>` element.
-pub fn build_acknowledged_element(id: &str) -> Element {
-    Element::builder("acknowledged", NS_CHAT_MARKERS)
-        .attr("id", id)
-        .build()
-}
-
-/// Build a standalone "displayed" marker message (read receipt).
+/// Build a standalone displayed marker message.
 pub fn build_displayed_message(
     to: impl Into<Option<jid::Jid>>,
     from: impl Into<Option<jid::Jid>>,
@@ -229,25 +204,26 @@ pub fn build_displayed_message(
 
 // ── Mutation ─────────────────────────────────────────────────────────
 
-/// Add a `<markable/>` element to a message (no-op if already present).
+/// Add a `<markable/>` element to a message when it has a traceable `id`.
 pub fn add_markable(msg: &mut Message) {
-    if !has_markable(msg) {
+    if message_has_id(msg) && !has_markable(msg) {
         msg.payloads.push(build_markable_element());
     }
 }
 
-/// Remove all chat marker elements from a message.
+/// Remove all displayed marker elements from a message.
 pub fn strip_markers(msg: &mut Message) {
     msg.payloads.retain(|e| e.ns() != NS_CHAT_MARKERS);
 }
 
-/// Check if a message is a standalone marker (no body, just a status marker).
+/// Check if a message is a standalone displayed marker (no body).
 /// These should be routed but not archived.
 pub fn is_standalone_marker(msg: &Message) -> bool {
     msg.bodies.is_empty()
         && msg.payloads.iter().any(|e| {
             e.ns() == NS_CHAT_MARKERS
-                && matches!(e.name(), "received" | "displayed" | "acknowledged")
+                && e.name() == "displayed"
+                && e.attr("id").is_some_and(|id| !id.is_empty())
         })
 }
 
@@ -258,16 +234,18 @@ mod tests {
 
     #[test]
     fn test_is_marker_element() {
-        for name in ["markable", "received", "displayed", "acknowledged"] {
+        for name in ["markable", "displayed"] {
             let elem = Element::builder(name, NS_CHAT_MARKERS).build();
             assert!(is_marker_element(&elem), "failed for {name}");
         }
 
+        for name in ["received", "acknowledged", "read"] {
+            let elem = Element::builder(name, NS_CHAT_MARKERS).build();
+            assert!(!is_marker_element(&elem), "unexpected marker for {name}");
+        }
+
         let wrong_ns = Element::builder("displayed", "jabber:client").build();
         assert!(!is_marker_element(&wrong_ns));
-
-        let wrong_name = Element::builder("read", NS_CHAT_MARKERS).build();
-        assert!(!is_marker_element(&wrong_name));
     }
 
     #[test]
@@ -280,6 +258,18 @@ mod tests {
             Message::try_from(xml.parse::<Element>().expect("valid xml")).expect("valid message");
         assert!(has_markable(&msg));
         assert!(has_marker(&msg));
+    }
+
+    #[test]
+    fn test_markable_without_message_id_is_ignored() {
+        let xml = "<message xmlns='jabber:client' type='chat'>\
+                    <markable xmlns='urn:xmpp:chat-markers:0'/>\
+                    </message>";
+        let msg =
+            Message::try_from(xml.parse::<Element>().expect("valid xml")).expect("valid message");
+
+        assert!(!has_markable(&msg));
+        assert_eq!(extract_marker_from_message(&msg), None);
     }
 
     #[test]
@@ -311,41 +301,13 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_received() {
-        let xml = "<message xmlns='jabber:client' type='chat'>\
-                    <received xmlns='urn:xmpp:chat-markers:0' id='msg-10'/>\
-                    </message>";
-        let msg =
-            Message::try_from(xml.parse::<Element>().expect("valid xml")).expect("valid message");
-
-        assert_eq!(
-            extract_marker_from_message(&msg),
-            Some(Marker::Received("msg-10".to_owned()))
-        );
-    }
-
-    #[test]
-    fn test_extract_acknowledged() {
-        let xml = "<message xmlns='jabber:client' type='chat'>\
-                    <acknowledged xmlns='urn:xmpp:chat-markers:0' id='msg-5'/>\
-                    </message>";
-        let msg =
-            Message::try_from(xml.parse::<Element>().expect("valid xml")).expect("valid message");
-
-        assert_eq!(
-            extract_marker_from_message(&msg),
-            Some(Marker::Acknowledged("msg-5".to_owned()))
-        );
-    }
-
-    #[test]
     fn test_extract_none() {
         let msg = Message::new(None::<jid::Jid>);
         assert!(extract_marker_from_message(&msg).is_none());
     }
 
     #[test]
-    fn test_extract_empty_id_ignored() {
+    fn test_extract_empty_displayed_id_ignored() {
         let xml = "<message xmlns='jabber:client' type='chat'>\
                     <displayed xmlns='urn:xmpp:chat-markers:0' id=''/>\
                     </message>";
@@ -355,8 +317,8 @@ mod tests {
     }
 
     #[test]
-    fn test_status_marker_preferred_over_markable() {
-        let xml = "<message xmlns='jabber:client' type='chat'>\
+    fn test_displayed_marker_preferred_over_markable() {
+        let xml = "<message xmlns='jabber:client' type='chat' id='msg-0'>\
                     <markable xmlns='urn:xmpp:chat-markers:0'/>\
                     <displayed xmlns='urn:xmpp:chat-markers:0' id='msg-1'/>\
                     </message>";
@@ -384,20 +346,6 @@ mod tests {
     }
 
     #[test]
-    fn test_build_received() {
-        let elem = build_received_element("msg-1");
-        assert_eq!(elem.name(), "received");
-        assert_eq!(elem.attr("id"), Some("msg-1"));
-    }
-
-    #[test]
-    fn test_build_acknowledged() {
-        let elem = build_acknowledged_element("msg-2");
-        assert_eq!(elem.name(), "acknowledged");
-        assert_eq!(elem.attr("id"), Some("msg-2"));
-    }
-
-    #[test]
     fn test_build_displayed_message() {
         let to: jid::Jid = "juliet@example.com".parse().expect("valid jid");
         let from: jid::Jid = "romeo@example.com".parse().expect("valid jid");
@@ -414,12 +362,16 @@ mod tests {
     }
 
     #[test]
-    fn test_add_markable() {
+    fn test_add_markable_requires_message_id() {
         let mut msg = Message::new(None::<jid::Jid>);
+        add_markable(&mut msg);
+        assert!(!has_markable(&msg));
+        assert!(msg.payloads.is_empty());
+
+        msg.id = Some("msg-1".to_string());
         add_markable(&mut msg);
         assert!(has_markable(&msg));
 
-        // Second add is no-op
         add_markable(&mut msg);
         assert_eq!(
             msg.payloads
@@ -446,7 +398,6 @@ mod tests {
 
     #[test]
     fn test_is_standalone_marker() {
-        // Displayed-only (no body) → standalone
         let xml = "<message xmlns='jabber:client' type='chat'>\
                     <displayed xmlns='urn:xmpp:chat-markers:0' id='msg-1'/>\
                     </message>";
@@ -454,7 +405,13 @@ mod tests {
             Message::try_from(xml.parse::<Element>().expect("valid xml")).expect("valid message");
         assert!(is_standalone_marker(&msg));
 
-        // Markable + body → not standalone
+        let invalid_xml = "<message xmlns='jabber:client' type='chat'>\
+                            <displayed xmlns='urn:xmpp:chat-markers:0' id=''/>\
+                            </message>";
+        let invalid = Message::try_from(invalid_xml.parse::<Element>().expect("valid xml"))
+            .expect("valid message");
+        assert!(!is_standalone_marker(&invalid));
+
         let xml2 = "<message xmlns='jabber:client' type='chat' id='msg-1'>\
                      <body>Hello</body>\
                      <markable xmlns='urn:xmpp:chat-markers:0'/>\
@@ -462,19 +419,10 @@ mod tests {
         let msg2 =
             Message::try_from(xml2.parse::<Element>().expect("valid xml")).expect("valid message");
         assert!(!is_standalone_marker(&msg2));
-
-        // Just markable, no body → not standalone (markable isn't a status marker)
-        let xml3 = "<message xmlns='jabber:client' type='chat'>\
-                     <markable xmlns='urn:xmpp:chat-markers:0'/>\
-                     </message>";
-        let msg3 =
-            Message::try_from(xml3.parse::<Element>().expect("valid xml")).expect("valid message");
-        assert!(!is_standalone_marker(&msg3));
     }
 
     #[test]
     fn test_marker_carrier_trait() {
-        // Markable
         let xml = "<message xmlns='jabber:client' type='chat' id='m1'>\
                     <body>Hi</body>\
                     <markable xmlns='urn:xmpp:chat-markers:0'/>\
@@ -485,7 +433,6 @@ mod tests {
         assert!(!msg.is_standalone_marker());
         assert_eq!(msg.marker_ref_id(), None);
 
-        // Displayed
         let xml2 = "<message xmlns='jabber:client' type='chat'>\
                      <displayed xmlns='urn:xmpp:chat-markers:0' id='m1'/>\
                      </message>";
@@ -499,11 +446,6 @@ mod tests {
     #[test]
     fn test_marker_element_name() {
         assert_eq!(Marker::Markable.element_name(), "markable");
-        assert_eq!(Marker::Received("x".into()).element_name(), "received");
         assert_eq!(Marker::Displayed("x".into()).element_name(), "displayed");
-        assert_eq!(
-            Marker::Acknowledged("x".into()).element_name(),
-            "acknowledged"
-        );
     }
 }

@@ -5,6 +5,7 @@
 //!
 //! Thread identifiers continue to use RFC 6121 `<thread/>`.
 
+use jid::Jid;
 use minidom::Element;
 use xmpp_parsers::message::Message;
 
@@ -17,7 +18,7 @@ pub struct ReplyReference {
     /// The ID of the message being replied to.
     pub id: String,
     /// Optional JID of the original message sender.
-    pub to: Option<String>,
+    pub to: Option<Jid>,
 }
 
 impl ReplyReference {
@@ -30,8 +31,8 @@ impl ReplyReference {
     }
 
     /// Attach the optional original sender JID.
-    pub fn with_to(mut self, to: impl Into<String>) -> Self {
-        self.to = Some(to.into());
+    pub fn with_to(mut self, to: Jid) -> Self {
+        self.to = Some(to);
         self
     }
 }
@@ -43,36 +44,31 @@ pub fn is_reply_element(elem: &Element) -> bool {
 
 /// Parse an XEP-0461 reply payload from a message.
 ///
-/// Accepts both:
-/// - `<reply id='message-id' to='sender@domain'/>` (preferred)
-/// - `<reply to='message-id'/>` (legacy compatibility)
+/// XEP-0461 requires an `id` attribute.
+///
+/// The optional `to` attribute is parsed as a JID when valid; malformed `to`
+/// values are ignored here and rejected at protocol ingress.
 pub fn parse_reply_from_message(msg: &Message) -> Option<ReplyReference> {
     let reply_elem = msg.payloads.iter().find(|elem| is_reply_element(elem))?;
 
-    let id_attr = reply_elem
+    let id = reply_elem
         .attr("id")
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned);
+        .map(ToOwned::to_owned)?;
 
-    let to_attr = reply_elem
+    let to = reply_elem
         .attr("to")
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned);
+        .and_then(|value| value.trim().parse::<Jid>().ok());
 
-    // Backward compatibility with older examples that used @to as the message id.
-    match id_attr {
-        Some(id) => Some(ReplyReference { id, to: to_attr }),
-        None => to_attr.map(ReplyReference::new),
-    }
+    Some(ReplyReference { id, to })
 }
 
 /// Build an XEP-0461 `<reply/>` payload element.
 pub fn build_reply_element(reply: &ReplyReference) -> Element {
     let mut builder = Element::builder("reply", NS_REPLY).attr("id", reply.id.as_str());
-    if let Some(to) = reply.to.as_deref() {
-        builder = builder.attr("to", to);
+    if let Some(to) = reply.to.as_ref() {
+        builder = builder.attr("to", to.to_string());
     }
     builder.build()
 }
@@ -94,16 +90,26 @@ mod tests {
         let msg = Message::try_from(xml.parse::<Element>().expect("valid xml")).expect("message");
         let reply = parse_reply_from_message(&msg).expect("reply present");
         assert_eq!(reply.id, "parent-1");
-        assert_eq!(reply.to.as_deref(), Some("alice@example.com"));
+        assert_eq!(
+            reply.to.as_ref().map(ToString::to_string).as_deref(),
+            Some("alice@example.com")
+        );
     }
 
     #[test]
-    fn test_parse_reply_legacy_to_as_id() {
+    fn test_parse_reply_requires_id() {
         let xml =
-            "<message xmlns='jabber:client'><reply xmlns='urn:xmpp:reply:0' to='legacy-id'/></message>";
+            "<message xmlns='jabber:client'><reply xmlns='urn:xmpp:reply:0' to='alice@example.com'/></message>";
+        let msg = Message::try_from(xml.parse::<Element>().expect("valid xml")).expect("message");
+        assert!(parse_reply_from_message(&msg).is_none());
+    }
+
+    #[test]
+    fn test_parse_reply_ignores_invalid_to_jid() {
+        let xml = "<message xmlns='jabber:client'><reply xmlns='urn:xmpp:reply:0' id='parent-1' to=' '/></message>";
         let msg = Message::try_from(xml.parse::<Element>().expect("valid xml")).expect("message");
         let reply = parse_reply_from_message(&msg).expect("reply present");
-        assert_eq!(reply.id, "legacy-id");
+        assert_eq!(reply.id, "parent-1");
         assert_eq!(reply.to, None);
     }
 
@@ -116,12 +122,16 @@ mod tests {
 
         set_reply_payload(
             &mut msg,
-            &ReplyReference::new("new-id").with_to("bob@example.com"),
+            &ReplyReference::new("new-id")
+                .with_to("bob@example.com".parse::<Jid>().expect("valid jid")),
         );
 
         let reply = parse_reply_from_message(&msg).expect("reply present");
         assert_eq!(reply.id, "new-id");
-        assert_eq!(reply.to.as_deref(), Some("bob@example.com"));
+        assert_eq!(
+            reply.to.as_ref().map(ToString::to_string).as_deref(),
+            Some("bob@example.com")
+        );
         assert_eq!(
             msg.payloads
                 .iter()
@@ -143,7 +153,8 @@ mod tests {
 
     #[test]
     fn test_build_reply_element_with_to() {
-        let reply = ReplyReference::new("msg-1").with_to("alice@example.com");
+        let reply = ReplyReference::new("msg-1")
+            .with_to("alice@example.com".parse::<Jid>().expect("valid jid"));
         let elem = build_reply_element(&reply);
         assert_eq!(elem.attr("id"), Some("msg-1"));
         assert_eq!(elem.attr("to"), Some("alice@example.com"));

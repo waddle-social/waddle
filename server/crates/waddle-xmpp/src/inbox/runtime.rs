@@ -5,10 +5,11 @@ use xmpp_parsers::message::Message;
 
 use super::{ConversationKind, InboxEntry};
 use crate::mam::STANZA_ID_NS;
+use crate::xep::xep0424::extract_retraction_from_message;
 use crate::xep::xep0430::InboxQuery;
 use crate::xep::{
     has_file_sharing, is_moderation_request_message, is_moderation_result_message,
-    is_reaction_message, is_retraction_message, is_sticker_message, should_skip_storage,
+    is_reaction_message, is_sticker_message, should_skip_storage,
 };
 
 pub fn should_project_message(msg: &Message) -> bool {
@@ -21,7 +22,10 @@ pub fn should_project_message(msg: &Message) -> bool {
     }
 
     is_reaction_message(msg)
-        || is_retraction_message(msg)
+        || matches!(
+            extract_retraction_from_message(msg),
+            Some(crate::xep::RetractionKind::Request(_))
+        )
         || is_moderation_request_message(msg)
         || is_moderation_result_message(msg)
         || has_file_sharing(msg)
@@ -159,6 +163,19 @@ mod tests {
 
         assert!(should_project_message(&msg));
         assert!(preview_text(&msg).is_none());
+    }
+
+    #[test]
+    fn runtime_skips_inbound_tombstones() {
+        let mut msg = Message::new(Some(jid::Jid::from(jid("bob@example.com"))));
+        msg.payloads.push(
+            minidom::Element::builder("retracted", crate::xep::xep0424::NS_MESSAGE_RETRACT)
+                .attr("id", "retract-1")
+                .attr("stamp", "2024-06-01T09:00:00Z")
+                .build(),
+        );
+
+        assert!(!should_project_message(&msg));
     }
 
     #[test]

@@ -198,52 +198,50 @@ describe("groupchat reply + thread parsing", () => {
         id: "msg-extension-only",
         waddleExtensions: {
           enrichments: [{
-            id: "enrich-quiz",
-            plugin: "pub-quiz",
+            id: "enrich-poll",
+            plugin: "decision-polls",
             capability: "launch",
-            payloadNamespace: "urn:waddle:pub-quiz:1",
-            surface: "game",
+            payloadNamespace: "urn:waddle:decision-polls:1",
+            surface: "message-card",
             source: {
-              stanzaId: "archive-id-quiz-1",
+              stanzaId: "archive-id-poll-1",
               by: "general@muc.waddle.social",
               bodyStart: "0",
               bodyEnd: "0",
             },
             payload: {
               elements: [{
-                name: "quiz-question",
+                name: "poll",
                 attributes: {
-                  xmlns: "urn:waddle:pub-quiz:1",
-                  "game-id": "game-1",
-                  "question-id": "q1",
+                  xmlns: "urn:waddle:decision-polls:1",
+                  "poll-id": "poll-1",
+                  question: "Which XEP defines Ad-Hoc Commands?",
                 },
                 children: [
-                  { name: "prompt", attributes: {}, children: ["Which XEP defines Ad-Hoc Commands?"] },
-                  { name: "choice", attributes: { id: "b" }, children: ["XEP-0050"] },
+                  { name: "option", attributes: { id: "b" }, children: ["XEP-0050"] },
                 ],
               }],
             },
             launches: [{
-              id: "answer-b",
-              plugin: "pub-quiz",
-              action: "answer",
+              id: "vote-b",
+              plugin: "decision-polls",
+              action: "vote",
               commandNode: "urn:waddle:extension:1:invoke",
-              token: "launch-token-answer-b",
-              label: "Answer B",
+              token: "launch-token-vote-b",
+              label: "Vote B",
               expiresAt: "2026-04-27T10:05:00Z",
               context: {
                 waddleId: "waddle-123",
                 room: "general@muc.waddle.social",
-                stanzaId: "archive-id-quiz-1",
+                stanzaId: "archive-id-poll-1",
               },
               payload: {
                 elements: [{
-                  name: "answer-request",
+                  name: "vote-request",
                   attributes: {
-                    xmlns: "urn:waddle:pub-quiz:1",
-                    "game-id": "game-1",
-                    "question-id": "q1",
-                    "choice-id": "b",
+                    xmlns: "urn:waddle:decision-polls:1",
+                    "poll-id": "poll-1",
+                    "option-id": "b",
                   },
                   children: [],
                 }],
@@ -258,13 +256,13 @@ describe("groupchat reply + thread parsing", () => {
     expect(h.messages).toHaveLength(1);
     expect(h.messages[0].body).toBe("");
     expect(h.messages[0].extensionAnnotations?.[0]).toMatchObject({
-      extensionId: "pub-quiz",
-      annotationId: "enrich-quiz",
-      surfaceKind: "game",
+      extensionId: "decision-polls",
+      annotationId: "enrich-poll",
+      surfaceKind: "message-card",
       title: "Which XEP defines Ad-Hoc Commands?",
-      payloadNamespace: "urn:waddle:pub-quiz:1",
+      payloadNamespace: "urn:waddle:decision-polls:1",
       source: {
-        stanzaId: "archive-id-quiz-1",
+        stanzaId: "archive-id-poll-1",
         by: "general@muc.waddle.social",
         bodyStart: 0,
         bodyEnd: 0,
@@ -272,37 +270,35 @@ describe("groupchat reply + thread parsing", () => {
     });
     const action = h.messages[0].extensionAnnotations?.[0]?.actions[0];
     expect(action).toMatchObject({
-      label: "Answer B",
-      route: "answer-b",
+      label: "Vote B",
+      route: "vote-b",
       launch: {
-        id: "answer-b",
-        pluginId: "pub-quiz",
-        actionId: "answer",
+        id: "vote-b",
+        pluginId: "decision-polls",
+        actionId: "vote",
         commandNode: "urn:waddle:extension:1:invoke",
-        launchToken: "launch-token-answer-b",
+        launchToken: "launch-token-vote-b",
         expiresAt: "2026-04-27T10:05:00Z",
         context: {
           waddleId: "waddle-123",
           roomJid: "general@muc.waddle.social",
-          stanzaId: "archive-id-quiz-1",
+          stanzaId: "archive-id-poll-1",
         },
       },
     });
     expect(action?.launch?.payloads[0]).toMatchObject({
-      namespace: "urn:waddle:pub-quiz:1",
-      name: "answer-request",
+      namespace: "urn:waddle:decision-polls:1",
+      name: "vote-request",
       attributes: {
-        "choice-id": "b",
+        "option-id": "b",
       },
     });
   });
 
   test("defaults sample payload namespaces to the generic message-card surface", () => {
     const samples = [
-      ["urn:waddle:links-task-board:1", "link"],
-      ["urn:waddle:pub-quiz:1", "quiz-question"],
+      ["urn:waddle:link-board:1", "link"],
       ["urn:waddle:ai-chatbot:1", "assistant-answer"],
-      ["urn:waddle:ai-assistant-canvas:1", "canvas"],
       ["urn:waddle:decision-polls:1", "poll"],
     ] as const;
 

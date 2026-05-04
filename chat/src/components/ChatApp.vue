@@ -16,8 +16,9 @@ import { useWindowVisibility } from "@/composables/useWindowVisibility";
 import { useReadReceipts } from "@/composables/useReadReceipts";
 import { useVersion } from "@/composables/useVersion";
 import { useRosterContacts } from "@/composables/useRosterContacts";
-import { buildDmPath, buildPath, buildSettingsPath, parseRoute, pushDmRoute, pushRoute, pushSettingsRoute, resolveChannel, shouldLoadStructureForRoute } from "@/composables/useRouting";
-import { barePeerJid, jidDomain, parseManagedRoomBareJid, roomBareJidFor } from "@/lib/xmpp-client";
+import { buildDmPath, buildExtensionRoutePath, buildPath, buildSettingsPath, parseRoute, pushDmRoute, pushExtensionRoute, pushRoute, pushSettingsRoute, resolveChannel, shouldLoadStructureForRoute } from "@/composables/useRouting";
+import { barePeerJid, jidDomain, parseManagedRoomBareJid } from "@/lib/xmpp-client";
+import { roomJidForChannelId as resolveRoomJidForChannelId } from "@/lib/channel-room";
 import { mergeRoomHats, roomHatsFromMembers } from "@/lib/xmpp/occupant-badges";
 import { connectionStore } from "@/lib/connection-store";
 import LandingState from "@/components/chat/LandingState.vue";
@@ -27,6 +28,7 @@ import TopicsPanel from "@/components/chat/TopicsPanel.vue";
 import HomeDashboard from "@/components/chat/HomeDashboard.vue";
 import DmPanel from "@/components/chat/DmPanel.vue";
 import ContentArea from "@/components/chat/ContentArea.vue";
+import ExtensionRouteView from "@/components/chat/ExtensionRouteView.vue";
 import ThreadPanel from "@/components/chat/ThreadPanel.vue";
 import { orderTimelineForScrollDirection, type ScrollDirectionMode } from "@/lib/scroll-direction";
 import { useScrollDirection } from "@/composables/useScrollDirection";
@@ -42,6 +44,7 @@ import MemberManagement from "@/components/modals/MemberManagement.vue";
 import ConfirmDialog from "@/components/ui/ConfirmDialog.vue";
 import type { MemberSummary } from "@/lib/chat-types";
 import type { ExtensionAnnotationAction, MarkupSpan, MessageReference, TimelineMessage } from "@/lib/chat-ui";
+import type { DiscoveredExtensionRoute } from "@/lib/xmpp/extension-commands";
 import { avatarLookupCandidates, mentionAutocompleteCandidates, mentionMatchesUsername, mergeMentionMembers } from "@/lib/mentions";
 import {
   moveReactionSelection,
@@ -139,6 +142,20 @@ const activeMessages = computed(() =>
 const activeFirstUnseenId = computed(() =>
   ui.sidebarMode.value === "dms" ? dmMessaging.firstUnseenId.value : messaging.firstUnseenId.value,
 );
+const extensionRoutes = ref<DiscoveredExtensionRoute[]>([]);
+const activeExtensionRouteKey = ref<{ channelId: string; pluginId: string; routeId: string } | null>(null);
+const activeExtensionRoute = computed(() => {
+  const key = activeExtensionRouteKey.value;
+  if (!key) return null;
+  return extensionRoutes.value.find((route) =>
+    route.pluginId === key.pluginId && route.routeId === key.routeId,
+  ) ?? null;
+});
+const activeChannelRoomJid = computed(() => {
+  const channel = waddles.currentChannel.value;
+  if (!channel || !session.value) return null;
+  return channel.jid ?? resolveRoomJidForChannelId(session.value, waddles.channels.value, channel.id);
+});
 
 // Thread panel state — stack = breadcrumb trail into nested sub-threads.
 // Empty stack = panel closed. Only meaningful for channel messages since DMs
@@ -421,6 +438,7 @@ useTabUnreadIndicator(totalTabUnreadCount, {
 
 const { isWindowFocused } = useWindowVisibility();
 const readReceiptsKind = computed<"channel" | "dm" | null>(() => {
+  if (ui.activePage.value !== "chat") return null;
   if (ui.sidebarMode.value === "dms") {
     return dmConversations.activePeerJid.value ? "dm" : null;
   }
@@ -431,7 +449,7 @@ const readReceiptsActiveRoomJid = computed<string | null>(() => {
   const channelId = waddles.activeChannelId.value;
   const sess = session.value;
   if (!channelId || !sess) return null;
-  return roomBareJidFor(sess, channelId);
+  return resolveRoomJidForChannelId(sess, waddles.channels.value, channelId);
 });
 const readReceiptsActivePeerJid = computed<string | null>(() =>
   readReceiptsKind.value === "dm" ? dmConversations.activePeerJid.value : null,
@@ -643,7 +661,13 @@ let routeRequestId = 0;
 const settingsPath = buildSettingsPath();
 
 const currentChatPath = computed(() =>
-  ui.sidebarMode.value === "dms" && activeDmPeer.value
+  ui.activePage.value === "extension" && activeExtensionRouteKey.value
+    ? buildExtensionRoutePath(
+        waddles.currentChannel.value,
+        activeExtensionRouteKey.value.pluginId,
+        activeExtensionRouteKey.value.routeId,
+      )
+    : ui.sidebarMode.value === "dms" && activeDmPeer.value
     ? buildDmPath(activeDmPeer.value.peerUsername)
     : buildPath(waddles.currentChannel.value, activeThreadStack.value),
 );
@@ -651,6 +675,19 @@ const currentChatPath = computed(() =>
 async function setupPushSubscription() {
   if (!xmppClient.value || !connectionStore.session) return;
   await notifications.syncPushSubscription(xmppClient.value, connectionStore.session.jid);
+}
+
+async function refreshExtensionRoutes() {
+  if (!xmppClient.value) {
+    extensionRoutes.value = [];
+    return;
+  }
+  try {
+    extensionRoutes.value = await xmppClient.value.discoverExtensionRoutes();
+  } catch (error) {
+    console.warn("Unable to discover extension routes", error);
+    extensionRoutes.value = [];
+  }
 }
 
 async function handleRequestNotifications() {
@@ -761,14 +798,20 @@ function openThread(threadId: string, targetMessageId?: string) {
   void messaging.backfillThread(threadId);
 }
 
+function roomJidForChannelId(channelId: string): string | null {
+  const sess = connectionStore.session;
+  if (!sess) return null;
+  return resolveRoomJidForChannelId(sess, waddles.channels.value, channelId);
+}
+
 async function onSelectThread(channelId: string, threadId: string) {
   // Navigate to the channel if not already there
   if (waddles.activeChannelId.value !== channelId) {
     await selectChannel(channelId);
   }
   // Mark thread as read
-  if (connectionStore.session) {
-    const roomJid = roomBareJidFor(connectionStore.session, channelId);
+  const roomJid = roomJidForChannelId(channelId);
+  if (roomJid) {
     channelUnread.markThreadRead(roomJid, threadId);
   }
   openThread(threadId);
@@ -901,6 +944,14 @@ function updateUrl() {
     pushRoute(null);
     return;
   }
+  if (ui.activePage.value === "extension") {
+    pushExtensionRoute(
+      waddles.currentChannel.value,
+      activeExtensionRouteKey.value?.pluginId,
+      activeExtensionRouteKey.value?.routeId,
+    );
+    return;
+  }
   if (ui.sidebarMode.value === "dms" && activeDmPeer.value) {
     pushDmRoute(activeDmPeer.value.peerUsername);
   } else {
@@ -963,9 +1014,19 @@ function closeUserSettings() {
     window.history.back();
     return;
   }
-  ui.activePage.value = waddles.currentChannel.value || activeDmPeer.value ? "chat" : "dashboard";
+  ui.activePage.value = activeExtensionRouteKey.value && waddles.currentChannel.value
+    ? "extension"
+    : waddles.currentChannel.value || activeDmPeer.value
+      ? "chat"
+      : "dashboard";
   if (window.location.pathname + window.location.search !== currentChatPath.value) {
-    if (ui.sidebarMode.value === "dms" && activeDmPeer.value) {
+    if (ui.activePage.value === "extension") {
+      pushExtensionRoute(
+        waddles.currentChannel.value,
+        activeExtensionRouteKey.value?.pluginId,
+        activeExtensionRouteKey.value?.routeId,
+      );
+    } else if (ui.sidebarMode.value === "dms" && activeDmPeer.value) {
       pushDmRoute(activeDmPeer.value.peerUsername);
     } else {
       pushRoute(waddles.currentChannel.value, activeThreadStack.value);
@@ -985,6 +1046,7 @@ function onPopState() {
     ui.sidebarMode.value = "channels";
     dmConversations.closeDm();
     waddles.activeChannelId.value = null;
+    activeExtensionRouteKey.value = null;
     messaging.clearMessages();
     activeThreadTargetMessageId.value = null;
     activeThreadStack.value = [];
@@ -1012,6 +1074,7 @@ async function applyRouteTarget(route: ReturnType<typeof parseRoute>, requestId:
     ui.sidebarMode.value = "channels";
     dmConversations.closeDm();
     waddles.activeChannelId.value = null;
+    activeExtensionRouteKey.value = null;
     messaging.clearMessages();
     activeThreadTargetMessageId.value = null;
     activeThreadStack.value = [];
@@ -1021,6 +1084,7 @@ async function applyRouteTarget(route: ReturnType<typeof parseRoute>, requestId:
     return;
   }
   if (route.dmUsername) {
+    activeExtensionRouteKey.value = null;
     const username = route.dmUsername.replace(/^@/, "").trim();
     if (username) {
       const domain = session.value ? jidDomain(session.value.jid) : "";
@@ -1035,7 +1099,29 @@ async function applyRouteTarget(route: ReturnType<typeof parseRoute>, requestId:
     if (requestId !== routeRequestId) return;
   }
 
+  if (route.page === "extension") {
+    ui.sidebarMode.value = "channels";
+    dmConversations.closeDm();
+    activeThreadTargetMessageId.value = null;
+    activeThreadStack.value = [];
+    if (route.channelSlug) {
+      const ch = resolveChannel(route.channelSlug, waddles.channels.value);
+      if (!ch) {
+        waddles.activeChannelId.value = null;
+        activeExtensionRouteKey.value = null;
+        return;
+      }
+      waddles.activeChannelId.value = ch.id;
+      void waddles.reloadChannelMembers(ch.id);
+      activeExtensionRouteKey.value = route.extensionPluginId && route.extensionRouteId
+        ? { channelId: ch.id, pluginId: route.extensionPluginId, routeId: route.extensionRouteId }
+        : null;
+    }
+    return;
+  }
+
   if (route.channelSlug) {
+    activeExtensionRouteKey.value = null;
     const ch = resolveChannel(route.channelSlug, waddles.channels.value);
     if (!ch) {
       waddles.activeChannelId.value = null;
@@ -1074,6 +1160,7 @@ async function onConnectionReady() {
     } else {
       await waddles.loadSpace({ loadStructure: !shouldLoadStructureForRoute(route, waddles.channels.value.length) });
     }
+    await refreshExtensionRoutes();
     if (requestId === routeRequestId) {
       await applyRouteTarget(route, requestId);
     }
@@ -1105,6 +1192,8 @@ async function handleLogout() {
   waddles.clearData();
   channelUnread.clearAll();
   rosterContacts.clearRosterContacts();
+  extensionRoutes.value = [];
+  activeExtensionRouteKey.value = null;
   setupPromptShown = false;
   messaging.clearMessages();
   dmMessaging.clearMessages();
@@ -1115,14 +1204,15 @@ async function handleLogout() {
 async function selectChannel(channelId: string) {
   ui.activePage.value = "chat";
   ui.sidebarMode.value = "channels";
+  activeExtensionRouteKey.value = null;
   dmConversations.closeDm();
   memberJidByNick.value = {};
   waddles.activeChannelId.value = channelId;
   void waddles.reloadChannelMembers(channelId);
   messaging.clearMessages();
   // XEP-0502: Clear activity indicator for this channel
-  if (connectionStore.session) {
-    const roomJid = roomBareJidFor(connectionStore.session, channelId);
+  const roomJid = roomJidForChannelId(channelId);
+  if (roomJid) {
     messaging.clearChannelActivity(roomJid);
   }
   const unreadAtLoad = computedChannelUnreadMap.value[channelId]?.unread ?? 0;
@@ -1134,9 +1224,23 @@ async function selectChannel(channelId: string) {
   ui.showMobileNav.value = false;
 }
 
+async function selectExtensionRoute(channelId: string, route: DiscoveredExtensionRoute) {
+  ui.activePage.value = "extension";
+  ui.sidebarMode.value = "channels";
+  dmConversations.closeDm();
+  activeThreadTargetMessageId.value = null;
+  activeThreadStack.value = [];
+  activeExtensionRouteKey.value = { channelId, pluginId: route.pluginId, routeId: route.routeId };
+  memberJidByNick.value = {};
+  waddles.activeChannelId.value = channelId;
+  void waddles.reloadChannelMembers(channelId);
+  ui.showMobileNav.value = false;
+}
+
 async function handleOpenDm(peerJid: string) {
   ui.activePage.value = "chat";
   ui.sidebarMode.value = "dms";
+  activeExtensionRouteKey.value = null;
   await dmConversations.openDm(peerJid);
   dmMessaging.clearMessages();
   const activePeer = dmConversations.activePeerJid.value;
@@ -1167,6 +1271,7 @@ async function handleCreateChannel() {
   }
   // MUC was created (muc / space-muc / space-with-muc): select and load messages.
   ui.activePage.value = "chat";
+  activeExtensionRouteKey.value = null;
   messaging.clearMessages();
   await messaging.loadMessages(waddles.currentChannel.value?.spaceId ?? "", created.channelId);
 }
@@ -1343,9 +1448,12 @@ onUnmounted(() => {
           :collapsed-group-ids="ui.collapsedSpaceGroupIds.value"
           :channel-unread-map="computedChannelUnreadMap"
           :thread-entries-fn="(roomJid: string) => channelUnread.threadEntries(roomJid)"
+          :extension-routes="extensionRoutes"
+          :active-extension-route="ui.activePage.value === 'extension' ? activeExtensionRouteKey : null"
           class="!w-full !border-r-0 !flex-1"
           @select-channel="selectChannel"
           @select-thread="onSelectThread"
+          @select-extension-route="selectExtensionRoute"
           @create-channel="openCreateChannelDialog()"
           @create-channel-in-space="openCreateChannelDialog"
           @open-settings="ui.showWaddleSettings.value = true"
@@ -1451,8 +1559,11 @@ onUnmounted(() => {
           :collapsed-group-ids="ui.collapsedSpaceGroupIds.value"
           :channel-unread-map="computedChannelUnreadMap"
           :thread-entries-fn="(roomJid: string) => channelUnread.threadEntries(roomJid)"
+          :extension-routes="extensionRoutes"
+          :active-extension-route="ui.activePage.value === 'extension' ? activeExtensionRouteKey : null"
           @select-channel="selectChannel"
           @select-thread="onSelectThread"
+          @select-extension-route="selectExtensionRoute"
           @create-channel="openCreateChannelDialog()"
           @create-channel-in-space="openCreateChannelDialog"
           @open-settings="ui.showWaddleSettings.value = true"
@@ -1487,6 +1598,16 @@ onUnmounted(() => {
         :server-version="version.serverVersion.value"
         @close="closeUserSettings"
       />
+      <ExtensionRouteView
+        v-else-if="ui.activePage.value === 'extension'"
+        :waddle="waddles.currentSpace.value"
+        :channel="waddles.currentChannel.value"
+        :route="activeExtensionRoute"
+        :requested-route="activeExtensionRouteKey"
+        :room-jid="activeChannelRoomJid"
+        :xmpp-client="xmppClient"
+        @open-nav="ui.showMobileNav.value = true"
+      />
       <template v-else>
         <!--
           Accordion thread layout
@@ -1520,6 +1641,7 @@ onUnmounted(() => {
               v-model:forum-title="activeForumTitle"
               :waddle="waddles.currentSpace.value"
               :channel="ui.sidebarMode.value === 'dms' ? null : waddles.currentChannel.value"
+              :room-jid="ui.sidebarMode.value === 'dms' ? null : activeChannelRoomJid"
               :dm-peer="activeDmPeer"
               :sidebar-mode="ui.sidebarMode.value"
               :messages="activeMessages"

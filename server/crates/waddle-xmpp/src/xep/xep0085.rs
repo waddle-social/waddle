@@ -31,9 +31,10 @@
 //!
 //! ## Service Discovery
 //!
-//! Per the specification, entities advertise support via `http://jabber.org/protocol/chatstates`
-//! in disco#info. The *server* does not advertise this feature; it is a client-to-client
-//! negotiation. The server transparently routes chat state notifications.
+//! Per the specification, entities advertise support via
+//! `http://jabber.org/protocol/chatstates` in disco#info. Waddle does not
+//! advertise chat states as a global server feature, but MUC rooms that
+//! rebroadcast groupchat chat state notifications do advertise the feature.
 
 use minidom::Element;
 use thiserror::Error;

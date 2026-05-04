@@ -71,6 +71,10 @@ impl WasmExtensionActor {
         self.grants.contains(&capability)
     }
 
+    pub fn validate_effect(&self, effect: &ExtensionEffect) -> bool {
+        effect.validate_for_manifest_and_grants(&self.manifest, &self.grants)
+    }
+
     pub async fn handle_event(&self, event: ExtensionEvent) -> Vec<ExtensionEffect> {
         self.handle_event_for_waddle(event, WaddleId::new("local").expect("static waddle id"))
             .await
@@ -95,6 +99,7 @@ impl WasmExtensionActor {
             waddle_id,
             plugin_id: self.manifest.id.clone(),
             requester: requester.or_else(|| requester_for_event(&event)),
+            source_room: source_room_for_event(&event),
             kind: invocation_kind_for_event(&event),
         };
         match self
@@ -159,5 +164,24 @@ fn requester_for_event(event: &ExtensionEvent) -> Option<xmpp_parsers::jid::Bare
             .parse::<FullJid>()
             .ok()
             .map(|jid| jid.to_bare()),
+    }
+}
+
+fn source_room_for_event(event: &ExtensionEvent) -> Option<xmpp_parsers::jid::BareJid> {
+    match event {
+        ExtensionEvent::MessageHook(hook) => hook
+            .context
+            .room
+            .as_ref()
+            .and_then(|room| room.as_str().parse().ok()),
+        ExtensionEvent::Command(command) => command
+            .room
+            .as_ref()
+            .and_then(|room| room.as_str().parse().ok()),
+        ExtensionEvent::Launch(launch) => launch
+            .context
+            .room
+            .as_ref()
+            .and_then(|room| room.as_str().parse().ok()),
     }
 }

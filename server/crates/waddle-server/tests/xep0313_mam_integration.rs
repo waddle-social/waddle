@@ -7,7 +7,7 @@ mod ws_common;
 use jid::Jid;
 use tokio::sync::Mutex;
 use waddle_xmpp::mam::{ArchivedMessage, MamQuery, MamStorage, MamStorageError, SqlxMamStorage};
-use ws_common::{TestServer, WsXmppClient};
+use ws_common::{disco_info_query, TestServer, WsXmppClient};
 use xmpp_parsers::message::MessageType;
 
 const DOMAIN: &str = "localhost";
@@ -41,6 +41,16 @@ fn mam_query_after_xml(id: &str, archive_jid: &str, max: u32, after: &str) -> St
     )
 }
 
+fn mam_query_ids_xml(id: &str, archive_jid: &str, ids: &[&str]) -> String {
+    let id_values = ids
+        .iter()
+        .map(|archive_id| format!(r#"<value>{archive_id}</value>"#))
+        .collect::<String>();
+    format!(
+        r#"<iq type="set" id="{id}" to="{archive_jid}"><query xmlns="urn:xmpp:mam:2"><x xmlns="jabber:x:data" type="submit"><field var="FORM_TYPE" type="hidden"><value>urn:xmpp:mam:2</value></field><field var="ids">{id_values}</field></x></query></iq>"#
+    )
+}
+
 async fn query_mam(client: &mut WsXmppClient, query_xml: &str) -> Result<Vec<String>, String> {
     client.send(query_xml).await?;
     client
@@ -52,6 +62,19 @@ fn extract_mam_body(frame: &str) -> Option<String> {
     let start = frame.find("<body>")?;
     let end = frame.find("</body>")?;
     Some(frame[start + 6..end].to_string())
+}
+
+fn extract_result_id(frame: &str) -> Option<String> {
+    let result = &frame[frame.find("<result")?..];
+    if let Some(start) = result.find(" id=\"") {
+        let value = &result[start + 5..];
+        return Some(value[..value.find('"')?].to_string());
+    }
+    if let Some(start) = result.find(" id='") {
+        let value = &result[start + 5..];
+        return Some(value[..value.find('\'')?].to_string());
+    }
+    None
 }
 
 fn extract_fin_last(frame: &str) -> Option<String> {
@@ -243,6 +266,164 @@ async fn muc_mam_pagination() {
     client.close().await;
 }
 
+#[tokio::test]
+async fn personal_archive_disco_advertises_extended_mam_feature() {
+    let _guard = TEST_SERIAL.lock().await;
+    let (_server, mut client) = setup().await;
+    let archive_jid = format!("{USERNAME}@{DOMAIN}");
+
+    let response = disco_info_query(&mut client, &archive_jid, "mam-disco-personal")
+        .await
+        .expect("personal archive disco#info response");
+
+    assert!(
+        response.contains("urn:xmpp:mam:2#extended"),
+        "personal archive disco missing urn:xmpp:mam:2#extended: {response}"
+    );
+
+    client.close().await;
+}
+
+#[tokio::test]
+async fn personal_archive_mam_form_includes_extended_fields() {
+    let _guard = TEST_SERIAL.lock().await;
+    let (_server, mut client) = setup().await;
+    let archive_jid = format!("{USERNAME}@{DOMAIN}");
+
+    client
+        .send(&format!(
+            r#"<iq type="get" id="mam-form-personal" to="{archive_jid}"><query xmlns="urn:xmpp:mam:2"/></iq>"#
+        ))
+        .await
+        .expect("send mam form request");
+    let response = client
+        .recv_matching(|frame| frame.contains("mam-form-personal"))
+        .await
+        .expect("mam form response");
+
+    for field in ["before-id", "after-id", "ids"] {
+        assert!(
+            response.contains(&format!("var=\"{field}\""))
+                || response.contains(&format!("var='{field}'")),
+            "mam form missing {field}: {response}"
+        );
+    }
+    assert!(
+        response.contains("http://jabber.org/protocol/xdata-validate"),
+        "mam form missing XEP-0122 validation namespace: {response}"
+    );
+    assert!(
+        response.contains("datatype=\"xs:string\"") || response.contains("datatype='xs:string'"),
+        "mam form missing ids datatype: {response}"
+    );
+    assert!(response.contains("<open") || response.contains("<open/>"));
+
+    client.close().await;
+}
+
+#[tokio::test]
+async fn room_disco_advertises_extended_mam_feature() {
+    let _guard = TEST_SERIAL.lock().await;
+    let (_server, mut client) = setup().await;
+    let room = format!("mam-disco-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
+
+    client
+        .send(&format!(
+            r#"<presence to="{room}/{USERNAME}"><x xmlns="http://jabber.org/protocol/muc"/></presence>"#
+        ))
+        .await
+        .expect("send join");
+    client
+        .recv_until(|frame| frame.contains("<subject"))
+        .await
+        .expect("join responses");
+
+    let response = disco_info_query(&mut client, &room, "mam-disco-room")
+        .await
+        .expect("room disco#info response");
+
+    assert!(
+        response.contains("urn:xmpp:mam:2#extended"),
+        "room disco missing urn:xmpp:mam:2#extended: {response}"
+    );
+
+    client.close().await;
+}
+
+#[tokio::test]
+async fn room_mam_ids_query_returns_only_requested_messages() {
+    let _guard = TEST_SERIAL.lock().await;
+    let (_server, mut client) = setup().await;
+    let room = format!("mam-ids-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
+
+    client
+        .send(&format!(
+            r#"<presence to="{room}/{USERNAME}"><x xmlns="http://jabber.org/protocol/muc"/></presence>"#
+        ))
+        .await
+        .expect("send join");
+    client
+        .recv_until(|frame| frame.contains("<subject"))
+        .await
+        .expect("join responses");
+
+    let bodies = ["ids one", "ids two", "ids three"];
+    for body in &bodies {
+        client
+            .send(&format!(
+                r#"<message type="groupchat" to="{room}"><body>{body}</body></message>"#
+            ))
+            .await
+            .expect("send message");
+        client
+            .recv_matching(|frame| frame.contains(body))
+            .await
+            .expect("echo");
+    }
+
+    let initial = query_mam(
+        &mut client,
+        &mam_query_xml(
+            &format!("ids-seed-{}", uuid::Uuid::new_v4()),
+            &room,
+            Some(10),
+        ),
+    )
+    .await
+    .expect("seed mam query");
+    let result_frames: Vec<&str> = initial
+        .iter()
+        .map(|frame| frame.as_str())
+        .filter(|frame| frame.contains("<forwarded"))
+        .collect();
+    let selected_ids = [
+        extract_result_id(result_frames[2]).expect("third archive id"),
+        extract_result_id(result_frames[0]).expect("first archive id"),
+    ];
+
+    let filtered = query_mam(
+        &mut client,
+        &mam_query_ids_xml(
+            &format!("ids-filter-{}", uuid::Uuid::new_v4()),
+            &room,
+            &[selected_ids[0].as_str(), selected_ids[1].as_str()],
+        ),
+    )
+    .await
+    .expect("ids mam query");
+    let filtered_bodies: Vec<String> = filtered
+        .iter()
+        .filter_map(|frame| extract_mam_body(frame))
+        .collect();
+
+    assert_eq!(
+        filtered_bodies,
+        vec!["ids one".to_string(), "ids three".to_string()]
+    );
+
+    client.close().await;
+}
+
 /// Returns the contents of the inner `<message>`'s `<body>` element
 /// inside a single MAM `<forwarded>` frame, distinguishing three
 /// wire shapes:
@@ -251,11 +432,6 @@ async fn muc_mam_pagination() {
 ///   `<body/>` parses as the empty string).
 /// - `Some(None)` — no `<body>` element on the inner message at all.
 /// - `None` — the frame has no inner `<message>` at all (caller bug).
-///
-/// Operates only on the **inner** `<message>` element of a MAM result
-/// frame so it isn't fooled by the outer `<message>` wrapper. Hand-rolled
-/// rather than pulling in a full XML parser to keep the integration test
-/// dependency-light, mirroring the existing `extract_mam_body` helper.
 fn extract_inner_body_presence(frame: &str) -> Option<Option<String>> {
     let forwarded_start = frame.find("<forwarded")?;
     let inner_msg_start = frame[forwarded_start..]
@@ -266,35 +442,22 @@ fn extract_inner_body_presence(frame: &str) -> Option<Option<String>> {
         .map(|i| i + inner_msg_start + "</message>".len())?;
     let inner = &frame[inner_msg_start..inner_msg_end];
 
-    // Look for `<body` with either `>` (open) or `/>` (self-closing) or
-    // attributes. Distinguish from a nested `<body/>` inside another
-    // namespace (e.g. XEP-0428 `<fallback>` carries its own
-    // `<body start='..' end='..'/>`); restrict to direct children of the
-    // inner `<message>` by requiring the tag to live at depth-1.
-    //
-    // Cheap depth tracking: scan forward and count nesting depth, only
-    // matching `<body` when depth == 0.
     let mut depth: i32 = 0;
     let mut idx = 0usize;
     let bytes = inner.as_bytes();
     while idx < bytes.len() {
         if bytes[idx] == b'<' {
-            // Closing tag drops depth before we read a new one.
             if idx + 1 < bytes.len() && bytes[idx + 1] == b'/' {
                 depth -= 1;
                 idx += 1;
                 continue;
             }
-            // The outermost `<message ...>` itself opens at depth 0
-            // — only inspect children (depth == 1 after we step in).
             if depth == 1 && inner[idx..].starts_with("<body") {
                 let after_tag = idx + "<body".len();
-                // Find end of the body open tag.
                 let close_rel = inner[after_tag..].find('>')?;
                 let close = after_tag + close_rel;
                 let is_self_close = bytes[close - 1] == b'/';
                 if is_self_close {
-                    // `<body/>` — empty body element.
                     return Some(Some(String::new()));
                 }
                 let text_start = close + 1;
@@ -318,18 +481,10 @@ async fn xep_0313_archives_preserve_body_presence_distinction() {
     //   1. `<body>text</body>` -> Some("text")
     //   2. `<body></body>` (or `<body/>`) -> Some("")
     //   3. no `<body>` element at all -> None
-    //
-    // Earlier denormalization collapsed (2) and (3) into the empty
-    // string via `.unwrap_or_default()`, so consumers reading the
-    // typed `body` field saw a misleading "empty body" for stanzas
-    // that had no `<body>` element at all (subject-only,
-    // reaction-only, etc.). This test locks the wire-level
-    // distinction end-to-end through the MUC archive.
     let _guard = TEST_SERIAL.lock().await;
     let (_server, mut client) = setup().await;
     let room = format!("body-fidelity-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
 
-    // Join MUC.
     client
         .send(&format!(
             r#"<presence to="{room}/{USERNAME}"><x xmlns="http://jabber.org/protocol/muc"/></presence>"#
@@ -341,15 +496,11 @@ async fn xep_0313_archives_preserve_body_presence_distinction() {
         .await
         .expect("join responses");
 
-    // Distinct id-prefix per case so we can pick out the right frame.
-    // Reactions need a target message id — the textual root msg gives
-    // the reaction-only frames a stable target.
     let id_text = format!("body-text-{}", uuid::Uuid::new_v4());
     let id_empty = format!("body-empty-{}", uuid::Uuid::new_v4());
     let id_absent = format!("body-absent-{}", uuid::Uuid::new_v4());
     let body_text = format!("hello-{}", uuid::Uuid::new_v4());
 
-    // Case 1: text body.
     client
         .send(&format!(
             r#"<message type="groupchat" to="{room}" id="{id_text}"><body>{body_text}</body></message>"#
@@ -361,10 +512,6 @@ async fn xep_0313_archives_preserve_body_presence_distinction() {
         .await
         .expect("echo text-body");
 
-    // Case 2: empty body element on the wire. `is_archivable` for
-    // groupchat treats any non-empty `bodies` collection as
-    // archivable (XEP-0313 §5.1.3 allowance for groupchat), so an
-    // empty `<body></body>` round-trips as Some("").
     client
         .send(&format!(
             r#"<message type="groupchat" to="{room}" id="{id_empty}"><body></body></message>"#
@@ -376,9 +523,6 @@ async fn xep_0313_archives_preserve_body_presence_distinction() {
         .await
         .expect("echo empty-body");
 
-    // Case 3: no `<body>` element at all. A reaction is the simplest
-    // bodyless archivable groupchat message (XEP-0444; the room
-    // archive treats reactions as archivable per `is_archivable`).
     client
         .send(&format!(
             r#"<message type="groupchat" to="{room}" id="{id_absent}"><reactions xmlns="urn:xmpp:reactions:0" id="{id_text}"><reaction>👍</reaction></reactions></message>"#
@@ -390,7 +534,6 @@ async fn xep_0313_archives_preserve_body_presence_distinction() {
         .await
         .expect("echo reaction-only");
 
-    // Query the room archive.
     let q_id = format!("body-fid-q-{}", uuid::Uuid::new_v4());
     let frames = query_mam(&mut client, &mam_query_xml(&q_id, &room, Some(50)))
         .await
@@ -433,7 +576,7 @@ async fn xep_0313_archives_preserve_body_presence_distinction() {
     assert_eq!(
         extract_inner_body_presence(frame_absent),
         Some(None),
-        "Case 3 (no <body> element) must replay with NO <body> element on the inner message; bug: it was being materialized as an empty body. Frame: {frame_absent}"
+        "Case 3 (no <body> element) must replay with NO <body> element on the inner message. Frame: {frame_absent}"
     );
 
     client.close().await;

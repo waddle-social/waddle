@@ -9,12 +9,10 @@
 
 Build the Waddle extension/plugin protocol as an XMPP-native framework that a
 junior developer can implement without inventing wire shapes. The first
-release supports these five sample plugins:
+release supports these three sample plugins:
 
-- Links Task Board
-- Pub Quiz
+- Link Board
 - Standard AI Chatbot
-- AI Assistant Dynamic Canvas
 - Decision Polls
 
 This spec defines the protocol, digest-pinned WASM artifact model,
@@ -50,9 +48,9 @@ launch, configuration, state, and interaction flows go through XMPP to
   to messages.
 - Message enrichment is one framework feature. No plugin may add direct
   top-level message payloads outside `<extensions xmlns='urn:waddle:extension:1'>`.
-- Extension actions, bot replies, board updates, quiz answers, AI requests,
-  canvas renders, and poll votes are XMPP-native operations. Do not add REST,
-  GraphQL, webhook, or browser postMessage control paths.
+- Extension actions, bot replies, board updates, AI requests, and poll votes are
+  XMPP-native operations. Do not add REST, GraphQL, webhook, or browser
+  postMessage control paths.
 
 ## XEP Baseline
 
@@ -100,10 +98,8 @@ Use these exact Waddle namespaces:
 | Use | Namespace |
 | --- | --- |
 | Framework envelope, manifests, launch metadata, command form `FORM_TYPE` | `urn:waddle:extension:1` |
-| Links Task Board payloads | `urn:waddle:links-task-board:1` |
-| Pub Quiz payloads | `urn:waddle:pub-quiz:1` |
+| Link Board payloads | `urn:waddle:link-board:1` |
 | Standard AI Chatbot payloads | `urn:waddle:ai-chatbot:1` |
-| AI Assistant Dynamic Canvas payloads | `urn:waddle:ai-assistant-canvas:1` |
 | Decision Polls payloads | `urn:waddle:decision-polls:1` |
 
 Do not introduce `urn:waddle:github:*`, `urn:waddle:bot:*`,
@@ -370,12 +366,12 @@ Framework node item payloads use:
 
 ```xml
 <extension xmlns='urn:waddle:extension:1'
-           id='links-task-board'
-           name='Links Task Board'
+           id='link-board'
+           name='Link Board'
            version='1.0.0'
-           payload-ns='urn:waddle:links-task-board:1'
+           payload-ns='urn:waddle:link-board:1'
            enabled='true'>
-  <artifact oci='oci://registry.example.com/waddle/extensions/links-task-board@sha256:1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff'
+  <artifact oci='oci://registry.example.com/waddle/extensions/link-board@sha256:1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff'
             wasm-digest='sha256:aaaabbbbccccddddeeeeffff1111222233334444555566667777888899990000'/>
   <capability name='message.enrich'/>
   <capability name='pubsub.read'/>
@@ -383,8 +379,8 @@ Framework node item payloads use:
   <capability name='commands'/>
   <capability name='launch'/>
   <permission name='net.fetch.opengraph' scope='message-link-hosts'/>
-  <permission name='pubsub.publish' scope='urn:waddle:links-task-board:1:waddle:{waddle-id}:*'/>
-  <bot jid='links-task-board@extensions.example.com'/>
+  <permission name='pubsub.publish' scope='urn:waddle:link-board:1:waddle:{waddle-id}:*'/>
+  <bot jid='link-board@extensions.example.com'/>
 </extension>
 ```
 
@@ -402,7 +398,7 @@ Required install fields:
 
 | Field | Example | Rule |
 | --- | --- | --- |
-| `waddle#artifact_oci` | `oci://registry.example.com/waddle/extensions/pub-quiz@sha256:...` | Must include `@sha256:`. Tags such as `:latest` are rejected even when paired with a digest elsewhere. |
+| `waddle#artifact_oci` | `oci://registry.example.com/waddle/extensions/link-board@sha256:...` | Must include `@sha256:`. Tags such as `:latest` are rejected even when paired with a digest elsewhere. |
 | `waddle#wasm_digest` | `sha256:...` | Must match the WASM component layer or artifact descriptor digest. |
 | `waddle#wit_world` | `waddle:extension@1.0.0#world:waddle-extension` | Must match the runtime world supported by the server. |
 | `waddle#manifest_digest` | `sha256:...` | Must match the extension manifest item stored in the OCI artifact. |
@@ -476,7 +472,7 @@ Use these permission names:
 | `pubsub.read` | Exact node or prefix pattern | Read only matching nodes after requester membership checks. |
 | `pubsub.publish` | Exact node or prefix pattern | Publish only matching typed payloads as server/plugin publisher. |
 | `net.fetch.opengraph` | Host allowlist and byte/time limits | Server-side fetch of OpenGraph metadata for URLs already present in accepted messages. |
-| `artifact.write` | Artifact class and max bytes | Write immutable generated artifacts such as canvas renders. |
+| `artifact.write` | Artifact class and max bytes | Write immutable generated artifacts. |
 | `extension.provider.config` | Extension-owned provider settings | Configure provider behavior inside the extension. The server does not expose an AI invocation API. |
 
 Permission rules:
@@ -497,17 +493,12 @@ Permission rules:
 
 | Plugin | Node | Access | Subscriber whitelist | Max | Payload |
 | --- | --- | --- | --- | --- | --- |
-| Links Task Board | `urn:waddle:links-task-board:1:waddle:{waddle-id}:links` | `whitelist` | Waddle members | `max` | `urn:waddle:links-task-board:1` |
-| Links Task Board | `urn:waddle:links-task-board:1:waddle:{waddle-id}:boards` | `whitelist` | Waddle members | `256` | `urn:waddle:links-task-board:1` |
-| Links Task Board | `urn:waddle:links-task-board:1:waddle:{waddle-id}:tasks:{board-id}` | `whitelist` | Waddle members | `max` | `urn:waddle:links-task-board:1` |
-| Links Task Board | `urn:waddle:links-task-board:1:waddle:{waddle-id}:opengraph-cache` | `whitelist` | Waddle members | `max` | `urn:waddle:links-task-board:1` |
-| Pub Quiz | `urn:waddle:pub-quiz:1:waddle:{waddle-id}:games` | `whitelist` | Waddle members | `500` | `urn:waddle:pub-quiz:1` |
-| Pub Quiz | `urn:waddle:pub-quiz:1:waddle:{waddle-id}:submissions:{game-id}` | `whitelist` | Waddle admins | `max` | `urn:waddle:pub-quiz:1` |
-| Pub Quiz | `urn:waddle:pub-quiz:1:waddle:{waddle-id}:leaderboard` | `whitelist` | Waddle members | `1` | `urn:waddle:pub-quiz:1` |
+| Link Board | `urn:waddle:link-board:1:waddle:{waddle-id}:links` | `whitelist` | Waddle members | `max` | `urn:waddle:link-board:1` |
+| Link Board | `urn:waddle:link-board:1:waddle:{waddle-id}:boards` | `whitelist` | Waddle members | `256` | `urn:waddle:link-board:1` |
+| Link Board | `urn:waddle:link-board:1:waddle:{waddle-id}:tasks:{board-id}` | `whitelist` | Waddle members | `max` | `urn:waddle:link-board:1` |
+| Link Board | `urn:waddle:link-board:1:waddle:{waddle-id}:opengraph-cache` | `whitelist` | Waddle members | `max` | `urn:waddle:link-board:1` |
 | Standard AI Chatbot | `urn:waddle:ai-chatbot:1:waddle:{waddle-id}:profiles` | `whitelist` | Waddle admins | `32` | `urn:waddle:ai-chatbot:1` |
 | Standard AI Chatbot | `urn:waddle:ai-chatbot:1:waddle:{waddle-id}:runs` | `whitelist` | Waddle members | `1000` | `urn:waddle:ai-chatbot:1` |
-| AI Assistant Dynamic Canvas | `urn:waddle:ai-assistant-canvas:1:waddle:{waddle-id}:canvases` | `whitelist` | Waddle members | `max` | `urn:waddle:ai-assistant-canvas:1` |
-| AI Assistant Dynamic Canvas | `urn:waddle:ai-assistant-canvas:1:waddle:{waddle-id}:renders` | `whitelist` | Waddle members | `max` | `urn:waddle:ai-assistant-canvas:1` |
 | Decision Polls | `urn:waddle:decision-polls:1:waddle:{waddle-id}:polls` | `whitelist` | Waddle members | `max` | `urn:waddle:decision-polls:1` |
 | Decision Polls | `urn:waddle:decision-polls:1:waddle:{waddle-id}:results` | `whitelist` | Waddle members | `max` | `urn:waddle:decision-polls:1` |
 | Decision Polls | `urn:waddle:decision-polls:1:waddle:{waddle-id}:votes:{poll-id}` | `whitelist` | Waddle admins | `max` | `urn:waddle:decision-polls:1` |
@@ -560,7 +551,7 @@ HTTP(S) artifact routes:
 | --- | --- | --- |
 | `/_extensions/{plugin-id}/{digest}/manifest.json` | `GET`, `HEAD` | Verified declarative manifest for clients that need static metadata. |
 | `/_extensions/{plugin-id}/{digest}/assets/{path}` | `GET`, `HEAD` | Verified icons, thumbnails, and static media from the OCI artifact. |
-| `/_extensions/{plugin-id}/{digest}/renders/{artifact-id}` | `GET`, `HEAD` | Immutable generated artifacts such as AI canvas render images. |
+| `/_extensions/{plugin-id}/{digest}/artifacts/{artifact-id}` | `GET`, `HEAD` | Immutable generated artifacts. |
 
 HTTP route rules:
 
@@ -589,8 +580,8 @@ XMPP route table:
 
 Declarative client routes:
 
-- A plugin may declare route ids such as `board`, `quiz-host`, `chat`,
-  `canvas`, and `poll-results` inside its manifest.
+- A plugin may declare route ids such as `board`, `chat`, and `poll-results`
+  inside its manifest.
 - Route ids are inert descriptors. Opening a client route reads PubSub state
   and renders Waddle-native components. It does not load plugin HTML or JS.
 - Route actions must map to XEP-0050 `invoke` with a plugin id, action id, and
@@ -607,8 +598,8 @@ data, not executable code.
 Allowed surface elements:
 
 - `text`, `markdown-safe`, `image`, `link-preview`, `button`, `button-group`,
-  `form`, `field`, `select`, `progress`, `leaderboard`, `task-board`,
-  `canvas-preview`, `poll-results`, and `empty-state`.
+  `form`, `field`, `select`, `progress`, `task-board`, `poll-results`, and
+  `empty-state`.
 
 Rules:
 
@@ -682,11 +673,11 @@ Return `status='completed'` with a result form:
       <field var='waddle#payload_ns' label='Payload Namespace'/>
     </reported>
     <item>
-      <field var='waddle#plugin_id'><value>links-task-board</value></field>
-      <field var='waddle#name'><value>Links Task Board</value></field>
+      <field var='waddle#plugin_id'><value>link-board</value></field>
+      <field var='waddle#name'><value>Link Board</value></field>
       <field var='waddle#enabled'><value>true</value></field>
       <field var='waddle#version'><value>1.0.0</value></field>
-      <field var='waddle#payload_ns'><value>urn:waddle:links-task-board:1</value></field>
+      <field var='waddle#payload_ns'><value>urn:waddle:link-board:1</value></field>
     </item>
   </x>
 </command>
@@ -844,7 +835,7 @@ The server adds at most one direct framework payload to each message:
 Each plugin contribution is an `<enrichment/>` child. Plugin payload elements
 live inside `<payload/>`, and launch descriptors live inside `<launch/>`.
 
-Example Links Task Board enriched groupchat message:
+Example Link Board enriched groupchat message:
 
 ```xml
 <message from='pub@muc.example.com/alice'
@@ -858,24 +849,24 @@ Example Links Task Board enriched groupchat message:
              id='archive-id-456'/>
   <extensions xmlns='urn:waddle:extension:1' version='1'>
     <enrichment id='enrich-1'
-                plugin='links-task-board'
+                plugin='link-board'
                 capability='message.enrich'
-                payload-ns='urn:waddle:links-task-board:1'
+                payload-ns='urn:waddle:link-board:1'
                 created='2026-04-27T10:00:00Z'>
       <source stanza-id='archive-id-456'
               by='pub@muc.example.com'
               body-start='5'
               body-end='29'/>
       <payload>
-        <link xmlns='urn:waddle:links-task-board:1'
+        <link xmlns='urn:waddle:link-board:1'
               url='https://example.org/post'
               title='Example Post'
               site='Example'
-              image='https://example.com/_extensions/links-task-board/def456/assets/thumb.png'
+              image='https://example.com/_extensions/link-board/def456/assets/thumb.png'
               image-sha256='def456'/>
       </payload>
       <launch id='save-link'
-              plugin='links-task-board'
+              plugin='link-board'
               action='save-link'
               command-node='urn:waddle:extension:1:invoke'
               label='Save link'
@@ -884,7 +875,7 @@ Example Links Task Board enriched groupchat message:
                  room='pub@muc.example.com'
                  stanza-id='archive-id-456'/>
         <payload>
-          <save-link xmlns='urn:waddle:links-task-board:1'
+          <save-link xmlns='urn:waddle:link-board:1'
                      url='https://example.org/post'/>
         </payload>
       </launch>
@@ -897,8 +888,8 @@ Implementation requirements:
 
 - If multiple plugins enrich a message, append multiple `<enrichment/>`
   children under the same `<extensions/>` element.
-- Do not add direct `<link/>`, `<quiz-question/>`, `<poll/>`, or other plugin
-  payload children to `<message/>`.
+- Do not add direct `<link/>`, `<poll/>`, or other plugin payload children to
+  `<message/>`.
 - Reject user-authored messages that contain a direct
   `<extensions xmlns='urn:waddle:extension:1'>` payload with `bad-request`.
 - Do not re-enrich a message that already has a framework `<extensions/>`
@@ -913,17 +904,17 @@ Launch descriptors are inert metadata until invoked through XEP-0050. A launch
 descriptor must include `id`, `plugin`, `action`, `command-node`, and `context`.
 It may include a plugin payload child under `<payload/>`.
 
-### Links Task Board
+### Link Board
 
 Message enrichment payload:
 
 ```xml
-<link xmlns='urn:waddle:links-task-board:1'
+<link xmlns='urn:waddle:link-board:1'
       url='https://example.org/post'
       title='Example Post'
       site='Example'
       description='Short OpenGraph description'
-      image='https://example.com/_extensions/links-task-board/def456/assets/thumb.png'
+      image='https://example.com/_extensions/link-board/def456/assets/thumb.png'
       image-sha256='def456'
       og-cache-item='og-https-example-org-post'/>
 ```
@@ -931,18 +922,18 @@ Message enrichment payload:
 Launches:
 
 ```xml
-<launch id='save-link' plugin='links-task-board' action='save-link'
+<launch id='save-link' plugin='link-board' action='save-link'
         command-node='urn:waddle:extension:1:invoke' label='Save link'>
   <context waddle-id='waddle-123' room='pub@muc.example.com' stanza-id='archive-id-456'/>
   <payload>
-    <save-link xmlns='urn:waddle:links-task-board:1' url='https://example.org/post'/>
+    <save-link xmlns='urn:waddle:link-board:1' url='https://example.org/post'/>
   </payload>
 </launch>
-<launch id='create-task' plugin='links-task-board' action='create-task'
+<launch id='create-task' plugin='link-board' action='create-task'
         command-node='urn:waddle:extension:1:invoke' label='Create task'>
   <context waddle-id='waddle-123' room='pub@muc.example.com' stanza-id='archive-id-456'/>
   <payload>
-    <task-candidate xmlns='urn:waddle:links-task-board:1'
+    <task-candidate xmlns='urn:waddle:link-board:1'
                     url='https://example.org/post'
                     title='Review Example Post'/>
   </payload>
@@ -964,7 +955,7 @@ never fetch or inject metadata on behalf of the plugin.
 Declarative board surface:
 
 ```xml
-<view xmlns='urn:waddle:links-task-board:1'
+<view xmlns='urn:waddle:link-board:1'
       route='board'
       board-id='board-1'
       title='Launch Links'>
@@ -976,41 +967,6 @@ Declarative board surface:
 
 The client renders this as Waddle-native task-board UI. It must not load iframe
 content from the link URL.
-
-### Pub Quiz
-
-Bot message payload:
-
-```xml
-<quiz-question xmlns='urn:waddle:pub-quiz:1'
-               game-id='game-1'
-               question-id='q1'
-               closes-at='2026-04-27T10:05:00Z'>
-  <prompt>Which XEP defines Ad-Hoc Commands?</prompt>
-  <choice id='a'>XEP-0030</choice>
-  <choice id='b'>XEP-0050</choice>
-  <choice id='c'>XEP-0060</choice>
-</quiz-question>
-```
-
-Launch per choice:
-
-```xml
-<launch id='answer-b' plugin='pub-quiz' action='answer'
-        command-node='urn:waddle:extension:1:invoke' label='Answer B'>
-  <context waddle-id='waddle-123' room='pub@muc.example.com' stanza-id='archive-id-quiz-1'/>
-  <payload>
-    <answer-request xmlns='urn:waddle:pub-quiz:1'
-                    game-id='game-1'
-                    question-id='q1'
-                    choice-id='b'/>
-  </payload>
-</launch>
-```
-
-Invoke fields: no extra fields for button answers. Completion publishes a
-submission item to the admin-only submissions node and publishes updated
-leaderboard state when appropriate.
 
 ### Standard AI Chatbot
 
@@ -1038,49 +994,7 @@ keys or provider tokens through Waddle clients.
 
 The standard chatbot is intentionally plain: one bot persona, mention/reply/DM
 triggers, optional bounded MAM context, text answer messages, and no custom
-canvas state. This keeps it useful as the baseline AI example.
-
-### AI Assistant Dynamic Canvas
-
-Canvas message payload:
-
-```xml
-<canvas xmlns='urn:waddle:ai-assistant-canvas:1'
-        canvas-id='canvas-1'
-        render-id='render-1'
-        artifact-uri='https://example.com/_extensions/ai-assistant-canvas/789abc/renders/render-1.png'
-        artifact-sha256='789abc'
-        media-type='image/png'/>
-```
-
-Launch:
-
-```xml
-<launch id='remix-canvas' plugin='ai-assistant-canvas' action='remix'
-        command-node='urn:waddle:extension:1:invoke' label='Remix'>
-  <context waddle-id='waddle-123' room='pub@muc.example.com' stanza-id='archive-id-canvas-1'/>
-  <payload>
-    <remix-source xmlns='urn:waddle:ai-assistant-canvas:1'
-                  canvas-id='canvas-1'
-                  render-id='render-1'/>
-  </payload>
-</launch>
-```
-
-Invoke fields: `payload#prompt` is required; `payload#style` is optional.
-Completion publishes a render item that references an immutable artifact URI
-and hash. The binary image is not sent over XMPP.
-
-AI integration for this plugin is extension-owned:
-
-- The install/config forms expose extension-specific provider settings, not
-  provider credentials in Waddle server or chat state.
-- The WASM component performs provider work inside the extension and uses only
-  approved host tools for XMPP-native context and message/artifact operations.
-- Generated render metadata is published as immutable typed extension state
-  with an artifact digest.
-- User clients submit prompt/style text through XEP-0050 only and never see
-  provider API keys, OAuth tokens, endpoints, or headers.
+artifact state. This keeps it useful as the baseline AI example.
 
 ### Decision Polls
 
@@ -1153,11 +1067,11 @@ Example MAM replay:
                    id='archive-id-456'/>
         <extensions xmlns='urn:waddle:extension:1' version='1'>
           <enrichment id='enrich-1'
-                      plugin='links-task-board'
+                      plugin='link-board'
                       capability='message.enrich'
-                      payload-ns='urn:waddle:links-task-board:1'>
+                      payload-ns='urn:waddle:link-board:1'>
             <payload>
-              <link xmlns='urn:waddle:links-task-board:1'
+              <link xmlns='urn:waddle:link-board:1'
                     url='https://example.org/post'
                     title='Example Post'/>
             </payload>
@@ -1193,10 +1107,8 @@ Follow XEP-0280 exactly for DM carbons:
 
 Bot identities are XMPP JIDs on the extension component:
 
-- `links-task-board@extensions.<domain>`
-- `pub-quiz@extensions.<domain>`
+- `link-board@extensions.<domain>`
 - `ai-chatbot@extensions.<domain>`
-- `ai-assistant-canvas@extensions.<domain>`
 - `decision-polls@extensions.<domain>`
 
 Messages from bots use normal XMPP chat/groupchat messages with `from` set to
@@ -1219,7 +1131,7 @@ Allowed triggers:
 Disallowed triggers:
 
 - Standard AI Chatbot must not respond to every message passively.
-- Links Task Board must not post a chat reply merely because a link appeared.
+- Link Board must not post a chat reply merely because a link appeared.
 - Plugins must not receive messages from rooms where they are not installed.
 - Plugins must not use HTTP webhooks for Waddle control or user actions.
 - Plugins must not rely on client-supplied secrets.
@@ -1228,10 +1140,8 @@ Sample plugin trigger matrix:
 
 | Plugin | Capabilities | Triggers |
 | --- | --- | --- |
-| Links Task Board | `message.enrich`, `launch`, `commands`, `pubsub.publish`, `artifact.reference`, `ui.declarative` | OpenGraph link enrichment; `/links`; `/board`; `save-link` and `create-task` launches. |
-| Pub Quiz | `commands`, `launch`, `bot.respond`, `pubsub.publish`, `ui.declarative` | `/quiz start`; answer launches; scheduled question close from server state. |
+| Link Board | `message.enrich`, `launch`, `commands`, `pubsub.publish`, `artifact.reference`, `ui.declarative` | OpenGraph link enrichment; `/links`; `/board`; `save-link` and `create-task` launches. |
 | Standard AI Chatbot | `commands`, `launch`, `bot.respond`, `message.observe`, `channels.read`, `members.read`, `presence.read`, `message.send`, `mam.query`, `roster.read`, `bot.presence` | Mention, DM, reply, `/ai`; follow-up launch. |
-| AI Assistant Dynamic Canvas | `commands`, `launch`, `bot.respond`, `artifact.reference`, `pubsub.publish`, `ui.declarative` | `/canvas`; remix launch; mention if configured. |
 | Decision Polls | `commands`, `launch`, `bot.respond`, `pubsub.publish`, `ui.declarative` | `/poll`; vote launches; close poll command/timer. |
 
 ## Implementation Work Items
@@ -1404,7 +1314,7 @@ Must assert:
 - The renderer accepts allowed elements and rejects iframe URLs, raw HTML,
   scripts, style blocks, arbitrary CSS, event handler strings, remote fonts,
   and plugin DOM directives.
-- Images and canvas renders must reference immutable artifact routes with
+- Images and artifact-backed media must reference immutable artifact routes with
   digests.
 - Route visibility follows Waddle membership and installed grants.
 - Hidden routes are not exposed through command discovery, PubSub state, or
@@ -1418,10 +1328,10 @@ Must assert:
 
 - A message with a link gets exactly one top-level
   `<extensions xmlns='urn:waddle:extension:1'>`.
-- Links Task Board payload appears only under
+- Link Board payload appears only under
   `extensions/enrichment/payload/link`.
-- No direct top-level `urn:waddle:links-task-board:1` payload is present.
-- Links Task Board can create a task from a launch and persists sanitized
+- No direct top-level `urn:waddle:link-board:1` payload is present.
+- Link Board can create a task from a launch and persists sanitized
   OpenGraph metadata to the `opengraph-cache` node.
 - Multiple enrichers produce multiple `<enrichment/>` children under one
   framework envelope.
@@ -1467,13 +1377,9 @@ Add `server/crates/waddle-server/tests/waddle_extension_bot_triggers_ws.rs`.
 
 Must assert:
 
-- Links Task Board enriches link messages but does not post a bot reply.
-- `/quiz start` creates a Pub Quiz bot message with launchable answer choices.
-- Answer launch invokes XEP-0050 and publishes an admin-only submission item.
+- Link Board enriches link messages but does not post a bot reply.
 - Standard AI Chatbot responds to mention, DM, reply, and `/ai`, but not to unrelated
   room messages.
-- AI Assistant Dynamic Canvas `/canvas` publishes a render payload with immutable
-  artifact URI plus SHA-256.
 - Decision Polls `/poll` creates a poll message, vote launch records a vote in
   the admin-only votes node, and member-visible results omit voter JIDs unless
   the poll is public-voter.

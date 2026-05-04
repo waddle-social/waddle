@@ -36,13 +36,17 @@
 //!
 //! ## Service Discovery
 //!
-//! The MUC service advertises `urn:xmpp:muc-selfping:0` in disco#info
+//! The MUC service advertises
+//! `http://jabber.org/protocol/muc#self-ping-optimization` in disco#info
 //! to indicate support for the optimized self-ping flow.
 
-use xmpp_parsers::iq::{Iq, IqType};
+use xmpp_parsers::{
+    iq::{Iq, IqType},
+    stanza_error::DefinedCondition,
+};
 
-/// Feature string for XEP-0410 MUC Self-Ping.
-pub const FEATURE_MUC_SELFPING: &str = "urn:xmpp:muc-selfping:0";
+/// Feature string for XEP-0410 MUC Self-Ping optimization.
+pub const FEATURE_MUC_SELFPING: &str = "http://jabber.org/protocol/muc#self-ping-optimization";
 
 /// Namespace for XEP-0199 Ping (used in self-ping).
 const NS_PING: &str = "urn:xmpp:ping";
@@ -108,7 +112,15 @@ pub fn is_self_ping(iq: &Iq) -> bool {
 pub fn interpret_self_ping_response(response: &Iq) -> SelfPingResult {
     match &response.payload {
         IqType::Result(_) => SelfPingResult::Connected,
-        IqType::Error(_) => SelfPingResult::Disconnected,
+        IqType::Error(error) => match error.defined_condition {
+            DefinedCondition::ServiceUnavailable
+            | DefinedCondition::FeatureNotImplemented
+            | DefinedCondition::ItemNotFound => SelfPingResult::Connected,
+            DefinedCondition::RemoteServerNotFound | DefinedCondition::RemoteServerTimeout => {
+                SelfPingResult::Timeout
+            }
+            _ => SelfPingResult::Disconnected,
+        },
         _ => SelfPingResult::Timeout,
     }
 }
@@ -123,6 +135,7 @@ pub const PING_TIMEOUT_SECS: u64 = 10;
 mod tests {
     use super::*;
     use minidom::Element;
+    use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
     #[test]
     fn test_build_self_ping() {
@@ -184,18 +197,48 @@ mod tests {
         assert_eq!(interpret_self_ping_response(&iq), SelfPingResult::Connected);
     }
 
+    fn error_iq(condition: DefinedCondition) -> Iq {
+        Iq {
+            from: Some("room@muc.example.com/mynick".parse().expect("valid")),
+            to: Some("juliet@example.com/client".parse().expect("valid")),
+            id: "sp-err".to_owned(),
+            payload: IqType::Error(StanzaError::new(ErrorType::Cancel, condition, "en", "")),
+        }
+    }
+
     #[test]
-    fn test_interpret_error_disconnected() {
-        let xml =
-            "<iq xmlns='jabber:client' type='error' from='room@muc.example.com/mynick' id='sp-1'>\
-                    <error type='cancel'>\
-                      <not-acceptable xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'/>\
-                    </error>\
-                    </iq>";
-        let iq = Iq::try_from(xml.parse::<Element>().expect("valid xml")).expect("valid iq");
+    fn test_interpret_not_acceptable_as_disconnected() {
         assert_eq!(
-            interpret_self_ping_response(&iq),
+            interpret_self_ping_response(&error_iq(DefinedCondition::NotAcceptable)),
             SelfPingResult::Disconnected
+        );
+    }
+
+    #[test]
+    fn test_interpret_service_unavailable_as_connected() {
+        assert_eq!(
+            interpret_self_ping_response(&error_iq(DefinedCondition::ServiceUnavailable)),
+            SelfPingResult::Connected
+        );
+        assert_eq!(
+            interpret_self_ping_response(&error_iq(DefinedCondition::FeatureNotImplemented)),
+            SelfPingResult::Connected
+        );
+        assert_eq!(
+            interpret_self_ping_response(&error_iq(DefinedCondition::ItemNotFound)),
+            SelfPingResult::Connected
+        );
+    }
+
+    #[test]
+    fn test_interpret_remote_server_errors_as_timeout() {
+        assert_eq!(
+            interpret_self_ping_response(&error_iq(DefinedCondition::RemoteServerNotFound)),
+            SelfPingResult::Timeout
+        );
+        assert_eq!(
+            interpret_self_ping_response(&error_iq(DefinedCondition::RemoteServerTimeout)),
+            SelfPingResult::Timeout
         );
     }
 
@@ -217,6 +260,9 @@ mod tests {
     fn test_constants() {
         assert_eq!(RECOMMENDED_INTERVAL_SECS, 60);
         assert_eq!(PING_TIMEOUT_SECS, 10);
-        assert_eq!(FEATURE_MUC_SELFPING, "urn:xmpp:muc-selfping:0");
+        assert_eq!(
+            FEATURE_MUC_SELFPING,
+            "http://jabber.org/protocol/muc#self-ping-optimization"
+        );
     }
 }

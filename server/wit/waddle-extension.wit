@@ -47,6 +47,10 @@ interface types {
         value: string,
     }
 
+    record route-id {
+        value: string,
+    }
+
     record media-type {
         value: string,
     }
@@ -136,6 +140,15 @@ interface types {
         ui-declarative,
     }
 
+    enum extension-route-scope {
+        channel,
+    }
+
+    enum extension-route-surface {
+        gallery,
+        list-view,
+    }
+
     record payload-root {
         namespace: payload-namespace,
         local-name: string,
@@ -159,13 +172,30 @@ interface types {
         payloads: list<payload-rule>,
         capabilities: list<extension-capability>,
         commands: list<command-descriptor>,
+        routes: list<extension-route-descriptor>,
         pubsub-nodes: list<pubsub-node>,
         artifact: option<artifact-reference>,
+    }
+
+    enum command-scope {
+        global,
+        channel,
     }
 
     record command-descriptor {
         node: command-node,
         name: display-text,
+        scope: command-scope,
+    }
+
+    record extension-route-descriptor {
+        plugin: plugin-id,
+        id: route-id,
+        label: display-text,
+        scope: extension-route-scope,
+        surface: extension-route-surface,
+        state-node: pubsub-node,
+        payload-namespace: payload-namespace,
     }
 
     enum text-style {
@@ -289,6 +319,7 @@ interface types {
 
     record launch-context {
         waddle-id: waddle-id,
+        room: option<room-jid>,
         source-stanza-id: option<stanza-id>,
     }
 
@@ -366,6 +397,7 @@ interface types {
 
     record command-invocation {
         waddle-id: waddle-id,
+        room: option<room-jid>,
         requester: full-jid,
         command-node: command-node,
         session-id: option<command-session-id>,
@@ -586,6 +618,7 @@ interface types {
         body: display-text,
         thread-id: option<thread-id>,
         reply-to: option<reply-target>,
+        extensions: option<extension-envelope>,
     }
 
     record send-message-response {
@@ -661,6 +694,12 @@ interface runtime {
 
     get-config: func() -> string;
     http-request: func(request: outgoing-http-request) -> result<http-response, host-tool-error>;
+
+    /// Current wall-clock time, formatted as an RFC 3339 / ISO 8601 string in
+    /// UTC. Extensions call this when populating `created_at`, `expires_at`,
+    /// `saved-at` and similar fields so that wall-clock authority stays on the
+    /// host and every published item gets a fresh timestamp.
+    current-timestamp: func() -> string;
 }
 
 world waddle-extension {

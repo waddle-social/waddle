@@ -11,7 +11,8 @@
 //! - `<message type='groupchat'>` MUST NOT be carboned (§6.2).
 //! - `<private xmlns='urn:xmpp:carbons:2'/>` MUST suppress carbons (§6.1).
 //! - XEP-0334 `<no-copy xmlns='urn:xmpp:hints'/>` MUST suppress carbons.
-//! - Body-less messages SHOULD NOT be carboned (`should_copy_message`).
+//! - `type='chat'` messages remain eligible even without a `<body/>` (§6.1).
+//! - Body-less XEP-0085 / XEP-0184 / XEP-0333 payloads remain eligible (§6.1).
 //! - Error stanzas are not carboned.
 //!
 //! Locality / `kind` mapping:
@@ -115,6 +116,7 @@ mod tests {
             blocklist: &bl,
             carbons,
             muc_occupancy: &occ,
+            has_live_transport: true,
             id_gen: &gen,
         };
         let ctx = MessageContext::derive(env, msg);
@@ -212,9 +214,9 @@ mod tests {
     // -----------------------------------------------------------------
 
     #[test]
-    fn xep_0334_no_copy_hint_suppresses_carbons() {
+    fn xep_0334_no_copy_hint_suppresses_carbons_for_full_jid_targets() {
         let local = full("alice@example.com/web");
-        let mut msg = chat_with_body("alice@example.com/web", "bob@example.com", "shh");
+        let mut msg = chat_with_body("alice@example.com/web", "bob@example.com/phone", "shh");
         msg.payloads.push(
             Element::builder(Hint::NoCopy.element_name(), crate::xep::xep0334::NS_HINTS).build(),
         );
@@ -222,16 +224,41 @@ mod tests {
         assert!(extract_carbons(&outcome).is_empty());
     }
 
+    #[test]
+    fn xep_0334_no_copy_hint_does_not_override_bare_jid_routing() {
+        let local = full("alice@example.com/web");
+        let mut msg = chat_with_body("alice@example.com/web", "bob@example.com", "shh");
+        msg.payloads.push(
+            Element::builder(Hint::NoCopy.element_name(), crate::xep::xep0334::NS_HINTS).build(),
+        );
+        let outcome = run(&local, CarbonsState::Enabled, &mut msg);
+        let carbons = extract_carbons(&outcome);
+        assert_eq!(carbons.len(), 1);
+        assert_eq!(carbons[0].1, CarbonKind::Sent);
+    }
+
     // -----------------------------------------------------------------
     // Body-less and error stanzas
     // -----------------------------------------------------------------
 
     #[test]
-    fn xep_0280_body_less_message_is_not_carboned() {
+    fn xep_0280_body_less_chat_message_is_carboned() {
         let local = full("alice@example.com/web");
         let mut msg = Message::new(Some("bob@example.com".parse().expect("jid")));
         msg.from = Some("alice@example.com/web".parse().expect("jid"));
         msg.type_ = MessageType::Chat;
+        let outcome = run(&local, CarbonsState::Enabled, &mut msg);
+        let carbons = extract_carbons(&outcome);
+        assert_eq!(carbons.len(), 1);
+        assert_eq!(carbons[0].1, CarbonKind::Sent);
+    }
+
+    #[test]
+    fn xep_0280_body_less_normal_message_without_im_payload_is_not_carboned() {
+        let local = full("alice@example.com/web");
+        let mut msg = Message::new(Some("bob@example.com".parse().expect("jid")));
+        msg.from = Some("alice@example.com/web".parse().expect("jid"));
+        msg.type_ = MessageType::Normal;
         let outcome = run(&local, CarbonsState::Enabled, &mut msg);
         assert!(extract_carbons(&outcome).is_empty());
     }

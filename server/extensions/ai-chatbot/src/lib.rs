@@ -49,7 +49,13 @@ static PROVIDER_CONFIG: OnceLock<Result<ProviderConfig, ProviderConfigError>> = 
 
 impl exports::waddle::extension::lifecycle::Guest for AiChatbot {
     fn init(config: String) -> Result<types::ExtensionManifest, String> {
-        let _ = PROVIDER_CONFIG.set(ProviderConfig::parse(&config));
+        let parsed = ProviderConfig::parse(&config);
+        if let Err(error) = parsed.as_ref() {
+            return Err(format!(
+                "ai-chatbot provider configuration is invalid: {error}"
+            ));
+        }
+        let _ = PROVIDER_CONFIG.set(parsed);
         Ok(manifest())
     }
 }
@@ -80,9 +86,7 @@ fn handle_event_with_executor(
     executor: &dyn ProviderExecutor,
 ) -> Result<types::ExtensionResponse, types::ExtensionError> {
     let effects = match event {
-        types::ExtensionEvent::MessageHook(hook) => message_hook_response(hook, executor)
-            .map(|effect| vec![effect])
-            .unwrap_or_default(),
+        types::ExtensionEvent::MessageHook(_) => vec![],
         types::ExtensionEvent::Command(command) => {
             return command_response(command, executor).map(|effect| types::ExtensionResponse {
                 effects: effect.into_iter().collect(),
@@ -130,7 +134,8 @@ fn command_response_with_config(
             "the /ai command requires a prompt field",
         )
     })?;
-    let context = ExecutionContext::command(command.requester, prompt);
+    let response_target = command_response_target(&command)?;
+    let context = ExecutionContext::command(command.requester, prompt, response_target);
     execute_for_context_with_config(context, executor, config).map(Some)
 }
 
@@ -139,85 +144,43 @@ fn prompt_command_form() -> types::DataForm {
         form_type: types::DataFormType::Form,
         title: Some(display("Ask AI")),
         instructions: vec![display("Enter a prompt for the AI extension.")],
-        fields: vec![types::DataFormField {
-            name: types::UiActionId {
-                value: "prompt".to_string(),
+        fields: vec![
+            types::DataFormField {
+                name: types::UiActionId {
+                    value: "prompt".to_string(),
+                },
+                field_type: types::FormFieldType::TextMulti,
+                label: Some(display("Prompt")),
+                required: true,
+                values: vec![],
+                options: vec![],
             },
-            field_type: types::FormFieldType::TextMulti,
-            label: Some(display("Prompt")),
-            required: true,
-            values: vec![],
-            options: vec![],
-        }],
-    }
-}
-
-fn message_hook_response(
-    hook: types::MessageHook,
-    executor: &dyn ProviderExecutor,
-) -> Option<types::ExtensionEffect> {
-    message_hook_response_with_config(hook, executor, provider_config())
-}
-
-fn message_hook_response_with_config(
-    hook: types::MessageHook,
-    executor: &dyn ProviderExecutor,
-    config: Result<ProviderConfig, types::ExtensionError>,
-) -> Option<types::ExtensionEffect> {
-    let body = hook.body.value.clone();
-    let explicit_trigger = starts_with_ai_command(&body) || contains_waddle_mention(&body);
-    let types::MessageContext {
-        waddle_id: _,
-        room,
-        sender,
-        thread_id,
-        stanza_id,
-        reply_to,
-    } = hook.context;
-    let in_thread = thread_id.is_some();
-    let is_reply = reply_to.is_some();
-    if is_reply && !in_thread {
-        return None;
-    }
-    let trigger = match MessageTrigger::from_body(&body) {
-        Some(trigger) => trigger,
-        None if explicit_trigger => {
-            let target = ResponseTarget {
-                room: room?,
-                thread_id,
-                reply_to: stanza_id.map(|id| types::ReplyTarget { id, to: None }),
-                focus_thread: in_thread,
-            };
-            return Some(room_error_effect(
-                target,
-                extension_error(
-                    types::ExtensionErrorCode::InvalidRequest,
-                    "AI request needs a prompt after /ai or @waddle",
-                ),
-            ));
-        }
-        None => return None,
-    };
-
-    let room = room?;
-    let reply_to = stanza_id.map(|id| types::ReplyTarget { id, to: None });
-    let context = ExecutionContext {
-        requester: sender
-            .as_ref()
-            .and_then(|jid| bare_jid_from_full(&jid.value)),
-        prompt: trigger.prompt,
-        response_target: Some(ResponseTarget {
-            room,
-            thread_id,
-            reply_to,
-            focus_thread: in_thread,
-        }),
-    };
-    match execute_for_context_with_config(context.clone(), executor, config) {
-        Ok(effect) => Some(effect),
-        Err(error) => context
-            .response_target
-            .map(|target| room_error_effect(target, error)),
+            types::DataFormField {
+                name: types::UiActionId {
+                    value: "output".to_string(),
+                },
+                field_type: types::FormFieldType::ListSingle,
+                label: Some(display("Output")),
+                required: true,
+                values: vec![types::DataFormValue {
+                    value: "private".to_string(),
+                }],
+                options: vec![
+                    types::FormFieldOption {
+                        label: Some(display("Private")),
+                        value: types::DataFormValue {
+                            value: "private".to_string(),
+                        },
+                    },
+                    types::FormFieldOption {
+                        label: Some(display("Post to channel")),
+                        value: types::DataFormValue {
+                            value: "channel".to_string(),
+                        },
+                    },
+                ],
+            },
+        ],
     }
 }
 
@@ -244,6 +207,39 @@ fn command_prompt(command: &types::CommandInvocation) -> Option<CleanPrompt> {
         .and_then(|value| CleanPrompt::new(clean_prompt(&value.value)))
 }
 
+fn command_response_target(
+    command: &types::CommandInvocation,
+) -> Result<Option<ResponseTarget>, types::ExtensionError> {
+    let output = command
+        .fields
+        .iter()
+        .find(|field| field.name.value == "output")
+        .and_then(|field| field.values.first())
+        .map(|value| value.value.as_str())
+        .unwrap_or("private");
+    match output {
+        "private" => Ok(None),
+        "channel" => {
+            let Some(room) = command.room.clone() else {
+                return Err(extension_error(
+                    types::ExtensionErrorCode::InvalidRequest,
+                    "posting an AI answer to a channel requires an active channel",
+                ));
+            };
+            Ok(Some(ResponseTarget {
+                room,
+                thread_id: None,
+                reply_to: None,
+                focus_thread: false,
+            }))
+        }
+        _ => Err(extension_error(
+            types::ExtensionErrorCode::InvalidRequest,
+            "unsupported AI output target",
+        )),
+    }
+}
+
 fn response_effect(
     target: Option<ResponseTarget>,
     answer: ProviderAnswer,
@@ -255,17 +251,6 @@ fn response_effect(
     Ok(types::ExtensionEffect::Noop)
 }
 
-fn room_error_effect(
-    target: ResponseTarget,
-    error: types::ExtensionError,
-) -> types::ExtensionEffect {
-    let body = display(&format!("AI request failed: {}", error.message.value));
-    match send_room_message(&target, body) {
-        Ok(()) => types::ExtensionEffect::Noop,
-        Err(send_error) => types::ExtensionEffect::HostWarning(send_error.message),
-    }
-}
-
 fn room_message_request(
     target: &ResponseTarget,
     body: types::DisplayText,
@@ -275,6 +260,7 @@ fn room_message_request(
         body,
         thread_id: target.thread_id.clone(),
         reply_to: target.reply_to.clone(),
+        extensions: None,
     }
 }
 
@@ -332,9 +318,7 @@ fn command_answer_effect(answer: ProviderAnswer) -> types::ExtensionEffect {
             plugin: plugin_id(),
             capability: types::ExtensionCapability::MessageEnrich,
             payload_namespace: payload_namespace(),
-            created_at: types::Timestamp {
-                value: "1970-01-01T00:00:00Z".to_string(),
-            },
+            created_at: timestamp(),
             source: None,
             ui: vec![types::UiView {
                 id: types::UiViewId {
@@ -558,11 +542,15 @@ struct ExecutionContext {
 }
 
 impl ExecutionContext {
-    fn command(requester: types::FullJid, prompt: CleanPrompt) -> Self {
+    fn command(
+        requester: types::FullJid,
+        prompt: CleanPrompt,
+        response_target: Option<ResponseTarget>,
+    ) -> Self {
         Self {
             requester: bare_jid_from_full(&requester.value),
             prompt,
-            response_target: None,
+            response_target,
         }
     }
 }
@@ -1374,49 +1362,12 @@ fn host_tool(tool: HostTool) -> HostToolRequest {
     HostToolRequest { tool }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct MessageTrigger {
-    prompt: CleanPrompt,
-}
-
-impl MessageTrigger {
-    fn from_body(body: &str) -> Option<Self> {
-        let explicit_mention = contains_waddle_mention(body);
-        let slash_trigger = starts_with_ai_command(body);
-        if !explicit_mention && !slash_trigger {
-            return None;
-        }
-        CleanPrompt::new(clean_prompt(body)).map(|prompt| Self { prompt })
-    }
-}
-
-fn contains_waddle_mention(body: &str) -> bool {
-    let lower = body.to_ascii_lowercase();
-    let bytes = lower.as_bytes();
-    lower.match_indices(WADDLE_MENTION).any(|(start, mention)| {
-        let previous = start.checked_sub(1).and_then(|index| bytes.get(index));
-        is_mention_start_boundary(previous) && is_word_boundary(bytes.get(start + mention.len()))
-    })
-}
-
-fn starts_with_ai_command(body: &str) -> bool {
-    let trimmed = body.trim_start();
-    has_ai_command_prefix(trimmed) && is_command_boundary(trimmed.as_bytes().get(AI_COMMAND.len()))
-}
-
 fn is_command_boundary(next: Option<&u8>) -> bool {
     matches!(next, None | Some(b' ' | b'\t' | b'\r' | b'\n'))
 }
 
 fn is_word_boundary(next: Option<&u8>) -> bool {
     !matches!(next, Some(b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_'))
-}
-
-fn is_mention_start_boundary(previous: Option<&u8>) -> bool {
-    !matches!(
-        previous,
-        Some(b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_' | b'.' | b'-')
-    )
 }
 
 fn manifest() -> types::ExtensionManifest {
@@ -1432,7 +1383,6 @@ fn manifest() -> types::ExtensionManifest {
         )],
         capabilities: vec![
             types::ExtensionCapability::MessageEnrich,
-            types::ExtensionCapability::MessageObserve,
             types::ExtensionCapability::HostMamRead,
             types::ExtensionCapability::HostMembersRead,
             types::ExtensionCapability::HostPresenceRead,
@@ -1443,7 +1393,12 @@ fn manifest() -> types::ExtensionManifest {
             types::ExtensionCapability::OutboundHttpRequest,
             types::ExtensionCapability::Commands,
         ],
-        commands: vec![command_descriptor(COMMAND_NODE, AI_COMMAND)],
+        commands: vec![command_descriptor(
+            COMMAND_NODE,
+            AI_COMMAND,
+            types::CommandScope::Global,
+        )],
+        routes: vec![],
         pubsub_nodes: vec![],
         artifact: None,
     }
@@ -1510,12 +1465,17 @@ fn payload_rule(surface: types::PayloadSurface, root: &str) -> types::PayloadRul
     }
 }
 
-fn command_descriptor(node: &str, name: &str) -> types::CommandDescriptor {
+fn command_descriptor(
+    node: &str,
+    name: &str,
+    scope: types::CommandScope,
+) -> types::CommandDescriptor {
     types::CommandDescriptor {
         node: types::CommandNode {
             value: node.to_string(),
         },
         name: display(name),
+        scope,
     }
 }
 
@@ -1531,6 +1491,22 @@ fn display(value: &str) -> types::DisplayText {
     }
 }
 
+fn timestamp() -> types::Timestamp {
+    types::Timestamp {
+        value: current_timestamp_value(),
+    }
+}
+
+#[cfg(not(test))]
+fn current_timestamp_value() -> String {
+    runtime::current_timestamp()
+}
+
+#[cfg(test)]
+fn current_timestamp_value() -> String {
+    "1970-01-01T00:00:00Z".to_string()
+}
+
 fn extension_error(code: types::ExtensionErrorCode, message: &str) -> types::ExtensionError {
     types::ExtensionError {
         code,
@@ -1542,21 +1518,15 @@ fn extension_error(code: types::ExtensionErrorCode, message: &str) -> types::Ext
 mod tests {
     use super::{
         assemble_provider_request, clean_prompt, command_response_with_config,
-        contains_waddle_mention, execute_provider_request_with_runtime, extension_error,
-        format_archived_messages, manifest, message_hook_response,
-        message_hook_response_with_config, parse_provider_answer, provider_execution_error,
-        provider_request_headers, provider_request_json, provider_request_json_from_parts,
-        provider_tool_mam_query, select_host_tools, sent_room_messages, starts_with_ai_command,
-        types, CleanPrompt, ExecutionContext, HostTool, NonEmptyString, ProviderAnswer,
-        ProviderConfig, ProviderExecutionError, ProviderExecutor, ProviderRequest, ProviderRole,
-        ResponseTarget, BASELINE_SYSTEM_PROMPT, COMMAND_NODE, MAX_CONTEXT_BYTES,
+        execute_provider_request_with_runtime, extension_error, format_archived_messages, manifest,
+        parse_provider_answer, provider_execution_error, provider_request_headers,
+        provider_request_json, provider_request_json_from_parts, provider_tool_mam_query,
+        select_host_tools, types, CleanPrompt, ExecutionContext, HostTool, NonEmptyString,
+        ProviderAnswer, ProviderConfig, ProviderExecutionError, ProviderExecutor, ProviderRequest,
+        ProviderRole, ResponseTarget, BASELINE_SYSTEM_PROMPT, COMMAND_NODE, MAX_CONTEXT_BYTES,
         MAX_CONTEXT_LINE_BYTES, MAX_PROVIDER_TOOL_CALLS_PER_ROUND, OPENROUTER_REFERER,
         OPENROUTER_TITLE,
     };
-
-    mod shared_ai_prompt_cases {
-        include!("../../../test-fixtures/ai_prompt_cases.rs");
-    }
 
     struct FakeExecutor {
         answer: Result<ProviderAnswer, ProviderExecutionError>,
@@ -1569,30 +1539,6 @@ mod tests {
         ) -> Result<ProviderAnswer, ProviderExecutionError> {
             self.answer.clone()
         }
-    }
-
-    #[test]
-    fn detects_ai_root_command_case_insensitively_with_boundary() {
-        assert!(starts_with_ai_command("/ai summarize"));
-        assert!(starts_with_ai_command("  /AI"));
-        assert!(starts_with_ai_command("/Ai\tthread"));
-        assert!(!starts_with_ai_command("prefix /ai"));
-        assert!(!starts_with_ai_command("/airship"));
-        assert!(!starts_with_ai_command("☃ /ai later"));
-    }
-
-    #[test]
-    fn detects_waddle_mention_case_insensitively_with_boundary() {
-        assert!(contains_waddle_mention("@waddle summarize"));
-        assert!(contains_waddle_mention("can @Waddle help?"));
-        assert!(contains_waddle_mention("@WADDLE"));
-        assert!(contains_waddle_mention("(@waddle) help"));
-        assert!(!contains_waddle_mention("@waddled"));
-        assert!(!contains_waddle_mention("@waddle_bot"));
-        assert!(!contains_waddle_mention("alice@waddle.social can help"));
-        assert!(!contains_waddle_mention(
-            "prefix-@waddle should not trigger"
-        ));
     }
 
     #[test]
@@ -1614,85 +1560,19 @@ mod tests {
     }
 
     #[test]
-    fn shared_ai_prompt_cases_match_extension_parser() {
-        for &(body, is_prompt, cleaned) in shared_ai_prompt_cases::AI_PROMPT_CASES {
-            assert_eq!(
-                starts_with_ai_command(body) || contains_waddle_mention(body),
-                is_prompt,
-                "{body}"
-            );
-            assert_eq!(clean_prompt(body), cleaned, "{body}");
-        }
-    }
-
-    #[test]
-    fn ignores_root_feed_replies_even_when_they_mention_ai() {
-        let hook = message_hook("/ai summarize this reply", None, Some("parent-msg"));
-        let executor = success_executor("unused");
-        assert!(message_hook_response(hook, &executor).is_none());
-    }
-
-    #[test]
-    fn allows_threaded_followups_with_slash_ai() {
-        let _guard = test_lock().lock().expect("test lock");
-        sent_room_messages().lock().expect("sent messages").clear();
-        let hook = message_hook("/ai continue", Some("thread-root"), Some("parent-msg"));
-        let executor = success_executor("continued");
-        assert!(message_hook_response_with_config(hook, &executor, test_config()).is_some());
-    }
-
-    #[test]
-    fn provider_unavailable_emits_clear_room_error_for_explicit_trigger() {
-        let _guard = test_lock().lock().expect("test lock");
-        sent_room_messages().lock().expect("sent messages").clear();
-        let hook = message_hook("/ai summarize the release notes", None, None);
-        let executor = FakeExecutor {
-            answer: Err(ProviderExecutionError::Http(
-                "provider transport failed".to_string(),
-            )),
-        };
-        let response =
-            message_hook_response_with_config(hook, &executor, test_config()).expect("response");
-        match response {
-            types::ExtensionEffect::Noop => {}
-            other => panic!("unexpected response: {other:?}"),
-        }
-        let sent = sent_room_messages().lock().expect("sent messages");
-        assert_eq!(sent.len(), 1);
-        assert!(sent[0].body.value.contains("AI request failed"));
-        assert!(sent[0].body.value.contains("provider transport failed"));
-    }
-
-    #[test]
-    fn invalid_prompt_error_does_not_reuse_incoming_reply_without_source_stanza_id() {
-        let _guard = test_lock().lock().expect("test lock");
-        sent_room_messages().lock().expect("sent messages").clear();
-        let mut hook = message_hook("/ai", Some("thread-root"), Some("parent-msg"));
-        hook.context.stanza_id = None;
-        let executor = success_executor("unused");
-        let response =
-            message_hook_response_with_config(hook, &executor, test_config()).expect("response");
-        let types::ExtensionEffect::Noop = response else {
-            panic!("expected sent error message");
-        };
-        let sent = sent_room_messages().lock().expect("sent messages");
-        assert_eq!(sent.len(), 1);
-        assert!(sent[0].body.value.contains("AI request needs a prompt"));
-        assert_eq!(sent[0].thread_id.as_ref().unwrap().value, "thread-root");
-        assert!(sent[0].reply_to.is_none());
-    }
-
-    #[test]
     fn manifest_registers_slash_ai_as_extension_command() {
         let manifest = manifest();
         assert_eq!(manifest.commands.len(), 1);
         assert_eq!(manifest.commands[0].node.value, COMMAND_NODE);
         assert_eq!(manifest.commands[0].name.value, "/ai");
+        assert!(matches!(
+            manifest.commands[0].scope,
+            types::CommandScope::Global,
+        ));
         assert_eq!(
             manifest.capabilities,
             vec![
                 types::ExtensionCapability::MessageEnrich,
-                types::ExtensionCapability::MessageObserve,
                 types::ExtensionCapability::HostMamRead,
                 types::ExtensionCapability::HostMembersRead,
                 types::ExtensionCapability::HostPresenceRead,
@@ -2247,73 +2127,6 @@ mod tests {
     }
 
     #[test]
-    fn sends_provider_response_to_original_room_thread_and_reply_target() {
-        let _guard = test_lock().lock().expect("test lock");
-        sent_room_messages().lock().expect("sent messages").clear();
-        let hook = message_hook("@waddle answer", Some("thread-root"), Some("parent-msg"));
-        let executor = success_executor("extension-owned answer");
-        let effect =
-            message_hook_response_with_config(hook, &executor, test_config()).expect("response");
-        let types::ExtensionEffect::Noop = effect else {
-            panic!("expected sent-message effect");
-        };
-        let sent = sent_room_messages().lock().expect("sent messages");
-        assert_eq!(sent.len(), 1);
-        assert_eq!(sent[0].body.value, "extension-owned answer");
-        assert_eq!(sent[0].thread_id.as_ref().unwrap().value, "thread-root");
-        assert_eq!(sent[0].reply_to.as_ref().unwrap().id.value, "source-msg");
-        match &sent[0].target {
-            types::MessageTarget::Muc(room) => assert_eq!(room.value, "chat@muc.example.com"),
-            other => panic!("unexpected target: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn sends_root_feed_slash_ai_response_without_thread_id() {
-        let _guard = test_lock().lock().expect("test lock");
-        sent_room_messages().lock().expect("sent messages").clear();
-        let hook = message_hook("/ai answer in the root feed", None, None);
-        let executor = success_executor("root-feed answer");
-        let effect =
-            message_hook_response_with_config(hook, &executor, test_config()).expect("response");
-        let types::ExtensionEffect::Noop = effect else {
-            panic!("expected sent-message effect");
-        };
-        let sent = sent_room_messages().lock().expect("sent messages");
-        assert_eq!(sent.len(), 1);
-        assert_eq!(sent[0].body.value, "root-feed answer");
-        assert!(sent[0].thread_id.is_none());
-        assert_eq!(sent[0].reply_to.as_ref().unwrap().id.value, "source-msg");
-        match &sent[0].target {
-            types::MessageTarget::Muc(room) => assert_eq!(room.value, "chat@muc.example.com"),
-            other => panic!("unexpected target: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn does_not_reuse_incoming_reply_target_without_source_stanza_id() {
-        let _guard = test_lock().lock().expect("test lock");
-        sent_room_messages().lock().expect("sent messages").clear();
-        let mut hook = message_hook(
-            "/ai answer this reply",
-            Some("thread-root"),
-            Some("parent-msg"),
-        );
-        hook.context.stanza_id = None;
-        let executor = success_executor("reply-safe answer");
-        let effect =
-            message_hook_response_with_config(hook, &executor, test_config()).expect("response");
-        let types::ExtensionEffect::Noop = effect else {
-            panic!("expected sent-message effect");
-        };
-        let sent = sent_room_messages().lock().expect("sent messages");
-        assert_eq!(sent.len(), 1);
-        assert_eq!(sent[0].body.value, "reply-safe answer");
-        assert_eq!(sent[0].thread_id.as_ref().unwrap().value, "thread-root");
-        assert!(sent[0].reply_to.is_none());
-    }
-
-    #[test]
     fn command_missing_provider_config_returns_clear_error_not_room_reply() {
         let command = command_invocation("summarize");
         let executor = success_executor("unused");
@@ -2477,16 +2290,12 @@ mod tests {
         }
     }
 
-    fn test_lock() -> &'static std::sync::Mutex<()> {
-        static TEST_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        TEST_LOCK.get_or_init(|| std::sync::Mutex::new(()))
-    }
-
     fn command_invocation(prompt: &str) -> types::CommandInvocation {
         types::CommandInvocation {
             waddle_id: types::WaddleId {
                 value: "space".to_string(),
             },
+            room: None,
             requester: types::FullJid {
                 value: "alice@example.com/work".to_string(),
             },
@@ -2504,42 +2313,6 @@ mod tests {
                     value: prompt.to_string(),
                 }],
             }],
-        }
-    }
-
-    fn message_hook(
-        body: &str,
-        thread_id: Option<&str>,
-        reply_to: Option<&str>,
-    ) -> types::MessageHook {
-        types::MessageHook {
-            context: types::MessageContext {
-                waddle_id: types::WaddleId {
-                    value: "space".to_string(),
-                },
-                stanza_id: Some(types::StanzaId {
-                    value: "source-msg".to_string(),
-                }),
-                room: Some(types::RoomJid {
-                    value: "chat@muc.example.com".to_string(),
-                }),
-                sender: Some(types::FullJid {
-                    value: "alice@example.com/web".to_string(),
-                }),
-                thread_id: thread_id.map(|value| types::ThreadId {
-                    value: value.to_string(),
-                }),
-                reply_to: reply_to.map(|id| types::ReplyTarget {
-                    id: types::StanzaId {
-                        value: id.to_string(),
-                    },
-                    to: None,
-                }),
-            },
-            body: types::DisplayText {
-                value: body.to_string(),
-            },
-            links: vec![],
         }
     }
 }

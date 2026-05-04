@@ -94,17 +94,33 @@ pub fn is_correction_message(msg: &Message) -> bool {
 
 // ── Extraction ───────────────────────────────────────────────────────
 
+/// Parse the correction from a message's payloads.
+///
+/// Returns `Ok(Some(Correction))` when the message contains a conformant
+/// `<replace/>` element, `Ok(None)` when no correction payload is present, and
+/// `Err(CorrectionError::MissingId)` when any `<replace/>` omits the required
+/// non-empty `id` attribute mandated by XEP-0308.
+pub fn parse_correction_from_message(msg: &Message) -> Result<Option<Correction>, CorrectionError> {
+    let Some(elem) = msg.payloads.iter().find(|elem| is_replace_element(elem)) else {
+        return Ok(None);
+    };
+
+    let id = elem
+        .attr("id")
+        .filter(|id| !id.is_empty())
+        .ok_or(CorrectionError::MissingId)?;
+
+    Ok(Some(Correction::new(id.to_owned())))
+}
+
 /// Extract the correction from a message's payloads.
 ///
-/// Returns `Some(Correction)` if the message contains a `<replace/>` element
-/// with a non-empty `id` attribute.
+/// Returns `Some(Correction)` if the message contains a conformant `<replace/>`
+/// element with a non-empty `id` attribute. Malformed correction payloads are
+/// ignored here; use [`parse_correction_from_message`] when they must be
+/// surfaced as protocol errors.
 pub fn extract_correction_from_message(msg: &Message) -> Option<Correction> {
-    msg.payloads
-        .iter()
-        .find(|e| is_replace_element(e))
-        .and_then(|e| e.attr("id"))
-        .filter(|id| !id.is_empty())
-        .map(Correction::new)
+    parse_correction_from_message(msg).ok().flatten()
 }
 
 /// Extract the replaced message id from a correction message.
@@ -205,7 +221,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_correction() {
+    fn test_parse_correction() {
         let xml = "<message xmlns='jabber:client' type='chat' id='new-1'>\
                     <body>Corrected text</body>\
                     <replace xmlns='urn:xmpp:message-correct:0' id='orig-42'/>\
@@ -213,8 +229,11 @@ mod tests {
         let msg =
             Message::try_from(xml.parse::<Element>().expect("valid xml")).expect("valid message");
 
-        let correction = extract_correction_from_message(&msg).expect("has correction");
+        let correction = parse_correction_from_message(&msg)
+            .expect("valid correction")
+            .expect("has correction");
         assert_eq!(correction.replaces_id, "orig-42");
+        assert_eq!(extract_correction_from_message(&msg), Some(correction));
     }
 
     #[test]
@@ -224,14 +243,48 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_correction_empty_id_ignored() {
+    fn test_parse_correction_missing_id_errors() {
+        let xml = "<message xmlns='jabber:client' type='chat'>\
+                    <body>Bad</body>\
+                    <replace xmlns='urn:xmpp:message-correct:0'/>\
+                    </message>";
+        let msg =
+            Message::try_from(xml.parse::<Element>().expect("valid xml")).expect("valid message");
+        assert!(matches!(
+            parse_correction_from_message(&msg),
+            Err(CorrectionError::MissingId)
+        ));
+        assert!(extract_correction_from_message(&msg).is_none());
+    }
+
+    #[test]
+    fn test_parse_correction_empty_id_errors() {
         let xml = "<message xmlns='jabber:client' type='chat'>\
                     <body>Bad</body>\
                     <replace xmlns='urn:xmpp:message-correct:0' id=''/>\
                     </message>";
         let msg =
             Message::try_from(xml.parse::<Element>().expect("valid xml")).expect("valid message");
+        assert!(matches!(
+            parse_correction_from_message(&msg),
+            Err(CorrectionError::MissingId)
+        ));
         assert!(extract_correction_from_message(&msg).is_none());
+    }
+
+    #[test]
+    fn test_parse_correction_ignores_later_malformed_replace() {
+        let xml = "<message xmlns='jabber:client' type='chat'>\
+                    <body>Fixed</body>\
+                    <replace xmlns='urn:xmpp:message-correct:0' id='orig-1'/>\
+                    <replace xmlns='urn:xmpp:message-correct:0' id=''/>\
+                    </message>";
+        let msg =
+            Message::try_from(xml.parse::<Element>().expect("valid xml")).expect("valid message");
+        let correction = parse_correction_from_message(&msg)
+            .expect("valid correction")
+            .expect("has correction");
+        assert_eq!(correction.replaces_id, "orig-1");
     }
 
     #[test]

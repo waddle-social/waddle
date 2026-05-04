@@ -16,6 +16,7 @@ import inbox from "./inbox";
 import encryptedFile from "./encrypted-file";
 import stanzaIds from "./stanza-ids";
 import framework from "./framework";
+import extensionRouteItems from "./extension-route-items";
 
 const allDefinitions = [
   ...hats,
@@ -34,6 +35,7 @@ const allDefinitions = [
   ...encryptedFile,
   ...stanzaIds,
   ...framework,
+  ...extensionRouteItems,
 ];
 
 export function registerWaddleExtensions(client: Agent): void {
