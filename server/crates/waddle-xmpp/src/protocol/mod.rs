@@ -24,6 +24,7 @@
 //! adapter and its async interpreter remain the caller's responsibility.
 
 pub mod dispatch;
+pub mod dm_routing;
 pub mod event;
 pub mod frame;
 pub mod handlers;
