@@ -292,14 +292,6 @@ pub struct WaddlePresence {
 }
 
 #[derive(Debug, Serialize)]
-pub struct WaddleRoom {
-    pub jid: String,
-    pub name: String,
-    pub channel_type: String,
-    pub position: i32,
-}
-
-#[derive(Debug, Serialize)]
 pub struct WaddleAvatar {
     pub jid: String,
     pub id: String,
@@ -1358,41 +1350,6 @@ impl WaddleClient {
             let slot = discovery::parse_upload_slot(&result)
                 .ok_or_else(|| js_error("could not parse upload slot"))?;
             to_js_value(&upload_slot_to_js(slot))
-        })
-    }
-
-    pub fn list_rooms(&self) -> Promise {
-        let inner = self.inner.clone();
-        future_to_promise(async move {
-            let spaces_domain = {
-                let stored = inner.borrow().config.clone();
-                format!("spaces.{}", jid_domain(&stored.jid))
-            };
-
-            let space_items =
-                send_iq_command(inner.clone(), build_disco_items_iq(&spaces_domain, None)).await?;
-            let Some(space) = discovery::parse_disco_items_result(&space_items)
-                .and_then(|items| items.into_iter().next())
-            else {
-                return to_js_value(&Vec::<WaddleRoom>::new());
-            };
-            let space_node = space.node.unwrap_or_else(|| space.jid.clone());
-            let rooms_result = send_iq_command(
-                inner,
-                build_disco_items_iq(&spaces_domain, Some(&space_node)),
-            )
-            .await?;
-            let rooms = discovery::parse_disco_items_result(&rooms_result)
-                .unwrap_or_default()
-                .into_iter()
-                .map(|item| WaddleRoom {
-                    jid: item.jid,
-                    name: item.name.unwrap_or_default(),
-                    channel_type: "text".to_string(),
-                    position: 0,
-                })
-                .collect::<Vec<_>>();
-            to_js_value(&rooms)
         })
     }
 
