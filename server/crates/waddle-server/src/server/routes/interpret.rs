@@ -210,6 +210,12 @@ pub struct Deps<'a> {
     /// recipient-pass runner constructs. `None` in unit tests that
     /// don't exercise the offline-pass.
     pub message_dispatcher: Option<&'a Arc<StanzaDispatcher>>,
+    /// XEP-0160 offline-message storage backend (issue #209). Used by
+    /// the [`OutboundEvent::QueueOfflineDelivery`] interpret arm to
+    /// persist offline DM stanzas during the headless recipient pass.
+    /// `None` in unit tests that don't exercise the offline-pass.
+    pub pending_delivery_storage:
+        Option<&'a Arc<dyn waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage>>,
 }
 
 impl<'a> Deps<'a> {
@@ -232,6 +238,7 @@ impl<'a> Deps<'a> {
             local_domain: "example.com",
             blocking_storage: None,
             message_dispatcher: None,
+            pending_delivery_storage: None,
         }
     }
 
@@ -256,6 +263,7 @@ impl<'a> Deps<'a> {
             local_domain: "example.com",
             blocking_storage: None,
             message_dispatcher: None,
+            pending_delivery_storage: None,
         }
     }
 
@@ -278,6 +286,7 @@ impl<'a> Deps<'a> {
             local_domain: "example.com",
             blocking_storage: None,
             message_dispatcher: None,
+            pending_delivery_storage: None,
         }
     }
 }
@@ -1039,6 +1048,59 @@ async fn interpret_with_depth(
                     timer_id = id.0,
                     "OutboundEvent variant not yet wired in interpreter"
                 );
+            }
+            OutboundEvent::QueueOfflineDelivery {
+                recipient,
+                payload,
+                original_receipt_at,
+            } => {
+                // XEP-0160 §3 step 2/4 — persist for later delivery.
+                // The classifier and OfflineDeliveryHandler have already
+                // applied XEP-0160 §4 type rules and the XEP-0334 hint
+                // matrix; here we just write the row.
+                let Some(storage) = deps.pending_delivery_storage else {
+                    warn!(
+                        recipient = %recipient,
+                        "QueueOfflineDelivery emitted but pending_delivery_storage is not wired; \
+                         dropping (test fixture or unwired deployment)"
+                    );
+                    continue;
+                };
+                let row = waddle_xmpp::pending_delivery::PendingRow {
+                    recipient: recipient.clone(),
+                    original_receipt_at,
+                    payload,
+                    flushed_in_session: None,
+                };
+                match storage.insert(row).await {
+                    Ok(waddle_xmpp::pending_delivery::InsertOutcome::Inserted) => {
+                        debug!(
+                            recipient = %recipient,
+                            "pending_delivery row inserted"
+                        );
+                    }
+                    Ok(waddle_xmpp::pending_delivery::InsertOutcome::QuotaExceeded) => {
+                        // XEP-0160 §3 step 3: server returns
+                        // <service-unavailable/> to the sender. The
+                        // bounce wire-shape is owned by the routing
+                        // layer; here we surface the quota event so a
+                        // future arm can consume and emit the bounce.
+                        // For now, log loudly so production can spot
+                        // the unhandled case.
+                        warn!(
+                            recipient = %recipient,
+                            "pending_delivery quota exceeded — XEP-0160 §3 step 3 \
+                             service-unavailable bounce path not yet wired"
+                        );
+                    }
+                    Err(error) => {
+                        warn!(
+                            recipient = %recipient,
+                            error = %error,
+                            "pending_delivery insert failed"
+                        );
+                    }
+                }
             }
         }
     }
@@ -3378,6 +3440,7 @@ mod tests {
             local_domain: "example.com",
             blocking_storage: None,
             message_dispatcher: None,
+            pending_delivery_storage: None,
         };
         let _outcome = interpret(
             vec![OutboundEvent::SendCarbons {
@@ -4694,6 +4757,7 @@ mod tests {
             local_domain: "example.com",
             blocking_storage: Some(blocking),
             message_dispatcher: Some(dispatcher),
+            pending_delivery_storage: None,
         }
     }
 
@@ -5182,6 +5246,7 @@ mod tests {
             local_domain: "example.com",
             blocking_storage: None,
             message_dispatcher: None,
+            pending_delivery_storage: None,
         };
 
         let setter: jid::BareJid = "alice@example.com".parse().expect("setter bare jid");

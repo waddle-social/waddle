@@ -432,6 +432,7 @@ pub async fn handle_iq_with_conn_state(
             local_domain: state.deps.auth_state.xmpp_domain.as_str(),
             blocking_storage: Some(&state.deps.protocol.blocking_storage),
             message_dispatcher: Some(&state.deps.protocol.dispatcher),
+            pending_delivery_storage: Some(&state.deps.protocol.pending_delivery_storage),
         };
         let outcome = crate::server::routes::interpret::interpret(events, &deps).await;
         if outcome.close {

@@ -1119,6 +1119,9 @@ async fn create_router(
                 mam_storage,
                 inbox_storage: Arc::clone(&state.inbox_storage),
                 blocking_storage,
+                pending_delivery_storage: Arc::new(
+                    waddle_xmpp::pending_delivery::storage::InMemoryPendingDeliveryStorage::with_default_quota(),
+                ),
                 command_registry: websocket_command_registry,
                 extension_manager,
                 dispatcher: stanza_dispatcher,

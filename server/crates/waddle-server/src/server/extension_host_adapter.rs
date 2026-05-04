@@ -544,6 +544,7 @@ impl ExtensionHostAdapter {
             local_domain: self.state.deps.auth_state.xmpp_domain.as_str(),
             blocking_storage: Some(&self.state.deps.protocol.blocking_storage),
             message_dispatcher: Some(&self.state.deps.protocol.dispatcher),
+            pending_delivery_storage: Some(&self.state.deps.protocol.pending_delivery_storage),
         }
     }
 

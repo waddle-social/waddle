@@ -120,6 +120,12 @@ pub struct ProtocolServices {
     /// recipient state machine's blocklist when delivering to a
     /// local-domain bare JID with no available resources.
     pub blocking_storage: Arc<dyn waddle_xmpp::xep::xep0191::BlockingStorage>,
+    /// XEP-0160 offline-message storage. Used by the
+    /// [`crate::server::routes::interpret::interpret`] arm for
+    /// `OutboundEvent::QueueOfflineDelivery` to persist DM stanzas
+    /// during the headless recipient pass (issue #209).
+    pub pending_delivery_storage:
+        Arc<dyn waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage>,
     /// Registry for ad-hoc commands exposed over the WebSocket transport.
     pub command_registry: Arc<CommandRegistry>,
     /// Runtime extension manager for message embeds + feature advertisements.
@@ -836,6 +842,7 @@ pub(super) fn build_interpret_deps<'a>(
         local_domain: state.deps.auth_state.xmpp_domain.as_str(),
         blocking_storage: Some(&state.deps.protocol.blocking_storage),
         message_dispatcher: Some(&state.deps.protocol.dispatcher),
+        pending_delivery_storage: Some(&state.deps.protocol.pending_delivery_storage),
     }
 }
 
@@ -2726,6 +2733,9 @@ mod tests {
                     ),
                     blocking_storage: Arc::new(
                         waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new(),
+                    ),
+                    pending_delivery_storage: Arc::new(
+                        waddle_xmpp::pending_delivery::storage::InMemoryPendingDeliveryStorage::with_default_quota(),
                     ),
                     command_registry: Arc::new(CommandRegistry::new()),
                     extension_manager,
