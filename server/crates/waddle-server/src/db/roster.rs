@@ -22,6 +22,14 @@ use super::Database;
 /// surfacing the error.
 const MAX_LOCK_RETRIES: usize = 6;
 
+/// Format a UTC timestamp matching SQLite's `datetime('now')` output
+/// (`YYYY-MM-DD HH:MM:SS`). Bound as a parameter rather than embedded as a
+/// SQL function call so the same statements work against Postgres too —
+/// `datetime('now')` is SQLite-only and would error on Postgres.
+fn now_utc_text() -> String {
+    chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()
+}
+
 /// A roster mutation request at the row layer.
 #[derive(Debug, Clone)]
 pub enum RosterRowChange {
@@ -124,9 +132,13 @@ impl DatabaseRosterStorage {
         // transaction — the existence read does not need to be transactional
         // (the per-user lock makes the result race-free).
         let existed_for_upsert = if let RosterRowChange::Upsert(row) = &change {
-            let contact: BareJid = row.contact_jid.parse().map_err(|e| {
-                RosterStorageError::QueryFailed(format!("Invalid contact JID: {}", e))
-            })?;
+            let contact: BareJid =
+                row.contact_jid
+                    .parse()
+                    .map_err(|source| RosterStorageError::InvalidStoredJid {
+                        value: row.contact_jid.clone(),
+                        source,
+                    })?;
             Some(self.has_roster_item(user_jid, &contact).await?)
         } else {
             None
@@ -174,27 +186,24 @@ impl DatabaseRosterStorage {
         existed_for_upsert: Option<bool>,
         version: &RosterVersion,
     ) -> Result<RosterRowMutationKind, RosterStorageError> {
-        let mut tx = self
-            .db
-            .begin()
-            .await
-            .map_err(|e| RosterStorageError::ConnectionFailed(e.to_string()))?;
+        let mut tx = self.db.begin().await?;
+        let now = now_utc_text();
 
         let kind = match change {
             RosterRowChange::Upsert(row) => {
                 let groups_json = serde_json::to_string(&row.groups)
-                    .map_err(|e| RosterStorageError::SerializationError(e.to_string()))?;
+                    .map_err(RosterStorageError::SerializationError)?;
                 tx.execute(
                     r#"
                     INSERT INTO roster_items (user_jid, contact_jid, name, subscription, ask, approved, groups, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(user_jid, contact_jid) DO UPDATE SET
                         name = excluded.name,
                         subscription = excluded.subscription,
                         ask = excluded.ask,
                         approved = excluded.approved,
                         groups = excluded.groups,
-                        updated_at = datetime('now')
+                        updated_at = excluded.updated_at
                     "#,
                     crate::db_params![
                         user_jid.to_string(),
@@ -204,10 +213,10 @@ impl DatabaseRosterStorage {
                         row.ask.clone(),
                         row.approved,
                         groups_json,
+                        now.clone(),
                     ],
                 )
-                .await
-                .map_err(|e| RosterStorageError::QueryFailed(e.to_string()))?;
+                .await?;
                 if existed_for_upsert.unwrap_or(false) {
                     RosterRowMutationKind::Updated(row.clone())
                 } else {
@@ -220,8 +229,7 @@ impl DatabaseRosterStorage {
                         "DELETE FROM roster_items WHERE user_jid = ? AND contact_jid = ?",
                         crate::db_params![user_jid.to_string(), contact_jid.to_string()],
                     )
-                    .await
-                    .map_err(|e| RosterStorageError::QueryFailed(e.to_string()))?;
+                    .await?;
                 if rows == 0 {
                     // Drop tx (auto-rolls-back) and surface ItemNotFound.
                     return Err(RosterStorageError::ItemNotFound);
@@ -233,19 +241,16 @@ impl DatabaseRosterStorage {
         tx.execute(
             r#"
             INSERT INTO roster_versions (user_jid, version, updated_at)
-            VALUES (?, ?, datetime('now'))
+            VALUES (?, ?, ?)
             ON CONFLICT(user_jid) DO UPDATE SET
                 version = excluded.version,
-                updated_at = datetime('now')
+                updated_at = excluded.updated_at
             "#,
-            crate::db_params![user_jid.to_string(), version.as_str().to_string()],
+            crate::db_params![user_jid.to_string(), version.as_str().to_string(), now],
         )
-        .await
-        .map_err(|e| RosterStorageError::QueryFailed(e.to_string()))?;
+        .await?;
 
-        tx.commit()
-            .await
-            .map_err(|e| RosterStorageError::QueryFailed(e.to_string()))?;
+        tx.commit().await?;
         Ok(kind)
     }
 
@@ -272,8 +277,10 @@ impl DatabaseRosterStorage {
 
         let items = self.get_roster(user_jid).await?;
         let version = if let Some(stored) = self.get_roster_version(user_jid).await? {
-            stored.parse::<RosterVersion>().map_err(|e| {
-                RosterStorageError::QueryFailed(format!("Stored roster version is invalid: {}", e))
+            stored.parse::<RosterVersion>().map_err(|_| {
+                RosterStorageError::InvalidStoredVersion {
+                    value: stored.clone(),
+                }
             })?
         } else {
             let v = RosterVersion::generate();
@@ -343,45 +350,39 @@ impl DatabaseRosterStorage {
         ask: Option<&str>,
         version: &RosterVersion,
     ) -> Result<(), RosterStorageError> {
-        let mut tx = self
-            .db
-            .begin()
-            .await
-            .map_err(|e| RosterStorageError::ConnectionFailed(e.to_string()))?;
+        let mut tx = self.db.begin().await?;
+        let now = now_utc_text();
         tx.execute(
             r#"
             INSERT INTO roster_items (user_jid, contact_jid, subscription, ask, approved, groups, updated_at)
-            VALUES (?, ?, ?, ?, 0, '[]', datetime('now'))
+            VALUES (?, ?, ?, ?, 0, '[]', ?)
             ON CONFLICT(user_jid, contact_jid) DO UPDATE SET
                 subscription = excluded.subscription,
                 ask = excluded.ask,
                 approved = excluded.approved,
-                updated_at = datetime('now')
+                updated_at = excluded.updated_at
             "#,
             crate::db_params![
                 user_jid.to_string(),
                 contact_jid.to_string(),
                 subscription.to_string(),
                 ask.map(|s| s.to_string()),
+                now.clone(),
             ],
         )
-        .await
-        .map_err(|e| RosterStorageError::QueryFailed(e.to_string()))?;
+        .await?;
         tx.execute(
             r#"
             INSERT INTO roster_versions (user_jid, version, updated_at)
-            VALUES (?, ?, datetime('now'))
+            VALUES (?, ?, ?)
             ON CONFLICT(user_jid) DO UPDATE SET
                 version = excluded.version,
-                updated_at = datetime('now')
+                updated_at = excluded.updated_at
             "#,
-            crate::db_params![user_jid.to_string(), version.as_str().to_string()],
+            crate::db_params![user_jid.to_string(), version.as_str().to_string(), now],
         )
-        .await
-        .map_err(|e| RosterStorageError::QueryFailed(e.to_string()))?;
-        tx.commit()
-            .await
-            .map_err(|e| RosterStorageError::QueryFailed(e.to_string()))?;
+        .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -392,15 +393,16 @@ impl DatabaseRosterStorage {
     ) -> Result<(), RosterStorageError> {
         let user_jid_s = user_jid.to_string();
         let version_s = version.as_str().to_string();
+        let now = now_utc_text();
         self.execute_with_retry(
             r#"
             INSERT INTO roster_versions (user_jid, version, updated_at)
-            VALUES (?, ?, datetime('now'))
+            VALUES (?, ?, ?)
             ON CONFLICT(user_jid) DO UPDATE SET
                 version = excluded.version,
-                updated_at = datetime('now')
+                updated_at = excluded.updated_at
             "#,
-            || crate::db_params![user_jid_s.clone(), version_s.clone()],
+            || crate::db_params![user_jid_s.clone(), version_s.clone(), now.clone()],
         )
         .await?;
         Ok(())
@@ -537,8 +539,10 @@ impl DatabaseRosterStorage {
         user_jid: &BareJid,
     ) -> Result<RosterVersion, RosterStorageError> {
         if let Some(existing) = self.get_roster_version(user_jid).await? {
-            return existing.parse::<RosterVersion>().map_err(|e| {
-                RosterStorageError::QueryFailed(format!("Stored roster version is invalid: {}", e))
+            return existing.parse::<RosterVersion>().map_err(|_| {
+                RosterStorageError::InvalidStoredVersion {
+                    value: existing.clone(),
+                }
             });
         }
 
@@ -546,8 +550,10 @@ impl DatabaseRosterStorage {
         let _guard = lock.lock().await;
         // Re-check under the lock in case another writer raced us.
         if let Some(existing) = self.get_roster_version(user_jid).await? {
-            return existing.parse::<RosterVersion>().map_err(|e| {
-                RosterStorageError::QueryFailed(format!("Stored roster version is invalid: {}", e))
+            return existing.parse::<RosterVersion>().map_err(|_| {
+                RosterStorageError::InvalidStoredVersion {
+                    value: existing.clone(),
+                }
             });
         }
         let version = RosterVersion::generate();
@@ -730,19 +736,44 @@ pub struct RosterItemRow {
 /// Errors that can occur during roster storage operations.
 #[derive(Debug, thiserror::Error)]
 pub enum RosterStorageError {
+    /// Database-layer failure (connect, execute, transaction commit).
+    /// Carries the typed [`DatabaseError`] verbatim so callers can branch on
+    /// the underlying cause if needed.
+    #[error("Database error: {0}")]
+    Database(#[from] super::DatabaseError),
+
+    /// Connection acquisition failed at the storage layer (pre-existing variant).
     #[error("Failed to connect to database: {0}")]
     ConnectionFailed(String),
 
+    /// Row-decode failure context. Only used for cases where the column
+    /// extraction itself failed — the database error chain doesn't apply.
     #[error("Query failed: {0}")]
     QueryFailed(String),
 
-    #[error("Serialization error: {0}")]
-    SerializationError(String),
+    /// JSON serialization of a roster row's `groups` field failed.
+    #[error("Roster row serialization failed: {0}")]
+    SerializationError(#[from] serde_json::Error),
 
     /// A `Remove` mutation targeted a roster item that does not exist.
     /// Callers map this to a `<item-not-found/>` stanza error per RFC 6121.
     #[error("Roster item not found")]
     ItemNotFound,
+
+    /// A JID stored in the database failed to parse — indicates corruption,
+    /// since stored JIDs are written via `BareJid::to_string`.
+    #[error("Invalid stored JID '{value}': {source}")]
+    InvalidStoredJid {
+        value: String,
+        #[source]
+        source: jid::Error,
+    },
+
+    /// A roster version stored in the database failed to parse (e.g. empty
+    /// string). Indicates corruption — stored versions are written via
+    /// `RosterVersion::generate`.
+    #[error("Invalid stored roster version: '{value}'")]
+    InvalidStoredVersion { value: String },
 }
 
 /// Owned guard returned by [`DatabaseRosterStorage::apply_roster_change`] and
