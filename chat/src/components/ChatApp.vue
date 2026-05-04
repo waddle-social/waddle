@@ -419,7 +419,7 @@ const activeDmPeer = computed(() => {
   };
 });
 
-const computedChannelUnreadMap = computed(() => channelUnread.channelUnreadMap());
+const computedChannelUnreadMap = computed(() => channelUnread.channelUnreadMap(waddles.channels.value));
 // Thread rows are drill-down detail; room unread already carries the
 // server-equivalent conversation total, so the browser badge must not add both.
 const totalTabUnreadCount = computed(() =>
@@ -471,9 +471,9 @@ const readReceiptsUnreadCount = computed<number>(() => {
     return dmConversations.conversations.value.find((c) => c.peerJid === peer)?.unreadCount ?? 0;
   }
   if (readReceiptsKind.value === "channel") {
-    const channelId = waddles.activeChannelId.value;
-    if (!channelId) return 0;
-    return computedChannelUnreadMap.value[channelId]?.unread ?? 0;
+    const jid = readReceiptsActiveRoomJid.value;
+    if (!jid) return 0;
+    return channelUnread.unreadForRoomJid(jid);
   }
   return 0;
 });
