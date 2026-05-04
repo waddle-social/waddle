@@ -41,7 +41,8 @@ use waddle_xmpp::{
     registry::BroadcastOutcome,
     roster::{
         build_roster_push, build_roster_result, build_roster_result_empty, parse_roster_get,
-        parse_roster_set, AskType, RosterItem, RosterSetResult, Subscription, ROSTER_NS,
+        parse_roster_set, AskType, RosterItem, RosterSetResult, RosterVersion, Subscription,
+        ROSTER_NS,
     },
     xep::xep0054::{VCard, VCardPhoto},
     xep::xep0357::{
@@ -83,7 +84,10 @@ use super::presence::{
 use crate::auth::{NativeUserStore, Session};
 use crate::db::actor::{DbExecute, DbQuery, DbQueryOne, GetDatabase};
 use crate::db::blocking::DatabaseBlockingStorage;
-use crate::db::roster::{DatabaseRosterStorage, RosterItemRow, RosterStorageError};
+use crate::db::roster::{
+    DatabaseRosterStorage, RosterItemRow, RosterRowChange, RosterRowMutationKind,
+    RosterStorageError,
+};
 use crate::db::{row_value, Database, Value, ValueExt};
 use crate::permissions::{
     CheckPermission, Object, ObjectType, Permission, PermissionError, Relation, Subject,
@@ -3044,10 +3048,12 @@ async fn handle_roster_get(
         Err(error) => return vec![build_xmpp_error_response(iq, error)],
     };
 
-    let rows = match storage.get_roster(user_jid).await {
-        Ok(rows) => rows,
+    // Atomic snapshot: items + version under the same per-user lock so the
+    // returned ver always identifies the returned roster state (XEP-0237 §2.6).
+    let (rows, version) = match storage.snapshot_roster(user_jid).await {
+        Ok(pair) => pair,
         Err(error) => {
-            warn!(user = %user_jid, error = %error, "Failed to read roster");
+            warn!(user = %user_jid, error = %error, "Failed to snapshot roster");
             return vec![build_xmpp_error_response(
                 iq,
                 XmppError::internal_server_error(None),
@@ -3064,16 +3070,6 @@ async fn handle_roster_get(
             )];
         }
     };
-    let version = match storage.get_or_create_roster_version(user_jid).await {
-        Ok(version) => version,
-        Err(error) => {
-            warn!(user = %user_jid, error = %error, "Failed to read roster version");
-            return vec![build_xmpp_error_response(
-                iq,
-                XmppError::internal_server_error(None),
-            )];
-        }
-    };
 
     state
         .deps
@@ -3081,8 +3077,12 @@ async fn handle_roster_get(
         .connection_registry
         .mark_roster_interested(full_jid);
     *roster_interested = true;
-    if query.ver.as_deref() == Some(version.as_str()) {
-        return vec![iq_to_xml(build_roster_result_empty(iq))];
+    // XEP-0237 §2.6: matching ver -> empty <iq type='result'/> (no <query>);
+    // anything else (Absent, Bootstrap, Cached(stale)) -> full roster + ver.
+    if let Some(cached) = query.ver.cached() {
+        if cached == &version {
+            return vec![iq_to_xml(build_roster_result_empty(iq))];
+        }
     }
     vec![iq_to_xml(build_roster_result(iq, &items, Some(&version)))]
 }
@@ -3104,7 +3104,12 @@ async fn handle_roster_set(
         .expect("parse_roster_set guarantees one item");
 
     let mut removed_item = None;
-    let set_result = if requested.subscription.is_remove() {
+    // Hold the per-user mutation lock from the start of the storage write
+    // through the end of push fanout below (XEP-0237 §2.6 — pushes for
+    // mutation N must be enqueued before mutation N+1's pushes can race onto
+    // the recipient socket). The guard is dropped at the end of this block.
+    let (set_result, version, _user_lock) = if requested.subscription.is_remove() {
+        // Snapshot the item before delete so we can run subscription side effects.
         removed_item = match storage.get_roster_item(user_jid, &requested.jid).await {
             Ok(Some(row)) => match roster_row_to_item(row) {
                 Ok(item) => Some(item),
@@ -3125,9 +3130,16 @@ async fn handle_roster_set(
                 )];
             }
         };
-        match storage.remove_roster_item(user_jid, &requested.jid).await {
-            Ok(true) => RosterSetResult::Removed(requested.jid.clone()),
-            Ok(false) => {
+        match storage
+            .apply_roster_change(user_jid, RosterRowChange::Remove(requested.jid.clone()))
+            .await
+        {
+            Ok((mutation, lock)) => (
+                RosterSetResult::Removed(requested.jid.clone()),
+                mutation.version,
+                lock,
+            ),
+            Err(RosterStorageError::ItemNotFound) => {
                 return vec![build_xmpp_error_response(
                     iq,
                     XmppError::item_not_found(None),
@@ -3166,11 +3178,20 @@ async fn handle_roster_set(
         item.name = requested.name.clone();
         item.groups = requested.groups.clone();
 
-        let is_new = match storage
-            .set_roster_item(user_jid, &roster_item_to_row(&item))
+        match storage
+            .apply_roster_change(user_jid, RosterRowChange::Upsert(roster_item_to_row(&item)))
             .await
         {
-            Ok(is_new) => is_new,
+            Ok((mutation, lock)) => {
+                let result = match mutation.kind {
+                    RosterRowMutationKind::Added(_) => RosterSetResult::Added(item),
+                    RosterRowMutationKind::Updated(_) => RosterSetResult::Updated(item),
+                    RosterRowMutationKind::Removed(_) => {
+                        unreachable!("Upsert never reports Removed")
+                    }
+                };
+                (result, mutation.version, lock)
+            }
             Err(error) => {
                 warn!(user = %user_jid, contact = %item.jid, error = %error, "Failed to store roster item");
                 return vec![build_xmpp_error_response(
@@ -3178,22 +3199,6 @@ async fn handle_roster_set(
                     XmppError::internal_server_error(None),
                 )];
             }
-        };
-        if is_new {
-            RosterSetResult::Added(item)
-        } else {
-            RosterSetResult::Updated(item)
-        }
-    };
-
-    let version = match storage.get_or_create_roster_version(user_jid).await {
-        Ok(version) => version,
-        Err(error) => {
-            warn!(user = %user_jid, error = %error, "Failed to read roster version after set");
-            return vec![build_xmpp_error_response(
-                iq,
-                XmppError::internal_server_error(None),
-            )];
         }
     };
 
@@ -3215,6 +3220,14 @@ async fn handle_roster_set(
     }
 
     send_roster_push_to_sibling_resources(state, user_jid, full_jid, &push_item, &version).await;
+    // Drop the user_jid mutation lock before invoking subscription side
+    // effects on the *contact's* roster — the side-effect path acquires the
+    // contact's lock, and holding two user-locks simultaneously could
+    // deadlock against a concurrent flow that touches the same pair in the
+    // opposite role (PR #336 review). The user_jid pushes have all been
+    // enqueued by this point, so XEP-0237 §2.6 ordering for user_jid is
+    // already preserved.
+    drop(_user_lock);
     if let Some(item) = removed_item.as_ref() {
         send_roster_remove_subscription_side_effects(state, storage, user_jid, item).await;
     }
@@ -3275,13 +3288,18 @@ async fn send_roster_remove_subscription_stanza(
                     }
                     SubscriptionType::Subscribe | SubscriptionType::Subscribed => {}
                 }
-                if let Err(error) = storage
-                    .set_roster_item(to, &roster_item_to_row(&item))
+                match storage
+                    .apply_roster_change(to, RosterRowChange::Upsert(roster_item_to_row(&item)))
                     .await
                 {
-                    warn!(error = %error, user = %to, contact = %from, "Failed to update contact roster after removal side effect");
-                } else if let Ok(version) = storage.get_or_create_roster_version(to).await {
-                    send_roster_push_to_all_resources(state, to, &item, &version).await;
+                    Ok((mutation, _lock)) => {
+                        // _lock held until the push enqueue below completes.
+                        send_roster_push_to_all_resources(state, to, &item, &mutation.version)
+                            .await;
+                    }
+                    Err(error) => {
+                        warn!(error = %error, user = %to, contact = %from, "Failed to update contact roster after removal side effect");
+                    }
                 }
             }
             Err(error) => {
@@ -3359,7 +3377,7 @@ async fn send_roster_push_to_all_resources(
     state: &WebSocketState,
     user_jid: &BareJid,
     item: &RosterItem,
-    version: &str,
+    version: &RosterVersion,
 ) {
     let live_resources = state
         .deps
@@ -3463,7 +3481,7 @@ async fn send_roster_push_to_sibling_resources(
     user_jid: &BareJid,
     source_jid: &FullJid,
     item: &RosterItem,
-    version: &str,
+    version: &RosterVersion,
 ) {
     let live_resources: Vec<_> = state
         .deps

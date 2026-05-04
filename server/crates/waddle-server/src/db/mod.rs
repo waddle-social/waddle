@@ -771,6 +771,59 @@ impl ConnectionGuard {
     }
 }
 
+/// A database transaction obtained from [`Database::begin`].
+///
+/// Holds a single pooled connection so multiple `execute` calls observe each
+/// other's writes atomically. Drop without calling [`Transaction::commit`] to
+/// roll back.
+pub struct Transaction<'a> {
+    inner: TransactionInner<'a>,
+}
+
+enum TransactionInner<'a> {
+    Sqlite(sqlx::Transaction<'a, sqlx::Sqlite>),
+    Postgres(sqlx::Transaction<'a, sqlx::Postgres>),
+}
+
+impl<'a> Transaction<'a> {
+    /// Execute a write statement inside the transaction.
+    pub async fn execute(
+        &mut self,
+        sql: &str,
+        params: impl IntoParams,
+    ) -> Result<u64, DatabaseError> {
+        let params = params.into_params();
+        match &mut self.inner {
+            TransactionInner::Sqlite(tx) => {
+                let mut q = sqlx::query(sql);
+                for value in params {
+                    q = bind_sqlite(q, value);
+                }
+                let result = q.execute(&mut **tx).await?;
+                Ok(result.rows_affected())
+            }
+            TransactionInner::Postgres(tx) => {
+                let sql = rewrite_positional_for_postgres(sql);
+                let mut q = sqlx::query(&sql);
+                for value in params {
+                    q = bind_postgres(q, value);
+                }
+                let result = q.execute(&mut **tx).await?;
+                Ok(result.rows_affected())
+            }
+        }
+    }
+
+    /// Commit the transaction. Drops without commit roll back automatically.
+    pub async fn commit(self) -> Result<(), DatabaseError> {
+        match self.inner {
+            TransactionInner::Sqlite(tx) => tx.commit().await?,
+            TransactionInner::Postgres(tx) => tx.commit().await?,
+        }
+        Ok(())
+    }
+}
+
 /// Extension trait for extracting typed values from row values.
 pub trait ValueExt {
     fn as_string(&self) -> Result<String, DatabaseError>;
@@ -910,6 +963,22 @@ impl Database {
             backend: self.backend.clone(),
             last_insert_rowid: Arc::new(AtomicI64::new(0)),
         })
+    }
+
+    /// Begin a database transaction.
+    ///
+    /// Multiple statements executed against the returned [`Transaction`]
+    /// share a single connection and are committed atomically by
+    /// [`Transaction::commit`] (or rolled back on drop). Use this when you
+    /// need an invariant — like XEP-0237's "ver identifies the roster
+    /// state" — to hold across multiple writes that must commit together
+    /// or not at all.
+    pub async fn begin(&self) -> Result<Transaction<'_>, DatabaseError> {
+        let inner = match &self.backend {
+            DatabaseBackend::Sqlite(pool) => TransactionInner::Sqlite(pool.begin().await?),
+            DatabaseBackend::Postgres(pool) => TransactionInner::Postgres(pool.begin().await?),
+        };
+        Ok(Transaction { inner })
     }
 
     pub fn name(&self) -> &str {

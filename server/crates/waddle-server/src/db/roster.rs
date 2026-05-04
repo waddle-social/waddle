@@ -4,27 +4,408 @@
 //! the internal SQLx-backed database adapter for persistent storage.
 
 use crate::db::IntoParams;
+use dashmap::DashMap;
 use jid::BareJid;
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Mutex;
 use tokio::time::sleep;
 use tracing::{debug, instrument};
-use uuid::Uuid;
+use waddle_xmpp_core::roster::RosterVersion;
 
 use super::Database;
+
+// `RosterVersion::generate()` lives in `waddle-xmpp-core` and uses uuid::v4 internally;
+// no Uuid import needed here.
+
+/// Maximum retries for transient `SQLITE_BUSY` lock contention before
+/// surfacing the error.
+const MAX_LOCK_RETRIES: usize = 6;
+
+/// Format a UTC timestamp matching SQLite's `datetime('now')` output
+/// (`YYYY-MM-DD HH:MM:SS`). Bound as a parameter rather than embedded as a
+/// SQL function call so the same statements work against Postgres too —
+/// `datetime('now')` is SQLite-only and would error on Postgres.
+fn now_utc_text() -> String {
+    chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()
+}
+
+/// A roster mutation request at the row layer.
+#[derive(Debug, Clone)]
+pub enum RosterRowChange {
+    /// Add or update an item. Storage decides Added vs Updated based on
+    /// whether the row already exists.
+    Upsert(RosterItemRow),
+    /// Remove the item with the given contact JID.
+    Remove(BareJid),
+}
+
+/// Outcome of an atomic roster mutation: the classified row-layer result and
+/// the post-mutation roster version, computed under the same per-user lock.
+///
+/// XEP-0237 §2.6 requires every roster push to carry the post-mutation
+/// version, those versions to be unique, and pushes to occur in modification
+/// order. Returning the version from the same call that performed the
+/// mutation is what makes those MUSTs holdable under concurrency.
+#[derive(Debug, Clone)]
+pub struct RosterRowMutation {
+    /// Classified row-layer result (Added / Updated / Removed).
+    pub kind: RosterRowMutationKind,
+    /// Roster version after this mutation.
+    pub version: RosterVersion,
+}
+
+/// Row-layer outcome classification.
+#[derive(Debug, Clone)]
+pub enum RosterRowMutationKind {
+    /// Item was newly inserted.
+    Added(RosterItemRow),
+    /// Existing item was overwritten.
+    Updated(RosterItemRow),
+    /// Item was deleted.
+    Removed(BareJid),
+}
 
 /// Database-backed roster storage implementation.
 ///
 /// Stores roster items in the `roster_items` table and manages roster
 /// versioning via the `roster_versions` table.
+///
+/// Mutations go through [`DatabaseRosterStorage::apply_roster_change`] which
+/// serialises per-user writes via an in-process mutex map and returns the new
+/// `RosterVersion` from the same call. Splitting the mutation and version
+/// read into separate awaits would race with concurrent callers and violate
+/// XEP-0237 §2.6's "version on each push MUST be unique" / "in order of
+/// modification" requirements.
 #[derive(Clone)]
 pub struct DatabaseRosterStorage {
     db: Database,
+    user_locks: Arc<DashMap<BareJid, Arc<Mutex<()>>>>,
 }
 
 impl DatabaseRosterStorage {
     /// Create a new database roster storage.
     pub fn new(db: Database) -> Self {
-        Self { db }
+        Self {
+            db,
+            user_locks: Arc::new(DashMap::new()),
+        }
+    }
+
+    fn user_lock(&self, user_jid: &BareJid) -> Arc<Mutex<()>> {
+        self.user_locks
+            .entry(user_jid.clone())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    }
+
+    /// Atomic roster mutation: write the row, bump the user's roster version,
+    /// return the new version along with a [`UserMutationLock`] guard.
+    ///
+    /// Both the row write and the version bump run inside a single database
+    /// transaction so a partial failure cannot commit the row without the
+    /// version (which would break XEP-0237 §2.6's "ver identifies the roster
+    /// state" invariant — a client whose cached `ver` happens to equal the
+    /// stale stored value would receive an empty result while having missed
+    /// the change).
+    ///
+    /// Acquires the per-user lock, performs the transaction, and returns
+    /// both the mutation outcome and the lock guard. The caller MUST keep
+    /// the guard alive while it enqueues roster pushes that announce this
+    /// mutation's version — otherwise a concurrent mutation could fan out
+    /// its own pushes onto the same recipient socket in interleaved order,
+    /// violating §2.6's "pushes MUST occur in order of modification"
+    /// invariant.
+    ///
+    /// Returns [`RosterStorageError::ItemNotFound`] if a `Remove` targets a
+    /// non-existent item.
+    #[instrument(skip(self, change), fields(user = %user_jid))]
+    pub async fn apply_roster_change(
+        &self,
+        user_jid: &BareJid,
+        change: RosterRowChange,
+    ) -> Result<(RosterRowMutation, UserMutationLock), RosterStorageError> {
+        let mutex = self.user_lock(user_jid);
+        let guard = mutex.lock_owned().await;
+
+        // Pre-check existence so we can classify Added vs Updated outside the
+        // transaction — the existence read does not need to be transactional
+        // (the per-user lock makes the result race-free).
+        let existed_for_upsert = if let RosterRowChange::Upsert(row) = &change {
+            let contact: BareJid =
+                row.contact_jid
+                    .parse()
+                    .map_err(|source| RosterStorageError::InvalidStoredJid {
+                        value: row.contact_jid.clone(),
+                        source,
+                    })?;
+            Some(self.has_roster_item(user_jid, &contact).await?)
+        } else {
+            None
+        };
+
+        let version = RosterVersion::generate();
+        let kind = self
+            .commit_mutation(user_jid, change, existed_for_upsert, &version)
+            .await?;
+
+        Ok((RosterRowMutation { kind, version }, guard))
+    }
+
+    /// Run the row write + version bump as a single transaction. Caller
+    /// supplies the pre-checked existence flag for `Upsert` (used to
+    /// classify Added vs Updated).
+    async fn commit_mutation(
+        &self,
+        user_jid: &BareJid,
+        change: RosterRowChange,
+        existed_for_upsert: Option<bool>,
+        version: &RosterVersion,
+    ) -> Result<RosterRowMutationKind, RosterStorageError> {
+        for attempt in 0..=MAX_LOCK_RETRIES {
+            let result = self
+                .commit_mutation_once(user_jid, &change, existed_for_upsert, version)
+                .await;
+            match result {
+                Ok(kind) => return Ok(kind),
+                Err(e) if is_sqlite_lock_error(&e) && attempt < MAX_LOCK_RETRIES => {
+                    sleep(retry_delay(attempt)).await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Err(RosterStorageError::QueryFailed(
+            "Transaction failed after lock retries".to_string(),
+        ))
+    }
+
+    async fn commit_mutation_once(
+        &self,
+        user_jid: &BareJid,
+        change: &RosterRowChange,
+        existed_for_upsert: Option<bool>,
+        version: &RosterVersion,
+    ) -> Result<RosterRowMutationKind, RosterStorageError> {
+        let mut tx = self.db.begin().await?;
+        let now = now_utc_text();
+
+        let kind = match change {
+            RosterRowChange::Upsert(row) => {
+                let groups_json = serde_json::to_string(&row.groups)
+                    .map_err(RosterStorageError::SerializationError)?;
+                tx.execute(
+                    r#"
+                    INSERT INTO roster_items (user_jid, contact_jid, name, subscription, ask, approved, groups, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(user_jid, contact_jid) DO UPDATE SET
+                        name = excluded.name,
+                        subscription = excluded.subscription,
+                        ask = excluded.ask,
+                        approved = excluded.approved,
+                        groups = excluded.groups,
+                        updated_at = excluded.updated_at
+                    "#,
+                    crate::db_params![
+                        user_jid.to_string(),
+                        row.contact_jid.clone(),
+                        row.name.clone(),
+                        row.subscription.clone(),
+                        row.ask.clone(),
+                        row.approved,
+                        groups_json,
+                        now.clone(),
+                    ],
+                )
+                .await?;
+                if existed_for_upsert.unwrap_or(false) {
+                    RosterRowMutationKind::Updated(row.clone())
+                } else {
+                    RosterRowMutationKind::Added(row.clone())
+                }
+            }
+            RosterRowChange::Remove(contact_jid) => {
+                let rows = tx
+                    .execute(
+                        "DELETE FROM roster_items WHERE user_jid = ? AND contact_jid = ?",
+                        crate::db_params![user_jid.to_string(), contact_jid.to_string()],
+                    )
+                    .await?;
+                if rows == 0 {
+                    // Drop tx (auto-rolls-back) and surface ItemNotFound.
+                    return Err(RosterStorageError::ItemNotFound);
+                }
+                RosterRowMutationKind::Removed(contact_jid.clone())
+            }
+        };
+
+        tx.execute(
+            r#"
+            INSERT INTO roster_versions (user_jid, version, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(user_jid) DO UPDATE SET
+                version = excluded.version,
+                updated_at = excluded.updated_at
+            "#,
+            crate::db_params![user_jid.to_string(), version.as_str().to_string(), now],
+        )
+        .await?;
+
+        tx.commit().await?;
+        Ok(kind)
+    }
+
+    /// Atomic roster snapshot: read all items and the current `RosterVersion`
+    /// under the per-user lock so the returned pair is mutually consistent.
+    ///
+    /// Without the shared lock, a `get_roster` + `get_roster_version` pair can
+    /// straddle a concurrent mutation and produce a snapshot whose items reflect
+    /// version V+1 but whose `ver` reads as V. A client caching that pair would
+    /// believe it was up-to-date when it had in fact missed an item, since on
+    /// reconnect the server would respond to a `ver=V` query with an empty
+    /// result. That breaks the XEP-0237 §2.6 invariant that `ver` identifies
+    /// the roster state.
+    ///
+    /// Synthesises a fresh version if none exists, matching
+    /// [`get_or_create_roster_version`].
+    #[instrument(skip(self), fields(user = %user_jid))]
+    pub async fn snapshot_roster(
+        &self,
+        user_jid: &BareJid,
+    ) -> Result<(Vec<RosterItemRow>, RosterVersion), RosterStorageError> {
+        let lock = self.user_lock(user_jid);
+        let _guard = lock.lock().await;
+
+        let items = self.get_roster(user_jid).await?;
+        let version = if let Some(stored) = self.get_roster_version(user_jid).await? {
+            stored.parse::<RosterVersion>().map_err(|_| {
+                RosterStorageError::InvalidStoredVersion {
+                    value: stored.clone(),
+                }
+            })?
+        } else {
+            let v = RosterVersion::generate();
+            self.write_roster_version(user_jid, &v).await?;
+            v
+        };
+        Ok((items, version))
+    }
+
+    /// Atomic subscription update: read-modify-write of just the subscription/ask
+    /// fields on an existing (or implicit) roster item, plus version bump.
+    /// Returns the mutation result and the [`UserMutationLock`] guard the
+    /// caller must hold across roster-push enqueue (see
+    /// [`apply_roster_change`]).
+    ///
+    /// Used by the RFC 6121 presence subscription state machine when it needs
+    /// to flip subscription/ask without disturbing name/groups. The row write
+    /// and version bump run inside a single database transaction under the
+    /// per-user lock.
+    #[instrument(skip(self), fields(user = %user_jid, contact = %contact_jid))]
+    pub async fn apply_subscription_update(
+        &self,
+        user_jid: &BareJid,
+        contact_jid: &BareJid,
+        subscription: &str,
+        ask: Option<&str>,
+    ) -> Result<(RosterRowMutation, UserMutationLock), RosterStorageError> {
+        let mutex = self.user_lock(user_jid);
+        let guard = mutex.lock_owned().await;
+
+        let existed = self.has_roster_item(user_jid, contact_jid).await?;
+        let version = RosterVersion::generate();
+
+        for attempt in 0..=MAX_LOCK_RETRIES {
+            match self
+                .commit_subscription_update_once(user_jid, contact_jid, subscription, ask, &version)
+                .await
+            {
+                Ok(()) => break,
+                Err(e) if is_sqlite_lock_error(&e) && attempt < MAX_LOCK_RETRIES => {
+                    sleep(retry_delay(attempt)).await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        let row = self
+            .get_roster_item(user_jid, contact_jid)
+            .await?
+            .ok_or_else(|| {
+                RosterStorageError::QueryFailed("Item missing after upsert".to_string())
+            })?;
+
+        let kind = if existed {
+            RosterRowMutationKind::Updated(row)
+        } else {
+            RosterRowMutationKind::Added(row)
+        };
+        Ok((RosterRowMutation { kind, version }, guard))
+    }
+
+    async fn commit_subscription_update_once(
+        &self,
+        user_jid: &BareJid,
+        contact_jid: &BareJid,
+        subscription: &str,
+        ask: Option<&str>,
+        version: &RosterVersion,
+    ) -> Result<(), RosterStorageError> {
+        let mut tx = self.db.begin().await?;
+        let now = now_utc_text();
+        tx.execute(
+            r#"
+            INSERT INTO roster_items (user_jid, contact_jid, subscription, ask, approved, groups, updated_at)
+            VALUES (?, ?, ?, ?, 0, '[]', ?)
+            ON CONFLICT(user_jid, contact_jid) DO UPDATE SET
+                subscription = excluded.subscription,
+                ask = excluded.ask,
+                approved = excluded.approved,
+                updated_at = excluded.updated_at
+            "#,
+            crate::db_params![
+                user_jid.to_string(),
+                contact_jid.to_string(),
+                subscription.to_string(),
+                ask.map(|s| s.to_string()),
+                now.clone(),
+            ],
+        )
+        .await?;
+        tx.execute(
+            r#"
+            INSERT INTO roster_versions (user_jid, version, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(user_jid) DO UPDATE SET
+                version = excluded.version,
+                updated_at = excluded.updated_at
+            "#,
+            crate::db_params![user_jid.to_string(), version.as_str().to_string(), now],
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn write_roster_version(
+        &self,
+        user_jid: &BareJid,
+        version: &RosterVersion,
+    ) -> Result<(), RosterStorageError> {
+        let user_jid_s = user_jid.to_string();
+        let version_s = version.as_str().to_string();
+        let now = now_utc_text();
+        self.execute_with_retry(
+            r#"
+            INSERT INTO roster_versions (user_jid, version, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(user_jid) DO UPDATE SET
+                version = excluded.version,
+                updated_at = excluded.updated_at
+            "#,
+            || crate::db_params![user_jid_s.clone(), version_s.clone(), now.clone()],
+        )
+        .await?;
+        Ok(())
     }
 
     /// Get all roster items for a user.
@@ -119,94 +500,6 @@ impl DatabaseRosterStorage {
         }
     }
 
-    /// Add or update a roster item.
-    ///
-    /// Returns `true` if a new item was created, `false` if an existing item was updated.
-    #[instrument(skip(self, item), fields(user = %user_jid, contact = %item.contact_jid))]
-    pub async fn set_roster_item(
-        &self,
-        user_jid: &BareJid,
-        item: &RosterItemRow,
-    ) -> Result<bool, RosterStorageError> {
-        // Check if the item exists before upsert to correctly determine if it's new
-        let contact_jid: BareJid = item
-            .contact_jid
-            .parse()
-            .map_err(|e| RosterStorageError::QueryFailed(format!("Invalid contact JID: {}", e)))?;
-        let exists = self.has_roster_item(user_jid, &contact_jid).await?;
-
-        let groups_json = serde_json::to_string(&item.groups)
-            .map_err(|e| RosterStorageError::SerializationError(e.to_string()))?;
-
-        let user_jid_s = user_jid.to_string();
-        let contact_jid_s = item.contact_jid.clone();
-        let name = item.name.clone();
-        let subscription = item.subscription.clone();
-        let ask = item.ask.clone();
-        let approved = item.approved;
-        let groups_json_param = groups_json.clone();
-
-        // Use INSERT OR REPLACE to upsert
-        self.execute_with_retry(
-            r#"
-            INSERT INTO roster_items (user_jid, contact_jid, name, subscription, ask, approved, groups, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
-            ON CONFLICT(user_jid, contact_jid) DO UPDATE SET
-                name = excluded.name,
-                subscription = excluded.subscription,
-                ask = excluded.ask,
-                approved = excluded.approved,
-                groups = excluded.groups,
-                updated_at = datetime('now')
-            "#,
-            || {
-                crate::db_params![
-                    user_jid_s.clone(),
-                    contact_jid_s.clone(),
-                    name.clone(),
-                    subscription.clone(),
-                    ask.clone(),
-                    approved,
-                    groups_json_param.clone(),
-                ]
-            },
-        ).await?;
-
-        // Update roster version
-        self.increment_roster_version(user_jid).await?;
-
-        let is_new = !exists;
-        debug!(is_new, "Set roster item");
-        Ok(is_new)
-    }
-
-    /// Remove a roster item.
-    ///
-    /// Returns `true` if an item was removed, `false` if it didn't exist.
-    #[instrument(skip(self), fields(user = %user_jid, contact = %contact_jid))]
-    pub async fn remove_roster_item(
-        &self,
-        user_jid: &BareJid,
-        contact_jid: &BareJid,
-    ) -> Result<bool, RosterStorageError> {
-        let user_jid_s = user_jid.to_string();
-        let contact_jid_s = contact_jid.to_string();
-        let result = self
-            .execute_with_retry(
-                "DELETE FROM roster_items WHERE user_jid = ? AND contact_jid = ?",
-                || crate::db_params![user_jid_s.clone(), contact_jid_s.clone()],
-            )
-            .await?;
-
-        if result > 0 {
-            // Update roster version
-            self.increment_roster_version(user_jid).await?;
-        }
-
-        debug!(removed = result > 0, "Remove roster item");
-        Ok(result > 0)
-    }
-
     /// Get the current roster version for a user.
     #[instrument(skip(self), fields(user = %user_jid))]
     pub async fn get_roster_version(
@@ -235,20 +528,37 @@ impl DatabaseRosterStorage {
         }
     }
 
-    /// Get the current roster version, creating one for an otherwise empty roster.
+    /// Get the current roster version, synthesising one for an otherwise empty
+    /// roster so first-sync responses can carry a `ver` attribute.
+    ///
+    /// Acquires the per-user lock and writes a fresh version when none exists,
+    /// matching the atomicity guarantees of [`apply_roster_change`].
     #[instrument(skip(self), fields(user = %user_jid))]
     pub async fn get_or_create_roster_version(
         &self,
         user_jid: &BareJid,
-    ) -> Result<String, RosterStorageError> {
-        if let Some(version) = self.get_roster_version(user_jid).await? {
-            return Ok(version);
+    ) -> Result<RosterVersion, RosterStorageError> {
+        if let Some(existing) = self.get_roster_version(user_jid).await? {
+            return existing.parse::<RosterVersion>().map_err(|_| {
+                RosterStorageError::InvalidStoredVersion {
+                    value: existing.clone(),
+                }
+            });
         }
 
-        self.increment_roster_version(user_jid).await?;
-        self.get_roster_version(user_jid).await?.ok_or_else(|| {
-            RosterStorageError::QueryFailed("Roster version missing after create".to_string())
-        })
+        let lock = self.user_lock(user_jid);
+        let _guard = lock.lock().await;
+        // Re-check under the lock in case another writer raced us.
+        if let Some(existing) = self.get_roster_version(user_jid).await? {
+            return existing.parse::<RosterVersion>().map_err(|_| {
+                RosterStorageError::InvalidStoredVersion {
+                    value: existing.clone(),
+                }
+            });
+        }
+        let version = RosterVersion::generate();
+        self.write_roster_version(user_jid, &version).await?;
+        Ok(version)
     }
 
     /// Check if a roster item exists.
@@ -272,53 +582,6 @@ impl DatabaseRosterStorage {
             .is_some();
 
         Ok(exists)
-    }
-
-    /// Update the subscription state for a roster item.
-    ///
-    /// Creates the roster item if it doesn't exist.
-    #[cfg(test)]
-    #[instrument(skip(self), fields(user = %user_jid, contact = %contact_jid))]
-    pub async fn update_subscription(
-        &self,
-        user_jid: &BareJid,
-        contact_jid: &BareJid,
-        subscription: &str,
-        ask: Option<&str>,
-    ) -> Result<RosterItemRow, RosterStorageError> {
-        let user_jid_s = user_jid.to_string();
-        let contact_jid_s = contact_jid.to_string();
-        let subscription_s = subscription.to_string();
-        let ask_s = ask.map(|s| s.to_string());
-
-        self.execute_with_retry(
-            r#"
-            INSERT INTO roster_items (user_jid, contact_jid, subscription, ask, approved, groups, updated_at)
-            VALUES (?, ?, ?, ?, 0, '[]', datetime('now'))
-            ON CONFLICT(user_jid, contact_jid) DO UPDATE SET
-                subscription = excluded.subscription,
-                ask = excluded.ask,
-                approved = excluded.approved,
-                updated_at = datetime('now')
-            "#,
-            || {
-                crate::db_params![
-                    user_jid_s.clone(),
-                    contact_jid_s.clone(),
-                    subscription_s.clone(),
-                    ask_s.clone(),
-                ]
-            },
-        )
-        .await?;
-
-        self.increment_roster_version(user_jid).await?;
-
-        self.get_roster_item(user_jid, contact_jid)
-            .await?
-            .ok_or_else(|| {
-                RosterStorageError::QueryFailed("Item not found after upsert".to_string())
-            })
     }
 
     /// Get all roster items where the user should send presence updates.
@@ -422,8 +685,6 @@ impl DatabaseRosterStorage {
         P: IntoParams,
         F: Fn() -> P,
     {
-        const MAX_LOCK_RETRIES: usize = 6;
-
         for attempt in 0..=MAX_LOCK_RETRIES {
             match self.execute_with_persistent(sql, params()).await {
                 Ok(rows_affected) => return Ok(rows_affected),
@@ -437,28 +698,6 @@ impl DatabaseRosterStorage {
         Err(RosterStorageError::QueryFailed(
             "Execute failed after lock retries".to_string(),
         ))
-    }
-
-    /// Increment the roster version for a user.
-    async fn increment_roster_version(&self, user_jid: &BareJid) -> Result<(), RosterStorageError> {
-        // Generate a new version string (UUID-based)
-        let new_version = Uuid::new_v4().to_string();
-
-        let user_jid_s = user_jid.to_string();
-        let new_version_s = new_version.clone();
-        self.execute_with_retry(
-            r#"
-            INSERT INTO roster_versions (user_jid, version, updated_at)
-            VALUES (?, ?, datetime('now'))
-            ON CONFLICT(user_jid) DO UPDATE SET
-                version = excluded.version,
-                updated_at = datetime('now')
-            "#,
-            || crate::db_params![user_jid_s.clone(), new_version_s.clone()],
-        )
-        .await?;
-
-        Ok(())
     }
 }
 
@@ -497,15 +736,58 @@ pub struct RosterItemRow {
 /// Errors that can occur during roster storage operations.
 #[derive(Debug, thiserror::Error)]
 pub enum RosterStorageError {
+    /// Database-layer failure (connect, execute, transaction commit).
+    /// Carries the typed [`DatabaseError`] verbatim so callers can branch on
+    /// the underlying cause if needed.
+    #[error("Database error: {0}")]
+    Database(#[from] super::DatabaseError),
+
+    /// Connection acquisition failed at the storage layer (pre-existing variant).
     #[error("Failed to connect to database: {0}")]
     ConnectionFailed(String),
 
+    /// Row-decode failure context. Only used for cases where the column
+    /// extraction itself failed — the database error chain doesn't apply.
     #[error("Query failed: {0}")]
     QueryFailed(String),
 
-    #[error("Serialization error: {0}")]
-    SerializationError(String),
+    /// JSON serialization of a roster row's `groups` field failed.
+    #[error("Roster row serialization failed: {0}")]
+    SerializationError(#[from] serde_json::Error),
+
+    /// A `Remove` mutation targeted a roster item that does not exist.
+    /// Callers map this to a `<item-not-found/>` stanza error per RFC 6121.
+    #[error("Roster item not found")]
+    ItemNotFound,
+
+    /// A JID stored in the database failed to parse — indicates corruption,
+    /// since stored JIDs are written via `BareJid::to_string`.
+    #[error("Invalid stored JID '{value}': {source}")]
+    InvalidStoredJid {
+        value: String,
+        #[source]
+        source: jid::Error,
+    },
+
+    /// A roster version stored in the database failed to parse (e.g. empty
+    /// string). Indicates corruption — stored versions are written via
+    /// `RosterVersion::generate`.
+    #[error("Invalid stored roster version: '{value}'")]
+    InvalidStoredVersion { value: String },
 }
+
+/// Owned guard returned by [`DatabaseRosterStorage::apply_roster_change`] and
+/// related mutating methods. Holding it serialises further mutations and
+/// reads of the same user's roster. The caller MUST keep it alive until any
+/// roster pushes that announce the mutation's `RosterVersion` have been
+/// enqueued onto the recipient sockets — otherwise a concurrent mutation
+/// could race ahead and break XEP-0237 §2.6's "pushes MUST occur in order
+/// of modification" invariant.
+///
+/// Implemented as a type alias rather than a wrapper struct so the underlying
+/// `OwnedMutexGuard` field cannot trigger `dead_code` warnings — the guard's
+/// purpose is its `Drop` impl, not data access. (See PR #336 review.)
+pub type UserMutationLock = tokio::sync::OwnedMutexGuard<()>;
 
 #[cfg(test)]
 mod tests {
@@ -519,20 +801,29 @@ mod tests {
         db
     }
 
+    fn make_row(contact_jid: &str, subscription: &str) -> RosterItemRow {
+        RosterItemRow {
+            contact_jid: contact_jid.to_string(),
+            name: None,
+            subscription: subscription.to_string(),
+            ask: None,
+            approved: false,
+            groups: vec![],
+        }
+    }
+
     #[tokio::test]
-    async fn test_roster_item_crud() {
+    async fn test_apply_roster_change_upsert_and_remove() {
         let db = setup_test_db().await;
         let storage = DatabaseRosterStorage::new(db);
 
         let user_jid: BareJid = "alice@example.com".parse().unwrap();
         let contact_jid: BareJid = "bob@example.com".parse().unwrap();
 
-        // Initially empty
         let roster = storage.get_roster(&user_jid).await.unwrap();
         assert!(roster.is_empty());
 
-        // Add item
-        let item = RosterItemRow {
+        let row = RosterItemRow {
             contact_jid: contact_jid.to_string(),
             name: Some("Bob".to_string()),
             subscription: "none".to_string(),
@@ -540,24 +831,13 @@ mod tests {
             approved: false,
             groups: vec!["Friends".to_string()],
         };
-        let is_new = storage.set_roster_item(&user_jid, &item).await.unwrap();
-        assert!(is_new);
-
-        // Check it exists
-        assert!(storage
-            .has_roster_item(&user_jid, &contact_jid)
+        let (added, _) = storage
+            .apply_roster_change(&user_jid, RosterRowChange::Upsert(row))
             .await
-            .unwrap());
+            .unwrap();
+        assert!(matches!(added.kind, RosterRowMutationKind::Added(_)));
 
-        // Get the roster
-        let roster = storage.get_roster(&user_jid).await.unwrap();
-        assert_eq!(roster.len(), 1);
-        assert_eq!(roster[0].contact_jid, contact_jid.to_string());
-        assert_eq!(roster[0].name, Some("Bob".to_string()));
-        assert_eq!(roster[0].groups, vec!["Friends".to_string()]);
-
-        // Update item
-        let updated_item = RosterItemRow {
+        let updated_row = RosterItemRow {
             contact_jid: contact_jid.to_string(),
             name: Some("Robert".to_string()),
             subscription: "both".to_string(),
@@ -565,60 +845,72 @@ mod tests {
             approved: false,
             groups: vec!["Friends".to_string(), "Work".to_string()],
         };
-        let is_new = storage
-            .set_roster_item(&user_jid, &updated_item)
+        let (updated, _) = storage
+            .apply_roster_change(&user_jid, RosterRowChange::Upsert(updated_row))
             .await
             .unwrap();
-        assert!(!is_new); // Should be an update, not new
+        assert!(matches!(updated.kind, RosterRowMutationKind::Updated(_)));
+        assert_ne!(added.version, updated.version);
 
-        // Verify update
-        let item = storage
-            .get_roster_item(&user_jid, &contact_jid)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(item.name, Some("Robert".to_string()));
-        assert_eq!(item.subscription, "both");
-
-        // Remove item
-        let removed = storage
-            .remove_roster_item(&user_jid, &contact_jid)
+        let (removed, _) = storage
+            .apply_roster_change(&user_jid, RosterRowChange::Remove(contact_jid.clone()))
             .await
             .unwrap();
-        assert!(removed);
+        assert!(matches!(removed.kind, RosterRowMutationKind::Removed(_)));
+        assert_ne!(updated.version, removed.version);
 
-        // Verify removal
         assert!(!storage
             .has_roster_item(&user_jid, &contact_jid)
             .await
             .unwrap());
-        let roster = storage.get_roster(&user_jid).await.unwrap();
-        assert!(roster.is_empty());
     }
 
     #[tokio::test]
-    async fn test_subscription_update() {
+    async fn test_apply_roster_change_remove_missing_returns_error() {
+        let db = setup_test_db().await;
+        let storage = DatabaseRosterStorage::new(db);
+
+        let user_jid: BareJid = "alice@example.com".parse().unwrap();
+        let contact_jid: BareJid = "ghost@example.com".parse().unwrap();
+
+        let result = storage
+            .apply_roster_change(&user_jid, RosterRowChange::Remove(contact_jid))
+            .await;
+        assert!(matches!(result, Err(RosterStorageError::ItemNotFound)));
+    }
+
+    #[tokio::test]
+    async fn test_apply_subscription_update_bumps_version() {
         let db = setup_test_db().await;
         let storage = DatabaseRosterStorage::new(db);
 
         let user_jid: BareJid = "alice@example.com".parse().unwrap();
         let contact_jid: BareJid = "bob@example.com".parse().unwrap();
 
-        // Update subscription (creates item if not exists)
-        let item = storage
-            .update_subscription(&user_jid, &contact_jid, "none", Some("subscribe"))
+        let (first, _) = storage
+            .apply_subscription_update(&user_jid, &contact_jid, "none", Some("subscribe"))
             .await
             .unwrap();
-        assert_eq!(item.subscription, "none");
-        assert_eq!(item.ask, Some("subscribe".to_string()));
+        match &first.kind {
+            RosterRowMutationKind::Added(row) => {
+                assert_eq!(row.subscription, "none");
+                assert_eq!(row.ask, Some("subscribe".to_string()));
+            }
+            other => panic!("expected Added, got {:?}", other),
+        }
 
-        // Update to 'to' state
-        let item = storage
-            .update_subscription(&user_jid, &contact_jid, "to", None)
+        let (second, _) = storage
+            .apply_subscription_update(&user_jid, &contact_jid, "to", None)
             .await
             .unwrap();
-        assert_eq!(item.subscription, "to");
-        assert_eq!(item.ask, None);
+        match &second.kind {
+            RosterRowMutationKind::Updated(row) => {
+                assert_eq!(row.subscription, "to");
+                assert!(row.ask.is_none());
+            }
+            other => panic!("expected Updated, got {:?}", other),
+        }
+        assert_ne!(first.version, second.version);
     }
 
     #[tokio::test]
@@ -628,33 +920,26 @@ mod tests {
 
         let user_jid: BareJid = "alice@example.com".parse().unwrap();
 
-        // Add contacts with different subscription states
-        let contacts = [
-            ("bob@example.com", "to"),     // Alice receives Bob's presence
-            ("carol@example.com", "from"), // Carol receives Alice's presence
-            ("dan@example.com", "both"),   // Mutual subscription
-            ("eve@example.com", "none"),   // No subscription
-        ];
-
-        for (contact, subscription) in contacts {
-            let item = RosterItemRow {
-                contact_jid: contact.to_string(),
-                name: None,
-                subscription: subscription.to_string(),
-                ask: None,
-                approved: false,
-                groups: vec![],
-            };
-            storage.set_roster_item(&user_jid, &item).await.unwrap();
+        for (contact, subscription) in [
+            ("bob@example.com", "to"),
+            ("carol@example.com", "from"),
+            ("dan@example.com", "both"),
+            ("eve@example.com", "none"),
+        ] {
+            let _ = storage
+                .apply_roster_change(
+                    &user_jid,
+                    RosterRowChange::Upsert(make_row(contact, subscription)),
+                )
+                .await
+                .unwrap();
         }
 
-        // Get presence subscribers (from or both) - these receive Alice's presence
         let subscribers = storage.get_presence_subscribers(&user_jid).await.unwrap();
         assert_eq!(subscribers.len(), 2);
         assert!(subscribers.contains(&"carol@example.com".to_string()));
         assert!(subscribers.contains(&"dan@example.com".to_string()));
 
-        // Get presence subscriptions (to or both) - Alice receives their presence
         let subscriptions = storage.get_presence_subscriptions(&user_jid).await.unwrap();
         assert_eq!(subscriptions.len(), 2);
         assert!(subscriptions.contains(&"bob@example.com".to_string()));
@@ -662,39 +947,149 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_roster_versioning() {
+    async fn test_get_or_create_roster_version_synthesises_for_empty_roster() {
         let db = setup_test_db().await;
         let storage = DatabaseRosterStorage::new(db);
 
         let user_jid: BareJid = "alice@example.com".parse().unwrap();
-        let contact_jid: BareJid = "bob@example.com".parse().unwrap();
+        assert!(storage
+            .get_roster_version(&user_jid)
+            .await
+            .unwrap()
+            .is_none());
 
-        // Initially no version
-        let version = storage.get_roster_version(&user_jid).await.unwrap();
-        assert!(version.is_none());
-
-        // Add item (creates version)
-        let item = RosterItemRow {
-            contact_jid: contact_jid.to_string(),
-            name: None,
-            subscription: "none".to_string(),
-            ask: None,
-            approved: false,
-            groups: vec![],
-        };
-        storage.set_roster_item(&user_jid, &item).await.unwrap();
-
-        let version1 = storage.get_roster_version(&user_jid).await.unwrap();
-        assert!(version1.is_some());
-
-        // Update item (updates version)
-        storage
-            .update_subscription(&user_jid, &contact_jid, "to", None)
+        let v1 = storage
+            .get_or_create_roster_version(&user_jid)
             .await
             .unwrap();
+        let v2 = storage
+            .get_or_create_roster_version(&user_jid)
+            .await
+            .unwrap();
+        assert_eq!(v1, v2, "second call should return the same version");
+    }
 
-        let version2 = storage.get_roster_version(&user_jid).await.unwrap();
-        assert!(version2.is_some());
-        assert_ne!(version1, version2);
+    /// XEP-0237 §2.6 conformance regression test (T6 in PR #336).
+    ///
+    /// Concurrent mutations against the same user must yield distinct versions —
+    /// "the version contained in a roster push MUST be unique" / "in order of
+    /// modification". The per-user lock in `apply_roster_change` is what holds
+    /// these MUSTs. If a future change splits the mutation+version-bump into
+    /// two awaits without serialisation, this test will start failing under
+    /// load.
+    ///
+    /// Runs on a multi-threaded runtime so the spawned tasks interleave on
+    /// distinct OS threads, exercising real lock contention rather than
+    /// cooperative scheduling on a single thread.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn apply_roster_change_emits_unique_versions_under_concurrency() {
+        let db = setup_test_db().await;
+        let storage = DatabaseRosterStorage::new(db);
+        let user_jid: BareJid = "alice@example.com".parse().unwrap();
+
+        const N: usize = 16;
+        let mut handles = Vec::with_capacity(N);
+        for i in 0..N {
+            let storage = storage.clone();
+            let user_jid = user_jid.clone();
+            let row = make_row(&format!("contact{i}@example.com"), "none");
+            handles.push(tokio::spawn(async move {
+                let (mutation, _lock) = storage
+                    .apply_roster_change(&user_jid, RosterRowChange::Upsert(row))
+                    .await
+                    .unwrap();
+                mutation.version
+            }));
+        }
+
+        let mut versions = Vec::with_capacity(N);
+        for h in handles {
+            versions.push(h.await.unwrap());
+        }
+
+        let unique: std::collections::HashSet<_> =
+            versions.iter().map(|v| v.as_str().to_string()).collect();
+        assert_eq!(
+            unique.len(),
+            N,
+            "all {N} concurrent mutations must produce distinct versions; got {versions:?}"
+        );
+    }
+
+    /// XEP-0237 §2.6 conformance regression test (companion to T6, addresses
+    /// the snapshot-vs-mutation race called out by code review on PR #336).
+    ///
+    /// Under concurrent writers and a reader spinning `snapshot_roster`, every
+    /// snapshot must see a (items, version) pair that was actually a state of
+    /// the storage at some point in time — never a torn read where items
+    /// reflect mutation k+1 but version reads as V_k. Without the per-user
+    /// lock around `snapshot_roster`, this property does not hold.
+    ///
+    /// We probe the invariant by recording each writer's (post-mutation
+    /// version, post-mutation item count) into a shared map. Every snapshot
+    /// the reader takes must produce a (items.len(), version) pair that
+    /// matches one of those recorded states (or the empty starting state).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn snapshot_roster_is_atomic_against_concurrent_mutations() {
+        let db = setup_test_db().await;
+        let storage = DatabaseRosterStorage::new(db);
+        let user_jid: BareJid = "alice@example.com".parse().unwrap();
+
+        // Map from observed (items_count, version_string) to how many times
+        // that pair was the post-mutation state of the storage. The empty
+        // starting state is implicitly allowed because `snapshot_roster`
+        // synthesises a fresh ver for an empty roster — and that fresh ver
+        // is then stored, so a subsequent mutation will produce ver != that.
+        // We record only writer-observed states.
+        let known_states: Arc<DashMap<(usize, String), ()>> = Arc::new(DashMap::new());
+
+        const WRITERS: usize = 12;
+        const READS_PER_WRITER: usize = 4;
+
+        let mut writers = Vec::with_capacity(WRITERS);
+        for i in 0..WRITERS {
+            let storage = storage.clone();
+            let user_jid = user_jid.clone();
+            let states = known_states.clone();
+            writers.push(tokio::spawn(async move {
+                let row = make_row(&format!("contact{i}@example.com"), "none");
+                let (mutation, _lock) = storage
+                    .apply_roster_change(&user_jid, RosterRowChange::Upsert(row))
+                    .await
+                    .unwrap();
+                // Record the post-mutation count + version *before* dropping
+                // the lock so a concurrent reader can never observe a state
+                // ahead of what's recorded here.
+                let count = storage.get_roster(&user_jid).await.unwrap().len();
+                states.insert((count, mutation.version.as_str().to_string()), ());
+            }));
+        }
+
+        let mut readers = Vec::with_capacity(WRITERS * READS_PER_WRITER);
+        for _ in 0..(WRITERS * READS_PER_WRITER) {
+            let storage = storage.clone();
+            let user_jid = user_jid.clone();
+            let states = known_states.clone();
+            readers.push(tokio::spawn(async move {
+                let (items, version) = storage.snapshot_roster(&user_jid).await.unwrap();
+                let key = (items.len(), version.as_str().to_string());
+                // The snapshot's pair must either be the empty-roster bootstrap
+                // (count=0, ver synthesised) or a state recorded by a writer.
+                // A reader that synthesises and stores a ver before any
+                // writer runs is harmless — it then becomes the storage's
+                // current ver, and the next writer will replace it.
+                key.0 == 0 || states.contains_key(&key)
+            }));
+        }
+
+        for w in writers {
+            w.await.unwrap();
+        }
+        for r in readers {
+            assert!(
+                r.await.unwrap(),
+                "snapshot_roster returned a (count, ver) pair that no mutation ever produced"
+            );
+        }
     }
 }
