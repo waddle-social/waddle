@@ -855,3 +855,134 @@ async fn xep_0313_decode_rejects_unknown_message_type_row() {
         ),
     }
 }
+
+#[tokio::test]
+async fn xep_0313_with_filter_does_not_match_domain_prefix_collision() {
+    // PR #331 review (Fix 7): the `with` filter MUST match by parsed
+    // JID structure, not by textual prefix. The earlier shape used
+    // `LIKE '{with}%'` (and `starts_with` in the in-memory backend),
+    // which incorrectly matched archived rows whose JID merely shared
+    // a textual prefix with the query — e.g. `with=alice@example.com`
+    // would falsely match a row with `from=alice@example.com.evil/x`.
+    // Per XEP-0313 §4.3.1 a bare `with` matches only the bare form of
+    // the archived JID (so the row may be the same bare JID, or that
+    // bare JID with any resource); a full `with` matches only exact
+    // equality.
+    let storage = SqlxMamStorage::open_in_memory()
+        .await
+        .expect("open sqlite in-memory");
+    let archive = archive_bare();
+    let to_room = jid_lit(ARCHIVE);
+
+    // Row 1: legitimate match — bare form equals `alice@example.com`,
+    // resource is `web`.
+    let legit_from = jid_lit("alice@example.com/web");
+    let legit_row = ArchivedMessage {
+        id: "archive-with-legit".to_string(),
+        timestamp: chrono::Utc::now(),
+        from: legit_from.clone(),
+        to: to_room.clone(),
+        body: Some("legit".to_string()),
+        stanza_id: Some(waddle_xmpp_core::xep0359::StanzaId::new(
+            "wire-with-legit",
+            ARCHIVE.parse::<jid::Jid>().expect("valid jid"),
+        )),
+        thread: None,
+        reply: None,
+        origin_id: None,
+        message_type: MessageType::Groupchat,
+        stanza_xml: None,
+        rich: None,
+        nickname_generation: None,
+    };
+    storage
+        .store_message(&archive, &legit_row)
+        .await
+        .expect("store legit");
+
+    // Row 2: malicious prefix collision — `alice@example.com.evil` is
+    // a different domain that shares the textual prefix
+    // `alice@example.com`.
+    let evil_from = jid_lit("alice@example.com.evil/whatever");
+    let evil_row = ArchivedMessage {
+        id: "archive-with-evil".to_string(),
+        timestamp: chrono::Utc::now(),
+        from: evil_from.clone(),
+        to: to_room.clone(),
+        body: Some("evil".to_string()),
+        stanza_id: Some(waddle_xmpp_core::xep0359::StanzaId::new(
+            "wire-with-evil",
+            ARCHIVE.parse::<jid::Jid>().expect("valid jid"),
+        )),
+        thread: None,
+        reply: None,
+        origin_id: None,
+        message_type: MessageType::Groupchat,
+        stanza_xml: None,
+        rich: None,
+        nickname_generation: None,
+    };
+    storage
+        .store_message(&archive, &evil_row)
+        .await
+        .expect("store evil");
+
+    // Bare `with` must match the legit row's bare form but NOT the
+    // evil row's prefix-colliding bare form.
+    let bare_with_query = MamQuery {
+        with: Some(jid_lit("alice@example.com")),
+        ..MamQuery::default()
+    };
+    let bare_result = storage
+        .query_messages(&archive, &bare_with_query)
+        .await
+        .expect("query bare with");
+    assert_eq!(
+        bare_result.messages.len(),
+        1,
+        "bare `with` must match only the legit alice@example.com row, not the alice@example.com.evil prefix collision; got: {:?}",
+        bare_result.messages.iter().map(|m| m.from.to_string()).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        bare_result.messages[0].from, legit_from,
+        "bare `with` must match the legit row, not the prefix-colliding evil row"
+    );
+
+    // Full `with` must match only exact equality — the legit row's
+    // resource is `web`, so a `with=alice@example.com/laptop` query
+    // must return zero rows even though the bare form matches.
+    let full_with_query = MamQuery {
+        with: Some(jid_lit("alice@example.com/laptop")),
+        ..MamQuery::default()
+    };
+    let full_result = storage
+        .query_messages(&archive, &full_with_query)
+        .await
+        .expect("query full with");
+    assert!(
+        full_result.messages.is_empty(),
+        "full `with` (with a resource the archive does not have) must return zero rows; got: {:?}",
+        full_result
+            .messages
+            .iter()
+            .map(|m| m.from.to_string())
+            .collect::<Vec<_>>()
+    );
+
+    // Full `with` exact match: querying for the actual resource on
+    // the legit row must return exactly that row.
+    let exact_full_with_query = MamQuery {
+        with: Some(legit_from.clone()),
+        ..MamQuery::default()
+    };
+    let exact_result = storage
+        .query_messages(&archive, &exact_full_with_query)
+        .await
+        .expect("query exact full with");
+    assert_eq!(
+        exact_result.messages.len(),
+        1,
+        "full `with` matching the exact archived JID must return that row"
+    );
+    assert_eq!(exact_result.messages[0].from, legit_from);
+}

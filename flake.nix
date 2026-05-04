@@ -308,8 +308,8 @@
           waddle-server-test = craneLib.cargoTest (
             serverTestArgs
             // {
-              cargoArtifacts = workspaceArtifacts;
-              cargoExtraArgs = "--locked --workspace";
+              cargoArtifacts = workspaceAllFeaturesArtifacts;
+              cargoExtraArgs = "--locked --workspace --all-features";
               cargoTestExtraArgs = "--lib --tests";
             }
           );
@@ -336,7 +336,7 @@
             // {
               pname = "waddle-server-xmpp-unit-tests";
               cargoArtifacts = xmppArtifacts;
-              cargoExtraArgs = "--locked --package waddle-xmpp";
+              cargoExtraArgs = "--locked --package waddle-xmpp --features test-utils";
               cargoTestExtraArgs = "--lib --verbose";
             }
           );
@@ -363,7 +363,7 @@
             // {
               pname = "waddle-server-xmpp-xep-integration";
               cargoArtifacts = xmppArtifacts;
-              cargoExtraArgs = "--locked --package waddle-xmpp";
+              cargoExtraArgs = "--locked --package waddle-xmpp --features test-utils";
               cargoTestExtraArgs = "--tests --verbose";
             }
           );

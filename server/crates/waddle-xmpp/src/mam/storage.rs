@@ -242,18 +242,23 @@ impl MamStorage for InMemoryMamStorage {
             messages.retain(|message| message.timestamp <= end);
         }
         if let Some(with) = query.with.as_ref() {
-            // XEP-0313 §4.1.5: `with` matches sender or recipient. The
-            // wire form is a single JID — bare matches the
-            // counterparty's bare JID and full matches the exact
-            // resource. Compare via the JID's textual form so a bare
-            // `with` matches both bare and full archived JIDs (the
-            // resource on the archived JID is a strict suffix); a
-            // full `with` matches only the exact full JID.
-            let with_str = with.to_string();
+            // XEP-0313 §4.3.1: `with` matches sender or recipient.
+            //  - Bare `with` matches archived JIDs whose **bare form**
+            //    equals `with`, regardless of resource (so the row may
+            //    be `alice@example.com` or `alice@example.com/web`).
+            //  - Full `with` matches only the exact full JID.
+            //
+            // Earlier this was a textual `starts_with` prefix match
+            // which is incorrect: `alice@example.com` would match
+            // `alice@example.com.evil/whatever`, leaking unrelated
+            // archive rows across XMPP domains. Compare via parsed
+            // [`jid::Jid`] values so the matching respects JID
+            // structure, not byte-prefix overlap.
+            let with_resource = with.resource().is_some();
+            let with_bare = with.to_bare();
             messages.retain(|message| {
-                let from_str = message.from.to_string();
-                let to_str = message.to.to_string();
-                from_str.starts_with(&with_str) || to_str.starts_with(&with_str)
+                jid_matches_with_filter(&message.from, &with_bare, with_resource, with)
+                    || jid_matches_with_filter(&message.to, &with_bare, with_resource, with)
             });
         }
         if !query.ids.is_empty() {
@@ -508,7 +513,10 @@ impl SqlxMamStorage {
     /// bypassing the typed encode path. Used to construct deliberately
     /// malformed rows (e.g. orphan `parent_thread_id` with NULL
     /// `thread_id`) so the decode-side hard-error contract can be
-    /// tested. Only available in test builds; sqlite-only.
+    /// tested. Gated behind `cfg(test)` for in-crate tests and the
+    /// `test-utils` Cargo feature for cross-crate integration tests;
+    /// sqlite-only.
+    #[cfg(any(test, feature = "test-utils"))]
     #[doc(hidden)]
     pub async fn insert_raw_thread_columns_for_test(
         &self,
@@ -545,8 +553,10 @@ impl SqlxMamStorage {
     /// hard-error contract for `parse_archived_addressing` (a parse
     /// failure surfaces as `MamStorageError::Serialization` rather
     /// than collapsing to a sentinel JID, the data-loss bug
-    /// `parse_message_jid` papered over). Only available in test
-    /// builds; sqlite-only.
+    /// `parse_message_jid` papered over). Gated behind `cfg(test)` for
+    /// in-crate tests and the `test-utils` Cargo feature for
+    /// cross-crate integration tests; sqlite-only.
+    #[cfg(any(test, feature = "test-utils"))]
     #[doc(hidden)]
     pub async fn insert_raw_from_jid_for_test(
         &self,
@@ -579,8 +589,10 @@ impl SqlxMamStorage {
     /// reply columns. Used to construct deliberately malformed rows
     /// (e.g. orphan `reply_to_jid` with NULL `reply_to_id`) so the
     /// decode-side hard-error contract for the collapsed
-    /// `Option<ArchivedReply>` field can be tested. Only available in
-    /// test builds; sqlite-only.
+    /// `Option<ArchivedReply>` field can be tested. Gated behind
+    /// `cfg(test)` for in-crate tests and the `test-utils` Cargo
+    /// feature for cross-crate integration tests; sqlite-only.
+    #[cfg(any(test, feature = "test-utils"))]
     #[doc(hidden)]
     pub async fn insert_raw_reply_columns_for_test(
         &self,
@@ -618,7 +630,10 @@ impl SqlxMamStorage {
     /// §5.2.2 set (`chat`, `error`, `groupchat`, `headline`,
     /// `normal`) so the decode-side hard-error contract for the
     /// typed [`xmpp_parsers::message::MessageType`] field can be
-    /// tested. Only available in test builds; sqlite-only.
+    /// tested. Gated behind `cfg(test)` for in-crate tests and the
+    /// `test-utils` Cargo feature for cross-crate integration tests;
+    /// sqlite-only.
+    #[cfg(any(test, feature = "test-utils"))]
     #[doc(hidden)]
     pub async fn insert_raw_message_type_for_test(
         &self,
@@ -889,15 +904,68 @@ fn missing_requested_id(messages: &[ArchivedMessage], requested_ids: &[String]) 
     missing_requested_id_in_set(&available_ids, requested_ids)
 }
 
+/// Pre-computed bind values for the SQL `with` filter.
+///
+/// XEP-0313 §4.3.1 distinguishes bare and full `with` semantics:
+/// bare matches the archived JID's bare form (resource may be any /
+/// absent); full matches only exact equality. Pre-computing both
+/// values keeps the bind site lifetime stable for sqlx and makes the
+/// matching shape readable at the SQL emit site.
+struct WithFilter {
+    /// The bare form of the query `with`. Used for both equality
+    /// (against an archived bare JID) and as the prefix in
+    /// `LIKE 'bare/%'` (against an archived full JID).
+    bare: String,
+    /// `Some(full_form)` when the query `with` carries a resource;
+    /// in that case the SQL emits an exact-equality match against the
+    /// full form. `None` when the query `with` is bare.
+    full: Option<String>,
+}
+
+impl WithFilter {
+    fn from_with(with: &jid::Jid) -> Self {
+        Self {
+            bare: with.to_bare().to_string(),
+            full: with.resource().is_some().then(|| with.to_string()),
+        }
+    }
+
+    fn bare_resource_prefix(&self) -> String {
+        format!("{}/%", self.bare)
+    }
+}
+
 macro_rules! push_common_mam_filters {
     ($builder:expr, $query:expr, $with_filter:expr) => {{
         if let Some(with) = $with_filter {
-            $builder
-                .push(" AND (from_jid LIKE ")
-                .push_bind(with)
-                .push(" OR to_jid LIKE ")
-                .push_bind(with)
-                .push(")");
+            // Bare `with`: archived JID may be bare (`= bare`) or full
+            // with any resource (`LIKE 'bare/%'`). The resource prefix
+            // MUST include the `/` separator so domain prefix
+            // collisions (`example.com` vs `example.com.evil`) cannot
+            // match.
+            //
+            // Full `with`: archived JID must equal exactly.
+            if let Some(full) = with.full.as_deref() {
+                $builder
+                    .push(" AND (from_jid = ")
+                    .push_bind(full)
+                    .push(" OR to_jid = ")
+                    .push_bind(full)
+                    .push(")");
+            } else {
+                let bare = with.bare.as_str();
+                let resource_prefix = with.bare_resource_prefix();
+                $builder
+                    .push(" AND (from_jid = ")
+                    .push_bind(bare)
+                    .push(" OR from_jid LIKE ")
+                    .push_bind(resource_prefix.clone())
+                    .push(" OR to_jid = ")
+                    .push_bind(bare)
+                    .push(" OR to_jid LIKE ")
+                    .push_bind(resource_prefix)
+                    .push(")");
+            }
         }
         if !$query.ids.is_empty() {
             $builder.push(" AND id IN (");
@@ -933,7 +1001,7 @@ fn push_sqlite_mam_filters<'args>(
     builder: &mut QueryBuilder<'args, Sqlite>,
     archive_jid: &'args str,
     query: &'args MamQuery,
-    with_filter: Option<&'args str>,
+    with_filter: Option<&'args WithFilter>,
     filter_before: Option<&'args ArchivedMessage>,
     filter_after: Option<&'args ArchivedMessage>,
 ) {
@@ -975,7 +1043,7 @@ fn push_postgres_mam_filters<'args>(
     builder: &mut QueryBuilder<'args, Postgres>,
     archive_jid: &'args str,
     query: &'args MamQuery,
-    with_filter: Option<&'args str>,
+    with_filter: Option<&'args WithFilter>,
     filter_before: Option<&'args ArchivedMessage>,
     filter_after: Option<&'args ArchivedMessage>,
 ) {
@@ -1150,6 +1218,34 @@ fn archive_order_after(message: &ArchivedMessage, cursor: &ArchivedMessage) -> b
         || (message.timestamp == cursor.timestamp && message.id > cursor.id)
 }
 
+/// XEP-0313 §4.3.1 `with` predicate, evaluated against a single
+/// archived JID (either the row's `from` or `to`).
+///
+/// - `with_bare`: pre-computed bare form of the query's `with`.
+/// - `with_has_resource`: whether the query's `with` carries a
+///   resource part (i.e. it is a full JID).
+/// - `with_full`: the original query JID, used for exact full-JID
+///   equality when the query specified a resource.
+///
+/// A bare `with` matches any archived JID whose bare form equals
+/// `with_bare`, regardless of resource. A full `with` matches only
+/// when the archived JID equals it exactly. Comparing structurally
+/// via parsed JIDs (rather than `starts_with`) prevents the prefix-
+/// collision class of bug where `alice@example.com` would otherwise
+/// match `alice@example.com.evil/whatever`.
+fn jid_matches_with_filter(
+    archived: &jid::Jid,
+    with_bare: &BareJid,
+    with_has_resource: bool,
+    with_full: &jid::Jid,
+) -> bool {
+    if with_has_resource {
+        archived == with_full
+    } else {
+        &archived.to_bare() == with_bare
+    }
+}
+
 fn matches_thread_filter(message: &ArchivedMessage, thread_id: &str) -> bool {
     let archived_thread_id = message.thread.as_ref().map(|t| t.id.as_str());
     let archived_reply_id = message.reply.as_ref().map(|r| r.id.as_str());
@@ -1255,15 +1351,24 @@ fn decode_thread_columns(
     use waddle_xmpp_core::mam::ThreadId;
     use waddle_xmpp_core::xep0201::ThreadInfo;
 
-    if thread_id.is_none() && parent_thread_id.is_some() {
-        return Err(MamStorageError::Serialization(
+    match (thread_id, parent_thread_id) {
+        (None, None) => Ok(None),
+        (None, Some(_)) => Err(MamStorageError::Serialization(
             "orphan parent_thread_id without thread_id".to_string(),
-        ));
+        )),
+        (Some(raw_id), parent_raw) => {
+            let id = ThreadId::new(raw_id).ok_or_else(|| {
+                MamStorageError::Serialization("invalid (empty) thread_id".to_string())
+            })?;
+            let parent = match parent_raw {
+                None => None,
+                Some(raw_parent) => Some(ThreadId::new(raw_parent).ok_or_else(|| {
+                    MamStorageError::Serialization("invalid (empty) parent_thread_id".to_string())
+                })?),
+            };
+            Ok(Some(ThreadInfo { id, parent }))
+        }
     }
-    Ok(thread_id.and_then(ThreadId::new).map(|id| ThreadInfo {
-        id,
-        parent: parent_thread_id.and_then(ThreadId::new),
-    }))
 }
 
 /// Combine the raw `reply_to_id` / `reply_to_jid` columns into a typed
@@ -1497,12 +1602,18 @@ impl MamStorage for SqlxMamStorage {
         query: &MamQuery,
     ) -> Result<MamResult, MamStorageError> {
         let limit = i64::from(query.max.unwrap_or(100).min(500)) + 1;
-        // XEP-0313 §4.1.5 `with` filter: storage compares the wire
-        // textual form so a bare `with` matches both bare and full
-        // archived JIDs, and a full `with` matches only the exact
-        // resource. The string is stable for sqlx's bind lifetime
-        // requirements.
-        let with_filter = query.with.as_ref().map(|with| format!("{with}%"));
+        // XEP-0313 §4.3.1 `with` filter: a bare `with` matches the
+        // bare form of the archived sender/recipient (so the row's
+        // resource can be anything, or absent); a full `with` matches
+        // only the exact full JID. The strings are stable for sqlx's
+        // bind lifetime requirements.
+        //
+        // NOTE: the previous shape was `LIKE '{with}%'` (a single
+        // textual prefix bind). That collided across JID structure —
+        // `alice@example.com` would match `alice@example.com.evil/...`
+        // because the prefix overlaps. The corrected shape is exact
+        // equality plus a `LIKE 'bare/%'` for the resource form.
+        let with_filter = query.with.as_ref().map(WithFilter::from_with);
         let archive_jid_str = archive_jid.to_string();
 
         match &self.backend {
@@ -1526,7 +1637,7 @@ impl MamStorage for SqlxMamStorage {
                     &mut count_builder,
                     archive_jid_str.as_str(),
                     query,
-                    with_filter.as_deref(),
+                    with_filter.as_ref(),
                     filter_before_cursor.as_ref(),
                     filter_after_cursor.as_ref(),
                 );
@@ -1542,7 +1653,7 @@ impl MamStorage for SqlxMamStorage {
                     &mut builder,
                     archive_jid_str.as_str(),
                     query,
-                    with_filter.as_deref(),
+                    with_filter.as_ref(),
                     filter_before_cursor.as_ref(),
                     filter_after_cursor.as_ref(),
                 );
@@ -1610,7 +1721,7 @@ impl MamStorage for SqlxMamStorage {
                     &mut count_builder,
                     archive_jid_str.as_str(),
                     query,
-                    with_filter.as_deref(),
+                    with_filter.as_ref(),
                     filter_before_cursor.as_ref(),
                     filter_after_cursor.as_ref(),
                 );
@@ -1626,7 +1737,7 @@ impl MamStorage for SqlxMamStorage {
                     &mut builder,
                     archive_jid_str.as_str(),
                     query,
-                    with_filter.as_deref(),
+                    with_filter.as_ref(),
                     filter_before_cursor.as_ref(),
                     filter_after_cursor.as_ref(),
                 );

@@ -75,7 +75,7 @@ pub fn build_direct_archived_message(
     // "empty `<body></body>`" (`Some("")`) so consumers reading the
     // denormalized `body` field don't conflate subject-only or
     // reaction-only stanzas with truly empty bodies.
-    let body = prototype_body(message).map(|value| value.trim().to_string());
+    let body = prototype_body(message);
     let reply = extract_reply_reference(message);
     let origin_id = extract_origin_id(message);
     let rich = rich_archive_payload(message);

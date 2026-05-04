@@ -453,6 +453,92 @@ async fn xep_0201_collapsed_thread_field_round_trips_no_thread_through_storage()
 }
 
 #[tokio::test]
+async fn xep_0201_decode_rejects_present_but_empty_thread_id_row() {
+    // Q7 hard-error policy (PR #331 review): a row whose `thread_id`
+    // column is non-NULL but fails `ThreadId::new`'s non-empty
+    // validation (e.g. an empty string `""`) is malformed. The earlier
+    // `decode_thread_columns` shape would silently fold this through
+    // `and_then(ThreadId::new)` and return `Ok(None)`, dropping both
+    // the (invalid) thread id AND any `parent_thread_id` set on the
+    // row — invisible corruption. Decode MUST surface this as a
+    // serialization error so DB corruption is observable at the
+    // boundary.
+    let storage = SqlxMamStorage::open_in_memory()
+        .await
+        .expect("open sqlite in-memory");
+    storage
+        .insert_raw_thread_columns_for_test(
+            &room_bare(),
+            "archive-empty-thread",
+            Some(""),
+            Some("orphan-parent"),
+        )
+        .await
+        .expect("raw insert");
+
+    let result = storage
+        .query_messages(&room_bare(), &MamQuery::default())
+        .await;
+    match result {
+        Err(MamStorageError::Serialization(message)) => {
+            assert!(
+                message.contains("thread_id"),
+                "decode error must reference the thread_id column; got: {message}"
+            );
+            assert!(
+                message.contains("invalid") || message.contains("empty"),
+                "decode error must describe the invalid/empty value; got: {message}"
+            );
+        }
+        Err(other) => panic!("expected Serialization error, got: {other:?}"),
+        Ok(result) => panic!(
+            "decode of empty thread_id row must hard-error; got rows: {:?}",
+            result.messages
+        ),
+    }
+}
+
+#[tokio::test]
+async fn xep_0201_decode_rejects_present_but_empty_parent_thread_id_row() {
+    // Companion to the empty-thread_id test above: a row with a valid
+    // `thread_id` but an empty `parent_thread_id` likewise must hard-
+    // error rather than silently dropping the corrupted parent column.
+    let storage = SqlxMamStorage::open_in_memory()
+        .await
+        .expect("open sqlite in-memory");
+    storage
+        .insert_raw_thread_columns_for_test(
+            &room_bare(),
+            "archive-empty-parent",
+            Some("real-thread"),
+            Some(""),
+        )
+        .await
+        .expect("raw insert");
+
+    let result = storage
+        .query_messages(&room_bare(), &MamQuery::default())
+        .await;
+    match result {
+        Err(MamStorageError::Serialization(message)) => {
+            assert!(
+                message.contains("parent_thread_id"),
+                "decode error must reference the parent_thread_id column; got: {message}"
+            );
+            assert!(
+                message.contains("invalid") || message.contains("empty"),
+                "decode error must describe the invalid/empty value; got: {message}"
+            );
+        }
+        Err(other) => panic!("expected Serialization error, got: {other:?}"),
+        Ok(result) => panic!(
+            "decode of empty parent_thread_id row must hard-error; got rows: {:?}",
+            result.messages
+        ),
+    }
+}
+
+#[tokio::test]
 async fn xep_0201_decode_rejects_orphan_parent_thread_id_row() {
     // Q7 hard-error policy: a malformed row with `thread_id IS NULL`
     // but `parent_thread_id` set is incoherent (RFC 6121 §5.2.5: parent

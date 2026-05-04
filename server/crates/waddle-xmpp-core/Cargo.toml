@@ -16,3 +16,9 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 xmpp-parsers = { workspace = true }
+
+[features]
+# Exposes `ArchivedMessage::for_test` (and other test-only fixture
+# constructors) to cross-crate tests. Production builds MUST NOT enable
+# this feature; downstream crates enable it via `[dev-dependencies]` only.
+test-utils = []

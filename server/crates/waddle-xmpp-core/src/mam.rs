@@ -340,9 +340,11 @@ impl ArchivedMessage {
     /// supply real typed JIDs.
     ///
     /// Exported (`pub`, `#[doc(hidden)]`) so test fixtures in dependent
-    /// crates (e.g. `waddle-xmpp`, `waddle-server`) can use it. Always
-    /// compiled (no cfg gate) because CI builds tests in release mode
-    /// where `debug_assertions` is off.
+    /// crates (e.g. `waddle-xmpp`, `waddle-server`) can use it. Gated
+    /// behind `cfg(test)` for in-crate tests and the `test-utils`
+    /// Cargo feature for cross-crate consumers — production builds do
+    /// not pull in this fixture constructor.
+    #[cfg(any(test, feature = "test-utils"))]
     #[doc(hidden)]
     pub fn for_test(from: Jid, to: Jid) -> Self {
         Self {
