@@ -60,3 +60,6 @@ gateway/supergraph.graphql
 .cuenv/vcs/tmp/
 xeps/
 # END cuenv vcs
+
+# WASM build artifacts — built by CI and published to GitHub Packages
+server/wasm-pkg/

@@ -2,4 +2,4 @@
 channel = "stable"
 profile = "minimal"
 components = ["rustfmt", "clippy"]
-targets = ["wasm32-wasip2"]
+targets = ["wasm32-wasip2", "wasm32-unknown-unknown"]

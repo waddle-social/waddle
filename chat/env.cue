@@ -32,6 +32,17 @@ schema.#Project & {
 	}
 
 	ci: pipelines: {
+		publishWasm: {
+			when: {
+				branch: ["main"]
+				defaultBranch: true
+			}
+			provider: github: permissions: {
+				contents: "read"
+				packages: "write"
+			}
+			"tasks": [tasks.buildAndPublishWasm]
+		}
 		default: {
 			environment: "production"
 			when: {
@@ -55,9 +66,25 @@ schema.#Project & {
 	}
 
 	tasks: {
-		buildWasm: schema.#Task & {
+		// Builds WASM from Rust source and publishes to GitHub Packages.
+		// Runs on every merge to main.
+		buildAndPublishWasm: schema.#Task & {
 			command: "bun"
-			args: ["run", "wasm:build"]
+			args: ["run", "scripts/build-and-publish-wasm.mjs"]
+			inputs: [
+				"../server/Cargo.toml",
+				"../server/Cargo.lock",
+				"../server/crates/waddle-xmpp-client/**",
+				"../server/crates/waddle-xmpp-client-wasm/**",
+				"scripts/build-and-publish-wasm.mjs",
+			]
+		}
+
+		// Builds WASM from Rust source for the PR lint/build pipelines.
+		// Always rebuilds (REBUILD_WASM=1) so CI never needs committed artifacts.
+		buildWasm: schema.#Task & {
+			command: "bash"
+			args: ["-c", "REBUILD_WASM=1 bun run wasm:build"]
 			inputs: [
 				"../server/Cargo.toml",
 				"../server/Cargo.lock",

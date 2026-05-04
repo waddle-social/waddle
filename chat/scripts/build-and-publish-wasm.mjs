@@ -1,5 +1,13 @@
+/**
+ * CI build-and-publish script for @waddle/xmpp-client-wasm.
+ *
+ * Runs in the CI `publishWasm` pipeline on every merge to main.
+ * Requires: wasm-pack, wasm32-unknown-unknown Rust target, NODE_AUTH_TOKEN env var.
+ *
+ * Usage: bun run scripts/build-and-publish-wasm.mjs
+ */
 import { execFileSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -7,19 +15,14 @@ const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, "..", "..");
 const crateDir = resolve(repoRoot, "server/crates/waddle-xmpp-client-wasm");
 const outDir = resolve(repoRoot, "server/wasm-pkg/waddle-xmpp-client-wasm");
-const nodeModulesDir = resolve(scriptDir, "..", "node_modules/@waddle/xmpp-client-wasm");
 
-if (process.env.REBUILD_WASM !== "1") {
-  // Default: rely on the published package installed via `bun install`.
-  // Set REBUILD_WASM=1 to compile from Rust source (requires wasm-pack + wasm32-unknown-unknown).
-  console.log("[wasm] Using published @waddle/xmpp-client-wasm from registry.");
-  console.log("[wasm] Set REBUILD_WASM=1 to recompile from Rust source.");
-  process.exit(0);
+if (!process.env.NODE_AUTH_TOKEN) {
+  console.error("[wasm] NODE_AUTH_TOKEN is required to publish to GitHub Packages.");
+  process.exit(1);
 }
 
-// REBUILD_WASM=1: compile from Rust source and install into node_modules.
+// Build
 console.log("[wasm] Building @waddle/xmpp-client-wasm from Rust source...");
-
 execFileSync(
   "wasm-pack",
   ["build", "--target", "bundler", "--out-dir", "../../wasm-pkg/waddle-xmpp-client-wasm"],
@@ -66,12 +69,12 @@ if (!dts.includes("export default function init()")) {
   writeFileSync(dtsPath, `${dts}\nexport default function init(): Promise<void>;\n`);
 }
 
-// Copy into node_modules so the local build uses this version without modifying package.json.
-// Note: the next `bun install` will restore the published registry version.
-console.log("[wasm] Installing local build into node_modules...");
-mkdirSync(nodeModulesDir, { recursive: true });
-cpSync(outDir, nodeModulesDir, { recursive: true });
+// Publish to GitHub Packages.
+console.log("[wasm] Publishing @waddle/xmpp-client-wasm to GitHub Packages...");
+execFileSync("bun", ["publish", "--access", "public"], {
+  cwd: outDir,
+  stdio: "inherit",
+  env: { ...process.env },
+});
 
-console.log("[wasm] Done. Local build installed.");
-console.log("[wasm] ⚠️  Next `bun install` will revert to the published registry version.");
-
+console.log("[wasm] Published successfully.");
