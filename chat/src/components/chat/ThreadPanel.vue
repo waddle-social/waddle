@@ -32,7 +32,7 @@ const props = defineProps<{
   roomHats: RoomHats;
   roomPresence: RoomPresence;
   roomLastSeen: Record<string, number>;
-  tenorApiKey: string;
+  giphyApiKey: string;
   mentionCandidates: MentionCandidate[];
   slowModeCooldown: number;
   isSending: boolean;
@@ -457,7 +457,7 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
         :channel-name="`thread in ${channelName}`"
         :is-sending="isSending"
         :disabled="false"
-        :tenor-api-key="tenorApiKey"
+        :giphy-api-key="giphyApiKey"
         :mention-candidates="mentionCandidates"
         :slow-mode-cooldown="slowModeCooldown"
         :upload-progress="uploadProgress"
@@ -605,7 +605,7 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
         :channel-name="`thread in ${channelName}`"
         :is-sending="isSending"
         :disabled="false"
-        :tenor-api-key="tenorApiKey"
+        :giphy-api-key="giphyApiKey"
         :mention-candidates="mentionCandidates"
         :slow-mode-cooldown="slowModeCooldown"
         :upload-progress="uploadProgress"

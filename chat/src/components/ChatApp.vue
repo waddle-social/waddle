@@ -55,10 +55,10 @@ import {
 } from "@/lib/reaction-mode";
 
 const props = defineProps<{
-  tenorApiKey?: string;
+  giphyApiKey?: string;
 }>();
 
-const tenorApiKey = props.tenorApiKey ?? "";
+const giphyApiKey = props.giphyApiKey ?? "";
 
 const ui = useUiState();
 const { mode: scrollDirectionMode } = useScrollDirection();
@@ -1661,7 +1661,7 @@ onUnmounted(() => {
               :self-domain="selfDomain"
               :avatar-url-by-author="avatarUrlByAuthor"
                :author-jid-by-nick="authorJidByNick"
-              :tenor-api-key="tenorApiKey"
+              :giphy-api-key="giphyApiKey"
                :mention-candidates="mentionCandidates"
               :room-hats="authorHatsByNick"
               :room-presence="messaging.roomPresence.value"
@@ -1739,7 +1739,7 @@ onUnmounted(() => {
               :room-hats="authorHatsByNick"
               :room-presence="messaging.roomPresence.value"
               :room-last-seen="messaging.roomLastSeen.value"
-              :tenor-api-key="tenorApiKey"
+              :giphy-api-key="giphyApiKey"
                :mention-candidates="mentionCandidates"
               :slow-mode-cooldown="messaging.slowModeCooldown.value"
               :is-sending="false"
@@ -1777,7 +1777,7 @@ onUnmounted(() => {
               :room-hats="authorHatsByNick"
               :room-presence="messaging.roomPresence.value"
               :room-last-seen="messaging.roomLastSeen.value"
-              :tenor-api-key="tenorApiKey"
+              :giphy-api-key="giphyApiKey"
                :mention-candidates="mentionCandidates"
               :slow-mode-cooldown="messaging.slowModeCooldown.value"
               :is-sending="messaging.isSending.value"
