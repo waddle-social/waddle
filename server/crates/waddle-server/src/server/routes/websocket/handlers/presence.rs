@@ -248,8 +248,10 @@ async fn handle_subscription_presence(
         }
     };
 
+    // Roster pushes are now emitted inline by `update_subscription_roster_state`
+    // (see PR #336 review on cross-user lock deadlock). Only the post-roster
+    // presence side effects remain here.
     if update.auto_approve_subscribe {
-        send_subscription_roster_pushes(state, update).await;
         send_existing_subscription_ack(
             state,
             &request.to,
@@ -263,7 +265,6 @@ async fn handle_subscription_presence(
     }
 
     if !update.forward_subscription_stanza {
-        send_subscription_roster_pushes(state, update).await;
         return;
     }
 
@@ -286,7 +287,6 @@ async fn handle_subscription_presence(
     {
         send_unavailable_presence_from_user_to_user(state, &request.from, &request.to).await;
     }
-    send_subscription_roster_pushes(state, update).await;
 
     let resources = subscription_presence_recipients(state, &request);
     let mut delivered = 0usize;
@@ -941,47 +941,34 @@ async fn update_subscription_roster_state(
             }
         }
     }
-    // Each push carries its own per-user lock guard so the lock is held from
-    // the storage write through until the push has been enqueued onto the
-    // recipient sockets in `send_subscription_roster_pushes`. This honours
-    // XEP-0237 §2.6's "pushes MUST occur in order of modification".
-    let from_push = if store_from_item {
-        let (mutation, lock) = storage
+    // Mutate the from-user's roster, fan out the from-push, drop the lock
+    // before touching the to-user's roster. Holding both per-user mutation
+    // locks simultaneously could deadlock under concurrent flows that touch
+    // the same user pair in opposite roles (PR #336 review). XEP-0237 §2.6
+    // ordering only applies *within* a single user's push stream, so
+    // emitting from-pushes before to-pushes need not be atomic across users.
+    if store_from_item {
+        let (mutation, _lock) = storage
             .apply_roster_change(
                 &request.from,
                 RosterRowChange::Upsert(roster_item_to_row(&from_item)),
             )
             .await?;
-        Some(SubscriptionRosterPush {
-            user: request.from.clone(),
-            item: from_item,
-            version: mutation.version,
-            _lock: lock,
-        })
-    } else {
-        None
-    };
-    let to_push = match to_item {
-        Some(to_item) => {
-            let (mutation, lock) = storage
-                .apply_roster_change(
-                    &request.to,
-                    RosterRowChange::Upsert(roster_item_to_row(&to_item)),
-                )
-                .await?;
-            Some(SubscriptionRosterPush {
-                user: request.to.clone(),
-                item: to_item,
-                version: mutation.version,
-                _lock: lock,
-            })
-        }
-        None => None,
-    };
+        send_roster_push_to_resources(state, &request.from, &from_item, &mutation.version).await;
+        // _lock drops at end of this block; from-user's lock released before
+        // we acquire to-user's lock below.
+    }
+    if let Some(to_item) = to_item {
+        let (mutation, _lock) = storage
+            .apply_roster_change(
+                &request.to,
+                RosterRowChange::Upsert(roster_item_to_row(&to_item)),
+            )
+            .await?;
+        send_roster_push_to_resources(state, &request.to, &to_item, &mutation.version).await;
+    }
 
     Ok(Some(SubscriptionRosterUpdate {
-        from_push,
-        to_push,
         send_unavailable_before_unsubscribed,
         auto_approve_subscribe,
         forward_subscription_stanza,
@@ -989,31 +976,9 @@ async fn update_subscription_roster_state(
 }
 
 struct SubscriptionRosterUpdate {
-    from_push: Option<SubscriptionRosterPush>,
-    to_push: Option<SubscriptionRosterPush>,
     send_unavailable_before_unsubscribed: bool,
     auto_approve_subscribe: bool,
     forward_subscription_stanza: bool,
-}
-
-struct SubscriptionRosterPush {
-    user: BareJid,
-    item: RosterItem,
-    version: RosterVersion,
-    /// Per-user mutation lock guard, held until the push has been enqueued in
-    /// `send_subscription_roster_pushes` to preserve modification order
-    /// against concurrent mutations on the same user (XEP-0237 §2.6).
-    _lock: crate::db::roster::UserMutationLock,
-}
-
-async fn send_subscription_roster_pushes(state: &WebSocketState, update: SubscriptionRosterUpdate) {
-    if let Some(from_push) = update.from_push {
-        send_roster_push_to_resources(state, &from_push.user, &from_push.item, &from_push.version)
-            .await;
-    }
-    if let Some(to_push) = update.to_push {
-        send_roster_push_to_resources(state, &to_push.user, &to_push.item, &to_push.version).await;
-    }
 }
 
 async fn send_roster_push_to_resources(

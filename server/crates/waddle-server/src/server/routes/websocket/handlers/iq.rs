@@ -3220,6 +3220,14 @@ async fn handle_roster_set(
     }
 
     send_roster_push_to_sibling_resources(state, user_jid, full_jid, &push_item, &version).await;
+    // Drop the user_jid mutation lock before invoking subscription side
+    // effects on the *contact's* roster — the side-effect path acquires the
+    // contact's lock, and holding two user-locks simultaneously could
+    // deadlock against a concurrent flow that touches the same pair in the
+    // opposite role (PR #336 review). The user_jid pushes have all been
+    // enqueued by this point, so XEP-0237 §2.6 ordering for user_jid is
+    // already preserved.
+    drop(_user_lock);
     if let Some(item) = removed_item.as_ref() {
         send_roster_remove_subscription_side_effects(state, storage, user_jid, item).await;
     }

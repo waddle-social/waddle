@@ -18,6 +18,10 @@ use super::Database;
 // `RosterVersion::generate()` lives in `waddle-xmpp-core` and uses uuid::v4 internally;
 // no Uuid import needed here.
 
+/// Maximum retries for transient `SQLITE_BUSY` lock contention before
+/// surfacing the error.
+const MAX_LOCK_RETRIES: usize = 6;
+
 /// A roster mutation request at the row layer.
 #[derive(Debug, Clone)]
 pub enum RosterRowChange {
@@ -90,13 +94,20 @@ impl DatabaseRosterStorage {
     /// Atomic roster mutation: write the row, bump the user's roster version,
     /// return the new version along with a [`UserMutationLock`] guard.
     ///
-    /// Acquires the per-user lock, performs the data write, writes a fresh
-    /// [`RosterVersion`], and returns both the mutation outcome and the lock
-    /// guard. The caller MUST keep the guard alive while it enqueues roster
-    /// pushes that announce this mutation's version — otherwise a concurrent
-    /// mutation could fan out its own pushes onto the same recipient socket
-    /// in interleaved order, violating XEP-0237 §2.6's "pushes MUST occur in
-    /// order of modification" invariant.
+    /// Both the row write and the version bump run inside a single database
+    /// transaction so a partial failure cannot commit the row without the
+    /// version (which would break XEP-0237 §2.6's "ver identifies the roster
+    /// state" invariant — a client whose cached `ver` happens to equal the
+    /// stale stored value would receive an empty result while having missed
+    /// the change).
+    ///
+    /// Acquires the per-user lock, performs the transaction, and returns
+    /// both the mutation outcome and the lock guard. The caller MUST keep
+    /// the guard alive while it enqueues roster pushes that announce this
+    /// mutation's version — otherwise a concurrent mutation could fan out
+    /// its own pushes onto the same recipient socket in interleaved order,
+    /// violating §2.6's "pushes MUST occur in order of modification"
+    /// invariant.
     ///
     /// Returns [`RosterStorageError::ItemNotFound`] if a `Remove` targets a
     /// non-existent item.
@@ -109,34 +120,133 @@ impl DatabaseRosterStorage {
         let mutex = self.user_lock(user_jid);
         let guard = mutex.lock_owned().await;
 
-        let kind = match change {
-            RosterRowChange::Upsert(row) => {
-                let contact: BareJid = row.contact_jid.parse().map_err(|e| {
-                    RosterStorageError::QueryFailed(format!("Invalid contact JID: {}", e))
-                })?;
-                let existed = self.has_roster_item(user_jid, &contact).await?;
-                self.write_roster_item(user_jid, &row).await?;
-                if existed {
-                    RosterRowMutationKind::Updated(row)
-                } else {
-                    RosterRowMutationKind::Added(row)
-                }
-            }
-            RosterRowChange::Remove(contact_jid) => {
-                let removed = self.delete_roster_item(user_jid, &contact_jid).await?;
-                if !removed {
-                    return Err(RosterStorageError::ItemNotFound);
-                }
-                RosterRowMutationKind::Removed(contact_jid)
-            }
+        // Pre-check existence so we can classify Added vs Updated outside the
+        // transaction — the existence read does not need to be transactional
+        // (the per-user lock makes the result race-free).
+        let existed_for_upsert = if let RosterRowChange::Upsert(row) = &change {
+            let contact: BareJid = row.contact_jid.parse().map_err(|e| {
+                RosterStorageError::QueryFailed(format!("Invalid contact JID: {}", e))
+            })?;
+            Some(self.has_roster_item(user_jid, &contact).await?)
+        } else {
+            None
         };
 
         let version = RosterVersion::generate();
-        self.write_roster_version(user_jid, &version).await?;
-        Ok((
-            RosterRowMutation { kind, version },
-            UserMutationLock { inner: guard },
+        let kind = self
+            .commit_mutation(user_jid, change, existed_for_upsert, &version)
+            .await?;
+
+        Ok((RosterRowMutation { kind, version }, guard))
+    }
+
+    /// Run the row write + version bump as a single transaction. Caller
+    /// supplies the pre-checked existence flag for `Upsert` (used to
+    /// classify Added vs Updated).
+    async fn commit_mutation(
+        &self,
+        user_jid: &BareJid,
+        change: RosterRowChange,
+        existed_for_upsert: Option<bool>,
+        version: &RosterVersion,
+    ) -> Result<RosterRowMutationKind, RosterStorageError> {
+        for attempt in 0..=MAX_LOCK_RETRIES {
+            let result = self
+                .commit_mutation_once(user_jid, &change, existed_for_upsert, version)
+                .await;
+            match result {
+                Ok(kind) => return Ok(kind),
+                Err(e) if is_sqlite_lock_error(&e) && attempt < MAX_LOCK_RETRIES => {
+                    sleep(retry_delay(attempt)).await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Err(RosterStorageError::QueryFailed(
+            "Transaction failed after lock retries".to_string(),
         ))
+    }
+
+    async fn commit_mutation_once(
+        &self,
+        user_jid: &BareJid,
+        change: &RosterRowChange,
+        existed_for_upsert: Option<bool>,
+        version: &RosterVersion,
+    ) -> Result<RosterRowMutationKind, RosterStorageError> {
+        let mut tx = self
+            .db
+            .begin()
+            .await
+            .map_err(|e| RosterStorageError::ConnectionFailed(e.to_string()))?;
+
+        let kind = match change {
+            RosterRowChange::Upsert(row) => {
+                let groups_json = serde_json::to_string(&row.groups)
+                    .map_err(|e| RosterStorageError::SerializationError(e.to_string()))?;
+                tx.execute(
+                    r#"
+                    INSERT INTO roster_items (user_jid, contact_jid, name, subscription, ask, approved, groups, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                    ON CONFLICT(user_jid, contact_jid) DO UPDATE SET
+                        name = excluded.name,
+                        subscription = excluded.subscription,
+                        ask = excluded.ask,
+                        approved = excluded.approved,
+                        groups = excluded.groups,
+                        updated_at = datetime('now')
+                    "#,
+                    crate::db_params![
+                        user_jid.to_string(),
+                        row.contact_jid.clone(),
+                        row.name.clone(),
+                        row.subscription.clone(),
+                        row.ask.clone(),
+                        row.approved,
+                        groups_json,
+                    ],
+                )
+                .await
+                .map_err(|e| RosterStorageError::QueryFailed(e.to_string()))?;
+                if existed_for_upsert.unwrap_or(false) {
+                    RosterRowMutationKind::Updated(row.clone())
+                } else {
+                    RosterRowMutationKind::Added(row.clone())
+                }
+            }
+            RosterRowChange::Remove(contact_jid) => {
+                let rows = tx
+                    .execute(
+                        "DELETE FROM roster_items WHERE user_jid = ? AND contact_jid = ?",
+                        crate::db_params![user_jid.to_string(), contact_jid.to_string()],
+                    )
+                    .await
+                    .map_err(|e| RosterStorageError::QueryFailed(e.to_string()))?;
+                if rows == 0 {
+                    // Drop tx (auto-rolls-back) and surface ItemNotFound.
+                    return Err(RosterStorageError::ItemNotFound);
+                }
+                RosterRowMutationKind::Removed(contact_jid.clone())
+            }
+        };
+
+        tx.execute(
+            r#"
+            INSERT INTO roster_versions (user_jid, version, updated_at)
+            VALUES (?, ?, datetime('now'))
+            ON CONFLICT(user_jid) DO UPDATE SET
+                version = excluded.version,
+                updated_at = datetime('now')
+            "#,
+            crate::db_params![user_jid.to_string(), version.as_str().to_string()],
+        )
+        .await
+        .map_err(|e| RosterStorageError::QueryFailed(e.to_string()))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| RosterStorageError::QueryFailed(e.to_string()))?;
+        Ok(kind)
     }
 
     /// Atomic roster snapshot: read all items and the current `RosterVersion`
@@ -180,9 +290,9 @@ impl DatabaseRosterStorage {
     /// [`apply_roster_change`]).
     ///
     /// Used by the RFC 6121 presence subscription state machine when it needs
-    /// to flip subscription/ask without disturbing name/groups. The whole
-    /// read-modify-write happens under the per-user lock so it composes safely
-    /// with [`apply_roster_change`].
+    /// to flip subscription/ask without disturbing name/groups. The row write
+    /// and version bump run inside a single database transaction under the
+    /// per-user lock.
     #[instrument(skip(self), fields(user = %user_jid, contact = %contact_jid))]
     pub async fn apply_subscription_update(
         &self,
@@ -195,12 +305,50 @@ impl DatabaseRosterStorage {
         let guard = mutex.lock_owned().await;
 
         let existed = self.has_roster_item(user_jid, contact_jid).await?;
-        let user_jid_s = user_jid.to_string();
-        let contact_jid_s = contact_jid.to_string();
-        let subscription_s = subscription.to_string();
-        let ask_s = ask.map(|s| s.to_string());
+        let version = RosterVersion::generate();
 
-        self.execute_with_retry(
+        for attempt in 0..=MAX_LOCK_RETRIES {
+            match self
+                .commit_subscription_update_once(user_jid, contact_jid, subscription, ask, &version)
+                .await
+            {
+                Ok(()) => break,
+                Err(e) if is_sqlite_lock_error(&e) && attempt < MAX_LOCK_RETRIES => {
+                    sleep(retry_delay(attempt)).await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        let row = self
+            .get_roster_item(user_jid, contact_jid)
+            .await?
+            .ok_or_else(|| {
+                RosterStorageError::QueryFailed("Item missing after upsert".to_string())
+            })?;
+
+        let kind = if existed {
+            RosterRowMutationKind::Updated(row)
+        } else {
+            RosterRowMutationKind::Added(row)
+        };
+        Ok((RosterRowMutation { kind, version }, guard))
+    }
+
+    async fn commit_subscription_update_once(
+        &self,
+        user_jid: &BareJid,
+        contact_jid: &BareJid,
+        subscription: &str,
+        ask: Option<&str>,
+        version: &RosterVersion,
+    ) -> Result<(), RosterStorageError> {
+        let mut tx = self
+            .db
+            .begin()
+            .await
+            .map_err(|e| RosterStorageError::ConnectionFailed(e.to_string()))?;
+        tx.execute(
             r#"
             INSERT INTO roster_items (user_jid, contact_jid, subscription, ask, approved, groups, updated_at)
             VALUES (?, ?, ?, ?, 0, '[]', datetime('now'))
@@ -210,96 +358,31 @@ impl DatabaseRosterStorage {
                 approved = excluded.approved,
                 updated_at = datetime('now')
             "#,
-            || {
-                crate::db_params![
-                    user_jid_s.clone(),
-                    contact_jid_s.clone(),
-                    subscription_s.clone(),
-                    ask_s.clone(),
-                ]
-            },
+            crate::db_params![
+                user_jid.to_string(),
+                contact_jid.to_string(),
+                subscription.to_string(),
+                ask.map(|s| s.to_string()),
+            ],
         )
-        .await?;
-
-        let row = self
-            .get_roster_item(user_jid, contact_jid)
-            .await?
-            .ok_or_else(|| {
-                RosterStorageError::QueryFailed("Item missing after upsert".to_string())
-            })?;
-
-        let version = RosterVersion::generate();
-        self.write_roster_version(user_jid, &version).await?;
-
-        let kind = if existed {
-            RosterRowMutationKind::Updated(row)
-        } else {
-            RosterRowMutationKind::Added(row)
-        };
-        Ok((
-            RosterRowMutation { kind, version },
-            UserMutationLock { inner: guard },
-        ))
-    }
-
-    async fn write_roster_item(
-        &self,
-        user_jid: &BareJid,
-        item: &RosterItemRow,
-    ) -> Result<(), RosterStorageError> {
-        let groups_json = serde_json::to_string(&item.groups)
-            .map_err(|e| RosterStorageError::SerializationError(e.to_string()))?;
-
-        let user_jid_s = user_jid.to_string();
-        let contact_jid_s = item.contact_jid.clone();
-        let name = item.name.clone();
-        let subscription = item.subscription.clone();
-        let ask = item.ask.clone();
-        let approved = item.approved;
-        let groups_json_param = groups_json.clone();
-
-        self.execute_with_retry(
+        .await
+        .map_err(|e| RosterStorageError::QueryFailed(e.to_string()))?;
+        tx.execute(
             r#"
-            INSERT INTO roster_items (user_jid, contact_jid, name, subscription, ask, approved, groups, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
-            ON CONFLICT(user_jid, contact_jid) DO UPDATE SET
-                name = excluded.name,
-                subscription = excluded.subscription,
-                ask = excluded.ask,
-                approved = excluded.approved,
-                groups = excluded.groups,
+            INSERT INTO roster_versions (user_jid, version, updated_at)
+            VALUES (?, ?, datetime('now'))
+            ON CONFLICT(user_jid) DO UPDATE SET
+                version = excluded.version,
                 updated_at = datetime('now')
             "#,
-            || {
-                crate::db_params![
-                    user_jid_s.clone(),
-                    contact_jid_s.clone(),
-                    name.clone(),
-                    subscription.clone(),
-                    ask.clone(),
-                    approved,
-                    groups_json_param.clone(),
-                ]
-            },
+            crate::db_params![user_jid.to_string(), version.as_str().to_string()],
         )
-        .await?;
+        .await
+        .map_err(|e| RosterStorageError::QueryFailed(e.to_string()))?;
+        tx.commit()
+            .await
+            .map_err(|e| RosterStorageError::QueryFailed(e.to_string()))?;
         Ok(())
-    }
-
-    async fn delete_roster_item(
-        &self,
-        user_jid: &BareJid,
-        contact_jid: &BareJid,
-    ) -> Result<bool, RosterStorageError> {
-        let user_jid_s = user_jid.to_string();
-        let contact_jid_s = contact_jid.to_string();
-        let result = self
-            .execute_with_retry(
-                "DELETE FROM roster_items WHERE user_jid = ? AND contact_jid = ?",
-                || crate::db_params![user_jid_s.clone(), contact_jid_s.clone()],
-            )
-            .await?;
-        Ok(result > 0)
     }
 
     async fn write_roster_version(
@@ -596,8 +679,6 @@ impl DatabaseRosterStorage {
         P: IntoParams,
         F: Fn() -> P,
     {
-        const MAX_LOCK_RETRIES: usize = 6;
-
         for attempt in 0..=MAX_LOCK_RETRIES {
             match self.execute_with_persistent(sql, params()).await {
                 Ok(rows_affected) => return Ok(rows_affected),
@@ -671,13 +752,11 @@ pub enum RosterStorageError {
 /// enqueued onto the recipient sockets — otherwise a concurrent mutation
 /// could race ahead and break XEP-0237 §2.6's "pushes MUST occur in order
 /// of modification" invariant.
-#[must_use = "drop the lock guard only after roster pushes for this mutation have been enqueued"]
-pub struct UserMutationLock {
-    /// Owned guard from `tokio::sync::Mutex`. The field exists purely to keep
-    /// the mutex held until this struct is dropped — never read directly.
-    #[allow(dead_code)]
-    inner: tokio::sync::OwnedMutexGuard<()>,
-}
+///
+/// Implemented as a type alias rather than a wrapper struct so the underlying
+/// `OwnedMutexGuard` field cannot trigger `dead_code` warnings — the guard's
+/// purpose is its `Drop` impl, not data access. (See PR #336 review.)
+pub type UserMutationLock = tokio::sync::OwnedMutexGuard<()>;
 
 #[cfg(test)]
 mod tests {
