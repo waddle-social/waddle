@@ -10,3 +10,12 @@ interface ImportMetaEnv {
 interface ImportMeta {
   readonly env: ImportMetaEnv;
 }
+
+// `GIPHY_API_KEY` is a Cloudflare Pages secret rather than a `wrangler.jsonc`
+// var, so `wrangler types` can't see it. Augment the generated `Cloudflare.Env`
+// here so layouts can read `env.GIPHY_API_KEY` without an unsafe cast.
+declare namespace Cloudflare {
+  interface Env {
+    GIPHY_API_KEY?: string;
+  }
+}

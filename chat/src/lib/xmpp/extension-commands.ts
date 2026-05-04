@@ -551,13 +551,33 @@ export async function fetchExtensionRouteItems(
   roomJid: string,
 ): Promise<ExtensionRouteItem[]> {
   const node = resolveExtensionRouteStateNode(route, roomJid);
-  const response = await (xmpp as unknown as {
-    getItems?: (jid: string, node: string, opts?: { max?: number }) => Promise<{ items?: Array<{ id?: string; content?: unknown }> }>;
-  }).getItems?.(route.serviceJid, node, { max: 100 });
+  let response: { items?: Array<{ id?: string; content?: unknown }> } | undefined;
+  try {
+    response = await (xmpp as unknown as {
+      getItems?: (jid: string, node: string, opts?: { max?: number }) => Promise<{ items?: Array<{ id?: string; content?: unknown }> }>;
+    }).getItems?.(route.serviceJid, node, { max: 100 });
+  } catch (error) {
+    // A pubsub state node that has never been published to returns
+    // `item-not-found`; surface that as an empty list rather than an error.
+    if (isItemNotFoundError(error)) return [];
+    throw error;
+  }
   return (response?.items ?? []).flatMap((item) => {
     const view = parseExtensionItemView(item.content, item.id);
     return view ? [view] : [];
   });
+}
+
+function isItemNotFoundError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const candidate = error as Record<string, unknown>;
+  if (candidate.condition === "item-not-found") return true;
+  const nested = candidate.error;
+  if (nested && typeof nested === "object") {
+    const nestedCondition = (nested as Record<string, unknown>).condition;
+    if (nestedCondition === "item-not-found") return true;
+  }
+  return false;
 }
 
 function parseExtensionItemView(content: unknown, id: string | undefined): ExtensionRouteItem | null {
