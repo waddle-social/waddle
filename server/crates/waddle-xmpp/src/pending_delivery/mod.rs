@@ -24,6 +24,7 @@
 //!   [`InsertOutcome::QuotaExceeded`] so the routing layer can return
 //!   `<service-unavailable/>` per XEP-0160 §3 step 3.
 
+pub mod flush;
 pub mod storage;
 
 use crate::protocol::event::StanzaIdRef;
