@@ -88,23 +88,26 @@ impl DatabaseRosterStorage {
     }
 
     /// Atomic roster mutation: write the row, bump the user's roster version,
-    /// return the new version.
+    /// return the new version along with a [`UserMutationLock`] guard.
     ///
-    /// Acquires a per-user lock, performs the data write, then writes a fresh
-    /// [`RosterVersion`]. All three steps observe the same lock so concurrent
-    /// callers see distinct, ordered versions.
+    /// Acquires the per-user lock, performs the data write, writes a fresh
+    /// [`RosterVersion`], and returns both the mutation outcome and the lock
+    /// guard. The caller MUST keep the guard alive while it enqueues roster
+    /// pushes that announce this mutation's version — otherwise a concurrent
+    /// mutation could fan out its own pushes onto the same recipient socket
+    /// in interleaved order, violating XEP-0237 §2.6's "pushes MUST occur in
+    /// order of modification" invariant.
     ///
-    /// Returns `Err(RosterStorageError::QueryFailed("Item not found"))` if a
-    /// `Remove` targets a non-existent item — callers map this to
-    /// `<item-not-found/>`.
+    /// Returns [`RosterStorageError::ItemNotFound`] if a `Remove` targets a
+    /// non-existent item.
     #[instrument(skip(self, change), fields(user = %user_jid))]
     pub async fn apply_roster_change(
         &self,
         user_jid: &BareJid,
         change: RosterRowChange,
-    ) -> Result<RosterRowMutation, RosterStorageError> {
-        let lock = self.user_lock(user_jid);
-        let _guard = lock.lock().await;
+    ) -> Result<(RosterRowMutation, UserMutationLock), RosterStorageError> {
+        let mutex = self.user_lock(user_jid);
+        let guard = mutex.lock_owned().await;
 
         let kind = match change {
             RosterRowChange::Upsert(row) => {
@@ -122,9 +125,7 @@ impl DatabaseRosterStorage {
             RosterRowChange::Remove(contact_jid) => {
                 let removed = self.delete_roster_item(user_jid, &contact_jid).await?;
                 if !removed {
-                    return Err(RosterStorageError::QueryFailed(
-                        "Item not found".to_string(),
-                    ));
+                    return Err(RosterStorageError::ItemNotFound);
                 }
                 RosterRowMutationKind::Removed(contact_jid)
             }
@@ -132,11 +133,51 @@ impl DatabaseRosterStorage {
 
         let version = RosterVersion::generate();
         self.write_roster_version(user_jid, &version).await?;
-        Ok(RosterRowMutation { kind, version })
+        Ok((
+            RosterRowMutation { kind, version },
+            UserMutationLock { inner: guard },
+        ))
+    }
+
+    /// Atomic roster snapshot: read all items and the current `RosterVersion`
+    /// under the per-user lock so the returned pair is mutually consistent.
+    ///
+    /// Without the shared lock, a `get_roster` + `get_roster_version` pair can
+    /// straddle a concurrent mutation and produce a snapshot whose items reflect
+    /// version V+1 but whose `ver` reads as V. A client caching that pair would
+    /// believe it was up-to-date when it had in fact missed an item, since on
+    /// reconnect the server would respond to a `ver=V` query with an empty
+    /// result. That breaks the XEP-0237 §2.6 invariant that `ver` identifies
+    /// the roster state.
+    ///
+    /// Synthesises a fresh version if none exists, matching
+    /// [`get_or_create_roster_version`].
+    #[instrument(skip(self), fields(user = %user_jid))]
+    pub async fn snapshot_roster(
+        &self,
+        user_jid: &BareJid,
+    ) -> Result<(Vec<RosterItemRow>, RosterVersion), RosterStorageError> {
+        let lock = self.user_lock(user_jid);
+        let _guard = lock.lock().await;
+
+        let items = self.get_roster(user_jid).await?;
+        let version = if let Some(stored) = self.get_roster_version(user_jid).await? {
+            stored.parse::<RosterVersion>().map_err(|e| {
+                RosterStorageError::QueryFailed(format!("Stored roster version is invalid: {}", e))
+            })?
+        } else {
+            let v = RosterVersion::generate();
+            self.write_roster_version(user_jid, &v).await?;
+            v
+        };
+        Ok((items, version))
     }
 
     /// Atomic subscription update: read-modify-write of just the subscription/ask
     /// fields on an existing (or implicit) roster item, plus version bump.
+    /// Returns the mutation result and the [`UserMutationLock`] guard the
+    /// caller must hold across roster-push enqueue (see
+    /// [`apply_roster_change`]).
     ///
     /// Used by the RFC 6121 presence subscription state machine when it needs
     /// to flip subscription/ask without disturbing name/groups. The whole
@@ -149,9 +190,9 @@ impl DatabaseRosterStorage {
         contact_jid: &BareJid,
         subscription: &str,
         ask: Option<&str>,
-    ) -> Result<RosterRowMutation, RosterStorageError> {
-        let lock = self.user_lock(user_jid);
-        let _guard = lock.lock().await;
+    ) -> Result<(RosterRowMutation, UserMutationLock), RosterStorageError> {
+        let mutex = self.user_lock(user_jid);
+        let guard = mutex.lock_owned().await;
 
         let existed = self.has_roster_item(user_jid, contact_jid).await?;
         let user_jid_s = user_jid.to_string();
@@ -195,7 +236,10 @@ impl DatabaseRosterStorage {
         } else {
             RosterRowMutationKind::Added(row)
         };
-        Ok(RosterRowMutation { kind, version })
+        Ok((
+            RosterRowMutation { kind, version },
+            UserMutationLock { inner: guard },
+        ))
     }
 
     async fn write_roster_item(
@@ -613,6 +657,26 @@ pub enum RosterStorageError {
 
     #[error("Serialization error: {0}")]
     SerializationError(String),
+
+    /// A `Remove` mutation targeted a roster item that does not exist.
+    /// Callers map this to a `<item-not-found/>` stanza error per RFC 6121.
+    #[error("Roster item not found")]
+    ItemNotFound,
+}
+
+/// Owned guard returned by [`DatabaseRosterStorage::apply_roster_change`] and
+/// related mutating methods. Holding it serialises further mutations and
+/// reads of the same user's roster. The caller MUST keep it alive until any
+/// roster pushes that announce the mutation's `RosterVersion` have been
+/// enqueued onto the recipient sockets — otherwise a concurrent mutation
+/// could race ahead and break XEP-0237 §2.6's "pushes MUST occur in order
+/// of modification" invariant.
+#[must_use = "drop the lock guard only after roster pushes for this mutation have been enqueued"]
+pub struct UserMutationLock {
+    /// Owned guard from `tokio::sync::Mutex`. The field exists purely to keep
+    /// the mutex held until this struct is dropped — never read directly.
+    #[allow(dead_code)]
+    inner: tokio::sync::OwnedMutexGuard<()>,
 }
 
 #[cfg(test)]
@@ -657,7 +721,7 @@ mod tests {
             approved: false,
             groups: vec!["Friends".to_string()],
         };
-        let added = storage
+        let (added, _) = storage
             .apply_roster_change(&user_jid, RosterRowChange::Upsert(row))
             .await
             .unwrap();
@@ -671,14 +735,14 @@ mod tests {
             approved: false,
             groups: vec!["Friends".to_string(), "Work".to_string()],
         };
-        let updated = storage
+        let (updated, _) = storage
             .apply_roster_change(&user_jid, RosterRowChange::Upsert(updated_row))
             .await
             .unwrap();
         assert!(matches!(updated.kind, RosterRowMutationKind::Updated(_)));
         assert_ne!(added.version, updated.version);
 
-        let removed = storage
+        let (removed, _) = storage
             .apply_roster_change(&user_jid, RosterRowChange::Remove(contact_jid.clone()))
             .await
             .unwrap();
@@ -702,7 +766,7 @@ mod tests {
         let result = storage
             .apply_roster_change(&user_jid, RosterRowChange::Remove(contact_jid))
             .await;
-        assert!(matches!(result, Err(RosterStorageError::QueryFailed(_))));
+        assert!(matches!(result, Err(RosterStorageError::ItemNotFound)));
     }
 
     #[tokio::test]
@@ -713,7 +777,7 @@ mod tests {
         let user_jid: BareJid = "alice@example.com".parse().unwrap();
         let contact_jid: BareJid = "bob@example.com".parse().unwrap();
 
-        let first = storage
+        let (first, _) = storage
             .apply_subscription_update(&user_jid, &contact_jid, "none", Some("subscribe"))
             .await
             .unwrap();
@@ -725,7 +789,7 @@ mod tests {
             other => panic!("expected Added, got {:?}", other),
         }
 
-        let second = storage
+        let (second, _) = storage
             .apply_subscription_update(&user_jid, &contact_jid, "to", None)
             .await
             .unwrap();
@@ -752,7 +816,7 @@ mod tests {
             ("dan@example.com", "both"),
             ("eve@example.com", "none"),
         ] {
-            storage
+            let _ = storage
                 .apply_roster_change(
                     &user_jid,
                     RosterRowChange::Upsert(make_row(contact, subscription)),
@@ -803,7 +867,11 @@ mod tests {
     /// these MUSTs. If a future change splits the mutation+version-bump into
     /// two awaits without serialisation, this test will start failing under
     /// load.
-    #[tokio::test]
+    ///
+    /// Runs on a multi-threaded runtime so the spawned tasks interleave on
+    /// distinct OS threads, exercising real lock contention rather than
+    /// cooperative scheduling on a single thread.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn apply_roster_change_emits_unique_versions_under_concurrency() {
         let db = setup_test_db().await;
         let storage = DatabaseRosterStorage::new(db);
@@ -816,11 +884,11 @@ mod tests {
             let user_jid = user_jid.clone();
             let row = make_row(&format!("contact{i}@example.com"), "none");
             handles.push(tokio::spawn(async move {
-                storage
+                let (mutation, _lock) = storage
                     .apply_roster_change(&user_jid, RosterRowChange::Upsert(row))
                     .await
-                    .unwrap()
-                    .version
+                    .unwrap();
+                mutation.version
             }));
         }
 
@@ -836,5 +904,82 @@ mod tests {
             N,
             "all {N} concurrent mutations must produce distinct versions; got {versions:?}"
         );
+    }
+
+    /// XEP-0237 §2.6 conformance regression test (companion to T6, addresses
+    /// the snapshot-vs-mutation race called out by code review on PR #336).
+    ///
+    /// Under concurrent writers and a reader spinning `snapshot_roster`, every
+    /// snapshot must see a (items, version) pair that was actually a state of
+    /// the storage at some point in time — never a torn read where items
+    /// reflect mutation k+1 but version reads as V_k. Without the per-user
+    /// lock around `snapshot_roster`, this property does not hold.
+    ///
+    /// We probe the invariant by recording each writer's (post-mutation
+    /// version, post-mutation item count) into a shared map. Every snapshot
+    /// the reader takes must produce a (items.len(), version) pair that
+    /// matches one of those recorded states (or the empty starting state).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn snapshot_roster_is_atomic_against_concurrent_mutations() {
+        let db = setup_test_db().await;
+        let storage = DatabaseRosterStorage::new(db);
+        let user_jid: BareJid = "alice@example.com".parse().unwrap();
+
+        // Map from observed (items_count, version_string) to how many times
+        // that pair was the post-mutation state of the storage. The empty
+        // starting state is implicitly allowed because `snapshot_roster`
+        // synthesises a fresh ver for an empty roster — and that fresh ver
+        // is then stored, so a subsequent mutation will produce ver != that.
+        // We record only writer-observed states.
+        let known_states: Arc<DashMap<(usize, String), ()>> = Arc::new(DashMap::new());
+
+        const WRITERS: usize = 12;
+        const READS_PER_WRITER: usize = 4;
+
+        let mut writers = Vec::with_capacity(WRITERS);
+        for i in 0..WRITERS {
+            let storage = storage.clone();
+            let user_jid = user_jid.clone();
+            let states = known_states.clone();
+            writers.push(tokio::spawn(async move {
+                let row = make_row(&format!("contact{i}@example.com"), "none");
+                let (mutation, _lock) = storage
+                    .apply_roster_change(&user_jid, RosterRowChange::Upsert(row))
+                    .await
+                    .unwrap();
+                // Record the post-mutation count + version *before* dropping
+                // the lock so a concurrent reader can never observe a state
+                // ahead of what's recorded here.
+                let count = storage.get_roster(&user_jid).await.unwrap().len();
+                states.insert((count, mutation.version.as_str().to_string()), ());
+            }));
+        }
+
+        let mut readers = Vec::with_capacity(WRITERS * READS_PER_WRITER);
+        for _ in 0..(WRITERS * READS_PER_WRITER) {
+            let storage = storage.clone();
+            let user_jid = user_jid.clone();
+            let states = known_states.clone();
+            readers.push(tokio::spawn(async move {
+                let (items, version) = storage.snapshot_roster(&user_jid).await.unwrap();
+                let key = (items.len(), version.as_str().to_string());
+                // The snapshot's pair must either be the empty-roster bootstrap
+                // (count=0, ver synthesised) or a state recorded by a writer.
+                // A reader that synthesises and stores a ver before any
+                // writer runs is harmless — it then becomes the storage's
+                // current ver, and the next writer will replace it.
+                key.0 == 0 || states.contains_key(&key)
+            }));
+        }
+
+        for w in writers {
+            w.await.unwrap();
+        }
+        for r in readers {
+            assert!(
+                r.await.unwrap(),
+                "snapshot_roster returned a (count, ver) pair that no mutation ever produced"
+            );
+        }
     }
 }

@@ -972,7 +972,7 @@ impl waddle_xmpp::AppState for XmppAppState {
         let db = self.global_database().await?;
         let storage = DatabaseRosterStorage::new(db);
 
-        let mutation = storage
+        let (mutation, _lock) = storage
             .apply_roster_change(user_jid, RosterRowChange::Upsert(roster_item_to_row(item)))
             .await
             .map_err(|e| {
@@ -1009,7 +1009,7 @@ impl waddle_xmpp::AppState for XmppAppState {
             .await
         {
             Ok(_) => Ok(true),
-            Err(RosterStorageError::QueryFailed(msg)) if msg == "Item not found" => Ok(false),
+            Err(RosterStorageError::ItemNotFound) => Ok(false),
             Err(e) => {
                 warn!(user = %user_jid, contact = %contact_jid, error = %e, "Failed to remove roster item");
                 Err(XmppError::internal(format!("Database error: {}", e)))
@@ -1059,7 +1059,7 @@ impl waddle_xmpp::AppState for XmppAppState {
         let subscription_str = subscription.as_str();
         let ask_str = ask.map(|a| a.as_str());
 
-        let mutation = storage
+        let (mutation, _lock) = storage
             .apply_subscription_update(user_jid, contact_jid, subscription_str, ask_str)
             .await
             .map_err(|e| {

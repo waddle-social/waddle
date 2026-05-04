@@ -941,8 +941,12 @@ async fn update_subscription_roster_state(
             }
         }
     }
+    // Each push carries its own per-user lock guard so the lock is held from
+    // the storage write through until the push has been enqueued onto the
+    // recipient sockets in `send_subscription_roster_pushes`. This honours
+    // XEP-0237 §2.6's "pushes MUST occur in order of modification".
     let from_push = if store_from_item {
-        let mutation = storage
+        let (mutation, lock) = storage
             .apply_roster_change(
                 &request.from,
                 RosterRowChange::Upsert(roster_item_to_row(&from_item)),
@@ -952,13 +956,14 @@ async fn update_subscription_roster_state(
             user: request.from.clone(),
             item: from_item,
             version: mutation.version,
+            _lock: lock,
         })
     } else {
         None
     };
     let to_push = match to_item {
         Some(to_item) => {
-            let mutation = storage
+            let (mutation, lock) = storage
                 .apply_roster_change(
                     &request.to,
                     RosterRowChange::Upsert(roster_item_to_row(&to_item)),
@@ -968,6 +973,7 @@ async fn update_subscription_roster_state(
                 user: request.to.clone(),
                 item: to_item,
                 version: mutation.version,
+                _lock: lock,
             })
         }
         None => None,
@@ -994,6 +1000,10 @@ struct SubscriptionRosterPush {
     user: BareJid,
     item: RosterItem,
     version: RosterVersion,
+    /// Per-user mutation lock guard, held until the push has been enqueued in
+    /// `send_subscription_roster_pushes` to preserve modification order
+    /// against concurrent mutations on the same user (XEP-0237 §2.6).
+    _lock: crate::db::roster::UserMutationLock,
 }
 
 async fn send_subscription_roster_pushes(state: &WebSocketState, update: SubscriptionRosterUpdate) {

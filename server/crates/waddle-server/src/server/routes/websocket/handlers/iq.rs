@@ -3048,10 +3048,12 @@ async fn handle_roster_get(
         Err(error) => return vec![build_xmpp_error_response(iq, error)],
     };
 
-    let rows = match storage.get_roster(user_jid).await {
-        Ok(rows) => rows,
+    // Atomic snapshot: items + version under the same per-user lock so the
+    // returned ver always identifies the returned roster state (XEP-0237 §2.6).
+    let (rows, version) = match storage.snapshot_roster(user_jid).await {
+        Ok(pair) => pair,
         Err(error) => {
-            warn!(user = %user_jid, error = %error, "Failed to read roster");
+            warn!(user = %user_jid, error = %error, "Failed to snapshot roster");
             return vec![build_xmpp_error_response(
                 iq,
                 XmppError::internal_server_error(None),
@@ -3062,16 +3064,6 @@ async fn handle_roster_get(
         Ok(items) => items,
         Err(error) => {
             warn!(user = %user_jid, error = %error, "Failed to convert roster rows");
-            return vec![build_xmpp_error_response(
-                iq,
-                XmppError::internal_server_error(None),
-            )];
-        }
-    };
-    let version = match storage.get_or_create_roster_version(user_jid).await {
-        Ok(version) => version,
-        Err(error) => {
-            warn!(user = %user_jid, error = %error, "Failed to read roster version");
             return vec![build_xmpp_error_response(
                 iq,
                 XmppError::internal_server_error(None),
@@ -3112,7 +3104,11 @@ async fn handle_roster_set(
         .expect("parse_roster_set guarantees one item");
 
     let mut removed_item = None;
-    let (set_result, version) = if requested.subscription.is_remove() {
+    // Hold the per-user mutation lock from the start of the storage write
+    // through the end of push fanout below (XEP-0237 §2.6 — pushes for
+    // mutation N must be enqueued before mutation N+1's pushes can race onto
+    // the recipient socket). The guard is dropped at the end of this block.
+    let (set_result, version, _user_lock) = if requested.subscription.is_remove() {
         // Snapshot the item before delete so we can run subscription side effects.
         removed_item = match storage.get_roster_item(user_jid, &requested.jid).await {
             Ok(Some(row)) => match roster_row_to_item(row) {
@@ -3138,11 +3134,12 @@ async fn handle_roster_set(
             .apply_roster_change(user_jid, RosterRowChange::Remove(requested.jid.clone()))
             .await
         {
-            Ok(mutation) => (
+            Ok((mutation, lock)) => (
                 RosterSetResult::Removed(requested.jid.clone()),
                 mutation.version,
+                lock,
             ),
-            Err(RosterStorageError::QueryFailed(msg)) if msg == "Item not found" => {
+            Err(RosterStorageError::ItemNotFound) => {
                 return vec![build_xmpp_error_response(
                     iq,
                     XmppError::item_not_found(None),
@@ -3185,7 +3182,7 @@ async fn handle_roster_set(
             .apply_roster_change(user_jid, RosterRowChange::Upsert(roster_item_to_row(&item)))
             .await
         {
-            Ok(mutation) => {
+            Ok((mutation, lock)) => {
                 let result = match mutation.kind {
                     RosterRowMutationKind::Added(_) => RosterSetResult::Added(item),
                     RosterRowMutationKind::Updated(_) => RosterSetResult::Updated(item),
@@ -3193,7 +3190,7 @@ async fn handle_roster_set(
                         unreachable!("Upsert never reports Removed")
                     }
                 };
-                (result, mutation.version)
+                (result, mutation.version, lock)
             }
             Err(error) => {
                 warn!(user = %user_jid, contact = %item.jid, error = %error, "Failed to store roster item");
@@ -3287,7 +3284,8 @@ async fn send_roster_remove_subscription_stanza(
                     .apply_roster_change(to, RosterRowChange::Upsert(roster_item_to_row(&item)))
                     .await
                 {
-                    Ok(mutation) => {
+                    Ok((mutation, _lock)) => {
+                        // _lock held until the push enqueue below completes.
                         send_roster_push_to_all_resources(state, to, &item, &mutation.version)
                             .await;
                     }

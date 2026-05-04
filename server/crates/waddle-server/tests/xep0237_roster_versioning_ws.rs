@@ -42,8 +42,9 @@ async fn roster_get(client: &mut WsXmppClient, id: &str, ver: Option<&str>) -> S
         ))
         .await
         .expect("send roster get");
+    let id_attr = format!(r#"id="{id}""#);
     client
-        .recv_matching(|frame| frame.contains(id))
+        .recv_matching(|frame| frame.contains(&id_attr))
         .await
         .expect("roster get result")
 }
@@ -64,8 +65,9 @@ async fn roster_set_add(
         ))
         .await
         .expect("send roster set");
+    let id_attr = format!(r#"id="{id}""#);
     let mut frames = client
-        .recv_until(|f| f.contains(id) && f.contains("type=\"result\""))
+        .recv_until(|f| f.contains(&id_attr) && f.contains("type=\"result\""))
         .await
         .expect("roster set result");
     let result = frames.pop().expect("at least the result frame");

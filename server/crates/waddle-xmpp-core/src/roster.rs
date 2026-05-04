@@ -91,7 +91,13 @@ impl RosterVersionRequest {
         match attr {
             None => Self::Absent,
             Some("") => Self::Bootstrap,
-            Some(s) => Self::Cached(RosterVersion(s.to_string())),
+            // Construct via FromStr so the empty-rejection invariant on
+            // RosterVersion holds at every construction site, even though the
+            // empty case is already steered to Bootstrap above.
+            Some(s) => match s.parse::<RosterVersion>() {
+                Ok(v) => Self::Cached(v),
+                Err(_) => Self::Bootstrap,
+            },
         }
     }
 
