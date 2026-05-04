@@ -414,7 +414,8 @@ mod tests {
     fn test_add_stanza_id_replaces_existing_same_by() {
         let mut msg = Message::new(None::<jid::Jid>);
         let alice: jid::Jid = "alice@example.com".parse().expect("valid jid");
-        msg.payloads.push(build_stanza_id_element("spoofed", &alice));
+        msg.payloads
+            .push(build_stanza_id_element("spoofed", &alice));
 
         add_stanza_id(&mut msg, &StanzaId::new("fresh", alice.clone()));
 
@@ -461,8 +462,7 @@ mod tests {
         let server: jid::Jid = "example.com".parse().expect("valid jid");
         msg.payloads
             .push(build_stanza_id_element("arc-1", &room_uppercase));
-        msg.payloads
-            .push(build_stanza_id_element("arc-2", &server));
+        msg.payloads.push(build_stanza_id_element("arc-2", &server));
 
         let room_lookup: jid::Jid = "room@muc.example.com".parse().expect("valid jid");
         remove_stanza_ids_by(&mut msg, &room_lookup);

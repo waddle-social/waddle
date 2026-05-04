@@ -510,7 +510,6 @@ impl SqlxMamStorage {
     /// `thread_id`) so the decode-side hard-error contract can be
     /// tested. Only available in test builds; sqlite-only.
     #[doc(hidden)]
-    #[cfg(any(test, debug_assertions))]
     pub async fn insert_raw_thread_columns_for_test(
         &self,
         archive_jid: &BareJid,
@@ -549,7 +548,6 @@ impl SqlxMamStorage {
     /// `parse_message_jid` papered over). Only available in test
     /// builds; sqlite-only.
     #[doc(hidden)]
-    #[cfg(any(test, debug_assertions))]
     pub async fn insert_raw_from_jid_for_test(
         &self,
         archive_jid: &BareJid,
@@ -584,7 +582,6 @@ impl SqlxMamStorage {
     /// `Option<ArchivedReply>` field can be tested. Only available in
     /// test builds; sqlite-only.
     #[doc(hidden)]
-    #[cfg(any(test, debug_assertions))]
     pub async fn insert_raw_reply_columns_for_test(
         &self,
         archive_jid: &BareJid,
@@ -623,7 +620,6 @@ impl SqlxMamStorage {
     /// typed [`xmpp_parsers::message::MessageType`] field can be
     /// tested. Only available in test builds; sqlite-only.
     #[doc(hidden)]
-    #[cfg(any(test, debug_assertions))]
     pub async fn insert_raw_message_type_for_test(
         &self,
         archive_jid: &BareJid,

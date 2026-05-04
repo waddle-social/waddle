@@ -339,11 +339,11 @@ impl ArchivedMessage {
     /// `String` which silently bypassed JID validity. Callers must
     /// supply real typed JIDs.
     ///
-    /// Exported (`pub`) and gated `#[cfg(any(test, debug_assertions))]`
-    /// so test fixtures in dependent crates (e.g. `waddle-xmpp`,
-    /// `waddle-server`) can use it without the test feature flag.
+    /// Exported (`pub`, `#[doc(hidden)]`) so test fixtures in dependent
+    /// crates (e.g. `waddle-xmpp`, `waddle-server`) can use it. Always
+    /// compiled (no cfg gate) because CI builds tests in release mode
+    /// where `debug_assertions` is off.
     #[doc(hidden)]
-    #[cfg(any(test, debug_assertions))]
     pub fn for_test(from: Jid, to: Jid) -> Self {
         Self {
             id: String::new(),
