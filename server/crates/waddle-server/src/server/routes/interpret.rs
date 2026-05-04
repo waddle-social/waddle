@@ -2295,15 +2295,14 @@ fn project_archived_row(
         None => fallback_archived_message(&row),
     };
 
-    let stamp_id = row
-        .stanza_id
-        .as_ref()
-        .map(|s| s.id.clone())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| row.id.clone());
+    // XEP-0359 §3 / XEP-0313 §5.2: the archive's <stanza-id> MUST carry
+    // the archive-stamped value (our schema's `row.id`), not the original
+    // wire `<message id>`. Follow-up handlers target the archived entry
+    // by this canonical id; preferring `row.stanza_id.id` (the wire id)
+    // would resolve incorrectly when the two differ.
     let stanza_id = StanzaIdRef {
         by: archive.clone(),
-        id: StanzaIdValue::new(&stamp_id),
+        id: StanzaIdValue::new(&row.id),
     };
 
     Some(Box::new(ProtocolArchivedMessage {
@@ -2347,6 +2346,12 @@ fn parse_archived_message_xml(xml: Option<&str>) -> Option<Message> {
 fn fallback_archived_message(row: &MamArchivedMessage) -> Message {
     let mut msg = Message::new(Some(row.to.clone()));
     msg.from = Some(row.from.clone());
+    // Preserve the archived row's MessageType. Without this, the
+    // body-only fallback rebuilds via `Message::new` whose default
+    // type would project groupchat rows back as the default type and
+    // break downstream ownership/retraction logic that branches on
+    // `msg.type_`.
+    msg.type_ = row.message_type.clone();
     msg.id = row.stanza_id.as_ref().map(|s| s.id.clone());
     // RFC 6121 §5.2.3: only emit `<body>` if the archived row recorded
     // one. `Some("")` round-trips as an empty `<body></body>` element;

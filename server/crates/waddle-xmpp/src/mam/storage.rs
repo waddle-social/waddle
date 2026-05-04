@@ -930,9 +930,30 @@ impl WithFilter {
         }
     }
 
+    /// SQL `LIKE` pattern matching `<bare>/<any-resource>`. The bare
+    /// portion is escaped so any `%`, `_`, or `\` characters in the
+    /// localpart (legal per RFC 7622) are treated literally instead of
+    /// as LIKE wildcards. Pair the produced pattern with `ESCAPE '\\'`
+    /// at the SQL site (see [`LIKE_ESCAPE`]).
     fn bare_resource_prefix(&self) -> String {
-        format!("{}/%", self.bare)
+        format!("{}/%", escape_like_pattern(&self.bare))
     }
+}
+
+/// Escape character used with the SQL `LIKE ... ESCAPE '\'` clause. A
+/// single backslash, doubled to escape the Rust string literal.
+const LIKE_ESCAPE: &str = "\\";
+
+/// Escape SQL `LIKE` pattern metacharacters in `value` so they match
+/// literally. Mirrors the `ESCAPE '\\'` clause emitted alongside the
+/// resulting bind. Order matters: the escape character itself must be
+/// doubled first so the subsequent `%`/`_` substitutions don't double-
+/// escape.
+fn escape_like_pattern(value: &str) -> String {
+    value
+        .replace(LIKE_ESCAPE, "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
 }
 
 macro_rules! push_common_mam_filters {
@@ -960,11 +981,11 @@ macro_rules! push_common_mam_filters {
                     .push_bind(bare)
                     .push(" OR from_jid LIKE ")
                     .push_bind(resource_prefix.clone())
-                    .push(" OR to_jid = ")
+                    .push(" ESCAPE '\\' OR to_jid = ")
                     .push_bind(bare)
                     .push(" OR to_jid LIKE ")
                     .push_bind(resource_prefix)
-                    .push(")");
+                    .push(" ESCAPE '\\')");
             }
         }
         if !$query.ids.is_empty() {
