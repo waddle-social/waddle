@@ -74,3 +74,14 @@ tokio = { workspace = true }
 tempfile = "3.14"
 tracing-subscriber = { workspace = true }
 serde_json = { workspace = true }
+
+[features]
+# Exposes `insert_raw_*_for_test` storage helpers (and other test-only
+# escape hatches) to cross-crate integration tests. Production builds
+# of `waddle-xmpp` MUST NOT enable this feature; downstream crates
+# enable it via `[dev-dependencies]` only.
+#
+# Enabling `test-utils` here transitively enables the same feature on
+# `waddle-xmpp-core` so the `ArchivedMessage::for_test` fixture
+# constructor is also visible to consumers.
+test-utils = ["waddle-xmpp-core/test-utils"]

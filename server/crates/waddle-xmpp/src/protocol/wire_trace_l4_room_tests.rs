@@ -17,12 +17,12 @@ use super::event::OutboundEvent;
 use super::id_gen::FixedIdGenerator;
 use super::room::{default_room_dispatcher, OccupantSnapshot, RoomContext};
 use crate::types::{Affiliation, Role};
-use crate::xep::xep0359::{extract_stanza_ids, NS_SID};
 use crate::xep::xep0421::{
     extract_occupant_id_from_message, generate_occupant_id, OccupantIdSecret,
 };
 use crate::Stanza;
 use jid::{BareJid, FullJid, Jid};
+use waddle_xmpp_core::xep0359::{extract_stanza_ids, NS_SID};
 use xmpp_parsers::message::{Body, Message, MessageType};
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
@@ -142,9 +142,10 @@ fn xep_0045_groupchat_dispatches_through_handler_chain_with_canonical_stamps() {
         );
         // `<stanza-id by='room' id='room-archive-id-1'>`
         let stamps = extract_stanza_ids(route);
+        let room_jid: Jid = "team@conf.example.com".parse().expect("valid jid");
         let room_stamp = stamps
             .iter()
-            .find(|s| s.by == "team@conf.example.com")
+            .find(|s| s.by == room_jid)
             .expect("room-stamped stanza-id present");
         assert_eq!(room_stamp.id, "room-archive-id-1");
         // `<occupant-id id='<HMAC>'>`
@@ -243,9 +244,9 @@ fn xep_0359_room_chain_strips_client_spoofed_room_stanza_id() {
 
     let mut msg = groupchat(&room, &alice, "spoof attempt");
     msg.payloads
-        .push(crate::xep::xep0359::build_stanza_id_element(
+        .push(waddle_xmpp_core::xep0359::build_stanza_id_element(
             "client-claim",
-            "team@conf.example.com",
+            &"team@conf.example.com".parse::<Jid>().expect("jid"),
         ));
 
     let outcome = default_room_dispatcher().dispatch(&mut msg, &ctx);

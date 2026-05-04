@@ -66,7 +66,7 @@ fn stanza_id_bys(message: &Message) -> Vec<String> {
     message
         .payloads
         .iter()
-        .filter(|p| p.name() == "stanza-id" && p.ns() == crate::xep::xep0359::NS_SID)
+        .filter(|p| p.name() == "stanza-id" && p.ns() == waddle_xmpp_core::xep0359::NS_SID)
         .filter_map(|p| p.attr("by").map(ToOwned::to_owned))
         .collect()
 }
@@ -161,9 +161,9 @@ fn xep_0359_recipient_pass_writes_recipient_archive_and_double_stamps_outgoing_w
     let mut wire_msg = chat_with_body(&alice_web, &bob, "hi bob");
     wire_msg
         .payloads
-        .push(crate::xep::xep0359::build_stanza_id_element(
+        .push(waddle_xmpp_core::xep0359::build_stanza_id_element(
             "alice-canon-1",
-            "alice@example.com",
+            &"alice@example.com".parse::<Jid>().expect("jid"),
         ));
 
     let id_gen = Arc::new(FixedIdGenerator("bob-canon-1".to_string()));
@@ -286,9 +286,9 @@ fn xep_0359_self_loop_peer_stanza_terminates_at_wire_not_re_routes() {
     wire_msg.to = Some(Jid::from(alice_web.clone()));
     wire_msg
         .payloads
-        .push(crate::xep::xep0359::build_stanza_id_element(
+        .push(waddle_xmpp_core::xep0359::build_stanza_id_element(
             "alice-loop-1",
-            "alice@example.com",
+            &"alice@example.com".parse::<Jid>().expect("jid"),
         ));
 
     let id_gen = Arc::new(FixedIdGenerator("alice-loop-2".to_string()));
@@ -375,9 +375,9 @@ fn xep_0359_recipient_pass_handler_chain_runs_in_locked_q2a_order() {
     let mut wire_msg = chat_with_body(&alice_web, &bob, "ordered");
     wire_msg
         .payloads
-        .push(crate::xep::xep0359::build_stanza_id_element(
+        .push(waddle_xmpp_core::xep0359::build_stanza_id_element(
             "alice-A",
-            "alice@example.com",
+            &"alice@example.com".parse::<Jid>().expect("jid"),
         ));
 
     let id_gen = Arc::new(FixedIdGenerator("bob-B".to_string()));

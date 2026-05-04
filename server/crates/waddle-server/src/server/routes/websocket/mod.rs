@@ -1386,13 +1386,16 @@ pub(crate) fn stanza_to_xml(stanza: &Stanza) -> String {
                 child.name() == "thread" && (child.ns() == stanza_ns || child.ns().is_empty())
             });
             if !has_thread {
-                let info = waddle_xmpp::xep0201::ThreadInfo {
-                    id: thread.0.clone(),
-                    parent: None,
-                };
-                element.append_child(waddle_xmpp::xep0201::build_thread_element(
-                    &info, &stanza_ns,
-                ));
+                // Skip the reattach if the typed `Thread` body is
+                // empty: the wire shape requires a non-empty body
+                // (`<thread></thread>` is malformed per RFC 6121
+                // §5.2.5 / XEP-0201). `ThreadId::new` is the gate.
+                if let Some(id) = waddle_xmpp::mam::ThreadId::new(thread.0.clone()) {
+                    let info = waddle_xmpp::xep0201::ThreadInfo::root(id);
+                    element.append_child(waddle_xmpp::xep0201::build_thread_element(
+                        &info, &stanza_ns,
+                    ));
+                }
             }
         }
     }
@@ -3253,9 +3256,9 @@ mod tests {
         // alice's (XEP-0359 §5 cross-archive preservation).
         peer_msg
             .payloads
-            .push(waddle_xmpp::xep::xep0359::build_stanza_id_element(
+            .push(waddle_xmpp_core::xep0359::build_stanza_id_element(
                 "alice-A1",
-                "alice@example.com",
+                &"alice@example.com".parse::<jid::Jid>().expect("jid"),
             ));
 
         let events = sm.handle(InboundEvent::StanzaFromPeer(Box::new(Stanza::Message(
@@ -3371,9 +3374,9 @@ mod tests {
         );
         peer_msg
             .payloads
-            .push(waddle_xmpp::xep::xep0359::build_stanza_id_element(
+            .push(waddle_xmpp_core::xep0359::build_stanza_id_element(
                 "alice-A1",
-                "alice@example.com",
+                &"alice@example.com".parse::<jid::Jid>().expect("jid"),
             ));
 
         let (tx, mut rx) = mpsc::channel::<OutboundStanza>(4);

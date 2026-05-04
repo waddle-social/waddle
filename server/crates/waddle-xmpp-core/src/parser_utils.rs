@@ -15,25 +15,20 @@ use xmpp_parsers::message::Message;
 /// - `element`: The message Element to potentially modify
 /// - `thread_id`: The thread ID from the parsed Message
 pub fn ensure_thread_element(element: &mut Element, thread_id: Option<&str>) {
-    if let Some(id) = thread_id {
-        let trimmed = id.trim();
-        if trimmed.is_empty() {
-            // skip empty thread
-        } else {
-            let stanza_ns = element.ns();
-            if element
-                .children()
-                .any(|child| crate::xep0201::is_thread_element_for_stanza(child, &stanza_ns))
-            {
-                return;
-            }
-            let info = crate::xep0201::ThreadInfo {
-                id: trimmed.to_owned(),
-                parent: None,
-            };
-            element.append_child(crate::xep0201::build_thread_element(&info, &stanza_ns));
-        }
+    let Some(id) = thread_id.and_then(|raw| crate::mam::ThreadId::new(raw.trim().to_owned()))
+    else {
+        // skip empty thread
+        return;
+    };
+    let stanza_ns = element.ns();
+    if element
+        .children()
+        .any(|child| crate::xep0201::is_thread_element_for_stanza(child, &stanza_ns))
+    {
+        return;
     }
+    let info = crate::xep0201::ThreadInfo::root(id);
+    element.append_child(crate::xep0201::build_thread_element(&info, &stanza_ns));
 }
 
 /// Extract thread parent attribute from a message Element before parsing.
@@ -73,14 +68,22 @@ pub fn extract_thread_parent(element: &Element) -> Option<String> {
 /// - `thread_parent`: The parent attribute value
 /// - `stanza_ns`: The namespace for the thread element
 pub fn reattach_thread_parent(msg: &mut Message, thread_parent: String, stanza_ns: &str) {
-    if let Some(thread) = msg.thread.take() {
-        let info = crate::xep0201::ThreadInfo {
-            id: thread.0,
-            parent: Some(thread_parent),
-        };
-        msg.payloads
-            .push(crate::xep0201::build_thread_element(&info, stanza_ns));
-    }
+    let Some(thread) = msg.thread.take() else {
+        return;
+    };
+    let Some(id) = crate::mam::ThreadId::new(thread.0) else {
+        // Empty thread body would render as a malformed
+        // `<thread parent='X'></thread>` (XEP-0201 implicitly forbids
+        // an empty thread body when `parent` is present). Drop the
+        // typed field without pushing a payload — the upstream parser
+        // already produced a degenerate state and we refuse to
+        // propagate it.
+        return;
+    };
+    let parent = crate::mam::ThreadId::new(thread_parent);
+    let info = crate::xep0201::ThreadInfo { id, parent };
+    msg.payloads
+        .push(crate::xep0201::build_thread_element(&info, stanza_ns));
 }
 
 #[cfg(test)]

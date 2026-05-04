@@ -11,6 +11,8 @@ use uuid::Uuid;
 use xmpp_parsers::iq::{Iq, IqType};
 use xmpp_parsers::message::{Message, MessageType};
 
+use crate::xep0201::ThreadInfo;
+use crate::xep0359::{OriginId, StanzaId};
 use crate::{CoreError, CoreResult};
 
 /// MAM XML namespace (XEP-0313 v2).
@@ -161,11 +163,11 @@ pub enum ArchivedRichPayload {
     Reactions(ArchivedReactionSet),
     /// In-place tombstone produced by XEP-0424 retraction or
     /// XEP-0425 moderation. The original row's `body` and
-    /// leak-prone fields (`thread_id`, `parent_thread_id`,
-    /// `reply_to_id`, `reply_to_jid`, `stanza_xml`, mentions, ...)
-    /// are cleared when this variant is set, per XEP-0424 §Tombstones
-    /// / XEP-0425 §Tombstones: "any related elements which might leak
-    /// information about the original message" must be replaced.
+    /// leak-prone fields (`thread`, `reply`, `stanza_xml`,
+    /// mentions, ...) are cleared when this variant is set, per
+    /// XEP-0424 §Tombstones / XEP-0425 §Tombstones: "any related
+    /// elements which might leak information about the original
+    /// message" must be replaced.
     Tombstone(ArchivedTombstone),
 }
 
@@ -192,45 +194,127 @@ impl ThreadId {
 }
 
 /// Archived message metadata.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `Serialize`/`Deserialize` are deliberately not derived: the
+/// canonical archive row format is the SQL columns + the
+/// JSON-encoded `rich_payload` column ([`ArchivedRichMessage`]),
+/// not the whole struct. Embedded typed values
+/// ([`ThreadInfo`], [`StanzaId`], [`OriginId`], [`ArchivedReply`])
+/// keep their derives because they appear inside the JSON-encoded
+/// payload column. Keeping `ArchivedMessage` itself non-serde keeps
+/// the boundary between "row shape that touches storage" and
+/// "rich payload blob that is JSON in the row" explicit.
+#[derive(Debug, Clone)]
 pub struct ArchivedMessage {
     /// Unique message ID.
     pub id: String,
     /// Timestamp when the message was received.
     pub timestamp: DateTime<Utc>,
     /// Sender JID.
-    pub from: String,
+    ///
+    /// Typed as `jid::Jid` (not `String`) per the typed-payloads hard
+    /// rule. Carries either a bare or full JID — the projection
+    /// preserves the wire form (full JID for groupchat occupants,
+    /// bare/full as appropriate for 1:1) so replay round-trips
+    /// resource and domain components without lossy reparse.
+    pub from: Jid,
     /// Recipient JID (room JID for MUC, or contact bare JID for 1:1).
-    pub to: String,
-    /// Message body.
-    pub body: String,
-    /// Original stanza ID (if present).
-    pub stanza_id: Option<String>,
-    /// RFC 6121 thread identifier for this message.
-    pub thread_id: Option<String>,
-    /// XEP-0201 nested-thread parent (the `parent` attribute on
-    /// `<thread/>`). Only meaningful when `thread_id` is `Some`.
+    ///
+    /// Typed as `jid::Jid` for the same reason as [`Self::from`]. The
+    /// archive write site supplies the canonical addressing tuple
+    /// upstream of this struct.
+    pub to: Jid,
+    /// Message body, preserving the wire-fidelity distinction between
+    /// "no `<body>` element on the wire" (`None`) and "an empty
+    /// `<body></body>` element" (`Some("")`).
+    ///
+    /// RFC 6121 §5.2.3 makes `<body>` optional: subject-only,
+    /// reaction-only, and other annotation-only messages may omit it
+    /// entirely. Earlier denormalizations collapsed both cases to the
+    /// empty string, so consumers reading this field directly (rather
+    /// than re-parsing `stanza_xml`) saw a misleading "empty body" for
+    /// stanzas that had no `<body>` element at all. Preserving the
+    /// distinction restores XEP-0313 §3 archive fidelity for the
+    /// denormalized projection.
+    pub body: Option<String>,
+    /// XEP-0359 stanza id captured for the archived row.
+    ///
+    /// Typed as [`xep0359::StanzaId`] (`{ id, by }`) so the
+    /// `by` attribute (REQUIRED per XEP-0359 §3) is structurally
+    /// inseparable from the id value. The `by` JID is reconstructed
+    /// from the storage row's archive JID at decode time per the
+    /// locked Q4 design — there is no separate `by` column in the
+    /// SQL schema.
+    ///
+    /// [`xep0359::StanzaId`]: crate::xep0359::StanzaId
+    pub stanza_id: Option<StanzaId>,
+    /// XEP-0201 thread reference (RFC 6121 `<thread/>` id plus
+    /// optional nested-thread `parent` attribute).
+    ///
+    /// Collapsed from the previous `thread_id: Option<String>` and
+    /// `parent_thread_id: Option<ThreadId>` pair into a single typed
+    /// field: `thread.id` is the RFC 6121 thread id and
+    /// `thread.parent` is the optional XEP-0201 nested-thread parent.
+    /// Modelling them together makes the "parent without id" invalid
+    /// state unrepresentable (you cannot construct
+    /// [`ThreadInfo`] with a parent and no id), aligning with the
+    /// typed-payloads hard rule.
+    ///
     /// Cleared on XEP-0424 / XEP-0425 tombstones — see the
     /// [`ArchivedRichPayload::Tombstone`] doc comment for the full
     /// list of leak-prone fields.
     ///
-    /// Typed as `ThreadId` (the existing newtype) per the
-    /// typed-payloads hard rule for new struct fields. The companion
-    /// `thread_id: Option<String>` field stays untyped here for now;
-    /// #228 will collapse both into a single `thread:
-    /// Option<xep0201::ThreadInfo>` field when the broader
-    /// retyping of `ArchivedMessage` lands.
-    #[serde(default)]
-    pub parent_thread_id: Option<ThreadId>,
-    /// XEP-0461 reply target message ID.
-    pub reply_to_id: Option<String>,
-    /// XEP-0461 optional original sender JID.
-    pub reply_to_jid: Option<String>,
+    /// Storage layout is unchanged: the SQL schema still has two
+    /// columns (`thread_id` and `parent_thread_id`); encode splits
+    /// this struct into the two columns and decode combines them.
+    pub thread: Option<ThreadInfo>,
+    /// XEP-0461 reply reference: the id of the replied-to message and
+    /// the optional original sender JID (`<reply id='X' to='Y'/>`).
+    ///
+    /// Collapsed from the previous `reply_to_id: Option<String>` and
+    /// `reply_to_jid: Option<String>` pair into a single typed
+    /// [`ArchivedReply`] field. Modelling them together makes the
+    /// "reply target sender without reply target id" invalid state
+    /// unrepresentable (you cannot construct [`ArchivedReply`] with a
+    /// `to` JID and no id), aligning with the typed-payloads hard rule
+    /// and matching the canonical typed shape already used inside
+    /// [`ArchivedRichMessage::reply`].
+    ///
+    /// Cleared on XEP-0424 / XEP-0425 tombstones — see the
+    /// [`ArchivedRichPayload::Tombstone`] doc comment for the full
+    /// list of leak-prone fields.
+    ///
+    /// Storage layout is unchanged: the SQL schema still has two
+    /// columns (`reply_to_id` and `reply_to_jid`) plus the
+    /// `idx_mam_room_reply_to` index; encode splits this struct into
+    /// the two columns and decode combines them.
+    pub reply: Option<ArchivedReply>,
     /// XEP-0359 origin-id supplied by client.
-    pub origin_id: Option<String>,
-    /// Message type ("chat", "groupchat", "normal", etc.).
-    #[serde(default = "default_message_type")]
-    pub message_type: String,
+    ///
+    /// Typed as [`xep0359::OriginId`] for symmetry with
+    /// [`Self::stanza_id`]. The newtype carries only the id value
+    /// (XEP-0359 origin-ids have no `by` attribute).
+    ///
+    /// [`xep0359::OriginId`]: crate::xep0359::OriginId
+    pub origin_id: Option<OriginId>,
+    /// Wire `<message type='…'/>` attribute, typed exactly per
+    /// RFC 6121 §5.2.2 (the closed set: `chat`, `error`, `groupchat`,
+    /// `headline`, `normal`).
+    ///
+    /// Pre-#228 this was `String` with a `default_message_type() =
+    /// "chat"` serde default. The string-typed shape papered over two
+    /// problems: the lossy `mam_message_type(&MessageType) -> String`
+    /// stringifier in the projection round-tripped the wire-typed
+    /// value through a string back into a string-only column, and the
+    /// `"chat"` serde default contradicted RFC 6121 §5.2.2 ("If
+    /// absent, the message is implicitly of type `normal`."). Typing
+    /// this field as [`MessageType`] propagates the wire-parsed value
+    /// directly and makes [`MessageType::default()`] == [`Normal`]
+    /// the source of the absent-type semantics — see the test
+    /// [`tests::message_type_default_matches_rfc6121_5_2_2`].
+    ///
+    /// [`Normal`]: xmpp_parsers::message::MessageType::Normal
+    pub message_type: MessageType,
     /// Preserved full stanza XML for faithful replay of archived timeline events.
     pub stanza_xml: Option<String>,
     /// Typed rich-message payload and annotations used to reconstruct XMPP payloads.
@@ -240,29 +324,44 @@ pub struct ArchivedMessage {
     /// otherwise. Used to disallow corrections across leave/rejoin
     /// cycles — the correction handler refuses if the room's current
     /// generation for the same nickname has advanced.
-    #[serde(default)]
     pub nickname_generation: Option<u64>,
 }
 
-fn default_message_type() -> String {
-    "chat".to_string()
-}
-
-impl Default for ArchivedMessage {
-    fn default() -> Self {
+impl ArchivedMessage {
+    /// Test-only constructor that stamps `timestamp = Utc::now()` and
+    /// fills every other optional field with its no-op default. Pulled
+    /// in to replace `..Default::default()` ergonomics in test fixtures
+    /// after the `Default` impl was dropped (no sensible default for
+    /// [`Jid`]).
+    ///
+    /// `from` and `to` are mandatory because they have no safe
+    /// fallback — the previous `Default::default()` returned an empty
+    /// `String` which silently bypassed JID validity. Callers must
+    /// supply real typed JIDs.
+    ///
+    /// Exported (`pub`, `#[doc(hidden)]`) so test fixtures in dependent
+    /// crates (e.g. `waddle-xmpp`, `waddle-server`) can use it. Gated
+    /// behind `cfg(test)` for in-crate tests and the `test-utils`
+    /// Cargo feature for cross-crate consumers — production builds do
+    /// not pull in this fixture constructor.
+    #[cfg(any(test, feature = "test-utils"))]
+    #[doc(hidden)]
+    pub fn for_test(from: Jid, to: Jid) -> Self {
         Self {
             id: String::new(),
             timestamp: Utc::now(),
-            from: String::new(),
-            to: String::new(),
-            body: String::new(),
+            from,
+            to,
+            body: None,
             stanza_id: None,
-            thread_id: None,
-            parent_thread_id: None,
-            reply_to_id: None,
-            reply_to_jid: None,
+            thread: None,
+            reply: None,
             origin_id: None,
-            message_type: default_message_type(),
+            // RFC 6121 §5.2.2: absent type defaults to `normal`.
+            // Identical to `MessageType::default()` — written
+            // explicitly here to make the conformance contract
+            // visible at the test-fixture site.
+            message_type: MessageType::Normal,
             stanza_xml: None,
             rich: None,
             nickname_generation: None,
@@ -277,8 +376,12 @@ pub struct MamQuery {
     pub start: Option<DateTime<Utc>>,
     /// End time filter.
     pub end: Option<DateTime<Utc>>,
-    /// Filter by sender.
-    pub with: Option<String>,
+    /// Filter by sender or recipient JID per XEP-0313 §4.1.5 `with`
+    /// field. Typed as `jid::Jid` (not `String`) per the typed-payloads
+    /// hard rule; parsing happens once at the IQ-form parse boundary
+    /// inside [`parse_data_form`] and a malformed value is rejected as
+    /// `bad-request` rather than silently substituted.
+    pub with: Option<Jid>,
     /// Filter by Waddle thread root id.
     pub thread_id: Option<ThreadId>,
     /// XEP-0431 full-text search terms.
@@ -445,9 +548,15 @@ pub fn build_query_form_iq(original_iq: &Iq) -> Iq {
 }
 
 /// Build MAM result messages for each archived message.
+///
+/// `to_jid` is typed as `&jid::Jid` so the recipient address is a
+/// validated value flowing in from the IQ wire-parse boundary; the
+/// previous string-typed parameter forced an internal `parse()` whose
+/// only failure mode was the `parse_message_jid` "unknown@invalid"
+/// fallback (a hot-path data-loss bug).
 pub fn build_result_messages(
     query_id: &str,
-    to_jid: &str,
+    to_jid: &Jid,
     messages: &[ArchivedMessage],
 ) -> Vec<Message> {
     messages
@@ -469,15 +578,6 @@ pub fn build_fin_iq(original_iq: &Iq, result: &MamResult) -> Iq {
         id: original_iq.id.clone(),
         payload: IqType::Result(Some(fin)),
     }
-}
-
-/// Add a stanza-id extension to a message for MAM compliance.
-pub fn add_stanza_id(message: &mut Message, archive_id: &str, by: &str) {
-    let stanza_id = Element::builder("stanza-id", STANZA_ID_NS)
-        .attr("id", archive_id)
-        .attr("by", by)
-        .build();
-    message.payloads.push(stanza_id);
 }
 
 fn parse_data_form(form: &Element, query: &mut MamQuery) -> CoreResult<()> {
@@ -507,7 +607,14 @@ fn parse_data_form(form: &Element, query: &mut MamQuery) -> CoreResult<()> {
                 }
             }
             "with" => {
-                query.with = value;
+                if let Some(value) = value {
+                    let parsed = value.parse::<Jid>().map_err(|error| {
+                        CoreError::bad_request(Some(format!(
+                            "Invalid `with` JID in MAM query: {error}"
+                        )))
+                    })?;
+                    query.with = Some(parsed);
+                }
             }
             "before-id" => {
                 query.filter_before_id = value;
@@ -569,7 +676,7 @@ fn parse_datetime(value: &str) -> CoreResult<DateTime<Utc>> {
         .map_err(|error| CoreError::bad_request(Some(format!("Invalid datetime: {}", error))))
 }
 
-fn build_result_message(query_id: &str, to_jid: &str, archived: &ArchivedMessage) -> Message {
+fn build_result_message(query_id: &str, to_jid: &Jid, archived: &ArchivedMessage) -> Message {
     let inner_msg = archived_inner_message(archived);
     let delay = Element::builder("delay", DELAY_NS)
         .attr("stamp", archived.timestamp.to_rfc3339())
@@ -584,17 +691,11 @@ fn build_result_message(query_id: &str, to_jid: &str, archived: &ArchivedMessage
         .append(forwarded)
         .build();
 
-    let mut msg = Message::new(Some(parse_message_jid(to_jid)));
+    let mut msg = Message::new(Some(to_jid.clone()));
     msg.id = Some(Uuid::now_v7().to_string());
     msg.type_ = MessageType::Normal;
     msg.payloads.push(result);
     msg
-}
-
-fn parse_message_jid(to_jid: &str) -> Jid {
-    to_jid
-        .parse()
-        .unwrap_or_else(|_| Jid::from(BareJid::new("unknown").expect("valid fallback JID")))
 }
 
 fn archived_inner_message(archived: &ArchivedMessage) -> Element {
@@ -618,8 +719,33 @@ fn archived_inner_message(archived: &ArchivedMessage) -> Element {
     build_legacy_inner_message(archived)
 }
 
+/// Wire-form name for a [`MessageType`] (the closed RFC 6121 §5.2.2
+/// set: `chat`, `error`, `groupchat`, `headline`, `normal`).
+///
+/// `xmpp_parsers::message::MessageType` is generated by the
+/// `generate_attribute! { …, Default = Normal }` macro, which
+/// implements `IntoAttributeValue` (returns `None` for the default
+/// to omit the attribute on serialize) and `xso::AsXmlText`, but
+/// **not** `Display` — `to_string()` on the enum does not exist.
+///
+/// We need an unconditional wire-form string for both replay
+/// (`<message type='…'/>` is always emitted with an explicit type
+/// for archived rows, including the default) and SQL bind. This
+/// helper provides exactly that: a total mapping from the typed
+/// enum back to the same wire literal `MessageType::from_str`
+/// would parse.
+pub fn message_type_wire_str(message_type: &MessageType) -> &'static str {
+    match message_type {
+        MessageType::Chat => "chat",
+        MessageType::Error => "error",
+        MessageType::Groupchat => "groupchat",
+        MessageType::Headline => "headline",
+        MessageType::Normal => "normal",
+    }
+}
+
 fn normalize_archived_inner_message(element: Element, archived: &ArchivedMessage) -> Element {
-    if archived.message_type != "groupchat" {
+    if archived.message_type != MessageType::Groupchat {
         return element;
     }
 
@@ -640,74 +766,62 @@ fn normalize_archived_inner_message(element: Element, archived: &ArchivedMessage
         builder.build()
     };
 
-    if let Some(thread_id) = archived.thread_id.as_deref() {
-        let info = crate::xep0201::ThreadInfo {
-            id: thread_id.to_owned(),
-            parent: archived
-                .parent_thread_id
-                .as_ref()
-                .map(|parent| parent.as_str().to_owned()),
-        };
-        crate::xep0201::install_thread_element(&mut normalized, &info);
+    if let Some(info) = archived.thread.as_ref() {
+        crate::xep0201::install_thread_element(&mut normalized, info);
     }
 
     normalized
 }
 
 fn build_typed_inner_message(archived: &ArchivedMessage, rich: &ArchivedRichMessage) -> Element {
-    let msg_type = if archived.message_type.is_empty() {
-        "chat"
-    } else {
-        archived.message_type.as_str()
-    };
+    let msg_type = archived.message_type.clone();
 
     let mut builder = Element::builder("message", CLIENT_NS)
-        .attr("from", &archived.from)
-        .attr("type", msg_type);
-    if msg_type != "groupchat" {
-        builder = builder.attr("to", &archived.to);
+        .attr("from", archived.from.to_string())
+        .attr("type", message_type_wire_str(&msg_type));
+    if msg_type != MessageType::Groupchat {
+        builder = builder.attr("to", archived.to.to_string());
     }
 
-    if let Some(stanza_id) = archived.stanza_id.as_deref() {
-        builder = builder.attr("id", stanza_id);
+    if let Some(sid) = archived.stanza_id.as_ref() {
+        builder = builder.attr("id", sid.id.as_str());
     }
-    if !archived.body.is_empty() {
+    // RFC 6121 §5.2.3 / XEP-0313 §3: emit `<body/>` exactly when the
+    // archived row recorded one on the wire. `Some("")` is a real
+    // empty `<body></body>` element and MUST round-trip as such;
+    // `None` MUST emit no `<body/>` element at all (subject-only,
+    // reaction-only, and other annotation-only stanzas).
+    if let Some(body) = archived.body.as_deref() {
         builder = builder.append(
             Element::builder("body", CLIENT_NS)
-                .append(archived.body.clone())
+                .append(body.to_owned())
                 .build(),
         );
     }
     // XEP-0201: emit `<thread parent='X'>id</thread>` via the canonical
     // typed builder so the optional parent attribute round-trips on
     // replay. The "parent without id ⇒ no `<thread/>` element" rule is
-    // enforced by gating the entire emission on `thread_id.is_some()`:
-    // a row with `parent_thread_id == Some(_)` and `thread_id == None`
-    // is incoherent (RFC 6121 §5.2.5 — `parent` is meaningful only as a
-    // back-reference from a thread that has its own id) and produces
-    // no `<thread/>` element at all.
-    if let Some(thread_id) = archived.thread_id.as_deref() {
-        let info = crate::xep0201::ThreadInfo {
-            id: thread_id.to_owned(),
-            parent: archived
-                .parent_thread_id
-                .as_ref()
-                .map(|t| t.as_str().to_owned()),
-        };
-        builder = builder.append(crate::xep0201::build_thread_element(&info, CLIENT_NS));
+    // enforced at the type level by collapsing the previous two flat
+    // fields into `Option<ThreadInfo>`: you cannot construct
+    // [`ThreadInfo`] with a parent and no id, so a row that was
+    // ever decoded into `archived.thread` already carries a coherent
+    // shape. A row with no thread metadata at all is `None` and emits
+    // nothing.
+    if let Some(info) = archived.thread.as_ref() {
+        builder = builder.append(crate::xep0201::build_thread_element(info, CLIENT_NS));
     }
-    if let Some(origin_id) = archived.origin_id.as_deref() {
+    if let Some(oid) = archived.origin_id.as_ref() {
         builder = builder.append(
             Element::builder("origin-id", STANZA_ID_NS)
-                .attr("id", origin_id)
+                .attr("id", oid.id.as_str())
                 .build(),
         );
     }
-    if msg_type == "groupchat" && !archived.id.is_empty() && !archived.to.is_empty() {
+    if msg_type == MessageType::Groupchat && !archived.id.is_empty() {
         builder = builder.append(
             Element::builder("stanza-id", STANZA_ID_NS)
                 .attr("id", &archived.id)
-                .attr("by", &archived.to)
+                .attr("by", archived.to.to_string())
                 .build(),
         );
     }
@@ -834,62 +948,55 @@ fn build_typed_inner_message(archived: &ArchivedMessage, rich: &ArchivedRichMess
 }
 
 fn build_legacy_inner_message(archived: &ArchivedMessage) -> Element {
-    let msg_type = if archived.message_type.is_empty() {
-        "chat"
-    } else {
-        archived.message_type.as_str()
-    };
+    let msg_type = archived.message_type.clone();
 
     let mut builder = Element::builder("message", CLIENT_NS)
-        .attr("from", &archived.from)
-        .attr("type", msg_type);
-    if msg_type != "groupchat" {
-        builder = builder.attr("to", &archived.to);
+        .attr("from", archived.from.to_string())
+        .attr("type", message_type_wire_str(&msg_type));
+    if msg_type != MessageType::Groupchat {
+        builder = builder.attr("to", archived.to.to_string());
     }
 
-    if let Some(stanza_id) = archived.stanza_id.as_deref() {
-        builder = builder.attr("id", stanza_id);
+    if let Some(sid) = archived.stanza_id.as_ref() {
+        builder = builder.attr("id", sid.id.as_str());
     }
-    if !archived.body.is_empty() {
+    // RFC 6121 §5.2.3 / XEP-0313 §3: see `build_typed_inner_message`
+    // — `Some("")` round-trips as `<body></body>`, `None` omits the
+    // element entirely.
+    if let Some(body) = archived.body.as_deref() {
         builder = builder.append(
             Element::builder("body", CLIENT_NS)
-                .append(archived.body.clone())
+                .append(body.to_owned())
                 .build(),
         );
     }
     // XEP-0201: same emission rule as `build_typed_inner_message`. Use
-    // the canonical typed builder so parent round-trips, and gate on
-    // `thread_id.is_some()` so a parent-only row never emits a stray
-    // `<thread/>` element (RFC 6121 §5.2.5 incoherence guard).
-    if let Some(thread_id) = archived.thread_id.as_deref() {
-        let info = crate::xep0201::ThreadInfo {
-            id: thread_id.to_owned(),
-            parent: archived
-                .parent_thread_id
-                .as_ref()
-                .map(|t| t.as_str().to_owned()),
-        };
-        builder = builder.append(crate::xep0201::build_thread_element(&info, CLIENT_NS));
+    // the canonical typed builder so parent round-trips. The "parent
+    // without id" incoherence (RFC 6121 §5.2.5) is unrepresentable in
+    // [`ThreadInfo`], so emission is simply gated on the entire
+    // `archived.thread` being `Some`.
+    if let Some(info) = archived.thread.as_ref() {
+        builder = builder.append(crate::xep0201::build_thread_element(info, CLIENT_NS));
     }
-    if let Some(reply_to_id) = archived.reply_to_id.as_deref() {
-        let mut reply = Element::builder("reply", REPLY_NS).attr("id", reply_to_id);
-        if let Some(reply_to_jid) = archived.reply_to_jid.as_deref() {
-            reply = reply.attr("to", reply_to_jid);
+    if let Some(reply) = archived.reply.as_ref() {
+        let mut reply_builder = Element::builder("reply", REPLY_NS).attr("id", reply.id.as_str());
+        if let Some(to) = reply.to.as_ref() {
+            reply_builder = reply_builder.attr("to", to.to_string());
         }
-        builder = builder.append(reply.build());
+        builder = builder.append(reply_builder.build());
     }
-    if let Some(origin_id) = archived.origin_id.as_deref() {
+    if let Some(oid) = archived.origin_id.as_ref() {
         builder = builder.append(
             Element::builder("origin-id", STANZA_ID_NS)
-                .attr("id", origin_id)
+                .attr("id", oid.id.as_str())
                 .build(),
         );
     }
-    if msg_type == "groupchat" && !archived.id.is_empty() && !archived.to.is_empty() {
+    if msg_type == MessageType::Groupchat && !archived.id.is_empty() {
         builder = builder.append(
             Element::builder("stanza-id", STANZA_ID_NS)
                 .attr("id", &archived.id)
-                .attr("by", &archived.to)
+                .attr("by", archived.to.to_string())
                 .build(),
         );
     }
@@ -921,6 +1028,35 @@ fn build_rsm_response_element(result: &MamResult) -> Element {
 mod tests {
     use super::*;
     use chrono::Datelike;
+
+    fn jid(value: &str) -> Jid {
+        value.parse::<Jid>().expect("valid jid literal")
+    }
+
+    /// RFC 6121 §5.2.2 ("Type Attribute"): "If absent, the message is
+    /// implicitly of type `normal`."
+    ///
+    /// `xmpp_parsers::message::MessageType::default()` correctly
+    /// returns [`MessageType::Normal`] (verified by reading
+    /// `generate_attribute!` `Default = Normal` in
+    /// `xmpp-parsers-0.21.0/src/message.rs`). This test pins that
+    /// contract: a future bump of `xmpp-parsers` that changes the
+    /// default would silently shift the absent-type semantics of every
+    /// archived row that hits the typed-decode fallback path.
+    ///
+    /// Pre-#228 commit 8 the `default_message_type() = "chat"` helper
+    /// in this module was a latent conformance bug: archived rows that
+    /// went through serde with an absent `message_type` field would
+    /// hydrate to `"chat"`, violating the RFC. Deleting that helper
+    /// and typing the field as [`MessageType`] anchors the absent-type
+    /// semantics to [`MessageType::default()`] (== [`Normal`]), which
+    /// matches the RFC.
+    ///
+    /// [`Normal`]: xmpp_parsers::message::MessageType::Normal
+    #[test]
+    fn message_type_default_matches_rfc6121_5_2_2() {
+        assert_eq!(MessageType::default(), MessageType::Normal);
+    }
 
     #[test]
     fn parses_mam_query_with_form_and_rsm() {
@@ -1019,7 +1155,10 @@ mod tests {
         assert_eq!(query.filter_before_id.as_deref(), Some("msg-20"));
         assert_eq!(query.filter_after_id.as_deref(), Some("msg-2"));
         assert_eq!(query.ids, vec!["msg-5", "msg-7"]);
-        assert_eq!(query.with.as_deref(), Some("juliet@example.com"));
+        assert_eq!(
+            query.with.as_ref().map(Jid::to_string).as_deref(),
+            Some("juliet@example.com")
+        );
         assert_eq!(
             query.fulltext.as_ref().map(RichText::as_str),
             Some("release notes")
@@ -1235,18 +1374,22 @@ mod tests {
     fn builds_result_message_from_legacy_fields() {
         let archived = ArchivedMessage {
             id: "msg-123".to_string(),
-            timestamp: Utc::now(),
-            from: "user@example.com/nick".to_string(),
-            to: "room@conference.example.com".to_string(),
-            body: "Hello, world!".to_string(),
-            thread_id: Some("thread-1".to_string()),
-            reply_to_id: Some("parent-1".to_string()),
-            reply_to_jid: Some("alice@example.com".to_string()),
-            origin_id: Some("origin-1".to_string()),
-            ..Default::default()
+            thread: Some(ThreadInfo::root(
+                ThreadId::new("thread-1").expect("non-empty thread id"),
+            )),
+            reply: Some(ArchivedReply {
+                id: RichMessageId::new("parent-1").expect("non-empty reply id"),
+                to: Some("alice@example.com".parse::<Jid>().expect("valid jid")),
+            }),
+            origin_id: Some(OriginId::new("origin-1")),
+            body: Some("Hello, world!".to_string()),
+            ..ArchivedMessage::for_test(
+                jid("user@example.com/nick"),
+                jid("room@conference.example.com"),
+            )
         };
 
-        let msg = build_result_messages("query-1", "user@example.com", &[archived]);
+        let msg = build_result_messages("query-1", &jid("user@example.com"), &[archived]);
         let result = msg[0]
             .payloads
             .iter()
@@ -1273,17 +1416,18 @@ mod tests {
     fn nested_thread_archived_for_replay(stanza_xml: Option<String>) -> ArchivedMessage {
         ArchivedMessage {
             id: "msg-thread-nested".to_string(),
-            timestamp: Utc::now(),
-            from: "alice@example.com/web".to_string(),
-            to: "bob@example.com".to_string(),
-            body: "nested reply".to_string(),
-            stanza_id: Some("wire-id-1".to_string()),
-            thread_id: Some("child-thread".to_string()),
-            parent_thread_id: ThreadId::new("root-thread"),
-            origin_id: None,
-            message_type: "chat".to_string(),
+            body: Some("nested reply".to_string()),
+            stanza_id: Some(StanzaId::new(
+                "wire-id-1",
+                "bob@example.com".parse::<Jid>().expect("valid jid"),
+            )),
+            thread: Some(ThreadInfo::child(
+                ThreadId::new("child-thread").expect("non-empty thread id"),
+                ThreadId::new("root-thread").expect("non-empty parent id"),
+            )),
+            message_type: MessageType::Chat,
             stanza_xml,
-            ..Default::default()
+            ..ArchivedMessage::for_test(jid("alice@example.com/web"), jid("bob@example.com"))
         }
     }
 
@@ -1324,7 +1468,7 @@ mod tests {
             }),
             ..nested_thread_archived_for_replay(None)
         };
-        let msgs = build_result_messages("q1", "user@example.com", &[archived]);
+        let msgs = build_result_messages("q1", &jid("user@example.com"), &[archived]);
         let thread = replay_inner_thread(&msgs[0]);
         assert_eq!(thread.text().trim(), "child-thread");
         assert_eq!(thread.attr("parent"), Some("root-thread"));
@@ -1336,7 +1480,7 @@ mod tests {
         // None — `build_legacy_inner_message` rebuilds purely from
         // scalar columns.
         let archived = nested_thread_archived_for_replay(None);
-        let msgs = build_result_messages("q2", "user@example.com", &[archived]);
+        let msgs = build_result_messages("q2", &jid("user@example.com"), &[archived]);
         let thread = replay_inner_thread(&msgs[0]);
         assert_eq!(thread.text().trim(), "child-thread");
         assert_eq!(thread.attr("parent"), Some("root-thread"));
@@ -1346,22 +1490,29 @@ mod tests {
     fn xep_0201_groupchat_stanza_xml_replay_reinstalls_thread_and_strips_to() {
         let archived = ArchivedMessage {
             id: "archive-threaded-reply".to_string(),
-            timestamp: Utc::now(),
-            from: "room@conference.example.com/alice".to_string(),
-            to: "room@conference.example.com".to_string(),
-            body: "threaded reply".to_string(),
-            stanza_id: Some("wire-id-2".to_string()),
-            thread_id: Some("root-thread".to_string()),
-            parent_thread_id: ThreadId::new("parent-thread"),
-            message_type: "groupchat".to_string(),
+            body: Some("threaded reply".to_string()),
+            stanza_id: Some(StanzaId::new(
+                "wire-id-2",
+                "room@conference.example.com"
+                    .parse::<Jid>()
+                    .expect("valid jid"),
+            )),
+            thread: Some(ThreadInfo::child(
+                ThreadId::new("root-thread").expect("non-empty thread id"),
+                ThreadId::new("parent-thread").expect("non-empty parent id"),
+            )),
+            message_type: MessageType::Groupchat,
             stanza_xml: Some(
                 "<message xmlns='jabber:client' from='room@conference.example.com/alice' to='bob@example.com/web' type='groupchat' id='wire-id-2'><body>threaded reply</body><thread>stale-thread</thread><reply xmlns='urn:xmpp:reply:0' id='root-thread'/></message>"
                     .to_string(),
             ),
-            ..Default::default()
+            ..ArchivedMessage::for_test(
+                jid("room@conference.example.com/alice"),
+                jid("room@conference.example.com"),
+            )
         };
 
-        let msgs = build_result_messages("q-stanza-xml", "bob@example.com/web", &[archived]);
+        let msgs = build_result_messages("q-stanza-xml", &jid("bob@example.com/web"), &[archived]);
         let result = msgs[0]
             .payloads
             .iter()
@@ -1396,18 +1547,20 @@ mod tests {
         // smuggled past the projection.
         let archived = ArchivedMessage {
             id: "msg-incoherent".to_string(),
-            timestamp: Utc::now(),
-            from: "alice@example.com/web".to_string(),
-            to: "bob@example.com".to_string(),
-            body: "body".to_string(),
-            thread_id: None,
-            parent_thread_id: ThreadId::new("root-thread"),
-            message_type: "chat".to_string(),
+            body: Some("body".to_string()),
+            // The collapsed `thread: Option<ThreadInfo>` field makes
+            // "parent without id" unrepresentable; the closest legal
+            // analog of the previous parent-only state is `None`,
+            // which (still) emits no `<thread/>` element. This test
+            // continues to pin that emission rule for the no-thread
+            // case.
+            thread: None,
+            message_type: MessageType::Chat,
             stanza_xml: None,
             rich: None,
-            ..Default::default()
+            ..ArchivedMessage::for_test(jid("alice@example.com/web"), jid("bob@example.com"))
         };
-        let msgs = build_result_messages("q3", "user@example.com", &[archived]);
+        let msgs = build_result_messages("q3", &jid("user@example.com"), &[archived]);
         let result = msgs[0]
             .payloads
             .iter()
@@ -1431,18 +1584,18 @@ mod tests {
     fn preserves_archived_stanza_payload() {
         let archived = ArchivedMessage {
             id: "msg-124".to_string(),
-            timestamp: Utc::now(),
-            from: "room@conference.example.com/alice".to_string(),
-            to: "room@conference.example.com".to_string(),
-            body: String::new(),
-            message_type: "groupchat".to_string(),
+            body: None,
+            message_type: MessageType::Groupchat,
             stanza_xml: Some(
                 "<message xmlns='jabber:client' from='room@conference.example.com/alice' to='room@conference.example.com' type='groupchat' id='reaction-1'><reactions xmlns='urn:xmpp:reactions:0' id='msg-1'><reaction>👍</reaction></reactions></message>".to_string(),
             ),
-            ..Default::default()
+            ..ArchivedMessage::for_test(
+                jid("room@conference.example.com/alice"),
+                jid("room@conference.example.com"),
+            )
         };
 
-        let msg = build_result_messages("query-2", "user@example.com", &[archived]);
+        let msg = build_result_messages("query-2", &jid("user@example.com"), &[archived]);
         let result = msg[0]
             .payloads
             .iter()
@@ -1468,8 +1621,8 @@ mod tests {
     #[test]
     fn builds_fin_iq_with_rsm_metadata() {
         let original = Iq {
-            from: Some(parse_message_jid("romeo@example.com/orchard")),
-            to: Some(parse_message_jid("juliet@example.com/balcony")),
+            from: Some(jid("romeo@example.com/orchard")),
+            to: Some(jid("juliet@example.com/balcony")),
             id: "iq-1".to_string(),
             payload: IqType::Get(Element::builder("query", MAM_NS).build()),
         };
@@ -1507,29 +1660,11 @@ mod tests {
     }
 
     #[test]
-    fn adds_stanza_id_payload() {
-        let mut message = Message::new(Some(parse_message_jid("juliet@example.com")));
-
-        add_stanza_id(&mut message, "archive-1", "room@example.com");
-
-        let stanza_id = message
-            .payloads
-            .iter()
-            .find(|payload| payload.name() == "stanza-id" && payload.ns() == STANZA_ID_NS)
-            .expect("stanza-id payload");
-        assert_eq!(stanza_id.attr("id"), Some("archive-1"));
-        assert_eq!(stanza_id.attr("by"), Some("room@example.com"));
-    }
-
-    #[test]
     fn stanza_xml_preferred_over_rich_payload() {
         let archived = ArchivedMessage {
             id: "msg-priority".to_string(),
-            timestamp: Utc::now(),
-            from: "room@conference.example.com/alice".to_string(),
-            to: "room@conference.example.com".to_string(),
-            body: "typed body".to_string(),
-            message_type: "groupchat".to_string(),
+            body: Some("typed body".to_string()),
+            message_type: MessageType::Groupchat,
             stanza_xml: Some(
                 "<message xmlns='jabber:client' from='room@conference.example.com/alice' type='groupchat' id='live-1'><body>live body with extension payload</body><item xmlns='urn:example:task-widget:1' id='task-123' status='open'/></message>".to_string(),
             ),
@@ -1539,10 +1674,13 @@ mod tests {
                 references: vec![],
                 mentions: vec![],
             }),
-            ..Default::default()
+            ..ArchivedMessage::for_test(
+                jid("room@conference.example.com/alice"),
+                jid("room@conference.example.com"),
+            )
         };
 
-        let msg = build_result_messages("query-priority", "user@example.com", &[archived]);
+        let msg = build_result_messages("query-priority", &jid("user@example.com"), &[archived]);
         let result = msg[0]
             .payloads
             .iter()
@@ -1573,29 +1711,31 @@ mod tests {
     fn stanza_xml_preserves_reply_fallback() {
         let archived = ArchivedMessage {
             id: "msg-fallback".to_string(),
-            timestamp: Utc::now(),
-            from: "room@conference.example.com/bob".to_string(),
-            to: "room@conference.example.com".to_string(),
-            body: "> Alice wrote:\n> Hello!\nI agree!".to_string(),
-            message_type: "groupchat".to_string(),
+            body: Some("> Alice wrote:\n> Hello!\nI agree!".to_string()),
+            message_type: MessageType::Groupchat,
             stanza_xml: Some(
                 "<message xmlns='jabber:client' from='room@conference.example.com/bob' type='groupchat' id='reply-1'><body>&gt; Alice wrote:\n&gt; Hello!\nI agree!</body><reply xmlns='urn:xmpp:reply:0' id='orig-1' to='room@conference.example.com/alice'/><fallback xmlns='urn:xmpp:fallback:0' for='urn:xmpp:reply:0'><body start='0' end='22'/></fallback></message>".to_string(),
             ),
-            reply_to_id: Some("orig-1".to_string()),
-            reply_to_jid: Some("room@conference.example.com/alice".to_string()),
+            reply: Some(ArchivedReply {
+                id: RichMessageId::new("orig-1").expect("non-empty reply id"),
+                to: Some(jid("room@conference.example.com/alice")),
+            }),
             rich: Some(ArchivedRichMessage {
                 payload: None,
                 reply: Some(ArchivedReply {
                     id: RichMessageId("orig-1".to_string()),
-                    to: Some("room@conference.example.com/alice".parse().unwrap()),
+                    to: Some(jid("room@conference.example.com/alice")),
                 }),
                 references: vec![],
                 mentions: vec![],
             }),
-            ..Default::default()
+            ..ArchivedMessage::for_test(
+                jid("room@conference.example.com/bob"),
+                jid("room@conference.example.com"),
+            )
         };
 
-        let msg = build_result_messages("query-fallback", "user@example.com", &[archived]);
+        let msg = build_result_messages("query-fallback", &jid("user@example.com"), &[archived]);
         let result = msg[0]
             .payloads
             .iter()
@@ -1632,18 +1772,18 @@ mod tests {
     fn stanza_xml_strips_to_for_groupchat() {
         let archived = ArchivedMessage {
             id: "msg-strip-to".to_string(),
-            timestamp: Utc::now(),
-            from: "room@conference.example.com/alice".to_string(),
-            to: "room@conference.example.com".to_string(),
-            body: "Hello!".to_string(),
-            message_type: "groupchat".to_string(),
+            body: Some("Hello!".to_string()),
+            message_type: MessageType::Groupchat,
             stanza_xml: Some(
                 "<message xmlns='jabber:client' from='room@conference.example.com/alice' to='room@conference.example.com' type='groupchat' id='msg-1'><body>Hello!</body></message>".to_string(),
             ),
-            ..Default::default()
+            ..ArchivedMessage::for_test(
+                jid("room@conference.example.com/alice"),
+                jid("room@conference.example.com"),
+            )
         };
 
-        let msg = build_result_messages("query-strip-to", "user@example.com", &[archived]);
+        let msg = build_result_messages("query-strip-to", &jid("user@example.com"), &[archived]);
         let result = msg[0]
             .payloads
             .iter()
@@ -1670,16 +1810,16 @@ mod tests {
         let stanza_xml = "<message xmlns='jabber:client' from='room@conf.example.com/alice' to='room@conf.example.com' type='groupchat' id='msg-x'><body>test</body><custom xmlns='urn:example:unknown'/></message>";
         let archived = ArchivedMessage {
             id: "msg-strip-raw".to_string(),
-            timestamp: Utc::now(),
-            from: "room@conf.example.com/alice".to_string(),
-            to: "room@conf.example.com".to_string(),
-            body: "test".to_string(),
-            message_type: "groupchat".to_string(),
+            body: Some("test".to_string()),
+            message_type: MessageType::Groupchat,
             stanza_xml: Some(stanza_xml.to_string()),
-            ..Default::default()
+            ..ArchivedMessage::for_test(
+                jid("room@conf.example.com/alice"),
+                jid("room@conf.example.com"),
+            )
         };
 
-        let msg = build_result_messages("query-strip-raw", "user@example.com", &[archived]);
+        let msg = build_result_messages("query-strip-raw", &jid("user@example.com"), &[archived]);
         let result = msg[0]
             .payloads
             .iter()

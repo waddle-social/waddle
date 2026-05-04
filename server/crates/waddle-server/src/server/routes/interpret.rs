@@ -938,16 +938,12 @@ async fn interpret_with_depth(
                 // typed message, so the projection serializer captures
                 // it for replay.
                 let archived = build_direct_archived_message(
-                    &archive_jid.to_string(),
-                    &from.to_string(),
-                    &to.to_string(),
+                    &jid::Jid::from(archive_jid.clone()),
+                    jid::Jid::from(from.clone()),
+                    jid::Jid::from(to.clone()),
                     &message,
                 );
-                let archive_jid_str = archive_jid.to_string();
-                match mam_storage
-                    .store_message(archive_jid_str.as_str(), &archived)
-                    .await
-                {
+                match mam_storage.store_message(&archive_jid, &archived).await {
                     Ok(archive_id) => {
                         debug!(
                             archive_jid = %archive_jid,
@@ -1217,9 +1213,8 @@ async fn apply_retraction_tombstone(
     target_wire_id: &str,
     retraction_message: &Message,
 ) {
-    let archive_str = archive.to_string();
     let original = match mam_storage
-        .get_message_by_message_id(&archive_str, target_wire_id)
+        .get_message_by_message_id(archive, target_wire_id)
         .await
     {
         Ok(Some(row)) => row,
@@ -1294,7 +1289,7 @@ async fn apply_retraction_tombstone(
     scrub_unacked_for_tombstone(
         sm_session_registry,
         target_wire_id,
-        &archive_str,
+        &archive.to_string(),
         "ApplyRetractionTombstone",
     )
     .await;
@@ -1451,7 +1446,7 @@ async fn dispatch_to_room(
     // Strip any client-claimed `<stanza-id by='room'/>` so the chain's
     // canonicalize handler stamps the canonical value. Mirrors the
     // legacy `remove_stanza_ids_by` call.
-    remove_stanza_ids_by(&mut prototype, &room_jid.to_string());
+    remove_stanza_ids_by(&mut prototype, &jid::Jid::from(room_jid.clone()));
     // 2. Look up the room actor + snapshot in one round-trip each.
     let room_actor = match room_registry
         .ask(GetRoom {
@@ -2195,7 +2190,6 @@ async fn lookup_archived_message(
         );
         return None;
     };
-    let archive_str = archive.to_string();
     let lookup = match reference {
         MessageRef::StanzaId { id, .. } => {
             // Strict stanza-id match: `get_message_by_message_id`
@@ -2204,7 +2198,7 @@ async fn lookup_archived_message(
             // (origin-id colliding with someone else's stanza-id)
             // can't return the wrong row.
             mam_storage
-                .get_message_by_message_id(&archive_str, id.as_str())
+                .get_message_by_message_id(archive, id.as_str())
                 .await
         }
         MessageRef::OriginId { sender, origin_id } => {
@@ -2221,10 +2215,10 @@ async fn lookup_archived_message(
             // OR-collision protection from #229 PR8: only rows sent
             // by the original author can satisfy the correction.
             let query = waddle_xmpp::mam::MamQuery {
-                with: Some(sender.to_string()),
+                with: Some(jid::Jid::from(sender.clone())),
                 ..Default::default()
             };
-            match mam_storage.query_messages(&archive_str, &query).await {
+            match mam_storage.query_messages(archive, &query).await {
                 Ok(result) => Ok(result.messages.into_iter().find(|row| {
                     row_matches_origin_id(row, sender, origin_id.as_str())
                         || row_matches_wire_id(row, sender, origin_id.as_str())
@@ -2257,13 +2251,10 @@ fn row_matches_origin_id(
     expected_sender: &jid::BareJid,
     expected_origin_id: &str,
 ) -> bool {
-    if row.origin_id.as_deref() != Some(expected_origin_id) {
+    if row.origin_id.as_ref().map(|o| o.id.as_str()) != Some(expected_origin_id) {
         return false;
     }
-    match row.from.parse::<jid::BareJid>() {
-        Ok(bare) => bare == *expected_sender,
-        Err(_) => false,
-    }
+    row.from.to_bare() == *expected_sender
 }
 
 /// Fallback match for the legacy XEP-0308 correction-target shape
@@ -2276,13 +2267,10 @@ fn row_matches_wire_id(
     expected_sender: &jid::BareJid,
     expected_wire_id: &str,
 ) -> bool {
-    if row.stanza_id.as_deref() != Some(expected_wire_id) {
+    if row.stanza_id.as_ref().map(|s| s.id.as_str()) != Some(expected_wire_id) {
         return false;
     }
-    match row.from.parse::<jid::BareJid>() {
-        Ok(bare) => bare == *expected_sender,
-        Err(_) => false,
-    }
+    row.from.to_bare() == *expected_sender
 }
 
 /// Project a storage [`MamArchivedMessage`] row into the protocol-side
@@ -2307,14 +2295,14 @@ fn project_archived_row(
         None => fallback_archived_message(&row),
     };
 
-    let stamp_id = row
-        .stanza_id
-        .clone()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| row.id.clone());
+    // XEP-0359 §3 / XEP-0313 §5.2: the archive's <stanza-id> MUST carry
+    // the archive-stamped value (our schema's `row.id`), not the original
+    // wire `<message id>`. Follow-up handlers target the archived entry
+    // by this canonical id; preferring `row.stanza_id.id` (the wire id)
+    // would resolve incorrectly when the two differ.
     let stanza_id = StanzaIdRef {
         by: archive.clone(),
-        id: StanzaIdValue::new(&stamp_id),
+        id: StanzaIdValue::new(&row.id),
     };
 
     Some(Box::new(ProtocolArchivedMessage {
@@ -2356,14 +2344,22 @@ fn parse_archived_message_xml(xml: Option<&str>) -> Option<Message> {
 }
 
 fn fallback_archived_message(row: &MamArchivedMessage) -> Message {
-    let to: Option<jid::Jid> = row.to.parse().ok();
-    let from: Option<jid::Jid> = row.from.parse().ok();
-    let mut msg = Message::new(to);
-    msg.from = from;
-    msg.id = row.stanza_id.clone();
-    if !row.body.is_empty() {
+    let mut msg = Message::new(Some(row.to.clone()));
+    msg.from = Some(row.from.clone());
+    // Preserve the archived row's MessageType. Without this, the
+    // body-only fallback rebuilds via `Message::new` whose default
+    // type would project groupchat rows back as the default type and
+    // break downstream ownership/retraction logic that branches on
+    // `msg.type_`.
+    msg.type_ = row.message_type.clone();
+    msg.id = row.stanza_id.as_ref().map(|s| s.id.clone());
+    // RFC 6121 §5.2.3: only emit `<body>` if the archived row recorded
+    // one. `Some("")` round-trips as an empty `<body></body>` element;
+    // `None` produces no `<body>` element at all (subject-only,
+    // reaction-only, etc.).
+    if let Some(body) = row.body.as_deref() {
         msg.bodies
-            .insert(String::new(), xmpp_parsers::message::Body(row.body.clone()));
+            .insert(String::new(), xmpp_parsers::message::Body(body.to_owned()));
     }
     msg
 }
@@ -2464,14 +2460,14 @@ async fn validate_groupchat_rich_targets(
 
     if let Some(correction) = extract_correction_from_message(message) {
         let original = match mam_storage
-            .get_message_by_message_id(&room.to_string(), &correction.replaces_id)
+            .get_message_by_message_id(room, &correction.replaces_id)
             .await
         {
             Ok(Some(original)) => original,
             Ok(None) => return Err(item_not_found_error("Correction target not found.")),
             Err(_) => return Err(internal_server_error_for_lookup()),
         };
-        if !sender_strings_match_for_groupchat(sender_archive_view, &original.from) {
+        if !sender_matches_groupchat_from(sender_archive_view, &original.from) {
             return Err(forbidden_error(
                 "Only the original sender may correct a message.",
             ));
@@ -2494,7 +2490,7 @@ async fn validate_groupchat_rich_targets(
                 Ok(None) => return Err(item_not_found_error("Retraction target not found.")),
                 Err(_) => return Err(internal_server_error_for_lookup()),
             };
-        if !sender_strings_match_for_groupchat(sender_archive_view, &original.from) {
+        if !sender_matches_groupchat_from(sender_archive_view, &original.from) {
             return Err(forbidden_error(
                 "Only the original sender may retract a message.",
             ));
@@ -2508,15 +2504,18 @@ async fn lookup_groupchat_retraction_target(
     room: &BareJid,
     target_id: &str,
 ) -> Result<Option<MamArchivedMessage>, waddle_xmpp::mam::MamStorageError> {
-    let archive_str = room.to_string();
     mam_storage
         .get_message(target_id)
         .await
-        .map(|message| message.filter(|message| message.to == archive_str))
+        .map(|message| message.filter(|message| message.to.to_bare() == *room))
 }
 
-fn sender_strings_match_for_groupchat(sender: &Jid, original_from: &str) -> bool {
-    sender.to_string() == original_from
+/// Compare a XEP-0045 sender (the in-room full JID `room/nick`) against
+/// the archived `from` JID for groupchat ownership checks. Both are
+/// typed `Jid` so we can compare structurally without round-tripping
+/// through strings.
+fn sender_matches_groupchat_from(sender: &Jid, original_from: &Jid) -> bool {
+    sender == original_from
 }
 
 /// XEP-0308 §3 occupancy continuity check: a full-JID that left the
@@ -2717,10 +2716,12 @@ async fn finish_archive_groupchat_message(
     archive_id: String,
     sender_nickname_generation: u64,
 ) -> Option<String> {
-    let body = prototype_body(&archive_clone)
-        .map(|value| value.trim().to_string())
-        .unwrap_or_default();
-    let (reply_to_id, reply_to_jid) = extract_groupchat_reply_reference(&archive_clone, room);
+    // RFC 6121 §5.2.3: `<body>` is optional. Preserve the
+    // None-vs-empty distinction so subject-only / reaction-only
+    // groupchat messages don't materialize a fake empty body in the
+    // archive's denormalized projection.
+    let body = prototype_body(&archive_clone);
+    let reply = extract_groupchat_reply_reference(&archive_clone, room);
     let origin_id = extract_origin_id(&archive_clone);
     let rich = rich_archive_payload(&archive_clone);
     let stanza_xml = serialize_groupchat_stanza_xml(&archive_clone);
@@ -2728,46 +2729,51 @@ async fn finish_archive_groupchat_message(
     // XEP-0201: read the typed thread info (id + optional parent) from the
     // post-reattach payload form. `protocol::frame::parse_stanza` calls
     // `reattach_thread_parent` at the inbound boundary so the parent
-    // attribute survives `Message::try_from` here.
-    let (thread_id, parent_thread_id) =
-        match waddle_xmpp::xep0201::thread_info_from_message_in_stanza_ns(
-            &archive_clone,
-            waddle_xmpp::xep0201::CLIENT_STANZA_NS,
-        ) {
-            Some(info) => (
-                Some(info.id),
-                info.parent.and_then(waddle_xmpp::mam::ThreadId::new),
-            ),
-            None => (None, None),
-        };
+    // attribute survives `Message::try_from` here. The collapsed
+    // `Option<ThreadInfo>` field on `ArchivedMessage` accepts the
+    // helper's result directly.
+    let thread = waddle_xmpp::xep0201::thread_info_from_message_in_stanza_ns(
+        &archive_clone,
+        waddle_xmpp::xep0201::CLIENT_STANZA_NS,
+    );
 
+    // XEP-0045 §7.2: groupchat reflections always carry an in-room
+    // sender JID; we treat a missing `from` as a malformed reflection
+    // and refuse the archive write rather than persisting a sentinel.
+    // (The protocol-side handler stamps `from` before reaching this
+    // arm, so this guard is defensive.)
+    let Some(from_jid) = archive_clone.from.clone() else {
+        warn!(
+            room = %room,
+            "ArchiveGroupchat: missing from JID on reflection; dropping archive write"
+        );
+        return None;
+    };
+    let room_jid_full = jid::Jid::from(room.clone());
+    let stanza_id = archive_clone
+        .id
+        .clone()
+        .map(|id| waddle_xmpp_core::xep0359::StanzaId::new(id, room_jid_full.clone()));
     let archived = MamArchivedMessage {
         id: archive_id,
         timestamp: chrono::Utc::now(),
-        from: archive_clone
-            .from
-            .as_ref()
-            .map(|jid| jid.to_string())
-            .unwrap_or_default(),
-        to: room.to_string(),
+        from: from_jid,
+        to: room_jid_full,
         body,
-        stanza_id: archive_clone.id.clone(),
-        thread_id,
-        parent_thread_id,
-        reply_to_id,
-        reply_to_jid,
+        stanza_id,
+        thread,
+        reply,
         origin_id,
-        message_type: mam_message_type(&archive_clone.type_),
+        // Typed propagation: see #228 commit 8 — `ArchivedMessage.message_type`
+        // is now `xmpp_parsers::message::MessageType`, not `String`. The
+        // wire-typed value flows directly through; no lossy stringifier.
+        message_type: archive_clone.type_.clone(),
         stanza_xml,
         rich,
         nickname_generation: Some(sender_nickname_generation),
     };
 
-    let archive_jid_str = room.to_string();
-    match mam_storage
-        .store_message(archive_jid_str.as_str(), &archived)
-        .await
-    {
+    match mam_storage.store_message(room, &archived).await {
         Ok(archive_id) => Some(archive_id),
         Err(error) => {
             warn!(
@@ -2787,9 +2793,8 @@ async fn apply_groupchat_retraction_tombstone(
     target_message_id: &str,
     retraction_message: &Message,
 ) {
-    let archive_str = room.to_string();
     let original = match mam_storage.get_message(target_message_id).await {
-        Ok(Some(row)) if row.to == archive_str => row,
+        Ok(Some(row)) if row.to.to_bare() == *room => row,
         Ok(_) => {
             debug!(
                 archive = %room,
@@ -2855,7 +2860,7 @@ async fn apply_groupchat_retraction_tombstone(
     scrub_unacked_for_tombstone(
         sm_session_registry,
         target_message_id,
-        &archive_str,
+        &room.to_string(),
         "ApplyGroupchatRetractionTombstone",
     )
     .await;
@@ -2979,32 +2984,24 @@ async fn push_inbox_update(
     }
 }
 
-fn mam_message_type(message_type: &XmppMessageType) -> String {
-    match message_type {
-        XmppMessageType::Chat => "chat".to_string(),
-        XmppMessageType::Error => "error".to_string(),
-        XmppMessageType::Groupchat => "groupchat".to_string(),
-        XmppMessageType::Headline => "headline".to_string(),
-        XmppMessageType::Normal => "normal".to_string(),
-    }
-}
-
 fn extract_groupchat_reply_reference(
     message: &Message,
     room: &BareJid,
-) -> (Option<String>, Option<String>) {
-    let Some(reply) = message
+) -> Option<waddle_xmpp_core::mam::ArchivedReply> {
+    use waddle_xmpp_core::mam::{ArchivedReply, RichMessageId};
+    let reply = message
         .payloads
         .iter()
-        .find(|payload| payload.name() == "reply" && payload.ns() == NS_REPLY)
-    else {
-        return (None, None);
-    };
-    let reply_to_jid = reply
+        .find(|payload| payload.name() == "reply" && payload.ns() == NS_REPLY)?;
+    let id = RichMessageId::new(reply.attr("id")?)?;
+    // XEP-0461 §3 makes `id` MUST and `to` SHOULD; for groupchat we
+    // additionally restrict `to` to a room-scoped JID. A `to` that
+    // fails the scope check is dropped (the reply still carries the
+    // id) rather than rejecting the entire reply reference.
+    let to = reply
         .attr("to")
-        .and_then(|value| room_scoped_reply_to_attr(value, room))
-        .map(|jid| jid.to_string());
-    (reply.attr("id").map(ToOwned::to_owned), reply_to_jid)
+        .and_then(|value| room_scoped_reply_to_attr(value, room));
+    Some(ArchivedReply { id, to })
 }
 
 pub(crate) fn room_scoped_reply_to_attr(value: &str, room: &BareJid) -> Option<Jid> {
@@ -3014,12 +3011,8 @@ pub(crate) fn room_scoped_reply_to_attr(value: &str, room: &BareJid) -> Option<J
         .filter(|jid| jid.to_bare() == *room)
 }
 
-fn extract_origin_id(message: &Message) -> Option<String> {
-    message
-        .payloads
-        .iter()
-        .find(|payload| payload.name() == "origin-id" && payload.ns() == STANZA_ID_NS)
-        .and_then(|origin| origin.attr("id").map(ToOwned::to_owned))
+fn extract_origin_id(message: &Message) -> Option<waddle_xmpp_core::xep0359::OriginId> {
+    waddle_xmpp_core::xep0359::extract_origin_id(message)
 }
 
 fn prototype_body(message: &Message) -> Option<String> {
@@ -3439,7 +3432,7 @@ mod tests {
         let _outcome = interpret(events, &deps).await;
 
         let stored = mam
-            .query_messages(&archive_jid.to_string(), &Default::default())
+            .query_messages(&archive_jid, &Default::default())
             .await
             .expect("query");
         assert_eq!(
@@ -3448,10 +3441,13 @@ mod tests {
             "ArchiveDirect persists exactly one row"
         );
         let row = &stored.messages[0];
-        assert_eq!(row.from, "alice@example.com");
-        assert_eq!(row.to, "bob@example.com");
-        assert_eq!(row.body, "hello");
-        assert_eq!(row.stanza_id.as_deref(), Some("orig-1"));
+        assert_eq!(row.from.to_string(), "alice@example.com");
+        assert_eq!(row.to.to_string(), "bob@example.com");
+        assert_eq!(row.body.as_deref(), Some("hello"));
+        assert_eq!(
+            row.stanza_id.as_ref().map(|s| s.id.as_str()),
+            Some("orig-1")
+        );
     }
 
     #[tokio::test]
@@ -3468,7 +3464,7 @@ mod tests {
         use waddle_xmpp::inbox::storage::InMemoryInboxStorage;
         use waddle_xmpp::mam::storage::InMemoryMamStorage;
         use waddle_xmpp::protocol::event::{StanzaIdRef, StanzaIdValue};
-        use waddle_xmpp::xep::xep0359::build_stanza_id_element;
+        use waddle_xmpp_core::xep0359::build_stanza_id_element;
         let registry = ConnectionRegistry::new();
         let mam: Arc<dyn MamStorage> = Arc::new(InMemoryMamStorage::new());
         let inbox_concrete = Arc::new(InMemoryInboxStorage::new());
@@ -3483,8 +3479,10 @@ mod tests {
         // under alice's archive — the same id InboxHandler will
         // emit as `archive_ref`.
         let canonical_id = "alice-canonical-1";
-        msg.payloads
-            .push(build_stanza_id_element(canonical_id, "alice@example.com"));
+        msg.payloads.push(build_stanza_id_element(
+            canonical_id,
+            &jid::Jid::from(alice.clone()),
+        ));
 
         let events = vec![
             OutboundEvent::ArchiveDirect {
@@ -3517,12 +3515,12 @@ mod tests {
         // pivot uses `get_message_by_archive_or_stanza_id` (queries
         // both `id` and `stanza_id`).
         let row = mam
-            .get_message_by_archive_or_stanza_id(&alice.to_string(), canonical_id)
+            .get_message_by_archive_or_stanza_id(&alice, canonical_id)
             .await
             .expect("mam lookup")
             .expect("MAM row keyed by canonical stanza-id");
         assert_eq!(row.id, canonical_id);
-        assert_eq!(row.body, "pivot test");
+        assert_eq!(row.body.as_deref(), Some("pivot test"));
     }
 
     #[tokio::test]
@@ -3558,11 +3556,11 @@ mod tests {
         let _outcome = interpret(events, &deps).await;
 
         let alice_archive = mam
-            .query_messages(&alice.to_string(), &Default::default())
+            .query_messages(&alice, &Default::default())
             .await
             .expect("query alice");
         let bob_archive = mam
-            .query_messages(&bob.to_string(), &Default::default())
+            .query_messages(&bob, &Default::default())
             .await
             .expect("query bob");
         assert_eq!(
@@ -3591,14 +3589,14 @@ mod tests {
         impl MamStorage for FailingMam {
             async fn store_message(
                 &self,
-                _: &str,
+                _: &jid::BareJid,
                 _: &ArchivedMessage,
             ) -> Result<String, MamStorageError> {
                 Err(MamStorageError::Database("simulated".into()))
             }
             async fn query_messages(
                 &self,
-                _: &str,
+                _: &jid::BareJid,
                 _: &MamQuery,
             ) -> Result<MamResult, MamStorageError> {
                 Ok(MamResult {
@@ -3624,31 +3622,31 @@ mod tests {
             }
             async fn get_message_by_stanza_id(
                 &self,
-                _: &str,
+                _: &jid::BareJid,
                 _: &str,
             ) -> Result<Option<ArchivedMessage>, MamStorageError> {
                 Ok(None)
             }
             async fn get_message_by_message_id(
                 &self,
-                _: &str,
+                _: &jid::BareJid,
                 _: &str,
             ) -> Result<Option<ArchivedMessage>, MamStorageError> {
                 Ok(None)
             }
             async fn get_message_by_archive_or_stanza_id(
                 &self,
-                _: &str,
+                _: &jid::BareJid,
                 _: &str,
             ) -> Result<Option<ArchivedMessage>, MamStorageError> {
                 Ok(None)
             }
-            async fn count_messages(&self, _: &str) -> Result<u32, MamStorageError> {
+            async fn count_messages(&self, _: &jid::BareJid) -> Result<u32, MamStorageError> {
                 Ok(0)
             }
             async fn delete_before(
                 &self,
-                _: &str,
+                _: &jid::BareJid,
                 _: chrono::DateTime<chrono::Utc>,
             ) -> Result<u64, MamStorageError> {
                 Ok(0)
@@ -3777,25 +3775,24 @@ mod tests {
         let row = ArchivedMessage {
             id: "canon-A1".to_string(),
             timestamp: chrono::Utc::now(),
-            from: "alice@example.com".to_string(),
-            to: "bob@example.com".to_string(),
-            body: "hello".to_string(),
-            stanza_id: Some("canon-A1".to_string()),
-            thread_id: None,
-            parent_thread_id: None,
-            reply_to_id: None,
-            reply_to_jid: None,
+            from: "alice@example.com".parse().expect("jid"),
+            to: "bob@example.com".parse().expect("jid"),
+            body: Some("hello".to_string()),
+            stanza_id: Some(waddle_xmpp_core::xep0359::StanzaId::new(
+                "canon-A1",
+                jid::Jid::from(archive_jid.clone()),
+            )),
+            thread: None,
+            reply: None,
             origin_id: None,
-            message_type: "chat".to_string(),
+            message_type: XmppMessageType::Chat,
             stanza_xml: Some(
                 r#"<message xmlns='jabber:client' type='chat' from='alice@example.com/web' to='bob@example.com'><body>hello</body></message>"#.to_string(),
             ),
             rich: None,
             nickname_generation: None,
         };
-        mam.store_message(&archive_jid.to_string(), &row)
-            .await
-            .expect("seed");
+        mam.store_message(&archive_jid, &row).await.expect("seed");
 
         let events = vec![OutboundEvent::LookupArchivedMessage {
             id: CallbackId(7),
@@ -3882,16 +3879,17 @@ mod tests {
         let bob_row = ArchivedMessage {
             id: "row-from-bob".to_string(),
             timestamp: chrono::Utc::now(),
-            from: "bob@example.com".to_string(),
-            to: "alice@example.com".to_string(),
-            body: "from bob".to_string(),
-            stanza_id: Some("alice-stamp-bob".to_string()),
-            thread_id: None,
-            parent_thread_id: None,
-            reply_to_id: None,
-            reply_to_jid: None,
-            origin_id: Some("collision".to_string()),
-            message_type: "chat".to_string(),
+            from: "bob@example.com".parse().expect("jid"),
+            to: "alice@example.com".parse().expect("jid"),
+            body: Some("from bob".to_string()),
+            stanza_id: Some(waddle_xmpp_core::xep0359::StanzaId::new(
+                "alice-stamp-bob",
+                jid::Jid::from(archive_jid.clone()),
+            )),
+            thread: None,
+            reply: None,
+            origin_id: Some(waddle_xmpp_core::xep0359::OriginId::new("collision")),
+            message_type: XmppMessageType::Chat,
             stanza_xml: None,
             rich: None,
             nickname_generation: None,
@@ -3901,25 +3899,26 @@ mod tests {
         let alice_row = ArchivedMessage {
             id: "row-from-alice".to_string(),
             timestamp: chrono::Utc::now(),
-            from: "alice@example.com".to_string(),
-            to: "bob@example.com".to_string(),
-            body: "from alice".to_string(),
-            stanza_id: Some("alice-stamp-alice".to_string()),
-            thread_id: None,
-            parent_thread_id: None,
-            reply_to_id: None,
-            reply_to_jid: None,
-            origin_id: Some("collision".to_string()),
-            message_type: "chat".to_string(),
+            from: "alice@example.com".parse().expect("jid"),
+            to: "bob@example.com".parse().expect("jid"),
+            body: Some("from alice".to_string()),
+            stanza_id: Some(waddle_xmpp_core::xep0359::StanzaId::new(
+                "alice-stamp-alice",
+                jid::Jid::from(archive_jid.clone()),
+            )),
+            thread: None,
+            reply: None,
+            origin_id: Some(waddle_xmpp_core::xep0359::OriginId::new("collision")),
+            message_type: XmppMessageType::Chat,
             stanza_xml: None,
             rich: None,
             nickname_generation: None,
         };
         // Insert bob's row FIRST so a naive OR-matcher would return it.
-        mam.store_message(&archive_jid.to_string(), &bob_row)
+        mam.store_message(&archive_jid, &bob_row)
             .await
             .expect("seed bob");
-        mam.store_message(&archive_jid.to_string(), &alice_row)
+        mam.store_message(&archive_jid, &alice_row)
             .await
             .expect("seed alice");
 
@@ -3971,23 +3970,22 @@ mod tests {
         let row = ArchivedMessage {
             id: "row-1".to_string(),
             timestamp: chrono::Utc::now(),
-            from: "bob@example.com".to_string(),
-            to: "alice@example.com".to_string(),
-            body: "bob's".to_string(),
-            stanza_id: Some("alice-stamp".to_string()),
-            thread_id: None,
-            parent_thread_id: None,
-            reply_to_id: None,
-            reply_to_jid: None,
-            origin_id: Some("oid-1".to_string()),
-            message_type: "chat".to_string(),
+            from: "bob@example.com".parse().expect("jid"),
+            to: "alice@example.com".parse().expect("jid"),
+            body: Some("bob's".to_string()),
+            stanza_id: Some(waddle_xmpp_core::xep0359::StanzaId::new(
+                "alice-stamp",
+                jid::Jid::from(archive_jid.clone()),
+            )),
+            thread: None,
+            reply: None,
+            origin_id: Some(waddle_xmpp_core::xep0359::OriginId::new("oid-1")),
+            message_type: XmppMessageType::Chat,
             stanza_xml: None,
             rich: None,
             nickname_generation: None,
         };
-        mam.store_message(&archive_jid.to_string(), &row)
-            .await
-            .expect("seed");
+        mam.store_message(&archive_jid, &row).await.expect("seed");
 
         // Look up for a DIFFERENT sender (charlie) with the colliding
         // origin-id. Must surface as not-found.
@@ -4033,21 +4031,22 @@ mod tests {
         let collision_row = ArchivedMessage {
             id: "row-collide".to_string(),
             timestamp: chrono::Utc::now(),
-            from: "alice@example.com".to_string(),
-            to: "bob@example.com".to_string(),
-            body: "collide".to_string(),
-            stanza_id: Some("real-stamp".to_string()),
-            thread_id: None,
-            parent_thread_id: None,
-            reply_to_id: None,
-            reply_to_jid: None,
-            origin_id: Some("queried-id".to_string()),
-            message_type: "chat".to_string(),
+            from: "alice@example.com".parse().expect("jid"),
+            to: "bob@example.com".parse().expect("jid"),
+            body: Some("collide".to_string()),
+            stanza_id: Some(waddle_xmpp_core::xep0359::StanzaId::new(
+                "real-stamp",
+                jid::Jid::from(archive_jid.clone()),
+            )),
+            thread: None,
+            reply: None,
+            origin_id: Some(waddle_xmpp_core::xep0359::OriginId::new("queried-id")),
+            message_type: XmppMessageType::Chat,
             stanza_xml: None,
             rich: None,
             nickname_generation: None,
         };
-        mam.store_message(&archive_jid.to_string(), &collision_row)
+        mam.store_message(&archive_jid, &collision_row)
             .await
             .expect("seed");
 
@@ -4091,16 +4090,17 @@ mod tests {
         let row = ArchivedMessage {
             id: "tomb-1".to_string(),
             timestamp: chrono::Utc::now(),
-            from: "alice@example.com".to_string(),
-            to: "bob@example.com".to_string(),
-            body: String::new(),
-            stanza_id: Some("tomb-1".to_string()),
-            thread_id: None,
-            parent_thread_id: None,
-            reply_to_id: None,
-            reply_to_jid: None,
+            from: "alice@example.com".parse().expect("jid"),
+            to: "bob@example.com".parse().expect("jid"),
+            body: None,
+            stanza_id: Some(waddle_xmpp_core::xep0359::StanzaId::new(
+                "tomb-1",
+                jid::Jid::from(archive_jid.clone()),
+            )),
+            thread: None,
+            reply: None,
             origin_id: None,
-            message_type: "chat".to_string(),
+            message_type: XmppMessageType::Chat,
             stanza_xml: None,
             rich: Some(ArchivedRichMessage {
                 payload: Some(ArchivedRichPayload::Tombstone(ArchivedTombstone {
@@ -4114,9 +4114,7 @@ mod tests {
             }),
             nickname_generation: None,
         };
-        mam.store_message(&archive_jid.to_string(), &row)
-            .await
-            .expect("seed");
+        mam.store_message(&archive_jid, &row).await.expect("seed");
 
         let events = vec![OutboundEvent::LookupArchivedMessage {
             id: CallbackId(13),
@@ -4729,8 +4727,9 @@ mod tests {
         }];
         let _ = interpret(events, &deps).await;
 
+        let bob_bare: jid::BareJid = "bob@example.com".parse().expect("bare");
         let bob_archive = mam
-            .query_messages("bob@example.com", &Default::default())
+            .query_messages(&bob_bare, &Default::default())
             .await
             .expect("query bob");
         assert_eq!(
@@ -4738,7 +4737,7 @@ mod tests {
             1,
             "headless recipient pass writes one archive entry under bob's bare"
         );
-        assert_eq!(bob_archive.messages[0].body, "hello bob");
+        assert_eq!(bob_archive.messages[0].body.as_deref(), Some("hello bob"));
     }
 
     #[tokio::test]
@@ -4812,7 +4811,7 @@ mod tests {
 
         let bob: jid::BareJid = "bob@example.com".parse().expect("bare");
         let bob_archive = mam
-            .query_messages(bob.as_str(), &Default::default())
+            .query_messages(&bob, &Default::default())
             .await
             .expect("query bob");
         assert!(
@@ -4893,8 +4892,9 @@ mod tests {
         }];
         let _ = interpret(events, &deps).await;
 
+        let bob_bare: jid::BareJid = "bob@example.com".parse().expect("bare");
         let bob_archive = mam
-            .query_messages("bob@example.com", &Default::default())
+            .query_messages(&bob_bare, &Default::default())
             .await
             .expect("query bob");
         assert!(
@@ -4950,7 +4950,7 @@ mod tests {
 
         let bob: jid::BareJid = "bob@example.com".parse().expect("bare");
         let bob_archive = mam
-            .query_messages(bob.as_str(), &Default::default())
+            .query_messages(&bob, &Default::default())
             .await
             .expect("query bob");
         assert!(
@@ -5031,7 +5031,7 @@ mod tests {
         // alice's MAM has 1 entry; <stanza-id by='alice@example.com'>
         // present.
         let alice_archive = mam
-            .query_messages(&alice_bare.to_string(), &Default::default())
+            .query_messages(&alice_bare, &Default::default())
             .await
             .expect("query alice");
         assert_eq!(
@@ -5053,7 +5053,7 @@ mod tests {
         // bob's MAM has 1 entry; <stanza-id by='bob@example.com'>
         // present (recipient-side stamp by the headless pass).
         let bob_archive = mam
-            .query_messages(&bob.to_string(), &Default::default())
+            .query_messages(&bob, &Default::default())
             .await
             .expect("query bob");
         assert_eq!(
@@ -5119,15 +5119,15 @@ mod tests {
         }];
         let _ = interpret(events, &deps).await;
 
+        let bob_remote: jid::BareJid = "bob@other.example.com".parse().expect("bare");
         let bob_archive = mam
-            .query_messages("bob@other.example.com", &Default::default())
+            .query_messages(&bob_remote, &Default::default())
             .await
             .expect("query bob");
         assert!(
             bob_archive.messages.is_empty(),
             "cross-domain bare JID drops without running the headless pass"
         );
-        let bob_remote: jid::BareJid = "bob@other.example.com".parse().expect("bare");
         let entries = inbox_concrete.list(&bob_remote).await.expect("list");
         assert!(
             entries.is_empty(),

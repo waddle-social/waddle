@@ -27,6 +27,7 @@ kameo = { workspace = true }
 
 # XMPP Server
 waddle-xmpp = { path = "../waddle-xmpp" }
+waddle-xmpp-core = { path = "../waddle-xmpp-core" }
 waddle-extensions = { path = "../waddle-extensions" }
 
 # Graceful restart (Ecdysis pattern)
@@ -99,6 +100,15 @@ tokio-tungstenite = "0.24"
 pbkdf2 = { version = "0.12", features = ["hmac"] }
 cuengine = "0.40.6"
 tempfile = "3.14"
+
+# Re-declare the workspace XMPP crates with `test-utils` enabled so
+# cross-crate integration tests in this package can call the
+# `insert_raw_*_for_test` storage helpers and `ArchivedMessage::for_test`
+# fixture constructor. The library/binary build (driven by
+# `[dependencies]` above) does NOT activate this feature, so production
+# builds of `waddle-server` do not pull in the test-only helpers.
+waddle-xmpp = { path = "../waddle-xmpp", features = ["test-utils"] }
+waddle-xmpp-core = { path = "../waddle-xmpp-core", features = ["test-utils"] }
 
 [[bin]]
 name = "waddle-server"

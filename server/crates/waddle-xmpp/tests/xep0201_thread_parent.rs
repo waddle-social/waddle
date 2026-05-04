@@ -16,15 +16,25 @@
 //! `waddle-xmpp-core/src/xep0201.rs`.
 
 use chrono::Utc;
+use jid::{BareJid, Jid};
 use minidom::Element;
 use waddle_xmpp::mam::{ArchivedMessage, MamQuery, MamStorage};
-use waddle_xmpp::mam::{InMemoryMamStorage, SqlxMamStorage};
+use waddle_xmpp::mam::{InMemoryMamStorage, MamStorageError, SqlxMamStorage};
+use waddle_xmpp_core::mam::ThreadId;
 use waddle_xmpp_core::xep0201::{
     build_thread_element, parse_thread_info, thread_info_from_message, ThreadInfo,
 };
-use xmpp_parsers::message::Message;
+use xmpp_parsers::message::{Message, MessageType};
 
 const ROOM: &str = "team@conference.example.com";
+
+fn room_bare() -> BareJid {
+    ROOM.parse::<BareJid>().expect("valid bare jid")
+}
+
+fn jid_lit(value: &str) -> Jid {
+    value.parse::<Jid>().expect("valid jid literal")
+}
 
 fn nested_thread_groupchat_row(
     archive_id: &str,
@@ -33,19 +43,25 @@ fn nested_thread_groupchat_row(
     thread_id: &str,
     parent_thread_id: Option<&str>,
 ) -> ArchivedMessage {
+    let id = ThreadId::new(thread_id).expect("non-empty thread id");
+    let thread = match parent_thread_id.and_then(ThreadId::new) {
+        Some(parent) => Some(ThreadInfo::child(id, parent)),
+        None => Some(ThreadInfo::root(id)),
+    };
     ArchivedMessage {
         id: archive_id.to_string(),
         timestamp: Utc::now(),
-        from: format!("{ROOM}/{nick}"),
-        to: ROOM.to_string(),
-        body: body.to_string(),
-        stanza_id: Some(format!("wire-{archive_id}")),
-        thread_id: Some(thread_id.to_string()),
-        parent_thread_id: parent_thread_id.and_then(waddle_xmpp::mam::ThreadId::new),
-        reply_to_id: None,
-        reply_to_jid: None,
+        from: jid_lit(&format!("{ROOM}/{nick}")),
+        to: jid_lit(ROOM),
+        body: Some(body.to_string()),
+        stanza_id: Some(waddle_xmpp_core::xep0359::StanzaId::new(
+            format!("wire-{archive_id}"),
+            jid_lit(ROOM),
+        )),
+        thread,
+        reply: None,
         origin_id: None,
-        message_type: "groupchat".to_string(),
+        message_type: MessageType::Groupchat,
         stanza_xml: None,
         rich: None,
         nickname_generation: Some(0),
@@ -73,25 +89,32 @@ async fn xep_0201_nested_thread_round_trips_through_mam() {
         "child-thread",
         Some("root-thread"),
     );
-    let archive_id = storage.store_message(ROOM, &row).await.expect("store row");
+    let archive_id = storage
+        .store_message(&room_bare(), &row)
+        .await
+        .expect("store row");
 
     let query = MamQuery::default();
     let result = storage
-        .query_messages(ROOM, &query)
+        .query_messages(&room_bare(), &query)
         .await
         .expect("query archive");
     assert_eq!(result.messages.len(), 1);
     let retrieved = &result.messages[0];
-    assert_eq!(retrieved.thread_id.as_deref(), Some("child-thread"));
+    let thread = retrieved.thread.as_ref().expect("thread present");
+    assert_eq!(thread.id.as_str(), "child-thread");
     assert_eq!(
-        retrieved.parent_thread_id.as_ref().map(|t| t.as_str()),
+        thread.parent.as_ref().map(|t| t.as_str()),
         Some("root-thread")
     );
 
     // Build the MAM result envelope and assert the inner `<message>`
     // carries `<thread parent='root-thread'>child-thread</thread>`.
-    let envelopes =
-        waddle_xmpp_core::mam::build_result_messages("q1", "alice@example.com", &result.messages);
+    let envelopes = waddle_xmpp_core::mam::build_result_messages(
+        "q1",
+        &jid_lit("alice@example.com"),
+        &result.messages,
+    );
     assert_eq!(envelopes.len(), 1);
     let result_payload = envelopes[0]
         .payloads
@@ -134,10 +157,7 @@ fn xep_0201_groupchat_stanza_xml_replay_preserves_thread_metadata() {
                 .build(),
         )
         .append(build_thread_element(
-            &ThreadInfo {
-                id: "stale-thread".to_string(),
-                parent: None,
-            },
+            &ThreadInfo::root(ThreadId::new("stale-thread").expect("non-empty")),
             "jabber:client",
         ))
         .append(
@@ -155,23 +175,31 @@ fn xep_0201_groupchat_stanza_xml_replay_preserves_thread_metadata() {
     let row = ArchivedMessage {
         id: "archive-xml".to_string(),
         timestamp: Utc::now(),
-        from: "team@conference.example.com/alice".to_string(),
-        to: ROOM.to_string(),
-        body: "threaded reply".to_string(),
-        stanza_id: Some("wire-archive-xml".to_string()),
-        thread_id: Some("root-thread".to_string()),
-        parent_thread_id: waddle_xmpp::mam::ThreadId::new("parent-thread"),
-        reply_to_id: Some("root-thread".to_string()),
-        reply_to_jid: None,
+        from: jid_lit("team@conference.example.com/alice"),
+        to: jid_lit(ROOM),
+        body: Some("threaded reply".to_string()),
+        stanza_id: Some(waddle_xmpp_core::xep0359::StanzaId::new(
+            "wire-archive-xml",
+            jid_lit(ROOM),
+        )),
+        thread: Some(ThreadInfo::child(
+            ThreadId::new("root-thread").expect("thread id"),
+            ThreadId::new("parent-thread").expect("parent id"),
+        )),
+        reply: Some(waddle_xmpp_core::mam::ArchivedReply {
+            id: waddle_xmpp_core::mam::RichMessageId::new("root-thread")
+                .expect("non-empty reply id"),
+            to: None,
+        }),
         origin_id: None,
-        message_type: "groupchat".to_string(),
+        message_type: MessageType::Groupchat,
         stanza_xml: Some(element_xml(&archived_stanza)),
         rich: None,
         nickname_generation: Some(0),
     };
 
     let envelopes =
-        waddle_xmpp_core::mam::build_result_messages("q-xml", "bob@example.com", &[row]);
+        waddle_xmpp_core::mam::build_result_messages("q-xml", &jid_lit("bob@example.com"), &[row]);
     let result_payload = envelopes[0]
         .payloads
         .iter()
@@ -218,17 +246,21 @@ async fn xep_0201_cross_archive_parent_thread_id_round_trips_without_validation(
         "child-thread-a",
         Some("parent-not-in-this-archive"),
     );
-    storage.store_message(ROOM, &row).await.expect("store row");
+    storage
+        .store_message(&room_bare(), &row)
+        .await
+        .expect("store row");
 
     let result = storage
-        .query_messages(ROOM, &MamQuery::default())
+        .query_messages(&room_bare(), &MamQuery::default())
         .await
         .expect("query");
     assert_eq!(result.messages.len(), 1);
     let retrieved = &result.messages[0];
-    assert_eq!(retrieved.thread_id.as_deref(), Some("child-thread-a"));
+    let thread = retrieved.thread.as_ref().expect("thread present");
+    assert_eq!(thread.id.as_str(), "child-thread-a");
     assert_eq!(
-        retrieved.parent_thread_id.as_ref().map(|t| t.as_str()),
+        thread.parent.as_ref().map(|t| t.as_str()),
         Some("parent-not-in-this-archive"),
         "cross-archive parent must round-trip; archive does not validate parent membership"
     );
@@ -260,14 +292,17 @@ fn xep_0201_parent_only_input_is_rejected_at_parser() {
 #[test]
 fn xep_0201_build_thread_element_round_trips_through_parse_thread_info() {
     // Sanity: builder + parser are inverses on the wire shape.
-    let info = ThreadInfo::child("child-2", "root-1");
+    let info = ThreadInfo::child(
+        ThreadId::new("child-2").expect("non-empty"),
+        ThreadId::new("root-1").expect("non-empty"),
+    );
     let elem = build_thread_element(&info, "jabber:client");
     let wrapped = Element::builder("message", "jabber:client")
         .append(elem)
         .build();
     let parsed = parse_thread_info(&wrapped).expect("parse should succeed");
-    assert_eq!(parsed.id, "child-2");
-    assert_eq!(parsed.parent.as_deref(), Some("root-1"));
+    assert_eq!(parsed.id.as_str(), "child-2");
+    assert_eq!(parsed.parent.as_ref().map(|t| t.as_str()), Some("root-1"));
 }
 
 #[tokio::test]
@@ -284,19 +319,265 @@ async fn xep_0201_inmemory_mam_storage_also_round_trips_parent() {
         Some("root-thread-m"),
     );
     storage
-        .store_message(ROOM, &row)
+        .store_message(&room_bare(), &row)
         .await
         .expect("store in-memory");
     let result = storage
-        .query_messages(ROOM, &MamQuery::default())
+        .query_messages(&room_bare(), &MamQuery::default())
         .await
         .expect("query in-memory");
     assert_eq!(result.messages.len(), 1);
+    let thread = result.messages[0]
+        .thread
+        .as_ref()
+        .expect("in-memory backend round-trips thread");
     assert_eq!(
-        result.messages[0]
-            .parent_thread_id
-            .as_ref()
-            .map(|t| t.as_str()),
+        thread.parent.as_ref().map(|t| t.as_str()),
         Some("root-thread-m")
     );
+}
+
+#[tokio::test]
+async fn xep_0201_collapsed_thread_field_round_trips_nested_through_storage() {
+    // #228 commit 4: `ArchivedMessage.thread: Option<ThreadInfo>`
+    // collapses the previous flat (`thread_id`, `parent_thread_id`)
+    // pair. SQL schema is unchanged (still two columns); encode splits,
+    // decode combines. This locks the typed-struct round-trip end to
+    // end so the field-level collapse never silently regresses to the
+    // flat shape.
+    let storage = SqlxMamStorage::open_in_memory()
+        .await
+        .expect("open sqlite in-memory");
+    let original = ThreadInfo::child(
+        ThreadId::new("c-collapse").expect("non-empty"),
+        ThreadId::new("r-collapse").expect("non-empty"),
+    );
+    let mut row = nested_thread_groupchat_row(
+        "archive-collapse",
+        "alice",
+        "collapsed",
+        "c-collapse",
+        Some("r-collapse"),
+    );
+    row.thread = Some(original.clone());
+    storage
+        .store_message(&room_bare(), &row)
+        .await
+        .expect("store row");
+
+    let result = storage
+        .query_messages(&room_bare(), &MamQuery::default())
+        .await
+        .expect("query");
+    assert_eq!(result.messages.len(), 1);
+    assert_eq!(
+        result.messages[0].thread.as_ref(),
+        Some(&original),
+        "the typed ThreadInfo struct must round-trip exactly"
+    );
+}
+
+#[tokio::test]
+async fn xep_0201_collapsed_thread_field_round_trips_root_only_through_storage() {
+    // Root thread (parent = None) must round-trip as `Some(ThreadInfo
+    // { id, parent: None })`, not `None`. The encode/decode pair MUST
+    // distinguish "no thread" from "root thread".
+    let storage = SqlxMamStorage::open_in_memory()
+        .await
+        .expect("open sqlite in-memory");
+    let original = ThreadInfo::root(ThreadId::new("root-only").expect("non-empty"));
+    let mut row =
+        nested_thread_groupchat_row("archive-root-only", "alice", "root only", "root-only", None);
+    row.thread = Some(original.clone());
+    storage
+        .store_message(&room_bare(), &row)
+        .await
+        .expect("store row");
+
+    let result = storage
+        .query_messages(&room_bare(), &MamQuery::default())
+        .await
+        .expect("query");
+    assert_eq!(result.messages.len(), 1);
+    let thread = result.messages[0]
+        .thread
+        .as_ref()
+        .expect("root-only thread must round-trip as Some");
+    assert_eq!(thread, &original);
+    assert!(
+        thread.parent.is_none(),
+        "root thread must decode with parent = None"
+    );
+}
+
+#[tokio::test]
+async fn xep_0201_collapsed_thread_field_round_trips_no_thread_through_storage() {
+    // `thread: None` (no `<thread/>` element on the wire and no row
+    // metadata) MUST round-trip as `None` and never decode to
+    // `Some(ThreadInfo { id: "", .. })` or similar.
+    let storage = SqlxMamStorage::open_in_memory()
+        .await
+        .expect("open sqlite in-memory");
+    let row = ArchivedMessage {
+        id: "archive-no-thread".to_string(),
+        timestamp: Utc::now(),
+        from: jid_lit(&format!("{ROOM}/alice")),
+        to: jid_lit(ROOM),
+        body: Some("plain body".to_string()),
+        stanza_id: Some(waddle_xmpp_core::xep0359::StanzaId::new(
+            "wire-no-thread",
+            jid_lit(ROOM),
+        )),
+        thread: None,
+        reply: None,
+        origin_id: None,
+        message_type: MessageType::Groupchat,
+        stanza_xml: None,
+        rich: None,
+        nickname_generation: Some(0),
+    };
+    storage
+        .store_message(&room_bare(), &row)
+        .await
+        .expect("store row");
+
+    let result = storage
+        .query_messages(&room_bare(), &MamQuery::default())
+        .await
+        .expect("query");
+    assert_eq!(result.messages.len(), 1);
+    assert!(
+        result.messages[0].thread.is_none(),
+        "rows with no thread metadata must decode as `thread: None`"
+    );
+}
+
+#[tokio::test]
+async fn xep_0201_decode_rejects_present_but_empty_thread_id_row() {
+    // Q7 hard-error policy (PR #331 review): a row whose `thread_id`
+    // column is non-NULL but fails `ThreadId::new`'s non-empty
+    // validation (e.g. an empty string `""`) is malformed. The earlier
+    // `decode_thread_columns` shape would silently fold this through
+    // `and_then(ThreadId::new)` and return `Ok(None)`, dropping both
+    // the (invalid) thread id AND any `parent_thread_id` set on the
+    // row — invisible corruption. Decode MUST surface this as a
+    // serialization error so DB corruption is observable at the
+    // boundary.
+    let storage = SqlxMamStorage::open_in_memory()
+        .await
+        .expect("open sqlite in-memory");
+    storage
+        .insert_raw_thread_columns_for_test(
+            &room_bare(),
+            "archive-empty-thread",
+            Some(""),
+            Some("orphan-parent"),
+        )
+        .await
+        .expect("raw insert");
+
+    let result = storage
+        .query_messages(&room_bare(), &MamQuery::default())
+        .await;
+    match result {
+        Err(MamStorageError::Serialization(message)) => {
+            assert!(
+                message.contains("thread_id"),
+                "decode error must reference the thread_id column; got: {message}"
+            );
+            assert!(
+                message.contains("invalid") || message.contains("empty"),
+                "decode error must describe the invalid/empty value; got: {message}"
+            );
+        }
+        Err(other) => panic!("expected Serialization error, got: {other:?}"),
+        Ok(result) => panic!(
+            "decode of empty thread_id row must hard-error; got rows: {:?}",
+            result.messages
+        ),
+    }
+}
+
+#[tokio::test]
+async fn xep_0201_decode_rejects_present_but_empty_parent_thread_id_row() {
+    // Companion to the empty-thread_id test above: a row with a valid
+    // `thread_id` but an empty `parent_thread_id` likewise must hard-
+    // error rather than silently dropping the corrupted parent column.
+    let storage = SqlxMamStorage::open_in_memory()
+        .await
+        .expect("open sqlite in-memory");
+    storage
+        .insert_raw_thread_columns_for_test(
+            &room_bare(),
+            "archive-empty-parent",
+            Some("real-thread"),
+            Some(""),
+        )
+        .await
+        .expect("raw insert");
+
+    let result = storage
+        .query_messages(&room_bare(), &MamQuery::default())
+        .await;
+    match result {
+        Err(MamStorageError::Serialization(message)) => {
+            assert!(
+                message.contains("parent_thread_id"),
+                "decode error must reference the parent_thread_id column; got: {message}"
+            );
+            assert!(
+                message.contains("invalid") || message.contains("empty"),
+                "decode error must describe the invalid/empty value; got: {message}"
+            );
+        }
+        Err(other) => panic!("expected Serialization error, got: {other:?}"),
+        Ok(result) => panic!(
+            "decode of empty parent_thread_id row must hard-error; got rows: {:?}",
+            result.messages
+        ),
+    }
+}
+
+#[tokio::test]
+async fn xep_0201_decode_rejects_orphan_parent_thread_id_row() {
+    // Q7 hard-error policy: a malformed row with `thread_id IS NULL`
+    // but `parent_thread_id` set is incoherent (RFC 6121 §5.2.5: parent
+    // is meaningful only as a back-reference from a thread that has its
+    // own id). The collapsed `Option<ThreadInfo>` field would otherwise
+    // paper over the corruption by silently dropping the orphan parent.
+    // Decode MUST surface this as a serialization error so DB
+    // corruption is visible at the boundary.
+    let storage = SqlxMamStorage::open_in_memory()
+        .await
+        .expect("open sqlite in-memory");
+    storage
+        .insert_raw_thread_columns_for_test(
+            &room_bare(),
+            "archive-orphan",
+            None,
+            Some("orphan-parent"),
+        )
+        .await
+        .expect("raw insert");
+
+    let result = storage
+        .query_messages(&room_bare(), &MamQuery::default())
+        .await;
+    match result {
+        Err(MamStorageError::Serialization(message)) => {
+            assert!(
+                message.contains("orphan"),
+                "decode error must mention the orphan condition; got: {message}"
+            );
+            assert!(
+                message.contains("parent_thread_id"),
+                "decode error must reference the leak-prone column; got: {message}"
+            );
+        }
+        Err(other) => panic!("expected Serialization error, got: {other:?}"),
+        Ok(result) => panic!(
+            "decode of orphan parent_thread_id row must hard-error; got rows: {:?}",
+            result.messages
+        ),
+    }
 }

@@ -876,7 +876,7 @@ impl ext_host::ExtensionHostTools for ExtensionHostAdapter {
         let xmpp_query = MamQuery {
             start: query.start,
             end: query.end,
-            with: with.map(|jid| jid.to_string()),
+            with: with.map(jid::Jid::from),
             thread_id: query
                 .thread_id
                 .and_then(|thread_id| waddle_xmpp::mam::ThreadId::new(thread_id.as_str())),
@@ -895,7 +895,7 @@ impl ext_host::ExtensionHostTools for ExtensionHostAdapter {
             .deps
             .protocol
             .mam_storage
-            .query_messages(archive.to_string().as_str(), &xmpp_query)
+            .query_messages(&archive, &xmpp_query)
             .await
             .map_err(|error| {
                 host_tool_error(ExtensionHostAdapterError::Storage(error.to_string()))
@@ -1074,19 +1074,54 @@ fn ext_roster_subscription(subscription: HostRosterSubscription) -> ext_host::Ro
 fn ext_archived_message(message: MamArchivedMessage) -> Option<ext_host::ArchivedMessage> {
     Some(ext_host::ArchivedMessage {
         stanza_id: waddle_extensions::StanzaId::new(message.id).ok()?,
-        from: message.from.parse().ok()?,
-        to: message.to.parse().ok()?,
+        from: message.from,
+        to: message.to,
         sent_at: message.timestamp,
-        body: DisplayText::new(message.body).ok(),
+        // Documented lossy boundary (Q8): `DisplayText` is a non-empty
+        // newtype on the extension/Wasm surface — by design, "displayable
+        // text" cannot be empty. So an archived `Some("")` body collapses
+        // to `None` here, conflating "wire `<body></body>`" with "no
+        // `<body>` element" at this surface only. Wire fidelity for the
+        // empty-vs-absent distinction is preserved upstream in
+        // `MamArchivedMessage.body: Option<String>` and in the verbatim
+        // `stanza_xml` column, which extensions can opt into via the raw
+        // stanza surface if they need that distinction.
+        body: message.body.and_then(|value| DisplayText::new(value).ok()),
         thread_id: message
-            .thread_id
-            .and_then(|thread| waddle_extensions::ThreadId::new(thread.as_str()).ok()),
-        reply_to: message.reply_to_id.and_then(|id| {
+            .thread
+            .as_ref()
+            .and_then(|t| waddle_extensions::ThreadId::new(t.id.as_str()).ok()),
+        reply_to: message.reply.and_then(|reply| {
+            // XEP-0461 §3 allows `<reply to=...>` to be either a bare or a
+            // full JID. The extension/Wasm surface (`ReplyTarget.to`) is
+            // typed `Option<FullJidValue>` and cannot currently carry a
+            // bare JID — widening the WIT interface is out of scope for
+            // PR #331 and would be an extension-API breaking change. As a
+            // documented lossy boundary, we drop the `to` field for bare
+            // JIDs but log a warning so the data loss is observable. The
+            // reply itself (the stanza id) still flows through. Wire
+            // fidelity is preserved upstream in `MamArchivedMessage.reply`
+            // and `stanza_xml`.
+            // TODO(#228 follow-up): widen the WIT `reply-target.to` to a
+            // bare-or-full JID union so XEP-0461 1:1 replies addressed by
+            // bare JID survive the extension boundary.
+            let to = reply.to.and_then(|jid| {
+                let jid_string = jid.to_string();
+                match waddle_extensions::FullJidValue::new(jid_string.clone()) {
+                    Ok(value) => Some(value),
+                    Err(_) => {
+                        warn!(
+                            reply_to = %jid_string,
+                            reply_id = %reply.id.as_str(),
+                            "extension boundary: dropping bare-JID reply.to (FullJidValue requires a resource); see XEP-0461 §3"
+                        );
+                        None
+                    }
+                }
+            });
             Some(waddle_extensions::ReplyTarget {
-                id: waddle_extensions::StanzaId::new(id).ok()?,
-                to: message
-                    .reply_to_jid
-                    .and_then(|jid| waddle_extensions::FullJidValue::new(jid).ok()),
+                id: waddle_extensions::StanzaId::new(reply.id.as_str().to_string()).ok()?,
+                to,
             })
         }),
     })

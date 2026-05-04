@@ -15,10 +15,9 @@ use waddle_xmpp::{
     inbox::runtime::filter_query,
     isr::{build_isr_token_error, build_isr_token_result, is_isr_token_request, IsrToken, ISR_NS},
     mam::{
-        add_stanza_id as add_mam_stanza_id, build_fin_iq, build_query_form_iq,
-        build_result_messages, is_mam_query, is_mam_query_form_request, parse_mam_query,
-        ArchivedMessage, ArchivedModeration, ArchivedRichMessage, ArchivedRichPayload,
-        RichMessageId, RichText,
+        build_fin_iq, build_query_form_iq, build_result_messages, is_mam_query,
+        is_mam_query_form_request, parse_mam_query, ArchivedMessage, ArchivedModeration,
+        ArchivedRichMessage, ArchivedRichPayload, RichMessageId, RichText,
     },
     muc::{
         admin::{
@@ -58,12 +57,13 @@ use waddle_xmpp::{
         parse_mark_read,
     },
     xep::{
-        build_command_items, build_command_result, build_last_activity_response,
-        build_moderation_result_message, build_room_space_metadata_forms, build_search_response,
-        build_server_role_form, build_spaces_metadata_form_for_requester, is_last_activity_query,
-        is_search_request, is_time_query, is_version_query, parse_command_from_iq,
-        parse_moderation_iq, parse_search_request, ChannelResult, Command, CommandStatus,
-        Searchable, SpaceAffiliation, NODE_COMMANDS, NS_CHANNEL_SEARCH,
+        add_stanza_id_xep0359, build_command_items, build_command_result,
+        build_last_activity_response, build_moderation_result_message,
+        build_room_space_metadata_forms, build_search_response, build_server_role_form,
+        build_spaces_metadata_form_for_requester, is_last_activity_query, is_search_request,
+        is_time_query, is_version_query, parse_command_from_iq, parse_moderation_iq,
+        parse_search_request, ChannelResult, Command, CommandStatus, Searchable, SpaceAffiliation,
+        Xep0359StanzaId, NODE_COMMANDS, NS_CHANNEL_SEARCH,
     },
     Affiliation, SpaceDetails, Stanza, StanzaErrorCondition, StanzaErrorType, XmppError,
 };
@@ -1196,7 +1196,7 @@ pub async fn handle_iq_with_conn_state(
             .get_message(&request.target_id)
             .await
         {
-            Ok(Some(message)) if message.to == room_jid.to_string() => {}
+            Ok(Some(message)) if message.to.to_string() == room_jid.to_string() => {}
             Ok(Some(_)) => {
                 return vec![build_iq_error_xml_with_addresses(
                     &id,
@@ -1241,7 +1241,11 @@ pub async fn handle_iq_with_conn_state(
             request.reason.as_deref(),
         );
         let archive_id = uuid::Uuid::now_v7().to_string();
-        add_mam_stanza_id(&mut moderation, archive_id.as_str(), &room_jid.to_string());
+        let room_jid_full = jid::Jid::from(room_jid.clone());
+        add_stanza_id_xep0359(
+            &mut moderation,
+            &Xep0359StanzaId::new(archive_id.as_str(), room_jid_full.clone()),
+        );
 
         if let (Some(target_id), Ok(moderator_jid)) = (
             RichMessageId::new(request.target_id.clone()),
@@ -1250,19 +1254,22 @@ pub async fn handle_iq_with_conn_state(
             let archived = ArchivedMessage {
                 id: archive_id.clone(),
                 timestamp: chrono::Utc::now(),
-                from: room_jid.to_string(),
-                to: room_jid.to_string(),
-                body: String::new(),
-                stanza_id: moderation.id.clone(),
-                thread_id: None,
+                from: jid::Jid::from(room_jid.clone()),
+                to: jid::Jid::from(room_jid.clone()),
+                // XEP-0425 moderation tombstone has no `<body>` — `None`
+                // is the wire-faithful "no body element" form.
+                body: None,
+                stanza_id: moderation
+                    .id
+                    .clone()
+                    .map(|id| Xep0359StanzaId::new(id, room_jid_full.clone())),
                 // XEP-0425 moderation tombstone: leak-prone fields are
                 // already cleared by construction (this row is a fresh
                 // tombstone, not a scrub of an existing message).
-                parent_thread_id: None,
-                reply_to_id: None,
-                reply_to_jid: None,
+                thread: None,
+                reply: None,
                 origin_id: None,
-                message_type: "groupchat".to_string(),
+                message_type: xmpp_parsers::message::MessageType::Groupchat,
                 stanza_xml: None,
                 rich: Some(ArchivedRichMessage {
                     payload: Some(ArchivedRichPayload::Moderation(ArchivedModeration {
@@ -1281,7 +1288,7 @@ pub async fn handle_iq_with_conn_state(
                 .deps
                 .protocol
                 .mam_storage
-                .store_message(&room_jid.to_string(), &archived)
+                .store_message(&room_jid, &archived)
                 .await
             {
                 warn!(room = %room_jid, target = %request.target_id, error = %error, "Failed to archive moderation event");
@@ -1299,10 +1306,10 @@ pub async fn handle_iq_with_conn_state(
                 .get_message(&request.target_id)
                 .await;
             match original_lookup {
-                Ok(Some(original)) if original.to == room_jid.to_string() => {
+                Ok(Some(original)) if original.to.to_string() == room_jid.to_string() => {
                     // Use the moderation message's server-assigned
                     // archive id (XEP-0359 stanza-id stamped via
-                    // `add_mam_stanza_id` above). That's the id
+                    // `add_stanza_id_xep0359` above). That's the id
                     // clients see on the live moderation broadcast
                     // and need to correlate against the tombstone —
                     // `moderation.id` is the client message-id
@@ -1446,12 +1453,11 @@ pub async fn handle_iq_with_conn_state(
             }
         };
 
-        let archive_jid = target_bare.to_string();
         let mut result = match state
             .deps
             .protocol
             .mam_storage
-            .query_messages(archive_jid.as_str(), &query)
+            .query_messages(&target_bare, &query)
             .await
         {
             Ok(result) => result,
@@ -1469,20 +1475,29 @@ pub async fn handle_iq_with_conn_state(
                 .deps
                 .protocol
                 .mam_storage
-                .count_messages(archive_jid.as_str())
+                .count_messages(&target_bare)
                 .await
                 .ok();
         }
 
-        let recipient_jid = request_iq
+        // XEP-0313 §5.1: result `<message/>` envelopes are addressed to
+        // the requesting client. Prefer the IQ's `from` (the client JID
+        // it stamped on the request) and fall back to the bound JID.
+        // Both are typed `Jid` already; the prior `to_string()` /
+        // `parse_message_jid` round-trip with an "unknown@localhost"
+        // fallback was a hot-path data-loss bug for unauthenticated /
+        // unbound edge cases. Reject the request here instead — a MAM
+        // query without an addressable recipient is ill-formed.
+        let Some(recipient_jid) = request_iq
             .from
-            .as_ref()
-            .map(|jid| jid.to_string())
-            .or_else(|| phase.bound_jid().map(ToString::to_string))
-            .unwrap_or_else(|| "unknown@localhost".to_string());
+            .clone()
+            .or_else(|| phase.bound_jid().cloned().map(jid::Jid::from))
+        else {
+            return vec![build_iq_error_xml(&id, "modify", "bad-request")];
+        };
 
         let mut responses: Vec<String> =
-            build_result_messages(&query_id, recipient_jid.as_str(), &result.messages)
+            build_result_messages(&query_id, &recipient_jid, &result.messages)
                 .into_iter()
                 .map(|message| stanza_to_xml(&Stanza::Message(message)))
                 .collect();
