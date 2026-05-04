@@ -403,6 +403,66 @@ describe("extension command invocation", () => {
     }]);
   });
 
+  test("treats item-not-found pubsub errors as an empty list", async () => {
+    const route = {
+      serviceJid: "extensions.example.com",
+      pluginId: "link-board",
+      routeId: "saved-links",
+      label: "Saved Links",
+      scope: "channel" as const,
+      surface: "gallery" as const,
+      stateNode: "urn:waddle:link-board:1:channel:{room}:links",
+      payloadNamespace: "urn:waddle:link-board:1",
+    };
+    const xmpp = {
+      async getItems() {
+        throw { condition: "item-not-found", type: "cancel" };
+      },
+    };
+
+    expect(await fetchExtensionRouteItems(xmpp as any, route, "general@muc.example.com")).toEqual([]);
+  });
+
+  test("treats nested item-not-found pubsub errors as an empty list", async () => {
+    const route = {
+      serviceJid: "extensions.example.com",
+      pluginId: "decision-polls",
+      routeId: "active-polls",
+      label: "Polls",
+      scope: "channel" as const,
+      surface: "list" as const,
+      stateNode: "urn:waddle:decision-polls:1:channel:{room}:polls",
+      payloadNamespace: "urn:waddle:decision-polls:1",
+    };
+    const xmpp = {
+      async getItems() {
+        throw { error: { condition: "item-not-found", type: "cancel" } };
+      },
+    };
+
+    expect(await fetchExtensionRouteItems(xmpp as any, route, "general@muc.example.com")).toEqual([]);
+  });
+
+  test("propagates non-item-not-found errors to the caller", async () => {
+    const route = {
+      serviceJid: "extensions.example.com",
+      pluginId: "link-board",
+      routeId: "saved-links",
+      label: "Saved Links",
+      scope: "channel" as const,
+      surface: "gallery" as const,
+      stateNode: "urn:waddle:link-board:1:channel:{room}:links",
+      payloadNamespace: "urn:waddle:link-board:1",
+    };
+    const xmpp = {
+      async getItems() {
+        throw new Error("forbidden");
+      },
+    };
+
+    await expect(fetchExtensionRouteItems(xmpp as any, route, "general@muc.example.com")).rejects.toThrow("forbidden");
+  });
+
   test("uses source stanza metadata when context only carries the waddle id", () => {
     const iq = buildExtensionLaunchInvokeIq("alice@example.com/web", {
       ...launch,
