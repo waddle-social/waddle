@@ -483,6 +483,28 @@ impl SmPersistenceStorage for DatabaseSmPersistence {
         }
         Ok(out)
     }
+
+    async fn list_all_sessions(&self) -> Result<Vec<PersistedSession>, SmPersistenceError> {
+        let mut rows = self
+            .query(
+                "SELECT stream_id, user_id, full_jid, inbound_count, outbound_count, \
+                        last_acked, max_resume_secs, detached_at_ms, max_resume_duration_ms, \
+                        carbons_enabled, roster_interested, presence_available, \
+                        presence_show, presence_status, presence_priority \
+                 FROM sm_sessions",
+                (),
+            )
+            .await?;
+        let mut out = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| SmPersistenceError::Other(e.to_string()))?
+        {
+            out.push(Self::decode_session(&row)?);
+        }
+        Ok(out)
+    }
 }
 
 fn show_wire_str(show: &Show) -> &'static str {
