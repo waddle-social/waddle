@@ -457,6 +457,10 @@ async fn websocket_user_and_channel_search_return_results() {
         form.contains("jabber:iq:search") && form.contains("instructions"),
         "expected user search form, got: {form}"
     );
+    assert!(
+        form.contains("<nick") && !form.contains("<email"),
+        "expected username-only user search form, got: {form}"
+    );
 
     client
         .send(
@@ -471,6 +475,67 @@ async fn websocket_user_and_channel_search_return_results() {
     assert!(
         users.contains("admin@localhost"),
         "expected fixed test account in user search results, got: {users}"
+    );
+    assert!(
+        !users.contains("<email") && !users.contains("admin@localhost</email>"),
+        "expected user search results to omit email addresses, got: {users}"
+    );
+
+    client
+        .send(
+            r#"<iq xmlns="jabber:client" type="set" id="ws-user-search-empty" to="localhost"><query xmlns="jabber:iq:search"><nick> </nick></query></iq>"#,
+        )
+        .await
+        .expect("send empty user search request");
+    let empty_search = client
+        .recv_matching(|frame| frame.contains("ws-user-search-empty"))
+        .await
+        .expect("empty user search response");
+    assert!(
+        empty_search.contains("type=\"error\"") || empty_search.contains("type='error'"),
+        "expected empty user search to fail, got: {empty_search}"
+    );
+    assert!(
+        empty_search.contains("bad-request"),
+        "expected empty user search bad-request, got: {empty_search}"
+    );
+
+    client
+        .send(
+            r#"<iq xmlns="jabber:client" type="set" id="ws-user-search-wildcard" to="localhost"><query xmlns="jabber:iq:search"><nick>%%</nick></query></iq>"#,
+        )
+        .await
+        .expect("send wildcard user search request");
+    let wildcard_search = client
+        .recv_matching(|frame| frame.contains("ws-user-search-wildcard"))
+        .await
+        .expect("wildcard user search response");
+    assert!(
+        wildcard_search.contains("type=\"result\"") || wildcard_search.contains("type='result'"),
+        "expected wildcard user search to return an empty result, got: {wildcard_search}"
+    );
+    assert!(
+        !wildcard_search.contains("admin@localhost"),
+        "expected SQL wildcards to be escaped, got: {wildcard_search}"
+    );
+
+    client
+        .send(
+            r#"<iq xmlns="jabber:client" type="set" id="ws-user-search-wrong-ns" to="localhost"><query xmlns="jabber:iq:search"><nick xmlns="urn:evil">admin</nick></query></iq>"#,
+        )
+        .await
+        .expect("send wrong-namespace user search request");
+    let wrong_ns_search = client
+        .recv_matching(|frame| frame.contains("ws-user-search-wrong-ns"))
+        .await
+        .expect("wrong-namespace user search response");
+    assert!(
+        wrong_ns_search.contains("type=\"error\"") || wrong_ns_search.contains("type='error'"),
+        "expected wrong-namespace user search to fail, got: {wrong_ns_search}"
+    );
+    assert!(
+        wrong_ns_search.contains("bad-request"),
+        "expected wrong-namespace user search bad-request, got: {wrong_ns_search}"
     );
 
     client

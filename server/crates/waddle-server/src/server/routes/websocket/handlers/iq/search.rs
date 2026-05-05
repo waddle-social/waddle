@@ -70,16 +70,17 @@ pub(super) async fn handle_user_search_iq(
     response_from: Option<&str>,
     response_to: Option<&str>,
 ) -> Vec<String> {
+    const MIN_USER_SEARCH_TERM_CHARS: usize = 2;
+
     match &iq.payload {
         xmpp_parsers::iq::IqType::Get(_) => {
             let payload = Element::builder("query", "jabber:iq:search")
                 .append(
                     Element::builder("instructions", "jabber:iq:search")
-                        .append("Search users by username or email")
+                        .append("Search users by username")
                         .build(),
                 )
                 .append(Element::builder("nick", "jabber:iq:search").build())
-                .append(Element::builder("email", "jabber:iq:search").build())
                 .build();
             vec![build_iq_result_xml(
                 &iq.id,
@@ -91,10 +92,20 @@ pub(super) async fn handle_user_search_iq(
         xmpp_parsers::iq::IqType::Set(query) => {
             let term = query
                 .children()
-                .find(|child| matches!(child.name(), "nick" | "email" | "first" | "last"))
+                .find(|child| child.name() == "nick" && child.ns() == "jabber:iq:search")
                 .map(|child| child.text())
                 .unwrap_or_default();
-            let like = format!("%{}%", term.trim());
+            let term = term.trim();
+            if term.chars().count() < MIN_USER_SEARCH_TERM_CHARS {
+                return vec![build_iq_error_xml_with_addresses(
+                    &iq.id,
+                    response_from,
+                    response_to,
+                    "modify",
+                    "bad-request",
+                )];
+            }
+            let like = format!("%{}%", escape_like_pattern(term));
             let rows = match state
                 .deps
                 .app_state
@@ -102,8 +113,8 @@ pub(super) async fn handle_user_search_iq(
                 .global_actor()
                 .clone()
                 .ask(DbQuery {
-                    sql: "SELECT username, email FROM native_users WHERE domain = ? AND (username LIKE ? OR COALESCE(email, '') LIKE ?) ORDER BY username LIMIT 50".to_string(),
-                    params: vec![domain.into(), like.clone().into(), like.into()],
+                    sql: "SELECT username FROM native_users WHERE domain = ? AND username LIKE ? ESCAPE '\\' ORDER BY username LIMIT 50".to_string(),
+                    params: vec![domain.into(), like.into()],
                 })
                 .await
             {
@@ -127,25 +138,15 @@ pub(super) async fn handle_user_search_iq(
                 if username.is_empty() {
                     continue;
                 }
-                let email = row_value(&row, 1)
-                    .and_then(ValueExt::as_optional_string)
-                    .ok()
-                    .flatten();
-                let mut item = Element::builder("item", "jabber:iq:search")
+                let item = Element::builder("item", "jabber:iq:search")
                     .attr("jid", format!("{username}@{domain}"))
                     .append(
                         Element::builder("nick", "jabber:iq:search")
                             .append(username.clone())
                             .build(),
-                    );
-                if let Some(email) = email {
-                    item = item.append(
-                        Element::builder("email", "jabber:iq:search")
-                            .append(email)
-                            .build(),
-                    );
-                }
-                query = query.append(item.build());
+                    )
+                    .build();
+                query = query.append(item);
             }
             vec![build_iq_result_xml(
                 &iq.id,
@@ -162,4 +163,15 @@ pub(super) async fn handle_user_search_iq(
             "bad-request",
         )],
     }
+}
+
+fn escape_like_pattern(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if matches!(ch, '\\' | '%' | '_') {
+            escaped.push('\\');
+        }
+        escaped.push(ch);
+    }
+    escaped
 }
