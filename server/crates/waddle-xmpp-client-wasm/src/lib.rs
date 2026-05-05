@@ -2056,6 +2056,19 @@ fn parse_raw_iq(xml: &str) -> Result<Element, JsValue> {
     if stanza.name() != "iq" {
         return Err(js_error("raw stanza must be an <iq/> element"));
     }
+    // Callers may omit xmlns='jabber:client' on the <iq> element.  Minidom
+    // would then serialise it as <iq xmlns=""> which the server rejects.
+    // Normalise to jabber:client here so the wire stanza is always valid.
+    if stanza.ns().is_empty() {
+        let mut builder = Element::builder("iq", NS_CLIENT);
+        for (name, value) in stanza.attrs() {
+            builder = builder.attr(name, value);
+        }
+        for node in stanza.nodes() {
+            builder = builder.append(node.clone());
+        }
+        return Ok(builder.build());
+    }
     Ok(stanza)
 }
 
