@@ -2,22 +2,34 @@
 
 mod ws_common;
 
+use std::str::FromStr;
 use tokio::sync::Mutex;
 use ws_common::{extract_attr_after, TestServer, WsXmppClient};
+use xmpp_parsers::minidom::Element;
 
 const DOMAIN: &str = "localhost";
 const USERNAME: &str = "admin";
+const BOB_USERNAME: &str = "bob";
+const BOB_PASSWORD: &str = "bob-password";
 static TEST_SERIAL: Mutex<()> = Mutex::const_new(());
 
 async fn setup() -> (TestServer, WsXmppClient) {
     let server = TestServer::start();
-    let resource = format!("xep0444-{}", uuid::Uuid::new_v4());
     let password = server.fixed_account_password().to_string();
-    let client =
-        WsXmppClient::connect_and_auth(&server.ws_url(), DOMAIN, USERNAME, &password, &resource)
-            .await
-            .expect("connect and auth");
+    let client = connect(&server, USERNAME, &password, "xep0444").await;
     (server, client)
+}
+
+async fn connect(
+    server: &TestServer,
+    username: &str,
+    password: &str,
+    resource_prefix: &str,
+) -> WsXmppClient {
+    let resource = format!("{resource_prefix}-{}", uuid::Uuid::new_v4());
+    WsXmppClient::connect_and_auth(&server.ws_url(), DOMAIN, username, password, &resource)
+        .await
+        .expect("connect and auth")
 }
 
 async fn join_room(client: &mut WsXmppClient, room: &str) {
@@ -35,6 +47,94 @@ async fn join_room(client: &mut WsXmppClient, room: &str) {
 
 fn stanza_id(frame: &str) -> String {
     extract_attr_after(frame, "stanza-id", "id").expect("stanza-id id")
+}
+
+fn frame_has_direct_message_body(frame: &str) -> bool {
+    Element::from_str(frame)
+        .ok()
+        .is_some_and(|element| element_contains_direct_message_body(&element))
+}
+
+fn element_contains_direct_message_body(element: &Element) -> bool {
+    let this_element_matches = element.name() == "message"
+        && element
+            .children()
+            .any(|child| child.name() == "body" && child.ns() == element.ns());
+
+    this_element_matches || element.children().any(element_contains_direct_message_body)
+}
+
+#[tokio::test]
+async fn direct_reaction_replays_from_personal_mam_after_reconnect() {
+    let _guard = TEST_SERIAL.lock().await;
+    let server = TestServer::start_with_extra_accounts(&[(BOB_USERNAME, BOB_PASSWORD)]);
+    let admin_password = server.fixed_account_password().to_string();
+    let mut alice = connect(&server, USERNAME, &admin_password, "xep0444-alice").await;
+    let mut bob = connect(&server, BOB_USERNAME, BOB_PASSWORD, "xep0444-bob").await;
+    let alice_jid = format!("{USERNAME}@{DOMAIN}");
+    let bob_jid = format!("{BOB_USERNAME}@{DOMAIN}");
+
+    alice
+        .send(&format!(
+            r#"<message type="chat" to="{bob_jid}" id="direct-original"><body>direct reaction target</body></message>"#
+        ))
+        .await
+        .expect("send original direct message");
+    bob.recv_matching(|frame| frame.contains("direct reaction target"))
+        .await
+        .expect("receive original direct message");
+
+    bob.send(&format!(
+        r#"<message type="chat" to="{alice_jid}" id="direct-reaction">
+                <reactions xmlns="urn:xmpp:reactions:0" id="direct-original">
+                    <reaction>🔥</reaction>
+                </reactions>
+                <store xmlns="urn:xmpp:hints"/>
+            </message>"#
+    ))
+    .await
+    .expect("send direct reaction");
+    alice
+        .recv_matching(|frame| {
+            frame.contains("urn:xmpp:reactions:0") && frame.contains("direct-original")
+        })
+        .await
+        .expect("receive direct reaction");
+
+    alice.close().await;
+    let mut alice = connect(
+        &server,
+        USERNAME,
+        &admin_password,
+        "xep0444-alice-reconnect",
+    )
+    .await;
+    alice
+        .send(&format!(
+            r#"<iq type="set" id="mam-direct-reaction" to="{alice_jid}"><query xmlns="urn:xmpp:mam:2"/></iq>"#
+        ))
+        .await
+        .expect("send personal MAM query");
+    let frames = alice
+        .recv_until(|frame| frame.contains("mam-direct-reaction") && frame.contains("<fin"))
+        .await
+        .expect("personal MAM frames");
+
+    let reaction = frames
+        .iter()
+        .find(|frame| {
+            frame.contains("direct-reaction")
+                && frame.contains("urn:xmpp:reactions:0")
+                && frame.contains("direct-original")
+        })
+        .unwrap_or_else(|| panic!("personal MAM did not replay direct reaction: {frames:?}"));
+    assert!(
+        !frame_has_direct_message_body(reaction),
+        "direct reaction replay unexpectedly had a body: {reaction}"
+    );
+
+    bob.close().await;
+    alice.close().await;
 }
 
 #[tokio::test]

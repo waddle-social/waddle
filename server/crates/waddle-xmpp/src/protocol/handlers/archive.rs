@@ -120,7 +120,7 @@ pub fn is_archivable(message: &Message) -> bool {
         return false;
     }
     // Require either a non-empty body or a substantive payload (e.g.
-    // a XEP-0424 retraction, XEP-0308 correction). Pure presence-like
+    // a XEP-0424 retraction, XEP-0308 correction, or XEP-0444 reaction). Pure presence-like
     // messages with no body and no archivable payload are dropped.
     has_body || has_archivable_payload(message)
 }
@@ -133,12 +133,13 @@ fn has_substantive_body(message: &Message) -> bool {
 }
 
 fn has_archivable_payload(message: &Message) -> bool {
-    use crate::xep::{xep0308, xep0424};
+    use crate::xep::{xep0308, xep0424, xep0444};
     xep0308::is_correction_message(message)
         || matches!(
             xep0424::extract_retraction_from_message(message),
             Some(xep0424::RetractionKind::Request(_))
         )
+        || xep0444::extract_reactions_from_message(message).is_some()
 }
 
 #[cfg(test)]
@@ -407,5 +408,41 @@ mod tests {
             .push(crate::xep::xep0424::build_retract_element("stanza-X"));
         let outcome = run(&local, &mut msg);
         assert_eq!(extract_archive_events(&outcome).len(), 1);
+    }
+
+    #[test]
+    fn xep_0313_reaction_without_body_is_archivable_payload() {
+        // XEP-0444 reaction messages are bodyless, but clients reload
+        // reaction state from MAM after reconnect/page refresh.
+        let local = full("alice@example.com/web");
+        let mut msg = Message::new(Some("bob@example.com".parse().expect("jid")));
+        msg.from = Some("alice@example.com/web".parse().expect("jid"));
+        msg.type_ = MessageType::Chat;
+        msg.payloads
+            .push(crate::xep::xep0444::build_reactions_element(
+                "stanza-X",
+                &["🔥"],
+            ));
+        let outcome = run(&local, &mut msg);
+        assert_eq!(extract_archive_events(&outcome).len(), 1);
+    }
+
+    #[test]
+    fn xep_0313_malformed_reaction_without_target_id_is_not_archived() {
+        let local = full("alice@example.com/web");
+        let mut msg = Message::new(Some("bob@example.com".parse().expect("jid")));
+        msg.from = Some("alice@example.com/web".parse().expect("jid"));
+        msg.type_ = MessageType::Chat;
+        msg.payloads.push(
+            Element::builder("reactions", crate::xep::xep0444::NS_REACTIONS)
+                .append(
+                    Element::builder("reaction", crate::xep::xep0444::NS_REACTIONS)
+                        .append("🔥")
+                        .build(),
+                )
+                .build(),
+        );
+        let outcome = run(&local, &mut msg);
+        assert!(extract_archive_events(&outcome).is_empty());
     }
 }
