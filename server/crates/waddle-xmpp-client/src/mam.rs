@@ -1,25 +1,37 @@
 //! MAM (XEP-0313) history queries for room and DM history.
 //!
-//! Implements [`MamExt`] on [`ClientHandle`] to send MAM IQ queries,
-//! collect the resulting `<message>` stanzas from the event stream, and
-//! return a structured [`MamPage`] when the server signals completion via
-//! the IQ result `<fin/>`.
-
-use std::time::Duration;
+//! Exposes MAM parsers and page types for every build. With the `native`
+//! feature enabled, also implements the MAM query helper on the native client
+//! handle to send IQ queries, collect result stanzas, and return a structured
+//! [`MamPage`] when the server signals completion via `<fin/>`.
 
 use chrono::{DateTime, Utc};
 use minidom::Element;
-use tokio::sync::broadcast;
-use tokio::time::timeout;
-use uuid::Uuid;
-use waddle_xmpp_core::mam::{DELAY_NS, FORWARD_NS, MAM_NS, RSM_NS};
+use waddle_xmpp_core::mam::{
+    DELAY_NS, FORWARD_NS, FULLTEXT_MAM_FIELD, MAM_NS, RSM_NS, WADDLE_MAM_THREAD_FIELD,
+};
 
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+use std::time::Duration;
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+use tokio::sync::broadcast;
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+use tokio::time::timeout;
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+use uuid::Uuid;
+
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 use crate::client::ClientHandle;
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 use crate::error::{ClientError, ClientResult};
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 use crate::event::ClientEvent;
 
 const CLIENT_NS: &str = "jabber:client";
 const DATA_FORMS_NS: &str = "jabber:x:data";
+const NS_MUC_USER: &str = "http://jabber.org/protocol/muc#user";
+pub const MAM_START_FIELD: &str = "start";
+pub const MAM_END_FIELD: &str = "end";
 
 /// A page of archived messages plus RSM pagination info.
 #[derive(Debug, Clone)]
@@ -48,6 +60,8 @@ pub struct ArchivedMessage {
     /// `crate::xep::thread::parse_thread` helper. `None` for root
     /// threads or messages without a `<thread/>`.
     pub parent_thread_id: Option<String>,
+    /// XEP-0045 MUC real JID from archived `<x><item jid='...'/></x>` payloads.
+    pub author_real_jid: Option<String>,
     /// Raw inner `<message>` element for full parsing by the messaging module.
     pub inner: Element,
 }
@@ -64,6 +78,7 @@ pub struct RsmPageInfo {
 
 // ── Extension trait ──────────────────────────────────────────────────────────
 
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 pub trait MamExt {
     /// Fetch archived messages for a MUC room.
     fn fetch_room_history<'a>(
@@ -82,6 +97,7 @@ pub trait MamExt {
     ) -> impl std::future::Future<Output = ClientResult<MamPage>> + Send + 'a;
 }
 
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 impl MamExt for ClientHandle {
     async fn fetch_room_history(
         &self,
@@ -116,7 +132,7 @@ impl MamExt for ClientHandle {
 ///
 /// * `with_jid` — set as the `<with>` data form field (DM queries).
 /// * `to_jid`   — set as the `to` attribute on the IQ (room queries).
-fn build_mam_iq(
+pub fn build_mam_iq(
     iq_id: &str,
     query_id: &str,
     max: u32,
@@ -124,67 +140,116 @@ fn build_mam_iq(
     with_jid: Option<&str>,
     to_jid: Option<&str>,
 ) -> Element {
-    // <set xmlns='http://jabber.org/protocol/rsm'>
-    let before_el = Element::builder("before", RSM_NS)
-        .append(before.unwrap_or(""))
-        .build();
+    build_mam_iq_extended(
+        iq_id,
+        query_id,
+        max,
+        before.or(Some("")),
+        None,
+        with_jid,
+        to_jid,
+        None,
+        None,
+        None,
+        None,
+    )
+}
 
-    let rsm = Element::builder("set", RSM_NS)
-        .append(
-            Element::builder("max", RSM_NS)
-                .append(max.to_string())
-                .build(),
-        )
-        .append(before_el)
-        .build();
-
-    // <x xmlns='jabber:x:data' type='submit'>
-    let form_type_field = Element::builder("field", DATA_FORMS_NS)
-        .attr("var", "FORM_TYPE")
-        .attr("type", "hidden")
+fn build_form_field(var: &str, value: &str) -> Element {
+    Element::builder("field", DATA_FORMS_NS)
+        .attr("var", var)
         .append(
             Element::builder("value", DATA_FORMS_NS)
-                .append(MAM_NS)
+                .append(value)
                 .build(),
         )
-        .build();
+        .build()
+}
 
-    let mut form_builder = Element::builder("x", DATA_FORMS_NS)
-        .attr("type", "submit")
-        .append(form_type_field);
+fn bare_jid(value: &str) -> &str {
+    value.split('/').next().unwrap_or(value)
+}
 
-    if let Some(with) = with_jid {
-        let with_field = Element::builder("field", DATA_FORMS_NS)
-            .attr("var", "with")
-            .append(
-                Element::builder("value", DATA_FORMS_NS)
-                    .append(with)
-                    .build(),
-            )
-            .build();
-        form_builder = form_builder.append(with_field);
+fn parse_archived_author_real_jid(inner: &Element) -> Option<String> {
+    inner
+        .get_child("x", NS_MUC_USER)
+        .and_then(|payload| payload.get_child("item", NS_MUC_USER))
+        .and_then(|item| item.attr("jid"))
+        .map(|jid| bare_jid(jid).to_string())
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Phase 3 API shape is required by the wasm bindings and TS parity"
+)]
+pub fn build_mam_iq_extended(
+    iq_id: &str,
+    query_id: &str,
+    max: u32,
+    before: Option<&str>,
+    after: Option<&str>,
+    with_jid: Option<&str>,
+    to_jid: Option<&str>,
+    thread_id: Option<&str>,
+    fulltext: Option<&str>,
+    start: Option<&str>,
+    end: Option<&str>,
+) -> Element {
+    let mut rsm = Element::builder("set", RSM_NS).append(
+        Element::builder("max", RSM_NS)
+            .append(max.to_string())
+            .build(),
+    );
+    if let Some(before) = before {
+        rsm = rsm.append(Element::builder("before", RSM_NS).append(before).build());
+    }
+    if let Some(after) = after {
+        rsm = rsm.append(Element::builder("after", RSM_NS).append(after).build());
     }
 
-    let form = form_builder.build();
+    let mut form = Element::builder("x", DATA_FORMS_NS)
+        .attr("type", "submit")
+        .append(
+            Element::builder("field", DATA_FORMS_NS)
+                .attr("var", "FORM_TYPE")
+                .attr("type", "hidden")
+                .append(
+                    Element::builder("value", DATA_FORMS_NS)
+                        .append(MAM_NS)
+                        .build(),
+                )
+                .build(),
+        );
+    if let Some(with_jid) = with_jid {
+        form = form.append(build_form_field("with", with_jid));
+    }
+    if let Some(thread_id) = thread_id {
+        form = form.append(build_form_field(WADDLE_MAM_THREAD_FIELD, thread_id));
+    }
+    if let Some(fulltext) = fulltext {
+        form = form.append(build_form_field(FULLTEXT_MAM_FIELD, fulltext));
+    }
+    if let Some(start) = start {
+        form = form.append(build_form_field(MAM_START_FIELD, start));
+    }
+    if let Some(end) = end {
+        form = form.append(build_form_field(MAM_END_FIELD, end));
+    }
 
-    // <query xmlns='urn:xmpp:mam:2' queryid='...'>
     let query = Element::builder("query", MAM_NS)
         .attr("queryid", query_id)
-        .append(form)
-        .append(rsm)
+        .append(form.build())
+        .append(rsm.build())
         .build();
 
-    // <iq type='set' id='...' xmlns='jabber:client'>
-    let mut iq_builder = Element::builder("iq", CLIENT_NS)
+    let mut iq = Element::builder("iq", CLIENT_NS)
         .attr("type", "set")
         .attr("id", iq_id)
         .append(query);
-
-    if let Some(to) = to_jid {
-        iq_builder = iq_builder.attr("to", to);
+    if let Some(to_jid) = to_jid {
+        iq = iq.attr("to", to_jid);
     }
-
-    iq_builder.build()
+    iq.build()
 }
 
 /// Subscribe to the event bus, send the IQ, collect MAM result messages until
@@ -197,6 +262,7 @@ fn build_mam_iq(
 /// buffered in the receiver — the driver dispatches transport events in order,
 /// so by the time `<fin/>` reaches us every prior MAM result is already in our
 /// receiver's ring.
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 async fn run_mam_query(
     handle: &ClientHandle,
     iq: Element,
@@ -264,7 +330,7 @@ async fn run_mam_query(
 }
 
 /// Extract RSM and completeness from the IQ result element wrapping `<fin/>`.
-fn parse_fin_from_iq_result(iq_result: &Element) -> (RsmPageInfo, bool) {
+pub fn parse_fin_from_iq_result(iq_result: &Element) -> (RsmPageInfo, bool) {
     // The result may be the raw <fin/> (if send_iq returns it directly) or
     // an <iq type='result'> wrapping a <fin/> child.
     let fin = if iq_result.name() == "fin" && iq_result.ns() == MAM_NS {
@@ -329,6 +395,7 @@ pub fn parse_mam_result(element: &Element) -> Option<ArchivedMessage> {
         .get_child("stanza-id", "urn:xmpp:sid:0")
         .and_then(|s| s.attr("id"))
         .map(str::to_string);
+    let author_real_jid = parse_archived_author_real_jid(&inner);
 
     Some(ArchivedMessage {
         mam_id,
@@ -341,6 +408,7 @@ pub fn parse_mam_result(element: &Element) -> Option<ArchivedMessage> {
         body,
         thread,
         parent_thread_id,
+        author_real_jid,
         inner,
     })
 }
@@ -481,6 +549,50 @@ mod tests {
     }
 
     #[test]
+    fn parse_mam_result_extracts_archived_author_real_jid() {
+        let inner = Element::builder("message", CLIENT_NS)
+            .attr("from", "room@muc.example.com/alice")
+            .attr("type", "groupchat")
+            .append(
+                Element::builder("body", CLIENT_NS)
+                    .append("Hello world")
+                    .build(),
+            )
+            .append(
+                Element::builder("x", NS_MUC_USER)
+                    .append(
+                        Element::builder("item", NS_MUC_USER)
+                            .attr("jid", "alice@example.com/phone")
+                            .build(),
+                    )
+                    .build(),
+            )
+            .build();
+        let delay = Element::builder("delay", DELAY_NS)
+            .attr("stamp", "2024-01-01T12:00:00Z")
+            .build();
+        let forwarded = Element::builder("forwarded", FORWARD_NS)
+            .append(delay)
+            .append(inner)
+            .build();
+        let result = Element::builder("result", MAM_NS)
+            .attr("id", "mam-id-2")
+            .attr("queryid", "qid-43")
+            .append(forwarded)
+            .build();
+        let el = Element::builder("message", CLIENT_NS)
+            .append(result)
+            .build();
+
+        let archived = parse_mam_result(&el).expect("should parse");
+
+        assert_eq!(
+            archived.author_real_jid.as_deref(),
+            Some("alice@example.com")
+        );
+    }
+
+    #[test]
     fn xep_0201_parses_archived_message_with_thread_parent() {
         // Locks the typed-parent surface on the client `ArchivedMessage`:
         // a MAM result carrying `<thread parent='X'>id</thread>` populates
@@ -603,8 +715,109 @@ mod tests {
         assert!(!info.is_complete);
     }
 
+    #[test]
+    fn build_mam_iq_extended_supports_thread_fulltext_and_after() {
+        let iq = build_mam_iq_extended(
+            "iq-1",
+            "query-1",
+            25,
+            None,
+            Some("after-1"),
+            Some("alice@example.com"),
+            Some("room@muc.example.com"),
+            Some("thread-42"),
+            Some("needle"),
+            Some("2024-01-01T00:00:00Z"),
+            Some("2024-01-31T23:59:59Z"),
+        );
+        let query = iq.get_child("query", MAM_NS).expect("query child");
+        let form = query.get_child("x", DATA_FORMS_NS).expect("form child");
+        let fields: Vec<(String, String)> = form
+            .children()
+            .filter(|child| child.name() == "field" && child.ns() == DATA_FORMS_NS)
+            .filter_map(|child| {
+                Some((
+                    child.attr("var")?.to_string(),
+                    child.get_child("value", DATA_FORMS_NS)?.text(),
+                ))
+            })
+            .collect();
+        assert!(fields.contains(&("with".to_string(), "alice@example.com".to_string())));
+        assert!(fields.contains(&(WADDLE_MAM_THREAD_FIELD.to_string(), "thread-42".to_string())));
+        assert!(fields.contains(&(FULLTEXT_MAM_FIELD.to_string(), "needle".to_string())));
+        assert!(fields.contains(&(
+            MAM_START_FIELD.to_string(),
+            "2024-01-01T00:00:00Z".to_string()
+        )));
+        assert!(fields.contains(&(
+            MAM_END_FIELD.to_string(),
+            "2024-01-31T23:59:59Z".to_string()
+        )));
+        let set = query.get_child("set", RSM_NS).expect("rsm set");
+        assert_eq!(
+            set.get_child("after", RSM_NS).map(|child| child.text()),
+            Some("after-1".to_string())
+        );
+        assert_eq!(iq.attr("to"), Some("room@muc.example.com"));
+    }
+
+    #[test]
+    fn build_mam_iq_extended_supports_latest_before_marker() {
+        let iq = build_mam_iq_extended(
+            "iq-2",
+            "query-2",
+            10,
+            Some(""),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        let before = iq
+            .get_child("query", MAM_NS)
+            .and_then(|query| query.get_child("set", RSM_NS))
+            .and_then(|set| set.get_child("before", RSM_NS))
+            .expect("before child");
+        assert_eq!(before.text(), "");
+    }
+
+    #[test]
+    fn build_mam_iq_preserves_existing_before_behavior() {
+        let iq = build_mam_iq(
+            "iq-3",
+            "query-3",
+            50,
+            Some("last-id"),
+            Some("bob@example.com"),
+            None,
+        );
+        let query = iq.get_child("query", MAM_NS).expect("query child");
+        let set = query.get_child("set", RSM_NS).expect("set child");
+        assert_eq!(
+            set.get_child("before", RSM_NS).map(|child| child.text()),
+            Some("last-id".to_string())
+        );
+        let fields: Vec<(String, String)> = query
+            .get_child("x", DATA_FORMS_NS)
+            .expect("form child")
+            .children()
+            .filter(|child| child.name() == "field" && child.ns() == DATA_FORMS_NS)
+            .filter_map(|child| {
+                Some((
+                    child.attr("var")?.to_string(),
+                    child.get_child("value", DATA_FORMS_NS)?.text(),
+                ))
+            })
+            .collect();
+        assert!(fields.contains(&("with".to_string(), "bob@example.com".to_string())));
+    }
+
     // ── Query orchestration integration tests ────────────────────────────────
 
+    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
     mod query {
         use std::sync::{Arc, RwLock};
         use std::time::Duration;
@@ -644,6 +857,7 @@ mod tests {
                 message_type: "groupchat".to_string(),
                 body: Some(body.to_string()),
                 thread: None,
+                author_real_jid: None,
                 inner: Element::builder("message", CLIENT_NS).build(),
             }
         }

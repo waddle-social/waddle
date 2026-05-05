@@ -4,7 +4,7 @@
  * Manages inbox state (channel + thread level).
  * Vue composables consume this as plain reactive state via subscription.
  */
-import type { InboxEntry } from "@/lib/xmpp/inbox";
+import type { InboxEntry } from "@/lib/xmpp/inbox-types";
 
 /** Composite key for deduplication: partner + optional thread. */
 function entryKey(entry: InboxEntry): string {

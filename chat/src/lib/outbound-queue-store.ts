@@ -1,5 +1,5 @@
 import type { MarkupSpan, MessageReference } from "@/lib/chat-ui";
-import type { OutboundFileAttachment, ReplyTarget } from "@/lib/xmpp/messaging";
+import type { OutboundFileAttachment, ReplyTarget } from "@/lib/xmpp/send-types";
 import { reportError } from "@/lib/telemetry";
 
 const PREFIX = "waddle.chat.outbound-queue";

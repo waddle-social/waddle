@@ -10,12 +10,17 @@ on:
     - .github/workflows/waddle-chat-default.yml
     - chat/../bun.lock
     - chat/../package.json
+    - chat/../server/Cargo.lock
+    - chat/../server/Cargo.toml
+    - chat/../server/crates/waddle-xmpp-client-wasm/**
+    - chat/../server/crates/waddle-xmpp-client/**
     - chat/astro.config.mjs
     - chat/dist/**
     - chat/env.cue
     - chat/package.json
     - chat/public/**
     - chat/schema/**
+    - chat/scripts/build-xmpp-wasm.mjs
     - chat/src/**
     - chat/tsconfig.json
     - chat/wrangler.jsonc

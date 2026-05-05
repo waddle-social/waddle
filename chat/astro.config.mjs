@@ -27,7 +27,38 @@ export default defineConfig({
   },
 
   vite: {
-    plugins: [tailwindcss()],
+    plugins: [
+      tailwindcss(),
+      // Force `Cache-Control: no-store` on every URL containing the WASM
+      // package name. Vite's `?v=<optimizer-hash>` URL convention sends
+      // `Cache-Control: max-age=31536000, immutable` to the browser, and the
+      // optimizer hash is deterministic — it does NOT change after a
+      // REBUILD_WASM=1 because the package content is excluded from the
+      // optimizer (see `optimizeDeps.exclude` below). Result: identical URL,
+      // year-long immutable cache, browser keeps serving the previous build's
+      // glue JS while the new .wasm has different closure indices →
+      // "wasm.__wasm_bindgen_func_elem_N is not a function".
+      // Wrapping `res.setHeader` lets us override Vite's later writes too,
+      // which a normal middleware running before the static-file handler
+      // cannot.
+      {
+        name: "waddle-wasm-disable-cache",
+        apply: "serve",
+        configureServer(server) {
+          server.middlewares.use((req, res, next) => {
+            if (req.url && req.url.includes("xmpp-client-wasm")) {
+              const setHeader = res.setHeader.bind(res);
+              res.setHeader = (name, value) =>
+                name.toLowerCase() === "cache-control"
+                  ? setHeader(name, "no-store, must-revalidate")
+                  : setHeader(name, value);
+              setHeader("Cache-Control", "no-store, must-revalidate");
+            }
+            next();
+          });
+        },
+      },
+    ],
     define: {
       "import.meta.env.PUBLIC_COMMIT_SHA": JSON.stringify(COMMIT_SHA),
       "import.meta.env.PUBLIC_FARO_URL": JSON.stringify(FARO_URL),
@@ -40,7 +71,30 @@ export default defineConfig({
       },
     },
     optimizeDeps: {
-      include: ["events", "stanza"],
+      include: ["events"],
+      // Exclude the local WASM package from esbuild pre-bundling. Pre-bundling
+      // produces a stable v= cache-buster hash derived from the lock file rather
+      // than file mtime, so the browser never re-fetches after a WASM rebuild.
+      // Serving the package directly lets Vite use mtime-based cache busting so
+      // a fresh REBUILD_WASM=1 build is always picked up without a hard refresh.
+      exclude: ["@waddle/xmpp-client-wasm"],
+    },
+    server: {
+      watch: {
+        // Vite's default chokidar config ignores `**/node_modules/**`. The
+        // local WASM package lives there (installed via `file:` and bun's
+        // .bun/ cache symlink), so without this Vite never observes a
+        // REBUILD_WASM=1 rewrite of `_bg.js` / `_bg.wasm`. The dev server
+        // keeps serving the cached transform of the *old* `_bg.js` while
+        // the browser fetches a *fresh* `_bg.wasm` (cache: "no-store"),
+        // producing "wasm.__wasm_bindgen_func_elem_N is not a function".
+        // Negation patterns in `ignored` are honoured by anymatch — when a
+        // path matches both a positive ignore and a negation, the negation
+        // wins, so this whitelists our package without touching the rest of
+        // node_modules. The pattern matches both the symlink path and bun's
+        // resolved .bun/ cache path.
+        ignored: ["!**/node_modules/@waddle/xmpp-client-wasm/**"],
+      },
     },
   },
 

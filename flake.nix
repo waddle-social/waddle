@@ -389,6 +389,7 @@
               pkgs.just
               pkgs.jujutsu
               pkgs.cargo-chef
+              pkgs.wasm-pack
               pkgs.teleport
               pkgs.openssl
               pkgs.pkg-config

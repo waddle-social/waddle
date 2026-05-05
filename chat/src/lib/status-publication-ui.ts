@@ -4,11 +4,11 @@ import type {
   MoodKind,
   MoodPublication,
   TunePublication,
-} from "@/lib/xmpp/pep-publications";
+} from "@/lib/xmpp/pep-types";
 import {
   GENERAL_ACTIVITIES,
   MOOD_KINDS,
-} from "@/lib/xmpp/pep-publications";
+} from "@/lib/xmpp/pep-types";
 
 export { GENERAL_ACTIVITIES, MOOD_KINDS };
 

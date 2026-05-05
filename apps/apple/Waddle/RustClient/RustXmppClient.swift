@@ -48,31 +48,34 @@ final class RustXmppClient: ObservableObject {
 
     // MARK: - Messaging
 
-    func sendChatMessage(peerJID: String, body: String, options: WaddleSendOptions? = nil) async {
+    @discardableResult
+    func sendChatMessage(peerJID: String, body: String, options: WaddleSendOptions? = nil) async -> String {
         await waddleClient.sendChatMessage(peerJid: peerJID, body: body, options: options)
     }
 
+    @discardableResult
     func sendGroupchatMessage(
         roomJID: String,
         body: String,
         options: WaddleSendOptions? = nil
-    ) async {
+    ) async -> String {
         await waddleClient.sendGroupchatMessage(roomJid: roomJID, body: body, options: options)
     }
 
     // Forum topics/replies are groupchat messages with a thread.
     func sendForumTopic(roomJID: String, body: String, title: String? = nil) async {
-        await waddleClient.sendGroupchatMessage(roomJid: roomJID, body: body, options: nil)
+        _ = await waddleClient.sendGroupchatMessage(roomJid: roomJID, body: body, options: nil)
     }
 
     func sendForumReply(roomJID: String, body: String, threadID: String) async {
         let options = WaddleSendOptions(
+            stanzaId: nil,
             reply: nil,
             fallback: nil,
             thread: WaddleThreadTarget(id: threadID, parent: nil),
             sharedFiles: []
         )
-        await waddleClient.sendGroupchatMessage(roomJid: roomJID, body: body, options: options)
+        _ = await waddleClient.sendGroupchatMessage(roomJid: roomJID, body: body, options: options)
     }
 
     // MARK: - History
@@ -114,7 +117,8 @@ final class RustXmppClient: ObservableObject {
 
     // MARK: - Direct messages
 
-    func sendDirectMessage(peerJID: String, body: String, options: WaddleSendOptions? = nil) async {
+    @discardableResult
+    func sendDirectMessage(peerJID: String, body: String, options: WaddleSendOptions? = nil) async -> String {
         await waddleClient.sendChatMessage(peerJid: peerJID, body: body, options: options)
     }
 
@@ -122,7 +126,7 @@ final class RustXmppClient: ObservableObject {
 
     func sendGroupchatMessageWithMarkup(roomJID: String, body: String, spans: [XMPPMarkupSpan]) async {
         // Markup spans are not yet re-wired through the FFI send path.
-        await waddleClient.sendGroupchatMessage(roomJid: roomJID, body: body, options: nil)
+        _ = await waddleClient.sendGroupchatMessage(roomJid: roomJID, body: body, options: nil)
     }
 
     func retractMessage(roomJID: String, messageID: String) async {}
@@ -219,12 +223,13 @@ final class RustXmppClient: ObservableObject {
             disposition: inferredDisposition(for: mediaType)
         )
         let options = WaddleSendOptions(
+            stanzaId: nil,
             reply: nil,
             fallback: nil,
             thread: nil,
             sharedFiles: [sharedFile]
         )
-        await waddleClient.sendGroupchatMessage(roomJid: roomJID, body: fileURL, options: options)
+        _ = await waddleClient.sendGroupchatMessage(roomJid: roomJID, body: fileURL, options: options)
     }
 }
 
@@ -330,6 +335,14 @@ private final class _EventListener: WaddleEventListener {
         // MAM results are delivered via the fetchDmHistory / fetchRoomHistory return values;
         // individual callbacks here are informational only.
         logger.debug("RustXmppClient: MAM result id=\(message.mamId)")
+    }
+
+    func onMessageDeliveryAcked(stanzaId: String) {
+        continuation.yield(.messageDeliveryAcked(stanzaID: stanzaId))
+    }
+
+    func onMessageDeliveryFailed(stanzaId: String) {
+        continuation.yield(.messageDeliveryFailed(stanzaID: stanzaId))
     }
 }
 
