@@ -601,28 +601,38 @@ final class AppModel: ObservableObject {
             guard let self else { return }
             await MainActor.run {
                 self.inFlightAvatarFetches.remove(key)
-                // Always populate the cache — empty Data sentinel prevents
-                // repeat fetches for users without a published avatar.
-                self.avatarDataByJID[key] = avatarData
+                if let avatarData {
+                    // Empty Data is a sentinel for users without a published
+                    // avatar. Failed URL fetches are not cached so they can
+                    // recover on a later request.
+                    self.avatarDataByJID[key] = avatarData
+                }
             }
         }
     }
 
-    private nonisolated static func avatarData(from avatar: WaddleAvatar?) async -> Data {
+    private nonisolated static func avatarData(from avatar: WaddleAvatar?) async -> Data? {
         guard let avatar else { return Data() }
         if !avatar.data.isEmpty { return avatar.data }
         guard
             let value = avatar.url,
             let url = URL(string: value),
-            url.scheme == "https" || url.scheme == "http"
+            url.scheme == "https"
         else {
             return Data()
         }
         do {
-            let (data, _) = try await URLSession.shared.data(from: url)
+            let (data, response) = try await URLSession.shared.data(from: url)
+            guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+                return nil
+            }
+            if let contentType = http.value(forHTTPHeaderField: "Content-Type")?.lowercased(),
+               !contentType.hasPrefix("image/") {
+                return nil
+            }
             return data
         } catch {
-            return Data()
+            return nil
         }
     }
 

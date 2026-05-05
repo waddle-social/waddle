@@ -40,6 +40,7 @@ import { mergeOccupantHats, roleHatsForOccupant } from "./occupant-badges";
 import { prepareEncryptedAttachmentUpload } from "./encrypted-attachments";
 import { discoverChannels, discoverTopology } from "./discovery";
 import { discoverUploadService, uploadFile, type UploadProgress } from "./file-upload";
+import { ReconnectCatchup } from "./reconnect-catchup";
 import {
   discoverExtensionCommands,
   discoverExtensionRoutes,
@@ -477,18 +478,7 @@ export class BrowserXmppClient {
   private readonly errorHooks: Array<(event: XmppErrorEvent) => void> = [];
   private readonly roomJoinWaiters = new Map<string, { resolve: () => void; reject: (error: Error) => void }>();
   private readonly carbonDedupIds = new Set<string>();
-  readonly catchup = {
-    latestDmSeenAt: new Map<string, string>(),
-    primed: false,
-    recordDmSeen: (peer: string, timestamp: string) => {
-      this.catchup.latestDmSeenAt.set(barePeerJid(peer), timestamp);
-    },
-    onSessionStarted: () => {
-      const shouldRun = this.catchup.primed;
-      this.catchup.primed = true;
-      return shouldRun ? Array.from(this.catchup.latestDmSeenAt.entries()) : [];
-    },
-  };
+  readonly catchup = new ReconnectCatchup();
 
   constructor(session: WaddleSession) { this.session = session; }
 
@@ -1094,10 +1084,9 @@ export class BrowserXmppClient {
     if (this.xmpp !== xmpp) return;
     this.connected = true; this.reconnectAttempt = 0;
     this.emitStatus({ state: "online", detail: countQueuedMessages(this.queueScope) > 0 ? lifecycle.type === "fresh" ? "Reconnected — replaying queued messages" : "Connection resumed — replaying queued messages" : lifecycle.type === "fresh" ? "Connection ready" : "Connection resumed" });
+    const catchupEntries = this.catchup.onSessionStarted();
     if (lifecycle.type === "fresh") { this.inflightQueuedIds.clear(); void this.enableCarbons(xmpp); }
-    else {
-      this.catchup.onSessionStarted();
-    }
+    else if (catchupEntries.length > 0) { void this.runReconnectCatchup(xmpp, catchupEntries); }
     this.emitSessionLifecycle(lifecycle); void this.flushQueuedDirectMessages(); if (this.currentRoom) void this.flushQueuedRoomMessages(this.currentRoom);
     if (this.onceConnected) { const done = this.onceConnected; this.onceConnected = null; this.onceConnectFailed = null; done(); }
   }
@@ -1136,11 +1125,60 @@ export class BrowserXmppClient {
     if (message.is_muc) {
       const converted = roomMessageFromArchived({ ...message, mam_id: message.id ?? crypto.randomUUID() } as WasmArchivedMessage);
       if (!converted) return;
+      this.catchup.recordRoomSeen(converted.roomJid, converted.createdAt);
       if (converted.roomJid !== this.currentRoom && converted.body) { const activity: RoomActivityEvent = { roomJid: converted.roomJid, nick: converted.nick, body: converted.body }; if (converted.mentions) (activity as any).mentions = converted.mentions; if ((converted as any).broadcastMention) (activity as any).broadcastMention = (converted as any).broadcastMention; this.activityHandler?.(activity); return; }
       this.messageHandler?.(converted); return;
     }
     const converted = dmMessageFromArchived({ ...message, mam_id: message.id ?? crypto.randomUUID() } as WasmArchivedMessage, barePeerJid(this.session.jid));
-    if (converted) this.directMessageHandler?.(converted);
+    if (converted) {
+      this.catchup.recordDmSeen(converted.peerJid, converted.createdAt);
+      this.directMessageHandler?.(converted);
+    }
+  }
+  private async runReconnectCatchup(
+    xmpp: XmppClientInstance,
+    entries: Array<{ kind: "dm" | "room"; key: string }>,
+  ) {
+    for (const entry of entries) {
+      if (this.xmpp !== xmpp) return;
+      try {
+        if (entry.kind === "dm") {
+          const since = this.catchup.getDmLastSeen(entry.key);
+          if (!since || !xmpp.fetch_dm_history_page) continue;
+          const page = await xmpp.fetch_dm_history_page(entry.key, 100, { type: "latest" }) as WasmMamPage;
+          for (const message of page?.messages ?? []) {
+            const converted = dmMessageFromArchived(message, barePeerJid(this.session.jid));
+            if (!converted || converted.createdAt <= since) continue;
+            this.catchup.recordDmSeen(converted.peerJid, converted.createdAt);
+            this.directMessageHandler?.(converted);
+          }
+        } else {
+          const since = this.catchup.getRoomLastSeen(entry.key);
+          if (!since || !xmpp.fetch_room_history_page) continue;
+          const page = await xmpp.fetch_room_history_page(entry.key, 100, { type: "latest" }) as WasmMamPage;
+          for (const message of page?.messages ?? []) {
+            const converted = roomMessageFromArchived(message);
+            if (!converted || converted.createdAt <= since) continue;
+            this.catchup.recordRoomSeen(converted.roomJid, converted.createdAt);
+            if (converted.roomJid !== this.currentRoom && converted.body) {
+              const activity: RoomActivityEvent = { roomJid: converted.roomJid, nick: converted.nick, body: converted.body };
+              if (converted.mentions) (activity as any).mentions = converted.mentions;
+              if ((converted as any).broadcastMention) (activity as any).broadcastMention = (converted as any).broadcastMention;
+              this.activityHandler?.(activity);
+            } else {
+              this.messageHandler?.(converted);
+            }
+          }
+        }
+      } catch (error) {
+        this.emitError({
+          kind: "history",
+          recoverable: true,
+          detail: `Reconnect catch-up failed for ${entry.key}`,
+          cause: error,
+        });
+      }
+    }
   }
   private wireEvents(xmpp: XmppClientInstance & { enableKeepAlive?: (opts: { interval: number; timeout: number }) => void; disableKeepAlive?: () => void }) {
     xmpp.set_on_connected?.(() => { if (this.xmpp !== xmpp) return; void this.enableCarbons(xmpp); });

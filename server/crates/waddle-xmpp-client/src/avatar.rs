@@ -14,6 +14,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use jid::BareJid;
 use minidom::Element;
 use std::future::Future;
+use url::Url;
 use uuid::Uuid;
 
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
@@ -228,13 +229,13 @@ where
 
     if let Some(meta_response) = meta_response {
         if let Some(info) = parse_metadata_response(&meta_response) {
-            if let Some(url) = info.url.as_deref().filter(|url| !url.trim().is_empty()) {
+            if let Some(url) = info.url.as_deref().and_then(normalize_https_avatar_url) {
                 return Ok(Some(Avatar {
                     jid: jid.clone(),
                     id: info.id,
                     mime_type: info.mime_type,
                     data: Vec::new(),
-                    url: Some(url.trim().to_string()),
+                    url: Some(url),
                 }));
             }
 
@@ -283,14 +284,14 @@ where
 }
 
 fn vcard_photo_to_avatar(jid: &BareJid, photo: VcardPhoto) -> Option<Avatar> {
-    if let Some(url) = photo.url.filter(|url| !url.trim().is_empty()) {
-        let id = url.trim().to_string();
+    if let Some(url) = photo.url.as_deref().and_then(normalize_https_avatar_url) {
+        let id = url.clone();
         return Some(Avatar {
             jid: jid.clone(),
             id,
             mime_type: photo.mime_type.unwrap_or_else(|| "image/png".to_string()),
             data: Vec::new(),
-            url: Some(url.trim().to_string()),
+            url: Some(url),
         });
     }
 
@@ -301,6 +302,16 @@ fn vcard_photo_to_avatar(jid: &BareJid, photo: VcardPhoto) -> Option<Avatar> {
         data,
         url: None,
     })
+}
+
+fn normalize_https_avatar_url(url: &str) -> Option<String> {
+    let trimmed = url.trim();
+    let parsed = Url::parse(trimmed).ok()?;
+    if parsed.scheme() == "https" {
+        Some(trimmed.to_string())
+    } else {
+        None
+    }
 }
 
 fn decode_base64_bytes(base64_text: &str) -> Option<Vec<u8>> {
@@ -613,6 +624,33 @@ mod tests {
     }
 
     #[test]
+    fn request_avatar_rejects_plaintext_xep_0084_url() {
+        let jid: BareJid = "alice@example.com".parse().unwrap();
+        let responses = std::cell::RefCell::new(vec![make_metadata_url_iq(
+            "deadbeef",
+            "image/png",
+            "http://example.test/a.png",
+        )]);
+
+        let avatar = futures::executor::block_on(request_avatar_with_iq(&jid, |stanza| {
+            let is_metadata = stanza
+                .get_child("pubsub", NS_PUBSUB)
+                .and_then(|pubsub| pubsub.get_child("items", NS_PUBSUB))
+                .is_some_and(|items| items.attr("node") == Some(NS_AVATAR_METADATA));
+            let response = is_metadata.then(|| responses.borrow_mut().remove(0));
+            async move {
+                match response {
+                    Some(response) => Ok::<_, AvatarRequestFailure<()>>(response),
+                    None => Err(AvatarRequestFailure::StanzaError),
+                }
+            }
+        }))
+        .unwrap();
+
+        assert!(avatar.is_none());
+    }
+
+    #[test]
     fn request_avatar_falls_back_to_vcard_binval() {
         let jid: BareJid = "alice@example.com".parse().unwrap();
         let responses =
@@ -667,5 +705,29 @@ mod tests {
             avatar.url.as_deref(),
             Some("https://example.test/vcard.png")
         );
+    }
+
+    #[test]
+    fn request_avatar_rejects_plaintext_vcard_extval() {
+        let jid: BareJid = "alice@example.com".parse().unwrap();
+        let responses =
+            std::cell::RefCell::new(vec![make_vcard_extval_iq("http://example.test/vcard.png")]);
+
+        let avatar = futures::executor::block_on(request_avatar_with_iq(&jid, |stanza| {
+            let is_metadata = stanza
+                .get_child("pubsub", NS_PUBSUB)
+                .and_then(|pubsub| pubsub.get_child("items", NS_PUBSUB))
+                .is_some_and(|items| items.attr("node") == Some(NS_AVATAR_METADATA));
+            let response = (!is_metadata).then(|| responses.borrow_mut().remove(0));
+            async move {
+                match response {
+                    Some(response) => Ok::<_, AvatarRequestFailure<()>>(response),
+                    None => Err(AvatarRequestFailure::StanzaError),
+                }
+            }
+        }))
+        .unwrap();
+
+        assert!(avatar.is_none());
     }
 }

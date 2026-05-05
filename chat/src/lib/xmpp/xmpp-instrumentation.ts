@@ -23,6 +23,7 @@ const ERROR_KIND_MAP: Record<XmppErrorKind, ErrorKind> = {
   "stream": "xmpp.stream",
   "auth": "xmpp.auth",
   "connect-timeout": "xmpp.disconnect",
+  "history": "xmpp.stream",
   "member-query": "xmpp.stream",
 };
 

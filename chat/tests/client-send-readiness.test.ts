@@ -223,6 +223,46 @@ describe("client keepalive lifecycle", () => {
 
     expect(removedHistoryHelper).not.toHaveBeenCalled();
   });
+
+  test("runs Rust MAM catch-up for tracked DMs on stream-management resume", async () => {
+    const client = new BrowserXmppClient(session());
+    const catchup = (client as unknown as { catchup: { recordDmSeen: (peer: string, ts: string) => void; onSessionStarted: () => unknown[] } }).catchup;
+    catchup.recordDmSeen("bob@example.com", "2024-01-01T00:00:00.000Z");
+    catchup.onSessionStarted();
+    const dmHandler = mock(() => undefined);
+    client.setDirectMessageHandler(dmHandler);
+    const fetchDmHistoryPage = mock(async () => ({
+      messages: [{
+        mam_id: "mam-2",
+        id: "dm-2",
+        from: "bob@example.com/phone",
+        to: "alice@example.com/desktop",
+        message_type: "chat",
+        body: "missed while suspended",
+        timestamp: "2024-01-01T00:00:01.000Z",
+        reaction_emojis: [],
+        shared_files: [],
+      }],
+      complete: true,
+    }));
+
+    const xmpp = Object.assign(new EventEmitter(), {
+      fetch_dm_history_page: fetchDmHistoryPage,
+    }) as unknown as Agent;
+    (client as unknown as { xmpp: Agent }).xmpp = xmpp;
+    (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
+
+    xmpp.emit("stream:management:resumed");
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(fetchDmHistoryPage).toHaveBeenCalledWith("bob@example.com", 100, { type: "latest" });
+    expect(dmHandler).toHaveBeenCalledWith(expect.objectContaining({
+      id: "dm-2",
+      body: "missed while suspended",
+      peerJid: "bob@example.com",
+    }));
+  });
 });
 
 describe("carbon forwarding", () => {

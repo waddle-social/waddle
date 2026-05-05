@@ -94,6 +94,7 @@ export interface ExtensionItemOption {
 export interface ExtensionItemAction {
   launchId: string;
   label: string;
+  launch?: ExtensionLaunchDescriptor;
 }
 
 export interface ExtensionRouteItem {
@@ -161,7 +162,9 @@ function normalizeExtensionRouteItem(value: unknown): ExtensionRouteItem | null 
     const value = action as Record<string, unknown>;
     const launchId = stringField(value, "launchId") ?? stringField(value, "launch_id");
     const label = stringField(value, "label");
-    return launchId && label ? [{ launchId, label }] : [];
+    if (!launchId || !label) return [];
+    const launch = routeItemLaunchDescriptor(value, launchId, label);
+    return launch ? [{ launchId, label, launch }] : [];
   });
   return {
     ...(stringField(item, "id") ? { id: stringField(item, "id")! } : {}),
@@ -172,6 +175,37 @@ function normalizeExtensionRouteItem(value: unknown): ExtensionRouteItem | null 
     fields,
     options,
     actions,
+  };
+}
+
+function routeItemLaunchDescriptor(
+  value: Record<string, unknown>,
+  launchId: string,
+  label: string,
+): ExtensionLaunchDescriptor | null {
+  const pluginId = stringField(value, "pluginId") ?? stringField(value, "plugin_id") ?? stringField(value, "plugin");
+  const actionId = stringField(value, "actionId") ?? stringField(value, "action_id") ?? stringField(value, "action");
+  const commandNode = stringField(value, "commandNode") ?? stringField(value, "command_node") ?? stringField(value, "command-node");
+  const launchToken = stringField(value, "launchToken") ?? stringField(value, "launch_token") ?? stringField(value, "token");
+  const expiresAt = stringField(value, "expiresAt") ?? stringField(value, "expires_at") ?? stringField(value, "expires-at");
+  const waddleId = stringField(value, "waddleId") ?? stringField(value, "waddle_id") ?? stringField(value, "waddle-id");
+  if (!pluginId || !actionId || !commandNode || !launchToken || !expiresAt || !waddleId) return null;
+  const roomJid = stringField(value, "roomJid") ?? stringField(value, "room_jid") ?? stringField(value, "room");
+  const stanzaId = stringField(value, "sourceStanzaId") ?? stringField(value, "source_stanza_id") ?? stringField(value, "source-stanza-id");
+  return {
+    id: launchId,
+    pluginId,
+    actionId,
+    commandNode,
+    launchToken,
+    expiresAt,
+    label,
+    context: {
+      waddleId,
+      ...(roomJid ? { roomJid } : {}),
+      ...(stanzaId ? { stanzaId } : {}),
+    },
+    payloads: [],
   };
 }
 

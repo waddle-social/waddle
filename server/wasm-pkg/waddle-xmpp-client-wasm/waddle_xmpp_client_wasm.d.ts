@@ -20,6 +20,7 @@ export class WaddleClient {
     fetch_user_pep_profile(jid: string): Promise<any>;
     get_server_version(): Promise<any>;
     join_room(room_jid: string, nick: string): Promise<any>;
+    join_room_without_history(room_jid: string, nick: string): Promise<any>;
     leave_room(room_jid: string, nick: string): Promise<any>;
     list_room_members(room_jid: string, affiliation: string): Promise<any>;
     list_roster_contacts(): Promise<any>;

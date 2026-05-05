@@ -349,6 +349,14 @@ pub struct WaddleExtensionRouteItemOption {
 pub struct WaddleExtensionRouteItemAction {
     pub launch_id: String,
     pub label: String,
+    pub plugin_id: Option<String>,
+    pub action_id: Option<String>,
+    pub command_node: Option<String>,
+    pub launch_token: Option<String>,
+    pub expires_at: Option<String>,
+    pub waddle_id: Option<String>,
+    pub room_jid: Option<String>,
+    pub source_stanza_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1289,6 +1297,27 @@ impl WaddleClient {
         })
     }
 
+    pub fn join_room_without_history(&self, room_jid: String, nick: String) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let to = format!("{room_jid}/{nick}");
+            let stanza = Element::builder("presence", NS_CLIENT)
+                .attr("to", to.as_str())
+                .append(
+                    Element::builder("x", NS_MUC)
+                        .append(
+                            Element::builder("history", NS_MUC)
+                                .attr("maxstanzas", "0")
+                                .build(),
+                        )
+                        .build(),
+                )
+                .build();
+            send_stanza_command(inner, stanza).await?;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
     pub fn leave_room(&self, room_jid: String, nick: String) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
@@ -1632,6 +1661,14 @@ fn parse_extension_route_item(item: &Element) -> Option<WaddleExtensionRouteItem
                         view.actions.push(WaddleExtensionRouteItemAction {
                             launch_id: launch_id.to_string(),
                             label: label.to_string(),
+                            plugin_id: child.attr("plugin").map(str::to_string),
+                            action_id: child.attr("action").map(str::to_string),
+                            command_node: child.attr("command-node").map(str::to_string),
+                            launch_token: child.attr("token").map(str::to_string),
+                            expires_at: child.attr("expires-at").map(str::to_string),
+                            waddle_id: child.attr("waddle-id").map(str::to_string),
+                            room_jid: child.attr("room").map(str::to_string),
+                            source_stanza_id: child.attr("source-stanza-id").map(str::to_string),
                         });
                     }
                 }

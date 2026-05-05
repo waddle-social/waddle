@@ -876,11 +876,8 @@ async function invokeActiveExtensionAction(action: ExtensionAnnotationAction) {
   await activeTarget.value.invokeExtensionAction(action);
 }
 
-async function invokeExtensionRouteAction(action: { launchId: string; label: string }) {
-  await invokeActiveExtensionAction({
-    label: action.label,
-    route: action.launchId,
-  });
+async function invokeExtensionRouteAction(action: ExtensionAnnotationAction) {
+  await invokeActiveExtensionAction(action);
 }
 
 function searchActiveMessages(query: string) {

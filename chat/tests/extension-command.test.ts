@@ -240,7 +240,17 @@ describe("extension command invocation", () => {
             { id: "a", label: "Pizza" },
             { id: "b", label: "Sushi" },
           ],
-          actions: [{ launch_id: "vote-42", label: "Vote" }],
+          actions: [{
+            launch_id: "vote-42",
+            label: "Vote",
+            plugin_id: "decision-polls",
+            action_id: "vote",
+            command_node: "urn:waddle:extensions:invoke",
+            launch_token: "signed-token",
+            expires_at: "2026-04-27T00:00:00Z",
+            waddle_id: "alice@example.com",
+            room_jid: "general@muc.example.com",
+          }],
           fields: [],
         }];
       },
@@ -255,7 +265,56 @@ describe("extension command invocation", () => {
         { id: "a", label: "Pizza" },
         { id: "b", label: "Sushi" },
       ],
-      actions: [{ launchId: "vote-42", label: "Vote" }],
+      actions: [{
+        launchId: "vote-42",
+        label: "Vote",
+        launch: {
+          id: "vote-42",
+          pluginId: "decision-polls",
+          actionId: "vote",
+          commandNode: "urn:waddle:extensions:invoke",
+          launchToken: "signed-token",
+          expiresAt: "2026-04-27T00:00:00Z",
+          label: "Vote",
+          context: {
+            waddleId: "alice@example.com",
+            roomJid: "general@muc.example.com",
+          },
+          payloads: [],
+        },
+      }],
+    }]);
+  });
+
+  test("drops route item actions without launch metadata", async () => {
+    const route = {
+      serviceJid: "extensions.example.com",
+      pluginId: "decision-polls",
+      routeId: "active-polls",
+      label: "Polls",
+      scope: "channel" as const,
+      surface: "list" as const,
+      stateNode: "urn:waddle:decision-polls:1:channel:{room}:polls",
+      payloadNamespace: "urn:waddle:decision-polls:1",
+    };
+    const xmpp = {
+      async fetch_extension_route_items() {
+        return [{
+          id: "poll-42",
+          title: "Lunch tomorrow?",
+          options: [],
+          actions: [{ launch_id: "vote-42", label: "Vote" }],
+          fields: [],
+        }];
+      },
+    };
+
+    expect(await fetchExtensionRouteItems(xmpp as any, route, "general@muc.example.com")).toEqual([{
+      id: "poll-42",
+      title: "Lunch tomorrow?",
+      fields: [],
+      options: [],
+      actions: [],
     }]);
   });
 

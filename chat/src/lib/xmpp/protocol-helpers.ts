@@ -10,6 +10,7 @@ const NS_PUBSUB_NODE_CONFIG = "http://jabber.org/protocol/pubsub#node_config";
 
 type HybridClient = Partial<WaddleClient> & {
   send_raw_iq?: (xml: string) => Promise<unknown>;
+  join_room_without_history?: (roomJid: string, nick: string) => Promise<unknown>;
 };
 
 interface CreateMucRoomParams {
@@ -51,8 +52,12 @@ async function sendIq(client: HybridClient, type: "get" | "set", xmlPayload: str
 }
 
 async function joinRoom(client: HybridClient, roomJid: string, nick: string): Promise<void> {
+  if (client.join_room_without_history) {
+    await client.join_room_without_history(roomJid, nick);
+    return;
+  }
   if (!client.join_room) throw new Error("XMPP session is not ready");
-  return client.join_room(roomJid, nick);
+  await client.join_room(roomJid, nick);
 }
 
 async function leaveRoom(client: HybridClient, roomJid: string, nick: string): Promise<void> {

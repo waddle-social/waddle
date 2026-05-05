@@ -3,6 +3,7 @@ import { computed, ref, watch } from "vue";
 import { ExternalLink, Grid3X3, List, RefreshCw, WifiOff } from "lucide-vue-next";
 import type { ChannelSummary, SpaceSummary } from "@/lib/chat-types";
 import type { BrowserXmppClient } from "@/lib/xmpp-client";
+import type { ExtensionAnnotationAction } from "@/lib/chat-ui";
 import type { DiscoveredExtensionRoute, ExtensionRouteItem } from "@/lib/xmpp/extension-commands";
 
 const props = defineProps<{
@@ -17,7 +18,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   openNav: [];
-  invokeAction: [action: { launchId: string; label: string }];
+  invokeAction: [action: ExtensionAnnotationAction];
 }>();
 
 const items = ref<ExtensionRouteItem[]>([]);
@@ -190,7 +191,7 @@ watch(routeKey, () => {
               :key="action.launchId"
               type="button"
               class="chat-icon-button chat-icon-button--sm"
-              @click="emit('invokeAction', action)"
+              @click="emit('invokeAction', { label: action.label, route: action.launchId, launch: action.launch })"
             >
               {{ action.label }}
             </button>
