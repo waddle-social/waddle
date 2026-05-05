@@ -62,7 +62,7 @@ const props = defineProps<{
   selfDomain?: string;
   avatarUrlByAuthor: Record<string, string | null>;
   authorJidByNick?: Record<string, string>;
-  tenorApiKey: string;
+  giphyApiKey: string;
   mentionCandidates: MentionCandidate[];
   roomHats: RoomHats;
   roomPresence: RoomPresence;
@@ -969,7 +969,7 @@ function dayDividerLabel(createdAt: string): string {
       :is-forum-channel="isForumChannel"
       :is-sending="isSending"
       :disabled="!canShowComposer"
-      :tenor-api-key="tenorApiKey"
+      :giphy-api-key="giphyApiKey"
       :mention-candidates="mentionCandidates"
       :slow-mode-cooldown="slowModeCooldown"
       :upload-progress="uploadProgress"
@@ -1170,7 +1170,7 @@ function dayDividerLabel(createdAt: string): string {
       :is-forum-channel="isForumChannel"
       :is-sending="isSending"
       :disabled="!canShowComposer"
-      :tenor-api-key="tenorApiKey"
+      :giphy-api-key="giphyApiKey"
       :mention-candidates="mentionCandidates"
       :slow-mode-cooldown="slowModeCooldown"
       :upload-progress="uploadProgress"

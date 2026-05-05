@@ -55,10 +55,10 @@ import {
 } from "@/lib/reaction-mode";
 
 const props = defineProps<{
-  tenorApiKey?: string;
+  giphyApiKey?: string;
 }>();
 
-const tenorApiKey = props.tenorApiKey ?? "";
+const giphyApiKey = props.giphyApiKey ?? "";
 
 const ui = useUiState();
 const { mode: scrollDirectionMode } = useScrollDirection();
@@ -419,7 +419,7 @@ const activeDmPeer = computed(() => {
   };
 });
 
-const computedChannelUnreadMap = computed(() => channelUnread.channelUnreadMap());
+const computedChannelUnreadMap = computed(() => channelUnread.channelUnreadMap(waddles.channels.value));
 // Thread rows are drill-down detail; room unread already carries the
 // server-equivalent conversation total, so the browser badge must not add both.
 const totalTabUnreadCount = computed(() =>
@@ -471,9 +471,9 @@ const readReceiptsUnreadCount = computed<number>(() => {
     return dmConversations.conversations.value.find((c) => c.peerJid === peer)?.unreadCount ?? 0;
   }
   if (readReceiptsKind.value === "channel") {
-    const channelId = waddles.activeChannelId.value;
-    if (!channelId) return 0;
-    return computedChannelUnreadMap.value[channelId]?.unread ?? 0;
+    const jid = readReceiptsActiveRoomJid.value;
+    if (!jid) return 0;
+    return channelUnread.unreadForRoomJid(jid);
   }
   return 0;
 });
@@ -1661,7 +1661,7 @@ onUnmounted(() => {
               :self-domain="selfDomain"
               :avatar-url-by-author="avatarUrlByAuthor"
                :author-jid-by-nick="authorJidByNick"
-              :tenor-api-key="tenorApiKey"
+              :giphy-api-key="giphyApiKey"
                :mention-candidates="mentionCandidates"
               :room-hats="authorHatsByNick"
               :room-presence="messaging.roomPresence.value"
@@ -1739,7 +1739,7 @@ onUnmounted(() => {
               :room-hats="authorHatsByNick"
               :room-presence="messaging.roomPresence.value"
               :room-last-seen="messaging.roomLastSeen.value"
-              :tenor-api-key="tenorApiKey"
+              :giphy-api-key="giphyApiKey"
                :mention-candidates="mentionCandidates"
               :slow-mode-cooldown="messaging.slowModeCooldown.value"
               :is-sending="false"
@@ -1777,7 +1777,7 @@ onUnmounted(() => {
               :room-hats="authorHatsByNick"
               :room-presence="messaging.roomPresence.value"
               :room-last-seen="messaging.roomLastSeen.value"
-              :tenor-api-key="tenorApiKey"
+              :giphy-api-key="giphyApiKey"
                :mention-candidates="mentionCandidates"
               :slow-mode-cooldown="messaging.slowModeCooldown.value"
               :is-sending="messaging.isSending.value"

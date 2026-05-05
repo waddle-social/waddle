@@ -28,6 +28,9 @@ pub const NS_SPACES: &str = "urn:xmpp:spaces:0";
 /// Waddle's service-discovery form namespace for authenticated server metadata.
 pub const NS_WADDLE_SERVER_INFO: &str = "urn:waddle:server-info:0";
 
+/// Waddle room metadata carried in disco#info extension forms.
+pub const NS_WADDLE_ROOM_METADATA: &str = "urn:waddle:room:0";
+
 /// XEP-0060 PubSub affiliation for a requester against a Space node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpaceAffiliation {
@@ -157,23 +160,51 @@ pub fn build_space_parent_form(spaces_service: &str, node: &str) -> Element {
         .into_element()
 }
 
-/// Build the MUC roominfo compatibility form for XEP-0503 parent metadata.
-pub fn build_muc_roominfo_pubsub_form(spaces_service: &str, node: &str) -> Element {
-    DataForm::new(FormType::Result)
+/// Build the MUC roominfo compatibility form for room disco metadata.
+pub fn build_muc_roominfo_form(
+    spaces_service: &str,
+    node: &str,
+    description: Option<&str>,
+) -> Element {
+    let mut form = DataForm::new(FormType::Result)
         .add_field(Field::form_type("http://jabber.org/protocol/muc#roominfo"))
         .add_field(Field::text_single(
-            "muc#roominfo_pubsub",
+            "muc#roomconfig_pubsub",
             build_space_node_iri(spaces_service, node),
-        ))
-        .into_element()
+        ));
+    if let Some(description) = description.filter(|value| !value.trim().is_empty()) {
+        form = form.add_field(Field::text_single("muc#roominfo_description", description));
+    }
+    form.into_element()
+}
+
+/// Build the MUC roominfo compatibility form for XEP-0503 parent metadata.
+pub fn build_muc_roominfo_pubsub_form(spaces_service: &str, node: &str) -> Element {
+    build_muc_roominfo_form(spaces_service, node, None)
 }
 
 /// Build all XEP-0503 room disco extension forms for a room linked to a space.
 pub fn build_room_space_metadata_forms(spaces_service: &str, node: &str) -> Vec<Element> {
+    build_room_space_metadata_forms_with_description(spaces_service, node, None)
+}
+
+pub fn build_room_space_metadata_forms_with_description(
+    spaces_service: &str,
+    node: &str,
+    description: Option<&str>,
+) -> Vec<Element> {
     vec![
         build_space_parent_form(spaces_service, node),
-        build_muc_roominfo_pubsub_form(spaces_service, node),
+        build_muc_roominfo_form(spaces_service, node, description),
     ]
+}
+
+/// Build Waddle-specific room metadata for values not standardized by XEP-0045.
+pub fn build_room_metadata_form(channel_type: &str) -> Element {
+    DataForm::new(FormType::Result)
+        .add_field(Field::form_type(NS_WADDLE_ROOM_METADATA))
+        .add_field(Field::text_single("waddle#channel_type", channel_type))
+        .into_element()
 }
 
 /// Build a simple `pubsub#type` data form indicating a spaces node.
@@ -319,13 +350,31 @@ mod tests {
 
         let roominfo = forms[1]
             .children()
-            .find(|field| field.attr("var") == Some("muc#roominfo_pubsub"))
+            .find(|field| field.attr("var") == Some("muc#roomconfig_pubsub"))
             .expect("muc roominfo pubsub field");
         let roominfo_value: String = roominfo.children().next().unwrap().texts().collect();
         assert_eq!(
             roominfo_value,
             "xmpp:spaces.example.com?;node=general%20%26%20ops"
         );
+    }
+
+    #[test]
+    fn test_build_room_metadata_form() {
+        let form = build_room_metadata_form("forum");
+        let form_type = form
+            .children()
+            .find(|field| field.attr("var") == Some("FORM_TYPE"))
+            .expect("FORM_TYPE field");
+        let form_type_value: String = form_type.children().next().unwrap().texts().collect();
+        assert_eq!(form_type_value, NS_WADDLE_ROOM_METADATA);
+
+        let channel_type = form
+            .children()
+            .find(|field| field.attr("var") == Some("waddle#channel_type"))
+            .expect("channel type field");
+        let channel_type_value: String = channel_type.children().next().unwrap().texts().collect();
+        assert_eq!(channel_type_value, "forum");
     }
 
     #[test]

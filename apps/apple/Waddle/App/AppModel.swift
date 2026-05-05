@@ -59,8 +59,10 @@ final class AppModel: ObservableObject {
     @Published var serverURLText: String
     @Published var providers: [AuthProvider] = []
     @Published var session: WaddleSession?
-    /// Display name for the implicit single space (derived from the server URL host).
+    /// Display name fallback used before XEP-0503 topology has loaded.
     @Published var spaceName: String?
+    @Published var spaces: [SpaceSummary] = []
+    @Published var selectedSpaceID: String?
     @Published var channels: [ChannelSummary] = []
     @Published var selectedChannelID: String?
     @Published var members: [MemberSummary] = []
@@ -116,9 +118,19 @@ final class AppModel: ObservableObject {
         Task { await bootstrap() }
     }
 
-    /// Synthetic display object for the implicit single space.
-    /// Has no backend ID — views use it only for `.name` and `.description`.
     var selectedSpace: SpaceSummary? {
+        if let selectedSpaceID,
+           let space = spaces.first(where: { $0.id == selectedSpaceID }) {
+            return space
+        }
+        if let selectedChannel,
+           let spaceID = selectedChannel.spaceID,
+           let space = spaces.first(where: { $0.id == spaceID }) {
+            return space
+        }
+        if let first = spaces.first {
+            return first
+        }
         guard let spaceName else { return nil }
         return SpaceSummary(
             id: "",
@@ -250,6 +262,7 @@ final class AppModel: ObservableObject {
     func selectChannel(_ channelID: String?) async {
         dlog(" selectChannel: \(channelID ?? "nil")")
         selectedChannelID = channelID
+        selectedSpaceID = channels.first(where: { $0.id == channelID })?.spaceID ?? selectedSpaceID
         selectedForumThreadID = nil
         syncChatRooms()
         syncChatMembers()
@@ -629,6 +642,12 @@ final class AppModel: ObservableObject {
         do {
             try await client.updateSpace(sessionID: session.sessionID, name: name, description: description)
             spaceName = name
+            if let selectedSpaceID,
+               let index = spaces.firstIndex(where: { $0.id == selectedSpaceID }) {
+                spaces[index] = SpaceSummary(id: selectedSpaceID, name: name, description: description)
+            } else if spaces.count == 1 {
+                spaces[0] = SpaceSummary(id: spaces[0].id, name: name, description: description)
+            }
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -639,6 +658,8 @@ final class AppModel: ObservableObject {
         do {
             try await client.deleteSpace(sessionID: session.sessionID)
             spaceName = nil
+            spaces = []
+            selectedSpaceID = nil
             channels = []
             selectedChannelID = nil
             members = []
@@ -650,8 +671,9 @@ final class AppModel: ObservableObject {
 
     func updateChannel(channelID: String, name: String, description: String?, position: Int) async {
         guard let session else { return }
+        let apiChannelID = channels.first(where: { $0.id == channelID })?.apiID ?? channelID
         do {
-            try await client.updateChannel(sessionID: session.sessionID, channelID: channelID, name: name, description: description, position: position)
+            try await client.updateChannel(sessionID: session.sessionID, channelID: apiChannelID, name: name, description: description, position: position)
             await reloadSelectedSpaceStructure()
         } catch {
             errorMessage = error.localizedDescription
@@ -967,8 +989,7 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Loads the room list and member list for the implicit single space.
-    /// No per-space ID is fetched, stored, or passed — the server space is implicit.
+    /// Loads the XEP-0503 spaces topology and member list.
     private func loadRooms() async {
         guard let session, let rustClient else {
             updateChatSurfaceState()
@@ -979,36 +1000,47 @@ final class AppModel: ObservableObject {
         updateChatSurfaceState()
 
         do {
-            async let xmppRooms = rustClient.listRooms()
+            async let xmppTopology = rustClient.discoverTopology()
             async let loadedMembers = client.listMembers(sessionID: session.sessionID)
 
-            let (rooms, loadedMembersValue) = try await (xmppRooms, loadedMembers)
-            dlog(" loadRooms: \(rooms.count) rooms, \(loadedMembersValue.count) members")
+            let (topology, loadedMembersValue) = try await (xmppTopology, loadedMembers)
+            dlog(" loadRooms: \(topology.spaces.count) spaces, \(topology.channels.count) rooms, \(loadedMembersValue.count) members")
 
-            channels = rooms
-                .map { room in
-                    let channelID = parseManagedRoomBareJID(room.jid) ?? room.jid
+            spaces = topology.spaces.map { space in
+                SpaceSummary(
+                    id: space.id,
+                    name: space.name,
+                    description: space.description
+                )
+            }
+
+            channels = topology.channels
+                .map { channel in
                     return ChannelSummary(
-                        id: channelID,
-                        roomJid: room.jid,
-                        name: room.name,
-                        description: nil,
-                        channelType: room.channelType,
-                        position: Int(room.position)
+                        id: channel.id,
+                        apiID: parseManagedRoomBareJID(channel.roomJID),
+                        roomJid: channel.roomJID,
+                        name: channel.name,
+                        description: channel.description,
+                        channelType: channel.channelType,
+                        position: channel.position,
+                        spaceID: channel.spaceID
                     )
                 }
                 .sorted {
                     ($0.position ?? 0, $0.name.lowercased()) < ($1.position ?? 0, $1.name.lowercased())
                 }
             members = loadedMembersValue.sorted { $0.username.lowercased() < $1.username.lowercased() }
-            spaceName = serverURL.host ?? "Waddle"
 
             if let selectedChannelID,
-               channels.contains(where: { $0.id == selectedChannelID }) {
+               let selectedChannel = channels.first(where: { $0.id == selectedChannelID }) {
                 self.selectedChannelID = selectedChannelID
+                selectedSpaceID = selectedChannel.spaceID
             } else {
                 self.selectedChannelID = channels.first?.id
+                selectedSpaceID = channels.first?.spaceID ?? spaces.first?.id
             }
+            spaceName = selectedSpace?.name ?? serverURL.host ?? "Waddle"
 
             syncChatRooms()
             syncChatMembers()
@@ -1941,6 +1973,8 @@ final class AppModel: ObservableObject {
 
         session = nil
         spaceName = nil
+        spaces = []
+        selectedSpaceID = nil
         channels = []
         selectedChannelID = nil
         members = []

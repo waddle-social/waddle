@@ -59,12 +59,12 @@ use waddle_xmpp::{
     },
     xep::{
         add_stanza_id_xep0359, build_command_items, build_command_result,
-        build_last_activity_response, build_moderation_result_message,
-        build_room_space_metadata_forms, build_search_response, build_server_role_form,
-        build_spaces_metadata_form_for_requester, is_last_activity_query, is_search_request,
-        is_time_query, is_version_query, parse_command_from_iq, parse_moderation_iq,
-        parse_search_request, ChannelResult, Command, CommandStatus, Searchable, SpaceAffiliation,
-        Xep0359StanzaId, NODE_COMMANDS, NS_CHANNEL_SEARCH,
+        build_last_activity_response, build_moderation_result_message, build_room_metadata_form,
+        build_room_space_metadata_forms_with_description, build_search_response,
+        build_server_role_form, build_spaces_metadata_form_for_requester, is_last_activity_query,
+        is_search_request, is_time_query, is_version_query, parse_command_from_iq,
+        parse_moderation_iq, parse_search_request, ChannelResult, Command, CommandStatus,
+        Searchable, SpaceAffiliation, Xep0359StanzaId, NODE_COMMANDS, NS_CHANNEL_SEARCH,
     },
     Affiliation, SpaceDetails, Stanza, StanzaErrorCondition, StanzaErrorType, XmppError,
 };
@@ -542,29 +542,44 @@ pub async fn handle_iq_with_conn_state(
                             )];
                         }
                     };
+                    let managed_channel = get_managed_channel_for_room(state, &room_jid)
+                        .await
+                        .ok()
+                        .flatten();
+                    let channel_type = managed_channel
+                        .as_ref()
+                        .map(|channel| channel.channel_type.as_str())
+                        .unwrap_or(if snapshot.config.forum {
+                            "forum"
+                        } else {
+                            "text"
+                        });
+                    let description = managed_channel
+                        .as_ref()
+                        .and_then(|channel| channel.description.as_deref())
+                        .or(snapshot.config.description.as_deref());
                     let identities = vec![Identity::muc_room(Some(&snapshot.config.name))];
                     let mut features = muc_room_features(
                         snapshot.config.persistent,
                         snapshot.config.members_only,
-                        snapshot.config.moderated,
-                        snapshot.config.forum,
+                        snapshot.config.moderated || channel_type == "announcement",
+                        snapshot.config.forum || channel_type == "forum",
                     );
                     features.extend(extension_features_for_disco(state));
-                    let extensions = room_space_metadata_extensions(state, &room_jid, domain).await;
-                    if !extensions.is_empty() {
+                    let mut extensions =
+                        room_space_metadata_extensions(state, &room_jid, description).await;
+                    let has_space_metadata = !extensions.is_empty();
+                    if has_space_metadata {
                         features.push(Feature::spaces());
                     }
-                    let response = if extensions.is_empty() {
-                        build_disco_info_response(request_iq, &identities, &features, None)
-                    } else {
-                        build_disco_info_response_with_extensions(
-                            request_iq,
-                            &identities,
-                            &features,
-                            None,
-                            &extensions,
-                        )
-                    };
+                    extensions.push(build_room_metadata_form(channel_type));
+                    let response = build_disco_info_response_with_extensions(
+                        request_iq,
+                        &identities,
+                        &features,
+                        None,
+                        &extensions,
+                    );
                     return vec![iq_to_xml(response)];
                 }
 
@@ -579,22 +594,24 @@ pub async fn handle_iq_with_conn_state(
                             channel.channel_type == "forum",
                         );
                         features.extend(extension_features_for_disco(state));
-                        let extensions =
-                            room_space_metadata_extensions(state, &room_jid, domain).await;
-                        if !extensions.is_empty() {
+                        let mut extensions = room_space_metadata_extensions(
+                            state,
+                            &room_jid,
+                            channel.description.as_deref(),
+                        )
+                        .await;
+                        let has_space_metadata = !extensions.is_empty();
+                        if has_space_metadata {
                             features.push(Feature::spaces());
                         }
-                        let response = if extensions.is_empty() {
-                            build_disco_info_response(request_iq, &identities, &features, None)
-                        } else {
-                            build_disco_info_response_with_extensions(
-                                request_iq,
-                                &identities,
-                                &features,
-                                None,
-                                &extensions,
-                            )
-                        };
+                        extensions.push(build_room_metadata_form(&channel.channel_type));
+                        let response = build_disco_info_response_with_extensions(
+                            request_iq,
+                            &identities,
+                            &features,
+                            None,
+                            &extensions,
+                        );
                         return vec![iq_to_xml(response)];
                     }
 
@@ -831,11 +848,7 @@ pub async fn handle_iq_with_conn_state(
         // and dynamic extension namespaces extend further still.
         let identities = vec![Identity::server(Some("Waddle"))];
         let mut features = waddle_xmpp::disco::info::server_features();
-        features.extend([
-            Feature::spaces(),
-            Feature::new("jabber:iq:search"),
-            Feature::new(ISR_NS),
-        ]);
+        features.extend([Feature::new("jabber:iq:search"), Feature::new(ISR_NS)]);
         features.extend(extension_features_for_disco(state));
         let response =
             match server_affiliation_for_requester(state, authenticated_session.as_ref()).await {
@@ -2324,6 +2337,13 @@ pub async fn handle_iq_with_conn_state(
                     }
                 }
                 return vec![iq_to_xml(build_pubsub_success(&iq))];
+            }
+
+            PubSubRequest::Unsupported { feature } => {
+                return vec![iq_to_xml(build_pubsub_error(
+                    &iq,
+                    PubSubError::UnsupportedFeature(feature),
+                ))];
             }
         }
     }
@@ -5128,7 +5148,7 @@ async fn handle_spaces_retract(
 async fn room_space_metadata_extensions(
     state: &WebSocketState,
     room_jid: &BareJid,
-    _domain: &str,
+    description: Option<&str>,
 ) -> Vec<Element> {
     let spaces_domain = state.deps.service_domains.spaces.clone();
     let Ok(spaces_jid) = spaces_service_bare_jid(&spaces_domain) else {
@@ -5142,9 +5162,11 @@ async fn room_space_metadata_extensions(
         .find_node_for_item(&spaces_jid, &room_item_id)
         .await
     {
-        Ok(Some(space_node)) => {
-            build_room_space_metadata_forms(&spaces_domain, &space_node.node_name)
-        }
+        Ok(Some(space_node)) => build_room_space_metadata_forms_with_description(
+            &spaces_domain,
+            &space_node.node_name,
+            description,
+        ),
         Ok(None) => vec![],
         Err(error) => {
             warn!(room = %room_jid, error = %error, "Failed to find Space node for room");

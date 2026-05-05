@@ -1,5 +1,12 @@
 import SwiftUI
 
+private struct SidebarSpaceGroup: Identifiable {
+    let space: SpaceSummary
+    let rooms: [ChatRoomSelection]
+
+    var id: String { space.id }
+}
+
 struct WaddleChatSpaceView: View {
     @ObservedObject var model: AppModel
     @ObservedObject var store: ChatSurfaceStore
@@ -20,6 +27,7 @@ struct WaddleChatSpaceView: View {
     @State private var showNewDmSheet = false
     @State private var showCreateTopicSheet = false
     @State private var showEditChannelSheet = false
+    @State private var editingChannelID: String?
     @State private var editChannelName = ""
     @State private var editChannelDescription = ""
     @State private var showSpaceSettingsSheet = false
@@ -47,6 +55,19 @@ struct WaddleChatSpaceView: View {
         }
 
         return host
+    }
+
+    private var channelGroups: [SidebarSpaceGroup] {
+        let roomsByID = Dictionary(uniqueKeysWithValues: store.rooms.map { ($0.id, $0) })
+        let discoveredSpaces = model.spaces.isEmpty ? [space] : model.spaces
+
+        return discoveredSpaces.compactMap { discoveredSpace in
+            let rooms = model.channels
+                .filter { ($0.spaceID ?? discoveredSpace.id) == discoveredSpace.id }
+                .compactMap { roomsByID[$0.id] }
+            if rooms.isEmpty && !store.rooms.isEmpty { return nil }
+            return SidebarSpaceGroup(space: discoveredSpace, rooms: rooms)
+        }
     }
 
     var body: some View {
@@ -211,23 +232,27 @@ struct WaddleChatSpaceView: View {
 #endif
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) {
-                        Button("Cancel") { showEditChannelSheet = false }
+                        Button("Cancel") {
+                            editingChannelID = nil
+                            showEditChannelSheet = false
+                        }
                     }
                     ToolbarItem(placement: .confirmationAction) {
                         Button("Save") {
-                            guard let channelID = model.selectedChannelID else { return }
-                            let idx = model.channels.firstIndex(where: { $0.id == channelID })
+                            guard let channelID = editingChannelID else { return }
+                            let channelPosition = model.channels.first(where: { $0.id == channelID })?.position ?? 0
                             Task {
                                 await model.updateChannel(
                                     channelID: channelID,
                                     name: editChannelName,
                                     description: editChannelDescription.isEmpty ? nil : editChannelDescription,
-                                    position: idx ?? 0
+                                    position: channelPosition
                                 )
+                                editingChannelID = nil
                                 showEditChannelSheet = false
                             }
                         }
-                        .disabled(editChannelName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .disabled(editingChannelID == nil || editChannelName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     }
                 }
             }
@@ -460,8 +485,13 @@ struct WaddleChatSpaceView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     sidebarSectionHeader("Channels", action: { showCreateChannelSheet = true })
 
-                    ForEach(store.rooms) { room in
-                        sidebarChannelRow(room: room)
+                    ForEach(channelGroups) { group in
+                        if model.spaces.count > 1 {
+                            sidebarSpaceHeader(group.space.name)
+                        }
+                        ForEach(group.rooms) { room in
+                            sidebarChannelRow(room: room)
+                        }
                     }
 
                     if !store.dmConversations.isEmpty {
@@ -493,6 +523,16 @@ struct WaddleChatSpaceView: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 6)
+    }
+
+    private func sidebarSpaceHeader(_ title: String) -> some View {
+        Text(title)
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(WaddleTheme.textMuted)
+            .lineLimit(1)
+            .padding(.horizontal, 16)
+            .padding(.top, 10)
+            .padding(.bottom, 3)
     }
 
     private func sidebarChannelRow(room: ChatRoomSelection) -> some View {
@@ -642,21 +682,34 @@ struct WaddleChatSpaceView: View {
             } else {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 4) {
-                        ForEach(store.rooms) { room in
-                            ChatDesktopChannelRowView(
-                                room: room,
-                                isSelected: model.selectedChannelID == room.id
-                            ) {
-                                Task { await model.selectChannel(room.id) }
+                        ForEach(channelGroups) { group in
+                            if model.spaces.count > 1 {
+                                Text(group.space.name)
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundStyle(WaddleTheme.textMuted)
+                                    .textCase(.uppercase)
+                                    .padding(.horizontal, 12)
+                                    .padding(.top, 10)
+                                    .padding(.bottom, 4)
                             }
-                            .contextMenu {
-                                Button {
-                                    editChannelName = room.title
-                                    editChannelDescription = room.subtitle ?? ""
+
+                            ForEach(group.rooms) { room in
+                                ChatDesktopChannelRowView(
+                                    room: room,
+                                    isSelected: model.selectedChannelID == room.id
+                                ) {
                                     Task { await model.selectChannel(room.id) }
-                                    showEditChannelSheet = true
-                                } label: {
-                                    Label("Edit Channel", systemImage: "pencil")
+                                }
+                                .contextMenu {
+                                    Button {
+                                        editingChannelID = room.id
+                                        editChannelName = room.title
+                                        editChannelDescription = model.channels.first(where: { $0.id == room.id })?.description ?? ""
+                                        Task { await model.selectChannel(room.id) }
+                                        showEditChannelSheet = true
+                                    } label: {
+                                        Label("Edit Channel", systemImage: "pencil")
+                                    }
                                 }
                             }
                         }

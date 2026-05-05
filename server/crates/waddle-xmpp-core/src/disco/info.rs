@@ -13,7 +13,6 @@ const DATA_FORMS_NS: &str = "jabber:x:data";
 const SERVER_INFO_FORM_TYPE: &str = "urn:xmpp:serverinfo:0";
 const NS_CHATSTATES: &str = "http://jabber.org/protocol/chatstates";
 const NS_COMMANDS: &str = "http://jabber.org/protocol/commands";
-const NS_FORUMS: &str = "urn:xmpp:forums:0";
 const NS_MUC_SELF_PING_OPTIMIZATION: &str = "http://jabber.org/protocol/muc#self-ping-optimization";
 
 /// Service Discovery info namespace (XEP-0030).
@@ -363,10 +362,6 @@ impl Feature {
     pub fn spaces() -> Self {
         Self::new("urn:xmpp:spaces:0")
     }
-
-    pub fn forums() -> Self {
-        Self::new(NS_FORUMS)
-    }
 }
 
 /// Check if an IQ is a disco#info query.
@@ -573,18 +568,24 @@ pub fn pubsub_service_features() -> Vec<Feature> {
     ]
 }
 
-/// Get features for the Spaces service component (XEP-0503).
+/// Get features for the PubSub-backed Spaces service component.
+///
+/// This intentionally advertises only the PubSub features implemented by the
+/// service. Full XEP-0503 service conformance additionally requires owner
+/// subscription management, so the service does not advertise
+/// `urn:xmpp:spaces:0` until that behavior exists.
 pub fn spaces_service_features() -> Vec<Feature> {
     vec![
         Feature::disco_info(),
         Feature::disco_items(),
         Feature::pubsub(),
-        Feature::spaces(),
         Feature::pubsub_retrieve_items(),
         Feature::new("http://jabber.org/protocol/pubsub#subscribe"),
         Feature::new("http://jabber.org/protocol/pubsub#create-nodes"),
         Feature::new("http://jabber.org/protocol/pubsub#config-node"),
         Feature::new("http://jabber.org/protocol/pubsub#meta-data"),
+        Feature::new("http://jabber.org/protocol/pubsub#delete-nodes"),
+        Feature::new("http://jabber.org/protocol/pubsub#delete-items"),
         Feature::new("http://jabber.org/protocol/pubsub#retract-items"),
         Feature::new("http://jabber.org/protocol/pubsub#multi-items"),
         Feature::new("http://jabber.org/protocol/pubsub#item-ids"),
@@ -634,8 +635,6 @@ pub fn muc_room_features(
         Feature::muc_nonanonymous(),
     ];
 
-    let _ = forum;
-
     if persistent {
         features.push(Feature::muc_persistent());
     }
@@ -651,6 +650,8 @@ pub fn muc_room_features(
     } else {
         features.push(Feature::muc_unmoderated());
     }
+
+    let _ = forum;
 
     features
 }
@@ -753,7 +754,7 @@ mod tests {
     #[test]
     fn test_muc_room_features_forum_room() {
         let features = muc_room_features(true, true, false, true);
-        assert!(!features.contains(&Feature::forums()));
+        assert!(!features.contains(&Feature::new("urn:xmpp:forums:0")));
         assert!(features.contains(&Feature::muc_persistent()));
         assert!(features.contains(&Feature::muc_membersonly()));
         assert!(features.contains(&Feature::muc_unmoderated()));
@@ -772,5 +773,31 @@ mod tests {
             Feature::muc_self_ping_optimization().0,
             NS_MUC_SELF_PING_OPTIMIZATION
         );
+    }
+
+    #[test]
+    fn test_spaces_service_features_include_only_supported_pubsub_features() {
+        let features = spaces_service_features();
+        for feature in [
+            "http://jabber.org/protocol/pubsub#subscribe",
+            "http://jabber.org/protocol/pubsub#create-nodes",
+            "http://jabber.org/protocol/pubsub#config-node",
+            "http://jabber.org/protocol/pubsub#meta-data",
+            "http://jabber.org/protocol/pubsub#delete-nodes",
+            "http://jabber.org/protocol/pubsub#delete-items",
+            "http://jabber.org/protocol/pubsub#retract-items",
+            "http://jabber.org/protocol/pubsub#multi-items",
+            "http://jabber.org/protocol/pubsub#item-ids",
+            "http://jabber.org/protocol/pubsub#retrieve-items",
+        ] {
+            assert!(
+                features.contains(&Feature::new(feature)),
+                "spaces service missing {feature}"
+            );
+        }
+        assert!(!features.contains(&Feature::spaces()));
+        assert!(!features.contains(&Feature::new(
+            "http://jabber.org/protocol/pubsub#manage-subscriptions"
+        )));
     }
 }

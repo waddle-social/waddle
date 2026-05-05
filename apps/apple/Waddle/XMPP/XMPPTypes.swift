@@ -58,6 +58,28 @@ struct XMPPCredentials: Sendable, Equatable {
     }
 }
 
+struct XMPPDiscoveredSpace: Sendable, Equatable, Identifiable {
+    let id: String
+    let serviceJID: String
+    let name: String
+    let description: String?
+}
+
+struct XMPPDiscoveredChannel: Sendable, Equatable, Identifiable {
+    let id: String
+    let roomJID: String
+    let name: String
+    let description: String?
+    let channelType: String
+    let position: Int
+    let spaceID: String
+}
+
+struct XMPPDiscoveredTopology: Sendable, Equatable {
+    let spaces: [XMPPDiscoveredSpace]
+    let channels: [XMPPDiscoveredChannel]
+}
+
 enum XMPPConnectionState: Equatable {
     case disconnected
     case connecting

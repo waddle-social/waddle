@@ -403,6 +403,187 @@ describe("extension command invocation", () => {
     }]);
   });
 
+  test("treats successful empty PubSub route item responses as empty routes", async () => {
+    const route = {
+      serviceJid: "extensions.example.com",
+      pluginId: "link-board",
+      routeId: "saved-links",
+      label: "Saved Links",
+      scope: "channel" as const,
+      surface: "gallery" as const,
+      stateNode: "urn:waddle:link-board:1:channel:{room}:links",
+      payloadNamespace: "urn:waddle:link-board:1",
+    };
+    const xmpp = {
+      async getItems(jid: string, node: string, opts?: { max?: number }) {
+        expect(jid).toBe("extensions.example.com");
+        expect(node).toBe("urn:waddle:link-board:1:channel:general@muc.example.com:links");
+        expect(opts?.max).toBe(100);
+        return {};
+      },
+    };
+
+    expect(await fetchExtensionRouteItems(xmpp as any, route, "general@muc.example.com")).toEqual([]);
+  });
+
+  test("normalizes item-not-found pubsub errors as unavailable routes", async () => {
+    const route = {
+      serviceJid: "extensions.example.com",
+      pluginId: "link-board",
+      routeId: "saved-links",
+      label: "Saved Links",
+      scope: "channel" as const,
+      surface: "gallery" as const,
+      stateNode: "urn:waddle:link-board:1:channel:{room}:links",
+      payloadNamespace: "urn:waddle:link-board:1",
+    };
+    const xmpp = {
+      async getItems() {
+        throw { condition: "item-not-found", type: "cancel" };
+      },
+    };
+
+    await expect(fetchExtensionRouteItems(xmpp as any, route, "general@muc.example.com"))
+      .rejects.toThrow("Extension route was not found.");
+  });
+
+  test("normalizes nested item-not-found pubsub errors as unavailable routes", async () => {
+    const route = {
+      serviceJid: "extensions.example.com",
+      pluginId: "decision-polls",
+      routeId: "active-polls",
+      label: "Polls",
+      scope: "channel" as const,
+      surface: "list" as const,
+      stateNode: "urn:waddle:decision-polls:1:channel:{room}:polls",
+      payloadNamespace: "urn:waddle:decision-polls:1",
+    };
+    const xmpp = {
+      async getItems() {
+        throw { error: { condition: "item-not-found", type: "cancel" } };
+      },
+    };
+
+    await expect(fetchExtensionRouteItems(xmpp as any, route, "general@muc.example.com"))
+      .rejects.toThrow("Extension route was not found.");
+  });
+
+  test("normalizes stanza.js item-not-found IQ errors as unavailable routes", async () => {
+    const route = {
+      serviceJid: "extensions.example.com",
+      pluginId: "link-board",
+      routeId: "saved-links",
+      label: "Saved Links",
+      scope: "channel" as const,
+      surface: "gallery" as const,
+      stateNode: "urn:waddle:link-board:1:channel:{room}:links",
+      payloadNamespace: "urn:waddle:link-board:1",
+    };
+    const xmpp = {
+      async getItems() {
+        throw {
+          id: "pubsub-1",
+          type: "error",
+          error: { type: "cancel", condition: "item-not-found" },
+        };
+      },
+    };
+
+    await expect(fetchExtensionRouteItems(xmpp as any, route, "general@muc.example.com"))
+      .rejects.toThrow("Extension route was not found.");
+  });
+
+  test("normalizes pubsubError-only route load errors", async () => {
+    const route = {
+      serviceJid: "extensions.example.com",
+      pluginId: "link-board",
+      routeId: "saved-links",
+      label: "Saved Links",
+      scope: "channel" as const,
+      surface: "gallery" as const,
+      stateNode: "urn:waddle:link-board:1:channel:{room}:links",
+      payloadNamespace: "urn:waddle:link-board:1",
+    };
+    const xmpp = {
+      async getItems() {
+        throw {
+          id: "pubsub-1",
+          type: "error",
+          error: { type: "cancel", pubsubError: "item-not-found" },
+        };
+      },
+    };
+
+    await expect(fetchExtensionRouteItems(xmpp as any, route, "general@muc.example.com"))
+      .rejects.toThrow("Extension route was not found.");
+  });
+
+  test("normalizes stanza.js route load errors into actionable Error messages", async () => {
+    const route = {
+      serviceJid: "extensions.example.com",
+      pluginId: "link-board",
+      routeId: "saved-links",
+      label: "Saved Links",
+      scope: "channel" as const,
+      surface: "gallery" as const,
+      stateNode: "urn:waddle:link-board:1:channel:{room}:links",
+      payloadNamespace: "urn:waddle:link-board:1",
+    };
+    const xmpp = {
+      async getItems() {
+        throw {
+          id: "pubsub-1",
+          type: "error",
+          error: { type: "auth", condition: "forbidden" },
+        };
+      },
+    };
+
+    await expect(fetchExtensionRouteItems(xmpp as any, route, "general@muc.example.com"))
+      .rejects.toThrow("Extension route access was denied.");
+  });
+
+  test("normalizes remote server timeout route load errors", async () => {
+    const route = {
+      serviceJid: "extensions.example.com",
+      pluginId: "link-board",
+      routeId: "saved-links",
+      label: "Saved Links",
+      scope: "channel" as const,
+      surface: "gallery" as const,
+      stateNode: "urn:waddle:link-board:1:channel:{room}:links",
+      payloadNamespace: "urn:waddle:link-board:1",
+    };
+    const xmpp = {
+      async getItems() {
+        throw { error: { condition: "remote-server-timeout", type: "wait" } };
+      },
+    };
+
+    await expect(fetchExtensionRouteItems(xmpp as any, route, "general@muc.example.com"))
+      .rejects.toThrow("Extension route request timed out.");
+  });
+
+  test("propagates non-item-not-found errors to the caller", async () => {
+    const route = {
+      serviceJid: "extensions.example.com",
+      pluginId: "link-board",
+      routeId: "saved-links",
+      label: "Saved Links",
+      scope: "channel" as const,
+      surface: "gallery" as const,
+      stateNode: "urn:waddle:link-board:1:channel:{room}:links",
+      payloadNamespace: "urn:waddle:link-board:1",
+    };
+    const xmpp = {
+      async getItems() {
+        throw new Error("forbidden");
+      },
+    };
+
+    await expect(fetchExtensionRouteItems(xmpp as any, route, "general@muc.example.com")).rejects.toThrow("forbidden");
+  });
+
   test("uses source stanza metadata when context only carries the waddle id", () => {
     const iq = buildExtensionLaunchInvokeIq("alice@example.com/web", {
       ...launch,

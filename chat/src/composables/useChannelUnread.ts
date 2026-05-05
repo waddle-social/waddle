@@ -1,6 +1,7 @@
 import { computed, ref, type Ref } from "vue";
 import type { BrowserXmppClient, InboxEntry } from "@/lib/xmpp-client";
-import { parseManagedRoomBareJid } from "@/lib/xmpp-client";
+import { barePeerJid } from "@/lib/xmpp-client";
+import type { ChannelSummary } from "@/lib/chat-types";
 import {
   createInboxState,
   applyEntry,
@@ -104,15 +105,28 @@ export function useChannelUnread(
     }
   }
 
-  function channelUnreadMap(): Record<string, { unread: number; mentions: number }> {
+  /**
+   * Build a `channelId → unread` map by matching topology channel JIDs
+   * against inbox entries. Keying by JID (not partner-localpart) is
+   * required: stale inbox rows from a different deployment can share a
+   * localpart with a live room (e.g. `chat@muc.waddle.local` vs
+   * `chat@muc.waddle.social`) and a localpart-keyed map silently
+   * overwrites the live row, leaving its unread count stuck.
+   */
+  function channelUnreadMap(
+    channels: readonly Pick<ChannelSummary, "id" | "jid">[],
+  ): Record<string, { unread: number; mentions: number }> {
     const map: Record<string, { unread: number; mentions: number }> = {};
-    for (const entry of inboxState.value.channels.values()) {
-      if (entry.kind !== "muc") continue;
-      const parsed = parseManagedRoomBareJid(entry.partner);
-      if (!parsed) continue;
-      map[parsed.channelId] = { unread: entry.unread, mentions: 0 };
+    for (const channel of channels) {
+      if (!channel.jid) continue;
+      const entry = inboxState.value.channels.get(barePeerJid(channel.jid));
+      map[channel.id] = { unread: entry?.unread ?? 0, mentions: 0 };
     }
     return map;
+  }
+
+  function unreadForRoomJid(roomJid: string): number {
+    return inboxState.value.channels.get(roomJid)?.unread ?? 0;
   }
 
   function threadEntries(roomJid: string): ThreadInboxEntry[] {
@@ -141,6 +155,7 @@ export function useChannelUnread(
     markRead,
     markThreadRead,
     channelUnreadMap,
+    unreadForRoomJid,
     threadEntries,
   };
 }

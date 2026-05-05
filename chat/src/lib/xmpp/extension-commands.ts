@@ -551,13 +551,55 @@ export async function fetchExtensionRouteItems(
   roomJid: string,
 ): Promise<ExtensionRouteItem[]> {
   const node = resolveExtensionRouteStateNode(route, roomJid);
-  const response = await (xmpp as unknown as {
-    getItems?: (jid: string, node: string, opts?: { max?: number }) => Promise<{ items?: Array<{ id?: string; content?: unknown }> }>;
-  }).getItems?.(route.serviceJid, node, { max: 100 });
+  let response: { items?: Array<{ id?: string; content?: unknown }> } | undefined;
+  try {
+    response = await (xmpp as unknown as {
+      getItems?: (jid: string, node: string, opts?: { max?: number }) => Promise<{ items?: Array<{ id?: string; content?: unknown }> }>;
+    }).getItems?.(route.serviceJid, node, { max: 100 });
+  } catch (error) {
+    throw normalizeXmppRouteError(error);
+  }
   return (response?.items ?? []).flatMap((item) => {
     const view = parseExtensionItemView(item.content, item.id);
     return view ? [view] : [];
   });
+}
+
+function normalizeXmppRouteError(error: unknown): Error {
+  if (error instanceof Error) return error;
+  const condition = xmppErrorCondition(error) ?? xmppPubsubErrorCondition(error);
+  if (condition === "forbidden") return new Error("Extension route access was denied.");
+  if (condition === "item-not-found") return new Error("Extension route was not found.");
+  if (condition === "service-unavailable") return new Error("Extension route service is unavailable.");
+  if (condition === "timeout" || condition === "remote-server-timeout") {
+    return new Error("Extension route request timed out.");
+  }
+  if (condition) return new Error(`Extension route load failed: ${condition}.`);
+  return new Error("Could not load extension route.");
+}
+
+function xmppErrorCondition(error: unknown): string | null {
+  if (!error || typeof error !== "object") return null;
+  const candidate = error as Record<string, unknown>;
+  if (typeof candidate.condition === "string") return candidate.condition;
+  const nested = candidate.error;
+  if (nested && typeof nested === "object") {
+    const nestedCondition = (nested as Record<string, unknown>).condition;
+    if (typeof nestedCondition === "string") return nestedCondition;
+  }
+  return null;
+}
+
+function xmppPubsubErrorCondition(error: unknown): string | null {
+  if (!error || typeof error !== "object") return null;
+  const candidate = error as Record<string, unknown>;
+  if (typeof candidate.pubsubError === "string") return candidate.pubsubError;
+  const nested = candidate.error;
+  if (nested && typeof nested === "object") {
+    const nestedCondition = (nested as Record<string, unknown>).pubsubError;
+    if (typeof nestedCondition === "string") return nestedCondition;
+  }
+  return null;
 }
 
 function parseExtensionItemView(content: unknown, id: string | undefined): ExtensionRouteItem | null {

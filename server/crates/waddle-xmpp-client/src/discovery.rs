@@ -1,9 +1,10 @@
 //! Service discovery (XEP-0030), HTTP upload (XEP-0363), inbox (XEP-0430),
-//! push notifications, and custom Waddle channel creation.
+//! push notifications, and XEP-0503 Spaces topology discovery.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use jid::BareJid;
 use minidom::Element;
 
 use crate::client::ClientHandle;
@@ -20,6 +21,11 @@ pub const PUSH_NS: &str = "urn:xmpp:push:0";
 pub const CLIENT_NS: &str = "jabber:client";
 pub const DATA_FORMS_NS: &str = "jabber:x:data";
 pub const RSM_NS: &str = "http://jabber.org/protocol/rsm";
+pub const PUBSUB_NS: &str = "http://jabber.org/protocol/pubsub";
+pub const PUBSUB_METADATA_FORM_TYPE: &str = "http://jabber.org/protocol/pubsub#meta-data";
+pub const BOOKMARKS_NS: &str = "urn:xmpp:bookmarks:1";
+pub const SPACES_NS: &str = "urn:xmpp:spaces:0";
+pub const WADDLE_ROOM_METADATA_FORM_TYPE: &str = "urn:waddle:room:0";
 
 // ── ID generation ────────────────────────────────────────────────────────────
 
@@ -47,12 +53,46 @@ pub struct DiscoInfoResult {
     pub node: Option<String>,
     pub identities: Vec<DiscoIdentity>,
     pub features: Vec<String>,
+    pub forms: Vec<DiscoDataForm>,
 }
 
 impl DiscoInfoResult {
     pub fn has_feature(&self, feature: &str) -> bool {
         self.features.iter().any(|f| f == feature)
     }
+
+    pub fn has_form_value(&self, form_type: &str, field_var: &str, value: &str) -> bool {
+        self.forms
+            .iter()
+            .filter(|form| form.form_type.as_deref() == Some(form_type))
+            .flat_map(|form| &form.fields)
+            .any(|field| {
+                field.var == field_var
+                    && field.values.iter().any(|field_value| field_value == value)
+            })
+    }
+
+    pub fn form_value(&self, form_type: &str, field_var: &str) -> Option<&str> {
+        self.forms
+            .iter()
+            .filter(|form| form.form_type.as_deref() == Some(form_type))
+            .flat_map(|form| &form.fields)
+            .find(|field| field.var == field_var)
+            .and_then(|field| field.values.first())
+            .map(String::as_str)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DiscoDataForm {
+    pub form_type: Option<String>,
+    pub fields: Vec<DiscoDataField>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DiscoDataField {
+    pub var: String,
+    pub values: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -77,19 +117,73 @@ pub struct InboxEntry {
     pub timestamp: Option<chrono::DateTime<chrono::Utc>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SpaceNode(String);
+
+impl SpaceNode {
+    pub fn new(value: impl Into<String>) -> Option<Self> {
+        let value = value.into();
+        if value.trim().is_empty() {
+            None
+        } else {
+            Some(Self(value))
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
-pub struct DiscoveredWaddle {
-    pub id: String,
+pub struct DiscoveredSpace {
+    pub id: SpaceNode,
+    pub service_jid: BareJid,
     pub name: String,
-    pub is_public: bool,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DiscoveredChannelType {
+    Text,
+    Announcement,
+    Forum,
+}
+
+impl DiscoveredChannelType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Text => "text",
+            Self::Announcement => "announcement",
+            Self::Forum => "forum",
+        }
+    }
+
+    fn from_metadata(value: &str) -> Option<Self> {
+        match value.trim() {
+            "text" => Some(Self::Text),
+            "announcement" => Some(Self::Announcement),
+            "forum" => Some(Self::Forum),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DiscoveredChannel {
     pub id: String,
+    pub room_jid: BareJid,
     pub name: String,
-    pub channel_type: String,
+    pub description: Option<String>,
+    pub channel_type: DiscoveredChannelType,
     pub position: i32,
+    pub space_id: SpaceNode,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DiscoveredTopology {
+    pub spaces: Vec<DiscoveredSpace>,
+    pub channels: Vec<DiscoveredChannel>,
 }
 
 // ── Parse helpers ─────────────────────────────────────────────────────────────
@@ -114,13 +208,44 @@ pub fn parse_disco_info_result(iq: &Element, queried_jid: &str) -> Option<DiscoI
         .filter(|c| c.name() == "feature" && c.ns() == DISCO_INFO_NS)
         .filter_map(|c| c.attr("var").map(str::to_string))
         .collect();
+    let forms = query
+        .children()
+        .filter(|c| c.name() == "x" && c.ns() == DATA_FORMS_NS)
+        .filter_map(parse_disco_data_form)
+        .collect();
 
     Some(DiscoInfoResult {
         jid: queried_jid.to_string(),
         node,
         identities,
         features,
+        forms,
     })
+}
+
+fn parse_disco_data_form(form: &Element) -> Option<DiscoDataForm> {
+    let fields: Vec<DiscoDataField> = form
+        .children()
+        .filter(|child| child.name() == "field" && child.ns() == DATA_FORMS_NS)
+        .filter_map(|field| {
+            let var = field.attr("var")?.to_string();
+            let values = field
+                .children()
+                .filter(|child| child.name() == "value" && child.ns() == DATA_FORMS_NS)
+                .map(Element::text)
+                .collect();
+            Some(DiscoDataField { var, values })
+        })
+        .collect();
+    if fields.is_empty() {
+        return None;
+    }
+    let form_type = fields
+        .iter()
+        .find(|field| field.var == "FORM_TYPE")
+        .and_then(|field| field.values.first())
+        .cloned();
+    Some(DiscoDataForm { form_type, fields })
 }
 
 /// Parse a disco#items result IQ into a list of [`DiscoItem`]s.
@@ -141,6 +266,98 @@ pub fn parse_disco_items_result(iq: &Element) -> Option<Vec<DiscoItem>> {
         .collect();
 
     Some(items)
+}
+
+pub fn parse_spaces_from_disco_items(
+    spaces_jid: &BareJid,
+    items: Vec<DiscoItem>,
+) -> Vec<DiscoveredSpace> {
+    items
+        .into_iter()
+        .filter(|item| item.jid == spaces_jid.to_string())
+        .filter_map(|item| {
+            let id = SpaceNode::new(item.node?)?;
+            Some(DiscoveredSpace {
+                name: item.name.unwrap_or_else(|| id.as_str().to_string()),
+                id,
+                service_jid: spaces_jid.clone(),
+                description: None,
+            })
+        })
+        .collect()
+}
+
+fn space_from_disco_item(
+    spaces_jid: &BareJid,
+    item: DiscoItem,
+    info: &DiscoInfoResult,
+) -> Option<DiscoveredSpace> {
+    if item.jid != spaces_jid.to_string()
+        || !info.has_form_value(PUBSUB_METADATA_FORM_TYPE, "pubsub#type", SPACES_NS)
+    {
+        return None;
+    }
+    let id = SpaceNode::new(item.node?)?;
+    let name = info
+        .form_value(PUBSUB_METADATA_FORM_TYPE, "pubsub#title")
+        .filter(|name| !name.trim().is_empty())
+        .map(str::to_string)
+        .or(item.name)
+        .unwrap_or_else(|| id.as_str().to_string());
+    let description = info
+        .form_value(PUBSUB_METADATA_FORM_TYPE, "pubsub#description")
+        .filter(|description| !description.trim().is_empty())
+        .map(str::to_string);
+    Some(DiscoveredSpace {
+        id,
+        service_jid: spaces_jid.clone(),
+        name,
+        description,
+    })
+}
+
+pub fn parse_space_channels_result(
+    iq: &Element,
+    space_id: &SpaceNode,
+) -> Option<Vec<DiscoveredChannel>> {
+    let pubsub = iq.get_child("pubsub", PUBSUB_NS)?;
+    let items = pubsub.get_child("items", PUBSUB_NS)?;
+    if items.attr("node") != Some(space_id.as_str()) {
+        return None;
+    }
+
+    let channels = items
+        .children()
+        .filter(|child| child.name() == "item" && child.ns() == PUBSUB_NS)
+        .filter_map(|item| {
+            let room_jid: BareJid = item.attr("id")?.parse().ok()?;
+            let conference = item.get_child("conference", BOOKMARKS_NS)?;
+            let id = format!("{}::{}", space_id.as_str(), room_jid);
+            let name = conference
+                .attr("name")
+                .filter(|name| !name.trim().is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| {
+                    room_jid
+                        .node()
+                        .map(|node| node.as_str().to_string())
+                        .unwrap_or_else(|| id.clone())
+                });
+            Some((id, room_jid, name))
+        })
+        .enumerate()
+        .map(|(position, (id, room_jid, name))| DiscoveredChannel {
+            id,
+            room_jid,
+            name,
+            description: None,
+            channel_type: DiscoveredChannelType::Text,
+            position: position as i32,
+            space_id: space_id.clone(),
+        })
+        .collect();
+
+    Some(channels)
 }
 
 /// Parse an HTTP upload slot result IQ into an [`UploadSlot`].
@@ -245,6 +462,24 @@ fn build_disco_items_iq(to: &str, node: Option<&str>) -> Element {
         .build()
 }
 
+fn build_pubsub_items_iq(to: &BareJid, node: &SpaceNode) -> Element {
+    let id = format!("pubsub-items-{}", next_id());
+    Element::builder("iq", CLIENT_NS)
+        .attr("type", "get")
+        .attr("to", to.to_string())
+        .attr("id", id)
+        .append(
+            Element::builder("pubsub", PUBSUB_NS)
+                .append(
+                    Element::builder("items", PUBSUB_NS)
+                        .attr("node", node.as_str())
+                        .build(),
+                )
+                .build(),
+        )
+        .build()
+}
+
 fn build_upload_slot_iq(
     service_jid: &str,
     filename: &str,
@@ -339,21 +574,6 @@ fn build_disable_push_iq(push_service_jid: &str, node: &str) -> Element {
 
 // ── Private helpers ───────────────────────────────────────────────────────────
 
-/// Parse a channel node attribute in the format `{type}_{position}_{id}`.
-fn parse_channel_node(node: Option<&str>, jid: &str) -> (String, i32, String) {
-    if let Some(n) = node {
-        let parts: Vec<&str> = n.splitn(3, '_').collect();
-        if parts.len() == 3 {
-            let channel_type = parts[0].to_string();
-            let position = parts[1].parse::<i32>().unwrap_or(0);
-            let id = parts[2].to_string();
-            return (channel_type, position, id);
-        }
-    }
-    let id = jid.split('@').next().unwrap_or(jid).to_string();
-    ("text".to_string(), 0, id)
-}
-
 fn parse_error() -> ClientError {
     ClientError::StanzaError(StanzaError {
         error_type: StanzaErrorType::Cancel,
@@ -409,11 +629,18 @@ pub trait DiscoveryExt {
         node: &str,
     ) -> ClientResult<()>;
 
-    /// Discover top-level Waddle communities from the server.
-    async fn discover_waddles(&self, server_domain: &str) -> ClientResult<Vec<DiscoveredWaddle>>;
+    /// Discover XEP-0503 spaces from the spaces service.
+    async fn discover_spaces(&self, spaces_jid: &BareJid) -> ClientResult<Vec<DiscoveredSpace>>;
 
-    /// Discover channels within a waddle.
-    async fn discover_channels(&self, waddle_jid: &str) -> ClientResult<Vec<DiscoveredChannel>>;
+    /// Discover bookmark-backed MUC channels within one XEP-0503 space.
+    async fn discover_space_channels(
+        &self,
+        spaces_jid: &BareJid,
+        space_id: &SpaceNode,
+    ) -> ClientResult<Vec<DiscoveredChannel>>;
+
+    /// Discover the native spaces + channels topology.
+    async fn discover_topology(&self, spaces_jid: &BareJid) -> ClientResult<DiscoveredTopology>;
 }
 
 // ── Implementation ────────────────────────────────────────────────────────────
@@ -528,35 +755,65 @@ impl DiscoveryExt for ClientHandle {
         self.send_iq(iq).await.map(|_| ())
     }
 
-    async fn discover_waddles(&self, server_domain: &str) -> ClientResult<Vec<DiscoveredWaddle>> {
-        let items = self.discover_items(server_domain, None).await?;
-        let waddles = items
-            .into_iter()
-            .map(|item| DiscoveredWaddle {
-                id: item.node.unwrap_or_else(|| item.jid.clone()),
-                name: item.name.unwrap_or_default(),
-                is_public: true,
-            })
-            .collect();
-        Ok(waddles)
+    async fn discover_spaces(&self, spaces_jid: &BareJid) -> ClientResult<Vec<DiscoveredSpace>> {
+        let items = self.discover_items(&spaces_jid.to_string(), None).await?;
+        let mut spaces = Vec::new();
+        for item in items {
+            let Some(node) = item.node.as_deref() else {
+                continue;
+            };
+            let Ok(info) = self
+                .discover_info(&spaces_jid.to_string(), Some(node))
+                .await
+            else {
+                continue;
+            };
+            if let Some(space) = space_from_disco_item(spaces_jid, item, &info) {
+                spaces.push(space);
+            }
+        }
+        Ok(spaces)
     }
 
-    async fn discover_channels(&self, waddle_jid: &str) -> ClientResult<Vec<DiscoveredChannel>> {
-        let items = self.discover_items(waddle_jid, None).await?;
-        let channels = items
-            .into_iter()
-            .map(|item| {
-                let (channel_type, position, id) =
-                    parse_channel_node(item.node.as_deref(), &item.jid);
-                DiscoveredChannel {
-                    id,
-                    name: item.name.unwrap_or_default(),
-                    channel_type,
-                    position,
+    async fn discover_space_channels(
+        &self,
+        spaces_jid: &BareJid,
+        space_id: &SpaceNode,
+    ) -> ClientResult<Vec<DiscoveredChannel>> {
+        let iq = build_pubsub_items_iq(spaces_jid, space_id);
+        let result = self.send_iq(iq).await?;
+        let mut channels =
+            parse_space_channels_result(&result, space_id).ok_or_else(parse_error)?;
+        for channel in &mut channels {
+            if let Ok(info) = self
+                .discover_info(&channel.room_jid.to_string(), None)
+                .await
+            {
+                if let Some(channel_type) = info
+                    .form_value(WADDLE_ROOM_METADATA_FORM_TYPE, "waddle#channel_type")
+                    .and_then(DiscoveredChannelType::from_metadata)
+                {
+                    channel.channel_type = channel_type;
                 }
-            })
-            .collect();
+                channel.description = info
+                    .form_value(
+                        "http://jabber.org/protocol/muc#roominfo",
+                        "muc#roominfo_description",
+                    )
+                    .filter(|description| !description.trim().is_empty())
+                    .map(str::to_string);
+            }
+        }
         Ok(channels)
+    }
+
+    async fn discover_topology(&self, spaces_jid: &BareJid) -> ClientResult<DiscoveredTopology> {
+        let spaces = self.discover_spaces(spaces_jid).await?;
+        let mut channels = Vec::new();
+        for space in &spaces {
+            channels.extend(self.discover_space_channels(spaces_jid, &space.id).await?);
+        }
+        Ok(DiscoveredTopology { spaces, channels })
     }
 }
 
@@ -591,6 +848,92 @@ mod tests {
         assert!(result.has_feature(UPLOAD_NS));
         assert!(result.has_feature("jabber:iq:version"));
         assert!(!result.has_feature("urn:xmpp:nonexistent"));
+    }
+
+    #[test]
+    fn parse_disco_info_result_extracts_data_form_metadata() {
+        let iq = Element::builder("iq", CLIENT_NS)
+            .attr("type", "result")
+            .append(
+                Element::builder("query", DISCO_INFO_NS)
+                    .append(
+                        Element::builder("x", DATA_FORMS_NS)
+                            .attr("type", "result")
+                            .append(
+                                Element::builder("field", DATA_FORMS_NS)
+                                    .attr("var", "FORM_TYPE")
+                                    .append(
+                                        Element::builder("value", DATA_FORMS_NS)
+                                            .append(PUBSUB_METADATA_FORM_TYPE)
+                                            .build(),
+                                    )
+                                    .build(),
+                            )
+                            .append(
+                                Element::builder("field", DATA_FORMS_NS)
+                                    .attr("var", "pubsub#type")
+                                    .append(
+                                        Element::builder("value", DATA_FORMS_NS)
+                                            .append(SPACES_NS)
+                                            .build(),
+                                    )
+                                    .build(),
+                            )
+                            .append(
+                                Element::builder("field", DATA_FORMS_NS)
+                                    .attr("var", "pubsub#title")
+                                    .append(
+                                        Element::builder("value", DATA_FORMS_NS)
+                                            .append("Engineering")
+                                            .build(),
+                                    )
+                                    .build(),
+                            )
+                            .build(),
+                    )
+                    .append(
+                        Element::builder("x", DATA_FORMS_NS)
+                            .attr("type", "result")
+                            .append(
+                                Element::builder("field", DATA_FORMS_NS)
+                                    .attr("var", "FORM_TYPE")
+                                    .append(
+                                        Element::builder("value", DATA_FORMS_NS)
+                                            .append("http://jabber.org/protocol/muc#roominfo")
+                                            .build(),
+                                    )
+                                    .build(),
+                            )
+                            .append(
+                                Element::builder("field", DATA_FORMS_NS)
+                                    .attr("var", "muc#roominfo_description")
+                                    .append(
+                                        Element::builder("value", DATA_FORMS_NS)
+                                            .append("Project discussion")
+                                            .build(),
+                                    )
+                                    .build(),
+                            )
+                            .build(),
+                    )
+                    .build(),
+            )
+            .build();
+
+        let result = parse_disco_info_result(&iq, "spaces.example.com").unwrap();
+
+        assert!(result.has_form_value(PUBSUB_METADATA_FORM_TYPE, "pubsub#type", SPACES_NS));
+        assert_eq!(
+            result.form_value(PUBSUB_METADATA_FORM_TYPE, "pubsub#title"),
+            Some("Engineering")
+        );
+        assert_eq!(
+            result.form_value(
+                "http://jabber.org/protocol/muc#roominfo",
+                "muc#roominfo_description"
+            ),
+            Some("Project discussion")
+        );
     }
 
     #[test]
@@ -645,6 +988,172 @@ mod tests {
         assert_eq!(items[0].name.as_deref(), Some("Upload Service"));
         assert_eq!(items[1].jid, "muc.example.com");
         assert!(items[1].name.is_none());
+    }
+
+    #[test]
+    fn root_service_items_are_not_spaces() {
+        let spaces_jid: BareJid = "spaces.example.com".parse().expect("spaces jid");
+        let items = vec![
+            DiscoItem {
+                jid: "muc.example.com".to_string(),
+                name: Some("Chatrooms".to_string()),
+                node: None,
+            },
+            DiscoItem {
+                jid: "spaces.example.com".to_string(),
+                name: Some("Spaces".to_string()),
+                node: None,
+            },
+            DiscoItem {
+                jid: "extensions.example.com".to_string(),
+                name: Some("Extensions".to_string()),
+                node: None,
+            },
+        ];
+
+        assert!(parse_spaces_from_disco_items(&spaces_jid, items).is_empty());
+    }
+
+    #[test]
+    fn spaces_service_items_parse_node_backed_spaces() {
+        let spaces_jid: BareJid = "spaces.example.com".parse().expect("spaces jid");
+        let items = vec![DiscoItem {
+            jid: "spaces.example.com".to_string(),
+            name: Some("General".to_string()),
+            node: Some("general".to_string()),
+        }];
+
+        let spaces = parse_spaces_from_disco_items(&spaces_jid, items);
+
+        assert_eq!(spaces.len(), 1);
+        assert_eq!(spaces[0].id.as_str(), "general");
+        assert_eq!(spaces[0].service_jid, spaces_jid);
+        assert_eq!(spaces[0].name, "General");
+    }
+
+    #[test]
+    fn space_from_disco_item_requires_spaces_metadata_type() {
+        let spaces_jid: BareJid = "spaces.example.com".parse().expect("spaces jid");
+        let item = DiscoItem {
+            jid: "spaces.example.com".to_string(),
+            name: Some("Ignored Node Name".to_string()),
+            node: Some("engineering".to_string()),
+        };
+        let space_info = DiscoInfoResult {
+            jid: "spaces.example.com".to_string(),
+            node: Some("engineering".to_string()),
+            identities: vec![],
+            features: vec![],
+            forms: vec![DiscoDataForm {
+                form_type: Some(PUBSUB_METADATA_FORM_TYPE.to_string()),
+                fields: vec![
+                    DiscoDataField {
+                        var: "FORM_TYPE".to_string(),
+                        values: vec![PUBSUB_METADATA_FORM_TYPE.to_string()],
+                    },
+                    DiscoDataField {
+                        var: "pubsub#type".to_string(),
+                        values: vec![SPACES_NS.to_string()],
+                    },
+                    DiscoDataField {
+                        var: "pubsub#title".to_string(),
+                        values: vec!["Engineering".to_string()],
+                    },
+                    DiscoDataField {
+                        var: "pubsub#description".to_string(),
+                        values: vec!["Build systems".to_string()],
+                    },
+                ],
+            }],
+        };
+        let other_info = DiscoInfoResult {
+            forms: vec![],
+            ..space_info.clone()
+        };
+
+        let space = space_from_disco_item(&spaces_jid, item.clone(), &space_info).unwrap();
+
+        assert_eq!(space.id.as_str(), "engineering");
+        assert_eq!(space.name, "Engineering");
+        assert_eq!(space.description.as_deref(), Some("Build systems"));
+        assert!(space_from_disco_item(&spaces_jid, item, &other_info).is_none());
+    }
+
+    #[test]
+    fn pubsub_items_parse_bookmark_channels_and_ignore_non_conference_payloads() {
+        let space_id = SpaceNode::new("general").expect("space node");
+        let iq = Element::builder("iq", CLIENT_NS)
+            .attr("type", "result")
+            .append(
+                Element::builder("pubsub", PUBSUB_NS)
+                    .append(
+                        Element::builder("items", PUBSUB_NS)
+                            .attr("node", "general")
+                            .append(
+                                Element::builder("item", PUBSUB_NS)
+                                    .attr("id", "urn:xmpp:spaces:avatar:metadata:0")
+                                    .append(
+                                        Element::builder("metadata", "urn:xmpp:avatar:metadata")
+                                            .build(),
+                                    )
+                                    .build(),
+                            )
+                            .append(
+                                Element::builder("item", PUBSUB_NS)
+                                    .attr("id", "chat@muc.example.com")
+                                    .append(
+                                        Element::builder("conference", BOOKMARKS_NS)
+                                            .attr("name", "Chat")
+                                            .attr("autojoin", "true")
+                                            .build(),
+                                    )
+                                    .build(),
+                            )
+                            .append(
+                                Element::builder("item", PUBSUB_NS)
+                                    .attr("id", "not-a-room")
+                                    .append(
+                                        Element::builder("note", "urn:example:note")
+                                            .append("ignore me")
+                                            .build(),
+                                    )
+                                    .build(),
+                            )
+                            .build(),
+                    )
+                    .build(),
+            )
+            .build();
+
+        let channels = parse_space_channels_result(&iq, &space_id).expect("channels");
+
+        assert_eq!(channels.len(), 1);
+        assert_eq!(channels[0].id, "general::chat@muc.example.com");
+        assert_eq!(
+            channels[0].room_jid,
+            "chat@muc.example.com".parse::<BareJid>().expect("room jid")
+        );
+        assert_eq!(channels[0].name, "Chat");
+        assert_eq!(channels[0].channel_type, DiscoveredChannelType::Text);
+        assert_eq!(channels[0].position, 0);
+        assert_eq!(channels[0].space_id.as_str(), "general");
+    }
+
+    #[test]
+    fn discovered_channel_type_parses_waddle_metadata_values() {
+        assert_eq!(
+            DiscoveredChannelType::from_metadata("text"),
+            Some(DiscoveredChannelType::Text)
+        );
+        assert_eq!(
+            DiscoveredChannelType::from_metadata("announcement"),
+            Some(DiscoveredChannelType::Announcement)
+        );
+        assert_eq!(
+            DiscoveredChannelType::from_metadata("forum"),
+            Some(DiscoveredChannelType::Forum)
+        );
+        assert_eq!(DiscoveredChannelType::from_metadata("unknown"), None);
     }
 
     #[test]
@@ -726,6 +1235,7 @@ mod tests {
             node: None,
             identities: vec![],
             features: vec![UPLOAD_NS.to_string(), "jabber:iq:ping".to_string()],
+            forms: vec![],
         };
         assert!(result.has_feature(UPLOAD_NS));
         assert!(result.has_feature("jabber:iq:ping"));
