@@ -1314,6 +1314,15 @@ async fn create_router(
                     // §5 line 364: "treat unacknowledged stanzas in
                     // the same way that it would treat a stanza sent
                     // to an unavailable resource".
+                    //
+                    // Fail-closed on blocklist load error: degrading
+                    // to `Blocklist::empty()` would silently let
+                    // blocked senders into the recipient's MAM/inbox,
+                    // violating the policy in
+                    // `interpret.rs::offline_recipient_pass_blocklist_storage_error_skips_recipient_persistence`.
+                    // Skip promotion for this session so the durable
+                    // SM row survives for the next janitor pass /
+                    // restart-time retry. (Copilot review on PR #346.)
                     let blocklist = match state
                         .deps
                         .protocol
@@ -1326,9 +1335,11 @@ async fn create_router(
                             warn!(
                                 jid = %session.jid,
                                 error = %error,
-                                "SM janitor: blocklist load failed; promoting with empty blocklist"
+                                "SM janitor: blocklist load failed; SKIPPING promotion to \
+                                 preserve fail-closed XEP-0191 policy. Durable SM row will \
+                                 be retried on the next janitor pass."
                             );
-                            waddle_xmpp::protocol::session_state::Blocklist::empty()
+                            continue;
                         }
                     };
                     let summary = crate::sm_promotion::promote_session_unacked(
@@ -1339,7 +1350,9 @@ async fn create_router(
                         chrono::Utc::now(),
                     )
                     .await;
-                    if summary.queued + summary.redelivered + summary.bounced > 0 {
+                    if summary.queued + summary.redelivered + summary.bounced > 0
+                        || summary.storage_failed > 0
+                    {
                         info!(
                             jid = %session.jid,
                             redelivered = summary.redelivered,
@@ -1347,8 +1360,24 @@ async fn create_router(
                             bounced = summary.bounced,
                             dropped = summary.dropped,
                             unparseable = summary.unparseable,
+                            storage_failed = summary.storage_failed,
                             "SM janitor: Q6 promotion completed"
                         );
+                    }
+                    // If any stanza failed to insert into pending
+                    // storage, leave the durable SM row + in-memory
+                    // teardown alone so the next janitor pass can
+                    // retry. Otherwise the unacked stanzas would be
+                    // permanently lost on a transient storage error.
+                    // (Copilot review on PR #346.)
+                    if summary.has_storage_failure() {
+                        warn!(
+                            jid = %session.jid,
+                            storage_failed = summary.storage_failed,
+                            "SM janitor: promotion had storage failures; \
+                             preserving session state for retry"
+                        );
+                        continue;
                     }
                     // Promotion finished — now safe to delete the
                     // durable SM row. drain_expired intentionally
@@ -1424,6 +1453,13 @@ async fn create_router(
             // missed sessions detaching mid-shutdown.)
             const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
             const MAX_DRAIN_DURATION: std::time::Duration = std::time::Duration::from_secs(30);
+            // Quiet window: 8 consecutive empty polls × 250ms = ~2s
+            // of registry stability before we declare the drain
+            // complete. Two passes (~500ms) was too aggressive —
+            // `cleanup_connection_shutdown` may take longer than that
+            // to detach + store_session() its sessions during a busy
+            // shutdown. (Qodo review on PR #346.)
+            const QUIET_WINDOW_PASSES: u32 = 8;
             let drain_deadline = std::time::Instant::now() + MAX_DRAIN_DURATION;
             let mut empty_passes = 0u32;
             let mut total_drained = 0usize;
@@ -1431,8 +1467,9 @@ async fn create_router(
                 if std::time::Instant::now() >= drain_deadline {
                     warn!(
                         total_drained,
-                        "Graceful shutdown: drain timeout reached; remaining sessions \
-                         will be lost"
+                        "Graceful shutdown: drain timeout reached. Remaining sessions \
+                         keep their durable SM rows and will be retried on next startup \
+                         via restore_from_persistence + Q6 expiry."
                     );
                     break;
                 }
@@ -1451,9 +1488,9 @@ async fn create_router(
                 };
                 if drained.is_empty() {
                     empty_passes += 1;
-                    if empty_passes >= 2 {
-                        // Two consecutive empty passes — registry is
-                        // stable; safe to stop iterating.
+                    if empty_passes >= QUIET_WINDOW_PASSES {
+                        // Quiet window elapsed — registry has been
+                        // stable for ~2s; safe to stop iterating.
                         break;
                     }
                     tokio::time::sleep(POLL_INTERVAL).await;
@@ -1466,6 +1503,14 @@ async fn create_router(
                     "Graceful shutdown: promoting unacked queues for detached SM sessions"
                 );
                 for session in drained {
+                    // Fail-closed on blocklist load error: degrading
+                    // to `Blocklist::empty()` would silently let
+                    // blocked senders into the recipient's MAM/inbox,
+                    // violating the policy in
+                    // `interpret.rs::offline_recipient_pass_blocklist_storage_error_skips_recipient_persistence`.
+                    // Skip promotion for this session so the durable
+                    // SM row survives for restart-time retry. (Copilot
+                    // review on PR #346.)
                     let blocklist = match drain_state
                         .deps
                         .protocol
@@ -1478,9 +1523,11 @@ async fn create_router(
                             warn!(
                                 jid = %session.jid,
                                 error = %error,
-                                "Graceful shutdown: blocklist load failed; promoting with empty blocklist"
+                                "Graceful shutdown: blocklist load failed; SKIPPING \
+                                 promotion to preserve fail-closed XEP-0191 policy. \
+                                 Durable SM row will be retried on next startup."
                             );
-                            waddle_xmpp::protocol::session_state::Blocklist::empty()
+                            continue;
                         }
                     };
                     let summary = crate::sm_promotion::promote_session_unacked(
@@ -1498,8 +1545,25 @@ async fn create_router(
                         bounced = summary.bounced,
                         dropped = summary.dropped,
                         unparseable = summary.unparseable,
+                        storage_failed = summary.storage_failed,
                         "Graceful shutdown: Q6 promotion completed for session"
                     );
+                    // If pending_delivery storage was transiently
+                    // failing, skip confirm_drained so the durable
+                    // SM row survives for restart-time retry. The
+                    // in-memory drain is already done; the durable
+                    // row is what enables restart recovery via
+                    // `restore_from_persistence`. (Copilot review
+                    // on PR #346.)
+                    if summary.has_storage_failure() {
+                        warn!(
+                            jid = %session.jid,
+                            storage_failed = summary.storage_failed,
+                            "Graceful shutdown: promotion had storage failures; \
+                             preserving durable SM row for restart-time retry"
+                        );
+                        continue;
+                    }
                     // Promotion succeeded for this session — now safe
                     // to delete the durable SM row. The
                     // `drain_all_for_shutdown` method intentionally

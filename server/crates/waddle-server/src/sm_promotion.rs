@@ -52,6 +52,14 @@ pub enum PromotedOutcome {
     /// Skipped — stanza could not be parsed back to a typed value
     /// (corrupt unacked queue entry). Logged for operator visibility.
     Unparseable,
+    /// Storage backend failure — `pending_delivery.insert` returned
+    /// `Err`. The caller MUST treat this as a transient promotion
+    /// failure and SKIP `confirm_drained` for the owning session so
+    /// the durable SM row survives for restart-time retry. (Copilot
+    /// review on PR #346: previously collapsed into `Dropped` so the
+    /// caller would call `confirm_drained` and permanently lose the
+    /// stanza when offline storage was temporarily failing.)
+    StorageFailure,
 }
 
 /// Aggregate outcome of promoting every unacked stanza in a session.
@@ -62,6 +70,11 @@ pub struct PromotionSummary {
     pub bounced: u32,
     pub dropped: u32,
     pub unparseable: u32,
+    /// Number of stanzas that failed to insert into pending storage.
+    /// Non-zero means the session's promotion was lossy: the caller
+    /// MUST NOT call `confirm_drained` for this session, so its
+    /// durable SM row survives for restart-time retry.
+    pub storage_failed: u32,
 }
 
 impl PromotionSummary {
@@ -72,7 +85,17 @@ impl PromotionSummary {
             PromotedOutcome::Bounced => self.bounced += 1,
             PromotedOutcome::Dropped => self.dropped += 1,
             PromotedOutcome::Unparseable => self.unparseable += 1,
+            PromotedOutcome::StorageFailure => self.storage_failed += 1,
         }
+    }
+
+    /// True when at least one stanza in this session failed to
+    /// promote due to a transient storage backend error. Callers
+    /// MUST inspect this before invoking `confirm_drained`: a
+    /// `true` result means the durable SM row must be kept so a
+    /// later janitor pass / restart can retry promotion.
+    pub fn has_storage_failure(&self) -> bool {
+        self.storage_failed > 0
     }
 }
 
@@ -311,9 +334,11 @@ async fn insert_pending(
             warn!(
                 recipient = %recipient,
                 error = %error,
-                "Q6 promotion: pending_delivery insert failed"
+                "Q6 promotion: pending_delivery insert failed; \
+                 caller must NOT confirm_drained so durable SM row survives \
+                 for restart-time retry"
             );
-            PromotedOutcome::Dropped
+            PromotedOutcome::StorageFailure
         }
     }
 }
@@ -909,5 +934,91 @@ mod tests {
         .await;
         assert_eq!(summary.unparseable, 1);
         assert_eq!(summary.queued, 0);
+    }
+
+    #[tokio::test]
+    async fn storage_failure_records_storage_failed_not_dropped() {
+        // Copilot review on PR #346: pending_delivery insert backend
+        // failures must NOT be silently collapsed into Dropped, since
+        // the caller would then call confirm_drained and permanently
+        // lose the unacked stanza. The PromotionSummary must surface
+        // a separate `storage_failed` counter so the caller can keep
+        // the durable SM row for restart-time retry.
+        use async_trait::async_trait;
+        use waddle_xmpp::pending_delivery::storage::{PendingDeliveryStorage, PendingStorageError};
+        use waddle_xmpp::pending_delivery::{InsertOutcome, PendingRow, PendingRowId, SmSessionId};
+
+        struct AlwaysFailingPending;
+        #[async_trait]
+        impl PendingDeliveryStorage for AlwaysFailingPending {
+            async fn insert(&self, _row: PendingRow) -> Result<InsertOutcome, PendingStorageError> {
+                Err(PendingStorageError::Other(
+                    "simulated backend failure".into(),
+                ))
+            }
+            async fn list(
+                &self,
+                _recipient: &BareJid,
+            ) -> Result<Vec<PendingRow>, PendingStorageError> {
+                Ok(vec![])
+            }
+            async fn claim_for_session(
+                &self,
+                _recipient: &BareJid,
+                _session: &SmSessionId,
+            ) -> Result<Vec<PendingRow>, PendingStorageError> {
+                Ok(vec![])
+            }
+            async fn delete_claimed(
+                &self,
+                _session: &SmSessionId,
+            ) -> Result<u64, PendingStorageError> {
+                Ok(0)
+            }
+            async fn delete_row(&self, _id: &PendingRowId) -> Result<u64, PendingStorageError> {
+                Ok(0)
+            }
+            async fn release_claim(
+                &self,
+                _session: &SmSessionId,
+            ) -> Result<u64, PendingStorageError> {
+                Ok(0)
+            }
+            async fn release_row(&self, _id: &PendingRowId) -> Result<u64, PendingStorageError> {
+                Ok(0)
+            }
+            async fn count(&self, _recipient: &BareJid) -> Result<u32, PendingStorageError> {
+                Ok(0)
+            }
+        }
+
+        let storage: Arc<dyn PendingDeliveryStorage> = Arc::new(AlwaysFailingPending);
+        let registry = ConnectionRegistry::new();
+        let session = detached_session_with_unacked(
+            "stream-1",
+            full("alice@example.com/laptop"),
+            vec![dm_xml(
+                "bob@elsewhere/x",
+                "alice@example.com",
+                "transient backend down",
+            )],
+        );
+
+        let summary = promote_session_unacked(
+            &session,
+            &registry,
+            &storage,
+            &Blocklist::empty(),
+            Utc::now(),
+        )
+        .await;
+
+        assert_eq!(summary.storage_failed, 1, "storage failure surfaced");
+        assert_eq!(summary.dropped, 0, "must not collapse into Dropped");
+        assert_eq!(summary.queued, 0);
+        assert!(
+            summary.has_storage_failure(),
+            "has_storage_failure() must be true so caller skips confirm_drained"
+        );
     }
 }
