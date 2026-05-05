@@ -496,7 +496,7 @@ async fn execute_step(ctx: &mut ScenarioContext, step: &Step) -> Result<()> {
                     && body
                         .as_ref()
                         .is_none_or(|body| frame_contains_body(frame, body))
-                    && (!*body_absent || !frame.contains("<body"))
+                    && (!*body_absent || !frame_has_direct_message_body(frame))
                     && from
                         .as_ref()
                         .is_none_or(|from| frame.contains(&format!("from=\"{}", from.bare_jid)))
@@ -504,7 +504,7 @@ async fn execute_step(ctx: &mut ScenarioContext, step: &Step) -> Result<()> {
                     && contains.iter().all(|part| frame.contains(part))
             })
             .await?;
-            if *body_absent && frame.contains("<body") {
+            if *body_absent && frame_has_direct_message_body(&frame) {
                 return Err(anyhow!(
                     "message expectation expected no <body> element, got: {frame}"
                 ));
@@ -542,12 +542,12 @@ async fn execute_step(ctx: &mut ScenarioContext, step: &Step) -> Result<()> {
                     && body
                         .as_ref()
                         .is_none_or(|body| frame_contains_body(frame, body))
-                    && (!*body_absent || !frame.contains("<body"))
+                    && (!*body_absent || !frame_has_direct_message_body(frame))
                     && payload_expectations.iter().all(|part| frame.contains(part))
                     && contains.iter().all(|part| frame.contains(part))
             })
             .await?;
-            if *body_absent && frame.contains("<body") {
+            if *body_absent && frame_has_direct_message_body(&frame) {
                 return Err(anyhow!(
                     "carbon expectation expected no <body> element, got: {frame}"
                 ));
@@ -682,7 +682,7 @@ async fn execute_step(ctx: &mut ScenarioContext, step: &Step) -> Result<()> {
                     && body
                         .as_ref()
                         .is_none_or(|body| frame_contains_body(frame, body))
-                    && (!*body_absent || !frame.contains("<body"))
+                    && (!*body_absent || !frame_has_direct_message_body(frame))
                     && payload_expectations.iter().all(|part| frame.contains(part))
                     && contains.iter().all(|part| frame.contains(part))
             });
@@ -697,7 +697,7 @@ async fn execute_step(ctx: &mut ScenarioContext, step: &Step) -> Result<()> {
             if let Some(body) = body {
                 assert_contains_all(frame, std::slice::from_ref(body), "MAM result body")?;
             }
-            if *body_absent && frame.contains("<body") {
+            if *body_absent && frame_has_direct_message_body(frame) {
                 return Err(anyhow!(
                     "MAM result expected no <body> element, got: {frame}"
                 ));
@@ -1008,7 +1008,7 @@ fn payload_expectations(payloads: &[Payload], ctx: &ScenarioContext) -> Result<V
                     "urn:xmpp:reactions:0".to_string(),
                     format!("id=\"{target_id}\""),
                 ]);
-                expected.extend(emojis.iter().map(|emoji| text_node_marker(emoji)));
+                expected.extend(normalized_reaction_text_markers(&target_id, emojis));
             }
             Payload::ProcessingHint { name } => {
                 let hint = Hint::from(name);
@@ -1084,7 +1084,39 @@ fn stanza_xml(stanza: Stanza) -> Result<String> {
 }
 
 fn frame_contains_body(frame: &str, body: &str) -> bool {
-    frame.contains("<body") && frame.contains(&body_text_marker(body))
+    parse_frame(frame)
+        .is_some_and(|element| element_contains_direct_message_body(&element, Some(body)))
+}
+
+fn frame_has_direct_message_body(frame: &str) -> bool {
+    parse_frame(frame).is_some_and(|element| element_contains_direct_message_body(&element, None))
+}
+
+fn parse_frame(frame: &str) -> Option<Element> {
+    Element::from_str(frame).ok()
+}
+
+fn element_contains_direct_message_body(element: &Element, expected: Option<&str>) -> bool {
+    let this_element_matches = element.name() == "message"
+        && element.children().any(|child| {
+            child.name() == "body"
+                && child.ns() == element.ns()
+                && expected.is_none_or(|body| child.text() == body)
+        });
+
+    this_element_matches
+        || element
+            .children()
+            .any(|child| element_contains_direct_message_body(child, expected))
+}
+
+fn normalized_reaction_text_markers(target_id: &str, emojis: &[String]) -> Vec<String> {
+    let emoji_refs = emojis.iter().map(String::as_str).collect::<Vec<_>>();
+    xep0444::build_reactions_element(target_id, &emoji_refs)
+        .children()
+        .filter(|child| child.name() == "reaction" && child.ns() == xep0444::NS_REACTIONS)
+        .map(|child| text_node_marker(&child.text()))
+        .collect()
 }
 
 fn body_text_marker(body: &str) -> String {

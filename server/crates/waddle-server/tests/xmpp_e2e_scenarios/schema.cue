@@ -84,8 +84,7 @@ package xmpp_e2e_scenarios
 #ExpectMessage: {
 	kind:              "expectMessage"
 	target:            #Actor
-	body?:             string
-	bodyAbsent?:       bool
+	#BodyExpectation
 	from?:             #Actor
 	captureStanzaIdAs?: string
 	captureStanzaIdBy?: string
@@ -98,8 +97,7 @@ package xmpp_e2e_scenarios
 	kind:        "expectCarbon"
 	target:      #Actor
 	carbon:      "sent" | "received"
-	body?:       string
-	bodyAbsent?: bool
+	#BodyExpectation
 	payloads?: [...#ExpectedPayload]
 	contains?: [...string]
 	...
@@ -163,11 +161,18 @@ package xmpp_e2e_scenarios
 
 #ExpectMamResult: {
 	kind:        "expectMamResult"
-	body?:       string
-	bodyAbsent?: bool
+	#BodyExpectation
 	payloads?: [...#ExpectedPayload]
 	contains?: [...string]
 	...
+}
+
+#BodyExpectation: {
+	body?:       string
+	bodyAbsent?: false
+} | {
+	body?:       _|_
+	bodyAbsent: true
 }
 
 #ExpectNoStanza: {
