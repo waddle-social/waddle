@@ -728,6 +728,12 @@ pub async fn start_with_config(
     let acme_http01_challenge_service = acme_runtime
         .as_ref()
         .map(|runtime| runtime.http01_challenge_service.clone());
+    // Coordinates the Q6 SM-drain task's completion back to the HTTP
+    // server's graceful_shutdown closure. The drain task notifies on
+    // exit (RAII guard); the HTTP graceful_shutdown awaits it after
+    // stop_token cancels so axum doesn't tear down mid-drain.
+    let drain_complete = Arc::new(tokio::sync::Notify::new());
+    let http_drain_complete = Arc::clone(&drain_complete);
     let http_handle = tokio::spawn(async move {
         start_http_server(HttpServerDeps {
             state: http_state,
@@ -737,6 +743,7 @@ pub async fn start_with_config(
             acme_http01_challenge_service,
             listener: http_listener,
             stop_token: http_stop,
+            drain_complete: http_drain_complete,
         })
         .await
     });
@@ -789,6 +796,11 @@ struct HttpServerDeps {
     acme_http01_challenge_service: Option<TowerHttp01ChallengeService>,
     listener: tokio::net::TcpListener,
     stop_token: tokio_util::sync::CancellationToken,
+    /// Q6 graceful-shutdown drain completion signal — fired by the
+    /// drain task when it finishes promoting unacked queues. The
+    /// HTTP server's graceful_shutdown closure waits on this after
+    /// stop_token cancels so the runtime doesn't tear down mid-drain.
+    drain_complete: Arc<tokio::sync::Notify>,
 }
 
 /// Start the HTTP server with graceful shutdown support.
@@ -801,6 +813,7 @@ async fn start_http_server(deps: HttpServerDeps) -> Result<()> {
         acme_http01_challenge_service,
         listener,
         stop_token,
+        drain_complete,
     } = deps;
 
     let app = create_router(
@@ -810,6 +823,7 @@ async fn start_http_server(deps: HttpServerDeps) -> Result<()> {
         mam_storage,
         acme_http01_challenge_service,
         stop_token.clone(),
+        drain_complete.clone(),
     )
     .await?;
 
@@ -827,7 +841,14 @@ async fn start_http_server(deps: HttpServerDeps) -> Result<()> {
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
             stop_token.cancelled().await;
-            info!("HTTP server received shutdown signal, draining connections");
+            info!("HTTP server received shutdown signal; awaiting SM Q6 drain");
+            // Wait for the SM-expiry drain task spawned in
+            // create_router to finish promoting unacked queues
+            // before axum tears down. Without this await, the
+            // runtime exits before drain completes and we lose
+            // queued deliveries (Copilot review on PR #346).
+            drain_complete.notified().await;
+            info!("HTTP server: SM drain complete; draining connections");
         })
         .await?;
 
@@ -1037,6 +1058,7 @@ async fn create_router(
     mam_storage: Arc<dyn MamStorage>,
     acme_http01_challenge_service: Option<TowerHttp01ChallengeService>,
     shutdown_stop_token: tokio_util::sync::CancellationToken,
+    drain_complete: Arc<tokio::sync::Notify>,
 ) -> Result<Router> {
     // Create auth broker state
     let encryption_key = server_config.session_key.clone();
@@ -1349,7 +1371,22 @@ async fn create_router(
     {
         let drain_state = Arc::clone(&websocket_state);
         let drain_token = shutdown_stop_token.clone();
+        let drain_notify = Arc::clone(&drain_complete);
         tokio::spawn(async move {
+            // Always notify_one on exit (success or early-return) so
+            // the runtime's awaiting code never blocks indefinitely
+            // on drain completion. RAII via a guard struct ensures
+            // notification fires even on panic / early continue
+            // (Copilot review on PR #346: previous fire-and-forget
+            // task was raced by runtime tear-down).
+            struct NotifyOnDrop(Arc<tokio::sync::Notify>);
+            impl Drop for NotifyOnDrop {
+                fn drop(&mut self) {
+                    self.0.notify_one();
+                }
+            }
+            let _notify_guard = NotifyOnDrop(drain_notify);
+
             drain_token.cancelled().await;
             info!("Graceful shutdown: starting SM session Q6 drain");
             let drained = match drain_state
@@ -2641,6 +2678,7 @@ mod tests {
             mam_storage,
             None,
             tokio_util::sync::CancellationToken::new(),
+            std::sync::Arc::new(tokio::sync::Notify::new()),
         )
         .await
         .unwrap();
@@ -2677,6 +2715,7 @@ mod tests {
             mam_storage,
             None,
             tokio_util::sync::CancellationToken::new(),
+            std::sync::Arc::new(tokio::sync::Notify::new()),
         )
         .await
         .unwrap();
@@ -2706,6 +2745,7 @@ mod tests {
             mam_storage,
             None,
             tokio_util::sync::CancellationToken::new(),
+            std::sync::Arc::new(tokio::sync::Notify::new()),
         )
         .await
         .unwrap();
@@ -2743,6 +2783,7 @@ mod tests {
             mam_storage,
             None,
             tokio_util::sync::CancellationToken::new(),
+            std::sync::Arc::new(tokio::sync::Notify::new()),
         )
         .await
         .unwrap();
@@ -2777,6 +2818,7 @@ mod tests {
             mam_storage,
             None,
             tokio_util::sync::CancellationToken::new(),
+            std::sync::Arc::new(tokio::sync::Notify::new()),
         )
         .await
         .unwrap();
@@ -2806,6 +2848,7 @@ mod tests {
             mam_storage,
             None,
             tokio_util::sync::CancellationToken::new(),
+            std::sync::Arc::new(tokio::sync::Notify::new()),
         )
         .await
         .unwrap();

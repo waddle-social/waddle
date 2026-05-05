@@ -107,8 +107,8 @@ pub async fn promote_session_unacked(
     let online = build_online_resources(registry, &recipient_bare);
 
     for (sequence, stanza_xml) in &session.unacked_stanzas {
-        let outcome = match parse_message(stanza_xml) {
-            Some(message) => {
+        let outcome = match parse_stanza(stanza_xml) {
+            Some(Stanza::Message(message)) => {
                 promote_one(
                     message,
                     *sequence,
@@ -120,6 +120,8 @@ pub async fn promote_session_unacked(
                 )
                 .await
             }
+            Some(Stanza::Iq(iq)) => promote_iq(iq, registry).await,
+            Some(Stanza::Presence(presence)) => promote_presence(presence, registry).await,
             None => PromotedOutcome::Unparseable,
         };
         debug!(
@@ -153,18 +155,38 @@ async fn promote_one(
     let routing: DmRouting = classify_dm_intake(&message, online, blocklist);
 
     // Step 1: alt-resource — if the classifier says live-deliver,
-    // route to the active resource set via the connection registry.
+    // route to the recipient's connected resource(s) via the
+    // ConnectionRegistry. Locked Q6 = B step 1 (alt-resource) +
+    // RFC 6121 §8.5.2 (bare-JID fanout to ALL non-negative-priority
+    // resources, not just the highest-priority one — Copilot
+    // review on PR #346: earlier code took only the first via
+    // `next()` which silently lost deliveries on multi-resource
+    // users).
     if !matches!(routing.live, LiveDecision::None) {
-        if let Some(target) = pick_live_target(&routing, &message, registry) {
-            if let SendResult::Sent = registry
-                .send_to(&target, Stanza::Message(message.clone()))
-                .await
-            {
+        let targets = collect_live_targets(&routing, &message, registry);
+        if !targets.is_empty() {
+            // Send to all eligible resources; mark redelivered if at
+            // least one send succeeds (matches the live-route fanout
+            // semantics in interpret.rs's `RouteToConnection` arm).
+            let mut delivered_to: Option<FullJid> = None;
+            for target in targets {
+                if matches!(
+                    registry
+                        .send_to(&target, Stanza::Message(message.clone()))
+                        .await,
+                    SendResult::Sent
+                ) && delivered_to.is_none()
+                {
+                    delivered_to = Some(target);
+                }
+            }
+            if let Some(target) = delivered_to {
                 return PromotedOutcome::Redelivered { to: target };
             }
         }
-        // Live decision but no actual send target — fall through to
-        // offline storage if the classifier also approved that.
+        // Classifier said deliver but no live target took the stanza
+        // (full-JID target had gone offline by send time, or the
+        // socket buffer rejected). Fall through to offline storage.
     }
 
     // Step 2: offline storage — if the classifier marked the stanza
@@ -364,36 +386,116 @@ fn build_online_resources(
     OnlineResources::from_pairs(pairs)
 }
 
-/// Pick a live-delivery target full JID per the classifier's
-/// `LiveDecision`. Returns `None` if no online resource matches.
-fn pick_live_target(
+/// Collect every live-delivery target per the classifier's
+/// `LiveDecision`. Returns an empty vec if no online resource
+/// matches.
+///
+/// For `DeliverToFull`: if the addressed full JID is connected,
+/// route there only. If it isn't (the original-detached resource is
+/// gone), fall back to RFC 6121 §8.5.3's bare-JID fanout — locked
+/// Q6 = B intent: the message gets to SOME resource of the
+/// recipient, not just the original target.
+///
+/// For `DeliverToBareWithFanout`: route to ALL non-negative-priority
+/// resources, matching `interpret.rs`'s live-route fanout (Copilot
+/// review on PR #346: earlier code took only the first via `next()`
+/// which lost deliveries on multi-resource users).
+fn collect_live_targets(
     routing: &DmRouting,
     message: &xmpp_parsers::message::Message,
     registry: &ConnectionRegistry,
-) -> Option<FullJid> {
+) -> Vec<FullJid> {
+    let bare_target = match message.to.as_ref() {
+        Some(jid) => jid.to_bare(),
+        None => return Vec::new(),
+    };
     match routing.live {
-        LiveDecision::None => None,
-        LiveDecision::DeliverToFull => message
-            .to
-            .as_ref()
-            .and_then(|jid| jid.clone().try_into_full().ok())
-            .filter(|full| registry.get_entry(full).is_some()),
-        LiveDecision::DeliverToBareWithFanout => message.to.as_ref().and_then(|jid| {
-            let bare = jid.to_bare();
-            registry
-                .select_routable_resources_for_user(&bare)
-                .into_iter()
-                .next()
-        }),
+        LiveDecision::None => Vec::new(),
+        LiveDecision::DeliverToFull => {
+            let full_target = message
+                .to
+                .as_ref()
+                .and_then(|jid| jid.clone().try_into_full().ok())
+                .filter(|full| registry.get_entry(full).is_some());
+            if let Some(full) = full_target {
+                vec![full]
+            } else {
+                // Addressed resource has gone offline since the
+                // classifier ran (or before promotion fired).
+                // Fall back to bare-JID fanout per RFC 6121 §8.5.3
+                // ("treat as if addressed to bare JID").
+                registry.select_routable_resources_for_user(&bare_target)
+            }
+        }
+        LiveDecision::DeliverToBareWithFanout => {
+            registry.select_routable_resources_for_user(&bare_target)
+        }
     }
 }
 
-fn parse_message(xml: &str) -> Option<xmpp_parsers::message::Message> {
+/// Parse a wire-XML stanza back to its typed [`Stanza`] variant.
+/// Returns `None` for unparseable XML or unknown root elements.
+/// Handles `<message/>`, `<iq/>`, and `<presence/>` — the three
+/// stanza kinds the SM unacked queue can hold (Copilot review on
+/// PR #346: previous code only parsed `<message/>` and silently
+/// dropped IQ/presence as Unparseable).
+fn parse_stanza(xml: &str) -> Option<Stanza> {
     let element: xmpp_parsers::minidom::Element = xml.parse().ok()?;
-    if element.name() != "message" {
-        return None;
+    match element.name() {
+        "message" => xmpp_parsers::message::Message::try_from(element)
+            .ok()
+            .map(Stanza::Message),
+        "iq" => xmpp_parsers::iq::Iq::try_from(element).ok().map(Stanza::Iq),
+        "presence" => xmpp_parsers::presence::Presence::try_from(element)
+            .ok()
+            .map(Stanza::Presence),
+        _ => None,
     }
-    xmpp_parsers::message::Message::try_from(element).ok()
+}
+
+/// Promote an unacked `<iq/>` per the unavailable-resource semantics.
+/// IQs cannot be queued offline (XEP-0160 §3 narrative explicitly
+/// scopes offline storage to message stanzas; XEP-0160 §1 line 63
+/// excludes IQ/presence). Try alt-resource live-redelivery; drop
+/// otherwise.
+async fn promote_iq(iq: xmpp_parsers::iq::Iq, registry: &ConnectionRegistry) -> PromotedOutcome {
+    let target = iq
+        .to
+        .as_ref()
+        .and_then(|jid| jid.clone().try_into_full().ok())
+        .filter(|full| registry.get_entry(full).is_some());
+    if let Some(target) = target {
+        if matches!(
+            registry.send_to(&target, Stanza::Iq(iq)).await,
+            SendResult::Sent
+        ) {
+            return PromotedOutcome::Redelivered { to: target };
+        }
+    }
+    PromotedOutcome::Dropped
+}
+
+/// Promote an unacked `<presence/>` per the unavailable-resource
+/// semantics. Presence is not stored offline (RFC 6121 §8.5.2.1.4).
+/// Try alt-resource live-redelivery; drop otherwise.
+async fn promote_presence(
+    presence: xmpp_parsers::presence::Presence,
+    registry: &ConnectionRegistry,
+) -> PromotedOutcome {
+    let target = presence
+        .to
+        .as_ref()
+        .and_then(|jid| jid.clone().try_into_full().ok())
+        .filter(|full| registry.get_entry(full).is_some());
+    if let Some(target) = target {
+        if matches!(
+            registry.send_to(&target, Stanza::Presence(presence)).await,
+            SendResult::Sent
+        ) {
+            return PromotedOutcome::Redelivered { to: target };
+        }
+    }
+    PromotedOutcome::Dropped
 }
 
 #[cfg(test)]
@@ -600,6 +702,180 @@ mod tests {
         assert_eq!(summary.dropped, 1);
         assert_eq!(summary.queued, 0);
         assert_eq!(summary.bounced, 0);
+    }
+
+    #[tokio::test]
+    async fn full_jid_target_falls_back_to_bare_jid_fanout() {
+        // Locked Q6 = B + RFC 6121 §8.5.3: when the addressed full
+        // JID has gone offline but other resources of the recipient
+        // are online, the unacked stanza must reach SOME resource
+        // (not just be dropped). This tests the bare-JID fallback
+        // path when classifier returns DeliverToFull.
+        let storage: Arc<dyn PendingDeliveryStorage> =
+            Arc::new(InMemoryPendingDeliveryStorage::unlimited());
+        let registry = ConnectionRegistry::new();
+        // Alice's web resource is online; laptop is detached.
+        let alt = full("alice@example.com/web");
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        registry.register(alt.clone(), tx);
+        registry.update_presence(&alt, true, 1);
+
+        // Stanza was originally addressed to alice/laptop (full JID).
+        let xml = {
+            let mut m = xmpp_parsers::message::Message::new(Some(
+                "alice@example.com/laptop".parse::<jid::Jid>().unwrap(),
+            ));
+            m.from = Some("bob@elsewhere/x".parse::<jid::Jid>().unwrap());
+            m.type_ = xmpp_parsers::message::MessageType::Chat;
+            m.bodies
+                .insert(String::new(), xmpp_parsers::message::Body("hi".to_string()));
+            let element: xmpp_parsers::minidom::Element = m.into();
+            let mut buf = Vec::new();
+            element.write_to(&mut buf).unwrap();
+            String::from_utf8(buf).unwrap()
+        };
+
+        let session =
+            detached_session_with_unacked("stream-1", full("alice@example.com/laptop"), vec![xml]);
+
+        let summary = promote_session_unacked(
+            &session,
+            &registry,
+            &storage,
+            &Blocklist::empty(),
+            Utc::now(),
+        )
+        .await;
+
+        assert_eq!(summary.redelivered, 1);
+        assert_eq!(summary.queued, 0);
+        assert!(rx.try_recv().is_ok(), "stanza redelivered to /web");
+    }
+
+    #[tokio::test]
+    async fn bare_jid_target_fans_out_to_all_routable_resources() {
+        // Locked Q6 step 1 + RFC 6121 §8.5.2: bare-JID-addressed
+        // stanzas fan out to every non-negative-priority resource,
+        // not just the highest-priority one. (Copilot review on
+        // PR #346: prior code only delivered to one.)
+        let storage: Arc<dyn PendingDeliveryStorage> =
+            Arc::new(InMemoryPendingDeliveryStorage::unlimited());
+        let registry = ConnectionRegistry::new();
+        let web = full("alice@example.com/web");
+        let mobile = full("alice@example.com/mobile");
+        let (tx_web, mut rx_web) = tokio::sync::mpsc::channel(8);
+        let (tx_mobile, mut rx_mobile) = tokio::sync::mpsc::channel(8);
+        registry.register(web.clone(), tx_web);
+        registry.register(mobile.clone(), tx_mobile);
+        registry.update_presence(&web, true, 1);
+        registry.update_presence(&mobile, true, 1);
+
+        let session = detached_session_with_unacked(
+            "stream-laptop",
+            full("alice@example.com/laptop"),
+            vec![dm_xml("bob@elsewhere/x", "alice@example.com", "fanout")],
+        );
+
+        let summary = promote_session_unacked(
+            &session,
+            &registry,
+            &storage,
+            &Blocklist::empty(),
+            Utc::now(),
+        )
+        .await;
+
+        assert_eq!(summary.redelivered, 1);
+        // Both resources receive the stanza.
+        assert!(rx_web.try_recv().is_ok(), "web received fanout");
+        assert!(rx_mobile.try_recv().is_ok(), "mobile received fanout");
+    }
+
+    #[tokio::test]
+    async fn iq_unacked_promoted_to_alt_resource_when_addressed_resource_online() {
+        let storage: Arc<dyn PendingDeliveryStorage> =
+            Arc::new(InMemoryPendingDeliveryStorage::unlimited());
+        let registry = ConnectionRegistry::new();
+        let target = full("alice@example.com/laptop");
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        registry.register(target.clone(), tx);
+
+        // Build an IQ result addressed to alice/laptop.
+        let iq_xml = {
+            let iq = xmpp_parsers::iq::Iq {
+                from: Some("server.example/srv".parse().unwrap()),
+                to: Some("alice@example.com/laptop".parse().unwrap()),
+                id: "iq-1".to_string(),
+                payload: xmpp_parsers::iq::IqType::Result(None),
+            };
+            let element: xmpp_parsers::minidom::Element = iq.into();
+            let mut buf = Vec::new();
+            element.write_to(&mut buf).unwrap();
+            String::from_utf8(buf).unwrap()
+        };
+
+        let session = detached_session_with_unacked(
+            "stream-1",
+            full("alice@example.com/laptop"),
+            vec![iq_xml],
+        );
+
+        let summary = promote_session_unacked(
+            &session,
+            &registry,
+            &storage,
+            &Blocklist::empty(),
+            Utc::now(),
+        )
+        .await;
+
+        assert_eq!(summary.redelivered, 1);
+        assert_eq!(
+            summary.unparseable, 0,
+            "IQ must not be classified Unparseable"
+        );
+        assert!(
+            rx.try_recv().is_ok(),
+            "IQ redelivered to addressed resource"
+        );
+    }
+
+    #[tokio::test]
+    async fn iq_unacked_dropped_when_no_resource_online() {
+        // IQs cannot be queued offline (XEP-0160 §1 line 63).
+        let storage: Arc<dyn PendingDeliveryStorage> =
+            Arc::new(InMemoryPendingDeliveryStorage::unlimited());
+        let registry = ConnectionRegistry::new();
+        let iq_xml = {
+            let iq = xmpp_parsers::iq::Iq {
+                from: Some("server.example/srv".parse().unwrap()),
+                to: Some("alice@example.com/laptop".parse().unwrap()),
+                id: "iq-1".to_string(),
+                payload: xmpp_parsers::iq::IqType::Result(None),
+            };
+            let element: xmpp_parsers::minidom::Element = iq.into();
+            let mut buf = Vec::new();
+            element.write_to(&mut buf).unwrap();
+            String::from_utf8(buf).unwrap()
+        };
+
+        let session = detached_session_with_unacked(
+            "stream-1",
+            full("alice@example.com/laptop"),
+            vec![iq_xml],
+        );
+
+        let summary = promote_session_unacked(
+            &session,
+            &registry,
+            &storage,
+            &Blocklist::empty(),
+            Utc::now(),
+        )
+        .await;
+
+        assert_eq!(summary.dropped, 1);
+        assert_eq!(summary.queued, 0, "IQs never go to offline storage");
     }
 
     #[tokio::test]
