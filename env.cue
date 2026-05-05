@@ -14,7 +14,6 @@ schema.#Base & {
 		edition: "2021"
 		includes: [
 			"server/**/*.rs",
-			"bench-storage-backends/**/*.rs",
 		]
 	}
 
