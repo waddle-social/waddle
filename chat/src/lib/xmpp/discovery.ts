@@ -93,7 +93,7 @@ async function sendDiscoInfo(xmpp: HybridClient, to: string, node?: string): Pro
     const id = crypto.randomUUID();
     const nodeAttr = node ? ` node="${node}"` : "";
     const responseXml = await xmpp.send_raw_iq(`<iq type="get" id="${id}" to="${to}"><query xmlns="${DISCO_INFO_NS}"${nodeAttr}/></iq>`);
-    const query = parseXml(responseXml).documentElement.querySelector(`query[xmlns="${DISCO_INFO_NS}"]`);
+    const query = parseXml(responseXml).getElementsByTagNameNS(DISCO_INFO_NS, "query")[0];
     if (!query) return null;
     const fields = new Map<string, string>();
     for (const form of elementChildren(query, "x", DATAFORM_NS)) {
@@ -126,9 +126,20 @@ async function sendDiscoItems(xmpp: HybridClient, to: string, node?: string): Pr
   if (xmpp.send_raw_iq) {
     const id = crypto.randomUUID();
     const nodeAttr = node ? ` node="${node}"` : "";
-    const responseXml = await xmpp.send_raw_iq(`<iq type="get" id="${id}" to="${to}"><query xmlns="${DISCO_ITEMS_NS}"${nodeAttr}/></iq>`);
+    const xml = `<iq type="get" id="${id}" to="${to}"><query xmlns="${DISCO_ITEMS_NS}"${nodeAttr}/></iq>`;
+    let responseXml: string;
+    try {
+      responseXml = await xmpp.send_raw_iq(xml);
+    } catch (err) {
+      console.error("[disco] send_raw_iq items FAILED", { to, err });
+      throw err;
+    }
     const doc = parseXml(responseXml);
-    return Array.from(doc.querySelectorAll(`query[xmlns="${DISCO_ITEMS_NS}"] > item`)).map((item) => ({ jid: item.getAttribute("jid") ?? undefined, name: item.getAttribute("name") ?? undefined, node: item.getAttribute("node") ?? undefined }));
+    const query = doc.getElementsByTagNameNS(DISCO_ITEMS_NS, "query")[0];
+    if (!query) return [];
+    return Array.from(query.getElementsByTagNameNS(DISCO_ITEMS_NS, "item"))
+      .filter((item) => item.parentNode === query)
+      .map((item) => ({ jid: item.getAttribute("jid") ?? undefined, name: item.getAttribute("name") ?? undefined, node: item.getAttribute("node") ?? undefined }));
   }
   return (await legacyClient(xmpp).getDiscoItems?.(to, node))?.items ?? [];
 }
