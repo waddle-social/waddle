@@ -24,6 +24,7 @@
 //! - `SmSessionRegistry` - Server-wide registry for detached resumable sessions
 //! - `UnackedQueue` - Queue of unacknowledged outbound stanzas
 
+pub mod persistence;
 mod session_registry;
 mod unacked_queue;
 
