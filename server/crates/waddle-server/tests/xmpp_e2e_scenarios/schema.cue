@@ -26,6 +26,8 @@ package xmpp_e2e_scenarios
 
 #Step:
 	#EnableCarbons |
+	#ConnectActor |
+	#DisconnectActor |
 	#SendMessage |
 	#ExpectMessage |
 	#ExpectCarbon |
@@ -40,6 +42,18 @@ package xmpp_e2e_scenarios
 
 #EnableCarbons: {
 	kind:  "enableCarbons"
+	actor: #Actor
+	...
+}
+
+#ConnectActor: {
+	kind:  "connectActor"
+	actor: #Actor
+	...
+}
+
+#DisconnectActor: {
+	kind:  "disconnectActor"
 	actor: #Actor
 	...
 }
@@ -68,20 +82,24 @@ package xmpp_e2e_scenarios
 }
 
 #ExpectMessage: {
-	kind:   "expectMessage"
-	target: #Actor
-	body?:  string
-	from?:  #Actor
+	kind:              "expectMessage"
+	target:            #Actor
+	body?:             string
+	bodyAbsent?:       bool
+	from?:             #Actor
+	captureStanzaIdAs?: string
+	captureStanzaIdBy?: string
 	payloads?: [...#ExpectedPayload]
 	contains?: [...string]
 	...
 }
 
 #ExpectCarbon: {
-	kind:   "expectCarbon"
-	target: #Actor
-	carbon: "sent" | "received"
-	body?:  string
+	kind:        "expectCarbon"
+	target:      #Actor
+	carbon:      "sent" | "received"
+	body?:       string
+	bodyAbsent?: bool
 	payloads?: [...#ExpectedPayload]
 	contains?: [...string]
 	...
@@ -144,8 +162,9 @@ package xmpp_e2e_scenarios
 }
 
 #ExpectMamResult: {
-	kind: "expectMamResult"
-	body?: string
+	kind:        "expectMamResult"
+	body?:       string
+	bodyAbsent?: bool
 	payloads?: [...#ExpectedPayload]
 	contains?: [...string]
 	...
@@ -160,13 +179,36 @@ package xmpp_e2e_scenarios
 	...
 }
 
-#Payload: #FileShare | #LinkMetadata | #MessageCorrection
+#Payload: #FileShare | #LinkMetadata | #MessageCorrection | #Reactions | #ProcessingHint
 
-#ExpectedPayload: #FileShare | #LinkMetadata | #MessageCorrection
+#ExpectedPayload: #FileShare | #LinkMetadata | #MessageCorrection | #Reactions | #ProcessingHint
 
 #MessageCorrection: {
 	kind: "messageCorrection"
 	id:   string
+	...
+}
+
+#Reactions: {
+	kind: "reactions"
+	(#ReactionId | #ReactionIdFrom)
+	emojis: [...string]
+	...
+}
+
+#ReactionId: {
+	id: string
+	idFrom?: _|_
+}
+
+#ReactionIdFrom: {
+	id?: _|_
+	idFrom: string
+}
+
+#ProcessingHint: {
+	kind: "processingHint"
+	name: "no-permanent-store" | "no-store" | "no-copy" | "store"
 	...
 }
 
