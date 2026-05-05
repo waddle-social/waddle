@@ -79,13 +79,13 @@ describe("offline outbound queue replay", () => {
       "dm-2",
     ]);
 
-    // stanza.js calls emit(...) on its event bus; the BrowserXmppClient
+    // The XMPP client emits ack events; the BrowserXmppClient
     // wires "message:acked" in `wireEvents`, and that's what drives
     // removal from the persisted queue post-fix. For the flush test we
-    // drive sendMessage directly and simulate the ack afterwards.
+    // drive the Rust send method directly and simulate the ack afterwards.
     const handlers = new Map<string, Array<(payload: unknown) => void>>();
     const xmpp = {
-      sendMessage: mock(() => undefined),
+      send_chat_message: mock(async (_peer: string, _body: string, opts: { stanza_id?: string }) => opts.stanza_id),
       on(event: string, handler: (payload: unknown) => void) {
         const list = handlers.get(event) ?? [];
         list.push(handler);
@@ -113,7 +113,7 @@ describe("offline outbound queue replay", () => {
       { id: "dm-1", status: "sending" },
       { id: "dm-2", status: "sending" },
     ]);
-    expect(xmpp.sendMessage.mock.calls.map((call) => (call[0] as { id: string }).id)).toEqual([
+    expect(xmpp.send_chat_message.mock.calls.map((call) => (call[2] as { stanza_id?: string }).stanza_id)).toEqual([
       "dm-1",
       "dm-2",
     ]);
@@ -124,10 +124,10 @@ describe("offline outbound queue replay", () => {
     ).toEqual(["dm-1", "dm-2"]);
 
     // A second flush in the same session must NOT re-send: both entries
-    // are already inflight (handed to stanza.js, ack pending).
-    xmpp.sendMessage.mockClear();
+    // are already inflight (handed to the XMPP client, ack pending).
+    xmpp.send_chat_message.mockClear();
     await (client as unknown as { flushQueuedDirectMessages: () => Promise<void> }).flushQueuedDirectMessages();
-    expect(xmpp.sendMessage.mock.calls).toEqual([]);
+    expect(xmpp.send_chat_message.mock.calls).toEqual([]);
 
     // Now simulate the server acking dm-1 — that entry drops out of the
     // persisted queue; dm-2 is still pending.
@@ -160,7 +160,7 @@ describe("offline outbound queue replay", () => {
 
     const handlers = new Map<string, Array<(payload: unknown) => void>>();
     const xmpp = {
-      sendMessage: mock(() => undefined),
+      send_groupchat_message: mock(async (_room: string, _body: string, opts: { stanza_id?: string }) => opts.stanza_id),
       on(event: string, handler: (payload: unknown) => void) {
         const list = handlers.get(event) ?? [];
         list.push(handler);
@@ -180,7 +180,7 @@ describe("offline outbound queue replay", () => {
 
     await (client as unknown as { flushQueuedRoomMessages: (roomJid: string) => Promise<void> }).flushQueuedRoomMessages(roomJid);
 
-    expect(xmpp.sendMessage.mock.calls.map((call) => (call[0] as { id: string }).id)).toEqual([
+    expect(xmpp.send_groupchat_message.mock.calls.map((call) => (call[2] as { stanza_id?: string }).stanza_id)).toEqual([
       "room-1",
       "room-2",
     ]);

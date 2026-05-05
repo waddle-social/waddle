@@ -826,7 +826,7 @@ export function useMessaging(
   }
 
   /**
-   * XEP-0198: stanza.js gave up on the stanza (resume failed or no
+   * XEP-0198: the XMPP client gave up on the stanza (resume failed or no
    * resumable transport). Mark the message as failed so the UI can
    * surface a retry affordance. Kept in place so the user can see what
    * did not go through.

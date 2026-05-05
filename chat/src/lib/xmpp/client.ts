@@ -40,6 +40,7 @@ import { mergeOccupantHats, roleHatsForOccupant } from "./occupant-badges";
 import { prepareEncryptedAttachmentUpload } from "./encrypted-attachments";
 import { discoverChannels, discoverTopology } from "./discovery";
 import { discoverUploadService, uploadFile, type UploadProgress } from "./file-upload";
+import { ReconnectCatchup } from "./reconnect-catchup";
 import {
   discoverExtensionCommands,
   discoverExtensionRoutes,
@@ -88,9 +89,7 @@ type CompatEmitter = {
   off?: (event: string, handler: (...args: any[]) => void) => void;
 };
 
-type CompatXmpp = Partial<WasmClient> & CompatEmitter & {
-  sendMessage?: (message: Record<string, unknown>) => void;
-  sendIQ?: (iq: Record<string, unknown>) => Promise<unknown>;
+type XmppClientInstance = Partial<WasmClient> & CompatEmitter & {
   joinRoom?: (roomJid: string, nick: string) => Promise<void>;
   leaveRoom?: (roomJid: string, nick: string) => Promise<void>;
   set_on_connected?: (cb: () => void) => void;
@@ -450,7 +449,7 @@ export class BrowserXmppClient {
   private messageDeliveryFailureHandler: ((messageId: string) => void) | null = null;
   private queuedMessageStatusHandler: ((messageId: string, status: "queued" | "sending") => void) | null = null;
   private sessionLifecycleHandler: ((event: SessionLifecycleEvent) => void) | null = null;
-  private xmpp: CompatXmpp | null = null;
+  private xmpp: XmppClientInstance | null = null;
   private connectPromise: Promise<void> | null = null;
   private connected = false;
   private destroying = false;
@@ -479,18 +478,7 @@ export class BrowserXmppClient {
   private readonly errorHooks: Array<(event: XmppErrorEvent) => void> = [];
   private readonly roomJoinWaiters = new Map<string, { resolve: () => void; reject: (error: Error) => void }>();
   private readonly carbonDedupIds = new Set<string>();
-  readonly catchup = {
-    latestDmSeenAt: new Map<string, string>(),
-    primed: false,
-    recordDmSeen: (peer: string, timestamp: string) => {
-      this.catchup.latestDmSeenAt.set(barePeerJid(peer), timestamp);
-    },
-    onSessionStarted: () => {
-      const shouldRun = this.catchup.primed;
-      this.catchup.primed = true;
-      return shouldRun ? Array.from(this.catchup.latestDmSeenAt.entries()) : [];
-    },
-  };
+  readonly catchup = new ReconnectCatchup();
 
   constructor(session: WaddleSession) { this.session = session; }
 
@@ -590,7 +578,7 @@ export class BrowserXmppClient {
     }, delay);
   }
 
-  private async enableCarbons(xmpp: CompatXmpp & { enableCarbons?: () => Promise<void> }) {
+  private async enableCarbons(xmpp: XmppClientInstance & { enableCarbons?: () => Promise<void> }) {
     if (xmpp.enableCarbons) {
       try { await xmpp.enableCarbons(); } catch {}
       return;
@@ -607,7 +595,7 @@ export class BrowserXmppClient {
       this.session.session_id,
       this.resource,
     );
-    const xmpp = new mod.WaddleClient(config) as unknown as CompatXmpp;
+    const xmpp = new mod.WaddleClient(config) as unknown as XmppClientInstance;
     this.xmpp = xmpp;
     this.wireEvents(xmpp);
     await xmpp.connect?.();
@@ -818,76 +806,59 @@ export class BrowserXmppClient {
     return { id: queuedId, state: "queued" };
   }
 
-  private async compatSendGroupMessage(xmpp: CompatXmpp, roomJid: string, body: string, opts: SendGroupMessageOptions): Promise<string | null> {
+  private async compatSendGroupMessage(xmpp: XmppClientInstance, roomJid: string, body: string, opts: SendGroupMessageOptions): Promise<string | null> {
     const { effectiveBody, replyFallbackLength, rebasedMarkup } = encodeBodyForSend(body, opts.replyTo, opts.markup);
     const wasmOpts = buildWasmSendOptions({ ...opts, markup: rebasedMarkup }, replyFallbackLength);
     if (xmpp.send_groupchat_message) return await xmpp.send_groupchat_message(roomJid, effectiveBody, wasmOpts) as string;
-    if (xmpp.sendMessage) {
-      xmpp.sendMessage({ id: wasmOpts.stanza_id, to: roomJid, type: "groupchat", body: effectiveBody, ...(wasmOpts.subject ? { subject: wasmOpts.subject } : {}), ...(opts.threadId ? { thread: opts.threadId } : {}), ...(opts.threadCreate ? { threadCreate: opts.threadCreate } : {}), ...(opts.threadReply ? { threadReply: opts.threadReply } : {}) });
-      return wasmOpts.stanza_id ?? null;
-    }
     throw new Error("XMPP session is not ready");
   }
 
-  private async compatSendDirectMessage(xmpp: CompatXmpp, peerJid: string, body: string, opts: SendDirectMessageOptions): Promise<string | null> {
+  private async compatSendDirectMessage(xmpp: XmppClientInstance, peerJid: string, body: string, opts: SendDirectMessageOptions): Promise<string | null> {
     const { effectiveBody, replyFallbackLength, rebasedMarkup } = encodeBodyForSend(body, opts.replyTo, opts.markup);
     const wasmOpts = buildWasmSendOptions({ ...opts, markup: rebasedMarkup }, replyFallbackLength);
     if (xmpp.send_chat_message) return await xmpp.send_chat_message(peerJid, effectiveBody, wasmOpts) as string;
-    if (xmpp.sendMessage) {
-      xmpp.sendMessage({ id: wasmOpts.stanza_id, to: peerJid, type: "chat", body: effectiveBody });
-      return wasmOpts.stanza_id ?? null;
-    }
     throw new Error("XMPP session is not ready");
   }
 
-  private async compatSendChatState(xmpp: CompatXmpp, to: string, type: "chat" | "groupchat", state: ChatStateType) {
+  private async compatSendChatState(xmpp: XmppClientInstance, to: string, type: "chat" | "groupchat", state: ChatStateType) {
     if (xmpp.send_chat_state) return xmpp.send_chat_state(to, type, state);
-    if (xmpp.sendMessage) { xmpp.sendMessage({ to, type, chatState: state }); return; }
     throw new Error("XMPP session is not ready");
   }
 
-  private async compatSendDisplayed(xmpp: CompatXmpp, to: string, type: "chat" | "groupchat", id: string) {
+  private async compatSendDisplayed(xmpp: XmppClientInstance, to: string, type: "chat" | "groupchat", id: string) {
     if (xmpp.send_displayed) return xmpp.send_displayed(to, type, id);
-    if (xmpp.sendMessage) { xmpp.sendMessage({ to, type, marker: { type: "displayed", id } }); return; }
     throw new Error("XMPP session is not ready");
   }
 
-  private async compatSendReaction(xmpp: CompatXmpp, to: string, type: "chat" | "groupchat", id: string, emojis: string[]) {
+  private async compatSendReaction(xmpp: XmppClientInstance, to: string, type: "chat" | "groupchat", id: string, emojis: string[]) {
     if (xmpp.send_reaction) return xmpp.send_reaction(to, type, id, emojis);
-    if (xmpp.sendMessage) { xmpp.sendMessage({ id: crypto.randomUUID(), to, type, reactions: { id, items: emojis } }); return; }
     throw new Error("XMPP session is not ready");
   }
 
-  private async compatSendRetraction(xmpp: CompatXmpp, to: string, type: "chat" | "groupchat", id: string) {
+  private async compatSendRetraction(xmpp: XmppClientInstance, to: string, type: "chat" | "groupchat", id: string) {
     if (xmpp.send_retraction) return xmpp.send_retraction(to, type, id);
-    if (xmpp.sendMessage) { xmpp.sendMessage({ id: crypto.randomUUID(), to, type, retract: { id } }); return; }
     throw new Error("XMPP session is not ready");
   }
 
-  private async compatSendModeration(xmpp: CompatXmpp, roomJid: string, id: string, reason?: string) {
+  private async compatSendModeration(xmpp: XmppClientInstance, roomJid: string, id: string, reason?: string) {
     if (xmpp.send_moderation) return xmpp.send_moderation(roomJid, "groupchat", id, reason);
-    if (xmpp.sendMessage) { xmpp.sendMessage({ id: crypto.randomUUID(), to: roomJid, type: "groupchat", applyTo: { id, moderated: { retract: true, ...(reason ? { reason } : {}) } } }); return; }
     throw new Error("XMPP session is not ready");
   }
 
-  private async compatSendCorrection(xmpp: CompatXmpp, to: string, type: "chat" | "groupchat", body: string, replacesId: string, opts?: SendGroupMessageOptions | SendDirectMessageOptions): Promise<string | null> {
+  private async compatSendCorrection(xmpp: XmppClientInstance, to: string, type: "chat" | "groupchat", body: string, replacesId: string, opts?: SendGroupMessageOptions | SendDirectMessageOptions): Promise<string | null> {
     const { effectiveBody, replyFallbackLength, rebasedMarkup } = encodeBodyForSend(body, opts?.replyTo, opts?.markup);
     const wasmOpts = buildWasmSendOptions({ ...(opts ?? {}), markup: rebasedMarkup }, replyFallbackLength);
     if (xmpp.send_correction) return await xmpp.send_correction(to, type, effectiveBody, replacesId, wasmOpts) as string;
-    if (xmpp.sendMessage) {
-      xmpp.sendMessage({ id: wasmOpts.stanza_id, to, type, body: effectiveBody, replace: replacesId });
-      return wasmOpts.stanza_id ?? null;
-    }
     throw new Error("XMPP session is not ready");
   }
 
-  private async requireConnectedXmpp(): Promise<CompatXmpp> {
+  private async requireConnectedXmpp(): Promise<XmppClientInstance> {
     await this.connect();
     if (!this.xmpp || !this.connected || this.destroying) throw new Error("XMPP session is not ready");
     return this.xmpp;
   }
 
-  private async requireJoinedRoom(spaceId: string, channelId: string): Promise<{ xmpp: CompatXmpp; roomJid: string }> {
+  private async requireJoinedRoom(spaceId: string, channelId: string): Promise<{ xmpp: XmppClientInstance; roomJid: string }> {
     const roomJid = this.roomJidForChannel(channelId);
     await this.switchRoom(spaceId, channelId);
     if (!this.xmpp || !this.connected || this.destroying || this.currentRoom !== roomJid) throw new Error(`Room is not ready: ${roomJid}`);
@@ -1081,10 +1052,8 @@ export class BrowserXmppClient {
     const xmpp = await this.requireConnectedXmpp(); const roomJid = options?.roomJid ?? this.roomJidForChannel(channelId);
     const listMembers = xmpp.list_room_members
       ? async (affiliation: "owner" | "admin" | "member" | "outcast") => await xmpp.list_room_members?.(roomJid, affiliation) as WasmRoomMember[]
-      : (xmpp as CompatXmpp & { getRoomMembers?: (room: string, opts: { affiliation: "owner" | "admin" | "member" | "outcast" }) => Promise<{ muc?: { users?: Array<{ jid?: string }> } }> }).getRoomMembers
-        ? async (affiliation: "owner" | "admin" | "member" | "outcast") => (await (xmpp as CompatXmpp & { getRoomMembers: (room: string, opts: { affiliation: "owner" | "admin" | "member" | "outcast" }) => Promise<{ muc?: { users?: Array<{ jid?: string }> } }> }).getRoomMembers(roomJid, { affiliation }))?.muc?.users?.map((user) => ({ jid: user.jid })) ?? []
-        : null;
-    if (!listMembers) { this.emitError({ kind: "member-query", recoverable: false, detail: "missing getRoomMembers" }); throw new Error("missing getRoomMembers"); }
+      : null;
+    if (!listMembers) { this.emitError({ kind: "member-query", recoverable: false, detail: "missing list_room_members" }); throw new Error("missing list_room_members"); }
     const affiliations = ["owner", "admin", "member", "outcast"] as const; const members: MemberSummary[] = []; const failedAffiliations: string[] = [];
     for (const affiliation of affiliations) {
       try { const result = await listMembers(affiliation); for (const item of result ?? []) { if (!item.jid) continue; members.push({ jid: item.jid, username: item.jid.split("@")[0] ?? item.jid, avatar_url: null, role: affiliation, joined_at: "" }); } } catch (error: any) { failedAffiliations.push(affiliation); const condition = error?.condition ?? error?.error?.condition; const detail = condition === "forbidden" ? `forbidden affiliation query — ${roomJid}` : condition === "service-unavailable" ? `unsupported member query — ${roomJid}` : `affiliation query failed for ${affiliation} — ${roomJid}; reconstructed room JID may not match`; this.emitError({ kind: "member-query", recoverable: true, detail, cause: error, condition }); }
@@ -1098,51 +1067,30 @@ export class BrowserXmppClient {
     const xmpp = await this.requireConnectedXmpp();
     const bareJid = barePeerJid(jid);
     if (xmpp.request_avatar) {
-      const avatar = await xmpp.request_avatar(jid) as WasmAvatar | null;
-      if (avatar) return avatarDataUrl(avatar.data, avatar.mime_type);
+      const avatar = await xmpp.request_avatar(bareJid) as WasmAvatar | null;
+      if (avatar?.url) return avatar.url;
+      if (avatar?.data) return avatarDataUrl(avatar.data, avatar.mime_type);
     }
-    const legacy = xmpp as CompatXmpp & {
-      getItems?: (jid: string, node: string) => Promise<{ items?: Array<{ content?: { versions?: Array<{ id?: string; mediaType?: string }> } }> }>;
-      getAvatar?: (jid: string, id: string) => Promise<{ content?: { data?: Uint8Array } }>;
-      getVCard?: (jid: string) => Promise<{ records?: Array<{ type?: string; mediaType?: string; data?: Uint8Array; url?: string }> }>;
-    };
-    try {
-      const metadata = await legacy.getItems?.(bareJid, "urn:xmpp:avatar:metadata");
-      const version = metadata?.items?.[0]?.content?.versions?.[0];
-      if (version?.id) {
-        const avatar = await legacy.getAvatar?.(bareJid, version.id);
-        const data = avatar?.content?.data;
-        if (data) return avatarDataUrl(data, version.mediaType ?? "image/png");
-      }
-    } catch {}
-    const vcard = await legacy.getVCard?.(bareJid);
-    const photo = vcard?.records?.find((record) => record.type === "photo");
-    if (photo?.data) return avatarDataUrl(photo.data, photo.mediaType ?? "image/png");
-    if (photo?.url) return photo.url;
     return null;
   }
-  get agent(): CompatXmpp | null { return this.xmpp; }
+  get agent(): XmppClientInstance | null { return this.xmpp; }
 
   private startSelfPing() { this.stopSelfPing(); this.selfPingTimer = setInterval(() => { void this.doSelfPing(); }, 60000); }
   private stopSelfPing() { if (this.selfPingTimer) { clearInterval(this.selfPingTimer); this.selfPingTimer = null; } }
   private async doSelfPing() { if (!this.xmpp?.send_raw_iq || !this.currentRoom) return; try { await this.xmpp.send_raw_iq(`<iq type="get" id="${crypto.randomUUID()}" to="${this.currentRoom}/${this.session.username}"><ping xmlns="urn:ietf:params:xml:ns:xmpp-ping"/></iq>`); } catch { this.roomDisconnectHandler?.(); } }
   private handleMessageAck(id: string) { const wasQueued = this.inflightQueuedIds.delete(id); if (wasQueued) removeQueuedMessage(this.queueScope, id); this.messageAckHandler?.(id); const pending = this.pendingSendAt.get(id); if (pending) { this.pendingSendAt.delete(id); this.fireHook(this.messageAckHooks, id, { kind: pending.kind, latencyMs: performance.now() - pending.at }); } if (wasQueued) this.emitQueueDepth(); }
   private handleMessageFailed(id: string) { const wasQueued = this.inflightQueuedIds.delete(id); this.messageDeliveryFailureHandler?.(id); const pending = this.pendingSendAt.get(id); if (pending) { this.pendingSendAt.delete(id); this.fireHook(this.messageFailHooks, id, { kind: pending.kind }); } if (wasQueued) this.emitQueueDepth(); }
-  private handleSessionReady(xmpp: CompatXmpp, lifecycle: SessionLifecycleEvent) {
+  private handleSessionReady(xmpp: XmppClientInstance, lifecycle: SessionLifecycleEvent) {
     if (this.xmpp !== xmpp) return;
     this.connected = true; this.reconnectAttempt = 0;
     this.emitStatus({ state: "online", detail: countQueuedMessages(this.queueScope) > 0 ? lifecycle.type === "fresh" ? "Reconnected — replaying queued messages" : "Connection resumed — replaying queued messages" : lifecycle.type === "fresh" ? "Connection ready" : "Connection resumed" });
+    const catchupEntries = this.catchup.onSessionStarted();
     if (lifecycle.type === "fresh") { this.inflightQueuedIds.clear(); void this.enableCarbons(xmpp); }
-    else {
-      const catchupTargets = this.catchup.onSessionStarted();
-      if (catchupTargets.length > 0 && (xmpp as CompatXmpp & { searchHistory?: (jid: string, opts: { paging: { max: number } }) => Promise<unknown> }).searchHistory) {
-        void (xmpp as CompatXmpp & { searchHistory: (jid: string, opts: { paging: { max: number } }) => Promise<unknown> }).searchHistory(barePeerJid(this.session.jid), { paging: { max: 200 } });
-      }
-    }
+    else if (catchupEntries.length > 0) { void this.runReconnectCatchup(xmpp, catchupEntries); }
     this.emitSessionLifecycle(lifecycle); void this.flushQueuedDirectMessages(); if (this.currentRoom) void this.flushQueuedRoomMessages(this.currentRoom);
     if (this.onceConnected) { const done = this.onceConnected; this.onceConnected = null; this.onceConnectFailed = null; done(); }
   }
-  private handleDisconnected(xmpp: CompatXmpp, error?: Error) {
+  private handleDisconnected(xmpp: XmppClientInstance, error?: Error) {
     if (this.xmpp !== xmpp) return;
     this.connected = false; this.stopSelfPing(); this.xmpp = null;
     if (this.destroying) { this.emitStatus({ state: "offline", detail: error?.message ?? "Disconnected" }); return; }
@@ -1177,13 +1125,62 @@ export class BrowserXmppClient {
     if (message.is_muc) {
       const converted = roomMessageFromArchived({ ...message, mam_id: message.id ?? crypto.randomUUID() } as WasmArchivedMessage);
       if (!converted) return;
+      this.catchup.recordRoomSeen(converted.roomJid, converted.createdAt);
       if (converted.roomJid !== this.currentRoom && converted.body) { const activity: RoomActivityEvent = { roomJid: converted.roomJid, nick: converted.nick, body: converted.body }; if (converted.mentions) (activity as any).mentions = converted.mentions; if ((converted as any).broadcastMention) (activity as any).broadcastMention = (converted as any).broadcastMention; this.activityHandler?.(activity); return; }
       this.messageHandler?.(converted); return;
     }
     const converted = dmMessageFromArchived({ ...message, mam_id: message.id ?? crypto.randomUUID() } as WasmArchivedMessage, barePeerJid(this.session.jid));
-    if (converted) this.directMessageHandler?.(converted);
+    if (converted) {
+      this.catchup.recordDmSeen(converted.peerJid, converted.createdAt);
+      this.directMessageHandler?.(converted);
+    }
   }
-  private wireEvents(xmpp: CompatXmpp & { enableKeepAlive?: (opts: { interval: number; timeout: number }) => void; disableKeepAlive?: () => void }) {
+  private async runReconnectCatchup(
+    xmpp: XmppClientInstance,
+    entries: Array<{ kind: "dm" | "room"; key: string }>,
+  ) {
+    for (const entry of entries) {
+      if (this.xmpp !== xmpp) return;
+      try {
+        if (entry.kind === "dm") {
+          const since = this.catchup.getDmLastSeen(entry.key);
+          if (!since || !xmpp.fetch_dm_history_page) continue;
+          const page = await xmpp.fetch_dm_history_page(entry.key, 100, { type: "latest" }) as WasmMamPage;
+          for (const message of page?.messages ?? []) {
+            const converted = dmMessageFromArchived(message, barePeerJid(this.session.jid));
+            if (!converted || converted.createdAt <= since) continue;
+            this.catchup.recordDmSeen(converted.peerJid, converted.createdAt);
+            this.directMessageHandler?.(converted);
+          }
+        } else {
+          const since = this.catchup.getRoomLastSeen(entry.key);
+          if (!since || !xmpp.fetch_room_history_page) continue;
+          const page = await xmpp.fetch_room_history_page(entry.key, 100, { type: "latest" }) as WasmMamPage;
+          for (const message of page?.messages ?? []) {
+            const converted = roomMessageFromArchived(message);
+            if (!converted || converted.createdAt <= since) continue;
+            this.catchup.recordRoomSeen(converted.roomJid, converted.createdAt);
+            if (converted.roomJid !== this.currentRoom && converted.body) {
+              const activity: RoomActivityEvent = { roomJid: converted.roomJid, nick: converted.nick, body: converted.body };
+              if (converted.mentions) (activity as any).mentions = converted.mentions;
+              if ((converted as any).broadcastMention) (activity as any).broadcastMention = (converted as any).broadcastMention;
+              this.activityHandler?.(activity);
+            } else {
+              this.messageHandler?.(converted);
+            }
+          }
+        }
+      } catch (error) {
+        this.emitError({
+          kind: "history",
+          recoverable: true,
+          detail: `Reconnect catch-up failed for ${entry.key}`,
+          cause: error,
+        });
+      }
+    }
+  }
+  private wireEvents(xmpp: XmppClientInstance & { enableKeepAlive?: (opts: { interval: number; timeout: number }) => void; disableKeepAlive?: () => void }) {
     xmpp.set_on_connected?.(() => { if (this.xmpp !== xmpp) return; void this.enableCarbons(xmpp); });
     xmpp.set_on_session_lifecycle?.((event: string) => { if (event === "resumed") this.handleSessionReady(xmpp, { type: "resumed" }); else this.handleSessionReady(xmpp, { type: "fresh" }); });
     xmpp.set_on_disconnected?.(() => this.handleDisconnected(xmpp));

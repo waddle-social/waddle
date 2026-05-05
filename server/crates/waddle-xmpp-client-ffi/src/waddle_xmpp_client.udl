@@ -169,6 +169,7 @@ dictionary WaddleAvatar {
     string id;
     string mime_type;
     bytes data;
+    string? url;
 };
 
 // ── Event callback (Swift implements this protocol) ──────────────────────────

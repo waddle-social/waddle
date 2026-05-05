@@ -3,6 +3,7 @@ import { computed, ref, watch } from "vue";
 import { ExternalLink, Grid3X3, List, RefreshCw, WifiOff } from "lucide-vue-next";
 import type { ChannelSummary, SpaceSummary } from "@/lib/chat-types";
 import type { BrowserXmppClient } from "@/lib/xmpp-client";
+import type { ExtensionAnnotationAction } from "@/lib/chat-ui";
 import type { DiscoveredExtensionRoute, ExtensionRouteItem } from "@/lib/xmpp/extension-commands";
 
 const props = defineProps<{
@@ -12,11 +13,12 @@ const props = defineProps<{
   requestedRoute?: { pluginId: string; routeId: string } | null;
   roomJid: string | null;
   xmppClient?: BrowserXmppClient | null;
+  actionError?: string;
 }>();
 
 const emit = defineEmits<{
   openNav: [];
-  invokeAction: [action: { launchId: string; label: string }];
+  invokeAction: [action: ExtensionAnnotationAction];
 }>();
 
 const items = ref<ExtensionRouteItem[]>([]);
@@ -126,6 +128,10 @@ watch(routeKey, () => {
         <WifiOff class="h-4 w-4 shrink-0" />
         <span class="type-control">{{ detail }}</span>
       </div>
+      <div v-else-if="actionError" class="chat-message-lane flex items-center gap-3 rounded-md border border-destructive/20 bg-destructive/5 p-4 text-destructive">
+        <WifiOff class="h-4 w-4 shrink-0" />
+        <span class="type-control">{{ actionError }}</span>
+      </div>
       <div v-else-if="items.length === 0" class="type-caption flex h-full items-center justify-center text-muted-foreground">
         Nothing saved yet.
       </div>
@@ -185,7 +191,7 @@ watch(routeKey, () => {
               :key="action.launchId"
               type="button"
               class="chat-icon-button chat-icon-button--sm"
-              @click="emit('invokeAction', action)"
+              @click="emit('invokeAction', { label: action.label, route: action.launchId, launch: action.launch })"
             >
               {{ action.label }}
             </button>

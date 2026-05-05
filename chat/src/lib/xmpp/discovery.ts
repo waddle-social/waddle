@@ -15,24 +15,15 @@ const FIELD_FORUM_MODE = "muc#roomconfig_forum";
 
 type DiscoveryRole = "owner" | "admin" | "moderator" | "member" | null;
 
-type LegacyAgent = {
-  getDiscoItems?: (jid: string, node?: string) => Promise<{ items?: Array<{ jid?: string; name?: string; node?: string }> }>;
-  getDiscoInfo?: (jid: string, node?: string) => Promise<{ features?: string[]; identities?: Array<{ category?: string; type?: string; name?: string }>; extensions?: Array<{ fields?: Array<{ name?: string; value?: string }> }> }>;
-  getItems?: (jid: string, node: string, opts?: { max?: number }) => Promise<{ items?: Array<{ id?: string; content?: { itemType?: string; name?: string } }> }>;
-  agent?: LegacyAgent;
+type HybridClient = Partial<WaddleClient> & {
+  send_raw_iq?: (xml: string) => Promise<string>;
 };
-
-type HybridClient = Partial<WaddleClient> & LegacyAgent;
 
 type DiscoInfoData = {
   features: string[];
   identities: Array<{ category?: string; type?: string; name?: string }>;
   fields: Map<string, string>;
 };
-
-function legacyClient(xmpp: HybridClient): LegacyAgent {
-  return xmpp.agent ?? xmpp;
-}
 
 function parseXml(xml: string): Document {
   return new DOMParser().parseFromString(xml, "text/xml");
@@ -89,68 +80,64 @@ function roomParentSpaceId(info: DiscoInfoData): string | null {
 }
 
 async function sendDiscoInfo(xmpp: HybridClient, to: string, node?: string): Promise<DiscoInfoData | null> {
-  if (xmpp.send_raw_iq) {
-    const id = crypto.randomUUID();
-    const nodeAttr = node ? ` node="${node}"` : "";
-    const responseXml = await xmpp.send_raw_iq(`<iq type="get" id="${id}" to="${to}"><query xmlns="${DISCO_INFO_NS}"${nodeAttr}/></iq>`);
-    const query = parseXml(responseXml).getElementsByTagNameNS(DISCO_INFO_NS, "query")[0];
-    if (!query) return null;
-    const fields = new Map<string, string>();
-    for (const form of elementChildren(query, "x", DATAFORM_NS)) {
-      for (const field of elementChildren(form, "field", DATAFORM_NS)) {
-        const name = field.getAttribute("var");
-        if (!name) continue;
-        const value = textContent(field.querySelector("value"));
-        if (value) fields.set(name, value);
-      }
-    }
-    return {
-      features: elementChildren(query, "feature", DISCO_INFO_NS).map((feature) => feature.getAttribute("var") ?? "").filter(Boolean),
-      identities: elementChildren(query, "identity", DISCO_INFO_NS).map((identity) => ({ category: identity.getAttribute("category") ?? undefined, type: identity.getAttribute("type") ?? undefined, name: identity.getAttribute("name") ?? undefined })),
-      fields,
-    };
-  }
-  const legacy = legacyClient(xmpp);
-  const response = await legacy.getDiscoInfo?.(to, node);
-  if (!response) return null;
+  if (!xmpp.send_raw_iq) return null;
+  const id = crypto.randomUUID();
+  const nodeAttr = node ? ` node="${node}"` : "";
+  const responseXml = await xmpp.send_raw_iq(`<iq type="get" id="${id}" to="${to}"><query xmlns="${DISCO_INFO_NS}"${nodeAttr}/></iq>`);
+  const query = parseXml(responseXml).getElementsByTagNameNS(DISCO_INFO_NS, "query")[0];
+  if (!query) return null;
   const fields = new Map<string, string>();
-  for (const extension of response.extensions ?? []) {
-    for (const field of extension.fields ?? []) {
-      if (field.name && field.value) fields.set(field.name, field.value);
+  for (const form of elementChildren(query, "x", DATAFORM_NS)) {
+    for (const field of elementChildren(form, "field", DATAFORM_NS)) {
+      const name = field.getAttribute("var");
+      if (!name) continue;
+      const value = textContent(field.querySelector("value"));
+      if (value) fields.set(name, value);
     }
   }
-  return { features: response.features ?? [], identities: response.identities ?? [], fields };
+  return {
+    features: elementChildren(query, "feature", DISCO_INFO_NS).map((feature) => feature.getAttribute("var") ?? "").filter(Boolean),
+    identities: elementChildren(query, "identity", DISCO_INFO_NS).map((identity) => ({ category: identity.getAttribute("category") ?? undefined, type: identity.getAttribute("type") ?? undefined, name: identity.getAttribute("name") ?? undefined })),
+    fields,
+  };
 }
 
 async function sendDiscoItems(xmpp: HybridClient, to: string, node?: string): Promise<Array<{ jid?: string; name?: string; node?: string }>> {
-  if (xmpp.send_raw_iq) {
-    const id = crypto.randomUUID();
-    const nodeAttr = node ? ` node="${node}"` : "";
-    const xml = `<iq type="get" id="${id}" to="${to}"><query xmlns="${DISCO_ITEMS_NS}"${nodeAttr}/></iq>`;
-    let responseXml: string;
-    try {
-      responseXml = await xmpp.send_raw_iq(xml);
-    } catch (err) {
-      console.error("[disco] send_raw_iq items FAILED", { to, err });
-      throw err;
-    }
-    const doc = parseXml(responseXml);
-    const query = doc.getElementsByTagNameNS(DISCO_ITEMS_NS, "query")[0];
-    if (!query) return [];
-    return Array.from(query.getElementsByTagNameNS(DISCO_ITEMS_NS, "item"))
-      .filter((item) => item.parentNode === query)
-      .map((item) => ({ jid: item.getAttribute("jid") ?? undefined, name: item.getAttribute("name") ?? undefined, node: item.getAttribute("node") ?? undefined }));
+  if (!xmpp.send_raw_iq) return [];
+  const id = crypto.randomUUID();
+  const nodeAttr = node ? ` node="${node}"` : "";
+  const xml = `<iq type="get" id="${id}" to="${to}"><query xmlns="${DISCO_ITEMS_NS}"${nodeAttr}/></iq>`;
+  let responseXml: string;
+  try {
+    responseXml = await xmpp.send_raw_iq(xml);
+  } catch (err) {
+    console.error("[disco] send_raw_iq items FAILED", { to, err });
+    throw err;
   }
-  return (await legacyClient(xmpp).getDiscoItems?.(to, node))?.items ?? [];
+  const doc = parseXml(responseXml);
+  const query = doc.getElementsByTagNameNS(DISCO_ITEMS_NS, "query")[0];
+  if (!query) return [];
+  return Array.from(query.getElementsByTagNameNS(DISCO_ITEMS_NS, "item"))
+    .filter((item) => item.parentNode === query)
+    .map((item) => ({ jid: item.getAttribute("jid") ?? undefined, name: item.getAttribute("name") ?? undefined, node: item.getAttribute("node") ?? undefined }));
 }
 
 async function sendPubsubItems(xmpp: HybridClient, to: string, node: string): Promise<Array<{ jid?: string; name?: string }>> {
-  if (xmpp.get_pubsub_items) {
-    return (await xmpp.get_pubsub_items(to, node)) as Array<{ jid?: string; name?: string }>;
-  }
-  // Legacy stanza.js path: items are keyed by id (which is the room JID).
-  const result = await legacyClient(xmpp).getItems?.(to, node);
-  return (result?.items ?? []).map((item) => ({ jid: item.id, name: item.content?.name }));
+  if (!xmpp.send_raw_iq) return [];
+  const id = crypto.randomUUID();
+  const responseXml = await xmpp.send_raw_iq(`<iq type="get" id="${id}" to="${to}"><pubsub xmlns="${NS_PUBSUB}"><items node="${node}"/></pubsub></iq>`);
+  const doc = parseXml(responseXml);
+  const items = doc.getElementsByTagNameNS(NS_PUBSUB, "items")[0];
+  if (!items) return [];
+  return Array.from(items.getElementsByTagNameNS(NS_PUBSUB, "item"))
+    .filter((item) => item.parentNode === items)
+    .map((item) => {
+      const conference = item.getElementsByTagName("conference")[0];
+      return {
+        jid: item.getAttribute("id") ?? conference?.getAttribute("jid") ?? undefined,
+        name: conference?.getAttribute("name") ?? undefined,
+      };
+    });
 }
 
 export function spacesServiceDomain(jid: string): string { return `spaces.${jidDomain(jid)}`; }

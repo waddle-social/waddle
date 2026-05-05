@@ -1,7 +1,13 @@
-import type { ExtensionAnnotationAction, ExtensionLaunchDescriptor } from "@/lib/chat-ui";import { jidDomain } from "./jid";
+import type { ExtensionAnnotationAction, ExtensionLaunchDescriptor } from "@/lib/chat-ui";
+import { jidDomain } from "./jid";
 
 interface XmppSendIq {
   send_raw_iq(xml: string): Promise<string>;
+}
+
+interface XmppExtensionRoutes {
+  discover_extension_routes?: () => Promise<unknown>;
+  fetch_extension_route_items?: (route: unknown, roomJid: string) => Promise<unknown>;
 }
 
 function escapeXml(s: string): string {
@@ -10,7 +16,7 @@ function escapeXml(s: string): string {
 const NS_WADDLE_EXTENSION_1 = "urn:waddle:extension:1";
 const NS_ADHOC_COMMANDS = "http://jabber.org/protocol/commands";
 const INVOKE_COMMAND_NODE = "urn:waddle:extension:1:invoke";
-const EXTENSION_ROUTE_FORM_TYPE = "urn:waddle:extension:1:routes";
+const EXTENSION_COMMAND_FORM_TYPE = "urn:waddle:extension:1:command";
 
 
 export interface ExtensionCommandNote {
@@ -88,6 +94,7 @@ export interface ExtensionItemOption {
 export interface ExtensionItemAction {
   launchId: string;
   label: string;
+  launch?: ExtensionLaunchDescriptor;
 }
 
 export interface ExtensionRouteItem {
@@ -99,6 +106,126 @@ export interface ExtensionRouteItem {
   fields: ExtensionItemField[];
   options: ExtensionItemOption[];
   actions: ExtensionItemAction[];
+}
+
+function normalizeExtensionRoute(value: unknown): DiscoveredExtensionRoute | null {
+  const route = value as Record<string, unknown>;
+  const serviceJid = stringField(route, "serviceJid") ?? stringField(route, "service_jid");
+  const pluginId = stringField(route, "pluginId") ?? stringField(route, "plugin_id");
+  const routeId = stringField(route, "routeId") ?? stringField(route, "route_id");
+  const label = stringField(route, "label");
+  const scope = stringField(route, "scope");
+  const surface = stringField(route, "surface");
+  const stateNode = stringField(route, "stateNode") ?? stringField(route, "state_node");
+  const payloadNamespace = stringField(route, "payloadNamespace") ?? stringField(route, "payload_namespace");
+  if (
+    !serviceJid
+    || !pluginId
+    || !routeId
+    || !label
+    || scope !== "channel"
+    || (surface !== "gallery" && surface !== "list")
+    || !stateNode
+    || !payloadNamespace
+  ) {
+    return null;
+  }
+  return {
+    serviceJid,
+    pluginId,
+    routeId,
+    label,
+    scope,
+    surface,
+    stateNode,
+    payloadNamespace,
+  };
+}
+
+function normalizeExtensionRouteItem(value: unknown): ExtensionRouteItem | null {
+  const item = value as Record<string, unknown>;
+  const fields = arrayField(item, "fields").flatMap((field) => {
+    const value = field as Record<string, unknown>;
+    const name = stringField(value, "name");
+    const fieldValue = stringField(value, "value");
+    if (!name || fieldValue === null) return [];
+    const label = stringField(value, "label");
+    return label ? [{ name, label, value: fieldValue }] : [{ name, value: fieldValue }];
+  });
+  const options = arrayField(item, "options").flatMap((option) => {
+    const value = option as Record<string, unknown>;
+    const id = stringField(value, "id");
+    const label = stringField(value, "label");
+    return id && label ? [{ id, label }] : [];
+  });
+  const actions = arrayField(item, "actions").flatMap((action) => {
+    const value = action as Record<string, unknown>;
+    const launchValue = value.launch && typeof value.launch === "object"
+      ? value.launch as Record<string, unknown>
+      : value;
+    const launchId = stringField(value, "launchId") ?? stringField(value, "launch_id") ?? stringField(launchValue, "id");
+    const label = stringField(value, "label") ?? stringField(launchValue, "label");
+    if (!launchId || !label) return [];
+    const launch = routeItemLaunchDescriptor(launchValue, launchId, label);
+    return launch ? [{ launchId, label, launch }] : [];
+  });
+  return {
+    ...(stringField(item, "id") ? { id: stringField(item, "id")! } : {}),
+    ...(stringField(item, "title") ? { title: stringField(item, "title")! } : {}),
+    ...(stringField(item, "subtitle") ? { subtitle: stringField(item, "subtitle")! } : {}),
+    ...(stringField(item, "description") ? { description: stringField(item, "description")! } : {}),
+    ...(linkField(item) ? { link: linkField(item)! } : {}),
+    fields,
+    options,
+    actions,
+  };
+}
+
+function routeItemLaunchDescriptor(
+  value: Record<string, unknown>,
+  launchId: string,
+  label: string,
+): ExtensionLaunchDescriptor | null {
+  const pluginId = stringField(value, "pluginId") ?? stringField(value, "plugin_id") ?? stringField(value, "plugin");
+  const actionId = stringField(value, "actionId") ?? stringField(value, "action_id") ?? stringField(value, "action");
+  const commandNode = stringField(value, "commandNode") ?? stringField(value, "command_node") ?? stringField(value, "command-node");
+  const launchToken = stringField(value, "launchToken") ?? stringField(value, "launch_token") ?? stringField(value, "token");
+  const expiresAt = stringField(value, "expiresAt") ?? stringField(value, "expires_at") ?? stringField(value, "expires-at");
+  const waddleId = stringField(value, "waddleId") ?? stringField(value, "waddle_id") ?? stringField(value, "waddle-id");
+  if (!pluginId || !actionId || !commandNode || !launchToken || !expiresAt || !waddleId) return null;
+  const roomJid = stringField(value, "roomJid") ?? stringField(value, "room_jid") ?? stringField(value, "room");
+  const stanzaId = stringField(value, "sourceStanzaId") ?? stringField(value, "source_stanza_id") ?? stringField(value, "source-stanza-id");
+  return {
+    id: launchId,
+    pluginId,
+    actionId,
+    commandNode,
+    launchToken,
+    expiresAt,
+    label,
+    context: {
+      waddleId,
+      ...(roomJid ? { roomJid } : {}),
+      ...(stanzaId ? { stanzaId } : {}),
+    },
+    payloads: [],
+  };
+}
+
+function stringField(value: Record<string, unknown>, field: string): string | null {
+  const raw = value[field];
+  return typeof raw === "string" && raw.trim() ? raw : null;
+}
+
+function arrayField(value: Record<string, unknown>, field: string): unknown[] {
+  const raw = value[field];
+  return Array.isArray(raw) ? raw : [];
+}
+
+function linkField(value: Record<string, unknown>): { href: string } | null {
+  const link = value.link as Record<string, unknown> | undefined;
+  const href = link ? stringField(link, "href") : null;
+  return href ? { href } : null;
 }
 
 type ExtensionCommandOutcomeState = "success" | "warning" | "error";
@@ -562,7 +689,7 @@ function parseExtensionCommandScope(extensions: unknown[] | undefined): Extensio
   for (const form of extensions) {
     const fields = (form as { fields?: unknown[] } | undefined)?.fields;
     if (!Array.isArray(fields)) continue;
-    if (formFieldValue(fields, "FORM_TYPE") !== NS_WADDLE_EXTENSION_1) continue;
+    if (formFieldValue(fields, "FORM_TYPE") !== EXTENSION_COMMAND_FORM_TYPE) continue;
     const value = formFieldValue(fields, "waddle#command_scope");
     if (value === "global" || value === "channel") return value;
   }
@@ -652,40 +779,6 @@ async function discoverExtensionCommandService(xmpp: XmppSendIq, userJid: string
   return fallbackServiceJid;
 }
 
-function parseExtensionRouteForm(form: unknown, serviceJid: string): DiscoveredExtensionRoute | null {
-  const fields = (form as { fields?: unknown[] } | undefined)?.fields;
-  if (!Array.isArray(fields)) return null;
-  if (formFieldValue(fields, "FORM_TYPE") !== EXTENSION_ROUTE_FORM_TYPE) return null;
-  const pluginId = formFieldValue(fields, "waddle#plugin_id");
-  const routeId = formFieldValue(fields, "waddle#route_id");
-  const label = formFieldValue(fields, "waddle#route_label");
-  const scope = formFieldValue(fields, "waddle#route_scope");
-  const surface = formFieldValue(fields, "waddle#route_surface");
-  const stateNode = formFieldValue(fields, "waddle#state_node");
-  const payloadNamespace = formFieldValue(fields, "waddle#payload_ns");
-  if (
-    !pluginId
-    || !routeId
-    || !label
-    || scope !== "channel"
-    || (surface !== "gallery" && surface !== "list")
-    || !stateNode
-    || !payloadNamespace
-  ) {
-    return null;
-  }
-  return {
-    serviceJid,
-    pluginId,
-    routeId,
-    label,
-    scope,
-    surface,
-    stateNode,
-    payloadNamespace,
-  };
-}
-
 function parseDiscoInfoExtensions(xml: string): Array<{ fields: Array<{ var: string; value?: string; values?: string[] }> }> {
   const forms: Array<{ fields: Array<{ var: string; value?: string; values?: string[] }> }> = [];
   for (const [, formContent] of xml.matchAll(/<x\b[^>]*xmlns=["']jabber:x:data["'][^>]*>([\s\S]*?)<\/x>/g)) {
@@ -718,88 +811,34 @@ async function rawDiscoInfoFull(xmpp: XmppSendIq, jid: string, node?: string): P
 }
 
 export async function discoverExtensionRoutes(
-  xmpp: XmppSendIq,
+  xmpp: XmppExtensionRoutes,
   userJid: string,
 ): Promise<DiscoveredExtensionRoute[]> {
-  const serviceJid = await discoverExtensionCommandService(xmpp, userJid);
-  const items = await rawDiscoItems(xmpp, serviceJid);
-  const routes: DiscoveredExtensionRoute[] = [];
-  for (const item of items) {
-    if (!item.node) continue;
-    const itemServiceJid = item.jid ?? serviceJid;
-    const { extensions } = await rawDiscoInfoFull(xmpp, itemServiceJid, item.node);
-    routes.push(...extensions.flatMap((form) => parseExtensionRouteForm(form, itemServiceJid) ?? []));
+  if (!xmpp.discover_extension_routes) {
+    throw new Error(`Rust extension route discovery is not available for ${jidDomain(userJid)}.`);
   }
-  if (routes.length > 0) return routes;
-  const { extensions } = await rawDiscoInfoFull(xmpp, serviceJid);
-  return extensions.flatMap((form) => parseExtensionRouteForm(form, serviceJid) ?? []);
+  const routes = await xmpp.discover_extension_routes();
+  return (Array.isArray(routes) ? routes : [])
+    .map(normalizeExtensionRoute)
+    .filter((route): route is DiscoveredExtensionRoute => !!route);
 }
 
 export function resolveExtensionRouteStateNode(route: DiscoveredExtensionRoute, roomJid: string): string {
   return route.stateNode.replaceAll("{room}", roomJid);
 }
 
-function parseExtensionItemXml(xmlFragment: string, id?: string): ExtensionRouteItem | null {
-  const match = xmlFragment.match(/<extension-item\b[^>]*>([\s\S]*?)<\/extension-item>/);
-  if (!match) return null;
-  const content = match[1];
-  const view: ExtensionRouteItem = { fields: [], options: [], actions: [] };
-  if (id) view.id = id;
-  for (const [, tagName, attrs, text] of content.matchAll(/<([\w-]+)\b([^>]*)>([\s\S]*?)<\/\1>/g)) {
-    switch (tagName) {
-      case "title": { const t = decodeXml(text.trim()); if (t) view.title = t; break; }
-      case "subtitle": { const t = decodeXml(text.trim()); if (t) view.subtitle = t; break; }
-      case "description": { const t = decodeXml(text.trim()); if (t) view.description = t; break; }
-      case "link": { const href = readXmlAttr(attrs, "href")?.trim(); if (href) view.link = { href }; break; }
-      case "field": {
-        const name = readXmlAttr(attrs, "name")?.trim();
-        if (!name) break;
-        const label = readXmlAttr(attrs, "label")?.trim();
-        const value = decodeXml(text.trim());
-        view.fields.push(label ? { name, label, value } : { name, value });
-        break;
-      }
-      case "option": {
-        const optionId = readXmlAttr(attrs, "id")?.trim();
-        const label = readXmlAttr(attrs, "label")?.trim();
-        if (optionId && label) view.options.push({ id: optionId, label });
-        break;
-      }
-      case "action": {
-        const launchId = readXmlAttr(attrs, "launch-id")?.trim();
-        const label = readXmlAttr(attrs, "label")?.trim();
-        if (launchId && label) view.actions.push({ launchId, label });
-        break;
-      }
-    }
-  }
-  return view;
-}
-
 export async function fetchExtensionRouteItems(
-  xmpp: XmppSendIq,
+  xmpp: XmppExtensionRoutes,
   route: DiscoveredExtensionRoute,
   roomJid: string,
 ): Promise<ExtensionRouteItem[]> {
-  const node = resolveExtensionRouteStateNode(route, roomJid);
-  let responseXml: string;
-  try {
-    responseXml = await xmpp.send_raw_iq(
-      `<iq type="get" id="${crypto.randomUUID()}" to="${escapeXml(route.serviceJid)}">` +
-      `<pubsub xmlns="http://jabber.org/protocol/pubsub">` +
-      `<items node="${escapeXml(node)}" max_items="100"/>` +
-      `</pubsub></iq>`,
-    );
-  } catch {
-    return [];
+  if (!xmpp.fetch_extension_route_items) {
+    throw new Error("Rust extension route item loading is not available.");
   }
-  const results: ExtensionRouteItem[] = [];
-  for (const [, itemAttrs, itemContent] of responseXml.matchAll(/<item\b([^>]*)>([\s\S]*?)<\/item>/g)) {
-    const id = readXmlAttr(itemAttrs, "id");
-    const view = parseExtensionItemXml(itemContent, id);
-    if (view) results.push(view);
-  }
-  return results;
+  const items = await xmpp.fetch_extension_route_items(route, roomJid);
+  return (Array.isArray(items) ? items : [])
+    .map(normalizeExtensionRouteItem)
+    .filter((item): item is ExtensionRouteItem => !!item);
 }
 
 

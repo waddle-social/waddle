@@ -52,6 +52,7 @@ export type XmppErrorKind =
   | "stream"
   | "auth"
   | "connect-timeout"
+  | "history"
   | "member-query";
 
 export interface XmppErrorEvent {

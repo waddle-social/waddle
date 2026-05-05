@@ -304,11 +304,11 @@ describe("BrowserXmppClient telemetry hooks", () => {
       detail: "Session expired (no refresh available)",
     });
 
-    // Recoverable connect-timeout (stanza.js stalled, client discards + retries).
+    // Recoverable connect-timeout (Rust client stalled, client discards + retries).
     internal.emitError({
       kind: "connect-timeout",
       recoverable: true,
-      detail: "stanza.js reconnect stalled past 15s; discarding agent",
+      detail: "Rust client reconnect stalled past 15s; discarding agent",
     });
 
     expect(stub.errors).toHaveLength(3);
