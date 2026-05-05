@@ -40,6 +40,9 @@ const idleMessage = turnstileConfigured
 				>.</span
 			><span class="wordmark-tld">social</span>
 		</h1>
+		<p class="tagline">
+			Open-source, XMPP-native social chat — yours by default.
+		</p>
 		<div class="brand-stack">
 			<div class="logo-wrap">
 				<button
@@ -77,6 +80,7 @@ const idleMessage = turnstileConfigured
 						autocomplete="on"
 						aria-disabled={turnstileConfigured ? "false" : "true"}
 						data-waitlist-form
+						data-state="idle"
 						data-turnstile-action={WAITLIST_TURNSTILE_ACTION}
 						data-turnstile-configured={turnstileConfigured ? "true" : "false"}
 						data-turnstile-site-key={turnstileSiteKey}
@@ -89,9 +93,16 @@ const idleMessage = turnstileConfigured
 								type="email"
 								autocomplete="email"
 								inputmode="email"
-								placeholder="you@signal.example"
+								placeholder="you@yourdomain.com"
 								required
 							/>
+							<span
+								class="waitlist-spinner"
+								data-waitlist-spinner
+								role="status"
+								aria-live="polite"
+								aria-label="Verifying you're human"
+							></span>
 							<button
 								type="submit"
 								class="waitlist-send"
@@ -102,13 +113,11 @@ const idleMessage = turnstileConfigured
 							</button>
 						</div>
 						<input type="hidden" name="cf-turnstile-response" value="" data-turnstile-response />
-						{
-							turnstileConfigured && (
-								<div class="waitlist-turnstile-row">
-									<div class="waitlist-turnstile" data-waitlist-turnstile></div>
-								</div>
-							)
-						}
+						<div
+							class="waitlist-turnstile-host"
+							data-waitlist-turnstile
+							aria-hidden="true"
+						></div>
 					</form>
 
 					<p
@@ -159,7 +168,15 @@ const idleMessage = turnstileConfigured
 		let widgetId: string | null = null;
 		let turnstileScriptPromise: Promise<boolean> | null = null;
 		let turnstileRenderPromise: Promise<void> | null = null;
-		let turnstileNeedsReset = false;
+
+		type FormState = "idle" | "verifying" | "ready" | "submitting";
+
+		const setFormState = (next: FormState) => {
+			if (!form) {
+				return;
+			}
+			form.dataset.state = next;
+		};
 
 		const setPanelOpen = (next: boolean) => {
 			if (!logoButton || !panel) {
@@ -187,7 +204,6 @@ const idleMessage = turnstileConfigured
 			}
 
 			form.setAttribute("aria-disabled", String(busy));
-			form.dataset.busy = String(busy);
 			emailInput.disabled = busy;
 			submitButton.disabled = busy;
 		};
@@ -245,16 +261,6 @@ const idleMessage = turnstileConfigured
 			if (widgetId && window.turnstile) {
 				window.turnstile.reset(widgetId);
 			}
-
-			turnstileNeedsReset = false;
-		};
-
-		const markTurnstileDirty = () => {
-			if (turnstileResponseInput) {
-				turnstileResponseInput.value = "";
-			}
-
-			turnstileNeedsReset = widgetId !== null;
 		};
 
 		const renderTurnstile = async () => {
@@ -269,6 +275,7 @@ const idleMessage = turnstileConfigured
 			turnstileRenderPromise = (async () => {
 				const ready = await waitForTurnstile();
 				if (!ready || !window.turnstile) {
+					setFormState("idle");
 					setStatus("error", unavailableMessage);
 					return;
 				}
@@ -279,28 +286,37 @@ const idleMessage = turnstileConfigured
 				}
 
 				turnstileResponseInput.value = "";
+				setFormState("verifying");
 				widgetId = window.turnstile.render(turnstileContainer, {
 					sitekey: turnstileSiteKey,
 					action: turnstileAction,
-					size: "flexible",
-					theme: document.documentElement.dataset.theme === "light" ? "light" : "dark",
+					size: "invisible",
 					callback: (token) => {
 						turnstileResponseInput.value = token;
-						turnstileNeedsReset = false;
+						setFormState("ready");
 						if (status.dataset.state === "error") {
-							setStatus("idle", status.dataset.idleMessage ?? "Confirm first, launch notes later.");
+							setStatus(
+								"idle",
+								status.dataset.idleMessage ?? "Confirm first, launch notes later.",
+							);
 						}
 					},
 					"error-callback": () => {
 						turnstileResponseInput.value = "";
+						setFormState("idle");
 						setStatus("error", unavailableMessage);
 					},
 					"expired-callback": () => {
 						turnstileResponseInput.value = "";
+						setFormState("idle");
 						setStatus("error", verificationMessage);
 						resetTurnstile();
 					},
 				});
+
+				if (widgetId) {
+					window.turnstile.execute(widgetId);
+				}
 			})().finally(() => {
 				turnstileRenderPromise = null;
 			});
@@ -318,13 +334,22 @@ const idleMessage = turnstileConfigured
 				return;
 			}
 
+			if (turnstileResponseInput?.value) {
+				setFormState("ready");
+				return;
+			}
+
 			if (!widgetId) {
 				await renderTurnstile();
 				return;
 			}
 
-			if (turnstileNeedsReset) {
+			if (form?.dataset.state !== "verifying") {
+				setFormState("verifying");
 				resetTurnstile();
+				if (widgetId && window.turnstile) {
+					window.turnstile.execute(widgetId);
+				}
 			}
 		};
 
@@ -345,14 +370,6 @@ const idleMessage = turnstileConfigured
 			}
 
 			void renderTurnstile();
-		});
-
-		form?.addEventListener("focusin", () => {
-			void ensureTurnstileReady();
-		});
-
-		form?.addEventListener("pointerdown", () => {
-			void ensureTurnstileReady();
 		});
 
 		form?.addEventListener("submit", async (event) => {
@@ -382,6 +399,7 @@ const idleMessage = turnstileConfigured
 			const requestBody = new FormData(form);
 			setPanelOpen(true);
 			setBusy(true);
+			setFormState("submitting");
 			setStatus("pending", status.dataset.pendingMessage ?? "Packing your confirmation note…");
 
 			try {
@@ -401,6 +419,7 @@ const idleMessage = turnstileConfigured
 				if (response.ok && payload.ok) {
 					form.reset();
 					resetTurnstile();
+					setFormState("idle");
 					setStatus(
 						"success",
 						payload.message ??
@@ -410,19 +429,23 @@ const idleMessage = turnstileConfigured
 					return;
 				}
 
-				markTurnstileDirty();
+				resetTurnstile();
 				setStatus(
 					"error",
 					payload.message ??
 						status.dataset.errorMessage ??
 						"Mail hiccup on our side. Try again in a minute.",
 				);
+				setFormState("idle");
+				void ensureTurnstileReady();
 			} catch {
-				markTurnstileDirty();
+				resetTurnstile();
 				setStatus(
 					"error",
 					status.dataset.errorMessage ?? "Mail hiccup on our side. Try again in a minute.",
 				);
+				setFormState("idle");
+				void ensureTurnstileReady();
 			} finally {
 				setBusy(false);
 			}

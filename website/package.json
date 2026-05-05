@@ -18,19 +18,19 @@
     "generate-types": "wrangler types"
   },
   "dependencies": {
-    "@astrojs/cloudflare": "^13.1.10",
-    "@tailwindcss/vite": "^4.2.3",
-    "astro": "^6.1.8",
+    "@astrojs/cloudflare": "^13.3.1",
+    "@tailwindcss/vite": "^4.2.4",
+    "astro": "^6.2.2",
     "drizzle-orm": "^0.45.2",
-    "tailwindcss": "^4.2.3",
-    "wrangler": "^4.84.0"
+    "tailwindcss": "^4.2.4",
+    "wrangler": "^4.88.0"
   },
   "overrides": {
     "vite": "^7"
   },
   "devDependencies": {
-    "@astrojs/check": "^0.9.8",
-    "@cloudflare/workers-types": "^4.20260420.1",
+    "@astrojs/check": "^0.9.9",
+    "@cloudflare/workers-types": "^4.20260505.1",
     "drizzle-kit": "^0.31.10",
     "typescript": "^6.0.3"
   }

@@ -14,7 +14,7 @@ interface Props {
 const site = Astro.site ?? new URL("https://waddle.social");
 const title = Astro.props.title ?? "waddle.social";
 const description =
-	Astro.props.description ?? "Open-source, XMPP-native social chat for the fediverse.";
+	Astro.props.description ?? "Open-source, XMPP-native social chat — yours by default.";
 const canonicalPath = Astro.props.canonicalPath ?? Astro.url.pathname;
 const canonicalUrl = new URL(canonicalPath, site);
 const ogTitle = Astro.props.ogTitle ?? title;
