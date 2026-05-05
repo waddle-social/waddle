@@ -10,6 +10,14 @@ schema.#Base & {
 
 	hooks: onEnter: nix: xNix.#NixFlake
 
+	formatters: rust: {
+		edition: "2021"
+		includes: [
+			"server/**/*.rs",
+			"bench-storage-backends/**/*.rs",
+		]
+	}
+
 	env: {
 		environment: production: {
 			CLOUDFLARE_ACCOUNT_ID: schema.#OnePasswordRef & {
