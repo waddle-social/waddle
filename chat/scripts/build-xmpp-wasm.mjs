@@ -45,26 +45,56 @@ writeFileSync(pkgJsonPath, `${JSON.stringify(pkg, null, 2)}\n`);
 // Replace the wasm-pack bundler entry point with a Vite-compatible one that
 // passes the correct import object so WebAssembly.instantiate() receives the
 // JS glue functions the WASM binary imports from "./waddle_xmpp_client_wasm_bg.js".
+//
+// We import the WASM binary as a URL (?url) and instantiate it manually so that
+// in dev mode we can set cache: "no-store" on the fetch.  This prevents the
+// browser from serving a stale compiled WebAssembly module after a rebuild,
+// which would cause "wasm.__wasm_bindgen_func_elem_N is not a function" errors
+// when the .wasm binary and _bg.js glue are from different builds.
+// In production the ?url resolves to a content-hashed filename so the browser
+// cache is correctly busted without needing no-store.
+//
+// We also embed a per-build query string (?b=<timestamp>) into the imports of
+// _bg.js and the .wasm URL.  Vite treats different query strings as different
+// module IDs, which produces a brand-new URL on every REBUILD_WASM=1 run.  That
+// guarantees both the dev server's transform cache and the browser's HTTP
+// cache miss on the next page load — defense in depth on top of the chokidar
+// watch override in astro.config.mjs (which un-ignores this package so file
+// changes are detected at all).  Without this, a stale browser cache of the
+// entry file would keep referencing _bg.js?v=<old hash> even after a restart.
+const buildId = Date.now().toString(36);
 const jsPath = resolve(outDir, "waddle_xmpp_client_wasm.js");
 writeFileSync(
   jsPath,
   `/* @ts-self-types="./waddle_xmpp_client_wasm.d.ts" */
-import initWasm from "./waddle_xmpp_client_wasm_bg.wasm?init";
-import * as bgModule from "./waddle_xmpp_client_wasm_bg.js";
-import { __wbg_set_wasm } from "./waddle_xmpp_client_wasm_bg.js";
+import wasmUrl from "./waddle_xmpp_client_wasm_bg.wasm?url&b=${buildId}";
+import * as bgModule from "./waddle_xmpp_client_wasm_bg.js?b=${buildId}";
+import { __wbg_set_wasm } from "./waddle_xmpp_client_wasm_bg.js?b=${buildId}";
 
 let initPromise;
 
 export default async function init() {
   if (!initPromise) {
-    initPromise = initWasm({ "./waddle_xmpp_client_wasm_bg.js": bgModule }).then((instance) => {
+    initPromise = (async () => {
+      // In dev mode bypass the browser HTTP/WebAssembly cache so that a fresh
+      // REBUILD_WASM=1 build is picked up without a manual hard-refresh.
+      // In production the URL is content-hashed, so "default" is fine.
+      const cache = import.meta.env.DEV ? "no-store" : "default";
+      const response = await fetch(wasmUrl, { cache });
+      const bytes = await response.arrayBuffer();
+      const { instance } = await WebAssembly.instantiate(bytes, {
+        // The import-object key must match the literal string the WASM binary
+        // imports from — wasm-pack writes "./waddle_xmpp_client_wasm_bg.js"
+        // into the binary, with no query string.
+        "./waddle_xmpp_client_wasm_bg.js": bgModule,
+      });
       __wbg_set_wasm(instance.exports);
-    });
+    })();
   }
   return initPromise;
 }
 
-export { WaddleClient, WaddleConfig } from "./waddle_xmpp_client_wasm_bg.js";
+export { WaddleClient, WaddleConfig } from "./waddle_xmpp_client_wasm_bg.js?b=${buildId}";
 `,
 );
 
