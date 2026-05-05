@@ -22,7 +22,6 @@ use waddle_xmpp::protocol::dm_routing::{
     classify_dm_intake, ArchiveDecision, CarbonsDecision, InboxDecision, LiveDecision,
     OnlineResources, PendingDecision,
 };
-use waddle_xmpp::protocol::event::{StanzaIdRef, StanzaIdValue};
 use waddle_xmpp::protocol::session_state::Blocklist;
 use waddle_xmpp::xep::xep0334::{add_hint, Hint};
 use waddle_xmpp::xep::NS_DELAY;
