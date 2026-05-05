@@ -790,9 +790,13 @@ pub async fn start_with_config(
         Ok(Err(e)) => Err(e),
         Err(e) => Err(anyhow::anyhow!("HTTP server task failed: {}", e)),
     };
-    // Best-effort: ensure the shutdown lifecycle task is also
-    // joined so we don't leave it dangling.
-    let _ = shutdown_handle.await;
+    // Tear down the shutdown lifecycle task so we don't dangle.
+    // If HTTP exited on its own (error path) before any signal
+    // arrived, `shutdown_handle.await` would block on
+    // `shutdown.run()` indefinitely — Copilot review on PR #346.
+    // Abort the task and best-effort-join with a short timeout.
+    shutdown_handle.abort();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), shutdown_handle).await;
     info!("Graceful shutdown complete");
     result
 }
@@ -1346,6 +1350,18 @@ async fn create_router(
                             "SM janitor: Q6 promotion completed"
                         );
                     }
+                    // Promotion finished — now safe to delete the
+                    // durable SM row. drain_expired intentionally
+                    // doesn't delete durable rows up-front so a
+                    // promotion failure (panic, storage error)
+                    // leaves the unacked queue intact for restart-
+                    // time retry. (Copilot review on PR #346.)
+                    state
+                        .deps
+                        .protocol
+                        .sm_session_registry
+                        .confirm_drained(&session.stream_id)
+                        .await;
 
                     if session.presence_available {
                         routes::websocket::handlers::presence::broadcast_unavailable_for_expired_detached_session(
@@ -1484,6 +1500,19 @@ async fn create_router(
                         unparseable = summary.unparseable,
                         "Graceful shutdown: Q6 promotion completed for session"
                     );
+                    // Promotion succeeded for this session — now safe
+                    // to delete the durable SM row. The
+                    // `drain_all_for_shutdown` method intentionally
+                    // does NOT delete durable rows up-front so a
+                    // promotion failure (panic, storage error,
+                    // timeout) leaves the unacked queue intact for
+                    // restart-time retry. (Copilot review on PR #346.)
+                    drain_state
+                        .deps
+                        .protocol
+                        .sm_session_registry
+                        .confirm_drained(&session.stream_id)
+                        .await;
                 }
                 tokio::time::sleep(POLL_INTERVAL).await;
             }
