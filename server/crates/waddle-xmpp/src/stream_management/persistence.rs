@@ -153,6 +153,13 @@ pub trait SmPersistenceStorage: Send + Sync {
         &self,
         now: chrono::DateTime<chrono::Utc>,
     ) -> Result<Vec<PersistedSession>, SmPersistenceError>;
+
+    /// Enumerate every currently-persisted session, regardless of
+    /// expiry. Used by [`InMemorySmSessionRegistry`] on startup to
+    /// rebuild the in-memory view from durable storage so an
+    /// XEP-0198 `<resume previd='…'/>` finds sessions that detached
+    /// before the most recent restart.
+    async fn list_all_sessions(&self) -> Result<Vec<PersistedSession>, SmPersistenceError>;
 }
 
 /// In-memory implementation suitable for tests and as the structural
@@ -272,6 +279,14 @@ impl SmPersistenceStorage for InMemorySmPersistence {
             }
         }
         Ok(out)
+    }
+
+    async fn list_all_sessions(&self) -> Result<Vec<PersistedSession>, SmPersistenceError> {
+        let guard = self
+            .inner
+            .lock()
+            .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
+        Ok(guard.sessions.values().cloned().collect())
     }
 }
 

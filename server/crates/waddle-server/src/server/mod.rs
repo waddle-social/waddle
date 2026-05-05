@@ -261,6 +261,15 @@ pub struct XmppConfig {
     /// deployments MUST set one of these env vars so queued offline
     /// DMs survive restart per issue #209.
     pub pending_delivery_database_url: Option<String>,
+    /// XEP-0198 stream-management persistence database URL —
+    /// prefers dedicated XMPP DSN, otherwise the main runtime DSN.
+    /// Resolution order:
+    /// `WADDLE_XMPP_SM_DATABASE_URL` → `WADDLE_DATABASE_URL`. When
+    /// unset the storage falls back to in-memory SQLite — suitable
+    /// for tests; production deployments MUST set one of these env
+    /// vars so detached sessions survive restart per issue #209
+    /// slice (d) Q8 = B.
+    pub sm_database_url: Option<String>,
     /// PubSub/PEP database URL (prefers dedicated XMPP DSN, otherwise the main runtime DSN)
     pub pubsub_database_url: Option<String>,
     /// Whether native JID authentication is enabled (default: true)
@@ -279,6 +288,7 @@ impl Default for XmppConfig {
             mam_database_url: None,
             inbox_database_url: None,
             pending_delivery_database_url: None,
+            sm_database_url: None,
             pubsub_database_url: None,
             native_auth_enabled: true,
             acme: XmppAcmeConfig {
@@ -307,6 +317,7 @@ impl XmppConfig {
         let inbox_database_url = resolve_xmpp_database_url("WADDLE_XMPP_INBOX_DATABASE_URL");
         let pending_delivery_database_url =
             resolve_xmpp_database_url("WADDLE_XMPP_PENDING_DELIVERY_DATABASE_URL");
+        let sm_database_url = resolve_xmpp_database_url("WADDLE_XMPP_SM_DATABASE_URL");
         let pubsub_database_url = resolve_xmpp_database_url("WADDLE_XMPP_PUBSUB_DATABASE_URL");
 
         let native_auth_enabled = std::env::var("WADDLE_NATIVE_AUTH_ENABLED")
@@ -334,6 +345,7 @@ impl XmppConfig {
             mam_database_url,
             inbox_database_url,
             pending_delivery_database_url,
+            sm_database_url,
             pubsub_database_url,
             native_auth_enabled,
             acme: XmppAcmeConfig {
@@ -1112,9 +1124,43 @@ async fn create_router(
         Arc::new(waddle_xmpp::push::InMemoryPushStore::new());
 
     // XEP-0198 detached-session registry for stream resumption across
-    // transient WebSocket drops.
-    let sm_session_registry =
-        Arc::new(waddle_xmpp::stream_management::InMemorySmSessionRegistry::new());
+    // transient WebSocket drops. Backed by `DatabaseSmPersistence` so
+    // detached sessions and their unacked queues survive restart per
+    // locked Q8 = B (issue #209 slice d).
+    let sm_database_url = xmpp_config.sm_database_url.clone();
+    if sm_database_url.is_none() {
+        warn!(
+            "Neither WADDLE_XMPP_SM_DATABASE_URL nor WADDLE_DATABASE_URL is set; \
+             falling back to in-memory SQLite for SM session persistence. \
+             Detached XEP-0198 sessions will NOT survive restart. Set one of \
+             these env vars for durable session resumption (issue #209)."
+        );
+    }
+    let sm_persistence: Arc<dyn waddle_xmpp::stream_management::persistence::SmPersistenceStorage> =
+        Arc::new(
+            crate::sm_persistence::DatabaseSmPersistence::open(sm_database_url.as_deref())
+                .await
+                .expect("open SM persistence storage"),
+        );
+    let sm_session_registry = waddle_xmpp::stream_management::InMemorySmSessionRegistry::new()
+        .with_persistence(Arc::clone(&sm_persistence));
+    // Don't panic on a top-level restore error — `restore_from_persistence`
+    // already skips individual corrupt rows internally; a top-level
+    // failure here would only surface for catastrophic storage outages
+    // (table unreadable, etc.). Log and continue with an empty in-memory
+    // view; clients reconnecting after restart will see `<failed/>` on
+    // resume and fall back to fresh sessions (XEP-0198 §5). Was
+    // previously `expect()` which turned one bad row into a boot
+    // failure — Qodo review on PR #344.
+    if let Err(error) = sm_session_registry.restore_from_persistence().await {
+        warn!(
+            error = %error,
+            "restore_from_persistence failed at startup; continuing with empty \
+             in-memory SM session view. XEP-0198 resume will return <failed/> \
+             until storage health is restored."
+        );
+    }
+    let sm_session_registry = Arc::new(sm_session_registry);
     let resumable_sessions: Arc<dashmap::DashMap<String, crate::auth::Session>> =
         Arc::new(dashmap::DashMap::new());
 
