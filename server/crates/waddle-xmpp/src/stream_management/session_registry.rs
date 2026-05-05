@@ -882,6 +882,52 @@ impl InMemorySmSessionRegistry {
     /// removing MUC occupants, evicting routing entries, and discarding
     /// sidecar auth context. `cleanup_expired` only returns a count, which
     /// isn't enough for that work.
+    /// Drain every detached session regardless of expiry status,
+    /// removing each from in-memory + durable storage. Intended for
+    /// the graceful-shutdown path (issue #209 slice (d) phase 4 +
+    /// locked Q8 = B): the server is exiting, so it walks the full
+    /// session set and hands each one's unacked queue to the Q6
+    /// promotion path before terminating.
+    ///
+    /// Returns every drained session so the caller can run Q6
+    /// promotion (alt-resource → offline-storage → service-
+    /// unavailable) on each. Durable rows are deleted as part of
+    /// the drain so a subsequent restart doesn't resurrect sessions
+    /// whose unacked stanzas have already been promoted (would
+    /// otherwise cause duplicate delivery via XEP-0198 resume +
+    /// pending_delivery flush).
+    pub async fn drain_all_for_shutdown(&self) -> Result<Vec<DetachedSession>, SmRegistryError> {
+        let drained: Vec<DetachedSession> = {
+            let mut sessions = self
+                .sessions
+                .write()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+            let mut claimed = self
+                .claimed_sessions
+                .write()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+            let mut out: Vec<DetachedSession> = sessions.drain().map(|(_, s)| s).collect();
+            out.extend(claimed.drain().map(|(_, s)| s));
+            out
+        };
+        // Best-effort durable cleanup — failure here only matters if
+        // the server restarts AND the resume window hasn't yet
+        // expired AND the same client tries to resume; even then,
+        // the duplicate-delivery is bounded by client-side dedupe
+        // via XEP-0359 stanza-id (locked Q10d).
+        for session in &drained {
+            if let Err(error) = self.persist_delete_session(&session.stream_id).await {
+                debug!(
+                    stream_id = %session.stream_id,
+                    error = %error,
+                    "graceful-shutdown drain: durable delete failed; \
+                     restart-time expiry filter or client dedupe will catch"
+                );
+            }
+        }
+        Ok(drained)
+    }
+
     pub async fn drain_expired(&self) -> Result<Vec<DetachedSession>, SmRegistryError> {
         // Lock-scoped block so guards drop before the durable
         // delete awaits.

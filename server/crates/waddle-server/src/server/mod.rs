@@ -809,6 +809,7 @@ async fn start_http_server(deps: HttpServerDeps) -> Result<()> {
         xmpp_config,
         mam_storage,
         acme_http01_challenge_service,
+        stop_token.clone(),
     )
     .await?;
 
@@ -1035,6 +1036,7 @@ async fn create_router(
     xmpp_config: XmppConfig,
     mam_storage: Arc<dyn MamStorage>,
     acme_http01_challenge_service: Option<TowerHttp01ChallengeService>,
+    shutdown_stop_token: tokio_util::sync::CancellationToken,
 ) -> Result<Router> {
     // Create auth broker state
     let encryption_key = server_config.session_key.clone();
@@ -1333,6 +1335,81 @@ async fn create_router(
                     routes::websocket::cleanup_muc_presence_for_jid(&state, &session.jid).await;
                 }
             }
+        });
+    }
+
+    // Q6 graceful-shutdown drain (issue #209 slice (d) phase 4):
+    // when stop_token cancels (SIGTERM/SIGQUIT), walk every
+    // detached SM session and promote its unacked queue per the Q6
+    // priority chain BEFORE the runtime exits. Without this,
+    // unacked stanzas would either be replayed-via-resume on the
+    // next restart (causing duplicate delivery against
+    // pending_delivery flush) or lost entirely if the resume window
+    // closes during downtime.
+    {
+        let drain_state = Arc::clone(&websocket_state);
+        let drain_token = shutdown_stop_token.clone();
+        tokio::spawn(async move {
+            drain_token.cancelled().await;
+            info!("Graceful shutdown: starting SM session Q6 drain");
+            let drained = match drain_state
+                .deps
+                .protocol
+                .sm_session_registry
+                .drain_all_for_shutdown()
+                .await
+            {
+                Ok(s) => s,
+                Err(error) => {
+                    warn!(error = %error, "Graceful shutdown: drain_all_for_shutdown failed");
+                    return;
+                }
+            };
+            if drained.is_empty() {
+                info!("Graceful shutdown: no detached SM sessions to drain");
+                return;
+            }
+            info!(
+                count = drained.len(),
+                "Graceful shutdown: promoting unacked queues for detached SM sessions"
+            );
+            for session in drained {
+                let blocklist = match drain_state
+                    .deps
+                    .protocol
+                    .blocking_storage
+                    .list_blocked_jids(&session.jid.to_bare())
+                    .await
+                {
+                    Ok(jids) => waddle_xmpp::protocol::session_state::Blocklist::new(jids),
+                    Err(error) => {
+                        warn!(
+                            jid = %session.jid,
+                            error = %error,
+                            "Graceful shutdown: blocklist load failed; promoting with empty blocklist"
+                        );
+                        waddle_xmpp::protocol::session_state::Blocklist::empty()
+                    }
+                };
+                let summary = crate::sm_promotion::promote_session_unacked(
+                    &session,
+                    &drain_state.deps.protocol.connection_registry,
+                    &drain_state.deps.protocol.pending_delivery_storage,
+                    &blocklist,
+                    chrono::Utc::now(),
+                )
+                .await;
+                info!(
+                    jid = %session.jid,
+                    redelivered = summary.redelivered,
+                    queued = summary.queued,
+                    bounced = summary.bounced,
+                    dropped = summary.dropped,
+                    unparseable = summary.unparseable,
+                    "Graceful shutdown: Q6 promotion completed for session"
+                );
+            }
+            info!("Graceful shutdown: SM Q6 drain complete");
         });
     }
 
@@ -2557,9 +2634,16 @@ mod tests {
         let state = create_test_state().await;
         let server_config = ServerConfig::test_homeserver();
         let mam_storage = create_websocket_mam_storage(None).await.unwrap();
-        let app = create_router(state, server_config, test_xmpp_config(), mam_storage, None)
-            .await
-            .unwrap();
+        let app = create_router(
+            state,
+            server_config,
+            test_xmpp_config(),
+            mam_storage,
+            None,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
 
         let response = app
             .oneshot(
@@ -2586,9 +2670,16 @@ mod tests {
         let state = create_test_state().await;
         let server_config = ServerConfig::test_homeserver();
         let mam_storage = create_websocket_mam_storage(None).await.unwrap();
-        let app = create_router(state, server_config, test_xmpp_config(), mam_storage, None)
-            .await
-            .unwrap();
+        let app = create_router(
+            state,
+            server_config,
+            test_xmpp_config(),
+            mam_storage,
+            None,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
 
         let response = app
             .oneshot(
@@ -2608,9 +2699,16 @@ mod tests {
         let state = create_test_state().await;
         let server_config = ServerConfig::test_homeserver();
         let mam_storage = create_websocket_mam_storage(None).await.unwrap();
-        let app = create_router(state, server_config, test_xmpp_config(), mam_storage, None)
-            .await
-            .unwrap();
+        let app = create_router(
+            state,
+            server_config,
+            test_xmpp_config(),
+            mam_storage,
+            None,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
 
         let response = app
             .oneshot(
@@ -2638,9 +2736,16 @@ mod tests {
         let state = create_test_state().await;
         let server_config = ServerConfig::test_homeserver();
         let mam_storage = create_websocket_mam_storage(None).await.unwrap();
-        let app = create_router(state, server_config, test_xmpp_config(), mam_storage, None)
-            .await
-            .unwrap();
+        let app = create_router(
+            state,
+            server_config,
+            test_xmpp_config(),
+            mam_storage,
+            None,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
 
         let response = app
             .oneshot(
@@ -2665,9 +2770,16 @@ mod tests {
         let state = create_test_state().await;
         let server_config = ServerConfig::test_homeserver();
         let mam_storage = create_websocket_mam_storage(None).await.unwrap();
-        let app = create_router(state, server_config, test_xmpp_config(), mam_storage, None)
-            .await
-            .unwrap();
+        let app = create_router(
+            state,
+            server_config,
+            test_xmpp_config(),
+            mam_storage,
+            None,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
 
         let response = app
             .oneshot(
@@ -2687,9 +2799,16 @@ mod tests {
         let state = create_test_state().await;
         let server_config = ServerConfig::test_homeserver();
         let mam_storage = create_websocket_mam_storage(None).await.unwrap();
-        let app = create_router(state, server_config, test_xmpp_config(), mam_storage, None)
-            .await
-            .unwrap();
+        let app = create_router(
+            state,
+            server_config,
+            test_xmpp_config(),
+            mam_storage,
+            None,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
 
         let response = app
             .oneshot(
