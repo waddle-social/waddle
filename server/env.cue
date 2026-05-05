@@ -156,7 +156,7 @@ schema.#Project & {
 				packages:        "read"
 				"pull-requests": "none"
 			}
-			tasks: [_t.checkCiDrift, _t.nixFmt, _t.nixClippy, _t.nixTest, _t.renderDeployment, _t.nixBuildExtensionModules, _t.nixBuildCi]
+			tasks: [_t.checkRootSyncDrift, _t.checkCiDrift, _t.nixFmt, _t.nixClippy, _t.nixTest, _t.renderDeployment, _t.nixBuildExtensionModules, _t.nixBuildCi]
 		}
 		xmppCompliance: {
 			mode: "expanded"
@@ -189,6 +189,15 @@ schema.#Project & {
 			command: "cuenv"
 			args: ["sync", "ci", "--check", "-A"]
 			inputs: ["**/env.cue"]
+		}
+
+		checkRootSyncDrift: schema.#Task & {
+			command: "cuenv"
+			args: ["sync", "--check", "-p", ".."]
+			inputs: [
+				"../.rules.cue",
+				"../.gitignore",
+			]
 		}
 
 		nixFmt: schema.#Task & {
