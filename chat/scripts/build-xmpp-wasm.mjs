@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -10,15 +10,24 @@ const outDir = resolve(repoRoot, "server/wasm-pkg/waddle-xmpp-client-wasm");
 const nodeModulesDir = resolve(scriptDir, "..", "node_modules/@waddle/xmpp-client-wasm");
 
 if (process.env.REBUILD_WASM !== "1") {
-  // Default: rely on the published package installed via `bun install`.
-  // Set REBUILD_WASM=1 to compile from Rust source (requires wasm-pack + wasm32-unknown-unknown).
-  console.log("[wasm] Using published @waddle/xmpp-client-wasm from registry.");
-  console.log("[wasm] Set REBUILD_WASM=1 to recompile from Rust source.");
-  process.exit(0);
+  // If _bg.js doesn't exist in node_modules, the package is incomplete (fresh checkout or
+  // bun install after the artifact was removed). Auto-rebuild to avoid a broken dev server.
+  const bgJsPath = resolve(nodeModulesDir, "waddle_xmpp_client_wasm_bg.js");
+  const realBgJsPath = existsSync(nodeModulesDir)
+    ? resolve(realpathSync(nodeModulesDir), "waddle_xmpp_client_wasm_bg.js")
+    : bgJsPath;
+  if (!existsSync(realBgJsPath)) {
+    console.log("[wasm] WASM artifacts missing — auto-rebuilding from Rust source...");
+    console.log("[wasm] (Set REBUILD_WASM=1 explicitly to force a rebuild when artifacts exist.)");
+    // Fall through to the rebuild path below.
+  } else {
+    // Artifacts present; rely on the local build or published registry version.
+    console.log("[wasm] WASM artifacts found — skipping rebuild. Set REBUILD_WASM=1 to force recompile.");
+    process.exit(0);
+  }
+} else {
+  console.log("[wasm] REBUILD_WASM=1 — building @waddle/xmpp-client-wasm from Rust source...");
 }
-
-// REBUILD_WASM=1: compile from Rust source and install into node_modules.
-console.log("[wasm] Building @waddle/xmpp-client-wasm from Rust source...");
 
 execFileSync(
   "wasm-pack",
@@ -66,11 +75,31 @@ if (!dts.includes("export default function init()")) {
   writeFileSync(dtsPath, `${dts}\nexport default function init(): Promise<void>;\n`);
 }
 
-// Copy into node_modules so the local build uses this version without modifying package.json.
-// Note: the next `bun install` will restore the published registry version.
+// Copy compiled artifacts into node_modules so the local build uses this version.
+// We write each file individually (writeFileSync, not cpSync) so that bun's
+// hardlinked package cache is updated in-place: bun hardlinks the same inode
+// for both the file: path and its internal .bun/ cache directory. cpSync would
+// create new inodes (breaking hardlinks and leaving the bun cache stale), while
+// writeFileSync writes through the existing inode so every hardlinked copy sees
+// the new content immediately.
 console.log("[wasm] Installing local build into node_modules...");
-mkdirSync(nodeModulesDir, { recursive: true });
-cpSync(outDir, nodeModulesDir, { recursive: true });
+const realNodeModulesDir = existsSync(nodeModulesDir)
+  ? realpathSync(nodeModulesDir)
+  : nodeModulesDir;
+mkdirSync(realNodeModulesDir, { recursive: true });
+function copyDirInPlace(src, dest) {
+  mkdirSync(dest, { recursive: true });
+  for (const entry of readdirSync(src)) {
+    const srcPath = resolve(src, entry);
+    const destPath = resolve(dest, entry);
+    if (statSync(srcPath).isDirectory()) {
+      copyDirInPlace(srcPath, destPath);
+    } else {
+      writeFileSync(destPath, readFileSync(srcPath));
+    }
+  }
+}
+copyDirInPlace(outDir, realNodeModulesDir);
 
 // Clear Vite's module transform cache so it doesn't serve stale _bg.js from a previous build.
 // Without this, a mismatch between the cached glue JS and the newly compiled .wasm causes
