@@ -136,16 +136,6 @@ interface ExtensionInvokeIq {
   };
 }
 
-interface DiscoItem {
-  jid?: string;
-  node?: string;
-  name?: string;
-}
-
-interface DiscoInfo {
-  features?: string[];
-  extensions?: unknown[];
-}
 
 export function extensionServiceJidForUserJid(userJid: string): string {
   const domain = jidDomain(userJid);
@@ -541,18 +531,16 @@ export async function discoverExtensionCommands(
   userJid: string,
 ): Promise<DiscoveredExtensionCommand[]> {
   const serviceJid = await discoverExtensionCommandService(xmpp, userJid);
-  const disco = xmpp as unknown as DiscoClient;
-  const response = await disco.getDiscoItems?.(serviceJid, NS_ADHOC_COMMANDS);
-  const items = response?.items ?? [];
-  const filtered = items.filter((item) => item.node && item.node !== INVOKE_COMMAND_NODE);
+  const items = await rawDiscoItems(xmpp, serviceJid, NS_ADHOC_COMMANDS);
+  const filtered = items.filter((item): item is { jid?: string; node: string; name?: string } => !!item.node && item.node !== INVOKE_COMMAND_NODE);
   const commands: DiscoveredExtensionCommand[] = [];
   for (const item of filtered) {
     const itemServiceJid = item.jid ?? serviceJid;
-    const node = item.node!;
+    const node = item.node;
     let scope: ExtensionCommandScope = "global";
     try {
-      const info = await disco.getDiscoInfo?.(itemServiceJid, node);
-      const parsedScope = parseExtensionCommandScope(info?.extensions);
+      const info = await rawDiscoInfoFull(xmpp, itemServiceJid, node);
+      const parsedScope = parseExtensionCommandScope(info.extensions);
       if (parsedScope) scope = parsedScope;
     } catch {
       // If disco#info is unavailable for the command, fall back to global
@@ -574,7 +562,7 @@ function parseExtensionCommandScope(extensions: unknown[] | undefined): Extensio
   for (const form of extensions) {
     const fields = (form as { fields?: unknown[] } | undefined)?.fields;
     if (!Array.isArray(fields)) continue;
-    if (formFieldValue(fields, "FORM_TYPE") !== EXTENSION_COMMAND_FORM_TYPE) continue;
+    if (formFieldValue(fields, "FORM_TYPE") !== NS_WADDLE_EXTENSION_1) continue;
     const value = formFieldValue(fields, "waddle#command_scope");
     if (value === "global" || value === "channel") return value;
   }
