@@ -2050,24 +2050,27 @@ fn build_client_config(config: &StoredConfig) -> Result<ClientConfig, JsValue> {
 }
 
 fn parse_raw_iq(xml: &str) -> Result<Element, JsValue> {
-    let stanza = xml
+    // minidom 0.16 requires every element to carry a namespace at parse time.
+    // Callers omit xmlns='jabber:client' on the <iq> element (it is implied by
+    // the stream context).  Inject the namespace into the raw string before
+    // parsing so minidom does not return MissingNamespace.
+    //
+    // We inspect only the opening <iq …> tag (up to the first '>') to avoid
+    // matching xmlns= attributes on child elements.
+    let normalized: std::borrow::Cow<str> = {
+        let tag_end = xml.find('>').unwrap_or(xml.len());
+        let iq_tag = &xml[..tag_end];
+        if iq_tag.contains("xmlns=") {
+            std::borrow::Cow::Borrowed(xml)
+        } else {
+            std::borrow::Cow::Owned(xml.replacen("<iq", "<iq xmlns='jabber:client'", 1))
+        }
+    };
+    let stanza = normalized
         .parse::<Element>()
         .map_err(|err| js_error(format!("invalid IQ XML: {err}")))?;
     if stanza.name() != "iq" {
         return Err(js_error("raw stanza must be an <iq/> element"));
-    }
-    // Callers may omit xmlns='jabber:client' on the <iq> element.  Minidom
-    // would then serialise it as <iq xmlns=""> which the server rejects.
-    // Normalise to jabber:client here so the wire stanza is always valid.
-    if stanza.ns().is_empty() {
-        let mut builder = Element::builder("iq", NS_CLIENT);
-        for (name, value) in stanza.attrs() {
-            builder = builder.attr(name, value);
-        }
-        for node in stanza.nodes() {
-            builder = builder.append(node.clone());
-        }
-        return Ok(builder.build());
     }
     Ok(stanza)
 }
