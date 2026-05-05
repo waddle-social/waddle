@@ -22,6 +22,12 @@ pub struct SmState {
     pub server_h: u32,
     /// Resumption token (`previd`) set after `<enabled/>` or `<resumed/>`.
     pub previd: Option<String>,
+    /// Whether the outbound stanza counter has started for this session.
+    ///
+    /// XEP-0198 starts the sender's own counter immediately after sending
+    /// `<enable/>`; the peer's `<enabled/>` response can arrive after one or
+    /// more stanzas have already been sent.
+    pub outbound_enabled: bool,
     /// Whether SM is currently enabled for this session.
     pub enabled: bool,
 }
@@ -34,6 +40,19 @@ impl SmState {
     /// Increment the outbound stanza counter by `count`.
     pub fn record_sent(&mut self, count: u32) {
         self.outbound_count = self.outbound_count.wrapping_add(count);
+    }
+
+    /// Start a fresh outbound SM sequence after sending `<enable/>`.
+    pub fn start_outbound(&mut self) {
+        self.outbound_count = 0;
+        self.server_h = 0;
+        self.outbound_enabled = true;
+    }
+
+    /// Stop all SM counters after `<failed/>` or stream termination.
+    pub fn stop(&mut self) {
+        self.outbound_enabled = false;
+        self.enabled = false;
     }
 
     /// Increment the inbound stanza counter by `count`.

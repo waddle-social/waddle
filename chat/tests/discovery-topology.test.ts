@@ -1,5 +1,4 @@
 import { describe, expect, mock, test } from "bun:test";
-import type { Agent } from "stanza";
 import { discoverTopology } from "../src/lib/xmpp/discovery";
 
 const NS_MUC = "http://jabber.org/protocol/muc";
@@ -168,7 +167,7 @@ describe("topology discovery", () => {
       "example.com",
       "http://jabber.org/protocol/commands",
     ]);
-    expect(getItems.mock.calls).toEqual([["spaces.example.com", "space-1", { max: 500 }]]);
+    expect(getItems.mock.calls).toEqual([["spaces.example.com", "space-1"]]);
   });
 
   test("does not fall back to legacy command nodes when protocol support is absent", async () => {

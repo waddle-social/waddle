@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { EventEmitter } from "events";
-import type { Agent } from "stanza";
 import { ref } from "vue";
 import type { WaddleSession } from "../src/lib/server-auth";
 import { useDmMessaging } from "../src/composables/useDmMessaging";

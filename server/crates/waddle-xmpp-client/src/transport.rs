@@ -1,21 +1,32 @@
-use futures::future::BoxFuture;
-use futures::stream::{SplitSink, SplitStream};
-use futures::{SinkExt, StreamExt};
 use jid::BareJid;
 use minidom::Element;
-use std::collections::VecDeque;
 use std::str::FromStr;
-use tokio::net::TcpStream;
-use tokio::time::timeout;
-use tokio_tungstenite::tungstenite::handshake::client::generate_key;
-use tokio_tungstenite::tungstenite::http::Request;
-use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 
 use crate::bootstrap::NS_CLIENT;
 use crate::config::ClientConfig;
 use crate::error::{ClientError, ClientResult};
 use crate::state::StreamId;
+
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+use futures::future::BoxFuture;
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+use futures::stream::{SplitSink, SplitStream};
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+use futures::{SinkExt, StreamExt};
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+use std::collections::VecDeque;
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+use tokio::net::TcpStream;
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+use tokio::time::timeout;
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+use tokio_tungstenite::tungstenite::handshake::client::generate_key;
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+use tokio_tungstenite::tungstenite::http::Request;
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+use tokio_tungstenite::tungstenite::Message;
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 
 const NS_XMPP_FRAMING: &str = "urn:ietf:params:xml:ns:xmpp-framing";
 const MAX_FRAME_SIZE: usize = 1024 * 1024;
@@ -121,6 +132,7 @@ impl TransportEvent {
 }
 
 /// Runtime-owned factory for a WebSocket transport implementation.
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 pub trait WebSocketTransportFactory: Send + Sync {
     fn connect<'a>(
         &'a self,
@@ -129,6 +141,7 @@ pub trait WebSocketTransportFactory: Send + Sync {
 }
 
 /// Minimal async boundary for the WebSocket transport layer.
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 pub trait WebSocketTransport: Send + Sync {
     fn kind(&self) -> TransportKind {
         TransportKind::WebSocket
@@ -148,9 +161,11 @@ pub trait WebSocketTransport: Send + Sync {
 }
 
 /// Default runtime factory for the concrete WebSocket transport.
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 #[derive(Debug, Default, Clone, Copy)]
 pub struct DefaultTransportFactory;
 
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 impl WebSocketTransportFactory for DefaultTransportFactory {
     fn connect<'a>(
         &'a self,
@@ -170,10 +185,14 @@ impl WebSocketTransportFactory for DefaultTransportFactory {
     }
 }
 
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 type ClientWebSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 type ClientWebSocketSink = SplitSink<ClientWebSocket, Message>;
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 type ClientWebSocketStream = SplitStream<ClientWebSocket>;
 
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 #[derive(Debug)]
 struct ConnectedWebSocketTransport {
     sink: ClientWebSocketSink,
@@ -182,6 +201,7 @@ struct ConnectedWebSocketTransport {
     pending_events: VecDeque<TransportEvent>,
 }
 
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 impl ConnectedWebSocketTransport {
     fn new(socket: ClientWebSocket) -> Self {
         let mut pending_events = VecDeque::with_capacity(2);
@@ -216,6 +236,7 @@ impl ConnectedWebSocketTransport {
     }
 }
 
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 impl WebSocketTransport for ConnectedWebSocketTransport {
     fn drain_events(&mut self) -> Vec<TransportEvent> {
         self.pending_events.drain(..).collect()
@@ -306,6 +327,7 @@ impl WebSocketTransport for ConnectedWebSocketTransport {
     }
 }
 
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 fn websocket_request(config: &ClientConfig) -> ClientResult<Request<()>> {
     let host = websocket_host_header(&config.transport.endpoint)?;
     let mut builder = Request::builder()
@@ -326,6 +348,7 @@ fn websocket_request(config: &ClientConfig) -> ClientResult<Request<()>> {
         .map_err(ClientError::InvalidWebSocketRequest)
 }
 
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 fn websocket_host_header(endpoint: &url::Url) -> ClientResult<String> {
     let host = endpoint
         .host_str()
@@ -337,7 +360,11 @@ fn websocket_host_header(endpoint: &url::Url) -> ClientResult<String> {
     })
 }
 
-fn encode_message(message: &TransportMessage) -> ClientResult<String> {
+/// Encode a typed transport message as one RFC 7395 WebSocket text frame.
+///
+/// Browser integrations can use this with a JavaScript-owned `WebSocket`
+/// while keeping XMPP stream state in [`crate::runtime::XmppRuntime`].
+pub fn encode_message(message: &TransportMessage) -> ClientResult<String> {
     let encoded = match message {
         TransportMessage::Open(open) => serialize_element(&stream_open_element(open))?,
         TransportMessage::Element(element) => serialize_element(element)?,
@@ -380,7 +407,11 @@ fn stream_open_element(open: &StreamOpen) -> Element {
     builder.build()
 }
 
-fn decode_message(frame: &str) -> ClientResult<TransportMessage> {
+/// Decode one RFC 7395 WebSocket text frame into a typed transport message.
+///
+/// Incoming bare client stanzas without an explicit default namespace are
+/// normalised to `jabber:client`, matching the native transport.
+pub fn decode_message(frame: &str) -> ClientResult<TransportMessage> {
     let trimmed = frame.trim();
     if trimmed.is_empty() {
         return Err(ClientError::EmptyTransportFrame);
@@ -558,15 +589,24 @@ fn scan_start_tag(xml: &str) -> Option<StartTagScan> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{AccessToken, ClientResource, OAuthBearerConfig, WebSocketConfig};
-    use crate::ConnectionConfig;
-    use futures::{SinkExt, StreamExt};
     use std::str::FromStr;
+
+    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+    use crate::config::{AccessToken, ClientResource, OAuthBearerConfig, WebSocketConfig};
+    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+    use crate::ConnectionConfig;
+    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+    use futures::{SinkExt, StreamExt};
+    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
     use tokio::net::TcpListener;
+    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
     use tokio_tungstenite::accept_hdr_async;
+    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
     use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
+    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
     use url::Url;
 
+    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
     fn config() -> ClientConfig {
         ClientConfig::new(
             ConnectionConfig::new(BareJid::from_str("waddle.example").unwrap()),
@@ -581,6 +621,7 @@ mod tests {
         .unwrap()
     }
 
+    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
     #[expect(
         clippy::result_large_err,
         reason = "tungstenite fixes the handshake callback error type as a large ErrorResponse"
@@ -644,6 +685,7 @@ mod tests {
         assert_eq!(element.ns(), NS_CLIENT);
     }
 
+    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
     #[tokio::test(flavor = "current_thread")]
     async fn concrete_transport_connects_and_emits_typed_frames() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

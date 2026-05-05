@@ -1,58 +1,50 @@
-/** XEP-0030: Service discovery for waddles and channels. */
-import type { Agent } from "stanza";
-import type { DataFormField, DiscoInfoResult } from "stanza/protocol";
+import type { WaddleClient } from "@waddle/xmpp-client-wasm";
 import { normalizeChannelType } from "@/lib/channel-types";
 import type { DiscoveredChannel, DiscoveredSpace, DiscoveredTopology } from "./types";
 import { barePeerJid, jidDomain } from "./jid";
 
 const NS_FORUMS_0 = "urn:xmpp:forums:0";
-const NS_BOOKMARKS_1 = "urn:xmpp:bookmarks:1";
 const NS_MUC = "http://jabber.org/protocol/muc";
 const NS_SPACES_0 = "urn:xmpp:spaces:0";
+const NS_PUBSUB = "http://jabber.org/protocol/pubsub";
+const NS_PUBSUB_METADATA = `${NS_PUBSUB}#meta-data`;
+const DISCO_INFO_NS = "http://jabber.org/protocol/disco#info";
+const DISCO_ITEMS_NS = "http://jabber.org/protocol/disco#items";
+const DATAFORM_NS = "jabber:x:data";
 const FIELD_FORUM_MODE = "muc#roomconfig_forum";
+
 type DiscoveryRole = "owner" | "admin" | "moderator" | "member" | null;
-type PubsubItem = {
-  id?: string;
-  content?: {
-    itemType?: string;
-    name?: string;
-    autojoin?: boolean;
-    autoJoin?: boolean;
-  };
-};
-type PubsubAgent = Agent & {
-  getItems(jid: string, node: string, opts?: { max?: number }): Promise<{ items?: PubsubItem[] }>;
+
+type LegacyAgent = {
+  getDiscoItems?: (jid: string, node?: string) => Promise<{ items?: Array<{ jid?: string; name?: string; node?: string }> }>;
+  getDiscoInfo?: (jid: string, node?: string) => Promise<{ features?: string[]; identities?: Array<{ category?: string; type?: string; name?: string }>; extensions?: Array<{ fields?: Array<{ name?: string; value?: string }> }> }>;
+  getItems?: (jid: string, node: string, opts?: { max?: number }) => Promise<{ items?: Array<{ id?: string; content?: { itemType?: string; name?: string } }> }>;
+  agent?: LegacyAgent;
 };
 
-function fieldStringValue(field: DataFormField | undefined): string | null {
-  if (!field || field.value === undefined) return null;
-  const rawValue = Array.isArray(field.value) ? field.value[0] : field.value;
-  if (rawValue === undefined || rawValue === null) return null;
-  return String(rawValue).trim() || null;
+type HybridClient = Partial<WaddleClient> & LegacyAgent;
+
+type DiscoInfoData = {
+  features: string[];
+  identities: Array<{ category?: string; type?: string; name?: string }>;
+  fields: Map<string, string>;
+};
+
+function legacyClient(xmpp: HybridClient): LegacyAgent {
+  return xmpp.agent ?? xmpp;
 }
 
-function metadataField(infoResult: DiscoInfoResult, name: string): string | null {
-  for (const form of infoResult.extensions ?? []) {
-    if (!form.fields) continue;
-    const field = form.fields.find((f) => f.name === name);
-    const value = fieldStringValue(field);
-    if (value) return value;
-  }
-  return null;
+function parseXml(xml: string): Document {
+  return new DOMParser().parseFromString(xml, "text/xml");
 }
 
-function parseBooleanValue(value: string | null): boolean | null {
-  if (!value) return null;
-  const normalized = value.toLowerCase();
-  if (["1", "true", "yes"].includes(normalized)) return true;
-  if (["0", "false", "no"].includes(normalized)) return false;
-  return null;
+function elementChildren(element: Element, localName: string, namespace: string): Element[] {
+  return Array.from(element.children).filter((child) => child.localName === localName && child.namespaceURI === namespace);
 }
 
-function parseChannelType(infoResult: DiscoInfoResult) {
-  const hasForumFeature = infoResult.features?.includes(NS_FORUMS_0);
-  const forumField = parseBooleanValue(metadataField(infoResult, FIELD_FORUM_MODE));
-  return normalizeChannelType(hasForumFeature || forumField ? "forum" : "text");
+function textContent(element: Element | null | undefined): string | null {
+  const value = element?.textContent?.trim();
+  return value ? value : null;
 }
 
 function parseSpaceNodeIri(value: string | null): string | null {
@@ -67,237 +59,197 @@ function parseSpaceNodeIri(value: string | null): string | null {
   }
 }
 
-function parseRoomParentSpaceId(infoResult: DiscoInfoResult): string | null {
-  return (
-    parseSpaceNodeIri(metadataField(infoResult, "parent")) ??
-    parseSpaceNodeIri(metadataField(infoResult, "muc#roominfo_pubsub"))
-  );
+function parseBooleanValue(value: string | null): boolean | null {
+  if (!value) return null;
+  const normalized = value.toLowerCase();
+  if (["1", "true", "yes"].includes(normalized)) return true;
+  if (["0", "false", "no"].includes(normalized)) return false;
+  return null;
 }
 
 function parseDiscoveryRole(value: string | null): DiscoveryRole {
   switch (value) {
-    case "owner":
-      return "owner";
+    case "owner": return "owner";
     case "admin":
-    case "publisher":
-      return "admin";
-    case "moderator":
-      return "moderator";
-    case "member":
-      return "member";
-    default:
-      return null;
+    case "publisher": return "admin";
+    case "moderator": return "moderator";
+    case "member": return "member";
+    default: return null;
   }
 }
 
-export function spacesServiceDomain(jid: string): string {
-  return `spaces.${jidDomain(jid)}`;
+function channelTypeFromInfo(info: DiscoInfoData): DiscoveredChannel["channelType"] {
+  const forumField = parseBooleanValue(info.fields.get(FIELD_FORUM_MODE) ?? null);
+  return normalizeChannelType(info.features.includes(NS_FORUMS_0) || forumField ? "forum" : "text");
 }
 
-export function mucServiceDomain(jid: string): string {
-  return `muc.${jidDomain(jid)}`;
+function roomParentSpaceId(info: DiscoInfoData): string | null {
+  return parseSpaceNodeIri(info.fields.get("parent") ?? null)
+    ?? parseSpaceNodeIri(info.fields.get("muc#roominfo_pubsub") ?? null);
 }
 
-async function discoverComponentServices(
-  xmpp: Agent,
-  domain: string,
-  jid: string,
-): Promise<{ muc: string; spaces: string }> {
-  const fallback = {
-    muc: mucServiceDomain(jid),
-    spaces: spacesServiceDomain(jid),
-  };
+async function sendDiscoInfo(xmpp: HybridClient, to: string, node?: string): Promise<DiscoInfoData | null> {
+  if (xmpp.send_raw_iq) {
+    const id = crypto.randomUUID();
+    const nodeAttr = node ? ` node="${node}"` : "";
+    const responseXml = await xmpp.send_raw_iq(`<iq type="get" id="${id}" to="${to}"><query xmlns="${DISCO_INFO_NS}"${nodeAttr}/></iq>`);
+    const query = parseXml(responseXml).getElementsByTagNameNS(DISCO_INFO_NS, "query")[0];
+    if (!query) return null;
+    const fields = new Map<string, string>();
+    for (const form of elementChildren(query, "x", DATAFORM_NS)) {
+      for (const field of elementChildren(form, "field", DATAFORM_NS)) {
+        const name = field.getAttribute("var");
+        if (!name) continue;
+        const value = textContent(field.querySelector("value"));
+        if (value) fields.set(name, value);
+      }
+    }
+    return {
+      features: elementChildren(query, "feature", DISCO_INFO_NS).map((feature) => feature.getAttribute("var") ?? "").filter(Boolean),
+      identities: elementChildren(query, "identity", DISCO_INFO_NS).map((identity) => ({ category: identity.getAttribute("category") ?? undefined, type: identity.getAttribute("type") ?? undefined, name: identity.getAttribute("name") ?? undefined })),
+      fields,
+    };
+  }
+  const legacy = legacyClient(xmpp);
+  const response = await legacy.getDiscoInfo?.(to, node);
+  if (!response) return null;
+  const fields = new Map<string, string>();
+  for (const extension of response.extensions ?? []) {
+    for (const field of extension.fields ?? []) {
+      if (field.name && field.value) fields.set(field.name, field.value);
+    }
+  }
+  return { features: response.features ?? [], identities: response.identities ?? [], fields };
+}
 
+async function sendDiscoItems(xmpp: HybridClient, to: string, node?: string): Promise<Array<{ jid?: string; name?: string; node?: string }>> {
+  if (xmpp.send_raw_iq) {
+    const id = crypto.randomUUID();
+    const nodeAttr = node ? ` node="${node}"` : "";
+    const xml = `<iq type="get" id="${id}" to="${to}"><query xmlns="${DISCO_ITEMS_NS}"${nodeAttr}/></iq>`;
+    let responseXml: string;
+    try {
+      responseXml = await xmpp.send_raw_iq(xml);
+    } catch (err) {
+      console.error("[disco] send_raw_iq items FAILED", { to, err });
+      throw err;
+    }
+    const doc = parseXml(responseXml);
+    const query = doc.getElementsByTagNameNS(DISCO_ITEMS_NS, "query")[0];
+    if (!query) return [];
+    return Array.from(query.getElementsByTagNameNS(DISCO_ITEMS_NS, "item"))
+      .filter((item) => item.parentNode === query)
+      .map((item) => ({ jid: item.getAttribute("jid") ?? undefined, name: item.getAttribute("name") ?? undefined, node: item.getAttribute("node") ?? undefined }));
+  }
+  return (await legacyClient(xmpp).getDiscoItems?.(to, node))?.items ?? [];
+}
+
+async function sendPubsubItems(xmpp: HybridClient, to: string, node: string): Promise<Array<{ jid?: string; name?: string }>> {
+  if (xmpp.get_pubsub_items) {
+    return (await xmpp.get_pubsub_items(to, node)) as Array<{ jid?: string; name?: string }>;
+  }
+  // Legacy stanza.js path: items are keyed by id (which is the room JID).
+  const result = await legacyClient(xmpp).getItems?.(to, node);
+  return (result?.items ?? []).map((item) => ({ jid: item.id, name: item.content?.name }));
+}
+
+export function spacesServiceDomain(jid: string): string { return `spaces.${jidDomain(jid)}`; }
+export function mucServiceDomain(jid: string): string { return `muc.${jidDomain(jid)}`; }
+
+async function discoverComponentServices(xmpp: HybridClient, domain: string, jid: string): Promise<{ muc: string; spaces: string }> {
+  const fallback = { muc: mucServiceDomain(jid), spaces: spacesServiceDomain(jid) };
   try {
-    const response = await xmpp.getDiscoItems(domain);
-    const candidates = response.items?.map((item) => item.jid).filter((value): value is string => !!value) ?? [];
-    const infos = await Promise.all(
-      candidates.map(async (serviceJid) => {
-        try {
-          return { serviceJid, info: await xmpp.getDiscoInfo(serviceJid) };
-        } catch {
-          return { serviceJid, info: null };
-        }
-      }),
-    );
-    return infos.reduce((services, candidate) => {
-      const features = candidate.info?.features ?? [];
-      const identities = candidate.info?.identities ?? [];
-      if (features.includes(NS_MUC) || identities.some((identity) => identity.category === "conference")) {
-        services.muc = candidate.serviceJid;
-      }
-      if (features.includes(NS_SPACES_0) || identities.some((identity) => identity.category === "pubsub")) {
-        services.spaces = candidate.serviceJid;
-      }
-      return services;
-    }, fallback);
+    const items = await sendDiscoItems(xmpp, domain);
+    const candidates = items.map((item) => item.jid).filter((value): value is string => !!value);
+    let muc = fallback.muc;
+    let spaces = fallback.spaces;
+    await Promise.all(candidates.map(async (serviceJid) => {
+      try {
+        const info = await sendDiscoInfo(xmpp, serviceJid);
+        if (!info) return;
+        if (info.features.includes(NS_MUC) || info.identities.some((identity) => identity.category === "conference")) muc = serviceJid;
+        if (info.features.includes(NS_SPACES_0) || info.identities.some((identity) => identity.category === "pubsub")) spaces = serviceJid;
+      } catch {}
+    }));
+    return { muc, spaces };
   } catch {
     return fallback;
   }
 }
 
-function channelFromDiscoItem(
-  item: { jid?: string; name?: string; node?: string },
-  position: number,
-  extra: Partial<DiscoveredChannel> = {},
-): DiscoveredChannel | null {
-  const itemJid = item.jid ?? "";
-  const channelId = barePeerJid(itemJid).split("@")[0] ?? "";
-  if (!channelId) return null;
-  return {
-    id: channelId,
-    name: item.name ?? channelId,
-    jid: item.jid,
-    channelType: "text",
-    position,
-    ...extra,
-  };
+function channelFromRoom(room: { jid: string; name?: string; channel_type?: string }, position: number): DiscoveredChannel {
+  const id = barePeerJid(room.jid).split("@")[0] ?? room.jid;
+  return { id, name: room.name || id, jid: room.jid, channelType: normalizeChannelType(room.channel_type || "text"), position };
 }
 
-function channelFromSpaceItem(
-  item: PubsubItem,
-  position: number,
-  extra: Partial<DiscoveredChannel> = {},
-): DiscoveredChannel | null {
-  const itemJid = item.id ?? "";
-  const channelId = barePeerJid(itemJid).split("@")[0] ?? "";
-  if (!channelId) return null;
-  const content = item.content;
-  if (content?.itemType && content.itemType !== NS_BOOKMARKS_1) return null;
-  return {
-    id: channelId,
-    name: content?.name ?? channelId,
-    jid: itemJid,
-    channelType: "text",
-    position,
-    ...extra,
-  };
-}
-
-async function hydrateChannelType(
-  xmpp: Agent,
-  channel: DiscoveredChannel,
-): Promise<DiscoveredChannel> {
-  if (!channel.jid) return channel;
+async function hydrateRoomInfo(xmpp: HybridClient, room: DiscoveredChannel): Promise<DiscoveredChannel> {
+  if (!room.jid) return room;
   try {
-    const info = await xmpp.getDiscoInfo(channel.jid);
-    const parentSpaceId = parseRoomParentSpaceId(info);
+    const info = await sendDiscoInfo(xmpp, room.jid);
+    if (!info) return room;
+    const parentSpaceId = roomParentSpaceId(info);
     return {
-      ...channel,
-      channelType: parseChannelType(info),
-      spaceId: channel.spaceId ?? parentSpaceId ?? undefined,
-      standalone: channel.spaceId || parentSpaceId ? false : channel.standalone,
-      ...(info.features?.length ? { features: info.features } : {}),
+      ...room,
+      channelType: channelTypeFromInfo(info),
+      ...(parentSpaceId ? { spaceId: parentSpaceId, standalone: false } : {}),
+      ...(info.features.length ? { features: info.features } : {}),
     };
   } catch {
-    return channel;
+    return room;
   }
 }
 
-export async function discoverChannels(
-  xmpp: Agent,
-  jid: string,
-): Promise<DiscoveredChannel[]> {
-  const spacesDomain = spacesServiceDomain(jid);
-  const spacesResponse = await xmpp.getDiscoItems(spacesDomain);
-  const spaceNode = spacesResponse.items?.find((item) => item.node)?.node;
-
+export async function discoverChannels(xmpp: HybridClient, jid: string): Promise<DiscoveredChannel[]> {
+  const spaces = await sendDiscoItems(xmpp, spacesServiceDomain(jid));
+  const spaceNode = spaces[0]?.node;
   if (!spaceNode) return [];
-
-  const response = await (xmpp as PubsubAgent).getItems(spacesDomain, spaceNode, { max: 500 });
-  const discovered = (response.items ?? [])
-    .map((item, position) => channelFromSpaceItem(item, position))
-    .filter((channel): channel is DiscoveredChannel => !!channel);
-
-  const hydrated = await Promise.all(discovered.map((channel) => hydrateChannelType(xmpp, channel)));
-  return hydrated.map((room, position) => ({
-    id: room.id,
-    name: room.name,
-    channelType: room.channelType,
-    position,
-  }));
+  const items = await sendPubsubItems(xmpp, spacesServiceDomain(jid), spaceNode);
+  const hydrated = await Promise.all(items.map((item, position) => hydrateRoomInfo(xmpp, channelFromRoom({ jid: item.jid ?? "", name: item.name }, position))));
+  return hydrated.map((room, position) => ({ id: room.id, name: room.name, channelType: room.channelType, position }));
 }
 
-export async function discoverTopology(
-  xmpp: Agent,
-  jid: string,
-): Promise<DiscoveredTopology> {
+export async function discoverTopology(xmpp: HybridClient, jid: string): Promise<DiscoveredTopology> {
   const domain = jidDomain(jid);
   const services = await discoverComponentServices(xmpp, domain, jid);
-  const mucDomain = services.muc;
-  const spacesDomain = services.spaces;
-
-  const roomsByJid = new Map<string, DiscoveredChannel>();
+  let rooms: DiscoveredChannel[] = [];
+  const bookmarkedSpaceIds = new Map<string, string>();
   const spaces: DiscoveredSpace[] = [];
   let serverRole: DiscoveryRole = null;
 
   try {
-    const serverInfo = await xmpp.getDiscoInfo(domain);
-    serverRole = parseDiscoveryRole(metadataField(serverInfo, "waddle#server_affiliation"));
-  } catch {
-    serverRole = null;
-  }
+    const serverInfo = await sendDiscoInfo(xmpp, domain);
+    if (serverInfo) serverRole = parseDiscoveryRole(serverInfo.fields.get("waddle#server_affiliation") ?? null);
+  } catch {}
 
   try {
-    const mucResponse = await xmpp.getDiscoItems(mucDomain);
-    (mucResponse.items ?? []).forEach((item, position) => {
-      const channel = channelFromDiscoItem(item, position, { standalone: true });
-      if (channel?.jid) roomsByJid.set(barePeerJid(channel.jid), channel);
-    });
-  } catch {
-    // Empty or not-yet-initialized MUC services are a valid first-run state.
-  }
-
-  try {
-    const spacesResponse = await xmpp.getDiscoItems(spacesDomain);
-    for (const [spacePosition, item] of (spacesResponse.items ?? []).entries()) {
-      const spaceId = item.node ?? barePeerJid(item.jid ?? "").split("@")[0] ?? `space-${spacePosition}`;
-      if (!spaceId) continue;
-      let spaceRole = serverRole;
+    const spaceItems = await sendDiscoItems(xmpp, services.spaces);
+    for (const [index, item] of spaceItems.entries()) {
+      const spaceId = item.node ?? barePeerJid(item.jid ?? "").split("@")[0] ?? `space-${index}`;
+      let role = serverRole;
       if (item.node) {
         try {
-          const spaceInfo = await xmpp.getDiscoInfo(spacesDomain, item.node);
-          spaceRole =
-            parseDiscoveryRole(metadataField(spaceInfo, "pubsub#affiliation")) ??
-            serverRole;
-        } catch {
-          spaceRole = serverRole;
-        }
+          const info = await sendDiscoInfo(xmpp, services.spaces, item.node);
+          if (info) role = parseDiscoveryRole(info.fields.get("pubsub#affiliation") ?? null) ?? serverRole;
+        } catch {}
+        try {
+          const bookmarks = await sendPubsubItems(xmpp, services.spaces, item.node);
+          for (const bookmark of bookmarks) {
+            if (bookmark.jid) bookmarkedSpaceIds.set(barePeerJid(bookmark.jid), spaceId);
+          }
+        } catch {}
       }
-      spaces.push({
-        id: spaceId,
-        name: item.name ?? spaceId,
-        role: spaceRole,
-      });
-
-      if (!item.node) continue;
-      const response = await (xmpp as PubsubAgent).getItems(spacesDomain, item.node, { max: 500 });
-      (response.items ?? []).forEach((child, position) => {
-        const channel = channelFromSpaceItem(child, position, {
-          spaceId,
-          standalone: false,
-        });
-        if (!channel?.jid) return;
-        const key = barePeerJid(channel.jid);
-        roomsByJid.set(key, {
-          ...(roomsByJid.get(key) ?? channel),
-          ...channel,
-        });
-      });
+      spaces.push({ id: spaceId, name: item.name ?? spaceId, role });
     }
-  } catch {
-    // No spaces is the expected state on a fresh deployment.
-  }
+  } catch {}
 
-  const rooms = await Promise.all(
-    [...roomsByJid.values()]
-      .sort((a, b) => a.position - b.position || a.name.localeCompare(b.name))
-      .map((room, position) => hydrateChannelType(xmpp, { ...room, position })),
-  );
+  const mucRooms = await sendDiscoItems(xmpp, services.muc);
+  const hydrated = await Promise.all(mucRooms.map((room, position) => hydrateRoomInfo(xmpp, channelFromRoom({ jid: room.jid ?? "", name: room.name }, position))));
+  rooms = hydrated.map((room, position) => ({ ...room, position, ...(room.jid && bookmarkedSpaceIds.get(barePeerJid(room.jid)) ? { spaceId: bookmarkedSpaceIds.get(barePeerJid(room.jid)), standalone: false } : {}) }));
 
+  const roomSpaceIds = new Map(rooms.flatMap((room) => room.jid ? [[barePeerJid(room.jid), room.spaceId]] as const : []));
   return {
     spaces,
-    rooms,
+    rooms: rooms.map((room, position) => ({ ...room, position, ...(room.jid && roomSpaceIds.get(barePeerJid(room.jid)) ? { standalone: false } : { standalone: room.standalone ?? true }) })),
     serverRole,
     services,
   };

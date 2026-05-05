@@ -22,7 +22,7 @@ function dedupeMessageIds(ids: readonly (string | null | undefined)[]): string[]
   return out;
 }
 
-export function splitMessageIds(
+function splitMessageIds(
   primaryId: string | null | undefined,
   extraIds: readonly (string | null | undefined)[] = [],
 ): MessageIdCarrier {

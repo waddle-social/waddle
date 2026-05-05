@@ -8,13 +8,17 @@
 //! Typed payloads only — JIDs use [`BareJid`], errors use [`ClientError`], and
 //! the raw image bytes live in [`Avatar`].
 
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use jid::BareJid;
 use minidom::Element;
 use uuid::Uuid;
 
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 use crate::client::ClientHandle;
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 use crate::error::{ClientError, ClientResult};
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 use tracing::warn;
 
 pub const NS_AVATAR_DATA: &str = "urn:xmpp:avatar:data";
@@ -52,7 +56,7 @@ pub struct Avatar {
 // ── IQ builders ──────────────────────────────────────────────────────────────
 
 /// Build a pubsub `items` IQ requesting the latest avatar metadata item.
-fn build_metadata_request_iq(to: &BareJid) -> Element {
+pub fn build_metadata_request_iq(to: &BareJid) -> Element {
     let id = format!("avatar-meta-{}", Uuid::new_v4());
     let items = Element::builder("items", NS_PUBSUB)
         .attr("node", NS_AVATAR_METADATA)
@@ -70,7 +74,7 @@ fn build_metadata_request_iq(to: &BareJid) -> Element {
 }
 
 /// Build a pubsub `items` IQ requesting a specific avatar-data item by id.
-fn build_data_request_iq(to: &BareJid, item_id: &str) -> Element {
+pub fn build_data_request_iq(to: &BareJid, item_id: &str) -> Element {
     let id = format!("avatar-data-{}", Uuid::new_v4());
     let item = Element::builder("item", NS_PUBSUB)
         .attr("id", item_id)
@@ -94,7 +98,7 @@ fn build_data_request_iq(to: &BareJid, item_id: &str) -> Element {
 
 /// Parse a pubsub-items IQ result carrying an avatar-metadata payload.
 /// Returns `None` if the node is empty (no avatar published).
-fn parse_metadata_response(iq: &Element) -> Option<AvatarInfo> {
+pub fn parse_metadata_response(iq: &Element) -> Option<AvatarInfo> {
     let pubsub = iq.get_child("pubsub", NS_PUBSUB)?;
     let items = pubsub.get_child("items", NS_PUBSUB)?;
     if items.attr("node")? != NS_AVATAR_METADATA {
@@ -125,7 +129,7 @@ fn parse_metadata_response(iq: &Element) -> Option<AvatarInfo> {
 
 /// Parse a pubsub-items IQ result carrying an avatar-data payload.
 /// Returns the base64 text content of the `<data>` child.
-fn parse_data_response(iq: &Element) -> Option<String> {
+pub fn parse_data_response(iq: &Element) -> Option<String> {
     let pubsub = iq.get_child("pubsub", NS_PUBSUB)?;
     let items = pubsub.get_child("items", NS_PUBSUB)?;
     if items.attr("node")? != NS_AVATAR_DATA {
@@ -144,6 +148,7 @@ fn parse_data_response(iq: &Element) -> Option<String> {
 // ── AvatarExt trait ──────────────────────────────────────────────────────────
 
 /// High-level avatar operations on a connected client.
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 pub trait AvatarExt {
     /// Fetch the published avatar for the given JID, if any.
     ///
@@ -156,6 +161,7 @@ pub trait AvatarExt {
     ) -> impl std::future::Future<Output = ClientResult<Option<Avatar>>> + Send + 'a;
 }
 
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 impl AvatarExt for ClientHandle {
     async fn request_avatar(&self, jid: &BareJid) -> ClientResult<Option<Avatar>> {
         let meta_iq = build_metadata_request_iq(jid);
@@ -222,6 +228,7 @@ impl AvatarExt for ClientHandle {
 /// network, HTTP status, body read) is logged and collapsed to `None` so the
 /// UI falls back to initials rather than surfacing a hard error for what is
 /// cosmetic data.
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 async fn fetch_avatar_url(jid: &BareJid, info: &AvatarInfo, url: &str) -> Option<Avatar> {
     if !url.starts_with("https://") {
         warn!(jid = %jid, url, "avatar url is not https, skipping");

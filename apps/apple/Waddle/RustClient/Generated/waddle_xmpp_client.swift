@@ -564,13 +564,13 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
     func requestAvatar(jid: String) async  -> WaddleAvatar?
 
     func requestUploadSlot(serviceJid: String, filename: String, size: UInt64, contentType: String) async  -> WaddleUploadSlot?
-
-    func sendChatMessage(peerJid: String, body: String, options: WaddleSendOptions?) async
-
-    func sendGroupchatMessage(roomJid: String, body: String, options: WaddleSendOptions?) async
-
-    func sendPresence(status: String?, show: String?) async
-
+    
+    func sendChatMessage(peerJid: String, body: String, options: WaddleSendOptions?) async  -> String
+    
+    func sendGroupchatMessage(roomJid: String, body: String, options: WaddleSendOptions?) async  -> String
+    
+    func sendPresence(status: String?, show: String?) async 
+    
 }
 open class WaddleClient: WaddleClientProtocol, @unchecked Sendable {
     fileprivate let pointer: UnsafeMutableRawPointer!
@@ -818,8 +818,8 @@ open func requestUploadSlot(serviceJid: String, filename: String, size: UInt64, 
 
         )
 }
-
-open func sendChatMessage(peerJid: String, body: String, options: WaddleSendOptions?)async   {
+    
+open func sendChatMessage(peerJid: String, body: String, options: WaddleSendOptions?)async  -> String  {
     return
         try!  await uniffiRustCallAsync(
             rustFutureFunc: {
@@ -828,16 +828,16 @@ open func sendChatMessage(peerJid: String, body: String, options: WaddleSendOpti
                     FfiConverterString.lower(peerJid),FfiConverterString.lower(body),FfiConverterOptionTypeWaddleSendOptions.lower(options)
                 )
             },
-            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_void,
-            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_void,
-            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_void,
-            liftFunc: { $0 },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterString.lift,
             errorHandler: nil
 
         )
 }
-
-open func sendGroupchatMessage(roomJid: String, body: String, options: WaddleSendOptions?)async   {
+    
+open func sendGroupchatMessage(roomJid: String, body: String, options: WaddleSendOptions?)async  -> String  {
     return
         try!  await uniffiRustCallAsync(
             rustFutureFunc: {
@@ -846,10 +846,10 @@ open func sendGroupchatMessage(roomJid: String, body: String, options: WaddleSen
                     FfiConverterString.lower(roomJid),FfiConverterString.lower(body),FfiConverterOptionTypeWaddleSendOptions.lower(options)
                 )
             },
-            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_void,
-            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_void,
-            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_void,
-            liftFunc: { $0 },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterString.lift,
             errorHandler: nil
 
         )
@@ -1914,13 +1914,13 @@ public struct FfiConverterTypeWaddlePresence: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddlePresence {
         return
             try WaddlePresence(
-                from: FfiConverterOptionString.read(from: &buf),
-                to: FfiConverterOptionString.read(from: &buf),
-                presenceType: FfiConverterString.read(from: &buf),
-                show: FfiConverterOptionString.read(from: &buf),
-                status: FfiConverterOptionString.read(from: &buf),
-                hats: FfiConverterSequenceTypeWaddlePresenceHat.read(from: &buf),
-                mucAffiliation: FfiConverterOptionTypeWaddleMucAffiliation.read(from: &buf),
+                from: FfiConverterOptionString.read(from: &buf), 
+                to: FfiConverterOptionString.read(from: &buf), 
+                presenceType: FfiConverterString.read(from: &buf), 
+                show: FfiConverterOptionString.read(from: &buf), 
+                status: FfiConverterOptionString.read(from: &buf), 
+                hats: FfiConverterSequenceTypeWaddlePresenceHat.read(from: &buf), 
+                mucAffiliation: FfiConverterOptionTypeWaddleMucAffiliation.read(from: &buf), 
                 mucRole: FfiConverterOptionTypeWaddleMucRole.read(from: &buf)
         )
     }
@@ -1996,7 +1996,7 @@ public struct FfiConverterTypeWaddlePresenceHat: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddlePresenceHat {
         return
             try WaddlePresenceHat(
-                uri: FfiConverterString.read(from: &buf),
+                uri: FfiConverterString.read(from: &buf), 
                 title: FfiConverterString.read(from: &buf)
         )
     }
@@ -2114,6 +2114,7 @@ public func FfiConverterTypeWaddleReplyTarget_lower(_ value: WaddleReplyTarget) 
  * Options bag attached to an outbound chat or groupchat send.
  */
 public struct WaddleSendOptions {
+    public var stanzaId: String?
     public var reply: WaddleReplyTarget?
     public var fallback: WaddleFallbackRange?
     public var thread: WaddleThreadTarget?
@@ -2121,7 +2122,8 @@ public struct WaddleSendOptions {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(reply: WaddleReplyTarget?, fallback: WaddleFallbackRange?, thread: WaddleThreadTarget?, sharedFiles: [WaddleSharedFile]) {
+    public init(stanzaId: String?, reply: WaddleReplyTarget?, fallback: WaddleFallbackRange?, thread: WaddleThreadTarget?, sharedFiles: [WaddleSharedFile]) {
+        self.stanzaId = stanzaId
         self.reply = reply
         self.fallback = fallback
         self.thread = thread
@@ -2136,6 +2138,9 @@ extension WaddleSendOptions: Sendable {}
 
 extension WaddleSendOptions: Equatable, Hashable {
     public static func ==(lhs: WaddleSendOptions, rhs: WaddleSendOptions) -> Bool {
+        if lhs.stanzaId != rhs.stanzaId {
+            return false
+        }
         if lhs.reply != rhs.reply {
             return false
         }
@@ -2152,6 +2157,7 @@ extension WaddleSendOptions: Equatable, Hashable {
     }
 
     public func hash(into hasher: inout Hasher) {
+        hasher.combine(stanzaId)
         hasher.combine(reply)
         hasher.combine(fallback)
         hasher.combine(thread)
@@ -2168,14 +2174,16 @@ public struct FfiConverterTypeWaddleSendOptions: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleSendOptions {
         return
             try WaddleSendOptions(
-                reply: FfiConverterOptionTypeWaddleReplyTarget.read(from: &buf),
-                fallback: FfiConverterOptionTypeWaddleFallbackRange.read(from: &buf),
-                thread: FfiConverterOptionTypeWaddleThreadTarget.read(from: &buf),
+                stanzaId: FfiConverterOptionString.read(from: &buf), 
+                reply: FfiConverterOptionTypeWaddleReplyTarget.read(from: &buf), 
+                fallback: FfiConverterOptionTypeWaddleFallbackRange.read(from: &buf), 
+                thread: FfiConverterOptionTypeWaddleThreadTarget.read(from: &buf), 
                 sharedFiles: FfiConverterSequenceTypeWaddleSharedFile.read(from: &buf)
         )
     }
 
     public static func write(_ value: WaddleSendOptions, into buf: inout [UInt8]) {
+        FfiConverterOptionString.write(value.stanzaId, into: &buf)
         FfiConverterOptionTypeWaddleReplyTarget.write(value.reply, into: &buf)
         FfiConverterOptionTypeWaddleFallbackRange.write(value.fallback, into: &buf)
         FfiConverterOptionTypeWaddleThreadTarget.write(value.thread, into: &buf)
@@ -2698,7 +2706,7 @@ public func FfiConverterTypeWaddleUploadSlot_lower(_ value: WaddleUploadSlot) ->
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 
 public enum WaddleMucAffiliation {
-
+    
     case owner
     case admin
     case member
@@ -2720,44 +2728,44 @@ public struct FfiConverterTypeWaddleMucAffiliation: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleMucAffiliation {
         let variant: Int32 = try readInt(&buf)
         switch variant {
-
+        
         case 1: return .owner
-
+        
         case 2: return .admin
-
+        
         case 3: return .member
-
+        
         case 4: return .outcast
-
+        
         case 5: return .none
-
+        
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
     public static func write(_ value: WaddleMucAffiliation, into buf: inout [UInt8]) {
         switch value {
-
-
+        
+        
         case .owner:
             writeInt(&buf, Int32(1))
-
-
+        
+        
         case .admin:
             writeInt(&buf, Int32(2))
-
-
+        
+        
         case .member:
             writeInt(&buf, Int32(3))
-
-
+        
+        
         case .outcast:
             writeInt(&buf, Int32(4))
-
-
+        
+        
         case .none:
             writeInt(&buf, Int32(5))
-
+        
         }
     }
 }
@@ -2789,7 +2797,7 @@ extension WaddleMucAffiliation: Equatable, Hashable {}
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 
 public enum WaddleMucRole {
-
+    
     case moderator
     case participant
     case visitor
@@ -2810,38 +2818,38 @@ public struct FfiConverterTypeWaddleMucRole: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleMucRole {
         let variant: Int32 = try readInt(&buf)
         switch variant {
-
+        
         case 1: return .moderator
-
+        
         case 2: return .participant
-
+        
         case 3: return .visitor
-
+        
         case 4: return .none
-
+        
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
     public static func write(_ value: WaddleMucRole, into buf: inout [UInt8]) {
         switch value {
-
-
+        
+        
         case .moderator:
             writeInt(&buf, Int32(1))
-
-
+        
+        
         case .participant:
             writeInt(&buf, Int32(2))
-
-
+        
+        
         case .visitor:
             writeInt(&buf, Int32(3))
-
-
+        
+        
         case .none:
             writeInt(&buf, Int32(4))
-
+        
         }
     }
 }
@@ -2873,19 +2881,23 @@ extension WaddleMucRole: Equatable, Hashable {}
 
 
 public protocol WaddleEventListener: AnyObject, Sendable {
-
-    func onMessage(message: WaddleMessage)
-
-    func onPresence(presence: WaddlePresence)
-
-    func onMamResult(message: WaddleArchivedMessage)
-
-    func onConnected()
-
-    func onDisconnected()
-
-    func onError(description: String)
-
+    
+    func onMessage(message: WaddleMessage) 
+    
+    func onPresence(presence: WaddlePresence) 
+    
+    func onMamResult(message: WaddleArchivedMessage) 
+    
+    func onMessageDeliveryAcked(stanzaId: String) 
+    
+    func onMessageDeliveryFailed(stanzaId: String) 
+    
+    func onConnected() 
+    
+    func onDisconnected() 
+    
+    func onError(description: String) 
+    
 }
 
 
@@ -2963,6 +2975,54 @@ fileprivate struct UniffiCallbackInterfaceWaddleEventListener {
             }
 
 
+            let writeReturn = { () }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        },
+        onMessageDeliveryAcked: { (
+            uniffiHandle: UInt64,
+            stanzaId: RustBuffer,
+            uniffiOutReturn: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> () in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceWaddleEventListener.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.onMessageDeliveryAcked(
+                     stanzaId: try FfiConverterString.lift(stanzaId)
+                )
+            }
+
+            
+            let writeReturn = { () }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        },
+        onMessageDeliveryFailed: { (
+            uniffiHandle: UInt64,
+            stanzaId: RustBuffer,
+            uniffiOutReturn: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> () in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceWaddleEventListener.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.onMessageDeliveryFailed(
+                     stanzaId: try FfiConverterString.lift(stanzaId)
+                )
+            }
+
+            
             let writeReturn = { () }
             uniffiTraitInterfaceCall(
                 callStatus: uniffiCallStatus,
@@ -3641,10 +3701,10 @@ private let initializationResult: InitializationResult = {
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_request_upload_slot() != 18654) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_chat_message() != 43390) {
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_chat_message() != 26405) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_groupchat_message() != 55676) {
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_groupchat_message() != 10094) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_presence() != 28282) {
@@ -3662,13 +3722,19 @@ private let initializationResult: InitializationResult = {
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleeventlistener_on_mam_result() != 1286) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleeventlistener_on_connected() != 55961) {
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleeventlistener_on_message_delivery_acked() != 24426) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleeventlistener_on_disconnected() != 14090) {
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleeventlistener_on_message_delivery_failed() != 12616) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleeventlistener_on_error() != 42557) {
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleeventlistener_on_connected() != 40246) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleeventlistener_on_disconnected() != 54320) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleeventlistener_on_error() != 54497) {
         return InitializationResult.apiChecksumMismatch
     }
 

@@ -2,7 +2,7 @@ export function codePointLength(input: string): number {
   return Array.from(input).length;
 }
 
-export function codePointToCodeUnitIndex(input: string, codePointOffset: number): number {
+function codePointToCodeUnitIndex(input: string, codePointOffset: number): number {
   if (codePointOffset <= 0) return 0;
   let codePoints = 0;
   let codeUnits = 0;

@@ -1,5 +1,4 @@
 import { describe, expect, mock, test } from "bun:test";
-import type { Agent } from "stanza";
 import { discoverChannels } from "../src/lib/xmpp/discovery";
 
 function makeAgent() {
@@ -59,7 +58,7 @@ describe("forum channel discovery", () => {
       ["spaces.example.com"],
     ]);
     expect(xmpp.getItems.mock.calls).toEqual([
-      ["spaces.example.com", "space", { max: 500 }],
+      ["spaces.example.com", "space"],
     ]);
   });
 

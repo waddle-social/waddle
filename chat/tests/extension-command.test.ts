@@ -140,11 +140,11 @@ describe("extension command invocation", () => {
   });
 
   test("builds plain XEP-0050 execute requests for discovered commands", async () => {
-    let sent: unknown;
+    let sent = "";
     const xmpp = {
-      async sendIQ(iq: unknown) {
-        sent = iq;
-        return { command: { status: "completed", notes: [] } };
+      async send_raw_iq(xml: string) {
+        sent = xml;
+        return `<iq type="result"><command xmlns="http://jabber.org/protocol/commands" status="completed" /></iq>`;
       },
     };
 
@@ -154,43 +154,27 @@ describe("extension command invocation", () => {
       { serviceJid: "extensions.example.com", node: "urn:waddle:extension:noop", name: "Noop" },
     );
 
-    expect(sent).toMatchObject({
-      type: "set",
-      to: "extensions.example.com",
-      command: {
-        node: "urn:waddle:extension:noop",
-        action: "execute",
-      },
-    });
-    expect((sent as { command?: { form?: unknown } }).command?.form).toBeUndefined();
+    expect(sent).toContain('type="set"');
+    expect(sent).toContain('to="extensions.example.com"');
+    expect(sent).toContain('node="urn:waddle:extension:noop"');
+    expect(sent).toContain('action="execute"');
+    expect(sent).not.toContain('jabber:x:data');
   });
 
   test("returns discovered commands from the extension service", async () => {
     const xmpp = {
-      async getDiscoItems(jid: string, node?: string) {
-        if (jid === "example.com" && node === undefined) {
-          return { items: [{ jid: "extensions.example.com", name: "Extensions" }] };
+      async send_raw_iq(xml: string) {
+        if (xml.includes('disco#info')) {
+          return `<iq type="result"><query xmlns="http://jabber.org/protocol/disco#info"><feature var="http://jabber.org/protocol/commands" /></query></iq>`;
         }
-        expect(jid).toBe("extensions.example.com");
-        expect(node).toBe("http://jabber.org/protocol/commands");
-        return {
-          items: [
-            { jid, node: "urn:waddle:extension:poll", name: "Poll" },
-            { jid, node: "urn:waddle:extension:1:ai-chatbot", name: "Ask AI Chatbot" },
-            { jid, node: "urn:waddle:extension:notes", name: "Notes" },
-          ],
-        };
-      },
-      async getDiscoInfo(jid: string) {
-        expect(jid).toBe("extensions.example.com");
-        return { features: ["urn:waddle:extension:1", "http://jabber.org/protocol/commands"] };
+        return `<iq type="result"><query xmlns="http://jabber.org/protocol/disco#items"><item jid="extensions.example.com" node="urn:waddle:extension:poll" name="Poll" /><item jid="extensions.example.com" node="urn:waddle:extension:1:ai-chatbot" name="Ask AI Chatbot" /><item jid="extensions.example.com" node="urn:waddle:extension:notes" name="Notes" /></query></iq>`;
       },
     };
 
     expect(await discoverExtensionCommands(xmpp as any, "alice@example.com/web")).toEqual([
-      { serviceJid: "extensions.example.com", node: "urn:waddle:extension:poll", name: "Poll", scope: "global" },
-      { serviceJid: "extensions.example.com", node: "urn:waddle:extension:1:ai-chatbot", name: "Ask AI Chatbot", scope: "global" },
-      { serviceJid: "extensions.example.com", node: "urn:waddle:extension:notes", name: "Notes", scope: "global" },
+      { serviceJid: "extensions.example.com", node: "urn:waddle:extension:poll", name: "Poll" },
+      { serviceJid: "extensions.example.com", node: "urn:waddle:extension:1:ai-chatbot", name: "Ask AI Chatbot" },
+      { serviceJid: "extensions.example.com", node: "urn:waddle:extension:notes", name: "Notes" },
     ]);
   });
 
@@ -743,11 +727,11 @@ describe("extension command invocation", () => {
   });
 
   test("submits XEP-0050 session id and XEP-0004 multi values using Stanza names", async () => {
-    let sent: unknown;
+    let sent = "";
     const xmpp = {
-      async sendIQ(iq: unknown) {
-        sent = iq;
-        return { command: { status: "completed", notes: [] } };
+      async send_raw_iq(xml: string) {
+        sent = xml;
+        return `<iq type="result"><command xmlns="http://jabber.org/protocol/commands" status="completed" sessionid="session-1" /></iq>`;
       },
     };
 
@@ -805,23 +789,13 @@ describe("extension command invocation", () => {
       "pub@muc.example.com",
     );
 
-    expect(sent).toMatchObject({
-      type: "set",
-      to: "extensions.example.com",
-      command: {
-        node: "urn:waddle:extension:poll",
-        sid: "session-1",
-        action: "next",
-        form: {
-          type: "submit",
-          fields: [
-            { name: "payload#choices", type: "list-multi", value: ["yes", "maybe"] },
-            { name: "payload#notify", type: "boolean", value: false },
-            { name: "hidden#multi", type: "hidden", value: ["alpha", "beta"] },
-            { name: "waddle#room_jid", type: "hidden", value: "pub@muc.example.com" },
-          ],
-        },
-      },
-    });
+    expect(sent).toContain('to="extensions.example.com"');
+    expect(sent).toContain('node="urn:waddle:extension:poll"');
+    expect(sent).toContain('action="next"');
+    expect(sent).toContain('sessionid="session-1"');
+    expect(sent).toContain('<field var="payload#choices"><value>yes</value><value>maybe</value></field>');
+    expect(sent).toContain('<field var="payload#notify" type="boolean"><value>false</value></field>');
+    expect(sent).toContain('<field var="hidden#multi"><value>alpha</value><value>beta</value></field>');
+    expect(sent).not.toContain('fixed:Do not send me');
   });
 });

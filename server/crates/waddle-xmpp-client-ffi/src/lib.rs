@@ -13,12 +13,13 @@ use waddle_xmpp_client::{
     discovery::DiscoveryExt,
     mam::MamExt,
     messaging::{self, InboundMessage, MessagingExt, SendMessageOptions},
+    request::StanzaId,
     xep::{
         reply::{FallbackRange, ReplyMarker},
         thread::ThreadRef,
     },
-    AccessToken, ClientConfig, ClientHandle, ConnectionConfig, LifecycleEvent, MessagingEvent,
-    OAuthBearerConfig, WebSocketConfig,
+    AccessToken, ClientConfig, ClientHandle, ConnectionConfig, LifecycleEvent,
+    MessageDeliveryEvent, MessagingEvent, OAuthBearerConfig, WebSocketConfig,
 };
 use waddle_xmpp_client::{ClientEvent, ClientResource, XmppClient};
 
@@ -221,6 +222,7 @@ pub struct WaddleThreadTarget {
 /// Options bag attached to an outbound chat or groupchat send.
 #[derive(uniffi::Record, Clone, Default)]
 pub struct WaddleSendOptions {
+    pub stanza_id: Option<String>,
     pub reply: Option<WaddleReplyTarget>,
     pub fallback: Option<WaddleFallbackRange>,
     pub thread: Option<WaddleThreadTarget>,
@@ -234,6 +236,8 @@ pub trait WaddleEventListener: Send + Sync {
     fn on_message(&self, message: WaddleMessage);
     fn on_presence(&self, presence: WaddlePresence);
     fn on_mam_result(&self, message: WaddleArchivedMessage);
+    fn on_message_delivery_acked(&self, stanza_id: String);
+    fn on_message_delivery_failed(&self, stanza_id: String);
     fn on_connected(&self);
     fn on_disconnected(&self);
     fn on_error(&self, description: String);
@@ -439,12 +443,12 @@ impl WaddleClient {
         room_jid: String,
         body: String,
         options: Option<WaddleSendOptions>,
-    ) {
+    ) -> String {
         let opts = match options.map(send_options_from_ffi).transpose() {
             Ok(o) => o.unwrap_or_default(),
             Err(e) => {
                 self.listener.on_error(e);
-                return;
+                return String::new();
             }
         };
         let guard = self.handle.lock().await;
@@ -452,13 +456,18 @@ impl WaddleClient {
             None => {
                 drop(guard);
                 self.listener.on_error("Not connected".to_string());
+                String::new()
             }
             Some(h) => {
                 let result = h.send_groupchat_message(&room_jid, &body, &opts).await;
                 drop(guard);
-                if let Err(e) = result {
-                    self.listener
-                        .on_error(format!("send_groupchat_message failed: {e}"));
+                match result {
+                    Ok(stanza_id) => stanza_id.to_string(),
+                    Err(e) => {
+                        self.listener
+                            .on_error(format!("send_groupchat_message failed: {e}"));
+                        String::new()
+                    }
                 }
             }
         }
@@ -469,12 +478,12 @@ impl WaddleClient {
         peer_jid: String,
         body: String,
         options: Option<WaddleSendOptions>,
-    ) {
+    ) -> String {
         let opts = match options.map(send_options_from_ffi).transpose() {
             Ok(o) => o.unwrap_or_default(),
             Err(e) => {
                 self.listener.on_error(e);
-                return;
+                return String::new();
             }
         };
         let guard = self.handle.lock().await;
@@ -482,13 +491,18 @@ impl WaddleClient {
             None => {
                 drop(guard);
                 self.listener.on_error("Not connected".to_string());
+                String::new()
             }
             Some(h) => {
                 let result = h.send_chat_message(&peer_jid, &body, &opts).await;
                 drop(guard);
-                if let Err(e) = result {
-                    self.listener
-                        .on_error(format!("send_chat_message failed: {e}"));
+                match result {
+                    Ok(stanza_id) => stanza_id.to_string(),
+                    Err(e) => {
+                        self.listener
+                            .on_error(format!("send_chat_message failed: {e}"));
+                        String::new()
+                    }
                 }
             }
         }
@@ -690,6 +704,12 @@ fn dispatch_event(event: ClientEvent, listener: &dyn WaddleEventListener) {
         }
         ClientEvent::MamResult(archived) => {
             listener.on_mam_result(archived_to_ffi(archived));
+        }
+        ClientEvent::MessageDelivery(MessageDeliveryEvent::Acked { stanza_id }) => {
+            listener.on_message_delivery_acked(stanza_id.to_string());
+        }
+        ClientEvent::MessageDelivery(MessageDeliveryEvent::Failed { stanza_id }) => {
+            listener.on_message_delivery_failed(stanza_id.to_string());
         }
         _ => {}
     }
@@ -945,10 +965,20 @@ fn send_options_from_ffi(opts: WaddleSendOptions) -> Result<SendMessageOptions, 
         })
         .collect();
 
+    let stanza_id = opts
+        .stanza_id
+        .map(StanzaId::new)
+        .transpose()
+        .map_err(|e| e.to_string())?;
+
     Ok(SendMessageOptions {
+        stanza_id,
         reply,
         fallback,
         thread,
         shared_files,
+        subject: None,
+        markup_spans: vec![],
+        references: vec![],
     })
 }

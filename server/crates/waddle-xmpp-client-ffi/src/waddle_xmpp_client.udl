@@ -91,6 +91,7 @@ dictionary WaddleThreadTarget {
 };
 
 dictionary WaddleSendOptions {
+    string? stanza_id;
     WaddleReplyTarget? reply;
     WaddleFallbackRange? fallback;
     WaddleThreadTarget? thread;
@@ -175,6 +176,8 @@ callback interface WaddleEventListener {
     void on_message(WaddleMessage message);
     void on_presence(WaddlePresence presence);
     void on_mam_result(WaddleArchivedMessage message);
+    void on_message_delivery_acked(string stanza_id);
+    void on_message_delivery_failed(string stanza_id);
     void on_connected();
     void on_disconnected();
     void on_error(string description);
@@ -197,10 +200,10 @@ interface WaddleClient {
     WaddleMamPage fetch_dm_history(string peer_jid, u32 max_messages, string? before_id);
 
     [Async]
-    void send_groupchat_message(string room_jid, string body, WaddleSendOptions? options);
+    string send_groupchat_message(string room_jid, string body, WaddleSendOptions? options);
 
     [Async]
-    void send_chat_message(string peer_jid, string body, WaddleSendOptions? options);
+    string send_chat_message(string peer_jid, string body, WaddleSendOptions? options);
 
     [Async]
     void join_room(string room_jid, string nick);
