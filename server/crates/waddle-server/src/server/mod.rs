@@ -768,23 +768,33 @@ pub async fn start_with_config(
         info!(signal = ?signal, "Shutdown lifecycle complete");
     });
 
-    // Wait for any task to complete
-    tokio::select! {
-        result = http_handle => {
-            match result {
-                Ok(Ok(())) => {
-                    info!("HTTP server stopped");
-                    Ok(())
-                },
-                Ok(Err(e)) => Err(e),
-                Err(e) => Err(anyhow::anyhow!("HTTP server task failed: {}", e)),
-            }
-        }
-        _ = shutdown_handle => {
-            info!("Graceful shutdown complete");
+    // Wait for the HTTP server to fully exit. axum's
+    // `graceful_shutdown` closure (in `start_http_server`) is what
+    // waits on the SM Q6 drain via `drain_complete.notified()`, so
+    // letting `http_handle` drive the exit guarantees the runtime
+    // doesn't tear down mid-drain. The shutdown lifecycle task
+    // runs in parallel and signals stop_token; the HTTP server
+    // sees that and starts its graceful drain. Once the HTTP
+    // server returns, drain has completed.
+    //
+    // Previously this used `tokio::select!` between http_handle
+    // and shutdown_handle, which would return on whichever fired
+    // first — and shutdown_handle fires as soon as Ecdysis
+    // observes the signal, which is well before the HTTP graceful
+    // drain finishes (Copilot + Qodo review on PR #346).
+    let result = match http_handle.await {
+        Ok(Ok(())) => {
+            info!("HTTP server stopped (graceful drain complete)");
             Ok(())
         }
-    }
+        Ok(Err(e)) => Err(e),
+        Err(e) => Err(anyhow::anyhow!("HTTP server task failed: {}", e)),
+    };
+    // Best-effort: ensure the shutdown lifecycle task is also
+    // joined so we don't leave it dangling.
+    let _ = shutdown_handle.await;
+    info!("Graceful shutdown complete");
+    result
 }
 
 /// Bundle of parameters for [`start_http_server`].
@@ -1389,64 +1399,98 @@ async fn create_router(
 
             drain_token.cancelled().await;
             info!("Graceful shutdown: starting SM session Q6 drain");
-            let drained = match drain_state
-                .deps
-                .protocol
-                .sm_session_registry
-                .drain_all_for_shutdown()
-                .await
-            {
-                Ok(s) => s,
-                Err(error) => {
-                    warn!(error = %error, "Graceful shutdown: drain_all_for_shutdown failed");
-                    return;
+            // Iterative drain: live WebSocket connections close
+            // asynchronously after stop_token fires (cleanup_connection_shutdown
+            // detaches each session, then store_session puts it in the
+            // SM registry). We loop draining until two consecutive
+            // iterations see an empty registry, OR the bounded timeout
+            // elapses. (Copilot review on PR #346: a single-pass drain
+            // missed sessions detaching mid-shutdown.)
+            const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+            const MAX_DRAIN_DURATION: std::time::Duration = std::time::Duration::from_secs(30);
+            let drain_deadline = std::time::Instant::now() + MAX_DRAIN_DURATION;
+            let mut empty_passes = 0u32;
+            let mut total_drained = 0usize;
+            loop {
+                if std::time::Instant::now() >= drain_deadline {
+                    warn!(
+                        total_drained,
+                        "Graceful shutdown: drain timeout reached; remaining sessions \
+                         will be lost"
+                    );
+                    break;
                 }
-            };
-            if drained.is_empty() {
-                info!("Graceful shutdown: no detached SM sessions to drain");
-                return;
-            }
-            info!(
-                count = drained.len(),
-                "Graceful shutdown: promoting unacked queues for detached SM sessions"
-            );
-            for session in drained {
-                let blocklist = match drain_state
+                let drained = match drain_state
                     .deps
                     .protocol
-                    .blocking_storage
-                    .list_blocked_jids(&session.jid.to_bare())
+                    .sm_session_registry
+                    .drain_all_for_shutdown()
                     .await
                 {
-                    Ok(jids) => waddle_xmpp::protocol::session_state::Blocklist::new(jids),
+                    Ok(s) => s,
                     Err(error) => {
-                        warn!(
-                            jid = %session.jid,
-                            error = %error,
-                            "Graceful shutdown: blocklist load failed; promoting with empty blocklist"
-                        );
-                        waddle_xmpp::protocol::session_state::Blocklist::empty()
+                        warn!(error = %error, "Graceful shutdown: drain_all_for_shutdown failed");
+                        break;
                     }
                 };
-                let summary = crate::sm_promotion::promote_session_unacked(
-                    &session,
-                    &drain_state.deps.protocol.connection_registry,
-                    &drain_state.deps.protocol.pending_delivery_storage,
-                    &blocklist,
-                    chrono::Utc::now(),
-                )
-                .await;
+                if drained.is_empty() {
+                    empty_passes += 1;
+                    if empty_passes >= 2 {
+                        // Two consecutive empty passes — registry is
+                        // stable; safe to stop iterating.
+                        break;
+                    }
+                    tokio::time::sleep(POLL_INTERVAL).await;
+                    continue;
+                }
+                empty_passes = 0;
+                total_drained += drained.len();
                 info!(
-                    jid = %session.jid,
-                    redelivered = summary.redelivered,
-                    queued = summary.queued,
-                    bounced = summary.bounced,
-                    dropped = summary.dropped,
-                    unparseable = summary.unparseable,
-                    "Graceful shutdown: Q6 promotion completed for session"
+                    count = drained.len(),
+                    "Graceful shutdown: promoting unacked queues for detached SM sessions"
                 );
+                for session in drained {
+                    let blocklist = match drain_state
+                        .deps
+                        .protocol
+                        .blocking_storage
+                        .list_blocked_jids(&session.jid.to_bare())
+                        .await
+                    {
+                        Ok(jids) => waddle_xmpp::protocol::session_state::Blocklist::new(jids),
+                        Err(error) => {
+                            warn!(
+                                jid = %session.jid,
+                                error = %error,
+                                "Graceful shutdown: blocklist load failed; promoting with empty blocklist"
+                            );
+                            waddle_xmpp::protocol::session_state::Blocklist::empty()
+                        }
+                    };
+                    let summary = crate::sm_promotion::promote_session_unacked(
+                        &session,
+                        &drain_state.deps.protocol.connection_registry,
+                        &drain_state.deps.protocol.pending_delivery_storage,
+                        &blocklist,
+                        chrono::Utc::now(),
+                    )
+                    .await;
+                    info!(
+                        jid = %session.jid,
+                        redelivered = summary.redelivered,
+                        queued = summary.queued,
+                        bounced = summary.bounced,
+                        dropped = summary.dropped,
+                        unparseable = summary.unparseable,
+                        "Graceful shutdown: Q6 promotion completed for session"
+                    );
+                }
+                tokio::time::sleep(POLL_INTERVAL).await;
             }
-            info!("Graceful shutdown: SM Q6 drain complete");
+            info!(
+                total_drained,
+                "Graceful shutdown: SM Q6 drain complete (iterative)"
+            );
         });
     }
 

@@ -370,6 +370,15 @@ async fn send_quota_bounce(
 
 /// Build an [`OnlineResources`] snapshot for `recipient_bare` from
 /// the connection registry.
+///
+/// Filters to resources that are both connected AND have sent
+/// available presence. RFC 6121 §8.5.2.1.1 says only "available
+/// resources that have specified a non-negative priority" are
+/// candidates for bare-JID delivery; classify_dm_intake's online-
+/// check should match. Without the `presence_available` filter
+/// (Qodo review on PR #346), a connected-but-unavailable resource
+/// would be mis-classified as a live recipient and the unacked
+/// stanza would silently fail to route.
 fn build_online_resources(
     registry: &ConnectionRegistry,
     recipient_bare: &BareJid,
@@ -378,9 +387,11 @@ fn build_online_resources(
         .get_resources_for_user(recipient_bare)
         .into_iter()
         .filter_map(|full| {
-            registry
-                .get_entry(&full)
-                .map(|entry| (full, entry.presence_priority()))
+            let entry = registry.get_entry(&full)?;
+            if !entry.is_presence_available() {
+                return None;
+            }
+            Some((full, entry.presence_priority()))
         })
         .collect();
     OnlineResources::from_pairs(pairs)
