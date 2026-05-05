@@ -2571,7 +2571,9 @@ mod tests {
     use super::*;
     use crate::config::ServerConfig;
     use crate::db::{DatabaseConfig, DatabasePool, MigrationRunner, PoolConfig};
-    use crate::permissions::{Object, ObjectType, Relation, Subject, Tuple, WriteTuple};
+    use crate::permissions::{
+        Object, ObjectType, Permission, Relation, Subject, Tuple, WriteTuple,
+    };
     use crate::server::bootstrap_membership::DEPLOYMENT_SERVER_ID;
     use crate::server::AppState;
     use futures::Sink;
@@ -2583,7 +2585,9 @@ mod tests {
     use std::task::{Context, Poll};
     use tokio::sync::mpsc;
     // Handler functions moved to sub-modules but called directly in tests
-    use handlers::iq::{handle_iq, handle_iq_with_conn_state, IqConnState};
+    use handlers::iq::{
+        handle_iq, handle_iq_with_conn_state, managed_channel_permission_allowed, IqConnState,
+    };
     use handlers::presence::{handle_muc_join, handle_muc_leave, parse_room_jid_context};
     // Types moved out of mod.rs scope but used in tests
     use waddle_extensions::ExtensionConfig;
@@ -2772,6 +2776,144 @@ mod tests {
             .await
             .expect("server owner tuple");
         session
+    }
+
+    #[tokio::test]
+    async fn extension_route_channel_permission_allows_bootstrap_chat_member() {
+        let state = create_test_websocket_state().await;
+        let session = create_test_session(state.as_ref(), "alice").await;
+
+        assert!(
+            !managed_channel_permission_allowed(
+                state.as_ref(),
+                Some(&session),
+                "chat",
+                Permission::View,
+            )
+            .await
+            .expect("initial permission check"),
+            "server membership should be required before default chat policy applies"
+        );
+
+        state
+            .deps
+            .app_state
+            .permission_actor
+            .ask(WriteTuple {
+                tuple: Tuple::new(
+                    Object::new(ObjectType::Server, DEPLOYMENT_SERVER_ID),
+                    Relation::new("member"),
+                    Subject::user(&session.user_id),
+                ),
+            })
+            .await
+            .expect("server member tuple");
+
+        let owner_session = create_test_session(state.as_ref(), "owner").await;
+        state
+            .deps
+            .app_state
+            .permission_actor
+            .ask(WriteTuple {
+                tuple: Tuple::new(
+                    Object::new(ObjectType::Server, DEPLOYMENT_SERVER_ID),
+                    Relation::new("owner"),
+                    Subject::user(&owner_session.user_id),
+                ),
+            })
+            .await
+            .expect("server owner tuple");
+
+        assert!(
+            managed_channel_permission_allowed(
+                state.as_ref(),
+                Some(&session),
+                "chat",
+                Permission::View,
+            )
+            .await
+            .expect("chat permission check"),
+            "default chat routes should inherit deployment membership"
+        );
+        assert!(
+            managed_channel_permission_allowed(
+                state.as_ref(),
+                Some(&session),
+                "announcements",
+                Permission::View,
+            )
+            .await
+            .expect("announcements view permission check"),
+            "default announcement route reads should inherit deployment membership"
+        );
+        assert!(
+            managed_channel_permission_allowed(
+                state.as_ref(),
+                Some(&owner_session),
+                "chat",
+                Permission::View,
+            )
+            .await
+            .expect("owner chat permission check"),
+            "default room membership policy must include deployment owners"
+        );
+        assert!(
+            managed_channel_permission_allowed(
+                state.as_ref(),
+                Some(&owner_session),
+                "announcements",
+                Permission::SendMessage,
+            )
+            .await
+            .expect("owner announcements send permission check"),
+            "deployment owners should be allowed to publish announcement extension state"
+        );
+        assert!(
+            !managed_channel_permission_allowed(
+                state.as_ref(),
+                Some(&session),
+                "announcements",
+                Permission::SendMessage,
+            )
+            .await
+            .expect("announcements send permission check"),
+            "announcement extension publishes still require owner permissions"
+        );
+        state
+            .deps
+            .app_state
+            .permission_actor
+            .ask(WriteTuple {
+                tuple: Tuple::new(
+                    Object::new(ObjectType::Channel, "announcements"),
+                    Relation::new("writer"),
+                    Subject::user(&session.user_id),
+                ),
+            })
+            .await
+            .expect("announcement writer tuple");
+        assert!(
+            !managed_channel_permission_allowed(
+                state.as_ref(),
+                Some(&session),
+                "announcements",
+                Permission::SendMessage,
+            )
+            .await
+            .expect("announcements writer permission check"),
+            "announcement channel writer grants must not bypass server-owner write policy"
+        );
+        assert!(
+            !managed_channel_permission_allowed(
+                state.as_ref(),
+                Some(&session),
+                "random",
+                Permission::View,
+            )
+            .await
+            .expect("random channel permission check"),
+            "non-default channels still require channel permissions"
+        );
     }
 
     async fn register_test_native_user(state: &WebSocketState, username: &str, password: &str) {

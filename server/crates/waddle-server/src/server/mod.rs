@@ -7,6 +7,11 @@ use crate::permissions::{
     CheckPermission, Object, ObjectType, Permission, PermissionActor, Subject,
 };
 use crate::pubsub::build_pubsub_storage;
+use crate::server::bootstrap_membership::DEPLOYMENT_SERVER_ID;
+use crate::server::managed_channel_policy::{
+    server_policy_for_managed_channel, ManagedChannelServerPolicy,
+    DEPLOYMENT_MEMBERSHIP_PERMISSIONS,
+};
 use anyhow::Result;
 use async_trait::async_trait;
 use axum::{
@@ -53,6 +58,7 @@ use waddle_xmpp::{muc::room_registry_actor::RoomRegistryActor, registry::Connect
 
 pub(crate) mod bootstrap_membership;
 pub mod extension_host_adapter;
+pub(crate) mod managed_channel_policy;
 mod routes;
 pub mod xmpp_state;
 
@@ -1584,7 +1590,7 @@ async fn authorize_extension_pubsub_publish(
     let Some(channel_id) = waddle_xmpp::parse_managed_room_jid(&room_jid) else {
         return Err("PubSub node is not bound to a managed channel".to_string());
     };
-    let object = Object::new(ObjectType::Channel, channel_id);
+    let object = Object::new(ObjectType::Channel, channel_id.clone());
     let subject = Subject::user(user_id);
     let outcast = context
         .app_state
@@ -1599,21 +1605,75 @@ async fn authorize_extension_pubsub_publish(
     if outcast.allowed {
         return Err("requester is not allowed in this channel".to_string());
     }
-    let send = context
-        .app_state
-        .permission_actor
-        .ask(CheckPermission {
-            subject,
-            permission: Permission::SendMessage,
-            object,
-        })
-        .await
-        .map_err(|error| format!("permission check failed: {error}"))?;
-    if send.allowed {
+    if managed_channel_permission_allowed(
+        &context.app_state,
+        &subject,
+        channel_id.as_str(),
+        Permission::SendMessage,
+    )
+    .await?
+    {
         Ok(())
     } else {
         Err("requester cannot write extension state for this channel".to_string())
     }
+}
+
+async fn managed_channel_permission_allowed(
+    app_state: &AppState,
+    subject: &Subject,
+    channel_id: &str,
+    permission: Permission,
+) -> Result<bool, String> {
+    let policy = server_policy_for_managed_channel(channel_id, &permission);
+    if policy == ManagedChannelServerPolicy::DeploymentOwnerOnly {
+        let server_owner = app_state
+            .permission_actor
+            .ask(CheckPermission {
+                subject: subject.clone(),
+                permission: Permission::Owner,
+                object: Object::new(ObjectType::Server, DEPLOYMENT_SERVER_ID),
+            })
+            .await
+            .map_err(|error| format!("permission check failed: {error}"))?;
+        return Ok(server_owner.allowed);
+    }
+
+    let allowed = app_state
+        .permission_actor
+        .ask(CheckPermission {
+            subject: subject.clone(),
+            permission: permission.clone(),
+            object: Object::new(ObjectType::Channel, channel_id),
+        })
+        .await
+        .map_err(|error| format!("permission check failed: {error}"))?;
+    if allowed.allowed {
+        return Ok(true);
+    }
+
+    if policy == ManagedChannelServerPolicy::DeploymentMembership {
+        // Keep these as explicit relation/permission checks. The local permission
+        // schema makes `member` inherit owner/admin, but the SpiceDB schema uses
+        // server relations directly for compatibility.
+        for server_permission in DEPLOYMENT_MEMBERSHIP_PERMISSIONS {
+            let server_allowed = app_state
+                .permission_actor
+                .ask(CheckPermission {
+                    subject: subject.clone(),
+                    permission: server_permission,
+                    object: Object::new(ObjectType::Server, DEPLOYMENT_SERVER_ID),
+                })
+                .await
+                .map_err(|error| format!("permission check failed: {error}"))?;
+            if server_allowed.allowed {
+                return Ok(true);
+            }
+        }
+        return Ok(false);
+    }
+
+    Ok(false)
 }
 
 async fn extension_command_result(
@@ -2149,6 +2209,7 @@ async fn detailed_health_handler(State(state): State<Arc<AppState>>) -> impl Int
 mod tests {
     use super::*;
     use crate::db::{DatabaseConfig, MigrationRunner, PoolConfig};
+    use crate::permissions::{Relation, Tuple, WriteTuple};
     use axum::body::Body;
     use axum::http::{header, Request, StatusCode};
     use base64::prelude::*;
@@ -2182,6 +2243,118 @@ mod tests {
         runner.run(db_pool.global()).await.unwrap();
 
         Arc::new(AppState::new(Arc::new(db_pool)))
+    }
+
+    #[tokio::test]
+    async fn extension_pubsub_permission_allows_bootstrap_chat_member() {
+        let state = create_test_state().await;
+        let subject = Subject::user("user-alice");
+
+        assert!(
+            !managed_channel_permission_allowed(&state, &subject, "chat", Permission::SendMessage)
+                .await
+                .expect("initial permission check"),
+            "server membership should be required before default chat policy applies"
+        );
+
+        state
+            .permission_actor
+            .ask(WriteTuple {
+                tuple: Tuple::new(
+                    Object::new(ObjectType::Server, DEPLOYMENT_SERVER_ID),
+                    Relation::new("member"),
+                    subject.clone(),
+                ),
+            })
+            .await
+            .expect("server member tuple");
+
+        let owner_subject = Subject::user("user-owner");
+        state
+            .permission_actor
+            .ask(WriteTuple {
+                tuple: Tuple::new(
+                    Object::new(ObjectType::Server, DEPLOYMENT_SERVER_ID),
+                    Relation::new("owner"),
+                    owner_subject.clone(),
+                ),
+            })
+            .await
+            .expect("server owner tuple");
+
+        assert!(
+            managed_channel_permission_allowed(&state, &subject, "chat", Permission::SendMessage)
+                .await
+                .expect("chat permission check"),
+            "default chat extension publishes should inherit deployment membership"
+        );
+        assert!(
+            managed_channel_permission_allowed(&state, &subject, "announcements", Permission::View)
+                .await
+                .expect("announcements view permission check"),
+            "default announcement route reads should inherit deployment membership"
+        );
+        assert!(
+            managed_channel_permission_allowed(&state, &owner_subject, "chat", Permission::View)
+                .await
+                .expect("owner chat permission check"),
+            "default room membership policy must include deployment owners"
+        );
+        assert!(
+            managed_channel_permission_allowed(
+                &state,
+                &owner_subject,
+                "announcements",
+                Permission::SendMessage,
+            )
+            .await
+            .expect("owner announcements send permission check"),
+            "deployment owners should be allowed to publish announcement extension state"
+        );
+        assert!(
+            !managed_channel_permission_allowed(
+                &state,
+                &subject,
+                "announcements",
+                Permission::SendMessage,
+            )
+            .await
+            .expect("announcements send permission check"),
+            "announcement extension publishes still require owner permissions"
+        );
+        state
+            .permission_actor
+            .ask(WriteTuple {
+                tuple: Tuple::new(
+                    Object::new(ObjectType::Channel, "announcements"),
+                    Relation::new("writer"),
+                    subject.clone(),
+                ),
+            })
+            .await
+            .expect("announcement writer tuple");
+        assert!(
+            !managed_channel_permission_allowed(
+                &state,
+                &subject,
+                "announcements",
+                Permission::SendMessage,
+            )
+            .await
+            .expect("announcements writer permission check"),
+            "announcement channel writer grants must not bypass server-owner write policy"
+        );
+        assert!(
+            !managed_channel_permission_allowed(
+                &state,
+                &subject,
+                "random",
+                Permission::SendMessage
+            )
+            .await
+            .expect("random permission check"),
+            "non-default channels still require channel permissions"
+        );
     }
 
     #[test]
