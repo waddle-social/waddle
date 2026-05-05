@@ -94,6 +94,10 @@ use crate::permissions::{
     SubjectType, Tuple, WriteTuple,
 };
 use crate::server::bootstrap_membership::DEPLOYMENT_SERVER_ID;
+use crate::server::managed_channel_policy::{
+    server_policy_for_managed_channel, ManagedChannelServerPolicy,
+    DEPLOYMENT_MEMBERSHIP_PERMISSIONS,
+};
 use crate::server::xmpp_state::{get_xmpp_channel, list_xmpp_channels, XmppChannelRecord};
 use crate::vcard::VCardStore;
 
@@ -4476,6 +4480,43 @@ async fn server_permission_allowed(
     .await
 }
 
+pub(crate) async fn managed_channel_permission_allowed(
+    state: &WebSocketState,
+    session: Option<&Session>,
+    channel_id: &str,
+    permission: Permission,
+) -> Result<bool, String> {
+    let policy = server_policy_for_managed_channel(channel_id, &permission);
+    if policy == ManagedChannelServerPolicy::DeploymentOwnerOnly {
+        return server_permission_allowed(state, session, Permission::Owner).await;
+    }
+
+    if permission_allowed(
+        state,
+        session,
+        Object::new(ObjectType::Channel, channel_id),
+        permission.clone(),
+    )
+    .await?
+    {
+        return Ok(true);
+    }
+
+    if policy == ManagedChannelServerPolicy::DeploymentMembership {
+        // Keep these as explicit relation/permission checks. The local permission
+        // schema makes `member` inherit owner/admin, but the SpiceDB schema uses
+        // server relations directly for compatibility.
+        for server_permission in DEPLOYMENT_MEMBERSHIP_PERMISSIONS {
+            if server_permission_allowed(state, session, server_permission).await? {
+                return Ok(true);
+            }
+        }
+        return Ok(false);
+    }
+
+    Ok(false)
+}
+
 async fn server_affiliation_for_requester(
     state: &WebSocketState,
     session: Option<&Session>,
@@ -4869,11 +4910,10 @@ async fn handle_extension_route_items(
     let Some(channel_id) = waddle_xmpp::parse_managed_room_jid(&room_jid) else {
         return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::InvalidJid))];
     };
-    let channel = Object::new(ObjectType::Channel, channel_id);
     match permission_allowed(
         state,
         session,
-        channel.clone(),
+        Object::new(ObjectType::Channel, channel_id.clone()),
         Permission::Custom("outcast".into()),
     )
     .await
@@ -4885,7 +4925,7 @@ async fn handle_extension_route_items(
             return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))];
         }
     }
-    match permission_allowed(state, session, channel, Permission::View).await {
+    match managed_channel_permission_allowed(state, session, &channel_id, Permission::View).await {
         Ok(true) => {}
         Ok(false) => return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))],
         Err(error) => {
