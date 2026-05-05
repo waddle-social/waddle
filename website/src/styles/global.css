@@ -411,6 +411,18 @@ html[data-theme="light"] .snow span {
   letter-spacing: 0;
 }
 
+.tagline {
+  margin: 0;
+  max-width: 32rem;
+  color: color-mix(in oklab, var(--fg) 70%, transparent);
+  font-family: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  font-size: clamp(0.92rem, 1.6vw, 1.05rem);
+  font-weight: 500;
+  line-height: 1.55;
+  letter-spacing: 0.01em;
+  text-wrap: balance;
+}
+
 /* ---------- logo ↔ waitlist cross-fade ----------
    the header stays fixed in the centered layout while the body swaps
    between the logo and the waitlist form underneath it. */
@@ -520,7 +532,7 @@ html[data-theme="light"] .snow span {
   transition: transform 180ms ease;
 }
 
-.waitlist-form[data-busy="true"] {
+.waitlist-form[data-state="submitting"] {
   transform: scale(0.995);
 }
 
@@ -534,11 +546,6 @@ html[data-theme="light"] .snow span {
     border-color 180ms ease,
     background 180ms ease,
     box-shadow 180ms ease;
-}
-
-.waitlist-form:has(.waitlist-turnstile-row) .waitlist-form-main {
-  border-radius: 18px 18px 0 0;
-  border-bottom: 0;
 }
 
 .waitlist-form-main:focus-within {
@@ -560,10 +567,6 @@ html[data-theme="light"] .snow span {
   font-family: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
   font-size: 1rem;
   outline: none;
-}
-
-.waitlist-form:has(.waitlist-turnstile-row) .waitlist-form-main input[type="email"] {
-  border-radius: 18px 18px 0 0;
 }
 
 .waitlist-form-main input[type="email"]:disabled {
@@ -596,7 +599,8 @@ html[data-theme="light"] .snow span {
   -webkit-tap-highlight-color: transparent;
   transition:
     transform 180ms cubic-bezier(0.2, 0.8, 0.2, 1),
-    background 180ms ease;
+    background 180ms ease,
+    opacity 180ms ease;
 }
 
 .waitlist-send img {
@@ -632,31 +636,56 @@ html[data-theme="light"] .snow span {
   transform: translateY(-50%);
 }
 
-.waitlist-turnstile-row {
-  display: grid;
-  padding: 0;
-  background: color-mix(in oklab, var(--card) 78%, transparent);
-  border-radius: 0;
-}
-
-.waitlist-turnstile {
-  min-height: 0;
-  display: flex;
-  align-items: stretch;
-  justify-content: center;
-  line-height: 0;
+/* invisible turnstile host — kept in DOM so the widget can mount,
+   but hidden from view. */
+.waitlist-turnstile-host {
+  position: absolute;
+  width: 0;
+  height: 0;
   overflow: hidden;
+  pointer-events: none;
+  visibility: hidden;
 }
 
-.waitlist-turnstile > div {
-  display: block !important;
-  width: 100%;
-  min-height: 0;
-  margin: 0 !important;
+/* spinner takes the slot the send button would occupy while the
+   challenge is running or the request is in flight. */
+.waitlist-spinner {
+  position: absolute;
+  top: 50%;
+  right: 0.16rem;
+  display: none;
+  width: 3.5rem;
+  height: 3.5rem;
+  place-items: center;
+  pointer-events: none;
+  transform: translateY(-50%);
 }
 
-.waitlist-turnstile iframe {
-  display: block;
+.waitlist-spinner::before {
+  content: "";
+  width: 1.4rem;
+  height: 1.4rem;
+  border-radius: 50%;
+  border: 2px solid color-mix(in oklab, var(--halo) 28%, transparent);
+  border-top-color: var(--halo);
+  animation: waitlist-spin 800ms linear infinite;
+}
+
+.waitlist-form[data-state="verifying"] .waitlist-spinner,
+.waitlist-form[data-state="submitting"] .waitlist-spinner {
+  display: grid;
+}
+
+.waitlist-form[data-state="verifying"] .waitlist-send,
+.waitlist-form[data-state="submitting"] .waitlist-send {
+  opacity: 0;
+  pointer-events: none;
+}
+
+@keyframes waitlist-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .waitlist-status {
@@ -879,7 +908,8 @@ html[data-theme="light"] .snow span {
   .celestial-slot,
   .stars span,
   .snow span,
-  .logo {
+  .logo,
+  .waitlist-spinner::before {
     animation: none !important;
     transition: none !important;
   }
