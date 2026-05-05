@@ -115,7 +115,8 @@ export interface WasmAvatar {
   jid: string;
   id: string;
   mime_type: string;
-  data: Uint8Array;
+  data?: Uint8Array;
+  url?: string;
 }
 
 export interface WasmUploadSlot {

@@ -2,16 +2,13 @@ use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 
-use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use futures::channel::{mpsc, oneshot};
 use futures::{pin_mut, select, FutureExt, SinkExt, StreamExt};
 use jid::{BareJid, Jid};
-use js_sys::{Function, Promise, Uint8Array};
+use js_sys::{Function, Promise};
 use minidom::Element;
 use serde::{Deserialize, Serialize};
-use waddle_xmpp_client::avatar::{
-    build_data_request_iq, build_metadata_request_iq, parse_data_response, parse_metadata_response,
-};
+use waddle_xmpp_client::avatar::{request_avatar_with_iq, AvatarRequestFailure};
 use waddle_xmpp_client::discovery::{
     self, build_disable_push_iq, build_disco_info_iq, build_disco_items_iq, build_enable_push_iq,
     build_muc_admin_affiliation_list_iq, build_muc_admin_affiliation_set_iq, build_roster_get_iq,
@@ -47,8 +44,7 @@ use waddle_xmpp_client::{
     WebSocketConfig, XmppRuntime,
 };
 use wasm_bindgen::prelude::*;
-use wasm_bindgen::JsCast;
-use wasm_bindgen_futures::{future_to_promise, spawn_local, JsFuture};
+use wasm_bindgen_futures::{future_to_promise, spawn_local};
 
 const NS_CLIENT: &str = "jabber:client";
 const NS_CHAT_STATES: &str = "http://jabber.org/protocol/chatstates";
@@ -64,6 +60,10 @@ const NS_MUC_ADMIN: &str = "http://jabber.org/protocol/muc#admin";
 const NS_VERSION: &str = "jabber:iq:version";
 const NS_USER_SEARCH: &str = "jabber:iq:search";
 const NS_MUC: &str = "http://jabber.org/protocol/muc";
+const NS_ADHOC_COMMANDS: &str = "http://jabber.org/protocol/commands";
+const NS_WADDLE_EXTENSION_1: &str = "urn:waddle:extension:1";
+const EXTENSION_ROUTE_FORM_TYPE: &str = "urn:waddle:extension:1:routes";
+const EXTENSION_ROUTE_ITEM_LIMIT: u32 = 100;
 
 type DriverResult<T> = Result<T, ClientError>;
 
@@ -297,6 +297,58 @@ pub struct WaddleAvatar {
     pub id: String,
     pub mime_type: String,
     pub data: Vec<u8>,
+    pub url: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WaddleExtensionRoute {
+    pub service_jid: String,
+    pub plugin_id: String,
+    pub route_id: String,
+    pub label: String,
+    pub scope: String,
+    pub surface: String,
+    pub state_node: String,
+    pub payload_namespace: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WaddleExtensionRouteItem {
+    pub id: Option<String>,
+    pub title: Option<String>,
+    pub subtitle: Option<String>,
+    pub link: Option<WaddleExtensionRouteLink>,
+    pub description: Option<String>,
+    pub fields: Vec<WaddleExtensionRouteItemField>,
+    pub options: Vec<WaddleExtensionRouteItemOption>,
+    pub actions: Vec<WaddleExtensionRouteItemAction>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct WaddleExtensionRouteLink {
+    pub href: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct WaddleExtensionRouteItemField {
+    pub name: String,
+    pub label: Option<String>,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct WaddleExtensionRouteItemOption {
+    pub id: String,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WaddleExtensionRouteItemAction {
+    pub launch_id: String,
+    pub label: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1272,41 +1324,22 @@ impl WaddleClient {
             let bare: BareJid = jid
                 .parse()
                 .map_err(|err| js_error(format!("invalid JID: {err}")))?;
-            let meta_iq = build_metadata_request_iq(&bare);
-            let meta_response = match send_iq_command(inner.clone(), meta_iq).await {
-                Ok(response) => response,
-                Err(err) if err.as_string().is_some() => return Ok(JsValue::NULL),
-                Err(err) => return Err(err),
-            };
-            let Some(info) = parse_metadata_response(&meta_response) else {
-                return Ok(JsValue::NULL);
-            };
+            let avatar = request_avatar_with_iq(&bare, |stanza| {
+                let inner = inner.clone();
+                async move { send_avatar_iq_command(inner, stanza).await }
+            })
+            .await?;
 
-            let data = if let Some(url) = info.url.as_deref() {
-                fetch_avatar_url(url).await?
-            } else {
-                let data_iq = build_data_request_iq(&bare, &info.id);
-                let data_response = match send_iq_command(inner, data_iq).await {
-                    Ok(response) => response,
-                    Err(err) if err.as_string().is_some() => return Ok(JsValue::NULL),
-                    Err(err) => return Err(err),
-                };
-                let Some(base64_text) = parse_data_response(&data_response) else {
-                    return Ok(JsValue::NULL);
-                };
-                let cleaned: String = base64_text.chars().filter(|c| !c.is_whitespace()).collect();
-                BASE64_STANDARD
-                    .decode(cleaned.as_bytes())
-                    .map_err(|err| js_error(format!("invalid avatar data: {err}")))?
-            };
-
-            let avatar = WaddleAvatar {
-                jid: bare.to_string(),
-                id: info.id,
-                mime_type: info.mime_type,
-                data,
-            };
-            to_js_value(&avatar)
+            match avatar {
+                Some(avatar) => to_js_value(&WaddleAvatar {
+                    jid: avatar.jid.to_string(),
+                    id: avatar.id,
+                    mime_type: avatar.mime_type,
+                    data: avatar.data,
+                    url: avatar.url,
+                }),
+                None => Ok(JsValue::NULL),
+            }
         })
     }
 
@@ -1353,18 +1386,63 @@ impl WaddleClient {
         })
     }
 
-    /// Query pubsub items from a node (XEP-0060).
-    ///
-    /// Returns an array of `{ jid, name }` objects extracted from the `<item>`
-    /// elements in the result IQ.  The item `id` attribute is used as the JID;
-    /// the optional `name` attribute on a `<conference>` child (XEP-0402) is
-    /// used as the human-readable name.
-    pub fn get_pubsub_items(&self, to: String, node: String) -> Promise {
+    pub fn discover_extension_routes(&self, user_jid: Option<String>) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
-            let iq = build_pubsub_items_iq(&to, &node);
+            let requested_jid = user_jid.unwrap_or_else(|| inner.borrow().config.jid.clone());
+            let jid: Jid = requested_jid
+                .parse()
+                .map_err(|err| js_error(format!("invalid JID: {err}")))?;
+            let domain = jid_domain(&jid.to_string());
+            let service_jid = discover_extension_command_service(inner.clone(), &domain).await;
+            let mut routes = Vec::new();
+
+            let items_result =
+                send_iq_command(inner.clone(), build_disco_items_iq(&service_jid, None)).await?;
+            let items = discovery::parse_disco_items_result(&items_result)
+                .ok_or_else(|| js_error("could not parse extension route disco#items result"))?;
+            for item in items {
+                let Some(node) = item.node.as_deref() else {
+                    continue;
+                };
+                let item_service_jid = item.jid.as_str();
+                let info_result = send_iq_command(
+                    inner.clone(),
+                    build_disco_info_iq(item_service_jid, Some(node)),
+                )
+                .await?;
+                if let Some(info) =
+                    discovery::parse_disco_info_result(&info_result, item_service_jid)
+                {
+                    routes.extend(parse_extension_routes_from_info(&info, item_service_jid));
+                }
+            }
+
+            if routes.is_empty() {
+                let info_result =
+                    send_iq_command(inner.clone(), build_disco_info_iq(&service_jid, None)).await?;
+                if let Some(info) = discovery::parse_disco_info_result(&info_result, &service_jid) {
+                    routes.extend(parse_extension_routes_from_info(&info, &service_jid));
+                }
+            }
+
+            to_js_value(&routes)
+        })
+    }
+
+    pub fn fetch_extension_route_items(&self, route: JsValue, room_jid: String) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let route: WaddleExtensionRoute = serde_wasm_bindgen::from_value(route)
+                .map_err(|err| js_error(format!("invalid extension route: {err}")))?;
+            let node = route.state_node.replace("{room}", &room_jid);
+            let iq = build_extension_route_items_iq(
+                &route.service_jid,
+                &node,
+                Some(EXTENSION_ROUTE_ITEM_LIMIT),
+            );
             let result = send_iq_command(inner, iq).await?;
-            let items = parse_pubsub_items_result(&result);
+            let items = parse_extension_route_items_result(&result);
             to_js_value(&items)
         })
     }
@@ -1372,12 +1450,90 @@ impl WaddleClient {
 
 const NS_PUBSUB: &str = "http://jabber.org/protocol/pubsub";
 
+async fn discover_extension_command_service(
+    inner: Rc<RefCell<WaddleClientInner>>,
+    domain: &str,
+) -> String {
+    let fallback_service_jid = format!("extensions.{domain}");
+    let mut candidates = vec![domain.to_string(), fallback_service_jid.clone()];
+
+    if let Ok(items_result) =
+        send_iq_command(inner.clone(), build_disco_items_iq(domain, None)).await
+    {
+        if let Some(items) = discovery::parse_disco_items_result(&items_result) {
+            for item in items {
+                if !candidates.iter().any(|candidate| candidate == &item.jid) {
+                    candidates.push(item.jid);
+                }
+            }
+        }
+    }
+
+    for candidate in candidates {
+        if let Ok(info_result) =
+            send_iq_command(inner.clone(), build_disco_info_iq(&candidate, None)).await
+        {
+            if let Some(info) = discovery::parse_disco_info_result(&info_result, &candidate) {
+                if info.has_feature(NS_ADHOC_COMMANDS) {
+                    return candidate;
+                }
+            }
+        }
+    }
+
+    fallback_service_jid
+}
+
+fn parse_extension_routes_from_info(
+    info: &discovery::DiscoInfoResult,
+    service_jid: &str,
+) -> Vec<WaddleExtensionRoute> {
+    info.forms
+        .iter()
+        .filter(|form| form.form_type.as_deref() == Some(EXTENSION_ROUTE_FORM_TYPE))
+        .filter_map(|form| {
+            let plugin_id = disco_form_value(form, "waddle#plugin_id")?;
+            let route_id = disco_form_value(form, "waddle#route_id")?;
+            let label = disco_form_value(form, "waddle#route_label")?;
+            let scope = disco_form_value(form, "waddle#route_scope")?;
+            let surface = disco_form_value(form, "waddle#route_surface")?;
+            let state_node = disco_form_value(form, "waddle#state_node")?;
+            let payload_namespace = disco_form_value(form, "waddle#payload_ns")?;
+            if scope != "channel" || (surface != "gallery" && surface != "list") {
+                return None;
+            }
+            Some(WaddleExtensionRoute {
+                service_jid: service_jid.to_string(),
+                plugin_id: plugin_id.to_string(),
+                route_id: route_id.to_string(),
+                label: label.to_string(),
+                scope: scope.to_string(),
+                surface: surface.to_string(),
+                state_node: state_node.to_string(),
+                payload_namespace: payload_namespace.to_string(),
+            })
+        })
+        .collect()
+}
+
+fn disco_form_value<'a>(form: &'a discovery::DiscoDataForm, var: &str) -> Option<&'a str> {
+    form.fields
+        .iter()
+        .find(|field| field.var == var)
+        .and_then(|field| field.values.first())
+        .map(String::as_str)
+}
+
 /// Build an XEP-0060 pubsub `<items>` IQ directed at `to` for `node`.
-fn build_pubsub_items_iq(to: &str, node: &str) -> Element {
+fn build_extension_route_items_iq(to: &str, node: &str, max_items: Option<u32>) -> Element {
     let id = format!("pubsub-items-{}", uuid::Uuid::new_v4());
-    let items = Element::builder("items", NS_PUBSUB)
-        .attr("node", node)
-        .build();
+    let mut items_builder = Element::builder("items", NS_PUBSUB).attr("node", node);
+    let max_items_value;
+    if let Some(max_items) = max_items {
+        max_items_value = max_items.to_string();
+        items_builder = items_builder.attr("max_items", max_items_value.as_str());
+    }
+    let items = items_builder.build();
     let pubsub = Element::builder("pubsub", NS_PUBSUB).append(items).build();
     Element::builder("iq", NS_CLIENT)
         .attr("type", "get")
@@ -1387,18 +1543,7 @@ fn build_pubsub_items_iq(to: &str, node: &str) -> Element {
         .build()
 }
 
-#[derive(Debug, Serialize)]
-struct PubsubItem {
-    jid: Option<String>,
-    name: Option<String>,
-}
-
-/// Parse the `<item>` children from an XEP-0060 items IQ result.
-///
-/// The item `id` attribute is used as the JID.  An optional `name` attribute
-/// on a `<conference xmlns='urn:xmpp:bookmarks:1'>` child element is used as
-/// the human-readable name.
-fn parse_pubsub_items_result(iq: &Element) -> Vec<PubsubItem> {
+fn parse_extension_route_items_result(iq: &Element) -> Vec<WaddleExtensionRouteItem> {
     let Some(pubsub) = iq.get_child("pubsub", NS_PUBSUB) else {
         return Vec::new();
     };
@@ -1407,16 +1552,95 @@ fn parse_pubsub_items_result(iq: &Element) -> Vec<PubsubItem> {
     };
     items
         .children()
-        .filter(|el| el.name() == "item")
-        .map(|item| {
-            let jid = item.attr("id").map(String::from);
-            let name = item
-                .children()
-                .find(|c| c.name() == "conference")
-                .and_then(|conf| conf.attr("name").map(String::from));
-            PubsubItem { jid, name }
-        })
+        .filter(|el| el.name() == "item" && el.ns() == NS_PUBSUB)
+        .filter_map(parse_extension_route_item)
         .collect()
+}
+
+fn parse_extension_route_item(item: &Element) -> Option<WaddleExtensionRouteItem> {
+    let payload = item
+        .children()
+        .find(|child| child.name() == "extension-item" && child.ns() == NS_WADDLE_EXTENSION_1)?;
+    let mut view = WaddleExtensionRouteItem {
+        id: item.attr("id").map(str::to_string),
+        title: None,
+        subtitle: None,
+        link: None,
+        description: None,
+        fields: Vec::new(),
+        options: Vec::new(),
+        actions: Vec::new(),
+    };
+
+    for child in payload
+        .children()
+        .filter(|child| child.ns() == NS_WADDLE_EXTENSION_1)
+    {
+        match child.name() {
+            "title" => {
+                let value = child.text().trim().to_string();
+                if !value.is_empty() {
+                    view.title = Some(value);
+                }
+            }
+            "subtitle" => {
+                let value = child.text().trim().to_string();
+                if !value.is_empty() {
+                    view.subtitle = Some(value);
+                }
+            }
+            "description" => {
+                let value = child.text().trim().to_string();
+                if !value.is_empty() {
+                    view.description = Some(value);
+                }
+            }
+            "link" => {
+                if let Some(href) = child.attr("href").filter(|href| !href.trim().is_empty()) {
+                    view.link = Some(WaddleExtensionRouteLink {
+                        href: href.to_string(),
+                    });
+                }
+            }
+            "field" => {
+                if let Some(name) = child.attr("name").filter(|name| !name.trim().is_empty()) {
+                    view.fields.push(WaddleExtensionRouteItemField {
+                        name: name.to_string(),
+                        label: child
+                            .attr("label")
+                            .filter(|label| !label.trim().is_empty())
+                            .map(str::to_string),
+                        value: child.text().trim().to_string(),
+                    });
+                }
+            }
+            "option" => {
+                if let (Some(id), Some(label)) = (child.attr("id"), child.attr("label")) {
+                    if !id.trim().is_empty() && !label.trim().is_empty() {
+                        view.options.push(WaddleExtensionRouteItemOption {
+                            id: id.to_string(),
+                            label: label.to_string(),
+                        });
+                    }
+                }
+            }
+            "action" => {
+                if let (Some(launch_id), Some(label)) =
+                    (child.attr("launch-id"), child.attr("label"))
+                {
+                    if !launch_id.trim().is_empty() && !label.trim().is_empty() {
+                        view.actions.push(WaddleExtensionRouteItemAction {
+                            launch_id: launch_id.to_string(),
+                            label: label.to_string(),
+                        });
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Some(view)
 }
 
 async fn driver_loop(
@@ -1977,6 +2201,24 @@ async fn send_iq_command(
         .map_err(|err| js_error(err.to_string()))
 }
 
+async fn send_avatar_iq_command(
+    inner: Rc<RefCell<WaddleClientInner>>,
+    stanza: Element,
+) -> Result<Element, AvatarRequestFailure<JsValue>> {
+    let mut cmd_tx = command_sender(&inner).map_err(AvatarRequestFailure::Other)?;
+    let (responder, rx) = oneshot::channel();
+    cmd_tx
+        .send(WasmCommand::SendIq { stanza, responder })
+        .await
+        .map_err(|_| AvatarRequestFailure::Other(js_error("client is disconnected")))?;
+    rx.await
+        .map_err(|_| AvatarRequestFailure::Other(js_error("client is disconnected")))?
+        .map_err(|err| match err {
+            ClientError::StanzaError(_) => AvatarRequestFailure::StanzaError,
+            other => AvatarRequestFailure::Other(js_error(other.to_string())),
+        })
+}
+
 async fn send_mam_query_command(
     inner: Rc<RefCell<WaddleClientInner>>,
     stanza: Element,
@@ -2460,33 +2702,6 @@ fn parse_muc_affiliation(value: &str) -> Result<MucAffiliation, JsValue> {
     }
 }
 
-async fn fetch_avatar_url(url: &str) -> Result<Vec<u8>, JsValue> {
-    let window = web_sys::window().ok_or_else(|| js_error("window is unavailable"))?;
-    let response = JsFuture::from(window.fetch_with_str(url))
-        .await
-        .map_err(|err| js_error(format!("avatar fetch failed: {:?}", err)))?;
-    let response: web_sys::Response = response
-        .dyn_into()
-        .map_err(|_| js_error("avatar fetch returned an invalid response"))?;
-
-    if !response.ok() {
-        return Err(js_error(format!(
-            "avatar fetch returned HTTP {}",
-            response.status()
-        )));
-    }
-
-    let buffer = JsFuture::from(
-        response
-            .array_buffer()
-            .map_err(|err| js_error(format!("avatar response missing body: {:?}", err)))?,
-    )
-    .await
-    .map_err(|err| js_error(format!("avatar body read failed: {:?}", err)))?;
-
-    Ok(Uint8Array::new(&buffer).to_vec())
-}
-
 fn message_delivery_stanza_id(element: &Element) -> Option<StanzaId> {
     if element.name() != "message" {
         return None;
@@ -2505,4 +2720,158 @@ fn to_js_value<T: Serialize + ?Sized>(value: &T) -> Result<JsValue, JsValue> {
 
 fn js_error(message: impl ToString) -> JsValue {
     JsValue::from_str(&message.to_string())
+}
+
+#[cfg(test)]
+mod extension_route_tests {
+    use super::*;
+
+    #[test]
+    fn extension_route_items_iq_uses_xep_0060_items_with_limit() {
+        let iq = build_extension_route_items_iq(
+            "extensions.example.com",
+            "urn:waddle:link-board:1:channel:general@muc.example.com:links",
+            Some(100),
+        );
+
+        assert_eq!(iq.name(), "iq");
+        assert_eq!(iq.ns(), NS_CLIENT);
+        assert_eq!(iq.attr("type"), Some("get"));
+        assert_eq!(iq.attr("to"), Some("extensions.example.com"));
+        let pubsub = iq.get_child("pubsub", NS_PUBSUB).expect("pubsub");
+        let items = pubsub.get_child("items", NS_PUBSUB).expect("items");
+        assert_eq!(
+            items.attr("node"),
+            Some("urn:waddle:link-board:1:channel:general@muc.example.com:links")
+        );
+        assert_eq!(items.attr("max_items"), Some("100"));
+    }
+
+    #[test]
+    fn parses_xep_0128_route_forms_from_disco_info() {
+        let info = discovery::DiscoInfoResult {
+            jid: "extensions.example.com".to_string(),
+            node: Some("urn:waddle:link-board:1:channel:{room}:links".to_string()),
+            identities: Vec::new(),
+            features: Vec::new(),
+            forms: vec![discovery::DiscoDataForm {
+                form_type: Some(EXTENSION_ROUTE_FORM_TYPE.to_string()),
+                fields: vec![
+                    field("FORM_TYPE", EXTENSION_ROUTE_FORM_TYPE),
+                    field("waddle#plugin_id", "link-board"),
+                    field("waddle#route_id", "saved-links"),
+                    field("waddle#route_label", "Saved Links"),
+                    field("waddle#route_scope", "channel"),
+                    field("waddle#route_surface", "gallery"),
+                    field(
+                        "waddle#state_node",
+                        "urn:waddle:link-board:1:channel:{room}:links",
+                    ),
+                    field("waddle#payload_ns", "urn:waddle:link-board:1"),
+                ],
+            }],
+        };
+
+        let routes = parse_extension_routes_from_info(&info, "extensions.example.com");
+
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].service_jid, "extensions.example.com");
+        assert_eq!(routes[0].plugin_id, "link-board");
+        assert_eq!(routes[0].route_id, "saved-links");
+        assert_eq!(routes[0].surface, "gallery");
+        assert_eq!(
+            routes[0].state_node,
+            "urn:waddle:link-board:1:channel:{room}:links"
+        );
+    }
+
+    #[test]
+    fn parses_extension_item_envelopes_from_pubsub_items() {
+        let iq = Element::builder("iq", NS_CLIENT)
+            .attr("type", "result")
+            .append(
+                Element::builder("pubsub", NS_PUBSUB)
+                    .append(
+                        Element::builder("items", NS_PUBSUB)
+                            .attr("node", "urn:waddle:decision-polls:1:channel:general:polls")
+                            .append(
+                                Element::builder("item", NS_PUBSUB)
+                                    .attr("id", "poll-42")
+                                    .append(
+                                        Element::builder("extension-item", NS_WADDLE_EXTENSION_1)
+                                            .append(
+                                                Element::builder("title", NS_WADDLE_EXTENSION_1)
+                                                    .append("Lunch tomorrow?")
+                                                    .build(),
+                                            )
+                                            .append(
+                                                Element::builder("subtitle", NS_WADDLE_EXTENSION_1)
+                                                    .append("Open")
+                                                    .build(),
+                                            )
+                                            .append(
+                                                Element::builder("link", NS_WADDLE_EXTENSION_1)
+                                                    .attr("href", "https://example.org/poll")
+                                                    .build(),
+                                            )
+                                            .append(
+                                                Element::builder("field", NS_WADDLE_EXTENSION_1)
+                                                    .attr("name", "saved-at")
+                                                    .attr("label", "Saved")
+                                                    .append("2026-04-27T00:00:00Z")
+                                                    .build(),
+                                            )
+                                            .append(
+                                                Element::builder("option", NS_WADDLE_EXTENSION_1)
+                                                    .attr("id", "a")
+                                                    .attr("label", "Pizza")
+                                                    .build(),
+                                            )
+                                            .append(
+                                                Element::builder("action", NS_WADDLE_EXTENSION_1)
+                                                    .attr("launch-id", "vote-42")
+                                                    .attr("label", "Vote")
+                                                    .build(),
+                                            )
+                                            .build(),
+                                    )
+                                    .build(),
+                            )
+                            .append(
+                                Element::builder("item", NS_PUBSUB)
+                                    .attr("id", "raw")
+                                    .append(
+                                        Element::builder("saved-item", "urn:waddle:unknown:1")
+                                            .build(),
+                                    )
+                                    .build(),
+                            )
+                            .build(),
+                    )
+                    .build(),
+            )
+            .build();
+
+        let items = parse_extension_route_items_result(&iq);
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id.as_deref(), Some("poll-42"));
+        assert_eq!(items[0].title.as_deref(), Some("Lunch tomorrow?"));
+        assert_eq!(items[0].subtitle.as_deref(), Some("Open"));
+        assert_eq!(
+            items[0].link.as_ref().map(|link| link.href.as_str()),
+            Some("https://example.org/poll")
+        );
+        assert_eq!(items[0].fields[0].name, "saved-at");
+        assert_eq!(items[0].fields[0].label.as_deref(), Some("Saved"));
+        assert_eq!(items[0].options[0].id, "a");
+        assert_eq!(items[0].actions[0].launch_id, "vote-42");
+    }
+
+    fn field(var: &str, value: &str) -> discovery::DiscoDataField {
+        discovery::DiscoDataField {
+            var: var.to_string(),
+            values: vec![value.to_string()],
+        }
+    }
 }

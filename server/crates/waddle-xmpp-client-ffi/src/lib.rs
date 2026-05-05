@@ -153,8 +153,9 @@ pub struct WaddleTopology {
 
 /// XEP-0084 user avatar fetched from the `urn:xmpp:avatar` PEP nodes.
 ///
-/// `data` is the raw image bytes (base64-decoded) ready to be handed to
-/// `UIImage(data:)` / `NSImage(data:)` on the Swift side.
+/// `data` is the raw image bytes (base64-decoded) when carried by XMPP.
+/// `url` is present when XEP-0084 metadata or vCard `EXTVAL` points to an
+/// externally hosted avatar.
 #[derive(uniffi::Record, Clone)]
 pub struct WaddleAvatar {
     /// Bare JID the avatar belongs to (string form).
@@ -165,6 +166,8 @@ pub struct WaddleAvatar {
     pub mime_type: String,
     /// Decoded image bytes.
     pub data: Vec<u8>,
+    /// Externally hosted avatar URL.
+    pub url: Option<String>,
 }
 
 /// XEP-0446 / XEP-0447 shared-file metadata exposed to Swift.
@@ -615,6 +618,7 @@ impl WaddleClient {
                     id: avatar.id,
                     mime_type: avatar.mime_type,
                     data: avatar.data,
+                    url: avatar.url,
                 }),
                 Ok(None) => None,
                 Err(e) => {

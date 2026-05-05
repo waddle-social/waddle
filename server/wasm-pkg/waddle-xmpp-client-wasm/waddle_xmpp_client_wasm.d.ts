@@ -7,24 +7,17 @@ export class WaddleClient {
     connect(): Promise<any>;
     disable_push_notifications(service_jid: string, node: string): Promise<any>;
     disconnect(): Promise<any>;
+    discover_extension_routes(user_jid?: string | null): Promise<any>;
     discover_upload_service(): Promise<any>;
     enable_push_notifications(service_jid: string, node: string, token: string): Promise<any>;
     fetch_dm_history(peer_jid: string, max: number, before_id?: string | null): Promise<any>;
     fetch_dm_history_page(peer_jid: string, max: number, page_param: any): Promise<any>;
+    fetch_extension_route_items(route: any, room_jid: string): Promise<any>;
     fetch_inbox(opts: any): Promise<any>;
     fetch_room_history(room_jid: string, max: number, before_id?: string | null): Promise<any>;
     fetch_room_history_by_thread(room_jid: string, thread_id: string, max: number, before_id?: string | null): Promise<any>;
     fetch_room_history_page(room_jid: string, max: number, page_param: any): Promise<any>;
     fetch_user_pep_profile(jid: string): Promise<any>;
-    /**
-     * Query pubsub items from a node (XEP-0060).
-     *
-     * Returns an array of `{ jid, name }` objects extracted from the `<item>`
-     * elements in the result IQ.  The item `id` attribute is used as the JID;
-     * the optional `name` attribute on a `<conference>` child (XEP-0402) is
-     * used as the human-readable name.
-     */
-    get_pubsub_items(to: string, node: string): Promise<any>;
     get_server_version(): Promise<any>;
     join_room(room_jid: string, nick: string): Promise<any>;
     leave_room(room_jid: string, nick: string): Promise<any>;

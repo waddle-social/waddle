@@ -168,7 +168,7 @@ impl DiscoveredChannelType {
         }
     }
 
-    fn from_metadata(value: &str) -> Option<Self> {
+    pub fn from_metadata(value: &str) -> Option<Self> {
         match value.trim() {
             "text" => Some(Self::Text),
             "announcement" => Some(Self::Announcement),
@@ -372,7 +372,7 @@ pub fn parse_spaces_from_disco_items(
         .collect()
 }
 
-fn space_from_disco_item(
+pub fn space_from_disco_item(
     spaces_jid: &BareJid,
     item: DiscoItem,
     info: &DiscoInfoResult,
@@ -547,7 +547,7 @@ pub fn build_disco_items_iq(to: &str, node: Option<&str>) -> Element {
         .build()
 }
 
-fn build_pubsub_items_iq(to: &BareJid, node: &SpaceNode) -> Element {
+pub fn build_pubsub_items_iq(to: &BareJid, node: &SpaceNode) -> Element {
     let id = format!("pubsub-items-{}", next_id());
     Element::builder("iq", CLIENT_NS)
         .attr("type", "get")

@@ -876,6 +876,13 @@ async function invokeActiveExtensionAction(action: ExtensionAnnotationAction) {
   await activeTarget.value.invokeExtensionAction(action);
 }
 
+async function invokeExtensionRouteAction(action: { launchId: string; label: string }) {
+  await invokeActiveExtensionAction({
+    label: action.label,
+    route: action.launchId,
+  });
+}
+
 function searchActiveMessages(query: string) {
   void activeTarget.value.searchMessages(query);
 }
@@ -1610,7 +1617,9 @@ onUnmounted(() => {
         :requested-route="activeExtensionRouteKey"
         :room-jid="activeChannelRoomJid"
         :xmpp-client="xmppClient"
+        :action-error="activeActionError"
         @open-nav="ui.showMobileNav.value = true"
+        @invoke-action="invokeExtensionRouteAction"
       />
       <template v-else>
         <!--

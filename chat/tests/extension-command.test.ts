@@ -48,49 +48,21 @@ describe("extension command invocation", () => {
 
   test("reads command scope from XEP-0128 disco metadata when discovering commands", async () => {
     const xmpp = {
-      async getDiscoItems(jid: string, node?: string) {
-        if (jid === "example.com" && node === undefined) {
-          return { items: [{ jid: "extensions.example.com", name: "Extensions" }] };
+      async send_raw_iq(xml: string) {
+        if (xml.includes('to="example.com"') && xml.includes("disco#items")) {
+          return `<iq type="result"><query xmlns="http://jabber.org/protocol/disco#items"><item jid="extensions.example.com" name="Extensions" /></query></iq>`;
         }
-        expect(jid).toBe("extensions.example.com");
-        expect(node).toBe("http://jabber.org/protocol/commands");
-        return {
-          items: [
-            { jid, node: "urn:waddle:extension:1:decision-polls", name: "Create Decision Poll" },
-            { jid, node: "urn:waddle:extension:1:ai-chatbot", name: "Ask AI Chatbot" },
-          ],
-        };
-      },
-      async getDiscoInfo(jid: string, node?: string) {
-        expect(jid).toBe("extensions.example.com");
-        if (node === undefined) {
-          return { features: ["urn:waddle:extension:1", "http://jabber.org/protocol/commands"] };
+        if (xml.includes('to="extensions.example.com"') && xml.includes("disco#info") && !xml.includes(" node=")) {
+          return `<iq type="result"><query xmlns="http://jabber.org/protocol/disco#info"><feature var="urn:waddle:extension:1" /><feature var="http://jabber.org/protocol/commands" /></query></iq>`;
         }
-        if (node === "urn:waddle:extension:1:decision-polls") {
-          return {
-            extensions: [{
-              fields: [
-                { name: "FORM_TYPE", value: "urn:waddle:extension:1:command" },
-                { name: "waddle#plugin_id", value: "decision-polls" },
-                { name: "waddle#command_node", value: "urn:waddle:extension:1:decision-polls" },
-                { name: "waddle#command_label", value: "Create Decision Poll" },
-                { name: "waddle#command_scope", value: "channel" },
-              ],
-            }],
-          };
+        if (xml.includes('node="http://jabber.org/protocol/commands"')) {
+          return `<iq type="result"><query xmlns="http://jabber.org/protocol/disco#items"><item jid="extensions.example.com" node="urn:waddle:extension:1:decision-polls" name="Create Decision Poll" /><item jid="extensions.example.com" node="urn:waddle:extension:1:ai-chatbot" name="Ask AI Chatbot" /></query></iq>`;
         }
-        expect(node).toBe("urn:waddle:extension:1:ai-chatbot");
-        return {
-          extensions: [{
-            fields: [
-              { name: "FORM_TYPE", value: "urn:waddle:extension:1:command" },
-              { name: "waddle#plugin_id", value: "ai-chatbot" },
-              { name: "waddle#command_node", value: "urn:waddle:extension:1:ai-chatbot" },
-              { name: "waddle#command_label", value: "Ask AI Chatbot" },
-              { name: "waddle#command_scope", value: "global" },
-            ],
-          }],
-        };
+        if (xml.includes('node="urn:waddle:extension:1:decision-polls"')) {
+          return `<iq type="result"><query xmlns="http://jabber.org/protocol/disco#info"><x xmlns="jabber:x:data" type="result"><field var="FORM_TYPE"><value>urn:waddle:extension:1:command</value></field><field var="waddle#plugin_id"><value>decision-polls</value></field><field var="waddle#command_node"><value>urn:waddle:extension:1:decision-polls</value></field><field var="waddle#command_label"><value>Create Decision Poll</value></field><field var="waddle#command_scope"><value>channel</value></field></x></query></iq>`;
+        }
+        expect(xml).toContain('node="urn:waddle:extension:1:ai-chatbot"');
+        return `<iq type="result"><query xmlns="http://jabber.org/protocol/disco#info"><x xmlns="jabber:x:data" type="result"><field var="FORM_TYPE"><value>urn:waddle:extension:1:command</value></field><field var="waddle#plugin_id"><value>ai-chatbot</value></field><field var="waddle#command_node"><value>urn:waddle:extension:1:ai-chatbot</value></field><field var="waddle#command_label"><value>Ask AI Chatbot</value></field><field var="waddle#command_scope"><value>global</value></field></x></query></iq>`;
       },
     };
 
@@ -172,43 +144,26 @@ describe("extension command invocation", () => {
     };
 
     expect(await discoverExtensionCommands(xmpp as any, "alice@example.com/web")).toEqual([
-      { serviceJid: "extensions.example.com", node: "urn:waddle:extension:poll", name: "Poll" },
-      { serviceJid: "extensions.example.com", node: "urn:waddle:extension:1:ai-chatbot", name: "Ask AI Chatbot" },
-      { serviceJid: "extensions.example.com", node: "urn:waddle:extension:notes", name: "Notes" },
+      { serviceJid: "extensions.example.com", node: "urn:waddle:extension:poll", name: "Poll", scope: "global" },
+      { serviceJid: "extensions.example.com", node: "urn:waddle:extension:1:ai-chatbot", name: "Ask AI Chatbot", scope: "global" },
+      { serviceJid: "extensions.example.com", node: "urn:waddle:extension:notes", name: "Notes", scope: "global" },
     ]);
   });
 
   test("discovers channel-scoped extension routes from route disco#info forms", async () => {
     const routeNode = "urn:waddle:link-board:1:channel:{room}:links";
     const xmpp = {
-      async getDiscoItems(jid: string, node?: string) {
-        if (jid === "example.com" && node === undefined) {
-          return { items: [{ jid: "extensions.example.com", name: "Extensions" }] };
-        }
-        expect(jid).toBe("extensions.example.com");
-        expect(node).toBeUndefined();
-        return { items: [{ jid, node: routeNode, name: "Saved Links" }] };
-      },
-      async getDiscoInfo(jid: string, node?: string) {
-        expect(jid).toBe("extensions.example.com");
-        if (node === undefined) {
-          return { features: ["urn:waddle:extension:1", "http://jabber.org/protocol/commands"] };
-        }
-        expect(node).toBe(routeNode);
-        return {
-          extensions: [{
-            fields: [
-              { name: "FORM_TYPE", value: "urn:waddle:extension:1:routes" },
-              { name: "waddle#plugin_id", value: "link-board" },
-              { name: "waddle#route_id", value: "saved-links" },
-              { name: "waddle#route_label", value: "Saved Links" },
-              { name: "waddle#route_scope", value: "channel" },
-              { name: "waddle#route_surface", value: "gallery" },
-              { name: "waddle#state_node", value: routeNode },
-              { name: "waddle#payload_ns", value: "urn:waddle:link-board:1" },
-            ],
-          }],
-        };
+      async discover_extension_routes() {
+        return [{
+          service_jid: "extensions.example.com",
+          plugin_id: "link-board",
+          route_id: "saved-links",
+          label: "Saved Links",
+          scope: "channel",
+          surface: "gallery",
+          state_node: routeNode,
+          payload_namespace: "urn:waddle:link-board:1",
+        }];
       },
     };
 
@@ -224,7 +179,7 @@ describe("extension command invocation", () => {
     }]);
   });
 
-  test("parses generic extension-item envelopes from PubSub state nodes", async () => {
+  test("normalizes typed extension route items from the Rust client", async () => {
     const route = {
       serviceJid: "extensions.example.com",
       pluginId: "link-board",
@@ -236,41 +191,18 @@ describe("extension command invocation", () => {
       payloadNamespace: "urn:waddle:link-board:1",
     };
     const xmpp = {
-      async getItems(jid: string, node: string, opts?: { max?: number }) {
-        expect(jid).toBe("extensions.example.com");
-        expect(node).toBe("urn:waddle:link-board:1:channel:general@muc.example.com:links");
-        expect(opts?.max).toBe(100);
-        return {
-          items: [{
-            id: "https---example-org-post",
-            content: {
-              name: "extension-item",
-              attributes: { xmlns: "urn:waddle:extension:1" },
-              children: [
-                {
-                  name: "title",
-                  attributes: { xmlns: "urn:waddle:extension:1" },
-                  children: ["Example Post"],
-                },
-                {
-                  name: "link",
-                  attributes: { xmlns: "urn:waddle:extension:1", href: "https://example.org/post" },
-                  children: [],
-                },
-                {
-                  name: "description",
-                  attributes: { xmlns: "urn:waddle:extension:1" },
-                  children: ["A short summary of the post."],
-                },
-                {
-                  name: "field",
-                  attributes: { xmlns: "urn:waddle:extension:1", name: "saved-at", label: "Saved" },
-                  children: ["2026-04-27T00:00:00Z"],
-                },
-              ],
-            },
-          }],
-        };
+      async fetch_extension_route_items(receivedRoute: unknown, roomJid: string) {
+        expect(receivedRoute).toEqual(route);
+        expect(roomJid).toBe("general@muc.example.com");
+        return [{
+          id: "https---example-org-post",
+          title: "Example Post",
+          link: { href: "https://example.org/post" },
+          description: "A short summary of the post.",
+          fields: [{ name: "saved-at", label: "Saved", value: "2026-04-27T00:00:00Z" }],
+          options: [],
+          actions: [],
+        }];
       },
     };
 
@@ -287,42 +219,7 @@ describe("extension command invocation", () => {
     }]);
   });
 
-  test("skips PubSub items that are not Waddle extension-item envelopes", async () => {
-    const route = {
-      serviceJid: "extensions.example.com",
-      pluginId: "unknown-extension",
-      routeId: "items",
-      label: "Items",
-      scope: "channel" as const,
-      surface: "list" as const,
-      stateNode: "urn:waddle:unknown:1:channel:{room}:items",
-      payloadNamespace: "urn:waddle:unknown:1",
-    };
-    const xmpp = {
-      async getItems() {
-        return {
-          items: [{
-            id: "item-1",
-            content: {
-              getNamespace: () => "urn:waddle:unknown:1",
-              getName: () => "saved-item",
-              attributes: { url: "https://example.org/raw" },
-              children: [{
-                getNamespace: () => "urn:waddle:unknown:1",
-                getName: () => "title",
-                attributes: {},
-                children: ["Raw item"],
-              }],
-            },
-          }],
-        };
-      },
-    };
-
-    expect(await fetchExtensionRouteItems(xmpp as any, route, "general@muc.example.com")).toEqual([]);
-  });
-
-  test("parses extension-item envelopes with options and actions for poll-shaped routes", async () => {
+  test("normalizes typed route items with options and actions for poll-shaped routes", async () => {
     const route = {
       serviceJid: "extensions.example.com",
       pluginId: "decision-polls",
@@ -334,43 +231,18 @@ describe("extension command invocation", () => {
       payloadNamespace: "urn:waddle:decision-polls:1",
     };
     const xmpp = {
-      async getItems() {
-        return {
-          items: [{
-            id: "poll-42",
-            content: {
-              name: "extension-item",
-              attributes: { xmlns: "urn:waddle:extension:1" },
-              children: [
-                {
-                  name: "title",
-                  attributes: { xmlns: "urn:waddle:extension:1" },
-                  children: ["Lunch tomorrow?"],
-                },
-                {
-                  name: "subtitle",
-                  attributes: { xmlns: "urn:waddle:extension:1" },
-                  children: ["Open"],
-                },
-                {
-                  name: "option",
-                  attributes: { xmlns: "urn:waddle:extension:1", id: "a", label: "Pizza" },
-                  children: [],
-                },
-                {
-                  name: "option",
-                  attributes: { xmlns: "urn:waddle:extension:1", id: "b", label: "Sushi" },
-                  children: [],
-                },
-                {
-                  name: "action",
-                  attributes: { xmlns: "urn:waddle:extension:1", "launch-id": "vote-42", label: "Vote" },
-                  children: [],
-                },
-              ],
-            },
-          }],
-        };
+      async fetch_extension_route_items() {
+        return [{
+          id: "poll-42",
+          title: "Lunch tomorrow?",
+          subtitle: "Open",
+          options: [
+            { id: "a", label: "Pizza" },
+            { id: "b", label: "Sushi" },
+          ],
+          actions: [{ launch_id: "vote-42", label: "Vote" }],
+          fields: [],
+        }];
       },
     };
 
@@ -387,7 +259,7 @@ describe("extension command invocation", () => {
     }]);
   });
 
-  test("treats successful empty PubSub route item responses as empty routes", async () => {
+  test("treats successful empty Rust route item responses as empty routes", async () => {
     const route = {
       serviceJid: "extensions.example.com",
       pluginId: "link-board",
@@ -399,18 +271,15 @@ describe("extension command invocation", () => {
       payloadNamespace: "urn:waddle:link-board:1",
     };
     const xmpp = {
-      async getItems(jid: string, node: string, opts?: { max?: number }) {
-        expect(jid).toBe("extensions.example.com");
-        expect(node).toBe("urn:waddle:link-board:1:channel:general@muc.example.com:links");
-        expect(opts?.max).toBe(100);
-        return {};
+      async fetch_extension_route_items() {
+        return [];
       },
     };
 
     expect(await fetchExtensionRouteItems(xmpp as any, route, "general@muc.example.com")).toEqual([]);
   });
 
-  test("normalizes item-not-found pubsub errors as unavailable routes", async () => {
+  test("propagates typed Rust route load errors to the caller", async () => {
     const route = {
       serviceJid: "extensions.example.com",
       pluginId: "link-board",
@@ -422,150 +291,13 @@ describe("extension command invocation", () => {
       payloadNamespace: "urn:waddle:link-board:1",
     };
     const xmpp = {
-      async getItems() {
-        throw { condition: "item-not-found", type: "cancel" };
-      },
-    };
-
-    await expect(fetchExtensionRouteItems(xmpp as any, route, "general@muc.example.com"))
-      .rejects.toThrow("Extension route was not found.");
-  });
-
-  test("normalizes nested item-not-found pubsub errors as unavailable routes", async () => {
-    const route = {
-      serviceJid: "extensions.example.com",
-      pluginId: "decision-polls",
-      routeId: "active-polls",
-      label: "Polls",
-      scope: "channel" as const,
-      surface: "list" as const,
-      stateNode: "urn:waddle:decision-polls:1:channel:{room}:polls",
-      payloadNamespace: "urn:waddle:decision-polls:1",
-    };
-    const xmpp = {
-      async getItems() {
-        throw { error: { condition: "item-not-found", type: "cancel" } };
-      },
-    };
-
-    await expect(fetchExtensionRouteItems(xmpp as any, route, "general@muc.example.com"))
-      .rejects.toThrow("Extension route was not found.");
-  });
-
-  test("normalizes stanza.js item-not-found IQ errors as unavailable routes", async () => {
-    const route = {
-      serviceJid: "extensions.example.com",
-      pluginId: "link-board",
-      routeId: "saved-links",
-      label: "Saved Links",
-      scope: "channel" as const,
-      surface: "gallery" as const,
-      stateNode: "urn:waddle:link-board:1:channel:{room}:links",
-      payloadNamespace: "urn:waddle:link-board:1",
-    };
-    const xmpp = {
-      async getItems() {
-        throw {
-          id: "pubsub-1",
-          type: "error",
-          error: { type: "cancel", condition: "item-not-found" },
-        };
-      },
-    };
-
-    await expect(fetchExtensionRouteItems(xmpp as any, route, "general@muc.example.com"))
-      .rejects.toThrow("Extension route was not found.");
-  });
-
-  test("normalizes pubsubError-only route load errors", async () => {
-    const route = {
-      serviceJid: "extensions.example.com",
-      pluginId: "link-board",
-      routeId: "saved-links",
-      label: "Saved Links",
-      scope: "channel" as const,
-      surface: "gallery" as const,
-      stateNode: "urn:waddle:link-board:1:channel:{room}:links",
-      payloadNamespace: "urn:waddle:link-board:1",
-    };
-    const xmpp = {
-      async getItems() {
-        throw {
-          id: "pubsub-1",
-          type: "error",
-          error: { type: "cancel", pubsubError: "item-not-found" },
-        };
-      },
-    };
-
-    await expect(fetchExtensionRouteItems(xmpp as any, route, "general@muc.example.com"))
-      .rejects.toThrow("Extension route was not found.");
-  });
-
-  test("normalizes stanza.js route load errors into actionable Error messages", async () => {
-    const route = {
-      serviceJid: "extensions.example.com",
-      pluginId: "link-board",
-      routeId: "saved-links",
-      label: "Saved Links",
-      scope: "channel" as const,
-      surface: "gallery" as const,
-      stateNode: "urn:waddle:link-board:1:channel:{room}:links",
-      payloadNamespace: "urn:waddle:link-board:1",
-    };
-    const xmpp = {
-      async getItems() {
-        throw {
-          id: "pubsub-1",
-          type: "error",
-          error: { type: "auth", condition: "forbidden" },
-        };
+      async fetch_extension_route_items() {
+        throw new Error("Extension route access was denied.");
       },
     };
 
     await expect(fetchExtensionRouteItems(xmpp as any, route, "general@muc.example.com"))
       .rejects.toThrow("Extension route access was denied.");
-  });
-
-  test("normalizes remote server timeout route load errors", async () => {
-    const route = {
-      serviceJid: "extensions.example.com",
-      pluginId: "link-board",
-      routeId: "saved-links",
-      label: "Saved Links",
-      scope: "channel" as const,
-      surface: "gallery" as const,
-      stateNode: "urn:waddle:link-board:1:channel:{room}:links",
-      payloadNamespace: "urn:waddle:link-board:1",
-    };
-    const xmpp = {
-      async getItems() {
-        throw { error: { condition: "remote-server-timeout", type: "wait" } };
-      },
-    };
-
-    await expect(fetchExtensionRouteItems(xmpp as any, route, "general@muc.example.com"))
-      .rejects.toThrow("Extension route request timed out.");
-  });
-
-  test("propagates non-item-not-found errors to the caller", async () => {
-    const route = {
-      serviceJid: "extensions.example.com",
-      pluginId: "link-board",
-      routeId: "saved-links",
-      label: "Saved Links",
-      scope: "channel" as const,
-      surface: "gallery" as const,
-      stateNode: "urn:waddle:link-board:1:channel:{room}:links",
-      payloadNamespace: "urn:waddle:link-board:1",
-    };
-    const xmpp = {
-      async getItems() {
-        throw new Error("forbidden");
-      },
-    };
-
-    await expect(fetchExtensionRouteItems(xmpp as any, route, "general@muc.example.com")).rejects.toThrow("forbidden");
   });
 
   test("uses source stanza metadata when context only carries the waddle id", () => {
@@ -712,7 +444,7 @@ describe("extension command invocation", () => {
     });
   });
 
-  test("preserves XEP-0004 multi-value fields from Stanza form values", () => {
+  test("preserves XEP-0004 multi-value fields from command form values", () => {
     const fields = parseExtensionCommandForm({
       fields: [
         { name: "payload#choices", type: "list-multi", value: ["yes", "maybe"] },
@@ -726,7 +458,7 @@ describe("extension command invocation", () => {
     expect(fields[2]).toMatchObject({ value: "0", values: ["0"] });
   });
 
-  test("submits XEP-0050 session id and XEP-0004 multi values using Stanza names", async () => {
+  test("submits XEP-0050 session id and XEP-0004 multi values using protocol field names", async () => {
     let sent = "";
     const xmpp = {
       async send_raw_iq(xml: string) {

@@ -3,15 +3,13 @@ import type { WaddleClient } from "@waddle/xmpp-client-wasm";
 const NS_DATAFORM = "jabber:x:data";
 const NS_MUC_OWNER = "http://jabber.org/protocol/muc#owner";
 const NS_PUBSUB = "http://jabber.org/protocol/pubsub";
-export const NS_BOOKMARKS_1 = "urn:xmpp:bookmarks:1";
+const NS_BOOKMARKS_1 = "urn:xmpp:bookmarks:1";
 const NS_SPACES_0 = "urn:xmpp:spaces:0";
 const NS_MUC_ROOMCONFIG = "http://jabber.org/protocol/muc#roomconfig";
 const NS_PUBSUB_NODE_CONFIG = "http://jabber.org/protocol/pubsub#node_config";
 
 type HybridClient = Partial<WaddleClient> & {
-  sendIQ?: (iq: Record<string, unknown>) => Promise<unknown>;
-  joinRoom?: (roomJid: string, nick: string, opts?: unknown) => Promise<void>;
-  leaveRoom?: (roomJid: string, nick: string) => Promise<void>;
+  send_raw_iq?: (xml: string) => Promise<unknown>;
 };
 
 interface CreateMucRoomParams {
@@ -47,19 +45,19 @@ function slugifyNodeId(value: string): string {
   return value.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || "space";
 }
 
-async function sendIq(client: HybridClient, iq: Record<string, unknown>, xmlPayload: string, to: string): Promise<unknown> {
-  if (client.sendIQ) return client.sendIQ(iq);
-  return client.send_raw_iq?.(`<iq type="${iq.type}" id="${crypto.randomUUID()}" to="${to}">${xmlPayload}</iq>`);
+async function sendIq(client: HybridClient, type: "get" | "set", xmlPayload: string, to: string): Promise<unknown> {
+  if (!client.send_raw_iq) throw new Error("XMPP session is not ready");
+  return client.send_raw_iq(`<iq type="${type}" id="${crypto.randomUUID()}" to="${to}">${xmlPayload}</iq>`);
 }
 
 async function joinRoom(client: HybridClient, roomJid: string, nick: string): Promise<void> {
-  if (client.joinRoom) return client.joinRoom(roomJid, nick, { history: { maxStanzas: 0 } });
-  return client.join_room?.(roomJid, nick);
+  if (!client.join_room) throw new Error("XMPP session is not ready");
+  return client.join_room(roomJid, nick);
 }
 
 async function leaveRoom(client: HybridClient, roomJid: string, nick: string): Promise<void> {
-  if (client.leaveRoom) return client.leaveRoom(roomJid, nick);
-  return client.leave_room?.(roomJid, nick);
+  if (!client.leave_room) throw new Error("XMPP session is not ready");
+  return client.leave_room(roomJid, nick);
 }
 
 export async function createMucRoom(client: HybridClient, mucServiceJid: string, params: CreateMucRoomParams): Promise<{ roomJid: string }> {
@@ -73,7 +71,7 @@ export async function createMucRoom(client: HybridClient, mucServiceJid: string,
   ];
   await sendIq(
     client,
-    { type: "set", to: roomJid, muc: { type: "configure", form: { type: "submit", fields } } },
+    "set",
     `<query xmlns="${NS_MUC_OWNER}"><x xmlns="${NS_DATAFORM}" type="submit">${fields.map((field) => `<field var="${escapeXml(field.name)}"><value>${escapeXml(field.value)}</value></field>`).join("")}</x></query>`,
     roomJid,
   );
@@ -92,17 +90,17 @@ export async function createSpaceNode(client: HybridClient, spacesServiceJid: st
   ];
   await sendIq(
     client,
-    { type: "set", to: spacesServiceJid, pubsub: { create: { node: nodeId }, configure: { node: nodeId, form: { type: "submit", fields } } } },
+    "set",
     `<pubsub xmlns="${NS_PUBSUB}"><create node="${escapeXml(nodeId)}"/><configure node="${escapeXml(nodeId)}"><x xmlns="${NS_DATAFORM}" type="submit">${fields.map((field) => `<field var="${escapeXml(field.name)}"><value>${escapeXml(field.value)}</value></field>`).join("")}</x></configure></pubsub>`,
     spacesServiceJid,
   );
   return { node: nodeId, serviceJid: spacesServiceJid };
 }
 
-export async function publishMucToSpace(client: HybridClient, spacesServiceJid: string, spaceNode: string, mucJid: string, params: PublishMucToSpaceParams): Promise<void> {
+async function publishMucToSpace(client: HybridClient, spacesServiceJid: string, spaceNode: string, mucJid: string, params: PublishMucToSpaceParams): Promise<void> {
   await sendIq(
     client,
-    { type: "set", to: spacesServiceJid, pubsub: { publish: { node: spaceNode, item: { id: mucJid, content: { itemType: NS_BOOKMARKS_1, name: params.name, autojoin: params.autojoin !== false } } } } },
+    "set",
     `<pubsub xmlns="${NS_PUBSUB}"><publish node="${escapeXml(spaceNode)}"><item id="${escapeXml(mucJid)}"><conference xmlns="${NS_BOOKMARKS_1}" name="${escapeXml(params.name)}" autojoin="${params.autojoin === false ? "false" : "true"}"/></item></publish></pubsub>`,
     spacesServiceJid,
   );

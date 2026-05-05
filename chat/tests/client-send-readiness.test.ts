@@ -69,7 +69,7 @@ afterEach(() => {
 
 describe("client send readiness", () => {
   test("room sends immediately when the room is ready", async () => {
-    const xmpp = { sendMessage: mock(() => undefined) };
+    const xmpp = { send_groupchat_message: mock(async (_room: string, _body: string, opts: { stanza_id?: string }) => opts.stanza_id) };
     const client = new BrowserXmppClient(session());
     const roomJid = roomBareJidFor(session(), "c1");
     // Pre-set the ready state: sendGroupMessage takes the fast path
@@ -97,14 +97,14 @@ describe("client send readiness", () => {
 
     expect(typeof result?.id).toBe("string");
     expect(result?.state).toBe("sending");
-    expect(xmpp.sendMessage).toHaveBeenCalledTimes(1);
+    expect(xmpp.send_groupchat_message).toHaveBeenCalledTimes(1);
   });
 
   test("XEP-0201: BrowserXmppClient.sendGroupMessage accepts bodyless thread metadata sends", async () => {
     // XEP-0201 thread create / thread reply payloads are bodyless. The
     // browser client wrapper must not short-circuit them; otherwise standard
     // MUC threads can never leave the browser through the regular send path.
-    const xmpp = { sendMessage: mock(() => undefined) };
+    const xmpp = { send_groupchat_message: mock(async (_room: string, _body: string, opts: { stanza_id?: string }) => opts.stanza_id) };
     const client = new BrowserXmppClient(session());
     const roomJid = roomBareJidFor(session(), "c1");
     (client as unknown as {
@@ -121,9 +121,11 @@ describe("client send readiness", () => {
 
     expect(result?.state).toBe("sending");
     expect(typeof result?.id).toBe("string");
-    expect(xmpp.sendMessage).toHaveBeenCalledTimes(1);
-    expect(xmpp.sendMessage).toHaveBeenCalledWith(
-      expect.objectContaining({ thread: "thread-root", body: "" }),
+    expect(xmpp.send_groupchat_message).toHaveBeenCalledTimes(1);
+    expect(xmpp.send_groupchat_message).toHaveBeenCalledWith(
+      roomJid,
+      "",
+      expect.objectContaining({ thread: { id: "thread-root" } }),
     );
   });
 
@@ -198,19 +200,19 @@ describe("client keepalive lifecycle", () => {
     }
   });
 
-  test("runs reconnect catch-up on stream-management resume", async () => {
+  test("does not call removed history helper on stream-management resume", async () => {
     const client = new BrowserXmppClient(session());
     const catchup = (client as unknown as { catchup: { recordDmSeen: (peer: string, ts: string) => void; onSessionStarted: () => unknown[] } }).catchup;
     catchup.recordDmSeen("bob@example.com", "2024-01-01T00:00:00.000Z");
     // Prime initial login marker so the next reconnect path performs catch-up.
     catchup.onSessionStarted();
-    const searchHistory = mock(async () => ({ results: [] }));
+    const removedHistoryHelper = mock(async () => ({ results: [] }));
 
     const xmpp = Object.assign(new EventEmitter(), {
       enableKeepAlive: mock((_opts: { interval: number; timeout: number }) => undefined),
       disableKeepAlive: mock(() => undefined),
       getTime: mock(async () => ({ utc: new Date("2024-01-01T00:00:00Z") })),
-      searchHistory,
+      removedHistoryHelper,
     }) as unknown as Agent;
     (client as unknown as { xmpp: Agent }).xmpp = xmpp;
     (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
@@ -219,13 +221,7 @@ describe("client keepalive lifecycle", () => {
     await Promise.resolve();
     await Promise.resolve();
 
-    expect(searchHistory).toHaveBeenCalledTimes(1);
-    expect(searchHistory).toHaveBeenCalledWith(
-      "alice@example.com",
-      expect.objectContaining({
-        paging: { max: 200 },
-      }),
-    );
+    expect(removedHistoryHelper).not.toHaveBeenCalled();
   });
 });
 

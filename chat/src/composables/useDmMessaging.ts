@@ -460,7 +460,7 @@ export function useDmMessaging(
     );
   }
 
-  /** XEP-0198: stanza.js gave up on the stanza — surface as failed so the
+  /** XEP-0198: the XMPP client gave up on the stanza — surface as failed so the
    *  user can retry. */
   function onMessageDeliveryFailure(messageId: string) {
     messages.value = messages.value.map((m) =>

@@ -597,13 +597,32 @@ final class AppModel: ObservableObject {
         inFlightAvatarFetches.insert(key)
         Task { [weak self] in
             let avatar = await rustClient.requestAvatar(jid: key)
+            let avatarData = await Self.avatarData(from: avatar)
             guard let self else { return }
             await MainActor.run {
                 self.inFlightAvatarFetches.remove(key)
                 // Always populate the cache — empty Data sentinel prevents
                 // repeat fetches for users without a published avatar.
-                self.avatarDataByJID[key] = avatar?.data ?? Data()
+                self.avatarDataByJID[key] = avatarData
             }
+        }
+    }
+
+    private nonisolated static func avatarData(from avatar: WaddleAvatar?) async -> Data {
+        guard let avatar else { return Data() }
+        if !avatar.data.isEmpty { return avatar.data }
+        guard
+            let value = avatar.url,
+            let url = URL(string: value),
+            url.scheme == "https" || url.scheme == "http"
+        else {
+            return Data()
+        }
+        do {
+            let (data, _) = try await URLSession.shared.data(from: url)
+            return data
+        } catch {
+            return Data()
         }
     }
 

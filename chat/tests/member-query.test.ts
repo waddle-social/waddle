@@ -4,13 +4,11 @@ import { BrowserXmppClient } from "../src/lib/xmpp-client";
 import type { XmppErrorEvent } from "../src/lib/xmpp-client";
 
 type TestXmpp = {
-  getRoomMembers?: (
+  list_room_members?: (
     room: string,
-    opts: { affiliation: "owner" | "admin" | "member" | "outcast" },
-  ) => Promise<{ muc?: { users?: Array<{ jid?: string; affiliation?: string }> } }>;
-  getItems?: (jid: string, node: string) => Promise<{ items?: Array<{ content?: unknown }> }>;
-  getAvatar?: (jid: string, id: string) => Promise<{ content?: unknown }>;
-  getVCard?: (jid: string) => Promise<{ records?: unknown[] }>;
+    affiliation: "owner" | "admin" | "member" | "outcast",
+  ) => Promise<Array<{ jid?: string }>>;
+  request_avatar?: (jid: string) => Promise<{ jid: string; id: string; mime_type: string; data?: Uint8Array; url?: string } | null>;
 };
 
 function session(partial: Partial<WaddleSession> = {}): WaddleSession {
@@ -32,12 +30,12 @@ function clientWithXmpp(xmpp: TestXmpp) {
 }
 
 describe("BrowserXmppClient.listRoomMembers", () => {
-  test("fails visibly when stanza member-query support is missing", async () => {
+  test("fails visibly when Rust member-query support is missing", async () => {
     const client = clientWithXmpp({});
     const errors: XmppErrorEvent[] = [];
     client.onError((event) => errors.push(event));
 
-    await expect(client.listRoomMembers("general")).rejects.toThrow("missing getRoomMembers");
+    await expect(client.listRoomMembers("general")).rejects.toThrow("missing list_room_members");
 
     expect(errors).toHaveLength(1);
     expect(errors[0]).toMatchObject({
@@ -47,22 +45,22 @@ describe("BrowserXmppClient.listRoomMembers", () => {
   });
 
   test("queries affiliations independently and returns successful members", async () => {
-    const getRoomMembers = mock(async (
+    const listRoomMembers = mock(async (
       room: string,
-      opts: { affiliation: "owner" | "admin" | "member" | "outcast" },
+      affiliation: "owner" | "admin" | "member" | "outcast",
     ) => {
-      if (opts.affiliation === "admin") {
+      if (affiliation === "admin") {
         throw { condition: "forbidden" };
       }
-      if (opts.affiliation === "outcast") {
+      if (affiliation === "outcast") {
         throw { error: { condition: "service-unavailable" } };
       }
-      if (opts.affiliation === "member") {
-        return { muc: { users: [{ jid: "bob@example.com" }] } };
+      if (affiliation === "member") {
+        return [{ jid: "bob@example.com" }];
       }
-      return { muc: { users: [] } };
+      return [];
     });
-    const client = clientWithXmpp({ getRoomMembers });
+    const client = clientWithXmpp({ list_room_members: listRoomMembers });
     const errors: XmppErrorEvent[] = [];
     client.onError((event) => errors.push(event));
 
@@ -75,7 +73,7 @@ describe("BrowserXmppClient.listRoomMembers", () => {
       role: "member",
       joined_at: "",
     }]);
-    expect(getRoomMembers.mock.calls.map((call) => call[0])).toEqual([
+    expect(listRoomMembers.mock.calls.map((call) => call[0])).toEqual([
       "room-123@conference.example.net",
       "room-123@conference.example.net",
       "room-123@conference.example.net",
@@ -87,74 +85,60 @@ describe("BrowserXmppClient.listRoomMembers", () => {
   });
 
   test("does not silently show zero members when only failed queries could contain members", async () => {
-    const getRoomMembers = mock(async (
+    const listRoomMembers = mock(async (
       _room: string,
-      opts: { affiliation: "owner" | "admin" | "member" | "outcast" },
+      affiliation: "owner" | "admin" | "member" | "outcast",
     ) => {
-      if (opts.affiliation === "member") {
+      if (affiliation === "member") {
         throw { condition: "item-not-found" };
       }
-      return { muc: { users: [] } };
+      return [];
     });
-    const client = clientWithXmpp({ getRoomMembers });
+    const client = clientWithXmpp({ list_room_members: listRoomMembers });
     const errors: XmppErrorEvent[] = [];
     client.onError((event) => errors.push(event));
 
     await expect(client.listRoomMembers("general")).rejects.toThrow("refusing to show Members 0");
 
-    expect(getRoomMembers).toHaveBeenCalledTimes(4);
+    expect(listRoomMembers).toHaveBeenCalledTimes(4);
     expect(errors.some((event) => event.detail.includes("reconstructed room JID may not match"))).toBe(true);
   });
 });
 
 describe("BrowserXmppClient.fetchUserAvatar", () => {
-  test("fetches XEP-0084 avatar data before vCard fallback", async () => {
-    const getItems = mock(async () => ({
-      items: [{ content: { versions: [{ id: "hash1", mediaType: "image/png" }] } }],
+  test("fetches avatar data through the Rust client with a bare JID", async () => {
+    const requestAvatar = mock(async (jid: string) => ({
+      jid,
+      id: "hash1",
+      mime_type: "image/png",
+      data: new Uint8Array(Buffer.from("avatar-bytes")),
     }));
-    const getAvatar = mock(async () => ({
-      content: { data: Buffer.from("avatar-bytes") },
-    }));
-    const getVCard = mock(async () => ({ records: [] }));
-    const client = clientWithXmpp({ getItems, getAvatar, getVCard });
+    const client = clientWithXmpp({ request_avatar: requestAvatar });
 
     await expect(client.fetchUserAvatar("bob@example.com/mobile")).resolves.toBe(
       `data:image/png;base64,${Buffer.from("avatar-bytes").toString("base64")}`,
     );
-    expect(getItems).toHaveBeenCalledWith("bob@example.com", "urn:xmpp:avatar:metadata");
-    expect(getAvatar).toHaveBeenCalledWith("bob@example.com", "hash1");
-    expect(getVCard).not.toHaveBeenCalled();
+    expect(requestAvatar).toHaveBeenCalledWith("bob@example.com");
   });
 
-  test("falls back to vCard photo when PEP avatar is unavailable", async () => {
-    const getItems = mock(async () => {
-      throw { condition: "item-not-found" };
+  test("returns external avatar URLs from the Rust client", async () => {
+    const requestAvatar = mock(async (jid: string) => {
+      expect(jid).toBe("dana@example.com");
+      return {
+        jid,
+        id: "vcard-extval",
+        mime_type: "image/png",
+        url: "https://avatars.example.com/dana.png",
+      };
     });
-    const getVCard = mock(async () => ({
-      records: [{ type: "photo", mediaType: "image/jpeg", data: Buffer.from("vcard-photo") }],
-    }));
-    const client = clientWithXmpp({ getItems, getVCard });
-
-    await expect(client.fetchUserAvatar("carol@example.com")).resolves.toBe(
-      `data:image/jpeg;base64,${Buffer.from("vcard-photo").toString("base64")}`,
-    );
-    expect(getVCard).toHaveBeenCalledWith("carol@example.com");
-  });
-
-  test("falls back to vCard external photo URLs", async () => {
-    const getItems = mock(async () => ({ items: [] }));
-    const getVCard = mock(async () => ({
-      records: [{ type: "photo", url: "https://avatars.example.com/dana.png" }],
-    }));
-    const client = clientWithXmpp({ getItems, getVCard });
+    const client = clientWithXmpp({ request_avatar: requestAvatar });
 
     await expect(client.fetchUserAvatar("dana@example.com")).resolves.toBe("https://avatars.example.com/dana.png");
   });
 
-  test("returns null when avatar sources are unsupported or empty", async () => {
-    const getItems = mock(async () => ({ items: [] }));
-    const getVCard = mock(async () => ({ records: [] }));
-    const client = clientWithXmpp({ getItems, getVCard });
+  test("returns null when the Rust client has no avatar", async () => {
+    const requestAvatar = mock(async () => null);
+    const client = clientWithXmpp({ request_avatar: requestAvatar });
 
     await expect(client.fetchUserAvatar("dana@example.com")).resolves.toBeNull();
   });
