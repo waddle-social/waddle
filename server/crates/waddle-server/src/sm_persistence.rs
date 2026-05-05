@@ -73,13 +73,28 @@ pub struct DatabaseSmPersistence {
 }
 
 impl DatabaseSmPersistence {
-    /// Open against `database_url` (SQLite path or Postgres DSN).
+    /// Open against `database_url`. Supported schemes:
+    ///
+    /// - `postgres://…` / `postgresql://…` → Postgres adapter
+    /// - `sqlite://…`, bare path, or `:memory:` → SQLite adapter
+    ///
     /// `None` falls back to in-memory SQLite suitable only for tests.
+    /// `libsql://…` URLs are NOT supported by the current
+    /// [`crate::db::DatabaseDriver`] enum and would silently route to
+    /// the SQLite adapter (which doesn't speak the libSQL wire
+    /// protocol). Reject them explicitly so misconfigured deployments
+    /// fail loudly at startup. (Copilot review on PR #344.)
     pub async fn open(database_url: Option<&str>) -> Result<Self, SmPersistenceError> {
         let db = match database_url {
             Some(url) => {
                 let driver = if url.starts_with("postgres://") || url.starts_with("postgresql://") {
                     DatabaseDriver::Postgres
+                } else if url.starts_with("libsql://") || url.starts_with("libsql+") {
+                    return Err(SmPersistenceError::Other(format!(
+                        "libsql:// URL '{url}' is not supported by the current \
+                         crate::db::DatabaseDriver (SQLite or Postgres only); \
+                         use sqlite:// or postgres:// instead"
+                    )));
                 } else {
                     DatabaseDriver::Sqlite
                 };

@@ -413,26 +413,24 @@ impl InMemorySmSessionRegistry {
 
 impl InMemorySmSessionRegistry {
     /// Helper: delete every durable row for `stream_id` (session +
-    /// unacked queue). Best-effort — failures are logged and
-    /// swallowed because the in-memory state has already mutated
-    /// when this is called and we'd rather have a transient durable
-    /// drift than fail the resume / cleanup path.
-    async fn persist_delete_session(&self, stream_id: &str) {
+    /// unacked queue). Returns the underlying error so callers can
+    /// adopt a "persist-first" ordering — refuse to mutate the
+    /// in-memory map when the durable delete failed, so a transient
+    /// storage hiccup doesn't leave an orphaned `sm_sessions` row
+    /// that `restore_from_persistence` would resurrect on restart.
+    /// (Codex P1 + Copilot + Qodo on PR #344: best-effort silent
+    /// swallow allowed durable orphans whenever the in-memory state
+    /// had already moved on.)
+    async fn persist_delete_session(&self, stream_id: &str) -> Result<(), SmRegistryError> {
         let Some(storage) = &self.persistence else {
-            return;
+            return Ok(());
         };
-        if let Err(error) = storage
+        storage
             .delete_session(&crate::pending_delivery::SmSessionId::new(
                 stream_id.to_string(),
             ))
             .await
-        {
-            debug!(
-                stream_id = %stream_id,
-                error = %error,
-                "failed to delete persisted SM session; will retry via janitor"
-            );
-        }
+            .map_err(|e| SmRegistryError::Internal(e.to_string()))
     }
 }
 
@@ -589,7 +587,22 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
         // review on PR #344: durable rows for evicted streams must
         // not be silently rehydrated.)
         for evicted in &evicted_stream_ids {
-            self.persist_delete_session(evicted).await;
+            // Best-effort: failure to delete an evictee row means
+            // the next restart MAY resurrect it via
+            // restore_from_persistence (until its resume window
+            // expires and the restore-time expired-filter drops it).
+            // Bubbling the error here would fail the whole detach
+            // because an unrelated evictee row couldn't be cleaned;
+            // log loudly instead so operators can spot storage
+            // health issues.
+            if let Err(error) = self.persist_delete_session(evicted).await {
+                debug!(
+                    stream_id = %evicted,
+                    error = %error,
+                    "evicted SM session: durable delete failed; row will be \
+                     filtered by restore-time expiry check"
+                );
+            }
         }
 
         // Persist the detached session + its unacked queue so it
@@ -660,9 +673,23 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
         &self,
         stream_id: &str,
     ) -> Result<Option<DetachedSession>, SmRegistryError> {
-        // Lock-scoped block so guards drop before the await
-        // (RwLockWriteGuard is not Send and explicit drop() doesn't
-        // satisfy async future lifetime analysis).
+        // Persist-first ordering (same rationale as complete_claim):
+        // peek to see if the session exists, durably erase, then
+        // remove from in-memory. Failure to durably erase aborts
+        // the take so the caller can retry without leaving an
+        // orphan row in storage that restart would resurrect.
+        let exists = {
+            let sessions = self
+                .sessions
+                .read()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+            sessions.contains_key(stream_id)
+        };
+        if !exists {
+            debug!(stream_id = %stream_id, "SM session not found");
+            return Ok(None);
+        }
+        self.persist_delete_session(stream_id).await?;
         let removed = {
             let mut sessions = self
                 .sessions
@@ -689,19 +716,6 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
                 .remove(stream_id);
             removed
         };
-        // Mirror the take into durable storage. take_session is the
-        // resume path's commitment point — once we've decided to
-        // hand the session back to the resuming connection the
-        // durable record is no longer needed (the session is now
-        // live again).
-        if let Some(storage) = &self.persistence {
-            storage
-                .delete_session(&crate::pending_delivery::SmSessionId::new(
-                    stream_id.to_string(),
-                ))
-                .await
-                .map_err(|e| SmRegistryError::Internal(e.to_string()))?;
-        }
         Ok(removed)
     }
 
@@ -737,7 +751,18 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
             drain_expired_internal(&mut sessions)
         };
         for session in &drained {
-            self.persist_delete_session(&session.stream_id).await;
+            // Best-effort: cleanup paths log and continue rather
+            // than aborting the whole sweep on a single bad row.
+            // Restart-time expired-filter still drops anything that
+            // slipped through.
+            if let Err(error) = self.persist_delete_session(&session.stream_id).await {
+                debug!(
+                    stream_id = %session.stream_id,
+                    error = %error,
+                    "expired SM session: durable delete failed in cleanup; \
+                     restart-time expiry filter will drop the orphan"
+                );
+            }
         }
         Ok(drained.len())
     }
@@ -868,7 +893,18 @@ impl InMemorySmSessionRegistry {
             drain_expired_internal(&mut sessions)
         };
         for session in &drained {
-            self.persist_delete_session(&session.stream_id).await;
+            // Best-effort: cleanup paths log and continue rather
+            // than aborting the whole sweep on a single bad row.
+            // Restart-time expired-filter still drops anything that
+            // slipped through.
+            if let Err(error) = self.persist_delete_session(&session.stream_id).await {
+                debug!(
+                    stream_id = %session.stream_id,
+                    error = %error,
+                    "expired SM session: durable delete failed in cleanup; \
+                     restart-time expiry filter will drop the orphan"
+                );
+            }
         }
         Ok(drained)
     }
@@ -930,31 +966,42 @@ impl InMemorySmSessionRegistry {
         &self,
         stream_id: &str,
     ) -> Result<Option<SmClaimCompletion>, SmRegistryError> {
-        // Lock-scoped block so guards are dropped before the durable
-        // delete await (RwLockWriteGuard is not Send).
-        let outcome = {
-            self.claimed_sessions
-                .write()
-                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
-                .remove(stream_id)
-                .map(|session| {
-                    if session.is_expired() {
-                        SmClaimCompletion::Expired(session)
-                    } else {
-                        SmClaimCompletion::Resumed(session)
-                    }
-                })
+        // Persist-first ordering: durably erase the session BEFORE
+        // we hand it back to the resuming connection. If the durable
+        // delete fails, abort the resume — the in-memory entry stays
+        // in claimed_sessions and the caller can retry, or
+        // release_claim to put it back. Without persist-first, a
+        // successful in-memory completion + failed durable delete
+        // would leave an orphan row that
+        // `restore_from_persistence` would resurrect on next
+        // restart, exposing a stale `<resume previd='…'/>` for an
+        // already-live session (Codex P1 + Copilot + Qodo on PR
+        // #344).
+        let exists = {
+            let claimed = self
+                .claimed_sessions
+                .read()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+            claimed.contains_key(stream_id)
         };
-        // Resume is the durable commitment point — once we hand the
-        // session back to the resuming connection (or detect it
-        // expired mid-claim), the durable record is no longer needed.
-        // Without this delete, restart_from_persistence would
-        // resurrect the just-resumed session (Copilot review on
-        // PR #344). For Expired we still delete: the session will
-        // not be resumable again.
-        if outcome.is_some() {
-            self.persist_delete_session(stream_id).await;
+        if !exists {
+            return Ok(None);
         }
+        self.persist_delete_session(stream_id).await?;
+        // Now remove from in-memory; the durable side has already
+        // committed.
+        let outcome = self
+            .claimed_sessions
+            .write()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
+            .remove(stream_id)
+            .map(|session| {
+                if session.is_expired() {
+                    SmClaimCompletion::Expired(session)
+                } else {
+                    SmClaimCompletion::Resumed(session)
+                }
+            });
         Ok(outcome)
     }
 
@@ -964,26 +1011,31 @@ impl InMemorySmSessionRegistry {
         &self,
         stream_id: &str,
     ) -> Result<Option<DetachedSession>, SmRegistryError> {
-        // Lock-scoped block so guards drop before the durable delete
-        // await.
-        let removed = {
-            let mut sessions = self
+        // Persist-first ordering: peek + abort if claimed, durably
+        // erase, then remove from in-memory. Same rationale as
+        // complete_claim — failure to durably erase aborts the
+        // operation so a transient storage error doesn't leave an
+        // orphan that restart resurrects.
+        let exists_unclaimed = {
+            let sessions = self
                 .sessions
-                .write()
+                .read()
                 .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-            if self
+            let claimed = self
                 .claimed_sessions
                 .read()
-                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
-                .contains_key(stream_id)
-            {
-                return Ok(None);
-            }
-            sessions.remove(stream_id)
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+            sessions.contains_key(stream_id) && !claimed.contains_key(stream_id)
         };
-        if removed.is_some() {
-            self.persist_delete_session(stream_id).await;
+        if !exists_unclaimed {
+            return Ok(None);
         }
+        self.persist_delete_session(stream_id).await?;
+        let removed = self
+            .sessions
+            .write()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
+            .remove(stream_id);
         Ok(removed)
     }
 
@@ -993,46 +1045,53 @@ impl InMemorySmSessionRegistry {
         &self,
         jid: &FullJid,
     ) -> Result<Vec<DetachedSession>, SmRegistryError> {
-        // Lock-scoped block so guards drop before the durable delete
-        // awaits.
-        let (removed, removed_ids) = {
-            let mut removed = Vec::new();
-            let mut removed_ids: Vec<String> = Vec::new();
+        // Persist-first: enumerate matching stream-ids under a brief
+        // lock, durably erase each, then remove from in-memory. If
+        // any durable erase fails, abort before in-memory mutation
+        // so a transient storage error doesn't leave orphans.
+        let matching_ids: Vec<String> = {
+            let sessions = self
+                .sessions
+                .read()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+            let claimed = self
+                .claimed_sessions
+                .read()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+            let mut ids: Vec<String> = sessions
+                .iter()
+                .filter(|(_, s)| s.jid == *jid)
+                .map(|(id, _)| id.clone())
+                .collect();
+            for (id, s) in claimed.iter() {
+                if s.jid == *jid {
+                    ids.push(id.clone());
+                }
+            }
+            ids
+        };
+        for stream_id in &matching_ids {
+            self.persist_delete_session(stream_id).await?;
+        }
+        // Now remove from in-memory (durable side already committed).
+        let mut removed = Vec::new();
+        {
             let mut sessions = self
                 .sessions
                 .write()
                 .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-            let matching_streams: Vec<_> = sessions
-                .iter()
-                .filter(|(_, session)| session.jid == *jid)
-                .map(|(stream_id, _)| stream_id.clone())
-                .collect();
-            for stream_id in matching_streams {
-                if let Some(session) = sessions.remove(&stream_id) {
-                    removed_ids.push(stream_id);
-                    removed.push(session);
-                }
-            }
-            drop(sessions);
             let mut claimed = self
                 .claimed_sessions
                 .write()
                 .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-            let matching_streams: Vec<_> = claimed
-                .iter()
-                .filter(|(_, session)| session.jid == *jid)
-                .map(|(stream_id, _)| stream_id.clone())
-                .collect();
-            for stream_id in matching_streams {
-                if let Some(session) = claimed.remove(&stream_id) {
-                    removed_ids.push(stream_id);
+            for stream_id in &matching_ids {
+                if let Some(session) = sessions.remove(stream_id) {
+                    removed.push(session);
+                }
+                if let Some(session) = claimed.remove(stream_id) {
                     removed.push(session);
                 }
             }
-            (removed, removed_ids)
-        };
-        for stream_id in &removed_ids {
-            self.persist_delete_session(stream_id).await;
         }
         Ok(removed)
     }
