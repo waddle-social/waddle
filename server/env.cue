@@ -116,6 +116,8 @@ schema.#Project & {
 				}
 			}
 			tasks: [
+				_t.checkRootSyncDrift,
+				_t.checkCiDrift,
 				_t.fmt,
 				_t.clippy,
 				_t.test,
@@ -192,9 +194,15 @@ schema.#Project & {
 		}
 
 		checkRootSyncDrift: schema.#Task & {
-			command: "cuenv"
-			args: ["sync", "--check", "-p", ".."]
+			command: "bash"
+			args: ["-c", #"""
+					set -euo pipefail
+					cuenv sync --check -p ..
+					git diff --exit-code -- ../.gitignore ../cuenv.lock
+				"""#]
 			inputs: [
+				"../env.cue",
+				"../cuenv.lock",
 				"../.rules.cue",
 				"../.gitignore",
 			]

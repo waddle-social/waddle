@@ -17,6 +17,13 @@ schema.#Base & {
 		]
 	}
 
+	vcs: xeps: {
+		url:       "https://github.com/xsf/xeps.git"
+		reference: "master"
+		vendor:    false
+		path:      "xeps"
+	}
+
 	env: {
 		environment: production: {
 			CLOUDFLARE_ACCOUNT_ID: schema.#OnePasswordRef & {

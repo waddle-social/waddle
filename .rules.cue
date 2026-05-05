@@ -5,9 +5,6 @@ import "github.com/cuenv/cuenv/schema/rules"
 rules.#DirectoryRules
 
 ignore: git: [
-	"# XMPP XEPs",
-	"xeps",
-	"",
 	"# Astro",
 	".astro/",
 	"",

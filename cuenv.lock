@@ -29,3 +29,11 @@ type = "nix"
 flake = ".."
 digest = "sha256:22c72a3faea22e798923cadadad88c625122228e05204cc052fc74d5f2d8d883"
 lockfile = "website/../flake.lock"
+
+[vcs.xeps]
+url = "https://github.com/xsf/xeps.git"
+reference = "master"
+commit = "fa21a8371a078ca3a748a2a270d1b23f6ba51569"
+tree = "344f5a4706d2bb7cd24b2f122d956c50e34f7cef"
+vendor = false
+path = "xeps"
