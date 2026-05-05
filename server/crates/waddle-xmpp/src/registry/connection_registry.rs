@@ -106,6 +106,11 @@ pub struct ConnectionEntry {
     pub presence_priority: Arc<std::sync::atomic::AtomicI8>,
     /// Whether this stream requested its roster during the current session.
     pub roster_interested: Arc<AtomicBool>,
+    /// Whether this stream has already received its XEP-0160 offline-message
+    /// flush. Set on first non-negative-priority presence (locked Q7a +
+    /// Q7d) so subsequent presence updates do not re-flush an already-
+    /// drained `pending_delivery` queue (issue #209).
+    pub offline_flushed: Arc<AtomicBool>,
 }
 
 impl ConnectionEntry {
@@ -117,6 +122,7 @@ impl ConnectionEntry {
             presence_available: Arc::new(AtomicBool::new(false)),
             presence_priority: Arc::new(std::sync::atomic::AtomicI8::new(0)),
             roster_interested: Arc::new(AtomicBool::new(false)),
+            offline_flushed: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -141,6 +147,16 @@ impl ConnectionEntry {
     /// Get the last advertised presence priority.
     pub fn presence_priority(&self) -> i8 {
         self.presence_priority.load(Ordering::Relaxed)
+    }
+
+    /// Atomically check-and-set the XEP-0160 offline-flushed flag. Returns
+    /// `true` exactly once per connection (the first call), `false` on
+    /// every subsequent call. Used to ensure the per-user-bare-JID flush
+    /// (locked Q7c) only fires once per fresh session.
+    pub fn claim_offline_flush(&self) -> bool {
+        self.offline_flushed
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
     }
 }
 
@@ -371,6 +387,15 @@ impl ConnectionRegistry {
     /// Check if a JID is currently connected.
     pub fn is_connected(&self, jid: &FullJid) -> bool {
         self.connections.contains_key(jid)
+    }
+
+    /// Look up the [`ConnectionEntry`] for a registered full JID.
+    ///
+    /// Used by handlers that need to inspect or atomically transition
+    /// per-connection flags (e.g. the XEP-0160 offline-flush CAS via
+    /// [`ConnectionEntry::claim_offline_flush`]).
+    pub fn get_entry(&self, jid: &FullJid) -> Option<ConnectionEntry> {
+        self.connections.get(jid).map(|entry| entry.clone())
     }
 
     /// Get the number of active connections.

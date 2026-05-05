@@ -581,6 +581,36 @@ pub enum OutboundEvent {
     /// Cancel a previously-set timer.
     CancelTimer(TimerId),
 
+    /// XEP-0160 offline-message store: the recipient has no resource
+    /// with non-negative presence priority online at intake time, and
+    /// the [`crate::protocol::dm_routing::classify_dm_intake`] classifier
+    /// has approved persistence (issue #209, locked Q1 = C / Q4 = A).
+    ///
+    /// The interpreter writes the row into
+    /// [`crate::pending_delivery::storage::PendingDeliveryStorage`] and
+    /// returns `<service-unavailable/>` to the sender on
+    /// [`crate::pending_delivery::InsertOutcome::QuotaExceeded`] per
+    /// XEP-0160 §3 step 3 (locked Q9b).
+    ///
+    /// `original_receipt_at` is the server-side intake timestamp; it is
+    /// the value the server will eventually stamp onto `<delay/>` per
+    /// XEP-0203 §4.1 + XEP-0198 §5 line 364 ("original (failed) delivery
+    /// timestamp").
+    QueueOfflineDelivery {
+        recipient: BareJid,
+        payload: crate::pending_delivery::PendingPayload,
+        original_receipt_at: chrono::DateTime<chrono::Utc>,
+        /// The original inbound `<message>`, preserved verbatim so the
+        /// `<service-unavailable/>` bounce path on
+        /// `InsertOutcome::QuotaExceeded` can construct a typed reply
+        /// via `protocol::handlers::errors::message_error_reply` —
+        /// which swaps `from`/`to` and attaches a typed
+        /// `xmpp_parsers::stanza_error::StanzaError`. RFC 6120 §8.3
+        /// has the canonical wire shape; XEP-0160 §3 step 3 mandates
+        /// it on quota overflow.
+        original_message: Box<Message>,
+    },
+
     // -------------------------------------------------------------------
     // Diagnostics
     // -------------------------------------------------------------------

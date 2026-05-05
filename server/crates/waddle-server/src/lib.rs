@@ -5,6 +5,7 @@ pub mod config;
 pub mod db;
 pub mod inbox;
 pub mod messages;
+pub mod pending_delivery;
 pub mod permissions;
 pub mod pubsub;
 pub mod pubsub_authz;

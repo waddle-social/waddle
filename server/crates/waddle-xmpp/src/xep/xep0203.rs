@@ -29,7 +29,7 @@
 //! - Offline message delivery
 //! - Message forwarding (XEP-0297)
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
 use minidom::Element;
 use thiserror::Error;
 use xmpp_parsers::message::Message;
@@ -154,8 +154,16 @@ pub fn extract_delay_stamp(msg: &Message) -> Option<DateTime<Utc>> {
 // ── Building ─────────────────────────────────────────────────────────
 
 /// Build a `<delay/>` element.
+///
+/// XEP-0082 §3.2 BNF requires UTC datetimes use the literal `Z` suffix
+/// (e.g. `2002-09-10T23:08:25Z`), not the `+00:00` form. `chrono`'s
+/// default `to_rfc3339` emits `+00:00` for `DateTime<Utc>`, so we use
+/// the explicit `to_rfc3339_opts(_, true)` to force the `Z` form for
+/// strict-client compatibility (Conversations, gajim, Movim all expect
+/// the canonical XEP-0082 stamp).
 pub fn build_delay_element(info: &DelayInfo) -> Element {
-    let mut builder = Element::builder("delay", NS_DELAY).attr("stamp", info.stamp.to_rfc3339());
+    let stamp = info.stamp.to_rfc3339_opts(SecondsFormat::Secs, true);
+    let mut builder = Element::builder("delay", NS_DELAY).attr("stamp", stamp);
 
     if let Some(ref from) = info.from {
         builder = builder.attr("from", from.as_str());
@@ -173,7 +181,7 @@ pub fn build_delay_element(info: &DelayInfo) -> Element {
 /// Build a simple delay element with just a timestamp and from.
 pub fn build_delay_element_simple(stamp: DateTime<Utc>, from: &str) -> Element {
     Element::builder("delay", NS_DELAY)
-        .attr("stamp", stamp.to_rfc3339())
+        .attr("stamp", stamp.to_rfc3339_opts(SecondsFormat::Secs, true))
         .attr("from", from)
         .build()
 }
