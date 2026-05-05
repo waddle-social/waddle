@@ -789,9 +789,9 @@ impl DiscoveryExt for ClientHandle {
                 .discover_info(&channel.room_jid.to_string(), None)
                 .await
             {
-                if let Some(channel_type) =
-                    info.form_value(WADDLE_ROOM_METADATA_FORM_TYPE, "waddle#channel_type")
-                        .and_then(DiscoveredChannelType::from_metadata)
+                if let Some(channel_type) = info
+                    .form_value(WADDLE_ROOM_METADATA_FORM_TYPE, "waddle#channel_type")
+                    .and_then(DiscoveredChannelType::from_metadata)
                 {
                     channel.channel_type = channel_type;
                 }

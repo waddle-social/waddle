@@ -5730,7 +5730,10 @@ mod tests {
         .await;
         let response = responses.first().expect("room disco response");
         assert!(response.contains("muc_moderated"), "response: {response}");
-        assert!(response.contains("waddle#channel_type"), "response: {response}");
+        assert!(
+            response.contains("waddle#channel_type"),
+            "response: {response}"
+        );
         assert!(response.contains("announcement"), "response: {response}");
         assert!(
             !response.contains("<value>text</value>"),
