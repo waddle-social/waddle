@@ -1086,6 +1086,24 @@ async fn interpret_with_depth(
                         // typed `<service-unavailable/>` bounce that
                         // echoes the original payload (RFC 6120 §8.3.4
                         // convention).
+                        //
+                        // **Known partial inconsistency**: ArchiveHandler
+                        // runs earlier in the chain than
+                        // OfflineDeliveryHandler, so by the time we get
+                        // here the message is already in MAM. Sender
+                        // sees `<service-unavailable/>` while the
+                        // recipient can still pull the message from MAM
+                        // catch-up on next reconnect — i.e. the bounce
+                        // is for the *live-delivery* obligation, not
+                        // for archival visibility.
+                        //
+                        // This matches every existing reference XMPP
+                        // server (Prosody, ejabberd) and is consistent
+                        // with XEP-0160 §3 step 3's narrow scope
+                        // ("offline message queue is full"). The
+                        // alternative — un-archiving on quota — would
+                        // race with concurrent MAM queries and break
+                        // XEP-0313's monotonic-archive invariant.
                         let error = xmpp_parsers::stanza_error::StanzaError::new(
                             xmpp_parsers::stanza_error::ErrorType::Cancel,
                             xmpp_parsers::stanza_error::DefinedCondition::ServiceUnavailable,

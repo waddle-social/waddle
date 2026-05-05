@@ -243,6 +243,19 @@ where
 const PAYLOAD_KIND_ARCHIVED: &str = "archived";
 const PAYLOAD_KIND_TRANSIENT: &str = "transient";
 
+/// Per-recipient mutex map serializing inserts so the
+/// `INSERT … SELECT … WHERE COUNT < cap` quota check is strict on
+/// Postgres too. SQLite serializes writers globally so this is
+/// belt-and-suspenders for SQLite, but on Postgres with the default
+/// READ-COMMITTED isolation level two concurrent inserts can both
+/// observe the same `COUNT(*)` snapshot and exceed `max_rows`. The
+/// app-level lock per recipient bare-JID closes that race
+/// portably across drivers.
+///
+/// Lock granularity is per recipient — concurrent inserts for
+/// *different* recipients don't contend.
+type RecipientLockMap = dashmap::DashMap<BareJid, std::sync::Arc<tokio::sync::Mutex<()>>>;
+
 /// libSQL/Postgres-backed [`PendingDeliveryStorage`] implementation.
 ///
 /// Schema:
@@ -268,6 +281,12 @@ const PAYLOAD_KIND_TRANSIENT: &str = "transient";
 pub struct DatabasePendingDeliveryStorage {
     db: Database,
     quota: QuotaPolicy,
+    /// Per-recipient insert serialization to make
+    /// `INSERT … SELECT … WHERE COUNT < cap` strict on Postgres
+    /// (READ-COMMITTED snapshots can't see uncommitted concurrent
+    /// inserts, so two writers can both pass the cap check). SQLite
+    /// already serializes writers; this is portable defense.
+    recipient_locks: std::sync::Arc<RecipientLockMap>,
 }
 
 impl DatabasePendingDeliveryStorage {
@@ -295,7 +314,11 @@ impl DatabasePendingDeliveryStorage {
                 .await
                 .map_err(|e| PendingStorageError::Other(e.to_string()))?,
         };
-        let storage = Self { db, quota };
+        let storage = Self {
+            db,
+            quota,
+            recipient_locks: std::sync::Arc::new(RecipientLockMap::new()),
+        };
         storage.initialize().await?;
         info!(
             driver = ?storage.db.driver(),
@@ -330,6 +353,23 @@ impl DatabasePendingDeliveryStorage {
         self.execute(
             "CREATE INDEX IF NOT EXISTS idx_pending_delivery_session \
              ON pending_delivery (flushed_in_session)",
+            (),
+        )
+        .await?;
+        // UNIQUE partial index on (recipient_jid, archive_stanza_id)
+        // for Archived rows. XEP-0359 stanza-ids are unique per
+        // archive (recipient bare JID); two pending_delivery rows
+        // pointing at the same MAM entry would replay the same
+        // message twice. Both SQLite (since 3.8.0) and Postgres
+        // support partial indexes; the WHERE clause limits the
+        // constraint to Archived rows so multiple Transient inserts
+        // for the same recipient remain allowed (the typed
+        // PendingPayload::Transient variant has no archive id to
+        // collide on).
+        self.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_delivery_archived_unique \
+             ON pending_delivery (recipient_jid, archive_stanza_id) \
+             WHERE payload_kind = 'archived'",
             (),
         )
         .await?;
@@ -447,6 +487,20 @@ impl DatabasePendingDeliveryStorage {
 impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
     #[instrument(skip(self, row), fields(recipient = %row.recipient))]
     async fn insert(&self, row: PendingRow) -> Result<InsertOutcome, PendingStorageError> {
+        // Per-recipient lock to serialize concurrent inserts for the
+        // same recipient. This makes the `INSERT … SELECT … WHERE
+        // COUNT < cap` quota check strict on Postgres (where
+        // READ-COMMITTED snapshots can otherwise let two concurrent
+        // inserts both pass the cap and exceed `max_rows`). SQLite
+        // serializes writers globally, so for SQLite this is
+        // belt-and-suspenders.
+        let recipient_lock = self
+            .recipient_locks
+            .entry(row.recipient.clone())
+            .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+        let _guard = recipient_lock.lock().await;
+
         let row_id = if row.id.as_str().is_empty() {
             PendingRowId::fresh().as_str().to_string()
         } else {
@@ -466,10 +520,11 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
             }
         };
         // Atomic-with-quota INSERT: the WHERE clause runs in the same
-        // SQL statement as the insert, so concurrent callers cannot
-        // observe stale `COUNT(*)` results. Standard SQL portable
-        // across SQLite and Postgres. Affected row count differentiates
-        // accepted (1) from quota-rejected (0).
+        // SQL statement as the insert. Combined with the per-recipient
+        // lock above this gives strict cap enforcement portably across
+        // SQLite (single-writer) and Postgres (READ-COMMITTED).
+        // Affected row count differentiates accepted (1) from
+        // quota-rejected (0).
         let affected = match self.quota {
             QuotaPolicy::Unlimited => {
                 self.execute(

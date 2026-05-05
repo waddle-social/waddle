@@ -188,20 +188,25 @@ pub fn classify_dm_intake(
     // RFC 6121 §8.5.2 (bare JID): server delivers only to resources
     // with non-negative priority.
     // RFC 6121 §8.5.3 (full JID): server delivers to that specific
-    // resource if connected, regardless of priority. The negative-
-    // priority filter from §8.5.2 does NOT apply to full-JID delivery.
+    // resource if connected at any priority. If the addressed
+    // resource is NOT available, §8.5.3 says the server SHOULD treat
+    // the stanza "as if it had been addressed to the user's bare JID"
+    // (i.e. fall back to §8.5.2 fanout semantics) — NOT jump straight
+    // to offline storage.
     //
-    // So "online" depends on the address shape: for bare-JID-targeted
-    // stanzas we ask "any non-negative-priority resource available";
-    // for full-JID-targeted stanzas we ask "is THAT specific resource
-    // connected at any priority".
+    // So "online" reduces to:
+    //   - bare-JID `to`              → any non-negative-priority resource
+    //   - full-JID `to`, target up   → live (any priority)
+    //   - full-JID `to`, target down → fall back to bare-JID rule above
     let recipient_online = match message
         .to
         .as_ref()
         .and_then(|jid| jid.clone().try_into_full().ok())
     {
-        Some(full_target) => online_resources.contains_full(&full_target),
-        None => online_resources.has_non_negative_priority(),
+        Some(full_target) if online_resources.contains_full(&full_target) => true,
+        // Either full-JID target is offline (fall back to bare-JID
+        // semantics per §8.5.3) or the `to` was already a bare JID.
+        _ => online_resources.has_non_negative_priority(),
     };
 
     // ── XEP-0334 §6 ¶3: ignore hints in `type='error'` stanzas ────────
@@ -482,20 +487,40 @@ mod tests {
     }
 
     #[test]
-    fn full_jid_target_to_disconnected_resource_falls_back_to_offline() {
+    fn full_jid_target_to_disconnected_resource_falls_back_to_bare_jid_routing() {
         // RFC 6121 §8.5.3: if the addressed resource is not connected,
-        // the server SHOULD treat the stanza as if no specific resource
-        // was specified (i.e. bare-JID semantics). For our purposes
-        // that means storing offline when no other resource is
-        // available with non-negative priority.
+        // the server SHOULD treat the stanza "as if it had been
+        // addressed to the user's bare JID" — i.e. fall back to
+        // §8.5.2 fanout to non-negative-priority resources, NOT
+        // jump straight to offline storage.
         let msg = dm(
             "bob@elsewhere/x",
             "alice@example.com/laptop",
             MessageType::Chat,
             Some("hi"),
         );
-        // Only the /web resource is online; /laptop is not.
+        // /web is online with priority=1; /laptop is not connected.
+        // §8.5.3 fallback should send live to /web, not store offline.
         let routing = classify_dm_intake(&msg, &one_resource_online(1), &Blocklist::empty());
+        assert_eq!(routing.pending, PendingDecision::None);
+        // The classifier's `live` reflects the wire `to` shape (the
+        // routing layer below this is responsible for resolving the
+        // bare-JID-fallback fanout), so we still see DeliverToFull.
+        // What matters for §8.5.3 conformance is that we did NOT
+        // store offline and DID emit a live decision.
+        assert_eq!(routing.live, LiveDecision::DeliverToFull);
+    }
+
+    #[test]
+    fn full_jid_target_to_fully_offline_user_stores_offline() {
+        // No resources online at all → standard §8.5.2 offline path.
+        let msg = dm(
+            "bob@elsewhere/x",
+            "alice@example.com/laptop",
+            MessageType::Chat,
+            Some("hi"),
+        );
+        let routing = classify_dm_intake(&msg, &OnlineResources::empty(), &Blocklist::empty());
         assert_eq!(routing.live, LiveDecision::None);
         assert_eq!(routing.pending, PendingDecision::Archived);
     }

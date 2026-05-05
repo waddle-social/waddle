@@ -248,11 +248,12 @@ pub struct XmppConfig {
     pub inbox_database_url: Option<String>,
     /// XEP-0160 offline-message (`pending_delivery`) database URL —
     /// prefers dedicated XMPP DSN, otherwise the main runtime DSN.
-    /// `None` falls back to in-memory SQLite which is suitable only
-    /// for tests; production deployments MUST set
-    /// `WADDLE_XMPP_PENDING_DELIVERY_DATABASE_URL` (or the legacy
-    /// `WADDLE_XMPP_DATABASE_URL`) so queued offline DMs survive
-    /// restart per issue #209.
+    /// Resolution order (matches `resolve_xmpp_database_url`):
+    /// `WADDLE_XMPP_PENDING_DELIVERY_DATABASE_URL` →
+    /// `WADDLE_DATABASE_URL`. When neither is set the storage falls
+    /// back to in-memory SQLite — suitable only for tests; production
+    /// deployments MUST set one of these env vars so queued offline
+    /// DMs survive restart per issue #209.
     pub pending_delivery_database_url: Option<String>,
     /// PubSub/PEP database URL (prefers dedicated XMPP DSN, otherwise the main runtime DSN)
     pub pubsub_database_url: Option<String>,
@@ -1123,18 +1124,19 @@ async fn create_router(
     // PendingDeliveryStorage so XMPP DMs to fully-offline local users
     // are durably queued and replayed on reconnect (issue #209).
     //
-    // URL comes from `WADDLE_XMPP_PENDING_DELIVERY_DATABASE_URL` (or
-    // the `WADDLE_XMPP_DATABASE_URL` fallback in
-    // `resolve_xmpp_database_url`). When unset we fall back to
-    // in-memory SQLite — which loses rows on restart; warn loudly so
-    // operators see the deployment misconfiguration.
+    // URL resolution (via `resolve_xmpp_database_url`):
+    //   WADDLE_XMPP_PENDING_DELIVERY_DATABASE_URL → WADDLE_DATABASE_URL
+    // When neither is set we fall back to in-memory SQLite — which
+    // loses rows on restart; warn loudly so operators see the
+    // deployment misconfiguration.
     let pending_delivery_url = xmpp_config.pending_delivery_database_url.clone();
     if pending_delivery_url.is_none() {
         warn!(
-            "WADDLE_XMPP_PENDING_DELIVERY_DATABASE_URL is unset; falling back to \
-             in-memory SQLite. Offline DMs queued via XEP-0160 will NOT survive \
-             restart. Set the env var to a SQLite path or Postgres URL for \
-             durable offline delivery (issue #209)."
+            "Neither WADDLE_XMPP_PENDING_DELIVERY_DATABASE_URL nor \
+             WADDLE_DATABASE_URL is set; falling back to in-memory SQLite. \
+             Offline DMs queued via XEP-0160 will NOT survive restart. \
+             Set one of these env vars to a SQLite path or Postgres URL \
+             for durable offline delivery (issue #209)."
         );
     }
     let pending_delivery_storage: Arc<
