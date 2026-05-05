@@ -347,14 +347,20 @@ pub struct WaddleExtensionRouteItemOption {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WaddleExtensionRouteItemAction {
-    pub launch_id: String,
+    pub launch: WaddleExtensionRouteItemLaunch,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WaddleExtensionRouteItemLaunch {
+    pub id: String,
+    pub plugin_id: String,
+    pub action_id: String,
+    pub command_node: String,
     pub label: String,
-    pub plugin_id: Option<String>,
-    pub action_id: Option<String>,
-    pub command_node: Option<String>,
-    pub launch_token: Option<String>,
-    pub expires_at: Option<String>,
-    pub waddle_id: Option<String>,
+    pub launch_token: String,
+    pub expires_at: String,
+    pub waddle_id: String,
     pub room_jid: Option<String>,
     pub source_stanza_id: Option<String>,
 }
@@ -1654,23 +1660,51 @@ fn parse_extension_route_item(item: &Element) -> Option<WaddleExtensionRouteItem
                 }
             }
             "action" => {
-                if let (Some(launch_id), Some(label)) =
-                    (child.attr("launch-id"), child.attr("label"))
-                {
-                    if !launch_id.trim().is_empty() && !label.trim().is_empty() {
-                        view.actions.push(WaddleExtensionRouteItemAction {
-                            launch_id: launch_id.to_string(),
+                if let (
+                    Some(launch_id),
+                    Some(label),
+                    Some(plugin_id),
+                    Some(action_id),
+                    Some(command_node),
+                    Some(launch_token),
+                    Some(expires_at),
+                    Some(waddle_id),
+                ) = (
+                    child
+                        .attr("launch-id")
+                        .filter(|value| !value.trim().is_empty()),
+                    child.attr("label").filter(|value| !value.trim().is_empty()),
+                    child
+                        .attr("plugin")
+                        .filter(|value| !value.trim().is_empty()),
+                    child
+                        .attr("action")
+                        .filter(|value| !value.trim().is_empty()),
+                    child
+                        .attr("command-node")
+                        .filter(|value| !value.trim().is_empty()),
+                    child.attr("token").filter(|value| !value.trim().is_empty()),
+                    child
+                        .attr("expires-at")
+                        .filter(|value| !value.trim().is_empty()),
+                    child
+                        .attr("waddle-id")
+                        .filter(|value| !value.trim().is_empty()),
+                ) {
+                    view.actions.push(WaddleExtensionRouteItemAction {
+                        launch: WaddleExtensionRouteItemLaunch {
+                            id: launch_id.to_string(),
+                            plugin_id: plugin_id.to_string(),
+                            action_id: action_id.to_string(),
+                            command_node: command_node.to_string(),
                             label: label.to_string(),
-                            plugin_id: child.attr("plugin").map(str::to_string),
-                            action_id: child.attr("action").map(str::to_string),
-                            command_node: child.attr("command-node").map(str::to_string),
-                            launch_token: child.attr("token").map(str::to_string),
-                            expires_at: child.attr("expires-at").map(str::to_string),
-                            waddle_id: child.attr("waddle-id").map(str::to_string),
+                            launch_token: launch_token.to_string(),
+                            expires_at: expires_at.to_string(),
+                            waddle_id: waddle_id.to_string(),
                             room_jid: child.attr("room").map(str::to_string),
                             source_stanza_id: child.attr("source-stanza-id").map(str::to_string),
-                        });
-                    }
+                        },
+                    });
                 }
             }
             _ => {}
@@ -2868,6 +2902,15 @@ mod extension_route_tests {
                                                 Element::builder("action", NS_WADDLE_EXTENSION_1)
                                                     .attr("launch-id", "vote-42")
                                                     .attr("label", "Vote")
+                                                    .attr("plugin", "decision-polls")
+                                                    .attr("action", "vote")
+                                                    .attr(
+                                                        "command-node",
+                                                        "urn:waddle:extensions:invoke",
+                                                    )
+                                                    .attr("token", "signed-token")
+                                                    .attr("expires-at", "2026-04-27T00:00:00Z")
+                                                    .attr("waddle-id", "alice@example.com")
                                                     .build(),
                                             )
                                             .build(),
@@ -2902,7 +2945,8 @@ mod extension_route_tests {
         assert_eq!(items[0].fields[0].name, "saved-at");
         assert_eq!(items[0].fields[0].label.as_deref(), Some("Saved"));
         assert_eq!(items[0].options[0].id, "a");
-        assert_eq!(items[0].actions[0].launch_id, "vote-42");
+        assert_eq!(items[0].actions[0].launch.id, "vote-42");
+        assert_eq!(items[0].actions[0].launch.launch_token, "signed-token");
     }
 
     fn field(var: &str, value: &str) -> discovery::DiscoDataField {

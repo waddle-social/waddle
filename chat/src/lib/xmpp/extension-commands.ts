@@ -160,10 +160,13 @@ function normalizeExtensionRouteItem(value: unknown): ExtensionRouteItem | null 
   });
   const actions = arrayField(item, "actions").flatMap((action) => {
     const value = action as Record<string, unknown>;
-    const launchId = stringField(value, "launchId") ?? stringField(value, "launch_id");
-    const label = stringField(value, "label");
+    const launchValue = value.launch && typeof value.launch === "object"
+      ? value.launch as Record<string, unknown>
+      : value;
+    const launchId = stringField(value, "launchId") ?? stringField(value, "launch_id") ?? stringField(launchValue, "id");
+    const label = stringField(value, "label") ?? stringField(launchValue, "label");
     if (!launchId || !label) return [];
-    const launch = routeItemLaunchDescriptor(value, launchId, label);
+    const launch = routeItemLaunchDescriptor(launchValue, launchId, label);
     return launch ? [{ launchId, label, launch }] : [];
   });
   return {

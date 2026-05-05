@@ -64,7 +64,16 @@ bun test && bun run lint
 
 ## Code Style
 
-TypeScript 5.8.x; Bun 1.3.x: Follow standard conventions
+- TypeScript 5.8.x; Bun 1.3.x: Follow standard conventions.
+- Write single-purpose functions with explicit inputs and outputs; keep them
+  small enough to review quickly and avoid multi-purpose helpers.
+- Prefer many small, focused files over large modules; organize files around
+  behavior, protocol boundary, or UI responsibility.
+- Prefer functional patterns where they improve clarity: pure helpers,
+  immutable data, composition, and local reasoning over hidden side effects.
+- Avoid broad utility modules and implicit shared state. When functional style
+  conflicts with local Rust, TypeScript, XMPP, or framework idioms, choose the
+  clearest conformant implementation.
 
 ## Commit Messages
 
