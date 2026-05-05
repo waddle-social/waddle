@@ -4048,14 +4048,110 @@ mod tests {
         let user_x = self_presence
             .get_child("x", "http://jabber.org/protocol/muc#user")
             .expect("muc user payload");
+        let item = user_x
+            .get_child("item", "http://jabber.org/protocol/muc#user")
+            .expect("muc user item");
+        assert_eq!(item.attr("jid"), Some("alice@example.com/web"));
+        assert_eq!(item.attr("affiliation"), Some("owner"));
+        assert_eq!(item.attr("role"), Some("moderator"));
+        assert!(user_x
+            .children()
+            .any(|child| child.name() == "status" && child.attr("code") == Some("100")));
         assert!(user_x
             .children()
             .any(|child| child.name() == "status" && child.attr("code") == Some("110")));
+        assert!(
+            self_presence
+                .get_child("occupant-id", waddle_xmpp::xep::xep0421::NS_OCCUPANT_ID)
+                .is_some(),
+            "self-presence must carry XEP-0421 occupant-id"
+        );
 
         let subject_message = Element::from_str(&responses[1]).expect("subject xml");
         assert_eq!(subject_message.name(), "message");
         assert_eq!(subject_message.ns(), waddle_xmpp::ns::JABBER_CLIENT);
         assert_eq!(subject_message.attr("type"), Some("groupchat"));
+    }
+
+    #[tokio::test]
+    async fn xep_0045_join_replay_exposes_existing_occupant_real_jids() {
+        let state = create_test_websocket_state().await;
+        let owner_session = create_test_server_owner_session(state.as_ref(), "icepuma").await;
+        let room_jid: BareJid = "mentions@muc.example.com".parse().expect("room jid");
+
+        let occupants = [
+            ("icepuma", "icepuma@example.com/web"),
+            ("randax", "randax@example.com/desktop"),
+            ("rawkode", "rawkode@example.com/mobile"),
+        ];
+
+        for (index, (nick, full_jid)) in occupants.iter().enumerate() {
+            let sender_jid: FullJid = full_jid.parse().expect("occupant jid");
+            let session = if index == 0 {
+                Some(owner_session.clone())
+            } else {
+                None
+            };
+            let _ = handle_muc_join(
+                state.as_ref(),
+                "example.com",
+                &room_jid,
+                &sender_jid,
+                nick,
+                &session,
+            )
+            .await;
+        }
+
+        let joiner: FullJid = "witness@example.com/browser".parse().expect("joiner jid");
+        let responses = handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room_jid,
+            &joiner,
+            "witness",
+            &None,
+        )
+        .await;
+
+        for (nick, full_jid) in occupants {
+            let from = format!("{room_jid}/{nick}");
+            let replay = responses
+                .iter()
+                .filter_map(|xml| Element::from_str(xml).ok())
+                .find(|element| {
+                    element.name() == "presence"
+                        && element.attr("from") == Some(from.as_str())
+                        && element.attr("to") == Some(joiner.as_str())
+                })
+                .unwrap_or_else(|| panic!("missing replay presence for {nick}: {responses:?}"));
+            let user_x = replay
+                .get_child("x", "http://jabber.org/protocol/muc#user")
+                .expect("muc user payload");
+            let item = user_x
+                .get_child("item", "http://jabber.org/protocol/muc#user")
+                .expect("muc user item");
+
+            assert_eq!(item.attr("jid"), Some(full_jid));
+            assert!(
+                user_x
+                    .children()
+                    .any(|child| child.name() == "status" && child.attr("code") == Some("100")),
+                "non-anonymous replay must disclose status 100 for {nick}"
+            );
+            assert!(
+                !user_x
+                    .children()
+                    .any(|child| child.name() == "status" && child.attr("code") == Some("110")),
+                "replay presence for another occupant must not be self-presence"
+            );
+            assert!(
+                replay
+                    .get_child("occupant-id", waddle_xmpp::xep::xep0421::NS_OCCUPANT_ID)
+                    .is_some(),
+                "replay presence for {nick} must carry XEP-0421 occupant-id"
+            );
+        }
     }
 
     #[tokio::test]

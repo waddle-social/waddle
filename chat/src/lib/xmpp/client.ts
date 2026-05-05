@@ -131,6 +131,44 @@ function parseMucInfo(pres: ReceivedMUCPresence): { affiliation?: string; role?:
   };
 }
 
+function record(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" ? value as Record<string, unknown> : null;
+}
+
+function jidValueToString(value: unknown): string | null {
+  if (typeof value === "string") return value;
+  const candidate = record(value);
+  if (!candidate || typeof candidate.toString !== "function") return null;
+  const jid = candidate.toString();
+  return jid && jid !== "[object Object]" ? jid : null;
+}
+
+function realBareJid(value: unknown): string | null {
+  const jid = jidValueToString(value);
+  if (!jid || !jid.includes("@")) return null;
+  return barePeerJid(jid);
+}
+
+export function mucPresenceRealBareJid(presence: unknown): string | null {
+  const muc = record(record(presence)?.muc);
+  if (!muc) return null;
+
+  const direct = realBareJid(muc.jid);
+  if (direct) return direct;
+
+  const item = record(muc.item);
+  const itemJid = realBareJid(item?.jid);
+  if (itemJid) return itemJid;
+
+  const items = Array.isArray(muc.items) ? muc.items : [];
+  for (const maybeItem of items) {
+    const jid = realBareJid(record(maybeItem)?.jid);
+    if (jid) return jid;
+  }
+
+  return null;
+}
+
 const OPTIONAL_XMPP_FEATURE_ERROR_CONDITIONS = new Set([
   "feature-not-implemented",
   "service-unavailable",
@@ -1936,9 +1974,8 @@ export class BrowserXmppClient {
           this.hatsHandler?.({ ...this.roomHats });
           this.roomPresence[nick] = parsePresenceShow(pres.show);
           this.presenceHandler?.({ ...this.roomPresence });
-          const muc = ext(pres).muc as { jid?: string } | undefined;
-          if (muc?.jid) {
-            const bareJid = barePeerJid(String(muc.jid));
+          const bareJid = mucPresenceRealBareJid(ext(pres));
+          if (bareJid) {
             this.roomMemberJids[nick] = bareJid;
             this.memberJidHandler?.(nick, bareJid);
           }
