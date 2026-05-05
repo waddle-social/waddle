@@ -600,14 +600,15 @@ pub enum OutboundEvent {
         recipient: BareJid,
         payload: crate::pending_delivery::PendingPayload,
         original_receipt_at: chrono::DateTime<chrono::Utc>,
-        /// Sender's `from` address — preserved on the event so the
-        /// interpreter can route a `<service-unavailable/>` error back
-        /// to the sender on `InsertOutcome::QuotaExceeded` per
-        /// XEP-0160 §3 step 3 + RFC 6120 §8.3.
-        sender: jid::Jid,
-        /// Original `id` attribute of the inbound `<message>` (if any),
-        /// echoed back on the bounce per RFC 6120 §8.3.4.
-        original_id: Option<String>,
+        /// The original inbound `<message>`, preserved verbatim so the
+        /// `<service-unavailable/>` bounce path on
+        /// `InsertOutcome::QuotaExceeded` can construct a typed reply
+        /// via `protocol::handlers::errors::message_error_reply` —
+        /// which swaps `from`/`to` and attaches a typed
+        /// `xmpp_parsers::stanza_error::StanzaError`. RFC 6120 §8.3
+        /// has the canonical wire shape; XEP-0160 §3 step 3 mandates
+        /// it on quota overflow.
+        original_message: Box<Message>,
     },
 
     // -------------------------------------------------------------------

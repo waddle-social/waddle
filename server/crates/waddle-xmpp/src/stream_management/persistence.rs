@@ -34,6 +34,9 @@ use jid::FullJid;
 use thiserror::Error;
 use xmpp_parsers::presence::Show;
 
+use crate::pending_delivery::SmSessionId;
+use crate::Stanza;
+
 /// Errors returned by [`SmPersistenceStorage`] implementations.
 #[derive(Debug, Error)]
 pub enum SmPersistenceError {
@@ -57,7 +60,7 @@ pub enum SmPersistenceError {
 /// [`PersistedUnackedStanza`] holds that value.
 #[derive(Debug, Clone)]
 pub struct PersistedSession {
-    pub stream_id: String,
+    pub stream_id: SmSessionId,
     pub user_id: String,
     pub jid: FullJid,
     pub inbound_count: u32,
@@ -76,15 +79,20 @@ pub struct PersistedSession {
 
 /// One row in the `sm_unacked` table — a stanza sent to a session
 /// that has not yet been acknowledged.
+///
+/// The stanza is carried as a typed [`Stanza`] (not wire XML) so this
+/// trait sits in front of any I/O serialization boundary; the
+/// libSQL/Postgres impl serializes to wire XML internally on write
+/// and parses back to typed on read.
 #[derive(Debug, Clone)]
 pub struct PersistedUnackedStanza {
     /// XEP-0198 stream-id of the owning session.
-    pub stream_id: String,
+    pub stream_id: SmSessionId,
     /// Server-side outbound sequence number; ordered ascending.
     pub sequence: u32,
-    /// Stanza wire XML (serialized minidom). Stored as the original
-    /// outbound payload so SM resumption replays bit-identically.
-    pub stanza_xml: String,
+    /// Typed stanza payload — the original outbound stanza so SM
+    /// resumption replays bit-identically.
+    pub stanza: Box<Stanza>,
     /// Original receipt time at the server. Carried so that the Q6
     /// promotion path can stamp the `<delay/>` per XEP-0203 §4.1 +
     /// XEP-0198 §5 line 364 with the correct timestamp.
@@ -107,13 +115,13 @@ pub trait SmPersistenceStorage: Send + Sync {
     /// the previd is recognized and to rebuild the in-memory session.
     async fn get_session(
         &self,
-        stream_id: &str,
+        stream_id: &SmSessionId,
     ) -> Result<Option<PersistedSession>, SmPersistenceError>;
 
     /// Delete a session and all its unacked stanzas. Called on
     /// successful `<resumed/>` (the session is now live again, no
     /// longer detached) and on session timeout.
-    async fn delete_session(&self, stream_id: &str) -> Result<(), SmPersistenceError>;
+    async fn delete_session(&self, stream_id: &SmSessionId) -> Result<(), SmPersistenceError>;
 
     /// Append an outbound stanza to the unacked queue for the named
     /// session.
@@ -126,7 +134,7 @@ pub trait SmPersistenceStorage: Send + Sync {
     /// Called when an `<a h='N'/>` ack arrives.
     async fn ack_through(
         &self,
-        stream_id: &str,
+        stream_id: &SmSessionId,
         up_to_sequence: u32,
     ) -> Result<u64, SmPersistenceError>;
 
@@ -135,7 +143,7 @@ pub trait SmPersistenceStorage: Send + Sync {
     /// drain on session expiry.
     async fn list_unacked(
         &self,
-        stream_id: &str,
+        stream_id: &SmSessionId,
     ) -> Result<Vec<PersistedUnackedStanza>, SmPersistenceError>;
 
     /// Enumerate every persisted session whose `detached_at +
@@ -156,9 +164,9 @@ pub struct InMemorySmPersistence {
 
 #[derive(Debug, Default)]
 struct InMemoryState {
-    sessions: std::collections::HashMap<String, PersistedSession>,
+    sessions: std::collections::HashMap<SmSessionId, PersistedSession>,
     // Per-session unacked queue keyed by stream_id.
-    unacked: std::collections::HashMap<String, Vec<PersistedUnackedStanza>>,
+    unacked: std::collections::HashMap<SmSessionId, Vec<PersistedUnackedStanza>>,
 }
 
 impl InMemorySmPersistence {
@@ -180,7 +188,7 @@ impl SmPersistenceStorage for InMemorySmPersistence {
 
     async fn get_session(
         &self,
-        stream_id: &str,
+        stream_id: &SmSessionId,
     ) -> Result<Option<PersistedSession>, SmPersistenceError> {
         let guard = self
             .inner
@@ -189,7 +197,7 @@ impl SmPersistenceStorage for InMemorySmPersistence {
         Ok(guard.sessions.get(stream_id).cloned())
     }
 
-    async fn delete_session(&self, stream_id: &str) -> Result<(), SmPersistenceError> {
+    async fn delete_session(&self, stream_id: &SmSessionId) -> Result<(), SmPersistenceError> {
         let mut guard = self
             .inner
             .lock()
@@ -217,7 +225,7 @@ impl SmPersistenceStorage for InMemorySmPersistence {
 
     async fn ack_through(
         &self,
-        stream_id: &str,
+        stream_id: &SmSessionId,
         up_to_sequence: u32,
     ) -> Result<u64, SmPersistenceError> {
         let mut guard = self
@@ -235,7 +243,7 @@ impl SmPersistenceStorage for InMemorySmPersistence {
 
     async fn list_unacked(
         &self,
-        stream_id: &str,
+        stream_id: &SmSessionId,
     ) -> Result<Vec<PersistedUnackedStanza>, SmPersistenceError> {
         let guard = self
             .inner
@@ -276,9 +284,13 @@ mod tests {
         s.parse().unwrap()
     }
 
+    fn sid(s: &str) -> SmSessionId {
+        SmSessionId::new(s)
+    }
+
     fn fixture_session(stream_id: &str) -> PersistedSession {
         PersistedSession {
-            stream_id: stream_id.to_string(),
+            stream_id: sid(stream_id),
             user_id: "alice".to_string(),
             jid: full("alice@example.com/web"),
             inbound_count: 0,
@@ -297,12 +309,13 @@ mod tests {
     }
 
     fn fixture_unacked(stream_id: &str, sequence: u32) -> PersistedUnackedStanza {
+        let xml = format!("<message xmlns='jabber:client'><body>m{sequence}</body></message>");
+        let element: minidom::Element = xml.parse().expect("valid xml");
+        let message = xmpp_parsers::message::Message::try_from(element).expect("valid message");
         PersistedUnackedStanza {
-            stream_id: stream_id.to_string(),
+            stream_id: sid(stream_id),
             sequence,
-            stanza_xml: format!(
-                "<message xmlns='jabber:client'><body>m{sequence}</body></message>"
-            ),
+            stanza: Box::new(Stanza::Message(message)),
             original_receipt_at: Utc::now(),
         }
     }
@@ -312,9 +325,9 @@ mod tests {
         let store = InMemorySmPersistence::new();
         let s = fixture_session("stream-1");
         store.upsert_session(s.clone()).await.unwrap();
-        let loaded = store.get_session("stream-1").await.unwrap().unwrap();
+        let loaded = store.get_session(&sid("stream-1")).await.unwrap().unwrap();
         assert_eq!(loaded.user_id, s.user_id);
-        assert_eq!(loaded.carbons_enabled, true);
+        assert!(loaded.carbons_enabled);
     }
 
     #[tokio::test]
@@ -326,9 +339,9 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let dropped = store.ack_through("stream-1", 2).await.unwrap();
+        let dropped = store.ack_through(&sid("stream-1"), 2).await.unwrap();
         assert_eq!(dropped, 2);
-        let remaining = store.list_unacked("stream-1").await.unwrap();
+        let remaining = store.list_unacked(&sid("stream-1")).await.unwrap();
         assert_eq!(remaining.len(), 2);
         assert_eq!(remaining[0].sequence, 3);
         assert_eq!(remaining[1].sequence, 4);
@@ -345,9 +358,13 @@ mod tests {
             .append_unacked(fixture_unacked("stream-1", 1))
             .await
             .unwrap();
-        store.delete_session("stream-1").await.unwrap();
-        assert!(store.get_session("stream-1").await.unwrap().is_none());
-        assert!(store.list_unacked("stream-1").await.unwrap().is_empty());
+        store.delete_session(&sid("stream-1")).await.unwrap();
+        assert!(store.get_session(&sid("stream-1")).await.unwrap().is_none());
+        assert!(store
+            .list_unacked(&sid("stream-1"))
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]
@@ -365,6 +382,6 @@ mod tests {
         store.upsert_session(future).await.unwrap();
         let expired = store.list_expired_sessions(now).await.unwrap();
         assert_eq!(expired.len(), 1);
-        assert_eq!(expired[0].stream_id, "expired");
+        assert_eq!(expired[0].stream_id, sid("expired"));
     }
 }

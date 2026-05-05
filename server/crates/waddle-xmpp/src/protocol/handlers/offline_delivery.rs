@@ -84,16 +84,14 @@ impl MessageHandler for OfflineDeliveryHandler {
                     by: recipient_bare.clone(),
                     id: StanzaIdValue::new(stanza_id_str),
                 });
-                let sender = match message.from.clone() {
-                    Some(from) => from,
-                    None => return HandlerOutcome::Continue(Vec::new()),
-                };
+                if message.from.is_none() {
+                    return HandlerOutcome::Continue(Vec::new());
+                }
                 HandlerOutcome::Continue(vec![OutboundEvent::QueueOfflineDelivery {
                     recipient: recipient_bare,
                     payload,
                     original_receipt_at: Utc::now(),
-                    sender,
-                    original_id: message.id.clone(),
+                    original_message: Box::new(message.clone()),
                 }])
             }
             PendingDecision::Transient => {
@@ -101,16 +99,14 @@ impl MessageHandler for OfflineDeliveryHandler {
                 // stanza inline so the flush handler can replay it
                 // verbatim.
                 let payload = PendingPayload::Transient(Box::new(message.clone()));
-                let sender = match message.from.clone() {
-                    Some(from) => from,
-                    None => return HandlerOutcome::Continue(Vec::new()),
-                };
+                if message.from.is_none() {
+                    return HandlerOutcome::Continue(Vec::new());
+                }
                 HandlerOutcome::Continue(vec![OutboundEvent::QueueOfflineDelivery {
                     recipient: recipient_bare,
                     payload,
                     original_receipt_at: Utc::now(),
-                    sender,
-                    original_id: message.id.clone(),
+                    original_message: Box::new(message.clone()),
                 }])
             }
         }

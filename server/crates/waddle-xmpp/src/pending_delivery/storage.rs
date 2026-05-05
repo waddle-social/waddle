@@ -10,7 +10,7 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use jid::BareJid;
 
-use super::{InsertOutcome, PendingRow, QuotaPolicy, SmSessionId};
+use super::{InsertOutcome, PendingRow, PendingRowId, QuotaPolicy, SmSessionId};
 
 /// Errors returned by [`PendingDeliveryStorage`] implementations.
 #[derive(Debug, thiserror::Error)]
@@ -51,14 +51,25 @@ pub trait PendingDeliveryStorage: Send + Sync {
         session: &SmSessionId,
     ) -> Result<Vec<PendingRow>, PendingStorageError>;
 
-    /// Delete rows previously claimed by `session`. Called on SM-ack
-    /// of the flush stanzas (locked Q7b).
+    /// Delete every row previously claimed by `session`. Used by paths
+    /// that succeed or fail as a unit — e.g. SM-ack of the entire
+    /// flush batch (locked Q7b).
     async fn delete_claimed(&self, session: &SmSessionId) -> Result<u64, PendingStorageError>;
 
-    /// Release rows claimed by `session` back to the unclaimed pool.
-    /// Called on SM-session expiry pre-ack so a subsequent recovering
-    /// resource can re-flush them (Q7c re-flush path).
+    /// Delete a single row by id. Used by per-row partial-success
+    /// flush paths so a delivered row is removed without affecting
+    /// rows that failed to push.
+    async fn delete_row(&self, id: &PendingRowId) -> Result<u64, PendingStorageError>;
+
+    /// Release every row claimed by `session` back to the unclaimed
+    /// pool. Used on SM-session expiry pre-ack so a subsequent
+    /// recovering resource can re-flush them (Q7c re-flush path).
     async fn release_claim(&self, session: &SmSessionId) -> Result<u64, PendingStorageError>;
+
+    /// Release a single row by id (clears `flushed_in_session`). Used
+    /// by per-row partial-success flush paths so a row that failed to
+    /// push becomes eligible for re-claim on the next flush trigger.
+    async fn release_row(&self, id: &PendingRowId) -> Result<u64, PendingStorageError>;
 
     /// Current row count for `recipient` (used by the quota check;
     /// also exposed for metrics).
@@ -106,7 +117,7 @@ impl Default for InMemoryPendingDeliveryStorage {
 
 #[async_trait]
 impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
-    async fn insert(&self, row: PendingRow) -> Result<InsertOutcome, PendingStorageError> {
+    async fn insert(&self, mut row: PendingRow) -> Result<InsertOutcome, PendingStorageError> {
         let mut guard = self
             .inner
             .lock()
@@ -116,6 +127,12 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
             if entry.len() as u32 >= max_rows {
                 return Ok(InsertOutcome::QuotaExceeded);
             }
+        }
+        // Assign a fresh id if the caller didn't supply one. This lets
+        // callers either pre-generate (for round-trip tests) or rely
+        // on storage to do it (production path).
+        if row.id.as_str().is_empty() {
+            row.id = PendingRowId::fresh();
         }
         entry.push_back(row);
         Ok(InsertOutcome::Inserted)
@@ -170,6 +187,21 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
         Ok(removed)
     }
 
+    async fn delete_row(&self, id: &PendingRowId) -> Result<u64, PendingStorageError> {
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?;
+        let mut removed = 0u64;
+        for queue in guard.values_mut() {
+            let before = queue.len();
+            queue.retain(|row| &row.id != id);
+            removed += (before - queue.len()) as u64;
+        }
+        guard.retain(|_, q| !q.is_empty());
+        Ok(removed)
+    }
+
     async fn release_claim(&self, session: &SmSessionId) -> Result<u64, PendingStorageError> {
         let mut guard = self
             .inner
@@ -185,6 +217,22 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
             }
         }
         Ok(released)
+    }
+
+    async fn release_row(&self, id: &PendingRowId) -> Result<u64, PendingStorageError> {
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?;
+        for queue in guard.values_mut() {
+            for row in queue.iter_mut() {
+                if &row.id == id {
+                    row.flushed_in_session = None;
+                    return Ok(1);
+                }
+            }
+        }
+        Ok(0)
     }
 
     async fn count(&self, recipient: &BareJid) -> Result<u32, PendingStorageError> {
@@ -210,6 +258,7 @@ mod tests {
 
     fn archived_row(recipient: &str, id: &str) -> PendingRow {
         PendingRow {
+            id: PendingRowId::fresh(),
             recipient: bare(recipient),
             original_receipt_at: Utc::now(),
             payload: PendingPayload::Archived(StanzaIdRef {
@@ -222,6 +271,7 @@ mod tests {
 
     fn transient_row(recipient: &str) -> PendingRow {
         PendingRow {
+            id: PendingRowId::fresh(),
             recipient: bare(recipient),
             original_receipt_at: Utc::now(),
             payload: PendingPayload::Transient(Box::new(Message::new(None::<jid::Jid>))),

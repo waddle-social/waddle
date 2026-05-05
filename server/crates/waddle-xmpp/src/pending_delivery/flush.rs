@@ -144,6 +144,7 @@ mod tests {
 
     fn archived_row(recipient: &str) -> PendingRow {
         PendingRow {
+            id: crate::pending_delivery::PendingRowId::fresh(),
             recipient: bare(recipient),
             original_receipt_at: fixed_receipt(),
             payload: PendingPayload::Archived(StanzaIdRef {
@@ -156,6 +157,7 @@ mod tests {
 
     fn transient_row(recipient: &str, body: &str) -> PendingRow {
         PendingRow {
+            id: crate::pending_delivery::PendingRowId::fresh(),
             recipient: bare(recipient),
             original_receipt_at: fixed_receipt(),
             payload: PendingPayload::Transient(Box::new(original_message(
@@ -183,9 +185,12 @@ mod tests {
         let delay = delay_element(&replayed).expect("delay element appended");
         assert_eq!(delay.attr("from"), Some("example.com"));
         // ISO-8601 stamp matches the original receipt time, not "now".
+        // XEP-0082 §3.2 BNF requires the `Z` suffix for UTC datetimes;
+        // chrono renders `+00:00` by default, so we force the `Z` form
+        // in build_delay_element.
         assert_eq!(
             delay.attr("stamp").map(str::to_string),
-            Some("2026-05-01T12:30:00+00:00".to_string())
+            Some("2026-05-01T12:30:00Z".to_string())
         );
         assert_eq!(delay.text(), "Offline Storage");
     }

@@ -30,7 +30,7 @@ use tracing::{debug, info, instrument, warn};
 use waddle_xmpp::pending_delivery::flush::{build_replay_stanza, MaterializedPayload};
 use waddle_xmpp::pending_delivery::storage::{PendingDeliveryStorage, PendingStorageError};
 use waddle_xmpp::pending_delivery::{
-    InsertOutcome, PendingPayload, PendingRow, QuotaPolicy, SmSessionId,
+    InsertOutcome, PendingPayload, PendingRow, PendingRowId, QuotaPolicy, SmSessionId,
 };
 use waddle_xmpp::protocol::event::{StanzaIdRef, StanzaIdValue};
 use waddle_xmpp::registry::{ConnectionRegistry, SendResult};
@@ -90,33 +90,58 @@ where
 
     for row in claimed {
         let Some(payload) = materialize(&row, archive_resolver).await else {
+            // Archived row whose MAM lookup failed — the original
+            // stanza is unrecoverable. Drop the row instead of
+            // releasing it so we don't loop forever on a poison pill.
+            // The message is permanently lost from the recipient's
+            // perspective; we surface it loudly so production logs
+            // can flag MAM corruption / unexpected tombstones.
             outcome.unresolved += 1;
+            if let Err(error) = storage.delete_row(&row.id).await {
+                warn!(
+                    row_id = %row.id,
+                    error = %error,
+                    "pending_delivery delete_row (unresolved poison pill) failed"
+                );
+            }
             continue;
         };
         let replay = build_replay_stanza(payload, server_domain, row.original_receipt_at);
         let stanza = Stanza::Message(replay);
         match registry.send_to(resource, stanza).await {
-            SendResult::Sent => outcome.pushed += 1,
+            SendResult::Sent => {
+                outcome.pushed += 1;
+                // SLICE (d) TODO: defer deletion until SM-ack of the
+                // flush stanza (locked Q7b). Until SM session
+                // persistence lands, delete on push so a successful
+                // flush doesn't re-deliver on the next presence
+                // update. The MAM catch-up path (Q10a) still recovers
+                // Archived rows on crash; Transient rows are by-design
+                // ephemeral on crash.
+                if let Err(error) = storage.delete_row(&row.id).await {
+                    warn!(
+                        row_id = %row.id,
+                        error = %error,
+                        "pending_delivery delete_row (delivered) failed; \
+                         row may re-deliver on next presence"
+                    );
+                }
+            }
             other => {
-                debug!(?other, "send to recovering resource failed mid-flush");
+                debug!(?other, row_id = %row.id, "send to recovering resource failed mid-flush");
+                // Per-row release so an undelivered row stays eligible
+                // for re-claim on the next flush trigger, while
+                // delivered rows in the same batch were already
+                // deleted above (partial-success correctness).
+                if let Err(error) = storage.release_row(&row.id).await {
+                    warn!(
+                        row_id = %row.id,
+                        error = %error,
+                        "pending_delivery release_row (undelivered) failed"
+                    );
+                }
             }
         }
-    }
-
-    // SLICE (d) TODO: defer deletion until SM-ack of the flush stanza
-    // (locked Q7b). Until SM session persistence lands, delete on push
-    // so a successful flush doesn't re-deliver on the next presence
-    // update; the trade-off is a crash window (push succeeds, server
-    // crashes before SM-ack) where the recipient may not have the
-    // message and pending_delivery has already dropped it. The MAM
-    // catch-up path (Q10a) still recovers Archived rows; Transient
-    // rows are by-design ephemeral on crash.
-    if outcome.pushed > 0 {
-        let _ = storage.delete_claimed(&session_id).await;
-    } else {
-        // Nothing was delivered — release rows so a subsequent flush
-        // can retry them.
-        let _ = storage.release_claim(&session_id).await;
     }
 
     outcome
@@ -129,11 +154,15 @@ where
 /// [`NullArchiveResolver`] when only Transient rows are exercised.
 #[async_trait::async_trait]
 pub trait ArchiveResolver: Send + Sync {
-    /// Read the archived stanza by recipient bare JID + stanza-id.
+    /// Read the archived stanza by recipient bare JID + typed XEP-0359
+    /// stanza-id. Returns the typed [`xmpp_parsers::message::Message`]
+    /// reconstructed from the MAM row; returns `None` on miss or any
+    /// non-fatal lookup failure (the caller treats this as a poison
+    /// pill and drops the `pending_delivery` row).
     async fn resolve(
         &self,
         archive_jid: &BareJid,
-        stanza_id: &str,
+        stanza_id: &waddle_xmpp::protocol::event::StanzaIdValue,
     ) -> Option<xmpp_parsers::message::Message>;
 }
 
@@ -147,11 +176,11 @@ impl ArchiveResolver for MamArchiveResolver {
     async fn resolve(
         &self,
         archive_jid: &BareJid,
-        stanza_id: &str,
+        stanza_id: &waddle_xmpp::protocol::event::StanzaIdValue,
     ) -> Option<xmpp_parsers::message::Message> {
         let archived = match self
             .mam_storage
-            .get_message_by_archive_or_stanza_id(archive_jid, stanza_id)
+            .get_message_by_archive_or_stanza_id(archive_jid, stanza_id.as_str())
             .await
         {
             Ok(Some(archived)) => archived,
@@ -160,7 +189,7 @@ impl ArchiveResolver for MamArchiveResolver {
                 warn!(
                     error = %error,
                     archive_jid = %archive_jid,
-                    stanza_id,
+                    stanza_id = %stanza_id,
                     "MAM lookup failed during flush"
                 );
                 return None;
@@ -185,7 +214,7 @@ impl ArchiveResolver for NullArchiveResolver {
     async fn resolve(
         &self,
         _archive_jid: &BareJid,
-        _stanza_id: &str,
+        _stanza_id: &waddle_xmpp::protocol::event::StanzaIdValue,
     ) -> Option<xmpp_parsers::message::Message> {
         None
     }
@@ -199,7 +228,7 @@ where
         PendingPayload::Transient(_) => MaterializedPayload::from_transient(row),
         PendingPayload::Archived(stanza_id_ref) => {
             let archived = resolver
-                .resolve(&stanza_id_ref.by, stanza_id_ref.id.as_str())
+                .resolve(&stanza_id_ref.by, &stanza_id_ref.id)
                 .await?;
             Some(MaterializedPayload::Archived(Box::new(archived)))
         }
@@ -338,32 +367,36 @@ impl DatabasePendingDeliveryStorage {
     }
 
     fn decode_row(row: &crate::db::Row) -> Result<PendingRow, PendingStorageError> {
-        let recipient_jid: String = row
+        let row_id: String = row
             .get(0)
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?;
+        let id = PendingRowId::new(row_id);
+        let recipient_jid: String = row
+            .get(1)
             .map_err(|e| PendingStorageError::Other(e.to_string()))?;
         let recipient: BareJid = recipient_jid
             .parse()
             .map_err(|e: jid::Error| PendingStorageError::Other(e.to_string()))?;
         let original_receipt_at_ms: i64 = row
-            .get(1)
+            .get(2)
             .map_err(|e| PendingStorageError::Other(e.to_string()))?;
         let original_receipt_at =
             chrono::DateTime::<chrono::Utc>::from_timestamp_millis(original_receipt_at_ms)
                 .ok_or_else(|| PendingStorageError::Other("invalid receipt timestamp".into()))?;
         let payload_kind: String = row
-            .get(2)
-            .map_err(|e| PendingStorageError::Other(e.to_string()))?;
-        let archive_stanza_by: Option<String> = row
             .get(3)
             .map_err(|e| PendingStorageError::Other(e.to_string()))?;
-        let archive_stanza_id: Option<String> = row
+        let archive_stanza_by: Option<String> = row
             .get(4)
             .map_err(|e| PendingStorageError::Other(e.to_string()))?;
-        let transient_xml: Option<String> = row
+        let archive_stanza_id: Option<String> = row
             .get(5)
             .map_err(|e| PendingStorageError::Other(e.to_string()))?;
-        let flushed_in_session: Option<String> = row
+        let transient_xml: Option<String> = row
             .get(6)
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?;
+        let flushed_in_session: Option<String> = row
+            .get(7)
             .map_err(|e| PendingStorageError::Other(e.to_string()))?;
 
         let payload = match payload_kind.as_str() {
@@ -401,6 +434,7 @@ impl DatabasePendingDeliveryStorage {
             }
         };
         Ok(PendingRow {
+            id,
             recipient,
             original_receipt_at,
             payload,
@@ -419,7 +453,11 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
                 return Ok(InsertOutcome::QuotaExceeded);
             }
         }
-        let row_id = uuid::Uuid::now_v7().to_string();
+        let row_id = if row.id.as_str().is_empty() {
+            PendingRowId::fresh().as_str().to_string()
+        } else {
+            row.id.as_str().to_string()
+        };
         let receipt_ms = row.original_receipt_at.timestamp_millis();
         let (kind, by, sid, xml) = match &row.payload {
             PendingPayload::Archived(stanza_id_ref) => (
@@ -455,7 +493,7 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
     async fn list(&self, recipient: &BareJid) -> Result<Vec<PendingRow>, PendingStorageError> {
         let mut rows = self
             .query(
-                "SELECT recipient_jid, original_receipt_at, payload_kind, \
+                "SELECT row_id, recipient_jid, original_receipt_at, payload_kind, \
                         archive_stanza_by, archive_stanza_id, transient_xml, flushed_in_session \
                  FROM pending_delivery \
                  WHERE recipient_jid = ? \
@@ -494,7 +532,7 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
         .await?;
         let mut rows = self
             .query(
-                "SELECT recipient_jid, original_receipt_at, payload_kind, \
+                "SELECT row_id, recipient_jid, original_receipt_at, payload_kind, \
                         archive_stanza_by, archive_stanza_id, transient_xml, flushed_in_session \
                  FROM pending_delivery \
                  WHERE recipient_jid = ? AND flushed_in_session = ? \
@@ -521,11 +559,27 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
         .await
     }
 
+    async fn delete_row(&self, id: &PendingRowId) -> Result<u64, PendingStorageError> {
+        self.execute(
+            "DELETE FROM pending_delivery WHERE row_id = ?",
+            crate::db_params![id.as_str().to_string()],
+        )
+        .await
+    }
+
     async fn release_claim(&self, session: &SmSessionId) -> Result<u64, PendingStorageError> {
         self.execute(
             "UPDATE pending_delivery SET flushed_in_session = NULL \
              WHERE flushed_in_session = ?",
             crate::db_params![session.as_str().to_string()],
+        )
+        .await
+    }
+
+    async fn release_row(&self, id: &PendingRowId) -> Result<u64, PendingStorageError> {
+        self.execute(
+            "UPDATE pending_delivery SET flushed_in_session = NULL WHERE row_id = ?",
+            crate::db_params![id.as_str().to_string()],
         )
         .await
     }
@@ -582,6 +636,7 @@ mod tests {
         m.type_ = MessageType::Chat;
         m.bodies.insert(String::new(), Body(body.to_string()));
         PendingRow {
+            id: PendingRowId::fresh(),
             recipient: bare(recipient),
             original_receipt_at: Utc::now(),
             payload: PendingPayload::Transient(Box::new(m)),
@@ -690,6 +745,7 @@ mod tests {
         // Insert one Archived + one Transient
         let recipient = bare("alice@example.com");
         let archived = PendingRow {
+            id: PendingRowId::fresh(),
             recipient: recipient.clone(),
             original_receipt_at: chrono::DateTime::<chrono::Utc>::from_timestamp_millis(
                 1_700_000_000_000,

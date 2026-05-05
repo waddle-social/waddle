@@ -32,6 +32,39 @@ use chrono::{DateTime, Utc};
 use jid::BareJid;
 use xmpp_parsers::message::Message;
 
+/// Opaque per-row identifier for a `pending_delivery` row.
+///
+/// Newtype around `String` so a row id cannot be accidentally swapped
+/// for a stream-id, stanza-id, or any other opaque string at the
+/// storage boundary (typed-payloads hard rule). Production storage
+/// generates UUID v7 values so `ORDER BY id` reproduces FIFO without
+/// driver-specific autoincrement syntax.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PendingRowId(String);
+
+impl PendingRowId {
+    /// Generate a fresh UUID-v7-based id (sortable by time of generation).
+    pub fn fresh() -> Self {
+        Self(uuid::Uuid::now_v7().to_string())
+    }
+
+    /// Wrap an existing id value (e.g. from a SELECT result).
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    /// Borrow the underlying string.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for PendingRowId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// Opaque XEP-0198 stream-id, identifying a single SM session.
 ///
 /// Two SM sessions for the same user have different `SmSessionId`s.
@@ -91,6 +124,10 @@ impl PendingPayload {
 /// One row in the `pending_delivery` table.
 #[derive(Debug, Clone)]
 pub struct PendingRow {
+    /// Per-row identifier — generated at insert time (UUID v7) so
+    /// per-row delete/release can target this row without conflating
+    /// with neighbours that share the same `flushed_in_session` claim.
+    pub id: PendingRowId,
     /// Recipient (always a bare JID — XEP-0160 §3 stores per-user, not
     /// per-resource).
     pub recipient: BareJid,

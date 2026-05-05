@@ -1053,8 +1053,7 @@ async fn interpret_with_depth(
                 recipient,
                 payload,
                 original_receipt_at,
-                sender,
-                original_id,
+                original_message,
             } => {
                 // XEP-0160 §3 step 2/4 — persist for later delivery.
                 // The classifier and OfflineDeliveryHandler have already
@@ -1069,6 +1068,7 @@ async fn interpret_with_depth(
                     continue;
                 };
                 let row = waddle_xmpp::pending_delivery::PendingRow {
+                    id: waddle_xmpp::pending_delivery::PendingRowId::fresh(),
                     recipient: recipient.clone(),
                     original_receipt_at,
                     payload,
@@ -1082,34 +1082,77 @@ async fn interpret_with_depth(
                         );
                     }
                     Ok(waddle_xmpp::pending_delivery::InsertOutcome::QuotaExceeded) => {
-                        // XEP-0160 §3 step 3 + RFC 6120 §8.3.
-                        // Bounce <service-unavailable/> back to sender.
-                        let bounce = build_offline_unavailable_bounce(
-                            &recipient,
-                            &sender,
-                            original_id.as_deref(),
+                        // XEP-0160 §3 step 3 + RFC 6120 §8.3 — return a
+                        // typed `<service-unavailable/>` bounce that
+                        // echoes the original payload (RFC 6120 §8.3.4
+                        // convention).
+                        let error = xmpp_parsers::stanza_error::StanzaError::new(
+                            xmpp_parsers::stanza_error::ErrorType::Cancel,
+                            xmpp_parsers::stanza_error::DefinedCondition::ServiceUnavailable,
+                            "en",
+                            "Recipient's offline message queue is full",
                         );
+                        let bounce = waddle_xmpp::protocol::handlers::errors::message_error_reply(
+                            &original_message,
+                            error,
+                        );
+                        let sender_jid = match bounce.to.clone() {
+                            Some(j) => j,
+                            None => {
+                                warn!(
+                                    recipient = %recipient,
+                                    "bounce target JID missing; dropping bounce"
+                                );
+                                continue;
+                            }
+                        };
                         let bounce_stanza = waddle_xmpp::Stanza::Message(bounce);
-                        match sender.clone().try_into_full() {
+                        let mut delivered = false;
+                        match sender_jid.clone().try_into_full() {
                             Ok(full) => {
-                                let _ =
-                                    deps.connection_registry.send_to(&full, bounce_stanza).await;
+                                if matches!(
+                                    deps.connection_registry.send_to(&full, bounce_stanza).await,
+                                    waddle_xmpp::registry::SendResult::Sent
+                                ) {
+                                    delivered = true;
+                                }
                             }
                             Err(bare) => {
                                 for full in deps.connection_registry.get_resources_for_user(&bare) {
-                                    let _ = deps
-                                        .connection_registry
-                                        .send_to(&full, bounce_stanza.clone())
-                                        .await;
+                                    if matches!(
+                                        deps.connection_registry
+                                            .send_to(&full, bounce_stanza.clone())
+                                            .await,
+                                        waddle_xmpp::registry::SendResult::Sent
+                                    ) {
+                                        delivered = true;
+                                    }
                                 }
                             }
                         }
-                        warn!(
-                            recipient = %recipient,
-                            sender = %sender,
-                            "pending_delivery quota exceeded — bounced \
-                             <service-unavailable/> to sender per XEP-0160 §3 step 3"
-                        );
+                        if delivered {
+                            warn!(
+                                recipient = %recipient,
+                                sender = %sender_jid,
+                                "pending_delivery quota exceeded — bounced \
+                                 <service-unavailable/> to sender per XEP-0160 §3 step 3"
+                            );
+                        } else {
+                            // Sender is remote (cross-domain) or has no
+                            // resources currently bound. S2S routing of
+                            // the bounce is out of scope today; surface
+                            // the conformance gap loudly so it shows up
+                            // in deployment logs.
+                            warn!(
+                                recipient = %recipient,
+                                sender = %sender_jid,
+                                "pending_delivery quota exceeded but \
+                                 <service-unavailable/> bounce was not \
+                                 deliverable (remote sender or no bound \
+                                 resource) — XEP-0160 §3 step 3 \
+                                 conformance gap until s2s lands"
+                            );
+                        }
                     }
                     Err(error) => {
                         warn!(
@@ -1189,34 +1232,6 @@ async fn interpret_with_depth(
 /// matches `to` against the bound bare JID — the resource value is
 /// irrelevant for locality, and the synthetic resource never reaches
 /// the wire (no `SendStanza` frames bubble out).
-/// Build a `<message type='error'>` bounce for the XEP-0160 §3 step 3
-/// "queue full" branch. Wire shape per RFC 6120 §8.3 + XEP-0160 §3
-/// step 3 — the original payload is NOT echoed back here because
-/// `pending_delivery` does not retain the original stanza beyond what's
-/// already in MAM (Archived) or in the Transient row; for the bounce
-/// the typed sender / id pair is sufficient to identify the message
-/// for the sender's client.
-fn build_offline_unavailable_bounce(
-    recipient: &jid::BareJid,
-    sender: &jid::Jid,
-    original_id: Option<&str>,
-) -> xmpp_parsers::message::Message {
-    use xmpp_parsers::minidom::Element;
-    let from_jid = jid::Jid::from(recipient.clone());
-    let mut bounce = xmpp_parsers::message::Message::new(Some(sender.clone()));
-    bounce.from = Some(from_jid);
-    bounce.id = original_id.map(str::to_string);
-    bounce.type_ = xmpp_parsers::message::MessageType::Error;
-    let error = Element::builder("error", "jabber:client")
-        .attr("type", "cancel")
-        .append(
-            Element::builder("service-unavailable", "urn:ietf:params:xml:ns:xmpp-stanzas").build(),
-        )
-        .build();
-    bounce.payloads.push(error);
-    bounce
-}
-
 async fn run_headless_recipient_pass(
     deps: &Deps<'_>,
     recipient_bare: &jid::BareJid,
