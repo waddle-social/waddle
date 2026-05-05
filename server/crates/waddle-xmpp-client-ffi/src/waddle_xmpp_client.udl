@@ -20,6 +20,8 @@ dictionary WaddleMessage {
     string? origin_id;
     string? replaces_id;
     string? retracts_id;
+    string? reaction_target_id;
+    sequence<string> reaction_emojis;
     boolean is_muc;
     string? thread;
     string? parent_thread_id;
@@ -40,6 +42,8 @@ dictionary WaddleArchivedMessage {
     string? to;
     string message_type;
     string? body;
+    string? reaction_target_id;
+    sequence<string> reaction_emojis;
     string? thread;
     string? parent_thread_id;
     string? reply_to_id;
@@ -102,21 +106,59 @@ dictionary WaddleMamPage {
 };
 
 // ── Presence ─────────────────────────────────────────────────────────────────
+dictionary WaddlePresenceHat {
+    string uri;
+    string title;
+};
+
+enum WaddleMucAffiliation {
+    Owner,
+    Admin,
+    Member,
+    Outcast,
+    None
+};
+
+enum WaddleMucRole {
+    Moderator,
+    Participant,
+    Visitor,
+    None
+};
+
 dictionary WaddlePresence {
     string? from;
     string? to;
     string presence_type;
     string? show;
     string? status;
+    sequence<WaddlePresenceHat> hats;
+    WaddleMucAffiliation? muc_affiliation;
+    WaddleMucRole? muc_role;
 };
 
-// ── Room list (single implicit space) ────────────────────────────────────────
+// ── XEP-0503 Spaces topology ────────────────────────────────────────────────
 
-dictionary WaddleRoom {
-    string jid;
+dictionary WaddleSpace {
+    string id;
+    string service_jid;
     string name;
+    string? description;
+};
+
+dictionary WaddleChannel {
+    string id;
+    string room_jid;
+    string name;
+    string? description;
     string channel_type;
     i32 position;
+    string space_id;
+};
+
+dictionary WaddleTopology {
+    sequence<WaddleSpace> spaces;
+    sequence<WaddleChannel> channels;
 };
 
 // ── XEP-0084 Avatar ──────────────────────────────────────────────────────────
@@ -167,7 +209,7 @@ interface WaddleClient {
     void leave_room(string room_jid, string nick);
 
     [Async]
-    sequence<WaddleRoom> list_rooms();
+    WaddleTopology discover_topology();
 
     [Async]
     void send_presence(string? status, string? show);

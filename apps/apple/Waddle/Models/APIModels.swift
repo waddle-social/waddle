@@ -82,10 +82,12 @@ struct SpaceSummary: Decodable, Identifiable, Hashable {
 
 struct ChannelSummary: Decodable, Identifiable, Hashable {
     let id: String
+    let apiID: String
     let name: String
     let description: String?
     let channelType: String?
     let position: Int?
+    let spaceID: String?
     /// Full XMPP room JID (e.g. `{channelUUID}@muc.domain`).
     /// Set from XMPP discovery; not decoded from JSON.
     var roomJid: String
@@ -96,25 +98,30 @@ struct ChannelSummary: Decodable, Identifiable, Hashable {
         case description
         case channelType = "channel_type"
         case position
+        case spaceID = "space_id"
     }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(String.self, forKey: .id)
+        apiID = id
         name = try c.decode(String.self, forKey: .name)
         description = try c.decodeIfPresent(String.self, forKey: .description)
         channelType = try c.decodeIfPresent(String.self, forKey: .channelType)
         position = try c.decodeIfPresent(Int.self, forKey: .position)
+        spaceID = try c.decodeIfPresent(String.self, forKey: .spaceID)
         roomJid = ""
     }
 
-    init(id: String, roomJid: String = "", name: String, description: String? = nil, channelType: String? = nil, position: Int? = nil) {
+    init(id: String, apiID: String? = nil, roomJid: String = "", name: String, description: String? = nil, channelType: String? = nil, position: Int? = nil, spaceID: String? = nil) {
         self.id = id
+        self.apiID = apiID ?? id
         self.roomJid = roomJid
         self.name = name
         self.description = description
         self.channelType = channelType
         self.position = position
+        self.spaceID = spaceID
     }
 }
 

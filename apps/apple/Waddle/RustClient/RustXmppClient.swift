@@ -127,10 +127,31 @@ final class RustXmppClient: ObservableObject {
 
     func retractMessage(roomJID: String, messageID: String) async {}
 
-    // MARK: - Room list (implicit single space)
+    // MARK: - Spaces topology
 
-    func listRooms() async -> [WaddleRoom] {
-        return await waddleClient.listRooms()
+    func discoverTopology() async -> XMPPDiscoveredTopology {
+        let topology = await waddleClient.discoverTopology()
+        return XMPPDiscoveredTopology(
+            spaces: topology.spaces.map {
+                XMPPDiscoveredSpace(
+                    id: $0.id,
+                    serviceJID: $0.serviceJid,
+                    name: $0.name,
+                    description: $0.description
+                )
+            },
+            channels: topology.channels.map {
+                XMPPDiscoveredChannel(
+                    id: $0.id,
+                    roomJID: $0.roomJid,
+                    name: $0.name,
+                    description: $0.description,
+                    channelType: $0.channelType,
+                    position: Int($0.position),
+                    spaceID: $0.spaceId
+                )
+            }
+        )
     }
 
     // MARK: - Chat state / markers stubs

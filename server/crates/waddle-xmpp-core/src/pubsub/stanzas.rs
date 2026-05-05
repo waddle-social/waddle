@@ -146,6 +146,23 @@ pub enum PubSubRequest {
         node: String,
         changes: Vec<(jid::BareJid, Affiliation)>,
     },
+    Unsupported {
+        feature: PubSubUnsupportedFeature,
+    },
+}
+
+/// PubSub features understood by the parser but not implemented by this server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PubSubUnsupportedFeature {
+    ManageSubscriptions,
+}
+
+impl PubSubUnsupportedFeature {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ManageSubscriptions => "manage-subscriptions",
+        }
+    }
 }
 
 /// PubSub-specific error conditions.
@@ -161,6 +178,7 @@ pub enum PubSubError {
     /// An unexpected backend/storage failure unrelated to the requested resource.
     /// Maps to XEP-0060 §8.1.3 `<internal-server-error/>` (error type: wait).
     InternalServerError,
+    UnsupportedFeature(PubSubUnsupportedFeature),
 }
 
 /// Check if an IQ is a PubSub request.
@@ -313,6 +331,15 @@ pub fn parse_pubsub_iq(iq: &Iq) -> CoreResult<PubSubRequest> {
         return Ok(PubSubRequest::AffiliationsSet { node, changes });
     }
 
+    if pubsub_elem
+        .get_child("subscriptions", NS_PUBSUB_OWNER)
+        .is_some()
+    {
+        return Ok(PubSubRequest::Unsupported {
+            feature: PubSubUnsupportedFeature::ManageSubscriptions,
+        });
+    }
+
     // Some clients send <configure/> under NS_PUBSUB; XEP-0060 puts it under NS_PUBSUB_OWNER.
     for ns in &[NS_PUBSUB_OWNER, NS_PUBSUB] {
         if let Some(configure) = pubsub_elem.get_child("configure", *ns) {
@@ -433,9 +460,19 @@ pub fn build_pubsub_error(original_iq: &Iq, error: PubSubError) -> Iq {
         PubSubError::InternalServerError => {
             (ErrorType::Wait, DefinedCondition::InternalServerError)
         }
+        PubSubError::UnsupportedFeature(_) => {
+            (ErrorType::Cancel, DefinedCondition::FeatureNotImplemented)
+        }
     };
 
-    let stanza_error = StanzaError::new(error_type, defined_condition, "en", "");
+    let mut stanza_error = StanzaError::new(error_type, defined_condition, "en", "");
+    if let PubSubError::UnsupportedFeature(feature) = error {
+        stanza_error.other = Some(
+            Element::builder("unsupported", NS_PUBSUB_ERRORS)
+                .attr("feature", feature.as_str())
+                .build(),
+        );
+    }
 
     Iq {
         from: original_iq.to.clone(),
@@ -736,6 +773,51 @@ mod tests {
             PubSubRequest::ConfigureNode { node } => assert_eq!(node, "space"),
             other => panic!("Expected configure request, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_owner_subscriptions_as_unsupported_manage_subscriptions() {
+        let xml = r#"<iq xmlns='jabber:client' type='get' from='owner@example.com' id='subs1'>
+            <pubsub xmlns='http://jabber.org/protocol/pubsub#owner'>
+                <subscriptions node='space'/>
+            </pubsub>
+        </iq>"#;
+
+        let iq = Iq::try_from(xml.parse::<Element>().expect("valid XML")).expect("valid IQ");
+        let request = parse_pubsub_iq(&iq).expect("should parse unsupported feature");
+
+        match request {
+            PubSubRequest::Unsupported { feature } => {
+                assert_eq!(feature, PubSubUnsupportedFeature::ManageSubscriptions);
+            }
+            other => panic!("Expected unsupported feature request, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unsupported_feature_error_includes_pubsub_condition() {
+        let xml = r#"<iq xmlns='jabber:client' type='get' from='owner@example.com' id='subs1'>
+            <pubsub xmlns='http://jabber.org/protocol/pubsub#owner'>
+                <subscriptions node='space'/>
+            </pubsub>
+        </iq>"#;
+        let iq = Iq::try_from(xml.parse::<Element>().expect("valid XML")).expect("valid IQ");
+        let response = build_pubsub_error(
+            &iq,
+            PubSubError::UnsupportedFeature(PubSubUnsupportedFeature::ManageSubscriptions),
+        );
+        let IqType::Error(error) = response.payload else {
+            panic!("expected error response");
+        };
+
+        assert_eq!(
+            error.defined_condition,
+            xmpp_parsers::stanza_error::DefinedCondition::FeatureNotImplemented
+        );
+        let unsupported = error.other.expect("pubsub unsupported condition");
+        assert_eq!(unsupported.name(), "unsupported");
+        assert_eq!(unsupported.ns(), NS_PUBSUB_ERRORS);
+        assert_eq!(unsupported.attr("feature"), Some("manage-subscriptions"));
     }
 
     #[test]

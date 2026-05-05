@@ -126,11 +126,28 @@ pub struct WaddlePresence {
 }
 
 #[derive(uniffi::Record, Clone)]
-pub struct WaddleRoom {
-    pub jid: String,
+pub struct WaddleSpace {
+    pub id: String,
+    pub service_jid: String,
     pub name: String,
+    pub description: Option<String>,
+}
+
+#[derive(uniffi::Record, Clone)]
+pub struct WaddleChannel {
+    pub id: String,
+    pub room_jid: String,
+    pub name: String,
+    pub description: Option<String>,
     pub channel_type: String,
     pub position: i32,
+    pub space_id: String,
+}
+
+#[derive(uniffi::Record, Clone)]
+pub struct WaddleTopology {
+    pub spaces: Vec<WaddleSpace>,
+    pub channels: Vec<WaddleChannel>,
 }
 
 /// XEP-0084 user avatar fetched from the `urn:xmpp:avatar` PEP nodes.
@@ -511,50 +528,32 @@ impl WaddleClient {
         }
     }
 
-    pub async fn list_rooms(&self) -> Vec<WaddleRoom> {
+    pub async fn discover_topology(&self) -> WaddleTopology {
         let guard = self.handle.lock().await;
         let Some(h) = guard.as_ref() else {
             drop(guard);
             self.listener.on_error("Not connected".to_string());
-            return vec![];
+            return empty_topology();
         };
 
         let spaces_domain = format!("spaces.{}", jid_domain(&self.config.jid));
-
-        // Step 1: discover the canonical space node (internal — not returned to caller).
-        let space_items = match h.discover_items(&spaces_domain, None).await {
-            Ok(items) => items,
+        let spaces_jid: BareJid = match spaces_domain.parse() {
+            Ok(jid) => jid,
             Err(e) => {
                 drop(guard);
                 self.listener
-                    .on_error(format!("list_rooms: space discovery failed: {e}"));
-                return vec![];
+                    .on_error(format!("discover_topology: invalid spaces JID: {e}"));
+                return empty_topology();
             }
         };
 
-        let Some(space) = space_items.into_iter().next() else {
-            return vec![];
-        };
-
-        let space_node = space.node.unwrap_or_else(|| space.jid.clone());
-
-        // Step 2: discover rooms within the space. Room JIDs are returned as-is
-        // so callers can use them directly for all XMPP operations.
-        match h.discover_items(&spaces_domain, Some(&space_node)).await {
-            Ok(items) => items
-                .into_iter()
-                .map(|item| WaddleRoom {
-                    jid: item.jid.clone(),
-                    name: item.name.unwrap_or_default(),
-                    channel_type: "text".to_string(),
-                    position: 0,
-                })
-                .collect(),
+        match h.discover_topology(&spaces_jid).await {
+            Ok(topology) => topology_to_ffi(topology),
             Err(e) => {
                 drop(guard);
                 self.listener
-                    .on_error(format!("list_rooms: room discovery failed: {e}"));
-                vec![]
+                    .on_error(format!("discover_topology failed: {e}"));
+                empty_topology()
             }
         }
     }
@@ -701,6 +700,41 @@ fn dispatch_event(event: ClientEvent, listener: &dyn WaddleEventListener) {
 /// Extract the domain part from a JID like `user@domain` or `domain`.
 fn jid_domain(jid: &str) -> &str {
     jid.split('@').next_back().unwrap_or(jid)
+}
+
+fn empty_topology() -> WaddleTopology {
+    WaddleTopology {
+        spaces: Vec::new(),
+        channels: Vec::new(),
+    }
+}
+
+fn topology_to_ffi(topology: waddle_xmpp_client::discovery::DiscoveredTopology) -> WaddleTopology {
+    WaddleTopology {
+        spaces: topology
+            .spaces
+            .into_iter()
+            .map(|space| WaddleSpace {
+                id: space.id.as_str().to_string(),
+                service_jid: space.service_jid.to_string(),
+                name: space.name,
+                description: space.description,
+            })
+            .collect(),
+        channels: topology
+            .channels
+            .into_iter()
+            .map(|channel| WaddleChannel {
+                id: channel.id,
+                room_jid: channel.room_jid.to_string(),
+                name: channel.name,
+                description: channel.description,
+                channel_type: channel.channel_type.as_str().to_string(),
+                position: channel.position,
+                space_id: channel.space_id.as_str().to_string(),
+            })
+            .collect(),
+    }
 }
 
 fn mam_page_to_ffi(page: waddle_xmpp_client::mam::MamPage) -> WaddleMamPage {
