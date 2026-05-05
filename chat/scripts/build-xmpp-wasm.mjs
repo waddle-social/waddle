@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -71,6 +71,15 @@ if (!dts.includes("export default function init()")) {
 console.log("[wasm] Installing local build into node_modules...");
 mkdirSync(nodeModulesDir, { recursive: true });
 cpSync(outDir, nodeModulesDir, { recursive: true });
+
+// Clear Vite's module transform cache so it doesn't serve stale _bg.js from a previous build.
+// Without this, a mismatch between the cached glue JS and the newly compiled .wasm causes
+// runtime errors like "wasm.__wasm_bindgen_func_elem_N is not a function".
+const viteCacheDir = resolve(scriptDir, "..", "node_modules", ".vite");
+if (existsSync(viteCacheDir)) {
+  rmSync(viteCacheDir, { recursive: true, force: true });
+  console.log("[wasm] Cleared Vite module cache.");
+}
 
 console.log("[wasm] Done. Local build installed.");
 console.log("[wasm] ⚠️  Next `bun install` will revert to the published registry version.");
