@@ -5093,6 +5093,7 @@ mod tests {
         .await;
         let server_response = server_responses.first().expect("server disco response");
         assert!(server_response.contains("urn:xmpp:reply:0"));
+        assert!(!server_response.contains("urn:xmpp:spaces:0"));
         assert!(!server_response.contains("urn:xmpp:fulltext:0"));
         assert!(!server_response.contains("urn:waddle:test-extension:1"));
 
@@ -5537,8 +5538,8 @@ mod tests {
         let space_db = state.deps.app_state.db_pool.global();
         let conn = space_db.guard().await.expect("persistent connection");
         conn.execute(
-            "INSERT INTO channels (id, name, channel_type, position, is_default) VALUES (?, ?, 'text', 0, 0)",
-            crate::db_params!["linked", "Linked"],
+            "INSERT INTO channels (id, name, description, channel_type, position, is_default) VALUES (?, ?, ?, 'text', 0, 0)",
+            crate::db_params!["linked", "Linked", "Linked channel description"],
         )
         .await
         .expect("insert channel");
@@ -5582,7 +5583,63 @@ mod tests {
         assert!(response.contains("var=\"parent\""));
         assert!(response.contains("xmpp:spaces.example.com?;node=team"));
         assert!(response.contains("http://jabber.org/protocol/muc#roominfo"));
-        assert!(response.contains("muc#roominfo_pubsub"));
+        assert!(response.contains("muc#roomconfig_pubsub"));
+        assert!(response.contains("muc#roominfo_description"));
+        assert!(response.contains("Linked channel description"));
+    }
+
+    #[tokio::test]
+    async fn active_room_disco_preserves_managed_announcement_channel_type() {
+        let state = create_test_websocket_state().await;
+        let session = create_test_session(state.as_ref(), "alice").await;
+        let conn = state
+            .deps
+            .app_state
+            .db_pool
+            .global()
+            .guard()
+            .await
+            .expect("persistent connection");
+        conn.execute(
+            "INSERT INTO channels (id, name, description, channel_type, position, is_default) VALUES (?, ?, ?, 'announcement', 0, 0)",
+            crate::db_params!["announcements", "Announcements", "Owner-posted announcements"],
+        )
+        .await
+        .expect("insert announcement channel");
+        drop(conn);
+
+        let room_jid: BareJid = "announcements@muc.example.com".parse().expect("room jid");
+        let alice_jid: FullJid = format!("{}@example.com/web", session.xmpp_localpart)
+            .parse()
+            .expect("alice jid");
+        handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room_jid,
+            &alice_jid,
+            "alice",
+            &Some(session.clone()),
+        )
+        .await;
+
+        let query = disco_info_iq_frame("announcement-info", "announcements@muc.example.com", None);
+        let responses = handle_iq(
+            &query,
+            "example.com",
+            "muc.example.com",
+            state.as_ref(),
+            &Some(session),
+            &ready_phase(&alice_jid),
+        )
+        .await;
+        let response = responses.first().expect("room disco response");
+        assert!(response.contains("muc_moderated"), "response: {response}");
+        assert!(response.contains("waddle#channel_type"), "response: {response}");
+        assert!(response.contains("announcement"), "response: {response}");
+        assert!(
+            !response.contains("<value>text</value>"),
+            "announcement room must not be reported as text: {response}"
+        );
     }
 
     #[tokio::test]

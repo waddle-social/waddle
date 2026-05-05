@@ -115,7 +115,7 @@ async fn room_disco_advertises_parent_space_metadata() {
     );
     assert!(
         info.contains("http://jabber.org/protocol/muc#roominfo")
-            && info.contains("muc#roominfo_pubsub")
+            && info.contains("muc#roomconfig_pubsub")
             && info.contains("xmpp:spaces.localhost?;node=general"),
         "expected MUC roominfo pubsub compatibility field: {info}"
     );
