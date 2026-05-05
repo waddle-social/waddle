@@ -1364,6 +1364,13 @@ async fn handle_regular_presence_update(
             .protocol
             .connection_registry
             .update_presence(sender_jid, true, priority);
+        // XEP-0160 §3 step 5 (locked Q7a/Q7d): on the first non-negative-
+        // priority presence of a fresh session, drain pending_delivery
+        // for the recipient. `claim_offline_flush` ensures this fires at
+        // most once per session even across priority transitions.
+        if priority >= 0 {
+            maybe_flush_pending_delivery(state, sender_jid).await;
+        }
         state
             .deps
             .protocol
@@ -1411,6 +1418,52 @@ async fn handle_regular_presence_update(
             );
     }
     broadcast_presence_to_subscribers(state, sender_jid, &presence, available).await;
+}
+
+/// XEP-0160 §3 step 5 + locked Q7a / Q7c / Q7d: on the recovering
+/// session's first non-negative-priority presence, drain
+/// `pending_delivery` for the user's bare JID and push each row to
+/// this resource.
+///
+/// `ConnectionEntry::claim_offline_flush()` is a CAS that returns
+/// `true` exactly once per fresh session — repeated presence updates
+/// (priority transitions, status text changes) do not re-flush an
+/// already-drained queue.
+async fn maybe_flush_pending_delivery(state: &WebSocketState, sender_jid: &FullJid) {
+    let entry = match state
+        .deps
+        .protocol
+        .connection_registry
+        .get_entry(sender_jid)
+    {
+        Some(entry) => entry,
+        None => return,
+    };
+    if !entry.claim_offline_flush() {
+        return;
+    }
+    let recipient_bare = sender_jid.to_bare();
+    let resolver = crate::pending_delivery::MamArchiveResolver {
+        mam_storage: std::sync::Arc::clone(&state.deps.protocol.mam_storage),
+    };
+    let outcome = crate::pending_delivery::flush_for_resource(
+        &state.deps.protocol.pending_delivery_storage,
+        &state.deps.protocol.connection_registry,
+        state.deps.auth_state.xmpp_domain.as_str(),
+        &recipient_bare,
+        sender_jid,
+        &resolver,
+    )
+    .await;
+    if outcome.claimed > 0 {
+        debug!(
+            jid = %sender_jid,
+            claimed = outcome.claimed,
+            pushed = outcome.pushed,
+            unresolved = outcome.unresolved,
+            "XEP-0160 pending_delivery flush completed"
+        );
+    }
 }
 
 async fn broadcast_presence_to_subscribers(
