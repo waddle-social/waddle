@@ -1138,10 +1138,22 @@ async fn create_router(
         );
     let sm_session_registry = waddle_xmpp::stream_management::InMemorySmSessionRegistry::new()
         .with_persistence(Arc::clone(&sm_persistence));
-    sm_session_registry
-        .restore_from_persistence()
-        .await
-        .expect("restore SM sessions from persistence");
+    // Don't panic on a top-level restore error — `restore_from_persistence`
+    // already skips individual corrupt rows internally; a top-level
+    // failure here would only surface for catastrophic storage outages
+    // (table unreadable, etc.). Log and continue with an empty in-memory
+    // view; clients reconnecting after restart will see `<failed/>` on
+    // resume and fall back to fresh sessions (XEP-0198 §5). Was
+    // previously `expect()` which turned one bad row into a boot
+    // failure — Qodo review on PR #344.
+    if let Err(error) = sm_session_registry.restore_from_persistence().await {
+        warn!(
+            error = %error,
+            "restore_from_persistence failed at startup; continuing with empty \
+             in-memory SM session view. XEP-0198 resume will return <failed/> \
+             until storage health is restored."
+        );
+    }
     let sm_session_registry = Arc::new(sm_session_registry);
     let resumable_sessions: Arc<dashmap::DashMap<String, crate::auth::Session>> =
         Arc::new(dashmap::DashMap::new());

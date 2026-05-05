@@ -58,7 +58,21 @@ pub struct DetachedSession {
     pub outbound_count: u32,
     /// Last acknowledged outbound stanza count
     pub last_acked: u32,
-    /// Unacknowledged stanzas (sequence, xml)
+    /// Unacknowledged stanzas (sequence, xml).
+    ///
+    /// **Known limitation**: this tuple does not carry an
+    /// original_receipt_at timestamp. When the session is persisted
+    /// via [`super::persistence::SmPersistenceStorage`], each
+    /// unacked stanza inherits the persist-time `Utc::now()` for its
+    /// `PersistedUnackedStanza::original_receipt_at`, not the
+    /// actual server receipt time. For the Q6c `<delay/>` stamping
+    /// path (XEP-0203 §4.1 + XEP-0198 §5 line 364) this is
+    /// approximate — bounded by the session's detach latency in
+    /// practice (typically milliseconds). Plumbing the real receipt
+    /// time through every `record_*detached*` call site would touch
+    /// many files and is queued as a follow-up to issue #209 slice
+    /// (d) phase 4 (the SM-expiry promotion path that consumes this
+    /// timestamp).
     pub unacked_stanzas: Vec<(u32, String)>,
     /// Maximum resumption time in seconds
     pub max_resume_time: Option<u32>,
@@ -315,6 +329,7 @@ impl InMemorySmSessionRegistry {
         let Some(storage) = &self.persistence else {
             return Ok(0);
         };
+        let now = chrono::Utc::now();
         let stored = storage
             .list_all_sessions()
             .await
@@ -324,12 +339,57 @@ impl InMemorySmSessionRegistry {
         // the hydrated sessions. RwLock guards are not Send and
         // cannot be held across .await points.
         let mut hydrated_sessions = Vec::with_capacity(stored.len());
+        let mut expired_ids = Vec::new();
+        let mut bad_rows = 0usize;
         for persisted in stored {
-            let unacked = storage
-                .list_unacked(&persisted.stream_id)
-                .await
-                .map_err(|e| SmRegistryError::Internal(e.to_string()))?;
-            hydrated_sessions.push(persisted_to_detached(&persisted, &unacked)?);
+            // Filter expired-during-downtime: detached_at +
+            // max_resume_duration <= now means the resume window is
+            // already closed. Hydrating these would let them appear
+            // resumable on the wire and silently exceed
+            // max_sessions, plus they'd be re-loaded on every
+            // restart since the in-memory janitor doesn't drain
+            // durable rows. Mark for durable deletion below.
+            let expires_at = persisted.detached_at
+                + chrono::Duration::from_std(persisted.max_resume_duration)
+                    .unwrap_or(chrono::Duration::seconds(0));
+            if expires_at <= now {
+                expired_ids.push(persisted.stream_id.clone());
+                continue;
+            }
+            let unacked = match storage.list_unacked(&persisted.stream_id).await {
+                Ok(u) => u,
+                Err(error) => {
+                    debug!(
+                        stream_id = %persisted.stream_id,
+                        error = %error,
+                        "skipping persisted session: list_unacked failed"
+                    );
+                    bad_rows += 1;
+                    continue;
+                }
+            };
+            match persisted_to_detached(&persisted, &unacked) {
+                Ok(session) => hydrated_sessions.push(session),
+                Err(error) => {
+                    debug!(
+                        stream_id = %persisted.stream_id,
+                        error = %error,
+                        "skipping persisted session: row decode failed (poison pill)"
+                    );
+                    bad_rows += 1;
+                }
+            }
+        }
+        // Best-effort durable cleanup of expired rows. Failures here
+        // are non-fatal — the janitor's next pass will retry.
+        for stream_id in &expired_ids {
+            if let Err(error) = storage.delete_session(stream_id).await {
+                debug!(
+                    stream_id = %stream_id,
+                    error = %error,
+                    "failed to delete expired persisted SM session during restore; will retry"
+                );
+            }
         }
         let hydrated = hydrated_sessions.len();
         {
@@ -341,8 +401,38 @@ impl InMemorySmSessionRegistry {
                 sessions.insert(session.stream_id.clone(), session);
             }
         }
-        debug!(hydrated, "restored detached SM sessions from persistence");
+        debug!(
+            hydrated,
+            expired = expired_ids.len(),
+            bad_rows,
+            "restored detached SM sessions from persistence"
+        );
         Ok(hydrated)
+    }
+}
+
+impl InMemorySmSessionRegistry {
+    /// Helper: delete every durable row for `stream_id` (session +
+    /// unacked queue). Best-effort — failures are logged and
+    /// swallowed because the in-memory state has already mutated
+    /// when this is called and we'd rather have a transient durable
+    /// drift than fail the resume / cleanup path.
+    async fn persist_delete_session(&self, stream_id: &str) {
+        let Some(storage) = &self.persistence else {
+            return;
+        };
+        if let Err(error) = storage
+            .delete_session(&crate::pending_delivery::SmSessionId::new(
+                stream_id.to_string(),
+            ))
+            .await
+        {
+            debug!(
+                stream_id = %stream_id,
+                error = %error,
+                "failed to delete persisted SM session; will retry via janitor"
+            );
+        }
     }
 }
 
@@ -445,7 +535,10 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
         // Scope the RwLock guards in a block so they're definitively
         // dropped before any await point. RwLockWriteGuard is not
         // Send, and explicit `drop()` doesn't satisfy the async
-        // future's lifetime analysis.
+        // future's lifetime analysis. Capture eviction victims
+        // (jid-collision retain + max_sessions oldest) so we can
+        // mirror their durable rows after releasing the lock.
+        let mut evicted_stream_ids: Vec<String> = Vec::new();
         let count = {
             let mut sessions = self
                 .sessions
@@ -455,6 +548,18 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
                 .claimed_sessions
                 .write()
                 .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+            // Capture jid-collision evictions in `sessions` before
+            // retain mutates; same for `claimed`.
+            for (id, existing) in sessions.iter() {
+                if id != &stream_id && existing.jid == jid {
+                    evicted_stream_ids.push(id.clone());
+                }
+            }
+            for (id, existing) in claimed.iter() {
+                if id != &stream_id && existing.jid == jid {
+                    evicted_stream_ids.push(id.clone());
+                }
+            }
             sessions.retain(|existing_stream_id, existing| {
                 existing_stream_id == &stream_id || existing.jid != jid
             });
@@ -471,12 +576,21 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
                 {
                     sessions.remove(&oldest_key);
                     debug!(stream_id = %oldest_key, "Evicted oldest SM session to make room");
+                    evicted_stream_ids.push(oldest_key);
                 }
             }
 
             sessions.insert(stream_id.clone(), session.clone());
             sessions.len()
         };
+        // Mirror in-memory evictions to durable storage so a restart
+        // doesn't resurrect sessions that were displaced by a fresh
+        // bind for the same JID or by max_sessions overflow. (Copilot
+        // review on PR #344: durable rows for evicted streams must
+        // not be silently rehydrated.)
+        for evicted in &evicted_stream_ids {
+            self.persist_delete_session(evicted).await;
+        }
 
         // Persist the detached session + its unacked queue so it
         // survives a server restart per locked Q8 = B.
@@ -613,12 +727,19 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
     }
 
     async fn cleanup_expired(&self) -> Result<usize, SmRegistryError> {
-        let mut sessions = self
-            .sessions
-            .write()
-            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-
-        Ok(drain_expired_internal(&mut sessions).len())
+        // Lock-scoped block so guards drop before the durable
+        // delete awaits.
+        let drained: Vec<DetachedSession> = {
+            let mut sessions = self
+                .sessions
+                .write()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+            drain_expired_internal(&mut sessions)
+        };
+        for session in &drained {
+            self.persist_delete_session(&session.stream_id).await;
+        }
+        Ok(drained.len())
     }
 
     async fn session_count(&self) -> usize {
@@ -737,12 +858,19 @@ impl InMemorySmSessionRegistry {
     /// sidecar auth context. `cleanup_expired` only returns a count, which
     /// isn't enough for that work.
     pub async fn drain_expired(&self) -> Result<Vec<DetachedSession>, SmRegistryError> {
-        let mut sessions = self
-            .sessions
-            .write()
-            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-
-        Ok(drain_expired_internal(&mut sessions))
+        // Lock-scoped block so guards drop before the durable
+        // delete awaits.
+        let drained: Vec<DetachedSession> = {
+            let mut sessions = self
+                .sessions
+                .write()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+            drain_expired_internal(&mut sessions)
+        };
+        for session in &drained {
+            self.persist_delete_session(&session.stream_id).await;
+        }
+        Ok(drained)
     }
 
     /// Atomically claim a resumable session for a single resume attempt.
@@ -802,18 +930,32 @@ impl InMemorySmSessionRegistry {
         &self,
         stream_id: &str,
     ) -> Result<Option<SmClaimCompletion>, SmRegistryError> {
-        Ok(self
-            .claimed_sessions
-            .write()
-            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
-            .remove(stream_id)
-            .map(|session| {
-                if session.is_expired() {
-                    SmClaimCompletion::Expired(session)
-                } else {
-                    SmClaimCompletion::Resumed(session)
-                }
-            }))
+        // Lock-scoped block so guards are dropped before the durable
+        // delete await (RwLockWriteGuard is not Send).
+        let outcome = {
+            self.claimed_sessions
+                .write()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
+                .remove(stream_id)
+                .map(|session| {
+                    if session.is_expired() {
+                        SmClaimCompletion::Expired(session)
+                    } else {
+                        SmClaimCompletion::Resumed(session)
+                    }
+                })
+        };
+        // Resume is the durable commitment point — once we hand the
+        // session back to the resuming connection (or detect it
+        // expired mid-claim), the durable record is no longer needed.
+        // Without this delete, restart_from_persistence would
+        // resurrect the just-resumed session (Copilot review on
+        // PR #344). For Expired we still delete: the session will
+        // not be resumable again.
+        if outcome.is_some() {
+            self.persist_delete_session(stream_id).await;
+        }
+        Ok(outcome)
     }
 
     /// Remove a stored detached session only if it has not been claimed by a
@@ -822,19 +964,27 @@ impl InMemorySmSessionRegistry {
         &self,
         stream_id: &str,
     ) -> Result<Option<DetachedSession>, SmRegistryError> {
-        let mut sessions = self
-            .sessions
-            .write()
-            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-        if self
-            .claimed_sessions
-            .read()
-            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
-            .contains_key(stream_id)
-        {
-            return Ok(None);
+        // Lock-scoped block so guards drop before the durable delete
+        // await.
+        let removed = {
+            let mut sessions = self
+                .sessions
+                .write()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+            if self
+                .claimed_sessions
+                .read()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
+                .contains_key(stream_id)
+            {
+                return Ok(None);
+            }
+            sessions.remove(stream_id)
+        };
+        if removed.is_some() {
+            self.persist_delete_session(stream_id).await;
         }
-        Ok(sessions.remove(stream_id))
+        Ok(removed)
     }
 
     /// Invalidate detached sessions for a FullJID after a fresh bind has
@@ -843,35 +993,46 @@ impl InMemorySmSessionRegistry {
         &self,
         jid: &FullJid,
     ) -> Result<Vec<DetachedSession>, SmRegistryError> {
-        let mut removed = Vec::new();
-        let mut sessions = self
-            .sessions
-            .write()
-            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-        let matching_streams: Vec<_> = sessions
-            .iter()
-            .filter(|(_, session)| session.jid == *jid)
-            .map(|(stream_id, _)| stream_id.clone())
-            .collect();
-        for stream_id in matching_streams {
-            if let Some(session) = sessions.remove(&stream_id) {
-                removed.push(session);
+        // Lock-scoped block so guards drop before the durable delete
+        // awaits.
+        let (removed, removed_ids) = {
+            let mut removed = Vec::new();
+            let mut removed_ids: Vec<String> = Vec::new();
+            let mut sessions = self
+                .sessions
+                .write()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+            let matching_streams: Vec<_> = sessions
+                .iter()
+                .filter(|(_, session)| session.jid == *jid)
+                .map(|(stream_id, _)| stream_id.clone())
+                .collect();
+            for stream_id in matching_streams {
+                if let Some(session) = sessions.remove(&stream_id) {
+                    removed_ids.push(stream_id);
+                    removed.push(session);
+                }
             }
-        }
-        drop(sessions);
-        let mut claimed = self
-            .claimed_sessions
-            .write()
-            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-        let matching_streams: Vec<_> = claimed
-            .iter()
-            .filter(|(_, session)| session.jid == *jid)
-            .map(|(stream_id, _)| stream_id.clone())
-            .collect();
-        for stream_id in matching_streams {
-            if let Some(session) = claimed.remove(&stream_id) {
-                removed.push(session);
+            drop(sessions);
+            let mut claimed = self
+                .claimed_sessions
+                .write()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+            let matching_streams: Vec<_> = claimed
+                .iter()
+                .filter(|(_, session)| session.jid == *jid)
+                .map(|(stream_id, _)| stream_id.clone())
+                .collect();
+            for stream_id in matching_streams {
+                if let Some(session) = claimed.remove(&stream_id) {
+                    removed_ids.push(stream_id);
+                    removed.push(session);
+                }
             }
+            (removed, removed_ids)
+        };
+        for stream_id in &removed_ids {
+            self.persist_delete_session(stream_id).await;
         }
         Ok(removed)
     }
@@ -1878,10 +2039,14 @@ mod tests {
     }
 
     fn realistic_test_session(stream_id: &str) -> DetachedSession {
+        realistic_test_session_for_jid(stream_id, make_test_jid())
+    }
+
+    fn realistic_test_session_for_jid(stream_id: &str, jid: FullJid) -> DetachedSession {
         DetachedSession {
             stream_id: stream_id.to_string(),
             user_id: "user@example.com".to_string(),
-            jid: make_test_jid(),
+            jid,
             inbound_count: 4,
             outbound_count: 7,
             last_acked: 5,
@@ -1940,15 +2105,26 @@ mod tests {
     async fn restore_from_persistence_rebuilds_in_memory_view() {
         let storage = std::sync::Arc::new(super::super::persistence::InMemorySmPersistence::new());
         // Pre-populate storage as if a previous server lifecycle had
-        // detached this session.
+        // detached two sessions for distinct users. Using distinct
+        // JIDs is important: store_session evicts any prior detached
+        // session with the same JID (RFC-aligned: a fresh bind for
+        // a JID supersedes any older detached stream for that JID),
+        // and the durable mirror also deletes the evicted row, so
+        // two sessions with the same JID would resolve to one.
         {
             let registry = InMemorySmSessionRegistry::new().with_persistence(storage.clone());
             registry
-                .store_session(realistic_test_session("stream-1"))
+                .store_session(realistic_test_session_for_jid(
+                    "stream-1",
+                    "alice@example.com/web".parse().unwrap(),
+                ))
                 .await
                 .unwrap();
             registry
-                .store_session(realistic_test_session("stream-2"))
+                .store_session(realistic_test_session_for_jid(
+                    "stream-2",
+                    "bob@example.com/laptop".parse().unwrap(),
+                ))
                 .await
                 .unwrap();
         }
@@ -1974,5 +2150,107 @@ mod tests {
     async fn restore_is_noop_when_no_persistence_attached() {
         let registry = InMemorySmSessionRegistry::new();
         assert_eq!(registry.restore_from_persistence().await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn complete_claim_deletes_durable_session_on_resume() {
+        // The real resume path is claim_session -> complete_claim,
+        // not take_session. Without durable cleanup at the
+        // complete_claim commitment point, a successful resume
+        // would leave rows in storage that restart_from_persistence
+        // would resurrect. (Codex P1 + Copilot review on PR #344.)
+        let storage = std::sync::Arc::new(super::super::persistence::InMemorySmPersistence::new());
+        let registry = InMemorySmSessionRegistry::new().with_persistence(storage.clone());
+        registry
+            .store_session(realistic_test_session("stream-1"))
+            .await
+            .unwrap();
+        let stream_id = crate::pending_delivery::SmSessionId::new("stream-1");
+        assert!(storage.get_session(&stream_id).await.unwrap().is_some());
+
+        let _claimed = registry.claim_session("stream-1").await.unwrap();
+        let outcome = registry.complete_claim("stream-1").await.unwrap();
+        assert!(matches!(outcome, Some(SmClaimCompletion::Resumed(_))));
+
+        assert!(storage.get_session(&stream_id).await.unwrap().is_none());
+        assert!(storage.list_unacked(&stream_id).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn store_session_evicts_jid_collision_durably() {
+        // Two store_session calls for the same JID with different
+        // stream_ids: the second supersedes the first per RFC
+        // resume semantics. The first's durable rows must be
+        // deleted too — otherwise restart_from_persistence
+        // resurrects the obsolete stream and exposes a stale
+        // <resume previd='…'/> path. (Copilot review on PR #344.)
+        let storage = std::sync::Arc::new(super::super::persistence::InMemorySmPersistence::new());
+        let registry = InMemorySmSessionRegistry::new().with_persistence(storage.clone());
+        registry
+            .store_session(realistic_test_session_for_jid(
+                "stream-old",
+                "alice@example.com/web".parse().unwrap(),
+            ))
+            .await
+            .unwrap();
+        registry
+            .store_session(realistic_test_session_for_jid(
+                "stream-new",
+                "alice@example.com/web".parse().unwrap(),
+            ))
+            .await
+            .unwrap();
+        let old_id = crate::pending_delivery::SmSessionId::new("stream-old");
+        let new_id = crate::pending_delivery::SmSessionId::new("stream-new");
+        assert!(
+            storage.get_session(&old_id).await.unwrap().is_none(),
+            "evicted stream-old should be removed from durable storage"
+        );
+        assert!(
+            storage.get_session(&new_id).await.unwrap().is_some(),
+            "stream-new should remain"
+        );
+    }
+
+    #[tokio::test]
+    async fn restore_skips_and_deletes_expired_sessions() {
+        // Sessions whose resume window already closed during the
+        // server's downtime must not be rehydrated, AND their
+        // durable rows must be deleted so restart doesn't re-load
+        // them next boot. (Copilot review on PR #344.)
+        let storage = std::sync::Arc::new(super::super::persistence::InMemorySmPersistence::new());
+
+        // Manually insert an already-expired session by writing
+        // directly to storage with a detached_at + duration in the
+        // past.
+        let now = chrono::Utc::now();
+        let expired = super::super::persistence::PersistedSession {
+            stream_id: crate::pending_delivery::SmSessionId::new("stream-expired"),
+            user_id: "alice".to_string(),
+            jid: "alice@example.com/web".parse().unwrap(),
+            inbound_count: 0,
+            outbound_count: 0,
+            last_acked: 0,
+            max_resume_time: Some(60),
+            detached_at: now - chrono::Duration::seconds(120),
+            max_resume_duration: Duration::from_secs(60),
+            carbons_enabled: false,
+            roster_interested: false,
+            presence_available: false,
+            presence_show: None,
+            presence_status: None,
+            presence_priority: 0,
+        };
+        storage.upsert_session(expired).await.unwrap();
+
+        let registry = InMemorySmSessionRegistry::new().with_persistence(storage.clone());
+        let hydrated = registry.restore_from_persistence().await.unwrap();
+        assert_eq!(hydrated, 0);
+        // Durable cleanup of expired rows.
+        assert!(storage
+            .get_session(&crate::pending_delivery::SmSessionId::new("stream-expired"))
+            .await
+            .unwrap()
+            .is_none());
     }
 }

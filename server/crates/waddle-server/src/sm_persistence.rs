@@ -104,39 +104,50 @@ impl DatabaseSmPersistence {
     }
 
     async fn initialize(&self) -> Result<(), SmPersistenceError> {
+        // Driver-aware bigint type: Postgres INTEGER is i32 (overflows
+        // for `timestamp_millis()` after Jan 2038); BIGINT is i64.
+        // SQLite INTEGER is dynamically sized so the same DDL works.
+        let bigint = match self.db.driver() {
+            DatabaseDriver::Postgres => "BIGINT",
+            DatabaseDriver::Sqlite => "INTEGER",
+        };
         self.execute(
-            r#"
-            CREATE TABLE IF NOT EXISTS sm_sessions (
-                stream_id TEXT PRIMARY KEY,
-                user_id TEXT NOT NULL,
-                full_jid TEXT NOT NULL,
-                inbound_count INTEGER NOT NULL,
-                outbound_count INTEGER NOT NULL,
-                last_acked INTEGER NOT NULL,
-                max_resume_secs INTEGER,
-                detached_at_ms INTEGER NOT NULL,
-                max_resume_duration_ms INTEGER NOT NULL,
-                carbons_enabled INTEGER NOT NULL,
-                roster_interested INTEGER NOT NULL,
-                presence_available INTEGER NOT NULL,
-                presence_show TEXT,
-                presence_status TEXT,
-                presence_priority INTEGER NOT NULL
-            )
-            "#,
+            &format!(
+                r#"
+                CREATE TABLE IF NOT EXISTS sm_sessions (
+                    stream_id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    full_jid TEXT NOT NULL,
+                    inbound_count {bigint} NOT NULL,
+                    outbound_count {bigint} NOT NULL,
+                    last_acked {bigint} NOT NULL,
+                    max_resume_secs {bigint},
+                    detached_at_ms {bigint} NOT NULL,
+                    max_resume_duration_ms {bigint} NOT NULL,
+                    carbons_enabled INTEGER NOT NULL,
+                    roster_interested INTEGER NOT NULL,
+                    presence_available INTEGER NOT NULL,
+                    presence_show TEXT,
+                    presence_status TEXT,
+                    presence_priority INTEGER NOT NULL
+                )
+                "#
+            ),
             (),
         )
         .await?;
         self.execute(
-            r#"
-            CREATE TABLE IF NOT EXISTS sm_unacked (
-                stream_id TEXT NOT NULL,
-                sequence INTEGER NOT NULL,
-                stanza_xml TEXT NOT NULL,
-                original_receipt_at_ms INTEGER NOT NULL,
-                PRIMARY KEY (stream_id, sequence)
-            )
-            "#,
+            &format!(
+                r#"
+                CREATE TABLE IF NOT EXISTS sm_unacked (
+                    stream_id TEXT NOT NULL,
+                    sequence {bigint} NOT NULL,
+                    stanza_xml TEXT NOT NULL,
+                    original_receipt_at_ms {bigint} NOT NULL,
+                    PRIMARY KEY (stream_id, sequence)
+                )
+                "#
+            ),
             (),
         )
         .await?;
