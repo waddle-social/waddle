@@ -1053,6 +1053,8 @@ async fn interpret_with_depth(
                 recipient,
                 payload,
                 original_receipt_at,
+                sender,
+                original_id,
             } => {
                 // XEP-0160 §3 step 2/4 — persist for later delivery.
                 // The classifier and OfflineDeliveryHandler have already
@@ -1080,17 +1082,33 @@ async fn interpret_with_depth(
                         );
                     }
                     Ok(waddle_xmpp::pending_delivery::InsertOutcome::QuotaExceeded) => {
-                        // XEP-0160 §3 step 3: server returns
-                        // <service-unavailable/> to the sender. The
-                        // bounce wire-shape is owned by the routing
-                        // layer; here we surface the quota event so a
-                        // future arm can consume and emit the bounce.
-                        // For now, log loudly so production can spot
-                        // the unhandled case.
+                        // XEP-0160 §3 step 3 + RFC 6120 §8.3.
+                        // Bounce <service-unavailable/> back to sender.
+                        let bounce = build_offline_unavailable_bounce(
+                            &recipient,
+                            &sender,
+                            original_id.as_deref(),
+                        );
+                        let bounce_stanza = waddle_xmpp::Stanza::Message(bounce);
+                        match sender.clone().try_into_full() {
+                            Ok(full) => {
+                                let _ =
+                                    deps.connection_registry.send_to(&full, bounce_stanza).await;
+                            }
+                            Err(bare) => {
+                                for full in deps.connection_registry.get_resources_for_user(&bare) {
+                                    let _ = deps
+                                        .connection_registry
+                                        .send_to(&full, bounce_stanza.clone())
+                                        .await;
+                                }
+                            }
+                        }
                         warn!(
                             recipient = %recipient,
-                            "pending_delivery quota exceeded — XEP-0160 §3 step 3 \
-                             service-unavailable bounce path not yet wired"
+                            sender = %sender,
+                            "pending_delivery quota exceeded — bounced \
+                             <service-unavailable/> to sender per XEP-0160 §3 step 3"
                         );
                     }
                     Err(error) => {
@@ -1171,6 +1189,34 @@ async fn interpret_with_depth(
 /// matches `to` against the bound bare JID — the resource value is
 /// irrelevant for locality, and the synthetic resource never reaches
 /// the wire (no `SendStanza` frames bubble out).
+/// Build a `<message type='error'>` bounce for the XEP-0160 §3 step 3
+/// "queue full" branch. Wire shape per RFC 6120 §8.3 + XEP-0160 §3
+/// step 3 — the original payload is NOT echoed back here because
+/// `pending_delivery` does not retain the original stanza beyond what's
+/// already in MAM (Archived) or in the Transient row; for the bounce
+/// the typed sender / id pair is sufficient to identify the message
+/// for the sender's client.
+fn build_offline_unavailable_bounce(
+    recipient: &jid::BareJid,
+    sender: &jid::Jid,
+    original_id: Option<&str>,
+) -> xmpp_parsers::message::Message {
+    use xmpp_parsers::minidom::Element;
+    let from_jid = jid::Jid::from(recipient.clone());
+    let mut bounce = xmpp_parsers::message::Message::new(Some(sender.clone()));
+    bounce.from = Some(from_jid);
+    bounce.id = original_id.map(str::to_string);
+    bounce.type_ = xmpp_parsers::message::MessageType::Error;
+    let error = Element::builder("error", "jabber:client")
+        .attr("type", "cancel")
+        .append(
+            Element::builder("service-unavailable", "urn:ietf:params:xml:ns:xmpp-stanzas").build(),
+        )
+        .build();
+    bounce.payloads.push(error);
+    bounce
+}
+
 async fn run_headless_recipient_pass(
     deps: &Deps<'_>,
     recipient_bare: &jid::BareJid,
