@@ -40,7 +40,13 @@ export default defineConfig({
       },
     },
     optimizeDeps: {
-      include: ["events", "@waddle/xmpp-client-wasm"],
+      include: ["events"],
+      // Exclude the local WASM package from esbuild pre-bundling. Pre-bundling
+      // produces a stable v= cache-buster hash derived from the lock file rather
+      // than file mtime, so the browser never re-fetches after a WASM rebuild.
+      // Serving the package directly lets Vite use mtime-based cache busting so
+      // a fresh REBUILD_WASM=1 build is always picked up without a hard refresh.
+      exclude: ["@waddle/xmpp-client-wasm"],
     },
   },
 
