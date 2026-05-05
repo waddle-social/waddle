@@ -1268,6 +1268,51 @@ async fn create_router(
                     "SM janitor: cleaning up expired detached sessions"
                 );
                 for session in drained {
+                    // Q6 promotion (issue #209 slice d phase 4):
+                    // before tearing down per-session state, walk the
+                    // session's unacked queue and promote each stanza
+                    // via classify_dm_intake → alt-resource → offline-
+                    // storage → service-unavailable bounce. XEP-0198
+                    // §5 line 364: "treat unacknowledged stanzas in
+                    // the same way that it would treat a stanza sent
+                    // to an unavailable resource".
+                    let blocklist = match state
+                        .deps
+                        .protocol
+                        .blocking_storage
+                        .list_blocked_jids(&session.jid.to_bare())
+                        .await
+                    {
+                        Ok(jids) => waddle_xmpp::protocol::session_state::Blocklist::new(jids),
+                        Err(error) => {
+                            warn!(
+                                jid = %session.jid,
+                                error = %error,
+                                "SM janitor: blocklist load failed; promoting with empty blocklist"
+                            );
+                            waddle_xmpp::protocol::session_state::Blocklist::empty()
+                        }
+                    };
+                    let summary = crate::sm_promotion::promote_session_unacked(
+                        &session,
+                        &state.deps.protocol.connection_registry,
+                        &state.deps.protocol.pending_delivery_storage,
+                        &blocklist,
+                        chrono::Utc::now(),
+                    )
+                    .await;
+                    if summary.queued + summary.redelivered + summary.bounced > 0 {
+                        info!(
+                            jid = %session.jid,
+                            redelivered = summary.redelivered,
+                            queued = summary.queued,
+                            bounced = summary.bounced,
+                            dropped = summary.dropped,
+                            unparseable = summary.unparseable,
+                            "SM janitor: Q6 promotion completed"
+                        );
+                    }
+
                     if session.presence_available {
                         routes::websocket::handlers::presence::broadcast_unavailable_for_expired_detached_session(
                             &state,
