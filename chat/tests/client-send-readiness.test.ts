@@ -2,8 +2,8 @@ import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { EventEmitter } from "events";
 import { ref } from "vue";
 import type { WaddleSession } from "../src/lib/server-auth";
-import { useDmMessaging } from "../src/composables/useDmMessaging";
-import { useMessaging } from "../src/composables/useMessaging";
+import { useDirectMessages } from "../src/dms/messages";
+import { useChannelMessages } from "../src/channels/messages";
 import { BrowserXmppClient, roomBareJidFor, type InboxEntry } from "../src/lib/xmpp-client";
 import { listQueuedDmMessages, listQueuedRoomMessages } from "../src/lib/outbound-queue-store";
 import { handlerStubs } from "./helpers/xmpp-client-mock";
@@ -401,7 +401,7 @@ describe("optimistic UI waits for successful sends", () => {
     const sendGroupMessage = mock(async () => ({ id: "queued-room-1", state: "queued" as const }));
     const sendChatState = mock(async () => undefined);
     const actionError = ref("");
-    const messaging = useMessaging(
+    const messaging = useChannelMessages(
       ref(session()),
       ref(null),
       ref({ ...handlerStubs(), sendGroupMessage, sendChatState } as never),
@@ -428,7 +428,7 @@ describe("optimistic UI waits for successful sends", () => {
     const sendGroupMessage = mock(async () => ({ id: "thread-marker-1", state: "sending" as const }));
     const sendChatState = mock(async () => undefined);
     const actionError = ref("");
-    const messaging = useMessaging(
+    const messaging = useChannelMessages(
       ref(session()),
       ref(null),
       ref({ ...handlerStubs(), sendGroupMessage, sendChatState } as never),
@@ -463,7 +463,7 @@ describe("optimistic UI waits for successful sends", () => {
     const sendDirectMessage = mock(async () => ({ id: "queued-dm-1", state: "queued" as const }));
     const sendDmChatState = mock(async () => undefined);
     const actionError = ref("");
-    const messaging = useDmMessaging(
+    const messaging = useDirectMessages(
       ref(session()),
       ref({ sendDirectMessage, sendDmChatState } as never),
       ref("bob@example.com"),
@@ -489,7 +489,7 @@ describe("optimistic UI waits for successful sends", () => {
       throw new Error("typing unavailable");
     });
     const actionError = ref("");
-    const messaging = useMessaging(
+    const messaging = useChannelMessages(
       ref(session()),
       ref(null),
       ref({ ...handlerStubs(), sendGroupMessage, sendChatState } as never),

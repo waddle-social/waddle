@@ -4,7 +4,7 @@ import { Bell, BellOff, ChevronUp, LogOut, Settings } from "lucide-vue-next";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
 import ThemeSwitcher from "@/components/chat/ThemeSwitcher.vue";
 import VersionFooter from "@/components/chat/VersionFooter.vue";
-import type { ServerVersion } from "@/composables/useVersion";
+import type { XmppServerVersion } from "@/shell/version";
 import type { WaddleSession } from "@/lib/server-auth";
 
 const props = defineProps<{
@@ -15,7 +15,7 @@ const props = defineProps<{
   totalMentionCount?: number;
   compact?: boolean;
   webCommitSha?: string;
-  serverVersion?: ServerVersion | null;
+  serverVersion?: XmppServerVersion | null;
 }>();
 
 const emit = defineEmits<{

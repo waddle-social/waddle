@@ -1,8 +1,8 @@
 import { describe, expect, mock, test } from "bun:test";
 import { ref } from "vue";
 import type { WaddleSession } from "../src/lib/server-auth";
-import { useDmMessaging } from "../src/composables/useDmMessaging";
-import { useMessaging } from "../src/composables/useMessaging";
+import { useDirectMessages } from "../src/dms/messages";
+import { useChannelMessages } from "../src/channels/messages";
 import { handlerStubs } from "./helpers/xmpp-client-mock";
 import type { LiveDmMessage, LiveRoomMessage } from "../src/lib/xmpp-client";
 
@@ -20,7 +20,7 @@ describe("edit targeting", () => {
   test("room edits target the XEP-0308 correction id, not the rendered stanza id", async () => {
     const sendCorrection = mock(async () => "edit-1");
     const actionError = ref("");
-    const messaging = useMessaging(
+    const messaging = useChannelMessages(
       ref(session()),
       ref(null),
       ref({ ...handlerStubs(), sendCorrection } as never),
@@ -62,7 +62,7 @@ describe("edit targeting", () => {
   test("room corrections from a different occupant do not rewrite the target", async () => {
     let onMessage: ((msg: LiveRoomMessage) => void) | null = null;
     const actionError = ref("");
-    const messaging = useMessaging(
+    const messaging = useChannelMessages(
       ref(session()),
       ref(null),
       ref({
@@ -111,7 +111,7 @@ describe("edit targeting", () => {
   test("room corrections require the same full occupant JID even when real bare JID matches", () => {
     let onMessage: ((msg: LiveRoomMessage) => void) | null = null;
     const actionError = ref("");
-    const messaging = useMessaging(
+    const messaging = useChannelMessages(
       ref(session()),
       ref(null),
       ref({
@@ -162,7 +162,7 @@ describe("edit targeting", () => {
   test("room corrections apply when a real author JID is known and the occupant JID matches", () => {
     let onMessage: ((msg: LiveRoomMessage) => void) | null = null;
     const actionError = ref("");
-    const messaging = useMessaging(
+    const messaging = useChannelMessages(
       ref(session()),
       ref(null),
       ref({
@@ -214,7 +214,7 @@ describe("edit targeting", () => {
   test("DM edits target the XEP-0308 correction id, not the rendered stanza id", async () => {
     const sendDmCorrection = mock(async () => "edit-1");
     const actionError = ref("");
-    const messaging = useDmMessaging(
+    const messaging = useDirectMessages(
       ref(session()),
       ref({ sendDmCorrection } as never),
       ref("bob@example.com"),
@@ -251,7 +251,7 @@ describe("edit targeting", () => {
 
   test("DM corrections from a different bare JID do not rewrite the target", () => {
     const actionError = ref("");
-    const messaging = useDmMessaging(
+    const messaging = useDirectMessages(
       ref(session()),
       ref({} as never),
       ref("bob@example.com"),

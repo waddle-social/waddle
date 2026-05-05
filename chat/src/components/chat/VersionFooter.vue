@@ -1,10 +1,10 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import { extractServerSha, extractServerShortVersion, type ServerVersion } from "@/composables/useVersion";
+import { extractServerCommitSha, extractServerReleaseVersion, type XmppServerVersion } from "@/shell/version";
 
 const props = defineProps<{
   webCommitSha?: string;
-  serverVersion?: ServerVersion | null;
+  serverVersion?: XmppServerVersion | null;
   layout?: "detail" | "inline";
 }>();
 
@@ -12,10 +12,10 @@ const layout = computed(() => props.layout ?? "detail");
 
 const webShortSha = computed(() => (props.webCommitSha ?? "unknown").slice(0, 7));
 const serverShortSha = computed(() => {
-  const sha = extractServerSha(props.serverVersion ?? null);
+  const sha = extractServerCommitSha(props.serverVersion ?? null);
   if (sha) return sha.slice(0, 7);
   if (!props.serverVersion) return "…";
-  return extractServerShortVersion(props.serverVersion) ?? "unknown";
+  return extractServerReleaseVersion(props.serverVersion) ?? "unknown";
 });
 const tooltip = computed(
   () => `web ${props.webCommitSha ?? "unknown"}\nserver ${props.serverVersion?.version ?? "unknown"}`,

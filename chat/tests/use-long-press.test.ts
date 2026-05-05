@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { effectScope } from "vue";
-import { useLongPress } from "../src/composables/useLongPress";
+import { useLongPress } from "../src/ui/gestures/long-press";
 
 type PointerInit = {
   pointerId?: number;

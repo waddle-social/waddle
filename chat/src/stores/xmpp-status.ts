@@ -9,7 +9,7 @@ export const OFFLINE_SNAPSHOT: XmppStatusSnapshot = {
 /**
  * Authoritative connection status shared across the component tree.
  *
- * Lives outside `useMessaging` so it survives `ChatApp` remounts on route
+ * Lives outside `useChannelMessages` so it survives `ChatApp` remounts on route
  * transitions (e.g. /settings -> back). The single writer is `XmppProvider`
  * (persisted via Astro `transition:persist`), which registers one
  * `setStatusHandler` on the `BrowserXmppClient` and mirrors every snapshot

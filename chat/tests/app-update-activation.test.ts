@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
-import { useAppUpdate } from "../src/composables/useAppUpdate";
+import { useServiceWorkerUpdate } from "../src/shell/service-worker-update";
 
 class FakeServiceWorker extends EventTarget {
 	state: ServiceWorkerState;
@@ -104,7 +104,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-	useAppUpdate().stop();
+	useServiceWorkerUpdate().stop();
 	Date.now = originalDateNow;
 
 	if (originalWindow === undefined) {
@@ -138,9 +138,9 @@ afterEach(() => {
 	}
 });
 
-describe("useAppUpdate activation flow", () => {
+describe("useServiceWorkerUpdate activation flow", () => {
 	test("tracks an installing worker until it becomes a waiting refresh", async () => {
-		const appUpdate = useAppUpdate();
+		const appUpdate = useServiceWorkerUpdate();
 		const registration = new FakeServiceWorkerRegistration();
 		const installingWorker = new FakeServiceWorker("installing");
 		serviceWorker.registration =
@@ -166,7 +166,7 @@ describe("useAppUpdate activation flow", () => {
 	});
 
 	test("checks for updates again on focus and polling, then cleans up listeners", async () => {
-		const appUpdate = useAppUpdate();
+		const appUpdate = useServiceWorkerUpdate();
 		const registration = new FakeServiceWorkerRegistration();
 		serviceWorker.registration =
 			registration as unknown as ServiceWorkerRegistration;
@@ -198,7 +198,7 @@ describe("useAppUpdate activation flow", () => {
 	});
 
 	test("deduplicates repeat apply requests while activation is pending", async () => {
-		const appUpdate = useAppUpdate();
+		const appUpdate = useServiceWorkerUpdate();
 		const waitingWorker = new FakeServiceWorker("installed");
 		const registration = new FakeServiceWorkerRegistration();
 		registration.waiting = waitingWorker as unknown as ServiceWorker;
@@ -219,7 +219,7 @@ describe("useAppUpdate activation flow", () => {
 	});
 
 	test("reloads the current tab after controllerchange and treats repeat clicks as safe", async () => {
-		const appUpdate = useAppUpdate();
+		const appUpdate = useServiceWorkerUpdate();
 		const waitingWorker = new FakeServiceWorker("installed");
 		const activeWorker = new FakeServiceWorker("activated");
 		const registration = new FakeServiceWorkerRegistration();
@@ -242,7 +242,7 @@ describe("useAppUpdate activation flow", () => {
 	});
 
 	test("triggers an update check when the document becomes visible after the throttle window", async () => {
-		const appUpdate = useAppUpdate();
+		const appUpdate = useServiceWorkerUpdate();
 		const registration = new FakeServiceWorkerRegistration();
 		serviceWorker.registration =
 			registration as unknown as ServiceWorkerRegistration;
@@ -277,7 +277,7 @@ describe("useAppUpdate activation flow", () => {
 	});
 
 	test("does not trigger an update check when the document becomes hidden", async () => {
-		const appUpdate = useAppUpdate();
+		const appUpdate = useServiceWorkerUpdate();
 		const registration = new FakeServiceWorkerRegistration();
 		serviceWorker.registration =
 			registration as unknown as ServiceWorkerRegistration;
@@ -298,7 +298,7 @@ describe("useAppUpdate activation flow", () => {
 	});
 
 	test("concurrent checkForUpdate calls share a single inflight update() call", async () => {
-		const appUpdate = useAppUpdate();
+		const appUpdate = useServiceWorkerUpdate();
 		const registration = new FakeServiceWorkerRegistration();
 		serviceWorker.registration =
 			registration as unknown as ServiceWorkerRegistration;
@@ -316,7 +316,7 @@ describe("useAppUpdate activation flow", () => {
 	});
 
 	test("stop() while a check is inflight abandons the result via lifecycle token", async () => {
-		const appUpdate = useAppUpdate();
+		const appUpdate = useServiceWorkerUpdate();
 		const registration = new FakeServiceWorkerRegistration();
 		serviceWorker.registration =
 			registration as unknown as ServiceWorkerRegistration;
@@ -334,7 +334,7 @@ describe("useAppUpdate activation flow", () => {
 	});
 
 	test("does not reload when another source changes the controller", async () => {
-		const appUpdate = useAppUpdate();
+		const appUpdate = useServiceWorkerUpdate();
 		const registration = new FakeServiceWorkerRegistration();
 		serviceWorker.registration =
 			registration as unknown as ServiceWorkerRegistration;
@@ -347,7 +347,7 @@ describe("useAppUpdate activation flow", () => {
 	});
 
 	test("resets applying state when skip-waiting fails", async () => {
-		const appUpdate = useAppUpdate();
+		const appUpdate = useServiceWorkerUpdate();
 		const waitingWorker = new FakeServiceWorker("installed");
 		waitingWorker.postMessage = mock(() => {
 			throw new Error("boom");

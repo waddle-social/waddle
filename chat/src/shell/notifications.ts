@@ -26,7 +26,7 @@ interface DmNotificationOptions {
   onNavigate?: (peerJid: string) => void;
 }
 
-export function useNotifications() {
+export function usePushNotifications() {
   const permissionState = ref<NotificationPermission>(
     hasNotificationApi ? Notification.permission : "denied",
   );

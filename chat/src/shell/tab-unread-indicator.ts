@@ -26,7 +26,7 @@ interface FaviconSnapshot {
   sizes: string | null;
 }
 
-export function useTabUnreadIndicator(
+export function useChatTabUnreadIndicator(
   unreadCount: Readonly<Ref<number>>,
   options: TabUnreadIndicatorOptions = {},
 ) {

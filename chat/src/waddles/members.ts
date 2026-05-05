@@ -3,7 +3,7 @@ import type { MemberSummary, UserSearchResult } from "@/lib/chat-types";
 import type { EditableRole } from "@/lib/chat-ui";
 import type { BrowserXmppClient } from "@/lib/xmpp-client";
 
-export function useMembers(
+export function useWaddleMembers(
   xmppClient: Ref<BrowserXmppClient | null>,
   activeSpaceId: Ref<string | null>,
   activeChannelId: Ref<string | null>,

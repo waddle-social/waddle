@@ -6,7 +6,7 @@ function readFocused(): boolean {
   return typeof document.hasFocus === "function" ? document.hasFocus() : true;
 }
 
-export function useWindowVisibility(): { isWindowFocused: Readonly<Ref<boolean>> } {
+export function useChatWindowVisibility(): { isWindowFocused: Readonly<Ref<boolean>> } {
   const isWindowFocused = ref(readFocused());
 
   if (typeof window === "undefined") {

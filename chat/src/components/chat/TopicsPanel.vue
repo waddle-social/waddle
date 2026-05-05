@@ -3,7 +3,7 @@ import { computed, watch } from "vue";
 import { Hash, LayoutDashboard, MessagesSquare, Plus, Settings, Users, ChevronDown, MessageCircle } from "lucide-vue-next";
 import { isForumChannel as detectForumChannel } from "@/lib/channel-types";
 import type { ChannelSummary, SpaceSummary } from "@/lib/chat-types";
-import type { ThreadInboxEntry } from "@/composables/useChannelUnread";
+import type { ChannelThreadInboxEntry } from "@/channels/inbox";
 import { groupChannelsBySpace } from "@/lib/channel-grouping";
 import type { DiscoveredExtensionRoute } from "@/lib/xmpp/extension-commands";
 
@@ -19,7 +19,7 @@ const props = defineProps<{
   activeChannelJids: Set<string>;
   collapsedGroupIds: Set<string>;
   channelUnreadMap?: Record<string, { unread: number; mentions: number }>;
-  threadEntriesFn?: (roomJid: string) => ThreadInboxEntry[];
+  threadEntriesFn?: (roomJid: string) => ChannelThreadInboxEntry[];
   roomAvatarHashes?: Record<string, string>;
   extensionRoutes?: DiscoveredExtensionRoute[];
   activeExtensionRoute?: { channelId: string; pluginId: string; routeId: string } | null;
@@ -90,7 +90,7 @@ function channelRowLabel(
   })}`;
 }
 
-function threadRowLabel(thread: ThreadInboxEntry) {
+function threadRowLabel(thread: ChannelThreadInboxEntry) {
   const summary = thread.unread > 0 ? `${thread.unread} unread` : "no unread activity";
   const replies = `${thread.replyCount} ${thread.replyCount === 1 ? "reply" : "replies"}`;
   return `${truncateTitle(thread.title)}, thread, ${replies}, ${summary}`;
@@ -100,7 +100,7 @@ function channelIcon(channel: ChannelSummary) {
   return detectForumChannel(channel) ? MessagesSquare : Hash;
 }
 
-function channelThreads(channel: ChannelSummary): ThreadInboxEntry[] {
+function channelThreads(channel: ChannelSummary): ChannelThreadInboxEntry[] {
   if (!props.threadEntriesFn) return [];
   if (channel.jid) return props.threadEntriesFn(channel.jid);
 

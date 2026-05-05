@@ -2,7 +2,7 @@ import { describe, expect, mock, test } from "bun:test";
 import { ref } from "vue";
 import type { ChannelSummary } from "../src/lib/chat-types";
 import type { WaddleSession } from "../src/lib/server-auth";
-import { useMessaging } from "../src/composables/useMessaging";
+import { useChannelMessages } from "../src/channels/messages";
 import { handlerStubs } from "./helpers/xmpp-client-mock";
 
 function session(partial: Partial<WaddleSession> = {}): WaddleSession {
@@ -29,7 +29,7 @@ describe("forum composition", () => {
     const sendGroupMessage = mock(async () => ({ id: "topic-1", state: "sending" as const }));
     const sendChatState = mock(async () => undefined);
     const actionError = ref("");
-    const messaging = useMessaging(
+    const messaging = useChannelMessages(
       ref(session()),
       ref(null),
       ref({ ...handlerStubs(), sendGroupMessage, sendChatState } as never),
@@ -69,7 +69,7 @@ describe("forum composition", () => {
     const sendGroupMessage = mock(async () => ({ id: "topic-1", state: "sending" as const }));
     const sendChatState = mock(async () => undefined);
     const actionError = ref("");
-    const messaging = useMessaging(
+    const messaging = useChannelMessages(
       ref(session()),
       ref(null),
       ref({ ...handlerStubs(), sendGroupMessage, sendChatState } as never),
@@ -101,7 +101,7 @@ describe("forum composition", () => {
     const sendGroupMessage = mock(async () => ({ id: "topic-1", state: "sending" as const }));
     const sendChatState = mock(async () => undefined);
     const actionError = ref("");
-    const messaging = useMessaging(
+    const messaging = useChannelMessages(
       ref(session()),
       ref(null),
       ref({ ...handlerStubs(), sendGroupMessage, sendChatState } as never),
@@ -125,7 +125,7 @@ describe("forum composition", () => {
     const sendGroupMessage = mock(async () => ({ id: "reply-2", state: "sending" as const }));
     const sendChatState = mock(async () => undefined);
     const actionError = ref("");
-    const messaging = useMessaging(
+    const messaging = useChannelMessages(
       ref(session()),
       ref(null),
       ref({ ...handlerStubs(), sendGroupMessage, sendChatState } as never),
@@ -199,7 +199,7 @@ describe("forum composition", () => {
     const sendGroupMessage = mock(async () => ({ id: "reply-2", state: "sending" as const }));
     const sendChatState = mock(async () => undefined);
     const actionError = ref("");
-    const messaging = useMessaging(
+    const messaging = useChannelMessages(
       ref(session()),
       ref(null),
       ref({ ...handlerStubs(), sendGroupMessage, sendChatState } as never),

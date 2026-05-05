@@ -2,7 +2,7 @@
 import { Layers, MessageCircle } from "lucide-vue-next";
 import type { SpaceSummary } from "@/lib/chat-types";
 import type { WaddleSession } from "@/lib/server-auth";
-import type { ServerVersion } from "@/composables/useVersion";
+import type { XmppServerVersion } from "@/shell/version";
 import ProfilePanel from "@/components/chat/ProfilePanel.vue";
 
 defineProps<{
@@ -17,7 +17,7 @@ defineProps<{
   totalMentionCount?: number;
   horizontal?: boolean;
   webCommitSha?: string;
-  serverVersion?: ServerVersion | null;
+  serverVersion?: XmppServerVersion | null;
 }>();
 
 const emit = defineEmits<{

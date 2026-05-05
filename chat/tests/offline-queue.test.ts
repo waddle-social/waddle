@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { ref } from "vue";
 import type { WaddleSession } from "../src/lib/server-auth";
-import { useDmMessaging } from "../src/composables/useDmMessaging";
-import { useMessaging } from "../src/composables/useMessaging";
+import { useDirectMessages } from "../src/dms/messages";
+import { useChannelMessages } from "../src/channels/messages";
 import { BrowserXmppClient, roomBareJidFor } from "../src/lib/xmpp-client";
 import {
   enqueueQueuedMessage,
@@ -207,7 +207,7 @@ describe("offline outbound queue hydration", () => {
     });
 
     const actionError = ref("");
-    const messaging = useMessaging(
+    const messaging = useChannelMessages(
       ref(session()),
       ref(null),
       ref(null),
@@ -241,7 +241,7 @@ describe("offline outbound queue hydration", () => {
     });
 
     const actionError = ref("");
-    const messaging = useDmMessaging(
+    const messaging = useDirectMessages(
       ref(session()),
       ref(null),
       ref("bob@example.com"),

@@ -13,7 +13,7 @@ function setScrollDirection(value: ScrollDirectionMode) {
   writeStoredScrollDirection(value);
 }
 
-export function useScrollDirection() {
+export function useScrollDirectionPreference() {
   return {
     mode,
     setScrollDirection,

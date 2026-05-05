@@ -1,7 +1,7 @@
 import { ref } from "vue";
 import type { AdminTab } from "@/lib/chat-ui";
 
-export function useUiState() {
+export function useChatShellState() {
   const activePage = ref<"dashboard" | "chat" | "settings" | "extension">("dashboard");
   const adminTab = ref<AdminTab>("rooms");
   const sidebarMode = ref<"channels" | "dms">("channels");

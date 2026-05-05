@@ -31,7 +31,7 @@ function sortByRecent(conversations: DmConversation[]): DmConversation[] {
   });
 }
 
-export function useDmConversations(
+export function useDirectMessageConversations(
   session: Ref<WaddleSession | null>,
   xmppClient: Ref<BrowserXmppClient | null>,
 ) {

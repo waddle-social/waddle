@@ -24,29 +24,23 @@ import EmojiPicker from "@/components/chat/EmojiPicker.vue";
 import ImageLightbox from "@/components/ui/ImageLightbox.vue";
 import {
   extensionCardDetails,
-  extensionActionStatusLabel,
   extensionPresentation,
   renderStyledBody,
   extensionSurfaceLabel,
-  isAudioFile,
-  isImageUrl,
-  isImageFile,
-  isPdfFile,
-  isVideoFile,
   type TimelineMessage,
   type ExtensionAnnotationAction,
   type MarkupSpan,
   type MessageReference,
-  type TimelineSharedFile,
 } from "@/lib/chat-ui";
 import { mentionMatchesUsername } from "@/lib/mentions";
 import { richMessageToTiptap, tiptapToRichMessage } from "@/lib/rich-message";
 import { applyShikiToCodeBlocks } from "@/lib/shiki";
-import { decryptEncryptedAttachment, encryptedAttachmentKey, hasEncryptedAttachmentMetadata } from "@/lib/xmpp/encrypted-attachments";
-import { extensionCommandOutcome } from "@/lib/xmpp/extension-commands";
 import type { OccupantHat, OccupantPresence } from "@/lib/xmpp-client";
-import { formatTimeOfDay } from "@/composables/useMessaging";
-import { useLongPress } from "@/composables/useLongPress";
+import { formatTimelineTimeOfDay } from "@/channels/timeline";
+import { formatFileSize, useMessageAttachments } from "@/channels/message-attachments";
+import { useExtensionAnnotationActions } from "@/channels/extension-annotation-actions";
+import { useLongPress } from "@/ui/gestures/long-press";
+import type { ExtensionCommandResult } from "@/lib/xmpp/extension-commands";
 import { $desktopToolbarOwnerId } from "@/stores/message-toolbar";
 import { QUICK_REACTION_EMOJIS } from "@/lib/reaction-mode";
 
@@ -90,7 +84,7 @@ const props = defineProps<{
   hideThreadChip?: boolean;
   grouped?: boolean;
   reactionModeSelected?: boolean;
-  invokeExtensionAction?: (action: ExtensionAnnotationAction) => Promise<unknown>;
+  invokeExtensionAction?: (action: ExtensionAnnotationAction) => Promise<ExtensionCommandResult>;
 }>();
 
 const emit = defineEmits<{
@@ -104,6 +98,8 @@ const emit = defineEmits<{
 }>();
 
 const quickEmojis = QUICK_REACTION_EMOJIS;
+const messageRef = computed(() => props.message);
+const invokeExtensionActionRef = computed(() => props.invokeExtensionAction);
 
 const seniorHat = computed<OccupantHat | null>(() => {
   if (!props.hats || props.hats.length === 0) return null;
@@ -124,248 +120,40 @@ const styledBodyRef = ref<HTMLDivElement | null>(null);
 const setStyledBodyRef = (el: HTMLDivElement | null) => {
   styledBodyRef.value = el;
 };
-const sharedFiles = computed(() => props.message.sharedFiles ?? []);
 const extensionAnnotations = computed(() => props.message.extensionAnnotations ?? []);
-const isGif = computed(() => sharedFiles.value.length === 0 && isImageUrl(props.message.body));
-type ExtensionInvokeState = "loading" | "success" | "warning" | "error";
-const extensionInvokeStates = ref<Record<string, { state: ExtensionInvokeState; detail?: string }>>({});
-
-function extensionActionKey(annotationId: string, action: ExtensionAnnotationAction): string {
-  return `${annotationId}:${action.launch?.id ?? action.route}:${action.label}`;
-}
-
-function extensionActionState(annotationId: string, action: ExtensionAnnotationAction) {
-  return extensionInvokeStates.value[extensionActionKey(annotationId, action)];
-}
-
-function setExtensionActionState(
-  annotationId: string,
-  action: ExtensionAnnotationAction,
-  state?: { state: ExtensionInvokeState; detail?: string },
-) {
-  const next = { ...extensionInvokeStates.value };
-  const key = extensionActionKey(annotationId, action);
-  if (state) next[key] = state;
-  else delete next[key];
-  extensionInvokeStates.value = next;
-}
-
-async function invokeExtension(annotationId: string, action: ExtensionAnnotationAction) {
-  if (!props.invokeExtensionAction || !action.launch) {
-    setExtensionActionState(annotationId, action, { state: "error", detail: "This action cannot be invoked." });
-    return;
-  }
-  setExtensionActionState(annotationId, action, { state: "loading" });
-  try {
-    const result = await props.invokeExtensionAction(action);
-    const outcome = extensionCommandOutcome(result);
-    setExtensionActionState(annotationId, action, outcome);
-  } catch (error) {
-    setExtensionActionState(annotationId, action, {
-      state: "error",
-      detail: error instanceof Error ? error.message : "Action failed.",
-    });
-  }
-}
-
-function actionStatusLabel(annotationId: string, action: ExtensionAnnotationAction): string {
-  return extensionActionStatusLabel(extensionActionState(annotationId, action)?.state);
-}
-
-const imageAttachments = computed(() =>
-  sharedFiles.value.filter((f) =>
-    f.disposition === "inline" && isImageFile(f.mediaType, f.url),
-  ),
-);
-const videoAttachments = computed(() =>
-  sharedFiles.value.filter((f) =>
-    f.disposition === "inline"
-    && !isImageFile(f.mediaType, f.url)
-    && isVideoFile(f.mediaType, f.url),
-  ),
-);
-const audioAttachments = computed(() =>
-  sharedFiles.value.filter((f) =>
-    f.disposition === "inline"
-    && !isImageFile(f.mediaType, f.url)
-    && !isVideoFile(f.mediaType, f.url)
-    && isAudioFile(f.mediaType, f.url),
-  ),
-);
-const pdfAttachments = computed(() =>
-  sharedFiles.value.filter((f) =>
-    f.disposition === "inline"
-    && !isImageFile(f.mediaType, f.url)
-    && !isVideoFile(f.mediaType, f.url)
-    && !isAudioFile(f.mediaType, f.url)
-    && isPdfFile(f.mediaType, f.url),
-  ),
-);
-const downloadableAttachments = computed(() =>
-  sharedFiles.value.filter((f) =>
-    f.disposition !== "inline"
-    || (
-      !isImageFile(f.mediaType, f.url)
-      && !isVideoFile(f.mediaType, f.url)
-      && !isAudioFile(f.mediaType, f.url)
-      && !isPdfFile(f.mediaType, f.url)
-    ),
-  ),
-);
-/** Display the user's text body when present; hide body when it's just the fallback URL for a single image. */
-const displayBody = computed(() => {
-  const body = props.message.body;
-  if (!body) return "";
-  if (sharedFiles.value.length === 0) return isGif.value ? "" : body;
-  const matchesAttachment = sharedFiles.value.some((f) => f.url === body.trim());
-  return matchesAttachment ? "" : body;
+const {
+  sharedFiles,
+  imageAttachments,
+  videoAttachments,
+  audioAttachments,
+  pdfAttachments,
+  downloadableAttachments,
+  displayBody,
+  isGif,
+  lightboxOpen,
+  lightboxIndex,
+  lightboxImages,
+  attachmentKey,
+  resolvedAttachmentUrl,
+  attachmentError,
+  isDecryptingAttachment,
+  openLightbox,
+  downloadAttachment,
+  cleanup: cleanupAttachments,
+} = useMessageAttachments(messageRef);
+const {
+  actionState: extensionActionState,
+  actionStatusLabel,
+  invokeExtension,
+} = useExtensionAnnotationActions({
+  annotations: extensionAnnotations,
+  invokeExtensionAction: invokeExtensionActionRef,
 });
-
-const lightboxOpen = ref(false);
-const lightboxIndex = ref(0);
-const decryptedAttachmentUrls = ref<Record<string, string>>({});
-const decryptedAttachmentErrors = ref<Record<string, string>>({});
-const decryptingAttachmentKeys = ref<Record<string, boolean>>({});
-
-function attachmentKey(file: TimelineSharedFile): string {
-  return hasEncryptedAttachmentMetadata(file) ? encryptedAttachmentKey(file) : file.url;
-}
-
-function setAttachmentFlag(state: typeof decryptingAttachmentKeys, key: string, value: boolean) {
-  const next = { ...state.value };
-  if (value) next[key] = true;
-  else delete next[key];
-  state.value = next;
-}
-
-function setAttachmentError(key: string, value?: string) {
-  const next = { ...decryptedAttachmentErrors.value };
-  if (value) next[key] = value;
-  else delete next[key];
-  decryptedAttachmentErrors.value = next;
-}
-
-function revokeAttachmentUrl(key: string) {
-  const current = decryptedAttachmentUrls.value[key];
-  if (!current) return;
-  URL.revokeObjectURL(current);
-  const next = { ...decryptedAttachmentUrls.value };
-  delete next[key];
-  decryptedAttachmentUrls.value = next;
-}
-
-function resolvedAttachmentUrl(file: TimelineSharedFile): string | null {
-  if (!hasEncryptedAttachmentMetadata(file)) return file.url;
-  return decryptedAttachmentUrls.value[attachmentKey(file)] ?? null;
-}
-
-function attachmentError(file: TimelineSharedFile): string | null {
-  return decryptedAttachmentErrors.value[attachmentKey(file)] ?? null;
-}
-
-function isDecryptingAttachment(file: TimelineSharedFile): boolean {
-  return !!decryptingAttachmentKeys.value[attachmentKey(file)];
-}
-
-async function ensureAttachmentReady(file: TimelineSharedFile, persist = false): Promise<string | null> {
-  if (!hasEncryptedAttachmentMetadata(file)) return file.url;
-  if (typeof window === "undefined" || typeof URL === "undefined") return null;
-  const key = attachmentKey(file);
-  const existing = decryptedAttachmentUrls.value[key];
-  if (existing) return existing;
-  if (decryptingAttachmentKeys.value[key]) return null;
-
-  setAttachmentFlag(decryptingAttachmentKeys, key, true);
-  setAttachmentError(key);
-  try {
-    const blob = await decryptEncryptedAttachment(file);
-    const objectUrl = URL.createObjectURL(blob);
-    if (!persist) return objectUrl;
-    const stillVisible = imageAttachments.value.some((attachment) => attachmentKey(attachment) === key);
-    if (!stillVisible) {
-      URL.revokeObjectURL(objectUrl);
-      return null;
-    }
-    decryptedAttachmentUrls.value = { ...decryptedAttachmentUrls.value, [key]: objectUrl };
-    return objectUrl;
-  } catch (error) {
-    setAttachmentError(key, error instanceof Error ? error.message : "Couldn't decrypt attachment.");
-    return null;
-  } finally {
-    setAttachmentFlag(decryptingAttachmentKeys, key, false);
-  }
-}
-
-const previewableAttachments = computed(() => [
-  ...imageAttachments.value,
-  ...videoAttachments.value,
-  ...audioAttachments.value,
-  ...pdfAttachments.value,
-]);
-
-watch(
-  previewableAttachments,
-  (attachments) => {
-    if (typeof window === "undefined") return;
-    const activeKeys = new Set(attachments.map((attachment) => attachmentKey(attachment)));
-    for (const key of Object.keys(decryptedAttachmentUrls.value)) {
-      if (!activeKeys.has(key)) revokeAttachmentUrl(key);
-    }
-    for (const attachment of attachments) {
-      if (hasEncryptedAttachmentMetadata(attachment)) {
-        void ensureAttachmentReady(attachment, true);
-      }
-    }
-  },
-  { immediate: true },
-);
-
-const lightboxImages = computed(() =>
-  imageAttachments.value.flatMap((f) => {
-    const resolvedUrl = resolvedAttachmentUrl(f);
-    if (!resolvedUrl) return [];
-    const img: { url: string; name?: string; width?: number; height?: number } = { url: resolvedUrl };
-    if (f.name) img.name = f.name;
-    if (f.width) img.width = f.width;
-    if (f.height) img.height = f.height;
-    return [img];
-  }),
-);
-
-function openLightbox(file: TimelineSharedFile) {
-  const resolvedUrl = resolvedAttachmentUrl(file);
-  if (!resolvedUrl) return;
-  const index = lightboxImages.value.findIndex((image) => image.url === resolvedUrl);
-  if (index < 0) return;
-  lightboxIndex.value = index;
-  lightboxOpen.value = true;
-}
-
-async function downloadAttachment(file: TimelineSharedFile) {
-  const downloadUrl = await ensureAttachmentReady(file);
-  if (!downloadUrl || typeof document === "undefined") return;
-  const link = document.createElement("a");
-  link.href = downloadUrl;
-  link.download = file.name ?? "attachment";
-  link.rel = "noopener noreferrer";
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  if (hasEncryptedAttachmentMetadata(file) && !decryptedAttachmentUrls.value[attachmentKey(file)]) {
-    setTimeout(() => URL.revokeObjectURL(downloadUrl), 60_000);
-  }
-}
 
 async function highlightMessageCodeBlocks() {
   const el = styledBodyRef.value;
   if (!el) return;
   await applyShikiToCodeBlocks(el);
-}
-
-function formatFileSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 const replyAuthorName = computed(() => {
@@ -645,11 +433,7 @@ onBeforeUnmount(() => {
 });
 
 onBeforeUnmount(() => {
-  if (typeof URL !== "undefined") {
-    for (const key of Object.keys(decryptedAttachmentUrls.value)) {
-      revokeAttachmentUrl(key);
-    }
-  }
+  cleanupAttachments();
   if (typeof window === "undefined") return;
   window.removeEventListener("pointerdown", onWindowPointerDown, true);
   window.removeEventListener("keydown", onWindowKeydown);
@@ -674,7 +458,7 @@ watch(
     :class="grouped ? 'chat-message-grouped' : ''"
   >
     <div v-if="grouped" class="chat-message-avatar-cell chat-message-time-gutter">
-      <span class="type-meta type-numeric text-muted-foreground/60">{{ formatTimeOfDay(message.createdAt) }}</span>
+      <span class="type-meta type-numeric text-muted-foreground/60">{{ formatTimelineTimeOfDay(message.createdAt) }}</span>
     </div>
     <AppAvatar
       v-else
@@ -689,7 +473,7 @@ watch(
       <div v-if="!grouped" class="chat-message-meta-row">
         <span class="type-message-author">{{ message.author }}</span>
         <span class="type-meta type-numeric text-muted-foreground">
-          {{ formatTimeOfDay(message.createdAt) }}
+          {{ formatTimelineTimeOfDay(message.createdAt) }}
         </span>
       </div>
       <p class="type-message-body italic text-muted-foreground">This message was deleted.</p>
@@ -725,7 +509,7 @@ watch(
     @contextmenu="onBubbleContextMenu"
   >
     <div v-if="grouped" class="chat-message-avatar-cell chat-message-time-gutter" aria-hidden="true">
-      <span class="type-meta type-numeric text-muted-foreground/60">{{ formatTimeOfDay(message.createdAt) }}</span>
+      <span class="type-meta type-numeric text-muted-foreground/60">{{ formatTimelineTimeOfDay(message.createdAt) }}</span>
     </div>
     <button
       v-else
@@ -746,7 +530,7 @@ watch(
           :title="hats.length > 1 ? hats.map(h => HAT_LABELS[h.uri] ?? h.title).join(' · ') : seniorHat.title"
         >{{ HAT_LABELS[seniorHat.uri] ?? seniorHat.title }}</span>
         <span class="type-meta type-numeric text-muted-foreground/60">
-          {{ formatTimeOfDay(message.createdAt) }}
+          {{ formatTimelineTimeOfDay(message.createdAt) }}
         </span>
         <span v-if="message.isEdited" class="type-meta text-muted-foreground/50">(edited)</span>
         <span

@@ -21,7 +21,7 @@ interface LoadStructureOptions {
   noChannelSelect?: boolean;
 }
 
-export function useWaddles(
+export function useWaddleDirectory(
   _api: Ref<null>,
   xmppClient: Ref<BrowserXmppClient | null>,
   session: Ref<WaddleSession | null>,

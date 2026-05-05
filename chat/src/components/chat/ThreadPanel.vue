@@ -7,25 +7,25 @@ import VirtualTimeline from "@/components/chat/VirtualTimeline.vue";
 import type { ExtensionAnnotationAction, TimelineMessage, MarkupSpan, MessageReference } from "@/lib/chat-ui";
 import type { MentionCandidate } from "@/lib/mentions";
 import type { OccupantHat, OccupantPresence, RoomHats, RoomPresence } from "@/lib/xmpp-client";
-import type { ThreadEntry, ThreadIndex } from "@/composables/useThreads";
-import { useScrollDirection } from "@/composables/useScrollDirection";
+import type { MessageThreadEntry, MessageThreadIndex } from "@/channels/threads";
+import { useScrollDirectionPreference } from "@/preferences/scroll-direction";
 import {
   isTopPinnedScrollDirection,
   orderTimelineForScrollDirection,
   type ScrollDirectionMode,
 } from "@/lib/scroll-direction";
 import { createPinnedEdgeScroller } from "@/lib/pinned-edge-scroll";
-import { formatDayDivider, isSameDay } from "@/composables/useMessaging";
+import { formatTimelineDayDivider, isSameTimelineDay } from "@/channels/timeline";
 
 const props = defineProps<{
   threadStack: string[];
-  threadIndex: ThreadIndex;
+  threadIndex: MessageThreadIndex;
   /**
    * Resolves a thread entry, synthesising an empty one when the id points
    * at a known message with no replies yet (e.g. a freshly-started
    * sub-thread). Returns undefined when the root hasn't been loaded.
    */
-  resolveEntry: (threadId: string) => ThreadEntry | undefined;
+  resolveEntry: (threadId: string) => MessageThreadEntry | undefined;
   currentUser?: string;
   avatarUrlByAuthor: Record<string, string | null>;
   authorJidByNick?: Record<string, string>;
@@ -71,7 +71,7 @@ const emit = defineEmits<{
   loadOlder: [threadId: string];
 }>();
 
-const { mode: scrollDirectionMode } = useScrollDirection();
+const { mode: scrollDirectionMode } = useScrollDirectionPreference();
 
 const activeThreadId = computed(() => props.threadStack[props.threadStack.length - 1] ?? null);
 const parentThreadId = computed(() =>
@@ -108,7 +108,7 @@ const threadDisplayMeta = computed(() => {
     if (!cur) continue;
     const prev = i > 0 ? sequence[i - 1] : null;
     if (!prev) continue;
-    const sameDay = isSameDay(prev.createdAt, cur.createdAt);
+    const sameDay = isSameTimelineDay(prev.createdAt, cur.createdAt);
     if (!sameDay) dayDivider.add(cur.id);
     if (
       sameDay
@@ -130,7 +130,7 @@ function showDayDividerBefore(messageId: string): boolean {
 }
 
 function dayDividerLabel(createdAt: string): string {
-  return formatDayDivider(createdAt);
+  return formatTimelineDayDivider(createdAt);
 }
 
 const isTopPinned = computed(() =>
@@ -225,7 +225,7 @@ function updateCurrentDayMarker() {
   }
 
   const createdAt = current.dataset.dayMarkerCreatedAt ?? current.dataset.messageCreatedAt;
-  currentDayMarkerLabel.value = createdAt ? formatDayDivider(createdAt) : "";
+  currentDayMarkerLabel.value = createdAt ? formatTimelineDayDivider(createdAt) : "";
 }
 
 function setScrollContainerRef(el: HTMLElement | null) {

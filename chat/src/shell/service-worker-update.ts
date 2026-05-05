@@ -309,7 +309,7 @@ function stop() {
 	resetState();
 }
 
-export function useAppUpdate() {
+export function useServiceWorkerUpdate() {
 	return {
 		registration,
 		installingState,

@@ -67,7 +67,7 @@ function consumeRedirectSession() {
   return sessionId ?? getStoredSessionId();
 }
 
-export function useAuth(defaultServerUrl: string) {
+export function useSessionAuth(defaultServerUrl: string) {
   const activeServerUrl = ref(normalizeServerUrl(defaultServerUrl));
   const providers = ref<AuthProvider[]>([]);
   const auth = createServerAuth(activeServerUrl.value);

@@ -5,7 +5,7 @@ const WEB_COMMIT_SHA = (import.meta.env.PUBLIC_COMMIT_SHA ?? "unknown").trim() |
 const SERVER_VERSION_RETRY_DELAY_MS = 5_000;
 const SERVER_VERSION_MAX_ATTEMPTS = 3;
 
-export interface ServerVersion {
+export interface XmppServerVersion {
   name?: string;
   version?: string;
   os?: string;
@@ -15,9 +15,9 @@ export interface ServerVersion {
  * Expose the web app's build-time commit SHA and the server's XEP-0092
  * software version so the sidebar can make deployment state visible.
  */
-export function useVersion(xmppClient: Ref<BrowserXmppClient | null>) {
+export function useDeploymentVersionInfo(xmppClient: Ref<BrowserXmppClient | null>) {
   const webCommitSha = ref(WEB_COMMIT_SHA);
-  const serverVersion = ref<ServerVersion | null>(null);
+  const serverVersion = ref<XmppServerVersion | null>(null);
 
   let fetchedForClient: BrowserXmppClient | null = null;
   let fetchGeneration = 0;
@@ -86,7 +86,7 @@ export function useVersion(xmppClient: Ref<BrowserXmppClient | null>) {
 const RAW_SHA_PATTERN = /^[0-9a-f]{6,}$/i;
 
 /** Extract a commit SHA from a raw XEP-0092 version or a legacy "0.1.0 (sha)" value. */
-export function extractServerSha(version: ServerVersion | null): string | null {
+export function extractServerCommitSha(version: XmppServerVersion | null): string | null {
   if (!version?.version) return null;
   const raw = version.version.trim();
   if (RAW_SHA_PATTERN.test(raw)) return raw;
@@ -99,7 +99,7 @@ export function extractServerSha(version: ServerVersion | null): string | null {
  * version. Used as a fallback when the SHA is missing or unparseable (e.g. a
  * build that couldn't stamp the git SHA and reports "0.1.0 (unknown)").
  */
-export function extractServerShortVersion(version: ServerVersion | null): string | null {
+export function extractServerReleaseVersion(version: XmppServerVersion | null): string | null {
   const raw = version?.version?.trim();
   if (!raw) return null;
   const stripped = raw.replace(/\s*\(.*\)\s*$/, "").trim();
