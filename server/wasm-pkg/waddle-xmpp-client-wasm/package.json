@@ -1,19 +1,15 @@
 {
   "name": "@waddle/xmpp-client-wasm",
-  "version": "0.1.0",
   "type": "module",
   "collaborators": [
     "Waddle Contributors"
   ],
   "description": "WebAssembly bindings for Waddle's native XMPP client",
+  "version": "0.1.0",
   "license": "AGPL-3.0",
   "repository": {
     "type": "git",
     "url": "https://github.com/waddle-social/waddle"
-  },
-  "publishConfig": {
-    "registry": "https://npm.pkg.github.com",
-    "access": "public"
   },
   "files": [
     "waddle_xmpp_client_wasm_bg.wasm",
@@ -26,5 +22,9 @@
   "sideEffects": [
     "./waddle_xmpp_client_wasm.js",
     "./snippets/*"
-  ]
+  ],
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com",
+    "access": "public"
+  }
 }

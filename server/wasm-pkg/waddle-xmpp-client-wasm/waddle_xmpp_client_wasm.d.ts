@@ -29,7 +29,6 @@ export class WaddleClient {
     join_room(room_jid: string, nick: string): Promise<any>;
     leave_room(room_jid: string, nick: string): Promise<any>;
     list_room_members(room_jid: string, affiliation: string): Promise<any>;
-    list_rooms(): Promise<any>;
     list_roster_contacts(): Promise<any>;
     mark_inbox_read(partner_jid: string, thread_id?: string | null): Promise<any>;
     constructor(config: WaddleConfig);
