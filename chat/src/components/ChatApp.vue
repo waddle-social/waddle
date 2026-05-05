@@ -1,22 +1,20 @@
 <script setup lang="ts">
 import { type ComponentPublicInstance, computed, onMounted, onUnmounted, ref, watch, watchEffect } from "vue";
 import { createKeystrok, type Keystrok } from "keystrok";
-import { useWaddles } from "@/composables/useWaddles";
-import { useMembers } from "@/composables/useMembers";
-import { useDmConversations } from "@/composables/useDmConversations";
-import { useDmMessaging } from "@/composables/useDmMessaging";
-import { useMessaging } from "@/composables/useMessaging";
-import { useThreads } from "@/composables/useThreads";
-import { useUiState } from "@/composables/useUiState";
-import { useAppUpdate } from "@/composables/useAppUpdate";
-import { useNotifications } from "@/composables/useNotifications";
-import { useChannelUnread } from "@/composables/useChannelUnread";
-import { useTabUnreadIndicator } from "@/composables/useTabUnreadIndicator";
-import { useWindowVisibility } from "@/composables/useWindowVisibility";
-import { useReadReceipts } from "@/composables/useReadReceipts";
-import { useVersion } from "@/composables/useVersion";
-import { useRosterContacts } from "@/composables/useRosterContacts";
-import { buildDmPath, buildExtensionRoutePath, buildPath, buildSettingsPath, parseRoute, pushDmRoute, pushExtensionRoute, pushRoute, pushSettingsRoute, resolveChannel, shouldLoadStructureForRoute } from "@/composables/useRouting";
+import { useWaddleDirectory } from "@/waddles/directory";
+import { useWaddleMembers } from "@/waddles/members";
+import { useDirectMessageConversations } from "@/dms/conversations";
+import { useDirectMessages } from "@/dms/messages";
+import { useChannelMessages } from "@/channels/messages";
+import { useMessageThreads } from "@/channels/threads";
+import { useChatShellState } from "@/shell/state";
+import { useServiceWorkerUpdate } from "@/shell/service-worker-update";
+import { usePushNotifications } from "@/shell/notifications";
+import { useChannelInbox } from "@/channels/inbox";
+import { useChatReadActivity } from "@/shell/read-activity";
+import { useDeploymentVersionInfo } from "@/shell/version";
+import { useXmppRosterContacts } from "@/contacts/roster";
+import { buildDirectMessagePath, buildChannelExtensionPath, buildChannelPath, buildChatSettingsPath, parseChatLocation, pushDirectMessageRoute, pushChannelExtensionRoute, pushChannelRoute, pushChatSettingsRoute, resolveChannelBySlug, shouldLoadWaddleStructureForRoute } from "@/shell/navigation";
 import { barePeerJid, jidDomain, parseManagedRoomBareJid } from "@/lib/xmpp-client";
 import { roomJidForChannelId as resolveRoomJidForChannelId } from "@/lib/channel-room";
 import { mergeRoomHats, roomHatsFromMembers } from "@/lib/xmpp/occupant-badges";
@@ -31,7 +29,7 @@ import ContentArea from "@/components/chat/ContentArea.vue";
 import ExtensionRouteView from "@/components/chat/ExtensionRouteView.vue";
 import ThreadPanel from "@/components/chat/ThreadPanel.vue";
 import { orderTimelineForScrollDirection, type ScrollDirectionMode } from "@/lib/scroll-direction";
-import { useScrollDirection } from "@/composables/useScrollDirection";
+import { useScrollDirectionPreference } from "@/preferences/scroll-direction";
 import SettingsMobileHeader from "@/components/chat/SettingsMobileHeader.vue";
 import ProfilePanel from "@/components/chat/ProfilePanel.vue";
 import UserSettingsPage from "@/components/chat/UserSettingsPage.vue";
@@ -60,14 +58,14 @@ const props = defineProps<{
 
 const giphyApiKey = props.giphyApiKey ?? "";
 
-const ui = useUiState();
-const { mode: scrollDirectionMode } = useScrollDirection();
+const ui = useChatShellState();
+const { mode: scrollDirectionMode } = useScrollDirectionPreference();
 
 const xmppClient = computed(() => connectionStore.client);
 const session = computed(() => connectionStore.session);
 const api = computed(() => connectionStore.api);
 
-const waddles = useWaddles(
+const waddles = useWaddleDirectory(
   api,
   xmppClient,
   session,
@@ -79,7 +77,7 @@ const waddles = useWaddles(
 const memberJidByNick = ref<Record<string, string>>({});
 const mentionJidsByNickForSend = ref<Record<string, string>>({});
 
-const messaging = useMessaging(
+const messaging = useChannelMessages(
   session,
   api,
   xmppClient,
@@ -92,15 +90,15 @@ const messaging = useMessaging(
   mentionJidsByNickForSend,
 );
 
-const dmConversations = useDmConversations(
+const dmConversations = useDirectMessageConversations(
   session,
   xmppClient,
 );
 
-const channelUnread = useChannelUnread(xmppClient);
-const rosterContacts = useRosterContacts(xmppClient);
+const channelUnread = useChannelInbox(xmppClient);
+const rosterContacts = useXmppRosterContacts(xmppClient);
 
-const dmMessaging = useDmMessaging(
+const dmMessaging = useDirectMessages(
   session,
   xmppClient,
   dmConversations.activePeerJid,
@@ -162,7 +160,7 @@ const activeChannelRoomJid = computed(() => {
 // don't use XEP-0201 threads yet.
 const activeThreadStack = ref<string[]>([]);
 const activeThreadTargetMessageId = ref<string | null>(null);
-const threads = useThreads(activeMessages);
+const threads = useMessageThreads(activeMessages);
 type ReactionModeTarget = "main" | "thread";
 const reactionModeTarget = ref<ReactionModeTarget | null>(null);
 const reactionModeSelectedMessageId = ref<string | null>(null);
@@ -369,7 +367,7 @@ const activeIsSearching = computed(() =>
 );
 
 const selfDomain = computed(() => (session.value ? jidDomain(session.value.jid) : ""));
-const members = useMembers(
+const members = useWaddleMembers(
   xmppClient,
   waddles.activeSpaceId,
   waddles.activeChannelId,
@@ -419,80 +417,28 @@ const activeDmPeer = computed(() => {
   };
 });
 
-const computedChannelUnreadMap = computed(() => channelUnread.channelUnreadMap(waddles.channels.value));
-// Thread rows are drill-down detail; room unread already carries the
-// server-equivalent conversation total, so the browser badge must not add both.
-const totalTabUnreadCount = computed(() =>
-  connectionStore.appState === "ready" && session.value && xmppClient.value
-    ? dmConversations.totalUnreadCount.value + channelUnread.totalUnreadCount.value
-    : 0
+const activeTarget = computed(() =>
+  ui.sidebarMode.value === "dms" ? dmMessaging : messaging,
 );
-useTabUnreadIndicator(totalTabUnreadCount, {
-  shouldAcceptServiceWorkerUnreadCount: () =>
-    connectionStore.appState === "ready" && !!session.value && !!xmppClient.value,
-  onServiceWorkerUnreadCount: () => Promise.all([
-    dmConversations.hydrateFromInbox(),
-    channelUnread.hydrateFromInbox(),
-  ]).then((results) => results.every(Boolean)),
+const { computedChannelUnreadMap, totalTabUnreadCount } = useChatReadActivity({
+  appReady: computed(() => connectionStore.appState === "ready"),
+  session,
+  xmppClient,
+  activePage: ui.activePage,
+  sidebarMode: ui.sidebarMode,
+  activeChannelId: waddles.activeChannelId,
+  channels: waddles.channels,
+  channelUnread,
+  dmConversations,
+  messaging,
+  dmMessaging,
+  activeTarget,
+  roomJidForChannelId: resolveRoomJidForChannelId,
 });
 
-const { isWindowFocused } = useWindowVisibility();
-const readReceiptsKind = computed<"channel" | "dm" | null>(() => {
-  if (ui.activePage.value !== "chat") return null;
-  if (ui.sidebarMode.value === "dms") {
-    return dmConversations.activePeerJid.value ? "dm" : null;
-  }
-  return waddles.activeChannelId.value ? "channel" : null;
-});
-const readReceiptsActiveRoomJid = computed<string | null>(() => {
-  if (readReceiptsKind.value !== "channel") return null;
-  const channelId = waddles.activeChannelId.value;
-  const sess = session.value;
-  if (!channelId || !sess) return null;
-  return resolveRoomJidForChannelId(sess, waddles.channels.value, channelId);
-});
-const readReceiptsActivePeerJid = computed<string | null>(() =>
-  readReceiptsKind.value === "dm" ? dmConversations.activePeerJid.value : null,
-);
-const readReceiptsIsPinnedAtEdge = computed<boolean>(() =>
-  readReceiptsKind.value === "dm"
-    ? dmMessaging.isPinnedAtEdge.value
-    : messaging.isPinnedAtEdge.value,
-);
-const readReceiptsLatestRemoteId = computed<string | null>(() =>
-  readReceiptsKind.value === "dm"
-    ? dmMessaging.latestRemoteMessageId.value
-    : messaging.latestRemoteMessageId.value,
-);
-const readReceiptsUnreadCount = computed<number>(() => {
-  if (readReceiptsKind.value === "dm") {
-    const peer = readReceiptsActivePeerJid.value;
-    if (!peer) return 0;
-    return dmConversations.conversations.value.find((c) => c.peerJid === peer)?.unreadCount ?? 0;
-  }
-  if (readReceiptsKind.value === "channel") {
-    const jid = readReceiptsActiveRoomJid.value;
-    if (!jid) return 0;
-    return channelUnread.unreadForRoomJid(jid);
-  }
-  return 0;
-});
-useReadReceipts({
-  isWindowFocused,
-  isPinnedAtEdge: readReceiptsIsPinnedAtEdge,
-  activeKind: readReceiptsKind,
-  activeRoomJid: readReceiptsActiveRoomJid,
-  activePeerJid: readReceiptsActivePeerJid,
-  latestRemoteMessageId: readReceiptsLatestRemoteId,
-  unreadCountForActive: readReceiptsUnreadCount,
-  markChannelRead: (jid) => channelUnread.markRead(jid),
-  markDmRead: (peer) => dmConversations.markRead(peer),
-  markDisplayed: (id) => activeTarget.value.markDisplayed(id),
-});
-
-const notifications = useNotifications();
-const appUpdate = useAppUpdate();
-const version = useVersion(xmppClient);
+const notifications = usePushNotifications();
+const appUpdate = useServiceWorkerUpdate();
+const version = useDeploymentVersionInfo(xmppClient);
 const avatarCandidates = computed(() =>
   avatarLookupCandidates({
     members: mergedMentionMembers.value.members,
@@ -662,18 +608,18 @@ watch(xmppClient, (client) => {
 
 const isApplyingRoute = ref(false);
 let routeRequestId = 0;
-const settingsPath = buildSettingsPath();
+const settingsPath = buildChatSettingsPath();
 
 const currentChatPath = computed(() =>
   ui.activePage.value === "extension" && activeExtensionRouteKey.value
-    ? buildExtensionRoutePath(
+    ? buildChannelExtensionPath(
         waddles.currentChannel.value,
         activeExtensionRouteKey.value.pluginId,
         activeExtensionRouteKey.value.routeId,
       )
     : ui.sidebarMode.value === "dms" && activeDmPeer.value
-    ? buildDmPath(activeDmPeer.value.peerUsername)
-    : buildPath(waddles.currentChannel.value, activeThreadStack.value),
+    ? buildDirectMessagePath(activeDmPeer.value.peerUsername)
+    : buildChannelPath(waddles.currentChannel.value, activeThreadStack.value),
 );
 
 async function setupPushSubscription() {
@@ -713,10 +659,6 @@ async function handleToggleNotifications() {
 async function refreshAppUpdate() {
   await appUpdate.applyUpdate();
 }
-
-const activeTarget = computed(() =>
-  ui.sidebarMode.value === "dms" ? dmMessaging : messaging,
-);
 
 const activeUploadProgress = computed(() =>
   ui.sidebarMode.value === "dms" ? dmMessaging.uploadProgress.value : messaging.uploadProgress.value,
@@ -873,7 +815,7 @@ function markActiveDisplayed(messageId: string) {
 }
 
 async function invokeActiveExtensionAction(action: ExtensionAnnotationAction) {
-  await activeTarget.value.invokeExtensionAction(action);
+  return await activeTarget.value.invokeExtensionAction(action);
 }
 
 async function invokeExtensionRouteAction(action: ExtensionAnnotationAction) {
@@ -945,15 +887,15 @@ function bindChatKeystrokShortcuts() {
 function updateUrl() {
   if (isApplyingRoute.value) return;
   if (ui.activePage.value === "settings") {
-    pushSettingsRoute("app");
+    pushChatSettingsRoute("app");
     return;
   }
   if (ui.activePage.value === "dashboard") {
-    pushRoute(null);
+    pushChannelRoute(null);
     return;
   }
   if (ui.activePage.value === "extension") {
-    pushExtensionRoute(
+    pushChannelExtensionRoute(
       waddles.currentChannel.value,
       activeExtensionRouteKey.value?.pluginId,
       activeExtensionRouteKey.value?.routeId,
@@ -961,9 +903,9 @@ function updateUrl() {
     return;
   }
   if (ui.sidebarMode.value === "dms" && activeDmPeer.value) {
-    pushDmRoute(activeDmPeer.value.peerUsername);
+    pushDirectMessageRoute(activeDmPeer.value.peerUsername);
   } else {
-    pushRoute(waddles.currentChannel.value, activeThreadStack.value);
+    pushChannelRoute(waddles.currentChannel.value, activeThreadStack.value);
   }
 }
 
@@ -1029,21 +971,21 @@ function closeUserSettings() {
       : "dashboard";
   if (window.location.pathname + window.location.search !== currentChatPath.value) {
     if (ui.activePage.value === "extension") {
-      pushExtensionRoute(
+      pushChannelExtensionRoute(
         waddles.currentChannel.value,
         activeExtensionRouteKey.value?.pluginId,
         activeExtensionRouteKey.value?.routeId,
       );
     } else if (ui.sidebarMode.value === "dms" && activeDmPeer.value) {
-      pushDmRoute(activeDmPeer.value.peerUsername);
+      pushDirectMessageRoute(activeDmPeer.value.peerUsername);
     } else {
-      pushRoute(waddles.currentChannel.value, activeThreadStack.value);
+      pushChannelRoute(waddles.currentChannel.value, activeThreadStack.value);
     }
   }
 }
 
 function onPopState() {
-  const route = parseRoute(window.location.pathname, window.location.search);
+  const route = parseChatLocation(window.location.pathname, window.location.search);
   ui.activePage.value = route.page;
   if (route.page === "settings") {
     activeThreadTargetMessageId.value = null;
@@ -1071,7 +1013,7 @@ function onPopState() {
   });
 }
 
-async function applyRouteTarget(route: ReturnType<typeof parseRoute>, requestId: number) {
+async function applyRouteTarget(route: ReturnType<typeof parseChatLocation>, requestId: number) {
   ui.activePage.value = route.page;
   if (route.page === "settings") {
     activeThreadTargetMessageId.value = null;
@@ -1086,7 +1028,7 @@ async function applyRouteTarget(route: ReturnType<typeof parseRoute>, requestId:
     messaging.clearMessages();
     activeThreadTargetMessageId.value = null;
     activeThreadStack.value = [];
-    if (shouldLoadStructureForRoute(route, waddles.channels.value.length)) {
+    if (shouldLoadWaddleStructureForRoute(route, waddles.channels.value.length)) {
       await waddles.loadStructure(null, { noChannelSelect: true });
     }
     return;
@@ -1102,7 +1044,7 @@ async function applyRouteTarget(route: ReturnType<typeof parseRoute>, requestId:
     return;
   }
 
-  if (shouldLoadStructureForRoute(route, waddles.channels.value.length)) {
+  if (shouldLoadWaddleStructureForRoute(route, waddles.channels.value.length)) {
     await waddles.loadStructure();
     if (requestId !== routeRequestId) return;
   }
@@ -1113,7 +1055,7 @@ async function applyRouteTarget(route: ReturnType<typeof parseRoute>, requestId:
     activeThreadTargetMessageId.value = null;
     activeThreadStack.value = [];
     if (route.channelSlug) {
-      const ch = resolveChannel(route.channelSlug, waddles.channels.value);
+      const ch = resolveChannelBySlug(route.channelSlug, waddles.channels.value);
       if (!ch) {
         waddles.activeChannelId.value = null;
         activeExtensionRouteKey.value = null;
@@ -1130,7 +1072,7 @@ async function applyRouteTarget(route: ReturnType<typeof parseRoute>, requestId:
 
   if (route.channelSlug) {
     activeExtensionRouteKey.value = null;
-    const ch = resolveChannel(route.channelSlug, waddles.channels.value);
+    const ch = resolveChannelBySlug(route.channelSlug, waddles.channels.value);
     if (!ch) {
       waddles.activeChannelId.value = null;
       messaging.clearMessages();
@@ -1158,7 +1100,7 @@ async function applyRouteTarget(route: ReturnType<typeof parseRoute>, requestId:
 // --- Bootstrap (watches connection store) ---
 
 async function onConnectionReady() {
-  const route = parseRoute(window.location.pathname, window.location.search);
+  const route = parseChatLocation(window.location.pathname, window.location.search);
   const requestId = ++routeRequestId;
   isApplyingRoute.value = true;
 
@@ -1166,7 +1108,7 @@ async function onConnectionReady() {
     if (route.page === "dashboard") {
       await waddles.loadStructure(null, { noChannelSelect: true });
     } else {
-      await waddles.loadSpace({ loadStructure: !shouldLoadStructureForRoute(route, waddles.channels.value.length) });
+      await waddles.loadSpace({ loadStructure: !shouldLoadWaddleStructureForRoute(route, waddles.channels.value.length) });
     }
     await refreshExtensionRoutes();
     if (requestId === routeRequestId) {
@@ -1205,7 +1147,7 @@ async function handleLogout() {
   setupPromptShown = false;
   messaging.clearMessages();
   dmMessaging.clearMessages();
-  pushRoute(null);
+  pushChannelRoute(null);
   await connectionStore.logout();
 }
 

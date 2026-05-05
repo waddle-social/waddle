@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { useScrollDirection } from "@/composables/useScrollDirection";
+import { useScrollDirectionPreference } from "@/preferences/scroll-direction";
 import type { ScrollDirectionMode } from "@/lib/scroll-direction";
 
-const { mode, setScrollDirection } = useScrollDirection();
+const { mode, setScrollDirection } = useScrollDirectionPreference();
 
 const options: ReadonlyArray<{
   value: ScrollDirectionMode;

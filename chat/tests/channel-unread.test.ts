@@ -1,7 +1,7 @@
 import { describe, expect, mock, test } from "bun:test";
 import { computed, effectScope, ref } from "vue";
-import { useChannelUnread } from "../src/composables/useChannelUnread";
-import { useReadReceipts } from "../src/composables/useReadReceipts";
+import { useChannelInbox } from "../src/channels/inbox";
+import { useChatReadReceipts } from "../src/shell/read-receipts";
 import { roomJidForChannelId } from "../src/lib/channel-room";
 import type { ChannelSummary } from "../src/lib/chat-types";
 import type { WaddleSession } from "../src/lib/server-auth";
@@ -40,7 +40,7 @@ const threadEntry: InboxEntry = {
   threadTitle: "Planning",
 };
 
-describe("useChannelUnread", () => {
+describe("useChannelInbox", () => {
   test("hydrates channel and thread unread totals", async () => {
     const client = makeClient([
       channelEntry,
@@ -53,7 +53,7 @@ describe("useChannelUnread", () => {
         unread: 7,
       },
     ]);
-    const composable = useChannelUnread(ref<BrowserXmppClient | null>(client));
+    const composable = useChannelInbox(ref<BrowserXmppClient | null>(client));
 
     await composable.hydrateFromInbox();
 
@@ -68,7 +68,7 @@ describe("useChannelUnread", () => {
   });
 
   test("updates totals from inbox pushes and ignores direct entries", () => {
-    const composable = useChannelUnread(ref<BrowserXmppClient | null>(null));
+    const composable = useChannelInbox(ref<BrowserXmppClient | null>(null));
 
     composable.onInboxPush(channelEntry);
     composable.onInboxPush(threadEntry);
@@ -87,7 +87,7 @@ describe("useChannelUnread", () => {
 
   test("markRead and markThreadRead clear their own totals", () => {
     const client = makeClient();
-    const composable = useChannelUnread(ref<BrowserXmppClient | null>(client));
+    const composable = useChannelInbox(ref<BrowserXmppClient | null>(client));
     composable.onInboxPush(channelEntry);
     composable.onInboxPush(threadEntry);
 
@@ -107,7 +107,7 @@ describe("useChannelUnread", () => {
 
   test("read receipts clear active discovered-MUC row and bell counts", async () => {
     const client = makeClient();
-    const composable = useChannelUnread(ref<BrowserXmppClient | null>(client));
+    const composable = useChannelInbox(ref<BrowserXmppClient | null>(client));
     const session = ref({
       jid: "alice@example.com/desktop",
       username: "alice",
@@ -138,7 +138,7 @@ describe("useChannelUnread", () => {
     expect(unreadCountForActive.value).toBe(4);
 
     scope.run(() => {
-      useReadReceipts({
+      useChatReadReceipts({
         isWindowFocused: ref(true),
         isPinnedAtEdge: ref(true),
         activeKind: ref<"channel" | "dm" | null>("channel"),
@@ -169,7 +169,7 @@ describe("useChannelUnread", () => {
     // live row, so opening the channel reported unread=0 and the
     // mark-read path never fired.
     const client = makeClient();
-    const composable = useChannelUnread(ref<BrowserXmppClient | null>(client));
+    const composable = useChannelInbox(ref<BrowserXmppClient | null>(client));
     composable.onInboxPush({
       partner: "chat@muc.waddle.local",
       kind: "muc",
@@ -207,7 +207,7 @@ describe("useChannelUnread", () => {
 
   test("clears stale unread state without a client", async () => {
     const client = ref<BrowserXmppClient | null>(makeClient());
-    const composable = useChannelUnread(client);
+    const composable = useChannelInbox(client);
     composable.onInboxPush(channelEntry);
     composable.onInboxPush(threadEntry);
 

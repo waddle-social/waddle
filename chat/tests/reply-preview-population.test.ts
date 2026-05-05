@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { fromLiveMessage } from "../src/composables/useMessaging";
+import { mapLiveRoomMessageToTimeline } from "../src/channels/timeline";
 import type { LiveRoomMessage } from "../src/lib/xmpp-client";
 import type { WaddleSession } from "../src/lib/server-auth";
 
@@ -26,7 +26,7 @@ function mkMsg(partial: Partial<LiveRoomMessage> & { id: string }): LiveRoomMess
   } as LiveRoomMessage;
 }
 
-describe("fromLiveMessage reply-preview population", () => {
+describe("mapLiveRoomMessageToTimeline reply-preview population", () => {
   test("copies parent body into replyTo.preview when parent lookup resolves", () => {
     const parentBody = "shall we ship?";
     const inbound = mkMsg({
@@ -35,7 +35,7 @@ describe("fromLiveMessage reply-preview population", () => {
       replyTo: { id: "parent-1", author: "lobby@muc.waddle.social/alice" },
     });
 
-    const tm = fromLiveMessage(session, inbound, (id) =>
+    const tm = mapLiveRoomMessageToTimeline(session, inbound, (id) =>
       id === "parent-1" ? { body: parentBody } : undefined,
     );
 
@@ -52,7 +52,7 @@ describe("fromLiveMessage reply-preview population", () => {
       replyTo: { id: "missing", author: "lobby@muc.waddle.social/alice" },
     });
 
-    const tm = fromLiveMessage(session, inbound, () => undefined);
+    const tm = mapLiveRoomMessageToTimeline(session, inbound, () => undefined);
 
     expect(tm.replyTo?.preview).toBeUndefined();
     expect(tm.replyTo?.id).toBe("missing");
@@ -65,7 +65,7 @@ describe("fromLiveMessage reply-preview population", () => {
       replyTo: { id: "parent-3", author: "lobby@muc.waddle.social/alice" },
     });
 
-    const tm = fromLiveMessage(session, inbound);
+    const tm = mapLiveRoomMessageToTimeline(session, inbound);
 
     expect(tm.replyTo?.preview).toBeUndefined();
   });
@@ -73,7 +73,7 @@ describe("fromLiveMessage reply-preview population", () => {
   test("does not set replyTo when the inbound message has none", () => {
     const inbound = mkMsg({ id: "plain-1", body: "hi" });
 
-    const tm = fromLiveMessage(session, inbound, () => ({ body: "x" }));
+    const tm = mapLiveRoomMessageToTimeline(session, inbound, () => ({ body: "x" }));
 
     expect(tm.replyTo).toBeUndefined();
   });

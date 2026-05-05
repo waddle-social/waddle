@@ -1,6 +1,6 @@
 import { describe, test, expect, mock } from "bun:test";
 import { effectScope, ref } from "vue";
-import { useReadReceipts } from "../src/composables/useReadReceipts";
+import { useChatReadReceipts } from "../src/shell/read-receipts";
 
 type Harness = {
   isWindowFocused: ReturnType<typeof ref<boolean>>;
@@ -33,7 +33,7 @@ function makeHarness(initial: Partial<Pick<Harness,
 
   const scope = effectScope();
   scope.run(() => {
-    useReadReceipts({
+    useChatReadReceipts({
       isWindowFocused,
       isPinnedAtEdge,
       activeKind,
@@ -62,7 +62,7 @@ function makeHarness(initial: Partial<Pick<Harness,
   };
 }
 
-describe("useReadReceipts", () => {
+describe("useChatReadReceipts", () => {
   test("does nothing when no active conversation", async () => {
     const h = makeHarness();
     h.latestRemoteMessageId.value = "m1";

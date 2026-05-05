@@ -17,18 +17,11 @@ import type { ChannelSummary, SpaceSummary } from "@/lib/chat-types";
 import type { ExtensionAnnotationAction, TimelineMessage, MarkupSpan, MessageReference } from "@/lib/chat-ui";
 import type { MentionCandidate } from "@/lib/mentions";
 import type { BrowserXmppClient, MessageSearchResult, XmppStatusSnapshot, RoomHats, RoomPresence } from "@/lib/xmpp-client";
-import {
-  extensionCommandOutcome,
-  parseExtensionCommandLaunches,
-  parseExtensionCommandForm,
-  type DiscoveredExtensionCommand,
-  type ExtensionCommandAction,
-  type ExtensionCommandFormField,
-  type ExtensionCommandResult,
-} from "@/lib/xmpp/extension-commands";
-import { useScrollDirection } from "@/composables/useScrollDirection";
-import type { ThreadIndex } from "@/composables/useThreads";
-import { formatStamp, formatDayDivider, isSameDay } from "@/composables/useMessaging";
+import type { DiscoveredExtensionCommand, ExtensionCommandAction, ExtensionCommandResult } from "@/lib/xmpp/extension-commands";
+import { useScrollDirectionPreference } from "@/preferences/scroll-direction";
+import type { MessageThreadIndex } from "@/channels/threads";
+import { formatTimelineStamp, formatTimelineDayDivider, isSameTimelineDay } from "@/channels/timeline";
+import { useExtensionLauncher } from "@/channels/extension-launcher";
 import ChatHeader from "@/components/chat/ChatHeader.vue";
 import ExtensionPalette from "@/components/chat/ExtensionPalette.vue";
 import MessageCard from "@/components/chat/MessageCard.vue";
@@ -71,11 +64,11 @@ const props = defineProps<{
   searchResults: MessageSearchResult[];
   isSearching: boolean;
   uploadProgress: { uploading: boolean; progress: number; filename: string };
-  threadIndex: ThreadIndex;
+  threadIndex: MessageThreadIndex;
   xmppClient?: BrowserXmppClient | null;
   reactionMode?: { selectedMessageId: string | null } | null;
   ensureMessageLoaded?: (messageId: string) => Promise<boolean>;
-  invokeExtensionAction?: (action: ExtensionAnnotationAction) => Promise<unknown>;
+  invokeExtensionAction?: (action: ExtensionAnnotationAction) => Promise<ExtensionCommandResult>;
 }>();
 
 const emit = defineEmits<{
@@ -107,7 +100,7 @@ const emit = defineEmits<{
 const feedMessages = computed(() =>
   props.messages.filter((m) => !m.threadId || m.id === m.threadId),
 );
-const { mode: scrollDirection, isTopPinned } = useScrollDirection();
+const { mode: scrollDirection, isTopPinned } = useScrollDirectionPreference();
 const orderedFeedMessages = computed(() =>
   orderTimelineForScrollDirection(feedMessages.value, scrollDirection.value),
 );
@@ -117,18 +110,6 @@ const newMessagesDividerPlacement = computed(() =>
 const olderSentinelPosition = computed(() => scrollDirection.value === "social" ? "end" : "start");
 
 const replyingTo = ref<{ id: string; author: string; body?: string; preview?: string } | null>(null);
-const extensionLauncherOpen = ref(false);
-const extensionCommands = ref<DiscoveredExtensionCommand[]>([]);
-const extensionLauncherState = ref<"idle" | "loading" | "error">("idle");
-const extensionLauncherDetail = ref("");
-const extensionCommandStates = ref<Record<string, { state: "loading" | "success" | "warning" | "error"; detail?: string }>>({});
-const extensionCommandForms = ref<Record<string, { sessionId: string; fields: ExtensionCommandFormField[]; actions?: ExtensionCommandAction[] }>>({});
-const extensionCommandActions = ref<Record<string, ExtensionAnnotationAction[]>>({});
-const availableExtensionCommands = computed(() =>
-  props.roomJid
-    ? extensionCommands.value
-    : extensionCommands.value.filter((command) => command.scope !== "channel"),
-);
 const autoOpenedThreadIds = new Set<string>();
 
 type MessageComposerHandle = {
@@ -147,156 +128,7 @@ function focusComposer() {
 }
 
 function closeExtensionLauncher() {
-  extensionLauncherOpen.value = false;
-  void nextTick(() => composerRef.value?.focusExtensions());
-}
-
-function clearExtensionCommandSurfaces(key: string) {
-  const nextForms = { ...extensionCommandForms.value };
-  delete nextForms[key];
-  extensionCommandForms.value = nextForms;
-  const nextActions = { ...extensionCommandActions.value };
-  delete nextActions[key];
-  extensionCommandActions.value = nextActions;
-}
-
-function storeExtensionResultSurfaces(key: string, result: ExtensionCommandResult) {
-  let foundActions = false;
-  if (result.form) {
-    const actions = parseExtensionCommandLaunches(result.form);
-    if (actions.length > 0) {
-      foundActions = true;
-      extensionCommandActions.value = { ...extensionCommandActions.value, [key]: actions };
-    }
-  }
-  if (!foundActions) {
-    const nextActions = { ...extensionCommandActions.value };
-    delete nextActions[key];
-    extensionCommandActions.value = nextActions;
-  }
-
-  if (result.sessionId && result.form && result.status === "executing") {
-    const fields = parseExtensionCommandForm(result.form);
-    if (fields.length > 0) {
-      extensionCommandForms.value = {
-        ...extensionCommandForms.value,
-        [key]: {
-          sessionId: result.sessionId,
-          fields,
-          ...(result.actions?.allowed.length ? { actions: result.actions.allowed } : {}),
-        },
-      };
-      return;
-    }
-  }
-  const nextForms = { ...extensionCommandForms.value };
-  delete nextForms[key];
-  extensionCommandForms.value = nextForms;
-}
-
-async function openExtensionLauncher() {
-  extensionLauncherOpen.value = !extensionLauncherOpen.value;
-  if (extensionLauncherOpen.value) {
-    void nextTick(() => extensionPaletteRef.value?.focus());
-  }
-  if (!extensionLauncherOpen.value || extensionCommands.value.length > 0) return;
-  if (!props.xmppClient) {
-    extensionLauncherState.value = "error";
-    extensionLauncherDetail.value = "Extensions are unavailable while XMPP is disconnected.";
-    return;
-  }
-  extensionLauncherState.value = "loading";
-  extensionLauncherDetail.value = "";
-  try {
-    extensionCommands.value = await props.xmppClient.discoverExtensionCommands();
-    extensionLauncherState.value = "idle";
-    if (extensionCommands.value.length === 0) {
-      extensionLauncherDetail.value = "No extension commands discovered.";
-    }
-  } catch (error) {
-    extensionLauncherState.value = "error";
-    extensionLauncherDetail.value = error instanceof Error ? error.message : "Could not discover extension commands.";
-  }
-}
-
-async function invokeExtensionCommand(command: DiscoveredExtensionCommand) {
-  if (!props.xmppClient) return;
-  const key = command.node;
-  clearExtensionCommandSurfaces(key);
-  extensionCommandStates.value = { ...extensionCommandStates.value, [key]: { state: "loading" } };
-  try {
-    const result = await props.xmppClient.invokeExtensionCommand(command);
-    const outcome = extensionCommandOutcome(result);
-    storeExtensionResultSurfaces(key, result);
-    extensionCommandStates.value = { ...extensionCommandStates.value, [key]: outcome };
-  } catch (error) {
-    extensionCommandStates.value = {
-      ...extensionCommandStates.value,
-      [key]: { state: "error", detail: error instanceof Error ? error.message : "Extension command failed." },
-    };
-  }
-}
-
-function updateExtensionCommandField(commandNode: string, fieldName: string, values: string[]) {
-  const form = extensionCommandForms.value[commandNode];
-  if (!form) return;
-  extensionCommandForms.value = {
-    ...extensionCommandForms.value,
-    [commandNode]: {
-      ...form,
-      fields: form.fields.map((field) =>
-        field.name === fieldName
-          ? { ...field, values, value: values[0] ?? "" }
-          : field,
-      ),
-    },
-  };
-}
-
-function resetExtensionLauncherState() {
-  extensionLauncherOpen.value = false;
-  extensionCommands.value = [];
-  extensionLauncherState.value = "idle";
-  extensionLauncherDetail.value = "";
-  extensionCommandStates.value = {};
-  extensionCommandForms.value = {};
-  extensionCommandActions.value = {};
-}
-
-async function submitExtensionCommandForm(command: DiscoveredExtensionCommand, action: ExtensionCommandAction = "complete") {
-  if (!props.xmppClient) return;
-  const key = command.node;
-  const form = extensionCommandForms.value[key];
-  if (!form) return;
-  extensionCommandStates.value = { ...extensionCommandStates.value, [key]: { state: "loading" } };
-  try {
-    const result = await props.xmppClient.submitExtensionCommandForm(command, form.sessionId, form.fields, action, props.roomJid ?? undefined);
-    const outcome = extensionCommandOutcome(result);
-    storeExtensionResultSurfaces(key, result);
-    extensionCommandStates.value = { ...extensionCommandStates.value, [key]: outcome };
-  } catch (error) {
-    extensionCommandStates.value = {
-      ...extensionCommandStates.value,
-      [key]: { state: "error", detail: error instanceof Error ? error.message : "Extension form submission failed." },
-    };
-  }
-}
-
-async function invokeCommandResultAction(command: DiscoveredExtensionCommand, action: ExtensionAnnotationAction) {
-  if (!props.invokeExtensionAction) return;
-  const key = command.node;
-  extensionCommandStates.value = { ...extensionCommandStates.value, [key]: { state: "loading" } };
-  try {
-    const result = await props.invokeExtensionAction(action);
-    const outcome = extensionCommandOutcome(result);
-    storeExtensionResultSurfaces(key, result);
-    extensionCommandStates.value = { ...extensionCommandStates.value, [key]: outcome };
-  } catch (error) {
-    extensionCommandStates.value = {
-      ...extensionCommandStates.value,
-      [key]: { state: "error", detail: error instanceof Error ? error.message : "Extension action failed." },
-    };
-  }
+  extensionLauncher.close();
 }
 
 function beginReply(message: TimelineMessage) {
@@ -444,6 +276,26 @@ const extensionPaletteRef = ref<ExtensionPaletteHandle | null>(null);
 const setExtensionPaletteRef = (instance: ExtensionPaletteHandle | null) => {
   extensionPaletteRef.value = instance;
 };
+const extensionLauncher = useExtensionLauncher({
+  xmppClient: computed(() => props.xmppClient),
+  roomJid: computed(() => props.roomJid),
+  invokeExtensionAction: computed(() => props.invokeExtensionAction),
+  focusPalette: () => extensionPaletteRef.value?.focus(),
+  focusComposerExtensions: () => composerRef.value?.focusExtensions(),
+});
+const extensionLauncherOpen = extensionLauncher.open;
+const extensionLauncherState = extensionLauncher.state;
+const extensionLauncherDetail = extensionLauncher.detail;
+const availableExtensionCommands = extensionLauncher.availableCommands;
+const extensionCommandStates = extensionLauncher.commandStates;
+const extensionCommandForms = extensionLauncher.commandForms;
+const extensionCommandActions = extensionLauncher.commandActions;
+const openExtensionLauncher = extensionLauncher.toggle;
+const invokeExtensionCommand = extensionLauncher.invokeCommand;
+const updateExtensionCommandField = extensionLauncher.updateField;
+const resetExtensionLauncherState = extensionLauncher.reset;
+const submitExtensionCommandForm = extensionLauncher.submitForm;
+const invokeCommandResultAction = extensionLauncher.invokeResultAction;
 const showSearch = ref(false);
 const searchInput = ref("");
 const searchSubmitted = ref(false);
@@ -737,7 +589,7 @@ function updateCurrentDayMarker() {
   }
 
   const createdAt = current.dataset.dayMarkerCreatedAt ?? current.dataset.messageCreatedAt;
-  currentDayMarkerLabel.value = createdAt ? formatDayDivider(createdAt) : "";
+  currentDayMarkerLabel.value = createdAt ? formatTimelineDayDivider(createdAt) : "";
 }
 
 watch(
@@ -761,7 +613,7 @@ const messageDisplayMeta = computed(() => {
     if (!cur) continue;
     const prev = i > 0 ? list[i - 1] : null;
     if (!prev) continue;
-    const sameDay = isSameDay(prev.createdAt, cur.createdAt);
+    const sameDay = isSameTimelineDay(prev.createdAt, cur.createdAt);
     if (!sameDay) dayDivider.add(cur.id);
     if (
       sameDay
@@ -783,7 +635,7 @@ function showDayDividerBefore(messageId: string): boolean {
 }
 
 function dayDividerLabel(createdAt: string): string {
-  return formatDayDivider(createdAt);
+  return formatTimelineDayDivider(createdAt);
 }
 </script>
 
@@ -929,7 +781,7 @@ function dayDividerLabel(createdAt: string): string {
           >
             <div class="flex items-baseline gap-2">
               <span class="type-control">{{ result.nick }}</span>
-              <span class="type-meta type-numeric text-muted-foreground">{{ formatStamp(result.createdAt) }}</span>
+              <span class="type-meta type-numeric text-muted-foreground">{{ formatTimelineStamp(result.createdAt) }}</span>
             </div>
             <p class="type-caption truncate text-muted-foreground">{{ result.body }}</p>
           </button>

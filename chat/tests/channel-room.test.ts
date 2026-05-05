@@ -36,16 +36,20 @@ describe("roomJidForChannelSummary", () => {
   });
 
   test("ChatApp routes unread and activity clearing through the discovered room resolver", () => {
-    const source = readFileSync(
+    const appSource = readFileSync(
       new URL("../src/components/ChatApp.vue", import.meta.url),
       "utf8",
     );
+    const readActivitySource = readFileSync(
+      new URL("../src/shell/read-activity.ts", import.meta.url),
+      "utf8",
+    );
 
-    expect(source).toContain("roomJidForChannelId as resolveRoomJidForChannelId");
-    expect(source).toContain("readReceiptsActiveRoomJid");
-    expect(source).toContain("resolveRoomJidForChannelId(sess, waddles.channels.value, channelId)");
-    expect(source).toContain("channelUnread.markThreadRead(roomJid, threadId)");
-    expect(source).toContain("messaging.clearChannelActivity(roomJid)");
-    expect(source).not.toContain("roomBareJidFor");
+    expect(appSource).toContain("roomJidForChannelId as resolveRoomJidForChannelId");
+    expect(readActivitySource).toContain("readReceiptsActiveRoomJid");
+    expect(readActivitySource).toContain("options.roomJidForChannelId(session, options.channels.value, channelId)");
+    expect(appSource).toContain("channelUnread.markThreadRead(roomJid, threadId)");
+    expect(appSource).toContain("messaging.clearChannelActivity(roomJid)");
+    expect(appSource).not.toContain("roomBareJidFor");
   });
 });

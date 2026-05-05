@@ -35,7 +35,7 @@ import {
   listQueuedDmMessages,
   type PersistedQueuedDmMessage,
 } from "@/lib/outbound-queue-store";
-import { useScrollDirection } from "@/composables/useScrollDirection";
+import { useScrollDirectionPreference } from "@/preferences/scroll-direction";
 
 function fromLiveDmMessage(
   session: WaddleSession,
@@ -111,7 +111,7 @@ function queuedDmMessageToTimeline(
   return message;
 }
 
-export function useDmMessaging(
+export function useDirectMessages(
   session: Ref<WaddleSession | null>,
   xmppClient: Ref<BrowserXmppClient | null>,
   activePeerJid: Ref<string | null>,
@@ -119,7 +119,7 @@ export function useDmMessaging(
   actionError: Ref<string>,
   clearActionError: () => void,
 ) {
-  const { mode: scrollDirection } = useScrollDirection();
+  const { mode: scrollDirection } = useScrollDirectionPreference();
   const peerNameFromJid = (jid: string) => barePeerJid(jid).split("@")[0] ?? "unknown";
   const messages = ref<TimelineMessage[]>([]);
   const draft = ref("");

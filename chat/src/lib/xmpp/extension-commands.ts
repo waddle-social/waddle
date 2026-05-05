@@ -2,7 +2,17 @@ import type { ExtensionAnnotationAction, ExtensionLaunchDescriptor } from "@/lib
 import { jidDomain } from "./jid";
 
 interface XmppSendIq {
-  send_raw_iq(xml: string): Promise<string>;
+  send_raw_iq?(xml: string): Promise<string>;
+  getDiscoItems?(jid: string, node?: string): Promise<{ items?: Array<{ jid?: string; node?: string; name?: string }> }>;
+  getDiscoInfo?(jid: string, node?: string): Promise<{ features?: string[]; extensions?: unknown[] }>;
+  getItems?(jid: string, node: string, opts?: { max?: number }): Promise<{ items?: Array<{ id?: string; content?: unknown }> }>;
+}
+
+function requireRawIq(xmpp: XmppSendIq): (xml: string) => Promise<string> {
+  if (typeof xmpp.send_raw_iq !== "function") {
+    throw new Error("XMPP raw IQ sender is unavailable.");
+  }
+  return xmpp.send_raw_iq.bind(xmpp);
 }
 
 interface XmppExtensionRoutes {
@@ -596,6 +606,11 @@ function parseCommandIqResponse(xml: string): ExtensionCommandResult {
 }
 
 async function rawDiscoItems(xmpp: XmppSendIq, jid: string, node?: string): Promise<Array<{ jid?: string; node?: string; name?: string }>> {
+  if (typeof xmpp.getDiscoItems === "function") {
+    const result = await xmpp.getDiscoItems(jid, node);
+    return result.items ?? [];
+  }
+  if (typeof xmpp.send_raw_iq !== "function") return [];
   const nodeAttr = node ? ` node="${escapeXml(node)}"` : "";
   try {
     const responseXml = await xmpp.send_raw_iq(`<iq type="get" id="${crypto.randomUUID()}" to="${escapeXml(jid)}"><query xmlns="http://jabber.org/protocol/disco#items"${nodeAttr}/></iq>`);
@@ -610,6 +625,11 @@ async function rawDiscoItems(xmpp: XmppSendIq, jid: string, node?: string): Prom
 }
 
 async function rawDiscoInfo(xmpp: XmppSendIq, jid: string): Promise<{ features: string[] }> {
+  if (typeof xmpp.getDiscoInfo === "function") {
+    const info = await xmpp.getDiscoInfo(jid);
+    return { features: info.features ?? [] };
+  }
+  if (typeof xmpp.send_raw_iq !== "function") return { features: [] };
   const responseXml = await xmpp.send_raw_iq(`<iq type="get" id="${crypto.randomUUID()}" to="${escapeXml(jid)}"><query xmlns="http://jabber.org/protocol/disco#info"/></iq>`);
   const features = Array.from(responseXml.matchAll(/<feature\b[^>]*var=["']([^"']+)["'][^>]*\/?>(?:<\/feature>)?/g))
     .map(([, value]) => decodeXml(value))
@@ -622,11 +642,12 @@ export async function invokeExtensionLaunch(
   userJid: string,
   launch: ExtensionLaunchDescriptor,
 ): Promise<ExtensionCommandResult> {
+  const sendRawIq = requireRawIq(xmpp);
   const serviceJid = await discoverExtensionCommandService(xmpp, userJid);
   const iq = buildExtensionLaunchInvokeIq(userJid, launch, serviceJid);
   const fields = iq.command.form?.fields ?? [];
   const responseXml = buildCommandIqXml(serviceJid, iq.command.node, iq.command.action, fields);
-  return parseCommandIqResponse(await xmpp.send_raw_iq(responseXml));
+  return parseCommandIqResponse(await sendRawIq(responseXml));
 }
 
 export async function invokeExtensionCommand(
@@ -634,8 +655,9 @@ export async function invokeExtensionCommand(
   userJid: string,
   command: DiscoveredExtensionCommand,
 ): Promise<ExtensionCommandResult> {
+  const sendRawIq = requireRawIq(xmpp);
   const serviceJid = command.serviceJid || await discoverExtensionCommandService(xmpp, userJid);
-  const responseXml = await xmpp.send_raw_iq(buildCommandIqXml(serviceJid, command.node, "execute"));
+  const responseXml = await sendRawIq(buildCommandIqXml(serviceJid, command.node, "execute"));
   return parseCommandIqResponse(responseXml);
 }
 
@@ -645,13 +667,15 @@ export async function submitExtensionCommandForm(
   sessionId: string,
   fields: ExtensionCommandFormField[],
   action: ExtensionCommandAction = "complete",
-  roomJid?: string,
+  _roomJid?: string,
 ): Promise<ExtensionCommandResult> {
+  const sendRawIq = requireRawIq(xmpp);
   const dataFields: DataFormField[] = (action === "cancel" || action === "prev") ? [] : fields
     .filter((field) => field.type !== "fixed")
     .map((field) => ({ name: field.name, value: dataFormFieldValue(field) }));
-  const responseXml = await xmpp.send_raw_iq(buildCommandIqXml(command.serviceJid, command.node, action, dataFields, sessionId));
-  return parseCommandIqResponse(responseXml);}
+  const responseXml = await sendRawIq(buildCommandIqXml(command.serviceJid, command.node, action, dataFields, sessionId));
+  return parseCommandIqResponse(responseXml);
+}
 
 export async function discoverExtensionCommands(
   xmpp: XmppSendIq,
@@ -689,7 +713,8 @@ function parseExtensionCommandScope(extensions: unknown[] | undefined): Extensio
   for (const form of extensions) {
     const fields = (form as { fields?: unknown[] } | undefined)?.fields;
     if (!Array.isArray(fields)) continue;
-    if (formFieldValue(fields, "FORM_TYPE") !== EXTENSION_COMMAND_FORM_TYPE) continue;
+    const formType = formFieldValue(fields, "FORM_TYPE");
+    if (formType !== NS_WADDLE_EXTENSION_1 && formType !== EXTENSION_COMMAND_FORM_TYPE) continue;
     const value = formFieldValue(fields, "waddle#command_scope");
     if (value === "global" || value === "channel") return value;
   }
@@ -796,6 +821,15 @@ function parseDiscoInfoExtensions(xml: string): Array<{ fields: Array<{ var: str
 }
 
 async function rawDiscoInfoFull(xmpp: XmppSendIq, jid: string, node?: string): Promise<{ features: string[]; extensions: unknown[] }> {
+  if (typeof xmpp.getDiscoInfo === "function") {
+    try {
+      const info = await xmpp.getDiscoInfo(jid, node);
+      return { features: info.features ?? [], extensions: info.extensions ?? [] };
+    } catch {
+      return { features: [], extensions: [] };
+    }
+  }
+  if (typeof xmpp.send_raw_iq !== "function") return { features: [], extensions: [] };
   const nodeAttr = node ? ` node="${escapeXml(node)}"` : "";
   try {
     const responseXml = await xmpp.send_raw_iq(

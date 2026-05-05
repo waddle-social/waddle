@@ -4,7 +4,7 @@ import { ChevronLeft, MessageCircle, ScanText, UserRound } from "lucide-vue-next
 import AppAvatar from "@/components/ui/AppAvatar.vue";
 import ScrollDirectionSwitcher from "@/components/chat/ScrollDirectionSwitcher.vue";
 import VersionFooter from "@/components/chat/VersionFooter.vue";
-import type { ServerVersion } from "@/composables/useVersion";
+import type { XmppServerVersion } from "@/shell/version";
 import type { WaddleSession } from "@/lib/server-auth";
 import type { BrowserXmppClient } from "@/lib/xmpp-client";
 import {
@@ -29,7 +29,7 @@ const props = defineProps<{
   session: WaddleSession;
   xmppClient?: BrowserXmppClient | null;
   webCommitSha?: string;
-  serverVersion?: ServerVersion | null;
+  serverVersion?: XmppServerVersion | null;
 }>();
 
 const emit = defineEmits<{

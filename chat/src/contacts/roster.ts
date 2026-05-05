@@ -2,7 +2,7 @@ import { ref, type Ref } from "vue";
 import type { BrowserXmppClient } from "@/lib/xmpp-client";
 import type { RosterContact } from "@/lib/xmpp/types";
 
-export function useRosterContacts(xmppClient: Ref<BrowserXmppClient | null>) {
+export function useXmppRosterContacts(xmppClient: Ref<BrowserXmppClient | null>) {
   const contacts = ref<RosterContact[]>([]);
   const isLoadingContacts = ref(false);
 

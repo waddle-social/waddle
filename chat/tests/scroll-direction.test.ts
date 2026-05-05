@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { nextTick, ref } from "vue";
-import { useDmMessaging } from "../src/composables/useDmMessaging";
-import { useMessaging } from "../src/composables/useMessaging";
+import { useDirectMessages } from "../src/dms/messages";
+import { useChannelMessages } from "../src/channels/messages";
 import { handlerStubs } from "./helpers/xmpp-client-mock";
-import { useScrollDirection } from "../src/composables/useScrollDirection";
+import { useScrollDirectionPreference } from "../src/preferences/scroll-direction";
 import {
   getNewMessagesDividerPlacement,
   orderTimelineForScrollDirection,
@@ -67,7 +67,7 @@ const originalWindow = globalThis.window;
 const originalLocalStorage = globalThis.localStorage;
 
 describe("scroll direction preference", () => {
-  const { mode, setScrollDirection } = useScrollDirection();
+  const { mode, setScrollDirection } = useScrollDirectionPreference();
 
   beforeEach(() => {
     const storage = createStorageMock();
@@ -145,7 +145,7 @@ describe("scroll direction preference", () => {
       },
     ]);
     const actionError = ref("");
-    const dm = useDmMessaging(
+    const dm = useDirectMessages(
       ref(session()),
       ref({ queryPersonalMam } as never) as never,
       ref("bob@example.com"),
@@ -169,7 +169,7 @@ describe("scroll direction preference", () => {
     const sendChatState = mock(async () => undefined);
     const sendGroupMessage = mock(async () => ({ id: "client-1", state: "sending" as const }));
     const actionError = ref("");
-    const messaging = useMessaging(
+    const messaging = useChannelMessages(
       ref(session()),
       ref(null),
       ref({
@@ -202,7 +202,7 @@ describe("scroll direction preference", () => {
     const sendChatState = mock(async () => undefined);
     const sendGroupMessage = mock(async () => ({ id: "client-1", state: "sending" as const }));
     const actionError = ref("");
-    const messaging = useMessaging(
+    const messaging = useChannelMessages(
       ref(session()),
       ref(null),
       ref({
@@ -252,7 +252,7 @@ describe("scroll direction preference", () => {
       },
     ]);
     const actionError = ref("");
-    const messaging = useMessaging(
+    const messaging = useChannelMessages(
       ref(session()),
       ref(null),
       ref({ ...handlerStubs(), queryMam } as never) as never,
@@ -295,7 +295,7 @@ describe("scroll direction preference", () => {
       },
     ]);
     const actionError = ref("");
-    const messaging = useMessaging(
+    const messaging = useChannelMessages(
       ref(session()),
       ref(null),
       ref({ ...handlerStubs(), queryMam } as never) as never,
@@ -339,7 +339,7 @@ describe("scroll direction preference", () => {
     ]);
     const virtualScroll = mock(async () => true);
     const actionError = ref("");
-    const messaging = useMessaging(
+    const messaging = useChannelMessages(
       ref(session()),
       ref(null),
       ref({ ...handlerStubs(), queryMam } as never) as never,
@@ -411,7 +411,7 @@ describe("scroll direction preference", () => {
       };
     });
     const actionError = ref("");
-    const messaging = useMessaging(
+    const messaging = useChannelMessages(
       ref(session()),
       ref(null),
       ref({ ...handlerStubs(), queryMamPage } as never) as never,
@@ -458,7 +458,7 @@ describe("scroll direction preference", () => {
       return true;
     });
     const actionError = ref("");
-    const messaging = useMessaging(
+    const messaging = useChannelMessages(
       ref(session()),
       ref(null),
       ref({ ...handlerStubs(), queryMam } as never) as never,
@@ -532,7 +532,7 @@ describe("scroll direction preference", () => {
       return true;
     });
     const actionError = ref("");
-    const messaging = useMessaging(
+    const messaging = useChannelMessages(
       ref(session()),
       ref(null),
       ref({ ...handlerStubs(), queryMamPage } as never) as never,
@@ -603,7 +603,7 @@ describe("scroll direction preference", () => {
       };
     });
     const actionError = ref("");
-    const messaging = useMessaging(
+    const messaging = useChannelMessages(
       ref(session()),
       ref(null),
       ref({ ...handlerStubs(), queryMamPage } as never) as never,
@@ -650,7 +650,7 @@ describe("scroll direction preference", () => {
       },
     ]);
     const actionError = ref("");
-    const dm = useDmMessaging(
+    const dm = useDirectMessages(
       ref(session()),
       ref({ queryPersonalMam } as never) as never,
       ref("bob@example.com"),
@@ -693,7 +693,7 @@ describe("scroll direction preference", () => {
     ]);
     const virtualScroll = mock(async () => true);
     const actionError = ref("");
-    const dm = useDmMessaging(
+    const dm = useDirectMessages(
       ref(session()),
       ref({ queryPersonalMam } as never) as never,
       ref("bob@example.com"),
@@ -765,7 +765,7 @@ describe("scroll direction preference", () => {
       };
     });
     const actionError = ref("");
-    const dm = useDmMessaging(
+    const dm = useDirectMessages(
       ref(session()),
       ref({ queryPersonalMamPage } as never) as never,
       ref("bob@example.com"),
@@ -811,7 +811,7 @@ describe("scroll direction preference", () => {
       return true;
     });
     const actionError = ref("");
-    const dm = useDmMessaging(
+    const dm = useDirectMessages(
       ref(session()),
       ref({ queryPersonalMam } as never) as never,
       activePeerJid,
@@ -885,7 +885,7 @@ describe("scroll direction preference", () => {
       return true;
     });
     const actionError = ref("");
-    const dm = useDmMessaging(
+    const dm = useDirectMessages(
       ref(session()),
       ref({ queryPersonalMamPage } as never) as never,
       ref("bob@example.com"),
@@ -956,7 +956,7 @@ describe("scroll direction preference", () => {
       };
     });
     const actionError = ref("");
-    const dm = useDmMessaging(
+    const dm = useDirectMessages(
       ref(session()),
       ref({ queryPersonalMamPage } as never) as never,
       ref("bob@example.com"),
@@ -979,7 +979,7 @@ describe("scroll direction preference", () => {
 
   test("live DM messages pin to the active edge in chat and social modes", async () => {
     const actionError = ref("");
-    const dm = useDmMessaging(
+    const dm = useDirectMessages(
       ref(session()),
       ref(null),
       ref("bob@example.com"),
@@ -1025,7 +1025,7 @@ describe("scroll direction preference", () => {
     let liveHandler: ((msg: LiveRoomMessage) => void) | null = null;
     const virtualScroll = mock(async () => true);
     const actionError = ref("");
-    const messaging = useMessaging(
+    const messaging = useChannelMessages(
       ref(session()),
       ref(null),
       ref({
@@ -1065,7 +1065,7 @@ describe("scroll direction preference", () => {
 
   test("re-pins an open DM timeline when the preference changes", async () => {
     const actionError = ref("");
-    const dm = useDmMessaging(
+    const dm = useDirectMessages(
       ref(session()),
       ref(null),
       ref("bob@example.com"),

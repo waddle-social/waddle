@@ -40,108 +40,13 @@ import {
   type PersistedQueuedRoomMessage,
 } from "@/lib/outbound-queue-store";
 import { mentionMatchesUsername } from "@/lib/mentions";
-import { useScrollDirection } from "@/composables/useScrollDirection";
+import { useScrollDirectionPreference } from "@/preferences/scroll-direction";
 import { roomJidForChannelSummary } from "@/lib/channel-room";
-
-export function fromLiveMessage(
-  session: WaddleSession,
-  msg: LiveRoomMessage,
-  parentLookup?: (id: string) => { body?: string } | undefined,
-): TimelineMessage {
-  const authorOccupantJid = `${msg.roomJid}/${msg.nick}`;
-  const tm: TimelineMessage = {
-    id: msg.id,
-    author: msg.nick,
-    authorJid: msg.authorRealJid ?? authorOccupantJid,
-    authorOccupantJid,
-    body: msg.body,
-    createdAt: msg.createdAt,
-    isSelf: msg.nick === session.username,
-  };
-  if (msg.correctionTargetId) tm.correctionTargetId = msg.correctionTargetId;
-  if (msg.reactionTargetId) tm.reactionTargetId = msg.reactionTargetId;
-  if (msg.replyableId) tm.replyableId = msg.replyableId;
-  if (msg.authorRealJid) tm.authorRealJid = msg.authorRealJid;
-  if (msg.wireIds && msg.wireIds.length > 0) {
-    tm.wireIds = msg.wireIds;
-  }
-  if (msg.mentions && msg.mentions.length > 0) {
-    tm.mentions = msg.mentions;
-  }
-  if (msg.sharedFiles && msg.sharedFiles.length > 0) {
-    tm.sharedFiles = msg.sharedFiles;
-  }
-  if (msg.extensionAnnotations && msg.extensionAnnotations.length > 0) {
-    tm.extensionAnnotations = msg.extensionAnnotations;
-  }
-  if (msg.isSticker) {
-    tm.isSticker = true;
-  }
-  if (msg.broadcastMention) {
-    tm.broadcastMention = msg.broadcastMention;
-  }
-  if (msg.markup && msg.markup.length > 0) {
-    tm.markup = msg.markup;
-  }
-  if (msg.references && msg.references.length > 0) {
-    tm.references = msg.references;
-  }
-  if (msg.replyTo) {
-    const parent = parentLookup?.(msg.replyTo.id);
-    tm.replyTo = {
-      id: msg.replyTo.id,
-      ...(msg.replyTo.author ? { author: msg.replyTo.author } : {}),
-      ...(parent?.body ? { preview: parent.body } : {}),
-    };
-  }
-  if (msg.threadId) tm.threadId = msg.threadId;
-  if (msg.parentThreadId) tm.parentThreadId = msg.parentThreadId;
-  if (msg.forumPostKind) tm.forumPostKind = msg.forumPostKind;
-  if (msg.forumTitle) tm.forumTitle = msg.forumTitle;
-  if (msg.forumThreadTitle) tm.forumThreadTitle = msg.forumThreadTitle;
-  return tm;
-}
-
-function applyForumContext(list: TimelineMessage[], inferForumReplies = true): TimelineMessage[] {
-  const threadTitles = new Map<string, string>();
-
-  for (const message of list) {
-    if (message.forumPostKind === "topic" && message.forumTitle) {
-      threadTitles.set(message.threadId ?? message.id, message.forumTitle);
-    }
-  }
-
-  return list.map((message) => {
-    const threadId = message.threadId ?? (message.forumPostKind === "topic" ? message.id : undefined);
-    const threadTitle = threadId ? threadTitles.get(threadId) : undefined;
-    const next: TimelineMessage = { ...message };
-    let changed = false;
-
-    if (message.forumPostKind === "topic") {
-      if (threadId && message.threadId !== threadId) {
-        next.threadId = threadId;
-        changed = true;
-      }
-      if (message.forumTitle && message.forumThreadTitle !== message.forumTitle) {
-        next.forumThreadTitle = message.forumTitle;
-        changed = true;
-      }
-    } else if (threadId) {
-      if (inferForumReplies && !message.forumPostKind && message.id !== threadId) {
-        next.forumPostKind = "reply";
-        changed = true;
-      }
-      const forumThreadTitle = threadTitle
-        ?? (next.forumPostKind === "reply" && !message.body ? `Thread ${threadId}` : undefined);
-      if (forumThreadTitle && message.forumThreadTitle !== forumThreadTitle) {
-        next.forumThreadTitle = forumThreadTitle;
-        changed = true;
-      }
-    }
-
-    return changed ? next : message;
-  });
-}
+import {
+  applyForumContext,
+  isFeedTimelineMessage,
+  mapLiveRoomMessageToTimeline,
+} from "@/channels/timeline";
 
 function mergeReplyToMetadata(
   existing: TimelineMessage["replyTo"],
@@ -243,46 +148,7 @@ function queuedRoomMessageToTimeline(
   return message;
 }
 
-export function formatStamp(value: string) {
-  return new Intl.DateTimeFormat("en", {
-    hour: "2-digit",
-    minute: "2-digit",
-    month: "short",
-    day: "numeric",
-  }).format(new Date(value));
-}
-
-export function formatTimeOfDay(value: string) {
-  return new Intl.DateTimeFormat("en", {
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(new Date(value));
-}
-
-const DAY_DIVIDER_FORMATTER = new Intl.DateTimeFormat("en", {
-  weekday: "short",
-  month: "short",
-  day: "numeric",
-});
-
-function localDayOrdinal(date: Date): number {
-  return Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()) / (24 * 60 * 60 * 1000);
-}
-
-export function formatDayDivider(value: string, now = new Date()) {
-  const date = new Date(value);
-  const dayOffset = localDayOrdinal(now) - localDayOrdinal(date);
-  if (dayOffset === 0) return "Today";
-  if (dayOffset === 1) return "Yesterday";
-  // Older messages get a full weekday + month + day banner.
-  return DAY_DIVIDER_FORMATTER.format(date);
-}
-
-export function isSameDay(a: string, b: string): boolean {
-  return localDayOrdinal(new Date(a)) === localDayOrdinal(new Date(b));
-}
-
-export function useMessaging(
+export function useChannelMessages(
   session: Ref<WaddleSession | null>,
   _api: Ref<null>,
   xmppClient: Ref<BrowserXmppClient | null>,
@@ -294,7 +160,7 @@ export function useMessaging(
   clearActionError: () => void,
   mentionJidsByNick?: Ref<Record<string, string>>,
 ) {
-  const { mode: scrollDirection } = useScrollDirection();
+  const { mode: scrollDirection } = useScrollDirectionPreference();
   // xmppStatus is owned by $xmppStatus (written from XmppProvider, which is
   // persisted across route changes). Reading via useStore keeps the composable
   // in sync with the authoritative snapshot on every mount.
@@ -414,7 +280,7 @@ export function useMessaging(
         }
 
         mergeLiveMessage(
-          fromLiveMessage(session.value!, msg, (id) => findMessageById(messages.value, id)),
+          mapLiveRoomMessageToTimeline(session.value!, msg, (id) => findMessageById(messages.value, id)),
         );
 
         // Trigger notification for mentions when tab is unfocused
@@ -879,9 +745,7 @@ export function useMessaging(
   // Matches ContentArea.feedMessages: thread replies (messages with a
   // threadId that isn't their own id) are hidden, so the last-seen anchor
   // and the "New messages" divider must be computed against this predicate.
-  function isFeedVisible(m: TimelineMessage): boolean {
-    return !m.threadId || m.id === m.threadId;
-  }
+  const isFeedVisible = isFeedTimelineMessage;
 
   function buildTimelineFromMamResults(
     mamResults: LiveRoomMessage[],
@@ -938,7 +802,7 @@ export function useMessaging(
     }
     const timeline = options.seedExistingOnly ? [] : [...existing];
     for (const raw of regularMessages) {
-      const tm = fromLiveMessage(session.value!, raw, (id) => byId.get(id));
+      const tm = mapLiveRoomMessageToTimeline(session.value!, raw, (id) => byId.get(id));
       const existingMessage = [tm.id, ...(tm.wireIds ?? [])]
         .map((id) => byId.get(id))
         .find((message): message is TimelineMessage => !!message);
@@ -1344,7 +1208,7 @@ export function useMessaging(
       const wireReplyTo = replyTo && parent && parent.replyableId
         ? {
             id: parent.replyableId,
-            author: parent.authorJid ?? replyTo.author,
+            author: parent.authorOccupantJid ?? parent.authorJid ?? replyTo.author,
             ...(replyTo.body ? { body: replyTo.body } : {}),
           }
         : undefined;
@@ -1488,9 +1352,15 @@ export function useMessaging(
 
   async function retractMessage(messageId: string) {
     if (!xmppClient.value || !activeChannelId.value) return;
-    const targetId = findMessageById(messages.value, messageId)?.id ?? messageId;
+    const target = findMessageById(messages.value, messageId);
+    const targetId = target?.replyableId;
 
     clearActionError();
+    if (!targetId) {
+      actionError.value =
+        "This message can't be retracted (no room stanza-id). Try reloading the channel.";
+      return;
+    }
 
     try {
       await xmppClient.value.sendRetraction(
@@ -1505,9 +1375,15 @@ export function useMessaging(
 
   async function moderateMessage(messageId: string, reason?: string) {
     if (!xmppClient.value || !activeChannelId.value) return;
-    const targetId = findMessageById(messages.value, messageId)?.id ?? messageId;
+    const target = findMessageById(messages.value, messageId);
+    const targetId = target?.replyableId;
 
     clearActionError();
+    if (!targetId) {
+      actionError.value =
+        "This message can't be moderated (no room stanza-id). Try reloading the channel.";
+      return;
+    }
 
     try {
       await xmppClient.value.sendModeration(

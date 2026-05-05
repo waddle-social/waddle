@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { nextTick, ref } from "vue";
-import { useTabUnreadIndicator } from "../src/composables/useTabUnreadIndicator";
+import { useChatTabUnreadIndicator } from "../src/shell/tab-unread-indicator";
 
 const originalWindow = globalThis.window;
 const originalDocument = globalThis.document;
@@ -205,10 +205,10 @@ afterEach(() => {
   }
 });
 
-describe("useTabUnreadIndicator", () => {
+describe("useChatTabUnreadIndicator", () => {
   test("updates title, favicon, and app badge for unread counts", async () => {
     const count = ref(3);
-    const indicator = useTabUnreadIndicator(count);
+    const indicator = useChatTabUnreadIndicator(count);
 
     await flushPromises();
 
@@ -258,7 +258,7 @@ describe("useTabUnreadIndicator", () => {
     const count = ref(0);
     const hydration = deferred<boolean>();
     const onServiceWorkerUnreadCount = mock((_count: number) => hydration.promise);
-    const indicator = useTabUnreadIndicator(count, { onServiceWorkerUnreadCount });
+    const indicator = useChatTabUnreadIndicator(count, { onServiceWorkerUnreadCount });
     await flushPromises();
 
     const event = Object.assign(new Event("message"), {
@@ -284,7 +284,7 @@ describe("useTabUnreadIndicator", () => {
   test("reconciles deferred local changes when inbox refresh does not complete", async () => {
     const count = ref(0);
     const hydration = deferred<boolean>();
-    const indicator = useTabUnreadIndicator(count, {
+    const indicator = useChatTabUnreadIndicator(count, {
       onServiceWorkerUnreadCount: mock((_count: number) => hydration.promise),
     });
     await flushPromises();
@@ -310,7 +310,7 @@ describe("useTabUnreadIndicator", () => {
     autoLoadImages = false;
     const count = ref(3);
     const hydration = deferred<boolean>();
-    const indicator = useTabUnreadIndicator(count, {
+    const indicator = useChatTabUnreadIndicator(count, {
       onServiceWorkerUnreadCount: mock((_count: number) => hydration.promise),
     });
     await nextTick();
@@ -344,7 +344,7 @@ describe("useTabUnreadIndicator", () => {
   test("ignores service worker unread messages when the app should not accept them", async () => {
     const count = ref(0);
     const onServiceWorkerUnreadCount = mock((_count: number) => true);
-    const indicator = useTabUnreadIndicator(count, {
+    const indicator = useChatTabUnreadIndicator(count, {
       shouldAcceptServiceWorkerUnreadCount: () => false,
       onServiceWorkerUnreadCount,
     });

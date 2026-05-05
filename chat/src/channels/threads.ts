@@ -1,7 +1,7 @@
 import { computed, type Ref } from "vue";
 import type { TimelineMessage } from "@/lib/chat-ui";
 
-export interface ThreadEntry {
+export interface MessageThreadEntry {
   threadId: string;
   /**
    * Resolved thread root. Two paths:
@@ -21,18 +21,18 @@ export interface ThreadEntry {
   lastTs: string;
 }
 
-export type ThreadIndex = ReadonlyMap<string, ThreadEntry>;
+export type MessageThreadIndex = ReadonlyMap<string, MessageThreadEntry>;
 
 interface UseThreadsResult {
-  index: Readonly<Ref<ThreadIndex>>;
-  getEntry: (threadId: string | null | undefined) => ThreadEntry | undefined;
+  index: Readonly<Ref<MessageThreadIndex>>;
+  getEntry: (threadId: string | null | undefined) => MessageThreadEntry | undefined;
   /**
    * Like `getEntry`, but synthesises an empty entry rooted at the matching
    * message when no replies exist yet. Use this for the thread panel so
    * opening an empty sub-thread renders the root and composer instead of
    * "Loading…".
    */
-  resolveEntry: (threadId: string | null | undefined) => ThreadEntry | undefined;
+  resolveEntry: (threadId: string | null | undefined) => MessageThreadEntry | undefined;
   hasChildren: (messageId: string) => boolean;
   rootOf: (message: TimelineMessage | null | undefined) => TimelineMessage | null;
 }
@@ -41,7 +41,7 @@ function byCreatedAt(a: TimelineMessage, b: TimelineMessage): number {
   return a.createdAt.localeCompare(b.createdAt);
 }
 
-function buildIndex(messages: readonly TimelineMessage[]): ThreadIndex {
+function buildIndex(messages: readonly TimelineMessage[]): MessageThreadIndex {
   if (messages.length === 0) return new Map();
 
   const byId = new Map<string, TimelineMessage>();
@@ -59,7 +59,7 @@ function buildIndex(messages: readonly TimelineMessage[]): ThreadIndex {
     }
   }
 
-  const entries = new Map<string, ThreadEntry>();
+  const entries = new Map<string, MessageThreadEntry>();
   for (const [threadId, group] of byThread) {
     group.sort(byCreatedAt);
     // Resolve the thread root via two paths, in order:
@@ -141,20 +141,20 @@ function buildIndex(messages: readonly TimelineMessage[]): ThreadIndex {
  * Walks parentThreadId links so ancestor threads see their sub-threads'
  * reply counts.
  */
-export function useThreads(messages: Ref<readonly TimelineMessage[]>): UseThreadsResult {
-  const index = computed<ThreadIndex>(() => buildIndex(messages.value));
+export function useMessageThreads(messages: Ref<readonly TimelineMessage[]>): UseThreadsResult {
+  const index = computed<MessageThreadIndex>(() => buildIndex(messages.value));
   const byId = computed<ReadonlyMap<string, TimelineMessage>>(() => {
     const map = new Map<string, TimelineMessage>();
     for (const m of messages.value) map.set(m.id, m);
     return map;
   });
 
-  function getEntry(threadId: string | null | undefined): ThreadEntry | undefined {
+  function getEntry(threadId: string | null | undefined): MessageThreadEntry | undefined {
     if (!threadId) return undefined;
     return index.value.get(threadId);
   }
 
-  function resolveEntry(threadId: string | null | undefined): ThreadEntry | undefined {
+  function resolveEntry(threadId: string | null | undefined): MessageThreadEntry | undefined {
     if (!threadId) return undefined;
     const existing = index.value.get(threadId);
     if (existing) return existing;

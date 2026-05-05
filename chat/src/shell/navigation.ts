@@ -41,7 +41,7 @@ function buildSearch(threadStack: string[] | undefined): string {
 }
 
 // Parses canonical Waddle app routes.
-export function parseRoute(pathname: string, search?: string): RouteState {
+export function parseChatLocation(pathname: string, search?: string): RouteState {
   const segments = pathname.split("/").filter(Boolean);
   const resolvedSearch = search ?? (typeof window !== "undefined" ? window.location.search : "");
   const threadStack = parseThreadStack(resolvedSearch);
@@ -105,18 +105,18 @@ export function parseRoute(pathname: string, search?: string): RouteState {
   };
 }
 
-export function resolveChannel(slug: string, channels: ChannelSummary[]): ChannelSummary | undefined {
+export function resolveChannelBySlug(slug: string, channels: ChannelSummary[]): ChannelSummary | undefined {
   return channels.find((c) => c.id === slug);
 }
 
-export function shouldLoadStructureForRoute(
+export function shouldLoadWaddleStructureForRoute(
   route: RouteState,
   channelCount: number,
 ): boolean {
   return (route.page === "dashboard" || route.page === "extension" || (route.page === "chat" && !route.dmUsername)) && channelCount === 0;
 }
 
-export function buildPath(
+export function buildChannelPath(
   channel: ChannelSummary | null,
   threadStack?: string[],
 ): string {
@@ -124,7 +124,7 @@ export function buildPath(
   return channel ? `/r/${encodeURIComponent(channel.id)}${search}` : "/";
 }
 
-export function buildExtensionRoutePath(
+export function buildChannelExtensionPath(
   channel: ChannelSummary | null,
   pluginId: string | null | undefined,
   routeId: string | null | undefined,
@@ -133,47 +133,47 @@ export function buildExtensionRoutePath(
   return `/r/${encodeURIComponent(channel.id)}/x/${encodeURIComponent(pluginId)}/${encodeURIComponent(routeId)}`;
 }
 
-export function buildDmPath(username: string | null, threadStack?: string[]): string {
+export function buildDirectMessagePath(username: string | null, threadStack?: string[]): string {
   const search = buildSearch(threadStack);
   return username ? `/dm/${encodeURIComponent(username)}${search}` : "/";
 }
 
-export function buildSettingsPath(): string {
+export function buildChatSettingsPath(): string {
   return SETTINGS_PATH;
 }
 
-export function pushRoute(
+export function pushChannelRoute(
   channel: ChannelSummary | null,
   threadStack?: string[],
 ) {
-  const path = buildPath(channel, threadStack);
+  const path = buildChannelPath(channel, threadStack);
   const current = window.location.pathname + window.location.search;
   if (current !== path) {
     window.history.pushState({ waddlePage: "chat" }, "", path);
   }
 }
 
-export function pushDmRoute(username: string | null, threadStack?: string[]) {
-  const path = buildDmPath(username, threadStack);
+export function pushDirectMessageRoute(username: string | null, threadStack?: string[]) {
+  const path = buildDirectMessagePath(username, threadStack);
   const current = window.location.pathname + window.location.search;
   if (current !== path) {
     window.history.pushState({ waddlePage: "chat" }, "", path);
   }
 }
 
-export function pushSettingsRoute(origin: "app" | "direct" = "app") {
+export function pushChatSettingsRoute(origin: "app" | "direct" = "app") {
   const current = window.location.pathname + window.location.search;
   if (current !== SETTINGS_PATH) {
     window.history.pushState({ waddlePage: "settings", origin }, "", SETTINGS_PATH);
   }
 }
 
-export function pushExtensionRoute(
+export function pushChannelExtensionRoute(
   channel: ChannelSummary | null,
   pluginId: string | null | undefined,
   routeId: string | null | undefined,
 ) {
-  const path = buildExtensionRoutePath(channel, pluginId, routeId);
+  const path = buildChannelExtensionPath(channel, pluginId, routeId);
   const current = window.location.pathname + window.location.search;
   if (current !== path) {
     window.history.pushState({ waddlePage: "extension" }, "", path);

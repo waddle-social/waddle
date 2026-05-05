@@ -11,7 +11,7 @@ import {
   type InboxState,
 } from "@/services/inbox";
 
-export interface ThreadInboxEntry {
+export interface ChannelThreadInboxEntry {
   roomJid: string;
   threadId: string;
   title?: string;
@@ -22,7 +22,7 @@ export interface ThreadInboxEntry {
   preview?: string;
 }
 
-export function useChannelUnread(
+export function useChannelInbox(
   xmppClient: Ref<BrowserXmppClient | null>,
 ) {
   const inboxState = ref<InboxState>(createInboxState());
@@ -129,7 +129,7 @@ export function useChannelUnread(
     return inboxState.value.channels.get(roomJid)?.unread ?? 0;
   }
 
-  function threadEntries(roomJid: string): ThreadInboxEntry[] {
+  function threadEntries(roomJid: string): ChannelThreadInboxEntry[] {
     return threadsForRoom(inboxState.value, roomJid).map((entry) => ({
       roomJid: entry.partner,
       threadId: entry.thread!,

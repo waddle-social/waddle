@@ -1,6 +1,6 @@
 import { describe, expect, mock, test } from "bun:test";
 import { ref } from "vue";
-import { useWaddles } from "../src/composables/useWaddles";
+import { useWaddleDirectory } from "../src/waddles/directory";
 import type { MemberSummary } from "../src/lib/chat-types";
 import type { BrowserXmppClient } from "../src/lib/xmpp-client";
 
@@ -32,7 +32,7 @@ function makeWaddles(client: BrowserXmppClient | null = null) {
   const clearActionError = mock(() => { actionError.value = ""; });
   const normalizeError = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
-  const w = useWaddles(
+  const w = useWaddleDirectory(
     ref(null),
     xmppClient,
     ref(null),
@@ -44,7 +44,7 @@ function makeWaddles(client: BrowserXmppClient | null = null) {
   return { w, xmppClient, actionError };
 }
 
-describe("useWaddles.loadStructure", () => {
+describe("useWaddleDirectory.loadStructure", () => {
   test("loads members for the first channel when no preferred channel is supplied", async () => {
     const listRoomMembers = mock(async (_id: string, _opts?: { roomJid?: string }) => [ALICE]);
     const client = makeClient({ listRoomMembers });
@@ -107,7 +107,7 @@ describe("useWaddles.loadStructure", () => {
   });
 });
 
-describe("useWaddles.reloadChannelMembers", () => {
+describe("useWaddleDirectory.reloadChannelMembers", () => {
   test("loads members for the active channel using its discovered JID", async () => {
     const listRoomMembers = mock(async (_id: string, _opts?: { roomJid?: string }) => [ALICE]);
     const client = makeClient({ listRoomMembers });

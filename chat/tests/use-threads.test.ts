@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { ref } from "vue";
-import { useThreads } from "../src/composables/useThreads";
+import { useMessageThreads } from "../src/channels/threads";
 import type { TimelineMessage } from "../src/lib/chat-ui";
 
 function makeMessage(partial: Partial<TimelineMessage> & { id: string; createdAt: string }): TimelineMessage {
@@ -12,13 +12,13 @@ function makeMessage(partial: Partial<TimelineMessage> & { id: string; createdAt
   };
 }
 
-describe("useThreads", () => {
+describe("useMessageThreads", () => {
   test("returns an empty index when there are no threaded messages", () => {
     const messages = ref<TimelineMessage[]>([
       makeMessage({ id: "a", createdAt: "2026-01-01T00:00:00Z", body: "hi" }),
       makeMessage({ id: "b", createdAt: "2026-01-01T00:01:00Z", body: "yo" }),
     ]);
-    const { index } = useThreads(messages);
+    const { index } = useMessageThreads(messages);
     expect(index.value.size).toBe(0);
   });
 
@@ -30,7 +30,7 @@ describe("useThreads", () => {
       makeMessage({ id: "c1", threadId: "root", createdAt: "2026-01-01T00:01:00Z", body: "first reply" }),
       makeMessage({ id: "c2", threadId: "root", createdAt: "2026-01-01T00:02:00Z", body: "second reply" }),
     ]);
-    const { index, hasChildren, rootOf } = useThreads(messages);
+    const { index, hasChildren, rootOf } = useMessageThreads(messages);
     const entry = index.value.get("root");
     expect(entry).toBeTruthy();
     expect(entry!.root?.id).toBe("root");
@@ -55,7 +55,7 @@ describe("useThreads", () => {
         body: "orphan reply",
       }),
     ]);
-    const { index } = useThreads(messages);
+    const { index } = useMessageThreads(messages);
     const entry = index.value.get("missing-root");
     expect(entry).toBeTruthy();
     expect(entry!.root).toBeNull();
@@ -73,7 +73,7 @@ describe("useThreads", () => {
       makeMessage({ id: "sub1", threadId: "c1", parentThreadId: "root", createdAt: "2026-01-01T00:02:00Z", body: "nested" }),
       makeMessage({ id: "sub2", threadId: "c1", parentThreadId: "root", createdAt: "2026-01-01T00:03:00Z", body: "nested 2" }),
     ]);
-    const { index } = useThreads(messages);
+    const { index } = useMessageThreads(messages);
     const rootEntry = index.value.get("root");
     const subEntry = index.value.get("c1");
     expect(subEntry).toBeTruthy();
@@ -89,7 +89,7 @@ describe("useThreads", () => {
 
   test("getEntry returns undefined for unknown ids", () => {
     const messages = ref<TimelineMessage[]>([]);
-    const { getEntry } = useThreads(messages);
+    const { getEntry } = useMessageThreads(messages);
     expect(getEntry(undefined)).toBeUndefined();
     expect(getEntry("nope")).toBeUndefined();
   });
@@ -102,7 +102,7 @@ describe("useThreads", () => {
       makeMessage({ id: "root", threadId: "root", createdAt: "2026-01-01T00:00:00Z", body: "root msg" }),
       makeMessage({ id: "c1", threadId: "root", createdAt: "2026-01-01T00:01:00Z", body: "reply" }),
     ]);
-    const { getEntry, resolveEntry } = useThreads(messages);
+    const { getEntry, resolveEntry } = useMessageThreads(messages);
     expect(getEntry("c1")).toBeUndefined();
     const entry = resolveEntry("c1");
     expect(entry).toBeTruthy();
@@ -113,7 +113,7 @@ describe("useThreads", () => {
 
   test("resolveEntry returns undefined when the id doesn't match any loaded message", () => {
     const messages = ref<TimelineMessage[]>([]);
-    const { resolveEntry } = useThreads(messages);
+    const { resolveEntry } = useMessageThreads(messages);
     expect(resolveEntry("nope")).toBeUndefined();
     expect(resolveEntry(undefined)).toBeUndefined();
   });
@@ -137,7 +137,7 @@ describe("useThreads", () => {
         body: "agree, let's split it",
       }),
     ]);
-    const { index, rootOf } = useThreads(messages);
+    const { index, rootOf } = useMessageThreads(messages);
     const entry = index.value.get("topic-roadmap");
     expect(entry).toBeTruthy();
     expect(entry!.root?.id).toBe("msg-1");

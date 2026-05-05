@@ -2,8 +2,8 @@ import { describe, expect, mock, test } from "bun:test";
 import { nextTick, ref } from "vue";
 import type { WaddleSession } from "../src/lib/server-auth";
 import { roomBareJidFor, type LiveDmMessage, type LiveRoomMessage } from "../src/lib/xmpp-client";
-import { useDmMessaging } from "../src/composables/useDmMessaging";
-import { useMessaging } from "../src/composables/useMessaging";
+import { useDirectMessages } from "../src/dms/messages";
+import { useChannelMessages } from "../src/channels/messages";
 import { handlerStubs } from "./helpers/xmpp-client-mock";
 
 function session(partial: Partial<WaddleSession> = {}): WaddleSession {
@@ -18,7 +18,7 @@ function session(partial: Partial<WaddleSession> = {}): WaddleSession {
 
 function makeRoomMessaging(xmppClient: ReturnType<typeof makeRoomClient>) {
   const actionError = ref("");
-  const messaging = useMessaging(
+  const messaging = useChannelMessages(
     ref(session()),
     ref(null),
     xmppClient,
@@ -41,7 +41,7 @@ function makeRoomClient(queryMamResults: LiveRoomMessage[] = []) {
 
 function makeDmMessaging(xmppClient: ReturnType<typeof makeDmClient>) {
   const actionError = ref("");
-  const dm = useDmMessaging(
+  const dm = useDirectMessages(
     ref(session()),
     xmppClient,
     ref("bob@example.com"),
@@ -508,7 +508,7 @@ describe("XEP-0198 self-echo reconciliation (group chat)", () => {
     let onMessage: ((msg: LiveRoomMessage) => void) | null = null;
     const actionError = ref("");
     const xmppClient = ref(null as never);
-    const messaging = useMessaging(
+    const messaging = useChannelMessages(
       ref(currentSession),
       ref(null),
       xmppClient,

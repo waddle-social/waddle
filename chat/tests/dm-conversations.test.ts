@@ -1,6 +1,6 @@
 import { describe, test, expect, mock } from "bun:test";
 import { ref } from "vue";
-import { useDmConversations } from "../src/composables/useDmConversations";
+import { useDirectMessageConversations } from "../src/dms/conversations";
 import type { WaddleSession } from "../src/lib/server-auth";
 import type { BrowserXmppClient, InboxEntry, LiveDmMessage } from "../src/lib/xmpp-client";
 
@@ -27,7 +27,7 @@ function makeComposable(
 ) {
   const session = ref<WaddleSession | null>(makeSession(jid));
   const clientRef = ref<BrowserXmppClient | null>(client);
-  return { composable: useDmConversations(session, clientRef), session, client: clientRef };
+  return { composable: useDirectMessageConversations(session, clientRef), session, client: clientRef };
 }
 
 function makeDmMessage(overrides: Partial<LiveDmMessage> = {}): LiveDmMessage {
@@ -47,7 +47,7 @@ function epochSeconds(value: string): number {
   return Math.floor(new Date(value).getTime() / 1000);
 }
 
-describe("useDmConversations", () => {
+describe("useDirectMessageConversations", () => {
   test("starts with empty state", () => {
     const { composable } = makeComposable();
     expect(composable.conversations.value).toEqual([]);
@@ -161,8 +161,8 @@ describe("useDmConversations", () => {
   });
 
   test("receiveIncomingDm does not auto-sync inbox read for active conversation", async () => {
-    // Auto-mark-read responsibility lives in useReadReceipts (gated on
-    // viewport + window focus); useDmConversations only suppresses the
+    // Auto-mark-read responsibility lives in useChatReadReceipts (gated on
+    // viewport + window focus); useDirectMessageConversations only suppresses the
     // unread increment for the active conversation.
     const client = makeClient();
     const { composable } = makeComposable({ client });
@@ -183,7 +183,7 @@ describe("useDmConversations", () => {
   });
 
   test("openDm does not auto-mark-read on its own", async () => {
-    // Auto-mark-read responsibility lives in useReadReceipts (gated on
+    // Auto-mark-read responsibility lives in useChatReadReceipts (gated on
     // viewport + window focus); openDm only sets the active peer.
     const client = makeClient([
       {

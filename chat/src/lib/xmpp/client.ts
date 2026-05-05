@@ -38,6 +38,7 @@ import type {
 } from "./types";
 import { mergeOccupantHats, roleHatsForOccupant } from "./occupant-badges";
 import { prepareEncryptedAttachmentUpload } from "./encrypted-attachments";
+
 import { discoverChannels, discoverTopology } from "./discovery";
 import { discoverUploadService, uploadFile, type UploadProgress } from "./file-upload";
 import { ReconnectCatchup } from "./reconnect-catchup";
@@ -82,7 +83,10 @@ import type {
 } from "./wasm-types";
 
 type WasmModule = typeof import("@waddle/xmpp-client-wasm");
-type WasmClient = import("@waddle/xmpp-client-wasm").WaddleClient;
+type WasmClient = import("@waddle/xmpp-client-wasm").WaddleClient & {
+  discover_extension_routes?: () => Promise<unknown>;
+  fetch_extension_route_items?: (route: unknown, roomJid: string) => Promise<unknown>;
+};
 
 type CompatEmitter = {
   on?: (event: string, handler: (...args: any[]) => void) => void;
@@ -972,7 +976,7 @@ export class BrowserXmppClient {
   async discoverExtensionRoutes(): Promise<DiscoveredExtensionRoute[]> { const xmpp = await this.requireConnectedXmpp(); return discoverExtensionRoutes(xmpp as WasmClient, this.session.jid); }
   async fetchExtensionRouteItems(route: DiscoveredExtensionRoute, roomJid: string): Promise<ExtensionRouteItem[]> { const xmpp = await this.requireConnectedXmpp(); return fetchExtensionRouteItems(xmpp as WasmClient, route, roomJid); }
   async invokeExtensionCommand(command: DiscoveredExtensionCommand): Promise<ExtensionCommandResult> { const xmpp = await this.requireConnectedXmpp(); return invokeExtensionCommand(xmpp as WasmClient, this.session.jid, command); }
-  async submitExtensionCommandForm(command: DiscoveredExtensionCommand, sessionId: string, fields: ExtensionCommandFormField[], action?: ExtensionCommandAction): Promise<ExtensionCommandResult> { const xmpp = await this.requireConnectedXmpp(); return submitExtensionCommandForm(xmpp as WasmClient, command, sessionId, fields, action); }
+  async submitExtensionCommandForm(command: DiscoveredExtensionCommand, sessionId: string, fields: ExtensionCommandFormField[], action?: ExtensionCommandAction, roomJid?: string): Promise<ExtensionCommandResult> { const xmpp = await this.requireConnectedXmpp(); return submitExtensionCommandForm(xmpp as WasmClient, command, sessionId, fields, action, roomJid); }
 
   async enablePushNotifications(opts: { serviceJid: string; node?: string; endpoint: string; p256dh: string; auth: string }): Promise<boolean> {
     const xmpp = await this.requireConnectedXmpp();

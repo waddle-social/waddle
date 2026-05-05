@@ -15,7 +15,7 @@ interface UseReadReceiptsOptions {
   markDisplayed: (messageId: string) => void;
 }
 
-export function useReadReceipts(options: UseReadReceiptsOptions) {
+export function useChatReadReceipts(options: UseReadReceiptsOptions) {
   let lastDispatchedDisplayedId: string | null = null;
   let lastReadActiveKey: string | null = null;
 

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { MessageCircle, Plus } from "lucide-vue-next";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
-import { formatStamp } from "@/composables/useMessaging";
+import { formatTimelineStamp } from "@/channels/timeline";
 import type { DmConversation } from "@/lib/xmpp-client";
 
 const props = defineProps<{
@@ -71,7 +71,7 @@ function dotClass(show?: DmConversation["presenceShow"]): string {
             <div class="flex items-center justify-between gap-2">
               <span class="type-control truncate">{{ conversation.peerUsername }}</span>
               <span v-if="conversation.lastMessageAt" class="type-meta type-numeric text-sidebar-muted">
-                {{ formatStamp(conversation.lastMessageAt) }}
+                {{ formatTimelineStamp(conversation.lastMessageAt) }}
               </span>
             </div>
             <div class="flex items-center gap-1.5">

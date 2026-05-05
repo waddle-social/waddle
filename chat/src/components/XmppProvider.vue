@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted } from "vue";
-import { useAuth } from "@/composables/useAuth";
+import { useSessionAuth } from "@/auth/session";
 import { BrowserXmppClient } from "@/lib/xmpp-client";
 import { connectionStore } from "@/lib/connection-store";
 import { createServerAuth } from "@/lib/server-auth";
@@ -11,7 +11,7 @@ const props = defineProps<{
   serverBaseUrl: string;
 }>();
 
-const auth = useAuth(props.serverBaseUrl);
+const auth = useSessionAuth(props.serverBaseUrl);
 
 function syncStoreFromAuth() {
   connectionStore.appState = auth.appState.value;
@@ -46,7 +46,7 @@ async function bootstrap() {
     // The status handler is owned here — XmppProvider is persisted across
     // route changes (transition:persist), so there is exactly one writer to
     // $xmppStatus for the lifetime of the client. Transient consumers
-    // (useMessaging, connection-notice) read the store via useStore.
+    // (useChannelMessages, connection-notice) read the store via useStore.
     client.setStatusHandler((status) => {
       $xmppStatus.set(status);
     });
