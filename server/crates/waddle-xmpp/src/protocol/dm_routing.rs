@@ -20,12 +20,18 @@
 //!   MUST be silently dropped (neither stored nor bounced)
 //! - Issue #209 lock Q10b — `<no-permanent-store/>` skips the inbox bump
 //!
-//! Hint precedence (XEP-0334 is silent on conflicts; project rule is
-//! "more-restrictive wins"):
-//! - `<store/>` overrides type-default skips, EXCEPT `type='error'`.
-//! - `<no-store/>` overrides `<no-permanent-store/>` (more restrictive).
-//! - `<no-store/>` and `<no-permanent-store/>` lose to `<store/>` (XEP-0334
-//!   §5.4 says `<store/>` SHOULD store).
+//! Hint precedence (XEP-0334 is silent on conflicts; project rule):
+//! - **Explicit `<store/>` wins over conflicting restrictive hints.**
+//!   XEP-0334 §5.4 says a stanza with `<store/>` SHOULD be stored, so
+//!   when both `<store/>` and `<no-store/>` (or `<no-permanent-store/>`)
+//!   are present, `<store/>` is honored.
+//! - **In the absence of `<store/>`, the more-restrictive hint wins.**
+//!   `<no-store/>` is strictly more restrictive than
+//!   `<no-permanent-store/>` (the latter still allows transient hold-
+//!   and-forward; the former forbids it), so when both appear without
+//!   `<store/>`, `<no-store/>` wins.
+//! - **`<store/>` does NOT override `type='error'`** — XEP-0334 §6 ¶3
+//!   ignores all hints inside `type='error'` stanzas.
 //!
 //! The classifier is a pure function: same inputs → same `DmRouting`.
 //! It performs no I/O. Wiring this into the routing layer and existing
