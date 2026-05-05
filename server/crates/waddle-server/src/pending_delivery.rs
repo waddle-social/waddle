@@ -24,13 +24,19 @@
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use jid::{BareJid, FullJid};
-use tracing::{debug, instrument, warn};
+use tracing::{debug, info, instrument, warn};
 use waddle_xmpp::pending_delivery::flush::{build_replay_stanza, MaterializedPayload};
-use waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage;
-use waddle_xmpp::pending_delivery::{PendingPayload, PendingRow, SmSessionId};
+use waddle_xmpp::pending_delivery::storage::{PendingDeliveryStorage, PendingStorageError};
+use waddle_xmpp::pending_delivery::{
+    InsertOutcome, PendingPayload, PendingRow, QuotaPolicy, SmSessionId,
+};
+use waddle_xmpp::protocol::event::{StanzaIdRef, StanzaIdValue};
 use waddle_xmpp::registry::{ConnectionRegistry, SendResult};
 use waddle_xmpp::Stanza;
+
+use crate::db::{Database, DatabaseConfig, DatabaseDriver, IntoParams};
 
 /// Outcome of a flush attempt for one resource.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -200,6 +206,360 @@ where
     }
 }
 
+// ---------------------------------------------------------------------------
+// Database-backed PendingDeliveryStorage (issue #209, slice (b) production
+// backend).
+// ---------------------------------------------------------------------------
+
+const PAYLOAD_KIND_ARCHIVED: &str = "archived";
+const PAYLOAD_KIND_TRANSIENT: &str = "transient";
+
+/// libSQL/Postgres-backed [`PendingDeliveryStorage`] implementation.
+///
+/// Schema:
+///
+/// ```sql
+/// CREATE TABLE pending_delivery (
+///     row_id TEXT PRIMARY KEY,            -- UUID v7 — sortable for FIFO
+///     recipient_jid TEXT NOT NULL,
+///     original_receipt_at INTEGER NOT NULL, -- ms since unix epoch
+///     payload_kind TEXT NOT NULL,         -- 'archived' | 'transient'
+///     archive_stanza_by TEXT,             -- bare jid stamping `<stanza-id/>`
+///     archive_stanza_id TEXT,             -- XEP-0359 id (Archived rows)
+///     transient_xml TEXT,                 -- serialized minidom (Transient)
+///     flushed_in_session TEXT
+/// );
+/// ```
+///
+/// `row_id` is a UUID v7 — sortable by time of generation, so an
+/// `ORDER BY row_id` reproduces FIFO without driver-specific
+/// auto-increment syntax (SQLite: `AUTOINCREMENT`; Postgres:
+/// `BIGSERIAL`).
+#[derive(Clone)]
+pub struct DatabasePendingDeliveryStorage {
+    db: Database,
+    quota: QuotaPolicy,
+}
+
+impl DatabasePendingDeliveryStorage {
+    /// Open a backing database (or in-memory fallback when no URL is
+    /// supplied). Mirrors [`crate::inbox::DatabaseInboxStorage::open`].
+    pub async fn open(
+        database_url: Option<&str>,
+        quota: QuotaPolicy,
+    ) -> Result<Self, PendingStorageError> {
+        let db = match database_url {
+            Some(url) => {
+                let driver = if url.starts_with("postgres://") || url.starts_with("postgresql://") {
+                    DatabaseDriver::Postgres
+                } else {
+                    DatabaseDriver::Sqlite
+                };
+                Database::from_config(
+                    "pending_delivery",
+                    &DatabaseConfig::new(driver, url.to_string()),
+                )
+                .await
+                .map_err(|e| PendingStorageError::Other(e.to_string()))?
+            }
+            None => Database::in_memory("pending_delivery")
+                .await
+                .map_err(|e| PendingStorageError::Other(e.to_string()))?,
+        };
+        let storage = Self { db, quota };
+        storage.initialize().await?;
+        info!(
+            driver = ?storage.db.driver(),
+            "pending_delivery storage initialized (XEP-0160)"
+        );
+        Ok(storage)
+    }
+
+    async fn initialize(&self) -> Result<(), PendingStorageError> {
+        self.execute(
+            r#"
+            CREATE TABLE IF NOT EXISTS pending_delivery (
+                row_id TEXT PRIMARY KEY,
+                recipient_jid TEXT NOT NULL,
+                original_receipt_at INTEGER NOT NULL,
+                payload_kind TEXT NOT NULL,
+                archive_stanza_by TEXT,
+                archive_stanza_id TEXT,
+                transient_xml TEXT,
+                flushed_in_session TEXT
+            )
+            "#,
+            (),
+        )
+        .await?;
+        self.execute(
+            "CREATE INDEX IF NOT EXISTS idx_pending_delivery_recipient \
+             ON pending_delivery (recipient_jid, row_id)",
+            (),
+        )
+        .await?;
+        self.execute(
+            "CREATE INDEX IF NOT EXISTS idx_pending_delivery_session \
+             ON pending_delivery (flushed_in_session)",
+            (),
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn execute(
+        &self,
+        sql: &str,
+        params: impl IntoParams,
+    ) -> Result<u64, PendingStorageError> {
+        let conn = self
+            .db
+            .guard()
+            .await
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?;
+        conn.execute(sql, params)
+            .await
+            .map_err(|e| PendingStorageError::Other(e.to_string()))
+    }
+
+    async fn query(
+        &self,
+        sql: &str,
+        params: impl IntoParams,
+    ) -> Result<crate::db::Rows, PendingStorageError> {
+        let conn = self
+            .db
+            .guard()
+            .await
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?;
+        conn.query(sql, params)
+            .await
+            .map_err(|e| PendingStorageError::Other(e.to_string()))
+    }
+
+    fn decode_row(row: &crate::db::Row) -> Result<PendingRow, PendingStorageError> {
+        let recipient_jid: String = row
+            .get(0)
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?;
+        let recipient: BareJid = recipient_jid
+            .parse()
+            .map_err(|e: jid::Error| PendingStorageError::Other(e.to_string()))?;
+        let original_receipt_at_ms: i64 = row
+            .get(1)
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?;
+        let original_receipt_at =
+            chrono::DateTime::<chrono::Utc>::from_timestamp_millis(original_receipt_at_ms)
+                .ok_or_else(|| PendingStorageError::Other("invalid receipt timestamp".into()))?;
+        let payload_kind: String = row
+            .get(2)
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?;
+        let archive_stanza_by: Option<String> = row
+            .get(3)
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?;
+        let archive_stanza_id: Option<String> = row
+            .get(4)
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?;
+        let transient_xml: Option<String> = row
+            .get(5)
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?;
+        let flushed_in_session: Option<String> = row
+            .get(6)
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?;
+
+        let payload = match payload_kind.as_str() {
+            PAYLOAD_KIND_ARCHIVED => {
+                let by_str = archive_stanza_by.ok_or_else(|| {
+                    PendingStorageError::Other("archived row missing archive_stanza_by".into())
+                })?;
+                let by: BareJid = by_str
+                    .parse()
+                    .map_err(|e: jid::Error| PendingStorageError::Other(e.to_string()))?;
+                let id_str = archive_stanza_id.ok_or_else(|| {
+                    PendingStorageError::Other("archived row missing archive_stanza_id".into())
+                })?;
+                PendingPayload::Archived(StanzaIdRef {
+                    by,
+                    id: StanzaIdValue::new(id_str),
+                })
+            }
+            PAYLOAD_KIND_TRANSIENT => {
+                let xml = transient_xml.ok_or_else(|| {
+                    PendingStorageError::Other("transient row missing transient_xml".into())
+                })?;
+                let element: xmpp_parsers::minidom::Element =
+                    xml.parse().map_err(|e: xmpp_parsers::minidom::Error| {
+                        PendingStorageError::Other(e.to_string())
+                    })?;
+                let message = xmpp_parsers::message::Message::try_from(element)
+                    .map_err(|e| PendingStorageError::Other(e.to_string()))?;
+                PendingPayload::Transient(Box::new(message))
+            }
+            other => {
+                return Err(PendingStorageError::Other(format!(
+                    "unknown payload_kind '{other}'"
+                )))
+            }
+        };
+        Ok(PendingRow {
+            recipient,
+            original_receipt_at,
+            payload,
+            flushed_in_session: flushed_in_session.map(SmSessionId::new),
+        })
+    }
+}
+
+#[async_trait]
+impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
+    #[instrument(skip(self, row), fields(recipient = %row.recipient))]
+    async fn insert(&self, row: PendingRow) -> Result<InsertOutcome, PendingStorageError> {
+        if let QuotaPolicy::CountCap { max_rows } = self.quota {
+            let current = self.count(&row.recipient).await?;
+            if current >= max_rows {
+                return Ok(InsertOutcome::QuotaExceeded);
+            }
+        }
+        let row_id = uuid::Uuid::now_v7().to_string();
+        let receipt_ms = row.original_receipt_at.timestamp_millis();
+        let (kind, by, sid, xml) = match &row.payload {
+            PendingPayload::Archived(stanza_id_ref) => (
+                PAYLOAD_KIND_ARCHIVED,
+                Some(stanza_id_ref.by.to_string()),
+                Some(stanza_id_ref.id.as_str().to_string()),
+                None,
+            ),
+            PendingPayload::Transient(message) => {
+                let serialized = serialize_message(message)?;
+                (PAYLOAD_KIND_TRANSIENT, None, None, Some(serialized))
+            }
+        };
+        self.execute(
+            "INSERT INTO pending_delivery (\
+                row_id, recipient_jid, original_receipt_at, payload_kind, \
+                archive_stanza_by, archive_stanza_id, transient_xml, flushed_in_session \
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL)",
+            crate::db_params![
+                row_id,
+                row.recipient.to_string(),
+                receipt_ms,
+                kind,
+                by,
+                sid,
+                xml,
+            ],
+        )
+        .await?;
+        Ok(InsertOutcome::Inserted)
+    }
+
+    async fn list(&self, recipient: &BareJid) -> Result<Vec<PendingRow>, PendingStorageError> {
+        let mut rows = self
+            .query(
+                "SELECT recipient_jid, original_receipt_at, payload_kind, \
+                        archive_stanza_by, archive_stanza_id, transient_xml, flushed_in_session \
+                 FROM pending_delivery \
+                 WHERE recipient_jid = ? \
+                 ORDER BY row_id ASC",
+                crate::db_params![recipient.to_string()],
+            )
+            .await?;
+        let mut out = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?
+        {
+            out.push(Self::decode_row(&row)?);
+        }
+        Ok(out)
+    }
+
+    async fn claim_for_session(
+        &self,
+        recipient: &BareJid,
+        session: &SmSessionId,
+    ) -> Result<Vec<PendingRow>, PendingStorageError> {
+        // Atomic-ish: a single UPDATE … WHERE flushed_in_session IS NULL
+        // tags every currently-unclaimed row, then a SELECT pulls the
+        // newly-claimed set. Two concurrent calls for the same recipient
+        // both run the UPDATE; whichever wins the row-level lock first
+        // tags the rows, the loser's UPDATE finds zero matches and the
+        // loser's SELECT returns rows already tagged for the other
+        // session — filtered out by the WHERE.
+        self.execute(
+            "UPDATE pending_delivery SET flushed_in_session = ? \
+             WHERE recipient_jid = ? AND flushed_in_session IS NULL",
+            crate::db_params![session.as_str().to_string(), recipient.to_string()],
+        )
+        .await?;
+        let mut rows = self
+            .query(
+                "SELECT recipient_jid, original_receipt_at, payload_kind, \
+                        archive_stanza_by, archive_stanza_id, transient_xml, flushed_in_session \
+                 FROM pending_delivery \
+                 WHERE recipient_jid = ? AND flushed_in_session = ? \
+                 ORDER BY row_id ASC",
+                crate::db_params![recipient.to_string(), session.as_str().to_string()],
+            )
+            .await?;
+        let mut out = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?
+        {
+            out.push(Self::decode_row(&row)?);
+        }
+        Ok(out)
+    }
+
+    async fn delete_claimed(&self, session: &SmSessionId) -> Result<u64, PendingStorageError> {
+        self.execute(
+            "DELETE FROM pending_delivery WHERE flushed_in_session = ?",
+            crate::db_params![session.as_str().to_string()],
+        )
+        .await
+    }
+
+    async fn release_claim(&self, session: &SmSessionId) -> Result<u64, PendingStorageError> {
+        self.execute(
+            "UPDATE pending_delivery SET flushed_in_session = NULL \
+             WHERE flushed_in_session = ?",
+            crate::db_params![session.as_str().to_string()],
+        )
+        .await
+    }
+
+    async fn count(&self, recipient: &BareJid) -> Result<u32, PendingStorageError> {
+        let mut rows = self
+            .query(
+                "SELECT COUNT(*) FROM pending_delivery WHERE recipient_jid = ?",
+                crate::db_params![recipient.to_string()],
+            )
+            .await?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?
+            .ok_or_else(|| PendingStorageError::Other("COUNT(*) returned no row".into()))?;
+        let count: i64 = row
+            .get(0)
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?;
+        Ok(count.max(0) as u32)
+    }
+}
+
+fn serialize_message(
+    message: &xmpp_parsers::message::Message,
+) -> Result<String, PendingStorageError> {
+    let element = xmpp_parsers::minidom::Element::from(message.clone());
+    let mut buf = Vec::new();
+    element
+        .write_to(&mut buf)
+        .map_err(|e| PendingStorageError::Other(e.to_string()))?;
+    String::from_utf8(buf).map_err(|e| PendingStorageError::Other(e.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -318,5 +678,111 @@ mod tests {
         let rows = storage.list(&bare("alice@example.com")).await.unwrap();
         assert_eq!(rows.len(), 1);
         assert!(rows[0].flushed_in_session.is_none());
+    }
+
+    // ── DatabasePendingDeliveryStorage integration tests ────────────────
+
+    #[tokio::test]
+    async fn db_storage_round_trips_archived_and_transient_rows() {
+        let storage = DatabasePendingDeliveryStorage::open(None, QuotaPolicy::Unlimited)
+            .await
+            .expect("open in-memory storage");
+        // Insert one Archived + one Transient
+        let recipient = bare("alice@example.com");
+        let archived = PendingRow {
+            recipient: recipient.clone(),
+            original_receipt_at: chrono::DateTime::<chrono::Utc>::from_timestamp_millis(
+                1_700_000_000_000,
+            )
+            .unwrap(),
+            payload: PendingPayload::Archived(StanzaIdRef {
+                by: recipient.clone(),
+                id: StanzaIdValue::new("mam-id"),
+            }),
+            flushed_in_session: None,
+        };
+        let trans = transient_row("alice@example.com", "transient body");
+        assert_eq!(
+            storage.insert(archived).await.unwrap(),
+            InsertOutcome::Inserted
+        );
+        assert_eq!(
+            storage.insert(trans).await.unwrap(),
+            InsertOutcome::Inserted
+        );
+
+        let rows = storage.list(&recipient).await.unwrap();
+        assert_eq!(rows.len(), 2);
+        // FIFO: archived inserted first.
+        assert!(rows[0].payload.is_archived());
+        assert!(rows[1].payload.is_transient());
+    }
+
+    #[tokio::test]
+    async fn db_storage_quota_returns_quota_exceeded_outcome() {
+        let storage =
+            DatabasePendingDeliveryStorage::open(None, QuotaPolicy::CountCap { max_rows: 2 })
+                .await
+                .unwrap();
+        let recipient = bare("alice@example.com");
+        for n in 0..2 {
+            assert_eq!(
+                storage
+                    .insert(transient_row("alice@example.com", &format!("body-{n}"),))
+                    .await
+                    .unwrap(),
+                InsertOutcome::Inserted
+            );
+        }
+        assert_eq!(
+            storage
+                .insert(transient_row("alice@example.com", "overflow"))
+                .await
+                .unwrap(),
+            InsertOutcome::QuotaExceeded
+        );
+        assert_eq!(storage.count(&recipient).await.unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn db_storage_claim_release_delete_lifecycle() {
+        let storage = DatabasePendingDeliveryStorage::open(None, QuotaPolicy::Unlimited)
+            .await
+            .unwrap();
+        let recipient = bare("alice@example.com");
+        for n in 0..3 {
+            storage
+                .insert(transient_row("alice@example.com", &format!("body-{n}")))
+                .await
+                .unwrap();
+        }
+
+        let session1 = SmSessionId::new("session-1");
+        let claimed1 = storage
+            .claim_for_session(&recipient, &session1)
+            .await
+            .unwrap();
+        assert_eq!(claimed1.len(), 3);
+        // Concurrent claim by another session sees no unclaimed rows.
+        let session2 = SmSessionId::new("session-2");
+        let claimed2 = storage
+            .claim_for_session(&recipient, &session2)
+            .await
+            .unwrap();
+        assert_eq!(claimed2.len(), 0);
+
+        // Release session1's claim → rows become available for session2.
+        let released = storage.release_claim(&session1).await.unwrap();
+        assert_eq!(released, 3);
+        let claimed2 = storage
+            .claim_for_session(&recipient, &session2)
+            .await
+            .unwrap();
+        assert_eq!(claimed2.len(), 3);
+
+        // Delete on SM-ack of session2's flush stanzas.
+        let removed = storage.delete_claimed(&session2).await.unwrap();
+        assert_eq!(removed, 3);
+        assert_eq!(storage.count(&recipient).await.unwrap(), 0);
     }
 }

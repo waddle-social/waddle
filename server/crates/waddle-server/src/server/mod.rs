@@ -1107,6 +1107,20 @@ async fn create_router(
         crate::db::blocking::DatabaseBlockingStorage::new(state.db_pool.global().clone()),
     );
 
+    // XEP-0160 offline-message storage. Open the dedicated SQLite/Postgres-
+    // backed PendingDeliveryStorage so XMPP DMs to fully-offline local users
+    // are durably queued and replayed on reconnect (issue #209).
+    let pending_delivery_storage: Arc<
+        dyn waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage,
+    > = Arc::new(
+        crate::pending_delivery::DatabasePendingDeliveryStorage::open(
+            None,
+            waddle_xmpp::pending_delivery::QuotaPolicy::default_policy(),
+        )
+        .await
+        .expect("open pending_delivery storage"),
+    );
+
     // XMPP over WebSocket (RFC 7395) with registries for message routing
     let websocket_state = Arc::new(WebSocketState {
         deps: WebSocketDeps {
@@ -1119,9 +1133,7 @@ async fn create_router(
                 mam_storage,
                 inbox_storage: Arc::clone(&state.inbox_storage),
                 blocking_storage,
-                pending_delivery_storage: Arc::new(
-                    waddle_xmpp::pending_delivery::storage::InMemoryPendingDeliveryStorage::with_default_quota(),
-                ),
+                pending_delivery_storage,
                 command_registry: websocket_command_registry,
                 extension_manager,
                 dispatcher: stanza_dispatcher,
