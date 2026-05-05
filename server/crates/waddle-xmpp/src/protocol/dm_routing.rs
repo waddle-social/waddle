@@ -185,7 +185,24 @@ pub fn classify_dm_intake(
         }
     }
 
-    let recipient_online = online_resources.has_non_negative_priority();
+    // RFC 6121 §8.5.2 (bare JID): server delivers only to resources
+    // with non-negative priority.
+    // RFC 6121 §8.5.3 (full JID): server delivers to that specific
+    // resource if connected, regardless of priority. The negative-
+    // priority filter from §8.5.2 does NOT apply to full-JID delivery.
+    //
+    // So "online" depends on the address shape: for bare-JID-targeted
+    // stanzas we ask "any non-negative-priority resource available";
+    // for full-JID-targeted stanzas we ask "is THAT specific resource
+    // connected at any priority".
+    let recipient_online = match message
+        .to
+        .as_ref()
+        .and_then(|jid| jid.clone().try_into_full().ok())
+    {
+        Some(full_target) => online_resources.contains_full(&full_target),
+        None => online_resources.has_non_negative_priority(),
+    };
 
     // ── XEP-0334 §6 ¶3: ignore hints in `type='error'` stanzas ────────
     let hints_apply = !matches!(message.type_, MessageType::Error);
@@ -448,6 +465,42 @@ mod tests {
     }
 
     #[test]
+    fn full_jid_target_to_negative_priority_resource_is_still_live() {
+        // RFC 6121 §8.5.3: full-JID-addressed messages go to the
+        // specific resource regardless of priority. The negative-
+        // priority filter is for bare-JID delivery (§8.5.2) only.
+        let msg = dm(
+            "bob@elsewhere/x",
+            "alice@example.com/web",
+            MessageType::Chat,
+            Some("hi"),
+        );
+        // Resource is online but with negative priority.
+        let routing = classify_dm_intake(&msg, &one_resource_online(-1), &Blocklist::empty());
+        assert_eq!(routing.live, LiveDecision::DeliverToFull);
+        assert_eq!(routing.pending, PendingDecision::None);
+    }
+
+    #[test]
+    fn full_jid_target_to_disconnected_resource_falls_back_to_offline() {
+        // RFC 6121 §8.5.3: if the addressed resource is not connected,
+        // the server SHOULD treat the stanza as if no specific resource
+        // was specified (i.e. bare-JID semantics). For our purposes
+        // that means storing offline when no other resource is
+        // available with non-negative priority.
+        let msg = dm(
+            "bob@elsewhere/x",
+            "alice@example.com/laptop",
+            MessageType::Chat,
+            Some("hi"),
+        );
+        // Only the /web resource is online; /laptop is not.
+        let routing = classify_dm_intake(&msg, &one_resource_online(1), &Blocklist::empty());
+        assert_eq!(routing.live, LiveDecision::None);
+        assert_eq!(routing.pending, PendingDecision::Archived);
+    }
+
+    #[test]
     fn full_jid_target_uses_deliver_to_full() {
         let msg = dm(
             "bob@elsewhere/x",
@@ -610,11 +663,13 @@ mod tests {
         );
         add_hint(&mut msg, Hint::Store);
         let routing = classify_dm_intake(&msg, &OnlineResources::empty(), &Blocklist::empty());
+        // XEP-0334 §5.4 says <store/> SHOULD store; XEP-0160 §4 says
+        // headline SHOULD NOT be stored offline. The two SHOULDs
+        // conflict; the project rule (see module header) chooses
+        // <store/> wins, so headline+<store/> goes to BOTH MAM (Mam)
+        // and offline storage (Archived) — pending derives from
+        // `archive == ArchiveDecision::Mam`.
         assert_eq!(routing.archive, ArchiveDecision::Mam);
-        // Headline still doesn't pending — only chat/normal do per #209
-        // scope; <store/> forces archive but pending follows the type.
-        // XEP-0160 §4 explicitly says headline SHOULD NOT be stored
-        // offline; <store/> is project-side discretion. Keep restrictive.
         assert_eq!(routing.pending, PendingDecision::Archived);
     }
 

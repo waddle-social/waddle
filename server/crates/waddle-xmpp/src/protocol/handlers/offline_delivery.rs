@@ -72,13 +72,35 @@ impl MessageHandler for OfflineDeliveryHandler {
                 // pending_delivery row points at the same MAM entry.
                 let owner_jid = Jid::from(recipient_bare.clone());
                 let Some(stanza_id_str) = extract_stanza_id_by(message, &owner_jid) else {
-                    // Q2(a) ordering puts ArchiveHandler before this
-                    // handler precisely so the stamp is present. If it
-                    // is missing, ArchiveHandler chose not to archive
-                    // (e.g. <no-store/>) — but the classifier said
-                    // Archived, which is a contradiction. Skip rather
-                    // than emit a row pointing at a non-existent MAM id.
-                    return HandlerOutcome::Continue(Vec::new());
+                    // The classifier produced PendingDecision::Archived
+                    // (so it expects the stanza to be in MAM), but the
+                    // recipient-archive XEP-0359 stamp is missing. The
+                    // locked Q2(a) handler order puts ArchiveHandler
+                    // *before* this handler precisely so the stamp is
+                    // present here, so a missing stamp signals one of:
+                    //   - chain misconfiguration (test fixture / custom
+                    //     dispatcher with handlers reordered),
+                    //   - ArchiveHandler skipped this stanza despite
+                    //     classifier eligibility (silent disagreement),
+                    //   - canonicalize stage was bypassed.
+                    //
+                    // Emit a typed Log so production deployments surface
+                    // the bug, then drop the stanza rather than write a
+                    // pending_delivery row pointing at a non-existent
+                    // MAM id (which would loop forever as a poison
+                    // pill on every flush). Falling back to Transient
+                    // would discard the message-vs-archive consistency
+                    // guarantee the rest of the stack relies on; it's
+                    // safer to surface than to paper over.
+                    return HandlerOutcome::Continue(vec![OutboundEvent::Log {
+                        level: tracing::Level::WARN,
+                        message: format!(
+                            "OfflineDeliveryHandler: classifier said Archived for \
+                             recipient={recipient_bare} but no <stanza-id by='{recipient_bare}'/> \
+                             stamp present — chain misconfiguration suspected; dropping \
+                             pending_delivery row to avoid dangling MAM reference"
+                        ),
+                    }]);
                 };
                 let payload = PendingPayload::Archived(StanzaIdRef {
                     by: recipient_bare.clone(),

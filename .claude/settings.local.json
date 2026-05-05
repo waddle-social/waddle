@@ -22,16 +22,7 @@
       "Bash(bun install:*)",
       "Bash(bun test:*)",
       "Bash(rustup target:*)",
-      "Bash(cargo build:*)",
-      "Bash(gh issue *)",
-      "Bash(git clone *)",
-      "Bash(cargo doc *)",
-      "Bash(gh repo *)",
-      "Bash(cargo fmt *)",
-      "Bash(git stash *)",
-      "Bash(git switch *)",
-      "Bash(git -C /Users/oyr/projects/waddle log --oneline --all --grep=\"clear unread\")",
-      "Bash(git *)"
+      "Bash(cargo build:*)"
     ]
   }
 }

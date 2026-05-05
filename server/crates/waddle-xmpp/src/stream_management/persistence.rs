@@ -309,9 +309,16 @@ mod tests {
     }
 
     fn fixture_unacked(stream_id: &str, sequence: u32) -> PersistedUnackedStanza {
-        let xml = format!("<message xmlns='jabber:client'><body>m{sequence}</body></message>");
-        let element: minidom::Element = xml.parse().expect("valid xml");
-        let message = xmpp_parsers::message::Message::try_from(element).expect("valid message");
+        // Build the typed Message via the project's XML hard-rule
+        // builders — Element::builder + Body::new — instead of
+        // format!-ing an XML string. The fixture stays portable across
+        // any future xmpp-parsers minidom upgrades that change the
+        // string-form XML shape (whitespace, attribute order, etc.).
+        let mut message = xmpp_parsers::message::Message::new(None::<jid::Jid>);
+        message.bodies.insert(
+            String::new(),
+            xmpp_parsers::message::Body(format!("m{sequence}")),
+        );
         PersistedUnackedStanza {
             stream_id: sid(stream_id),
             sequence,

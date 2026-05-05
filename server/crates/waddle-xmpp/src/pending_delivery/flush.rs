@@ -87,14 +87,22 @@ pub fn build_replay_stanza(
     original_receipt_at: DateTime<Utc>,
 ) -> Message {
     let mut message = *payload.into_message();
-    // Defensive: strip any pre-existing offline `<delay/>` so we don't
-    // double-stamp. Senders cannot legitimately have a `<delay/>` from
-    // the server's own domain on inbound stanzas, but pre-stripping is
-    // cheap and removes a class of duplicate-stamp footguns when
-    // intake parsing changes in the future.
-    message
-        .payloads
-        .retain(|payload| !(payload.name() == "delay" && payload.ns() == NS_DELAY));
+    // Strip ONLY any pre-existing `<delay/>` whose `from` attribute
+    // matches our own server domain — that would be a stamp this
+    // server itself added on a prior path (round-trip via MAM, replay
+    // through a transient pass, etc.) and re-emitting it would result
+    // in two `<delay from='our-domain'/>` siblings.
+    //
+    // Legitimate upstream `<delay/>` elements (e.g. ones a different
+    // server in a federated chain stamped, or a forwarded-message
+    // delay from a stored stanza) are preserved unchanged so the
+    // recipient sees the full delivery history per XEP-0203 §5
+    // ("multiple delay elements MAY appear").
+    message.payloads.retain(|payload| {
+        !(payload.name() == "delay"
+            && payload.ns() == NS_DELAY
+            && payload.attr("from") == Some(server_domain))
+    });
     message.payloads.push(build_offline_delay(
         server_domain,
         original_receipt_at,
@@ -233,24 +241,61 @@ mod tests {
     }
 
     #[test]
-    fn replay_stanza_strips_preexisting_delay_to_avoid_double_stamping() {
+    fn replay_stanza_strips_only_self_stamped_delay_to_avoid_double_stamping() {
+        // Pre-existing delay stamped by THIS server should be replaced
+        // by the freshly-built one (avoid two `<delay from='example.com'/>`
+        // siblings). Round-trip safety: if a stanza somehow ends up
+        // re-flushed, we don't want two of the server's own stamps.
         let mut row = transient_row("alice@example.com", "hi");
-        // Pretend an upstream entity already stamped a delay.
+        if let PendingPayload::Transient(msg) = &mut row.payload {
+            msg.payloads
+                .push(build_offline_delay("example.com", fixed_receipt(), None));
+        }
+        let payload = MaterializedPayload::from_transient(&row).unwrap();
+        let replayed = build_replay_stanza(payload, "example.com", row.original_receipt_at);
+        let self_stamped = replayed
+            .payloads
+            .iter()
+            .filter(|payload| {
+                payload.name() == "delay"
+                    && payload.ns() == NS_DELAY
+                    && payload.attr("from") == Some("example.com")
+            })
+            .count();
+        assert_eq!(
+            self_stamped, 1,
+            "exactly one self-stamped delay after replay"
+        );
+    }
+
+    #[test]
+    fn replay_stanza_preserves_upstream_delay_metadata() {
+        // XEP-0203 §5 allows multiple `<delay/>` elements, e.g. when a
+        // stanza traverses multiple servers in a federated chain. Our
+        // offline-delay stamping must NOT strip delays stamped by
+        // other entities.
+        let mut row = transient_row("alice@example.com", "hi");
         if let PendingPayload::Transient(msg) = &mut row.payload {
             msg.payloads.push(build_offline_delay(
-                "upstream.example",
+                "upstream.example.org",
                 fixed_receipt(),
-                None,
+                Some("Forwarded by upstream"),
             ));
         }
         let payload = MaterializedPayload::from_transient(&row).unwrap();
         let replayed = build_replay_stanza(payload, "example.com", row.original_receipt_at);
-        let delay_count = replayed
-            .payloads
-            .iter()
-            .filter(|payload| payload.name() == "delay" && payload.ns() == NS_DELAY)
-            .count();
-        assert_eq!(delay_count, 1, "exactly one delay element after replay");
+        let upstream_preserved = replayed.payloads.iter().any(|payload| {
+            payload.name() == "delay"
+                && payload.ns() == NS_DELAY
+                && payload.attr("from") == Some("upstream.example.org")
+        });
+        let self_added = replayed.payloads.iter().any(|payload| {
+            payload.name() == "delay"
+                && payload.ns() == NS_DELAY
+                && payload.attr("from") == Some("example.com")
+        });
+        assert!(upstream_preserved, "upstream delay metadata preserved");
+        assert!(self_added, "server's own offline delay stamped");
     }
 
     #[test]

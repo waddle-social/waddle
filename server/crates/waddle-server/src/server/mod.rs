@@ -246,6 +246,14 @@ pub struct XmppConfig {
     pub mam_database_url: Option<String>,
     /// Inbox database URL (prefers dedicated XMPP DSN, otherwise the main runtime DSN)
     pub inbox_database_url: Option<String>,
+    /// XEP-0160 offline-message (`pending_delivery`) database URL —
+    /// prefers dedicated XMPP DSN, otherwise the main runtime DSN.
+    /// `None` falls back to in-memory SQLite which is suitable only
+    /// for tests; production deployments MUST set
+    /// `WADDLE_XMPP_PENDING_DELIVERY_DATABASE_URL` (or the legacy
+    /// `WADDLE_XMPP_DATABASE_URL`) so queued offline DMs survive
+    /// restart per issue #209.
+    pub pending_delivery_database_url: Option<String>,
     /// PubSub/PEP database URL (prefers dedicated XMPP DSN, otherwise the main runtime DSN)
     pub pubsub_database_url: Option<String>,
     /// Whether native JID authentication is enabled (default: true)
@@ -263,6 +271,7 @@ impl Default for XmppConfig {
             component_domain: "localhost".to_string(),
             mam_database_url: None,
             inbox_database_url: None,
+            pending_delivery_database_url: None,
             pubsub_database_url: None,
             native_auth_enabled: true,
             acme: XmppAcmeConfig {
@@ -289,6 +298,8 @@ impl XmppConfig {
 
         let mam_database_url = resolve_xmpp_database_url("WADDLE_XMPP_MAM_DATABASE_URL");
         let inbox_database_url = resolve_xmpp_database_url("WADDLE_XMPP_INBOX_DATABASE_URL");
+        let pending_delivery_database_url =
+            resolve_xmpp_database_url("WADDLE_XMPP_PENDING_DELIVERY_DATABASE_URL");
         let pubsub_database_url = resolve_xmpp_database_url("WADDLE_XMPP_PUBSUB_DATABASE_URL");
 
         let native_auth_enabled = std::env::var("WADDLE_NATIVE_AUTH_ENABLED")
@@ -315,6 +326,7 @@ impl XmppConfig {
             component_domain,
             mam_database_url,
             inbox_database_url,
+            pending_delivery_database_url,
             pubsub_database_url,
             native_auth_enabled,
             acme: XmppAcmeConfig {
@@ -1107,14 +1119,29 @@ async fn create_router(
         crate::db::blocking::DatabaseBlockingStorage::new(state.db_pool.global().clone()),
     );
 
-    // XEP-0160 offline-message storage. Open the dedicated SQLite/Postgres-
-    // backed PendingDeliveryStorage so XMPP DMs to fully-offline local users
+    // XEP-0160 offline-message storage. Open the SQLite/Postgres-backed
+    // PendingDeliveryStorage so XMPP DMs to fully-offline local users
     // are durably queued and replayed on reconnect (issue #209).
+    //
+    // URL comes from `WADDLE_XMPP_PENDING_DELIVERY_DATABASE_URL` (or
+    // the `WADDLE_XMPP_DATABASE_URL` fallback in
+    // `resolve_xmpp_database_url`). When unset we fall back to
+    // in-memory SQLite — which loses rows on restart; warn loudly so
+    // operators see the deployment misconfiguration.
+    let pending_delivery_url = xmpp_config.pending_delivery_database_url.clone();
+    if pending_delivery_url.is_none() {
+        warn!(
+            "WADDLE_XMPP_PENDING_DELIVERY_DATABASE_URL is unset; falling back to \
+             in-memory SQLite. Offline DMs queued via XEP-0160 will NOT survive \
+             restart. Set the env var to a SQLite path or Postgres URL for \
+             durable offline delivery (issue #209)."
+        );
+    }
     let pending_delivery_storage: Arc<
         dyn waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage,
     > = Arc::new(
         crate::pending_delivery::DatabasePendingDeliveryStorage::open(
-            None,
+            pending_delivery_url.as_deref(),
             waddle_xmpp::pending_delivery::QuotaPolicy::default_policy(),
         )
         .await

@@ -447,12 +447,6 @@ impl DatabasePendingDeliveryStorage {
 impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
     #[instrument(skip(self, row), fields(recipient = %row.recipient))]
     async fn insert(&self, row: PendingRow) -> Result<InsertOutcome, PendingStorageError> {
-        if let QuotaPolicy::CountCap { max_rows } = self.quota {
-            let current = self.count(&row.recipient).await?;
-            if current >= max_rows {
-                return Ok(InsertOutcome::QuotaExceeded);
-            }
-        }
         let row_id = if row.id.as_str().is_empty() {
             PendingRowId::fresh().as_str().to_string()
         } else {
@@ -471,23 +465,58 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
                 (PAYLOAD_KIND_TRANSIENT, None, None, Some(serialized))
             }
         };
-        self.execute(
-            "INSERT INTO pending_delivery (\
-                row_id, recipient_jid, original_receipt_at, payload_kind, \
-                archive_stanza_by, archive_stanza_id, transient_xml, flushed_in_session \
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL)",
-            crate::db_params![
-                row_id,
-                row.recipient.to_string(),
-                receipt_ms,
-                kind,
-                by,
-                sid,
-                xml,
-            ],
-        )
-        .await?;
-        Ok(InsertOutcome::Inserted)
+        // Atomic-with-quota INSERT: the WHERE clause runs in the same
+        // SQL statement as the insert, so concurrent callers cannot
+        // observe stale `COUNT(*)` results. Standard SQL portable
+        // across SQLite and Postgres. Affected row count differentiates
+        // accepted (1) from quota-rejected (0).
+        let affected = match self.quota {
+            QuotaPolicy::Unlimited => {
+                self.execute(
+                    "INSERT INTO pending_delivery (\
+                        row_id, recipient_jid, original_receipt_at, payload_kind, \
+                        archive_stanza_by, archive_stanza_id, transient_xml, flushed_in_session \
+                     ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL)",
+                    crate::db_params![
+                        row_id,
+                        row.recipient.to_string(),
+                        receipt_ms,
+                        kind,
+                        by,
+                        sid,
+                        xml,
+                    ],
+                )
+                .await?
+            }
+            QuotaPolicy::CountCap { max_rows } => {
+                self.execute(
+                    "INSERT INTO pending_delivery (\
+                        row_id, recipient_jid, original_receipt_at, payload_kind, \
+                        archive_stanza_by, archive_stanza_id, transient_xml, flushed_in_session \
+                     ) \
+                     SELECT ?, ?, ?, ?, ?, ?, ?, NULL \
+                     WHERE (SELECT COUNT(*) FROM pending_delivery WHERE recipient_jid = ?) < ?",
+                    crate::db_params![
+                        row_id,
+                        row.recipient.to_string(),
+                        receipt_ms,
+                        kind,
+                        by,
+                        sid,
+                        xml,
+                        row.recipient.to_string(),
+                        i64::from(max_rows),
+                    ],
+                )
+                .await?
+            }
+        };
+        if affected == 0 {
+            Ok(InsertOutcome::QuotaExceeded)
+        } else {
+            Ok(InsertOutcome::Inserted)
+        }
     }
 
     async fn list(&self, recipient: &BareJid) -> Result<Vec<PendingRow>, PendingStorageError> {
