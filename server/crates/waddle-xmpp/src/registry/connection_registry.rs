@@ -60,6 +60,16 @@ pub struct OutboundStanza {
     pub stanza: Stanza,
     /// How the destination connection should handle the stanza.
     pub kind: DeliveryKind,
+    /// `pending_delivery` row id when this stanza is the replay of a
+    /// queued offline-delivery row (locked Q7b SM-ack lifecycle). The
+    /// destination's main loop reads this after `record_outbound`
+    /// assigns a new XEP-0198 outbound counter, then stamps the
+    /// counter onto the row via
+    /// [`crate::pending_delivery::storage::PendingDeliveryStorage::record_pushed_at`]
+    /// so a subsequent SM `<a h>` ack can range-delete only those
+    /// rows whose flush stanza was actually acknowledged. `None` for
+    /// every other outbound (the common case).
+    pub pending_row_id: Option<crate::pending_delivery::PendingRowId>,
 }
 
 impl OutboundStanza {
@@ -74,6 +84,7 @@ impl OutboundStanza {
         Self {
             stanza,
             kind: DeliveryKind::DirectFrame,
+            pending_row_id: None,
         }
     }
 
@@ -86,6 +97,24 @@ impl OutboundStanza {
         Self {
             stanza,
             kind: DeliveryKind::PeerStanza,
+            pending_row_id: None,
+        }
+    }
+
+    /// Create an outbound stanza that replays a queued
+    /// `pending_delivery` row to a recovering session (locked Q7b
+    /// SM-ack lifecycle). The destination's main loop uses
+    /// [`Self::pending_row_id`] to bind the stanza's assigned
+    /// XEP-0198 outbound counter back to the row so subsequent SM
+    /// `<a h>` acks can range-delete it.
+    pub fn for_pending_flush(
+        stanza: Stanza,
+        row_id: crate::pending_delivery::PendingRowId,
+    ) -> Self {
+        Self {
+            stanza,
+            kind: DeliveryKind::DirectFrame,
+            pending_row_id: Some(row_id),
         }
     }
 }
@@ -111,6 +140,18 @@ pub struct ConnectionEntry {
     /// Q7d) so subsequent presence updates do not re-flush an already-
     /// drained `pending_delivery` queue (issue #209).
     pub offline_flushed: Arc<AtomicBool>,
+    /// Per-connection XEP-0198 SM session id, set when the client
+    /// enables SM (or resumes onto this connection). `None` while SM
+    /// is disabled. Used directly by the offline-flush path for
+    /// `claim_for_session` so each SM session has a distinct id and
+    /// reconnect-on-same-resource never collides with the dead
+    /// session's claimed pending_delivery rows (locked Q7b
+    /// SM-ack lifecycle, issue #209). Stored as the typed
+    /// [`crate::pending_delivery::SmSessionId`] so the registry
+    /// boundary stays typed end-to-end (Qodo review on PR #358:
+    /// previous `Option<String>` form violated the typed-payloads
+    /// rule).
+    pub sm_stream_id: Arc<std::sync::Mutex<Option<crate::pending_delivery::SmSessionId>>>,
 }
 
 impl ConnectionEntry {
@@ -123,6 +164,7 @@ impl ConnectionEntry {
             presence_priority: Arc::new(std::sync::atomic::AtomicI8::new(0)),
             roster_interested: Arc::new(AtomicBool::new(false)),
             offline_flushed: Arc::new(AtomicBool::new(false)),
+            sm_stream_id: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -157,6 +199,29 @@ impl ConnectionEntry {
         self.offline_flushed
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
+    }
+
+    /// Publish the XEP-0198 SM session id for this connection.
+    /// Called by the websocket main loop after `<enable/>` (fresh
+    /// SM session) and after `<resume/>` (continuation onto a
+    /// previously-stored session). Used by the offline-flush path
+    /// for `claim_for_session` (locked Q7b SM-ack lifecycle).
+    pub fn set_sm_stream_id(&self, session_id: Option<crate::pending_delivery::SmSessionId>) {
+        if let Ok(mut guard) = self.sm_stream_id.lock() {
+            *guard = session_id;
+        }
+    }
+
+    /// Read the XEP-0198 SM session id for this connection, if SM is
+    /// enabled. Returns `None` while SM is disabled (no
+    /// `pending_delivery` row will be claimed under an SM session id
+    /// in that case — the flush falls back to the delete-on-push
+    /// path).
+    pub fn sm_stream_id(&self) -> Option<crate::pending_delivery::SmSessionId> {
+        self.sm_stream_id
+            .lock()
+            .ok()
+            .and_then(|g| g.as_ref().cloned())
     }
 }
 
@@ -418,6 +483,35 @@ impl ConnectionRegistry {
     pub async fn send_to(&self, jid: &FullJid, stanza: Stanza) -> SendResult {
         self.send_to_with_kind(jid, stanza, DeliveryKind::DirectFrame)
             .await
+    }
+
+    /// Send a [`pending_delivery`](crate::pending_delivery) flush stanza
+    /// to a recovering session. Identical to [`Self::send_to`] except
+    /// the queued [`OutboundStanza`] carries the source row id so the
+    /// destination's main loop can bind the stanza's assigned XEP-0198
+    /// outbound counter back to the row (locked Q7b SM-ack lifecycle).
+    #[instrument(skip(self, stanza), fields(to = %jid, row = %row_id))]
+    pub async fn send_pending_flush(
+        &self,
+        jid: &FullJid,
+        stanza: Stanza,
+        row_id: crate::pending_delivery::PendingRowId,
+    ) -> SendResult {
+        let sender = match self.connections.get(jid) {
+            Some(entry) => entry.value().sender.clone(),
+            None => {
+                debug!("Recipient not connected for pending flush");
+                return SendResult::NotConnected;
+            }
+        };
+        let outbound = OutboundStanza::for_pending_flush(stanza, row_id);
+        match sender.send(outbound).await {
+            Ok(()) => SendResult::Sent,
+            Err(_) => {
+                self.remove_if_sender_closed_owner(jid, &sender);
+                SendResult::ChannelClosed
+            }
+        }
     }
 
     /// Send a stanza to a connected user as a [`DeliveryKind::PeerStanza`]

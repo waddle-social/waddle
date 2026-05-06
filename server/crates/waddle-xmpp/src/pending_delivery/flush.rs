@@ -160,6 +160,7 @@ mod tests {
                 id: StanzaIdValue::new("mam-id"),
             }),
             flushed_in_session: Some(SmSessionId::new("s1")),
+            outbound_sequence: None,
         }
     }
 
@@ -174,6 +175,7 @@ mod tests {
                 body,
             ))),
             flushed_in_session: None,
+            outbound_sequence: None,
         }
     }
 

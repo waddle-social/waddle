@@ -1391,6 +1391,31 @@ async fn create_router(
                         .sm_session_registry
                         .confirm_drained(&session.stream_id)
                         .await;
+                    // Locked Q7c re-flush (issue #209): release any
+                    // `pending_delivery` rows still claimed by this
+                    // SM session so the next recovering resource can
+                    // re-flush them. Key by XEP-0198 stream_id —
+                    // matches what flush_for_resource uses (Codex/
+                    // Qodo review on PR #358: keying by JID would
+                    // conflate distinct SM sessions on the same
+                    // resource).
+                    let session_id =
+                        waddle_xmpp::pending_delivery::SmSessionId::new(session.stream_id.clone());
+                    if let Err(error) = state
+                        .deps
+                        .protocol
+                        .pending_delivery_storage
+                        .release_claim(&session_id)
+                        .await
+                    {
+                        warn!(
+                            jid = %session.jid,
+                            stream_id = %session.stream_id,
+                            error = %error,
+                            "SM janitor: pending_delivery release_claim failed; \
+                             rows remain claimed and will be released by claim-expiry janitor"
+                        );
+                    }
 
                     if session.presence_available {
                         routes::websocket::handlers::presence::broadcast_unavailable_for_expired_detached_session(
@@ -1577,6 +1602,32 @@ async fn create_router(
                         .sm_session_registry
                         .confirm_drained(&session.stream_id)
                         .await;
+                    // Locked Q7c re-flush (issue #209): release any
+                    // `pending_delivery` rows still claimed by this
+                    // SM session. Key by XEP-0198 stream_id (Codex/
+                    // Qodo review on PR #358). On restart, the
+                    // recovering resource gets a fresh
+                    // `SmSessionId`, and these now-unclaimed rows
+                    // will be picked up by its first
+                    // `claim_for_session`.
+                    let session_id =
+                        waddle_xmpp::pending_delivery::SmSessionId::new(session.stream_id.clone());
+                    if let Err(error) = drain_state
+                        .deps
+                        .protocol
+                        .pending_delivery_storage
+                        .release_claim(&session_id)
+                        .await
+                    {
+                        warn!(
+                            jid = %session.jid,
+                            stream_id = %session.stream_id,
+                            error = %error,
+                            "Graceful shutdown: pending_delivery release_claim failed; \
+                             rows remain claimed and will be released by next-startup \
+                             claim-expiry janitor"
+                        );
+                    }
                 }
                 tokio::time::sleep(POLL_INTERVAL).await;
             }

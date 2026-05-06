@@ -58,11 +58,4 @@ ignore: git: [
 	"# Gateway generated schemas",
 	"gateway/schemas/",
 	"gateway/supergraph.graphql",
-	"",
-	"",
-	"# WASM build artifacts — built by CI and published to GitHub Packages",
-	"# WASM build artifacts — binary blobs only; package.json/entry.js/.d.ts are committed stubs",
-	"server/wasm-pkg/waddle-xmpp-client-wasm/*_bg.js",
-	"server/wasm-pkg/waddle-xmpp-client-wasm/*_bg.wasm",
-	"server/wasm-pkg/waddle-xmpp-client-wasm/*_bg.wasm.d.ts",
 ]

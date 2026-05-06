@@ -17,7 +17,7 @@ use jid::{BareJid, FullJid, Jid};
 use minidom::Element;
 use waddle_xmpp::disco::{server_features, Feature};
 use waddle_xmpp::pending_delivery::flush::{build_replay_stanza, MaterializedPayload};
-use waddle_xmpp::pending_delivery::{PendingPayload, PendingRow, PendingRowId};
+use waddle_xmpp::pending_delivery::{PendingPayload, PendingRow, PendingRowId, SmSessionId};
 use waddle_xmpp::protocol::dm_routing::{
     classify_dm_intake, ArchiveDecision, CarbonsDecision, InboxDecision, LiveDecision,
     OnlineResources, PendingDecision,
@@ -207,6 +207,7 @@ fn transient_row(recipient: &str, body: &str) -> PendingRow {
         original_receipt_at: fixed_receipt(),
         payload: PendingPayload::Transient(Box::new(m)),
         flushed_in_session: None,
+        outbound_sequence: None,
     }
 }
 
@@ -322,10 +323,71 @@ fn xep0160_concurrent_resources_first_presence_wins_via_lock() {
     todo!("integration: race two resources' presence; second sees empty claim pool");
 }
 
-#[test]
-#[ignore = "TODO #209 slice (d) phase 2: SM-ack-keyed deletion (locked Q7b)"]
-fn xep0160_pending_row_survives_pre_ack_session_death_for_reflush() {
-    todo!("integration: claim → session dies before SM-ack → next resource re-claims");
+#[tokio::test]
+async fn xep0160_pending_row_survives_pre_ack_session_death_for_reflush() {
+    // Locked Q7b + Q7c (issue #209 PR #347): when a recovering
+    // session claims a pending_delivery row, has its flush stanza
+    // pushed (`record_pushed_at` stamps the outbound counter), and
+    // then the session dies BEFORE the SM `<a h>` ack arrives, the
+    // SM-expiry janitor / shutdown drain calls `release_claim` which
+    // restores the row to the unclaimed pool. A subsequent resource
+    // can then re-claim and re-flush the same row — its content is
+    // preserved exactly because deletion is gated on SM-ack via
+    // `delete_acked_through`, not on push.
+    use std::sync::Arc;
+    use waddle_xmpp::pending_delivery::storage::{
+        InMemoryPendingDeliveryStorage, PendingDeliveryStorage,
+    };
+
+    let storage: Arc<dyn PendingDeliveryStorage> =
+        Arc::new(InMemoryPendingDeliveryStorage::unlimited());
+    let recipient = bare("alice@example.com");
+    storage
+        .insert(transient_row("alice@example.com", "missed during detach"))
+        .await
+        .unwrap();
+
+    // Session-A claims and pushes (recipient main loop stamped seq=4).
+    let session_a = SmSessionId::new("alice@example.com/laptop");
+    let claimed_a = storage
+        .claim_for_session(&recipient, &session_a)
+        .await
+        .unwrap();
+    assert_eq!(claimed_a.len(), 1);
+    let row_id = claimed_a[0].id.clone();
+    storage.record_pushed_at(&row_id, 4).await.unwrap();
+
+    // Session-A dies pre-ack. Janitor / shutdown drain releases.
+    let released = storage.release_claim(&session_a).await.unwrap();
+    assert_eq!(released, 1);
+
+    // The row's still in storage with flushed_in_session = NULL.
+    let rows = storage.list(&recipient).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert!(
+        rows[0].flushed_in_session.is_none(),
+        "release_claim cleared the dead session's tag"
+    );
+
+    // Session-B (a new resource) recovers and re-claims.
+    let session_b = SmSessionId::new("alice@example.com/web");
+    let claimed_b = storage
+        .claim_for_session(&recipient, &session_b)
+        .await
+        .unwrap();
+    assert_eq!(claimed_b.len(), 1);
+    assert_eq!(
+        claimed_b[0].id, row_id,
+        "same row, preserved across pre-ack session death"
+    );
+
+    // Session-B's flush stanza assigned outbound seq=2 (different
+    // counter on a different SM stream). On its SM ack, the row is
+    // finally deleted.
+    storage.record_pushed_at(&row_id, 2).await.unwrap();
+    let removed = storage.delete_acked_through(&session_b, 2).await.unwrap();
+    assert_eq!(removed, 1);
+    assert_eq!(storage.count(&recipient).await.unwrap(), 0);
 }
 
 // -----------------------------------------------------------------------------

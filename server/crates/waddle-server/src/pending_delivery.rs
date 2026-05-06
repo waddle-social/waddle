@@ -12,15 +12,21 @@
 //! - **Q7a/Q7d** — caller (presence handler) gates this on the first
 //!   non-negative-priority presence of a fresh session via
 //!   [`ConnectionEntry::claim_offline_flush`].
+//! - **Q7b** — SM-ack-keyed deletion. The flush no longer deletes
+//!   rows on push; it tags each [`OutboundStanza`] with its source
+//!   [`PendingRowId`] so the recipient's main loop can stamp the
+//!   assigned XEP-0198 outbound counter via
+//!   [`PendingDeliveryStorage::record_pushed_at`]. Rows are deleted
+//!   only on SM `<a h>` ack via
+//!   [`PendingDeliveryStorage::delete_acked_through`].
 //! - **Q7c** — `claim_for_session` atomically tags rows with the
 //!   recipient's resource so a concurrent presence from another
-//!   resource sees an empty pool.
+//!   resource sees an empty pool. On pre-ack session death the SM
+//!   janitor / shutdown drain calls
+//!   [`PendingDeliveryStorage::release_claim`] to restore the rows
+//!   for re-flush by the next recovering resource.
 //! - **Q5** — wire shape (`<delay/>` with original receipt time, server
 //!   `from`, preserved `to`/extensions, no `<stanza-id/>` for Transient).
-//! - **Q7b (partial)** — currently rows are deleted on send rather than
-//!   on SM-ack. Full SM-ack-keyed lifecycle lands with slice (d) (SM
-//!   persistence). Re-flush after pre-ack session death (Q7c) requires
-//!   the SM-ack lifecycle and is therefore TODO with the same slice.
 
 use std::sync::Arc;
 
@@ -58,22 +64,50 @@ pub struct FlushOutcome {
 /// returned `true` on the recovering [`ConnectionEntry`] — i.e. the
 /// first non-negative-priority presence of a fresh session.
 ///
-/// The session-id used to claim rows is derived from the recovering
-/// full JID (a concrete SM session id is wired in slice (d)).
-#[instrument(skip(storage, registry, archive_resolver), fields(recipient = %recipient, resource = %resource))]
+/// `sm_session` is the recovering connection's XEP-0198 stream id
+/// (`Some(_)` when the client has enabled SM, `None` otherwise). The
+/// SM-enabled path uses the locked Q7b SM-ack lifecycle: claim → tag
+/// outbound stanza → recipient main loop stamps `outbound_sequence`
+/// → SM `<a h>` deletes via `delete_acked_through`. The non-SM path
+/// falls back to delete-on-push: the recipient cannot ack so we
+/// can't gate deletion on it. (Codex/Qodo review on PR #358:
+/// previously the JID was used as the session key, conflating
+/// distinct SM sessions on the same resource and leaking rows for
+/// non-SM clients.)
+#[instrument(
+    skip(storage, registry, archive_resolver, sm_session),
+    fields(recipient = %recipient, resource = %resource)
+)]
 pub async fn flush_for_resource<R>(
     storage: &Arc<dyn PendingDeliveryStorage>,
     registry: &ConnectionRegistry,
     server_domain: &str,
     recipient: &BareJid,
     resource: &FullJid,
+    sm_session: Option<&SmSessionId>,
     archive_resolver: &R,
 ) -> FlushOutcome
 where
     R: ArchiveResolver + ?Sized,
 {
-    let session_id = SmSessionId::new(resource.to_string());
-    let claimed = match storage.claim_for_session(recipient, &session_id).await {
+    // For non-SM sessions, use a transient per-flush session id so the
+    // claim row tag is consistent within the batch. The post-push
+    // delete path keys on row id, not session id, so the transient
+    // value never escapes this function. Only the SM path keeps the
+    // claim alive past the push for the SM-ack lifecycle.
+    let transient_session_id;
+    let session_id_for_claim: &SmSessionId = match sm_session {
+        Some(id) => id,
+        None => {
+            transient_session_id =
+                SmSessionId::new(format!("transient:{}:{}", resource, uuid::Uuid::new_v4()));
+            &transient_session_id
+        }
+    };
+    let claimed = match storage
+        .claim_for_session(recipient, session_id_for_claim)
+        .await
+    {
         Ok(rows) => rows,
         Err(error) => {
             warn!(error = %error, "claim_for_session failed; skipping flush");
@@ -108,31 +142,43 @@ where
         };
         let replay = build_replay_stanza(payload, server_domain, row.original_receipt_at);
         let stanza = Stanza::Message(replay);
-        match registry.send_to(resource, stanza).await {
+        // SM-enabled path: tag outbound with row id so the recipient's
+        // main loop can stamp `outbound_sequence` post-`record_outbound`.
+        // The row stays claimed for the SM-ack lifecycle.
+        // Non-SM path: same outbound tag (cheap), but we delete on Sent
+        // because there's no SM session to ack against.
+        let push_result = if sm_session.is_some() {
+            registry
+                .send_pending_flush(resource, stanza, row.id.clone())
+                .await
+        } else {
+            registry.send_to(resource, stanza).await
+        };
+        match push_result {
             SendResult::Sent => {
                 outcome.pushed += 1;
-                // SLICE (d) TODO: defer deletion until SM-ack of the
-                // flush stanza (locked Q7b). Until SM session
-                // persistence lands, delete on push so a successful
-                // flush doesn't re-deliver on the next presence
-                // update. The MAM catch-up path (Q10a) still recovers
-                // Archived rows on crash; Transient rows are by-design
-                // ephemeral on crash.
-                if let Err(error) = storage.delete_row(&row.id).await {
-                    warn!(
-                        row_id = %row.id,
-                        error = %error,
-                        "pending_delivery delete_row (delivered) failed; \
-                         row may re-deliver on next presence"
-                    );
+                if sm_session.is_none() {
+                    // Non-SM fallback: delete on push since no `<a h>`
+                    // will ever fire (Codex review on PR #358).
+                    if let Err(error) = storage.delete_row(&row.id).await {
+                        warn!(
+                            row_id = %row.id,
+                            error = %error,
+                            "pending_delivery delete_row (non-SM push) failed; \
+                             row may re-deliver on next presence"
+                        );
+                    }
                 }
+                // SM-enabled: row stays claimed by `sm_session` with
+                // `outbound_sequence = NULL` until the recipient's
+                // main loop stamps it via `record_pushed_at`. If the
+                // session dies before push, `release_claim` clears
+                // the claim for re-flush (Q7c).
             }
             other => {
                 debug!(?other, row_id = %row.id, "send to recovering resource failed mid-flush");
                 // Per-row release so an undelivered row stays eligible
-                // for re-claim on the next flush trigger, while
-                // delivered rows in the same batch were already
-                // deleted above (partial-success correctness).
+                // for re-claim on the next flush trigger.
                 if let Err(error) = storage.release_row(&row.id).await {
                     warn!(
                         row_id = %row.id,
@@ -269,7 +315,11 @@ type RecipientLockMap = dashmap::DashMap<BareJid, std::sync::Arc<tokio::sync::Mu
 ///     archive_stanza_by TEXT,             -- bare jid stamping `<stanza-id/>`
 ///     archive_stanza_id TEXT,             -- XEP-0359 id (Archived rows)
 ///     transient_xml TEXT,                 -- serialized minidom (Transient)
-///     flushed_in_session TEXT
+///     flushed_in_session TEXT,
+///     outbound_sequence INTEGER           -- XEP-0198 outbound counter,
+///                                         -- stamped post-record_outbound
+///                                         -- so SM `<a h>` can range-delete
+///                                         -- (locked Q7b SM-ack lifecycle)
 /// );
 /// ```
 ///
@@ -338,12 +388,47 @@ impl DatabasePendingDeliveryStorage {
                 archive_stanza_by TEXT,
                 archive_stanza_id TEXT,
                 transient_xml TEXT,
-                flushed_in_session TEXT
+                flushed_in_session TEXT,
+                outbound_sequence INTEGER
             )
             "#,
             (),
         )
         .await?;
+        // Idempotent column-add migration for the locked Q7b
+        // outbound_sequence column. Tables created by an older
+        // version of waddle-server (before PR #358) were missing this
+        // column, and `CREATE TABLE IF NOT EXISTS` is a no-op when the
+        // table already exists — so the SELECT/INSERT/UPDATE statements
+        // below would fail with "no such column: outbound_sequence" at
+        // first use without this ALTER. (Codex/Qodo review on PR #358.)
+        //
+        // Both backends support `ADD COLUMN IF NOT EXISTS` syntax in
+        // recent versions (SQLite ≥ 3.35.0, Postgres ≥ 9.6); for older
+        // SQLite we fall through to a tolerant ALTER + best-effort
+        // ignore of the "duplicate column" error.
+        let alter_sql = match self.db.driver() {
+            DatabaseDriver::Postgres => {
+                "ALTER TABLE pending_delivery ADD COLUMN IF NOT EXISTS outbound_sequence INTEGER"
+            }
+            DatabaseDriver::Sqlite => {
+                "ALTER TABLE pending_delivery ADD COLUMN outbound_sequence INTEGER"
+            }
+        };
+        if let Err(error) = self.execute(alter_sql, ()).await {
+            // SQLite's `ALTER TABLE … ADD COLUMN` is not idempotent
+            // and reports "duplicate column name" when the column
+            // already exists. Treat that specific error as a no-op so
+            // the migration stays idempotent for both freshly-created
+            // tables (where the column exists from CREATE TABLE
+            // above) and pre-existing older tables.
+            let msg = error.to_string().to_lowercase();
+            if msg.contains("duplicate column") || msg.contains("already exists") {
+                debug!("pending_delivery.outbound_sequence column already present");
+            } else {
+                return Err(error);
+            }
+        }
         self.execute(
             "CREATE INDEX IF NOT EXISTS idx_pending_delivery_recipient \
              ON pending_delivery (recipient_jid, row_id)",
@@ -438,6 +523,12 @@ impl DatabasePendingDeliveryStorage {
         let flushed_in_session: Option<String> = row
             .get(7)
             .map_err(|e| PendingStorageError::Other(e.to_string()))?;
+        let outbound_sequence_i64: Option<i64> = row
+            .get(8)
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?;
+        let outbound_sequence = outbound_sequence_i64
+            .map(|v| u32::try_from(v).map_err(|e| PendingStorageError::Other(e.to_string())))
+            .transpose()?;
 
         let payload = match payload_kind.as_str() {
             PAYLOAD_KIND_ARCHIVED => {
@@ -479,6 +570,7 @@ impl DatabasePendingDeliveryStorage {
             original_receipt_at,
             payload,
             flushed_in_session: flushed_in_session.map(SmSessionId::new),
+            outbound_sequence,
         })
     }
 }
@@ -530,8 +622,9 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
                 self.execute(
                     "INSERT INTO pending_delivery (\
                         row_id, recipient_jid, original_receipt_at, payload_kind, \
-                        archive_stanza_by, archive_stanza_id, transient_xml, flushed_in_session \
-                     ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL)",
+                        archive_stanza_by, archive_stanza_id, transient_xml, \
+                        flushed_in_session, outbound_sequence \
+                     ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL)",
                     crate::db_params![
                         row_id,
                         row.recipient.to_string(),
@@ -548,9 +641,10 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
                 self.execute(
                     "INSERT INTO pending_delivery (\
                         row_id, recipient_jid, original_receipt_at, payload_kind, \
-                        archive_stanza_by, archive_stanza_id, transient_xml, flushed_in_session \
+                        archive_stanza_by, archive_stanza_id, transient_xml, \
+                        flushed_in_session, outbound_sequence \
                      ) \
-                     SELECT ?, ?, ?, ?, ?, ?, ?, NULL \
+                     SELECT ?, ?, ?, ?, ?, ?, ?, NULL, NULL \
                      WHERE (SELECT COUNT(*) FROM pending_delivery WHERE recipient_jid = ?) < ?",
                     crate::db_params![
                         row_id,
@@ -578,7 +672,8 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
         let mut rows = self
             .query(
                 "SELECT row_id, recipient_jid, original_receipt_at, payload_kind, \
-                        archive_stanza_by, archive_stanza_id, transient_xml, flushed_in_session \
+                        archive_stanza_by, archive_stanza_id, transient_xml, \
+                        flushed_in_session, outbound_sequence \
                  FROM pending_delivery \
                  WHERE recipient_jid = ? \
                  ORDER BY row_id ASC",
@@ -608,8 +703,14 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
         // tags the rows, the loser's UPDATE finds zero matches and the
         // loser's SELECT returns rows already tagged for the other
         // session — filtered out by the WHERE.
+        // Defensive: clear outbound_sequence on claim too. release_*
+        // already does this, but a future code path that leaves a row
+        // half-released should not be able to confuse the SM-ack
+        // delete. Targets only newly-claimed rows (flushed_in_session
+        // IS NULL filter ensures we don't trample another session's
+        // ongoing claim).
         self.execute(
-            "UPDATE pending_delivery SET flushed_in_session = ? \
+            "UPDATE pending_delivery SET flushed_in_session = ?, outbound_sequence = NULL \
              WHERE recipient_jid = ? AND flushed_in_session IS NULL",
             crate::db_params![session.as_str().to_string(), recipient.to_string()],
         )
@@ -617,7 +718,8 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
         let mut rows = self
             .query(
                 "SELECT row_id, recipient_jid, original_receipt_at, payload_kind, \
-                        archive_stanza_by, archive_stanza_id, transient_xml, flushed_in_session \
+                        archive_stanza_by, archive_stanza_id, transient_xml, \
+                        flushed_in_session, outbound_sequence \
                  FROM pending_delivery \
                  WHERE recipient_jid = ? AND flushed_in_session = ? \
                  ORDER BY row_id ASC",
@@ -652,8 +754,13 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
     }
 
     async fn release_claim(&self, session: &SmSessionId) -> Result<u64, PendingStorageError> {
+        // Clear `outbound_sequence` alongside `flushed_in_session` so a
+        // stale sequence from the dead session can't survive a re-claim
+        // and trick a later session's SM ack into deleting an unack'd
+        // row. (Qodo review on PR #358.)
         self.execute(
-            "UPDATE pending_delivery SET flushed_in_session = NULL \
+            "UPDATE pending_delivery SET flushed_in_session = NULL, \
+                                          outbound_sequence = NULL \
              WHERE flushed_in_session = ?",
             crate::db_params![session.as_str().to_string()],
         )
@@ -662,8 +769,37 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
 
     async fn release_row(&self, id: &PendingRowId) -> Result<u64, PendingStorageError> {
         self.execute(
-            "UPDATE pending_delivery SET flushed_in_session = NULL WHERE row_id = ?",
+            "UPDATE pending_delivery SET flushed_in_session = NULL, \
+                                          outbound_sequence = NULL \
+             WHERE row_id = ?",
             crate::db_params![id.as_str().to_string()],
+        )
+        .await
+    }
+
+    async fn record_pushed_at(
+        &self,
+        id: &PendingRowId,
+        sequence: u32,
+    ) -> Result<u64, PendingStorageError> {
+        self.execute(
+            "UPDATE pending_delivery SET outbound_sequence = ? WHERE row_id = ?",
+            crate::db_params![i64::from(sequence), id.as_str().to_string()],
+        )
+        .await
+    }
+
+    async fn delete_acked_through(
+        &self,
+        session: &SmSessionId,
+        sequence_max: u32,
+    ) -> Result<u64, PendingStorageError> {
+        self.execute(
+            "DELETE FROM pending_delivery \
+             WHERE flushed_in_session = ? \
+               AND outbound_sequence IS NOT NULL \
+               AND outbound_sequence <= ?",
+            crate::db_params![session.as_str().to_string(), i64::from(sequence_max)],
         )
         .await
     }
@@ -725,6 +861,7 @@ mod tests {
             original_receipt_at: Utc::now(),
             payload: PendingPayload::Transient(Box::new(m)),
             flushed_in_session: None,
+            outbound_sequence: None,
         }
     }
 
@@ -739,6 +876,7 @@ mod tests {
             "example.com",
             &bare("alice@example.com"),
             &full("alice@example.com/web"),
+            None,
             &NullArchiveResolver,
         )
         .await;
@@ -746,10 +884,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn flush_pushes_transient_rows_and_deletes_on_success() {
+    async fn flush_pushes_transient_rows_and_keeps_them_for_sm_ack() {
+        // SM-enabled flush: rows are pushed but stay in storage
+        // claimed by the SM session until `delete_acked_through` is
+        // called by the SM ack handler.
         let storage: Arc<dyn PendingDeliveryStorage> =
             Arc::new(InMemoryPendingDeliveryStorage::unlimited());
-        // Insert two transient rows.
         for body in ["one", "two"] {
             storage
                 .insert(transient_row("alice@example.com", body))
@@ -757,7 +897,71 @@ mod tests {
                 .unwrap();
         }
 
-        // Wire a registered connection so send_to actually has a sink.
+        let registry = ConnectionRegistry::new();
+        let resource = full("alice@example.com/web");
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        registry.register(resource.clone(), tx);
+
+        let sm_session = SmSessionId::new("sm-stream-uuid-1");
+        let outcome = flush_for_resource(
+            &storage,
+            &registry,
+            "example.com",
+            &bare("alice@example.com"),
+            &resource,
+            Some(&sm_session),
+            &NullArchiveResolver,
+        )
+        .await;
+        assert_eq!(outcome.claimed, 2);
+        assert_eq!(outcome.pushed, 2);
+        assert_eq!(outcome.unresolved, 0);
+
+        let mut received = Vec::new();
+        while let Ok(stanza) = rx.try_recv() {
+            received.push(stanza);
+        }
+        assert_eq!(received.len(), 2);
+
+        // Locked Q7b SM-ack lifecycle: rows stay in storage tagged
+        // `flushed_in_session` after push; deletion happens on SM
+        // `<a h>` ack via `delete_acked_through`, NOT on send.
+        assert_eq!(storage.count(&bare("alice@example.com")).await.unwrap(), 2);
+        let listed = storage.list(&bare("alice@example.com")).await.unwrap();
+        for row in &listed {
+            assert_eq!(
+                row.flushed_in_session.as_ref(),
+                Some(&sm_session),
+                "row claimed by the recovering SM session until SM-ack"
+            );
+        }
+        let row_ids: std::collections::HashSet<_> = received
+            .iter()
+            .filter_map(|o| o.pending_row_id.clone())
+            .collect();
+        assert_eq!(
+            row_ids.len(),
+            2,
+            "every flush stanza carries its pending_row_id"
+        );
+    }
+
+    #[tokio::test]
+    async fn flush_non_sm_session_deletes_on_push() {
+        // Codex review on PR #358: when the recovering connection has
+        // NOT enabled XEP-0198, the SM ack handler will never fire to
+        // delete claimed rows. The flush function must fall back to
+        // delete-on-push so the queue doesn't leak forever for non-SM
+        // clients.
+        let storage: Arc<dyn PendingDeliveryStorage> =
+            Arc::new(InMemoryPendingDeliveryStorage::unlimited());
+        for body in ["one", "two"] {
+            storage
+                .insert(transient_row("alice@example.com", body))
+                .await
+                .unwrap();
+        }
+
         let registry = ConnectionRegistry::new();
         let resource = full("alice@example.com/web");
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
@@ -769,12 +973,12 @@ mod tests {
             "example.com",
             &bare("alice@example.com"),
             &resource,
+            None, // ← no SM session: delete-on-push fallback
             &NullArchiveResolver,
         )
         .await;
         assert_eq!(outcome.claimed, 2);
         assert_eq!(outcome.pushed, 2);
-        assert_eq!(outcome.unresolved, 0);
 
         // Both messages were sent on the wire.
         let mut received = Vec::new();
@@ -783,8 +987,8 @@ mod tests {
         }
         assert_eq!(received.len(), 2);
 
-        // Rows have been deleted on successful push (slice (d) will
-        // shift this to SM-ack-keyed deletion).
+        // Non-SM fallback: rows are deleted on Sent (no ack will ever
+        // fire). Storage is empty.
         assert_eq!(storage.count(&bare("alice@example.com")).await.unwrap(), 0);
     }
 
@@ -801,12 +1005,14 @@ mod tests {
         let registry = ConnectionRegistry::new();
         let resource = full("alice@example.com/web");
 
+        let sm_session = SmSessionId::new("sm-stream-uuid-1");
         let outcome = flush_for_resource(
             &storage,
             &registry,
             "example.com",
             &bare("alice@example.com"),
             &resource,
+            Some(&sm_session),
             &NullArchiveResolver,
         )
         .await;
@@ -840,6 +1046,7 @@ mod tests {
                 id: StanzaIdValue::new("mam-id"),
             }),
             flushed_in_session: None,
+            outbound_sequence: None,
         };
         let trans = transient_row("alice@example.com", "transient body");
         assert_eq!(
@@ -924,5 +1131,189 @@ mod tests {
         let removed = storage.delete_claimed(&session2).await.unwrap();
         assert_eq!(removed, 3);
         assert_eq!(storage.count(&recipient).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn pending_row_deleted_only_after_sm_ack() {
+        // Q7b end-to-end (issue #209 PR #347):
+        // 1. Insert a transient row.
+        // 2. Flush to a registered resource — row is claimed + pushed
+        //    (OutboundStanza in the channel) but stays in storage.
+        // 3. Simulate the recipient main loop's `record_pushed_at`
+        //    after `record_outbound`.
+        // 4. Simulate an SM `<a h>` ack via `delete_acked_through`.
+        // 5. Verify the row is now gone.
+        let storage: Arc<dyn PendingDeliveryStorage> =
+            Arc::new(InMemoryPendingDeliveryStorage::unlimited());
+        storage
+            .insert(transient_row("alice@example.com", "hi"))
+            .await
+            .unwrap();
+
+        let registry = ConnectionRegistry::new();
+        let resource = full("alice@example.com/web");
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        registry.register(resource.clone(), tx);
+
+        let session_id = waddle_xmpp::pending_delivery::SmSessionId::new("sm-stream-uuid-7");
+        let outcome = flush_for_resource(
+            &storage,
+            &registry,
+            "example.com",
+            &bare("alice@example.com"),
+            &resource,
+            Some(&session_id),
+            &NullArchiveResolver,
+        )
+        .await;
+        assert_eq!(outcome.pushed, 1);
+        // Row stays in storage post-flush, claimed by this session.
+        assert_eq!(storage.count(&bare("alice@example.com")).await.unwrap(), 1);
+        let pushed = rx.try_recv().expect("flush stanza pushed to channel");
+        let row_id = pushed
+            .pending_row_id
+            .clone()
+            .expect("flush stanza carries source row id");
+
+        // Recipient main loop simulation: after `record_outbound`
+        // assigns SM outbound counter (say h=7), bind it to the row.
+        storage.record_pushed_at(&row_id, 7).await.unwrap();
+
+        // Pre-ack: row is still there.
+        assert_eq!(storage.count(&bare("alice@example.com")).await.unwrap(), 1);
+
+        // Pre-ack with h=6 (covers earlier stanzas, not this one).
+        let removed = storage.delete_acked_through(&session_id, 6).await.unwrap();
+        assert_eq!(removed, 0, "ack(h=6) does not cover h=7 row");
+        assert_eq!(storage.count(&bare("alice@example.com")).await.unwrap(), 1);
+
+        // SM ack arrives covering h=7.
+        let removed = storage.delete_acked_through(&session_id, 7).await.unwrap();
+        assert_eq!(removed, 1);
+        assert_eq!(
+            storage.count(&bare("alice@example.com")).await.unwrap(),
+            0,
+            "row deleted only after SM-ack (locked Q7b)"
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_row_released_on_pre_ack_session_death() {
+        // Q7c end-to-end (issue #209 PR #347):
+        // 1. Insert a row + flush via session-A.
+        // 2. Stamp it with outbound_sequence (push happened).
+        // 3. Session-A dies BEFORE the recipient's SM `<a h>` ack
+        //    arrives (e.g. socket dropped). `release_claim(session_A)`
+        //    is called by the SM janitor / shutdown drain.
+        // 4. A second resource (session-B) recovers and re-claims —
+        //    the released row must be eligible.
+        let storage: Arc<dyn PendingDeliveryStorage> =
+            Arc::new(InMemoryPendingDeliveryStorage::unlimited());
+        storage
+            .insert(transient_row("alice@example.com", "hi"))
+            .await
+            .unwrap();
+
+        let registry = ConnectionRegistry::new();
+        let resource_a = full("alice@example.com/laptop");
+        let (tx_a, mut rx_a) = tokio::sync::mpsc::channel(8);
+        registry.register(resource_a.clone(), tx_a);
+
+        let session_a = waddle_xmpp::pending_delivery::SmSessionId::new("sm-stream-laptop-uuid");
+        let outcome = flush_for_resource(
+            &storage,
+            &registry,
+            "example.com",
+            &bare("alice@example.com"),
+            &resource_a,
+            Some(&session_a),
+            &NullArchiveResolver,
+        )
+        .await;
+        assert_eq!(outcome.pushed, 1);
+        let pushed = rx_a.try_recv().expect("flush stanza pushed");
+        let row_id = pushed.pending_row_id.clone().unwrap();
+        // Recipient stamped sequence, but no SM-ack arrives.
+        storage.record_pushed_at(&row_id, 3).await.unwrap();
+
+        // Session-A dies pre-ack — the SM janitor's release_claim
+        // restores the row to the unclaimed pool.
+        let released = storage.release_claim(&session_a).await.unwrap();
+        assert_eq!(released, 1);
+
+        // Verify release_claim cleared outbound_sequence too — a
+        // stale value would let session-B's first ack delete the row
+        // before it even pushes (Qodo review on PR #358).
+        let after_release = storage.list(&bare("alice@example.com")).await.unwrap();
+        assert_eq!(after_release.len(), 1);
+        assert!(after_release[0].outbound_sequence.is_none());
+        assert!(after_release[0].flushed_in_session.is_none());
+
+        // Second resource comes online and claims for itself with a
+        // distinct SM session id (different XEP-0198 stream).
+        let resource_b = full("alice@example.com/web");
+        let (tx_b, mut rx_b) = tokio::sync::mpsc::channel(8);
+        registry.register(resource_b.clone(), tx_b);
+        let session_b = waddle_xmpp::pending_delivery::SmSessionId::new("sm-stream-web-uuid");
+        let outcome = flush_for_resource(
+            &storage,
+            &registry,
+            "example.com",
+            &bare("alice@example.com"),
+            &resource_b,
+            Some(&session_b),
+            &NullArchiveResolver,
+        )
+        .await;
+        assert_eq!(outcome.pushed, 1, "row re-flushed to recovering resource-B");
+        let pushed_b = rx_b.try_recv().expect("flush stanza pushed to resource-B");
+        assert_eq!(pushed_b.pending_row_id.unwrap(), row_id, "same row");
+    }
+
+    #[tokio::test]
+    async fn ack_before_record_pushed_at_skips_unsequenced_row() {
+        // Greptile review on PR #358: documents the storage-layer
+        // contract that motivates the `record_pushed_at` /
+        // `delete_acked_through` ordering rule in the websocket main
+        // loop. If `delete_acked_through` runs while a freshly-claimed
+        // row's `outbound_sequence` is still NULL, the row is skipped
+        // (correct: NULL means "not yet pushed, no h-coverage
+        // possible"). The websocket main loop guarantees the
+        // record_pushed_at completes before the next inbound frame
+        // (including the SM ack) is processed by awaiting it inline
+        // — this test pins down the storage semantics so a future
+        // refactor that re-introduces async stamping breaks visibly.
+        let storage: Arc<dyn PendingDeliveryStorage> =
+            Arc::new(InMemoryPendingDeliveryStorage::unlimited());
+        storage
+            .insert(transient_row("alice@example.com", "hi"))
+            .await
+            .unwrap();
+        let session = waddle_xmpp::pending_delivery::SmSessionId::new("sm-stream");
+        let claimed = storage
+            .claim_for_session(&bare("alice@example.com"), &session)
+            .await
+            .unwrap();
+        assert_eq!(claimed.len(), 1);
+        let row_id = claimed[0].id.clone();
+        // Ack runs before record_pushed_at — outbound_sequence is
+        // NULL so the row is skipped. This is the failure mode
+        // Greptile flagged when both calls were spawned: the row
+        // would persist claimed-but-never-acked until session death.
+        let removed = storage.delete_acked_through(&session, 100).await.unwrap();
+        assert_eq!(
+            removed, 0,
+            "NULL outbound_sequence is skipped by delete_acked_through"
+        );
+        assert_eq!(storage.count(&bare("alice@example.com")).await.unwrap(), 1);
+
+        // Now record_pushed_at fires (inline ordering would have done
+        // this BEFORE the ack). A subsequent ack covering the same
+        // h DOES delete the row. This proves recovery — the next ack
+        // after the stamp completes the cleanup.
+        storage.record_pushed_at(&row_id, 50).await.unwrap();
+        let removed = storage.delete_acked_through(&session, 50).await.unwrap();
+        assert_eq!(removed, 1);
+        assert_eq!(storage.count(&bare("alice@example.com")).await.unwrap(), 0);
     }
 }

@@ -8,8 +8,8 @@ Tracking doc for the multi-PR implementation of issue [#209](https://github.com/
 |---|---|---|---|
 | Foundation | [#339](https://github.com/waddle-social/waddle/pull/339) | ✅ merged | Typed `DmRouting` classifier, `pending_delivery` storage trait + in-memory + libSQL backend, `OfflineDeliveryHandler`, presence-driven flush, `<service-unavailable/>` bounce on quota |
 | Slice (d) phases 2–3 | [#344](https://github.com/waddle-social/waddle/pull/344) | ✅ merged | `DatabaseSmPersistence` libSQL/Postgres backend, `InMemorySmSessionRegistry` plumbed through `SmPersistenceStorage`, restart restoration |
-| Slice (d) phase 4 | [#346](https://github.com/waddle-social/waddle/pull/346) | 🟡 in review | Q6 SM-expiry promotion (alt-resource → offline → service-unavailable), graceful-shutdown drain, persist-after-promotion ordering |
-| Q7 lifecycle | [#347](#pr-347--q7b--q7c-sm-ack-lifecycle--planned) | ⬜ planned | SM-ack-keyed deletion of `pending_delivery` rows + pre-ack session-death re-flush |
+| Slice (d) phase 4 | [#346](https://github.com/waddle-social/waddle/pull/346) | ✅ merged | Q6 SM-expiry promotion (alt-resource → offline → service-unavailable), graceful-shutdown drain, persist-after-promotion ordering |
+| Q7 lifecycle | [#358](https://github.com/waddle-social/waddle/pull/358) | 🟡 in review | SM-ack-keyed deletion of `pending_delivery` rows + pre-ack session-death re-flush |
 | Janitor + flush-time block | [#348](#pr-348--claim-expiry-janitor--xep-0191-flush-time-block-re-eval--planned) | ⬜ planned | Claim-expiry janitor + XEP-0191 flush-time block re-eval |
 | Receipt-time plumbing | [#349](#pr-349--original_receipt_at-plumbing-through-detachedsession--planned) | ⬜ planned | `original_receipt_at` plumbing through `DetachedSession.unacked_stanzas` |
 | Test-coverage debt | [#350](#pr-350--test-coverage-debt--planned) | ⬜ planned | Un-ignore XEP-0160 integration tests + extend dedicated XEP-0198/0334/0280/0313/0203/0359/0191 suites |
@@ -26,8 +26,8 @@ Tracking doc for the multi-PR implementation of issue [#209](https://github.com/
 | Q5 | Wire shape on flush (preserve `to`, stamp stanza-id only on Archived, `<delay/>` per XEP-0203) | ✅ shipped |
 | Q6 | Alt-resource → offline-storage → `<service-unavailable/>` priority chain | ✅ shipped (#346) |
 | Q7a | Flush triggers on first non-neg-priority presence of fresh session | ✅ shipped |
-| Q7b | SM-ack-keyed deletion of `pending_delivery` rows | ⬜ planned (#347) |
-| Q7c | Pre-ack session-death → release row for re-flush | ⬜ planned (#347) |
+| Q7b | SM-ack-keyed deletion of `pending_delivery` rows | 🟡 in review (#358) |
+| Q7c | Pre-ack session-death → release row for re-flush | 🟡 in review (#358) |
 | Q7d | Priority transition negative→non-negative also triggers flush | ✅ shipped |
 | Q8=B | SM session/unacked persistence durable across restart | ✅ shipped (#344+#346) |
 | Q9 | Per-recipient row count cap, server-wide config, refuse-on-overflow | ✅ shipped |

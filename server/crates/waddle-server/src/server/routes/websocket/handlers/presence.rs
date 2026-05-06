@@ -1446,12 +1446,19 @@ async fn maybe_flush_pending_delivery(state: &WebSocketState, sender_jid: &FullJ
     let resolver = crate::pending_delivery::MamArchiveResolver {
         mam_storage: std::sync::Arc::clone(&state.deps.protocol.mam_storage),
     };
+    // Locked Q7b SM-ack lifecycle (issue #209): when the recovering
+    // connection has an active XEP-0198 session, key claims by its
+    // stream id so a subsequent `<a h>` from the same session deletes
+    // exactly its acked rows. Without SM, the flush function falls
+    // back to delete-on-push (no ack will ever fire).
+    let sm_session_id = entry.sm_stream_id();
     let outcome = crate::pending_delivery::flush_for_resource(
         &state.deps.protocol.pending_delivery_storage,
         &state.deps.protocol.connection_registry,
         state.deps.auth_state.xmpp_domain.as_str(),
         &recipient_bare,
         sender_jid,
+        sm_session_id.as_ref(),
         &resolver,
     )
     .await;
