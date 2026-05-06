@@ -62,6 +62,31 @@ pub struct FlushOutcome {
     pub dropped_blocked: u32,
 }
 
+/// Per-flush context bundling the optional / contextual parameters
+/// of [`flush_for_resource`]. Carved out of the function signature so
+/// adding a new dependency (e.g. a future XEP-0411 hook) doesn't push
+/// the parameter count over the clippy threshold and tempt a
+/// suppression. Project hard rule (`server/CLAUDE.md`): never add
+/// `#[allow(clippy::too_many_arguments)]` (Greptile/Qodo review on
+/// PR #360).
+pub struct FlushContext<'a, R>
+where
+    R: ArchiveResolver + ?Sized,
+{
+    /// JID-form domain stamped onto the `<delay/>` element added to
+    /// each replayed stanza per XEP-0203 §4.1.
+    pub server_domain: &'a str,
+    /// Recovering connection's XEP-0198 stream id when SM is enabled.
+    /// `None` falls back to the delete-on-push path (no ack will fire).
+    pub sm_session: Option<&'a SmSessionId>,
+    /// Live blocking storage for XEP-0191 §2 step 4 flush-time
+    /// re-evaluation. `None` skips the check (test fixtures only;
+    /// production always wires the real backend).
+    pub blocking_storage: Option<&'a Arc<dyn waddle_xmpp::xep::xep0191::BlockingStorage>>,
+    /// Resolves Archived `PendingRow` references against MAM.
+    pub archive_resolver: &'a R,
+}
+
 /// Flush every currently-unclaimed `pending_delivery` row for the
 /// given recipient to the given resource.
 ///
@@ -69,34 +94,26 @@ pub struct FlushOutcome {
 /// returned `true` on the recovering [`ConnectionEntry`] — i.e. the
 /// first non-negative-priority presence of a fresh session.
 ///
-/// `sm_session` is the recovering connection's XEP-0198 stream id
-/// (`Some(_)` when the client has enabled SM, `None` otherwise). The
-/// SM-enabled path uses the locked Q7b SM-ack lifecycle; the non-SM
-/// path falls back to delete-on-push.
-///
-/// `blocking_storage` lets the flush re-check XEP-0191 §2 step 4 at
-/// delivery time: if the recipient blocked the sender AFTER the row
-/// was inserted, the row is dropped (deleted) instead of replayed.
-/// `None` skips the check entirely (test fixtures without a blocking
-/// storage); production wires the live `BlockingStorage` here.
-#[allow(clippy::too_many_arguments)]
-#[instrument(
-    skip(storage, registry, archive_resolver, sm_session, blocking_storage),
-    fields(recipient = %recipient, resource = %resource)
-)]
+/// `ctx` carries the optional / contextual parameters
+/// (`sm_session`, `blocking_storage`, `archive_resolver`,
+/// `server_domain`) — see [`FlushContext`] for details.
+#[instrument(skip(storage, registry, ctx), fields(recipient = %recipient, resource = %resource))]
 pub async fn flush_for_resource<R>(
     storage: &Arc<dyn PendingDeliveryStorage>,
     registry: &ConnectionRegistry,
-    server_domain: &str,
     recipient: &BareJid,
     resource: &FullJid,
-    sm_session: Option<&SmSessionId>,
-    blocking_storage: Option<&Arc<dyn waddle_xmpp::xep::xep0191::BlockingStorage>>,
-    archive_resolver: &R,
+    ctx: FlushContext<'_, R>,
 ) -> FlushOutcome
 where
     R: ArchiveResolver + ?Sized,
 {
+    let FlushContext {
+        server_domain,
+        sm_session,
+        blocking_storage,
+        archive_resolver,
+    } = ctx;
     // Snapshot the recipient's current blocklist once for the whole
     // flush batch. XEP-0191 §2 step 4: if the recipient blocked the
     // sender AFTER the row was queued, the row must be dropped.
@@ -189,7 +206,9 @@ where
                             row_id = %row.id,
                             error = %error,
                             "pending_delivery delete_row (blocked at flush) failed; \
-                             row may re-deliver on next presence"
+                             row stays in storage and the next flush will re-check the \
+                             blocklist — only re-delivers if the recipient lifts the block \
+                             before the next delete attempt"
                         );
                     }
                     continue;
@@ -978,12 +997,14 @@ mod tests {
         let outcome = flush_for_resource(
             &storage,
             &registry,
-            "example.com",
             &bare("alice@example.com"),
             &full("alice@example.com/web"),
-            None,
-            None,
-            &NullArchiveResolver,
+            FlushContext {
+                server_domain: "example.com",
+                sm_session: None,
+                blocking_storage: None,
+                archive_resolver: &NullArchiveResolver,
+            },
         )
         .await;
         assert_eq!(outcome, FlushOutcome::default());
@@ -1012,12 +1033,14 @@ mod tests {
         let outcome = flush_for_resource(
             &storage,
             &registry,
-            "example.com",
             &bare("alice@example.com"),
             &resource,
-            Some(&sm_session),
-            None,
-            &NullArchiveResolver,
+            FlushContext {
+                server_domain: "example.com",
+                sm_session: Some(&sm_session),
+                blocking_storage: None,
+                archive_resolver: &NullArchiveResolver,
+            },
         )
         .await;
         assert_eq!(outcome.claimed, 2);
@@ -1077,12 +1100,14 @@ mod tests {
         let outcome = flush_for_resource(
             &storage,
             &registry,
-            "example.com",
             &bare("alice@example.com"),
             &resource,
-            None, // ← no SM session: delete-on-push fallback
-            None,
-            &NullArchiveResolver,
+            FlushContext {
+                server_domain: "example.com",
+                sm_session: None, // ← no SM session: delete-on-push fallback
+                blocking_storage: None,
+                archive_resolver: &NullArchiveResolver,
+            },
         )
         .await;
         assert_eq!(outcome.claimed, 2);
@@ -1117,12 +1142,14 @@ mod tests {
         let outcome = flush_for_resource(
             &storage,
             &registry,
-            "example.com",
             &bare("alice@example.com"),
             &resource,
-            Some(&sm_session),
-            None,
-            &NullArchiveResolver,
+            FlushContext {
+                server_domain: "example.com",
+                sm_session: Some(&sm_session),
+                blocking_storage: None,
+                archive_resolver: &NullArchiveResolver,
+            },
         )
         .await;
         assert_eq!(outcome.claimed, 1);
@@ -1268,12 +1295,14 @@ mod tests {
         let outcome = flush_for_resource(
             &storage,
             &registry,
-            "example.com",
             &bare("alice@example.com"),
             &resource,
-            Some(&session_id),
-            None,
-            &NullArchiveResolver,
+            FlushContext {
+                server_domain: "example.com",
+                sm_session: Some(&session_id),
+                blocking_storage: None,
+                archive_resolver: &NullArchiveResolver,
+            },
         )
         .await;
         assert_eq!(outcome.pushed, 1);
@@ -1333,12 +1362,14 @@ mod tests {
         let outcome = flush_for_resource(
             &storage,
             &registry,
-            "example.com",
             &bare("alice@example.com"),
             &resource_a,
-            Some(&session_a),
-            None,
-            &NullArchiveResolver,
+            FlushContext {
+                server_domain: "example.com",
+                sm_session: Some(&session_a),
+                blocking_storage: None,
+                archive_resolver: &NullArchiveResolver,
+            },
         )
         .await;
         assert_eq!(outcome.pushed, 1);
@@ -1369,12 +1400,14 @@ mod tests {
         let outcome = flush_for_resource(
             &storage,
             &registry,
-            "example.com",
             &bare("alice@example.com"),
             &resource_b,
-            Some(&session_b),
-            None,
-            &NullArchiveResolver,
+            FlushContext {
+                server_domain: "example.com",
+                sm_session: Some(&session_b),
+                blocking_storage: None,
+                archive_resolver: &NullArchiveResolver,
+            },
         )
         .await;
         assert_eq!(outcome.pushed, 1, "row re-flushed to recovering resource-B");
@@ -1537,12 +1570,14 @@ mod tests {
         let outcome = flush_for_resource(
             &storage,
             &registry,
-            "example.com",
             &bare("alice@example.com"),
             &resource,
-            Some(&sm_session),
-            Some(&blocking_arc),
-            &NullArchiveResolver,
+            FlushContext {
+                server_domain: "example.com",
+                sm_session: Some(&sm_session),
+                blocking_storage: Some(&blocking_arc),
+                archive_resolver: &NullArchiveResolver,
+            },
         )
         .await;
         assert_eq!(outcome.claimed, 1);
@@ -1593,17 +1628,68 @@ mod tests {
         let outcome = flush_for_resource(
             &storage,
             &registry,
-            "example.com",
             &bare("alice@example.com"),
             &resource,
-            Some(&sm_session),
-            Some(&blocking_arc),
-            &NullArchiveResolver,
+            FlushContext {
+                server_domain: "example.com",
+                sm_session: Some(&sm_session),
+                blocking_storage: Some(&blocking_arc),
+                archive_resolver: &NullArchiveResolver,
+            },
         )
         .await;
         // Fail-closed: nothing claimed, nothing pushed, row stays for retry.
         assert_eq!(outcome.claimed, 0);
         assert_eq!(outcome.pushed, 0);
         assert_eq!(storage.count(&bare("alice@example.com")).await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn list_orphaned_claims_excludes_active_session_rows() {
+        // Codex/Qodo P1 review on PR #360: the claim-expiry janitor's
+        // "live" set MUST include both detached/resumable SM sessions
+        // (`sm_session_registry.live_session_ids()`) AND currently-
+        // connected active SM sessions (`ConnectionEntry.sm_stream_id`).
+        // Without the active half, a row claimed by a connected
+        // resource awaiting `<a h>` would be misclassified as orphaned
+        // and `release_row`'d, breaking the SM-ack lifecycle and
+        // producing a duplicate flush on the next presence transition.
+        //
+        // This test pins the storage-layer contract: passing the
+        // active session id into `list_orphaned_claims`'s `live`
+        // argument MUST exclude its rows from the orphan list. The
+        // janitor wiring in `start_with_config` builds the union and
+        // is exercised by integration coverage above.
+        let storage = InMemoryPendingDeliveryStorage::unlimited();
+        let mut row = transient_row("alice@example.com", "active");
+        let active_session = SmSessionId::new("sm-stream-active");
+        row.flushed_in_session = Some(active_session.clone());
+        storage.insert(row).await.unwrap();
+
+        // Sweep with active_session in the live set: NOT an orphan.
+        let orphans = storage
+            .list_orphaned_claims(std::slice::from_ref(&active_session))
+            .await
+            .unwrap();
+        assert!(
+            orphans.is_empty(),
+            "row claimed by an active SM session must not be flagged as orphaned"
+        );
+
+        // Sweep with active session MISSING from the live set: now an
+        // orphan. This is the failure mode that prompted the fix —
+        // the previous janitor only consulted the detached registry,
+        // which would have produced this incorrect result.
+        let dead_session = SmSessionId::new("sm-stream-something-else");
+        let orphans = storage
+            .list_orphaned_claims(std::slice::from_ref(&dead_session))
+            .await
+            .unwrap();
+        assert_eq!(
+            orphans.len(),
+            1,
+            "row IS an orphan when its session is missing from the live set"
+        );
+        assert_eq!(orphans[0].1, active_session);
     }
 }

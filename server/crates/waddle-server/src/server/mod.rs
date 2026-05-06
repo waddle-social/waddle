@@ -1453,9 +1453,13 @@ async fn create_router(
     // so the next recovering resource can re-flush.
     {
         let weak_state = Arc::downgrade(&websocket_state);
+        // Clamp to ≥ 1s — `tokio::time::interval(Duration::ZERO)` panics
+        // and `WADDLE_PENDING_DELIVERY_JANITOR_INTERVAL=0` would
+        // otherwise crash the server. (Copilot review on PR #360.)
         let interval_secs = std::env::var("WADDLE_PENDING_DELIVERY_JANITOR_INTERVAL")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
+            .map(|v| v.max(1))
             .unwrap_or(60);
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
@@ -1467,14 +1471,45 @@ async fn create_router(
                 let Some(state) = weak_state.upgrade() else {
                     break;
                 };
-                let live_sessions: Vec<waddle_xmpp::pending_delivery::SmSessionId> = state
+                // Live SM session set = detached/resumable (from
+                // sm_session_registry) UNION currently-connected
+                // active streams (from connection_registry's
+                // ConnectionEntry.sm_stream_id values). Without the
+                // active half, the janitor would treat actively-
+                // claimed-but-not-yet-acked rows as orphaned and
+                // release them, breaking the SM-ack lifecycle for
+                // active sessions. (Codex/Qodo P1 review on PR #360.)
+                let detached_live: Option<Vec<waddle_xmpp::pending_delivery::SmSessionId>> = state
                     .deps
                     .protocol
                     .sm_session_registry
                     .live_session_ids()
-                    .into_iter()
-                    .map(waddle_xmpp::pending_delivery::SmSessionId::new)
-                    .collect();
+                    .map(|ids| {
+                        ids.into_iter()
+                            .map(waddle_xmpp::pending_delivery::SmSessionId::new)
+                            .collect()
+                    });
+                let detached_live = match detached_live {
+                    Some(v) => v,
+                    None => {
+                        // RwLock poisoned. Skip this sweep rather than
+                        // proceed with an empty live set (which would
+                        // mass-release every claim). (Copilot review on
+                        // PR #360.)
+                        warn!(
+                            "claim-expiry janitor: SM session registry locks poisoned; \
+                             skipping sweep to avoid mass-release"
+                        );
+                        continue;
+                    }
+                };
+                let active_live = state
+                    .deps
+                    .protocol
+                    .connection_registry
+                    .active_sm_stream_ids();
+                let mut live_sessions = detached_live;
+                live_sessions.extend(active_live);
                 let orphans = match state
                     .deps
                     .protocol

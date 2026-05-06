@@ -342,6 +342,10 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
         &self,
         live_sessions: &[SmSessionId],
     ) -> Result<Vec<(PendingRowId, SmSessionId)>, PendingStorageError> {
+        // O(rows) lookup via a HashSet of `&SmSessionId` references —
+        // avoids the O(rows × live_sessions) `Vec::contains` scan.
+        // (Copilot review on PR #360.)
+        let live: std::collections::HashSet<&SmSessionId> = live_sessions.iter().collect();
         let guard = self
             .inner
             .lock()
@@ -350,7 +354,7 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
         for queue in guard.values() {
             for row in queue.iter() {
                 if let Some(session) = row.flushed_in_session.as_ref() {
-                    if !live_sessions.contains(session) {
+                    if !live.contains(session) {
                         out.push((row.id.clone(), session.clone()));
                     }
                 }
