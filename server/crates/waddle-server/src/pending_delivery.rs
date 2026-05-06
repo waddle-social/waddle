@@ -202,14 +202,35 @@ where
                     );
                     outcome.dropped_blocked += 1;
                     if let Err(error) = storage.delete_row(&row.id).await {
+                        // Copilot review on PR #360: without a release
+                        // here, the row would stay tagged with the
+                        // current (still-live) SM session id.
+                        // Consequence: the SM-expiry janitor wouldn't
+                        // see it as orphaned (its session is alive),
+                        // the SM ack wouldn't delete it
+                        // (`outbound_sequence` is NULL — never pushed),
+                        // and the next flush wouldn't re-claim it
+                        // (`flushed_in_session` not NULL). The row
+                        // would wedge permanently and consume quota.
+                        // Fall back to `release_row` so the next
+                        // recovering resource (or this same session
+                        // on a later presence transition) can re-claim
+                        // it and re-check the blocklist.
                         warn!(
                             row_id = %row.id,
                             error = %error,
                             "pending_delivery delete_row (blocked at flush) failed; \
-                             row stays in storage and the next flush will re-check the \
-                             blocklist — only re-delivers if the recipient lifts the block \
-                             before the next delete attempt"
+                             releasing claim so the next flush can re-check the blocklist"
                         );
+                        if let Err(release_error) = storage.release_row(&row.id).await {
+                            warn!(
+                                row_id = %row.id,
+                                error = %release_error,
+                                "pending_delivery release_row (blocked-at-flush fallback) \
+                                 also failed; row may remain wedged until claim-expiry janitor \
+                                 sees the session expire"
+                            );
+                        }
                     }
                     continue;
                 }
@@ -1691,5 +1712,221 @@ mod tests {
             "row IS an orphan when its session is missing from the live set"
         );
         assert_eq!(orphans[0].1, active_session);
+    }
+
+    #[tokio::test]
+    async fn janitor_releases_rows_with_dead_sessions() {
+        // End-to-end exercise of the claim-expiry janitor's data flow
+        // (issue #209 PR #360): given a mixture of rows tagged with
+        // a live session, a dead session, and an unclaimed row, the
+        // janitor's expected sequence (`list_orphaned_claims(live)`
+        // → `release_row(orphan)`) MUST release exactly the dead-
+        // session rows and leave the live + unclaimed rows alone.
+        //
+        // The janitor task itself runs in the websocket runtime and
+        // is not directly addressable from a unit test; this test
+        // pins the storage-layer flow that the janitor relies on.
+        // The websocket wiring (live-set union of detached +
+        // active SM streams) is verified separately by
+        // `list_orphaned_claims_excludes_active_session_rows`.
+        let storage: Arc<dyn PendingDeliveryStorage> =
+            Arc::new(InMemoryPendingDeliveryStorage::unlimited());
+        let alice = bare("alice@example.com");
+
+        // Build the state directly (claim_for_session is all-or-nothing,
+        // which doesn't fit the test setup of mixed claim states).
+        let live_session = SmSessionId::new("sm-stream-live");
+        let dead_session_a = SmSessionId::new("sm-stream-dead-a");
+        let dead_session_b = SmSessionId::new("sm-stream-dead-b");
+        for (body, session_opt, sequence_opt) in [
+            ("live-claimed", Some(live_session.clone()), Some(7u32)),
+            ("dead-claimed-a", Some(dead_session_a.clone()), Some(3u32)),
+            ("dead-claimed-b-no-seq", Some(dead_session_b.clone()), None),
+            ("unclaimed", None, None),
+        ] {
+            let mut row = transient_row("alice@example.com", body);
+            row.flushed_in_session = session_opt;
+            row.outbound_sequence = sequence_opt;
+            storage.insert(row).await.unwrap();
+        }
+        assert_eq!(storage.count(&alice).await.unwrap(), 4);
+
+        // Janitor sweep step 1: ask for orphans given the live set.
+        let orphans = storage
+            .list_orphaned_claims(std::slice::from_ref(&live_session))
+            .await
+            .unwrap();
+        assert_eq!(orphans.len(), 2, "two dead-session rows are orphaned");
+        let orphan_sessions: std::collections::HashSet<_> =
+            orphans.iter().map(|(_, s)| s.clone()).collect();
+        assert!(orphan_sessions.contains(&dead_session_a));
+        assert!(orphan_sessions.contains(&dead_session_b));
+
+        // Janitor sweep step 2: release each orphan row.
+        for (row_id, _) in &orphans {
+            storage.release_row(row_id).await.unwrap();
+        }
+
+        // Post-sweep assertions:
+        // - Live row stays tagged + sequenced (will be deleted by SM ack).
+        // - Both dead-session rows are now unclaimed (re-flush eligible).
+        // - The originally-unclaimed row is untouched.
+        // - No rows were deleted — the janitor only releases.
+        assert_eq!(storage.count(&alice).await.unwrap(), 4, "no rows deleted");
+        let after = storage.list(&alice).await.unwrap();
+        let by_body: std::collections::HashMap<&str, &PendingRow> = after
+            .iter()
+            .map(|row| {
+                let body_marker = match &row.payload {
+                    PendingPayload::Transient(m) => {
+                        m.bodies.get("").map(|b| b.0.as_str()).unwrap_or("")
+                    }
+                    _ => "",
+                };
+                (body_marker, row)
+            })
+            .collect();
+        let live_row = by_body.get("live-claimed").expect("live row present");
+        assert_eq!(live_row.flushed_in_session.as_ref(), Some(&live_session));
+        assert_eq!(live_row.outbound_sequence, Some(7));
+        let dead_a = by_body.get("dead-claimed-a").expect("dead-a present");
+        assert!(dead_a.flushed_in_session.is_none(), "released by janitor");
+        assert!(
+            dead_a.outbound_sequence.is_none(),
+            "release_row clears outbound_sequence"
+        );
+        let dead_b = by_body
+            .get("dead-claimed-b-no-seq")
+            .expect("dead-b present");
+        assert!(dead_b.flushed_in_session.is_none());
+        let unclaimed = by_body.get("unclaimed").expect("unclaimed present");
+        assert!(unclaimed.flushed_in_session.is_none());
+    }
+
+    #[tokio::test]
+    async fn flush_blocked_row_releases_claim_when_delete_fails() {
+        // Copilot review on PR #360: if `delete_row` fails for a
+        // blocked row, the row would otherwise stay tagged with the
+        // current (still-live) SM session id. The SM-expiry janitor
+        // wouldn't see it as orphaned, the SM ack wouldn't delete it
+        // (NULL outbound_sequence), and the next flush wouldn't
+        // re-claim it. Permanent wedge + quota leak. Fix: fall back
+        // to `release_row` so the next flush can re-check the block.
+        use async_trait::async_trait;
+        use waddle_xmpp::pending_delivery::storage::PendingStorageError;
+        use waddle_xmpp::xep::xep0191::{BlockingStorage, InMemoryBlockingStorage};
+
+        // Wrap an in-memory storage so `delete_row` fails once but
+        // every other operation passes through.
+        struct DeleteRowFails {
+            inner: InMemoryPendingDeliveryStorage,
+        }
+        #[async_trait]
+        impl PendingDeliveryStorage for DeleteRowFails {
+            async fn insert(&self, row: PendingRow) -> Result<InsertOutcome, PendingStorageError> {
+                self.inner.insert(row).await
+            }
+            async fn list(
+                &self,
+                recipient: &BareJid,
+            ) -> Result<Vec<PendingRow>, PendingStorageError> {
+                self.inner.list(recipient).await
+            }
+            async fn claim_for_session(
+                &self,
+                recipient: &BareJid,
+                session: &waddle_xmpp::pending_delivery::SmSessionId,
+            ) -> Result<Vec<PendingRow>, PendingStorageError> {
+                self.inner.claim_for_session(recipient, session).await
+            }
+            async fn delete_claimed(
+                &self,
+                session: &waddle_xmpp::pending_delivery::SmSessionId,
+            ) -> Result<u64, PendingStorageError> {
+                self.inner.delete_claimed(session).await
+            }
+            async fn delete_row(&self, _id: &PendingRowId) -> Result<u64, PendingStorageError> {
+                Err(PendingStorageError::Other(
+                    "simulated delete failure".into(),
+                ))
+            }
+            async fn release_claim(
+                &self,
+                session: &waddle_xmpp::pending_delivery::SmSessionId,
+            ) -> Result<u64, PendingStorageError> {
+                self.inner.release_claim(session).await
+            }
+            async fn release_row(&self, id: &PendingRowId) -> Result<u64, PendingStorageError> {
+                self.inner.release_row(id).await
+            }
+            async fn record_pushed_at(
+                &self,
+                id: &PendingRowId,
+                sequence: u32,
+            ) -> Result<u64, PendingStorageError> {
+                self.inner.record_pushed_at(id, sequence).await
+            }
+            async fn delete_acked_through(
+                &self,
+                session: &waddle_xmpp::pending_delivery::SmSessionId,
+                sequence_max: u32,
+            ) -> Result<u64, PendingStorageError> {
+                self.inner.delete_acked_through(session, sequence_max).await
+            }
+            async fn list_orphaned_claims(
+                &self,
+                live: &[waddle_xmpp::pending_delivery::SmSessionId],
+            ) -> Result<
+                Vec<(PendingRowId, waddle_xmpp::pending_delivery::SmSessionId)>,
+                PendingStorageError,
+            > {
+                self.inner.list_orphaned_claims(live).await
+            }
+            async fn count(&self, recipient: &BareJid) -> Result<u32, PendingStorageError> {
+                self.inner.count(recipient).await
+            }
+        }
+
+        let storage: Arc<dyn PendingDeliveryStorage> = Arc::new(DeleteRowFails {
+            inner: InMemoryPendingDeliveryStorage::unlimited(),
+        });
+        storage
+            .insert(transient_row("alice@example.com", "blocked-row"))
+            .await
+            .unwrap();
+        let blocking = InMemoryBlockingStorage::new();
+        blocking.set_blocklist(bare("alice@example.com"), vec![bare("bob@elsewhere")]);
+        let blocking_arc: Arc<dyn BlockingStorage> = Arc::new(blocking);
+        let registry = ConnectionRegistry::new();
+        let resource = full("alice@example.com/web");
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        registry.register(resource.clone(), tx);
+        let sm_session = SmSessionId::new("sm-stream-wedge-test");
+
+        let outcome = flush_for_resource(
+            &storage,
+            &registry,
+            &bare("alice@example.com"),
+            &resource,
+            FlushContext {
+                server_domain: "example.com",
+                sm_session: Some(&sm_session),
+                blocking_storage: Some(&blocking_arc),
+                archive_resolver: &NullArchiveResolver,
+            },
+        )
+        .await;
+        assert_eq!(outcome.dropped_blocked, 1);
+
+        // Row stays in storage (delete_row failed), but the claim
+        // MUST be cleared by the release_row fallback so a future
+        // flush can re-evaluate the blocklist or push it.
+        let rows = storage.list(&bare("alice@example.com")).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(
+            rows[0].flushed_in_session.is_none(),
+            "release_row fallback cleared the wedged claim"
+        );
+        assert!(rows[0].outbound_sequence.is_none());
     }
 }
