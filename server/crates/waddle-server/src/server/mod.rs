@@ -1391,6 +1391,28 @@ async fn create_router(
                         .sm_session_registry
                         .confirm_drained(&session.stream_id)
                         .await;
+                    // Locked Q7c re-flush (issue #209): release any
+                    // `pending_delivery` rows still claimed by this
+                    // session so the next recovering resource can
+                    // re-flush them. The flush path uses
+                    // `SmSessionId::new(resource.to_string())` for
+                    // claim_for_session; mirror that here.
+                    let session_id =
+                        waddle_xmpp::pending_delivery::SmSessionId::new(session.jid.to_string());
+                    if let Err(error) = state
+                        .deps
+                        .protocol
+                        .pending_delivery_storage
+                        .release_claim(&session_id)
+                        .await
+                    {
+                        warn!(
+                            jid = %session.jid,
+                            error = %error,
+                            "SM janitor: pending_delivery release_claim failed; \
+                             rows remain claimed and will be released by claim-expiry janitor"
+                        );
+                    }
 
                     if session.presence_available {
                         routes::websocket::handlers::presence::broadcast_unavailable_for_expired_detached_session(
@@ -1577,6 +1599,29 @@ async fn create_router(
                         .sm_session_registry
                         .confirm_drained(&session.stream_id)
                         .await;
+                    // Locked Q7c re-flush (issue #209): release any
+                    // `pending_delivery` rows still claimed by this
+                    // session. On restart, the recovering resource
+                    // gets a fresh `SmSessionId`, and these now-
+                    // unclaimed rows will be picked up by its first
+                    // `claim_for_session`.
+                    let session_id =
+                        waddle_xmpp::pending_delivery::SmSessionId::new(session.jid.to_string());
+                    if let Err(error) = drain_state
+                        .deps
+                        .protocol
+                        .pending_delivery_storage
+                        .release_claim(&session_id)
+                        .await
+                    {
+                        warn!(
+                            jid = %session.jid,
+                            error = %error,
+                            "Graceful shutdown: pending_delivery release_claim failed; \
+                             rows remain claimed and will be released by next-startup \
+                             claim-expiry janitor"
+                        );
+                    }
                 }
                 tokio::time::sleep(POLL_INTERVAL).await;
             }

@@ -638,8 +638,43 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
                                 // PR1–PR10 semantic, byte-for-byte
                                 // unchanged.
                                 let xml = stanza_to_xml(&outbound_stanza.stanza);
+                                let pending_row_id = outbound_stanza.pending_row_id.clone();
                                 if conn.sm_state.enabled && is_countable_stanza(&xml) {
                                     conn.sm_state.record_outbound(xml.clone());
+                                    // Locked Q7b SM-ack lifecycle: when
+                                    // this is a `pending_delivery` flush
+                                    // replay, bind the just-assigned
+                                    // outbound counter back onto the
+                                    // source row so a subsequent SM
+                                    // `<a h>` ack can range-delete it
+                                    // via `delete_acked_through`. If
+                                    // SM is disabled or the stanza
+                                    // isn't countable (rare for replay
+                                    // messages), the row stays claimed
+                                    // and is released on session death
+                                    // for re-flush (Q7c).
+                                    if let Some(row_id) = pending_row_id {
+                                        let storage = state
+                                            .deps
+                                            .protocol
+                                            .pending_delivery_storage
+                                            .clone();
+                                        let sequence = conn.sm_state.outbound_count;
+                                        tokio::spawn(async move {
+                                            if let Err(error) =
+                                                storage.record_pushed_at(&row_id, sequence).await
+                                            {
+                                                warn!(
+                                                    row_id = %row_id,
+                                                    sequence,
+                                                    error = %error,
+                                                    "pending_delivery record_pushed_at \
+                                                     failed; row remains claimed but unsequenced \
+                                                     and will be released on session death"
+                                                );
+                                            }
+                                        });
+                                    }
                                 }
                                 if !send_ws_message(
                                     &mut ws_sender,
@@ -1654,6 +1689,44 @@ async fn handle_sm_stanza(sm: SmStanza, state: &WebSocketState, ctx: SmCtx<'_>) 
         SmStanza::Request => vec![SmAck::new(ctx.sm_state.get_inbound_count()).to_xml()],
         SmStanza::Ack(ack) => {
             ctx.sm_state.acknowledge(ack.h);
+            // Locked Q7b SM-ack lifecycle (issue #209): range-delete
+            // every `pending_delivery` row claimed by this session
+            // whose recorded outbound counter is <= `ack.h`. This is
+            // what actually frees the row from the durable queue —
+            // the flush path no longer deletes on push (PR #346 left
+            // the row claimed; we used to ALSO delete in flush, but
+            // that defeated the durability guarantee for the push-to-
+            // ack window). The session id is the same value the
+            // flush function uses for `claim_for_session`:
+            // `SmSessionId::new(resource.to_string())`.
+            if let Some(full_jid) = ctx.phase.bound_jid().cloned() {
+                let session_id =
+                    waddle_xmpp::pending_delivery::SmSessionId::new(full_jid.to_string());
+                let storage = state.deps.protocol.pending_delivery_storage.clone();
+                let h = ack.h;
+                tokio::spawn(async move {
+                    match storage.delete_acked_through(&session_id, h).await {
+                        Ok(removed) if removed > 0 => {
+                            debug!(
+                                session = %session_id,
+                                h,
+                                removed,
+                                "pending_delivery rows cleared by SM ack"
+                            );
+                        }
+                        Ok(_) => {}
+                        Err(error) => {
+                            warn!(
+                                session = %session_id,
+                                h,
+                                error = %error,
+                                "pending_delivery delete_acked_through failed; rows \
+                                 will be retried on next session via release_claim"
+                            );
+                        }
+                    }
+                });
+            }
             vec![]
         }
         SmStanza::Resume(resume) => handle_sm_resume(resume, state, ctx).await,

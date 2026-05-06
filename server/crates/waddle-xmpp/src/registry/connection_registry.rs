@@ -60,6 +60,16 @@ pub struct OutboundStanza {
     pub stanza: Stanza,
     /// How the destination connection should handle the stanza.
     pub kind: DeliveryKind,
+    /// `pending_delivery` row id when this stanza is the replay of a
+    /// queued offline-delivery row (locked Q7b SM-ack lifecycle). The
+    /// destination's main loop reads this after `record_outbound`
+    /// assigns a new XEP-0198 outbound counter, then stamps the
+    /// counter onto the row via
+    /// [`crate::pending_delivery::storage::PendingDeliveryStorage::record_pushed_at`]
+    /// so a subsequent SM `<a h>` ack can range-delete only those
+    /// rows whose flush stanza was actually acknowledged. `None` for
+    /// every other outbound (the common case).
+    pub pending_row_id: Option<crate::pending_delivery::PendingRowId>,
 }
 
 impl OutboundStanza {
@@ -74,6 +84,7 @@ impl OutboundStanza {
         Self {
             stanza,
             kind: DeliveryKind::DirectFrame,
+            pending_row_id: None,
         }
     }
 
@@ -86,6 +97,24 @@ impl OutboundStanza {
         Self {
             stanza,
             kind: DeliveryKind::PeerStanza,
+            pending_row_id: None,
+        }
+    }
+
+    /// Create an outbound stanza that replays a queued
+    /// `pending_delivery` row to a recovering session (locked Q7b
+    /// SM-ack lifecycle). The destination's main loop uses
+    /// [`Self::pending_row_id`] to bind the stanza's assigned
+    /// XEP-0198 outbound counter back to the row so subsequent SM
+    /// `<a h>` acks can range-delete it.
+    pub fn for_pending_flush(
+        stanza: Stanza,
+        row_id: crate::pending_delivery::PendingRowId,
+    ) -> Self {
+        Self {
+            stanza,
+            kind: DeliveryKind::DirectFrame,
+            pending_row_id: Some(row_id),
         }
     }
 }
@@ -418,6 +447,35 @@ impl ConnectionRegistry {
     pub async fn send_to(&self, jid: &FullJid, stanza: Stanza) -> SendResult {
         self.send_to_with_kind(jid, stanza, DeliveryKind::DirectFrame)
             .await
+    }
+
+    /// Send a [`pending_delivery`](crate::pending_delivery) flush stanza
+    /// to a recovering session. Identical to [`Self::send_to`] except
+    /// the queued [`OutboundStanza`] carries the source row id so the
+    /// destination's main loop can bind the stanza's assigned XEP-0198
+    /// outbound counter back to the row (locked Q7b SM-ack lifecycle).
+    #[instrument(skip(self, stanza), fields(to = %jid, row = %row_id))]
+    pub async fn send_pending_flush(
+        &self,
+        jid: &FullJid,
+        stanza: Stanza,
+        row_id: crate::pending_delivery::PendingRowId,
+    ) -> SendResult {
+        let sender = match self.connections.get(jid) {
+            Some(entry) => entry.value().sender.clone(),
+            None => {
+                debug!("Recipient not connected for pending flush");
+                return SendResult::NotConnected;
+            }
+        };
+        let outbound = OutboundStanza::for_pending_flush(stanza, row_id);
+        match sender.send(outbound).await {
+            Ok(()) => SendResult::Sent,
+            Err(_) => {
+                self.remove_if_sender_closed_owner(jid, &sender);
+                SendResult::ChannelClosed
+            }
+        }
     }
 
     /// Send a stanza to a connected user as a [`DeliveryKind::PeerStanza`]

@@ -71,6 +71,35 @@ pub trait PendingDeliveryStorage: Send + Sync {
     /// push becomes eligible for re-claim on the next flush trigger.
     async fn release_row(&self, id: &PendingRowId) -> Result<u64, PendingStorageError>;
 
+    /// Stamp the XEP-0198 outbound counter value onto a previously-
+    /// claimed row, after that row's flush stanza has been pushed
+    /// onto the recovering session's outbound queue and assigned its
+    /// SM outbound sequence (locked Q7b). Pair with
+    /// [`Self::delete_acked_through`]: an SM `<a h='N'/>` ack from
+    /// the recovering session range-deletes claimed rows whose
+    /// `outbound_sequence <= N`.
+    async fn record_pushed_at(
+        &self,
+        id: &PendingRowId,
+        sequence: u32,
+    ) -> Result<u64, PendingStorageError>;
+
+    /// Range-delete rows previously claimed by `session` whose
+    /// recorded `outbound_sequence <= sequence_max` (locked Q7b
+    /// SM-ack-keyed deletion). The SM ack handler invokes this with
+    /// the `h` value carried in the ack so only stanzas the recovering
+    /// session has actually acknowledged are removed; rows whose
+    /// flush stanzas haven't yet been ack'd stay claimed for a future
+    /// ack. Rows with `outbound_sequence = NULL` (claimed but not yet
+    /// pushed) are intentionally NOT deleted by this call — they are
+    /// either still in the push pipeline or were claimed by a session
+    /// that died pre-push (handled by [`Self::release_claim`]).
+    async fn delete_acked_through(
+        &self,
+        session: &SmSessionId,
+        sequence_max: u32,
+    ) -> Result<u64, PendingStorageError>;
+
     /// Current row count for `recipient` (used by the quota check;
     /// also exposed for metrics).
     async fn count(&self, recipient: &BareJid) -> Result<u32, PendingStorageError>;
@@ -235,6 +264,49 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
         Ok(0)
     }
 
+    async fn record_pushed_at(
+        &self,
+        id: &PendingRowId,
+        sequence: u32,
+    ) -> Result<u64, PendingStorageError> {
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?;
+        for queue in guard.values_mut() {
+            for row in queue.iter_mut() {
+                if &row.id == id {
+                    row.outbound_sequence = Some(sequence);
+                    return Ok(1);
+                }
+            }
+        }
+        Ok(0)
+    }
+
+    async fn delete_acked_through(
+        &self,
+        session: &SmSessionId,
+        sequence_max: u32,
+    ) -> Result<u64, PendingStorageError> {
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?;
+        let mut removed = 0u64;
+        for queue in guard.values_mut() {
+            let before = queue.len();
+            queue.retain(|row| {
+                let claimed_by_session = row.flushed_in_session.as_ref() == Some(session);
+                let acked = matches!(row.outbound_sequence, Some(seq) if seq <= sequence_max);
+                !(claimed_by_session && acked)
+            });
+            removed += (before - queue.len()) as u64;
+        }
+        guard.retain(|_, q| !q.is_empty());
+        Ok(removed)
+    }
+
     async fn count(&self, recipient: &BareJid) -> Result<u32, PendingStorageError> {
         let guard = self
             .inner
@@ -266,6 +338,7 @@ mod tests {
                 id: StanzaIdValue::new(id),
             }),
             flushed_in_session: None,
+            outbound_sequence: None,
         }
     }
 
@@ -276,6 +349,7 @@ mod tests {
             original_receipt_at: Utc::now(),
             payload: PendingPayload::Transient(Box::new(Message::new(None::<jid::Jid>))),
             flushed_in_session: None,
+            outbound_sequence: None,
         }
     }
 
@@ -419,5 +493,119 @@ mod tests {
     async fn empty_recipient_count_is_zero() {
         let store = InMemoryPendingDeliveryStorage::unlimited();
         assert_eq!(store.count(&bare("nobody@example.com")).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn delete_acked_through_only_removes_acked_session_rows() {
+        // Locked Q7b SM-ack-keyed deletion: an SM `<a h>` ack with
+        // h=N must remove rows where flushed_in_session = current
+        // AND outbound_sequence <= N — and must leave alone:
+        // - rows with outbound_sequence = NULL (claimed but not yet
+        //   pushed),
+        // - rows with outbound_sequence > N (pushed but not yet
+        //   ack'd),
+        // - rows claimed by a different session.
+        let store = InMemoryPendingDeliveryStorage::unlimited();
+        let recipient = bare("alice@example.com");
+        for n in 0..4 {
+            store
+                .insert(archived_row("alice@example.com", &format!("id-{n}")))
+                .await
+                .unwrap();
+        }
+        let session_a = SmSessionId::new("s-a");
+        let claimed = store
+            .claim_for_session(&recipient, &session_a)
+            .await
+            .unwrap();
+        assert_eq!(claimed.len(), 4);
+
+        // Three rows pushed and assigned outbound_sequences 1, 2, 3;
+        // fourth row was claimed but the recipient's main loop never
+        // got around to pushing it (e.g. socket died) — sequence
+        // stays NULL.
+        store.record_pushed_at(&claimed[0].id, 1).await.unwrap();
+        store.record_pushed_at(&claimed[1].id, 2).await.unwrap();
+        store.record_pushed_at(&claimed[2].id, 3).await.unwrap();
+        // claimed[3] left without record_pushed_at.
+
+        // SM ack with h=2 covers the first two only.
+        let removed = store.delete_acked_through(&session_a, 2).await.unwrap();
+        assert_eq!(removed, 2);
+        let remaining = store.list(&recipient).await.unwrap();
+        assert_eq!(remaining.len(), 2);
+        // Surviving rows: the one with outbound_sequence=3 and the
+        // unsequenced one.
+        let mut seen_seq3 = false;
+        let mut seen_unseq = false;
+        for row in &remaining {
+            match row.outbound_sequence {
+                Some(3) => seen_seq3 = true,
+                None => seen_unseq = true,
+                other => panic!("unexpected outbound_sequence: {other:?}"),
+            }
+        }
+        assert!(seen_seq3, "outbound_sequence=3 row survives ack(h=2)");
+        assert!(
+            seen_unseq,
+            "unsequenced (claimed but unpushed) row survives ack"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_acked_through_ignores_other_sessions() {
+        // Two sessions for the same recipient (e.g. parallel
+        // resources): an ack from session A must not affect rows
+        // claimed by session B.
+        let store = InMemoryPendingDeliveryStorage::unlimited();
+        store
+            .insert(archived_row("alice@example.com", "x"))
+            .await
+            .unwrap();
+        let session_a = SmSessionId::new("s-a");
+        let claimed_a = store
+            .claim_for_session(&bare("alice@example.com"), &session_a)
+            .await
+            .unwrap();
+        store.record_pushed_at(&claimed_a[0].id, 5).await.unwrap();
+
+        // A different session's ack with h=10 must not touch
+        // session_a's row.
+        let session_b = SmSessionId::new("s-b");
+        let removed = store.delete_acked_through(&session_b, 10).await.unwrap();
+        assert_eq!(removed, 0);
+        assert_eq!(
+            store.count(&bare("alice@example.com")).await.unwrap(),
+            1,
+            "session_a row preserved"
+        );
+    }
+
+    #[tokio::test]
+    async fn record_pushed_at_is_idempotent_per_row() {
+        // Locked Q7b: outbound_sequence updates are only valid when
+        // they progress forward, but the storage layer is permissive —
+        // it just sets the value. The invariant "first write wins" is
+        // maintained at the call site (the recipient main loop calls
+        // record_outbound exactly once per stanza). Here we verify the
+        // storage layer preserves the latest write.
+        let store = InMemoryPendingDeliveryStorage::unlimited();
+        store
+            .insert(archived_row("alice@example.com", "a"))
+            .await
+            .unwrap();
+        let session = SmSessionId::new("s");
+        let claimed = store
+            .claim_for_session(&bare("alice@example.com"), &session)
+            .await
+            .unwrap();
+        let id = &claimed[0].id;
+        store.record_pushed_at(id, 7).await.unwrap();
+        let rows = store.list(&bare("alice@example.com")).await.unwrap();
+        assert_eq!(rows[0].outbound_sequence, Some(7));
+        // Latest write wins (no monotonicity check at storage layer).
+        store.record_pushed_at(id, 12).await.unwrap();
+        let rows = store.list(&bare("alice@example.com")).await.unwrap();
+        assert_eq!(rows[0].outbound_sequence, Some(12));
     }
 }

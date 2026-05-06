@@ -142,6 +142,14 @@ pub struct PendingRow {
     /// SM-ack. Released back to `None` on session expiry pre-ack
     /// (Q7c re-flush).
     pub flushed_in_session: Option<SmSessionId>,
+    /// XEP-0198 outbound counter value assigned to this row's flush
+    /// stanza when it was pushed onto the recovering session's
+    /// outbound queue (Q7b). `None` until [`storage::PendingDeliveryStorage::record_pushed_at`]
+    /// stamps it post-`record_outbound`. The SM `<a h='N'/>` ack
+    /// handler uses this to range-delete only rows whose flush stanza
+    /// was actually acknowledged: `flushed_in_session = session AND
+    /// outbound_sequence IS NOT NULL AND outbound_sequence <= N`.
+    pub outbound_sequence: Option<u32>,
 }
 
 /// Quota policy controlling [`storage::PendingDeliveryStorage::insert`]

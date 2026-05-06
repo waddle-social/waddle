@@ -1073,6 +1073,7 @@ async fn interpret_with_depth(
                     original_receipt_at,
                     payload,
                     flushed_in_session: None,
+                    outbound_sequence: None,
                 };
                 match storage.insert(row).await {
                     Ok(waddle_xmpp::pending_delivery::InsertOutcome::Inserted) => {

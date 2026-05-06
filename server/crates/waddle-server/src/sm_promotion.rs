@@ -318,6 +318,7 @@ async fn insert_pending(
         original_receipt_at,
         payload,
         flushed_in_session: None,
+        outbound_sequence: None,
     };
     match pending_storage.insert(row).await {
         Ok(InsertOutcome::Inserted) => PromotedOutcome::Queued,
@@ -985,6 +986,20 @@ mod tests {
                 Ok(0)
             }
             async fn release_row(&self, _id: &PendingRowId) -> Result<u64, PendingStorageError> {
+                Ok(0)
+            }
+            async fn record_pushed_at(
+                &self,
+                _id: &PendingRowId,
+                _sequence: u32,
+            ) -> Result<u64, PendingStorageError> {
+                Ok(0)
+            }
+            async fn delete_acked_through(
+                &self,
+                _session: &SmSessionId,
+                _sequence_max: u32,
+            ) -> Result<u64, PendingStorageError> {
                 Ok(0)
             }
             async fn count(&self, _recipient: &BareJid) -> Result<u32, PendingStorageError> {
