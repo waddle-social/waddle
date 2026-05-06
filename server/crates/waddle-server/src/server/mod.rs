@@ -1440,6 +1440,118 @@ async fn create_router(
         });
     }
 
+    // pending_delivery claim-expiry janitor (issue #209 slice (d)
+    // phase 6 / PR #360): the SM-expiry janitor + shutdown drain
+    // already release `pending_delivery` claims for sessions that
+    // shut down cleanly. This janitor catches the residual cases —
+    // non-SM sessions that close without ever calling `release_claim`,
+    // and SM sessions that crashed before their durable record was
+    // stored (race window between claim_for_session and store_session).
+    // It periodically asks the storage layer for rows whose
+    // `flushed_in_session` references a session no longer in the
+    // SM registry's live set, and releases each via `release_row`
+    // so the next recovering resource can re-flush.
+    {
+        let weak_state = Arc::downgrade(&websocket_state);
+        // Clamp to ≥ 1s — `tokio::time::interval(Duration::ZERO)` panics
+        // and `WADDLE_PENDING_DELIVERY_JANITOR_INTERVAL=0` would
+        // otherwise crash the server. (Copilot review on PR #360.)
+        let interval_secs = std::env::var("WADDLE_PENDING_DELIVERY_JANITOR_INTERVAL")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .map(|v| v.max(1))
+            .unwrap_or(60);
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+            // Skip the first tick (immediate) so we don't sweep before
+            // any flush has had a chance to run.
+            ticker.tick().await;
+            loop {
+                ticker.tick().await;
+                let Some(state) = weak_state.upgrade() else {
+                    break;
+                };
+                // Live SM session set = detached/resumable (from
+                // sm_session_registry) UNION currently-connected
+                // active streams (from connection_registry's
+                // ConnectionEntry.sm_stream_id values). Without the
+                // active half, the janitor would treat actively-
+                // claimed-but-not-yet-acked rows as orphaned and
+                // release them, breaking the SM-ack lifecycle for
+                // active sessions. (Codex/Qodo P1 review on PR #360.)
+                let detached_live: Option<Vec<waddle_xmpp::pending_delivery::SmSessionId>> = state
+                    .deps
+                    .protocol
+                    .sm_session_registry
+                    .live_session_ids()
+                    .map(|ids| {
+                        ids.into_iter()
+                            .map(waddle_xmpp::pending_delivery::SmSessionId::new)
+                            .collect()
+                    });
+                let detached_live = match detached_live {
+                    Some(v) => v,
+                    None => {
+                        // RwLock poisoned. Skip this sweep rather than
+                        // proceed with an empty live set (which would
+                        // mass-release every claim). (Copilot review on
+                        // PR #360.)
+                        warn!(
+                            "claim-expiry janitor: SM session registry locks poisoned; \
+                             skipping sweep to avoid mass-release"
+                        );
+                        continue;
+                    }
+                };
+                let active_live = state
+                    .deps
+                    .protocol
+                    .connection_registry
+                    .active_sm_stream_ids();
+                let mut live_sessions = detached_live;
+                live_sessions.extend(active_live);
+                let orphans = match state
+                    .deps
+                    .protocol
+                    .pending_delivery_storage
+                    .list_orphaned_claims(&live_sessions)
+                    .await
+                {
+                    Ok(rows) => rows,
+                    Err(error) => {
+                        warn!(error = %error, "claim-expiry janitor: list_orphaned_claims failed");
+                        continue;
+                    }
+                };
+                if orphans.is_empty() {
+                    continue;
+                }
+                let count = orphans.len();
+                for (row_id, session) in orphans {
+                    if let Err(error) = state
+                        .deps
+                        .protocol
+                        .pending_delivery_storage
+                        .release_row(&row_id)
+                        .await
+                    {
+                        warn!(
+                            row_id = %row_id,
+                            session = %session,
+                            error = %error,
+                            "claim-expiry janitor: release_row failed; row stays \
+                             claimed and will be retried next sweep"
+                        );
+                    }
+                }
+                info!(
+                    count,
+                    "claim-expiry janitor: released orphaned pending_delivery claims"
+                );
+            }
+        });
+    }
+
     // Q6 graceful-shutdown drain (issue #209 slice (d) phase 4):
     // when stop_token cancels (SIGTERM/SIGQUIT), walk every
     // detached SM session and promote its unacked queue per the Q6

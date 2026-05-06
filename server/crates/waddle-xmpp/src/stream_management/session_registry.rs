@@ -915,6 +915,26 @@ impl InMemorySmSessionRegistry {
         Ok(drained)
     }
 
+    /// Snapshot every currently-live SM session id (detached +
+    /// claimed). Returns `None` if either internal lock is poisoned
+    /// — the caller (claim-expiry janitor) MUST treat that as
+    /// "skip this sweep" rather than proceed with a partial set,
+    /// since an empty live set would trigger mass-release of every
+    /// claim. (Copilot review on PR #360.)
+    ///
+    /// "Live" here means the session's durable record is still
+    /// resumable: its resume window hasn't closed yet OR a resume
+    /// claim is in flight. Sessions that have already been drained
+    /// and `confirm_drained`'d are absent from this set, and their
+    /// `pending_delivery` claims are eligible for orphan recovery.
+    pub fn live_session_ids(&self) -> Option<Vec<String>> {
+        let sessions = self.sessions.read().ok()?;
+        let claimed = self.claimed_sessions.read().ok()?;
+        let mut out: Vec<String> = sessions.keys().cloned().collect();
+        out.extend(claimed.keys().cloned());
+        Some(out)
+    }
+
     /// Confirm that a drained session has been fully promoted —
     /// delete its durable row so a subsequent restart doesn't
     /// resurrect it. Best-effort: failures are logged but not

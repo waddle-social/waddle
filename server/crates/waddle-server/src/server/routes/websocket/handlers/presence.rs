@@ -1455,11 +1455,18 @@ async fn maybe_flush_pending_delivery(state: &WebSocketState, sender_jid: &FullJ
     let outcome = crate::pending_delivery::flush_for_resource(
         &state.deps.protocol.pending_delivery_storage,
         &state.deps.protocol.connection_registry,
-        state.deps.auth_state.xmpp_domain.as_str(),
         &recipient_bare,
         sender_jid,
-        sm_session_id.as_ref(),
-        &resolver,
+        crate::pending_delivery::FlushContext {
+            server_domain: state.deps.auth_state.xmpp_domain.as_str(),
+            sm_session: sm_session_id.as_ref(),
+            // XEP-0191 §2 step 4 flush-time block re-evaluation
+            // (PR #360): pass live blocking storage so a recipient
+            // who blocked a sender AFTER intake doesn't see queued
+            // messages from that sender on reconnect.
+            blocking_storage: Some(&state.deps.protocol.blocking_storage),
+            archive_resolver: &resolver,
+        },
     )
     .await;
     if outcome.claimed > 0 {

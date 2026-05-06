@@ -768,6 +768,21 @@ impl ConnectionRegistry {
         self.connections.iter().map(|r| r.key().clone()).collect()
     }
 
+    /// Snapshot every active connection's published XEP-0198 SM
+    /// session id. Used by the `pending_delivery` claim-expiry
+    /// janitor (issue #209 PR #360) to extend its "live SM session"
+    /// set with currently-connected sessions — the
+    /// `sm_session_registry` only knows about detached/resumable
+    /// sessions, not active ones, so without this the janitor would
+    /// wrongly treat actively-claimed-but-not-yet-acked rows as
+    /// orphaned and release them. (Codex/Qodo review on PR #360.)
+    pub fn active_sm_stream_ids(&self) -> Vec<crate::pending_delivery::SmSessionId> {
+        self.connections
+            .iter()
+            .filter_map(|entry| entry.value().sm_stream_id())
+            .collect()
+    }
+
     /// Get all connected resources for a bare JID, excluding a specific full JID.
     ///
     /// Returns all full JIDs that match the bare JID except the excluded one.
