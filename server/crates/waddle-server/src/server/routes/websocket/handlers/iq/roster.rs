@@ -361,7 +361,7 @@ async fn send_roster_remove_subscription_stanza(
             .deps
             .protocol
             .sm_session_registry
-            .record_stanza_for_detached_resource(&resource, &stanza)
+            .record_stanza_for_detached_resource(&resource, &stanza, chrono::Utc::now())
             .await
         {
             Ok(true) => {}
@@ -439,7 +439,7 @@ async fn send_roster_push_to_all_resources(
             .deps
             .protocol
             .sm_session_registry
-            .record_stanza_for_detached_resource(&resource, &stanza)
+            .record_stanza_for_detached_resource(&resource, &stanza, chrono::Utc::now())
             .await
         {
             Ok(true) => delivered_resources.push(resource.clone()),
@@ -547,7 +547,7 @@ async fn send_roster_push_to_sibling_resources(
             .deps
             .protocol
             .sm_session_registry
-            .record_stanza_for_detached_resource(&resource, &stanza)
+            .record_stanza_for_detached_resource(&resource, &stanza, chrono::Utc::now())
             .await
         {
             Ok(true) => delivered_resources.push(resource.clone()),

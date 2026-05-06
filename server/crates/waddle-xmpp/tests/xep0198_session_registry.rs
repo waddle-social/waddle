@@ -59,7 +59,11 @@ async fn xep0198_claimed_session_remains_writable_until_completed() {
     assert_eq!(claimed.unacked_stanzas.len(), 0);
 
     assert!(registry
-        .record_stanza_for_detached_bound_resource(&jid, &chat_stanza(&jid, "handoff"))
+        .record_stanza_for_detached_bound_resource(
+            &jid,
+            &chat_stanza(&jid, "handoff"),
+            chrono::Utc::now(),
+        )
         .await
         .expect("record during claim"));
 
@@ -72,7 +76,7 @@ async fn xep0198_claimed_session_remains_writable_until_completed() {
         panic!("claim should still be resumable");
     };
     assert_eq!(completed.unacked_stanzas.len(), 1);
-    assert!(completed.unacked_stanzas[0].1.contains("handoff"));
+    assert!(completed.unacked_stanzas[0].stanza_xml.contains("handoff"));
     assert_eq!(registry.session_count().await, 0);
 }
 
@@ -91,7 +95,11 @@ async fn xep0198_releasing_claim_restores_session_with_handoff_records() {
         .expect("session exists");
 
     assert!(registry
-        .record_stanza_for_detached_bound_resource(&jid, &chat_stanza(&jid, "retry"))
+        .record_stanza_for_detached_bound_resource(
+            &jid,
+            &chat_stanza(&jid, "retry"),
+            chrono::Utc::now(),
+        )
         .await
         .expect("record during failed resume"));
     registry
@@ -105,7 +113,7 @@ async fn xep0198_releasing_claim_restores_session_with_handoff_records() {
         .expect("take restored session")
         .expect("session restored");
     assert_eq!(restored.unacked_stanzas.len(), 1);
-    assert!(restored.unacked_stanzas[0].1.contains("retry"));
+    assert!(restored.unacked_stanzas[0].stanza_xml.contains("retry"));
 }
 
 #[tokio::test]
@@ -137,7 +145,11 @@ async fn xep0198_release_claim_drops_expired_claimed_session() {
         .expect("take expired released claim")
         .is_none());
     assert!(!registry
-        .record_stanza_for_detached_bound_resource(&jid, &chat_stanza(&jid, "expired"))
+        .record_stanza_for_detached_bound_resource(
+            &jid,
+            &chat_stanza(&jid, "expired"),
+            chrono::Utc::now(),
+        )
         .await
         .expect("record against expired released claim"));
 }
@@ -205,7 +217,11 @@ async fn xep0198_expired_claimed_sessions_are_hidden_from_detached_fanout() {
         .expect("carbon resources")
         .is_empty());
     assert!(!registry
-        .record_stanza_for_detached_resource(&jid, &chat_stanza(&jid, "expired"))
+        .record_stanza_for_detached_resource(
+            &jid,
+            &chat_stanza(&jid, "expired"),
+            chrono::Utc::now(),
+        )
         .await
         .expect("record expired claimed interested"));
 }

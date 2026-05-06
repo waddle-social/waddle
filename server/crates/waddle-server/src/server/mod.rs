@@ -1347,7 +1347,6 @@ async fn create_router(
                         &state.deps.protocol.connection_registry,
                         &state.deps.protocol.pending_delivery_storage,
                         &blocklist,
-                        chrono::Utc::now(),
                     )
                     .await;
                     if summary.queued + summary.redelivered + summary.bounced > 0
@@ -1672,7 +1671,6 @@ async fn create_router(
                         &drain_state.deps.protocol.connection_registry,
                         &drain_state.deps.protocol.pending_delivery_storage,
                         &blocklist,
-                        chrono::Utc::now(),
                     )
                     .await;
                     info!(

@@ -518,6 +518,7 @@ async fn interpret_with_depth(
                                             .record_stanza_for_detached_bound_resource(
                                                 &full,
                                                 &stanza_typed,
+                                                chrono::Utc::now(),
                                             )
                                             .await
                                         {
@@ -729,7 +730,11 @@ async fn interpret_with_depth(
                             };
                         let stanza = Stanza::Message(envelope);
                         match sm
-                            .record_stanza_for_detached_bound_resource(&target, &stanza)
+                            .record_stanza_for_detached_bound_resource(
+                                &target,
+                                &stanza,
+                                chrono::Utc::now(),
+                            )
                             .await
                         {
                             Ok(true) => {
@@ -1483,7 +1488,7 @@ async fn deliver_peer_to_full(
             // output — tracked as a follow-up to #229.
             if let Some(sm) = sm_session_registry {
                 match sm
-                    .record_stanza_for_detached_bound_resource(target, stanza)
+                    .record_stanza_for_detached_bound_resource(target, stanza, chrono::Utc::now())
                     .await
                 {
                     Ok(true) => {

@@ -172,7 +172,11 @@ pub async fn fan_out_publish(
                     .deps
                     .protocol
                     .sm_session_registry
-                    .record_stanza_for_detached_bound_resource(&resource, &stanza)
+                    .record_stanza_for_detached_bound_resource(
+                        &resource,
+                        &stanza,
+                        chrono::Utc::now(),
+                    )
                     .await
                 {
                     Ok(true) => delivered += 1,
@@ -190,7 +194,11 @@ pub async fn fan_out_publish(
                     .deps
                     .protocol
                     .sm_session_registry
-                    .record_stanza_for_detached_bound_resource(&resource, &stanza)
+                    .record_stanza_for_detached_bound_resource(
+                        &resource,
+                        &stanza,
+                        chrono::Utc::now(),
+                    )
                     .await
                 {
                     Ok(true) => delivered += 1,

@@ -990,7 +990,7 @@ async fn record_drained_xml(
             .deps
             .protocol
             .sm_session_registry
-            .record_outbound_for_detached_stream_at(stream_id, sequence, xml)
+            .record_outbound_for_detached_stream_at(stream_id, sequence, xml, chrono::Utc::now())
             .await
         {
             warn!(stream_id = %stream_id, %error, "Failed to record drained outbound for detached SM session");
@@ -7937,8 +7937,16 @@ mod tests {
             outbound_count: 10,
             last_acked: 8,
             unacked_stanzas: vec![
-                (9, "<message id='m9'/>".to_string()),
-                (10, "<message id='m10'/>".to_string()),
+                waddle_xmpp::stream_management::DetachedUnackedStanza {
+                    sequence: 9,
+                    stanza_xml: "<message id='m9'/>".to_string(),
+                    original_receipt_at: chrono::Utc::now(),
+                },
+                waddle_xmpp::stream_management::DetachedUnackedStanza {
+                    sequence: 10,
+                    stanza_xml: "<message id='m10'/>".to_string(),
+                    original_receipt_at: chrono::Utc::now(),
+                },
             ],
             max_resume_time: Some(300),
             detached_at: std::time::Instant::now(),
@@ -8012,7 +8020,11 @@ mod tests {
                 inbound_count: 4,
                 outbound_count: 2,
                 last_acked: 0,
-                unacked_stanzas: vec![(1, "<message id='m1'/>".to_string())],
+                unacked_stanzas: vec![waddle_xmpp::stream_management::DetachedUnackedStanza {
+                    sequence: 1,
+                    stanza_xml: "<message id='m1'/>".to_string(),
+                    original_receipt_at: chrono::Utc::now(),
+                }],
                 max_resume_time: Some(300),
                 detached_at: std::time::Instant::now(),
                 carbons_enabled: false,
@@ -8111,6 +8123,7 @@ mod tests {
                     .try_into()
                     .expect("iq stanza"),
                 ),
+                chrono::Utc::now(),
             )
             .await
             .expect("record detached roster push");
@@ -8196,7 +8209,7 @@ mod tests {
             detached
                 .unacked_stanzas
                 .iter()
-                .any(|(_, stanza)| stanza.contains("detached-dm-1")),
+                .any(|entry| entry.stanza_xml.contains("detached-dm-1")),
             "full-JID direct message should be recorded for detached replay: {detached:?}"
         );
     }
@@ -8263,7 +8276,7 @@ mod tests {
             detached
                 .unacked_stanzas
                 .iter()
-                .any(|(_, stanza)| stanza.contains("detached-bare-dm-1")),
+                .any(|entry| entry.stanza_xml.contains("detached-bare-dm-1")),
             "bare-JID direct message should be recorded for detached replay: {detached:?}"
         );
         // RFC 6121 §8.5.2.1.1: bare-JID delivery routes the original
@@ -8338,9 +8351,9 @@ mod tests {
             sent_detached
                 .unacked_stanzas
                 .iter()
-                .any(|(_, stanza)| stanza.contains("<sent")
-                    && stanza.contains("urn:xmpp:carbons:2")
-                    && stanza.contains("detached-sent-carbon-source")),
+                .any(|entry| entry.stanza_xml.contains("<sent")
+                    && entry.stanza_xml.contains("urn:xmpp:carbons:2")
+                    && entry.stanza_xml.contains("detached-sent-carbon-source")),
             "sent carbon should be recorded for detached opted-in resource: {sent_detached:?}"
         );
 
@@ -8435,9 +8448,9 @@ mod tests {
             received_detached
                 .unacked_stanzas
                 .iter()
-                .any(|(_, stanza)| stanza.contains("<received")
-                    && stanza.contains("urn:xmpp:carbons:2")
-                    && stanza.contains("detached-received-carbon-source")),
+                .any(|entry| entry.stanza_xml.contains("<received")
+                    && entry.stanza_xml.contains("urn:xmpp:carbons:2")
+                    && entry.stanza_xml.contains("detached-received-carbon-source")),
             "received carbon should be recorded for detached opted-in resource: {received_detached:?}"
         );
     }
@@ -9252,8 +9265,16 @@ mod tests {
             outbound_count: 2,
             last_acked: 0,
             unacked_stanzas: vec![
-                (1, "<message id='m1'/>".to_string()),
-                (2, "<message id='m2'/>".to_string()),
+                waddle_xmpp::stream_management::DetachedUnackedStanza {
+                    sequence: 1,
+                    stanza_xml: "<message id='m1'/>".to_string(),
+                    original_receipt_at: chrono::Utc::now(),
+                },
+                waddle_xmpp::stream_management::DetachedUnackedStanza {
+                    sequence: 2,
+                    stanza_xml: "<message id='m2'/>".to_string(),
+                    original_receipt_at: chrono::Utc::now(),
+                },
             ],
             max_resume_time: Some(300),
             detached_at: std::time::Instant::now(),
@@ -9377,7 +9398,7 @@ mod tests {
             detached
                 .unacked_stanzas
                 .iter()
-                .any(|(_, stanza)| stanza.contains("<presence")),
+                .any(|entry| entry.stanza_xml.contains("<presence")),
             "cleanup must record queued-but-unwritten outbound stanzas before detaching"
         );
         assert!(snapshot_room(state.as_ref(), &room_jid)

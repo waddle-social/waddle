@@ -400,7 +400,7 @@ async fn send_existing_subscription_ack(
             .deps
             .protocol
             .sm_session_registry
-            .record_stanza_for_detached_resource(&resource, &stanza)
+            .record_stanza_for_detached_resource(&resource, &stanza, chrono::Utc::now())
             .await
         {
             Ok(true) => {}
@@ -693,7 +693,7 @@ async fn record_stanza_for_detached_available_resources_excluding(
             .deps
             .protocol
             .sm_session_registry
-            .record_stanza_for_detached_available_resource(&resource, stanza)
+            .record_stanza_for_detached_available_resource(&resource, stanza, chrono::Utc::now())
             .await
         {
             Ok(true) => recorded.push(resource.clone()),
@@ -754,7 +754,7 @@ async fn record_subscription_stanza_for_detached_resources_excluding(
             .deps
             .protocol
             .sm_session_registry
-            .record_stanza_for_detached_resource(&resource, stanza)
+            .record_stanza_for_detached_resource(&resource, stanza, chrono::Utc::now())
             .await
         {
             Ok(true) => recorded += 1,
@@ -1041,7 +1041,7 @@ async fn send_roster_push_to_resources(
             .deps
             .protocol
             .sm_session_registry
-            .record_stanza_for_detached_resource(&resource, &stanza)
+            .record_stanza_for_detached_resource(&resource, &stanza, chrono::Utc::now())
             .await
         {
             Ok(true) => delivered_resources.push(resource.clone()),

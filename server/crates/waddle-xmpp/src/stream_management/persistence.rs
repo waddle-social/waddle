@@ -406,4 +406,30 @@ mod tests {
         assert_eq!(expired.len(), 1);
         assert_eq!(expired[0].stream_id, sid("expired"));
     }
+
+    #[tokio::test]
+    async fn persisted_unacked_round_trips_original_receipt_at() {
+        // Issue #209 PR #361: `original_receipt_at` is the
+        // server-side receipt time of the original stanza (NOT
+        // append/list time). The Q6 SM-expiry promotion path
+        // consumes this for the XEP-0203 `<delay/>` stamp on offline
+        // replays per XEP-0203 §4.1 + XEP-0198 §5 line 364.
+        //
+        // Verify the value supplied at append time round-trips
+        // verbatim through `list_unacked` — i.e. the storage layer
+        // does NOT stamp `Utc::now()` at write or read time.
+        let store = InMemorySmPersistence::new();
+        let receipt_time = chrono::DateTime::<Utc>::from_timestamp_millis(1_700_000_000_000)
+            .expect("valid millis");
+        let mut entry = fixture_unacked("stream-receipt", 1);
+        entry.original_receipt_at = receipt_time;
+        store.append_unacked(entry).await.unwrap();
+        let listed = store.list_unacked(&sid("stream-receipt")).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(
+            listed[0].original_receipt_at, receipt_time,
+            "original_receipt_at must round-trip exactly (not be re-stamped \
+             at write or read time)"
+        );
+    }
 }

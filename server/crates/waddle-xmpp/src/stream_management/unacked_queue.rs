@@ -7,6 +7,8 @@
 use std::collections::VecDeque;
 use std::time::Instant;
 
+use chrono::{DateTime, Utc};
+
 /// An unacknowledged stanza waiting for client acknowledgment.
 #[derive(Debug, Clone)]
 pub struct UnackedStanza {
@@ -14,8 +16,14 @@ pub struct UnackedStanza {
     pub sequence: u32,
     /// The XML content of the stanza
     pub stanza_xml: String,
-    /// When the stanza was sent
+    /// When the stanza was sent (monotonic — used for age telemetry).
     pub sent_at: Instant,
+    /// Server-side receipt time of the original stanza. For server-
+    /// origin replays this is `Utc::now()` at push time; for replays
+    /// of `pending_delivery` rows it's the row's `original_receipt_at`.
+    /// Used by the Q6 SM-expiry promotion path for the XEP-0203
+    /// `<delay/>` stamp on offline replays (issue #209 PR #361).
+    pub original_receipt_at: DateTime<Utc>,
 }
 
 /// Outcome of a `push` onto the unacked queue.
@@ -37,12 +45,25 @@ pub enum UnackedPushResult {
 }
 
 impl UnackedStanza {
-    /// Create a new unacked stanza.
+    /// Create a new unacked stanza, stamping `original_receipt_at`
+    /// with `Utc::now()`. Use [`Self::with_receipt_at`] when the
+    /// caller already knows the original receipt time (e.g. when
+    /// replaying a `pending_delivery` row).
     pub fn new(sequence: u32, stanza_xml: String) -> Self {
+        Self::with_receipt_at(sequence, stanza_xml, Utc::now())
+    }
+
+    /// Create a new unacked stanza with an explicit receipt time.
+    pub fn with_receipt_at(
+        sequence: u32,
+        stanza_xml: String,
+        original_receipt_at: DateTime<Utc>,
+    ) -> Self {
         Self {
             sequence,
             stanza_xml,
             sent_at: Instant::now(),
+            original_receipt_at,
         }
     }
 
@@ -83,14 +104,30 @@ impl UnackedQueue {
     /// replays will be missing those stanzas entirely.
     #[must_use = "eviction must be observed so missing-after-resume drops are not silent"]
     pub fn push(&mut self, sequence: u32, stanza_xml: String) -> UnackedPushResult {
+        self.push_with_receipt_at(sequence, stanza_xml, Utc::now())
+    }
+
+    /// Push a stanza with an explicit `original_receipt_at`. Used by
+    /// the `pending_delivery` flush path so the row's receipt time
+    /// flows into a future XEP-0203 `<delay/>` on Q6 promotion.
+    #[must_use = "eviction must be observed so missing-after-resume drops are not silent"]
+    pub fn push_with_receipt_at(
+        &mut self,
+        sequence: u32,
+        stanza_xml: String,
+        original_receipt_at: DateTime<Utc>,
+    ) -> UnackedPushResult {
         let evicted = if self.stanzas.len() >= self.max_size {
             self.stanzas.pop_front()
         } else {
             None
         };
 
-        self.stanzas
-            .push_back(UnackedStanza::new(sequence, stanza_xml));
+        self.stanzas.push_back(UnackedStanza::with_receipt_at(
+            sequence,
+            stanza_xml,
+            original_receipt_at,
+        ));
 
         match evicted {
             Some(stanza) => UnackedPushResult::Evicted(stanza),
@@ -122,23 +159,32 @@ impl UnackedQueue {
             .collect()
     }
 
-    /// Get all stanzas in the queue (for detached session storage).
-    pub fn get_all_unacked(&self) -> Vec<(u32, String)> {
+    /// Get every queued stanza as a [`DetachedUnackedStanza`] suitable
+    /// for storage on a detached SM session. Preserves the original
+    /// receipt time so the Q6 SM-expiry promotion path can stamp the
+    /// XEP-0203 `<delay/>` correctly on offline replays.
+    pub fn get_all_unacked(&self) -> Vec<super::session_registry::DetachedUnackedStanza> {
         self.stanzas
             .iter()
-            .map(|s| (s.sequence, s.stanza_xml.clone()))
+            .map(|s| super::session_registry::DetachedUnackedStanza {
+                sequence: s.sequence,
+                stanza_xml: s.stanza_xml.clone(),
+                original_receipt_at: s.original_receipt_at,
+            })
             .collect()
     }
 
-    /// Restore the queue from a list of (sequence, xml) pairs.
-    ///
-    /// This is used when resuming a stream from a detached session.
-    pub fn restore(&mut self, stanzas: &[(u32, String)]) {
+    /// Restore the queue from the stored detached-session form.
+    /// Called during XEP-0198 stream resumption.
+    pub fn restore(&mut self, stanzas: &[super::session_registry::DetachedUnackedStanza]) {
         self.stanzas.clear();
-        for (seq, xml) in stanzas {
+        for entry in stanzas {
             if self.stanzas.len() < self.max_size {
-                self.stanzas
-                    .push_back(UnackedStanza::new(*seq, xml.clone()));
+                self.stanzas.push_back(UnackedStanza::with_receipt_at(
+                    entry.sequence,
+                    entry.stanza_xml.clone(),
+                    entry.original_receipt_at,
+                ));
             }
         }
     }
@@ -280,14 +326,26 @@ mod tests {
 
     #[test]
     fn test_unacked_queue_restore() {
+        use super::super::session_registry::DetachedUnackedStanza;
         let mut queue = UnackedQueue::new(10);
-
+        let now = Utc::now();
         let stanzas = vec![
-            (5, "<msg5/>".to_string()),
-            (6, "<msg6/>".to_string()),
-            (7, "<msg7/>".to_string()),
+            DetachedUnackedStanza {
+                sequence: 5,
+                stanza_xml: "<msg5/>".to_string(),
+                original_receipt_at: now,
+            },
+            DetachedUnackedStanza {
+                sequence: 6,
+                stanza_xml: "<msg6/>".to_string(),
+                original_receipt_at: now,
+            },
+            DetachedUnackedStanza {
+                sequence: 7,
+                stanza_xml: "<msg7/>".to_string(),
+                original_receipt_at: now,
+            },
         ];
-
         queue.restore(&stanzas);
         assert_eq!(queue.len(), 3);
         assert_eq!(queue.oldest_sequence(), Some(5));

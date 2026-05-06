@@ -29,8 +29,8 @@ mod session_registry;
 mod unacked_queue;
 
 pub use session_registry::{
-    DetachedSession, InMemorySmSessionRegistry, SmClaimCompletion, SmRegistryError,
-    SmSessionRegistry,
+    DetachedSession, DetachedUnackedStanza, InMemorySmSessionRegistry, SmClaimCompletion,
+    SmRegistryError, SmSessionRegistry,
 };
 pub use unacked_queue::{UnackedPushResult, UnackedQueue, UnackedStanza};
 

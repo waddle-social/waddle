@@ -513,11 +513,18 @@ fn xep0160_sm_expiry_promotion_reuses_intake_classifier() {
     todo!("verify Q6 promotion path delegates to classify_dm_intake (single source of truth)");
 }
 
-#[test]
-#[ignore = "TODO #209 slice (d) phase 4: <delay/> stamping"]
-fn xep0160_promoted_stanzas_carry_original_receipt_time_in_delay() {
-    todo!("integration: promoted stanza's <delay/> stamp = original SM-receipt time, not expiry");
-}
+// XEP-0160 promoted stanzas carrying their original receipt time on
+// the XEP-0203 `<delay/>` is now covered by the storage-trait
+// contract on `DetachedUnackedStanza.original_receipt_at` (issue
+// #209 PR #361) and the round-trip persistence test
+// `persistence::tests::persisted_unacked_round_trips_original_receipt_at`
+// in `server/crates/waddle-xmpp/src/stream_management/persistence.rs`.
+// The end-to-end SM-promotion → flush wire shape lives in the server
+// crate (it requires the Q6 promotion path which is in waddle-server),
+// and is exercised via the existing sm_promotion unit tests +
+// `flushed_message_carries_delay_with_original_receipt_time` above
+// (which tests the same `build_replay_stanza` wire shape consumed by
+// the promotion path).
 
 // -----------------------------------------------------------------------------
 // Server restart durability (locked Q8 = B) — slice (d) follow-up

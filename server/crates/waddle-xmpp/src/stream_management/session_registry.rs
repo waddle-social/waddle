@@ -12,6 +12,7 @@ use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use jid::{BareJid, FullJid};
 use thiserror::Error;
 use tracing::debug;
@@ -41,6 +42,29 @@ pub enum SmRegistryError {
     Internal(String),
 }
 
+/// One unacknowledged stanza retained on a detached SM session.
+///
+/// Carries the XEP-0198 outbound sequence + the serialized stanza
+/// XML as the queue did before, plus the **server-side receipt time**
+/// of the original stanza (NOT the detach time). The Q6 SM-expiry
+/// promotion path consumes `original_receipt_at` when it stamps the
+/// XEP-0203 `<delay/>` on a flushed offline replay so the recipient
+/// sees the failed delivery's true timestamp per XEP-0203 §4.1 +
+/// XEP-0198 §5 line 364.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DetachedUnackedStanza {
+    /// XEP-0198 outbound sequence number assigned to this stanza.
+    pub sequence: u32,
+    /// Serialized stanza XML (re-parsed on demand by the promotion
+    /// path; kept as `String` here so the queue doesn't pin the
+    /// `xmpp_parsers::Element` representation in memory across
+    /// detach windows).
+    pub stanza_xml: String,
+    /// Server-side receipt time of the original stanza. Used by the
+    /// Q6 SM-expiry promotion path for the XEP-0203 `<delay/>` stamp.
+    pub original_receipt_at: DateTime<Utc>,
+}
+
 /// A detached stream management session.
 ///
 /// Contains all the state needed to resume a stream after disconnection.
@@ -58,22 +82,9 @@ pub struct DetachedSession {
     pub outbound_count: u32,
     /// Last acknowledged outbound stanza count
     pub last_acked: u32,
-    /// Unacknowledged stanzas (sequence, xml).
-    ///
-    /// **Known limitation**: this tuple does not carry an
-    /// original_receipt_at timestamp. When the session is persisted
-    /// via [`super::persistence::SmPersistenceStorage`], each
-    /// unacked stanza inherits the persist-time `Utc::now()` for its
-    /// `PersistedUnackedStanza::original_receipt_at`, not the
-    /// actual server receipt time. For the Q6c `<delay/>` stamping
-    /// path (XEP-0203 §4.1 + XEP-0198 §5 line 364) this is
-    /// approximate — bounded by the session's detach latency in
-    /// practice (typically milliseconds). Plumbing the real receipt
-    /// time through every `record_*detached*` call site would touch
-    /// many files and is queued as a follow-up to issue #209 slice
-    /// (d) phase 4 (the SM-expiry promotion path that consumes this
-    /// timestamp).
-    pub unacked_stanzas: Vec<(u32, String)>,
+    /// Unacknowledged stanzas (sequence + xml + receipt time).
+    /// See [`DetachedUnackedStanza`] for field semantics.
+    pub unacked_stanzas: Vec<DetachedUnackedStanza>,
     /// Maximum resumption time in seconds
     pub max_resume_time: Option<u32>,
     /// When the session was detached
@@ -126,7 +137,7 @@ impl DetachedSession {
     pub fn stanzas_to_resend_count(&self, client_h: u32) -> usize {
         self.unacked_stanzas
             .iter()
-            .filter(|(seq, _)| sequence_gt(*seq, client_h))
+            .filter(|entry| sequence_gt(entry.sequence, client_h))
             .count()
     }
 
@@ -134,35 +145,54 @@ impl DetachedSession {
     pub fn stanzas_to_resend(&self, client_h: u32) -> Vec<String> {
         self.unacked_stanzas
             .iter()
-            .filter(|(seq, _)| sequence_gt(*seq, client_h))
-            .map(|(_, xml)| xml.clone())
+            .filter(|entry| sequence_gt(entry.sequence, client_h))
+            .map(|entry| entry.stanza_xml.clone())
             .collect()
     }
 
     /// Record an outbound stanza while this stream is detached.
-    pub fn record_detached_outbound(&mut self, stanza_xml: String) {
+    /// `original_receipt_at` is the server-side receipt time of the
+    /// stanza (NOT the detach time) — consumed by the Q6 SM-expiry
+    /// promotion path for the XEP-0203 `<delay/>` stamp.
+    pub fn record_detached_outbound(
+        &mut self,
+        stanza_xml: String,
+        original_receipt_at: DateTime<Utc>,
+    ) {
         self.outbound_count = self.outbound_count.wrapping_add(1);
         if self.unacked_stanzas.len() >= super::DEFAULT_MAX_UNACKED_QUEUE_SIZE {
             self.unacked_stanzas.remove(0);
         }
-        self.unacked_stanzas.push((self.outbound_count, stanza_xml));
+        self.unacked_stanzas.push(DetachedUnackedStanza {
+            sequence: self.outbound_count,
+            stanza_xml,
+            original_receipt_at,
+        });
     }
 
-    pub fn record_detached_outbound_at(&mut self, sequence: u32, stanza_xml: String) {
+    pub fn record_detached_outbound_at(
+        &mut self,
+        sequence: u32,
+        stanza_xml: String,
+        original_receipt_at: DateTime<Utc>,
+    ) {
         self.outbound_count = self.outbound_count.max(sequence);
         if self
             .unacked_stanzas
             .iter()
-            .any(|(existing_sequence, _)| *existing_sequence == sequence)
+            .any(|entry| entry.sequence == sequence)
         {
             return;
         }
         if self.unacked_stanzas.len() >= super::DEFAULT_MAX_UNACKED_QUEUE_SIZE {
             self.unacked_stanzas.remove(0);
         }
-        self.unacked_stanzas.push((sequence, stanza_xml));
-        self.unacked_stanzas
-            .sort_by_key(|(existing_sequence, _)| *existing_sequence);
+        self.unacked_stanzas.push(DetachedUnackedStanza {
+            sequence,
+            stanza_xml,
+            original_receipt_at,
+        });
+        self.unacked_stanzas.sort_by_key(|entry| entry.sequence);
     }
 }
 
@@ -488,7 +518,7 @@ fn persisted_to_detached(
         .checked_sub(elapsed_since_detach)
         .unwrap_or_else(Instant::now);
 
-    let unacked_stanzas: Vec<(u32, String)> = unacked
+    let unacked_stanzas: Vec<DetachedUnackedStanza> = unacked
         .iter()
         .map(|row| {
             let element: minidom::Element = match &*row.stanza {
@@ -502,7 +532,11 @@ fn persisted_to_detached(
                 .map_err(|e| SmRegistryError::Internal(format!("serialize unacked stanza: {e}")))?;
             let xml = String::from_utf8(buf)
                 .map_err(|e| SmRegistryError::Internal(format!("serialize unacked stanza: {e}")))?;
-            Ok((row.sequence, xml))
+            Ok(DetachedUnackedStanza {
+                sequence: row.sequence,
+                stanza_xml: xml,
+                original_receipt_at: row.original_receipt_at,
+            })
         })
         .collect::<Result<_, SmRegistryError>>()?;
 
@@ -626,9 +660,9 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
             // them via append (PRIMARY KEY (stream_id, sequence)
             // would conflict — caller is expected to take_session
             // before storing a new one with the same id).
-            for (sequence, stanza_xml) in &session.unacked_stanzas {
+            for entry in &session.unacked_stanzas {
                 let element: minidom::Element =
-                    stanza_xml.parse().map_err(|e: minidom::Error| {
+                    entry.stanza_xml.parse().map_err(|e: minidom::Error| {
                         SmRegistryError::Internal(format!(
                             "parse unacked stanza for persistence: {e}"
                         ))
@@ -652,11 +686,17 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
                         )))
                     }
                 };
+                // Locked Q6c (issue #209 PR #361): persist the row's
+                // actual receipt time, not Utc::now() at persist time.
+                // This is what makes the XEP-0203 `<delay/>` on a
+                // future Q6 SM-expiry promotion advertise the original
+                // failed-delivery time per XEP-0203 §4.1 + XEP-0198
+                // §5 line 364.
                 let unacked = super::persistence::PersistedUnackedStanza {
                     stream_id: crate::pending_delivery::SmSessionId::new(stream_id.clone()),
-                    sequence: *sequence,
+                    sequence: entry.sequence,
                     stanza: Box::new(stanza),
-                    original_receipt_at: chrono::Utc::now(),
+                    original_receipt_at: entry.original_receipt_at,
                 };
                 storage
                     .append_unacked(unacked)
@@ -821,7 +861,7 @@ fn scrub_session_unacked(
     let before = session.unacked_stanzas.len();
     session
         .unacked_stanzas
-        .retain(|(_, xml)| match xml.parse::<minidom::Element>() {
+        .retain(|entry| match entry.stanza_xml.parse::<minidom::Element>() {
             Ok(el) => !cached_message_matches_tombstone(&el, target_id, archive_jid),
             Err(_) => true,
         });
@@ -1206,6 +1246,7 @@ impl InMemorySmSessionRegistry {
         &self,
         jid: &FullJid,
         stanza_xml: String,
+        original_receipt_at: DateTime<Utc>,
     ) -> Result<bool, SmRegistryError> {
         let mut sessions = self
             .sessions
@@ -1213,7 +1254,7 @@ impl InMemorySmSessionRegistry {
             .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
         for session in sessions.values_mut() {
             if !session.is_expired() && session.roster_interested && session.jid == *jid {
-                session.record_detached_outbound(stanza_xml);
+                session.record_detached_outbound(stanza_xml, original_receipt_at);
                 return Ok(true);
             }
         }
@@ -1224,7 +1265,7 @@ impl InMemorySmSessionRegistry {
             .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
         for session in claimed.values_mut() {
             if !session.is_expired() && session.roster_interested && session.jid == *jid {
-                session.record_detached_outbound(stanza_xml);
+                session.record_detached_outbound(stanza_xml, original_receipt_at);
                 return Ok(true);
             }
         }
@@ -1236,9 +1277,14 @@ impl InMemorySmSessionRegistry {
         &self,
         jid: &FullJid,
         stanza: &Stanza,
+        original_receipt_at: DateTime<Utc>,
     ) -> Result<bool, SmRegistryError> {
-        self.record_outbound_for_detached_resource(jid, Self::stanza_to_replay_xml(stanza))
-            .await
+        self.record_outbound_for_detached_resource(
+            jid,
+            Self::stanza_to_replay_xml(stanza),
+            original_receipt_at,
+        )
+        .await
     }
 
     /// Record a typed stanza for one detached resource by exact FullJID,
@@ -1247,6 +1293,7 @@ impl InMemorySmSessionRegistry {
         &self,
         jid: &FullJid,
         stanza: &Stanza,
+        original_receipt_at: DateTime<Utc>,
     ) -> Result<bool, SmRegistryError> {
         let stanza_xml = Self::stanza_to_replay_xml(stanza);
         let mut sessions = self
@@ -1255,7 +1302,7 @@ impl InMemorySmSessionRegistry {
             .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
         for session in sessions.values_mut() {
             if !session.is_expired() && session.jid == *jid {
-                session.record_detached_outbound(stanza_xml);
+                session.record_detached_outbound(stanza_xml, original_receipt_at);
                 return Ok(true);
             }
         }
@@ -1266,7 +1313,7 @@ impl InMemorySmSessionRegistry {
             .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
         for session in claimed.values_mut() {
             if !session.is_expired() && session.jid == *jid {
-                session.record_detached_outbound(stanza_xml);
+                session.record_detached_outbound(stanza_xml, original_receipt_at);
                 return Ok(true);
             }
         }
@@ -1279,6 +1326,7 @@ impl InMemorySmSessionRegistry {
         &self,
         stream_id: &str,
         stanza_xml: String,
+        original_receipt_at: DateTime<Utc>,
     ) -> Result<bool, SmRegistryError> {
         let mut sessions = self
             .sessions
@@ -1286,7 +1334,7 @@ impl InMemorySmSessionRegistry {
             .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
         if let Some(session) = sessions.get_mut(stream_id) {
             if !session.is_expired() {
-                session.record_detached_outbound(stanza_xml);
+                session.record_detached_outbound(stanza_xml, original_receipt_at);
                 return Ok(true);
             }
             return Ok(false);
@@ -1298,7 +1346,7 @@ impl InMemorySmSessionRegistry {
             .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
         if let Some(session) = claimed.get_mut(stream_id) {
             if !session.is_expired() {
-                session.record_detached_outbound(stanza_xml);
+                session.record_detached_outbound(stanza_xml, original_receipt_at);
                 return Ok(true);
             }
             return Ok(false);
@@ -1311,6 +1359,7 @@ impl InMemorySmSessionRegistry {
         stream_id: &str,
         sequence: u32,
         stanza_xml: String,
+        original_receipt_at: DateTime<Utc>,
     ) -> Result<bool, SmRegistryError> {
         let mut sessions = self
             .sessions
@@ -1319,7 +1368,7 @@ impl InMemorySmSessionRegistry {
 
         if let Some(session) = sessions.get_mut(stream_id) {
             if !session.is_expired() {
-                session.record_detached_outbound_at(sequence, stanza_xml);
+                session.record_detached_outbound_at(sequence, stanza_xml, original_receipt_at);
                 return Ok(true);
             }
             return Ok(false);
@@ -1331,7 +1380,7 @@ impl InMemorySmSessionRegistry {
             .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
         if let Some(session) = claimed.get_mut(stream_id) {
             if !session.is_expired() {
-                session.record_detached_outbound_at(sequence, stanza_xml);
+                session.record_detached_outbound_at(sequence, stanza_xml, original_receipt_at);
                 return Ok(true);
             }
             return Ok(false);
@@ -1453,6 +1502,7 @@ impl InMemorySmSessionRegistry {
         &self,
         jid: &FullJid,
         stanza_xml: String,
+        original_receipt_at: DateTime<Utc>,
     ) -> Result<bool, SmRegistryError> {
         let mut sessions = self
             .sessions
@@ -1460,7 +1510,7 @@ impl InMemorySmSessionRegistry {
             .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
         for session in sessions.values_mut() {
             if !session.is_expired() && session.presence_available && session.jid == *jid {
-                session.record_detached_outbound(stanza_xml);
+                session.record_detached_outbound(stanza_xml, original_receipt_at);
                 return Ok(true);
             }
         }
@@ -1471,7 +1521,7 @@ impl InMemorySmSessionRegistry {
             .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
         for session in claimed.values_mut() {
             if !session.is_expired() && session.presence_available && session.jid == *jid {
-                session.record_detached_outbound(stanza_xml);
+                session.record_detached_outbound(stanza_xml, original_receipt_at);
                 return Ok(true);
             }
         }
@@ -1483,10 +1533,12 @@ impl InMemorySmSessionRegistry {
         &self,
         jid: &FullJid,
         stanza: &Stanza,
+        original_receipt_at: DateTime<Utc>,
     ) -> Result<bool, SmRegistryError> {
         self.record_outbound_for_detached_available_resource(
             jid,
             Self::stanza_to_replay_xml(stanza),
+            original_receipt_at,
         )
         .await
     }
@@ -1643,9 +1695,21 @@ mod tests {
             outbound_count: 15,
             last_acked: 12,
             unacked_stanzas: vec![
-                (13, "<msg1/>".to_string()),
-                (14, "<msg2/>".to_string()),
-                (15, "<msg3/>".to_string()),
+                DetachedUnackedStanza {
+                    sequence: 13,
+                    stanza_xml: "<msg1/>".to_string(),
+                    original_receipt_at: Utc::now(),
+                },
+                DetachedUnackedStanza {
+                    sequence: 14,
+                    stanza_xml: "<msg2/>".to_string(),
+                    original_receipt_at: Utc::now(),
+                },
+                DetachedUnackedStanza {
+                    sequence: 15,
+                    stanza_xml: "<msg3/>".to_string(),
+                    original_receipt_at: Utc::now(),
+                },
             ],
             max_resume_time: Some(300),
             detached_at: Instant::now(),
@@ -1662,8 +1726,16 @@ mod tests {
         stream_id: &str,
         unacked: Vec<(u32, String)>,
     ) -> DetachedSession {
+        let now = Utc::now();
         let mut s = make_test_session(stream_id);
-        s.unacked_stanzas = unacked;
+        s.unacked_stanzas = unacked
+            .into_iter()
+            .map(|(sequence, stanza_xml)| DetachedUnackedStanza {
+                sequence,
+                stanza_xml,
+                original_receipt_at: now,
+            })
+            .collect();
         s
     }
 
@@ -1713,28 +1785,28 @@ mod tests {
             !again
                 .unacked_stanzas
                 .iter()
-                .any(|(_, xml)| xml.contains("id='target'")),
+                .any(|entry| entry.stanza_xml.contains("id='target'")),
             "scrubbed message must not appear in queue"
         );
         assert!(
             again
                 .unacked_stanzas
                 .iter()
-                .any(|(_, xml)| xml.contains("id='other'")),
+                .any(|entry| entry.stanza_xml.contains("id='other'")),
             "non-matching message must remain"
         );
         assert!(
             again
                 .unacked_stanzas
                 .iter()
-                .any(|(_, xml)| xml.contains("<presence")),
+                .any(|entry| entry.stanza_xml.contains("<presence")),
             "presence frame must remain (not a message)"
         );
         assert!(
             again
                 .unacked_stanzas
                 .iter()
-                .any(|(_, xml)| xml.contains("<iq")),
+                .any(|entry| entry.stanza_xml.contains("<iq")),
             "iq frame must remain (not a message)"
         );
     }
@@ -1765,7 +1837,7 @@ mod tests {
         );
 
         assert!(registry
-            .record_stanza_for_detached_bound_resource(&jid, &Stanza::Message(msg))
+            .record_stanza_for_detached_bound_resource(&jid, &Stanza::Message(msg), Utc::now())
             .await
             .unwrap());
         let stored = registry
@@ -1776,7 +1848,7 @@ mod tests {
         let replay = stored
             .unacked_stanzas
             .last()
-            .map(|(_, xml)| xml)
+            .map(|entry| &entry.stanza_xml)
             .expect("recorded replay stanza");
         let element = replay
             .parse::<minidom::Element>()
@@ -1871,7 +1943,7 @@ mod tests {
             again
                 .unacked_stanzas
                 .iter()
-                .any(|(_, xml)| xml.contains("conv-B")),
+                .any(|entry| entry.stanza_xml.contains("conv-B")),
             "conversation B's message must survive — different scope"
         );
     }
@@ -2006,14 +2078,19 @@ mod tests {
 
         assert!(
             registry
-                .record_stanza_for_detached_resource(&jid, &{
-                    let mut presence =
-                        xmpp_parsers::presence::Presence::new(xmpp_parsers::presence::Type::None);
-                    presence
-                        .statuses
-                        .insert(String::new(), "during-claim".to_string());
-                    Stanza::Presence(presence)
-                })
+                .record_stanza_for_detached_resource(
+                    &jid,
+                    &{
+                        let mut presence = xmpp_parsers::presence::Presence::new(
+                            xmpp_parsers::presence::Type::None,
+                        );
+                        presence
+                            .statuses
+                            .insert(String::new(), "during-claim".to_string());
+                        Stanza::Presence(presence)
+                    },
+                    Utc::now(),
+                )
                 .await
                 .unwrap(),
             "fanout during resume handoff must write to the claimed session"
@@ -2030,7 +2107,7 @@ mod tests {
                     completed
                         .unacked_stanzas
                         .iter()
-                        .any(|(_, stanza)| stanza.contains("during-claim")),
+                        .any(|entry| entry.stanza_xml.contains("during-claim")),
                     "completed claim must include fanout recorded during handoff"
                 );
             }
@@ -2178,8 +2255,16 @@ mod tests {
             outbound_count: 7,
             last_acked: 5,
             unacked_stanzas: vec![
-                (6, realistic_message_stanza("first")),
-                (7, realistic_message_stanza("second")),
+                DetachedUnackedStanza {
+                    sequence: 6,
+                    stanza_xml: realistic_message_stanza("first"),
+                    original_receipt_at: Utc::now(),
+                },
+                DetachedUnackedStanza {
+                    sequence: 7,
+                    stanza_xml: realistic_message_stanza("second"),
+                    original_receipt_at: Utc::now(),
+                },
             ],
             max_resume_time: Some(120),
             detached_at: Instant::now(),
