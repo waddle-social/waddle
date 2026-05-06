@@ -658,8 +658,28 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
                                 // unchanged.
                                 let xml = stanza_to_xml(&outbound_stanza.stanza);
                                 let pending_row_id = outbound_stanza.pending_row_id.clone();
+                                let pending_row_receipt_at =
+                                    outbound_stanza.pending_row_original_receipt_at;
                                 if conn.sm_state.enabled && is_countable_stanza(&xml) {
-                                    conn.sm_state.record_outbound(xml.clone());
+                                    // Issue #209 PR #361 review fix: when this
+                                    // is a `pending_delivery` flush replay,
+                                    // record the SM unacked entry with the
+                                    // SOURCE row's `original_receipt_at`
+                                    // (not Utc::now()). Without this, a
+                                    // disconnect-pre-ack → SM-expiry
+                                    // sequence would re-create the
+                                    // `pending_delivery` row with the wrong
+                                    // receipt time, mis-stamping the
+                                    // XEP-0203 `<delay/>` on later replays.
+                                    match pending_row_receipt_at {
+                                        Some(receipt_at) => conn
+                                            .sm_state
+                                            .record_outbound_with_receipt_at(
+                                                xml.clone(),
+                                                receipt_at,
+                                            ),
+                                        None => conn.sm_state.record_outbound(xml.clone()),
+                                    }
                                     // Locked Q7b SM-ack lifecycle: when
                                     // this is a `pending_delivery` flush
                                     // replay, bind the just-assigned
@@ -943,10 +963,19 @@ async fn drain_outbound_into_replay(
     let deps = build_interpret_deps(state, authenticated_session);
     let mut sm_borrow: Option<&mut XmppStateMachine> = state_machine;
     while let Ok(outbound_stanza) = outbound_rx.try_recv() {
+        // Codex P2 review on PR #361: when this is a pending_delivery
+        // flush replay, preserve the row's original_receipt_at instead
+        // of stamping `Utc::now()` at drain time. Otherwise a flush
+        // queued just before the WebSocket dropped would replay later
+        // (after Q6 promotion re-creates the pending row) with a
+        // wrong XEP-0203 `<delay/>` time.
+        let receipt_at = outbound_stanza
+            .pending_row_original_receipt_at
+            .unwrap_or_else(chrono::Utc::now);
         match outbound_stanza.kind {
             DeliveryKind::DirectFrame => {
                 let xml = stanza_to_xml(&outbound_stanza.stanza);
-                record_drained_xml(state, sm_state, detached_stream_id, xml).await;
+                record_drained_xml(state, sm_state, detached_stream_id, xml, receipt_at).await;
             }
             DeliveryKind::PeerStanza => {
                 let Some(sm) = sm_borrow.as_deref_mut() else {
@@ -961,7 +990,7 @@ async fn drain_outbound_into_replay(
                 )));
                 let (frames, _close) = drive_interpret_loop(events, sm, &deps).await;
                 for xml in frames {
-                    record_drained_xml(state, sm_state, detached_stream_id, xml).await;
+                    record_drained_xml(state, sm_state, detached_stream_id, xml, receipt_at).await;
                 }
             }
         }
@@ -979,18 +1008,19 @@ async fn record_drained_xml(
     sm_state: &mut StreamManagementState,
     detached_stream_id: Option<&str>,
     xml: String,
+    original_receipt_at: chrono::DateTime<chrono::Utc>,
 ) {
     if !sm_state.enabled || !is_countable_stanza(&xml) {
         return;
     }
-    sm_state.record_outbound(xml.clone());
+    sm_state.record_outbound_with_receipt_at(xml.clone(), original_receipt_at);
     if let Some(stream_id) = detached_stream_id {
         let sequence = sm_state.outbound_count;
         if let Err(error) = state
             .deps
             .protocol
             .sm_session_registry
-            .record_outbound_for_detached_stream_at(stream_id, sequence, xml)
+            .record_outbound_for_detached_stream_at(stream_id, sequence, xml, original_receipt_at)
             .await
         {
             warn!(stream_id = %stream_id, %error, "Failed to record drained outbound for detached SM session");
@@ -7937,8 +7967,16 @@ mod tests {
             outbound_count: 10,
             last_acked: 8,
             unacked_stanzas: vec![
-                (9, "<message id='m9'/>".to_string()),
-                (10, "<message id='m10'/>".to_string()),
+                waddle_xmpp::stream_management::DetachedUnackedStanza {
+                    sequence: 9,
+                    stanza_xml: "<message id='m9'/>".to_string(),
+                    original_receipt_at: chrono::Utc::now(),
+                },
+                waddle_xmpp::stream_management::DetachedUnackedStanza {
+                    sequence: 10,
+                    stanza_xml: "<message id='m10'/>".to_string(),
+                    original_receipt_at: chrono::Utc::now(),
+                },
             ],
             max_resume_time: Some(300),
             detached_at: std::time::Instant::now(),
@@ -8012,7 +8050,11 @@ mod tests {
                 inbound_count: 4,
                 outbound_count: 2,
                 last_acked: 0,
-                unacked_stanzas: vec![(1, "<message id='m1'/>".to_string())],
+                unacked_stanzas: vec![waddle_xmpp::stream_management::DetachedUnackedStanza {
+                    sequence: 1,
+                    stanza_xml: "<message id='m1'/>".to_string(),
+                    original_receipt_at: chrono::Utc::now(),
+                }],
                 max_resume_time: Some(300),
                 detached_at: std::time::Instant::now(),
                 carbons_enabled: false,
@@ -8111,6 +8153,7 @@ mod tests {
                     .try_into()
                     .expect("iq stanza"),
                 ),
+                chrono::Utc::now(),
             )
             .await
             .expect("record detached roster push");
@@ -8196,7 +8239,7 @@ mod tests {
             detached
                 .unacked_stanzas
                 .iter()
-                .any(|(_, stanza)| stanza.contains("detached-dm-1")),
+                .any(|entry| entry.stanza_xml.contains("detached-dm-1")),
             "full-JID direct message should be recorded for detached replay: {detached:?}"
         );
     }
@@ -8263,7 +8306,7 @@ mod tests {
             detached
                 .unacked_stanzas
                 .iter()
-                .any(|(_, stanza)| stanza.contains("detached-bare-dm-1")),
+                .any(|entry| entry.stanza_xml.contains("detached-bare-dm-1")),
             "bare-JID direct message should be recorded for detached replay: {detached:?}"
         );
         // RFC 6121 §8.5.2.1.1: bare-JID delivery routes the original
@@ -8338,9 +8381,9 @@ mod tests {
             sent_detached
                 .unacked_stanzas
                 .iter()
-                .any(|(_, stanza)| stanza.contains("<sent")
-                    && stanza.contains("urn:xmpp:carbons:2")
-                    && stanza.contains("detached-sent-carbon-source")),
+                .any(|entry| entry.stanza_xml.contains("<sent")
+                    && entry.stanza_xml.contains("urn:xmpp:carbons:2")
+                    && entry.stanza_xml.contains("detached-sent-carbon-source")),
             "sent carbon should be recorded for detached opted-in resource: {sent_detached:?}"
         );
 
@@ -8435,9 +8478,9 @@ mod tests {
             received_detached
                 .unacked_stanzas
                 .iter()
-                .any(|(_, stanza)| stanza.contains("<received")
-                    && stanza.contains("urn:xmpp:carbons:2")
-                    && stanza.contains("detached-received-carbon-source")),
+                .any(|entry| entry.stanza_xml.contains("<received")
+                    && entry.stanza_xml.contains("urn:xmpp:carbons:2")
+                    && entry.stanza_xml.contains("detached-received-carbon-source")),
             "received carbon should be recorded for detached opted-in resource: {received_detached:?}"
         );
     }
@@ -9252,8 +9295,16 @@ mod tests {
             outbound_count: 2,
             last_acked: 0,
             unacked_stanzas: vec![
-                (1, "<message id='m1'/>".to_string()),
-                (2, "<message id='m2'/>".to_string()),
+                waddle_xmpp::stream_management::DetachedUnackedStanza {
+                    sequence: 1,
+                    stanza_xml: "<message id='m1'/>".to_string(),
+                    original_receipt_at: chrono::Utc::now(),
+                },
+                waddle_xmpp::stream_management::DetachedUnackedStanza {
+                    sequence: 2,
+                    stanza_xml: "<message id='m2'/>".to_string(),
+                    original_receipt_at: chrono::Utc::now(),
+                },
             ],
             max_resume_time: Some(300),
             detached_at: std::time::Instant::now(),
@@ -9377,7 +9428,7 @@ mod tests {
             detached
                 .unacked_stanzas
                 .iter()
-                .any(|(_, stanza)| stanza.contains("<presence")),
+                .any(|entry| entry.stanza_xml.contains("<presence")),
             "cleanup must record queued-but-unwritten outbound stanzas before detaching"
         );
         assert!(snapshot_room(state.as_ref(), &room_jid)

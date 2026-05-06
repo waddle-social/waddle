@@ -100,15 +100,11 @@ impl PromotionSummary {
 }
 
 /// Walk a session's unacked queue, promoting each stanza per the
-/// locked Q6 = B priority chain.
-///
-/// `original_receipt_fallback` is the wall-clock time stamped onto
-/// each promoted `pending_delivery` row's `original_receipt_at`
-/// when the underlying [`DetachedSession`] doesn't carry per-
-/// stanza receipt times. Today this is `Utc::now()` at expiry —
-/// approximate but bounded by the session's resume window. When
-/// `DetachedSession.unacked_stanzas` grows a typed shape carrying
-/// the real receipt time, the fallback becomes irrelevant.
+/// locked Q6 = B priority chain. Each promoted `pending_delivery`
+/// row's `original_receipt_at` is the per-stanza receipt time
+/// preserved on the [`DetachedUnackedStanza`] (issue #209 PR #361:
+/// previously a wall-clock fallback at expiry — now correct per
+/// XEP-0203 §4.1 + XEP-0198 §5 line 364).
 #[instrument(
     skip(session, registry, pending_storage, blocklist),
     fields(stream_id = %session.stream_id, jid = %session.jid)
@@ -118,7 +114,6 @@ pub async fn promote_session_unacked(
     registry: &ConnectionRegistry,
     pending_storage: &Arc<dyn PendingDeliveryStorage>,
     blocklist: &Blocklist,
-    original_receipt_fallback: DateTime<Utc>,
 ) -> PromotionSummary {
     let mut summary = PromotionSummary::default();
     let recipient_bare = session.jid.to_bare();
@@ -129,17 +124,17 @@ pub async fn promote_session_unacked(
     // unless other resources joined after detach).
     let online = build_online_resources(registry, &recipient_bare);
 
-    for (sequence, stanza_xml) in &session.unacked_stanzas {
-        let outcome = match parse_stanza(stanza_xml) {
+    for entry in &session.unacked_stanzas {
+        let outcome = match parse_stanza(&entry.stanza_xml) {
             Some(Stanza::Message(message)) => {
                 promote_one(
                     message,
-                    *sequence,
+                    entry.sequence,
                     &online,
                     blocklist,
                     registry,
                     pending_storage,
-                    original_receipt_fallback,
+                    entry.original_receipt_at,
                 )
                 .await
             }
@@ -149,7 +144,7 @@ pub async fn promote_session_unacked(
         };
         debug!(
             stream_id = %session.stream_id,
-            sequence,
+            sequence = entry.sequence,
             ?outcome,
             "Q6 promotion: per-stanza outcome"
         );
@@ -555,6 +550,7 @@ mod tests {
         jid: FullJid,
         unacked_xml: Vec<String>,
     ) -> DetachedSession {
+        let now = Utc::now();
         DetachedSession {
             stream_id: stream_id.to_string(),
             user_id: "alice".to_string(),
@@ -565,7 +561,13 @@ mod tests {
             unacked_stanzas: unacked_xml
                 .into_iter()
                 .enumerate()
-                .map(|(i, xml)| (i as u32 + 1, xml))
+                .map(
+                    |(i, xml)| waddle_xmpp::stream_management::DetachedUnackedStanza {
+                        sequence: i as u32 + 1,
+                        stanza_xml: xml,
+                        original_receipt_at: now,
+                    },
+                )
                 .collect(),
             max_resume_time: Some(60),
             detached_at: Instant::now(),
@@ -603,14 +605,8 @@ mod tests {
             vec![dm_xml("bob@elsewhere/x", "alice@example.com", "missed me?")],
         );
 
-        let summary = promote_session_unacked(
-            &session,
-            &registry,
-            &storage,
-            &Blocklist::empty(),
-            Utc::now(),
-        )
-        .await;
+        let summary =
+            promote_session_unacked(&session, &registry, &storage, &Blocklist::empty()).await;
 
         assert_eq!(summary.queued, 1);
         assert_eq!(summary.redelivered, 0);
@@ -641,14 +637,8 @@ mod tests {
             )],
         );
 
-        let summary = promote_session_unacked(
-            &session,
-            &registry,
-            &storage,
-            &Blocklist::empty(),
-            Utc::now(),
-        )
-        .await;
+        let summary =
+            promote_session_unacked(&session, &registry, &storage, &Blocklist::empty()).await;
 
         assert_eq!(summary.redelivered, 1);
         assert_eq!(summary.queued, 0);
@@ -682,14 +672,8 @@ mod tests {
             )],
         );
 
-        let summary = promote_session_unacked(
-            &session,
-            &registry,
-            &storage,
-            &Blocklist::empty(),
-            Utc::now(),
-        )
-        .await;
+        let summary =
+            promote_session_unacked(&session, &registry, &storage, &Blocklist::empty()).await;
 
         assert_eq!(summary.bounced, 1);
         assert_eq!(summary.queued, 0);
@@ -727,14 +711,8 @@ mod tests {
         let session =
             detached_session_with_unacked("stream-1", full("alice@example.com/laptop"), vec![xml]);
 
-        let summary = promote_session_unacked(
-            &session,
-            &registry,
-            &storage,
-            &Blocklist::empty(),
-            Utc::now(),
-        )
-        .await;
+        let summary =
+            promote_session_unacked(&session, &registry, &storage, &Blocklist::empty()).await;
 
         assert_eq!(summary.dropped, 1);
         assert_eq!(summary.queued, 0);
@@ -775,14 +753,8 @@ mod tests {
         let session =
             detached_session_with_unacked("stream-1", full("alice@example.com/laptop"), vec![xml]);
 
-        let summary = promote_session_unacked(
-            &session,
-            &registry,
-            &storage,
-            &Blocklist::empty(),
-            Utc::now(),
-        )
-        .await;
+        let summary =
+            promote_session_unacked(&session, &registry, &storage, &Blocklist::empty()).await;
 
         assert_eq!(summary.redelivered, 1);
         assert_eq!(summary.queued, 0);
@@ -813,14 +785,8 @@ mod tests {
             vec![dm_xml("bob@elsewhere/x", "alice@example.com", "fanout")],
         );
 
-        let summary = promote_session_unacked(
-            &session,
-            &registry,
-            &storage,
-            &Blocklist::empty(),
-            Utc::now(),
-        )
-        .await;
+        let summary =
+            promote_session_unacked(&session, &registry, &storage, &Blocklist::empty()).await;
 
         assert_eq!(summary.redelivered, 1);
         // Both resources receive the stanza.
@@ -857,14 +823,8 @@ mod tests {
             vec![iq_xml],
         );
 
-        let summary = promote_session_unacked(
-            &session,
-            &registry,
-            &storage,
-            &Blocklist::empty(),
-            Utc::now(),
-        )
-        .await;
+        let summary =
+            promote_session_unacked(&session, &registry, &storage, &Blocklist::empty()).await;
 
         assert_eq!(summary.redelivered, 1);
         assert_eq!(
@@ -902,14 +862,8 @@ mod tests {
             vec![iq_xml],
         );
 
-        let summary = promote_session_unacked(
-            &session,
-            &registry,
-            &storage,
-            &Blocklist::empty(),
-            Utc::now(),
-        )
-        .await;
+        let summary =
+            promote_session_unacked(&session, &registry, &storage, &Blocklist::empty()).await;
 
         assert_eq!(summary.dropped, 1);
         assert_eq!(summary.queued, 0, "IQs never go to offline storage");
@@ -925,16 +879,59 @@ mod tests {
             full("alice@example.com/laptop"),
             vec!["not actually XML".to_string()],
         );
-        let summary = promote_session_unacked(
-            &session,
-            &registry,
-            &storage,
-            &Blocklist::empty(),
-            Utc::now(),
-        )
-        .await;
+        let summary =
+            promote_session_unacked(&session, &registry, &storage, &Blocklist::empty()).await;
         assert_eq!(summary.unparseable, 1);
         assert_eq!(summary.queued, 0);
+    }
+
+    #[tokio::test]
+    async fn promoted_pending_row_carries_per_stanza_original_receipt_at() {
+        // Issue #209 PR #361: the Q6 SM-expiry promotion must stamp
+        // each `pending_delivery` row's `original_receipt_at` with
+        // the per-stanza value from the source DetachedUnackedStanza,
+        // NOT a wall-clock fallback at expiry time. This is what
+        // makes the eventual XEP-0203 `<delay/>` on the offline
+        // replay carry the real failed-delivery time per
+        // XEP-0203 §4.1 + XEP-0198 §5 line 364.
+        let storage: Arc<dyn PendingDeliveryStorage> =
+            Arc::new(InMemoryPendingDeliveryStorage::unlimited());
+        let registry = ConnectionRegistry::new();
+        let receipt_time = chrono::DateTime::<Utc>::from_timestamp_millis(1_700_000_000_000)
+            .expect("valid millis");
+        let session = waddle_xmpp::stream_management::DetachedSession {
+            stream_id: "stream-receipt-test".to_string(),
+            user_id: "alice".to_string(),
+            jid: full("alice@example.com/laptop"),
+            inbound_count: 0,
+            outbound_count: 1,
+            last_acked: 0,
+            unacked_stanzas: vec![waddle_xmpp::stream_management::DetachedUnackedStanza {
+                sequence: 1,
+                stanza_xml: dm_xml("bob@elsewhere/x", "alice@example.com", "missed me"),
+                original_receipt_at: receipt_time,
+            }],
+            max_resume_time: Some(60),
+            detached_at: std::time::Instant::now(),
+            carbons_enabled: false,
+            roster_interested: false,
+            presence_available: false,
+            presence_show: None,
+            presence_status: None,
+            presence_priority: 0,
+        };
+
+        let summary =
+            promote_session_unacked(&session, &registry, &storage, &Blocklist::empty()).await;
+        assert_eq!(summary.queued, 1);
+
+        let rows = storage.list(&bare("alice@example.com")).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].original_receipt_at, receipt_time,
+            "promoted row's original_receipt_at MUST be the per-stanza value, \
+             not Utc::now() at expiry"
+        );
     }
 
     #[tokio::test]
@@ -1025,14 +1022,8 @@ mod tests {
             )],
         );
 
-        let summary = promote_session_unacked(
-            &session,
-            &registry,
-            &storage,
-            &Blocklist::empty(),
-            Utc::now(),
-        )
-        .await;
+        let summary =
+            promote_session_unacked(&session, &registry, &storage, &Blocklist::empty()).await;
 
         assert_eq!(summary.storage_failed, 1, "storage failure surfaced");
         assert_eq!(summary.dropped, 0, "must not collapse into Dropped");

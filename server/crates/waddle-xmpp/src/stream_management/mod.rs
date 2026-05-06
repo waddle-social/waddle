@@ -29,8 +29,8 @@ mod session_registry;
 mod unacked_queue;
 
 pub use session_registry::{
-    DetachedSession, InMemorySmSessionRegistry, SmClaimCompletion, SmRegistryError,
-    SmSessionRegistry,
+    DetachedSession, DetachedUnackedStanza, InMemorySmSessionRegistry, SmClaimCompletion,
+    SmRegistryError, SmSessionRegistry,
 };
 pub use unacked_queue::{UnackedPushResult, UnackedQueue, UnackedStanza};
 
@@ -453,8 +453,30 @@ impl StreamManagementState {
     /// the evicted stanzas — the sender half of "reconnects drop
     /// messages".
     pub fn record_outbound(&mut self, stanza_xml: String) {
+        self.record_outbound_with_receipt_at(stanza_xml, chrono::Utc::now());
+    }
+
+    /// Record an outbound stanza with an explicit `original_receipt_at`.
+    ///
+    /// Used by the `pending_delivery` flush path so the SM unacked
+    /// queue preserves the row's original receipt time. Without this,
+    /// a flush replay → client disconnect pre-ack → SM expiry sequence
+    /// would have Q6 promotion re-create the `pending_delivery` row
+    /// with `original_receipt_at = flush time` (wrong), making the
+    /// eventual XEP-0203 `<delay/>` stamp the flush time instead of
+    /// the original failed-delivery time.
+    /// (Greptile/Copilot/Qodo P1 review on PR #361.)
+    pub fn record_outbound_with_receipt_at(
+        &mut self,
+        stanza_xml: String,
+        original_receipt_at: chrono::DateTime<chrono::Utc>,
+    ) {
         self.outbound_count = self.outbound_count.wrapping_add(1);
-        match self.unacked_queue.push(self.outbound_count, stanza_xml) {
+        match self.unacked_queue.push_with_receipt_at(
+            self.outbound_count,
+            stanza_xml,
+            original_receipt_at,
+        ) {
             UnackedPushResult::Accepted => {}
             UnackedPushResult::Evicted(evicted) => {
                 prometheus::increment_sm_unacked_evicted();

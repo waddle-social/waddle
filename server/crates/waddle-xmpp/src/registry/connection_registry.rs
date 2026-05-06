@@ -70,6 +70,18 @@ pub struct OutboundStanza {
     /// rows whose flush stanza was actually acknowledged. `None` for
     /// every other outbound (the common case).
     pub pending_row_id: Option<crate::pending_delivery::PendingRowId>,
+    /// `original_receipt_at` of the source `pending_delivery` row
+    /// when this stanza is a flush replay. The destination's main
+    /// loop uses this to call
+    /// [`crate::stream_management::StreamManagementState::record_outbound_with_receipt_at`]
+    /// instead of `record_outbound`, so the SM unacked queue
+    /// preserves the row's original receipt time. If the client
+    /// disconnects pre-ack and the SM session later expires, Q6
+    /// promotion re-creates a `pending_delivery` row whose
+    /// `original_receipt_at` matches the original — so the eventual
+    /// XEP-0203 `<delay/>` advertises the real failed-delivery time.
+    /// (Greptile/Copilot/Qodo P1 review on PR #361.)
+    pub pending_row_original_receipt_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl OutboundStanza {
@@ -85,6 +97,7 @@ impl OutboundStanza {
             stanza,
             kind: DeliveryKind::DirectFrame,
             pending_row_id: None,
+            pending_row_original_receipt_at: None,
         }
     }
 
@@ -98,6 +111,7 @@ impl OutboundStanza {
             stanza,
             kind: DeliveryKind::PeerStanza,
             pending_row_id: None,
+            pending_row_original_receipt_at: None,
         }
     }
 
@@ -106,15 +120,21 @@ impl OutboundStanza {
     /// SM-ack lifecycle). The destination's main loop uses
     /// [`Self::pending_row_id`] to bind the stanza's assigned
     /// XEP-0198 outbound counter back to the row so subsequent SM
-    /// `<a h>` acks can range-delete it.
+    /// `<a h>` acks can range-delete it. `original_receipt_at` is
+    /// the source row's receipt time — the recipient's main loop
+    /// stamps it onto the unacked-queue entry so a future SM-expiry
+    /// promotion re-creates the pending row with the correct
+    /// XEP-0203 `<delay/>` time.
     pub fn for_pending_flush(
         stanza: Stanza,
         row_id: crate::pending_delivery::PendingRowId,
+        original_receipt_at: chrono::DateTime<chrono::Utc>,
     ) -> Self {
         Self {
             stanza,
             kind: DeliveryKind::DirectFrame,
             pending_row_id: Some(row_id),
+            pending_row_original_receipt_at: Some(original_receipt_at),
         }
     }
 }
@@ -496,6 +516,7 @@ impl ConnectionRegistry {
         jid: &FullJid,
         stanza: Stanza,
         row_id: crate::pending_delivery::PendingRowId,
+        original_receipt_at: chrono::DateTime<chrono::Utc>,
     ) -> SendResult {
         let sender = match self.connections.get(jid) {
             Some(entry) => entry.value().sender.clone(),
@@ -504,7 +525,7 @@ impl ConnectionRegistry {
                 return SendResult::NotConnected;
             }
         };
-        let outbound = OutboundStanza::for_pending_flush(stanza, row_id);
+        let outbound = OutboundStanza::for_pending_flush(stanza, row_id, original_receipt_at);
         match sender.send(outbound).await {
             Ok(()) => SendResult::Sent,
             Err(_) => {
