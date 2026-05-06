@@ -2760,6 +2760,16 @@ mod tests {
     use xmpp_parsers::iq::{Iq, IqType};
     use xmpp_parsers::message::MessageType as XmppMessageType;
 
+    #[test]
+    fn service_domains_use_component_parent_for_extension_component() {
+        let domains = XmppServiceDomains::new("waddle.social", "waddle.local");
+
+        assert_eq!(domains.extensions, "extensions.waddle.local");
+        assert_eq!(domains.muc, "muc.waddle.local");
+        assert_eq!(domains.spaces, "spaces.waddle.local");
+        assert_eq!(domains.upload, "upload.waddle.social");
+    }
+
     #[derive(Default)]
     struct TestSink {
         fail_after: Option<usize>,
