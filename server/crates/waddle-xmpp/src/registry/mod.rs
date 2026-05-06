@@ -21,7 +21,7 @@ pub mod user_actor;
 pub mod user_registry;
 
 pub use connection_registry::{
-    BroadcastOutcome, ConnectionRegistry, DeliveryKind, OutboundStanza, SendResult,
+    BroadcastOutcome, ConnectionEntry, ConnectionRegistry, DeliveryKind, OutboundStanza, SendResult,
 };
 pub use user_registry::{
     GetOrCreateUser, GetUser, ListUsers, RegisterUserResource, RemoveUser, UnregisterUserResource,
