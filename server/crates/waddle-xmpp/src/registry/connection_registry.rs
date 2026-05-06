@@ -140,16 +140,18 @@ pub struct ConnectionEntry {
     /// Q7d) so subsequent presence updates do not re-flush an already-
     /// drained `pending_delivery` queue (issue #209).
     pub offline_flushed: Arc<AtomicBool>,
-    /// Per-connection XEP-0198 stream id, set when the client enables
-    /// SM (or resumes onto this connection). `None` while SM is
-    /// disabled. Used to key
-    /// [`crate::pending_delivery::SmSessionId`] for the locked Q7b
-    /// SM-ack lifecycle (issue #209): each SM session is a distinct
-    /// id, so reconnect-on-same-resource never collides with the
-    /// dead session's claimed pending_delivery rows. Stored behind
-    /// `Mutex<Option<String>>` so the websocket SM-enable handler can
-    /// publish into it without taking the registry-level lock.
-    pub sm_stream_id: Arc<std::sync::Mutex<Option<String>>>,
+    /// Per-connection XEP-0198 SM session id, set when the client
+    /// enables SM (or resumes onto this connection). `None` while SM
+    /// is disabled. Used directly by the offline-flush path for
+    /// `claim_for_session` so each SM session has a distinct id and
+    /// reconnect-on-same-resource never collides with the dead
+    /// session's claimed pending_delivery rows (locked Q7b
+    /// SM-ack lifecycle, issue #209). Stored as the typed
+    /// [`crate::pending_delivery::SmSessionId`] so the registry
+    /// boundary stays typed end-to-end (Qodo review on PR #358:
+    /// previous `Option<String>` form violated the typed-payloads
+    /// rule).
+    pub sm_stream_id: Arc<std::sync::Mutex<Option<crate::pending_delivery::SmSessionId>>>,
 }
 
 impl ConnectionEntry {
@@ -199,23 +201,23 @@ impl ConnectionEntry {
             .is_ok()
     }
 
-    /// Publish the XEP-0198 SM stream id for this connection. Called
-    /// by the websocket main loop after `<enable/>` (fresh SM session)
-    /// and after `<resume/>` (continuation onto a previously-stored
-    /// stream id). Used to key [`crate::pending_delivery::SmSessionId`]
-    /// for the locked Q7b SM-ack lifecycle.
-    pub fn set_sm_stream_id(&self, stream_id: Option<String>) {
+    /// Publish the XEP-0198 SM session id for this connection.
+    /// Called by the websocket main loop after `<enable/>` (fresh
+    /// SM session) and after `<resume/>` (continuation onto a
+    /// previously-stored session). Used by the offline-flush path
+    /// for `claim_for_session` (locked Q7b SM-ack lifecycle).
+    pub fn set_sm_stream_id(&self, session_id: Option<crate::pending_delivery::SmSessionId>) {
         if let Ok(mut guard) = self.sm_stream_id.lock() {
-            *guard = stream_id;
+            *guard = session_id;
         }
     }
 
-    /// Read the XEP-0198 SM stream id for this connection, if SM is
+    /// Read the XEP-0198 SM session id for this connection, if SM is
     /// enabled. Returns `None` while SM is disabled (no
     /// `pending_delivery` row will be claimed under an SM session id
     /// in that case — the flush falls back to the delete-on-push
     /// path).
-    pub fn sm_stream_id(&self) -> Option<String> {
+    pub fn sm_stream_id(&self) -> Option<crate::pending_delivery::SmSessionId> {
         self.sm_stream_id
             .lock()
             .ok()

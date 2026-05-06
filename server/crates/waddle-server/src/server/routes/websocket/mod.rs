@@ -458,7 +458,12 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
                                     .connection_registry
                                     .get_entry(&jid)
                                 {
-                                    entry.set_sm_stream_id(conn.sm_state.stream_id.clone());
+                                    entry.set_sm_stream_id(
+                                        conn.sm_state
+                                            .stream_id
+                                            .clone()
+                                            .map(waddle_xmpp::pending_delivery::SmSessionId::new),
+                                    );
                                 }
                                 if conn.presence_available {
                                     state
@@ -661,33 +666,37 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
                                     // outbound counter back onto the
                                     // source row so a subsequent SM
                                     // `<a h>` ack can range-delete it
-                                    // via `delete_acked_through`. If
-                                    // SM is disabled or the stanza
-                                    // isn't countable (rare for replay
-                                    // messages), the row stays claimed
-                                    // and is released on session death
-                                    // for re-flush (Q7c).
+                                    // via `delete_acked_through`.
+                                    //
+                                    // Greptile review on PR #358: this
+                                    // MUST happen synchronously before
+                                    // we yield to the next event so
+                                    // an SM ack frame queued right
+                                    // behind this push doesn't run
+                                    // `delete_acked_through` while the
+                                    // row's `outbound_sequence` is
+                                    // still NULL (which would skip
+                                    // the delete and leave the row
+                                    // claimed indefinitely until the
+                                    // session dies).
                                     if let Some(row_id) = pending_row_id {
-                                        let storage = state
+                                        let sequence = conn.sm_state.outbound_count;
+                                        if let Err(error) = state
                                             .deps
                                             .protocol
                                             .pending_delivery_storage
-                                            .clone();
-                                        let sequence = conn.sm_state.outbound_count;
-                                        tokio::spawn(async move {
-                                            if let Err(error) =
-                                                storage.record_pushed_at(&row_id, sequence).await
-                                            {
-                                                warn!(
-                                                    row_id = %row_id,
-                                                    sequence,
-                                                    error = %error,
-                                                    "pending_delivery record_pushed_at \
-                                                     failed; row remains claimed but unsequenced \
-                                                     and will be released on session death"
-                                                );
-                                            }
-                                        });
+                                            .record_pushed_at(&row_id, sequence)
+                                            .await
+                                        {
+                                            warn!(
+                                                row_id = %row_id,
+                                                sequence,
+                                                error = %error,
+                                                "pending_delivery record_pushed_at \
+                                                 failed; row remains claimed but unsequenced \
+                                                 and will be released on session death"
+                                            );
+                                        }
                                     }
                                 }
                                 if !send_ws_message(
@@ -1716,32 +1725,42 @@ async fn handle_sm_stanza(sm: SmStanza, state: &WebSocketState, ctx: SmCtx<'_>) 
             // rows). The flush function reads the same stream_id from
             // the connection's `ConnectionEntry` so claim and delete
             // agree on the key.
+            // Greptile review on PR #358: this MUST run inline so it
+            // executes after any preceding `record_pushed_at` for the
+            // same connection. Spawning would let a quick ack arrive
+            // and run delete_acked_through against a row whose
+            // outbound_sequence is still NULL (because the
+            // record_pushed_at task hadn't completed), silently
+            // skipping the delete.
             if let Some(stream_id) = ctx.sm_state.stream_id.clone() {
                 let session_id = waddle_xmpp::pending_delivery::SmSessionId::new(stream_id);
-                let storage = state.deps.protocol.pending_delivery_storage.clone();
                 let h = ack.h;
-                tokio::spawn(async move {
-                    match storage.delete_acked_through(&session_id, h).await {
-                        Ok(removed) if removed > 0 => {
-                            debug!(
-                                session = %session_id,
-                                h,
-                                removed,
-                                "pending_delivery rows cleared by SM ack"
-                            );
-                        }
-                        Ok(_) => {}
-                        Err(error) => {
-                            warn!(
-                                session = %session_id,
-                                h,
-                                error = %error,
-                                "pending_delivery delete_acked_through failed; rows \
-                                 will be retried on next session via release_claim"
-                            );
-                        }
+                match state
+                    .deps
+                    .protocol
+                    .pending_delivery_storage
+                    .delete_acked_through(&session_id, h)
+                    .await
+                {
+                    Ok(removed) if removed > 0 => {
+                        debug!(
+                            session = %session_id,
+                            h,
+                            removed,
+                            "pending_delivery rows cleared by SM ack"
+                        );
                     }
-                });
+                    Ok(_) => {}
+                    Err(error) => {
+                        warn!(
+                            session = %session_id,
+                            h,
+                            error = %error,
+                            "pending_delivery delete_acked_through failed; rows \
+                             will be retried on next session via release_claim"
+                        );
+                    }
+                }
             }
             vec![]
         }
@@ -1785,7 +1804,9 @@ fn handle_sm_enable(
     // deletion). Locked Q7b SM-ack lifecycle (issue #209).
     if let Some(jid) = phase.bound_jid() {
         if let Some(entry) = state.deps.protocol.connection_registry.get_entry(jid) {
-            entry.set_sm_stream_id(Some(stream_id.clone()));
+            entry.set_sm_stream_id(Some(waddle_xmpp::pending_delivery::SmSessionId::new(
+                stream_id.clone(),
+            )));
         }
     }
 

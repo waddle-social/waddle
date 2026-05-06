@@ -1269,4 +1269,51 @@ mod tests {
         let pushed_b = rx_b.try_recv().expect("flush stanza pushed to resource-B");
         assert_eq!(pushed_b.pending_row_id.unwrap(), row_id, "same row");
     }
+
+    #[tokio::test]
+    async fn ack_before_record_pushed_at_skips_unsequenced_row() {
+        // Greptile review on PR #358: documents the storage-layer
+        // contract that motivates the `record_pushed_at` /
+        // `delete_acked_through` ordering rule in the websocket main
+        // loop. If `delete_acked_through` runs while a freshly-claimed
+        // row's `outbound_sequence` is still NULL, the row is skipped
+        // (correct: NULL means "not yet pushed, no h-coverage
+        // possible"). The websocket main loop guarantees the
+        // record_pushed_at completes before the next inbound frame
+        // (including the SM ack) is processed by awaiting it inline
+        // — this test pins down the storage semantics so a future
+        // refactor that re-introduces async stamping breaks visibly.
+        let storage: Arc<dyn PendingDeliveryStorage> =
+            Arc::new(InMemoryPendingDeliveryStorage::unlimited());
+        storage
+            .insert(transient_row("alice@example.com", "hi"))
+            .await
+            .unwrap();
+        let session = waddle_xmpp::pending_delivery::SmSessionId::new("sm-stream");
+        let claimed = storage
+            .claim_for_session(&bare("alice@example.com"), &session)
+            .await
+            .unwrap();
+        assert_eq!(claimed.len(), 1);
+        let row_id = claimed[0].id.clone();
+        // Ack runs before record_pushed_at — outbound_sequence is
+        // NULL so the row is skipped. This is the failure mode
+        // Greptile flagged when both calls were spawned: the row
+        // would persist claimed-but-never-acked until session death.
+        let removed = storage.delete_acked_through(&session, 100).await.unwrap();
+        assert_eq!(
+            removed, 0,
+            "NULL outbound_sequence is skipped by delete_acked_through"
+        );
+        assert_eq!(storage.count(&bare("alice@example.com")).await.unwrap(), 1);
+
+        // Now record_pushed_at fires (inline ordering would have done
+        // this BEFORE the ack). A subsequent ack covering the same
+        // h DOES delete the row. This proves recovery — the next ack
+        // after the stamp completes the cleanup.
+        storage.record_pushed_at(&row_id, 50).await.unwrap();
+        let removed = storage.delete_acked_through(&session, 50).await.unwrap();
+        assert_eq!(removed, 1);
+        assert_eq!(storage.count(&bare("alice@example.com")).await.unwrap(), 0);
+    }
 }
