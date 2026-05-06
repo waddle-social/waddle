@@ -789,11 +789,15 @@ async function discoverExtensionCommandService(xmpp: XmppSendIq, userJid: string
 
   try {
     const items = await rawDiscoItems(xmpp, domain);
-    const candidates = items.map((item) => item.jid).filter((jid): jid is string => !!jid);
-    for (const candidate of [domain, fallbackServiceJid, ...candidates.filter((jid) => jid !== fallbackServiceJid && jid !== domain)]) {
+    const candidates = extensionServiceCandidates(
+      domain,
+      fallbackServiceJid,
+      items.map((item) => item.jid).filter((jid): jid is string => !!jid),
+    );
+    for (const candidate of candidates) {
       try {
         const info = await rawDiscoInfo(xmpp, candidate);
-        if (info.features.some((feature) => feature === NS_ADHOC_COMMANDS)) return candidate;
+        if (isWaddleExtensionServiceInfo(info.features)) return candidate;
       } catch {
         // Try the next discovered component.
       }
@@ -802,6 +806,22 @@ async function discoverExtensionCommandService(xmpp: XmppSendIq, userJid: string
     // Fall through to returning the conventional extension service JID.
   }
   return fallbackServiceJid;
+}
+
+function extensionServiceCandidates(domain: string, fallbackServiceJid: string, discoveredJids: string[]): string[] {
+  const candidates: string[] = [];
+  for (const jid of [...discoveredJids, fallbackServiceJid, domain]) {
+    if (!candidates.includes(jid)) candidates.push(jid);
+  }
+  return candidates;
+}
+
+function isWaddleExtensionServiceInfo(features: string[]): boolean {
+  return hasFeature(features, NS_WADDLE_EXTENSION_1) && hasFeature(features, NS_ADHOC_COMMANDS);
+}
+
+function hasFeature(features: string[], expected: string): boolean {
+  return features.some((feature) => feature === expected);
 }
 
 function parseDiscoInfoExtensions(xml: string): Array<{ fields: Array<{ var: string; value?: string; values?: string[] }> }> {

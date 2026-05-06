@@ -1490,26 +1490,22 @@ async fn discover_extension_command_service(
     domain: &str,
 ) -> String {
     let fallback_service_jid = format!("extensions.{domain}");
-    let mut candidates = vec![domain.to_string(), fallback_service_jid.clone()];
+    let mut discovered_items = Vec::new();
 
     if let Ok(items_result) =
         send_iq_command(inner.clone(), build_disco_items_iq(domain, None)).await
     {
         if let Some(items) = discovery::parse_disco_items_result(&items_result) {
-            for item in items {
-                if !candidates.iter().any(|candidate| candidate == &item.jid) {
-                    candidates.push(item.jid);
-                }
-            }
+            discovered_items = items;
         }
     }
 
-    for candidate in candidates {
+    for candidate in extension_command_service_candidates(domain, &discovered_items) {
         if let Ok(info_result) =
             send_iq_command(inner.clone(), build_disco_info_iq(&candidate, None)).await
         {
             if let Some(info) = discovery::parse_disco_info_result(&info_result, &candidate) {
-                if info.has_feature(NS_ADHOC_COMMANDS) {
+                if is_waddle_extension_service(&info) {
                     return candidate;
                 }
             }
@@ -1517,6 +1513,32 @@ async fn discover_extension_command_service(
     }
 
     fallback_service_jid
+}
+
+fn extension_command_service_candidates(
+    domain: &str,
+    items: &[discovery::DiscoItem],
+) -> Vec<String> {
+    let fallback_service_jid = format!("extensions.{domain}");
+    let mut candidates = Vec::new();
+
+    for item in items {
+        push_unique_candidate(&mut candidates, item.jid.as_str());
+    }
+    push_unique_candidate(&mut candidates, &fallback_service_jid);
+    push_unique_candidate(&mut candidates, domain);
+
+    candidates
+}
+
+fn push_unique_candidate(candidates: &mut Vec<String>, candidate: &str) {
+    if !candidates.iter().any(|existing| existing == candidate) {
+        candidates.push(candidate.to_string());
+    }
+}
+
+fn is_waddle_extension_service(info: &discovery::DiscoInfoResult) -> bool {
+    info.has_feature(NS_WADDLE_EXTENSION_1) && info.has_feature(NS_ADHOC_COMMANDS)
 }
 
 fn parse_extension_routes_from_info(
@@ -2857,6 +2879,42 @@ mod extension_route_tests {
     }
 
     #[test]
+    fn extension_service_candidates_probe_advertised_items_before_domain_fallbacks() {
+        let items = vec![
+            disco_item("muc.waddle.local"),
+            disco_item("upload.waddle.social"),
+            disco_item("extensions.waddle.local"),
+        ];
+
+        let candidates = extension_command_service_candidates("waddle.social", &items);
+
+        assert_eq!(
+            candidates,
+            vec![
+                "muc.waddle.local",
+                "upload.waddle.social",
+                "extensions.waddle.local",
+                "extensions.waddle.social",
+                "waddle.social",
+            ]
+        );
+    }
+
+    #[test]
+    fn waddle_extension_service_requires_framework_and_commands_features() {
+        assert!(!is_waddle_extension_service(&disco_info(&[
+            NS_ADHOC_COMMANDS
+        ])));
+        assert!(!is_waddle_extension_service(&disco_info(&[
+            NS_WADDLE_EXTENSION_1
+        ])));
+        assert!(is_waddle_extension_service(&disco_info(&[
+            NS_WADDLE_EXTENSION_1,
+            NS_ADHOC_COMMANDS,
+        ])));
+    }
+
+    #[test]
     fn parses_extension_item_envelopes_from_pubsub_items() {
         let iq = Element::builder("iq", NS_CLIENT)
             .attr("type", "result")
@@ -2953,6 +3011,24 @@ mod extension_route_tests {
         discovery::DiscoDataField {
             var: var.to_string(),
             values: vec![value.to_string()],
+        }
+    }
+
+    fn disco_item(jid: &str) -> discovery::DiscoItem {
+        discovery::DiscoItem {
+            jid: jid.to_string(),
+            name: None,
+            node: None,
+        }
+    }
+
+    fn disco_info(features: &[&str]) -> discovery::DiscoInfoResult {
+        discovery::DiscoInfoResult {
+            jid: "example.com".to_string(),
+            node: None,
+            identities: Vec::new(),
+            features: features.iter().map(|feature| feature.to_string()).collect(),
+            forms: Vec::new(),
         }
     }
 }
