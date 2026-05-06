@@ -245,7 +245,7 @@ where
         // because there's no SM session to ack against.
         let push_result = if sm_session.is_some() {
             registry
-                .send_pending_flush(resource, stanza, row.id.clone())
+                .send_pending_flush(resource, stanza, row.id.clone(), row.original_receipt_at)
                 .await
         } else {
             registry.send_to(resource, stanza).await
@@ -1928,5 +1928,140 @@ mod tests {
             "release_row fallback cleared the wedged claim"
         );
         assert!(rows[0].outbound_sequence.is_none());
+    }
+
+    #[tokio::test]
+    async fn xep0160_promoted_stanzas_carry_original_receipt_time_in_delay() {
+        // Issue #209 PR #361 dedicated XEP-0160 test (Greptile +
+        // Copilot + Qodo P1 review): the SM-promoted-then-replayed
+        // path MUST carry the ORIGINAL pending_delivery row's
+        // `original_receipt_at` all the way through to the eventual
+        // XEP-0203 `<delay/>` stamp on the offline replay, even
+        // when the stanza was flushed to a live SM session that
+        // disconnected pre-ack and the SM session later expired
+        // (Q6 promotion re-creates the pending row).
+        //
+        // Failure mode this guards against: stamping `Utc::now()`
+        // anywhere along the path (flush time, drain time, expiry
+        // time) would mean the recipient sees the wrong delivery
+        // time on their reconnect.
+        //
+        // End-to-end flow exercised:
+        //   1. Insert pending row with original_receipt_at = T1.
+        //   2. flush_for_resource sends OutboundStanza carrying T1.
+        //   3. Recipient's main loop records into SM unacked queue
+        //      with T1 (via record_outbound_with_receipt_at).
+        //   4. Convert SM state → DetachedSession (simulates
+        //      disconnect + detach at T2 >> T1).
+        //   5. promote_session_unacked re-creates a pending row.
+        //   6. Verify the new row's original_receipt_at == T1.
+        use waddle_xmpp::stream_management::{DetachedSessionSnapshot, StreamManagementState};
+        let storage: Arc<dyn PendingDeliveryStorage> =
+            Arc::new(InMemoryPendingDeliveryStorage::unlimited());
+        let registry = ConnectionRegistry::new();
+        let alice_bare = bare("alice@example.com");
+        let alice_jid = full("alice@example.com/laptop");
+
+        // T1 = the original failed-delivery time (a year ago).
+        let t1 = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(1_700_000_000_000)
+            .expect("valid millis");
+        let mut row = transient_row("alice@example.com", "missed-while-offline");
+        row.original_receipt_at = t1;
+        let row_id = row.id.clone();
+        storage.insert(row).await.unwrap();
+
+        // Wire alice's recovering resource as the recipient.
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        registry.register(alice_jid.clone(), tx);
+
+        // Step 2: flush_for_resource through the SM-enabled path.
+        let sm_session_id =
+            waddle_xmpp::pending_delivery::SmSessionId::new("sm-stream-receipt-e2e");
+        let outcome = flush_for_resource(
+            &storage,
+            &registry,
+            &alice_bare,
+            &alice_jid,
+            FlushContext {
+                server_domain: "example.com",
+                sm_session: Some(&sm_session_id),
+                blocking_storage: None,
+                archive_resolver: &NullArchiveResolver,
+            },
+        )
+        .await;
+        assert_eq!(outcome.pushed, 1);
+
+        // Step 3: pluck the OutboundStanza from the channel — it
+        // MUST carry T1 as pending_row_original_receipt_at.
+        let pushed = rx.try_recv().expect("flush stanza pushed");
+        assert_eq!(
+            pushed.pending_row_id.as_ref(),
+            Some(&row_id),
+            "OutboundStanza tagged with source row id"
+        );
+        assert_eq!(
+            pushed.pending_row_original_receipt_at,
+            Some(t1),
+            "OutboundStanza carries the source row's original_receipt_at"
+        );
+
+        // Step 4: simulate the recipient's main loop recording the
+        // outbound stanza into its SM unacked queue WITH T1, then
+        // converting state → DetachedSession (i.e. transport drops).
+        let mut sm_state = StreamManagementState::new();
+        sm_state.enable("sm-stream-receipt-e2e".to_string(), true, Some(300));
+        let xml = match &pushed.stanza {
+            waddle_xmpp::Stanza::Message(m) => {
+                let element: xmpp_parsers::minidom::Element = m.clone().into();
+                let mut buf = Vec::new();
+                element.write_to(&mut buf).unwrap();
+                String::from_utf8(buf).unwrap()
+            }
+            _ => panic!("expected Message"),
+        };
+        sm_state.record_outbound_with_receipt_at(xml, t1);
+
+        // Convert to detached session (simulates transport drop).
+        let detached = sm_state
+            .to_detached_session(DetachedSessionSnapshot {
+                user_id: "alice".to_string(),
+                jid: alice_jid.clone(),
+                carbons_enabled: false,
+                roster_interested: false,
+                presence_available: false,
+                presence_show: None,
+                presence_status: None,
+                presence_priority: 0,
+            })
+            .expect("session resumable");
+
+        // Verify the detached snapshot preserved T1.
+        assert_eq!(detached.unacked_stanzas.len(), 1);
+        assert_eq!(detached.unacked_stanzas[0].original_receipt_at, t1);
+
+        // Clear the original pending row so we observe only the
+        // promoted row (the original would have been deleted by
+        // SM-ack in production; here we simulate).
+        storage.delete_row(&row_id).await.unwrap();
+
+        // Step 5: SM-expiry promotion re-creates the pending row.
+        let summary = crate::sm_promotion::promote_session_unacked(
+            &detached,
+            &registry,
+            &storage,
+            &waddle_xmpp::protocol::session_state::Blocklist::empty(),
+        )
+        .await;
+        assert_eq!(summary.queued, 1);
+
+        // Step 6: the new pending row carries T1, NOT flush/expiry time.
+        let rows = storage.list(&alice_bare).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].original_receipt_at, t1,
+            "promoted row's original_receipt_at MUST be the source row's T1, \
+             NOT the flush/drain/expiry wall-clock"
+        );
     }
 }

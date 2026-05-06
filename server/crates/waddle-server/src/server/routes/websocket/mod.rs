@@ -658,8 +658,28 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
                                 // unchanged.
                                 let xml = stanza_to_xml(&outbound_stanza.stanza);
                                 let pending_row_id = outbound_stanza.pending_row_id.clone();
+                                let pending_row_receipt_at =
+                                    outbound_stanza.pending_row_original_receipt_at;
                                 if conn.sm_state.enabled && is_countable_stanza(&xml) {
-                                    conn.sm_state.record_outbound(xml.clone());
+                                    // Issue #209 PR #361 review fix: when this
+                                    // is a `pending_delivery` flush replay,
+                                    // record the SM unacked entry with the
+                                    // SOURCE row's `original_receipt_at`
+                                    // (not Utc::now()). Without this, a
+                                    // disconnect-pre-ack → SM-expiry
+                                    // sequence would re-create the
+                                    // `pending_delivery` row with the wrong
+                                    // receipt time, mis-stamping the
+                                    // XEP-0203 `<delay/>` on later replays.
+                                    match pending_row_receipt_at {
+                                        Some(receipt_at) => conn
+                                            .sm_state
+                                            .record_outbound_with_receipt_at(
+                                                xml.clone(),
+                                                receipt_at,
+                                            ),
+                                        None => conn.sm_state.record_outbound(xml.clone()),
+                                    }
                                     // Locked Q7b SM-ack lifecycle: when
                                     // this is a `pending_delivery` flush
                                     // replay, bind the just-assigned
@@ -943,10 +963,19 @@ async fn drain_outbound_into_replay(
     let deps = build_interpret_deps(state, authenticated_session);
     let mut sm_borrow: Option<&mut XmppStateMachine> = state_machine;
     while let Ok(outbound_stanza) = outbound_rx.try_recv() {
+        // Codex P2 review on PR #361: when this is a pending_delivery
+        // flush replay, preserve the row's original_receipt_at instead
+        // of stamping `Utc::now()` at drain time. Otherwise a flush
+        // queued just before the WebSocket dropped would replay later
+        // (after Q6 promotion re-creates the pending row) with a
+        // wrong XEP-0203 `<delay/>` time.
+        let receipt_at = outbound_stanza
+            .pending_row_original_receipt_at
+            .unwrap_or_else(chrono::Utc::now);
         match outbound_stanza.kind {
             DeliveryKind::DirectFrame => {
                 let xml = stanza_to_xml(&outbound_stanza.stanza);
-                record_drained_xml(state, sm_state, detached_stream_id, xml).await;
+                record_drained_xml(state, sm_state, detached_stream_id, xml, receipt_at).await;
             }
             DeliveryKind::PeerStanza => {
                 let Some(sm) = sm_borrow.as_deref_mut() else {
@@ -961,7 +990,7 @@ async fn drain_outbound_into_replay(
                 )));
                 let (frames, _close) = drive_interpret_loop(events, sm, &deps).await;
                 for xml in frames {
-                    record_drained_xml(state, sm_state, detached_stream_id, xml).await;
+                    record_drained_xml(state, sm_state, detached_stream_id, xml, receipt_at).await;
                 }
             }
         }
@@ -979,18 +1008,19 @@ async fn record_drained_xml(
     sm_state: &mut StreamManagementState,
     detached_stream_id: Option<&str>,
     xml: String,
+    original_receipt_at: chrono::DateTime<chrono::Utc>,
 ) {
     if !sm_state.enabled || !is_countable_stanza(&xml) {
         return;
     }
-    sm_state.record_outbound(xml.clone());
+    sm_state.record_outbound_with_receipt_at(xml.clone(), original_receipt_at);
     if let Some(stream_id) = detached_stream_id {
         let sequence = sm_state.outbound_count;
         if let Err(error) = state
             .deps
             .protocol
             .sm_session_registry
-            .record_outbound_for_detached_stream_at(stream_id, sequence, xml, chrono::Utc::now())
+            .record_outbound_for_detached_stream_at(stream_id, sequence, xml, original_receipt_at)
             .await
         {
             warn!(stream_id = %stream_id, %error, "Failed to record drained outbound for detached SM session");
