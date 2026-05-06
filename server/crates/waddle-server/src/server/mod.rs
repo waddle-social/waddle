@@ -728,6 +728,12 @@ pub async fn start_with_config(
     let acme_http01_challenge_service = acme_runtime
         .as_ref()
         .map(|runtime| runtime.http01_challenge_service.clone());
+    // Coordinates the Q6 SM-drain task's completion back to the HTTP
+    // server's graceful_shutdown closure. The drain task notifies on
+    // exit (RAII guard); the HTTP graceful_shutdown awaits it after
+    // stop_token cancels so axum doesn't tear down mid-drain.
+    let drain_complete = Arc::new(tokio::sync::Notify::new());
+    let http_drain_complete = Arc::clone(&drain_complete);
     let http_handle = tokio::spawn(async move {
         start_http_server(HttpServerDeps {
             state: http_state,
@@ -737,6 +743,7 @@ pub async fn start_with_config(
             acme_http01_challenge_service,
             listener: http_listener,
             stop_token: http_stop,
+            drain_complete: http_drain_complete,
         })
         .await
     });
@@ -761,23 +768,37 @@ pub async fn start_with_config(
         info!(signal = ?signal, "Shutdown lifecycle complete");
     });
 
-    // Wait for any task to complete
-    tokio::select! {
-        result = http_handle => {
-            match result {
-                Ok(Ok(())) => {
-                    info!("HTTP server stopped");
-                    Ok(())
-                },
-                Ok(Err(e)) => Err(e),
-                Err(e) => Err(anyhow::anyhow!("HTTP server task failed: {}", e)),
-            }
-        }
-        _ = shutdown_handle => {
-            info!("Graceful shutdown complete");
+    // Wait for the HTTP server to fully exit. axum's
+    // `graceful_shutdown` closure (in `start_http_server`) is what
+    // waits on the SM Q6 drain via `drain_complete.notified()`, so
+    // letting `http_handle` drive the exit guarantees the runtime
+    // doesn't tear down mid-drain. The shutdown lifecycle task
+    // runs in parallel and signals stop_token; the HTTP server
+    // sees that and starts its graceful drain. Once the HTTP
+    // server returns, drain has completed.
+    //
+    // Previously this used `tokio::select!` between http_handle
+    // and shutdown_handle, which would return on whichever fired
+    // first — and shutdown_handle fires as soon as Ecdysis
+    // observes the signal, which is well before the HTTP graceful
+    // drain finishes (Copilot + Qodo review on PR #346).
+    let result = match http_handle.await {
+        Ok(Ok(())) => {
+            info!("HTTP server stopped (graceful drain complete)");
             Ok(())
         }
-    }
+        Ok(Err(e)) => Err(e),
+        Err(e) => Err(anyhow::anyhow!("HTTP server task failed: {}", e)),
+    };
+    // Tear down the shutdown lifecycle task so we don't dangle.
+    // If HTTP exited on its own (error path) before any signal
+    // arrived, `shutdown_handle.await` would block on
+    // `shutdown.run()` indefinitely — Copilot review on PR #346.
+    // Abort the task and best-effort-join with a short timeout.
+    shutdown_handle.abort();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), shutdown_handle).await;
+    info!("Graceful shutdown complete");
+    result
 }
 
 /// Bundle of parameters for [`start_http_server`].
@@ -789,6 +810,11 @@ struct HttpServerDeps {
     acme_http01_challenge_service: Option<TowerHttp01ChallengeService>,
     listener: tokio::net::TcpListener,
     stop_token: tokio_util::sync::CancellationToken,
+    /// Q6 graceful-shutdown drain completion signal — fired by the
+    /// drain task when it finishes promoting unacked queues. The
+    /// HTTP server's graceful_shutdown closure waits on this after
+    /// stop_token cancels so the runtime doesn't tear down mid-drain.
+    drain_complete: Arc<tokio::sync::Notify>,
 }
 
 /// Start the HTTP server with graceful shutdown support.
@@ -801,6 +827,7 @@ async fn start_http_server(deps: HttpServerDeps) -> Result<()> {
         acme_http01_challenge_service,
         listener,
         stop_token,
+        drain_complete,
     } = deps;
 
     let app = create_router(
@@ -809,6 +836,8 @@ async fn start_http_server(deps: HttpServerDeps) -> Result<()> {
         xmpp_config,
         mam_storage,
         acme_http01_challenge_service,
+        stop_token.clone(),
+        drain_complete.clone(),
     )
     .await?;
 
@@ -826,7 +855,14 @@ async fn start_http_server(deps: HttpServerDeps) -> Result<()> {
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
             stop_token.cancelled().await;
-            info!("HTTP server received shutdown signal, draining connections");
+            info!("HTTP server received shutdown signal; awaiting SM Q6 drain");
+            // Wait for the SM-expiry drain task spawned in
+            // create_router to finish promoting unacked queues
+            // before axum tears down. Without this await, the
+            // runtime exits before drain completes and we lose
+            // queued deliveries (Copilot review on PR #346).
+            drain_complete.notified().await;
+            info!("HTTP server: SM drain complete; draining connections");
         })
         .await?;
 
@@ -1035,6 +1071,8 @@ async fn create_router(
     xmpp_config: XmppConfig,
     mam_storage: Arc<dyn MamStorage>,
     acme_http01_challenge_service: Option<TowerHttp01ChallengeService>,
+    shutdown_stop_token: tokio_util::sync::CancellationToken,
+    drain_complete: Arc<tokio::sync::Notify>,
 ) -> Result<Router> {
     // Create auth broker state
     let encryption_key = server_config.session_key.clone();
@@ -1268,6 +1306,92 @@ async fn create_router(
                     "SM janitor: cleaning up expired detached sessions"
                 );
                 for session in drained {
+                    // Q6 promotion (issue #209 slice d phase 4):
+                    // before tearing down per-session state, walk the
+                    // session's unacked queue and promote each stanza
+                    // via classify_dm_intake → alt-resource → offline-
+                    // storage → service-unavailable bounce. XEP-0198
+                    // §5 line 364: "treat unacknowledged stanzas in
+                    // the same way that it would treat a stanza sent
+                    // to an unavailable resource".
+                    //
+                    // Fail-closed on blocklist load error: degrading
+                    // to `Blocklist::empty()` would silently let
+                    // blocked senders into the recipient's MAM/inbox,
+                    // violating the policy in
+                    // `interpret.rs::offline_recipient_pass_blocklist_storage_error_skips_recipient_persistence`.
+                    // Skip promotion for this session so the durable
+                    // SM row survives for the next janitor pass /
+                    // restart-time retry. (Copilot review on PR #346.)
+                    let blocklist = match state
+                        .deps
+                        .protocol
+                        .blocking_storage
+                        .list_blocked_jids(&session.jid.to_bare())
+                        .await
+                    {
+                        Ok(jids) => waddle_xmpp::protocol::session_state::Blocklist::new(jids),
+                        Err(error) => {
+                            warn!(
+                                jid = %session.jid,
+                                error = %error,
+                                "SM janitor: blocklist load failed; SKIPPING promotion to \
+                                 preserve fail-closed XEP-0191 policy. Durable SM row will \
+                                 be retried on the next janitor pass."
+                            );
+                            continue;
+                        }
+                    };
+                    let summary = crate::sm_promotion::promote_session_unacked(
+                        &session,
+                        &state.deps.protocol.connection_registry,
+                        &state.deps.protocol.pending_delivery_storage,
+                        &blocklist,
+                        chrono::Utc::now(),
+                    )
+                    .await;
+                    if summary.queued + summary.redelivered + summary.bounced > 0
+                        || summary.storage_failed > 0
+                    {
+                        info!(
+                            jid = %session.jid,
+                            redelivered = summary.redelivered,
+                            queued = summary.queued,
+                            bounced = summary.bounced,
+                            dropped = summary.dropped,
+                            unparseable = summary.unparseable,
+                            storage_failed = summary.storage_failed,
+                            "SM janitor: Q6 promotion completed"
+                        );
+                    }
+                    // If any stanza failed to insert into pending
+                    // storage, leave the durable SM row + in-memory
+                    // teardown alone so the next janitor pass can
+                    // retry. Otherwise the unacked stanzas would be
+                    // permanently lost on a transient storage error.
+                    // (Copilot review on PR #346.)
+                    if summary.has_storage_failure() {
+                        warn!(
+                            jid = %session.jid,
+                            storage_failed = summary.storage_failed,
+                            "SM janitor: promotion had storage failures; \
+                             preserving session state for retry"
+                        );
+                        continue;
+                    }
+                    // Promotion finished — now safe to delete the
+                    // durable SM row. drain_expired intentionally
+                    // doesn't delete durable rows up-front so a
+                    // promotion failure (panic, storage error)
+                    // leaves the unacked queue intact for restart-
+                    // time retry. (Copilot review on PR #346.)
+                    state
+                        .deps
+                        .protocol
+                        .sm_session_registry
+                        .confirm_drained(&session.stream_id)
+                        .await;
+
                     if session.presence_available {
                         routes::websocket::handlers::presence::broadcast_unavailable_for_expired_detached_session(
                             &state,
@@ -1288,6 +1412,178 @@ async fn create_router(
                     routes::websocket::cleanup_muc_presence_for_jid(&state, &session.jid).await;
                 }
             }
+        });
+    }
+
+    // Q6 graceful-shutdown drain (issue #209 slice (d) phase 4):
+    // when stop_token cancels (SIGTERM/SIGQUIT), walk every
+    // detached SM session and promote its unacked queue per the Q6
+    // priority chain BEFORE the runtime exits. Without this,
+    // unacked stanzas would either be replayed-via-resume on the
+    // next restart (causing duplicate delivery against
+    // pending_delivery flush) or lost entirely if the resume window
+    // closes during downtime.
+    {
+        let drain_state = Arc::clone(&websocket_state);
+        let drain_token = shutdown_stop_token.clone();
+        let drain_notify = Arc::clone(&drain_complete);
+        tokio::spawn(async move {
+            // Always notify_one on exit (success or early-return) so
+            // the runtime's awaiting code never blocks indefinitely
+            // on drain completion. RAII via a guard struct ensures
+            // notification fires even on panic / early continue
+            // (Copilot review on PR #346: previous fire-and-forget
+            // task was raced by runtime tear-down).
+            struct NotifyOnDrop(Arc<tokio::sync::Notify>);
+            impl Drop for NotifyOnDrop {
+                fn drop(&mut self) {
+                    self.0.notify_one();
+                }
+            }
+            let _notify_guard = NotifyOnDrop(drain_notify);
+
+            drain_token.cancelled().await;
+            info!("Graceful shutdown: starting SM session Q6 drain");
+            // Iterative drain: live WebSocket connections close
+            // asynchronously after stop_token fires (cleanup_connection_shutdown
+            // detaches each session, then store_session puts it in the
+            // SM registry). We loop draining until two consecutive
+            // iterations see an empty registry, OR the bounded timeout
+            // elapses. (Copilot review on PR #346: a single-pass drain
+            // missed sessions detaching mid-shutdown.)
+            const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+            const MAX_DRAIN_DURATION: std::time::Duration = std::time::Duration::from_secs(30);
+            // Quiet window: 8 consecutive empty polls × 250ms = ~2s
+            // of registry stability before we declare the drain
+            // complete. Two passes (~500ms) was too aggressive —
+            // `cleanup_connection_shutdown` may take longer than that
+            // to detach + store_session() its sessions during a busy
+            // shutdown. (Qodo review on PR #346.)
+            const QUIET_WINDOW_PASSES: u32 = 8;
+            let drain_deadline = std::time::Instant::now() + MAX_DRAIN_DURATION;
+            let mut empty_passes = 0u32;
+            let mut total_drained = 0usize;
+            loop {
+                if std::time::Instant::now() >= drain_deadline {
+                    warn!(
+                        total_drained,
+                        "Graceful shutdown: drain timeout reached. Remaining sessions \
+                         keep their durable SM rows and will be retried on next startup \
+                         via restore_from_persistence + Q6 expiry."
+                    );
+                    break;
+                }
+                let drained = match drain_state
+                    .deps
+                    .protocol
+                    .sm_session_registry
+                    .drain_all_for_shutdown()
+                    .await
+                {
+                    Ok(s) => s,
+                    Err(error) => {
+                        warn!(error = %error, "Graceful shutdown: drain_all_for_shutdown failed");
+                        break;
+                    }
+                };
+                if drained.is_empty() {
+                    empty_passes += 1;
+                    if empty_passes >= QUIET_WINDOW_PASSES {
+                        // Quiet window elapsed — registry has been
+                        // stable for ~2s; safe to stop iterating.
+                        break;
+                    }
+                    tokio::time::sleep(POLL_INTERVAL).await;
+                    continue;
+                }
+                empty_passes = 0;
+                total_drained += drained.len();
+                info!(
+                    count = drained.len(),
+                    "Graceful shutdown: promoting unacked queues for detached SM sessions"
+                );
+                for session in drained {
+                    // Fail-closed on blocklist load error: degrading
+                    // to `Blocklist::empty()` would silently let
+                    // blocked senders into the recipient's MAM/inbox,
+                    // violating the policy in
+                    // `interpret.rs::offline_recipient_pass_blocklist_storage_error_skips_recipient_persistence`.
+                    // Skip promotion for this session so the durable
+                    // SM row survives for restart-time retry. (Copilot
+                    // review on PR #346.)
+                    let blocklist = match drain_state
+                        .deps
+                        .protocol
+                        .blocking_storage
+                        .list_blocked_jids(&session.jid.to_bare())
+                        .await
+                    {
+                        Ok(jids) => waddle_xmpp::protocol::session_state::Blocklist::new(jids),
+                        Err(error) => {
+                            warn!(
+                                jid = %session.jid,
+                                error = %error,
+                                "Graceful shutdown: blocklist load failed; SKIPPING \
+                                 promotion to preserve fail-closed XEP-0191 policy. \
+                                 Durable SM row will be retried on next startup."
+                            );
+                            continue;
+                        }
+                    };
+                    let summary = crate::sm_promotion::promote_session_unacked(
+                        &session,
+                        &drain_state.deps.protocol.connection_registry,
+                        &drain_state.deps.protocol.pending_delivery_storage,
+                        &blocklist,
+                        chrono::Utc::now(),
+                    )
+                    .await;
+                    info!(
+                        jid = %session.jid,
+                        redelivered = summary.redelivered,
+                        queued = summary.queued,
+                        bounced = summary.bounced,
+                        dropped = summary.dropped,
+                        unparseable = summary.unparseable,
+                        storage_failed = summary.storage_failed,
+                        "Graceful shutdown: Q6 promotion completed for session"
+                    );
+                    // If pending_delivery storage was transiently
+                    // failing, skip confirm_drained so the durable
+                    // SM row survives for restart-time retry. The
+                    // in-memory drain is already done; the durable
+                    // row is what enables restart recovery via
+                    // `restore_from_persistence`. (Copilot review
+                    // on PR #346.)
+                    if summary.has_storage_failure() {
+                        warn!(
+                            jid = %session.jid,
+                            storage_failed = summary.storage_failed,
+                            "Graceful shutdown: promotion had storage failures; \
+                             preserving durable SM row for restart-time retry"
+                        );
+                        continue;
+                    }
+                    // Promotion succeeded for this session — now safe
+                    // to delete the durable SM row. The
+                    // `drain_all_for_shutdown` method intentionally
+                    // does NOT delete durable rows up-front so a
+                    // promotion failure (panic, storage error,
+                    // timeout) leaves the unacked queue intact for
+                    // restart-time retry. (Copilot review on PR #346.)
+                    drain_state
+                        .deps
+                        .protocol
+                        .sm_session_registry
+                        .confirm_drained(&session.stream_id)
+                        .await;
+                }
+                tokio::time::sleep(POLL_INTERVAL).await;
+            }
+            info!(
+                total_drained,
+                "Graceful shutdown: SM Q6 drain complete (iterative)"
+            );
         });
     }
 
@@ -2512,9 +2808,17 @@ mod tests {
         let state = create_test_state().await;
         let server_config = ServerConfig::test_homeserver();
         let mam_storage = create_websocket_mam_storage(None).await.unwrap();
-        let app = create_router(state, server_config, test_xmpp_config(), mam_storage, None)
-            .await
-            .unwrap();
+        let app = create_router(
+            state,
+            server_config,
+            test_xmpp_config(),
+            mam_storage,
+            None,
+            tokio_util::sync::CancellationToken::new(),
+            std::sync::Arc::new(tokio::sync::Notify::new()),
+        )
+        .await
+        .unwrap();
 
         let response = app
             .oneshot(
@@ -2541,9 +2845,17 @@ mod tests {
         let state = create_test_state().await;
         let server_config = ServerConfig::test_homeserver();
         let mam_storage = create_websocket_mam_storage(None).await.unwrap();
-        let app = create_router(state, server_config, test_xmpp_config(), mam_storage, None)
-            .await
-            .unwrap();
+        let app = create_router(
+            state,
+            server_config,
+            test_xmpp_config(),
+            mam_storage,
+            None,
+            tokio_util::sync::CancellationToken::new(),
+            std::sync::Arc::new(tokio::sync::Notify::new()),
+        )
+        .await
+        .unwrap();
 
         let response = app
             .oneshot(
@@ -2563,9 +2875,17 @@ mod tests {
         let state = create_test_state().await;
         let server_config = ServerConfig::test_homeserver();
         let mam_storage = create_websocket_mam_storage(None).await.unwrap();
-        let app = create_router(state, server_config, test_xmpp_config(), mam_storage, None)
-            .await
-            .unwrap();
+        let app = create_router(
+            state,
+            server_config,
+            test_xmpp_config(),
+            mam_storage,
+            None,
+            tokio_util::sync::CancellationToken::new(),
+            std::sync::Arc::new(tokio::sync::Notify::new()),
+        )
+        .await
+        .unwrap();
 
         let response = app
             .oneshot(
@@ -2593,9 +2913,17 @@ mod tests {
         let state = create_test_state().await;
         let server_config = ServerConfig::test_homeserver();
         let mam_storage = create_websocket_mam_storage(None).await.unwrap();
-        let app = create_router(state, server_config, test_xmpp_config(), mam_storage, None)
-            .await
-            .unwrap();
+        let app = create_router(
+            state,
+            server_config,
+            test_xmpp_config(),
+            mam_storage,
+            None,
+            tokio_util::sync::CancellationToken::new(),
+            std::sync::Arc::new(tokio::sync::Notify::new()),
+        )
+        .await
+        .unwrap();
 
         let response = app
             .oneshot(
@@ -2620,9 +2948,17 @@ mod tests {
         let state = create_test_state().await;
         let server_config = ServerConfig::test_homeserver();
         let mam_storage = create_websocket_mam_storage(None).await.unwrap();
-        let app = create_router(state, server_config, test_xmpp_config(), mam_storage, None)
-            .await
-            .unwrap();
+        let app = create_router(
+            state,
+            server_config,
+            test_xmpp_config(),
+            mam_storage,
+            None,
+            tokio_util::sync::CancellationToken::new(),
+            std::sync::Arc::new(tokio::sync::Notify::new()),
+        )
+        .await
+        .unwrap();
 
         let response = app
             .oneshot(
@@ -2642,9 +2978,17 @@ mod tests {
         let state = create_test_state().await;
         let server_config = ServerConfig::test_homeserver();
         let mam_storage = create_websocket_mam_storage(None).await.unwrap();
-        let app = create_router(state, server_config, test_xmpp_config(), mam_storage, None)
-            .await
-            .unwrap();
+        let app = create_router(
+            state,
+            server_config,
+            test_xmpp_config(),
+            mam_storage,
+            None,
+            tokio_util::sync::CancellationToken::new(),
+            std::sync::Arc::new(tokio::sync::Notify::new()),
+        )
+        .await
+        .unwrap();
 
         let response = app
             .oneshot(
