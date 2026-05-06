@@ -140,6 +140,16 @@ pub struct ConnectionEntry {
     /// Q7d) so subsequent presence updates do not re-flush an already-
     /// drained `pending_delivery` queue (issue #209).
     pub offline_flushed: Arc<AtomicBool>,
+    /// Per-connection XEP-0198 stream id, set when the client enables
+    /// SM (or resumes onto this connection). `None` while SM is
+    /// disabled. Used to key
+    /// [`crate::pending_delivery::SmSessionId`] for the locked Q7b
+    /// SM-ack lifecycle (issue #209): each SM session is a distinct
+    /// id, so reconnect-on-same-resource never collides with the
+    /// dead session's claimed pending_delivery rows. Stored behind
+    /// `Mutex<Option<String>>` so the websocket SM-enable handler can
+    /// publish into it without taking the registry-level lock.
+    pub sm_stream_id: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 impl ConnectionEntry {
@@ -152,6 +162,7 @@ impl ConnectionEntry {
             presence_priority: Arc::new(std::sync::atomic::AtomicI8::new(0)),
             roster_interested: Arc::new(AtomicBool::new(false)),
             offline_flushed: Arc::new(AtomicBool::new(false)),
+            sm_stream_id: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -186,6 +197,29 @@ impl ConnectionEntry {
         self.offline_flushed
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
+    }
+
+    /// Publish the XEP-0198 SM stream id for this connection. Called
+    /// by the websocket main loop after `<enable/>` (fresh SM session)
+    /// and after `<resume/>` (continuation onto a previously-stored
+    /// stream id). Used to key [`crate::pending_delivery::SmSessionId`]
+    /// for the locked Q7b SM-ack lifecycle.
+    pub fn set_sm_stream_id(&self, stream_id: Option<String>) {
+        if let Ok(mut guard) = self.sm_stream_id.lock() {
+            *guard = stream_id;
+        }
+    }
+
+    /// Read the XEP-0198 SM stream id for this connection, if SM is
+    /// enabled. Returns `None` while SM is disabled (no
+    /// `pending_delivery` row will be claimed under an SM session id
+    /// in that case — the flush falls back to the delete-on-push
+    /// path).
+    pub fn sm_stream_id(&self) -> Option<String> {
+        self.sm_stream_id
+            .lock()
+            .ok()
+            .and_then(|g| g.as_ref().cloned())
     }
 }
 

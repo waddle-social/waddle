@@ -64,22 +64,50 @@ pub struct FlushOutcome {
 /// returned `true` on the recovering [`ConnectionEntry`] — i.e. the
 /// first non-negative-priority presence of a fresh session.
 ///
-/// The session-id used to claim rows is derived from the recovering
-/// full JID (a concrete SM session id is wired in slice (d)).
-#[instrument(skip(storage, registry, archive_resolver), fields(recipient = %recipient, resource = %resource))]
+/// `sm_session` is the recovering connection's XEP-0198 stream id
+/// (`Some(_)` when the client has enabled SM, `None` otherwise). The
+/// SM-enabled path uses the locked Q7b SM-ack lifecycle: claim → tag
+/// outbound stanza → recipient main loop stamps `outbound_sequence`
+/// → SM `<a h>` deletes via `delete_acked_through`. The non-SM path
+/// falls back to delete-on-push: the recipient cannot ack so we
+/// can't gate deletion on it. (Codex/Qodo review on PR #358:
+/// previously the JID was used as the session key, conflating
+/// distinct SM sessions on the same resource and leaking rows for
+/// non-SM clients.)
+#[instrument(
+    skip(storage, registry, archive_resolver, sm_session),
+    fields(recipient = %recipient, resource = %resource)
+)]
 pub async fn flush_for_resource<R>(
     storage: &Arc<dyn PendingDeliveryStorage>,
     registry: &ConnectionRegistry,
     server_domain: &str,
     recipient: &BareJid,
     resource: &FullJid,
+    sm_session: Option<&SmSessionId>,
     archive_resolver: &R,
 ) -> FlushOutcome
 where
     R: ArchiveResolver + ?Sized,
 {
-    let session_id = SmSessionId::new(resource.to_string());
-    let claimed = match storage.claim_for_session(recipient, &session_id).await {
+    // For non-SM sessions, use a transient per-flush session id so the
+    // claim row tag is consistent within the batch. The post-push
+    // delete path keys on row id, not session id, so the transient
+    // value never escapes this function. Only the SM path keeps the
+    // claim alive past the push for the SM-ack lifecycle.
+    let transient_session_id;
+    let session_id_for_claim: &SmSessionId = match sm_session {
+        Some(id) => id,
+        None => {
+            transient_session_id =
+                SmSessionId::new(format!("transient:{}:{}", resource, uuid::Uuid::new_v4()));
+            &transient_session_id
+        }
+    };
+    let claimed = match storage
+        .claim_for_session(recipient, session_id_for_claim)
+        .await
+    {
         Ok(rows) => rows,
         Err(error) => {
             warn!(error = %error, "claim_for_session failed; skipping flush");
@@ -114,20 +142,34 @@ where
         };
         let replay = build_replay_stanza(payload, server_domain, row.original_receipt_at);
         let stanza = Stanza::Message(replay);
-        // Locked Q7b SM-ack lifecycle: do NOT delete on push. Tag the
-        // outbound stanza with the source row id so the recipient's
-        // main loop can bind the assigned XEP-0198 outbound counter
-        // back to the row via `record_pushed_at`. The row is then
-        // deleted only when an SM `<a h>` from the recovering session
-        // covers `outbound_sequence` (handled in the SM ack path,
-        // `delete_acked_through`).
-        match registry
-            .send_pending_flush(resource, stanza, row.id.clone())
-            .await
-        {
+        // SM-enabled path: tag outbound with row id so the recipient's
+        // main loop can stamp `outbound_sequence` post-`record_outbound`.
+        // The row stays claimed for the SM-ack lifecycle.
+        // Non-SM path: same outbound tag (cheap), but we delete on Sent
+        // because there's no SM session to ack against.
+        let push_result = if sm_session.is_some() {
+            registry
+                .send_pending_flush(resource, stanza, row.id.clone())
+                .await
+        } else {
+            registry.send_to(resource, stanza).await
+        };
+        match push_result {
             SendResult::Sent => {
                 outcome.pushed += 1;
-                // Row stays claimed by `session_id` with
+                if sm_session.is_none() {
+                    // Non-SM fallback: delete on push since no `<a h>`
+                    // will ever fire (Codex review on PR #358).
+                    if let Err(error) = storage.delete_row(&row.id).await {
+                        warn!(
+                            row_id = %row.id,
+                            error = %error,
+                            "pending_delivery delete_row (non-SM push) failed; \
+                             row may re-deliver on next presence"
+                        );
+                    }
+                }
+                // SM-enabled: row stays claimed by `sm_session` with
                 // `outbound_sequence = NULL` until the recipient's
                 // main loop stamps it via `record_pushed_at`. If the
                 // session dies before push, `release_claim` clears
@@ -353,6 +395,40 @@ impl DatabasePendingDeliveryStorage {
             (),
         )
         .await?;
+        // Idempotent column-add migration for the locked Q7b
+        // outbound_sequence column. Tables created by an older
+        // version of waddle-server (before PR #358) were missing this
+        // column, and `CREATE TABLE IF NOT EXISTS` is a no-op when the
+        // table already exists — so the SELECT/INSERT/UPDATE statements
+        // below would fail with "no such column: outbound_sequence" at
+        // first use without this ALTER. (Codex/Qodo review on PR #358.)
+        //
+        // Both backends support `ADD COLUMN IF NOT EXISTS` syntax in
+        // recent versions (SQLite ≥ 3.35.0, Postgres ≥ 9.6); for older
+        // SQLite we fall through to a tolerant ALTER + best-effort
+        // ignore of the "duplicate column" error.
+        let alter_sql = match self.db.driver() {
+            DatabaseDriver::Postgres => {
+                "ALTER TABLE pending_delivery ADD COLUMN IF NOT EXISTS outbound_sequence INTEGER"
+            }
+            DatabaseDriver::Sqlite => {
+                "ALTER TABLE pending_delivery ADD COLUMN outbound_sequence INTEGER"
+            }
+        };
+        if let Err(error) = self.execute(alter_sql, ()).await {
+            // SQLite's `ALTER TABLE … ADD COLUMN` is not idempotent
+            // and reports "duplicate column name" when the column
+            // already exists. Treat that specific error as a no-op so
+            // the migration stays idempotent for both freshly-created
+            // tables (where the column exists from CREATE TABLE
+            // above) and pre-existing older tables.
+            let msg = error.to_string().to_lowercase();
+            if msg.contains("duplicate column") || msg.contains("already exists") {
+                debug!("pending_delivery.outbound_sequence column already present");
+            } else {
+                return Err(error);
+            }
+        }
         self.execute(
             "CREATE INDEX IF NOT EXISTS idx_pending_delivery_recipient \
              ON pending_delivery (recipient_jid, row_id)",
@@ -627,8 +703,14 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
         // tags the rows, the loser's UPDATE finds zero matches and the
         // loser's SELECT returns rows already tagged for the other
         // session — filtered out by the WHERE.
+        // Defensive: clear outbound_sequence on claim too. release_*
+        // already does this, but a future code path that leaves a row
+        // half-released should not be able to confuse the SM-ack
+        // delete. Targets only newly-claimed rows (flushed_in_session
+        // IS NULL filter ensures we don't trample another session's
+        // ongoing claim).
         self.execute(
-            "UPDATE pending_delivery SET flushed_in_session = ? \
+            "UPDATE pending_delivery SET flushed_in_session = ?, outbound_sequence = NULL \
              WHERE recipient_jid = ? AND flushed_in_session IS NULL",
             crate::db_params![session.as_str().to_string(), recipient.to_string()],
         )
@@ -672,8 +754,13 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
     }
 
     async fn release_claim(&self, session: &SmSessionId) -> Result<u64, PendingStorageError> {
+        // Clear `outbound_sequence` alongside `flushed_in_session` so a
+        // stale sequence from the dead session can't survive a re-claim
+        // and trick a later session's SM ack into deleting an unack'd
+        // row. (Qodo review on PR #358.)
         self.execute(
-            "UPDATE pending_delivery SET flushed_in_session = NULL \
+            "UPDATE pending_delivery SET flushed_in_session = NULL, \
+                                          outbound_sequence = NULL \
              WHERE flushed_in_session = ?",
             crate::db_params![session.as_str().to_string()],
         )
@@ -682,7 +769,9 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
 
     async fn release_row(&self, id: &PendingRowId) -> Result<u64, PendingStorageError> {
         self.execute(
-            "UPDATE pending_delivery SET flushed_in_session = NULL WHERE row_id = ?",
+            "UPDATE pending_delivery SET flushed_in_session = NULL, \
+                                          outbound_sequence = NULL \
+             WHERE row_id = ?",
             crate::db_params![id.as_str().to_string()],
         )
         .await
@@ -787,6 +876,7 @@ mod tests {
             "example.com",
             &bare("alice@example.com"),
             &full("alice@example.com/web"),
+            None,
             &NullArchiveResolver,
         )
         .await;
@@ -794,10 +884,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn flush_pushes_transient_rows_and_deletes_on_success() {
+    async fn flush_pushes_transient_rows_and_keeps_them_for_sm_ack() {
+        // SM-enabled flush: rows are pushed but stay in storage
+        // claimed by the SM session until `delete_acked_through` is
+        // called by the SM ack handler.
         let storage: Arc<dyn PendingDeliveryStorage> =
             Arc::new(InMemoryPendingDeliveryStorage::unlimited());
-        // Insert two transient rows.
         for body in ["one", "two"] {
             storage
                 .insert(transient_row("alice@example.com", body))
@@ -805,7 +897,71 @@ mod tests {
                 .unwrap();
         }
 
-        // Wire a registered connection so send_to actually has a sink.
+        let registry = ConnectionRegistry::new();
+        let resource = full("alice@example.com/web");
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        registry.register(resource.clone(), tx);
+
+        let sm_session = SmSessionId::new("sm-stream-uuid-1");
+        let outcome = flush_for_resource(
+            &storage,
+            &registry,
+            "example.com",
+            &bare("alice@example.com"),
+            &resource,
+            Some(&sm_session),
+            &NullArchiveResolver,
+        )
+        .await;
+        assert_eq!(outcome.claimed, 2);
+        assert_eq!(outcome.pushed, 2);
+        assert_eq!(outcome.unresolved, 0);
+
+        let mut received = Vec::new();
+        while let Ok(stanza) = rx.try_recv() {
+            received.push(stanza);
+        }
+        assert_eq!(received.len(), 2);
+
+        // Locked Q7b SM-ack lifecycle: rows stay in storage tagged
+        // `flushed_in_session` after push; deletion happens on SM
+        // `<a h>` ack via `delete_acked_through`, NOT on send.
+        assert_eq!(storage.count(&bare("alice@example.com")).await.unwrap(), 2);
+        let listed = storage.list(&bare("alice@example.com")).await.unwrap();
+        for row in &listed {
+            assert_eq!(
+                row.flushed_in_session.as_ref(),
+                Some(&sm_session),
+                "row claimed by the recovering SM session until SM-ack"
+            );
+        }
+        let row_ids: std::collections::HashSet<_> = received
+            .iter()
+            .filter_map(|o| o.pending_row_id.clone())
+            .collect();
+        assert_eq!(
+            row_ids.len(),
+            2,
+            "every flush stanza carries its pending_row_id"
+        );
+    }
+
+    #[tokio::test]
+    async fn flush_non_sm_session_deletes_on_push() {
+        // Codex review on PR #358: when the recovering connection has
+        // NOT enabled XEP-0198, the SM ack handler will never fire to
+        // delete claimed rows. The flush function must fall back to
+        // delete-on-push so the queue doesn't leak forever for non-SM
+        // clients.
+        let storage: Arc<dyn PendingDeliveryStorage> =
+            Arc::new(InMemoryPendingDeliveryStorage::unlimited());
+        for body in ["one", "two"] {
+            storage
+                .insert(transient_row("alice@example.com", body))
+                .await
+                .unwrap();
+        }
+
         let registry = ConnectionRegistry::new();
         let resource = full("alice@example.com/web");
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
@@ -817,12 +973,12 @@ mod tests {
             "example.com",
             &bare("alice@example.com"),
             &resource,
+            None, // ← no SM session: delete-on-push fallback
             &NullArchiveResolver,
         )
         .await;
         assert_eq!(outcome.claimed, 2);
         assert_eq!(outcome.pushed, 2);
-        assert_eq!(outcome.unresolved, 0);
 
         // Both messages were sent on the wire.
         let mut received = Vec::new();
@@ -831,33 +987,9 @@ mod tests {
         }
         assert_eq!(received.len(), 2);
 
-        // Locked Q7b SM-ack lifecycle (issue #209 PR #347): rows
-        // stay in storage tagged `flushed_in_session` after push;
-        // deletion happens on SM `<a h>` ack via
-        // `delete_acked_through`, NOT on send. Verify the rows are
-        // claimed by the resource session and have NOT been deleted
-        // by the flush itself.
-        assert_eq!(storage.count(&bare("alice@example.com")).await.unwrap(), 2);
-        let listed = storage.list(&bare("alice@example.com")).await.unwrap();
-        for row in &listed {
-            assert!(
-                row.flushed_in_session.is_some(),
-                "row stays claimed by recovering session until SM-ack"
-            );
-        }
-        // Each pushed OutboundStanza carries the row id so the
-        // recipient's main loop can stamp `outbound_sequence` after
-        // its `record_outbound`. The pending stanzas in `received`
-        // correspond to the claimed rows.
-        let row_ids: std::collections::HashSet<_> = received
-            .iter()
-            .filter_map(|o| o.pending_row_id.clone())
-            .collect();
-        assert_eq!(
-            row_ids.len(),
-            2,
-            "every flush stanza carries its pending_row_id"
-        );
+        // Non-SM fallback: rows are deleted on Sent (no ack will ever
+        // fire). Storage is empty.
+        assert_eq!(storage.count(&bare("alice@example.com")).await.unwrap(), 0);
     }
 
     #[tokio::test]
@@ -873,12 +1005,14 @@ mod tests {
         let registry = ConnectionRegistry::new();
         let resource = full("alice@example.com/web");
 
+        let sm_session = SmSessionId::new("sm-stream-uuid-1");
         let outcome = flush_for_resource(
             &storage,
             &registry,
             "example.com",
             &bare("alice@example.com"),
             &resource,
+            Some(&sm_session),
             &NullArchiveResolver,
         )
         .await;
@@ -1021,12 +1155,14 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
         registry.register(resource.clone(), tx);
 
+        let session_id = waddle_xmpp::pending_delivery::SmSessionId::new("sm-stream-uuid-7");
         let outcome = flush_for_resource(
             &storage,
             &registry,
             "example.com",
             &bare("alice@example.com"),
             &resource,
+            Some(&session_id),
             &NullArchiveResolver,
         )
         .await;
@@ -1047,7 +1183,6 @@ mod tests {
         assert_eq!(storage.count(&bare("alice@example.com")).await.unwrap(), 1);
 
         // Pre-ack with h=6 (covers earlier stanzas, not this one).
-        let session_id = waddle_xmpp::pending_delivery::SmSessionId::new(resource.to_string());
         let removed = storage.delete_acked_through(&session_id, 6).await.unwrap();
         assert_eq!(removed, 0, "ack(h=6) does not cover h=7 row");
         assert_eq!(storage.count(&bare("alice@example.com")).await.unwrap(), 1);
@@ -1084,12 +1219,14 @@ mod tests {
         let (tx_a, mut rx_a) = tokio::sync::mpsc::channel(8);
         registry.register(resource_a.clone(), tx_a);
 
+        let session_a = waddle_xmpp::pending_delivery::SmSessionId::new("sm-stream-laptop-uuid");
         let outcome = flush_for_resource(
             &storage,
             &registry,
             "example.com",
             &bare("alice@example.com"),
             &resource_a,
+            Some(&session_a),
             &NullArchiveResolver,
         )
         .await;
@@ -1101,20 +1238,30 @@ mod tests {
 
         // Session-A dies pre-ack — the SM janitor's release_claim
         // restores the row to the unclaimed pool.
-        let session_a = waddle_xmpp::pending_delivery::SmSessionId::new(resource_a.to_string());
         let released = storage.release_claim(&session_a).await.unwrap();
         assert_eq!(released, 1);
 
-        // Second resource comes online and claims for itself.
+        // Verify release_claim cleared outbound_sequence too — a
+        // stale value would let session-B's first ack delete the row
+        // before it even pushes (Qodo review on PR #358).
+        let after_release = storage.list(&bare("alice@example.com")).await.unwrap();
+        assert_eq!(after_release.len(), 1);
+        assert!(after_release[0].outbound_sequence.is_none());
+        assert!(after_release[0].flushed_in_session.is_none());
+
+        // Second resource comes online and claims for itself with a
+        // distinct SM session id (different XEP-0198 stream).
         let resource_b = full("alice@example.com/web");
         let (tx_b, mut rx_b) = tokio::sync::mpsc::channel(8);
         registry.register(resource_b.clone(), tx_b);
+        let session_b = waddle_xmpp::pending_delivery::SmSessionId::new("sm-stream-web-uuid");
         let outcome = flush_for_resource(
             &storage,
             &registry,
             "example.com",
             &bare("alice@example.com"),
             &resource_b,
+            Some(&session_b),
             &NullArchiveResolver,
         )
         .await;

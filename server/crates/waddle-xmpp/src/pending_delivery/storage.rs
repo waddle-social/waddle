@@ -195,6 +195,12 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
         for row in queue.iter_mut() {
             if row.flushed_in_session.is_none() {
                 row.flushed_in_session = Some(session.clone());
+                // Defensive: clear any leftover sequence so the new
+                // claim starts from a known-clean state. release_*
+                // already does this, but a future code path that
+                // leaves a row half-released should not be able to
+                // confuse the SM-ack delete.
+                row.outbound_sequence = None;
                 claimed.push(row.clone());
             }
         }
@@ -232,6 +238,10 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
     }
 
     async fn release_claim(&self, session: &SmSessionId) -> Result<u64, PendingStorageError> {
+        // Clear `outbound_sequence` alongside `flushed_in_session` so
+        // a stale sequence from the dead session can't survive a
+        // re-claim and trick a later session's SM ack into deleting
+        // an unack'd row. (Qodo review on PR #358.)
         let mut guard = self
             .inner
             .lock()
@@ -241,6 +251,7 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
             for row in queue.iter_mut() {
                 if row.flushed_in_session.as_ref() == Some(session) {
                     row.flushed_in_session = None;
+                    row.outbound_sequence = None;
                     released += 1;
                 }
             }
@@ -257,6 +268,7 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
             for row in queue.iter_mut() {
                 if &row.id == id {
                     row.flushed_in_session = None;
+                    row.outbound_sequence = None;
                     return Ok(1);
                 }
             }

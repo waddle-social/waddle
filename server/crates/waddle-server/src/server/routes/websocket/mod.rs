@@ -446,6 +446,20 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
                                     conn.roster_interested,
                                 );
                                 conn.registry_owner = Some(owner.clone());
+                                // Publish the SM stream id onto the freshly-registered entry
+                                // so the offline-flush path keys claims by the XEP-0198
+                                // session id, not the resource JID. Locked Q7b SM-ack
+                                // lifecycle (issue #209). For a fresh bind without SM
+                                // enabled, sm_state.stream_id is None — the flush path
+                                // falls back to delete-on-push for non-SM sessions.
+                                if let Some(entry) = state
+                                    .deps
+                                    .protocol
+                                    .connection_registry
+                                    .get_entry(&jid)
+                                {
+                                    entry.set_sm_stream_id(conn.sm_state.stream_id.clone());
+                                }
                                 if conn.presence_available {
                                     state
                                         .deps
@@ -1685,23 +1699,25 @@ async fn handle_sm_stanza(sm: SmStanza, state: &WebSocketState, ctx: SmCtx<'_>) 
     use waddle_xmpp::stream_management::SmAck;
 
     match sm {
-        SmStanza::Enable(enable) => handle_sm_enable(enable, ctx.sm_state, ctx.phase),
+        SmStanza::Enable(enable) => handle_sm_enable(enable, state, ctx.sm_state, ctx.phase),
         SmStanza::Request => vec![SmAck::new(ctx.sm_state.get_inbound_count()).to_xml()],
         SmStanza::Ack(ack) => {
             ctx.sm_state.acknowledge(ack.h);
             // Locked Q7b SM-ack lifecycle (issue #209): range-delete
-            // every `pending_delivery` row claimed by this session
-            // whose recorded outbound counter is <= `ack.h`. This is
-            // what actually frees the row from the durable queue —
-            // the flush path no longer deletes on push (PR #346 left
-            // the row claimed; we used to ALSO delete in flush, but
-            // that defeated the durability guarantee for the push-to-
-            // ack window). The session id is the same value the
-            // flush function uses for `claim_for_session`:
-            // `SmSessionId::new(resource.to_string())`.
-            if let Some(full_jid) = ctx.phase.bound_jid().cloned() {
-                let session_id =
-                    waddle_xmpp::pending_delivery::SmSessionId::new(full_jid.to_string());
+            // every `pending_delivery` row claimed by this XEP-0198
+            // session whose recorded outbound counter is <= `ack.h`.
+            // This is what actually frees the row from the durable
+            // queue — the flush path no longer deletes on push.
+            //
+            // Session id is the XEP-0198 stream_id (NOT the resource
+            // JID — Qodo review on PR #358: distinct SM sessions on
+            // the same resource share the same JID, so keying by JID
+            // would let one session's ack delete another's claimed
+            // rows). The flush function reads the same stream_id from
+            // the connection's `ConnectionEntry` so claim and delete
+            // agree on the key.
+            if let Some(stream_id) = ctx.sm_state.stream_id.clone() {
+                let session_id = waddle_xmpp::pending_delivery::SmSessionId::new(stream_id);
                 let storage = state.deps.protocol.pending_delivery_storage.clone();
                 let h = ack.h;
                 tokio::spawn(async move {
@@ -1737,6 +1753,7 @@ async fn handle_sm_stanza(sm: SmStanza, state: &WebSocketState, ctx: SmCtx<'_>) 
 
 fn handle_sm_enable(
     enable: SmEnable,
+    state: &WebSocketState,
     sm_state: &mut StreamManagementState,
     phase: &ConnectionPhase,
 ) -> Vec<String> {
@@ -1759,6 +1776,18 @@ fn handle_sm_enable(
         .map(|m| m.min(MAX_RESUME_SECS))
         .unwrap_or(MAX_RESUME_SECS);
     sm_state.enable(stream_id.clone(), enable.resume, Some(max));
+
+    // Publish the stream id onto the registry's ConnectionEntry so
+    // the offline-flush path can claim `pending_delivery` rows under
+    // a session id that's unique to this XEP-0198 session (not just
+    // the resource JID — distinct SM sessions on the same resource
+    // would otherwise share the same key, causing cross-session row
+    // deletion). Locked Q7b SM-ack lifecycle (issue #209).
+    if let Some(jid) = phase.bound_jid() {
+        if let Some(entry) = state.deps.protocol.connection_registry.get_entry(jid) {
+            entry.set_sm_stream_id(Some(stream_id.clone()));
+        }
+    }
 
     info!(stream_id = %stream_id, resume = enable.resume, max = max, "SM enabled");
     if enable.resume {
