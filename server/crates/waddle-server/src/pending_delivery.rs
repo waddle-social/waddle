@@ -55,6 +55,11 @@ pub struct FlushOutcome {
     /// whose MAM lookup is not available — happens when MAM storage is
     /// unwired in the test fixture, never in production).
     pub unresolved: u32,
+    /// Number of rows dropped because the recipient blocked the sender
+    /// AFTER the row was inserted (XEP-0191 §2 step 4 flush-time
+    /// re-evaluation, issue #209 PR #360). Blocked rows are deleted
+    /// from `pending_delivery` since the block is final until lifted.
+    pub dropped_blocked: u32,
 }
 
 /// Flush every currently-unclaimed `pending_delivery` row for the
@@ -66,16 +71,17 @@ pub struct FlushOutcome {
 ///
 /// `sm_session` is the recovering connection's XEP-0198 stream id
 /// (`Some(_)` when the client has enabled SM, `None` otherwise). The
-/// SM-enabled path uses the locked Q7b SM-ack lifecycle: claim → tag
-/// outbound stanza → recipient main loop stamps `outbound_sequence`
-/// → SM `<a h>` deletes via `delete_acked_through`. The non-SM path
-/// falls back to delete-on-push: the recipient cannot ack so we
-/// can't gate deletion on it. (Codex/Qodo review on PR #358:
-/// previously the JID was used as the session key, conflating
-/// distinct SM sessions on the same resource and leaking rows for
-/// non-SM clients.)
+/// SM-enabled path uses the locked Q7b SM-ack lifecycle; the non-SM
+/// path falls back to delete-on-push.
+///
+/// `blocking_storage` lets the flush re-check XEP-0191 §2 step 4 at
+/// delivery time: if the recipient blocked the sender AFTER the row
+/// was inserted, the row is dropped (deleted) instead of replayed.
+/// `None` skips the check entirely (test fixtures without a blocking
+/// storage); production wires the live `BlockingStorage` here.
+#[allow(clippy::too_many_arguments)]
 #[instrument(
-    skip(storage, registry, archive_resolver, sm_session),
+    skip(storage, registry, archive_resolver, sm_session, blocking_storage),
     fields(recipient = %recipient, resource = %resource)
 )]
 pub async fn flush_for_resource<R>(
@@ -85,11 +91,34 @@ pub async fn flush_for_resource<R>(
     recipient: &BareJid,
     resource: &FullJid,
     sm_session: Option<&SmSessionId>,
+    blocking_storage: Option<&Arc<dyn waddle_xmpp::xep::xep0191::BlockingStorage>>,
     archive_resolver: &R,
 ) -> FlushOutcome
 where
     R: ArchiveResolver + ?Sized,
 {
+    // Snapshot the recipient's current blocklist once for the whole
+    // flush batch. XEP-0191 §2 step 4: if the recipient blocked the
+    // sender AFTER the row was queued, the row must be dropped.
+    // Per-batch (not per-row) to avoid hammering the blocking-storage
+    // backend; correctness window is the duration of one flush
+    // (typically << 1 s). Same fail-closed policy as
+    // `interpret.rs::offline_recipient_pass_blocklist_storage_error_skips_recipient_persistence`:
+    // on storage error, abort the flush rather than degrade to an
+    // empty blocklist (which would let blocked senders through).
+    let blocklist: Option<std::collections::HashSet<jid::BareJid>> = match blocking_storage {
+        Some(bs) => match bs.list_blocked_jids(recipient).await {
+            Ok(jids) => Some(jids.into_iter().collect()),
+            Err(error) => {
+                warn!(
+                    error = %error,
+                    "blocklist load failed; aborting flush to preserve fail-closed XEP-0191 policy"
+                );
+                return FlushOutcome::default();
+            }
+        },
+        None => None,
+    };
     // For non-SM sessions, use a transient per-flush session id so the
     // claim row tag is consistent within the batch. The post-push
     // delete path keys on row id, not session id, so the transient
@@ -140,6 +169,33 @@ where
             }
             continue;
         };
+        // XEP-0191 §2 step 4 flush-time block re-evaluation
+        // (issue #209 PR #360): if the recipient blocked the sender
+        // after the row was queued, drop it. Block is final until
+        // the recipient lifts it — `delete_row` not `release_row`.
+        if let Some(blocked) = blocklist.as_ref() {
+            let sender_bare = sender_bare_for_payload(&payload);
+            if let Some(sender) = sender_bare {
+                if blocked.contains(&sender) {
+                    debug!(
+                        row_id = %row.id,
+                        recipient = %recipient,
+                        sender = %sender,
+                        "pending_delivery flush dropping row: recipient blocked sender post-intake (XEP-0191 §2 step 4)"
+                    );
+                    outcome.dropped_blocked += 1;
+                    if let Err(error) = storage.delete_row(&row.id).await {
+                        warn!(
+                            row_id = %row.id,
+                            error = %error,
+                            "pending_delivery delete_row (blocked at flush) failed; \
+                             row may re-deliver on next presence"
+                        );
+                    }
+                    continue;
+                }
+            }
+        }
         let replay = build_replay_stanza(payload, server_domain, row.original_receipt_at);
         let stanza = Stanza::Message(replay);
         // SM-enabled path: tag outbound with row id so the recipient's
@@ -279,6 +335,17 @@ where
             Some(MaterializedPayload::Archived(Box::new(archived)))
         }
     }
+}
+
+/// Extract the sender's bare JID from a materialized payload for the
+/// XEP-0191 §2 step 4 flush-time block re-evaluation. Returns `None`
+/// when the message has no `from` attribute (server-origin replays
+/// have no flesh-and-blood sender to block).
+fn sender_bare_for_payload(payload: &MaterializedPayload) -> Option<jid::BareJid> {
+    let message: &xmpp_parsers::message::Message = match payload {
+        MaterializedPayload::Archived(m) | MaterializedPayload::Transient(m) => m,
+    };
+    message.from.as_ref().map(|jid| jid.to_bare())
 }
 
 // ---------------------------------------------------------------------------
@@ -804,6 +871,44 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
         .await
     }
 
+    async fn list_orphaned_claims(
+        &self,
+        live_sessions: &[SmSessionId],
+    ) -> Result<Vec<(PendingRowId, SmSessionId)>, PendingStorageError> {
+        // SELECT every claimed row, then filter in-memory against the
+        // live-set. This avoids generating a `WHERE flushed_in_session
+        // NOT IN (?, ?, ?, …)` clause whose parameter count would be
+        // unbounded for production deployments. The expected orphan
+        // population is small (low hundreds) compared to live-session
+        // count, so the filter cost is negligible.
+        let mut rows = self
+            .query(
+                "SELECT row_id, flushed_in_session FROM pending_delivery \
+                 WHERE flushed_in_session IS NOT NULL",
+                (),
+            )
+            .await?;
+        let live: std::collections::HashSet<&str> =
+            live_sessions.iter().map(SmSessionId::as_str).collect();
+        let mut out = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?
+        {
+            let row_id: String = row
+                .get(0)
+                .map_err(|e| PendingStorageError::Other(e.to_string()))?;
+            let session: String = row
+                .get(1)
+                .map_err(|e| PendingStorageError::Other(e.to_string()))?;
+            if !live.contains(session.as_str()) {
+                out.push((PendingRowId::new(row_id), SmSessionId::new(session)));
+            }
+        }
+        Ok(out)
+    }
+
     async fn count(&self, recipient: &BareJid) -> Result<u32, PendingStorageError> {
         let mut rows = self
             .query(
@@ -877,6 +982,7 @@ mod tests {
             &bare("alice@example.com"),
             &full("alice@example.com/web"),
             None,
+            None,
             &NullArchiveResolver,
         )
         .await;
@@ -910,6 +1016,7 @@ mod tests {
             &bare("alice@example.com"),
             &resource,
             Some(&sm_session),
+            None,
             &NullArchiveResolver,
         )
         .await;
@@ -974,6 +1081,7 @@ mod tests {
             &bare("alice@example.com"),
             &resource,
             None, // ← no SM session: delete-on-push fallback
+            None,
             &NullArchiveResolver,
         )
         .await;
@@ -1013,6 +1121,7 @@ mod tests {
             &bare("alice@example.com"),
             &resource,
             Some(&sm_session),
+            None,
             &NullArchiveResolver,
         )
         .await;
@@ -1163,6 +1272,7 @@ mod tests {
             &bare("alice@example.com"),
             &resource,
             Some(&session_id),
+            None,
             &NullArchiveResolver,
         )
         .await;
@@ -1227,6 +1337,7 @@ mod tests {
             &bare("alice@example.com"),
             &resource_a,
             Some(&session_a),
+            None,
             &NullArchiveResolver,
         )
         .await;
@@ -1262,6 +1373,7 @@ mod tests {
             &bare("alice@example.com"),
             &resource_b,
             Some(&session_b),
+            None,
             &NullArchiveResolver,
         )
         .await;
@@ -1315,5 +1427,183 @@ mod tests {
         let removed = storage.delete_acked_through(&session, 50).await.unwrap();
         assert_eq!(removed, 1);
         assert_eq!(storage.count(&bare("alice@example.com")).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn list_orphaned_claims_returns_only_dead_session_rows() {
+        // Issue #209 PR #360 storage-layer contract test for the
+        // claim-expiry janitor. Three rows: row-A claimed by
+        // session-live, row-B claimed by session-dead, row-C
+        // unclaimed. With live=[session-live], the janitor should see
+        // only row-B in the orphan list. row-A is recoverable, row-C
+        // doesn't need recovery.
+        let storage = InMemoryPendingDeliveryStorage::unlimited();
+        let alice = bare("alice@example.com");
+        for body in ["a", "b", "c"] {
+            storage
+                .insert(transient_row("alice@example.com", body))
+                .await
+                .unwrap();
+        }
+        let session_live = SmSessionId::new("sm-stream-live");
+        let session_dead = SmSessionId::new("sm-stream-dead");
+        // Claim two rows under each session in turn (claim_for_session
+        // takes whatever's currently unclaimed, so call sequentially).
+        let claimed_live = storage
+            .claim_for_session(&alice, &session_live)
+            .await
+            .unwrap();
+        assert_eq!(claimed_live.len(), 3);
+        // Release one row back to unclaimed (simulating partial-success);
+        // then "transfer" one to session_dead by releasing all and
+        // re-claiming individually.
+        for row in &claimed_live {
+            storage.release_row(&row.id).await.unwrap();
+        }
+        // Now manually claim row[0] under session_live, row[1] under
+        // session_dead, leave row[2] unclaimed.
+        // claim_for_session is all-or-nothing, so build the state via
+        // direct inserts on a fresh storage.
+        let storage = InMemoryPendingDeliveryStorage::unlimited();
+        for (body, session_opt) in [
+            ("a", Some(&session_live)),
+            ("b", Some(&session_dead)),
+            ("c", None),
+        ] {
+            let mut row = transient_row("alice@example.com", body);
+            row.flushed_in_session = session_opt.cloned();
+            storage.insert(row).await.unwrap();
+        }
+        let orphans = storage
+            .list_orphaned_claims(std::slice::from_ref(&session_live))
+            .await
+            .unwrap();
+        assert_eq!(orphans.len(), 1, "only the dead-session row is orphaned");
+        assert_eq!(
+            orphans[0].1, session_dead,
+            "orphan tagged with dead session"
+        );
+        // Releasing the orphan via `release_row` clears the claim.
+        storage.release_row(&orphans[0].0).await.unwrap();
+        let after = storage
+            .list_orphaned_claims(std::slice::from_ref(&session_live))
+            .await
+            .unwrap();
+        assert!(after.is_empty(), "no orphans after release");
+        // The live-session and unclaimed rows remain in storage.
+        assert_eq!(storage.count(&alice).await.unwrap(), 3);
+    }
+
+    #[tokio::test]
+    async fn list_orphaned_claims_with_empty_live_set_returns_all_claims() {
+        // Startup recovery scenario (issue #209 PR #360): SM registry
+        // is empty after a restart, every claim is orphaned. The
+        // janitor releases them all so the recovering resources can
+        // re-flush.
+        let storage = InMemoryPendingDeliveryStorage::unlimited();
+        for body in ["a", "b"] {
+            let mut row = transient_row("alice@example.com", body);
+            row.flushed_in_session = Some(SmSessionId::new("sm-stream-pre-restart"));
+            storage.insert(row).await.unwrap();
+        }
+        let orphans = storage.list_orphaned_claims(&[]).await.unwrap();
+        assert_eq!(orphans.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn flush_drops_pending_row_when_sender_blocked_after_intake() {
+        // Locked XEP-0191 §2 step 4 (issue #209 PR #360): if the
+        // recipient blocks the sender AFTER the row was queued, the
+        // flush MUST drop the row instead of replaying it. The block
+        // is final until lifted, so the row is `delete_row`'d (not
+        // released) — no retry needed.
+        use waddle_xmpp::xep::xep0191::{BlockingStorage, InMemoryBlockingStorage};
+        let storage: Arc<dyn PendingDeliveryStorage> =
+            Arc::new(InMemoryPendingDeliveryStorage::unlimited());
+        storage
+            .insert(transient_row("alice@example.com", "blocked-after-intake"))
+            .await
+            .unwrap();
+        // Recipient blocks the sender BEFORE flush.
+        let blocking = InMemoryBlockingStorage::new();
+        blocking.set_blocklist(bare("alice@example.com"), vec![bare("bob@elsewhere")]);
+        let blocking_arc: Arc<dyn BlockingStorage> = Arc::new(blocking);
+        // Wire a recovering session.
+        let registry = ConnectionRegistry::new();
+        let resource = full("alice@example.com/web");
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        registry.register(resource.clone(), tx);
+        let sm_session = SmSessionId::new("sm-stream-block-test");
+        let outcome = flush_for_resource(
+            &storage,
+            &registry,
+            "example.com",
+            &bare("alice@example.com"),
+            &resource,
+            Some(&sm_session),
+            Some(&blocking_arc),
+            &NullArchiveResolver,
+        )
+        .await;
+        assert_eq!(outcome.claimed, 1);
+        assert_eq!(outcome.pushed, 0, "blocked sender's row not pushed");
+        assert_eq!(outcome.dropped_blocked, 1);
+        // Row is deleted from storage (block is final until lifted).
+        assert_eq!(storage.count(&bare("alice@example.com")).await.unwrap(), 0);
+        // Nothing was sent on the wire.
+        assert!(
+            rx.try_recv().is_err(),
+            "no flush stanza pushed for blocked sender"
+        );
+    }
+
+    #[tokio::test]
+    async fn flush_aborts_on_blocking_storage_failure_fail_closed() {
+        // Fail-closed semantic (mirrors interpret.rs intake-pass policy):
+        // if blocking-storage errors at flush time, the flush MUST abort
+        // rather than degrade to an empty blocklist (which would silently
+        // let blocked senders through to MAM/inbox via re-delivery).
+        use async_trait::async_trait;
+        use waddle_xmpp::xep::xep0191::{BlockingStorage, BlockingStorageError};
+        #[derive(Debug, thiserror::Error)]
+        #[error("simulated backend down")]
+        struct SimulatedFailure;
+        struct FailingBlocking;
+        #[async_trait]
+        impl BlockingStorage for FailingBlocking {
+            async fn list_blocked_jids(
+                &self,
+                _user: &BareJid,
+            ) -> Result<Vec<BareJid>, BlockingStorageError> {
+                Err(BlockingStorageError::new(SimulatedFailure))
+            }
+        }
+        let storage: Arc<dyn PendingDeliveryStorage> =
+            Arc::new(InMemoryPendingDeliveryStorage::unlimited());
+        storage
+            .insert(transient_row("alice@example.com", "must-not-leak"))
+            .await
+            .unwrap();
+        let blocking_arc: Arc<dyn BlockingStorage> = Arc::new(FailingBlocking);
+        let registry = ConnectionRegistry::new();
+        let resource = full("alice@example.com/web");
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        registry.register(resource.clone(), tx);
+        let sm_session = SmSessionId::new("sm-stream-fail-closed");
+        let outcome = flush_for_resource(
+            &storage,
+            &registry,
+            "example.com",
+            &bare("alice@example.com"),
+            &resource,
+            Some(&sm_session),
+            Some(&blocking_arc),
+            &NullArchiveResolver,
+        )
+        .await;
+        // Fail-closed: nothing claimed, nothing pushed, row stays for retry.
+        assert_eq!(outcome.claimed, 0);
+        assert_eq!(outcome.pushed, 0);
+        assert_eq!(storage.count(&bare("alice@example.com")).await.unwrap(), 1);
     }
 }

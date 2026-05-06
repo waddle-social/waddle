@@ -559,11 +559,13 @@ fn xep0160_blocked_sender_does_not_create_pending_delivery_row() {
     assert_eq!(routing.pending, PendingDecision::None);
 }
 
-#[test]
-#[ignore = "TODO #209 follow-up PR: flush-time block re-evaluation"]
-fn xep0160_flush_drops_pending_row_when_sender_blocked_after_intake() {
-    todo!("flush-time block check: integration test against pending_delivery + flush_for_resource");
-}
+// XEP-0191 §2 step 4 flush-time block re-evaluation (issue #209
+// PR #360) is covered by the server-side integration test
+// `pending_delivery::tests::flush_drops_pending_row_when_sender_blocked_after_intake`
+// in `server/crates/waddle-server/src/pending_delivery.rs`. The
+// waddle-xmpp crate cannot exercise the live `flush_for_resource`
+// (which lives in waddle-server), so the assertion was promoted to
+// the higher layer where the wiring exists.
 
 // -----------------------------------------------------------------------------
 // Multi-resource and carbons (locked Q10a) — integration scope

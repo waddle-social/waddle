@@ -100,6 +100,25 @@ pub trait PendingDeliveryStorage: Send + Sync {
         sequence_max: u32,
     ) -> Result<u64, PendingStorageError>;
 
+    /// List rows whose `flushed_in_session` references a session
+    /// that is NOT in `live_sessions`. Used by the claim-expiry
+    /// janitor (issue #209 PR #360) to find orphaned claims left
+    /// behind by sessions that closed without going through the SM
+    /// janitor / shutdown drain (e.g. non-SM sessions, or SM
+    /// sessions that crashed before `store_session`). The janitor
+    /// then calls [`Self::release_row`] on each entry to make the
+    /// rows eligible for re-flush.
+    ///
+    /// Implementations MUST scan only rows with
+    /// `flushed_in_session IS NOT NULL`. The caller passes a
+    /// snapshot of currently-live SM session ids; an empty
+    /// `live_sessions` slice returns every claimed row (useful for
+    /// startup recovery when the SM registry is empty).
+    async fn list_orphaned_claims(
+        &self,
+        live_sessions: &[SmSessionId],
+    ) -> Result<Vec<(PendingRowId, SmSessionId)>, PendingStorageError>;
+
     /// Current row count for `recipient` (used by the quota check;
     /// also exposed for metrics).
     async fn count(&self, recipient: &BareJid) -> Result<u32, PendingStorageError>;
@@ -317,6 +336,27 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
         }
         guard.retain(|_, q| !q.is_empty());
         Ok(removed)
+    }
+
+    async fn list_orphaned_claims(
+        &self,
+        live_sessions: &[SmSessionId],
+    ) -> Result<Vec<(PendingRowId, SmSessionId)>, PendingStorageError> {
+        let guard = self
+            .inner
+            .lock()
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?;
+        let mut out = Vec::new();
+        for queue in guard.values() {
+            for row in queue.iter() {
+                if let Some(session) = row.flushed_in_session.as_ref() {
+                    if !live_sessions.contains(session) {
+                        out.push((row.id.clone(), session.clone()));
+                    }
+                }
+            }
+        }
+        Ok(out)
     }
 
     async fn count(&self, recipient: &BareJid) -> Result<u32, PendingStorageError> {

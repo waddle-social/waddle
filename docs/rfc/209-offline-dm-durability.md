@@ -9,8 +9,8 @@ Tracking doc for the multi-PR implementation of issue [#209](https://github.com/
 | Foundation | [#339](https://github.com/waddle-social/waddle/pull/339) | ✅ merged | Typed `DmRouting` classifier, `pending_delivery` storage trait + in-memory + libSQL backend, `OfflineDeliveryHandler`, presence-driven flush, `<service-unavailable/>` bounce on quota |
 | Slice (d) phases 2–3 | [#344](https://github.com/waddle-social/waddle/pull/344) | ✅ merged | `DatabaseSmPersistence` libSQL/Postgres backend, `InMemorySmSessionRegistry` plumbed through `SmPersistenceStorage`, restart restoration |
 | Slice (d) phase 4 | [#346](https://github.com/waddle-social/waddle/pull/346) | ✅ merged | Q6 SM-expiry promotion (alt-resource → offline → service-unavailable), graceful-shutdown drain, persist-after-promotion ordering |
-| Q7 lifecycle | [#358](https://github.com/waddle-social/waddle/pull/358) | 🟡 in review | SM-ack-keyed deletion of `pending_delivery` rows + pre-ack session-death re-flush |
-| Janitor + flush-time block | [#348](#pr-348--claim-expiry-janitor--xep-0191-flush-time-block-re-eval--planned) | ⬜ planned | Claim-expiry janitor + XEP-0191 flush-time block re-eval |
+| Q7 lifecycle | [#358](https://github.com/waddle-social/waddle/pull/358) | ✅ merged | SM-ack-keyed deletion of `pending_delivery` rows + pre-ack session-death re-flush |
+| Janitor + flush-time block | [#360](https://github.com/waddle-social/waddle/pull/360) | 🟡 in review | Claim-expiry janitor + XEP-0191 flush-time block re-eval |
 | Receipt-time plumbing | [#349](#pr-349--original_receipt_at-plumbing-through-detachedsession--planned) | ⬜ planned | `original_receipt_at` plumbing through `DetachedSession.unacked_stanzas` |
 | Test-coverage debt | [#350](#pr-350--test-coverage-debt--planned) | ⬜ planned | Un-ignore XEP-0160 integration tests + extend dedicated XEP-0198/0334/0280/0313/0203/0359/0191 suites |
 | Storage performance | [#351](#pr-351--storage-performance--planned) | ⬜ planned (low priority) | N+1 `list_unacked` JOIN; atomic transactions in `Database` abstraction |
@@ -34,7 +34,7 @@ Tracking doc for the multi-PR implementation of issue [#209](https://github.com/
 | Q10a | Single-resource flush; other resources via MAM catch-up | ✅ shipped |
 | Q10b | Skip inbox bump for `Transient` payloads | ✅ shipped |
 | Q10d | Server best-efforts; client dedupes via XEP-0359 stanza-id | ✅ shipped |
-| Final fork #1 | XEP-0191 block list evaluated at intake AND flush | 🟡 partial — intake done, flush planned (#348) |
+| Final fork #1 | XEP-0191 block list evaluated at intake AND flush | 🟡 in review (#360) — intake done; flush re-eval shipping in #360 |
 | Final fork #3 | `sm_sessions.carbons_enabled` persisted | ✅ shipped (#344) |
 
 ## Issue #209 acceptance criteria

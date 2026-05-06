@@ -1002,6 +1002,12 @@ mod tests {
             ) -> Result<u64, PendingStorageError> {
                 Ok(0)
             }
+            async fn list_orphaned_claims(
+                &self,
+                _live_sessions: &[SmSessionId],
+            ) -> Result<Vec<(PendingRowId, SmSessionId)>, PendingStorageError> {
+                Ok(vec![])
+            }
             async fn count(&self, _recipient: &BareJid) -> Result<u32, PendingStorageError> {
                 Ok(0)
             }

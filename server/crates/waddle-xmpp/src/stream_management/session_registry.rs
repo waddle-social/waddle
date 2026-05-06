@@ -915,6 +915,27 @@ impl InMemorySmSessionRegistry {
         Ok(drained)
     }
 
+    /// Snapshot every currently-live SM session id (detached +
+    /// claimed). Used by the `pending_delivery` claim-expiry janitor
+    /// (issue #209 PR #360) to determine which `flushed_in_session`
+    /// tags reference still-recoverable sessions vs. orphaned ones.
+    ///
+    /// "Live" here means the session's durable record is still
+    /// resumable: its resume window hasn't closed yet OR a resume
+    /// claim is in flight. Sessions that have already been drained
+    /// and `confirm_drained`'d are absent from this set, and their
+    /// `pending_delivery` claims are eligible for orphan recovery.
+    pub fn live_session_ids(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if let Ok(sessions) = self.sessions.read() {
+            out.extend(sessions.keys().cloned());
+        }
+        if let Ok(claimed) = self.claimed_sessions.read() {
+            out.extend(claimed.keys().cloned());
+        }
+        out
+    }
+
     /// Confirm that a drained session has been fully promoted —
     /// delete its durable row so a subsequent restart doesn't
     /// resurrect it. Best-effort: failures are logged but not
