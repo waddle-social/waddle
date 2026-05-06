@@ -354,19 +354,29 @@ fn xep0160_flushes_on_first_non_negative_presence_of_fresh_session() {
     assert!(!entry.claim_offline_flush());
 }
 
-/// Locked Q7d: the priority-transition flush trigger uses the SAME
-/// per-session CAS, so a `-1 → +1` priority change on a connection
-/// that's already CAS-claimed must NOT re-fire. This is the property
-/// the maybe_flush_pending_delivery presence handler relies on.
+// Locked Q7d (`-1 → +1` priority transition triggers flush exactly
+// once): the presence handler in
+// `server/crates/waddle-server/src/server/routes/websocket/handlers/presence.rs::maybe_flush_pending_delivery`
+// gates `claim_offline_flush` on `priority >= 0` AND on the CAS
+// returning `true`. The full transition simulation (negative
+// presence → non-negative presence → flush fires; subsequent
+// non-negative presences → no re-flush) requires the live presence
+// handler + ConnectionRegistry, which lives in waddle-server.
+//
+// The trait-level CAS contract here pins what the presence handler
+// relies on: the second `claim_offline_flush()` call ALWAYS returns
+// false, regardless of how many priority transitions happened
+// between calls. Any future code that re-arms the CAS would need
+// to update this test (Greptile/Copilot review on PR #362: prior
+// version's name implied a transition that wasn't actually
+// modelled).
 #[test]
-fn xep0160_negative_to_non_negative_priority_transition_triggers_flush() {
+fn xep0160_claim_offline_flush_cas_is_idempotent_after_first_claim() {
     use waddle_xmpp::registry::ConnectionEntry;
     let (tx, _rx) = tokio::sync::mpsc::channel(8);
     let entry = ConnectionEntry::new(tx);
-    // Initial negative-priority presence does not call
-    // `claim_offline_flush` per the gating logic in
-    // `maybe_flush_pending_delivery`. The first non-negative call
-    // wins exactly once.
+    // First non-negative-priority presence wins; the presence
+    // handler triggers a flush only when this CAS returns true.
     assert!(entry.claim_offline_flush(), "first non-negative wins");
     assert!(
         !entry.claim_offline_flush(),
@@ -629,39 +639,19 @@ fn xep0160_hints_in_error_stanzas_are_ignored() {
 // Server restart durability (locked Q8 = B) — slice (d) follow-up
 // -----------------------------------------------------------------------------
 
-/// Locked Q8 = B: `pending_delivery` rows survive a process restart.
-/// In-process simulation: write + drop the storage handle + reopen
-/// the same in-memory storage pointer (a SQLite file would survive
-/// the process restart in production; the trait contract is the
-/// same).
-///
-/// Note: in-memory SQLite databases are per-handle, so a true
-/// "file-on-disk" round-trip is the integration test for the
-/// libSQL backend. This trait-level test pins the contract that
-/// `list()` returns whatever was inserted.
-#[tokio::test]
-async fn xep0160_pending_delivery_survives_server_restart() {
-    use std::sync::Arc;
-    use waddle_xmpp::pending_delivery::storage::{
-        InMemoryPendingDeliveryStorage, PendingDeliveryStorage,
-    };
-    let storage: Arc<dyn PendingDeliveryStorage> =
-        Arc::new(InMemoryPendingDeliveryStorage::unlimited());
-    let recipient = bare("alice@example.com");
-    storage
-        .insert(transient_row("alice@example.com", "across-restart"))
-        .await
-        .unwrap();
-    // Simulate restart by re-reading via the trait API (file-backed
-    // backends — Database{Sqlite,Postgres} — exercise the same
-    // contract; the in-memory backend models the trait surface).
-    let rows = storage.list(&recipient).await.unwrap();
-    assert_eq!(
-        rows.len(),
-        1,
-        "row visible across the storage handle's lifetime"
-    );
-}
+// XEP-0160 Q8 = B `pending_delivery` rows survive a process restart
+// is covered by the dedicated server-side integration test
+// `pending_delivery::tests::xep0160_pending_delivery_survives_server_restart`
+// in `server/crates/waddle-server/src/pending_delivery.rs`. That test
+// uses a `tempfile`-backed SQLite path: insert → drop the storage
+// handle → reopen the SAME path → assert the row is still there.
+// This is the actual "process restart" semantic.
+//
+// In-memory backends (the default in waddle-xmpp's test fixtures)
+// are per-handle and therefore can't model restart durability —
+// only the file-backed Database backend in waddle-server can. The
+// trait contract is identical, but the durability assertion only
+// holds for backends with on-disk storage.
 
 // XEP-0160 SM session resumability across server restart is covered
 // by the dedicated SM-persistence tests in
@@ -754,25 +744,39 @@ fn xep0160_flush_is_not_copied_via_xep0280_carbons() {
     );
 }
 
-/// Locked final fork #3: `sm_sessions.carbons_enabled` survives
-/// XEP-0198 detach + resume so the resumed session continues to
-/// receive carbon-routed stanzas without re-negotiating XEP-0280
-/// enable.
+/// Locked final fork #3: a connection's XEP-0280 carbons opt-in
+/// must survive XEP-0198 detach so the resumed session continues
+/// receiving carbon-routed stanzas without re-negotiating
+/// `<enable xmlns='urn:xmpp:carbons:2'/>`.
+///
+/// The carbons flag is per-connection and lives on
+/// `ConnectionEntry`, NOT on the `StreamManagementState` (which
+/// only carries SM-stream counters and the unacked queue).
+/// `restore_from_session` therefore correctly does NOT touch the
+/// carbons flag — the websocket bind handler reads
+/// `detached.carbons_enabled` and writes it onto the NEW
+/// `ConnectionEntry` it just created for the resumed transport.
+///
+/// What this test pins (the contract the resume handshake relies on):
+///   1. `to_detached_session` propagates the snapshot's
+///      `carbons_enabled` onto the `DetachedSession`.
+///   2. The value round-trips through the snapshot — flipping the
+///      input flips the output.
+///
+/// The bind-handler side of the handshake (writing the flag onto
+/// the new ConnectionEntry) lives in waddle-server and is exercised
+/// by the SM-resume flow there.
 #[test]
 fn xep0160_sm_resumption_preserves_carbons_enabled_state() {
     use waddle_xmpp::stream_management::{DetachedSessionSnapshot, StreamManagementState};
+
+    // Case 1: carbons enabled at detach → preserved on DetachedSession.
     let mut sm = StreamManagementState::new();
-    sm.enable(
-        "stream-carbons-survives-resume".to_string(),
-        true,
-        Some(300),
-    );
-    let detached = sm
+    sm.enable("stream-carbons-on".to_string(), true, Some(300));
+    let detached_on = sm
         .to_detached_session(DetachedSessionSnapshot {
             user_id: "alice".to_string(),
             jid: full("alice@example.com/laptop"),
-            // The websocket main loop snapshots `conn.carbons_enabled`
-            // into the DetachedSessionSnapshot at detach time.
             carbons_enabled: true,
             roster_interested: true,
             presence_available: true,
@@ -782,20 +786,33 @@ fn xep0160_sm_resumption_preserves_carbons_enabled_state() {
         })
         .expect("session resumable");
     assert!(
-        detached.carbons_enabled,
-        "carbons opt-in survives detach for the resume window"
+        detached_on.carbons_enabled,
+        "carbons-enabled snapshot propagated onto DetachedSession"
     );
-    // Resume the session into a fresh SM state (simulates a new
-    // transport reconnecting via `<resume previd='…'/>`). The
-    // restored session itself carries `carbons_enabled = true` so
-    // the websocket bind handler can write it back into the new
-    // connection's ConnectionEntry without requiring the client to
-    // re-send `<enable xmlns='urn:xmpp:carbons:2'/>`.
-    let mut resumed_sm = StreamManagementState::new();
-    resumed_sm.restore_from_session(&detached);
+
+    // Case 2: carbons disabled at detach → preserved as false (the
+    // round-trip is faithful, not always-true). Without this, a
+    // future regression that always sets carbons_enabled = true on
+    // DetachedSession would silently grant carbons to clients that
+    // never enabled it.
+    let mut sm2 = StreamManagementState::new();
+    sm2.enable("stream-carbons-off".to_string(), true, Some(300));
+    let detached_off = sm2
+        .to_detached_session(DetachedSessionSnapshot {
+            user_id: "alice".to_string(),
+            jid: full("alice@example.com/laptop"),
+            carbons_enabled: false,
+            roster_interested: true,
+            presence_available: true,
+            presence_show: None,
+            presence_status: None,
+            presence_priority: 1,
+        })
+        .expect("session resumable");
     assert!(
-        detached.carbons_enabled,
-        "DetachedSession exposes carbons_enabled for the resume handshake"
+        !detached_off.carbons_enabled,
+        "carbons-disabled snapshot also round-trips faithfully \
+         (no implicit enable on detach)"
     );
 }
 
@@ -843,22 +860,17 @@ fn xep0160_flush_and_mam_emit_same_stanza_id_for_same_message() {
     assert_eq!(stanza_id.attr("by"), Some("alice@example.com"));
 }
 
-/// Locked Q10d: the server is best-efforts. It does NOT filter
-/// duplicates across channels (e.g. SM replay AND pending_delivery
-/// flush of the same stanza). Client-side dedup via XEP-0359
-/// stanza-id is the contract.
-///
-/// This is a structural assertion: there is no
-/// `pending_delivery::dedup_against_sm_replay` API in the codebase,
-/// and `flush_for_resource` is unconditional once `claim_offline_flush`
-/// returns true. Documented here for the XEP-0160 dedicated suite.
-#[test]
-fn xep0160_server_does_not_filter_duplicates_across_channels() {
-    // No assertion needed — the absence of a server-side dedup
-    // path IS the assertion. Any future code that adds one would
-    // need to update this test (and the locked Q10d decision).
-    // The classifier emits routing decisions independently per
-    // intake stanza; the SM replay path replays whatever was
-    // unacked; the pending_delivery flush path flushes whatever
-    // is unclaimed. There is no cross-channel filter by design.
-}
+// Locked Q10d (server is best-efforts; client dedupes via XEP-0359
+// stanza-id) is a structural property of the codebase: there is no
+// `dedup_against_sm_replay` API anywhere, the SM replay path
+// (`stanzas_to_resend`) returns the entire unacked queue
+// unconditionally, and `flush_for_resource` claims + pushes
+// unconditionally once `claim_offline_flush` returns true. The
+// invariant is enforced by code review on any future PR that would
+// introduce server-side cross-channel dedup; an always-passing
+// test here would be a false-green (Codex review on PR #362).
+//
+// The dedup contract IS exercised at the client side via XEP-0359
+// stanza-id matching — see `xep0359_archived_flush_preserves_stanza_id_for_dedupe`
+// in `tests/xep0359_stanza_id.rs` which pins the wire-shape
+// invariant the client dedups against.

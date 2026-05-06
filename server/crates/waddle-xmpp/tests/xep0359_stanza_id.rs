@@ -13,7 +13,7 @@
 //! Citations refer to `xeps/xep-0359.xml` unless otherwise noted.
 
 use chrono::Utc;
-use jid::{BareJid, FullJid, Jid};
+use jid::{BareJid, Jid};
 use waddle_xmpp::pending_delivery::flush::{build_replay_stanza, MaterializedPayload};
 use waddle_xmpp::pending_delivery::{PendingPayload, PendingRow, PendingRowId};
 use waddle_xmpp::protocol::event::{StanzaIdRef, StanzaIdValue};
@@ -22,11 +22,6 @@ use xmpp_parsers::message::{Body, Message, MessageType};
 
 fn bare(s: &str) -> BareJid {
     s.parse().expect("bare jid")
-}
-
-#[allow(dead_code)]
-fn full(s: &str) -> FullJid {
-    s.parse().expect("full jid")
 }
 
 fn dm(from: &str, to: &str, body: &str) -> Message {

@@ -23,7 +23,7 @@
 use chrono::{TimeZone, Utc};
 use jid::{BareJid, Jid};
 use waddle_xmpp::pending_delivery::flush::{build_replay_stanza, MaterializedPayload};
-use waddle_xmpp::pending_delivery::{PendingPayload, PendingRow, PendingRowId, SmSessionId};
+use waddle_xmpp::pending_delivery::{PendingPayload, PendingRow, PendingRowId};
 use waddle_xmpp::xep::NS_DELAY;
 use xmpp_parsers::message::{Body, Message, MessageType};
 
@@ -147,11 +147,10 @@ fn xep0203_delay_lives_in_stanza_payloads_not_body() {
     assert!(delay.is_some(), "delay element appended to payloads");
 }
 
-// SmSessionId import retained for future tests that need to assert
-// the SM-promote → pending_delivery → flush path delay stamp; the
-// classifier-level Q6 promotion tests live in
-// `server/crates/waddle-server/src/sm_promotion.rs::tests`.
-#[allow(dead_code)]
-fn _sm_session_id_witness() -> SmSessionId {
-    SmSessionId::new("witness")
-}
+// SM-promote → pending_delivery → flush path delay stamping is
+// covered by the classifier-level Q6 promotion tests in
+// `server/crates/waddle-server/src/sm_promotion.rs::tests` and the
+// e2e test
+// `pending_delivery::tests::xep0160_promoted_stanzas_carry_original_receipt_time_in_delay`.
+// Those live in the server crate where `flush_for_resource` and the
+// promotion path are reachable.
