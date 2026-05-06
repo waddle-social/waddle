@@ -817,7 +817,11 @@ function extensionServiceCandidates(domain: string, fallbackServiceJid: string, 
 }
 
 function isWaddleExtensionServiceInfo(features: string[]): boolean {
-  return features.includes(NS_WADDLE_EXTENSION_1) && features.includes(NS_ADHOC_COMMANDS);
+  return hasFeature(features, NS_WADDLE_EXTENSION_1) && hasFeature(features, NS_ADHOC_COMMANDS);
+}
+
+function hasFeature(features: string[], expected: string): boolean {
+  return features.some((feature) => feature === expected);
 }
 
 function parseDiscoInfoExtensions(xml: string): Array<{ fields: Array<{ var: string; value?: string; values?: string[] }> }> {
