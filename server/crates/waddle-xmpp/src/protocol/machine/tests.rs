@@ -1,5 +1,7 @@
 use super::*;
+use crate::protocol::handlers::enrichment_dispatch::ENRICHMENT_CALLBACK_SENTINEL;
 use crate::protocol::handlers::ping::PingHandler;
+use crate::protocol::handlers::rich_target_validation::RICH_TARGET_LOOKUP_CALLBACK_SENTINEL;
 use minidom::Element;
 use std::sync::Arc;
 use xmpp_parsers::iq::{Iq, IqType};
