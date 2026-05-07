@@ -1389,8 +1389,57 @@ async fn create_router(
                         Ok(jids) => waddle_xmpp::protocol::session_state::Blocklist::new(jids),
                         Err(error) => {
                             waddle_xmpp::prometheus::increment_sm_promotion_blocklist_failed();
+                            // Dead-letter cap (Qodo finding on PR #410):
+                            // a permanent blocklist-storage failure must
+                            // not retry forever. Reuse the same durable
+                            // attempt counter that the storage-failure
+                            // path uses (issue #209 finding #14) so a
+                            // session that can never load its blocklist
+                            // is eventually drained and stops re-tripping
+                            // every janitor pass.
+                            let attempts = match state
+                                .deps
+                                .protocol
+                                .sm_session_registry
+                                .record_promotion_failure(&session.stream_id)
+                                .await
+                            {
+                                Ok(n) => n,
+                                Err(record_error) => {
+                                    warn!(
+                                        jid = %session.jid,
+                                        error = %error,
+                                        record_error = %record_error,
+                                        "SM janitor: blocklist load failed AND \
+                                         record_promotion_failure also failed; preserving \
+                                         session state for retry"
+                                    );
+                                    continue;
+                                }
+                            };
+                            if attempts >= max_promotion_attempts_from_env() {
+                                waddle_xmpp::prometheus::increment_sm_promotion_dead_lettered();
+                                error!(
+                                    jid = %session.jid,
+                                    stream_id = %session.stream_id,
+                                    attempts,
+                                    error = %error,
+                                    "SM janitor: blocklist load has failed {attempts} times \
+                                     in a row for this session; dead-lettering the durable \
+                                     row to break the retry loop. Unacked stanzas are \
+                                     permanently lost (Qodo finding on PR #410)."
+                                );
+                                state
+                                    .deps
+                                    .protocol
+                                    .sm_session_registry
+                                    .confirm_drained(&session.stream_id)
+                                    .await;
+                                continue;
+                            }
                             warn!(
                                 jid = %session.jid,
+                                attempts,
                                 error = %error,
                                 "SM janitor: blocklist load failed; SKIPPING promotion to \
                                  preserve fail-closed XEP-0191 policy. Durable SM row will \
@@ -1616,51 +1665,63 @@ async fn create_router(
                     .active_sm_stream_ids();
                 let mut live_sessions = detached_live;
                 live_sessions.extend(active_live);
-                let orphans = match state
+                // Orphan-claim release: only runs when there are
+                // orphans to release, and only if the listing query
+                // succeeds. A failure here MUST NOT skip the
+                // unrelated periodic housekeeping below (Qodo
+                // finding on PR #410 — earlier code `continue`d on
+                // both the error path and the empty-orphans path,
+                // suppressing aging + lock-map GC entirely on most
+                // ticks for healthy systems).
+                match state
                     .deps
                     .protocol
                     .pending_delivery_storage
                     .list_orphaned_claims(&live_sessions)
                     .await
                 {
-                    Ok(rows) => rows,
-                    Err(error) => {
-                        warn!(error = %error, "claim-expiry janitor: list_orphaned_claims failed");
-                        continue;
-                    }
-                };
-                if orphans.is_empty() {
-                    continue;
-                }
-                let count = orphans.len();
-                for (row_id, session) in orphans {
-                    if let Err(error) = state
-                        .deps
-                        .protocol
-                        .pending_delivery_storage
-                        .release_row(&row_id)
-                        .await
-                    {
-                        warn!(
-                            row_id = %row_id,
-                            session = %session,
-                            error = %error,
-                            "claim-expiry janitor: release_row failed; row stays \
-                             claimed and will be retried next sweep"
+                    Ok(orphans) if !orphans.is_empty() => {
+                        let count = orphans.len();
+                        for (row_id, session) in orphans {
+                            if let Err(error) = state
+                                .deps
+                                .protocol
+                                .pending_delivery_storage
+                                .release_row(&row_id)
+                                .await
+                            {
+                                warn!(
+                                    row_id = %row_id,
+                                    session = %session,
+                                    error = %error,
+                                    "claim-expiry janitor: release_row failed; row stays \
+                                     claimed and will be retried next sweep"
+                                );
+                            }
+                        }
+                        info!(
+                            count,
+                            "claim-expiry janitor: released orphaned pending_delivery claims"
+                        );
+                        waddle_xmpp::prometheus::add_pending_delivery_orphan_claims_released(
+                            count as u64,
                         );
                     }
+                    Ok(_) => {}
+                    Err(error) => {
+                        warn!(error = %error, "claim-expiry janitor: list_orphaned_claims failed");
+                    }
                 }
-                info!(
-                    count,
-                    "claim-expiry janitor: released orphaned pending_delivery claims"
-                );
-                waddle_xmpp::prometheus::add_pending_delivery_orphan_claims_released(count as u64);
                 // Issue #209 finding #4: piggy-back the per-recipient
                 // insert-lock GC on the same ticker. Backends that
                 // don't track these (in-memory) return 0; the libSQL/
                 // Postgres backend prunes entries with
                 // `Arc::strong_count == 1` so the map can't accumulate
                 // permanently across the process lifetime.
+                //
+                // MUST run on every tick regardless of whether
+                // orphan claims were found, otherwise a healthy
+                // system never reclaims the locks it stops using.
                 let swept = state
                     .deps
                     .protocol
@@ -1676,6 +1737,11 @@ async fn create_router(
                 // older than the configured max age so a permanently-
                 // offline recipient can't wedge their per-recipient
                 // quota and bounce future legitimate senders forever.
+                //
+                // MUST run on every tick regardless of orphan-claim
+                // outcome, otherwise aging never advances on a
+                // healthy system that has no orphans (Qodo finding
+                // on PR #410).
                 let max_age_days = i64::from(pending_delivery_max_age_days_from_env());
                 let cutoff = chrono::Utc::now() - chrono::Duration::days(max_age_days);
                 match state
