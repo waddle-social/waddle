@@ -129,9 +129,9 @@ fn build_offline_delay(
 mod tests {
     use super::*;
     use crate::pending_delivery::{PendingPayload, PendingRow, SmSessionId};
-    use crate::protocol::event::{StanzaIdRef, StanzaIdValue};
     use chrono::TimeZone;
     use jid::{BareJid, Jid};
+    use waddle_xmpp_core::xep0359::StanzaId;
     use xmpp_parsers::message::{Body, MessageType};
 
     fn bare(s: &str) -> BareJid {
@@ -151,14 +151,12 @@ mod tests {
     }
 
     fn archived_row(recipient: &str) -> PendingRow {
+        let archive_jid: jid::Jid = bare(recipient).into();
         PendingRow {
             id: crate::pending_delivery::PendingRowId::fresh(),
             recipient: bare(recipient),
             original_receipt_at: fixed_receipt(),
-            payload: PendingPayload::Archived(StanzaIdRef {
-                by: bare(recipient),
-                id: StanzaIdValue::new("mam-id"),
-            }),
+            payload: PendingPayload::Archived(StanzaId::new("mam-id", archive_jid)),
             flushed_in_session: Some(SmSessionId::new("s1")),
             outbound_sequence: None,
         }

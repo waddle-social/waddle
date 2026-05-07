@@ -24,13 +24,13 @@ use crate::pending_delivery::PendingPayload;
 use crate::protocol::dm_routing::{
     classify_dm_intake, DmRouting, OnlineResources, PendingDecision,
 };
-use crate::protocol::event::{OutboundEvent, StanzaIdRef, StanzaIdValue};
+use crate::protocol::event::OutboundEvent;
 use crate::protocol::message_context::MessageContext;
 use crate::protocol::session_state::Locality;
 use crate::protocol::traits::{HandlerOutcome, MessageHandler};
 use chrono::Utc;
 use jid::Jid;
-use waddle_xmpp_core::xep0359::extract_stanza_id_by;
+use waddle_xmpp_core::xep0359::{extract_stanza_id_by, StanzaId};
 use xmpp_parsers::message::Message;
 
 /// Intake handler for XEP-0160 offline storage.
@@ -102,10 +102,8 @@ impl MessageHandler for OfflineDeliveryHandler {
                         ),
                     }]);
                 };
-                let payload = PendingPayload::Archived(StanzaIdRef {
-                    by: recipient_bare.clone(),
-                    id: StanzaIdValue::new(stanza_id_str),
-                });
+                let payload =
+                    PendingPayload::Archived(StanzaId::new(stanza_id_str, owner_jid.clone()));
                 if message.from.is_none() {
                     return HandlerOutcome::Continue(Vec::new());
                 }

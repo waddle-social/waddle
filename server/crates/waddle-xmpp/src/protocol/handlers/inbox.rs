@@ -31,12 +31,12 @@
 //!   applies.
 
 use crate::inbox::runtime::should_project_message;
-use crate::protocol::event::{OutboundEvent, StanzaIdRef, StanzaIdValue};
+use crate::protocol::event::OutboundEvent;
 use crate::protocol::message_context::MessageContext;
 use crate::protocol::session_state::Locality;
 use crate::protocol::traits::{HandlerOutcome, MessageHandler};
 use jid::{BareJid, Jid};
-use waddle_xmpp_core::xep0359::extract_stanza_id_by;
+use waddle_xmpp_core::xep0359::{extract_stanza_id_by, StanzaId};
 use xmpp_parsers::message::{Message, MessageType};
 
 /// Inbox projection handler.
@@ -111,14 +111,12 @@ fn build(
     local_archive_id: &str,
     increment_unread: bool,
 ) -> OutboundEvent {
+    let archive_jid: Jid = owner.clone().into();
     OutboundEvent::ProjectInbox {
-        owner: owner.clone(),
+        owner,
         peer,
         message: Box::new(message.clone()),
-        archive_ref: StanzaIdRef {
-            by: owner,
-            id: StanzaIdValue::new(local_archive_id),
-        },
+        archive_ref: StanzaId::new(local_archive_id, archive_jid),
         increment_unread,
     }
 }

@@ -20,65 +20,9 @@ use crate::Stanza;
 use chrono::{DateTime, Utc};
 use jid::{BareJid, FullJid};
 use tracing::Level;
+use waddle_xmpp_core::xep0359::{OriginId, StanzaId};
 use xmpp_parsers::iq::Iq;
 use xmpp_parsers::message::Message;
-
-/// XEP-0359 stamped stanza-id value.
-///
-/// Newtype around the opaque id value so a stanza-id cannot be silently
-/// swapped for an origin-id, message id, or any other XMPP identifier
-/// crossing event boundaries. Per XEP-0359 §6 the value itself is
-/// opaque (no internal structure), but the *kind* is type-significant
-/// — typed-payloads hard rule (CLAUDE.md).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct StanzaIdValue(String);
-
-impl StanzaIdValue {
-    /// Wrap an opaque id value coming from an [`super::id_gen::IdGenerator`]
-    /// or from a parsed XEP-0359 `<stanza-id/>` element.
-    pub fn new(value: impl Into<String>) -> Self {
-        Self(value.into())
-    }
-
-    /// Borrow the underlying value.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl std::fmt::Display for StanzaIdValue {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-/// XEP-0359 client-supplied origin-id value.
-///
-/// Newtype companion to [`StanzaIdValue`] for the same reasons; an
-/// origin-id is owned by the originating client and is a different
-/// identity space from the server-stamped stanza-id, so it must not be
-/// confused at handler/storage boundaries.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct OriginIdValue(String);
-
-impl OriginIdValue {
-    /// Wrap an origin-id value parsed from a XEP-0359 `<origin-id/>`
-    /// element.
-    pub fn new(value: impl Into<String>) -> Self {
-        Self(value.into())
-    }
-
-    /// Borrow the underlying value.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl std::fmt::Display for OriginIdValue {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
 
 /// Reference to a previously-archived message.
 ///
@@ -89,7 +33,8 @@ impl std::fmt::Display for OriginIdValue {
 ///
 /// - [`MessageRef::StanzaId`] is keyed on `(archive, id)` — what
 ///   XEP-0359 §5 stamps and what XEP-0424 retractions / XEP-0461 replies
-///   reference.
+///   reference. Carries the canonical [`StanzaId`] so the stamped id is
+///   inseparable from its assigning archive (`by`) — see issue #329.
 /// - [`MessageRef::OriginId`] is keyed on `(sender, origin_id)` — what
 ///   XEP-0359 §3 origin-ids carry and what XEP-0308 corrections may use as
 ///   a fallback when the original message hasn't yet been seen by stanza-id.
@@ -97,20 +42,18 @@ impl std::fmt::Display for OriginIdValue {
 pub enum MessageRef {
     /// XEP-0359 stable stanza-id, scoped to its stamping archive.
     StanzaId {
-        /// `by=` of the stamping archive (user bare JID for 1:1, room JID
-        /// for groupchat).
-        by: BareJid,
-        /// The stamped opaque id value (typed via [`StanzaIdValue`] so
-        /// it cannot be confused with an origin-id at call boundaries).
-        id: StanzaIdValue,
+        /// The canonical [`StanzaId`] — opaque id paired with its
+        /// stamping archive (`by`). Use the bare archive JID (user bare
+        /// JID for 1:1, room JID for groupchat) when constructing.
+        stanza_id: StanzaId,
     },
     /// XEP-0359 origin-id, scoped to the original sender.
     OriginId {
         /// Bare JID of the original sender.
         sender: BareJid,
-        /// The client-supplied opaque origin-id value (typed via
-        /// [`OriginIdValue`]).
-        origin_id: OriginIdValue,
+        /// The client-supplied opaque origin-id value (canonical
+        /// [`OriginId`] from `waddle-xmpp-core`).
+        origin_id: OriginId,
     },
 }
 
@@ -125,22 +68,6 @@ pub enum CarbonKind {
     Received,
 }
 
-/// Typed reference to a stanza-id stamped by a specific archive.
-///
-/// Identical shape to [`MessageRef::StanzaId`] but kept separate because
-/// `StanzaIdRef` is an output (e.g. an inbox row links to its archived
-/// counterpart) whereas `MessageRef` is an input (a handler asks the
-/// archive to look up something).
-#[derive(Debug, Clone)]
-pub struct StanzaIdRef {
-    /// `by=` of the stamping archive.
-    pub by: BareJid,
-    /// The stamped opaque id value, typed via [`StanzaIdValue`] so it
-    /// cannot be confused with an origin-id at handler / storage
-    /// boundaries.
-    pub id: StanzaIdValue,
-}
-
 /// Placeholder for the typed archived-message payload from issue #228.
 ///
 /// PR1 of issue #229 reserves the variant slots for the
@@ -150,8 +77,9 @@ pub struct StanzaIdRef {
 /// public surface stays grep-able.
 #[derive(Debug, Clone)]
 pub struct ArchivedMessage {
-    /// XEP-0359 stamped stanza-id.
-    pub stanza_id: StanzaIdRef,
+    /// XEP-0359 stamped stanza-id (canonical [`StanzaId`] from
+    /// `waddle-xmpp-core`).
+    pub stanza_id: StanzaId,
     /// The archived message stanza, typed.
     pub message: Box<Message>,
     /// XEP-0424 tombstone state — `true` when this archive entry has
@@ -408,7 +336,10 @@ pub enum OutboundEvent {
         owner: BareJid,
         peer: BareJid,
         message: Box<Message>,
-        archive_ref: StanzaIdRef,
+        /// Canonical [`StanzaId`] linking the inbox row to its archived
+        /// counterpart so clients can pivot to the MAM entry using the
+        /// same XEP-0359 stanza-id space.
+        archive_ref: StanzaId,
         increment_unread: bool,
     },
     /// XEP-0045 §8.1 subject-change persistence. Emitted by the room

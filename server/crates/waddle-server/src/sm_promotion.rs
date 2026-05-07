@@ -255,10 +255,10 @@ async fn promote_one(
                         .await;
                     }
                 };
-            PendingPayload::Archived(waddle_xmpp::protocol::event::StanzaIdRef {
-                by: recipient_bare,
-                id: waddle_xmpp::protocol::event::StanzaIdValue::new(stanza_id),
-            })
+            PendingPayload::Archived(waddle_xmpp_core::xep0359::StanzaId::new(
+                stanza_id,
+                recipient_jid,
+            ))
         }
         PendingDecision::Transient => PendingPayload::Transient(Box::new(message.clone())),
         PendingDecision::None => unreachable!("guarded above"),
