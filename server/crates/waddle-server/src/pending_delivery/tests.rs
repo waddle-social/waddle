@@ -1230,6 +1230,7 @@ async fn xep0160_promoted_stanzas_carry_original_receipt_time_in_delay() {
         &registry,
         &storage,
         &waddle_xmpp::protocol::session_state::Blocklist::empty(),
+        "example.com",
     )
     .await;
     assert_eq!(summary.queued, 1);
