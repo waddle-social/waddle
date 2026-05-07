@@ -38,9 +38,9 @@ use waddle_xmpp::pending_delivery::storage::{PendingDeliveryStorage, PendingStor
 use waddle_xmpp::pending_delivery::{
     InsertOutcome, PendingPayload, PendingRow, PendingRowId, QuotaPolicy, SmSessionId,
 };
-use waddle_xmpp::protocol::event::{StanzaIdRef, StanzaIdValue};
 use waddle_xmpp::registry::{ConnectionRegistry, SendResult};
 use waddle_xmpp::Stanza;
+use waddle_xmpp_core::xep0359::StanzaId;
 
 use crate::db::{Database, DatabaseConfig, DatabaseDriver, IntoParams};
 
@@ -296,16 +296,13 @@ where
 /// [`NullArchiveResolver`] when only Transient rows are exercised.
 #[async_trait::async_trait]
 pub trait ArchiveResolver: Send + Sync {
-    /// Read the archived stanza by recipient bare JID + typed XEP-0359
-    /// stanza-id. Returns the typed [`xmpp_parsers::message::Message`]
-    /// reconstructed from the MAM row; returns `None` on miss or any
-    /// non-fatal lookup failure (the caller treats this as a poison
-    /// pill and drops the `pending_delivery` row).
-    async fn resolve(
-        &self,
-        archive_jid: &BareJid,
-        stanza_id: &waddle_xmpp::protocol::event::StanzaIdValue,
-    ) -> Option<xmpp_parsers::message::Message>;
+    /// Read the archived stanza by canonical XEP-0359 [`StanzaId`]
+    /// (`{ id, by }`). Returns the typed
+    /// [`xmpp_parsers::message::Message`] reconstructed from the MAM
+    /// row; returns `None` on miss or any non-fatal lookup failure
+    /// (the caller treats this as a poison pill and drops the
+    /// `pending_delivery` row).
+    async fn resolve(&self, stanza_id: &StanzaId) -> Option<xmpp_parsers::message::Message>;
 }
 
 /// MAM-backed resolver for production use.
@@ -315,14 +312,15 @@ pub struct MamArchiveResolver {
 
 #[async_trait::async_trait]
 impl ArchiveResolver for MamArchiveResolver {
-    async fn resolve(
-        &self,
-        archive_jid: &BareJid,
-        stanza_id: &waddle_xmpp::protocol::event::StanzaIdValue,
-    ) -> Option<xmpp_parsers::message::Message> {
+    async fn resolve(&self, stanza_id: &StanzaId) -> Option<xmpp_parsers::message::Message> {
+        // MAM lookup keys on the archive's *bare* JID — XEP-0313 §5
+        // archives are per-user / per-room (BareJid), and the canonical
+        // `StanzaId.by` Jid carries that information (the MAM writer
+        // always stamps with a bare-form Jid).
+        let archive_bare = stanza_id.by.to_bare();
         let archived = match self
             .mam_storage
-            .get_message_by_archive_or_stanza_id(archive_jid, stanza_id.as_str())
+            .get_message_by_archive_or_stanza_id(&archive_bare, stanza_id.as_str())
             .await
         {
             Ok(Some(archived)) => archived,
@@ -330,7 +328,7 @@ impl ArchiveResolver for MamArchiveResolver {
             Err(error) => {
                 warn!(
                     error = %error,
-                    archive_jid = %archive_jid,
+                    archive_jid = %archive_bare,
                     stanza_id = %stanza_id,
                     "MAM lookup failed during flush"
                 );
@@ -353,11 +351,7 @@ pub struct NullArchiveResolver;
 
 #[async_trait::async_trait]
 impl ArchiveResolver for NullArchiveResolver {
-    async fn resolve(
-        &self,
-        _archive_jid: &BareJid,
-        _stanza_id: &waddle_xmpp::protocol::event::StanzaIdValue,
-    ) -> Option<xmpp_parsers::message::Message> {
+    async fn resolve(&self, _stanza_id: &StanzaId) -> Option<xmpp_parsers::message::Message> {
         None
     }
 }
@@ -368,10 +362,8 @@ where
 {
     match &row.payload {
         PendingPayload::Transient(_) => MaterializedPayload::from_transient(row),
-        PendingPayload::Archived(stanza_id_ref) => {
-            let archived = resolver
-                .resolve(&stanza_id_ref.by, &stanza_id_ref.id)
-                .await?;
+        PendingPayload::Archived(stanza_id) => {
+            let archived = resolver.resolve(stanza_id).await?;
             Some(MaterializedPayload::Archived(Box::new(archived)))
         }
     }
@@ -648,10 +640,8 @@ impl DatabasePendingDeliveryStorage {
                 let id_str = archive_stanza_id.ok_or_else(|| {
                     PendingStorageError::Other("archived row missing archive_stanza_id".into())
                 })?;
-                PendingPayload::Archived(StanzaIdRef {
-                    by,
-                    id: StanzaIdValue::new(id_str),
-                })
+                let archive_jid: jid::Jid = by.into();
+                PendingPayload::Archived(StanzaId::new(id_str, archive_jid))
             }
             PAYLOAD_KIND_TRANSIENT => {
                 let xml = transient_xml.ok_or_else(|| {
@@ -707,10 +697,10 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
         };
         let receipt_ms = row.original_receipt_at.timestamp_millis();
         let (kind, by, sid, xml) = match &row.payload {
-            PendingPayload::Archived(stanza_id_ref) => (
+            PendingPayload::Archived(stanza_id) => (
                 PAYLOAD_KIND_ARCHIVED,
-                Some(stanza_id_ref.by.to_string()),
-                Some(stanza_id_ref.id.as_str().to_string()),
+                Some(stanza_id.by.to_string()),
+                Some(stanza_id.id.clone()),
                 None,
             ),
             PendingPayload::Transient(message) => {
@@ -1198,10 +1188,10 @@ mod tests {
                 1_700_000_000_000,
             )
             .unwrap(),
-            payload: PendingPayload::Archived(StanzaIdRef {
-                by: recipient.clone(),
-                id: StanzaIdValue::new("mam-id"),
-            }),
+            payload: PendingPayload::Archived(StanzaId::new(
+                "mam-id",
+                jid::Jid::from(recipient.clone()),
+            )),
             flushed_in_session: None,
             outbound_sequence: None,
         };

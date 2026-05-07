@@ -97,8 +97,7 @@ use waddle_xmpp::muc::room_registry_actor::{GetRoom, RoomRegistryActor};
 use waddle_xmpp::parse_managed_room_jid;
 use waddle_xmpp::parser::{message_to_string, stanza_to_string};
 use waddle_xmpp::protocol::event::{
-    ArchivedMessage as ProtocolArchivedMessage, GroupchatThreadProjection, InboundEvent,
-    MessageRef, StanzaIdRef, StanzaIdValue,
+    ArchivedMessage as ProtocolArchivedMessage, GroupchatThreadProjection, InboundEvent, MessageRef,
 };
 use waddle_xmpp::protocol::id_gen::UuidV4Generator;
 use waddle_xmpp::protocol::room::{
@@ -2338,14 +2337,14 @@ async fn lookup_archived_message(
         return None;
     };
     let lookup = match reference {
-        MessageRef::StanzaId { id, .. } => {
+        MessageRef::StanzaId { stanza_id } => {
             // Strict stanza-id match: `get_message_by_message_id`
             // matches only the `stanza_id` column (not `origin_id`)
             // so the OR-collision identified in #229 PR8 review
             // (origin-id colliding with someone else's stanza-id)
             // can't return the wrong row.
             mam_storage
-                .get_message_by_message_id(archive, id.as_str())
+                .get_message_by_message_id(archive, stanza_id.as_str())
                 .await
         }
         MessageRef::OriginId { sender, origin_id } => {
@@ -2447,10 +2446,8 @@ fn project_archived_row(
     // wire `<message id>`. Follow-up handlers target the archived entry
     // by this canonical id; preferring `row.stanza_id.id` (the wire id)
     // would resolve incorrectly when the two differ.
-    let stanza_id = StanzaIdRef {
-        by: archive.clone(),
-        id: StanzaIdValue::new(&row.id),
-    };
+    let archive_jid: jid::Jid = archive.clone().into();
+    let stanza_id = waddle_xmpp_core::xep0359::StanzaId::new(&row.id, archive_jid);
 
     Some(Box::new(ProtocolArchivedMessage {
         stanza_id,
@@ -3611,8 +3608,7 @@ mod tests {
         // the archive.
         use waddle_xmpp::inbox::storage::InMemoryInboxStorage;
         use waddle_xmpp::mam::storage::InMemoryMamStorage;
-        use waddle_xmpp::protocol::event::{StanzaIdRef, StanzaIdValue};
-        use waddle_xmpp_core::xep0359::build_stanza_id_element;
+        use waddle_xmpp_core::xep0359::{build_stanza_id_element, StanzaId};
         let registry = ConnectionRegistry::new();
         let mam: Arc<dyn MamStorage> = Arc::new(InMemoryMamStorage::new());
         let inbox_concrete = Arc::new(InMemoryInboxStorage::new());
@@ -3643,10 +3639,7 @@ mod tests {
                 owner: alice.clone(),
                 peer: bob.clone(),
                 message: Box::new(msg),
-                archive_ref: StanzaIdRef {
-                    by: alice.clone(),
-                    id: StanzaIdValue::new(canonical_id),
-                },
+                archive_ref: StanzaId::new(canonical_id, jid::Jid::from(alice.clone())),
                 increment_unread: false,
             },
         ];
@@ -3830,7 +3823,7 @@ mod tests {
     async fn inbox_project_writes_owner_peer_keyed_row_with_typed_archive_ref() {
         use waddle_xmpp::inbox::storage::InMemoryInboxStorage;
         use waddle_xmpp::mam::storage::InMemoryMamStorage;
-        use waddle_xmpp::protocol::event::{StanzaIdRef, StanzaIdValue};
+        use waddle_xmpp_core::xep0359::StanzaId;
 
         let registry = ConnectionRegistry::new();
         let mam: Arc<dyn MamStorage> = Arc::new(InMemoryMamStorage::new());
@@ -3847,10 +3840,7 @@ mod tests {
             owner: owner.clone(),
             peer: peer.clone(),
             message: Box::new(msg),
-            archive_ref: StanzaIdRef {
-                by: owner.clone(),
-                id: StanzaIdValue::new("alice-archive-1"),
-            },
+            archive_ref: StanzaId::new("alice-archive-1", jid::Jid::from(owner.clone())),
             increment_unread: false,
         }];
         let _outcome = interpret(events, &deps).await;
@@ -3870,7 +3860,7 @@ mod tests {
     async fn inbox_project_increment_unread_bumps_recipient_count() {
         use waddle_xmpp::inbox::storage::InMemoryInboxStorage;
         use waddle_xmpp::mam::storage::InMemoryMamStorage;
-        use waddle_xmpp::protocol::event::{StanzaIdRef, StanzaIdValue};
+        use waddle_xmpp_core::xep0359::StanzaId;
 
         let registry = ConnectionRegistry::new();
         let mam: Arc<dyn MamStorage> = Arc::new(InMemoryMamStorage::new());
@@ -3886,10 +3876,7 @@ mod tests {
             owner: owner.clone(),
             peer: peer.clone(),
             message: Box::new(msg),
-            archive_ref: StanzaIdRef {
-                by: owner.clone(),
-                id: StanzaIdValue::new("bob-archive-1"),
-            },
+            archive_ref: StanzaId::new("bob-archive-1", jid::Jid::from(owner.clone())),
             increment_unread: true,
         }];
         let _outcome = interpret(events, &deps).await;
@@ -3909,7 +3896,7 @@ mod tests {
     async fn xep_0424_lookup_archived_message_by_stanza_id_feeds_archived_loaded_back() {
         use waddle_xmpp::mam::{ArchivedMessage, InMemoryMamStorage};
         use waddle_xmpp::protocol::event::CallbackId;
-        use waddle_xmpp::protocol::event::StanzaIdValue;
+        use waddle_xmpp_core::xep0359::StanzaId;
 
         let registry = ConnectionRegistry::new();
         let mam: Arc<dyn MamStorage> = Arc::new(InMemoryMamStorage::new());
@@ -3946,8 +3933,7 @@ mod tests {
             id: CallbackId(7),
             archive: archive_jid.clone(),
             reference: MessageRef::StanzaId {
-                by: archive_jid.clone(),
-                id: StanzaIdValue::new("canon-A1"),
+                stanza_id: StanzaId::new("canon-A1", jid::Jid::from(archive_jid.clone())),
             },
         }];
         let outcome = interpret(events, &deps).await;
@@ -3957,8 +3943,8 @@ mod tests {
             InboundEvent::ArchivedMessageLoaded { id, result } => {
                 assert_eq!(id, CallbackId(7));
                 let archived = result.expect("row resolved");
-                assert_eq!(archived.stanza_id.id.as_str(), "canon-A1");
-                assert_eq!(archived.stanza_id.by, archive_jid);
+                assert_eq!(archived.stanza_id.as_str(), "canon-A1");
+                assert_eq!(archived.stanza_id.by, jid::Jid::from(archive_jid.clone()));
                 assert!(!archived.tombstoned);
                 assert_eq!(
                     archived.message.bodies.get("").map(|b| b.0.clone()),
@@ -3974,7 +3960,7 @@ mod tests {
     async fn xep_0424_lookup_archived_message_not_found_feeds_none_back() {
         use waddle_xmpp::mam::InMemoryMamStorage;
         use waddle_xmpp::protocol::event::CallbackId;
-        use waddle_xmpp::protocol::event::StanzaIdValue;
+        use waddle_xmpp_core::xep0359::StanzaId;
 
         let registry = ConnectionRegistry::new();
         let mam: Arc<dyn MamStorage> = Arc::new(InMemoryMamStorage::new());
@@ -3987,8 +3973,7 @@ mod tests {
             id: CallbackId(11),
             archive: archive_jid.clone(),
             reference: MessageRef::StanzaId {
-                by: archive_jid,
-                id: StanzaIdValue::new("never-stamped"),
+                stanza_id: StanzaId::new("never-stamped", jid::Jid::from(archive_jid)),
             },
         }];
         let outcome = interpret(events, &deps).await;
@@ -4011,7 +3996,8 @@ mod tests {
         // post-filter on `sender` must pick the alice-authored row,
         // not the bob-authored one.
         use waddle_xmpp::mam::{ArchivedMessage, InMemoryMamStorage};
-        use waddle_xmpp::protocol::event::{CallbackId, OriginIdValue};
+        use waddle_xmpp::protocol::event::CallbackId;
+        use waddle_xmpp_core::xep0359::OriginId;
 
         let registry = ConnectionRegistry::new();
         let mam: Arc<dyn MamStorage> = Arc::new(InMemoryMamStorage::new());
@@ -4075,7 +4061,7 @@ mod tests {
             archive: archive_jid.clone(),
             reference: MessageRef::OriginId {
                 sender: alice_bare.clone(),
-                origin_id: OriginIdValue::new("collision"),
+                origin_id: OriginId::new("collision"),
             },
         }];
         let outcome = interpret(events, &deps).await;
@@ -4106,7 +4092,8 @@ mod tests {
         // requested -> result MUST be None (handler will treat as
         // <item-not-found>).
         use waddle_xmpp::mam::{ArchivedMessage, InMemoryMamStorage};
-        use waddle_xmpp::protocol::event::{CallbackId, OriginIdValue};
+        use waddle_xmpp::protocol::event::CallbackId;
+        use waddle_xmpp_core::xep0359::OriginId;
 
         let registry = ConnectionRegistry::new();
         let mam: Arc<dyn MamStorage> = Arc::new(InMemoryMamStorage::new());
@@ -4143,7 +4130,7 @@ mod tests {
             archive: archive_jid,
             reference: MessageRef::OriginId {
                 sender: charlie_bare,
-                origin_id: OriginIdValue::new("oid-1"),
+                origin_id: OriginId::new("oid-1"),
             },
         }];
         let outcome = interpret(events, &deps).await;
@@ -4165,7 +4152,8 @@ mod tests {
         // ONLY), so a row whose `origin_id` happens to equal the
         // requested stanza-id MUST NOT be returned.
         use waddle_xmpp::mam::{ArchivedMessage, InMemoryMamStorage};
-        use waddle_xmpp::protocol::event::{CallbackId, StanzaIdValue};
+        use waddle_xmpp::protocol::event::CallbackId;
+        use waddle_xmpp_core::xep0359::StanzaId;
 
         let registry = ConnectionRegistry::new();
         let mam: Arc<dyn MamStorage> = Arc::new(InMemoryMamStorage::new());
@@ -4202,8 +4190,7 @@ mod tests {
             id: CallbackId(41),
             archive: archive_jid.clone(),
             reference: MessageRef::StanzaId {
-                by: archive_jid,
-                id: StanzaIdValue::new("queried-id"),
+                stanza_id: StanzaId::new("queried-id", jid::Jid::from(archive_jid)),
             },
         }];
         let outcome = interpret(events, &deps).await;
@@ -4226,7 +4213,7 @@ mod tests {
             InMemoryMamStorage, RichMessageId,
         };
         use waddle_xmpp::protocol::event::CallbackId;
-        use waddle_xmpp::protocol::event::StanzaIdValue;
+        use waddle_xmpp_core::xep0359::StanzaId;
 
         let registry = ConnectionRegistry::new();
         let mam: Arc<dyn MamStorage> = Arc::new(InMemoryMamStorage::new());
@@ -4268,8 +4255,7 @@ mod tests {
             id: CallbackId(13),
             archive: archive_jid.clone(),
             reference: MessageRef::StanzaId {
-                by: archive_jid,
-                id: StanzaIdValue::new("tomb-1"),
+                stanza_id: StanzaId::new("tomb-1", jid::Jid::from(archive_jid)),
             },
         }];
         let outcome = interpret(events, &deps).await;

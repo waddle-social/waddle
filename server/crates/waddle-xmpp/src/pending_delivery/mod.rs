@@ -27,9 +27,9 @@
 pub mod flush;
 pub mod storage;
 
-use crate::protocol::event::StanzaIdRef;
 use chrono::{DateTime, Utc};
 use jid::BareJid;
+use waddle_xmpp_core::xep0359::StanzaId;
 use xmpp_parsers::message::Message;
 
 /// Opaque per-row identifier for a `pending_delivery` row.
@@ -102,8 +102,8 @@ impl std::fmt::Display for SmSessionId {
 #[derive(Debug, Clone)]
 pub enum PendingPayload {
     /// Pointer into MAM. The flush handler reads the archived message
-    /// by `StanzaIdRef` and pushes that.
-    Archived(StanzaIdRef),
+    /// by the canonical [`StanzaId`] (`{ id, by }`) and pushes that.
+    Archived(StanzaId),
     /// Inline payload — `<no-permanent-store/>` stanzas have no MAM row.
     /// Boxed so the size of [`PendingPayload`] doesn't blow up.
     Transient(Box<Message>),
@@ -192,10 +192,8 @@ mod tests {
 
     #[test]
     fn pending_payload_classification() {
-        let archived = PendingPayload::Archived(StanzaIdRef {
-            by: "alice@example.com".parse().unwrap(),
-            id: crate::protocol::event::StanzaIdValue::new("opaque-id"),
-        });
+        let archive_jid: jid::Jid = "alice@example.com".parse().unwrap();
+        let archived = PendingPayload::Archived(StanzaId::new("opaque-id", archive_jid));
         assert!(archived.is_archived());
         assert!(!archived.is_transient());
 

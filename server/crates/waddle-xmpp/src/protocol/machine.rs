@@ -1118,13 +1118,14 @@ mod tests {
     // pipeline resumes and runs to completion.
     // ----------------------------------------------------------------
 
-    use crate::protocol::event::{ArchivedMessage, StanzaIdRef, StanzaIdValue};
+    use crate::protocol::event::ArchivedMessage;
     use crate::protocol::handlers::canonicalize::CanonicalizeHandler;
     use crate::protocol::handlers::enrichment_dispatch::EnrichmentDispatchHandler;
     use crate::protocol::handlers::rich_target_validation::RichTargetValidationHandler;
     use crate::protocol::message_context::MessageContext;
     use crate::protocol::traits::{HandlerOutcome, MessageHandler};
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use waddle_xmpp_core::xep0359::StanzaId;
     use xmpp_parsers::message::{Body, Message, MessageType};
 
     fn ready_machine_with_dispatcher(
@@ -1262,10 +1263,10 @@ mod tests {
             chat_with_body("alice@example.com/web", "bob@example.com", "original text");
         archived_msg.id = Some("orig-msg-1".to_string());
         let archived = ArchivedMessage {
-            stanza_id: StanzaIdRef {
-                by: "alice@example.com".parse().expect("bare"),
-                id: StanzaIdValue::new("archive-A1"),
-            },
+            stanza_id: StanzaId::new(
+                "archive-A1",
+                "alice@example.com".parse::<jid::Jid>().expect("jid"),
+            ),
             message: Box::new(archived_msg),
             tombstoned: false,
         };
@@ -1367,10 +1368,10 @@ mod tests {
             chat_with_body("mallory@example.com/web", "bob@example.com", "imposter");
         archived_msg.id = Some("orig-msg-1".to_string());
         let archived = ArchivedMessage {
-            stanza_id: StanzaIdRef {
-                by: "alice@example.com".parse().expect("bare"),
-                id: StanzaIdValue::new("archive-X"),
-            },
+            stanza_id: StanzaId::new(
+                "archive-X",
+                "alice@example.com".parse::<jid::Jid>().expect("jid"),
+            ),
             message: Box::new(archived_msg),
             tombstoned: false,
         };
@@ -1461,10 +1462,7 @@ mod tests {
         let mut archived_msg = chat_with_body("alice@example.com/web", "bob@example.com", "orig");
         archived_msg.id = Some("orig-msg-1".to_string());
         let archived = ArchivedMessage {
-            stanza_id: StanzaIdRef {
-                by: "alice@example.com".parse().expect("bare"),
-                id: StanzaIdValue::new("A1"),
-            },
+            stanza_id: StanzaId::new("A1", "alice@example.com".parse::<jid::Jid>().expect("jid")),
             message: Box::new(archived_msg),
             tombstoned: false,
         };

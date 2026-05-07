@@ -51,8 +51,8 @@ mod wire_trace_l4_tests;
 
 pub use dispatch::{MessageDispatchOutcome, MessageDispatchTermination, StanzaDispatcher};
 pub use event::{
-    ArchivedMessage, CallbackId, CarbonKind, InboundEvent, MessageRef, OriginIdValue,
-    OutboundEvent, StanzaContext, StanzaIdRef, StanzaIdValue, TimerId,
+    ArchivedMessage, CallbackId, CarbonKind, InboundEvent, MessageRef, OutboundEvent,
+    StanzaContext, TimerId,
 };
 pub use frame::InboundFrame;
 pub use id_gen::{CounterIdGenerator, FixedIdGenerator, IdGenerator, UuidV4Generator};

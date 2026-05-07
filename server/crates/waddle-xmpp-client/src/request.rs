@@ -22,7 +22,18 @@ impl fmt::Display for RequestId {
     }
 }
 
-/// Typed wrapper for stanza ids used in IQ correlation.
+/// Typed wrapper for the client-side IQ-correlation token (the
+/// `<iq id='...'/>` value the client puts on outbound IQs and matches
+/// replies against).
+///
+/// **This is NOT a XEP-0359 server-stamped `<stanza-id/>`.** Per
+/// XEP-0359 §3 a stanza-id is server-stamped and inseparable from its
+/// assigning archive (`by`); the canonical workspace shape for that is
+/// [`waddle_xmpp_core::xep0359::StanzaId`]. The client-side
+/// correlation id has no `by` context (the client cannot stamp itself)
+/// and carries a non-emptiness invariant that the server-stamped type
+/// does not enforce — see issue #329 for the full rationale on why
+/// these two types stay distinct.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct StanzaId(String);
 
