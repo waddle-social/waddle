@@ -11,6 +11,8 @@ mod state;
 mod topology;
 mod trace;
 #[cfg(test)]
+mod xmpp_account_state;
+#[cfg(test)]
 mod xmpp_auth_state;
 mod xmpp_channels;
 #[cfg(test)]

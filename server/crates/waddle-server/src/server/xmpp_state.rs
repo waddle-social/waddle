@@ -8,14 +8,14 @@ use tracing::{debug, warn};
 #[cfg(test)]
 use waddle_xmpp::inbox::{InboxEntry, storage::InboxStorage};
 #[cfg(test)]
-use waddle_xmpp::{Session as XmppSession, UserDirectoryEntry, XmppError};
+use waddle_xmpp::{Session as XmppSession, XmppError};
 
 #[cfg(test)]
-use crate::auth::{NativeUserStore, RegisterRequest, SessionManager, localpart_to_jid};
+use crate::auth::{NativeUserStore, SessionManager};
 #[cfg(test)]
 use crate::db::Database;
 #[cfg(test)]
-use crate::db::actor::{DbActor, DbQuery, DbQueryOne};
+use crate::db::actor::{DbActor, DbQueryOne};
 #[cfg(test)]
 use crate::db::actor::{DbExecute, GetDatabase};
 #[cfg(test)]
@@ -29,32 +29,7 @@ use kameo::actor::ActorRef;
 #[cfg(test)]
 use std::sync::Arc;
 
-#[cfg(test)]
-use crate::server::bootstrap_membership::{BootstrapMembershipConfig, provision_user_membership};
-
 pub(crate) use super::xmpp_channels::{XmppChannelRecord, get_xmpp_channel, list_xmpp_channels};
-
-#[cfg(test)]
-fn db_string(
-    row: &crate::db::actor::RowValues,
-    index: usize,
-    name: &str,
-) -> Result<String, String> {
-    row_value(row, index)
-        .and_then(ValueExt::as_string)
-        .map_err(|e| format!("Failed to get {name}: {e}"))
-}
-
-#[cfg(test)]
-fn db_optional_string(
-    row: &crate::db::actor::RowValues,
-    index: usize,
-    name: &str,
-) -> Result<Option<String>, String> {
-    row_value(row, index)
-        .and_then(ValueExt::as_optional_string)
-        .map_err(|e| format!("Failed to get {name}: {e}"))
-}
 
 /// XMPP application state that bridges to waddle-server services.
 ///
@@ -229,55 +204,9 @@ impl waddle_xmpp::AppState for XmppAppState {
         &self,
         query: &str,
         limit: usize,
-    ) -> Result<Vec<UserDirectoryEntry>, XmppError> {
-        let pattern = format!("%{}%", query.trim());
-        let rows = self
-            .global_db_actor
-            .ask(DbQuery {
-                sql: r#"
-                    SELECT username, xmpp_localpart, display_name, avatar_url
-                    FROM users
-                    WHERE username LIKE ? OR xmpp_localpart LIKE ? OR display_name LIKE ?
-                    ORDER BY username ASC
-                    LIMIT ?
-                "#
-                .to_string(),
-                params: vec![
-                    pattern.as_str().into(),
-                    pattern.as_str().into(),
-                    pattern.as_str().into(),
-                    (limit as i64).into(),
-                ],
-            })
+    ) -> Result<Vec<waddle_xmpp::UserDirectoryEntry>, XmppError> {
+        super::xmpp_account_state::search_users(&self.global_db_actor, &self.domain, query, limit)
             .await
-            .map_err(|e| XmppError::internal(format!("Failed to search users: {}", e)))?;
-
-        rows.iter()
-            .map(|row| {
-                let username = db_string(row, 0, "username").map_err(|e| {
-                    XmppError::internal(format!("Failed to decode username: {}", e))
-                })?;
-                let localpart = db_string(row, 1, "xmpp_localpart").map_err(|e| {
-                    XmppError::internal(format!("Failed to decode xmpp_localpart: {}", e))
-                })?;
-                let display_name = db_optional_string(row, 2, "display_name").map_err(|e| {
-                    XmppError::internal(format!("Failed to decode display_name: {}", e))
-                })?;
-                let avatar_url = db_optional_string(row, 3, "avatar_url").map_err(|e| {
-                    XmppError::internal(format!("Failed to decode avatar_url: {}", e))
-                })?;
-                let jid = localpart_to_jid(&localpart, &self.domain)
-                    .map_err(|e| XmppError::internal(format!("Failed to build user JID: {}", e)))?
-                    .parse()
-                    .map_err(|e| XmppError::internal(format!("Failed to parse user JID: {}", e)))?;
-                Ok(UserDirectoryEntry {
-                    jid,
-                    username,
-                    display_name,
-                    avatar_url,
-                })
-            })
-            .collect()
     }
 
     async fn set_room_affiliation(
@@ -304,30 +233,12 @@ impl waddle_xmpp::AppState for XmppAppState {
         &self,
         username: &str,
     ) -> Result<Option<waddle_xmpp::ScramCredentials>, XmppError> {
-        debug!(
-            username = username,
-            domain = %self.domain,
-            "Looking up SCRAM credentials for native user"
-        );
-
-        match self
-            .native_user_store
-            .get_scram_credentials(username, &self.domain)
-            .await
-        {
-            Ok(Some(creds)) => {
-                debug!(username = username, "Found SCRAM credentials");
-                Ok(Some(creds))
-            }
-            Ok(None) => {
-                debug!(username = username, "No SCRAM credentials found");
-                Ok(None)
-            }
-            Err(e) => {
-                warn!(username = username, error = %e, "Failed to lookup SCRAM credentials");
-                Err(XmppError::internal(format!("Database error: {}", e)))
-            }
-        }
+        super::xmpp_account_state::lookup_scram_credentials(
+            &self.native_user_store,
+            &self.domain,
+            username,
+        )
+        .await
     }
 
     /// Register a new native user via XEP-0077 In-Band Registration.
@@ -339,80 +250,25 @@ impl waddle_xmpp::AppState for XmppAppState {
         password: &str,
         email: Option<&str>,
     ) -> Result<(), XmppError> {
-        debug!(
-            username = username,
-            domain = %self.domain,
-            has_email = email.is_some(),
-            "Registering native user via XEP-0077"
-        );
-
-        let request = RegisterRequest {
-            username: username.to_string(),
-            domain: self.domain.clone(),
-            password: password.to_string(),
-            email: email.map(|s| s.to_string()),
-        };
-
-        match self.native_user_store.register(request).await {
-            Ok(user_id) => {
-                let subject_user_id = format!("{}@{}", username, self.domain);
-                provision_user_membership(
-                    &self.permission_actor,
-                    &BootstrapMembershipConfig::from_env(),
-                    &subject_user_id,
-                    username,
-                )
-                .await
-                .map_err(|err| {
-                    XmppError::internal(format!("Failed to provision account membership: {err}"))
-                })?;
-                debug!(
-                    username = username,
-                    user_id = user_id,
-                    "Native user registered successfully"
-                );
-                Ok(())
-            }
-            Err(crate::auth::AuthError::UserAlreadyExists(_)) => {
-                warn!(
-                    username = username,
-                    "Registration failed: user already exists"
-                );
-                Err(XmppError::conflict(Some(format!(
-                    "User '{}' already exists",
-                    username
-                ))))
-            }
-            Err(crate::auth::AuthError::InvalidUsername(msg)) => {
-                warn!(username = username, error = %msg, "Registration failed: invalid username");
-                Err(XmppError::not_acceptable(Some(msg)))
-            }
-            Err(e) => {
-                warn!(username = username, error = %e, "Registration failed");
-                Err(XmppError::internal(format!("Registration failed: {}", e)))
-            }
-        }
+        super::xmpp_account_state::register_native_user(
+            &self.native_user_store,
+            &self.permission_actor,
+            &self.domain,
+            username,
+            password,
+            email,
+        )
+        .await
     }
 
     /// Check if a native user exists.
     async fn native_user_exists(&self, username: &str) -> Result<bool, XmppError> {
-        debug!(
-            username = username,
-            domain = %self.domain,
-            "Checking if native user exists"
-        );
-
-        match self
-            .native_user_store
-            .user_exists(username, &self.domain)
-            .await
-        {
-            Ok(exists) => Ok(exists),
-            Err(e) => {
-                warn!(username = username, error = %e, "Failed to check user existence");
-                Err(XmppError::internal(format!("Database error: {}", e)))
-            }
-        }
+        super::xmpp_account_state::native_user_exists(
+            &self.native_user_store,
+            &self.domain,
+            username,
+        )
+        .await
     }
 
     /// Get the vCard for a user (XEP-0054).
