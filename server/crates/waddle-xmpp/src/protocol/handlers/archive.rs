@@ -112,6 +112,12 @@ pub fn is_archivable(message: &Message) -> bool {
     if message.should_skip_archive() {
         return false;
     }
+    // An explicit `<store/>` hint forces archival even for body-less
+    // stanzas (XEP-0334 §5.4 SHOULD store). Without it, require either
+    // a non-empty body or a substantive archivable payload.
+    if message.has_store() {
+        return true;
+    }
     let has_body = has_substantive_body(message);
     // Skip subject-only messages — XEP-0313 §5.1.3 lists these as
     // non-archivable since they're typically MUC subject changes that
@@ -119,10 +125,19 @@ pub fn is_archivable(message: &Message) -> bool {
     if !message.subjects.is_empty() && !has_body {
         return false;
     }
-    // Require either a non-empty body or a substantive payload (e.g.
-    // a XEP-0424 retraction, XEP-0308 correction, or XEP-0444 reaction). Pure presence-like
-    // messages with no body and no archivable payload are dropped.
     has_body || has_archivable_payload(message)
+}
+
+/// True when the message carries content that justifies a MAM archive
+/// row even without an explicit `<store/>` hint (a non-empty body or a
+/// substantive XEP-0308 / XEP-0424 / XEP-0444 payload).
+///
+/// Public so the DM-intake classifier shares the exact same matrix as
+/// [`is_archivable`] — the two must never disagree, or the classifier
+/// will route stanzas to `pending_delivery` as `Archived` whose MAM row
+/// the archive handler refuses to write (issue #209 finding #1).
+pub fn has_archivable_content(message: &Message) -> bool {
+    has_substantive_body(message) || has_archivable_payload(message)
 }
 
 fn has_substantive_body(message: &Message) -> bool {

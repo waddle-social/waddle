@@ -2088,6 +2088,7 @@ mod tests {
             &registry,
             &storage,
             &waddle_xmpp::protocol::session_state::Blocklist::empty(),
+            "example.com",
         )
         .await;
         assert_eq!(summary.queued, 1);
