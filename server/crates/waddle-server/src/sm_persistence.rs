@@ -562,12 +562,15 @@ impl SmPersistenceStorage for DatabaseSmPersistence {
             crate::db_params![stream_id.as_str().to_string()],
         )
         .await?;
-        // Drop guard then attempt to free the per-stream lock entry.
-        // We have to release the lock first so `Arc::strong_count`
+        // Drop guard AND the local Arc clone so `Arc::strong_count`
         // can settle to 1 (only the DashMap entry holds a clone).
-        // Issue #209 finding #4 — the StreamLockMap was previously
-        // append-only and grew with every distinct session id seen.
+        // Without dropping `lock` here as well, `drop_stream_lock`'s
+        // `strong_count == 1` predicate could never fire (the local
+        // clone keeps the count at ≥2), defeating the StreamLockMap
+        // GC entirely. Issue #209 finding #4 + Qodo finding on PR
+        // #410.
         drop(_guard);
+        drop(lock);
         self.drop_stream_lock(stream_id);
         Ok(())
     }
@@ -1134,6 +1137,42 @@ mod tests {
             .await
             .unwrap()
             .is_empty());
+    }
+
+    /// Issue #209 finding #4 + Qodo finding on PR #410:
+    /// `delete_session` MUST drop its local `Arc` clone of the
+    /// per-stream lock before calling `drop_stream_lock`, or the
+    /// `Arc::strong_count == 1` predicate can never fire and the
+    /// `StreamLockMap` grows unbounded.
+    #[tokio::test]
+    async fn delete_session_releases_stream_lock_entry() {
+        let storage = DatabaseSmPersistence::open(None).await.unwrap();
+        storage
+            .upsert_session(fixture_session("stream-leaky"))
+            .await
+            .unwrap();
+        // Force a lock entry by walking the same path the writers do.
+        storage
+            .append_unacked(fixture_unacked("stream-leaky", 1))
+            .await
+            .unwrap();
+        assert!(
+            storage
+                .stream_locks
+                .contains_key(&SmSessionId::new("stream-leaky")),
+            "append_unacked must populate the stream_locks entry"
+        );
+
+        storage
+            .delete_session(&SmSessionId::new("stream-leaky"))
+            .await
+            .unwrap();
+        assert!(
+            !storage
+                .stream_locks
+                .contains_key(&SmSessionId::new("stream-leaky")),
+            "delete_session must drop its local Arc clone so drop_stream_lock can GC the entry"
+        );
     }
 
     #[tokio::test]
