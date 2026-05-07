@@ -87,11 +87,9 @@ export function tiptapToRichMessage(doc: JSONContent | Record<string, unknown>):
 }
 
 // Conservative URL pattern. Matches `http(s)://` schemes followed by a run of
-// non-whitespace characters, then strips trailing punctuation that is almost
-// always sentence-terminal (`.,;:!?` etc.) so `see https://foo.com.` doesn't
-// produce a reference that ends on the period.
+// non-whitespace characters; the captured run then has trailing punctuation
+// stripped by `stripUrlTrailingPunctuation` below.
 const BARE_URL_PATTERN = /\bhttps?:\/\/[^\s<>"'`]+/gi;
-const TRAILING_PUNCT = /[.,;:!?)\]}'"]+$/;
 
 function autolinkifyBareUrls(state: SerializeState): void {
   if (!state.body) return;
@@ -119,8 +117,7 @@ function autolinkifyBareUrls(state: SerializeState): void {
   let match: RegExpExecArray | null;
   BARE_URL_PATTERN.lastIndex = 0;
   while ((match = BARE_URL_PATTERN.exec(state.body)) !== null) {
-    let raw = match[0];
-    raw = raw.replace(TRAILING_PUNCT, "");
+    const raw = stripUrlTrailingPunctuation(match[0]);
     if (!raw) continue;
 
     const href = safeUri(raw);
@@ -145,6 +142,41 @@ function rangesOverlap(begin: number, end: number, ranges: Array<[number, number
     if (begin < rangeEnd && end > rangeBegin) return true;
   }
   return false;
+}
+
+// Strip trailing punctuation that is almost always sentence-terminal
+// (`.,;:!?'"`) plus *unbalanced* closing brackets. URLs may legitimately end
+// in `)` / `]` / `}` (e.g. Wikipedia disambiguation links such as
+// `https://en.wikipedia.org/wiki/Foo_(disambiguation)`) — strip the bracket
+// only when the captured URL has more closes than opens of that bracket type.
+function stripUrlTrailingPunctuation(url: string): string {
+  let result = url;
+  while (result.length > 0) {
+    const ch = result[result.length - 1];
+    if (".,;:!?'\"".includes(ch)) {
+      result = result.slice(0, -1);
+      continue;
+    }
+    const closingPairs: Array<readonly [string, string]> = [[")", "("], ["]", "["], ["}", "{"]];
+    const pair = closingPairs.find(([close]) => close === ch);
+    if (pair) {
+      const [closeChar, openChar] = pair;
+      const closes = countOccurrences(result, closeChar);
+      const opens = countOccurrences(result, openChar);
+      if (closes > opens) {
+        result = result.slice(0, -1);
+        continue;
+      }
+    }
+    break;
+  }
+  return result;
+}
+
+function countOccurrences(text: string, char: string): number {
+  let count = 0;
+  for (let i = 0; i < text.length; i++) if (text[i] === char) count++;
+  return count;
 }
 
 function serializeDoc(state: SerializeState, doc: TiptapNode): void {

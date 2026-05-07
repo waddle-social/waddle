@@ -81,6 +81,29 @@ describe("tiptapToRichMessage / autolinkifyBareUrls", () => {
     ]);
   });
 
+  test("balanced trailing parens / brackets are preserved (Wikipedia disambiguation)", () => {
+    // The closing `)` here is structurally part of the URL, not sentence
+    // punctuation. Strip-trailing-punctuation must respect bracket pairing.
+    const url = "https://en.wikipedia.org/wiki/Foo_(disambiguation)";
+    const body = `see ${url}`;
+    const result = tiptapToRichMessage(doc(paragraph(text(body))));
+
+    expect(result.references).toEqual([
+      { type: "data", uri: `${url}`, begin: 4, end: 4 + url.length },
+    ]);
+  });
+
+  test("unbalanced trailing closing paren is stripped (sentence terminal)", () => {
+    // "(see https://example.com)" — the `)` belongs to the sentence, not the
+    // URL. The captured URL has zero `(` so the trailing `)` is unbalanced
+    // and must be stripped.
+    const result = tiptapToRichMessage(doc(paragraph(text("(see https://example.com)"))));
+
+    expect(result.references).toEqual([
+      { type: "data", uri: "https://example.com/", begin: 5, end: 24 },
+    ]);
+  });
+
   test("non-http URLs (mailto, ftp, javascript) are not auto-linkified", () => {
     // The regex only matches http(s); other schemes never enter the pipeline.
     // safeUri also rejects javascript: as a defense in depth.
