@@ -130,8 +130,12 @@ pub fn parse_encrypted_element(elem: &Element) -> Option<EncryptedFile> {
         return None;
     }
     let cipher = Cipher::from_uri(elem.attr("cipher")?)?;
-    let key_b64 = elem.get_child("key", NS_ESFS)?.text();
-    let iv_b64 = elem.get_child("iv", NS_ESFS)?.text();
+    // XML pretty-printing can introduce surrounding whitespace inside
+    // `<key/>`, `<iv/>`, and `<hash/>` elements. Strict base64 decoders
+    // (including the browser's `atob`) reject that whitespace, so trim
+    // before handing the value off.
+    let key_b64 = elem.get_child("key", NS_ESFS)?.text().trim().to_string();
+    let iv_b64 = elem.get_child("iv", NS_ESFS)?.text().trim().to_string();
 
     let mut hashes = Vec::new();
     for child in elem.children() {
@@ -141,7 +145,7 @@ pub fn parse_encrypted_element(elem: &Element) -> Option<EncryptedFile> {
             };
             hashes.push(EncryptedHash {
                 algo: algo.to_string(),
-                value_b64: child.text(),
+                value_b64: child.text().trim().to_string(),
             });
         }
     }
@@ -248,6 +252,27 @@ mod tests {
             assert_eq!(Cipher::from_uri(c.as_uri()), Some(c));
         }
         assert!(Cipher::from_uri("urn:xmpp:ciphers:rot13:0").is_none());
+    }
+
+    #[test]
+    fn parse_trims_whitespace_around_base64_text() {
+        // Pretty-printed XML often wraps the base64 payload with newlines
+        // and indentation; the resulting text content must round-trip
+        // cleanly to a strict base64 decoder.
+        let xml = "<encrypted xmlns='urn:xmpp:esfs:0' \
+                       cipher='urn:xmpp:ciphers:aes-256-gcm-nopadding:0'>\
+                     <key>\n  a2V5\n</key>\
+                     <iv>\n  aXY=\n</iv>\
+                     <hash xmlns='urn:xmpp:hashes:2' algo='sha-256'>\n  aGFzaA==\n</hash>\
+                     <sources xmlns='urn:xmpp:sfs:0'>\
+                       <url-data xmlns='http://jabber.org/protocol/url-data' target='https://x'/>\
+                     </sources>\
+                   </encrypted>";
+        let elem: Element = xml.parse().expect("valid xml");
+        let parsed = parse_encrypted_element(&elem).expect("parses");
+        assert_eq!(parsed.key_b64, "a2V5");
+        assert_eq!(parsed.iv_b64, "aXY=");
+        assert_eq!(parsed.hashes[0].value_b64, "aGFzaA==");
     }
 
     #[test]

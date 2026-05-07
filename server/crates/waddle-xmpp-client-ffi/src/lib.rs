@@ -830,10 +830,21 @@ fn encrypted_file_to_ffi(
 
 fn encrypted_file_from_ffi(
     enc: WaddleEncryptedFile,
-) -> Option<waddle_xmpp_client::xep::encrypted_file::EncryptedFile> {
+) -> Result<waddle_xmpp_client::xep::encrypted_file::EncryptedFile, String> {
     use waddle_xmpp_client::xep::encrypted_file::{Cipher, EncryptedFile, EncryptedHash};
-    let cipher = Cipher::from_uri(&enc.cipher)?;
-    Some(EncryptedFile {
+    let cipher = Cipher::from_uri(&enc.cipher).ok_or_else(|| {
+        format!(
+            "encrypted attachment has unknown cipher: {cipher}",
+            cipher = enc.cipher
+        )
+    })?;
+    if enc.sources.is_empty() {
+        return Err(
+            "encrypted attachment has no sources; recipients would receive ciphertext with no decryption metadata"
+                .to_string(),
+        );
+    }
+    Ok(EncryptedFile {
         cipher,
         key_b64: enc.key_b64,
         iv_b64: enc.iv_b64,
@@ -1016,6 +1027,10 @@ fn send_options_from_ffi(opts: WaddleSendOptions) -> Result<SendMessageOptions, 
         parent: t.parent,
     });
 
+    // Surface invalid encryption metadata (unknown cipher, empty sources)
+    // as an explicit error rather than silently sending a ciphertext URL
+    // without the matching XEP-0448 envelope — that produces hard-to-debug
+    // broken attachments for recipients.
     let shared_files = opts
         .shared_files
         .into_iter()
@@ -1024,8 +1039,8 @@ fn send_options_from_ffi(opts: WaddleSendOptions) -> Result<SendMessageOptions, 
                 Some(file.disposition.as_str()),
                 file.media_type.as_deref(),
             );
-            let encrypted = file.encrypted.and_then(encrypted_file_from_ffi);
-            messaging::SharedFile {
+            let encrypted = file.encrypted.map(encrypted_file_from_ffi).transpose()?;
+            Ok(messaging::SharedFile {
                 url: file.url,
                 name: file.name,
                 media_type: file.media_type,
@@ -1034,9 +1049,9 @@ fn send_options_from_ffi(opts: WaddleSendOptions) -> Result<SendMessageOptions, 
                 height: file.height,
                 disposition,
                 encrypted,
-            }
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>, String>>()?;
 
     let stanza_id = opts
         .stanza_id

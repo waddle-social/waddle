@@ -2516,8 +2516,16 @@ fn send_options_from_js(options: JsValue) -> Result<SendMessageOptions, JsValue>
                     Some(file.disposition.as_str()),
                     file.media_type.as_deref(),
                 );
-                let encrypted = file.encrypted.and_then(encrypted_file_from_js);
-                messaging::SharedFile {
+                // Surface invalid encryption metadata as an explicit
+                // error rather than silently sending a ciphertext URL
+                // without the matching XEP-0448 envelope — that produces
+                // hard-to-debug broken attachments for recipients.
+                let encrypted = file
+                    .encrypted
+                    .map(encrypted_file_from_js)
+                    .transpose()
+                    .map_err(|err| js_error(err.to_string()))?;
+                Ok(messaging::SharedFile {
                     url: file.url,
                     name: file.name,
                     media_type: file.media_type,
@@ -2526,9 +2534,9 @@ fn send_options_from_js(options: JsValue) -> Result<SendMessageOptions, JsValue>
                     height: file.height,
                     disposition,
                     encrypted,
-                }
+                })
             })
-            .collect(),
+            .collect::<Result<Vec<_>, JsValue>>()?,
     })
 }
 
@@ -2804,15 +2812,30 @@ fn encrypted_file_to_js(
     }
 }
 
+/// Reasons `encrypted_file_from_js` may reject a payload from the JS side.
+/// Carried as a typed error so native unit tests do not have to construct
+/// `JsValue`s (wasm-bindgen panics on non-wasm32 targets); the WASM caller
+/// converts via `Display` at the boundary.
+#[derive(Debug, thiserror::Error)]
+enum EncryptedFileFromJsError {
+    #[error("encrypted attachment has unknown cipher: {0}")]
+    UnknownCipher(String),
+    #[error(
+        "encrypted attachment has no sources; recipients would receive ciphertext with no decryption metadata"
+    )]
+    NoSources,
+}
+
 fn encrypted_file_from_js(
     enc: WaddleEncryptedFile,
-) -> Option<waddle_xmpp_client::xep::encrypted_file::EncryptedFile> {
+) -> Result<waddle_xmpp_client::xep::encrypted_file::EncryptedFile, EncryptedFileFromJsError> {
     use waddle_xmpp_client::xep::encrypted_file::{Cipher, EncryptedFile, EncryptedHash};
-    let cipher = Cipher::from_uri(&enc.cipher)?;
+    let cipher = Cipher::from_uri(&enc.cipher)
+        .ok_or_else(|| EncryptedFileFromJsError::UnknownCipher(enc.cipher.clone()))?;
     if enc.sources.is_empty() {
-        return None;
+        return Err(EncryptedFileFromJsError::NoSources);
     }
-    Some(EncryptedFile {
+    Ok(EncryptedFile {
         cipher,
         key_b64: enc.key_b64,
         iv_b64: enc.iv_b64,
@@ -3286,7 +3309,7 @@ mod encrypted_file_bridge_tests {
             hashes: Vec::new(),
             sources: vec!["https://x".to_string()],
         };
-        assert!(encrypted_file_from_js(invalid).is_none());
+        assert!(encrypted_file_from_js(invalid).is_err());
     }
 
     #[test]
@@ -3298,6 +3321,6 @@ mod encrypted_file_bridge_tests {
             hashes: Vec::new(),
             sources: Vec::new(),
         };
-        assert!(encrypted_file_from_js(invalid).is_none());
+        assert!(encrypted_file_from_js(invalid).is_err());
     }
 }

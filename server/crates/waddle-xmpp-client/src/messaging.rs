@@ -482,25 +482,6 @@ fn parse_message(el: &Element) -> InboundMessage {
         }
     }
 
-    // XEP-0448: top-level `<encrypted xmlns='urn:xmpp:esfs:0'/>` siblings
-    // carry the cipher/key/iv metadata for any preceding `<file-sharing/>`
-    // entries. Match them up by URL so a `SharedFile` whose `url` already
-    // names the ciphertext gains the metadata needed to decrypt it.
-    for encrypted_el in el
-        .children()
-        .filter(|c| c.name() == "encrypted" && c.ns() == NS_ENCRYPTED_FILE)
-    {
-        let Some(encrypted) = xep_encrypted_file::parse_encrypted_element(encrypted_el) else {
-            continue;
-        };
-        let match_idx = shared_files
-            .iter()
-            .position(|f| encrypted.sources.iter().any(|src| src == &f.url));
-        if let Some(idx) = match_idx {
-            shared_files[idx].encrypted = Some(encrypted);
-        }
-    }
-
     // XEP-0447 / XEP-0363: also check <sims> children for file sharing
     for sims_el in el.children().filter(|c| c.ns() == NS_SIMS) {
         for source_el in sims_el.children() {
@@ -524,6 +505,47 @@ fn parse_message(el: &Element) -> InboundMessage {
                         encrypted: None,
                     });
                 }
+            }
+        }
+    }
+
+    // XEP-0448: top-level `<encrypted xmlns='urn:xmpp:esfs:0'/>` siblings
+    // carry the cipher/key/iv metadata for the file-sharing entries
+    // collected above (XEP-0447 file-sharing AND legacy XEP-0385 SIMS).
+    // Match by URL so a `SharedFile` whose `url` already names the
+    // ciphertext gains the metadata needed to decrypt it; if multiple
+    // entries reference the same source URL (rare but legal — same blob
+    // shared twice in one stanza) every one of them is annotated so none
+    // render broken.
+    for encrypted_el in el
+        .children()
+        .filter(|c| c.name() == "encrypted" && c.ns() == NS_ENCRYPTED_FILE)
+    {
+        let Some(encrypted) = xep_encrypted_file::parse_encrypted_element(encrypted_el) else {
+            continue;
+        };
+        let mut matched = false;
+        for file in shared_files.iter_mut() {
+            if encrypted.sources.iter().any(|src| src == &file.url) {
+                file.encrypted = Some(encrypted.clone());
+                matched = true;
+            }
+        }
+        // If no matching `<file-sharing/>` (or `<sims>`) sibling exists,
+        // synthesise one from the encrypted envelope's first source so
+        // the recipient still sees the attachment.
+        if !matched {
+            if let Some(url) = encrypted.sources.first().cloned() {
+                shared_files.push(SharedFile {
+                    url,
+                    name: None,
+                    media_type: None,
+                    size: None,
+                    width: None,
+                    height: None,
+                    disposition: SharedFileDisposition::Attachment,
+                    encrypted: Some(encrypted),
+                });
             }
         }
     }
@@ -2007,6 +2029,76 @@ mod tests {
             panic!("expected message event");
         };
         assert!(parsed.shared_files[0].encrypted.is_none());
+    }
+
+    #[test]
+    fn parse_message_attaches_encrypted_metadata_to_sims_share() {
+        // SIMS-style (XEP-0385) shares are collected after `<file-sharing/>`
+        // entries, so the XEP-0448 sibling matching must run last to cover
+        // them too. Regression guard for the original PR review feedback.
+        let url = "https://files.example.com/sims-blob.enc";
+        let xml = format!(
+            "<message xmlns='jabber:client' type='chat' from='bob@example.com' id='m1'>\
+               <body>see attached</body>\
+               <reference xmlns='urn:xmpp:reference:0' type='data' \
+                          uri='{url}' begin='0' end='0'>\
+                 <media-sharing xmlns='urn:xmpp:sims:1'>\
+                   <sources>\
+                     <reference xmlns='urn:xmpp:reference:0' type='data' url='{url}'/>\
+                   </sources>\
+                 </media-sharing>\
+               </reference>\
+               <encrypted xmlns='urn:xmpp:esfs:0' \
+                          cipher='urn:xmpp:ciphers:aes-256-gcm-nopadding:0'>\
+                 <key>a2V5</key>\
+                 <iv>aXY=</iv>\
+                 <sources xmlns='urn:xmpp:sfs:0'>\
+                   <url-data xmlns='http://jabber.org/protocol/url-data' target='{url}'/>\
+                 </sources>\
+               </encrypted>\
+             </message>"
+        );
+        let el: Element = xml.parse().expect("valid xml");
+        let MessagingEvent::Message(parsed) = parse(&el).expect("parses to event") else {
+            panic!("expected message event");
+        };
+        let with_url = parsed
+            .shared_files
+            .iter()
+            .find(|f| f.url == url)
+            .expect("sims-derived shared file present");
+        assert!(
+            with_url.encrypted.is_some(),
+            "sims-derived shared file gained xep-0448 metadata"
+        );
+    }
+
+    #[test]
+    fn parse_message_synthesises_share_for_orphan_encrypted_sibling() {
+        // A peer that only emits `<encrypted/>` (skipping the redundant
+        // `<file-sharing/>`) should still surface as a shared file so the
+        // chat UI can render it.
+        let url = "https://files.example.com/orphan.enc";
+        let xml = format!(
+            "<message xmlns='jabber:client' type='chat' from='bob@example.com' id='m1'>\
+               <body>orphan</body>\
+               <encrypted xmlns='urn:xmpp:esfs:0' \
+                          cipher='urn:xmpp:ciphers:aes-128-gcm-nopadding:0'>\
+                 <key>a2V5</key>\
+                 <iv>aXY=</iv>\
+                 <sources xmlns='urn:xmpp:sfs:0'>\
+                   <url-data xmlns='http://jabber.org/protocol/url-data' target='{url}'/>\
+                 </sources>\
+               </encrypted>\
+             </message>"
+        );
+        let el: Element = xml.parse().expect("valid xml");
+        let MessagingEvent::Message(parsed) = parse(&el).expect("parses to event") else {
+            panic!("expected message event");
+        };
+        assert_eq!(parsed.shared_files.len(), 1);
+        assert_eq!(parsed.shared_files[0].url, url);
+        assert!(parsed.shared_files[0].encrypted.is_some());
     }
 
     #[test]
