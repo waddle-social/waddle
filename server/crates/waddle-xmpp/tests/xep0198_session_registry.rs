@@ -601,6 +601,21 @@ async fn xep0198_drain_all_for_shutdown_skips_claimed_sessions() {
     );
 }
 
+/// Build a typed `<message/>` stanza and return its on-the-wire XML.
+///
+/// AGENTS.md PR Compliance ID 14: tests must construct XMPP XML via
+/// structured builders (`xmpp_parsers` / `minidom`) rather than raw
+/// string literals — string XML is brittle to escaping bugs and
+/// drifts from the production serialization path. `message_to_string`
+/// is the same helper the production write loop uses, so this test
+/// exercises the same wire shape.
+fn late_drain_message_xml(id: &str, body: &str) -> String {
+    let mut message = Message::new(None);
+    message.id = Some(id.to_string());
+    message.bodies.insert(String::new(), Body(body.to_string()));
+    waddle_xmpp::parser::message_to_string(&message).expect("serialize <message/>")
+}
+
 /// Issue #209 finding #8: stanzas appended via
 /// `record_outbound_for_detached_stream_at` (the second-detach drain
 /// path) must mirror to durable persistence so a process crash before
@@ -629,8 +644,7 @@ async fn xep0198_record_outbound_for_detached_stream_at_persists_durably() {
         .record_outbound_for_detached_stream_at(
             "stream-late-drain",
             42,
-            "<message xmlns='jabber:client' id='late'><body>late drain</body></message>"
-                .to_string(),
+            late_drain_message_xml("late", "late drain"),
             t1,
         )
         .await
@@ -652,4 +666,42 @@ async fn xep0198_record_outbound_for_detached_stream_at_persists_durably() {
     );
     assert_eq!(unacked[0].sequence, 42);
     assert_eq!(unacked[0].original_receipt_at, t1);
+}
+
+/// Qodo finding on PR #409: `record_outbound_for_detached_stream_at`
+/// MUST NOT durably persist an unacked row when the named session is
+/// unknown or expired. The earlier "persist first" ordering left
+/// orphan rows in the `sm_unacked` table that no `delete_session`
+/// reaper would ever clean up (the in-memory persistence backend
+/// happily accepts appends for any stream_id).
+#[tokio::test]
+async fn xep0198_record_outbound_for_unknown_stream_does_not_persist_orphan_row() {
+    use std::sync::Arc;
+    use waddle_xmpp::stream_management::persistence::InMemorySmPersistence;
+
+    let persistence: Arc<dyn waddle_xmpp::stream_management::persistence::SmPersistenceStorage> =
+        Arc::new(InMemorySmPersistence::new());
+    let registry = InMemorySmSessionRegistry::new().with_persistence(Arc::clone(&persistence));
+
+    let recorded = registry
+        .record_outbound_for_detached_stream_at(
+            "stream-does-not-exist",
+            7,
+            late_drain_message_xml("orphan", "orphan"),
+            chrono::Utc::now(),
+        )
+        .await
+        .expect("record_outbound_for_detached_stream_at");
+    assert!(!recorded, "missing session must short-circuit to Ok(false)");
+
+    let unacked = persistence
+        .list_unacked(&waddle_xmpp::pending_delivery::SmSessionId::new(
+            "stream-does-not-exist",
+        ))
+        .await
+        .expect("list_unacked");
+    assert!(
+        unacked.is_empty(),
+        "no orphan row may be persisted for an unknown stream_id"
+    );
 }

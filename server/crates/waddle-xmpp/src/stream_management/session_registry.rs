@@ -1377,6 +1377,19 @@ impl InMemorySmSessionRegistry {
         // (shouldn't happen in practice), restart-time
         // `restore_from_persistence` rebuilds the in-memory view
         // from durable state.
+        //
+        // BUT: pre-check session eligibility before persisting, so a
+        // call for an unknown / expired stream_id doesn't durably
+        // append a row that has no owning session and can never be
+        // cleaned up via `delete_session` (Qodo finding on PR #409 —
+        // some persistence backends accept `append_unacked` for any
+        // stream_id, leaving orphan rows). Locks are dropped before
+        // any `.await` so persistence I/O never holds a lock.
+        let eligible = self.detached_session_is_live(stream_id)?;
+        if !eligible {
+            return Ok(false);
+        }
+
         if let Some(storage) = &self.persistence {
             let persisted = parse_xml_to_persisted_unacked(
                 stream_id,
@@ -1415,6 +1428,30 @@ impl InMemorySmSessionRegistry {
             return Ok(false);
         }
         Ok(false)
+    }
+
+    /// Returns true when `stream_id` names a detached session that is
+    /// present (in either the live `sessions` or the `claimed_sessions`
+    /// map) and not yet expired. Used as a pre-flight check by
+    /// [`Self::record_outbound_for_detached_stream_at`] so we don't
+    /// durably persist unacked stanzas for sessions that no longer
+    /// exist.
+    fn detached_session_is_live(&self, stream_id: &str) -> Result<bool, SmRegistryError> {
+        let sessions = self
+            .sessions
+            .read()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+        if let Some(session) = sessions.get(stream_id) {
+            return Ok(!session.is_expired());
+        }
+        drop(sessions);
+        let claimed = self
+            .claimed_sessions
+            .read()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+        Ok(claimed
+            .get(stream_id)
+            .is_some_and(|session| !session.is_expired()))
     }
 
     /// List all detached resources for a bare JID, including resources that
