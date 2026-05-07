@@ -1,0 +1,247 @@
+@layer components {
+/* Semantic type roles for the dense chat UI. */
+:where(
+  .type-dialog-title,
+  .type-display-title,
+  .type-pane-title,
+  .type-chat-title,
+  .type-card-title,
+  .type-empty-title,
+  .type-menu-title,
+  .type-action,
+  .type-section-label,
+  .type-control,
+  .type-menu-item,
+  .type-field,
+  .type-caption,
+  .type-meta,
+  .type-message-author,
+  .type-message-body,
+  .type-badge,
+  .type-count-badge,
+  .type-chat-editor,
+  .type-version,
+  .type-version-label,
+  .type-emphasis,
+  .type-strong,
+  .type-avatar-mark,
+  .type-emoji-button,
+  .type-emoji-picker,
+  .type-emoji-sheet,
+  .type-rail-initial
+) {
+  font-family: var(--font-ui);
+  font-feature-settings: "kern" 1, "liga" 1, "calt" 1;
+  letter-spacing: 0;
+}
+
+.type-dialog-title {
+  font-size: var(--text-title);
+  line-height: var(--leading-compact);
+  font-weight: 650;
+}
+
+.type-display-title {
+  font-size: var(--text-display);
+  line-height: var(--leading-compact);
+  font-weight: 650;
+}
+
+.type-pane-title {
+  font-size: var(--text-body);
+  line-height: var(--leading-compact);
+  font-weight: 650;
+}
+
+.type-chat-title {
+  font-size: var(--text-title);
+  line-height: var(--leading-compact);
+  font-weight: 650;
+}
+
+.type-card-title {
+  font-size: var(--text-message);
+  line-height: var(--leading-compact);
+  font-weight: 650;
+}
+
+.type-empty-title {
+  font-size: var(--text-title);
+  line-height: var(--leading-compact);
+  font-weight: 650;
+}
+
+.type-section-label {
+  font-size: var(--text-caption);
+  line-height: var(--leading-compact);
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0;
+}
+
+.type-control {
+  font-size: var(--text-control);
+  line-height: var(--leading-control);
+  font-weight: 500;
+  letter-spacing: 0;
+}
+
+.type-menu-title {
+  font-size: var(--text-control);
+  line-height: var(--leading-compact);
+  font-weight: 650;
+}
+
+.type-action {
+  font-size: var(--text-control);
+  line-height: var(--leading-control);
+  font-weight: 650;
+}
+
+.type-menu-item {
+  font-size: var(--text-meta);
+  line-height: var(--leading-control);
+  font-weight: 550;
+  letter-spacing: 0;
+}
+
+.type-field {
+  font-size: var(--text-body);
+  line-height: var(--leading-body);
+  letter-spacing: 0;
+}
+
+.type-caption {
+  font-size: var(--text-meta);
+  line-height: var(--leading-control);
+  letter-spacing: 0;
+}
+
+.type-meta {
+  font-size: var(--text-caption);
+  line-height: var(--leading-compact);
+  letter-spacing: 0;
+}
+
+.type-message-author {
+  font-size: var(--text-control);
+  line-height: var(--leading-compact);
+  font-weight: 650;
+  letter-spacing: 0;
+}
+
+.type-message-body {
+  font-size: var(--text-message);
+  line-height: var(--leading-message);
+  letter-spacing: 0;
+}
+
+.type-badge {
+  font-size: var(--text-caption);
+  line-height: 1;
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0;
+}
+
+.type-count-badge {
+  font-size: var(--text-caption);
+  line-height: 1;
+  font-weight: 700;
+  letter-spacing: 0;
+}
+
+.type-chat-editor {
+  font-size: var(--text-message);
+  line-height: var(--leading-message);
+  letter-spacing: 0;
+}
+
+.type-version {
+  font-size: var(--text-caption);
+  line-height: var(--leading-compact);
+  letter-spacing: 0;
+}
+
+.type-version-label {
+  font-size: var(--text-caption);
+  line-height: var(--leading-compact);
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0;
+}
+
+.type-emphasis {
+  font-weight: 600;
+}
+
+.type-strong {
+  font-weight: 650;
+}
+
+.type-avatar-mark {
+  line-height: 1;
+  font-weight: 650;
+}
+
+.type-rail-initial {
+  font-size: var(--text-control);
+  line-height: 1;
+  font-weight: 750;
+  letter-spacing: 0;
+}
+
+.type-mono,
+.type-numeric {
+  font-family: var(--font-code);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1, "liga" 0, "calt" 0;
+  letter-spacing: 0;
+}
+
+.type-avatar-xs {
+  font-size: var(--text-avatar-xs);
+}
+
+.type-avatar-sm {
+  font-size: var(--text-avatar-sm);
+}
+
+.type-avatar-md {
+  font-size: var(--text-avatar-md);
+}
+
+.type-avatar-lg {
+  font-size: var(--text-avatar-lg);
+}
+
+.app-avatar-presence-dot {
+  right: 0;
+  bottom: 0;
+  transform: translate(50%, 50%);
+}
+
+.app-avatar-message-size {
+  width: var(--chat-message-avatar-size);
+  height: var(--chat-message-avatar-size);
+}
+
+.type-emoji-button,
+.type-emoji-picker,
+.type-emoji-sheet {
+  line-height: 1;
+  letter-spacing: 0;
+}
+
+.type-emoji-button {
+  font-size: var(--text-emoji);
+}
+
+.type-emoji-picker {
+  font-size: var(--text-emoji-picker);
+}
+
+.type-emoji-sheet {
+  font-size: var(--text-emoji-sheet);
+}
+}

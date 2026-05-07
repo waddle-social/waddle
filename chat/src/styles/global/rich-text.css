@@ -1,0 +1,106 @@
+@layer components {
+/* Collapsed accordion bar label — vertical text for thread ancestry strips */
+.accordion-bar-label {
+  writing-mode: vertical-rl;
+  text-orientation: mixed;
+  font-size: var(--text-caption);
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-height: 60%;
+  letter-spacing: 0;
+}
+
+/* Rich text rendered from XEP metadata and TipTap composer nodes. */
+:where(.styled-body, .chat-editor .ProseMirror) p {
+  margin: 0;
+}
+:where(.styled-body, .chat-editor .ProseMirror) p + p {
+  margin-top: 0.5rem;
+}
+:where(.styled-body, .chat-editor .ProseMirror) strong {
+  font-weight: 600;
+}
+:where(.styled-body, .chat-editor .ProseMirror) em {
+  font-style: italic;
+}
+:where(.styled-body, .chat-editor .ProseMirror) del,
+:where(.styled-body, .chat-editor .ProseMirror) s {
+  text-decoration: line-through;
+  opacity: 0.48;
+}
+:where(.styled-body, .chat-editor .ProseMirror) code {
+  font-family: var(--font-code);
+  font-size: 0.8em;
+  padding: 0.15em 0.4em;
+  color: var(--rich-code-foreground);
+  background: var(--rich-code-bg);
+  border: 1px solid var(--rich-code-border);
+  border-radius: 5px;
+}
+:where(.styled-body, .chat-editor .ProseMirror) pre {
+  font-family: var(--font-code);
+  font-size: 0.8em;
+  padding: 0.85em 1.1em;
+  color: var(--rich-code-foreground);
+  background: var(--rich-code-bg);
+  border: 1px solid var(--rich-code-border);
+  border-radius: 8px;
+  overflow-x: auto;
+  margin: 0.5em 0;
+}
+:where(.styled-body, .chat-editor .ProseMirror) pre code {
+  padding: 0;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  color: inherit;
+  font-size: inherit;
+}
+.styled-body pre.shiki,
+.styled-body pre.shiki span {
+  color: light-dark(var(--shiki-light), var(--shiki-dark)) !important;
+  background-color: transparent !important;
+}
+.styled-body pre.shiki {
+  background-color: light-dark(var(--shiki-light-bg), var(--shiki-dark-bg)) !important;
+}
+:where(.styled-body, .chat-editor .ProseMirror) blockquote {
+  border: 1px solid var(--rich-quote-border);
+  border-radius: 8px;
+  color: var(--rich-quote-foreground);
+  padding: 0.65em 0.85em;
+  margin: 0.5em 0;
+  background: color-mix(in oklab, var(--rich-quote-border) 8%, transparent);
+}
+:where(.styled-body, .chat-editor .ProseMirror) ul,
+:where(.styled-body, .chat-editor .ProseMirror) ol {
+  margin: 0.35em 0;
+  padding-left: 1.4em;
+}
+:where(.styled-body, .chat-editor .ProseMirror) ul {
+  list-style-type: disc;
+}
+:where(.styled-body, .chat-editor .ProseMirror) ol {
+  list-style-type: decimal;
+}
+:where(.styled-body, .chat-editor .ProseMirror) li {
+  margin: 0.15em 0;
+}
+:where(.styled-body, .chat-editor .ProseMirror) li > p {
+  margin: 0;
+}
+:where(.styled-body, .chat-editor .ProseMirror) a {
+  color: var(--rich-link);
+  text-decoration: none;
+  text-underline-offset: 2px;
+}
+:where(.styled-body, .chat-editor .ProseMirror) a:hover {
+  text-decoration: underline;
+}
+.rich-mention {
+  color: var(--primary);
+  font-weight: 650;
+}
+}

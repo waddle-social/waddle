@@ -1,0 +1,107 @@
+@layer components {
+.chat-composer {
+  padding: var(--chat-composer-block) var(--chat-content-inline);
+  box-shadow: var(--shadow-pane);
+}
+
+.chat-composer-input-shell {
+  min-height: var(--chat-composer-inner-height);
+  border-radius: var(--chat-composer-input-radius);
+}
+
+.chat-composer-input-action {
+  border-radius: var(--chat-composer-input-control-radius);
+}
+
+.chat-composer-popover {
+  left: var(--chat-content-inline);
+  right: var(--chat-content-inline);
+}
+
+.chat-pane-header {
+  height: var(--chat-header-height);
+  min-height: var(--chat-header-height);
+}
+
+.chat-pane-title-group {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: var(--control-md) minmax(0, 1fr);
+  column-gap: var(--space-sm);
+  align-items: center;
+}
+
+.chat-pane-title-icon {
+  display: flex;
+  width: var(--control-md);
+  height: var(--control-md);
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+}
+
+.chat-pane-scroll {
+  scrollbar-gutter: stable;
+}
+
+.chat-message-scroll {
+  padding-block: var(--space-md);
+}
+
+.chat-empty-state {
+  min-height: min(22rem, 38vh);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-sm);
+  padding-block: var(--space-2xl);
+  text-align: center;
+}
+
+.chat-dialog-stack,
+.chat-field-stack,
+.chat-panel-stack,
+.chat-settings-copy {
+  display: flex;
+  flex-direction: column;
+}
+
+.chat-dialog-stack {
+  gap: var(--space-lg);
+}
+
+.chat-field-stack {
+  gap: var(--space-xs);
+}
+
+.chat-settings-copy {
+  gap: var(--space-2xs);
+}
+
+.chat-panel-stack {
+  gap: var(--space-md);
+}
+
+.chat-composer-aux-stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  padding-bottom: var(--space-sm);
+}
+
+.chat-composer-attachment-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-xs);
+}
+
+.chat-message-media-stack {
+  display: flex;
+  width: 100%;
+  flex-direction: column;
+  gap: var(--space-xs);
+  align-items: flex-start;
+}
+
+}

@@ -1,0 +1,386 @@
+@layer components {
+.chat-message-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2xs);
+}
+
+.chat-message-grid {
+  display: grid;
+  width: 100%;
+  min-height: calc(var(--chat-message-avatar-size) + var(--space-xs));
+  grid-template-columns: var(--chat-message-avatar-size) minmax(0, 1fr);
+  align-items: start;
+  column-gap: var(--space-sm);
+  border-radius: var(--radius-md);
+  isolation: isolate;
+  padding: var(--space-xs) 0;
+}
+
+.chat-message-grid::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 0 calc(-1 * var(--space-sm));
+  z-index: -1;
+  pointer-events: none;
+  border: 1px solid transparent;
+  border-radius: inherit;
+  background: transparent;
+  opacity: 0;
+  transition:
+    background-color 0.16s ease,
+    border-color 0.16s ease,
+    opacity 0.16s ease;
+}
+
+.chat-message-grid:hover::before {
+  opacity: 1;
+  background: color-mix(in oklab, var(--muted) 36%, transparent);
+}
+
+.chat-message-grid--forum {
+  padding: var(--space-xs) 0;
+}
+
+.chat-message-grid--forum::before {
+  opacity: 1;
+  border-color: color-mix(in oklab, var(--border) 70%, transparent);
+  background: color-mix(in oklab, var(--card) 72%, transparent);
+}
+
+.chat-message-grid--mention::before {
+  opacity: 1;
+  border: 1px solid color-mix(in oklab, var(--warning) 25%, transparent);
+  background: color-mix(in oklab, var(--warning) 5%, transparent);
+}
+
+.chat-message-grid--thread::before {
+  opacity: 1;
+  border-color: color-mix(in oklab, var(--primary) 15%, transparent);
+}
+
+.chat-message-grid--thread:hover::before {
+  background: color-mix(in oklab, var(--muted) 38%, transparent);
+}
+
+.chat-message-grid--reaction-selected::before {
+  opacity: 1;
+  border-color: color-mix(in oklab, var(--primary) 16%, transparent);
+  background: linear-gradient(
+    90deg,
+    color-mix(in oklab, var(--primary) 7%, transparent),
+    color-mix(in oklab, var(--primary) 3%, transparent) 16rem,
+    transparent
+  );
+  box-shadow: 0 0 0 1px color-mix(in oklab, var(--primary) 7%, transparent);
+}
+
+.chat-message-avatar-cell {
+  width: var(--chat-message-avatar-size);
+  height: var(--chat-message-avatar-size);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  line-height: 0;
+}
+
+@media (pointer: coarse) {
+  .chat-message-grid {
+    padding-inline-end: var(--chat-touch-action-space);
+  }
+}
+
+.chat-message-body-stack {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--chat-message-body-gap);
+}
+
+.chat-message-body-stack > .chat-message-fill {
+  width: 100%;
+  align-self: stretch;
+  max-width: var(--chat-readable-measure);
+}
+
+.chat-forum-topic-card {
+  display: flex;
+  width: 100%;
+  flex-direction: column;
+  gap: var(--space-2xs);
+  border-radius: var(--radius-sm);
+  border: 1px solid color-mix(in oklab, var(--primary) 16%, transparent);
+  background: color-mix(in oklab, var(--primary) 7%, transparent);
+  padding: var(--space-sm);
+}
+
+.chat-forum-reply-chip {
+  display: flex;
+  width: 100%;
+  min-height: 2rem;
+  align-items: center;
+  gap: var(--space-xs);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: color-mix(in oklab, var(--muted) 58%, transparent);
+  padding: var(--space-xs) var(--space-sm);
+  color: var(--muted-foreground);
+}
+
+.chat-thread-chip {
+  min-width: 0;
+  width: fit-content;
+  max-width: 100%;
+  align-self: flex-start;
+  justify-content: flex-start;
+  white-space: nowrap;
+}
+
+.chat-message-reactions {
+  width: 100%;
+}
+
+.chat-hover-action-toolbar--reaction-mode {
+  border-color: color-mix(in oklab, var(--primary) 28%, var(--border));
+  background: color-mix(in oklab, var(--card) 88%, var(--primary) 12%);
+  box-shadow:
+    0 14px 36px color-mix(in oklab, var(--primary) 18%, transparent),
+    var(--shadow-floating);
+}
+
+.chat-reaction-mode-keycap {
+  position: absolute;
+  top: -0.35rem;
+  right: -0.25rem;
+  display: grid;
+  width: 1rem;
+  height: 1rem;
+  place-items: center;
+  border-radius: var(--radius-pill);
+  border: 1px solid color-mix(in oklab, var(--primary) 35%, var(--border));
+  background: var(--popover);
+  color: var(--primary);
+  line-height: 1;
+  box-shadow: 0 4px 10px color-mix(in oklab, var(--primary) 16%, transparent);
+}
+
+.chat-message-meta-row {
+  display: flex;
+  height: var(--chat-message-header-height);
+  min-height: var(--chat-message-header-height);
+  max-width: 100%;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: var(--space-2xs) var(--space-xs);
+  overflow: hidden;
+}
+
+.chat-message-meta-row > .type-message-author {
+  min-width: 0;
+  max-width: min(20rem, 60vw);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-message-meta-row > .type-badge,
+.chat-message-meta-row > .type-meta {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.chat-current-day-marker {
+  flex-shrink: 0;
+  padding: var(--space-xs) var(--chat-content-inline) 0;
+  color: var(--muted-foreground);
+}
+
+.chat-current-day-marker__lane {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  justify-content: center;
+  background: color-mix(in oklab, var(--background) 82%, transparent);
+  padding-block: 0 0.375rem;
+}
+
+.chat-current-day-marker__lane::before,
+.chat-current-day-marker__lane::after {
+  content: "";
+  height: 1px;
+  flex: 1;
+}
+
+.chat-current-day-marker__lane::before {
+  background: linear-gradient(
+    to right,
+    transparent,
+    color-mix(in oklab, var(--border) 58%, transparent) 18%,
+    color-mix(in oklab, var(--border) 58%, transparent) 100%
+  );
+}
+
+.chat-current-day-marker__lane::after {
+  background: linear-gradient(
+    to left,
+    transparent,
+    color-mix(in oklab, var(--border) 58%, transparent) 18%,
+    color-mix(in oklab, var(--border) 58%, transparent) 100%
+  );
+}
+
+.chat-current-day-marker__label {
+  border: 1px solid color-mix(in oklab, var(--border) 76%, transparent);
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--background) 76%, transparent);
+  box-shadow: 0 1px 2px color-mix(in oklab, var(--foreground) 8%, transparent);
+  padding: 0.25rem 0.625rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 0.6875rem;
+  line-height: 1;
+}
+
+.chat-day-divider {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding-block: var(--space-md) var(--space-sm);
+  color: var(--muted-foreground);
+}
+
+.chat-day-divider__rule {
+  flex: 1;
+  height: 1px;
+  background: color-mix(in oklab, var(--border) 55%, transparent);
+}
+
+.chat-day-divider__label {
+  flex-shrink: 0;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 0.6875rem;
+}
+
+/* Grouped follow-up: same author, < 5 min after the previous rendered
+ * message. The avatar column is reserved (visibility: hidden) so the body
+ * stays aligned under the burst's first message; the meta row is hidden
+ * inside MessageCard via v-if. The avatar slot becomes a hover-revealed
+ * timestamp gutter so the user can still read the per-message time. */
+.chat-message-grouped {
+  margin-block-start: calc(-1 * var(--chat-message-row-gap, var(--space-xs)));
+}
+
+.chat-message-time-gutter {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transition: opacity 0.12s ease-out;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+
+.chat-message-grouped:hover .chat-message-time-gutter,
+.chat-message-grouped:focus-within .chat-message-time-gutter {
+  opacity: 1;
+}
+
+@media (pointer: coarse) {
+  /* On touch devices the active state (long-press) reveals the timestamp.
+   * Hover does not exist; tapping the row briefly is enough. */
+  .chat-message-grouped:active .chat-message-time-gutter {
+    opacity: 1;
+  }
+}
+
+.chat-thread-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-xs);
+  padding-inline-start: var(--chat-thread-action-indent);
+  padding-block: var(--space-2xs) var(--space-sm);
+}
+
+.chat-accordion-bar {
+  display: none;
+}
+
+@media (min-width: 64rem) {
+  .chat-accordion-bar {
+    display: flex;
+    width: 2.75rem;
+    min-height: 0;
+    flex-shrink: 0;
+    flex-direction: column;
+    align-items: center;
+    justify-content: flex-start;
+    gap: var(--space-xs);
+    padding-top: var(--space-lg);
+    border-left: 1px solid var(--border);
+    cursor: pointer;
+    transition: background-color 0.2s ease, color 0.2s ease;
+  }
+}
+
+.chat-channel-thread-row {
+  margin-inline-start: var(--chat-channel-thread-indent);
+}
+
+.chat-attachment-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-xs);
+}
+
+.chat-attachment-image {
+  max-width: var(--chat-attachment-image-width);
+  max-height: 16rem;
+  border-radius: var(--radius-sm);
+}
+
+.chat-attachment-card {
+  width: var(--chat-attachment-card-width);
+}
+
+.chat-github-card {
+  width: var(--chat-attachment-card-width);
+  max-width: 100%;
+}
+
+.chat-extension-card {
+  width: var(--chat-attachment-card-width);
+  max-width: 100%;
+}
+
+.chat-attachment-card,
+.chat-file-card {
+  max-width: 100%;
+}
+
+.chat-file-card {
+  width: var(--chat-attachment-card-width);
+}
+
+.chat-action-sheet-stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.chat-action-sheet-handle {
+  display: flex;
+  justify-content: center;
+  padding-block-end: var(--space-2xs);
+}
+
+.chat-action-sheet-reactions {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: var(--space-2xs);
+}
+}
