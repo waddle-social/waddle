@@ -23,10 +23,7 @@ use crate::db::actor::{DbExecute, GetDatabase};
 #[cfg(test)]
 use crate::db::{ValueExt, row_value};
 #[cfg(test)]
-use crate::permissions::{
-    CheckPermission, DeleteTuple, ListRelations, ListSubjects, Object, ObjectType, Permission,
-    PermissionActor, Relation, Subject, SubjectType, Tuple, WriteTuple,
-};
+use crate::permissions::{Object, PermissionActor, Subject};
 #[cfg(test)]
 use crate::vcard::VCardStore;
 #[cfg(test)]
@@ -125,18 +122,14 @@ impl XmppAppState {
     ///
     /// Resource format: "space:{id}" or "channel:{id}"
     fn parse_resource(resource: &str) -> Result<Object, XmppError> {
-        Object::parse(resource).map_err(|e| {
-            XmppError::internal(format!("Invalid resource format '{}': {}", resource, e))
-        })
+        super::xmpp_permission_state::parse_resource(resource)
     }
 
     /// Parse a subject string into a Subject.
     ///
     /// Subject format: "user:{user_id}" or "space:{id}#member"
     fn parse_subject(subject: &str) -> Result<Subject, XmppError> {
-        Subject::parse(subject).map_err(|e| {
-            XmppError::internal(format!("Invalid subject format '{}': {}", subject, e))
-        })
+        super::xmpp_permission_state::parse_subject(subject)
     }
 
     async fn global_database(&self) -> Result<Database, XmppError> {
@@ -216,42 +209,13 @@ impl waddle_xmpp::AppState for XmppAppState {
         action: &str,
         subject: &str,
     ) -> Result<bool, XmppError> {
-        debug!(
-            resource = resource,
-            action = action,
-            subject = subject,
-            "Checking XMPP permission"
-        );
-
-        let object = Self::parse_resource(resource)?;
-        let subject = Self::parse_subject(subject)?;
-
-        let response = self
-            .permission_actor
-            .ask(CheckPermission {
-                subject,
-                permission: Permission::Custom(action.to_string()),
-                object,
-            })
-            .await
-            .map_err(|e| {
-                warn!(
-                    resource = resource,
-                    action = action,
-                    error = %e,
-                    "Permission check failed"
-                );
-                XmppError::internal(format!("Permission check failed: {}", e))
-            })?;
-
-        debug!(
-            resource = resource,
-            action = action,
-            allowed = response.allowed,
-            "Permission check result"
-        );
-
-        Ok(response.allowed)
+        super::xmpp_permission_state::check_permission(
+            &self.permission_actor,
+            resource,
+            action,
+            subject,
+        )
+        .await
     }
 
     /// Validate an XMPP session token without a JID (for OAUTHBEARER).
@@ -328,38 +292,8 @@ impl waddle_xmpp::AppState for XmppAppState {
         resource: &str,
         subject: &str,
     ) -> Result<Vec<String>, XmppError> {
-        debug!(
-            resource = resource,
-            subject = subject,
-            "Listing relations for subject on resource"
-        );
-
-        let object = Self::parse_resource(resource)?;
-        let subject = Self::parse_subject(subject)?;
-
-        let relations = self
-            .permission_actor
-            .ask(ListRelations { subject, object })
+        super::xmpp_permission_state::list_relations(&self.permission_actor, resource, subject)
             .await
-            .map_err(|e| {
-                warn!(
-                    resource = resource,
-                    error = %e,
-                    "Failed to list relations"
-                );
-                XmppError::internal(format!("Failed to list relations: {}", e))
-            })?;
-
-        debug!(
-            resource = resource,
-            relations = ?relations,
-            "Listed relations"
-        );
-
-        Ok(relations
-            .into_iter()
-            .map(|relation| relation.name)
-            .collect())
     }
 
     /// List all subjects with a specific relation on an object.
@@ -370,69 +304,17 @@ impl waddle_xmpp::AppState for XmppAppState {
         resource: &str,
         relation: &str,
     ) -> Result<Vec<String>, XmppError> {
-        debug!(
-            resource = resource,
-            relation = relation,
-            "Listing subjects with relation on resource"
-        );
-
-        let object = Self::parse_resource(resource)?;
-
-        let subjects = self
-            .permission_actor
-            .ask(ListSubjects {
-                object,
-                relation: Relation::new(relation),
-            })
+        super::xmpp_permission_state::list_subjects(&self.permission_actor, resource, relation)
             .await
-            .map_err(|e| {
-                warn!(
-                    resource = resource,
-                    relation = relation,
-                    error = %e,
-                    "Failed to list subjects"
-                );
-                XmppError::internal(format!("Failed to list subjects: {}", e))
-            })?;
-
-        // Convert Subject objects to string format
-        let subject_strings: Vec<String> = subjects.iter().map(|s| s.to_string()).collect();
-
-        debug!(
-            resource = resource,
-            relation = relation,
-            count = subject_strings.len(),
-            "Listed subjects"
-        );
-
-        Ok(subject_strings)
     }
 
     async fn resolve_subject_jid(&self, subject: &str) -> Result<Option<jid::BareJid>, XmppError> {
-        let subject = Self::parse_subject(subject)?;
-        if subject.subject_type != SubjectType::User || subject.relation.is_some() {
-            return Ok(None);
-        }
-
-        let row = self
-            .global_db_actor
-            .ask(DbQueryOne {
-                sql: "SELECT xmpp_localpart FROM users WHERE id = ? LIMIT 1".to_string(),
-                params: vec![subject.id.as_str().into()],
-            })
-            .await
-            .map_err(|e| XmppError::internal(format!("Failed to resolve user JID: {}", e)))?;
-
-        let Some(row) = row else {
-            return Ok(None);
-        };
-        let localpart = db_string(&row, 0, "xmpp_localpart")
-            .map_err(|e| XmppError::internal(format!("Failed to decode user JID: {}", e)))?;
-        let jid = localpart_to_jid(&localpart, &self.domain)
-            .map_err(|e| XmppError::internal(format!("Failed to build user JID: {}", e)))?
-            .parse()
-            .map_err(|e| XmppError::internal(format!("Failed to parse user JID: {}", e)))?;
-        Ok(Some(jid))
+        super::xmpp_permission_state::resolve_subject_jid(
+            &self.global_db_actor,
+            &self.domain,
+            subject,
+        )
+        .await
     }
 
     async fn search_users(
@@ -496,57 +378,14 @@ impl waddle_xmpp::AppState for XmppAppState {
         jid: &jid::BareJid,
         affiliation: waddle_xmpp::Affiliation,
     ) -> Result<(), XmppError> {
-        let Some(localpart) = jid.node() else {
-            return Err(XmppError::bad_request(Some("JID has no localpart".into())));
-        };
-        let row = self
-            .global_db_actor
-            .ask(DbQueryOne {
-                sql: "SELECT id FROM users WHERE xmpp_localpart = ? LIMIT 1".to_string(),
-                params: vec![localpart.as_str().into()],
-            })
-            .await
-            .map_err(|e| XmppError::internal(format!("Failed to resolve user: {}", e)))?;
-        let Some(row) = row else {
-            return Err(XmppError::item_not_found(Some(format!(
-                "User {} not found",
-                jid
-            ))));
-        };
-        let user_id = db_string(&row, 0, "id")
-            .map_err(|e| XmppError::internal(format!("Failed to decode user id: {}", e)))?;
-
-        let object = Object::new(ObjectType::Channel, channel_id);
-        let subject = Subject::user(&user_id);
-        for relation in ["owner", "admin", "member", "outcast"] {
-            let tuple = Tuple::new(object.clone(), Relation::new(relation), subject.clone());
-            self.permission_actor
-                .ask(DeleteTuple { tuple })
-                .await
-                .map_err(|e| {
-                    XmppError::internal(format!("Failed to clear MUC affiliation tuple: {}", e))
-                })?;
-        }
-
-        let relation = match affiliation {
-            waddle_xmpp::Affiliation::Owner => Some("owner"),
-            waddle_xmpp::Affiliation::Admin => Some("admin"),
-            waddle_xmpp::Affiliation::Member => Some("member"),
-            waddle_xmpp::Affiliation::Outcast => Some("outcast"),
-            waddle_xmpp::Affiliation::None => None,
-        };
-
-        if let Some(relation) = relation {
-            let tuple = Tuple::new(object, Relation::new(relation), subject);
-            self.permission_actor
-                .ask(WriteTuple { tuple })
-                .await
-                .map_err(|e| {
-                    XmppError::internal(format!("Failed to write MUC affiliation tuple: {}", e))
-                })?;
-        }
-
-        Ok(())
+        super::xmpp_permission_state::set_room_affiliation(
+            &self.global_db_actor,
+            &self.permission_actor,
+            channel_id,
+            jid,
+            affiliation,
+        )
+        .await
     }
 
     /// Lookup SCRAM credentials for a native JID user.

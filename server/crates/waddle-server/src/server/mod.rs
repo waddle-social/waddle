@@ -12,6 +12,8 @@ mod topology;
 mod trace;
 mod xmpp_channels;
 #[cfg(test)]
+mod xmpp_permission_state;
+#[cfg(test)]
 mod xmpp_roster_state;
 #[cfg(test)]
 mod xmpp_space_state;
