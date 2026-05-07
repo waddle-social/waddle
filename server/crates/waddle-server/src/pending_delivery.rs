@@ -699,7 +699,13 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
         let (kind, by, sid, xml) = match &row.payload {
             PendingPayload::Archived(stanza_id) => (
                 PAYLOAD_KIND_ARCHIVED,
-                Some(stanza_id.by.to_string()),
+                // The decode side parses `archive_stanza_by` as a `BareJid`
+                // (XEP-0313 archives are scoped per bare JID, see
+                // `MamArchiveResolver::resolve` which narrows via
+                // `.to_bare()`). Narrow on write too so a `StanzaId.by` that
+                // happens to carry a resource cannot poison a row that
+                // `decode_row` would later refuse to parse.
+                Some(stanza_id.by.to_bare().to_string()),
                 Some(stanza_id.id.clone()),
                 None,
             ),
@@ -1210,6 +1216,47 @@ mod tests {
         // FIFO: archived inserted first.
         assert!(rows[0].payload.is_archived());
         assert!(rows[1].payload.is_transient());
+    }
+
+    #[tokio::test]
+    async fn db_storage_archived_full_jid_by_round_trips_as_bare() {
+        // Regression: `StanzaId.by` is a `jid::Jid`, so a future call site
+        // could legitimately construct one with a resource. The
+        // `archive_stanza_by` column is decoded back as a `BareJid`, so the
+        // insert path must narrow with `.to_bare()`. Without that fix,
+        // round-tripping a Full-JID `StanzaId` through SQL would fail in
+        // `decode_row` and poison the recipient's pending queue.
+        let storage = DatabasePendingDeliveryStorage::open(None, QuotaPolicy::Unlimited)
+            .await
+            .expect("open in-memory storage");
+        let recipient = bare("alice@example.com");
+        let full_by: jid::Jid = "alice@example.com/resource"
+            .parse()
+            .expect("valid full jid");
+        let row = PendingRow {
+            id: PendingRowId::fresh(),
+            recipient: recipient.clone(),
+            original_receipt_at: chrono::DateTime::<chrono::Utc>::from_timestamp_millis(
+                1_700_000_000_000,
+            )
+            .unwrap(),
+            payload: PendingPayload::Archived(StanzaId::new("mam-id", full_by)),
+            flushed_in_session: None,
+            outbound_sequence: None,
+        };
+        assert_eq!(storage.insert(row).await.unwrap(), InsertOutcome::Inserted);
+
+        let rows = storage.list(&recipient).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        match &rows[0].payload {
+            PendingPayload::Archived(stanza_id) => {
+                assert_eq!(stanza_id.id, "mam-id");
+                // Decoded `by` must be the bare form even though we
+                // inserted a Full JID, so the column round-trips cleanly.
+                assert_eq!(stanza_id.by, jid::Jid::from(recipient));
+            }
+            other => panic!("expected Archived payload, got {other:?}"),
+        }
     }
 
     #[tokio::test]
