@@ -61,7 +61,7 @@ schema.#Project & {
 				contents:   "read"
 				"id-token": "write"
 			}
-			"tasks": [tasks.lint, tasks.build]
+			"tasks": [tasks.test, tasks.lint, tasks.build]
 		}
 	}
 
@@ -124,6 +124,20 @@ schema.#Project & {
 				"astro.config.mjs",
 				"src/**",
 				"scripts/**",
+				"tests/**",
+			]
+		}
+
+		test: schema.#Task & {
+			command: "bun"
+			args: ["test"]
+			dependsOn: [buildWasm, generateTypes]
+			inputs: [
+				"../package.json",
+				"../bun.lock",
+				"package.json",
+				"tsconfig.json",
+				"src/**",
 				"tests/**",
 			]
 		}
