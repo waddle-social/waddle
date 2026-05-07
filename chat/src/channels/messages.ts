@@ -27,7 +27,6 @@ import { MAX_FILE_UPLOAD_BYTES } from "@/lib/xmpp/file-upload";
 import type { OutboundFileAttachment } from "@/lib/xmpp";
 import {
   findMessageById,
-  indexMessageByIds,
   matchMessageId,
   mergeMessageIds,
 } from "@/lib/message-ids";
@@ -37,7 +36,6 @@ import { createPinnedEdgeScroller } from "@/lib/pinned-edge-scroll";
 import { roomKey, setLastSeen } from "@/lib/last-seen-store";
 import {
   listQueuedRoomMessages,
-  type PersistedQueuedRoomMessage,
 } from "@/lib/outbound-queue-store";
 import { mentionMatchesUsername } from "@/lib/mentions";
 import { useScrollDirectionPreference } from "@/preferences/scroll-direction";
@@ -47,106 +45,16 @@ import {
   isFeedTimelineMessage,
   mapLiveRoomMessageToTimeline,
 } from "@/channels/timeline";
-
-function mergeReplyToMetadata(
-  existing: TimelineMessage["replyTo"],
-  incoming: TimelineMessage["replyTo"],
-): TimelineMessage["replyTo"] {
-  if (!incoming) return existing;
-  if (!existing) return { ...incoming };
-  if (existing.id !== incoming.id) return existing;
-
-  let next = existing;
-  if (!next.author && incoming.author) next = { ...next, author: incoming.author };
-  if (!next.preview && incoming.preview) next = { ...next, preview: incoming.preview };
-  return next;
-}
-
-function sameStringList(a: readonly string[] | undefined, b: readonly string[] | undefined): boolean {
-  const left = a ?? [];
-  const right = b ?? [];
-  return left.length === right.length && left.every((value, index) => value === right[index]);
-}
-
-function mergeMissingThreadMetadata(
-  existing: TimelineMessage,
-  incoming: TimelineMessage,
-): TimelineMessage {
-  let next = existing;
-  const assign = (patch: Partial<TimelineMessage>) => {
-    next = next === existing ? { ...existing, ...patch } : { ...next, ...patch };
-  };
-
-  const ids = mergeMessageIds(next, next.id, [incoming.id, ...(incoming.wireIds ?? [])]);
-  if (ids.id !== next.id || !sameStringList(ids.wireIds, next.wireIds)) next = ids;
-
-  if (!next.threadId && incoming.threadId) assign({ threadId: incoming.threadId });
-  if (!next.parentThreadId && incoming.parentThreadId) assign({ parentThreadId: incoming.parentThreadId });
-  if (!next.correctionTargetId && incoming.correctionTargetId) {
-    assign({ correctionTargetId: incoming.correctionTargetId });
-  }
-  if (!next.reactionTargetId && incoming.reactionTargetId) {
-    assign({ reactionTargetId: incoming.reactionTargetId });
-  }
-
-  const replyTo = mergeReplyToMetadata(next.replyTo, incoming.replyTo);
-  if (replyTo !== next.replyTo) assign({ replyTo });
-
-  return next;
-}
-
-interface TimelineBuildOptions {
-  seedExistingOnly?: boolean;
-}
-
-function queuedRoomMessageToTimeline(
-  session: WaddleSession,
-  roomJid: string,
-  queued: PersistedQueuedRoomMessage,
-): TimelineMessage {
-  const message: TimelineMessage = {
-    id: queued.id,
-    correctionTargetId: queued.id,
-    author: session.username,
-    authorJid: `${roomJid}/${session.username}`,
-    body: queued.body || (queued.files?.[0]?.url ?? ""),
-    createdAt: queued.createdAt,
-    isSelf: true,
-    deliveryStatus: "queued",
-  };
-  if (queued.markup && queued.markup.length > 0) message.markup = queued.markup;
-  if (queued.references && queued.references.length > 0) message.references = queued.references;
-  if (queued.replyTo) {
-    message.replyTo = {
-      id: queued.replyTo.id,
-      ...(queued.replyTo.author ? { author: queued.replyTo.author } : {}),
-      ...(queued.replyTo.body ? { preview: queued.replyTo.body } : {}),
-    };
-  }
-  if (queued.threadId) message.threadId = queued.threadId;
-  if (queued.parentThreadId) message.parentThreadId = queued.parentThreadId;
-  if (queued.threadCreate) {
-    message.threadId = queued.id;
-    message.forumPostKind = "topic";
-    message.forumTitle = queued.threadCreate.title;
-    message.forumThreadTitle = queued.threadCreate.title;
-  } else if (queued.threadReply) {
-    message.forumPostKind = "reply";
-  }
-  if (queued.files && queued.files.length > 0) {
-    message.sharedFiles = queued.files.map((file) => ({
-      url: file.url,
-      name: file.name,
-      mediaType: file.mediaType,
-      size: file.size,
-      ...(file.width ? { width: file.width } : {}),
-      ...(file.height ? { height: file.height } : {}),
-      disposition: inferredFileDisposition(file.mediaType, file.name ?? file.url),
-      ...(file.encrypted ? { encrypted: file.encrypted } : {}),
-    }));
-  }
-  return message;
-}
+import {
+  buildChannelTimelineFromMamResults,
+  isSameMucCorrectionSender,
+  mucCorrectionSender,
+  queuedRoomMessageToTimeline,
+  reactionSendersForUpdate,
+  reactionsFromSenders,
+  removeSenderReactions,
+  type TimelineBuildOptions,
+} from "@/channels/message-timeline-state";
 
 export function useChannelMessages(
   session: Ref<WaddleSession | null>,
@@ -505,78 +413,10 @@ export function useChannelMessages(
     });
   }
 
-  function reactionSendersForUpdate(
-    message: TimelineMessage,
-    nick?: string,
-    senderId?: string,
-  ): Record<string, Record<string, string>> {
-    const reactionSenders: Record<string, Record<string, string>> = {};
-    for (const [emoji, senders] of Object.entries(message.reactionSenders ?? {})) {
-      reactionSenders[emoji] = { ...senders };
-    }
-    if (Object.keys(reactionSenders).length > 0) return reactionSenders;
-    for (const [emoji, nicks] of Object.entries(message.reactions ?? {})) {
-      reactionSenders[emoji] = {};
-      for (const existingNick of nicks) {
-        const legacySenderId = existingNick === nick && senderId ? senderId : existingNick;
-        reactionSenders[emoji][legacySenderId] = existingNick;
-      }
-    }
-    return reactionSenders;
-  }
-
-  function removeSenderReactions(
-    reactionSenders: Record<string, Record<string, string>>,
-    nick: string,
-    senderId: string,
-  ) {
-    for (const key of Object.keys(reactionSenders)) {
-      for (const existingSenderId of Object.keys(reactionSenders[key])) {
-        if (
-          existingSenderId === senderId ||
-          existingSenderId === nick ||
-          existingSenderId.endsWith(`/${nick}`)
-        ) {
-          delete reactionSenders[key][existingSenderId];
-        }
-      }
-      if (Object.keys(reactionSenders[key]).length === 0) delete reactionSenders[key];
-    }
-  }
-
-  function reactionsFromSenders(
-    reactionSenders: Record<string, Record<string, string>>,
-  ): Record<string, string[]> {
-    return Object.fromEntries(
-      Object.entries(reactionSenders).map(([emoji, senders]) => [emoji, Object.values(senders)]),
-    );
-  }
-
   function applyRetraction(retractsId: string) {
     messages.value = messages.value.map((m) =>
       matchMessageId(m, retractsId) ? { ...m, body: "", isRetracted: true } : m,
     );
-  }
-
-  function mucCorrectionSender(msg: Pick<LiveRoomMessage, "roomJid" | "nick" | "authorRealJid">): {
-    authorJid: string;
-    authorRealJid?: string;
-  } {
-    return {
-      authorJid: `${msg.roomJid}/${msg.nick}`,
-      ...(msg.authorRealJid ? { authorRealJid: msg.authorRealJid } : {}),
-    };
-  }
-
-  function isSameMucCorrectionSender(
-    target: TimelineMessage,
-    correction: { authorJid: string; authorRealJid?: string },
-  ): boolean {
-    if ((target.authorOccupantJid ?? target.authorJid) !== correction.authorJid) return false;
-    if (target.authorRealJid && correction.authorRealJid) {
-      return barePeerJid(target.authorRealJid) === barePeerJid(correction.authorRealJid);
-    }
-    return true;
   }
 
   function applyCorrection(
@@ -752,121 +592,14 @@ export function useChannelMessages(
     existing: TimelineMessage[] = [],
     options: TimelineBuildOptions = {},
   ): TimelineMessage[] {
-    const regularMessages: LiveRoomMessage[] = [];
-    const reactionUpdates: { targetId: string; nick: string; senderId: string; emojis: string[] }[] = [];
-    const retractionUpdates: string[] = [];
-    const correctionUpdates: {
-      targetId: string;
-      correctionSender: { authorJid: string; authorRealJid?: string };
-      body: string;
-      markup?: MarkupSpan[];
-      references?: MessageReference[];
-      extensionAnnotations?: LiveRoomMessage["extensionAnnotations"];
-    }[] = [];
-
-    for (const msg of mamResults) {
-      if (msg._reactionTarget && msg._reactionEmojis) {
-        reactionUpdates.push({
-          targetId: msg._reactionTarget,
-          nick: msg.nick,
-          senderId: msg._reactionSenderId ?? `${msg.roomJid}/${msg.nick}`,
-          emojis: msg._reactionEmojis,
-        });
-      } else if (msg.retractsId) {
-        retractionUpdates.push(msg.retractsId);
-      } else if (msg.replacesId) {
-        correctionUpdates.push({
-          targetId: msg.replacesId,
-          correctionSender: mucCorrectionSender(msg),
-          body: msg.body,
-          markup: msg.markup,
-          references: msg.references,
-          extensionAnnotations: msg.extensionAnnotations,
-        });
-      } else if (
-        msg.body
-        || (msg.sharedFiles && msg.sharedFiles.length > 0)
-        || msg.isSticker
-        || msg.threadId
-        || msg.replyTo
-        || msg.forumPostKind
-        || (msg.extensionAnnotations && msg.extensionAnnotations.length > 0)
-      ) {
-        regularMessages.push(msg);
-      }
-    }
-
-    const byId = new Map<string, TimelineMessage>();
-    for (const message of existing) {
-      indexMessageByIds(byId, message);
-    }
-    const timeline = options.seedExistingOnly ? [] : [...existing];
-    for (const raw of regularMessages) {
-      const tm = mapLiveRoomMessageToTimeline(session.value!, raw, (id) => byId.get(id));
-      const existingMessage = [tm.id, ...(tm.wireIds ?? [])]
-        .map((id) => byId.get(id))
-        .find((message): message is TimelineMessage => !!message);
-      if (existingMessage) {
-        const merged = options.seedExistingOnly
-          ? mergeMissingThreadMetadata(tm, existingMessage)
-          : mergeMissingThreadMetadata(existingMessage, tm);
-        if (options.seedExistingOnly) {
-          indexMessageByIds(byId, merged);
-          timeline.push(merged);
-        } else if (merged !== existingMessage) {
-          const index = timeline.indexOf(existingMessage);
-          if (index !== -1) timeline[index] = merged;
-          indexMessageByIds(byId, merged);
-        }
-        continue;
-      }
-      indexMessageByIds(byId, tm);
-      timeline.push(tm);
-    }
-
-    for (const update of correctionUpdates) {
-      const target = findMessageById(timeline, update.targetId);
-      if (!target || !isSameMucCorrectionSender(target, update.correctionSender)) continue;
-      target.body = update.body;
-      target.isEdited = true;
-      if (update.markup && update.markup.length > 0) target.markup = update.markup;
-      else delete target.markup;
-      if (update.references && update.references.length > 0) target.references = update.references;
-      else delete target.references;
-      if (update.extensionAnnotations && update.extensionAnnotations.length > 0) {
-        target.extensionAnnotations = update.extensionAnnotations;
-      } else {
-        delete target.extensionAnnotations;
-      }
-    }
-
-    for (const retractsId of retractionUpdates) {
-      const target = findMessageById(timeline, retractsId);
-      if (!target) continue;
-      target.body = "";
-      target.isRetracted = true;
-    }
-
-    for (const update of reactionUpdates) {
-      const target = timeline.find((message) => message.reactionTargetId === update.targetId);
-      if (!target) continue;
-      const reactionSenders = reactionSendersForUpdate(target, update.nick, update.senderId);
-      removeSenderReactions(reactionSenders, update.nick, update.senderId);
-      for (const emoji of update.emojis) {
-        if (!reactionSenders[emoji]) reactionSenders[emoji] = {};
-        reactionSenders[emoji][update.senderId] = update.nick;
-      }
-      const reactions = reactionsFromSenders(reactionSenders);
-      if (Object.keys(reactionSenders).length > 0) {
-        target.reactionSenders = reactionSenders;
-        target.reactions = reactions;
-      } else {
-        delete target.reactionSenders;
-        delete target.reactions;
-      }
-    }
-
-    return applyForumContext(timeline.sort((a, b) => a.createdAt.localeCompare(b.createdAt)), channelIsForum.value);
+    if (!session.value) return existing;
+    return buildChannelTimelineFromMamResults({
+      session: session.value,
+      channelIsForum: channelIsForum.value,
+      mamResults,
+      existing,
+      options,
+    });
   }
 
   async function loadMessages(
