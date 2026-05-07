@@ -550,9 +550,9 @@ export function useDirectMessages(
       initialLatestPagePinned = true;
       const newest = [...timelineWithQueue].reverse().find(isFeedVisible);
       if (newest) setLastSeen(key, newest.id);
-    } catch {
+    } catch (error) {
       if (requestId === messageRequestId) {
-        console.warn("Could not load DM conversation");
+        console.warn("Could not load DM conversation", { peerJid, error });
         const queuedOnly = appendQueuedMessages([], peerJid);
         messages.value = queuedOnly;
         loadErrorPeerJid.value = peerJid;
@@ -591,9 +591,9 @@ export function useDirectMessages(
       if (el && !isTopPinnedScrollDirection(scrollDirection.value)) {
         el.scrollTop = previousTop + (el.scrollHeight - previousHeight);
       }
-    } catch {
+    } catch (error) {
       if (isCurrentRequest()) {
-        console.warn("Could not load older DM messages");
+        console.warn("Could not load older DM messages", { peerJid, error });
         actionError.value = dmLoadErrorMessage(peerJid);
       }
     } finally {
