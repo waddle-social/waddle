@@ -160,6 +160,45 @@ pub trait SmPersistenceStorage: Send + Sync {
     /// XEP-0198 `<resume previd='…'/>` finds sessions that detached
     /// before the most recent restart.
     async fn list_all_sessions(&self) -> Result<Vec<PersistedSession>, SmPersistenceError>;
+
+    /// Enumerate every persisted session AND its unacked queue in a
+    /// single round-trip. Used by `restore_from_persistence` so cold
+    /// startup doesn't issue an N+1 (1 list_all_sessions + N
+    /// list_unacked). Default impl falls back to the N+1 sequence so
+    /// in-memory backends and bring-up tests keep working without
+    /// implementing a JOIN; the libSQL/Postgres backend overrides
+    /// with a single `SELECT … LEFT JOIN sm_unacked` query.
+    async fn list_all_sessions_with_unacked(
+        &self,
+    ) -> Result<Vec<(PersistedSession, Vec<PersistedUnackedStanza>)>, SmPersistenceError> {
+        let sessions = self.list_all_sessions().await?;
+        let mut out = Vec::with_capacity(sessions.len());
+        for session in sessions {
+            let unacked = self.list_unacked(&session.stream_id).await?;
+            out.push((session, unacked));
+        }
+        Ok(out)
+    }
+
+    /// Atomically write a session record + its unacked queue. Either
+    /// every row commits or none does, so a panic / process crash
+    /// mid-batch leaves the durable view consistent (no half-stored
+    /// session whose row claims N unacked stanzas but the table only
+    /// holds K < N). Default impl falls back to upsert + N appends
+    /// without a transaction so backends that don't support nested
+    /// ops keep working; the libSQL/Postgres backend overrides with
+    /// a `BEGIN; … ; COMMIT;` block via `Database::begin`.
+    async fn store_session_atomic(
+        &self,
+        session: PersistedSession,
+        unacked: Vec<PersistedUnackedStanza>,
+    ) -> Result<(), SmPersistenceError> {
+        self.upsert_session(session).await?;
+        for entry in unacked {
+            self.append_unacked(entry).await?;
+        }
+        Ok(())
+    }
 }
 
 /// In-memory implementation suitable for tests and as the structural
@@ -431,5 +470,72 @@ mod tests {
             "original_receipt_at must round-trip exactly (not be re-stamped \
              at write or read time)"
         );
+    }
+
+    /// Issue #209 PR #405: the trait default for
+    /// `list_all_sessions_with_unacked` falls back to N+1; verify
+    /// it returns sessions paired with their unacked queues. The
+    /// libSQL backend overrides with a single LEFT JOIN — that
+    /// override is exercised separately in
+    /// `server/crates/waddle-server/src/sm_persistence.rs` tests.
+    #[tokio::test]
+    async fn list_all_sessions_with_unacked_groups_by_session() {
+        let store = InMemorySmPersistence::new();
+        // Session A: 0 unacked rows.
+        store
+            .upsert_session(fixture_session("alpha"))
+            .await
+            .unwrap();
+        // Session B: 2 unacked rows.
+        store.upsert_session(fixture_session("beta")).await.unwrap();
+        store
+            .append_unacked(fixture_unacked("beta", 1))
+            .await
+            .unwrap();
+        store
+            .append_unacked(fixture_unacked("beta", 2))
+            .await
+            .unwrap();
+        // Session C: 1 unacked row.
+        store
+            .upsert_session(fixture_session("gamma"))
+            .await
+            .unwrap();
+        store
+            .append_unacked(fixture_unacked("gamma", 1))
+            .await
+            .unwrap();
+
+        let mut grouped = store.list_all_sessions_with_unacked().await.unwrap();
+        // Sort by stream_id for deterministic assertions (the trait
+        // doesn't mandate ordering since the in-memory backend uses a
+        // HashMap).
+        grouped.sort_by(|a, b| a.0.stream_id.as_str().cmp(b.0.stream_id.as_str()));
+        assert_eq!(grouped.len(), 3);
+        assert_eq!(grouped[0].0.stream_id.as_str(), "alpha");
+        assert!(grouped[0].1.is_empty(), "session with no unacked");
+        assert_eq!(grouped[1].0.stream_id.as_str(), "beta");
+        assert_eq!(grouped[1].1.len(), 2);
+        assert_eq!(grouped[2].0.stream_id.as_str(), "gamma");
+        assert_eq!(grouped[2].1.len(), 1);
+    }
+
+    /// Issue #209 PR #405: the trait default for
+    /// `store_session_atomic` falls back to upsert + N appends.
+    /// Verify the success path produces the same result as
+    /// individually-issued ops.
+    #[tokio::test]
+    async fn store_session_atomic_writes_session_and_unacked_together() {
+        let store = InMemorySmPersistence::new();
+        let session = fixture_session("atomic-1");
+        let unacked = vec![
+            fixture_unacked("atomic-1", 1),
+            fixture_unacked("atomic-1", 2),
+            fixture_unacked("atomic-1", 3),
+        ];
+        store.store_session_atomic(session, unacked).await.unwrap();
+        assert!(store.get_session(&sid("atomic-1")).await.unwrap().is_some());
+        let listed = store.list_unacked(&sid("atomic-1")).await.unwrap();
+        assert_eq!(listed.len(), 3);
     }
 }

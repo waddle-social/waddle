@@ -12,8 +12,8 @@ Tracking doc for the multi-PR implementation of issue [#209](https://github.com/
 | Q7 lifecycle | [#358](https://github.com/waddle-social/waddle/pull/358) | ✅ merged | SM-ack-keyed deletion of `pending_delivery` rows + pre-ack session-death re-flush |
 | Janitor + flush-time block | [#360](https://github.com/waddle-social/waddle/pull/360) | ✅ merged | Claim-expiry janitor + XEP-0191 flush-time block re-eval |
 | Receipt-time plumbing | [#361](https://github.com/waddle-social/waddle/pull/361) | ✅ merged | `original_receipt_at` plumbing through `DetachedSession.unacked_stanzas` |
-| Test-coverage debt | [#362](https://github.com/waddle-social/waddle/pull/362) | 🟡 in review | Un-ignore XEP-0160 integration tests + extend dedicated XEP-0198/0203/0359/0191 suites |
-| Storage performance | [#351](#pr-351--storage-performance--planned) | ⬜ planned (low priority) | N+1 `list_unacked` JOIN; atomic transactions in `Database` abstraction |
+| Test-coverage debt | [#362](https://github.com/waddle-social/waddle/pull/362) | ✅ merged | Un-ignore XEP-0160 integration tests + extend dedicated XEP-0198/0203/0359/0191 suites |
+| Storage performance | [#405](https://github.com/waddle-social/waddle/pull/405) | 🟡 in review | Single-JOIN restore (replaces N+1) + atomic upsert via `Database::begin` |
 
 ## Locked design (from grilling session)
 
