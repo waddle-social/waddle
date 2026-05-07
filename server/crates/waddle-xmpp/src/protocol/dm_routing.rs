@@ -917,7 +917,7 @@ mod tests {
             None,
         );
         msg.payloads
-            .push(Element::builder("sent", "urn:xmpp:carbons:2").build());
+            .push(Element::builder("sent", CARBONS_NS).build());
         let routing = classify_dm_intake(&msg, &OnlineResources::empty(), &Blocklist::empty());
         assert_eq!(routing, DmRouting::dropped());
     }
@@ -932,7 +932,7 @@ mod tests {
             None,
         );
         msg.payloads
-            .push(Element::builder("received", "urn:xmpp:carbons:2").build());
+            .push(Element::builder("received", CARBONS_NS).build());
         let routing = classify_dm_intake(&msg, &OnlineResources::empty(), &Blocklist::empty());
         assert_eq!(routing, DmRouting::dropped());
     }
