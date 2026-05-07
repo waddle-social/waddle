@@ -1054,70 +1054,7 @@ impl waddle_xmpp::AppState for XmppAppState {
 
     /// List all channels in the canonical space.
     async fn list_space_channels(&self) -> Result<Vec<waddle_xmpp::ChannelInfo>, XmppError> {
-        debug!("Listing space channels for auto-join");
-
-        let actor = self.space_db_actor.as_ref().ok_or_else(|| {
-            warn!("Database pool not configured for auto-join channel enumeration");
-            XmppError::internal("Database pool not configured".to_string())
-        })?;
-
-        const PAGE_SIZE: usize = 200;
-        let mut offset = 0usize;
-        let mut result = Vec::new();
-
-        loop {
-            let rows = actor
-                .ask(DbQuery {
-                    sql: r#"
-                        SELECT id, name, channel_type
-                        FROM channels
-                        ORDER BY position ASC, created_at ASC
-                        LIMIT ? OFFSET ?
-                    "#
-                    .to_string(),
-                    params: vec![
-                        crate::db::Value::from(PAGE_SIZE as i64),
-                        crate::db::Value::from(offset as i64),
-                    ],
-                })
-                .await
-                .map_err(|e| {
-                    warn!(error = %e, "Failed to list channels");
-                    XmppError::internal(format!("Failed to list channels: {}", e))
-                })?;
-
-            let page_len = rows.len();
-            for row in rows {
-                let id = row_value(&row, 0)
-                    .and_then(|value| value.as_string())
-                    .map_err(|e| {
-                        XmppError::internal(format!("Failed to parse channel id: {}", e))
-                    })?;
-                let name = row_value(&row, 1)
-                    .and_then(|value| value.as_string())
-                    .map_err(|e| {
-                        XmppError::internal(format!("Failed to parse channel name: {}", e))
-                    })?;
-                let channel_type = row_value(&row, 2)
-                    .and_then(|value| value.as_string())
-                    .map_err(|e| {
-                        XmppError::internal(format!("Failed to parse channel type: {}", e))
-                    })?;
-                result.push(waddle_xmpp::ChannelInfo {
-                    id,
-                    name,
-                    channel_type,
-                });
-            }
-
-            if page_len < PAGE_SIZE {
-                break;
-            }
-            offset += PAGE_SIZE;
-        }
-
-        debug!(count = result.len(), "Found space channels");
-        Ok(result)
+        super::xmpp_space_state::list_space_channels(self.space_db_actor.as_ref()).await
     }
 
     /// Look up a channel-backed room by channel ID.
@@ -1125,63 +1062,8 @@ impl waddle_xmpp::AppState for XmppAppState {
         &self,
         channel_id: &str,
     ) -> Result<Option<waddle_xmpp::ChannelRoomInfo>, XmppError> {
-        debug!(
-            channel_id = %channel_id,
-            "Looking up channel-backed room metadata"
-        );
-
-        let Some(actor) = self.space_db_actor.as_ref() else {
-            debug!("Database pool not configured for channel room lookup");
-            return Ok(None);
-        };
-
-        match actor
-            .ask(DbQueryOne {
-                sql: r#"
-                    SELECT id, name, channel_type
-                    FROM channels
-                    WHERE id = ?
-                "#
-                .to_string(),
-                params: vec![crate::db::Value::from(channel_id.to_string())],
-            })
+        super::xmpp_space_state::get_channel_room_info(self.space_db_actor.as_ref(), channel_id)
             .await
-        {
-            Ok(Some(row)) => {
-                let id = row_value(&row, 0)
-                    .and_then(|value| value.as_string())
-                    .map_err(|e| {
-                        XmppError::internal(format!("Failed to parse channel id: {}", e))
-                    })?;
-                let name = row_value(&row, 1)
-                    .and_then(|value| value.as_string())
-                    .map_err(|e| {
-                        XmppError::internal(format!("Failed to parse channel name: {}", e))
-                    })?;
-                let channel_type = row_value(&row, 2)
-                    .and_then(|value| value.as_string())
-                    .map_err(|e| {
-                        XmppError::internal(format!("Failed to parse channel type: {}", e))
-                    })?;
-                Ok(Some(waddle_xmpp::ChannelRoomInfo {
-                    waddle_id: "space".to_string(),
-                    channel: waddle_xmpp::ChannelInfo {
-                        id,
-                        name,
-                        channel_type,
-                    },
-                }))
-            }
-            Ok(None) => Ok(None),
-            Err(e) => {
-                warn!(
-                    channel_id = %channel_id,
-                    error = %e,
-                    "Failed to query channel from database actor"
-                );
-                Ok(None)
-            }
-        }
     }
 
     // =========================================================================
@@ -1190,15 +1072,9 @@ impl waddle_xmpp::AppState for XmppAppState {
 
     /// Get detailed information about the canonical space.
     async fn get_space_details(&self) -> Result<Option<waddle_xmpp::SpaceDetails>, XmppError> {
-        Ok(Some(waddle_xmpp::SpaceDetails {
-            id: "space".to_string(),
-            name: self.domain.clone(),
-            description: None,
-            owner_id: "server".to_string(),
-            icon_url: None,
-            is_public: true,
-            created_at: "1970-01-01T00:00:00Z".to_string(),
-        }))
+        Ok(Some(super::xmpp_space_state::get_space_details(
+            &self.domain,
+        )))
     }
 }
 

@@ -14,6 +14,8 @@ mod xmpp_channels;
 #[cfg(test)]
 mod xmpp_roster_state;
 #[cfg(test)]
+mod xmpp_space_state;
+#[cfg(test)]
 mod xmpp_user_storage_state;
 
 pub(crate) mod bootstrap_membership;
