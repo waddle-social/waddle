@@ -1,0 +1,233 @@
+use super::subscription::{
+    recipient_blocks_sender, record_stanza_for_detached_available_resources_excluding,
+    roster_storage,
+};
+use super::*;
+
+pub(super) async fn handle_regular_presence_update(
+    state: &WebSocketState,
+    sender_jid: &FullJid,
+    presence: xmpp_parsers::presence::Presence,
+) {
+    let available = presence.type_ != xmpp_parsers::presence::Type::Unavailable;
+    let priority = presence.priority;
+    if available {
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .clear_last_activity(&sender_jid.to_bare());
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .update_presence(sender_jid, true, priority);
+        // XEP-0160 §3 step 5 (locked Q7a/Q7d): on the first non-negative-
+        // priority presence of a fresh session, drain pending_delivery
+        // for the recipient. `claim_offline_flush` ensures this fires at
+        // most once per session even across priority transitions.
+        if priority >= 0 {
+            maybe_flush_pending_delivery(state, sender_jid).await;
+        }
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .update_presence_state(
+                sender_jid,
+                presence
+                    .show
+                    .as_ref()
+                    .map(|show| show_name(show).to_string()),
+                presence.statuses.values().next().cloned(),
+                priority,
+            );
+        for stanza in state
+            .deps
+            .protocol
+            .connection_registry
+            .pending_subscription_stanzas(&sender_jid.to_bare())
+        {
+            let _ = state
+                .deps
+                .protocol
+                .connection_registry
+                .send_to(sender_jid, stanza)
+                .await;
+        }
+    } else {
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .update_presence(sender_jid, false, priority);
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .clear_presence_state(sender_jid);
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .record_last_activity(
+                &sender_jid.to_bare(),
+                presence.statuses.values().next().cloned(),
+            );
+    }
+    broadcast_presence_to_subscribers(state, sender_jid, &presence, available).await;
+}
+
+/// XEP-0160 §3 step 5 + locked Q7a / Q7c / Q7d: on the recovering
+/// session's first non-negative-priority presence, drain
+/// `pending_delivery` for the user's bare JID and push each row to
+/// this resource.
+///
+/// `ConnectionEntry::claim_offline_flush()` is a CAS that returns
+/// `true` exactly once per fresh session — repeated presence updates
+/// (priority transitions, status text changes) do not re-flush an
+/// already-drained queue.
+async fn maybe_flush_pending_delivery(state: &WebSocketState, sender_jid: &FullJid) {
+    let entry = match state
+        .deps
+        .protocol
+        .connection_registry
+        .get_entry(sender_jid)
+    {
+        Some(entry) => entry,
+        None => return,
+    };
+    if !entry.claim_offline_flush() {
+        return;
+    }
+    let recipient_bare = sender_jid.to_bare();
+    let resolver = crate::pending_delivery::MamArchiveResolver {
+        mam_storage: std::sync::Arc::clone(&state.deps.protocol.mam_storage),
+    };
+    // Locked Q7b SM-ack lifecycle (issue #209): when the recovering
+    // connection has an active XEP-0198 session, key claims by its
+    // stream id so a subsequent `<a h>` from the same session deletes
+    // exactly its acked rows. Without SM, the flush function falls
+    // back to delete-on-push (no ack will ever fire).
+    let sm_session_id = entry.sm_stream_id();
+    let outcome = crate::pending_delivery::flush_for_resource(
+        &state.deps.protocol.pending_delivery_storage,
+        &state.deps.protocol.connection_registry,
+        &recipient_bare,
+        sender_jid,
+        crate::pending_delivery::FlushContext {
+            server_domain: state.deps.auth_state.xmpp_domain.as_str(),
+            sm_session: sm_session_id.as_ref(),
+            // XEP-0191 §2 step 4 flush-time block re-evaluation
+            // (PR #360): pass live blocking storage so a recipient
+            // who blocked a sender AFTER intake doesn't see queued
+            // messages from that sender on reconnect.
+            blocking_storage: Some(&state.deps.protocol.blocking_storage),
+            archive_resolver: &resolver,
+        },
+    )
+    .await;
+    if outcome.claimed > 0 {
+        debug!(
+            jid = %sender_jid,
+            claimed = outcome.claimed,
+            pushed = outcome.pushed,
+            unresolved = outcome.unresolved,
+            "XEP-0160 pending_delivery flush completed"
+        );
+    }
+}
+
+async fn broadcast_presence_to_subscribers(
+    state: &WebSocketState,
+    sender_jid: &FullJid,
+    presence: &xmpp_parsers::presence::Presence,
+    available: bool,
+) {
+    let Some(storage) = roster_storage(state).await else {
+        return;
+    };
+    let subscribers = match storage
+        .get_presence_subscribers(&sender_jid.to_bare())
+        .await
+    {
+        Ok(subscribers) => subscribers,
+        Err(error) => {
+            warn!(error = %error, jid = %sender_jid, "Failed to load presence subscribers");
+            return;
+        }
+    };
+    for subscriber in subscribers {
+        let Ok(subscriber_bare) = subscriber.parse::<BareJid>() else {
+            continue;
+        };
+        if recipient_blocks_sender(state, &sender_jid.to_bare(), &subscriber_bare).await {
+            continue;
+        }
+        if recipient_blocks_sender(state, &subscriber_bare, &sender_jid.to_bare()).await {
+            continue;
+        }
+        let stanza = if available {
+            let show = presence.show.as_ref().map(show_name);
+            Stanza::Presence(build_available_presence(
+                sender_jid,
+                &subscriber_bare,
+                show,
+                presence.statuses.values().next().map(String::as_str),
+                presence.priority,
+            ))
+        } else {
+            let mut unavailable = presence.clone();
+            unavailable.from = Some(Jid::from(sender_jid.clone()));
+            unavailable.to = Some(Jid::from(subscriber_bare.clone()));
+            Stanza::Presence(unavailable)
+        };
+        let mut delivered_resources = Vec::new();
+        for resource in state
+            .deps
+            .protocol
+            .connection_registry
+            .get_available_resources_for_user(&subscriber_bare)
+            .into_iter()
+            .map(|(jid, _)| jid)
+        {
+            if state
+                .deps
+                .protocol
+                .connection_registry
+                .send_to(&resource, stanza.clone())
+                .await
+                .is_sent()
+            {
+                delivered_resources.push(resource);
+            }
+        }
+        record_stanza_for_detached_available_resources_excluding(
+            state,
+            &subscriber_bare,
+            &stanza,
+            "presence broadcast",
+            &delivered_resources,
+        )
+        .await;
+    }
+}
+
+pub(super) fn show_name(show: &xmpp_parsers::presence::Show) -> &'static str {
+    match show {
+        xmpp_parsers::presence::Show::Away => "away",
+        xmpp_parsers::presence::Show::Chat => "chat",
+        xmpp_parsers::presence::Show::Dnd => "dnd",
+        xmpp_parsers::presence::Show::Xa => "xa",
+    }
+}
+
+pub(super) fn show_from_name(value: &str) -> Option<xmpp_parsers::presence::Show> {
+    match value {
+        "away" => Some(xmpp_parsers::presence::Show::Away),
+        "chat" => Some(xmpp_parsers::presence::Show::Chat),
+        "dnd" => Some(xmpp_parsers::presence::Show::Dnd),
+        "xa" => Some(xmpp_parsers::presence::Show::Xa),
+        _ => None,
+    }
+}

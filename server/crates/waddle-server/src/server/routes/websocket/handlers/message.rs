@@ -1,13 +1,15 @@
 use tracing::warn;
 use waddle_xmpp::{
+    Stanza,
     parser::stanza_to_string,
     protocol::handlers::errors::bad_request_reply,
-    protocol::{frame::InboundFrame, InboundEvent, XmppStateMachine},
+    protocol::{InboundEvent, XmppStateMachine, frame::InboundFrame},
     xep::NS_DELAY,
-    Stanza,
 };
 
-use super::super::{build_interpret_deps, drive_interpret_loop, WebSocketState};
+use super::super::{
+    WebSocketState, interpret_loop::build_interpret_deps, replay::drive_interpret_loop,
+};
 use crate::auth::Session;
 use waddle_xmpp::protocol::ConnectionPhase;
 
@@ -118,13 +120,17 @@ mod tests {
 
         strip_client_authored_delay(&mut message);
 
-        assert!(message
-            .payloads
-            .iter()
-            .all(|payload| payload.ns() != NS_DELAY));
-        assert!(message
-            .payloads
-            .iter()
-            .any(|payload| payload.ns().starts_with("urn:waddle:")));
+        assert!(
+            message
+                .payloads
+                .iter()
+                .all(|payload| payload.ns() != NS_DELAY)
+        );
+        assert!(
+            message
+                .payloads
+                .iter()
+                .any(|payload| payload.ns().starts_with("urn:waddle:"))
+        );
     }
 }

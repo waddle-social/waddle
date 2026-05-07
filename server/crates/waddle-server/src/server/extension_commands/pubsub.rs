@@ -1,0 +1,248 @@
+use crate::permissions::{CheckPermission, Object, ObjectType, Permission, Subject};
+use crate::server::AppState;
+use crate::server::bootstrap_membership::DEPLOYMENT_SERVER_ID;
+use crate::server::extension_commands::forms::{
+    extension_data_form_to_xmpp, extension_enrichment_result_form, extension_enrichment_texts,
+};
+use crate::server::managed_channel_policy::{
+    DEPLOYMENT_MEMBERSHIP_PERMISSIONS, ManagedChannelServerPolicy,
+    server_policy_for_managed_channel,
+};
+use std::sync::Arc;
+use waddle_extensions::{ExtensionEffect, ExtensionManager, PubSubPublish};
+use waddle_xmpp::pubsub::{NodeConfig, PubSubItem, PubSubStorage};
+
+pub(crate) struct ExtensionPubSubContext {
+    pub(crate) storage: Arc<dyn PubSubStorage>,
+    pub(crate) owner: jid::BareJid,
+    pub(crate) app_state: Arc<AppState>,
+    pub(crate) extension_manager: Arc<ExtensionManager>,
+    pub(crate) authenticated_user_id: Option<String>,
+}
+
+async fn authorize_extension_pubsub_publish(
+    context: &ExtensionPubSubContext,
+    node: &waddle_extensions::types::PubSubNode,
+) -> Result<(), String> {
+    let Some(user_id) = context.authenticated_user_id.as_deref() else {
+        return Err("authenticated user required".to_string());
+    };
+    let Some(room) = context.extension_manager.room_for_pubsub_node(node) else {
+        return Err("PubSub node is not bound to a channel".to_string());
+    };
+    let room_jid: jid::BareJid = room
+        .as_str()
+        .parse()
+        .map_err(|error| format!("invalid channel JID in PubSub node: {error}"))?;
+    let Some(channel_id) = waddle_xmpp::parse_managed_room_jid(&room_jid) else {
+        return Err("PubSub node is not bound to a managed channel".to_string());
+    };
+    let object = Object::new(ObjectType::Channel, channel_id.clone());
+    let subject = Subject::user(user_id);
+    let outcast = context
+        .app_state
+        .permission_actor
+        .ask(CheckPermission {
+            subject: subject.clone(),
+            permission: Permission::Custom("outcast".into()),
+            object: object.clone(),
+        })
+        .await
+        .map_err(|error| format!("permission check failed: {error}"))?;
+    if outcast.allowed {
+        return Err("requester is not allowed in this channel".to_string());
+    }
+    if managed_channel_permission_allowed(
+        &context.app_state,
+        &subject,
+        channel_id.as_str(),
+        Permission::SendMessage,
+    )
+    .await?
+    {
+        Ok(())
+    } else {
+        Err("requester cannot write extension state for this channel".to_string())
+    }
+}
+
+pub(crate) async fn managed_channel_permission_allowed(
+    app_state: &AppState,
+    subject: &Subject,
+    channel_id: &str,
+    permission: Permission,
+) -> Result<bool, String> {
+    let policy = server_policy_for_managed_channel(channel_id, &permission);
+    if policy == ManagedChannelServerPolicy::DeploymentOwnerOnly {
+        let server_owner = app_state
+            .permission_actor
+            .ask(CheckPermission {
+                subject: subject.clone(),
+                permission: Permission::Owner,
+                object: Object::new(ObjectType::Server, DEPLOYMENT_SERVER_ID),
+            })
+            .await
+            .map_err(|error| format!("permission check failed: {error}"))?;
+        return Ok(server_owner.allowed);
+    }
+
+    let allowed = app_state
+        .permission_actor
+        .ask(CheckPermission {
+            subject: subject.clone(),
+            permission: permission.clone(),
+            object: Object::new(ObjectType::Channel, channel_id),
+        })
+        .await
+        .map_err(|error| format!("permission check failed: {error}"))?;
+    if allowed.allowed {
+        return Ok(true);
+    }
+
+    if policy == ManagedChannelServerPolicy::DeploymentMembership {
+        // Keep these as explicit relation/permission checks. The local permission
+        // schema makes `member` inherit owner/admin, but the SpiceDB schema uses
+        // server relations directly for compatibility.
+        for server_permission in DEPLOYMENT_MEMBERSHIP_PERMISSIONS {
+            let server_allowed = app_state
+                .permission_actor
+                .ask(CheckPermission {
+                    subject: subject.clone(),
+                    permission: server_permission,
+                    object: Object::new(ObjectType::Server, DEPLOYMENT_SERVER_ID),
+                })
+                .await
+                .map_err(|error| format!("permission check failed: {error}"))?;
+            if server_allowed.allowed {
+                return Ok(true);
+            }
+        }
+        return Ok(false);
+    }
+
+    Ok(false)
+}
+
+pub(crate) async fn extension_command_result(
+    effects: Vec<ExtensionEffect>,
+    pubsub: Option<ExtensionPubSubContext>,
+) -> waddle_xmpp::commands::CommandResult {
+    let mut notes = Vec::new();
+    let mut result_form = None;
+    for effect in effects {
+        match effect {
+            ExtensionEffect::PublishPubSub(publish) => match pubsub.as_ref() {
+                Some(context) => {
+                    match authorize_extension_pubsub_publish(context, &publish.node).await {
+                        Ok(()) => {}
+                        Err(error) => {
+                            notes.push(waddle_xmpp::commands::Note::warn(format!(
+                                "PubSub publish denied: {error}"
+                            )));
+                            continue;
+                        }
+                    }
+                    match publish_extension_pubsub(
+                        context.storage.as_ref(),
+                        &context.owner,
+                        publish,
+                    )
+                    .await
+                    {
+                        Ok(item_id) => notes.push(waddle_xmpp::commands::Note::info(format!(
+                            "Published PubSub item {item_id}"
+                        ))),
+                        Err(error) => notes.push(waddle_xmpp::commands::Note::warn(format!(
+                            "PubSub publish failed: {error}"
+                        ))),
+                    }
+                }
+                None => notes.push(waddle_xmpp::commands::Note::warn(
+                    "PubSub publish unavailable".to_string(),
+                )),
+            },
+            ExtensionEffect::ReferenceArtifact(artifact) => {
+                let text = format!("Referenced artifact {}", artifact.uri.as_str());
+                notes.push(waddle_xmpp::commands::Note::info(text));
+            }
+            ExtensionEffect::CommandForm(form) => {
+                return waddle_xmpp::commands::CommandResult::Executing {
+                    form: extension_data_form_to_xmpp(form),
+                    session_id: String::new(),
+                    notes,
+                };
+            }
+            ExtensionEffect::HostWarning(message) => {
+                notes.push(waddle_xmpp::commands::Note::warn(
+                    message.as_str().to_string(),
+                ));
+            }
+            ExtensionEffect::EnrichMessage(envelope) => {
+                let count = envelope.enrichments.len();
+                if result_form.is_none() {
+                    result_form = Some(extension_enrichment_result_form(&envelope));
+                }
+                let summaries = extension_enrichment_texts(&envelope);
+                if summaries.is_empty() {
+                    notes.push(waddle_xmpp::commands::Note::info(format!(
+                        "Produced {count} message enrichment{}",
+                        if count == 1 { "" } else { "s" }
+                    )));
+                } else {
+                    notes.extend(summaries.into_iter().map(waddle_xmpp::commands::Note::info));
+                }
+            }
+            ExtensionEffect::Noop => {}
+        }
+    }
+    if notes.is_empty() {
+        notes.push(waddle_xmpp::commands::Note::warn(
+            "Extension action completed without a visible result".to_string(),
+        ));
+    }
+
+    waddle_xmpp::commands::CommandResult::Completed {
+        form: result_form,
+        notes,
+    }
+}
+
+const MAX_EXTENSION_PUBSUB_ITEMS: u32 = 500;
+
+async fn publish_extension_pubsub(
+    storage: &dyn PubSubStorage,
+    owner: &jid::BareJid,
+    publish: PubSubPublish,
+) -> Result<String, waddle_xmpp::XmppError> {
+    ensure_extension_pubsub_node(storage, owner, publish.node.as_str()).await?;
+    let item = PubSubItem::new(
+        publish.item_id.map(|item_id| item_id.into_string()),
+        Some(publish.payload.to_minidom()),
+    );
+    let result = storage
+        .publish_item(owner, publish.node.as_str(), &item, Some(owner), false)
+        .await?;
+    Ok(result.item_id)
+}
+
+async fn ensure_extension_pubsub_node(
+    storage: &dyn PubSubStorage,
+    owner: &jid::BareJid,
+    node: &str,
+) -> Result<(), waddle_xmpp::XmppError> {
+    let config = extension_pubsub_node_config();
+    let (existing, _) = storage.get_or_create_node(owner, node).await?;
+    if existing.config != config {
+        storage.update_node_config(owner, node, &config).await?;
+    }
+    storage
+        .set_affiliation(owner, node, owner, waddle_xmpp::pubsub::Affiliation::Owner)
+        .await?;
+    Ok(())
+}
+
+fn extension_pubsub_node_config() -> NodeConfig {
+    let mut config = NodeConfig::spaces_private();
+    config.max_items = MAX_EXTENSION_PUBSUB_ITEMS;
+    config
+}

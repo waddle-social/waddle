@@ -1,0 +1,162 @@
+use std::time::{Duration, Instant};
+
+use chrono::{DateTime, Utc};
+use jid::FullJid;
+use xmpp_parsers::presence::Show;
+
+use super::sequence::sequence_gt;
+use super::DEFAULT_SESSION_TIMEOUT_SECS;
+
+/// One unacknowledged stanza retained on a detached SM session.
+///
+/// Carries the XEP-0198 outbound sequence + the serialized stanza
+/// XML as the queue did before, plus the **server-side receipt time**
+/// of the original stanza (NOT the detach time). The Q6 SM-expiry
+/// promotion path consumes `original_receipt_at` when it stamps the
+/// XEP-0203 `<delay/>` on a flushed offline replay so the recipient
+/// sees the failed delivery's true timestamp per XEP-0203 §4.1 +
+/// XEP-0198 §5 line 364.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DetachedUnackedStanza {
+    /// XEP-0198 outbound sequence number assigned to this stanza.
+    pub sequence: u32,
+    /// Serialized stanza XML (re-parsed on demand by the promotion
+    /// path; kept as `String` here so the queue doesn't pin the
+    /// `xmpp_parsers::Element` representation in memory across
+    /// detach windows).
+    pub stanza_xml: String,
+    /// Server-side receipt time of the original stanza. Used by the
+    /// Q6 SM-expiry promotion path for the XEP-0203 `<delay/>` stamp.
+    pub original_receipt_at: DateTime<Utc>,
+}
+
+/// A detached stream management session.
+///
+/// Contains all the state needed to resume a stream after disconnection.
+#[derive(Debug, Clone)]
+pub struct DetachedSession {
+    /// The unique stream ID
+    pub stream_id: String,
+    /// Authenticated user identifier.
+    pub user_id: String,
+    /// The full JID of the session owner
+    pub jid: FullJid,
+    /// Server's inbound stanza count at detach time
+    pub inbound_count: u32,
+    /// Server's outbound stanza count at detach time
+    pub outbound_count: u32,
+    /// Last acknowledged outbound stanza count
+    pub last_acked: u32,
+    /// Unacknowledged stanzas (sequence + xml + receipt time).
+    /// See [`DetachedUnackedStanza`] for field semantics.
+    pub unacked_stanzas: Vec<DetachedUnackedStanza>,
+    /// Maximum resumption time in seconds
+    pub max_resume_time: Option<u32>,
+    /// When the session was detached
+    pub detached_at: Instant,
+    /// XEP-0280 Message Carbons opt-in at detach time.
+    ///
+    /// XEP-0198 §5 defines `<resumed/>` as continuing the same stream, so any
+    /// per-stream add-ons the client previously enabled (here: carbons) must
+    /// survive resumption without requiring the client to re-negotiate them.
+    pub carbons_enabled: bool,
+    /// RFC 6121 roster-interest state at detach time.
+    ///
+    /// XEP-0198 resumption continues the same stream, so an already
+    /// interested resource remains interested after a successful resume.
+    pub roster_interested: bool,
+    /// Whether the resource had sent available presence at detach time.
+    ///
+    /// Presence side effects required by RFC 6121 still apply to detached
+    /// XEP-0198 streams that were available when the transport dropped.
+    pub presence_available: bool,
+    /// Last advertised show value while available.
+    pub presence_show: Option<Show>,
+    /// Last advertised status text while available.
+    pub presence_status: Option<String>,
+    /// Last advertised priority while available.
+    pub presence_priority: i8,
+}
+
+impl DetachedSession {
+    /// Check if the session has expired.
+    pub fn is_expired(&self) -> bool {
+        let max_time = self
+            .max_resume_time
+            .unwrap_or(DEFAULT_SESSION_TIMEOUT_SECS as u32);
+        self.detached_at.elapsed() > Duration::from_secs(max_time as u64)
+    }
+
+    /// Get remaining time until expiration.
+    pub fn remaining_time(&self) -> Duration {
+        let max_time = Duration::from_secs(
+            self.max_resume_time
+                .unwrap_or(DEFAULT_SESSION_TIMEOUT_SECS as u32) as u64,
+        );
+        max_time.saturating_sub(self.detached_at.elapsed())
+    }
+
+    /// Get the number of stanzas that would need to be resent.
+    ///
+    /// `client_h` is what the client reports as last received.
+    pub fn stanzas_to_resend_count(&self, client_h: u32) -> usize {
+        self.unacked_stanzas
+            .iter()
+            .filter(|entry| sequence_gt(entry.sequence, client_h))
+            .count()
+    }
+
+    /// Get the XML payloads that must be resent to a client reporting `h`.
+    pub fn stanzas_to_resend(&self, client_h: u32) -> Vec<String> {
+        self.unacked_stanzas
+            .iter()
+            .filter(|entry| sequence_gt(entry.sequence, client_h))
+            .map(|entry| entry.stanza_xml.clone())
+            .collect()
+    }
+
+    /// Record an outbound stanza while this stream is detached.
+    /// `original_receipt_at` is the server-side receipt time of the
+    /// stanza (NOT the detach time) — consumed by the Q6 SM-expiry
+    /// promotion path for the XEP-0203 `<delay/>` stamp.
+    pub fn record_detached_outbound(
+        &mut self,
+        stanza_xml: String,
+        original_receipt_at: DateTime<Utc>,
+    ) {
+        self.outbound_count = self.outbound_count.wrapping_add(1);
+        if self.unacked_stanzas.len() >= crate::stream_management::DEFAULT_MAX_UNACKED_QUEUE_SIZE {
+            self.unacked_stanzas.remove(0);
+        }
+        self.unacked_stanzas.push(DetachedUnackedStanza {
+            sequence: self.outbound_count,
+            stanza_xml,
+            original_receipt_at,
+        });
+    }
+
+    pub fn record_detached_outbound_at(
+        &mut self,
+        sequence: u32,
+        stanza_xml: String,
+        original_receipt_at: DateTime<Utc>,
+    ) {
+        self.outbound_count = self.outbound_count.max(sequence);
+        if self
+            .unacked_stanzas
+            .iter()
+            .any(|entry| entry.sequence == sequence)
+        {
+            return;
+        }
+        if self.unacked_stanzas.len() >= crate::stream_management::DEFAULT_MAX_UNACKED_QUEUE_SIZE {
+            self.unacked_stanzas.remove(0);
+        }
+        self.unacked_stanzas.push(DetachedUnackedStanza {
+            sequence,
+            stanza_xml,
+            original_receipt_at,
+        });
+        self.unacked_stanzas.sort_by_key(|entry| entry.sequence);
+    }
+}

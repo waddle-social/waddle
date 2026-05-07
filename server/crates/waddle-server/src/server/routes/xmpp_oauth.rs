@@ -2,13 +2,13 @@
 
 use super::auth::{AuthState, ErrorResponse, PendingFlow};
 use axum::{
+    Form, Router,
     extract::{Query, State},
     http::StatusCode,
     response::{IntoResponse, Json, Redirect},
     routing::{get, post},
-    Form, Router,
 };
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;

@@ -1,0 +1,68 @@
+use super::*;
+
+fn build_bind_result_xml(id: &str, full_jid: &FullJid) -> String {
+    element_to_xml(
+        Element::builder("iq", waddle_xmpp::ns::JABBER_CLIENT)
+            .attr("id", id)
+            .attr("type", "result")
+            .append(
+                Element::builder("bind", waddle_xmpp::ns::BIND)
+                    .append(
+                        Element::builder("jid", waddle_xmpp::ns::BIND)
+                            .append(full_jid.to_string())
+                            .build(),
+                    )
+                    .build(),
+            )
+            .build(),
+    )
+}
+
+/// Handle resource binding IQ.
+pub(super) fn handle_resource_binding(
+    iq: &xmpp_parsers::iq::Iq,
+    _domain: &str,
+    phase: &mut ConnectionPhase,
+) -> Vec<String> {
+    let id = iq.id.clone();
+
+    if !phase.allows_resource_binding() {
+        warn!(phase = ?phase, id = %id, "Resource binding received in invalid phase");
+        return vec![build_iq_error_xml_typed(
+            &id,
+            None,
+            None,
+            not_authorized_iq_error("Authentication required."),
+        )];
+    }
+
+    let Some(bare_jid) = phase.authenticated_bare_jid() else {
+        warn!(id = %id, "Resource binding without authenticated session");
+        return vec![build_iq_error_xml_typed(
+            &id,
+            None,
+            None,
+            not_authorized_iq_error("Authentication required."),
+        )];
+    };
+    let bare_jid = bare_jid.clone();
+    let resource = match &iq.payload {
+        xmpp_parsers::iq::IqType::Set(e) | xmpp_parsers::iq::IqType::Get(e) => e
+            .get_child("resource", waddle_xmpp::ns::BIND)
+            .map(|r| r.text().trim().to_string())
+            .filter(|v| !v.is_empty()),
+        _ => None,
+    }
+    .unwrap_or_else(|| format!("ws-{}", uuid::Uuid::new_v4()));
+
+    let full_jid_str = format!("{}/{}", bare_jid, resource);
+
+    if let Ok(full_jid) = full_jid_str.parse::<FullJid>() {
+        info!(jid = %full_jid, id = %id, "Resource bound");
+        *phase = ConnectionPhase::ready(full_jid.clone(), false);
+        vec![build_bind_result_xml(&id, &full_jid)]
+    } else {
+        warn!(jid = %full_jid_str, "Invalid JID during resource binding");
+        vec![]
+    }
+}

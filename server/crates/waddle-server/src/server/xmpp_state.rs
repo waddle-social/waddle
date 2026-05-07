@@ -6,20 +6,20 @@
 #[cfg(test)]
 use tracing::{debug, warn};
 #[cfg(test)]
-use waddle_xmpp::inbox::{storage::InboxStorage, InboxEntry};
+use waddle_xmpp::inbox::{InboxEntry, storage::InboxStorage};
 #[cfg(test)]
 use waddle_xmpp::{Session as XmppSession, UserDirectoryEntry, XmppError};
 
 #[cfg(test)]
 use crate::auth::jid::jid_to_localpart;
 #[cfg(test)]
-use crate::auth::{localpart_to_jid, NativeUserStore, RegisterRequest, SessionManager};
+use crate::auth::{NativeUserStore, RegisterRequest, SessionManager, localpart_to_jid};
+#[cfg(test)]
+use crate::db::Database;
 use crate::db::actor::{DbActor, DbQuery, DbQueryOne};
 #[cfg(test)]
 use crate::db::actor::{DbExecute, GetDatabase};
-#[cfg(test)]
-use crate::db::Database;
-use crate::db::{row_value, ValueExt};
+use crate::db::{ValueExt, row_value};
 #[cfg(test)]
 use crate::permissions::{
     CheckPermission, DeleteTuple, ListRelations, ListSubjects, Object, ObjectType, Permission,
@@ -33,7 +33,7 @@ use serde::Serialize;
 use std::sync::Arc;
 
 #[cfg(test)]
-use crate::server::bootstrap_membership::{provision_user_membership, BootstrapMembershipConfig};
+use crate::server::bootstrap_membership::{BootstrapMembershipConfig, provision_user_membership};
 
 #[derive(Debug, Serialize)]
 pub(crate) struct XmppChannelRecord {

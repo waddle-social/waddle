@@ -1,0 +1,320 @@
+use minidom::Element;
+use uuid::Uuid;
+
+use crate::error::ClientResult;
+use crate::request::StanzaId;
+use crate::xep::encrypted_file as xep_encrypted_file;
+use crate::xep::{reply as xep_reply, thread as xep_thread};
+
+use super::namespaces::*;
+use super::parsing::payloads::validate_chat_state;
+use super::types::*;
+
+pub fn build_chat_state_message(
+    to: &str,
+    state: &str,
+    message_type: &str,
+) -> ClientResult<Element> {
+    let state = validate_chat_state(state)?;
+    Ok(Element::builder("message", NS_CLIENT)
+        .attr("to", to)
+        .attr("type", message_type)
+        .append(Element::builder(state, NS_CHAT_STATES).build())
+        .build())
+}
+
+pub fn build_displayed_message(to: &str, message_id: &str, message_type: &str) -> Element {
+    Element::builder("message", NS_CLIENT)
+        .attr("to", to)
+        .attr("type", message_type)
+        .append(
+            Element::builder("displayed", NS_CHAT_MARKERS)
+                .attr("id", message_id)
+                .build(),
+        )
+        .build()
+}
+
+pub fn build_reaction_message(
+    to: &str,
+    message_type: &str,
+    target_id: &str,
+    emojis: &[String],
+) -> Element {
+    let mut reactions = Element::builder("reactions", NS_REACTIONS)
+        .attr("id", target_id)
+        .build();
+    for emoji in emojis {
+        reactions.append_child(
+            Element::builder("reaction", NS_REACTIONS)
+                .append(emoji.as_str())
+                .build(),
+        );
+    }
+
+    Element::builder("message", NS_CLIENT)
+        .attr("to", to)
+        .attr("type", message_type)
+        .attr("id", Uuid::new_v4().to_string())
+        .append(reactions)
+        .append(Element::builder("store", NS_HINTS).build())
+        .build()
+}
+
+pub fn build_retraction_message(to: &str, message_type: &str, retracts_id: &str) -> Element {
+    Element::builder("message", NS_CLIENT)
+        .attr("to", to)
+        .attr("type", message_type)
+        .attr("id", Uuid::new_v4().to_string())
+        .append(
+            Element::builder("retract", NS_MESSAGE_RETRACT)
+                .attr("id", retracts_id)
+                .build(),
+        )
+        .append(
+            Element::builder("body", NS_CLIENT)
+                .append("This person attempted to retract a previous message.")
+                .build(),
+        )
+        .append(Element::builder("store", NS_HINTS).build())
+        .build()
+}
+
+pub fn build_moderation_message(
+    to: &str,
+    message_type: &str,
+    target_id: &str,
+    reason: Option<&str>,
+) -> Element {
+    let mut moderated = Element::builder("moderated", NS_MESSAGE_MODERATE)
+        .append(Element::builder("retract", NS_MESSAGE_RETRACT).build());
+    if let Some(reason) = reason {
+        moderated = moderated.append(
+            Element::builder("reason", NS_MESSAGE_MODERATE)
+                .append(reason)
+                .build(),
+        );
+    }
+
+    Element::builder("message", NS_CLIENT)
+        .attr("to", to)
+        .attr("type", message_type)
+        .attr("id", Uuid::new_v4().to_string())
+        .append(
+            Element::builder("apply-to", NS_FASTEN)
+                .attr("id", target_id)
+                .append(moderated.build())
+                .build(),
+        )
+        .append(Element::builder("store", NS_HINTS).build())
+        .build()
+}
+
+pub fn build_correction_message(
+    to: &str,
+    message_type: &str,
+    body: &str,
+    replaces_id: &str,
+    options: &SendMessageOptions,
+) -> ClientResult<(StanzaId, Element)> {
+    let (stanza_id, mut stanza) = build_outbound_message(to, message_type, body, options)?;
+    stanza.append_child(
+        Element::builder("replace", NS_MESSAGE_CORRECT)
+            .attr("id", replaces_id)
+            .build(),
+    );
+    Ok((stanza_id, stanza))
+}
+
+/// Build a `<message/>` stanza carrying the body plus any XEP payloads from
+/// `options`. All XML construction goes through typed `minidom::Element`
+/// builders — never `format!` — per the project XML hard rule.
+pub fn build_outbound_message(
+    to: &str,
+    message_type: &str,
+    body: &str,
+    options: &SendMessageOptions,
+) -> ClientResult<(StanzaId, Element)> {
+    let stanza_id = match options.stanza_id.clone() {
+        Some(stanza_id) => stanza_id,
+        None => StanzaId::new(Uuid::new_v4().to_string())?,
+    };
+    let mut builder = Element::builder("message", NS_CLIENT)
+        .attr("to", to)
+        .attr("type", message_type)
+        .attr("id", stanza_id.as_str())
+        .append(Element::builder("body", NS_CLIENT).append(body).build());
+
+    if let Some(subject) = options.subject.as_deref() {
+        builder = builder.append(
+            Element::builder("subject", NS_CLIENT)
+                .append(subject)
+                .build(),
+        );
+    }
+    if let Some(marker) = options.reply.as_ref() {
+        builder = builder.append(xep_reply::build_reply_element(marker));
+    }
+    if let Some(range) = options.fallback.as_ref() {
+        builder = builder.append(xep_reply::build_fallback_element(range));
+    }
+    if let Some(thread) = options.thread.as_ref() {
+        builder = builder.append(xep_thread::build_thread_element(thread));
+    }
+    if !options.markup_spans.is_empty() {
+        let mut markups = Element::builder("markup", NS_MARKUP).build();
+        for span in &options.markup_spans {
+            // XEP-0394: inline spans use <span start="..." end="..."><child/></span>;
+            // block-level elements (bcode, bquote) are siblings of span, not wrapped in it;
+            // links use <span start="..." end="..." uri="..."/> with no child element.
+            let el = match span.span_type.as_str() {
+                "bold" => {
+                    let mut el = Element::builder("span", NS_MARKUP)
+                        .attr("start", span.start.to_string())
+                        .attr("end", span.end.to_string())
+                        .build();
+                    el.append_child(Element::builder("strong", NS_MARKUP).build());
+                    el
+                }
+                "italic" => {
+                    let mut el = Element::builder("span", NS_MARKUP)
+                        .attr("start", span.start.to_string())
+                        .attr("end", span.end.to_string())
+                        .build();
+                    el.append_child(Element::builder("emphasis", NS_MARKUP).build());
+                    el
+                }
+                "strikethrough" => {
+                    let mut el = Element::builder("span", NS_MARKUP)
+                        .attr("start", span.start.to_string())
+                        .attr("end", span.end.to_string())
+                        .build();
+                    el.append_child(Element::builder("deleted", NS_MARKUP).build());
+                    el
+                }
+                "code" => {
+                    let mut el = Element::builder("span", NS_MARKUP)
+                        .attr("start", span.start.to_string())
+                        .attr("end", span.end.to_string())
+                        .build();
+                    el.append_child(Element::builder("code", NS_MARKUP).build());
+                    el
+                }
+                // Block-level: <bcode start="..." end="..."/> — sibling of <span>, never wrapped
+                "code_block" => Element::builder("bcode", NS_MARKUP)
+                    .attr("start", span.start.to_string())
+                    .attr("end", span.end.to_string())
+                    .build(),
+                // Block-level: <bquote start="..." end="..."/> — sibling of <span>, never wrapped
+                "blockquote" => Element::builder("bquote", NS_MARKUP)
+                    .attr("start", span.start.to_string())
+                    .attr("end", span.end.to_string())
+                    .build(),
+                // Link: <span start="..." end="..." uri="..."/> in urn:waddle:markup:0 —
+                // XEP-0394 does not define a link span; use custom namespace to avoid
+                // polluting the official markup namespace.
+                "link" => {
+                    let mut b = Element::builder("span", NS_WADDLE_MARKUP)
+                        .attr("start", span.start.to_string())
+                        .attr("end", span.end.to_string());
+                    if let Some(uri) = &span.uri {
+                        b = b.attr("uri", uri);
+                    }
+                    b.build()
+                }
+                _ => continue,
+            };
+            markups.append_child(el);
+        }
+        builder = builder.append(markups);
+    }
+    for reference in &options.references {
+        // XEP-0372 §2.1: `begin` and `end` are OPTIONAL. They MUST be present
+        // when the reference points at a substring of the body, and MUST be
+        // absent when no body position applies (e.g. anchor-only references
+        // to a previous message). Treat (0, 0) as the "no position" sentinel
+        // so anchor-only / future use cases can travel cleanly on the wire
+        // without emitting `begin="0" end="0"` (which a conformant receiver
+        // would interpret as a 0-length annotation at body offset 0).
+        let mut ref_builder = Element::builder("reference", NS_REFERENCES)
+            .attr("type", reference.ref_type.as_str())
+            .attr("uri", reference.uri.as_str());
+        if reference.begin != 0 || reference.end != 0 {
+            ref_builder = ref_builder
+                .attr("begin", reference.begin.to_string())
+                .attr("end", reference.end.to_string());
+        }
+        if let Some(anchor) = reference.anchor.as_deref() {
+            ref_builder = ref_builder.attr("anchor", anchor);
+        }
+        builder = builder.append(ref_builder.build());
+    }
+    for file in &options.shared_files {
+        builder = builder.append(build_file_sharing_element(file));
+        // XEP-0448: when the bytes at `file.url` are ciphertext, emit a
+        // sibling `<encrypted/>` envelope carrying the cipher/key/iv/hash
+        // metadata recipients need to decrypt. The `<file-sharing/>` element
+        // continues to advertise the plaintext metadata (filename, size,
+        // media-type) so peers without encryption support still see the
+        // attachment offer.
+        if let Some(encrypted) = file.encrypted.as_ref() {
+            if let Some(encrypted_el) = xep_encrypted_file::build_encrypted_element(encrypted) {
+                builder = builder.append(encrypted_el);
+            }
+        }
+    }
+    Ok((stanza_id, builder.build()))
+}
+
+pub fn build_file_sharing_element(file: &SharedFile) -> Element {
+    let mut file_sharing = Element::builder("file-sharing", NS_SFS)
+        .attr("disposition", file.disposition.as_str())
+        .build();
+
+    let mut metadata = Element::builder("file", NS_FILE_METADATA).build();
+    if let Some(media_type) = file.media_type.as_deref() {
+        metadata.append_child(
+            Element::builder("media-type", NS_FILE_METADATA)
+                .append(media_type)
+                .build(),
+        );
+    }
+    if let Some(name) = file.name.as_deref() {
+        metadata.append_child(
+            Element::builder("name", NS_FILE_METADATA)
+                .append(name)
+                .build(),
+        );
+    }
+    if let Some(size) = file.size {
+        metadata.append_child(
+            Element::builder("size", NS_FILE_METADATA)
+                .append(size.to_string())
+                .build(),
+        );
+    }
+    if let Some(width) = file.width {
+        metadata.append_child(
+            Element::builder("width", NS_FILE_METADATA)
+                .append(width.to_string())
+                .build(),
+        );
+    }
+    if let Some(height) = file.height {
+        metadata.append_child(
+            Element::builder("height", NS_FILE_METADATA)
+                .append(height.to_string())
+                .build(),
+        );
+    }
+    file_sharing.append_child(metadata);
+
+    let mut sources = Element::builder("sources", NS_SFS).build();
+    sources.append_child(
+        Element::builder("url-data", NS_URL_DATA)
+            .attr("target", file.url.as_str())
+            .build(),
+    );
+    file_sharing.append_child(sources);
+    file_sharing
+}

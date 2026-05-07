@@ -1,0 +1,165 @@
+use super::regular::show_name;
+use super::subscription::{parse_subscription_state, recipient_blocks_sender, roster_storage};
+use super::*;
+
+pub(super) async fn handle_presence_probe(
+    state: &WebSocketState,
+    from: BareJid,
+    to: BareJid,
+    to_full: Option<FullJid>,
+) {
+    if recipient_blocks_sender(state, &to, &from).await {
+        info!(requester = %from, target = %to, "Blocked presence probe");
+        return;
+    }
+    if !presence_probe_authorized(state, &from, &to).await {
+        info!(requester = %from, target = %to, "Unauthorized presence probe");
+        send_unsubscribed_probe_response(state, &to, &from).await;
+        return;
+    }
+    let mut available = state
+        .deps
+        .protocol
+        .connection_registry
+        .get_available_resources_for_user(&to);
+    let mut detached_available = match state
+        .deps
+        .protocol
+        .sm_session_registry
+        .available_detached_presence_states_for_user(&to)
+        .await
+    {
+        Ok(resources) => resources,
+        Err(error) => {
+            warn!(error = %error, target = %to, "Failed to list detached resources for presence probe");
+            Vec::new()
+        }
+    };
+    if let Some(to_full) = &to_full {
+        available.retain(|(resource, _)| resource == to_full);
+        detached_available.retain(|(resource, _, _, _)| resource == to_full);
+    }
+    detached_available.retain(|(resource, _, _, _)| {
+        !available
+            .iter()
+            .any(|(live_resource, _)| live_resource == resource)
+    });
+    if available.is_empty() && detached_available.is_empty() {
+        let unavailable = Stanza::Presence(if let Some(to_full) = &to_full {
+            let mut presence =
+                xmpp_parsers::presence::Presence::new(xmpp_parsers::presence::Type::Unavailable);
+            presence.from = Some(Jid::from(to_full.clone()));
+            presence.to = Some(Jid::from(from.clone()));
+            presence
+        } else {
+            build_unavailable_presence(&to, &from)
+        });
+        for resource in state
+            .deps
+            .protocol
+            .connection_registry
+            .get_resources_for_user(&from)
+        {
+            let _ = state
+                .deps
+                .protocol
+                .connection_registry
+                .send_to(&resource, unavailable.clone())
+                .await;
+        }
+        return;
+    }
+    let requester_resources = state
+        .deps
+        .protocol
+        .connection_registry
+        .get_resources_for_user(&from);
+    for (resource, show, status, priority) in detached_available {
+        let presence = Stanza::Presence(build_available_presence(
+            &resource,
+            &from,
+            show.as_ref().map(show_name),
+            status.as_deref(),
+            priority,
+        ));
+        for requester_resource in &requester_resources {
+            let _ = state
+                .deps
+                .protocol
+                .connection_registry
+                .send_to(requester_resource, presence.clone())
+                .await;
+        }
+    }
+    for (resource, _priority) in available {
+        let presence_state = state
+            .deps
+            .protocol
+            .connection_registry
+            .get_presence_state(&resource);
+        let presence = Stanza::Presence(build_available_presence(
+            &resource,
+            &from,
+            presence_state
+                .as_ref()
+                .and_then(|state| state.show.as_deref()),
+            presence_state
+                .as_ref()
+                .and_then(|state| state.status.as_deref()),
+            presence_state
+                .as_ref()
+                .map(|state| state.priority)
+                .unwrap_or(0),
+        ));
+        for requester_resource in &requester_resources {
+            let _ = state
+                .deps
+                .protocol
+                .connection_registry
+                .send_to(requester_resource, presence.clone())
+                .await;
+        }
+    }
+}
+
+async fn send_unsubscribed_probe_response(state: &WebSocketState, from: &BareJid, to: &BareJid) {
+    let stanza = Stanza::Presence(build_subscription_presence(
+        SubscriptionType::Unsubscribed,
+        from,
+        to,
+        None,
+        &[],
+    ));
+    for resource in state
+        .deps
+        .protocol
+        .connection_registry
+        .get_resources_for_user(to)
+    {
+        let _ = state
+            .deps
+            .protocol
+            .connection_registry
+            .send_to(&resource, stanza.clone())
+            .await;
+    }
+}
+
+async fn presence_probe_authorized(state: &WebSocketState, from: &BareJid, to: &BareJid) -> bool {
+    if from == to {
+        return true;
+    }
+    let Some(storage) = roster_storage(state).await else {
+        return false;
+    };
+    match storage.get_roster_item(from, to).await {
+        Ok(Some(row)) => SubscriptionStateMachine::should_receive_presence(
+            parse_subscription_state(&row.subscription),
+        ),
+        Ok(None) => false,
+        Err(error) => {
+            warn!(error = %error, requester = %from, target = %to, "Failed to authorize presence probe");
+            false
+        }
+    }
+}

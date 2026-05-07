@@ -1,0 +1,475 @@
+use super::*;
+
+mod schema;
+
+use super::codec::{decode_row, serialize_message, PAYLOAD_KIND_ARCHIVED, PAYLOAD_KIND_TRANSIENT};
+
+// ---------------------------------------------------------------------------
+// Database-backed PendingDeliveryStorage (issue #209, slice (b) production
+// backend).
+// ---------------------------------------------------------------------------
+
+/// Per-recipient mutex map serializing inserts so the
+/// `INSERT … SELECT … WHERE COUNT < cap` quota check is strict on
+/// Postgres too. SQLite serializes writers globally so this is
+/// belt-and-suspenders for SQLite, but on Postgres with the default
+/// READ-COMMITTED isolation level two concurrent inserts can both
+/// observe the same `COUNT(*)` snapshot and exceed `max_rows`. The
+/// app-level lock per recipient bare-JID closes that race
+/// portably across drivers.
+///
+/// Lock granularity is per recipient — concurrent inserts for
+/// *different* recipients don't contend.
+type RecipientLockMap = dashmap::DashMap<BareJid, std::sync::Arc<tokio::sync::Mutex<()>>>;
+
+/// Sweep [`RecipientLockMap`] entries that no caller is currently
+/// holding. Called periodically from the claim-expiry janitor so the
+/// per-recipient insert-lock map does not grow forever with every
+/// distinct recipient seen by the process.
+pub fn sweep_recipient_locks(
+    locks: &dashmap::DashMap<BareJid, std::sync::Arc<tokio::sync::Mutex<()>>>,
+) -> usize {
+    let mut removed = 0;
+    locks.retain(|_, lock| {
+        if std::sync::Arc::strong_count(lock) > 1 {
+            true
+        } else {
+            removed += 1;
+            false
+        }
+    });
+    removed
+}
+
+/// libSQL/Postgres-backed [`PendingDeliveryStorage`] implementation.
+///
+/// Schema:
+///
+/// ```sql
+/// CREATE TABLE pending_delivery (
+///     row_id TEXT PRIMARY KEY,            -- UUID v7 — sortable for FIFO
+///     recipient_jid TEXT NOT NULL,
+///     original_receipt_at INTEGER NOT NULL, -- ms since unix epoch
+///     payload_kind TEXT NOT NULL,         -- 'archived' | 'transient'
+///     archive_stanza_by TEXT,             -- bare jid stamping `<stanza-id/>`
+///     archive_stanza_id TEXT,             -- XEP-0359 id (Archived rows)
+///     transient_xml TEXT,                 -- serialized minidom (Transient)
+///     flushed_in_session TEXT,
+///     outbound_sequence INTEGER           -- XEP-0198 outbound counter,
+///                                         -- stamped post-record_outbound
+///                                         -- so SM `<a h>` can range-delete
+///                                         -- (locked Q7b SM-ack lifecycle)
+/// );
+/// ```
+///
+/// `row_id` is a UUID v7 — sortable by time of generation, so an
+/// `ORDER BY row_id` reproduces FIFO without driver-specific
+/// auto-increment syntax (SQLite: `AUTOINCREMENT`; Postgres:
+/// `BIGSERIAL`).
+#[derive(Clone)]
+pub struct DatabasePendingDeliveryStorage {
+    db: Database,
+    quota: QuotaPolicy,
+    /// Per-recipient insert serialization to make
+    /// `INSERT … SELECT … WHERE COUNT < cap` strict on Postgres
+    /// (READ-COMMITTED snapshots can't see uncommitted concurrent
+    /// inserts, so two writers can both pass the cap check). SQLite
+    /// already serializes writers; this is portable defense.
+    recipient_locks: std::sync::Arc<RecipientLockMap>,
+}
+
+impl DatabasePendingDeliveryStorage {
+    /// Open a backing database (or in-memory fallback when no URL is
+    /// supplied). Mirrors [`crate::inbox::DatabaseInboxStorage::open`].
+    pub async fn open(
+        database_url: Option<&str>,
+        quota: QuotaPolicy,
+    ) -> Result<Self, PendingStorageError> {
+        let db = match database_url {
+            Some(url) => {
+                let driver = if url.starts_with("postgres://") || url.starts_with("postgresql://") {
+                    DatabaseDriver::Postgres
+                } else {
+                    DatabaseDriver::Sqlite
+                };
+                Database::from_config(
+                    "pending_delivery",
+                    &DatabaseConfig::new(driver, url.to_string()),
+                )
+                .await
+                .map_err(|e| PendingStorageError::Other(e.to_string()))?
+            }
+            None => Database::in_memory("pending_delivery")
+                .await
+                .map_err(|e| PendingStorageError::Other(e.to_string()))?,
+        };
+        let storage = Self {
+            db,
+            quota,
+            recipient_locks: std::sync::Arc::new(RecipientLockMap::new()),
+        };
+        schema::initialize(&storage).await?;
+        info!(
+            driver = ?storage.db.driver(),
+            "pending_delivery storage initialized (XEP-0160)"
+        );
+        Ok(storage)
+    }
+
+    async fn execute(
+        &self,
+        sql: &str,
+        params: impl IntoParams,
+    ) -> Result<u64, PendingStorageError> {
+        let conn = self
+            .db
+            .guard()
+            .await
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?;
+        conn.execute(sql, params)
+            .await
+            .map_err(|e| PendingStorageError::Other(e.to_string()))
+    }
+
+    async fn query(
+        &self,
+        sql: &str,
+        params: impl IntoParams,
+    ) -> Result<crate::db::Rows, PendingStorageError> {
+        let conn = self
+            .db
+            .guard()
+            .await
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?;
+        conn.query(sql, params)
+            .await
+            .map_err(|e| PendingStorageError::Other(e.to_string()))
+    }
+}
+
+#[async_trait]
+impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
+    #[instrument(skip(self, row), fields(recipient = %row.recipient))]
+    async fn insert(&self, row: PendingRow) -> Result<InsertOutcome, PendingStorageError> {
+        // Per-recipient lock to serialize concurrent inserts for the
+        // same recipient. This makes the `INSERT … SELECT … WHERE
+        // COUNT < cap` quota check strict on Postgres (where
+        // READ-COMMITTED snapshots can otherwise let two concurrent
+        // inserts both pass the cap and exceed `max_rows`). SQLite
+        // serializes writers globally, so for SQLite this is
+        // belt-and-suspenders.
+        let recipient_lock = self
+            .recipient_locks
+            .entry(row.recipient.clone())
+            .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+        let _guard = recipient_lock.lock().await;
+
+        let row_id = if row.id.as_str().is_empty() {
+            PendingRowId::fresh().as_str().to_string()
+        } else {
+            row.id.as_str().to_string()
+        };
+        let receipt_ms = row.original_receipt_at.timestamp_millis();
+        let (kind, by, sid, xml) = match &row.payload {
+            PendingPayload::Archived(stanza_id) => (
+                PAYLOAD_KIND_ARCHIVED,
+                // The decode side parses `archive_stanza_by` as a `BareJid`
+                // (XEP-0313 archives are scoped per bare JID, see
+                // `MamArchiveResolver::resolve` which narrows via
+                // `.to_bare()`). Narrow on write too so a `StanzaId.by` that
+                // happens to carry a resource cannot poison a row that
+                // `decode_row` would later refuse to parse.
+                Some(stanza_id.by.to_bare().to_string()),
+                Some(stanza_id.id.clone()),
+                None,
+            ),
+            PendingPayload::Transient(message) => {
+                let serialized = serialize_message(message)?;
+                (PAYLOAD_KIND_TRANSIENT, None, None, Some(serialized))
+            }
+        };
+        // Atomic-with-quota INSERT: the WHERE clause runs in the same
+        // SQL statement as the insert. Combined with the per-recipient
+        // lock above this gives strict cap enforcement portably across
+        // SQLite (single-writer) and Postgres (READ-COMMITTED).
+        // Affected row count differentiates accepted (1) from
+        // quota-rejected (0).
+        let affected = match self.quota {
+            QuotaPolicy::Unlimited => {
+                self.execute(
+                    "INSERT INTO pending_delivery (\
+                        row_id, recipient_jid, original_receipt_at, payload_kind, \
+                        archive_stanza_by, archive_stanza_id, transient_xml, \
+                        flushed_in_session, outbound_sequence \
+                     ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL)",
+                    crate::db_params![
+                        row_id,
+                        row.recipient.to_string(),
+                        receipt_ms,
+                        kind,
+                        by,
+                        sid,
+                        xml,
+                    ],
+                )
+                .await?
+            }
+            QuotaPolicy::CountCap { max_rows } => {
+                self.execute(
+                    "INSERT INTO pending_delivery (\
+                        row_id, recipient_jid, original_receipt_at, payload_kind, \
+                        archive_stanza_by, archive_stanza_id, transient_xml, \
+                        flushed_in_session, outbound_sequence \
+                     ) \
+                     SELECT ?, ?, ?, ?, ?, ?, ?, NULL, NULL \
+                     WHERE (SELECT COUNT(*) FROM pending_delivery WHERE recipient_jid = ?) < ?",
+                    crate::db_params![
+                        row_id,
+                        row.recipient.to_string(),
+                        receipt_ms,
+                        kind,
+                        by,
+                        sid,
+                        xml,
+                        row.recipient.to_string(),
+                        i64::from(max_rows),
+                    ],
+                )
+                .await?
+            }
+        };
+        if affected == 0 {
+            Ok(InsertOutcome::QuotaExceeded)
+        } else {
+            Ok(InsertOutcome::Inserted)
+        }
+    }
+
+    async fn list(&self, recipient: &BareJid) -> Result<Vec<PendingRow>, PendingStorageError> {
+        let mut rows = self
+            .query(
+                "SELECT row_id, recipient_jid, original_receipt_at, payload_kind, \
+                        archive_stanza_by, archive_stanza_id, transient_xml, \
+                        flushed_in_session, outbound_sequence \
+                 FROM pending_delivery \
+                 WHERE recipient_jid = ? \
+                 ORDER BY row_id ASC",
+                crate::db_params![recipient.to_string()],
+            )
+            .await?;
+        let mut out = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?
+        {
+            out.push(decode_row(&row)?);
+        }
+        Ok(out)
+    }
+
+    async fn claim_for_session(
+        &self,
+        recipient: &BareJid,
+        session: &SmSessionId,
+    ) -> Result<Vec<PendingRow>, PendingStorageError> {
+        // Atomic-ish: a single UPDATE … WHERE flushed_in_session IS NULL
+        // tags every currently-unclaimed row, then a SELECT pulls the
+        // newly-claimed set. Two concurrent calls for the same recipient
+        // both run the UPDATE; whichever wins the row-level lock first
+        // tags the rows, the loser's UPDATE finds zero matches and the
+        // loser's SELECT returns rows already tagged for the other
+        // session — filtered out by the WHERE.
+        // Defensive: clear outbound_sequence on claim too. release_*
+        // already does this, but a future code path that leaves a row
+        // half-released should not be able to confuse the SM-ack
+        // delete. Targets only newly-claimed rows (flushed_in_session
+        // IS NULL filter ensures we don't trample another session's
+        // ongoing claim).
+        self.execute(
+            "UPDATE pending_delivery SET flushed_in_session = ?, outbound_sequence = NULL \
+             WHERE recipient_jid = ? AND flushed_in_session IS NULL",
+            crate::db_params![session.as_str().to_string(), recipient.to_string()],
+        )
+        .await?;
+        let mut rows = self
+            .query(
+                "SELECT row_id, recipient_jid, original_receipt_at, payload_kind, \
+                        archive_stanza_by, archive_stanza_id, transient_xml, \
+                        flushed_in_session, outbound_sequence \
+                 FROM pending_delivery \
+                 WHERE recipient_jid = ? AND flushed_in_session = ? \
+                 ORDER BY row_id ASC",
+                crate::db_params![recipient.to_string(), session.as_str().to_string()],
+            )
+            .await?;
+        let mut out = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?
+        {
+            out.push(decode_row(&row)?);
+        }
+        Ok(out)
+    }
+
+    async fn delete_claimed(&self, session: &SmSessionId) -> Result<u64, PendingStorageError> {
+        self.execute(
+            "DELETE FROM pending_delivery WHERE flushed_in_session = ?",
+            crate::db_params![session.as_str().to_string()],
+        )
+        .await
+    }
+
+    async fn delete_row(&self, id: &PendingRowId) -> Result<u64, PendingStorageError> {
+        self.execute(
+            "DELETE FROM pending_delivery WHERE row_id = ?",
+            crate::db_params![id.as_str().to_string()],
+        )
+        .await
+    }
+
+    async fn release_claim(&self, session: &SmSessionId) -> Result<u64, PendingStorageError> {
+        // Clear `outbound_sequence` alongside `flushed_in_session` so a
+        // stale sequence from the dead session can't survive a re-claim
+        // and trick a later session's SM ack into deleting an unack'd
+        // row. (Qodo review on PR #358.)
+        self.execute(
+            "UPDATE pending_delivery SET flushed_in_session = NULL, \
+                                          outbound_sequence = NULL \
+             WHERE flushed_in_session = ?",
+            crate::db_params![session.as_str().to_string()],
+        )
+        .await
+    }
+
+    async fn release_row(&self, id: &PendingRowId) -> Result<u64, PendingStorageError> {
+        self.execute(
+            "UPDATE pending_delivery SET flushed_in_session = NULL, \
+                                          outbound_sequence = NULL \
+             WHERE row_id = ?",
+            crate::db_params![id.as_str().to_string()],
+        )
+        .await
+    }
+
+    async fn release_row_if_session(
+        &self,
+        id: &PendingRowId,
+        expected_session: &SmSessionId,
+    ) -> Result<u64, PendingStorageError> {
+        // Conditional release for the claim-expiry janitor. The
+        // (row_id, session) snapshot returned by list_orphaned_claims can
+        // be stale if a fresh bind re-claims the row before release.
+        self.execute(
+            "UPDATE pending_delivery SET flushed_in_session = NULL, \
+                                          outbound_sequence = NULL \
+             WHERE row_id = ? AND flushed_in_session = ?",
+            crate::db_params![
+                id.as_str().to_string(),
+                expected_session.as_str().to_string()
+            ],
+        )
+        .await
+    }
+
+    async fn record_pushed_at(
+        &self,
+        id: &PendingRowId,
+        sequence: u32,
+    ) -> Result<u64, PendingStorageError> {
+        self.execute(
+            "UPDATE pending_delivery SET outbound_sequence = ? WHERE row_id = ?",
+            crate::db_params![i64::from(sequence), id.as_str().to_string()],
+        )
+        .await
+    }
+
+    async fn delete_acked_through(
+        &self,
+        session: &SmSessionId,
+        sequence_max: u32,
+    ) -> Result<u64, PendingStorageError> {
+        self.execute(
+            "DELETE FROM pending_delivery \
+             WHERE flushed_in_session = ? \
+               AND outbound_sequence IS NOT NULL \
+               AND outbound_sequence <= ?",
+            crate::db_params![session.as_str().to_string(), i64::from(sequence_max)],
+        )
+        .await
+    }
+
+    async fn list_orphaned_claims(
+        &self,
+        live_sessions: &[SmSessionId],
+    ) -> Result<Vec<(PendingRowId, SmSessionId)>, PendingStorageError> {
+        // SELECT every claimed row, then filter in-memory against the
+        // live-set. This avoids generating a `WHERE flushed_in_session
+        // NOT IN (?, ?, ?, …)` clause whose parameter count would be
+        // unbounded for production deployments. The expected orphan
+        // population is small (low hundreds) compared to live-session
+        // count, so the filter cost is negligible.
+        let mut rows = self
+            .query(
+                "SELECT row_id, flushed_in_session FROM pending_delivery \
+                 WHERE flushed_in_session IS NOT NULL",
+                (),
+            )
+            .await?;
+        let live: std::collections::HashSet<&str> =
+            live_sessions.iter().map(SmSessionId::as_str).collect();
+        let mut out = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?
+        {
+            let row_id: String = row
+                .get(0)
+                .map_err(|e| PendingStorageError::Other(e.to_string()))?;
+            let session: String = row
+                .get(1)
+                .map_err(|e| PendingStorageError::Other(e.to_string()))?;
+            if !live.contains(session.as_str()) {
+                out.push((PendingRowId::new(row_id), SmSessionId::new(session)));
+            }
+        }
+        Ok(out)
+    }
+
+    async fn count(&self, recipient: &BareJid) -> Result<u32, PendingStorageError> {
+        let mut rows = self
+            .query(
+                "SELECT COUNT(*) FROM pending_delivery WHERE recipient_jid = ?",
+                crate::db_params![recipient.to_string()],
+            )
+            .await?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?
+            .ok_or_else(|| PendingStorageError::Other("COUNT(*) returned no row".into()))?;
+        let count: i64 = row
+            .get(0)
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?;
+        Ok(count.max(0) as u32)
+    }
+
+    async fn delete_older_than(
+        &self,
+        cutoff: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64, PendingStorageError> {
+        self.execute(
+            "DELETE FROM pending_delivery WHERE original_receipt_at < ?",
+            crate::db_params![cutoff.timestamp_millis()],
+        )
+        .await
+    }
+
+    fn sweep_internal_bookkeeping(&self) -> usize {
+        sweep_recipient_locks(&self.recipient_locks)
+    }
+}

@@ -31,9 +31,9 @@
 
 use jid::{BareJid, FullJid, Jid};
 use tracing::{debug, info, warn};
-use waddle_xmpp::pubsub::{build_pubsub_event, PubSubEvent, PubSubItem};
-use waddle_xmpp::registry::BroadcastOutcome;
 use waddle_xmpp::Stanza;
+use waddle_xmpp::pubsub::{PubSubEvent, PubSubItem, build_pubsub_event};
+use waddle_xmpp::registry::BroadcastOutcome;
 
 use super::super::WebSocketState;
 

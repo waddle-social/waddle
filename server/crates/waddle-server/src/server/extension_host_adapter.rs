@@ -14,17 +14,17 @@ use thiserror::Error;
 use tracing::warn;
 use waddle_extensions::types::PubSubNode as ExtensionPubSubNode;
 use waddle_extensions::{
-    host_tools as ext_host, DisplayText, ReplyTarget, RoomJid, StanzaId, ThreadId,
+    DisplayText, ReplyTarget, RoomJid, StanzaId, ThreadId, host_tools as ext_host,
 };
 use waddle_xmpp::{
+    Stanza,
     mam::{ArchivedMessage as MamArchivedMessage, MamQuery},
     muc::{
         room_actor::{GetSnapshot, RoomActor},
         room_registry_actor::GetRoom,
     },
-    protocol::{frame::InboundFrame, Blocklist, InboundEvent, XmppStateMachine},
+    protocol::{Blocklist, InboundEvent, XmppStateMachine, frame::InboundFrame},
     roster::{AskType, RosterItem, Subscription},
-    Stanza,
 };
 use xmpp_parsers::message::{Body, Message, MessageType as XmppMessageType};
 use xmpp_parsers::presence::Show;
@@ -33,7 +33,7 @@ use crate::{
     auth::Session,
     db::blocking::DatabaseBlockingStorage,
     db::roster::DatabaseRosterStorage,
-    db::{actor::DbQueryOne, row_value, ValueExt},
+    db::{ValueExt, actor::DbQueryOne, row_value},
     permissions::{CheckPermission, Object, ObjectType, Permission, Subject},
     server::bootstrap_membership::DEPLOYMENT_SERVER_ID,
 };
