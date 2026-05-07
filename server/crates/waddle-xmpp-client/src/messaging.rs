@@ -421,14 +421,24 @@ fn parse_message(el: &Element) -> InboundMessage {
             Some(u) => u,
             None => continue,
         };
-        let begin = child
-            .attr("begin")
-            .and_then(|v| v.parse::<u32>().ok())
-            .unwrap_or(0);
-        let end = child
-            .attr("end")
-            .and_then(|v| v.parse::<u32>().ok())
-            .unwrap_or(0);
+        // begin/end are optional per XEP-0372, but if PRESENT they MUST be
+        // valid non-negative integers. A reference with `begin="abc"` is
+        // malformed; silently coercing it to 0 would mis-position the
+        // highlighted span. Drop the whole reference instead.
+        let begin = match child.attr("begin") {
+            Some(v) => match v.parse::<u32>() {
+                Ok(parsed) => parsed,
+                Err(_) => continue,
+            },
+            None => 0,
+        };
+        let end = match child.attr("end") {
+            Some(v) => match v.parse::<u32>() {
+                Ok(parsed) => parsed,
+                Err(_) => continue,
+            },
+            None => 0,
+        };
         let anchor = child.attr("anchor").map(String::from);
 
         references.push(ReferenceData {
@@ -1560,6 +1570,26 @@ mod tests {
                 anchor: None,
             }]
         );
+    }
+
+    #[test]
+    fn parse_message_reference_skipped_when_begin_or_end_unparseable() {
+        // XEP-0372 says begin/end are optional, but if present they MUST be
+        // numeric. Silently coercing "abc" to 0 would mis-position the
+        // highlighted span — drop the reference instead.
+        let e = el(
+            "<message xmlns='jabber:client' type='chat' id='m-bad-offsets'>\
+               <body>https://example.com</body>\
+               <reference xmlns='urn:xmpp:reference:0' type='data' \
+                  uri='https://example.com' begin='abc' end='5'/>\
+               <reference xmlns='urn:xmpp:reference:0' type='data' \
+                  uri='https://other.example' begin='0' end='not-a-number'/>\
+             </message>",
+        );
+        let MessagingEvent::Message(msg) = parse(&e).unwrap() else {
+            panic!("expected Message");
+        };
+        assert!(msg.references.is_empty());
     }
 
     #[test]

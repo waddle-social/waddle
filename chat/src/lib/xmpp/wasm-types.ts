@@ -184,5 +184,5 @@ export interface WasmSendOptions {
     disposition: string;
   }>;
   markup_spans?: WasmMarkupSpan[];
-  references?: Array<{ ref_type: string; uri: string; begin: number; end: number; anchor?: string }>;
+  references?: WasmReference[];
 }
