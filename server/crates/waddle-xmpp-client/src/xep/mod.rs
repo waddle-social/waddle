@@ -5,5 +5,6 @@
 //! namespaces or attribute names at call sites — everything flows through the
 //! typed module.
 
+pub mod encrypted_file;
 pub mod reply;
 pub mod thread;

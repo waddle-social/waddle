@@ -61,6 +61,20 @@ dictionary WaddleSharedFile {
     u32? width;
     u32? height;
     string disposition;
+    WaddleEncryptedFile? encrypted;
+};
+
+dictionary WaddleEncryptedFile {
+    string cipher;
+    string key_b64;
+    string iv_b64;
+    sequence<WaddleEncryptedFileHash> hashes;
+    sequence<string> sources;
+};
+
+dictionary WaddleEncryptedFileHash {
+    string algo;
+    string value_b64;
 };
 
 dictionary WaddleUploadHeader {

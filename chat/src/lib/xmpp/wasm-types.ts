@@ -9,6 +9,19 @@ export interface WasmMarkupSpan {
   uri?: string;
 }
 
+export interface WasmEncryptedFileHash {
+  algo: string;
+  value_b64: string;
+}
+
+export interface WasmEncryptedFile {
+  cipher: string;
+  key_b64: string;
+  iv_b64: string;
+  hashes: WasmEncryptedFileHash[];
+  sources: string[];
+}
+
 export interface WasmSharedFile {
   url: string;
   name?: string;
@@ -17,6 +30,7 @@ export interface WasmSharedFile {
   width?: number;
   height?: number;
   disposition: string;
+  encrypted?: WasmEncryptedFile;
 }
 
 export interface WasmReference {
@@ -182,6 +196,7 @@ export interface WasmSendOptions {
     width?: number;
     height?: number;
     disposition: string;
+    encrypted?: WasmEncryptedFile;
   }>;
   markup_spans?: WasmMarkupSpan[];
   references?: WasmReference[];

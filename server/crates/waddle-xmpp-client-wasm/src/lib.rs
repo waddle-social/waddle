@@ -376,6 +376,35 @@ pub struct WaddleSharedFile {
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub disposition: String,
+    /// XEP-0448 envelope when the bytes at `url` are ciphertext rather than
+    /// the plaintext file. Recipients MUST use these values to decrypt before
+    /// rendering. Absent for plaintext shares and on platforms that do not
+    /// produce encrypted attachments.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encrypted: Option<WaddleEncryptedFile>,
+}
+
+/// XEP-0448 envelope (cipher / key / iv / hashes / sources) bridged across
+/// the WASM boundary.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WaddleEncryptedFile {
+    /// Cipher URN, e.g. `urn:xmpp:ciphers:aes-256-gcm-nopadding:0`.
+    pub cipher: String,
+    /// Base64-encoded symmetric key.
+    pub key_b64: String,
+    /// Base64-encoded initialization vector / nonce.
+    pub iv_b64: String,
+    #[serde(default)]
+    pub hashes: Vec<WaddleEncryptedFileHash>,
+    /// Source URLs the ciphertext can be fetched from. Always non-empty.
+    pub sources: Vec<String>,
+}
+
+/// XEP-0300 hash entry nested under a `WaddleEncryptedFile`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WaddleEncryptedFileHash {
+    pub algo: String,
+    pub value_b64: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -2482,17 +2511,22 @@ fn send_options_from_js(options: JsValue) -> Result<SendMessageOptions, JsValue>
         shared_files: options
             .shared_files
             .into_iter()
-            .map(|file| messaging::SharedFile {
-                url: file.url,
-                name: file.name,
-                media_type: file.media_type.clone(),
-                size: file.size,
-                width: file.width,
-                height: file.height,
-                disposition: SharedFileDisposition::from_text_or_infer(
+            .map(|file| {
+                let disposition = SharedFileDisposition::from_text_or_infer(
                     Some(file.disposition.as_str()),
                     file.media_type.as_deref(),
-                ),
+                );
+                let encrypted = file.encrypted.and_then(encrypted_file_from_js);
+                messaging::SharedFile {
+                    url: file.url,
+                    name: file.name,
+                    media_type: file.media_type,
+                    size: file.size,
+                    width: file.width,
+                    height: file.height,
+                    disposition,
+                    encrypted,
+                }
             })
             .collect(),
     })
@@ -2747,7 +2781,51 @@ fn shared_file_to_js(file: messaging::SharedFile) -> WaddleSharedFile {
         width: file.width,
         height: file.height,
         disposition: file.disposition.as_str().to_string(),
+        encrypted: file.encrypted.map(encrypted_file_to_js),
     }
+}
+
+fn encrypted_file_to_js(
+    enc: waddle_xmpp_client::xep::encrypted_file::EncryptedFile,
+) -> WaddleEncryptedFile {
+    WaddleEncryptedFile {
+        cipher: enc.cipher.as_uri().to_string(),
+        key_b64: enc.key_b64,
+        iv_b64: enc.iv_b64,
+        hashes: enc
+            .hashes
+            .into_iter()
+            .map(|h| WaddleEncryptedFileHash {
+                algo: h.algo,
+                value_b64: h.value_b64,
+            })
+            .collect(),
+        sources: enc.sources,
+    }
+}
+
+fn encrypted_file_from_js(
+    enc: WaddleEncryptedFile,
+) -> Option<waddle_xmpp_client::xep::encrypted_file::EncryptedFile> {
+    use waddle_xmpp_client::xep::encrypted_file::{Cipher, EncryptedFile, EncryptedHash};
+    let cipher = Cipher::from_uri(&enc.cipher)?;
+    if enc.sources.is_empty() {
+        return None;
+    }
+    Some(EncryptedFile {
+        cipher,
+        key_b64: enc.key_b64,
+        iv_b64: enc.iv_b64,
+        hashes: enc
+            .hashes
+            .into_iter()
+            .map(|h| EncryptedHash {
+                algo: h.algo,
+                value_b64: h.value_b64,
+            })
+            .collect(),
+        sources: enc.sources,
+    })
 }
 
 fn presence_to_js(presence: InboundPresence) -> WaddlePresence {
@@ -3168,5 +3246,58 @@ mod inbound_to_js_tests {
         assert_eq!(references[0].anchor.as_deref(), Some("example.com"));
         assert_eq!(references[1].ref_type, "mention");
         assert!(references[1].anchor.is_none());
+    }
+}
+
+#[cfg(test)]
+mod encrypted_file_bridge_tests {
+    use super::*;
+    use waddle_xmpp_client::xep::encrypted_file::{Cipher, EncryptedFile, EncryptedHash};
+
+    fn sample_native() -> EncryptedFile {
+        EncryptedFile {
+            cipher: Cipher::Aes256GcmNoPadding,
+            key_b64: "a2V5".to_string(),
+            iv_b64: "aXY=".to_string(),
+            hashes: vec![EncryptedHash {
+                algo: "sha-256".to_string(),
+                value_b64: "aGFzaA==".to_string(),
+            }],
+            sources: vec!["https://files.example.com/blob.enc".to_string()],
+        }
+    }
+
+    #[test]
+    fn round_trips_encrypted_file_through_js_bridge() {
+        let native = sample_native();
+        let js = encrypted_file_to_js(native.clone());
+        assert_eq!(js.cipher, "urn:xmpp:ciphers:aes-256-gcm-nopadding:0");
+        assert_eq!(js.sources, native.sources);
+        let back = encrypted_file_from_js(js).expect("known cipher round-trips");
+        assert_eq!(back, native);
+    }
+
+    #[test]
+    fn rejects_unknown_cipher_at_js_boundary() {
+        let invalid = WaddleEncryptedFile {
+            cipher: "urn:xmpp:ciphers:rot13:0".to_string(),
+            key_b64: "k".to_string(),
+            iv_b64: "v".to_string(),
+            hashes: Vec::new(),
+            sources: vec!["https://x".to_string()],
+        };
+        assert!(encrypted_file_from_js(invalid).is_none());
+    }
+
+    #[test]
+    fn rejects_empty_sources_at_js_boundary() {
+        let invalid = WaddleEncryptedFile {
+            cipher: "urn:xmpp:ciphers:aes-256-gcm-nopadding:0".to_string(),
+            key_b64: "k".to_string(),
+            iv_b64: "v".to_string(),
+            hashes: Vec::new(),
+            sources: Vec::new(),
+        };
+        assert!(encrypted_file_from_js(invalid).is_none());
     }
 }

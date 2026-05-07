@@ -12,6 +12,9 @@ use uuid::Uuid;
 use crate::client::ClientHandle;
 use crate::error::{ClientError, ClientResult};
 use crate::request::StanzaId;
+use crate::xep::encrypted_file::{
+    self as xep_encrypted_file, EncryptedFile, NS_ESFS as NS_ENCRYPTED_FILE,
+};
 use crate::xep::{reply as xep_reply, thread as xep_thread};
 
 // ─── Namespace constants ───────────────────────────────────────────────────
@@ -109,6 +112,10 @@ pub struct SharedFile {
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub disposition: SharedFileDisposition,
+    /// XEP-0448 encryption envelope, when the bytes at `url` are ciphertext
+    /// rather than the plaintext file. Recipients MUST use these values to
+    /// decrypt before rendering.
+    pub encrypted: Option<EncryptedFile>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -475,6 +482,25 @@ fn parse_message(el: &Element) -> InboundMessage {
         }
     }
 
+    // XEP-0448: top-level `<encrypted xmlns='urn:xmpp:esfs:0'/>` siblings
+    // carry the cipher/key/iv metadata for any preceding `<file-sharing/>`
+    // entries. Match them up by URL so a `SharedFile` whose `url` already
+    // names the ciphertext gains the metadata needed to decrypt it.
+    for encrypted_el in el
+        .children()
+        .filter(|c| c.name() == "encrypted" && c.ns() == NS_ENCRYPTED_FILE)
+    {
+        let Some(encrypted) = xep_encrypted_file::parse_encrypted_element(encrypted_el) else {
+            continue;
+        };
+        let match_idx = shared_files
+            .iter()
+            .position(|f| encrypted.sources.iter().any(|src| src == &f.url));
+        if let Some(idx) = match_idx {
+            shared_files[idx].encrypted = Some(encrypted);
+        }
+    }
+
     // XEP-0447 / XEP-0363: also check <sims> children for file sharing
     for sims_el in el.children().filter(|c| c.ns() == NS_SIMS) {
         for source_el in sims_el.children() {
@@ -495,6 +521,7 @@ fn parse_message(el: &Element) -> InboundMessage {
                         width: None,
                         height: None,
                         disposition: SharedFileDisposition::Attachment,
+                        encrypted: None,
                     });
                 }
             }
@@ -759,6 +786,7 @@ fn parse_shared_file(reference_el: &Element) -> Option<SharedFile> {
         width,
         height,
         disposition,
+        encrypted: None,
     })
 }
 
@@ -806,6 +834,7 @@ fn parse_file_sharing_element(file_sharing_el: &Element) -> Option<SharedFile> {
         width,
         height,
         disposition,
+        encrypted: None,
     })
 }
 
@@ -1243,6 +1272,17 @@ pub fn build_outbound_message(
     }
     for file in &options.shared_files {
         builder = builder.append(build_file_sharing_element(file));
+        // XEP-0448: when the bytes at `file.url` are ciphertext, emit a
+        // sibling `<encrypted/>` envelope carrying the cipher/key/iv/hash
+        // metadata recipients need to decrypt. The `<file-sharing/>` element
+        // continues to advertise the plaintext metadata (filename, size,
+        // media-type) so peers without encryption support still see the
+        // attachment offer.
+        if let Some(encrypted) = file.encrypted.as_ref() {
+            if let Some(encrypted_el) = xep_encrypted_file::build_encrypted_element(encrypted) {
+                builder = builder.append(encrypted_el);
+            }
+        }
     }
     Ok((stanza_id, builder.build()))
 }
@@ -1808,6 +1848,7 @@ mod tests {
                 width: None,
                 height: None,
                 disposition: SharedFileDisposition::Inline,
+                encrypted: None,
             }],
             ..Default::default()
         };
@@ -1833,6 +1874,176 @@ mod tests {
                 .and_then(|url_data| url_data.attr("target")),
             Some("https://files.example.com/song.ogg")
         );
+    }
+
+    #[test]
+    fn build_outbound_message_emits_xep0448_when_encrypted() {
+        use crate::xep::encrypted_file::{Cipher, EncryptedFile, EncryptedHash, NS_ESFS};
+        let url = "https://files.example.com/photo.jpg.enc";
+        let options = SendMessageOptions {
+            shared_files: vec![SharedFile {
+                url: url.to_string(),
+                name: Some("photo.jpg".to_string()),
+                media_type: Some("image/jpeg".to_string()),
+                size: Some(2048),
+                width: Some(800),
+                height: Some(600),
+                disposition: SharedFileDisposition::Inline,
+                encrypted: Some(EncryptedFile {
+                    cipher: Cipher::Aes256GcmNoPadding,
+                    key_b64: "a2V5".to_string(),
+                    iv_b64: "aXY=".to_string(),
+                    hashes: vec![EncryptedHash {
+                        algo: "sha-256".to_string(),
+                        value_b64: "aGFzaA==".to_string(),
+                    }],
+                    sources: vec![url.to_string()],
+                }),
+            }],
+            ..Default::default()
+        };
+        let (_, stanza) =
+            build_outbound_message("bob@example.com", "chat", "see attached", &options).unwrap();
+
+        // The plaintext metadata still rides on `<file-sharing/>` so peers
+        // without encryption support see the filename and disposition.
+        let file_sharing = stanza
+            .get_child("file-sharing", NS_SFS)
+            .expect("file-sharing child present");
+        assert_eq!(file_sharing.attr("disposition"), Some("inline"));
+
+        // The XEP-0448 envelope is a sibling carrying cipher + key + iv +
+        // hashes + sources pointing at the ciphertext blob.
+        let encrypted = stanza
+            .get_child("encrypted", NS_ESFS)
+            .expect("encrypted sibling present");
+        assert_eq!(
+            encrypted.attr("cipher"),
+            Some("urn:xmpp:ciphers:aes-256-gcm-nopadding:0")
+        );
+        assert_eq!(
+            encrypted.get_child("key", NS_ESFS).map(|e| e.text()),
+            Some("a2V5".to_string())
+        );
+        assert_eq!(
+            encrypted.get_child("iv", NS_ESFS).map(|e| e.text()),
+            Some("aXY=".to_string())
+        );
+        let sources = encrypted
+            .get_child("sources", NS_SFS)
+            .expect("encrypted sources");
+        let url_data = sources
+            .get_child("url-data", NS_URL_DATA)
+            .expect("url-data inside encrypted sources");
+        assert_eq!(url_data.attr("target"), Some(url));
+    }
+
+    #[test]
+    fn parse_message_collects_encrypted_metadata_into_shared_file() {
+        let url = "https://files.example.com/photo.jpg.enc";
+        let xml = format!(
+            "<message xmlns='jabber:client' type='chat' from='bob@example.com' id='m1'>\
+               <body>see attached</body>\
+               <file-sharing xmlns='urn:xmpp:sfs:0' disposition='inline'>\
+                 <file xmlns='urn:xmpp:file:metadata:0'>\
+                   <media-type>image/jpeg</media-type>\
+                   <name>photo.jpg</name>\
+                   <size>2048</size>\
+                 </file>\
+                 <sources xmlns='urn:xmpp:sfs:0'>\
+                   <url-data xmlns='http://jabber.org/protocol/url-data' target='{url}'/>\
+                 </sources>\
+               </file-sharing>\
+               <encrypted xmlns='urn:xmpp:esfs:0' \
+                          cipher='urn:xmpp:ciphers:aes-256-gcm-nopadding:0'>\
+                 <key>a2V5</key>\
+                 <iv>aXY=</iv>\
+                 <hash xmlns='urn:xmpp:hashes:2' algo='sha-256'>aGFzaA==</hash>\
+                 <sources xmlns='urn:xmpp:sfs:0'>\
+                   <url-data xmlns='http://jabber.org/protocol/url-data' target='{url}'/>\
+                 </sources>\
+               </encrypted>\
+             </message>"
+        );
+        let el: Element = xml.parse().expect("valid xml");
+        let MessagingEvent::Message(parsed) = parse(&el).expect("parses to event") else {
+            panic!("expected message event");
+        };
+        assert_eq!(parsed.shared_files.len(), 1);
+        let file = &parsed.shared_files[0];
+        assert_eq!(file.url, url);
+        assert_eq!(file.media_type.as_deref(), Some("image/jpeg"));
+        let encrypted = file
+            .encrypted
+            .as_ref()
+            .expect("encrypted metadata attached");
+        assert_eq!(
+            encrypted.cipher,
+            crate::xep::encrypted_file::Cipher::Aes256GcmNoPadding
+        );
+        assert_eq!(encrypted.key_b64, "a2V5");
+        assert_eq!(encrypted.iv_b64, "aXY=");
+        assert_eq!(encrypted.hashes.len(), 1);
+        assert_eq!(encrypted.hashes[0].algo, "sha-256");
+        assert_eq!(encrypted.sources, vec![url.to_string()]);
+    }
+
+    #[test]
+    fn parse_message_leaves_encrypted_none_for_plaintext_share() {
+        let xml = "<message xmlns='jabber:client' type='chat' from='bob@example.com' id='m1'>\
+               <body>plain</body>\
+               <file-sharing xmlns='urn:xmpp:sfs:0' disposition='attachment'>\
+                 <file xmlns='urn:xmpp:file:metadata:0'>\
+                   <name>doc.pdf</name>\
+                 </file>\
+                 <sources xmlns='urn:xmpp:sfs:0'>\
+                   <url-data xmlns='http://jabber.org/protocol/url-data' \
+                             target='https://files.example.com/doc.pdf'/>\
+                 </sources>\
+               </file-sharing>\
+             </message>";
+        let el: Element = xml.parse().expect("valid xml");
+        let MessagingEvent::Message(parsed) = parse(&el).expect("parses to event") else {
+            panic!("expected message event");
+        };
+        assert!(parsed.shared_files[0].encrypted.is_none());
+    }
+
+    #[test]
+    fn build_then_parse_roundtrip_preserves_encrypted_metadata() {
+        use crate::xep::encrypted_file::{Cipher, EncryptedFile, EncryptedHash};
+        let url = "https://files.example.com/blob.enc";
+        let original = SharedFile {
+            url: url.to_string(),
+            name: Some("blob.bin".to_string()),
+            media_type: Some("application/octet-stream".to_string()),
+            size: Some(99),
+            width: None,
+            height: None,
+            disposition: SharedFileDisposition::Attachment,
+            encrypted: Some(EncryptedFile {
+                cipher: Cipher::Aes128GcmNoPadding,
+                key_b64: "k1".to_string(),
+                iv_b64: "i1".to_string(),
+                hashes: vec![EncryptedHash {
+                    algo: "sha-256".to_string(),
+                    value_b64: "h1".to_string(),
+                }],
+                sources: vec![url.to_string()],
+            }),
+        };
+        let options = SendMessageOptions {
+            shared_files: vec![original.clone()],
+            ..Default::default()
+        };
+        let (_, stanza) = build_outbound_message("bob@example.com", "chat", "x", &options).unwrap();
+        let MessagingEvent::Message(parsed) = parse(&stanza).expect("parses to event") else {
+            panic!("expected message event");
+        };
+        assert_eq!(parsed.shared_files.len(), 1);
+        let round_tripped = &parsed.shared_files[0];
+        assert_eq!(round_tripped.url, original.url);
+        assert_eq!(round_tripped.encrypted, original.encrypted);
     }
 
     #[test]
