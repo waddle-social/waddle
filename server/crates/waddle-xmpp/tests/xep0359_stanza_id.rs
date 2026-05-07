@@ -16,8 +16,7 @@ use chrono::Utc;
 use jid::{BareJid, Jid};
 use waddle_xmpp::pending_delivery::flush::{build_replay_stanza, MaterializedPayload};
 use waddle_xmpp::pending_delivery::{PendingPayload, PendingRow, PendingRowId};
-use waddle_xmpp::protocol::{StanzaIdRef, StanzaIdValue};
-use waddle_xmpp_core::xep0359::{build_stanza_id_element, NS_SID};
+use waddle_xmpp_core::xep0359::{build_stanza_id_element, StanzaId, NS_SID};
 use xmpp_parsers::message::{Body, Message, MessageType};
 
 fn bare(s: &str) -> BareJid {
@@ -130,18 +129,16 @@ fn xep0359_archived_flush_preserves_multiple_stanza_ids() {
     assert!(by_attrs.contains("example.com"));
 }
 
-/// Sanity: `StanzaIdRef` (the typed waddle reference) round-trips
-/// through `build_stanza_id_element` losslessly so a future code
-/// path that reconstructs a stamp from the typed reference
-/// produces wire-identical output.
+/// Sanity: the canonical `xep0359::StanzaId` (the workspace's
+/// consolidated stanza-id type after issue #329) round-trips
+/// through `build_stanza_id_element` losslessly so any code path
+/// that reconstructs a stamp from the typed reference produces
+/// wire-identical output.
 #[test]
-fn xep0359_typed_stanza_id_ref_round_trips_through_element() {
+fn xep0359_typed_stanza_id_round_trips_through_element() {
     let recipient = bare("alice@example.com");
-    let typed = StanzaIdRef {
-        by: recipient.clone(),
-        id: StanzaIdValue::new("mam-id-typed"),
-    };
-    let element = build_stanza_id_element(typed.id.as_str(), &Jid::from(typed.by.clone()));
+    let typed = StanzaId::new("mam-id-typed", Jid::from(recipient.clone()));
+    let element = build_stanza_id_element(typed.as_str(), &typed.by);
     assert_eq!(element.attr("id"), Some("mam-id-typed"));
     assert_eq!(element.attr("by"), Some("alice@example.com"));
 }
