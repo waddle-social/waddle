@@ -70,6 +70,22 @@ describe("renderStyledBody", () => {
     expect(html).toContain(">docs</a>");
   });
 
+  test("renders bare safe URLs as links when archived messages have no references", () => {
+    const html = renderStyledBody("see https://example.com today");
+
+    expect(html).toContain('<a href="https://example.com/"');
+    expect(html).toContain(">https://example.com</a>");
+  });
+
+  test("does not autolink bare URLs inside code markup", () => {
+    const html = renderStyledBody("`https://example.com`", [
+      { type: "span", start: 1, end: 20, styles: ["code"] },
+    ]);
+
+    expect(html).toContain("<code>https://example.com</code>");
+    expect(html).not.toContain("<a ");
+  });
+
   test("escapes unsafe HTML and rejects unsafe links", () => {
     const html = renderStyledBody("<script>x</script>", undefined, [
       { type: "data", uri: "javascript:alert(1)", begin: 0, end: 8 },

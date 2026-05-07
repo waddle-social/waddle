@@ -3069,6 +3069,11 @@ mod inbound_to_js_tests {
         }
     }
 
+    fn parse_mam_archived(xml: &str) -> waddle_xmpp_client::ArchivedMessage {
+        let el: Element = xml.parse().expect("invalid XML");
+        waddle_xmpp_client::mam::parse_mam_result(&el).expect("expected MAM result")
+    }
+
     #[test]
     fn inbound_to_js_propagates_data_reference_with_anchor() {
         let inbound = parse_message_element(
@@ -3089,6 +3094,35 @@ mod inbound_to_js_tests {
         assert_eq!(reference.begin, 4);
         assert_eq!(reference.end, 23);
         assert_eq!(reference.anchor.as_deref(), Some("https://example.com"));
+    }
+
+    #[test]
+    fn archived_to_js_propagates_mam_data_references_for_reload_rendering() {
+        let archived = parse_mam_archived(
+            "<message xmlns='jabber:client'>\
+               <result xmlns='urn:xmpp:mam:2' id='mam-1' queryid='q1'>\
+                 <forwarded xmlns='urn:xmpp:forward:0'>\
+                   <delay xmlns='urn:xmpp:delay' stamp='2026-05-06T12:00:00Z'/>\
+                   <message xmlns='jabber:client' type='groupchat' id='m-data' \
+                            from='room@conf.example/alice'>\
+                     <body>see https://example.com</body>\
+                     <reference xmlns='urn:xmpp:reference:0' type='data' \
+                        uri='https://example.com/' begin='4' end='23'/>\
+                   </message>\
+                 </forwarded>\
+               </result>\
+             </message>",
+        );
+
+        let js = archived_to_js(archived);
+
+        assert_eq!(js.references.len(), 1);
+        let reference = &js.references[0];
+        assert_eq!(reference.ref_type, "data");
+        assert_eq!(reference.uri, "https://example.com/");
+        assert_eq!(reference.begin, 4);
+        assert_eq!(reference.end, 23);
+        assert!(reference.anchor.is_none());
     }
 
     #[test]

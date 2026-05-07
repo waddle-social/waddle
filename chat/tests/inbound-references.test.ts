@@ -1,9 +1,38 @@
 import { describe, expect, test } from "bun:test";
+import type { JSONContent } from "@tiptap/core";
+import { mapLiveRoomMessageToTimeline } from "@/channels/timeline";
+import { renderStyledBody } from "@/lib/chat-ui";
+import { tiptapToRichMessage } from "@/lib/rich-message";
 import {
   dmMessageFromArchived,
   roomMessageFromArchived,
 } from "@/lib/xmpp/client";
+import type { WaddleSession } from "@/lib/server-auth";
 import type { WasmArchivedMessage } from "@/lib/xmpp/wasm-types";
+
+function paragraph(...content: JSONContent[]): JSONContent {
+  return { type: "paragraph", content };
+}
+
+function text(text: string): JSONContent {
+  return { type: "text", text };
+}
+
+function doc(...content: JSONContent[]): JSONContent {
+  return { type: "doc", content };
+}
+
+const session: WaddleSession = {
+  session_id: "session-1",
+  user_id: "alice-id",
+  username: "alice",
+  avatar_url: null,
+  xmpp_localpart: "alice",
+  jid: "alice@example.com/web",
+  xmpp_websocket_url: "wss://example.com/ws",
+  is_expired: false,
+  expires_at: null,
+};
 
 const baseArchivedRoom: WasmArchivedMessage = {
   mam_id: "mam-1",
@@ -36,6 +65,48 @@ const baseArchivedDm: WasmArchivedMessage = {
 };
 
 describe("roomMessageFromArchived", () => {
+  test("keeps editor autolink XEP-0372 references clickable after live echo and MAM reload", () => {
+    const outbound = tiptapToRichMessage(doc(paragraph(text("see https://example.com today"))));
+    expect(outbound.references).toEqual([
+      { type: "data", uri: "https://example.com/", begin: 4, end: 23 },
+    ]);
+
+    const wasmReferences = outbound.references.map((reference) => ({
+      ref_type: reference.type,
+      uri: reference.uri,
+      begin: reference.begin ?? 0,
+      end: reference.end ?? 0,
+      ...(reference.anchor ? { anchor: reference.anchor } : {}),
+    }));
+    const liveEcho = roomMessageFromArchived({
+      ...baseArchivedRoom,
+      mam_id: "live-echo",
+      id: "client-1",
+      stanza_id: "room-stanza-1",
+      from: "room@conf.example.com/alice",
+      body: outbound.body,
+      references: wasmReferences,
+    });
+    const mamReload = roomMessageFromArchived({
+      ...baseArchivedRoom,
+      mam_id: "mam-reload-1",
+      id: "server-1",
+      stanza_id: "room-stanza-1",
+      from: "room@conf.example.com/alice",
+      body: outbound.body,
+      references: wasmReferences,
+    });
+
+    for (const message of [liveEcho, mamReload]) {
+      expect(message).not.toBeNull();
+      const timeline = mapLiveRoomMessageToTimeline(session, message!, () => undefined);
+      expect(timeline.references).toEqual(outbound.references);
+      const html = renderStyledBody(timeline.body, timeline.markup, timeline.references);
+      expect(html).toContain('<a href="https://example.com/"');
+      expect(html).toContain(">https://example.com</a>");
+    }
+  });
+
   test("maps XEP-0372 references with anchor onto LiveRoomMessage.references", () => {
     const archived: WasmArchivedMessage = {
       ...baseArchivedRoom,
