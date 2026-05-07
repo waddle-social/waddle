@@ -88,22 +88,20 @@ export function shiftMarkupSpans<T extends { start: number; end: number }>(spans
 // message gets a reply-fallback prefix prepended, every reference offset must
 // shift right by `prefix.length`, otherwise begin/end points at the wrong
 // span on the wire.
+//
+// Anchor-only references (no body position) are represented by the (0, 0)
+// sentinel — they don't point at any body substring and MUST be preserved
+// verbatim through the rebase, not shifted or dropped.
 export function shiftReferenceOffsets<T extends { begin?: number; end?: number }>(
   references: readonly T[],
   offset: number,
 ): T[] {
   if (!Number.isFinite(offset)) return [];
   return references.flatMap((reference) => {
-    if (
-      typeof reference.begin !== "number"
-      || typeof reference.end !== "number"
-      || !Number.isFinite(reference.begin)
-      || !Number.isFinite(reference.end)
-      || reference.begin < 0
-      || reference.end <= reference.begin
-    ) {
-      return [];
-    }
+    if (typeof reference.begin !== "number" || typeof reference.end !== "number") return [];
+    if (!Number.isFinite(reference.begin) || !Number.isFinite(reference.end)) return [];
+    if (reference.begin === 0 && reference.end === 0) return [reference];
+    if (reference.begin < 0 || reference.end <= reference.begin) return [];
     const shifted = { ...reference, begin: reference.begin + offset, end: reference.end + offset };
     return shifted.end > shifted.begin ? [shifted] : [];
   });

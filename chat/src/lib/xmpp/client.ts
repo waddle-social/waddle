@@ -194,6 +194,9 @@ function stripMarkupRange<T extends { start: number; end: number }>(spans: reado
 function stripReferenceRange<T extends { begin?: number; end?: number }>(references: readonly T[], start: number, end: number): T[] {
   return references.flatMap((reference) => {
     if (typeof reference.begin !== "number" || typeof reference.end !== "number") return [];
+    // Anchor-only references (no body position) use the (0, 0) sentinel and
+    // are unaffected by reply-fallback stripping — preserve them verbatim.
+    if (reference.begin === 0 && reference.end === 0) return [reference];
     const rebased = {
       ...reference,
       begin: rebaseOffsetAfterRemoval(reference.begin, start, end),

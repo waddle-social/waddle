@@ -85,6 +85,41 @@ describe("roomMessageFromArchived", () => {
   });
 });
 
+describe("roomMessageFromArchived with reply-fallback", () => {
+  test("preserves anchor-only (0, 0) reference intact when stripping fallback", () => {
+    // Inbound: external client sent an anchor-only reference (no body
+    // position, omitted begin/end → parsed as (0, 0)) on a reply that has a
+    // fallback prefix. stripReplyFallback must NOT delete the reference.
+    const archived: WasmArchivedMessage = {
+      ...baseArchivedRoom,
+      body: "> quoted\n\nactual reply",
+      reply_fallback_start: 0,
+      reply_fallback_end: 10,
+      references: [
+        {
+          ref_type: "data",
+          uri: "xmpp:room@conf.example?message;id=earlier",
+          begin: 0,
+          end: 0,
+          anchor: "xmpp:alice@example.com",
+        },
+      ],
+    };
+
+    const result = roomMessageFromArchived(archived);
+
+    expect(result?.references).toEqual([
+      {
+        type: "data",
+        uri: "xmpp:room@conf.example?message;id=earlier",
+        begin: 0,
+        end: 0,
+        anchor: "xmpp:alice@example.com",
+      },
+    ]);
+  });
+});
+
 describe("dmMessageFromArchived", () => {
   test("maps XEP-0372 references onto LiveDmMessage.references", () => {
     const archived: WasmArchivedMessage = {

@@ -43,4 +43,19 @@ describe("shiftReferenceOffsets (XEP-0461 reply-fallback rebasing)", () => {
     const refs = [{ type: "data", uri: "https://foo", begin: 4, end: 23 }];
     expect(shiftReferenceOffsets(refs, 0)).toEqual(refs);
   });
+
+  test("anchor-only (0, 0) sentinel is preserved verbatim, not shifted or dropped", () => {
+    // XEP-0372 §2.4: anchor-only references point at a previous message and
+    // carry no body position. We represent them on the wire as `begin`/`end`
+    // omitted, parsed back as (0, 0). These must survive reply-fallback
+    // rebasing intact — they don't refer to anything in this body.
+    const anchorOnly = {
+      type: "data",
+      uri: "xmpp:room@conf.example?message;id=earlier",
+      begin: 0,
+      end: 0,
+      anchor: "xmpp:alice@example.com",
+    };
+    expect(shiftReferenceOffsets([anchorOnly], 25)).toEqual([anchorOnly]);
+  });
 });
