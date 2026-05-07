@@ -17,6 +17,7 @@ import type { ChannelSummary, SpaceSummary } from "@/lib/chat-types";
 import type { ExtensionAnnotationAction, TimelineMessage, MarkupSpan, MessageReference } from "@/lib/chat-ui";
 import type { MentionCandidate } from "@/lib/mentions";
 import type { BrowserXmppClient, MessageSearchResult, XmppStatusSnapshot, RoomHats, RoomPresence } from "@/lib/xmpp-client";
+import type { MemberLoadState } from "@/waddles/directory";
 import type { DiscoveredExtensionCommand, ExtensionCommandAction, ExtensionCommandResult } from "@/lib/xmpp/extension-commands";
 import { useScrollDirectionPreference } from "@/preferences/scroll-direction";
 import type { MessageThreadIndex } from "@/channels/threads";
@@ -50,7 +51,8 @@ const props = defineProps<{
   hasOlderMessages: boolean;
   isSending: boolean;
   canManageChannels: boolean;
-  memberCount: number;
+  memberCount: number | null;
+  memberState: MemberLoadState;
   typingUsers: string[];
   currentUser?: string;
   selfDomain?: string;
@@ -666,6 +668,7 @@ function dayDividerLabel(createdAt: string): string {
       :is-forum-channel="isForumChannel"
       :can-manage-channels="canManageChannels"
       :member-count="memberCount"
+      :member-state="memberState"
       :connection-notice="connectionNotice"
       :connection-status-classes="connectionStatusClasses"
       :connection-status-icon="connectionStatusIcon"

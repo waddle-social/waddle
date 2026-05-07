@@ -72,6 +72,17 @@ describe("mention helpers", () => {
     expect(names).toEqual(["everyone", "here", "alice", "bob"]);
   });
 
+  test("displayed member counts include affiliation members and live occupants", () => {
+    const merged = mergeMentionMembers({
+      members: [{ jid: "alice@example.com", username: "alice", avatar_url: null, role: "owner", joined_at: "" }],
+      roomPresence: { alice: "online", bob: "online", carol: "offline" },
+      memberJidsByNick: { Bob: "bob@example.com" },
+    });
+
+    expect(merged.members.map((member) => member.username)).toEqual(["alice", "bob"]);
+    expect(merged.members).toHaveLength(2);
+  });
+
   test("autocomplete candidates include registered offline members once", () => {
     const merged = mergeMentionMembers({
       members: [

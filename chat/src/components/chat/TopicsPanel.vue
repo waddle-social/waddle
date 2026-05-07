@@ -6,6 +6,7 @@ import type { ChannelSummary, SpaceSummary } from "@/lib/chat-types";
 import type { ChannelThreadInboxEntry } from "@/channels/inbox";
 import { groupChannelsBySpace } from "@/lib/channel-grouping";
 import type { DiscoveredExtensionRoute } from "@/lib/xmpp/extension-commands";
+import type { MemberLoadState } from "@/waddles/directory";
 
 const props = defineProps<{
   waddle: SpaceSummary | null;
@@ -15,7 +16,8 @@ const props = defineProps<{
   canManageChannels: boolean;
   canManageCommunity: boolean;
   isLoading: boolean;
-  memberCount: number;
+  memberCount: number | null;
+  memberState: MemberLoadState;
   activeChannelJids: Set<string>;
   collapsedGroupIds: Set<string>;
   channelUnreadMap?: Record<string, { unread: number; mentions: number }>;
@@ -76,6 +78,13 @@ function activityLabel(summary: { unread: number; mentions: number; hasActivity:
     parts.push("active");
   }
   return parts.length > 0 ? parts.join(", ") : "no unread activity";
+}
+
+function memberCountLabel() {
+  if (props.memberCount !== null) return String(props.memberCount);
+  if (props.memberState === "loading") return "syncing";
+  if (props.memberState === "unavailable") return "unavailable";
+  return "0";
 }
 
 function channelRowLabel(
@@ -398,7 +407,7 @@ watch(
       >
         <Users class="w-3.5 h-3.5 flex-shrink-0 opacity-40 group-hover:opacity-70 transition-opacity" />
         <span class="type-control flex-1">Members</span>
-        <span class="type-meta type-numeric text-sidebar-muted">{{ memberCount }}</span>
+        <span class="type-meta text-sidebar-muted">{{ memberCountLabel() }}</span>
       </button>
     </div>
   </div>

@@ -56,6 +56,7 @@ describe("useWaddleDirectory.loadStructure", () => {
     expect(listRoomMembers.mock.calls[0]![0]).toBe("general");
     expect(listRoomMembers.mock.calls[0]![1]).toEqual({ roomJid: "general@conference.example.com" });
     expect(w.members.value).toEqual([ALICE]);
+    expect(w.memberLoadState.value).toBe("ready");
   });
 
   test("loads members for the preferred channel when a channelId is supplied", async () => {
@@ -71,6 +72,7 @@ describe("useWaddleDirectory.loadStructure", () => {
     expect(listRoomMembers.mock.calls[0]![1]).toEqual({ roomJid: "random@conference.example.com" });
     expect(w.members.value).toEqual([BOB]);
     expect(w.activeChannelId.value).toBe("random");
+    expect(w.memberLoadState.value).toBe("ready");
   });
 
   test("routes to the first channel when preferred channel is not in the topology", async () => {
@@ -125,24 +127,33 @@ describe("useWaddleDirectory.reloadChannelMembers", () => {
     expect(w.members.value).toEqual([ALICE]);
   });
 
-  test("preserves previous members on failure and sets actionError", async () => {
+  test("preserves previous members on failure and marks members unavailable", async () => {
+    const warn = mock(() => {});
+    const previousWarn = console.warn;
+    console.warn = warn;
     const listRoomMembers = mock(async (_id: string) => [BOB]);
     const client = makeClient({ listRoomMembers });
     const { w, actionError } = makeWaddles(client);
 
-    await w.loadStructure();
-    // Seed members for the active channel
-    await w.reloadChannelMembers("general");
-    expect(w.members.value).toEqual([BOB]);
+    try {
+      await w.loadStructure();
+      // Seed members for the active channel
+      await w.reloadChannelMembers("general");
+      expect(w.members.value).toEqual([BOB]);
 
-    // Now make it fail
-    listRoomMembers.mockImplementation(async () => { throw new Error("forbidden"); });
+      // Now make it fail
+      listRoomMembers.mockImplementation(async () => { throw new Error("forbidden"); });
 
-    await w.reloadChannelMembers("general");
+      await w.reloadChannelMembers("general");
 
-    // Members preserved, error surfaced
-    expect(w.members.value).toEqual([BOB]);
-    expect(actionError.value).toBe("forbidden");
+      // Members preserved, failure represented in member-specific state.
+      expect(w.members.value).toEqual([BOB]);
+      expect(w.memberLoadState.value).toBe("unavailable");
+      expect(actionError.value).toBe("");
+      expect(warn).toHaveBeenCalledTimes(1);
+    } finally {
+      console.warn = previousWarn;
+    }
   });
 
   test("discards stale result when channel switches rapidly", async () => {
@@ -186,6 +197,7 @@ describe("useWaddleDirectory.reloadChannelMembers", () => {
     await w.reloadChannelMembers("general");
 
     expect(w.members.value).toEqual([]);
+    expect(w.memberLoadState.value).toBe("idle");
     expect(actionError.value).toBe("");
   });
 });
