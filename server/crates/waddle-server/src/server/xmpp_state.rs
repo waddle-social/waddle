@@ -927,17 +927,7 @@ impl waddle_xmpp::AppState for XmppAppState {
 
     /// Get all blocked JIDs for a user.
     async fn get_blocklist(&self, user_jid: &jid::BareJid) -> Result<Vec<String>, XmppError> {
-        use crate::db::blocking::DatabaseBlockingStorage;
-
-        debug!(jid = %user_jid, "Getting blocklist");
-
-        let db = self.global_database().await?;
-        let storage = DatabaseBlockingStorage::new(db);
-
-        storage.get_blocklist(user_jid).await.map_err(|e| {
-            warn!(jid = %user_jid, error = %e, "Failed to get blocklist");
-            XmppError::internal(format!("Database error: {}", e))
-        })
+        super::xmpp_user_storage_state::get_blocklist(self.global_database().await?, user_jid).await
     }
 
     /// Check if a JID is blocked by a user.
@@ -946,17 +936,12 @@ impl waddle_xmpp::AppState for XmppAppState {
         user_jid: &jid::BareJid,
         blocked_jid: &jid::BareJid,
     ) -> Result<bool, XmppError> {
-        use crate::db::blocking::DatabaseBlockingStorage;
-
-        debug!(user = %user_jid, blocked = %blocked_jid, "Checking if JID is blocked");
-
-        let db = self.global_database().await?;
-        let storage = DatabaseBlockingStorage::new(db);
-
-        storage.is_blocked(user_jid, blocked_jid).await.map_err(|e| {
-            warn!(user = %user_jid, blocked = %blocked_jid, error = %e, "Failed to check if blocked");
-            XmppError::internal(format!("Database error: {}", e))
-        })
+        super::xmpp_user_storage_state::is_blocked(
+            self.global_database().await?,
+            user_jid,
+            blocked_jid,
+        )
+        .await
     }
 
     /// Add JIDs to a user's blocklist.
@@ -965,20 +950,12 @@ impl waddle_xmpp::AppState for XmppAppState {
         user_jid: &jid::BareJid,
         blocked_jids: &[String],
     ) -> Result<usize, XmppError> {
-        use crate::db::blocking::DatabaseBlockingStorage;
-
-        debug!(jid = %user_jid, count = blocked_jids.len(), "Adding blocks");
-
-        let db = self.global_database().await?;
-        let storage = DatabaseBlockingStorage::new(db);
-
-        storage
-            .add_blocks(user_jid, blocked_jids)
-            .await
-            .map_err(|e| {
-                warn!(jid = %user_jid, error = %e, "Failed to add blocks");
-                XmppError::internal(format!("Database error: {}", e))
-            })
+        super::xmpp_user_storage_state::add_blocks(
+            self.global_database().await?,
+            user_jid,
+            blocked_jids,
+        )
+        .await
     }
 
     /// Remove JIDs from a user's blocklist.
@@ -987,35 +964,18 @@ impl waddle_xmpp::AppState for XmppAppState {
         user_jid: &jid::BareJid,
         blocked_jids: &[String],
     ) -> Result<usize, XmppError> {
-        use crate::db::blocking::DatabaseBlockingStorage;
-
-        debug!(jid = %user_jid, count = blocked_jids.len(), "Removing blocks");
-
-        let db = self.global_database().await?;
-        let storage = DatabaseBlockingStorage::new(db);
-
-        storage
-            .remove_blocks(user_jid, blocked_jids)
-            .await
-            .map_err(|e| {
-                warn!(jid = %user_jid, error = %e, "Failed to remove blocks");
-                XmppError::internal(format!("Database error: {}", e))
-            })
+        super::xmpp_user_storage_state::remove_blocks(
+            self.global_database().await?,
+            user_jid,
+            blocked_jids,
+        )
+        .await
     }
 
     /// Remove all JIDs from a user's blocklist.
     async fn remove_all_blocks(&self, user_jid: &jid::BareJid) -> Result<usize, XmppError> {
-        use crate::db::blocking::DatabaseBlockingStorage;
-
-        debug!(jid = %user_jid, "Removing all blocks");
-
-        let db = self.global_database().await?;
-        let storage = DatabaseBlockingStorage::new(db);
-
-        storage.remove_all_blocks(user_jid).await.map_err(|e| {
-            warn!(jid = %user_jid, error = %e, "Failed to remove all blocks");
-            XmppError::internal(format!("Database error: {}", e))
-        })
+        super::xmpp_user_storage_state::remove_all_blocks(self.global_database().await?, user_jid)
+            .await
     }
 
     // =========================================================================
@@ -1028,31 +988,7 @@ impl waddle_xmpp::AppState for XmppAppState {
         jid: &jid::BareJid,
         namespace: &str,
     ) -> Result<Option<String>, XmppError> {
-        debug!(jid = %jid, namespace = %namespace, "Getting private XML");
-
-        let row = self
-            .global_db_actor
-            .ask(DbQueryOne {
-                sql: "SELECT xml_content FROM private_xml_storage WHERE jid = ? AND namespace = ?"
-                    .to_string(),
-                params: vec![
-                    crate::db::Value::from(jid.to_string()),
-                    crate::db::Value::from(namespace.to_string()),
-                ],
-            })
-            .await
-            .map_err(|e| {
-                warn!(jid = %jid, namespace = %namespace, error = %e, "Failed to get private XML");
-                XmppError::internal(format!("Database actor error: {}", e))
-            })?;
-
-        match row {
-            Some(values) => row_value(&values, 0)
-                .and_then(|value| value.as_string())
-                .map(Some)
-                .map_err(|e| XmppError::internal(format!("Database error: {}", e))),
-            None => Ok(None),
-        }
+        super::xmpp_user_storage_state::get_private_xml(&self.global_db_actor, jid, namespace).await
     }
 
     /// Store/update private XML data for a user by namespace.
@@ -1062,24 +998,13 @@ impl waddle_xmpp::AppState for XmppAppState {
         namespace: &str,
         xml_content: &str,
     ) -> Result<(), XmppError> {
-        debug!(jid = %jid, namespace = %namespace, "Setting private XML");
-
-        self.global_db_actor
-            .ask(DbExecute {
-                sql: "INSERT OR REPLACE INTO private_xml_storage (jid, namespace, xml_content, updated_at) VALUES (?, ?, ?, datetime('now'))".to_string(),
-                params: vec![
-                    crate::db::Value::from(jid.to_string()),
-                    crate::db::Value::from(namespace.to_string()),
-                    crate::db::Value::from(xml_content.to_string()),
-                ],
-            })
-            .await
-            .map_err(|e| {
-                warn!(jid = %jid, namespace = %namespace, error = %e, "Failed to set private XML");
-                XmppError::internal(format!("Database actor error: {}", e))
-            })?;
-
-        Ok(())
+        super::xmpp_user_storage_state::set_private_xml(
+            &self.global_db_actor,
+            jid,
+            namespace,
+            xml_content,
+        )
+        .await
     }
 
     // =========================================================================
@@ -1087,14 +1012,7 @@ impl waddle_xmpp::AppState for XmppAppState {
     // =========================================================================
 
     async fn list_inbox(&self, user_jid: &jid::BareJid) -> Result<Vec<InboxEntry>, XmppError> {
-        let storage = self
-            .inbox_storage
-            .as_ref()
-            .ok_or_else(|| XmppError::internal("Inbox storage not configured"))?;
-        storage.list(user_jid).await.map_err(|error| {
-            warn!(jid = %user_jid, error = %error, "Failed to list inbox");
-            XmppError::internal(format!("Inbox error: {}", error))
-        })
+        super::xmpp_user_storage_state::list_inbox(self.inbox_storage.as_deref(), user_jid).await
     }
 
     async fn upsert_inbox_entry(
@@ -1103,18 +1021,13 @@ impl waddle_xmpp::AppState for XmppAppState {
         entry: InboxEntry,
         increment_unread: bool,
     ) -> Result<(), XmppError> {
-        let storage = self
-            .inbox_storage
-            .as_ref()
-            .ok_or_else(|| XmppError::internal("Inbox storage not configured"))?;
-        storage
-            .upsert(user_jid, entry, increment_unread)
-            .await
-            .map(|_| ())
-            .map_err(|error| {
-                warn!(jid = %user_jid, error = %error, "Failed to upsert inbox entry");
-                XmppError::internal(format!("Inbox error: {}", error))
-            })
+        super::xmpp_user_storage_state::upsert_inbox_entry(
+            self.inbox_storage.as_deref(),
+            user_jid,
+            entry,
+            increment_unread,
+        )
+        .await
     }
 
     async fn mark_inbox_read(
@@ -1122,33 +1035,17 @@ impl waddle_xmpp::AppState for XmppAppState {
         user_jid: &jid::BareJid,
         partner_jid: &jid::BareJid,
     ) -> Result<(), XmppError> {
-        let storage = self
-            .inbox_storage
-            .as_ref()
-            .ok_or_else(|| XmppError::internal("Inbox storage not configured"))?;
-        storage
-            .mark_read(user_jid, partner_jid, None)
-            .await
-            .map_err(|error| {
-                warn!(
-                    jid = %user_jid,
-                    partner = %partner_jid,
-                    error = %error,
-                    "Failed to mark inbox conversation read"
-                );
-                XmppError::internal(format!("Inbox error: {}", error))
-            })
+        super::xmpp_user_storage_state::mark_inbox_read(
+            self.inbox_storage.as_deref(),
+            user_jid,
+            partner_jid,
+        )
+        .await
     }
 
     async fn inbox_total_unread(&self, user_jid: &jid::BareJid) -> Result<u64, XmppError> {
-        let storage = self
-            .inbox_storage
-            .as_ref()
-            .ok_or_else(|| XmppError::internal("Inbox storage not configured"))?;
-        storage.total_unread(user_jid).await.map_err(|error| {
-            warn!(jid = %user_jid, error = %error, "Failed to count inbox unread");
-            XmppError::internal(format!("Inbox error: {}", error))
-        })
+        super::xmpp_user_storage_state::inbox_total_unread(self.inbox_storage.as_deref(), user_jid)
+            .await
     }
 
     // =========================================================================

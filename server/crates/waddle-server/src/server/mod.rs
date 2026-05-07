@@ -13,6 +13,8 @@ mod trace;
 mod xmpp_channels;
 #[cfg(test)]
 mod xmpp_roster_state;
+#[cfg(test)]
+mod xmpp_user_storage_state;
 
 pub(crate) mod bootstrap_membership;
 pub(crate) mod managed_channel_policy;
