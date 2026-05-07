@@ -164,18 +164,38 @@ pub trait SmPersistenceStorage: Send + Sync {
     /// Enumerate every persisted session AND its unacked queue in a
     /// single round-trip. Used by `restore_from_persistence` so cold
     /// startup doesn't issue an N+1 (1 list_all_sessions + N
-    /// list_unacked). Default impl falls back to the N+1 sequence so
-    /// in-memory backends and bring-up tests keep working without
-    /// implementing a JOIN; the libSQL/Postgres backend overrides
-    /// with a single `SELECT … LEFT JOIN sm_unacked` query.
+    /// list_unacked).
+    ///
+    /// **Best-effort semantics**: a session whose unacked queue
+    /// fails to decode (corrupted XML, invalid timestamp, etc.) is
+    /// SKIPPED with a debug log; other sessions still appear in the
+    /// returned set. This mirrors the prior per-session try-catch
+    /// in `restore_from_persistence` so a single poison-pill row
+    /// can't brick cold startup. (Greptile/Copilot/Qodo P1 review
+    /// on PR #405.)
+    ///
+    /// Default impl falls back to the N+1 sequence so in-memory
+    /// backends keep working without implementing a JOIN; the
+    /// libSQL/Postgres backend overrides with a single
+    /// `SELECT … LEFT JOIN sm_unacked` query that applies the same
+    /// poison-pill skip per-row.
     async fn list_all_sessions_with_unacked(
         &self,
     ) -> Result<Vec<(PersistedSession, Vec<PersistedUnackedStanza>)>, SmPersistenceError> {
         let sessions = self.list_all_sessions().await?;
         let mut out = Vec::with_capacity(sessions.len());
         for session in sessions {
-            let unacked = self.list_unacked(&session.stream_id).await?;
-            out.push((session, unacked));
+            match self.list_unacked(&session.stream_id).await {
+                Ok(unacked) => out.push((session, unacked)),
+                Err(error) => {
+                    tracing::debug!(
+                        stream_id = %session.stream_id,
+                        error = %error,
+                        "list_all_sessions_with_unacked: skipping session whose unacked \
+                         queue failed to decode (poison pill); other sessions continue"
+                    );
+                }
+            }
         }
         Ok(out)
     }

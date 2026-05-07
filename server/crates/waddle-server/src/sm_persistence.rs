@@ -315,6 +315,40 @@ impl DatabaseSmPersistence {
             original_receipt_at,
         })
     }
+
+    /// Decode an unacked-stanza row from a JOIN result. Reads
+    /// `stream_id` from column 0 (the session's stream_id),
+    /// `stanza_xml` from column 16, and `original_receipt_at_ms`
+    /// from column 17. Caller already has `sequence` (column 15).
+    /// Used by `list_all_sessions_with_unacked` (issue #209 PR #405).
+    fn decode_unacked_join_row(
+        row: &crate::db::Row,
+        sequence_i64: i64,
+    ) -> Result<PersistedUnackedStanza, SmPersistenceError> {
+        let stream_id: String = row
+            .get(0)
+            .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
+        let stanza_xml: String = row
+            .get(16)
+            .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
+        let receipt_ms: i64 = row
+            .get(17)
+            .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
+        let original_receipt_at = DateTime::<Utc>::from_timestamp_millis(receipt_ms)
+            .ok_or_else(|| SmPersistenceError::Other("invalid unacked receipt timestamp".into()))?;
+        let element: xmpp_parsers::minidom::Element = stanza_xml
+            .parse()
+            .map_err(|e: xmpp_parsers::minidom::Error| SmPersistenceError::Other(e.to_string()))?;
+        let stanza = parse_stanza(element)?;
+        let sequence =
+            u32::try_from(sequence_i64).map_err(|e| SmPersistenceError::Other(e.to_string()))?;
+        Ok(PersistedUnackedStanza {
+            stream_id: SmSessionId::new(stream_id),
+            sequence,
+            stanza: Box::new(stanza),
+            original_receipt_at,
+        })
+    }
 }
 
 #[async_trait]
@@ -560,53 +594,103 @@ impl SmPersistenceStorage for DatabaseSmPersistence {
             )
             .await?;
         let mut out: Vec<(PersistedSession, Vec<PersistedUnackedStanza>)> = Vec::new();
+        // Track the most recently seen stream_id so we only call
+        // `decode_session` once per group rather than per JOIN row
+        // (Copilot review on PR #405 — re-decoding for every unacked
+        // row in the same session was undercutting the cold-start
+        // perf goal for large queues).
+        let mut current_stream_id: Option<String> = None;
+        let mut poison_sessions = 0usize;
         while let Some(row) = rows
             .next()
             .await
             .map_err(|e| SmPersistenceError::Other(e.to_string()))?
         {
-            // Columns 0..15 are the session columns (same shape as
-            // `list_all_sessions`). 15..18 are the unacked columns;
-            // NULL when the LEFT JOIN had no match.
-            let session = Self::decode_session(&row)?;
-            let stream_id_for_unacked = SmSessionId::new(session.stream_id.as_str());
-            // The sequence column is i64 in storage; if NULL the
-            // session has no unacked rows.
-            let sequence_opt: Option<i64> = row
-                .get(15)
-                .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-            // Look up the existing entry for this stream_id (rows are
-            // grouped by stream_id thanks to ORDER BY) or push a new
-            // one. Common case is consecutive rows for the same id.
-            if out.last().map(|(s, _)| &s.stream_id) != Some(&session.stream_id) {
-                out.push((session, Vec::new()));
-            }
-            if let Some(sequence_i64) = sequence_opt {
-                let xml: String = row
-                    .get(16)
-                    .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-                let receipt_ms: i64 = row
-                    .get(17)
-                    .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-                let original_receipt_at =
-                    chrono::DateTime::<Utc>::from_timestamp_millis(receipt_ms).ok_or_else(
-                        || SmPersistenceError::Other("invalid unacked receipt timestamp".into()),
-                    )?;
-                let element: xmpp_parsers::minidom::Element =
-                    xml.parse().map_err(|e: xmpp_parsers::minidom::Error| {
-                        SmPersistenceError::Other(e.to_string())
-                    })?;
-                let stanza = parse_stanza(element)?;
-                let sequence = u32::try_from(sequence_i64)
-                    .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-                let entry = PersistedUnackedStanza {
-                    stream_id: stream_id_for_unacked,
-                    sequence,
-                    stanza: Box::new(stanza),
-                    original_receipt_at,
+            // Read the session's stream_id (column 0) up-front so
+            // we can decide whether this row starts a new group
+            // before paying for the full session decode.
+            let row_stream_id: String = match row.get(0) {
+                Ok(s) => s,
+                Err(error) => {
+                    tracing::debug!(
+                        error = %error,
+                        "list_all_sessions_with_unacked: skipping row with unreadable stream_id"
+                    );
+                    continue;
+                }
+            };
+            let starts_new_group = current_stream_id.as_deref() != Some(row_stream_id.as_str());
+            if starts_new_group {
+                // Decode the session columns (0..=14, 15 columns)
+                // exactly once per stream_id group. On decode
+                // failure, skip the entire group's rows so a single
+                // poison-pill session can't brick cold startup
+                // (Greptile/Copilot/Qodo P1 review on PR #405).
+                let session = match Self::decode_session(&row) {
+                    Ok(s) => s,
+                    Err(error) => {
+                        tracing::debug!(
+                            stream_id = %row_stream_id,
+                            error = %error,
+                            "list_all_sessions_with_unacked: skipping session whose row \
+                             failed to decode (poison pill)"
+                        );
+                        // Mark current_stream_id so subsequent rows
+                        // for the same stream_id are recognized as
+                        // belonging to the same skipped group and
+                        // also dropped.
+                        current_stream_id = Some(row_stream_id);
+                        poison_sessions += 1;
+                        continue;
+                    }
                 };
-                out.last_mut().expect("just pushed above").1.push(entry);
+                current_stream_id = Some(row_stream_id);
+                out.push((session, Vec::new()));
+            } else if out.last().is_none() {
+                // Same stream_id as a previously-skipped poison
+                // session; drop this unacked row too.
+                continue;
             }
+            // Unacked columns: sequence (15), stanza_xml (16),
+            // original_receipt_at_ms (17). NULL when LEFT JOIN had
+            // no match. Per-row decode failure skips that row but
+            // keeps the rest of the session's queue.
+            let sequence_opt: Option<i64> = match row.get(15) {
+                Ok(v) => v,
+                Err(error) => {
+                    tracing::debug!(
+                        error = %error,
+                        "list_all_sessions_with_unacked: skipping row with unreadable sequence"
+                    );
+                    continue;
+                }
+            };
+            let Some(sequence_i64) = sequence_opt else {
+                continue;
+            };
+            let entry = match Self::decode_unacked_join_row(&row, sequence_i64) {
+                Ok(entry) => entry,
+                Err(error) => {
+                    tracing::debug!(
+                        stream_id = %current_stream_id.as_deref().unwrap_or("<unknown>"),
+                        sequence = sequence_i64,
+                        error = %error,
+                        "list_all_sessions_with_unacked: skipping unacked row with \
+                         decode failure (poison pill)"
+                    );
+                    continue;
+                }
+            };
+            if let Some(group) = out.last_mut() {
+                group.1.push(entry);
+            }
+        }
+        if poison_sessions > 0 {
+            tracing::warn!(
+                count = poison_sessions,
+                "list_all_sessions_with_unacked: skipped poison-pill session(s); \
+                 cold startup proceeds with the remaining sessions"
+            );
         }
         Ok(out)
     }
@@ -635,6 +719,26 @@ impl SmPersistenceStorage for DatabaseSmPersistence {
             .begin()
             .await
             .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
+
+        // Drop any pre-existing unacked rows for this stream_id
+        // BEFORE the inserts so a previous `persist_delete_session`
+        // failure (eviction path logs-and-swallows) doesn't trip the
+        // `(stream_id, sequence)` PRIMARY KEY constraint on the new
+        // inserts and roll the whole transaction back — including
+        // the session row update we WANT to commit. (Greptile P1
+        // review on PR #405.) The session row's `ON CONFLICT DO
+        // UPDATE` already handles its own duplicate; the unacked
+        // table has no upsert path because it normally only sees
+        // appends. The DELETE here makes the atomic-store call
+        // idempotent against partial-prior-state on the same
+        // stream_id.
+        tx.execute(
+            "DELETE FROM sm_unacked WHERE stream_id = ?",
+            crate::db_params![session.stream_id.as_str().to_string()],
+        )
+        .await
+        .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
+
         tx.execute(
             r#"
             INSERT INTO sm_sessions (
@@ -1053,5 +1157,169 @@ mod tests {
         assert_eq!(listed.len(), 3);
         assert_eq!(listed[0].sequence, 1);
         assert_eq!(listed[2].sequence, 3);
+    }
+
+    /// Issue #209 PR #405 (Greptile/Copilot P2 review):
+    /// `store_session_atomic` MUST roll back the entire transaction
+    /// on any mid-batch failure — including the session-row update.
+    /// Force a fault by passing two unacked stanzas with the same
+    /// sequence; the second INSERT trips the `(stream_id, sequence)`
+    /// PRIMARY KEY constraint inside the transaction.
+    ///
+    /// After the failed call, both `get_session` and `list_unacked`
+    /// MUST observe the prior state (here: nothing), proving the
+    /// session row update did NOT commit.
+    #[tokio::test]
+    async fn store_session_atomic_rolls_back_on_unacked_constraint_violation() {
+        let storage = DatabaseSmPersistence::open(None).await.unwrap();
+        let session = fixture_session("rollback-stream");
+        // Two stanzas with the SAME sequence — the second INSERT
+        // hits the (stream_id, sequence) PRIMARY KEY constraint.
+        // Note that the new DELETE-before-INSERT (Greptile P1 fix)
+        // clears any pre-existing rows, so the conflict is between
+        // the two stanzas in THIS batch, not against pre-existing
+        // state.
+        let unacked = vec![
+            fixture_unacked("rollback-stream", 1),
+            fixture_unacked("rollback-stream", 1), // duplicate sequence
+        ];
+        let result = storage.store_session_atomic(session, unacked).await;
+        assert!(
+            result.is_err(),
+            "duplicate (stream_id, sequence) MUST fail the transaction"
+        );
+
+        // Critical assertion: the session row MUST NOT be present.
+        // Without `tx.commit()`, dropping the Transaction rolls back
+        // every statement including the session upsert.
+        let session_after = storage
+            .get_session(&SmSessionId::new("rollback-stream"))
+            .await
+            .unwrap();
+        assert!(
+            session_after.is_none(),
+            "transaction rollback MUST hide the session row update"
+        );
+
+        // No unacked rows leaked either.
+        let unacked_after = storage
+            .list_unacked(&SmSessionId::new("rollback-stream"))
+            .await
+            .unwrap();
+        assert!(
+            unacked_after.is_empty(),
+            "transaction rollback MUST hide partial unacked inserts"
+        );
+    }
+
+    /// Issue #209 PR #405 (Greptile P1 review): `store_session_atomic`
+    /// must be idempotent against pre-existing unacked rows for the
+    /// same stream_id (e.g., a previous `persist_delete_session`
+    /// failure left rows behind). The atomic store DELETEs existing
+    /// rows inside the transaction before the INSERT loop, so the
+    /// (stream_id, sequence) PRIMARY KEY constraint can't roll back
+    /// the session row update.
+    #[tokio::test]
+    async fn store_session_atomic_clears_stale_unacked_before_inserting() {
+        let storage = DatabaseSmPersistence::open(None).await.unwrap();
+        // Pre-seed an unacked row at (stream_id, sequence=1) — this
+        // simulates a previous persist_delete_session that failed in
+        // the eviction path.
+        storage
+            .append_unacked(fixture_unacked("retry-stream", 1))
+            .await
+            .unwrap();
+        // Now atomic-store with NEW unacked rows that include the
+        // same sequence (1). Without the DELETE-before-INSERT, the
+        // INSERT for sequence=1 would fail and roll back the session.
+        let session = fixture_session("retry-stream");
+        let unacked = vec![
+            fixture_unacked("retry-stream", 1),
+            fixture_unacked("retry-stream", 2),
+        ];
+        storage
+            .store_session_atomic(session, unacked)
+            .await
+            .expect("atomic store survives pre-existing unacked rows");
+
+        // Session row written.
+        assert!(storage
+            .get_session(&SmSessionId::new("retry-stream"))
+            .await
+            .unwrap()
+            .is_some());
+        // Exactly the new unacked rows are present (the stale row
+        // was DELETEd inside the transaction).
+        let listed = storage
+            .list_unacked(&SmSessionId::new("retry-stream"))
+            .await
+            .unwrap();
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].sequence, 1);
+        assert_eq!(listed[1].sequence, 2);
+    }
+
+    /// Issue #209 PR #405 (Greptile/Copilot/Qodo P1 review): a
+    /// single poison-pill `sm_unacked` row MUST NOT brick cold
+    /// startup. `list_all_sessions_with_unacked` should skip the
+    /// poisoned session and return the rest.
+    #[tokio::test]
+    async fn list_all_sessions_with_unacked_skips_poison_pill_unacked_rows() {
+        let storage = DatabaseSmPersistence::open(None).await.unwrap();
+        // Two healthy sessions.
+        storage
+            .upsert_session(fixture_session("alpha"))
+            .await
+            .unwrap();
+        storage
+            .append_unacked(fixture_unacked("alpha", 1))
+            .await
+            .unwrap();
+        storage
+            .upsert_session(fixture_session("gamma"))
+            .await
+            .unwrap();
+        storage
+            .append_unacked(fixture_unacked("gamma", 1))
+            .await
+            .unwrap();
+        // One poison-pill session: insert a sm_unacked row whose
+        // stanza_xml is malformed XML so decode fails. We bypass
+        // `append_unacked` (which serializes a typed Stanza) and
+        // write the raw poison directly via the underlying db.
+        storage
+            .upsert_session(fixture_session("beta"))
+            .await
+            .unwrap();
+        storage
+            .execute(
+                "INSERT INTO sm_unacked (stream_id, sequence, stanza_xml, original_receipt_at_ms) \
+                 VALUES (?, ?, ?, ?)",
+                crate::db_params![
+                    "beta".to_string(),
+                    1i64,
+                    "not valid xml <<<".to_string(),
+                    0i64
+                ],
+            )
+            .await
+            .expect("insert poison row");
+
+        let grouped = storage.list_all_sessions_with_unacked().await.unwrap();
+        // Healthy sessions present; poison-pill session's unacked
+        // row was skipped, so beta appears with an empty queue
+        // (since the only row failed to decode).
+        let stream_ids: Vec<_> = grouped
+            .iter()
+            .map(|(s, _)| s.stream_id.as_str().to_string())
+            .collect();
+        assert!(stream_ids.contains(&"alpha".to_string()));
+        assert!(stream_ids.contains(&"gamma".to_string()));
+        assert!(stream_ids.contains(&"beta".to_string()));
+        let beta_unacked = grouped
+            .iter()
+            .find(|(s, _)| s.stream_id.as_str() == "beta")
+            .map(|(_, u)| u);
+        assert_eq!(beta_unacked.map(Vec::len), Some(0));
     }
 }
