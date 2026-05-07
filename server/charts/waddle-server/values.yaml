@@ -143,10 +143,10 @@ telemetry:
 secret:
   create: true
   existingSecret: ""
-  # When true (default), a pre-install Helm hook generates and persists a
-  # separate Kubernetes Secret containing the auto-generated chart-managed
-  # keys (WADDLE_SESSION_KEY and, when manageOccupantIdSecret=true,
-  # WADDLE_OCCUPANT_ID_SECRET).
+  # When true (default), a pre-install / pre-upgrade Helm hook generates
+  # and persists a separate Kubernetes Secret containing the
+  # auto-generated chart-managed keys (WADDLE_SESSION_KEY and, when
+  # manageOccupantIdSecret=true, WADDLE_OCCUPANT_ID_SECRET).
   #
   # The bootstrap Secret is owned by `kubectl` (not Helm), so it is never
   # rendered by `helm template` and never produces drift in GitOps tools
@@ -159,8 +159,10 @@ secret:
   # through extraSecretRefs.
   autoGenerate: true
   bootstrap:
-    # Image used by the pre-install hook Job. Must contain `kubectl` and
-    # POSIX `tr` / `head` for random key generation.
+    # Image used by the pre-install / pre-upgrade hook Job. Must contain
+    # `kubectl`, `bash` (the script uses bash arrays), and `tr` / `head`
+    # / `base64` for random key generation and legacy-secret migration.
+    # `bitnami/kubectl` ships all of these.
     image: "bitnami/kubectl:1.31"
     imagePullPolicy: IfNotPresent
   # When set, used as WADDLE_SESSION_KEY in the operator Secret and
@@ -172,11 +174,12 @@ secret:
   manageOccupantIdSecret: true
   # Per-deployment HMAC key used to derive XEP-0421 occupant identifiers.
   # Required (≥32 bytes). When `secret.create` is true,
-  # `secret.autoGenerate` is true, and this value is empty the pre-install
-  # hook auto-generates a 64-character alphanumeric secret on first
-  # install. The bootstrap Secret is created out-of-band by `kubectl`
-  # inside the hook Job and persists for the life of the namespace; it is
-  # never re-created on subsequent upgrades.
+  # `secret.autoGenerate` is true, and this value is empty the
+  # pre-install / pre-upgrade hook auto-generates a 64-character
+  # alphanumeric secret on first install. The bootstrap Secret is
+  # created out-of-band by `kubectl` inside the hook Job and persists
+  # for the life of the namespace; the hook is idempotent and leaves
+  # existing values untouched on subsequent upgrades.
   # **Do not rotate** without an explicit migration plan — rotation breaks
   # XEP-0421 occupant-id continuity for every existing room/user pair.
   occupantIdSecret: ""

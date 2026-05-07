@@ -17,22 +17,29 @@ Image:   {{ .Values.image.repository }}:{{ default .Chart.AppVersion .Values.ima
 {{- if .Release.IsInstall }}
 {{- if and .Values.secret.create (not .Values.secret.existingSecret) $autoGenerate }}
 
-A pre-install Helm hook generated and persisted a Kubernetes Secret holding
-the chart-managed auto-generated keys (WADDLE_SESSION_KEY{{ if .Values.secret.manageOccupantIdSecret }}, WADDLE_OCCUPANT_ID_SECRET{{ end }}):
+A pre-install / pre-upgrade Helm hook generated and persisted a Kubernetes
+Secret holding the chart-managed auto-generated keys
+(WADDLE_SESSION_KEY{{ if .Values.secret.manageOccupantIdSecret }}, WADDLE_OCCUPANT_ID_SECRET{{ end }}):
 
   kubectl -n {{ .Release.Namespace }} get secret {{ include "waddle-server.bootstrapSecretName" . }}
 
 This Secret is owned by `kubectl` (not Helm) and is intentionally NOT part of
 the rendered chart manifest. `helm template` and GitOps tools that render
 charts without cluster access will not produce drift against it. The Secret
-persists for the life of the namespace and is never re-created on subsequent
-upgrades.
+persists for the life of the namespace; subsequent upgrades detect the
+existing Secret and leave it untouched (the hook is idempotent).
 
-To rotate (DESTRUCTIVE — breaks XEP-0421 occupant-id continuity and
-encrypted session state):
+To rotate (DESTRUCTIVE -- breaks XEP-0421 occupant-id continuity and
+encrypted session state). Both the bootstrap Secret AND the auto-managed
+keys in the legacy operator Secret must be removed; otherwise the hook
+helpfully migrates the legacy values back in:
 
   kubectl -n {{ .Release.Namespace }} delete secret {{ include "waddle-server.bootstrapSecretName" . }}
-  helm upgrade --install {{ .Release.Name }} <chart>   # hook re-runs
+  kubectl -n {{ .Release.Namespace }} patch secret {{ include "waddle-server.secretName" . }} \
+    --type=json \
+    -p='[{"op":"remove","path":"/data/WADDLE_SESSION_KEY"},{"op":"remove","path":"/data/WADDLE_OCCUPANT_ID_SECRET"}]' \
+    || true   # operator Secret may not exist if you supply no operator values
+  helm upgrade --install {{ .Release.Name }} <chart>   # pre-upgrade hook regenerates fresh values
 
 Back up the Secret externally (Velero, sealed-secrets export, password
 manager) so namespace deletion or etcd loss does not silently rotate it.
