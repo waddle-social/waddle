@@ -19,6 +19,14 @@ export interface WasmSharedFile {
   disposition: string;
 }
 
+export interface WasmReference {
+  ref_type: string;
+  uri: string;
+  begin: number;
+  end: number;
+  anchor?: string;
+}
+
 export interface WasmMessage {
   id?: string;
   from?: string;
@@ -48,6 +56,7 @@ export interface WasmMessage {
   markup_spans: WasmMarkupSpan[];
   broadcast_mention?: string;
   mention_uris: string[];
+  references: WasmReference[];
   forum_post_kind?: string;
   forum_title?: string;
   forum_thread_title?: string;
@@ -175,5 +184,5 @@ export interface WasmSendOptions {
     disposition: string;
   }>;
   markup_spans?: WasmMarkupSpan[];
-  references?: Array<{ ref_type: string; uri: string; begin: number; end: number }>;
+  references?: Array<{ ref_type: string; uri: string; begin: number; end: number; anchor?: string }>;
 }

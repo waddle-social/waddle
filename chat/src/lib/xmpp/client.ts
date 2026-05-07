@@ -74,6 +74,7 @@ import type {
   WasmMessage,
   WasmPepProfile,
   WasmPresence,
+  WasmReference,
   WasmRoomMember,
   WasmRosterContact,
   WasmSendOptions,
@@ -213,7 +214,17 @@ function sharedFileFromWasm(file: WasmSharedFile): SharedFileInfo {
   };
 }
 
-function roomMessageFromArchived(message: WasmArchivedMessage): LiveRoomMessage | null {
+function referenceFromWasm(reference: WasmReference): import("@/lib/rich-message").MessageReference {
+  return {
+    type: reference.ref_type,
+    uri: reference.uri,
+    begin: reference.begin,
+    end: reference.end,
+    ...(reference.anchor ? { anchor: reference.anchor } : {}),
+  };
+}
+
+export function roomMessageFromArchived(message: WasmArchivedMessage): LiveRoomMessage | null {
   const roomJid = barePeerJid(message.from ?? message.to ?? "");
   const nick = (message.from ?? "").split("/")[1] ?? "unknown";
   const createdAt = message.timestamp ?? new Date().toISOString();
@@ -244,6 +255,7 @@ function roomMessageFromArchived(message: WasmArchivedMessage): LiveRoomMessage 
   const sharedFiles = message.shared_files ?? [];
   const mentionUris = message.mention_uris ?? [];
   const markupSpans = message.markup_spans ?? [];
+  const references = message.references ?? [];
   if (!message.body && !message.subject && !sharedFiles.length && !message.thread && !message.forum_post_kind) {
     return null;
   }
@@ -268,6 +280,7 @@ function roomMessageFromArchived(message: WasmArchivedMessage): LiveRoomMessage 
     ...(mentionUris.length ? { mentions: mentionUris.map((uri) => uri.replace(/^xmpp:/, "")) } : {}),
     ...(message.broadcast_mention === "here" || message.broadcast_mention === "everyone" ? { broadcastMention: message.broadcast_mention } : {}),
     ...(markupSpans.length ? { markup: markupSpans.flatMap((s) => { const m = wasmSpanToMarkupSpan(s); return m ? [m] : []; }) } : {}),
+    ...(references.length ? { references: references.map(referenceFromWasm) } : {}),
     ...(sharedFiles.length ? { sharedFiles: sharedFiles.map(sharedFileFromWasm) } : {}),
     ...(message.is_sticker ? { isSticker: true } : {}),
     ...(message.stanza_id ?? message.origin_id ? { correctionTargetId: message.origin_id ?? message.id ?? "" } : {}),
@@ -276,7 +289,7 @@ function roomMessageFromArchived(message: WasmArchivedMessage): LiveRoomMessage 
   return stripReplyFallback(base, message.reply_fallback_start, message.reply_fallback_end);
 }
 
-function dmMessageFromArchived(message: WasmArchivedMessage, selfBareJid: string): LiveDmMessage | null {
+export function dmMessageFromArchived(message: WasmArchivedMessage, selfBareJid: string): LiveDmMessage | null {
   const fromBare = barePeerJid(message.from ?? "");
   const toBare = barePeerJid(message.to ?? "");
   const isSelf = fromBare === selfBareJid;
@@ -313,6 +326,7 @@ function dmMessageFromArchived(message: WasmArchivedMessage, selfBareJid: string
   const sharedFiles = message.shared_files ?? [];
   const mentionUris = message.mention_uris ?? [];
   const markupSpans = message.markup_spans ?? [];
+  const references = message.references ?? [];
   if (!message.body && !message.subject && !sharedFiles.length && !message.thread) return null;
   const base: LiveDmMessage = {
     id: message.id ?? message.stanza_id ?? message.mam_id,
@@ -331,6 +345,7 @@ function dmMessageFromArchived(message: WasmArchivedMessage, selfBareJid: string
     ...(message.forum_thread_title ? { forumThreadTitle: message.forum_thread_title } : {}),
     ...(mentionUris.length ? { mentions: mentionUris.map((uri) => uri.replace(/^xmpp:/, "")) } : {}),
     ...(markupSpans.length ? { markup: markupSpans.flatMap((s) => { const m = wasmSpanToMarkupSpan(s); return m ? [m] : []; }) } : {}),
+    ...(references.length ? { references: references.map(referenceFromWasm) } : {}),
     ...(sharedFiles.length ? { sharedFiles: sharedFiles.map(sharedFileFromWasm) } : {}),
     ...(message.is_sticker ? { isSticker: true } : {}),
     ...(message.origin_id || message.id ? { correctionTargetId: message.origin_id ?? message.id ?? "" } : {}),
@@ -399,6 +414,7 @@ function buildWasmSendOptions(opts: SendGroupMessageOptions | SendDirectMessageO
       uri: reference.uri ?? "",
       begin: reference.begin ?? 0,
       end: reference.end ?? 0,
+      ...(reference.anchor ? { anchor: reference.anchor } : {}),
     }));
   }
   return wasmOpts;
