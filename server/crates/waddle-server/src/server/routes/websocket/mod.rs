@@ -721,39 +721,92 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
                                             // live session, and on session
                                             // death + next-presence flush, the
                                             // row re-flushed and duplicate-
-                                            // delivered. Delete the durable row
-                                            // instead so the in-memory SM unacked
-                                            // queue (already populated above) is
-                                            // the sole owner: SM ack clears it
-                                            // on success, Q6 promotion creates
-                                            // a fresh `pending_delivery` row on
-                                            // session expiry. Either path is
-                                            // bounded and dedup-safe.
-                                            warn!(
-                                                row_id = %row_id,
-                                                sequence,
-                                                error = %error,
-                                                "pending_delivery record_pushed_at \
-                                                 failed; deleting row to avoid wedge \
-                                                 (issue #209 finding #10). The SM \
-                                                 unacked queue + Q6 promotion become \
-                                                 the sole owner of this stanza."
-                                            );
-                                            if let Err(delete_error) = state
-                                                .deps
-                                                .protocol
-                                                .pending_delivery_storage
-                                                .delete_row(&row_id)
-                                                .await
-                                            {
+                                            // delivered.
+                                            //
+                                            // Two recovery paths exist; pick by
+                                            // SM resumability (Qodo finding on
+                                            // PR #409 — earlier code unconditionally
+                                            // deleted the durable row, which on a
+                                            // non-resumable SM stream meant no
+                                            // detach/persistence/Q6 path would
+                                            // ever recover the stanza after a
+                                            // disconnect-pre-ack):
+                                            //
+                                            // - Resumable SM: the in-memory
+                                            //   unacked queue (already populated
+                                            //   above) becomes the sole durable
+                                            //   owner via `store_session_atomic`
+                                            //   on detach. Deleting the
+                                            //   `pending_delivery` row is safe
+                                            //   and avoids the wedge — SM ack
+                                            //   clears the in-memory entry on
+                                            //   success, Q6 promotion creates a
+                                            //   fresh row on session expiry.
+                                            // - Non-resumable (or SM-disabled):
+                                            //   `cleanup_connection_shutdown`
+                                            //   does not detach/persist this
+                                            //   session, so the
+                                            //   `pending_delivery` row is the
+                                            //   only durable owner. Release the
+                                            //   claim instead so the next
+                                            //   presence-driven flush can
+                                            //   retry — accept a possible
+                                            //   re-flush (XEP-0359 client
+                                            //   dedup mitigates) over a
+                                            //   permanent loss of the stanza.
+                                            if conn.sm_state.is_resumable() {
                                                 warn!(
                                                     row_id = %row_id,
-                                                    error = %delete_error,
-                                                    "pending_delivery delete_row \
-                                                     (record_pushed_at fallback) failed; \
-                                                     row may flush again on next presence \
-                                                     (XEP-0359 client dedup mitigates)"
+                                                    sequence,
+                                                    error = %error,
+                                                    "pending_delivery record_pushed_at \
+                                                     failed; deleting row (resumable SM \
+                                                     stream — in-memory unacked queue + \
+                                                     Q6 promotion become the sole owner \
+                                                     of this stanza)"
                                                 );
+                                                if let Err(delete_error) = state
+                                                    .deps
+                                                    .protocol
+                                                    .pending_delivery_storage
+                                                    .delete_row(&row_id)
+                                                    .await
+                                                {
+                                                    warn!(
+                                                        row_id = %row_id,
+                                                        error = %delete_error,
+                                                        "pending_delivery delete_row \
+                                                         (record_pushed_at fallback) failed; \
+                                                         row may flush again on next presence \
+                                                         (XEP-0359 client dedup mitigates)"
+                                                    );
+                                                }
+                                            } else {
+                                                warn!(
+                                                    row_id = %row_id,
+                                                    sequence,
+                                                    error = %error,
+                                                    "pending_delivery record_pushed_at \
+                                                     failed; releasing row (non-resumable \
+                                                     SM stream — durable row is the only \
+                                                     recovery path, must NOT be deleted)"
+                                                );
+                                                if let Err(release_error) = state
+                                                    .deps
+                                                    .protocol
+                                                    .pending_delivery_storage
+                                                    .release_row(&row_id)
+                                                    .await
+                                                {
+                                                    warn!(
+                                                        row_id = %row_id,
+                                                        error = %release_error,
+                                                        "pending_delivery release_row \
+                                                         (record_pushed_at fallback) failed; \
+                                                         row stays claimed and will be released \
+                                                         on session death by the claim janitor"
+                                                    );
+                                                }
                                             }
                                         }
                                     }
