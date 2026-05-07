@@ -161,7 +161,7 @@ function avatarDataUrl(data: Uint8Array, mediaType?: string | null): string | nu
 
 function wasmSpanToMarkupSpan(span: WasmMessage["markup_spans"][number]): import("@/lib/rich-message").MarkupSpan | null {
   type MarkupSpan = import("@/lib/rich-message").MarkupSpan;
-  type RichInlineStyle = import("@/lib/rich-message").RichInlineStyle;
+  type RichInlineStyle = import("@/lib/rich-message/types").RichInlineStyle;
   const styleMap: Record<string, RichInlineStyle> = {
     bold: "strong",
     italic: "emphasis",
@@ -452,7 +452,7 @@ function buildWasmSendOptions(opts: SendGroupMessageOptions | SendDirectMessageO
     }));
   }
   if (opts.markup?.length) {
-    type RichInlineStyle = import("@/lib/rich-message").RichInlineStyle;
+    type RichInlineStyle = import("@/lib/rich-message/types").RichInlineStyle;
     const styleToWasm: Record<RichInlineStyle, string> = { strong: "bold", emphasis: "italic", deleted: "strikethrough", code: "code" };
     wasmOpts.markup_spans = opts.markup.flatMap((span) => {
       if (span.type === "span") return span.styles.map((style) => ({ span_type: styleToWasm[style] ?? style, start: span.start, end: span.end }));
