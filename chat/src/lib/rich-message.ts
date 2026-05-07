@@ -94,29 +94,42 @@ const BARE_URL_PATTERN = /\bhttps?:\/\/[^\s<>"'`]+/gi;
 function autolinkifyBareUrls(state: SerializeState): void {
   if (!state.body) return;
 
+  state.references.push(
+    ...inferBareUrlReferences(state.body, state.references, codeRangesFromMarkup(state.markup)),
+  );
+}
+
+function codeRangesFromMarkup(markup: readonly MarkupSpan[]): Array<[number, number]> {
+  return markup
+    .filter((span) =>
+      span.type === "bcode"
+      || (span.type === "span" && span.styles.includes("code"))
+    )
+    .map((span) => [span.start, span.end]);
+}
+
+function inferBareUrlReferences(
+  body: string,
+  references: readonly MessageReference[],
+  codeRanges: Array<[number, number]>,
+): MessageReference[] {
   // Existing reference ranges in the typed projection. URLs already wrapped by
-  // a TipTap `link` mark must not be auto-linkified a second time — the mark
-  // path wins because it preserves the user's chosen href text.
-  const existingRanges: Array<[number, number]> = state.references
+  // a TipTap `link` mark or an inbound XEP-0372 reference must not be
+  // auto-linkified a second time — the explicit reference path wins.
+  const existingRanges: Array<[number, number]> = references
     .filter((reference) =>
       typeof reference.begin === "number"
       && typeof reference.end === "number"
       && reference.end > reference.begin
     )
     .map((reference) => [reference.begin as number, reference.end as number]);
-
-  // Code ranges to skip. XEP-0394 `<bcode>` covers fenced code blocks; an
-  // inline `<span styles=["code", ...]>` covers backtick code in TipTap.
-  const codeRanges: Array<[number, number]> = state.markup
-    .filter((span) =>
-      span.type === "bcode"
-      || (span.type === "span" && span.styles.includes("code"))
-    )
-    .map((span) => [span.start, span.end]);
+  const inferred: MessageReference[] = [];
 
   let match: RegExpExecArray | null;
   BARE_URL_PATTERN.lastIndex = 0;
-  while ((match = BARE_URL_PATTERN.exec(state.body)) !== null) {
+  while ((match = BARE_URL_PATTERN.exec(body)) !== null) {
+    if (body.slice(Math.max(0, match.index - 2), match.index) === "](") continue;
+
     const raw = stripUrlTrailingPunctuation(match[0]);
     if (!raw) continue;
 
@@ -126,15 +139,17 @@ function autolinkifyBareUrls(state: SerializeState): void {
     // codePointLength on the prefix gives a Unicode-scalar offset, matching
     // XEP-0372 begin/end semantics. `match.index` is a UTF-16 code-unit
     // offset and would mis-align after surrogate pairs (emoji, CJK).
-    const begin = codePointLength(state.body.slice(0, match.index));
+    const begin = codePointLength(body.slice(0, match.index));
     const end = begin + codePointLength(raw);
 
     if (rangesOverlap(begin, end, existingRanges)) continue;
     if (rangesOverlap(begin, end, codeRanges)) continue;
 
-    state.references.push({ type: "data", uri: href, begin, end });
+    inferred.push({ type: "data", uri: href, begin, end });
     existingRanges.push([begin, end]);
   }
+
+  return inferred;
 }
 
 function rangesOverlap(begin: number, end: number, ranges: Array<[number, number]>): boolean {
@@ -568,6 +583,7 @@ function createParseContext(
   const validReferences = references
     .filter((reference) => isValidInboundReference(reference, length))
     .sort((a, b) => (a.begin ?? 0) - (b.begin ?? 0) || (a.end ?? 0) - (b.end ?? 0));
+  const inferredReferences = inferBareUrlReferences(body, validReferences, codeRangesFromMarkup(validMarkup));
 
   return {
     body,
@@ -575,7 +591,8 @@ function createParseContext(
     markup: validMarkup,
     spans: validMarkup.filter((span): span is Extract<MarkupSpan, { type: "span" }> => span.type === "span"),
     blocks: validMarkup.filter((span): span is Exclude<MarkupSpan, { type: "span" }> => BLOCK_TYPES.has(span.type)),
-    references: validReferences,
+    references: [...validReferences, ...inferredReferences]
+      .sort((a, b) => (a.begin ?? 0) - (b.begin ?? 0) || (a.end ?? 0) - (b.end ?? 0)),
   };
 }
 
