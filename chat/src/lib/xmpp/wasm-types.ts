@@ -122,7 +122,7 @@ export interface WasmInboxConversation {
   author?: string;
 }
 
-interface WasmInboxResult {
+export interface WasmInboxResult {
   total_unread: number;
   conversations: WasmInboxConversation[];
 }

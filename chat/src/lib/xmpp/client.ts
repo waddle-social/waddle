@@ -74,6 +74,7 @@ import {
 import type {
   WasmArchivedMessage,
   WasmAvatar,
+  WasmInboxResult,
   WasmMamPage,
   WasmMessage,
   WasmPepProfile,
@@ -712,7 +713,7 @@ export class BrowserXmppClient {
 
   async fetchInbox(opts: FetchInboxOptions = {}): Promise<InboxResult> {
     const xmpp = await this.requireConnectedXmpp();
-    const result = await xmpp.fetch_inbox?.({ ...(typeof opts.since === "number" ? { since: opts.since } : {}), ...(opts.onlyUnread ? { only_unread: true } : {}), ...(opts.room ? { room: opts.room } : {}), ...(opts.threads ? { threads: true } : {}) }) as { total_unread: number; conversations: WasmInboxConversation[] };
+    const result = await xmpp.fetch_inbox?.({ ...(typeof opts.since === "number" ? { since: opts.since } : {}), ...(opts.onlyUnread ? { only_unread: true } : {}), ...(opts.room ? { room: opts.room } : {}), ...(opts.threads ? { threads: true } : {}) }) as WasmInboxResult | undefined;
     return { totalUnread: result?.total_unread ?? 0, conversations: (result?.conversations ?? []).map(inboxEntryFromWasm) };
   }
 
