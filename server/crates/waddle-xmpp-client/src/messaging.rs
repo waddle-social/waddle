@@ -1223,11 +1223,21 @@ pub fn build_outbound_message(
         builder = builder.append(markups);
     }
     for reference in &options.references {
+        // XEP-0372 §2.1: `begin` and `end` are OPTIONAL. They MUST be present
+        // when the reference points at a substring of the body, and MUST be
+        // absent when no body position applies (e.g. anchor-only references
+        // to a previous message). Treat (0, 0) as the "no position" sentinel
+        // so anchor-only / future use cases can travel cleanly on the wire
+        // without emitting `begin="0" end="0"` (which a conformant receiver
+        // would interpret as a 0-length annotation at body offset 0).
         let mut ref_builder = Element::builder("reference", NS_REFERENCES)
             .attr("type", reference.ref_type.as_str())
-            .attr("begin", reference.begin.to_string())
-            .attr("end", reference.end.to_string())
             .attr("uri", reference.uri.as_str());
+        if reference.begin != 0 || reference.end != 0 {
+            ref_builder = ref_builder
+                .attr("begin", reference.begin.to_string())
+                .attr("end", reference.end.to_string());
+        }
         if let Some(anchor) = reference.anchor.as_deref() {
             ref_builder = ref_builder.attr("anchor", anchor);
         }
@@ -1605,6 +1615,39 @@ mod tests {
             panic!("expected Message");
         };
         assert!(msg.references.is_empty());
+    }
+
+    #[test]
+    fn build_outbound_message_omits_begin_end_when_no_position() {
+        // XEP-0372 says begin/end are optional. Anchor-only references that
+        // do not point at a body substring must NOT carry begin="0" end="0"
+        // — that would be interpreted as a real 0-length annotation at
+        // offset 0 by a conformant receiver.
+        let options = SendMessageOptions {
+            references: vec![ReferenceData {
+                ref_type: "data".to_string(),
+                uri: "xmpp:room@conf.example?message;id=earlier-msg".to_string(),
+                begin: 0,
+                end: 0,
+                anchor: Some("xmpp:alice@example.com".to_string()),
+            }],
+            ..Default::default()
+        };
+
+        let (_, stanza) =
+            build_outbound_message("room@muc.example", "groupchat", "see above", &options).unwrap();
+
+        let reference = stanza
+            .get_child("reference", NS_REFERENCES)
+            .expect("reference child");
+        assert_eq!(reference.attr("type"), Some("data"));
+        assert_eq!(
+            reference.attr("uri"),
+            Some("xmpp:room@conf.example?message;id=earlier-msg")
+        );
+        assert_eq!(reference.attr("anchor"), Some("xmpp:alice@example.com"));
+        assert_eq!(reference.attr("begin"), None);
+        assert_eq!(reference.attr("end"), None);
     }
 
     #[test]
