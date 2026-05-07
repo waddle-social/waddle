@@ -88,23 +88,48 @@ fn xep0203_delay_stamp_is_original_receipt_time_in_xep0082_z_form() {
 /// build at the bottom of that chain stamps the SAME receipt time
 /// regardless of how long the row sat in pending_delivery before
 /// being flushed.
+///
+/// Pin this by varying the `original_receipt_at` argument across
+/// two builds (a row is just one possible source of the value) and
+/// verifying the wire stamp matches whatever the caller passed.
+/// `build_replay_stanza` does NOT consult any wall-clock of its
+/// own (Copilot review on PR #362).
 #[test]
-fn xep0203_delay_stamp_unaffected_by_flush_time() {
-    // Row with original receipt time T0 a year in the past.
-    let t0 =
+fn xep0203_delay_stamp_uses_caller_supplied_receipt_time_verbatim() {
+    let row = transient_row(
+        "alice@example.com",
+        "hi",
+        // Row's stored `original_receipt_at` — irrelevant to this
+        // test, since we pass a different value into the builder
+        // below to prove the builder uses its argument verbatim.
+        Utc::now(),
+    );
+
+    // Build #1: caller supplies a year-old timestamp.
+    let t_old =
         chrono::DateTime::<Utc>::from_timestamp_millis(1_700_000_000_000).expect("valid timestamp");
-    let row = transient_row("alice@example.com", "hi", t0);
-    // Simulate "flush time" by passing now() on a different
-    // wall-clock — `build_replay_stanza` uses ONLY the
-    // `original_receipt_at` argument it receives.
     let payload = MaterializedPayload::from_transient(&row).expect("transient");
-    let replayed = build_replay_stanza(payload, "example.com", row.original_receipt_at);
+    let replayed = build_replay_stanza(payload, "example.com", t_old);
     let delay = replayed
         .payloads
         .iter()
         .find(|p| p.name() == "delay" && p.ns() == NS_DELAY)
         .expect("delay element appended");
     assert_eq!(delay.attr("stamp"), Some("2023-11-14T22:13:20Z"));
+
+    // Build #2: caller supplies a different timestamp (would-be
+    // "flush time"). The wire stamp follows the caller's value, NOT
+    // the original row's `original_receipt_at` and NOT any wall-
+    // clock the builder might consult.
+    let t_recent = Utc.with_ymd_and_hms(2026, 1, 15, 8, 0, 0).unwrap();
+    let payload2 = MaterializedPayload::from_transient(&row).expect("transient");
+    let replayed2 = build_replay_stanza(payload2, "example.com", t_recent);
+    let delay2 = replayed2
+        .payloads
+        .iter()
+        .find(|p| p.name() == "delay" && p.ns() == NS_DELAY)
+        .expect("delay element appended");
+    assert_eq!(delay2.attr("stamp"), Some("2026-01-15T08:00:00Z"));
 }
 
 /// Sanity check: only a single `<delay/>` is added by the flush

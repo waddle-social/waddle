@@ -2075,15 +2075,24 @@ mod tests {
         // restart-equivalent).
         //
         // Real restart simulation: open a SQLite-backed storage
-        // against a tempfile path, insert a row, drop the storage
+        // against a tempdir path, insert a row, drop the storage
         // handle (closes the connection), reopen against the SAME
         // path, assert the row is still present.
-        let tmp = tempfile::Builder::new()
-            .prefix("waddle-pending-delivery-restart-")
-            .suffix(".sqlite")
-            .tempfile()
-            .expect("tempfile");
-        let path = tmp.path().to_str().expect("utf-8 path").to_string();
+        //
+        // Use `tempdir()` + `path.join()` rather than
+        // `NamedTempFile`: NamedTempFile keeps an open OS file
+        // handle alive for its lifetime, which can interfere with
+        // SQLite's file-locking semantics on some platforms
+        // (Copilot review on PR #362). The tempdir version creates
+        // only a directory; the SQLite file inside it has no other
+        // open handles.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir
+            .path()
+            .join("pending_delivery.sqlite")
+            .to_str()
+            .expect("utf-8 path")
+            .to_string();
         let url = format!("sqlite://{path}");
 
         // Boot 1: write a row + drop the handle to close the connection.

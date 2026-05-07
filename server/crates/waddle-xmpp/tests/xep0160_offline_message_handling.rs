@@ -334,53 +334,39 @@ fn xep0160_flushed_message_preserves_sender_extensions() {
 
 /// Locked Q7a + Q7d: the offline-flush trigger fires AT MOST ONCE
 /// per fresh session, gated by a connection-entry CAS
-/// (`ConnectionEntry::claim_offline_flush`). Repeat presence updates
-/// (priority transitions, status text changes) MUST NOT re-flush.
+/// (`ConnectionEntry::claim_offline_flush`). Repeat presence
+/// updates (priority transitions including `-1 → +1`, status text
+/// changes, …) MUST observe `false` and skip the flush.
 ///
 /// This pins the CAS contract used by the presence handler in
-/// `server/crates/waddle-server/src/server/routes/websocket/handlers/presence.rs::maybe_flush_pending_delivery`
-/// — the integration wiring (presence → flush) lives in the server
-/// crate; this trait-level test verifies the building block.
+/// `server/crates/waddle-server/src/server/routes/websocket/handlers/presence.rs::maybe_flush_pending_delivery`,
+/// which gates the actual flush on `priority >= 0` AND on this
+/// CAS returning `true`. The full presence-transition simulation
+/// (priority change events going through the live registry +
+/// presence handler) lives in waddle-server; this trait-level
+/// test verifies the building block — the second
+/// `claim_offline_flush()` call ALWAYS returns false, regardless
+/// of how many transitions happened between calls. Any future
+/// code that re-arms the CAS would need to update this test.
+/// (Copilot review on PR #362: previously two redundant tests
+/// covered this same property.)
 #[test]
-fn xep0160_flushes_on_first_non_negative_presence_of_fresh_session() {
-    use waddle_xmpp::registry::ConnectionEntry;
-    let (tx, _rx) = tokio::sync::mpsc::channel(8);
-    let entry = ConnectionEntry::new(tx);
-    // First presence wins.
-    assert!(entry.claim_offline_flush());
-    // Subsequent presence updates (priority transitions, status text
-    // changes, …) MUST observe `false` and skip the flush.
-    assert!(!entry.claim_offline_flush());
-    assert!(!entry.claim_offline_flush());
-}
-
-// Locked Q7d (`-1 → +1` priority transition triggers flush exactly
-// once): the presence handler in
-// `server/crates/waddle-server/src/server/routes/websocket/handlers/presence.rs::maybe_flush_pending_delivery`
-// gates `claim_offline_flush` on `priority >= 0` AND on the CAS
-// returning `true`. The full transition simulation (negative
-// presence → non-negative presence → flush fires; subsequent
-// non-negative presences → no re-flush) requires the live presence
-// handler + ConnectionRegistry, which lives in waddle-server.
-//
-// The trait-level CAS contract here pins what the presence handler
-// relies on: the second `claim_offline_flush()` call ALWAYS returns
-// false, regardless of how many priority transitions happened
-// between calls. Any future code that re-arms the CAS would need
-// to update this test (Greptile/Copilot review on PR #362: prior
-// version's name implied a transition that wasn't actually
-// modelled).
-#[test]
-fn xep0160_claim_offline_flush_cas_is_idempotent_after_first_claim() {
+fn xep0160_claim_offline_flush_cas_fires_once_per_connection() {
     use waddle_xmpp::registry::ConnectionEntry;
     let (tx, _rx) = tokio::sync::mpsc::channel(8);
     let entry = ConnectionEntry::new(tx);
     // First non-negative-priority presence wins; the presence
     // handler triggers a flush only when this CAS returns true.
-    assert!(entry.claim_offline_flush(), "first non-negative wins");
+    assert!(entry.claim_offline_flush(), "first call wins");
+    // Subsequent presence updates (priority transitions, status
+    // text changes, …) MUST observe `false` and skip the flush.
     assert!(
         !entry.claim_offline_flush(),
-        "second presence (now still non-negative) must NOT re-flush"
+        "second call (any cause: priority transition, status update) must NOT re-flush"
+    );
+    assert!(
+        !entry.claim_offline_flush(),
+        "third+ calls remain idempotent"
     );
 }
 
