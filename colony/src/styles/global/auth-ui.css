@@ -1,0 +1,238 @@
+.brand-stage {
+  position: relative;
+  z-index: 2;
+  width: 100%;
+  max-width: 35rem;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: clamp(0.9rem, 2.3vw, 1.4rem);
+  margin-inline: auto;
+  text-align: center;
+  isolation: isolate;
+  animation: slide-up 360ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.logo-link {
+  display: block;
+  width: clamp(9.5rem, 30vw, 15.5rem);
+  margin-inline: auto;
+  color: inherit;
+  outline: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.logo-link:focus-visible {
+  border-radius: 8px;
+  outline: 2px solid color-mix(in oklab, var(--halo) 70%, transparent);
+  outline-offset: 6px;
+}
+
+.logo {
+  width: 100%;
+  height: auto;
+  display: block;
+  filter: var(--logo-filter);
+  transition: scale 500ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.logo-link:hover .logo {
+  scale: 1.03;
+}
+
+.logo-link:active .logo {
+  scale: 0.97;
+}
+
+.auth-panel {
+  width: min(100%, 30rem);
+  min-width: 0;
+  display: grid;
+  justify-items: center;
+  gap: 1rem;
+  margin-inline: auto;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+.auth-panel--wide {
+  width: min(100%, 34rem);
+}
+
+.auth-header {
+  width: 100%;
+  min-width: 0;
+  display: grid;
+  justify-items: center;
+  gap: 0.45rem;
+  text-align: center;
+}
+
+h2 {
+  color: var(--fg);
+  font-family: var(--font-display);
+  font-size: clamp(1.3rem, 4vw, 1.72rem);
+  font-weight: 600;
+  line-height: 1.06;
+  letter-spacing: 0;
+}
+
+.lede {
+  width: 100%;
+  max-width: 31rem;
+  color: color-mix(in oklab, var(--fg) 68%, transparent);
+  font-size: 0.88rem;
+  line-height: 1.42;
+  text-align: center;
+}
+
+.stack {
+  width: 100%;
+  min-width: 0;
+  display: grid;
+  justify-items: center;
+  gap: 0.95rem;
+}
+
+.detail-list {
+  width: 100%;
+  min-width: 0;
+  display: grid;
+  gap: 0;
+  overflow: hidden;
+  border: 1px solid var(--edge);
+  border-radius: 8px;
+}
+
+.detail-row {
+  display: grid;
+  grid-template-columns: minmax(5.5rem, 0.46fr) minmax(0, 1fr);
+  gap: 1rem;
+  padding: 0.82rem 0.9rem;
+  background: color-mix(in oklab, var(--card) 78%, var(--bg-c));
+  border-top: 1px solid var(--edge);
+  font-size: 0.88rem;
+  text-align: left;
+}
+
+.detail-row:first-child {
+  border-top: 0;
+}
+
+.detail-row dt {
+  color: color-mix(in oklab, var(--fg) 56%, transparent);
+  font-weight: 600;
+}
+
+.detail-row dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-weight: 600;
+}
+
+.session-id,
+.client-id {
+  font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  font-size: 0.78rem;
+  letter-spacing: 0;
+}
+
+.scope-list {
+  width: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+
+.scope-list li {
+  max-width: 100%;
+  padding: 0.42rem 0.6rem;
+  border: 1px solid color-mix(in oklab, var(--halo) 32%, var(--edge));
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--halo) 8%, var(--card));
+  color: color-mix(in oklab, var(--fg) 88%, var(--halo));
+  font-size: 0.78rem;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.button-row {
+  width: 100%;
+  display: grid;
+  gap: 0.65rem;
+}
+
+.button-row--split {
+  grid-template-columns: 1fr 1fr;
+}
+
+.button {
+  min-width: 0;
+  min-height: 2.75rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.72rem 1rem;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  font-size: 0.86rem;
+  font-weight: 700;
+  line-height: 1;
+  text-decoration: none;
+  cursor: pointer;
+  transition:
+    transform 160ms cubic-bezier(0.16, 1, 0.3, 1),
+    border-color 160ms ease,
+    background 160ms ease,
+    box-shadow 160ms ease,
+    color 160ms ease;
+}
+
+.button:hover {
+  transform: translateY(-1px);
+}
+
+.button:active {
+  transform: translateY(0);
+}
+
+.button:focus-visible {
+  outline: 2px solid color-mix(in oklab, var(--halo) 70%, transparent);
+  outline-offset: 3px;
+}
+
+.button--primary {
+  background: var(--halo);
+  color: var(--bg-c);
+  box-shadow:
+    0 16px 48px color-mix(in oklab, var(--bg-c) 48%, transparent),
+    0 0 24px color-mix(in oklab, var(--halo) 22%, transparent);
+}
+
+.button--primary:hover {
+  box-shadow:
+    0 18px 52px color-mix(in oklab, var(--bg-c) 52%, transparent),
+    0 0 30px color-mix(in oklab, var(--halo) 34%, transparent);
+}
+
+.button--secondary {
+  border-color: var(--edge);
+  background: color-mix(in oklab, var(--card) 80%, transparent);
+  color: var(--fg);
+}
+
+.button--secondary:hover {
+  border-color: color-mix(in oklab, var(--danger) 36%, var(--edge));
+  color: var(--danger);
+}
