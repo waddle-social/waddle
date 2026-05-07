@@ -83,3 +83,28 @@ export function shiftMarkupSpans<T extends { start: number; end: number }>(spans
     return shifted.end > shifted.start ? [shifted] : [];
   });
 }
+
+// XEP-0372 references use `begin`/`end` (not `start`/`end`). When an outbound
+// message gets a reply-fallback prefix prepended, every reference offset must
+// shift right by `prefix.length`, otherwise begin/end points at the wrong
+// span on the wire.
+export function shiftReferenceOffsets<T extends { begin?: number; end?: number }>(
+  references: readonly T[],
+  offset: number,
+): T[] {
+  if (!Number.isFinite(offset)) return [];
+  return references.flatMap((reference) => {
+    if (
+      typeof reference.begin !== "number"
+      || typeof reference.end !== "number"
+      || !Number.isFinite(reference.begin)
+      || !Number.isFinite(reference.end)
+      || reference.begin < 0
+      || reference.end <= reference.begin
+    ) {
+      return [];
+    }
+    const shifted = { ...reference, begin: reference.begin + offset, end: reference.end + offset };
+    return shifted.end > shifted.begin ? [shifted] : [];
+  });
+}

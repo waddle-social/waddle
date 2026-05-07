@@ -61,6 +61,7 @@ import type { ActivityPublication, MoodPublication, TunePublication, UserPepProf
 import {
   buildReplyFallbackPrefix,
   shiftMarkupSpans,
+  shiftReferenceOffsets,
   type OutboundFileAttachment,
   type ReplyTarget,
   type SendDirectMessageOptions,
@@ -190,7 +191,25 @@ function stripMarkupRange<T extends { start: number; end: number }>(spans: reado
   });
 }
 
-function stripReplyFallback<T extends { body: string; markup?: Array<{ start: number; end: number }> }>(
+function stripReferenceRange<T extends { begin?: number; end?: number }>(references: readonly T[], start: number, end: number): T[] {
+  return references.flatMap((reference) => {
+    if (typeof reference.begin !== "number" || typeof reference.end !== "number") return [];
+    const rebased = {
+      ...reference,
+      begin: rebaseOffsetAfterRemoval(reference.begin, start, end),
+      end: rebaseOffsetAfterRemoval(reference.end, start, end),
+    };
+    return rebased.end > rebased.begin ? [rebased] : [];
+  });
+}
+
+function stripReplyFallback<
+  T extends {
+    body: string;
+    markup?: Array<{ start: number; end: number }>;
+    references?: Array<{ begin?: number; end?: number }>;
+  },
+>(
   message: T,
   start?: number,
   end?: number,
@@ -199,7 +218,13 @@ function stripReplyFallback<T extends { body: string; markup?: Array<{ start: nu
   const points = Array.from(message.body);
   const strippedBody = `${points.slice(0, start).join("")}${points.slice(end).join("")}`;
   const markup = message.markup?.length ? stripMarkupRange(message.markup, start, end) : undefined;
-  return { ...message, body: strippedBody, ...(markup?.length ? { markup } : {}) };
+  const references = message.references?.length ? stripReferenceRange(message.references, start, end) : undefined;
+  return {
+    ...message,
+    body: strippedBody,
+    ...(markup?.length ? { markup } : {}),
+    ...(references?.length ? { references } : {}),
+  };
 }
 
 function sharedFileFromWasm(file: WasmSharedFile): SharedFileInfo {
@@ -420,12 +445,18 @@ function buildWasmSendOptions(opts: SendGroupMessageOptions | SendDirectMessageO
   return wasmOpts;
 }
 
-function encodeBodyForSend(body: string, replyTo?: ReplyTarget, markup?: SendGroupMessageOptions["markup"]) {
+function encodeBodyForSend(
+  body: string,
+  replyTo?: ReplyTarget,
+  markup?: SendGroupMessageOptions["markup"],
+  references?: SendGroupMessageOptions["references"],
+) {
   const { prefix, length } = replyTo ? buildReplyFallbackPrefix(replyTo.body) : { prefix: "", length: 0 };
   return {
     effectiveBody: `${prefix}${body}`,
     replyFallbackLength: length,
     rebasedMarkup: markup?.length ? shiftMarkupSpans(markup, length) : undefined,
+    rebasedReferences: references?.length ? shiftReferenceOffsets(references, length) : undefined,
   };
 }
 
@@ -827,15 +858,15 @@ export class BrowserXmppClient {
   }
 
   private async compatSendGroupMessage(xmpp: XmppClientInstance, roomJid: string, body: string, opts: SendGroupMessageOptions): Promise<string | null> {
-    const { effectiveBody, replyFallbackLength, rebasedMarkup } = encodeBodyForSend(body, opts.replyTo, opts.markup);
-    const wasmOpts = buildWasmSendOptions({ ...opts, markup: rebasedMarkup }, replyFallbackLength);
+    const { effectiveBody, replyFallbackLength, rebasedMarkup, rebasedReferences } = encodeBodyForSend(body, opts.replyTo, opts.markup, opts.references);
+    const wasmOpts = buildWasmSendOptions({ ...opts, markup: rebasedMarkup, references: rebasedReferences }, replyFallbackLength);
     if (xmpp.send_groupchat_message) return await xmpp.send_groupchat_message(roomJid, effectiveBody, wasmOpts) as string;
     throw new Error("XMPP session is not ready");
   }
 
   private async compatSendDirectMessage(xmpp: XmppClientInstance, peerJid: string, body: string, opts: SendDirectMessageOptions): Promise<string | null> {
-    const { effectiveBody, replyFallbackLength, rebasedMarkup } = encodeBodyForSend(body, opts.replyTo, opts.markup);
-    const wasmOpts = buildWasmSendOptions({ ...opts, markup: rebasedMarkup }, replyFallbackLength);
+    const { effectiveBody, replyFallbackLength, rebasedMarkup, rebasedReferences } = encodeBodyForSend(body, opts.replyTo, opts.markup, opts.references);
+    const wasmOpts = buildWasmSendOptions({ ...opts, markup: rebasedMarkup, references: rebasedReferences }, replyFallbackLength);
     if (xmpp.send_chat_message) return await xmpp.send_chat_message(peerJid, effectiveBody, wasmOpts) as string;
     throw new Error("XMPP session is not ready");
   }
@@ -866,8 +897,8 @@ export class BrowserXmppClient {
   }
 
   private async compatSendCorrection(xmpp: XmppClientInstance, to: string, type: "chat" | "groupchat", body: string, replacesId: string, opts?: SendGroupMessageOptions | SendDirectMessageOptions): Promise<string | null> {
-    const { effectiveBody, replyFallbackLength, rebasedMarkup } = encodeBodyForSend(body, opts?.replyTo, opts?.markup);
-    const wasmOpts = buildWasmSendOptions({ ...(opts ?? {}), markup: rebasedMarkup }, replyFallbackLength);
+    const { effectiveBody, replyFallbackLength, rebasedMarkup, rebasedReferences } = encodeBodyForSend(body, opts?.replyTo, opts?.markup, opts?.references);
+    const wasmOpts = buildWasmSendOptions({ ...(opts ?? {}), markup: rebasedMarkup, references: rebasedReferences }, replyFallbackLength);
     if (xmpp.send_correction) return await xmpp.send_correction(to, type, effectiveBody, replacesId, wasmOpts) as string;
     throw new Error("XMPP session is not ready");
   }
