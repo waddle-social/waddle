@@ -4,6 +4,8 @@ import type { WaddleSession } from "../src/lib/server-auth";
 import { roomBareJidFor, type LiveDmMessage, type LiveRoomMessage } from "../src/lib/xmpp-client";
 import { useDirectMessages } from "../src/dms/messages";
 import { useChannelMessages } from "../src/channels/messages";
+import { roomMessageFromArchived } from "../src/lib/xmpp/client";
+import type { WasmArchivedMessage } from "../src/lib/xmpp/wasm-types";
 import { handlerStubs } from "./helpers/xmpp-client-mock";
 
 function session(partial: Partial<WaddleSession> = {}): WaddleSession {
@@ -256,6 +258,127 @@ describe("XEP-0198 session lifecycle catch-up (group chat)", () => {
     expect(clientAny.value.queryMam).not.toHaveBeenCalled();
   });
 
+  test("MAM-replayed reactions attach to the original message after a fresh load", async () => {
+    // Mirrors what `roomMessageFromArchived` produces for a MAM page that
+    // contains the original message followed by a reaction stanza pointing
+    // back at that message via XEP-0359 stanza-id.
+    const client = makeRoomClient([
+      {
+        id: "msg-original",
+        wireIds: ["msg-original", "room-stanza-1"],
+        roomJid: "c1@muc.example.com",
+        nick: "alice",
+        body: "react to me",
+        createdAt: "2024-01-01T00:00:00Z",
+        type: "message",
+        reactionTargetId: "room-stanza-1",
+        replyableId: "room-stanza-1",
+      },
+      {
+        id: "reaction-1",
+        roomJid: "c1@muc.example.com",
+        nick: "bob",
+        body: "",
+        createdAt: "2024-01-01T00:01:00Z",
+        type: "subject",
+        _reactionTarget: "room-stanza-1",
+        _reactionEmojis: ["👍"],
+        _reactionSenderId: "bob@example.com",
+      },
+    ]);
+    const { messaging } = makeRoomMessaging(client);
+
+    await messaging.loadMessages("w1", "c1");
+    await nextTick();
+
+    const original = messaging.messages.value.find((m) => m.id === "msg-original");
+    expect(original?.reactions).toEqual({ "👍": ["bob"] });
+  });
+
+  test("MAM-replayed reactions persist when LiveRoomMessages come from roomMessageFromArchived (full path)", async () => {
+    // Mirrors what production sees: `queryMamPage` returns a list of WASM
+    // archived messages that we run through `roomMessageFromArchived`. The
+    // resulting LiveRoomMessage[] must be enough for the channel composable
+    // to attach the reaction back onto its target on a fresh load.
+    const archivedOriginal: WasmArchivedMessage = {
+      mam_id: "mam-original",
+      message_type: "groupchat",
+      from: "c1@muc.example.com/alice",
+      to: "alice@example.com",
+      id: "client-id-original",
+      stanza_id: "room-stanza-original",
+      body: "react to me",
+      reaction_emojis: [],
+      is_muc: true,
+      markup_spans: [],
+      mention_uris: [],
+      references: [],
+      is_sticker: false,
+      shared_files: [],
+      timestamp: "2024-01-01T00:00:00Z",
+    };
+    const archivedReaction: WasmArchivedMessage = {
+      mam_id: "mam-reaction",
+      message_type: "groupchat",
+      from: "c1@muc.example.com/bob",
+      to: "alice@example.com",
+      id: "client-id-reaction",
+      stanza_id: "room-stanza-reaction",
+      reaction_target_id: "room-stanza-original",
+      reaction_emojis: ["👍"],
+      author_real_jid: "bob@example.com",
+      is_muc: true,
+      markup_spans: [],
+      mention_uris: [],
+      references: [],
+      is_sticker: false,
+      shared_files: [],
+      timestamp: "2024-01-01T00:01:00Z",
+    };
+    const liveMessages = [archivedOriginal, archivedReaction]
+      .map(roomMessageFromArchived)
+      .filter((m): m is LiveRoomMessage => !!m);
+
+    const client = makeRoomClient(liveMessages);
+    const { messaging } = makeRoomMessaging(client);
+
+    await messaging.loadMessages("w1", "c1");
+    await nextTick();
+
+    const original = messaging.messages.value.find((m) => m.body === "react to me");
+    expect(original).toBeDefined();
+    expect(original?.reactionTargetId).toBe("room-stanza-original");
+    expect(original?.reactions).toEqual({ "👍": ["bob"] });
+  });
+
+  test("toggleReaction optimistically updates the local timeline before the wire echo", async () => {
+    const sendReaction = mock(async () => undefined);
+    const client = makeRoomClient();
+    (client as unknown as { value: Record<string, unknown> }).value = {
+      ...(client as unknown as { value: Record<string, unknown> }).value,
+      sendReaction,
+    };
+    const { messaging } = makeRoomMessaging(client);
+
+    messaging.messages.value = [
+      {
+        id: "msg-1",
+        wireIds: ["msg-1", "room-stanza-1"],
+        reactionTargetId: "room-stanza-1",
+        author: "bob",
+        body: "react to me",
+        createdAt: "2024-01-01T00:00:00Z",
+        isSelf: false,
+      },
+    ];
+
+    await messaging.toggleReaction("msg-1", "👍");
+
+    const target = messaging.messages.value.find((m) => m.id === "msg-1");
+    expect(target?.reactions).toEqual({ "👍": ["alice"] });
+    expect(sendReaction).toHaveBeenCalled();
+  });
+
   test("resumed session never triggers a MAM refetch", async () => {
     const client = makeRoomClient();
     const { messaging } = makeRoomMessaging(client);
@@ -320,6 +443,64 @@ describe("XEP-0198 delivery status (DM)", () => {
       value: { queryPersonalMam: ReturnType<typeof mock> };
     };
     expect(clientAny.value.queryPersonalMam).toHaveBeenCalledWith("bob@example.com", 100);
+  });
+
+  test("MAM-replayed DM reactions attach to the original message after a fresh load", async () => {
+    const client = makeDmClient([
+      {
+        id: "dm-original",
+        peerJid: "bob@example.com",
+        fromJid: "alice@example.com/desktop",
+        nick: "alice",
+        body: "react to me in dm",
+        createdAt: "2024-01-01T00:00:00Z",
+        type: "message",
+      },
+      {
+        id: "dm-reaction",
+        peerJid: "bob@example.com",
+        fromJid: "bob@example.com/desktop",
+        nick: "bob",
+        body: "",
+        createdAt: "2024-01-01T00:01:00Z",
+        type: "message",
+        _reactionTarget: "dm-original",
+        _reactionEmojis: ["🔥"],
+      },
+    ]);
+    const { dm } = makeDmMessaging(client);
+
+    await dm.loadMessages("bob@example.com");
+    await nextTick();
+
+    const original = dm.messages.value.find((m) => m.id === "dm-original");
+    expect(original?.reactions).toEqual({ "🔥": ["bob"] });
+  });
+
+  test("DM toggleReaction optimistically updates the local timeline (the sender device gets no carbon)", async () => {
+    const sendDmReaction = mock(async () => undefined);
+    const client = makeDmClient();
+    (client as unknown as { value: Record<string, unknown> }).value = {
+      ...(client as unknown as { value: Record<string, unknown> }).value,
+      sendDmReaction,
+    };
+    const { dm } = makeDmMessaging(client);
+
+    dm.messages.value = [
+      {
+        id: "dm-target",
+        author: "bob",
+        body: "react to me",
+        createdAt: "2024-01-01T00:00:00Z",
+        isSelf: false,
+      },
+    ];
+
+    await dm.toggleReaction("dm-target", "👍");
+
+    const target = dm.messages.value.find((m) => m.id === "dm-target");
+    expect(target?.reactions).toEqual({ "👍": ["alice"] });
+    expect(sendDmReaction).toHaveBeenCalled();
   });
 
   test("DM self-echo reconciles first send only when duplicate text is queued", async () => {

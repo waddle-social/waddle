@@ -154,6 +154,49 @@ describe("roomMessageFromArchived", () => {
     const result = roomMessageFromArchived(baseArchivedRoom);
     expect(result?.references).toBeUndefined();
   });
+
+  test("derives reactionTargetId from the room-assigned XEP-0359 stanza-id", () => {
+    const archived: WasmArchivedMessage = {
+      ...baseArchivedRoom,
+      id: "client-origin-id",
+      stanza_id: "room-stanza-xyz",
+    };
+
+    const result = roomMessageFromArchived(archived);
+
+    expect(result?.reactionTargetId).toBe("room-stanza-xyz");
+  });
+
+  test("leaves reactionTargetId undefined when the room did not assign a stanza-id", () => {
+    const archived: WasmArchivedMessage = {
+      ...baseArchivedRoom,
+      id: "client-origin-id",
+    };
+
+    const result = roomMessageFromArchived(archived);
+
+    expect(result?.reactionTargetId).toBeUndefined();
+  });
+
+  test("converts an archived reaction stanza into a marker with _reactionTarget set", () => {
+    const archived: WasmArchivedMessage = {
+      ...baseArchivedRoom,
+      id: "reaction-msg-id",
+      stanza_id: "reaction-stanza-id",
+      from: "room@conf.example.com/bob",
+      body: "",
+      reaction_target_id: "original-room-stanza-id",
+      reaction_emojis: ["👍", "🎉"],
+      author_real_jid: "bob@example.com",
+    };
+
+    const result = roomMessageFromArchived(archived);
+
+    expect(result?._reactionTarget).toBe("original-room-stanza-id");
+    expect(result?._reactionEmojis).toEqual(["👍", "🎉"]);
+    expect(result?._reactionSenderId).toBe("bob@example.com");
+    expect(result?.nick).toBe("bob");
+  });
 });
 
 describe("roomMessageFromArchived with reply-fallback", () => {

@@ -1318,32 +1318,32 @@ export function useChannelMessages(
     if (!xmppClient.value || !activeChannelId.value || !session.value)
       return;
 
-    // Compute the new reaction set for this user
     const msg = findMessageById(messages.value, messageId);
     const targetId = msg?.reactionTargetId;
     if (!targetId) return;
     const myNick = session.value.username;
     const currentReactions = msg?.reactions ?? {};
 
-    // Gather all emojis this user currently has on this message
     const myEmojis = new Set<string>();
     for (const [e, nicks] of Object.entries(currentReactions)) {
       if (nicks.includes(myNick)) myEmojis.add(e);
     }
 
-    // Toggle the emoji
-    if (myEmojis.has(emoji)) {
-      myEmojis.delete(emoji);
-    } else {
-      myEmojis.add(emoji);
-    }
+    if (myEmojis.has(emoji)) myEmojis.delete(emoji);
+    else myEmojis.add(emoji);
+
+    const nextEmojis = [...myEmojis];
+    const senderId = currentRoomJid.value
+      ? `${currentRoomJid.value}/${myNick}`
+      : myNick;
+    applyReaction(targetId, myNick, nextEmojis, senderId);
 
     try {
       await xmppClient.value.sendReaction(
         activeSpaceId.value ?? "",
         activeChannelId.value,
         targetId,
-        [...myEmojis],
+        nextEmojis,
       );
     } catch (e) {
       actionError.value = normalizeError(e);

@@ -757,8 +757,15 @@ export function useDirectMessages(
     }
     if (myEmojis.has(emoji)) myEmojis.delete(emoji);
     else myEmojis.add(emoji);
+
+    const nextEmojis = [...myEmojis];
+    // Optimistic local update: the sender device never receives an XEP-0280
+    // carbon of its own send, so without this the reaction stays invisible
+    // to its author until the next MAM reload.
+    applyReaction(targetId, myNick, nextEmojis);
+
     try {
-      await xmppClient.value.sendDmReaction(activePeerJid.value, targetId, [...myEmojis]);
+      await xmppClient.value.sendDmReaction(activePeerJid.value, targetId, nextEmojis);
     } catch (e) {
       actionError.value = normalizeError(e);
     }
