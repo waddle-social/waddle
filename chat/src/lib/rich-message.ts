@@ -78,11 +78,105 @@ class SerializeState {
 export function tiptapToRichMessage(doc: JSONContent | Record<string, unknown>): RichMessage {
   const state = new SerializeState();
   serializeDoc(state, doc as TiptapNode);
+  autolinkifyBareUrls(state);
   return {
     body: state.body,
     markup: normalizeOutboundMarkup(state.markup),
     references: normalizeOutboundReferences(state.references),
   };
+}
+
+// Conservative URL pattern. Matches `http(s)://` schemes followed by a run of
+// non-whitespace characters; the captured run then has trailing punctuation
+// stripped by `stripUrlTrailingPunctuation` below.
+const BARE_URL_PATTERN = /\bhttps?:\/\/[^\s<>"'`]+/gi;
+
+function autolinkifyBareUrls(state: SerializeState): void {
+  if (!state.body) return;
+
+  // Existing reference ranges in the typed projection. URLs already wrapped by
+  // a TipTap `link` mark must not be auto-linkified a second time — the mark
+  // path wins because it preserves the user's chosen href text.
+  const existingRanges: Array<[number, number]> = state.references
+    .filter((reference) =>
+      typeof reference.begin === "number"
+      && typeof reference.end === "number"
+      && reference.end > reference.begin
+    )
+    .map((reference) => [reference.begin as number, reference.end as number]);
+
+  // Code ranges to skip. XEP-0394 `<bcode>` covers fenced code blocks; an
+  // inline `<span styles=["code", ...]>` covers backtick code in TipTap.
+  const codeRanges: Array<[number, number]> = state.markup
+    .filter((span) =>
+      span.type === "bcode"
+      || (span.type === "span" && span.styles.includes("code"))
+    )
+    .map((span) => [span.start, span.end]);
+
+  let match: RegExpExecArray | null;
+  BARE_URL_PATTERN.lastIndex = 0;
+  while ((match = BARE_URL_PATTERN.exec(state.body)) !== null) {
+    const raw = stripUrlTrailingPunctuation(match[0]);
+    if (!raw) continue;
+
+    const href = safeUri(raw);
+    if (!href) continue;
+
+    // codePointLength on the prefix gives a Unicode-scalar offset, matching
+    // XEP-0372 begin/end semantics. `match.index` is a UTF-16 code-unit
+    // offset and would mis-align after surrogate pairs (emoji, CJK).
+    const begin = codePointLength(state.body.slice(0, match.index));
+    const end = begin + codePointLength(raw);
+
+    if (rangesOverlap(begin, end, existingRanges)) continue;
+    if (rangesOverlap(begin, end, codeRanges)) continue;
+
+    state.references.push({ type: "data", uri: href, begin, end });
+    existingRanges.push([begin, end]);
+  }
+}
+
+function rangesOverlap(begin: number, end: number, ranges: Array<[number, number]>): boolean {
+  for (const [rangeBegin, rangeEnd] of ranges) {
+    if (begin < rangeEnd && end > rangeBegin) return true;
+  }
+  return false;
+}
+
+// Strip trailing punctuation that is almost always sentence-terminal
+// (`.,;:!?'"`) plus *unbalanced* closing brackets. URLs may legitimately end
+// in `)` / `]` / `}` (e.g. Wikipedia disambiguation links such as
+// `https://en.wikipedia.org/wiki/Foo_(disambiguation)`) — strip the bracket
+// only when the captured URL has more closes than opens of that bracket type.
+function stripUrlTrailingPunctuation(url: string): string {
+  let result = url;
+  while (result.length > 0) {
+    const ch = result[result.length - 1];
+    if (".,;:!?'\"".includes(ch)) {
+      result = result.slice(0, -1);
+      continue;
+    }
+    const closingPairs: Array<readonly [string, string]> = [[")", "("], ["]", "["], ["}", "{"]];
+    const pair = closingPairs.find(([close]) => close === ch);
+    if (pair) {
+      const [closeChar, openChar] = pair;
+      const closes = countOccurrences(result, closeChar);
+      const opens = countOccurrences(result, openChar);
+      if (closes > opens) {
+        result = result.slice(0, -1);
+        continue;
+      }
+    }
+    break;
+  }
+  return result;
+}
+
+function countOccurrences(text: string, char: string): number {
+  let count = 0;
+  for (let i = 0; i < text.length; i++) if (text[i] === char) count++;
+  return count;
 }
 
 function serializeDoc(state: SerializeState, doc: TiptapNode): void {

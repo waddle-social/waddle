@@ -173,6 +173,11 @@ pub struct InboundMessage {
     pub shared_files: Vec<SharedFile>,
     pub broadcast_mention: Option<String>,
     pub mention_uris: Vec<String>,
+    /// XEP-0372 references attached to this message. Populated for *every*
+    /// `<reference xmlns="urn:xmpp:reference:0"/>` child, regardless of type
+    /// (`mention`, `data`, or any other), as long as `type` and `uri` are
+    /// present (both required by XEP-0372).
+    pub references: Vec<ReferenceData>,
     pub forum_post_kind: Option<String>,
     pub forum_title: Option<String>,
     pub thread_id: Option<String>,
@@ -308,6 +313,9 @@ pub struct ReferenceData {
     pub uri: String,
     pub begin: u32,
     pub end: u32,
+    /// XEP-0372 optional `anchor` attribute. Carries the original, unresolved
+    /// display text (or arbitrary anchor URI) when offsets cannot be relied on.
+    pub anchor: Option<String>,
 }
 
 // ─── Parse entry point ────────────────────────────────────────────────────
@@ -387,6 +395,16 @@ fn parse_message(el: &Element) -> InboundMessage {
     let displayed_marker_id = parse_displayed_marker_payload(el).map(|payload| payload.id);
 
     // XEP-0372: References (mentions and data)
+    //
+    // Every `<reference xmlns="urn:xmpp:reference:0"/>` child with the required
+    // `type` and `uri` attributes is captured as a typed `ReferenceData` and
+    // also fans out into the flat helper views (`mention_uris`,
+    // `broadcast_mention`, `shared_files`) the rest of the codebase already
+    // consumes. The flat views are derived projections; `references` is the
+    // structural source of truth. Reading `begin`/`end` is the only string→u32
+    // parse on the inbound path; per the typed-payloads hard rule, no other
+    // boundary may stringify protocol values.
+    let mut references: Vec<ReferenceData> = Vec::new();
     let mut mention_uris: Vec<String> = Vec::new();
     let mut broadcast_mention: Option<String> = None;
     let mut shared_files: Vec<SharedFile> = Vec::new();
@@ -395,19 +413,51 @@ fn parse_message(el: &Element) -> InboundMessage {
         .children()
         .filter(|c| c.name() == "reference" && c.ns() == NS_REFERENCES)
     {
-        match child.attr("type") {
-            Some("mention") => {
-                if let Some(uri) = child.attr("uri") {
-                    let uri_str = uri.to_string();
-                    if uri_str.starts_with("xmpp:")
-                        && (uri_str.contains("@everyone") || uri_str.contains("@here"))
-                    {
-                        broadcast_mention = Some(uri_str.clone());
-                    }
-                    mention_uris.push(uri_str);
+        let ref_type = match child.attr("type") {
+            Some(t) => t,
+            None => continue,
+        };
+        let uri = match child.attr("uri") {
+            Some(u) => u,
+            None => continue,
+        };
+        // begin/end are optional per XEP-0372, but they form an all-or-nothing
+        // pair: a reference either points at a body substring (both present
+        // and numeric) or it is anchor-only (both absent → represented as the
+        // (0, 0) sentinel). A half-specified pair like `begin="3"` with no
+        // `end` is meaningless — drop it. Same for malformed values like
+        // `begin="abc"`, which would otherwise mis-position the span.
+        let begin_attr = child.attr("begin");
+        let end_attr = child.attr("end");
+        let (begin, end) = match (begin_attr, end_attr) {
+            (Some(b), Some(e)) => match (b.parse::<u32>(), e.parse::<u32>()) {
+                (Ok(b), Ok(e)) if e >= b => (b, e),
+                _ => continue,
+            },
+            (None, None) => (0, 0),
+            _ => continue,
+        };
+        let anchor = child.attr("anchor").map(String::from);
+
+        references.push(ReferenceData {
+            ref_type: ref_type.to_string(),
+            uri: uri.to_string(),
+            begin,
+            end,
+            anchor: anchor.clone(),
+        });
+
+        match ref_type {
+            "mention" => {
+                let uri_str = uri.to_string();
+                if uri_str.starts_with("xmpp:")
+                    && (uri_str.contains("@everyone") || uri_str.contains("@here"))
+                {
+                    broadcast_mention = Some(uri_str.clone());
                 }
+                mention_uris.push(uri_str);
             }
-            Some("data") => {
+            "data" => {
                 if let Some(file) = parse_shared_file(child) {
                     shared_files.push(file);
                 }
@@ -497,6 +547,7 @@ fn parse_message(el: &Element) -> InboundMessage {
         shared_files,
         broadcast_mention,
         mention_uris,
+        references,
         forum_post_kind,
         forum_title,
         thread_id,
@@ -1170,14 +1221,25 @@ pub fn build_outbound_message(
         builder = builder.append(markups);
     }
     for reference in &options.references {
-        builder = builder.append(
-            Element::builder("reference", NS_REFERENCES)
-                .attr("type", reference.ref_type.as_str())
+        // XEP-0372 §2.1: `begin` and `end` are OPTIONAL. They MUST be present
+        // when the reference points at a substring of the body, and MUST be
+        // absent when no body position applies (e.g. anchor-only references
+        // to a previous message). Treat (0, 0) as the "no position" sentinel
+        // so anchor-only / future use cases can travel cleanly on the wire
+        // without emitting `begin="0" end="0"` (which a conformant receiver
+        // would interpret as a 0-length annotation at body offset 0).
+        let mut ref_builder = Element::builder("reference", NS_REFERENCES)
+            .attr("type", reference.ref_type.as_str())
+            .attr("uri", reference.uri.as_str());
+        if reference.begin != 0 || reference.end != 0 {
+            ref_builder = ref_builder
                 .attr("begin", reference.begin.to_string())
-                .attr("end", reference.end.to_string())
-                .attr("uri", reference.uri.as_str())
-                .build(),
-        );
+                .attr("end", reference.end.to_string());
+        }
+        if let Some(anchor) = reference.anchor.as_deref() {
+            ref_builder = ref_builder.attr("anchor", anchor);
+        }
+        builder = builder.append(ref_builder.build());
     }
     for file in &options.shared_files {
         builder = builder.append(build_file_sharing_element(file));
@@ -1423,6 +1485,219 @@ mod tests {
     }
 
     #[test]
+    fn parse_message_extracts_references_for_data_type() {
+        let e = el(
+            "<message xmlns='jabber:client' type='groupchat' id='m-data'>\
+               <body>see https://example.com</body>\
+               <reference xmlns='urn:xmpp:reference:0' type='data' \
+                  uri='https://example.com' begin='4' end='23' \
+                  anchor='https://example.com'/>\
+             </message>",
+        );
+        let MessagingEvent::Message(msg) = parse(&e).unwrap() else {
+            panic!("expected Message");
+        };
+        assert_eq!(
+            msg.references,
+            vec![ReferenceData {
+                ref_type: "data".to_string(),
+                uri: "https://example.com".to_string(),
+                begin: 4,
+                end: 23,
+                anchor: Some("https://example.com".to_string()),
+            }]
+        );
+        // `type=data` references that don't carry XEP-0446/0447 file metadata
+        // must not pollute the shared_files projection.
+        assert!(msg.shared_files.is_empty());
+        // `type=data` references must not appear as mentions.
+        assert!(msg.mention_uris.is_empty());
+    }
+
+    #[test]
+    fn parse_message_extracts_references_for_mention_type() {
+        let e = el(
+            "<message xmlns='jabber:client' type='groupchat' id='m-mention'>\
+               <body>hi @bob</body>\
+               <reference xmlns='urn:xmpp:reference:0' type='mention' \
+                  uri='xmpp:bob@example.com' begin='3' end='7'/>\
+             </message>",
+        );
+        let MessagingEvent::Message(msg) = parse(&e).unwrap() else {
+            panic!("expected Message");
+        };
+        assert_eq!(
+            msg.references,
+            vec![ReferenceData {
+                ref_type: "mention".to_string(),
+                uri: "xmpp:bob@example.com".to_string(),
+                begin: 3,
+                end: 7,
+                anchor: None,
+            }]
+        );
+        // Mentions still also flow through the flat helper view.
+        assert_eq!(msg.mention_uris, vec!["xmpp:bob@example.com".to_string()]);
+    }
+
+    #[test]
+    fn parse_message_extracts_references_for_unknown_type() {
+        let e = el(
+            "<message xmlns='jabber:client' type='groupchat' id='m-unknown'>\
+               <body>see https://example.com</body>\
+               <reference xmlns='urn:xmpp:reference:0' type='quote' \
+                  uri='xmpp:room@conf.example?message;id=abc' begin='0' end='3'/>\
+             </message>",
+        );
+        let MessagingEvent::Message(msg) = parse(&e).unwrap() else {
+            panic!("expected Message");
+        };
+        assert_eq!(msg.references.len(), 1);
+        assert_eq!(msg.references[0].ref_type, "quote");
+        assert!(msg.mention_uris.is_empty());
+        assert!(msg.shared_files.is_empty());
+    }
+
+    #[test]
+    fn parse_message_reference_handles_missing_optional_attrs() {
+        let e = el("<message xmlns='jabber:client' type='chat' id='m-min'>\
+               <body>https://example.com</body>\
+               <reference xmlns='urn:xmpp:reference:0' type='data' \
+                  uri='https://example.com'/>\
+             </message>");
+        let MessagingEvent::Message(msg) = parse(&e).unwrap() else {
+            panic!("expected Message");
+        };
+        assert_eq!(
+            msg.references,
+            vec![ReferenceData {
+                ref_type: "data".to_string(),
+                uri: "https://example.com".to_string(),
+                begin: 0,
+                end: 0,
+                anchor: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn parse_message_reference_skipped_when_begin_or_end_unparseable() {
+        // XEP-0372 says begin/end are optional, but if present they MUST be
+        // numeric. Silently coercing "abc" to 0 would mis-position the
+        // highlighted span — drop the reference instead.
+        let e = el(
+            "<message xmlns='jabber:client' type='chat' id='m-bad-offsets'>\
+               <body>https://example.com</body>\
+               <reference xmlns='urn:xmpp:reference:0' type='data' \
+                  uri='https://example.com' begin='abc' end='5'/>\
+               <reference xmlns='urn:xmpp:reference:0' type='data' \
+                  uri='https://other.example' begin='0' end='not-a-number'/>\
+             </message>",
+        );
+        let MessagingEvent::Message(msg) = parse(&e).unwrap() else {
+            panic!("expected Message");
+        };
+        assert!(msg.references.is_empty());
+    }
+
+    #[test]
+    fn parse_message_reference_skipped_when_only_one_of_begin_end_is_present() {
+        // begin/end form an all-or-nothing pair under XEP-0372: either both
+        // are present (the reference points at a body substring) or both are
+        // absent (anchor-only). A half-specified `begin="3"` with no `end` is
+        // meaningless and would silently coerce `end` to 0, putting `end`
+        // before `begin` — drop the reference instead.
+        let e = el("<message xmlns='jabber:client' type='chat' id='m-half'>\
+               <body>see https://example.com</body>\
+               <reference xmlns='urn:xmpp:reference:0' type='data' \
+                  uri='https://example.com' begin='4'/>\
+               <reference xmlns='urn:xmpp:reference:0' type='data' \
+                  uri='https://other.example' end='10'/>\
+             </message>");
+        let MessagingEvent::Message(msg) = parse(&e).unwrap() else {
+            panic!("expected Message");
+        };
+        assert!(msg.references.is_empty());
+    }
+
+    #[test]
+    fn parse_message_reference_skipped_when_required_attr_missing() {
+        // XEP-0372 requires both `type` and `uri`. References missing either
+        // must be silently dropped — never returned with placeholder values.
+        let e = el("<message xmlns='jabber:client' type='chat' id='m-bad'>\
+               <body>https://example.com</body>\
+               <reference xmlns='urn:xmpp:reference:0' type='data'/>\
+               <reference xmlns='urn:xmpp:reference:0' uri='https://example.com'/>\
+             </message>");
+        let MessagingEvent::Message(msg) = parse(&e).unwrap() else {
+            panic!("expected Message");
+        };
+        assert!(msg.references.is_empty());
+    }
+
+    #[test]
+    fn build_outbound_message_omits_begin_end_when_no_position() {
+        // XEP-0372 says begin/end are optional. Anchor-only references that
+        // do not point at a body substring must NOT carry begin="0" end="0"
+        // — that would be interpreted as a real 0-length annotation at
+        // offset 0 by a conformant receiver.
+        let options = SendMessageOptions {
+            references: vec![ReferenceData {
+                ref_type: "data".to_string(),
+                uri: "xmpp:room@conf.example?message;id=earlier-msg".to_string(),
+                begin: 0,
+                end: 0,
+                anchor: Some("xmpp:alice@example.com".to_string()),
+            }],
+            ..Default::default()
+        };
+
+        let (_, stanza) =
+            build_outbound_message("room@muc.example", "groupchat", "see above", &options).unwrap();
+
+        let reference = stanza
+            .get_child("reference", NS_REFERENCES)
+            .expect("reference child");
+        assert_eq!(reference.attr("type"), Some("data"));
+        assert_eq!(
+            reference.attr("uri"),
+            Some("xmpp:room@conf.example?message;id=earlier-msg")
+        );
+        assert_eq!(reference.attr("anchor"), Some("xmpp:alice@example.com"));
+        assert_eq!(reference.attr("begin"), None);
+        assert_eq!(reference.attr("end"), None);
+    }
+
+    #[test]
+    fn build_outbound_message_emits_anchor_attribute_when_present() {
+        let options = SendMessageOptions {
+            references: vec![ReferenceData {
+                ref_type: "data".to_string(),
+                uri: "https://example.com".to_string(),
+                begin: 4,
+                end: 23,
+                anchor: Some("example.com".to_string()),
+            }],
+            ..Default::default()
+        };
+
+        let (_, stanza) = build_outbound_message(
+            "room@muc.example",
+            "groupchat",
+            "see https://example.com",
+            &options,
+        )
+        .unwrap();
+
+        let reference = stanza
+            .get_child("reference", NS_REFERENCES)
+            .expect("reference child");
+        assert_eq!(reference.attr("anchor"), Some("example.com"));
+        assert_eq!(reference.attr("type"), Some("data"));
+        assert_eq!(reference.attr("uri"), Some("https://example.com"));
+    }
+
+    #[test]
     fn parse_message_with_direct_file_sharing() {
         let e = el(
             "<message xmlns='jabber:client' type='chat'>\
@@ -1598,6 +1873,7 @@ mod tests {
                 uri: "xmpp:bob@example.com".to_string(),
                 begin: 6,
                 end: 10,
+                anchor: None,
             }],
             ..Default::default()
         };
@@ -1796,6 +2072,7 @@ mod tests {
                 uri: "xmpp:bob@example.com".to_string(),
                 begin: 6,
                 end: 10,
+                anchor: None,
             }],
             ..Default::default()
         };

@@ -221,6 +221,7 @@ pub struct WaddleMessage {
     pub markup_spans: Vec<WaddleMarkupSpan>,
     pub broadcast_mention: Option<String>,
     pub mention_uris: Vec<String>,
+    pub references: Vec<WaddleReference>,
     pub forum_post_kind: Option<String>,
     pub forum_title: Option<String>,
     pub forum_thread_title: Option<String>,
@@ -255,6 +256,7 @@ pub struct WaddleArchivedMessage {
     pub markup_spans: Vec<WaddleMarkupSpan>,
     pub broadcast_mention: Option<String>,
     pub mention_uris: Vec<String>,
+    pub references: Vec<WaddleReference>,
     pub forum_post_kind: Option<String>,
     pub forum_title: Option<String>,
     pub forum_thread_title: Option<String>,
@@ -535,13 +537,15 @@ pub struct WaddleMarkupSpanInput {
     pub uri: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct WaddleReference {
     pub ref_type: String,
     pub uri: String,
     pub begin: u32,
     pub end: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -2472,6 +2476,7 @@ fn send_options_from_js(options: JsValue) -> Result<SendMessageOptions, JsValue>
                 uri: reference.uri,
                 begin: reference.begin,
                 end: reference.end,
+                anchor: reference.anchor,
             })
             .collect(),
         shared_files: options
@@ -2530,6 +2535,19 @@ fn markup_spans_to_js(spans: Vec<messaging::MarkupSpan>) -> Vec<WaddleMarkupSpan
         .collect()
 }
 
+fn references_to_js(references: Vec<messaging::ReferenceData>) -> Vec<WaddleReference> {
+    references
+        .into_iter()
+        .map(|reference| WaddleReference {
+            ref_type: reference.ref_type,
+            uri: reference.uri,
+            begin: reference.begin,
+            end: reference.end,
+            anchor: reference.anchor,
+        })
+        .collect()
+}
+
 fn inbound_to_js(message: InboundMessage) -> WaddleMessage {
     let (reply_fallback_start, reply_fallback_end) = match message.reply_fallback {
         Some((start, end)) => (Some(start), Some(end)),
@@ -2573,6 +2591,7 @@ fn inbound_to_js(message: InboundMessage) -> WaddleMessage {
         markup_spans: markup_spans_to_js(message.markup_spans),
         broadcast_mention: message.broadcast_mention,
         mention_uris: message.mention_uris,
+        references: references_to_js(message.references),
         forum_post_kind: message.forum_post_kind,
         forum_title: message.forum_title,
         forum_thread_title,
@@ -2658,6 +2677,10 @@ fn archived_to_js(archived: ArchivedMessage) -> WaddleArchivedMessage {
         mention_uris: parsed
             .as_ref()
             .map(|message| message.mention_uris.clone())
+            .unwrap_or_default(),
+        references: parsed
+            .as_ref()
+            .map(|message| references_to_js(message.references.clone()))
             .unwrap_or_default(),
         forum_post_kind: parsed
             .as_ref()
@@ -3030,5 +3053,86 @@ mod extension_route_tests {
             features: features.iter().map(|feature| feature.to_string()).collect(),
             forms: Vec::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod inbound_to_js_tests {
+    use super::*;
+    use minidom::Element;
+
+    fn parse_message_element(xml: &str) -> InboundMessage {
+        let el: Element = xml.parse().expect("invalid XML");
+        match messaging::parse(&el).expect("expected message") {
+            messaging::MessagingEvent::Message(msg) => *msg,
+            _ => panic!("expected MessagingEvent::Message"),
+        }
+    }
+
+    #[test]
+    fn inbound_to_js_propagates_data_reference_with_anchor() {
+        let inbound = parse_message_element(
+            "<message xmlns='jabber:client' type='groupchat' id='m-data'>\
+               <body>see https://example.com</body>\
+               <reference xmlns='urn:xmpp:reference:0' type='data' \
+                  uri='https://example.com' begin='4' end='23' \
+                  anchor='https://example.com'/>\
+             </message>",
+        );
+
+        let js = inbound_to_js(inbound);
+
+        assert_eq!(js.references.len(), 1);
+        let reference = &js.references[0];
+        assert_eq!(reference.ref_type, "data");
+        assert_eq!(reference.uri, "https://example.com");
+        assert_eq!(reference.begin, 4);
+        assert_eq!(reference.end, 23);
+        assert_eq!(reference.anchor.as_deref(), Some("https://example.com"));
+    }
+
+    #[test]
+    fn inbound_to_js_propagates_mention_reference_in_addition_to_mention_uris() {
+        let inbound = parse_message_element(
+            "<message xmlns='jabber:client' type='groupchat' id='m-mention'>\
+               <body>hi @bob</body>\
+               <reference xmlns='urn:xmpp:reference:0' type='mention' \
+                  uri='xmpp:bob@example.com' begin='3' end='7'/>\
+             </message>",
+        );
+
+        let js = inbound_to_js(inbound);
+
+        assert_eq!(js.mention_uris, vec!["xmpp:bob@example.com".to_string()]);
+        assert_eq!(js.references.len(), 1);
+        assert_eq!(js.references[0].ref_type, "mention");
+        assert_eq!(js.references[0].uri, "xmpp:bob@example.com");
+        assert!(js.references[0].anchor.is_none());
+    }
+
+    #[test]
+    fn references_to_js_preserves_order_type_and_anchor() {
+        let references = references_to_js(vec![
+            messaging::ReferenceData {
+                ref_type: "data".to_string(),
+                uri: "https://example.com".to_string(),
+                begin: 4,
+                end: 23,
+                anchor: Some("example.com".to_string()),
+            },
+            messaging::ReferenceData {
+                ref_type: "mention".to_string(),
+                uri: "xmpp:bob@example.com".to_string(),
+                begin: 0,
+                end: 4,
+                anchor: None,
+            },
+        ]);
+
+        assert_eq!(references.len(), 2);
+        assert_eq!(references[0].ref_type, "data");
+        assert_eq!(references[0].anchor.as_deref(), Some("example.com"));
+        assert_eq!(references[1].ref_type, "mention");
+        assert!(references[1].anchor.is_none());
     }
 }
