@@ -52,7 +52,7 @@ impl TestServer {
 
     /// Start a waddle-server and seed additional native users.
     pub fn start_with_extra_accounts(extra_accounts: &[(&str, &str)]) -> Self {
-        Self::spawn(extra_accounts, None)
+        Self::spawn(extra_accounts, None, None)
     }
 
     /// Start a waddle-server pointed at a persistent SQLite file. Used by tests
@@ -64,10 +64,24 @@ impl TestServer {
         database_url: &str,
         extra_accounts: &[(&str, &str)],
     ) -> Self {
-        Self::spawn(extra_accounts, Some(database_url.to_string()))
+        Self::spawn(extra_accounts, Some(database_url.to_string()), None)
     }
 
-    fn spawn(extra_accounts: &[(&str, &str)], database_url: Option<String>) -> Self {
+    /// Start a waddle-server pointed at a persistent SQLite MAM database,
+    /// while leaving the user/inbox/pubsub stores in-memory. Used by tests
+    /// that need to exercise the production-shaped MAM read/write path
+    /// against a real on-disk SQLite backend (rather than the
+    /// `sqlite::memory:` shortcut the rest of the harness uses).
+    #[allow(dead_code)]
+    pub fn start_with_persistent_mam(mam_database_url: &str) -> Self {
+        Self::spawn(&[], None, Some(mam_database_url.to_string()))
+    }
+
+    fn spawn(
+        extra_accounts: &[(&str, &str)],
+        database_url: Option<String>,
+        mam_database_url: Option<String>,
+    ) -> Self {
         let bin = env!("CARGO_BIN_EXE_waddle-server");
         let fixed_account_password = format!("ws-test-password-{}", uuid::Uuid::new_v4());
         let extra_accounts_env = extra_accounts
@@ -95,7 +109,10 @@ impl TestServer {
             .env("WADDLE_SERVER_OWNER_LOCALPARTS", "admin")
             .env("WADDLE_HTTP_ADDR", "127.0.0.1:0")
             .env("WADDLE_XMPP_DOMAIN", "localhost")
-            .env("WADDLE_XMPP_MAM_DATABASE_URL", "sqlite::memory:")
+            .env(
+                "WADDLE_XMPP_MAM_DATABASE_URL",
+                mam_database_url.as_deref().unwrap_or("sqlite::memory:"),
+            )
             .env("WADDLE_XMPP_INBOX_DATABASE_URL", "sqlite::memory:")
             .env("WADDLE_XMPP_PUBSUB_DATABASE_URL", "sqlite::memory:")
             .env("WADDLE_GIT_SHA", TEST_GIT_SHA)
