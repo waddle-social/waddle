@@ -8,12 +8,11 @@ pub(super) async fn handle_vcard_iq(
     response_to: Option<&str>,
 ) -> Vec<String> {
     let Some(sender_jid) = sender_jid else {
-        return vec![build_iq_error_xml_with_addresses(
+        return vec![build_iq_error_xml_typed(
             &iq.id,
             response_from,
             response_to,
-            "auth",
-            "not-authorized",
+            not_authorized_iq_error("Authentication required."),
         )];
     };
 
@@ -21,12 +20,11 @@ pub(super) async fn handle_vcard_iq(
         Ok(db) => Arc::new(db),
         Err(error) => {
             warn!(error = %error, "Failed to access database for vCard IQ");
-            return vec![build_iq_error_xml_with_addresses(
+            return vec![build_iq_error_xml_typed(
                 &iq.id,
                 response_from,
                 response_to,
-                "wait",
-                "internal-server-error",
+                internal_server_error_iq_error("Internal server error."),
             )];
         }
     };
@@ -48,45 +46,41 @@ pub(super) async fn handle_vcard_iq(
                 },
                 Err(error) => {
                     warn!(target = %target_jid, error = %error, "Stored vCard XML is invalid");
-                    return vec![build_iq_error_xml_with_addresses(
+                    return vec![build_iq_error_xml_typed(
                         &iq.id,
                         response_from,
                         response_to,
-                        "wait",
-                        "internal-server-error",
+                        internal_server_error_iq_error("Internal server error."),
                     )];
                 }
             },
             Ok(None) => match avatar_vcard_from_user_profile(Arc::clone(&db), &target_jid).await {
                 Ok(Some(vcard)) => waddle_xmpp::xep::xep0054::build_vcard_response(iq, &vcard),
                 Ok(None) => {
-                    return vec![build_iq_error_xml_with_addresses(
+                    return vec![build_iq_error_xml_typed(
                         &iq.id,
                         response_from,
                         response_to,
-                        "cancel",
-                        "item-not-found",
+                        item_not_found_iq_error("Requested item not found."),
                     )];
                 }
                 Err(error) => {
                     warn!(target = %target_jid, error = %error, "Failed to load avatar vCard fallback");
-                    return vec![build_iq_error_xml_with_addresses(
+                    return vec![build_iq_error_xml_typed(
                         &iq.id,
                         response_from,
                         response_to,
-                        "wait",
-                        "internal-server-error",
+                        internal_server_error_iq_error("Internal server error."),
                     )];
                 }
             },
             Err(error) => {
                 warn!(target = %target_jid, error = %error, "Failed to load vCard");
-                return vec![build_iq_error_xml_with_addresses(
+                return vec![build_iq_error_xml_typed(
                     &iq.id,
                     response_from,
                     response_to,
-                    "wait",
-                    "internal-server-error",
+                    internal_server_error_iq_error("Internal server error."),
                 )];
             }
         };
@@ -95,34 +89,31 @@ pub(super) async fn handle_vcard_iq(
 
     if let Some(to) = &iq.to {
         if to.to_bare() != sender_jid.to_bare() {
-            return vec![build_iq_error_xml_with_addresses(
+            return vec![build_iq_error_xml_typed(
                 &iq.id,
                 response_from,
                 response_to,
-                "auth",
-                "forbidden",
+                forbidden_iq_error("Operation not permitted."),
             )];
         }
     }
 
     let xmpp_parsers::iq::IqType::Set(vcard) = &iq.payload else {
-        return vec![build_iq_error_xml_with_addresses(
+        return vec![build_iq_error_xml_typed(
             &iq.id,
             response_from,
             response_to,
-            "modify",
-            "bad-request",
+            bad_request_iq_error("Malformed IQ payload."),
         )];
     };
 
     if let Err(error) = store.set(&sender_jid.to_bare(), &String::from(vcard)).await {
         warn!(jid = %sender_jid, error = %error, "Failed to store vCard");
-        return vec![build_iq_error_xml_with_addresses(
+        return vec![build_iq_error_xml_typed(
             &iq.id,
             response_from,
             response_to,
-            "wait",
-            "internal-server-error",
+            internal_server_error_iq_error("Internal server error."),
         )];
     }
 
@@ -139,12 +130,11 @@ pub(super) async fn handle_private_storage_iq(
     response_to: Option<&str>,
 ) -> Vec<String> {
     let Some(sender_jid) = sender_jid else {
-        return vec![build_iq_error_xml_with_addresses(
+        return vec![build_iq_error_xml_typed(
             &iq.id,
             response_from,
             response_to,
-            "auth",
-            "not-authorized",
+            not_authorized_iq_error("Authentication required."),
         )];
     };
     let bare_jid = sender_jid.to_bare();
@@ -198,12 +188,11 @@ pub(super) async fn handle_private_storage_iq(
             Ok(row) => row,
             Err(error) => {
                 warn!(jid = %bare_jid, namespace = %key.namespace, error = %error, "Failed to load private XML");
-                return vec![build_iq_error_xml_with_addresses(
+                return vec![build_iq_error_xml_typed(
                     &iq.id,
                     response_from,
                     response_to,
-                    "wait",
-                    "internal-server-error",
+                    internal_server_error_iq_error("Internal server error."),
                 )];
             }
         };
@@ -212,12 +201,11 @@ pub(super) async fn handle_private_storage_iq(
                 Ok(value) => Some(value),
                 Err(error) => {
                     warn!(jid = %bare_jid, namespace = %key.namespace, error = %error, "Failed to decode private XML row");
-                    return vec![build_iq_error_xml_with_addresses(
+                    return vec![build_iq_error_xml_typed(
                         &iq.id,
                         response_from,
                         response_to,
-                        "wait",
-                        "internal-server-error",
+                        internal_server_error_iq_error("Internal server error."),
                     )];
                 }
             },
@@ -274,25 +262,23 @@ pub(super) async fn handle_private_storage_iq(
             .await
         {
             warn!(jid = %bare_jid, error = %error, "Failed to store private XML");
-            return vec![build_iq_error_xml_with_addresses(
-                &iq.id,
-                response_from,
-                response_to,
-                "wait",
-                "internal-server-error",
-            )];
+            return vec![build_iq_error_xml_typed(
+                            &iq.id,
+                            response_from,
+                            response_to,
+                            internal_server_error_iq_error("Internal server error."),
+                        )];
         }
         return vec![iq_to_xml(
             waddle_xmpp::xep::xep0049::build_private_storage_success(iq),
         )];
     }
 
-    vec![build_iq_error_xml_with_addresses(
+    vec![build_iq_error_xml_typed(
         &iq.id,
         response_from,
         response_to,
-        "modify",
-        "bad-request",
+        bad_request_iq_error("Malformed IQ payload."),
     )]
 }
 

@@ -72,6 +72,7 @@ use xmpp_parsers::minidom::Element;
 
 mod blocking;
 mod commands;
+pub(crate) mod errors;
 mod muc_admin;
 mod push;
 mod roster;
@@ -81,6 +82,15 @@ mod vcard_private;
 
 use blocking::handle_blocking_iq;
 use commands::handle_command_iq;
+// Re-exported via `pub(super)` so submodules that wildcard-import the
+// IQ-handler module's namespace (`use super::*;`) pick up the typed
+// IQ-error constructors without each having to re-import the
+// `errors` submodule directly.
+pub(super) use errors::{
+    bad_request_iq_error, feature_not_implemented_iq_error, forbidden_iq_error,
+    internal_server_error_iq_error, item_not_found_iq_error, jid_malformed_iq_error,
+    not_acceptable_iq_error, not_authorized_iq_error, service_unavailable_iq_error,
+};
 use muc_admin::handle_muc_admin_iq;
 use push::handle_push_iq;
 use roster::handle_roster_iq;
@@ -93,9 +103,13 @@ use vcard_private::{handle_private_storage_iq, handle_vcard_iq};
 #[cfg(test)]
 use waddle_xmpp::protocol::frame::{parse_frame, InboundFrame};
 
+// `build_iq_error_xml_typed` is re-exported via `pub(super) use` so
+// submodules wildcard-importing this module's namespace see it.
+pub(super) use super::super::build_iq_error_xml_typed;
+
 use super::super::{
-    build_iq_error_xml, build_iq_error_xml_with_addresses, build_iq_result_xml, destroy_room_actor,
-    get_room_actor, iq_to_xml, is_muc_room_jid, stanza_to_xml, WebSocketState,
+    build_iq_result_xml, destroy_room_actor, get_room_actor, iq_to_xml, is_muc_room_jid,
+    stanza_to_xml, WebSocketState,
 };
 use super::presence::{
     get_managed_channel_for_room, send_current_presence_from_user_to_user,
@@ -379,12 +393,11 @@ pub async fn handle_iq_with_conn_state(
         .has_iq_handler(payload_ns.as_str())
     {
         if payload_ns == waddle_xmpp::xep::NS_VERSION && !is_version_query(&iq) {
-            return vec![build_iq_error_xml_with_addresses(
+            return vec![build_iq_error_xml_typed(
                 &id,
                 response_from,
                 response_to,
-                "modify",
-                "bad-request",
+                bad_request_iq_error("Malformed IQ payload."),
             )];
         }
         if payload_ns == waddle_xmpp::xep::NS_VERSION
@@ -393,22 +406,20 @@ pub async fn handle_iq_with_conn_state(
                 .as_ref()
                 .is_some_and(|target| target.to_bare().as_str() != domain)
         {
-            return vec![build_iq_error_xml_with_addresses(
+            return vec![build_iq_error_xml_typed(
                 &id,
                 response_from,
                 response_to,
-                "cancel",
-                "service-unavailable",
+                service_unavailable_iq_error("Service unavailable at this address."),
             )];
         }
         if payload_ns == waddle_xmpp::xep::NS_TIME {
             if !is_time_query(&iq) {
-                return vec![build_iq_error_xml_with_addresses(
+                return vec![build_iq_error_xml_typed(
                     &id,
                     response_from,
                     response_to,
-                    "modify",
-                    "bad-request",
+                    bad_request_iq_error("Malformed IQ payload."),
                 )];
             }
             if iq
@@ -416,22 +427,20 @@ pub async fn handle_iq_with_conn_state(
                 .as_ref()
                 .is_some_and(|target| target.to_bare().as_str() != domain)
             {
-                return vec![build_iq_error_xml_with_addresses(
+                return vec![build_iq_error_xml_typed(
                     &id,
                     response_from,
                     response_to,
-                    "cancel",
-                    "service-unavailable",
+                    service_unavailable_iq_error("Service unavailable at this address."),
                 )];
             }
         }
         let Some(full_jid) = phase.bound_jid() else {
-            return vec![build_iq_error_xml_with_addresses(
+            return vec![build_iq_error_xml_typed(
                 &id,
                 response_from,
                 response_to,
-                "auth",
-                "not-authorized",
+                not_authorized_iq_error("Authentication required."),
             )];
         };
         if let Some(enabled) = carbons_toggle {
@@ -529,7 +538,14 @@ pub async fn handle_iq_with_conn_state(
         let request_iq = &iq;
         let query = match parse_disco_info_query(request_iq) {
             Ok(query) => query,
-            Err(_) => return vec![build_iq_error_xml(&id, "modify", "bad-request")],
+            Err(_) => {
+                return vec![build_iq_error_xml_typed(
+                    &id,
+                    None,
+                    None,
+                    bad_request_iq_error("Malformed IQ payload."),
+                )]
+            }
         };
 
         if to.as_deref() == Some(muc_domain) {
@@ -557,12 +573,11 @@ pub async fn handle_iq_with_conn_state(
                                 error = ?error,
                                 "Failed to load room snapshot for disco#info"
                             );
-                            return vec![build_iq_error_xml_with_addresses(
+                            return vec![build_iq_error_xml_typed(
                                 &id,
                                 response_from,
                                 response_to,
-                                "wait",
-                                "internal-server-error",
+                                internal_server_error_iq_error("Internal server error."),
                             )];
                         }
                     };
@@ -710,12 +725,11 @@ pub async fn handle_iq_with_conn_state(
                         .into_iter()
                         .find(|(_, descriptor)| descriptor.node.as_str() == node)
                     else {
-                        return vec![build_iq_error_xml_with_addresses(
+                        return vec![build_iq_error_xml_typed(
                             &id,
                             response_from,
                             response_to,
-                            "cancel",
-                            "item-not-found",
+                            item_not_found_iq_error("Requested item not found."),
                         )];
                     };
                     let identities = vec![Identity::automation(Some(descriptor.name.as_str()))];
@@ -744,12 +758,11 @@ pub async fn handle_iq_with_conn_state(
                     .iter()
                     .find(|route| extension_route_disco_node(route) == node)
                 else {
-                    return vec![build_iq_error_xml_with_addresses(
+                    return vec![build_iq_error_xml_typed(
                         &id,
                         response_from,
                         response_to,
-                        "cancel",
-                        "item-not-found",
+                        item_not_found_iq_error("Requested item not found."),
                     )];
                 };
                 let identities = vec![Identity::new(
@@ -792,7 +805,12 @@ pub async fn handle_iq_with_conn_state(
         if to.as_deref() == Some(spaces_domain.as_str()) {
             if let Some(node) = query.node.as_deref() {
                 let Ok(spaces_jid) = spaces_service_bare_jid(&spaces_domain) else {
-                    return vec![build_iq_error_xml(&id, "wait", "internal-server-error")];
+                    return vec![build_iq_error_xml_typed(
+                        &id,
+                        None,
+                        None,
+                        internal_server_error_iq_error("Internal server error."),
+                    )];
                 };
                 let space_node = match state
                     .deps
@@ -802,10 +820,22 @@ pub async fn handle_iq_with_conn_state(
                     .await
                 {
                     Ok(Some(node)) => node,
-                    Ok(None) => return vec![build_iq_error_xml(&id, "cancel", "item-not-found")],
+                    Ok(None) => {
+                        return vec![build_iq_error_xml_typed(
+                            &id,
+                            None,
+                            None,
+                            item_not_found_iq_error("Requested item not found."),
+                        )]
+                    }
                     Err(error) => {
                         warn!(node, error = %error, "Failed to resolve Spaces node info");
-                        return vec![build_iq_error_xml(&id, "cancel", "item-not-found")];
+                        return vec![build_iq_error_xml_typed(
+                            &id,
+                            None,
+                            None,
+                            item_not_found_iq_error("Requested item not found."),
+                        )];
                     }
                 };
 
@@ -893,7 +923,14 @@ pub async fn handle_iq_with_conn_state(
         let request_iq = &iq;
         let query = match parse_disco_items_query(request_iq) {
             Ok(query) => query,
-            Err(_) => return vec![build_iq_error_xml(&id, "modify", "bad-request")],
+            Err(_) => {
+                return vec![build_iq_error_xml_typed(
+                    &id,
+                    None,
+                    None,
+                    bad_request_iq_error("Malformed IQ payload."),
+                )]
+            }
         };
 
         if to.as_deref() == Some(muc_domain) {
@@ -930,12 +967,11 @@ pub async fn handle_iq_with_conn_state(
                     .iter()
                     .any(|route| extension_route_disco_node(route) == node);
                 if !known_route_node {
-                    return vec![build_iq_error_xml_with_addresses(
+                    return vec![build_iq_error_xml_typed(
                         &id,
                         response_from,
                         response_to,
-                        "cancel",
-                        "item-not-found",
+                        item_not_found_iq_error("Requested item not found."),
                     )];
                 }
                 let response = build_disco_items_response(request_iq, &[], Some(node));
@@ -1035,43 +1071,39 @@ pub async fn handle_iq_with_conn_state(
     // 2) submitting an empty owner form (`jabber:x:data` type='submit')
     if payload_ns == "http://jabber.org/protocol/muc#owner" {
         let Some(target) = to.as_deref() else {
-            return vec![build_iq_error_xml_with_addresses(
+            return vec![build_iq_error_xml_typed(
                 &id,
                 response_from,
                 response_to,
-                "modify",
-                "bad-request",
+                bad_request_iq_error("Malformed IQ payload."),
             )];
         };
 
         let room_target = target.split('/').next().unwrap_or(target);
         let Ok(room_jid) = room_target.parse::<BareJid>() else {
-            return vec![build_iq_error_xml_with_addresses(
+            return vec![build_iq_error_xml_typed(
                 &id,
                 response_from,
                 response_to,
-                "modify",
-                "jid-malformed",
+                jid_malformed_iq_error("Malformed JID in IQ addressing."),
             )];
         };
 
         if !is_muc_room_jid(state, &room_jid).await {
-            return vec![build_iq_error_xml_with_addresses(
+            return vec![build_iq_error_xml_typed(
                 &id,
                 response_from,
                 response_to,
-                "cancel",
-                "item-not-found",
+                item_not_found_iq_error("Requested item not found."),
             )];
         }
 
         let Some(sender_jid) = phase.bound_jid() else {
-            return vec![build_iq_error_xml_with_addresses(
+            return vec![build_iq_error_xml_typed(
                 &id,
                 response_from,
                 response_to,
-                "auth",
-                "not-authorized",
+                not_authorized_iq_error("Authentication required."),
             )];
         };
         match muc_owner_authorized(state, &room_jid, sender_jid, authenticated_session.as_ref())
@@ -1079,12 +1111,11 @@ pub async fn handle_iq_with_conn_state(
         {
             Ok(true) => {}
             Ok(false) => {
-                return vec![build_iq_error_xml_with_addresses(
+                return vec![build_iq_error_xml_typed(
                     &id,
                     response_from,
                     response_to,
-                    "auth",
-                    "forbidden",
+                    forbidden_iq_error("Operation not permitted."),
                 )];
             }
             Err(error) => {
@@ -1093,12 +1124,11 @@ pub async fn handle_iq_with_conn_state(
                     error = %error,
                     "Failed to authorize MUC owner IQ"
                 );
-                return vec![build_iq_error_xml_with_addresses(
+                return vec![build_iq_error_xml_typed(
                     &id,
                     response_from,
                     response_to,
-                    "wait",
-                    "internal-server-error",
+                    internal_server_error_iq_error("Internal server error."),
                 )];
             }
         }
@@ -1115,12 +1145,11 @@ pub async fn handle_iq_with_conn_state(
                 )];
             }
 
-            return vec![build_iq_error_xml_with_addresses(
+            return vec![build_iq_error_xml_typed(
                 &id,
                 response_from,
                 response_to,
-                "cancel",
-                "item-not-found",
+                item_not_found_iq_error("Requested item not found."),
             )];
         }
 
@@ -1133,12 +1162,11 @@ pub async fn handle_iq_with_conn_state(
                         error = %error,
                         "Failed to build MUC owner config response"
                     );
-                    return vec![build_iq_error_xml_with_addresses(
+                    return vec![build_iq_error_xml_typed(
                         &id,
                         response_from,
                         response_to,
-                        "wait",
-                        "internal-server-error",
+                        internal_server_error_iq_error("Internal server error."),
                     )];
                 }
             }
@@ -1152,12 +1180,11 @@ pub async fn handle_iq_with_conn_state(
                 error = %error,
                 "Failed to apply MUC owner config"
             );
-            return vec![build_iq_error_xml_with_addresses(
+            return vec![build_iq_error_xml_typed(
                 &id,
                 response_from,
                 response_to,
-                "wait",
-                "internal-server-error",
+                internal_server_error_iq_error("Internal server error."),
             )];
         }
 
@@ -1173,30 +1200,27 @@ pub async fn handle_iq_with_conn_state(
 
     if let Some(request) = parse_moderation_iq(&iq) {
         let Some(sender_jid) = phase.bound_jid() else {
-            return vec![build_iq_error_xml_with_addresses(
+            return vec![build_iq_error_xml_typed(
                 &id,
                 response_from,
                 response_to,
-                "auth",
-                "not-authorized",
+                not_authorized_iq_error("Authentication required."),
             )];
         };
         let Some(room_jid) = iq.to.as_ref().map(|jid| jid.to_bare()) else {
-            return vec![build_iq_error_xml_with_addresses(
+            return vec![build_iq_error_xml_typed(
                 &id,
                 response_from,
                 response_to,
-                "modify",
-                "bad-request",
+                bad_request_iq_error("Malformed IQ payload."),
             )];
         };
         let Some(room_actor) = get_room_actor(state, &room_jid).await else {
-            return vec![build_iq_error_xml_with_addresses(
+            return vec![build_iq_error_xml_typed(
                 &id,
                 response_from,
                 response_to,
-                "cancel",
-                "item-not-found",
+                item_not_found_iq_error("Requested item not found."),
             )];
         };
         let context = match room_actor
@@ -1207,12 +1231,11 @@ pub async fn handle_iq_with_conn_state(
         {
             Ok(context) => context,
             Err(_) => {
-                return vec![build_iq_error_xml_with_addresses(
+                return vec![build_iq_error_xml_typed(
                     &id,
                     response_from,
                     response_to,
-                    "wait",
-                    "internal-server-error",
+                    internal_server_error_iq_error("Internal server error."),
                 )]
             }
         };
@@ -1223,12 +1246,11 @@ pub async fn handle_iq_with_conn_state(
         // entry; if an owner has explicitly taken a non-moderator role
         // (e.g. visitor), that signal is intentional and must be honoured.
         if !matches!(context.role, waddle_xmpp::Role::Moderator) {
-            return vec![build_iq_error_xml_with_addresses(
+            return vec![build_iq_error_xml_typed(
                 &id,
                 response_from,
                 response_to,
-                "auth",
-                "forbidden",
+                forbidden_iq_error("Operation not permitted."),
             )];
         }
         match state
@@ -1240,31 +1262,28 @@ pub async fn handle_iq_with_conn_state(
         {
             Ok(Some(message)) if message.to.to_string() == room_jid.to_string() => {}
             Ok(Some(_)) => {
-                return vec![build_iq_error_xml_with_addresses(
+                return vec![build_iq_error_xml_typed(
                     &id,
                     response_from,
                     response_to,
-                    "cancel",
-                    "item-not-found",
+                    item_not_found_iq_error("Requested item not found."),
                 )]
             }
             Ok(None) => {
-                return vec![build_iq_error_xml_with_addresses(
+                return vec![build_iq_error_xml_typed(
                     &id,
                     response_from,
                     response_to,
-                    "cancel",
-                    "item-not-found",
+                    item_not_found_iq_error("Requested item not found."),
                 )]
             }
             Err(error) => {
                 warn!(room = %room_jid, target = %request.target_id, error = %error, "Failed to look up moderation target");
-                return vec![build_iq_error_xml_with_addresses(
+                return vec![build_iq_error_xml_typed(
                     &id,
                     response_from,
                     response_to,
-                    "wait",
-                    "internal-server-error",
+                    internal_server_error_iq_error("Internal server error."),
                 )];
             }
         }
@@ -1459,12 +1478,22 @@ pub async fn handle_iq_with_conn_state(
     if is_mam_query(&iq) {
         let request_iq = &iq;
         let Some(target) = request_iq.to.as_ref().map(|jid| jid.to_string()) else {
-            return vec![build_iq_error_xml(&id, "modify", "bad-request")];
+            return vec![build_iq_error_xml_typed(
+                &id,
+                None,
+                None,
+                bad_request_iq_error("Malformed IQ payload."),
+            )];
         };
 
         let room_target = target.split('/').next().unwrap_or(target.as_str());
         let Ok(target_bare) = room_target.parse::<BareJid>() else {
-            return vec![build_iq_error_xml(&id, "modify", "jid-malformed")];
+            return vec![build_iq_error_xml_typed(
+                &id,
+                None,
+                None,
+                jid_malformed_iq_error("Malformed JID in IQ addressing."),
+            )];
         };
 
         // Determine whether this is a personal archive query (to=self) or a
@@ -1477,7 +1506,12 @@ pub async fn handle_iq_with_conn_state(
             .is_some_and(|bare| *bare == target_bare);
 
         if !is_personal && !is_muc_room_jid(state, &target_bare).await {
-            return vec![build_iq_error_xml(&id, "cancel", "item-not-found")];
+            return vec![build_iq_error_xml_typed(
+                &id,
+                None,
+                None,
+                item_not_found_iq_error("Requested item not found."),
+            )];
         }
 
         if is_mam_query_form_request(request_iq) {
@@ -1489,9 +1523,19 @@ pub async fn handle_iq_with_conn_state(
             Err(err) => {
                 warn!(error = %err, target = %target_bare, "Invalid MAM query");
                 if matches!(err, waddle_xmpp::CoreError::NotImplemented) {
-                    return vec![build_iq_error_xml(&id, "cancel", "feature-not-implemented")];
+                    return vec![build_iq_error_xml_typed(
+                        &id,
+                        None,
+                        None,
+                        feature_not_implemented_iq_error("Requested feature not implemented."),
+                    )];
                 }
-                return vec![build_iq_error_xml(&id, "modify", "bad-request")];
+                return vec![build_iq_error_xml_typed(
+                    &id,
+                    None,
+                    None,
+                    bad_request_iq_error("Malformed IQ payload."),
+                )];
             }
         };
 
@@ -1504,11 +1548,21 @@ pub async fn handle_iq_with_conn_state(
         {
             Ok(result) => result,
             Err(waddle_xmpp::mam::MamStorageError::NotFound(_)) => {
-                return vec![build_iq_error_xml(&id, "cancel", "item-not-found")];
+                return vec![build_iq_error_xml_typed(
+                    &id,
+                    None,
+                    None,
+                    item_not_found_iq_error("Requested item not found."),
+                )];
             }
             Err(err) => {
                 warn!(error = %err, target = %target_bare, "MAM query failed");
-                return vec![build_iq_error_xml(&id, "wait", "internal-server-error")];
+                return vec![build_iq_error_xml_typed(
+                    &id,
+                    None,
+                    None,
+                    internal_server_error_iq_error("Internal server error."),
+                )];
             }
         };
 
@@ -1535,7 +1589,12 @@ pub async fn handle_iq_with_conn_state(
             .clone()
             .or_else(|| phase.bound_jid().cloned().map(jid::Jid::from))
         else {
-            return vec![build_iq_error_xml(&id, "modify", "bad-request")];
+            return vec![build_iq_error_xml_typed(
+                &id,
+                None,
+                None,
+                bad_request_iq_error("Malformed IQ payload."),
+            )];
         };
 
         let mut responses: Vec<String> =
@@ -1550,7 +1609,12 @@ pub async fn handle_iq_with_conn_state(
     if is_inbox_iq(&iq) {
         let request_iq = &iq;
         let Some(user_jid) = phase.bound_jid().map(|jid| jid.to_bare()) else {
-            return vec![build_iq_error_xml(&id, "auth", "not-authorized")];
+            return vec![build_iq_error_xml_typed(
+                &id,
+                None,
+                None,
+                not_authorized_iq_error("Authentication required."),
+            )];
         };
 
         match &request_iq.payload {
@@ -1559,7 +1623,12 @@ pub async fn handle_iq_with_conn_state(
                     Ok(query) => query,
                     Err(error) => {
                         warn!(error = %error, "Invalid inbox query");
-                        return vec![build_iq_error_xml(&id, "modify", "bad-request")];
+                        return vec![build_iq_error_xml_typed(
+                            &id,
+                            None,
+                            None,
+                            bad_request_iq_error("Malformed IQ payload."),
+                        )];
                     }
                 };
                 let entries = if query.threads {
@@ -1574,22 +1643,33 @@ pub async fn handle_iq_with_conn_state(
                             Ok(entries) => entries,
                             Err(error) => {
                                 warn!(error = %error, jid = %user_jid, "Failed to list thread inbox");
-                                return vec![build_iq_error_xml(
+                                return vec![build_iq_error_xml_typed(
                                     &id,
-                                    "wait",
-                                    "internal-server-error",
+                                    None,
+                                    None,
+                                    internal_server_error_iq_error("Internal server error."),
                                 )];
                             }
                         }
                     } else {
-                        return vec![build_iq_error_xml(&id, "modify", "bad-request")];
+                        return vec![build_iq_error_xml_typed(
+                            &id,
+                            None,
+                            None,
+                            bad_request_iq_error("Malformed IQ payload."),
+                        )];
                     }
                 } else {
                     match state.deps.protocol.inbox_storage.list(&user_jid).await {
                         Ok(entries) => entries,
                         Err(error) => {
                             warn!(error = %error, jid = %user_jid, "Failed to list inbox");
-                            return vec![build_iq_error_xml(&id, "wait", "internal-server-error")];
+                            return vec![build_iq_error_xml_typed(
+                                &id,
+                                None,
+                                None,
+                                internal_server_error_iq_error("Internal server error."),
+                            )];
                         }
                     }
                 };
@@ -1603,7 +1683,12 @@ pub async fn handle_iq_with_conn_state(
                     Ok(total_unread) => total_unread,
                     Err(error) => {
                         warn!(error = %error, jid = %user_jid, "Failed to count inbox unread");
-                        return vec![build_iq_error_xml(&id, "wait", "internal-server-error")];
+                        return vec![build_iq_error_xml_typed(
+                            &id,
+                            None,
+                            None,
+                            internal_server_error_iq_error("Internal server error."),
+                        )];
                     }
                 };
                 let response = build_inbox_query_result(
@@ -1618,7 +1703,12 @@ pub async fn handle_iq_with_conn_state(
                     Ok(mark_read) => mark_read,
                     Err(error) => {
                         warn!(error = %error, "Invalid inbox mark-read");
-                        return vec![build_iq_error_xml(&id, "modify", "bad-request")];
+                        return vec![build_iq_error_xml_typed(
+                            &id,
+                            None,
+                            None,
+                            bad_request_iq_error("Malformed IQ payload."),
+                        )];
                     }
                 };
                 if let Err(error) = state
@@ -1633,11 +1723,23 @@ pub async fn handle_iq_with_conn_state(
                     .await
                 {
                     warn!(error = %error, jid = %user_jid, partner = %mark_read.partner, "Failed to mark inbox read");
-                    return vec![build_iq_error_xml(&id, "wait", "internal-server-error")];
+                    return vec![build_iq_error_xml_typed(
+                        &id,
+                        None,
+                        None,
+                        internal_server_error_iq_error("Internal server error."),
+                    )];
                 }
                 return vec![iq_to_xml(build_mark_read_result(request_iq))];
             }
-            _ => return vec![build_iq_error_xml(&id, "modify", "bad-request")],
+            _ => {
+                return vec![build_iq_error_xml_typed(
+                    &id,
+                    None,
+                    None,
+                    bad_request_iq_error("Malformed IQ payload."),
+                )]
+            }
         }
     }
 
@@ -1649,7 +1751,12 @@ pub async fn handle_iq_with_conn_state(
         let request_iq = &iq;
         if is_upload_request(request_iq) {
             let Some(sender_jid) = phase.bound_jid() else {
-                return vec![build_iq_error_xml(&id, "auth", "not-authorized")];
+                return vec![build_iq_error_xml_typed(
+                    &id,
+                    None,
+                    None,
+                    not_authorized_iq_error("Authentication required."),
+                )];
             };
             let request = match parse_upload_request(request_iq) {
                 Ok(req) => req,
@@ -1728,22 +1835,20 @@ pub async fn handle_iq_with_conn_state(
     // PubSub / PEP (XEP-0060, XEP-0163)
     if is_pubsub_iq(&iq) {
         if !phase.is_ready() {
-            return vec![build_iq_error_xml_with_addresses(
+            return vec![build_iq_error_xml_typed(
                 &id,
                 response_from,
                 response_to,
-                "auth",
-                "not-authorized",
+                not_authorized_iq_error("Authentication required."),
             )];
         }
 
         let Some(user_jid) = phase.bound_jid().map(|jid| jid.to_bare()) else {
-            return vec![build_iq_error_xml_with_addresses(
+            return vec![build_iq_error_xml_typed(
                 &id,
                 response_from,
                 response_to,
-                "auth",
-                "not-authorized",
+                not_authorized_iq_error("Authentication required."),
             )];
         };
 
@@ -2375,12 +2480,11 @@ pub async fn handle_iq_with_conn_state(
     // Unknown IQ - log a compact summary and return an error.
     let payload_ns = (!payload_ns.is_empty()).then_some(payload_ns.as_str());
     warn!(id = %id, payload_ns, "Unhandled IQ stanza");
-    vec![build_iq_error_xml_with_addresses(
+    vec![build_iq_error_xml_typed(
         &id,
         response_from,
         response_to,
-        "cancel",
-        "feature-not-implemented",
+        feature_not_implemented_iq_error("Requested feature not implemented."),
     )]
 }
 
@@ -2393,12 +2497,11 @@ async fn handle_last_activity_iq(
     response_to: Option<&str>,
 ) -> Vec<String> {
     let Some(sender_jid) = sender_jid else {
-        return vec![build_iq_error_xml_with_addresses(
+        return vec![build_iq_error_xml_typed(
             &iq.id,
             response_from,
             response_to,
-            "auth",
-            "not-authorized",
+            not_authorized_iq_error("Authentication required."),
         )];
     };
 
@@ -2443,12 +2546,11 @@ async fn handle_last_activity_iq(
             Ok(db) => db,
             Err(error) => {
                 warn!(error = %error, "Failed to access database for last-activity block check");
-                return vec![build_iq_error_xml_with_addresses(
+                return vec![build_iq_error_xml_typed(
                     &iq.id,
                     response_from,
                     response_to,
-                    "wait",
-                    "internal-server-error",
+                    internal_server_error_iq_error("Internal server error."),
                 )];
             }
         };
@@ -2458,23 +2560,21 @@ async fn handle_last_activity_iq(
             .await
         {
             Ok(true) => {
-                return vec![build_iq_error_xml_with_addresses(
+                return vec![build_iq_error_xml_typed(
                     &iq.id,
                     response_from,
                     response_to,
-                    "cancel",
-                    "service-unavailable",
+                    service_unavailable_iq_error("Service unavailable at this address."),
                 )];
             }
             Ok(false) => {}
             Err(error) => {
                 warn!(error = %error, target = %target_bare, "Failed to check last-activity block state");
-                return vec![build_iq_error_xml_with_addresses(
+                return vec![build_iq_error_xml_typed(
                     &iq.id,
                     response_from,
                     response_to,
-                    "wait",
-                    "internal-server-error",
+                    internal_server_error_iq_error("Internal server error."),
                 )];
             }
         }
@@ -2505,54 +2605,49 @@ async fn handle_last_activity_iq(
         }
 
         let Some(node) = target_bare.node() else {
-            return vec![build_iq_error_xml_with_addresses(
+            return vec![build_iq_error_xml_typed(
                 &iq.id,
                 response_from,
                 response_to,
-                "cancel",
-                "service-unavailable",
+                service_unavailable_iq_error("Service unavailable at this address."),
             )];
         };
         let native_user_store =
             NativeUserStore::new(state.deps.app_state.db_pool.global_actor().clone());
         match native_user_store.user_exists(node.as_str(), domain).await {
             Ok(false) => {
-                return vec![build_iq_error_xml_with_addresses(
+                return vec![build_iq_error_xml_typed(
                     &iq.id,
                     response_from,
                     response_to,
-                    "cancel",
-                    "service-unavailable",
+                    service_unavailable_iq_error("Service unavailable at this address."),
                 )];
             }
             Ok(true) => {
-                return vec![build_iq_error_xml_with_addresses(
+                return vec![build_iq_error_xml_typed(
                     &iq.id,
                     response_from,
                     response_to,
-                    "auth",
-                    "forbidden",
+                    forbidden_iq_error("Operation not permitted."),
                 )];
             }
             Err(error) => {
                 warn!(error = %error, target = %target_bare, "Failed to check local user for last-activity query");
-                return vec![build_iq_error_xml_with_addresses(
+                return vec![build_iq_error_xml_typed(
                     &iq.id,
                     response_from,
                     response_to,
-                    "wait",
-                    "internal-server-error",
+                    internal_server_error_iq_error("Internal server error."),
                 )];
             }
         }
     }
 
-    vec![build_iq_error_xml_with_addresses(
+    vec![build_iq_error_xml_typed(
         &iq.id,
         response_from,
         response_to,
-        "cancel",
-        "service-unavailable",
+        service_unavailable_iq_error("Service unavailable at this address."),
     )]
 }
 

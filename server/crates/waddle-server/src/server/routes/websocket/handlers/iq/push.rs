@@ -8,24 +8,22 @@ pub(super) async fn handle_push_iq(
     response_to: Option<&str>,
 ) -> Vec<String> {
     let Some(sender_jid) = sender_jid else {
-        return vec![build_iq_error_xml_with_addresses(
+        return vec![build_iq_error_xml_typed(
             &iq.id,
             response_from,
             response_to,
-            "auth",
-            "not-authorized",
+            not_authorized_iq_error("Authentication required."),
         )];
     };
     let bare_jid = sender_jid.to_bare().to_string();
 
     if is_push_enable(iq) {
         let Some(enable) = parse_push_enable(iq) else {
-            return vec![build_iq_error_xml_with_addresses(
+            return vec![build_iq_error_xml_typed(
                 &iq.id,
                 response_from,
                 response_to,
-                "modify",
-                "bad-request",
+                bad_request_iq_error("Malformed IQ payload."),
             )];
         };
         let endpoint = enable
@@ -48,12 +46,11 @@ pub(super) async fn handle_push_iq(
             || p256dh.is_none()
             || auth_key.is_none()
         {
-            return vec![build_iq_error_xml_with_addresses(
+            return vec![build_iq_error_xml_typed(
                 &iq.id,
                 response_from,
                 response_to,
-                "modify",
-                "bad-request",
+                bad_request_iq_error("Malformed IQ payload."),
             )];
         }
 
@@ -67,24 +64,22 @@ pub(super) async fn handle_push_iq(
         };
         if let Err(error) = state.deps.protocol.push_store.register(subscription).await {
             warn!(user = %bare_jid, error = %error, "Failed to register push subscription");
-            return vec![build_iq_error_xml_with_addresses(
+            return vec![build_iq_error_xml_typed(
                 &iq.id,
                 response_from,
                 response_to,
-                "wait",
-                "internal-server-error",
+                internal_server_error_iq_error("Internal server error."),
             )];
         }
         return vec![iq_to_xml(build_push_enable_result(iq))];
     }
 
     let Some(disable) = parse_push_disable(iq) else {
-        return vec![build_iq_error_xml_with_addresses(
+        return vec![build_iq_error_xml_typed(
             &iq.id,
             response_from,
             response_to,
-            "modify",
-            "bad-request",
+            bad_request_iq_error("Malformed IQ payload."),
         )];
     };
     if let Err(error) = state
@@ -95,12 +90,11 @@ pub(super) async fn handle_push_iq(
         .await
     {
         warn!(user = %bare_jid, error = %error, "Failed to remove push subscription");
-        return vec![build_iq_error_xml_with_addresses(
+        return vec![build_iq_error_xml_typed(
             &iq.id,
             response_from,
             response_to,
-            "wait",
-            "internal-server-error",
+            internal_server_error_iq_error("Internal server error."),
         )];
     }
     vec![iq_to_xml(build_push_disable_result(iq))]
