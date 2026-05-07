@@ -192,3 +192,72 @@ async fn reaction_routes_and_replays_from_mam() {
 
     client.close().await;
 }
+
+/// Reproducer for the user-reported "reactions don't survive a page
+/// reload" bug. The matching `reaction_routes_and_replays_from_mam`
+/// test above runs against `sqlite::memory:`; this variant points the
+/// MAM store at a real on-disk SQLite file so the round-trip exercises
+/// the same backend the production deployment uses. If the bug is
+/// in-memory-only (e.g. a write that silently degrades on a real
+/// backend) this catches it.
+#[tokio::test]
+async fn reaction_routes_and_replays_from_persistent_sqlite_mam() {
+    let _guard = TEST_SERIAL.lock().await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mam_db = dir.path().join("mam.sqlite");
+    let mam_url = format!("sqlite://{}?mode=rwc", mam_db.display());
+    let server = ws_common::TestServer::start_with_persistent_mam(&mam_url);
+    let password = server.fixed_account_password().to_string();
+    let mut client = connect(&server, USERNAME, &password, "xep0444-persist").await;
+
+    let room = format!("react-persist-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
+    join_room(&mut client, &room).await;
+
+    client
+        .send(&format!(
+            r#"<message type="groupchat" to="{room}" id="orig-persist-1"><body>react here persistently</body></message>"#
+        ))
+        .await
+        .expect("send original");
+    let target = stanza_id(
+        &client
+            .recv_matching(|frame| frame.contains("react here persistently"))
+            .await
+            .expect("original echo"),
+    );
+
+    client
+        .send(&format!(
+            r#"<message type="groupchat" to="{room}" id="reaction-persist-1">
+                <reactions xmlns="urn:xmpp:reactions:0" id="{target}">
+                    <reaction>👍</reaction>
+                </reactions>
+            </message>"#
+        ))
+        .await
+        .expect("send reaction");
+    let echo = client
+        .recv_matching(|frame| frame.contains("urn:xmpp:reactions:0"))
+        .await
+        .expect("reaction echo");
+    assert!(echo.contains(&target), "missing reaction target: {echo}");
+
+    client
+        .send(&format!(
+            r#"<iq type="set" id="mam-react-persist" to="{room}"><query xmlns="urn:xmpp:mam:2"/></iq>"#
+        ))
+        .await
+        .expect("send MAM");
+    let frames = client
+        .recv_until(|frame| frame.contains("mam-react-persist") && frame.contains("<fin"))
+        .await
+        .expect("MAM frames");
+    assert!(
+        frames
+            .iter()
+            .any(|frame| frame.contains("urn:xmpp:reactions:0") && frame.contains(&target)),
+        "persistent-SQLite MAM did not replay reaction: {frames:?}"
+    );
+
+    client.close().await;
+}

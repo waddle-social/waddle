@@ -358,6 +358,16 @@ function react(emoji: string) {
   closeSheet();
 }
 
+const reactionListFormatter = new Intl.ListFormat(undefined, { style: "long", type: "conjunction" });
+
+function formatReactors(nicks: readonly string[]): string {
+  return reactionListFormatter.format([...nicks]);
+}
+
+function reactionAriaLabel(emoji: string, nicks: readonly string[]): string {
+  return `${formatReactors(nicks)} reacted with ${emoji}`;
+}
+
 function startReplyFromMenu() {
   emit("reply", props.message);
   closePicker(true);
@@ -389,34 +399,23 @@ function onBubbleContextMenu(event: MouseEvent) {
   if (longPress.isPressing.value) event.preventDefault();
 }
 
-function onWindowPointerDown(event: PointerEvent) {
-  if (sheetOpen.value) return;
-  if (!bubbleEl.value) return;
-  const target = event.target as Node | null;
-  if (target && bubbleEl.value.contains(target)) return;
-  closePicker(true);
-}
-
 function onWindowKeydown(event: KeyboardEvent) {
   if (event.key !== "Escape") return;
   if (sheetOpen.value) closeSheet();
   else closePicker(true);
 }
 
-// Only listen globally while an overlay is actually open. Otherwise every
-// MessageCard in a long timeline would attach its own capture-phase handler
-// and run on every pointerdown anywhere on the page.
+// Only listen globally while an overlay is actually open so a long timeline
+// does not attach a handler per card. Outside-click closing for the picker is
+// owned by EmojiPicker itself (its panel is teleported to <body>, so a
+// bubble-relative check here would close it on every in-panel click); the
+// action sheet uses a backdrop. We only handle Escape here.
 watch(
   anyOverlayOpen,
   (open) => {
     if (typeof window === "undefined") return;
-    if (open) {
-      window.addEventListener("pointerdown", onWindowPointerDown, true);
-      window.addEventListener("keydown", onWindowKeydown);
-    } else {
-      window.removeEventListener("pointerdown", onWindowPointerDown, true);
-      window.removeEventListener("keydown", onWindowKeydown);
-    }
+    if (open) window.addEventListener("keydown", onWindowKeydown);
+    else window.removeEventListener("keydown", onWindowKeydown);
   },
 );
 
@@ -435,7 +434,6 @@ onBeforeUnmount(() => {
 onBeforeUnmount(() => {
   cleanupAttachments();
   if (typeof window === "undefined") return;
-  window.removeEventListener("pointerdown", onWindowPointerDown, true);
   window.removeEventListener("keydown", onWindowKeydown);
 });
 
@@ -975,12 +973,21 @@ watch(
         v-for="(nicks, emoji) in message.reactions"
         :key="emoji"
         type="button"
-        class="type-caption inline-flex h-7 items-center gap-1 px-2 rounded-lg bg-muted/60 hover:bg-muted transition-all duration-200"
-        :title="nicks.join(', ')"
+        class="chat-reaction-chip group/reaction relative type-caption inline-flex h-7 items-center gap-1 px-2 rounded-lg bg-muted/60 hover:bg-muted transition-all duration-200"
+        :aria-label="reactionAriaLabel(emoji, nicks)"
         @click="emit('react', message.id, emoji)"
       >
         <span>{{ emoji }}</span>
         <span class="type-meta type-numeric text-muted-foreground">{{ nicks.length }}</span>
+        <span
+          aria-hidden="true"
+          class="chat-reaction-tooltip pointer-events-none absolute bottom-full left-1/2 z-popover mb-1 hidden -translate-x-1/2 max-w-xs rounded-md border border-border bg-popover px-2 py-1.5 text-popover-foreground shadow-md group-hover/reaction:flex group-focus-visible/reaction:flex flex-col items-center gap-0.5"
+        >
+          <span class="text-lg leading-none" aria-hidden="true">{{ emoji }}</span>
+          <span class="type-meta text-center text-muted-foreground">
+            {{ formatReactors(nicks) }}
+          </span>
+        </span>
       </button>
     </div>
 

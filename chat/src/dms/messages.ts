@@ -751,15 +751,26 @@ export function useDirectMessages(
     const targetId = msg?.id ?? messageId;
     const myNick = session.value.username;
     const currentReactions = msg?.reactions ?? {};
-    const myEmojis = new Set<string>();
+    const previousEmojis: string[] = [];
     for (const [e, nicks] of Object.entries(currentReactions)) {
-      if (nicks.includes(myNick)) myEmojis.add(e);
+      if (nicks.includes(myNick)) previousEmojis.push(e);
     }
+    const myEmojis = new Set(previousEmojis);
     if (myEmojis.has(emoji)) myEmojis.delete(emoji);
     else myEmojis.add(emoji);
+
+    const nextEmojis = [...myEmojis];
+    // Optimistic local update: the sender device never receives an XEP-0280
+    // carbon of its own send, so without this the reaction stays invisible
+    // to its author until the next MAM reload.
+    applyReaction(targetId, myNick, nextEmojis);
+
     try {
-      await xmppClient.value.sendDmReaction(activePeerJid.value, targetId, [...myEmojis]);
+      await xmppClient.value.sendDmReaction(activePeerJid.value, targetId, nextEmojis);
     } catch (e) {
+      // Roll back the optimistic update — no echo or carbon will arrive
+      // to reconcile a failed send.
+      applyReaction(targetId, myNick, previousEmojis);
       actionError.value = normalizeError(e);
     }
   }
@@ -934,7 +945,11 @@ export function useDirectMessages(
 
   function onReaction(event: DmReactionEvent) {
     if (!activePeerJid.value || event.peerJid !== activePeerJid.value) return;
-    applyReaction(event.messageId, peerNameFromJid(event.peerJid), event.emojis);
+    // Attribute the reaction to whoever sent the stanza, not the
+    // conversation key. For self-sent carbon-forwarded reactions
+    // `peerJid` is normalized to the recipient, so deriving the nick
+    // from `peerJid` would wrongly credit the partner.
+    applyReaction(event.messageId, peerNameFromJid(event.reactorJid), event.emojis);
   }
 
   watch(scrollDirection, () => {

@@ -2710,6 +2710,152 @@ mod tests {
         }
     }
 
+    /// Reproducer for "reactions don't survive a page reload".
+    ///
+    /// A body-less reaction stanza must round-trip through `MamStorage`
+    /// with its `<reactions/>` payload intact: the rich-payload column
+    /// is the only place the target id and emoji set live for a
+    /// reaction-only row, so dropping it on read or write would
+    /// invisibly delete every reaction from the archive.
+    ///
+    /// Two separate cases on purpose: in-memory SQLite (what the
+    /// existing test suite uses) and a persistent SQLite file (closer
+    /// to production). If the persistent variant fails while the
+    /// in-memory one passes, the bug is backend-specific.
+    #[tokio::test]
+    async fn reaction_round_trips_through_in_memory_storage() {
+        let storage = create_test_storage().await;
+        let archive = bare("room@conference.example.com");
+        let archive_jid = jid("room@conference.example.com");
+
+        let target_id = waddle_xmpp_core::mam::RichMessageId::new("room-stanza-original")
+            .expect("non-empty target id");
+        let thumbs_up =
+            waddle_xmpp_core::mam::RichText::new("👍").expect("non-empty emoji literal");
+        let reactions = waddle_xmpp_core::mam::ArchivedReactionSet {
+            target_id: target_id.clone(),
+            emojis: vec![thumbs_up.clone()],
+        };
+        let msg = ArchivedMessage {
+            stanza_id: Some(waddle_xmpp_core::xep0359::StanzaId::new(
+                "room-stanza-reaction",
+                archive_jid.clone(),
+            )),
+            message_type: xmpp_parsers::message::MessageType::Groupchat,
+            rich: Some(waddle_xmpp_core::mam::ArchivedRichMessage {
+                payload: Some(waddle_xmpp_core::mam::ArchivedRichPayload::Reactions(
+                    reactions.clone(),
+                )),
+                ..Default::default()
+            }),
+            ..ArchivedMessage::for_test(archive_alice(&archive), archive_jid.clone())
+        };
+
+        storage.store_message(&archive, &msg).await.expect("store");
+
+        let result = storage
+            .query_messages(&archive, &MamQuery::default())
+            .await
+            .expect("query");
+
+        assert_eq!(
+            result.messages.len(),
+            1,
+            "reaction-only row must survive MAM query: {:?}",
+            result
+        );
+        let archived = &result.messages[0];
+        assert!(
+            archived.body.is_none(),
+            "reaction-only row must have no body: body={:?}",
+            archived.body
+        );
+        let rich = archived.rich.as_ref().expect("rich payload survives");
+        match rich.payload.as_ref() {
+            Some(waddle_xmpp_core::mam::ArchivedRichPayload::Reactions(set)) => {
+                assert_eq!(set.target_id.as_str(), "room-stanza-original");
+                assert_eq!(
+                    set.emojis.iter().map(|e| e.as_str()).collect::<Vec<_>>(),
+                    vec!["👍"]
+                );
+            }
+            other => panic!("expected Reactions rich payload, got {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reaction_round_trips_through_persistent_sqlite() {
+        let artifacts = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/test-artifacts");
+        std::fs::create_dir_all(&artifacts).expect("artifacts dir");
+        let path = artifacts.join(format!("mam-reaction-{}.db", uuid::Uuid::new_v4()));
+        let database_url = format!("sqlite://{}", path.display());
+        let archive = bare("room@conference.example.com");
+        let archive_jid = jid("room@conference.example.com");
+
+        let target_id = waddle_xmpp_core::mam::RichMessageId::new("room-stanza-original")
+            .expect("non-empty target id");
+        let thumbs_up =
+            waddle_xmpp_core::mam::RichText::new("👍").expect("non-empty emoji literal");
+
+        {
+            let storage = SqlxMamStorage::open(&database_url).await.expect("storage");
+            let msg = ArchivedMessage {
+                stanza_id: Some(waddle_xmpp_core::xep0359::StanzaId::new(
+                    "room-stanza-reaction",
+                    archive_jid.clone(),
+                )),
+                message_type: xmpp_parsers::message::MessageType::Groupchat,
+                rich: Some(waddle_xmpp_core::mam::ArchivedRichMessage {
+                    payload: Some(waddle_xmpp_core::mam::ArchivedRichPayload::Reactions(
+                        waddle_xmpp_core::mam::ArchivedReactionSet {
+                            target_id: target_id.clone(),
+                            emojis: vec![thumbs_up.clone()],
+                        },
+                    )),
+                    ..Default::default()
+                }),
+                ..ArchivedMessage::for_test(archive_alice(&archive), archive_jid.clone())
+            };
+            storage.store_message(&archive, &msg).await.expect("store");
+        }
+
+        let reopened = SqlxMamStorage::open(&database_url).await.expect("reopen");
+        let result = reopened
+            .query_messages(&archive, &MamQuery::default())
+            .await
+            .expect("query");
+
+        assert_eq!(
+            result.messages.len(),
+            1,
+            "reaction-only row must survive MAM round-trip on persistent SQLite: {:?}",
+            result
+        );
+        let archived = &result.messages[0];
+        let rich = archived
+            .rich
+            .as_ref()
+            .expect("rich payload survives a reopen");
+        match rich.payload.as_ref() {
+            Some(waddle_xmpp_core::mam::ArchivedRichPayload::Reactions(set)) => {
+                assert_eq!(set.target_id.as_str(), "room-stanza-original");
+                assert_eq!(
+                    set.emojis.iter().map(|e| e.as_str()).collect::<Vec<_>>(),
+                    vec!["👍"]
+                );
+            }
+            other => panic!("expected Reactions rich payload, got {other:?}"),
+        }
+
+        for cleanup in [
+            path.clone(),
+            PathBuf::from(format!("{}-shm", path.display())),
+            PathBuf::from(format!("{}-wal", path.display())),
+        ] {
+            let _ = std::fs::remove_file(cleanup);
+        }
+    }
+
     // XEP-0059 §2.5: an empty <before/> element requests the last page of
     // results. Regression test for a bug where `before_id = Some("")` was
     // collapsed to "no pagination" and the query returned the *first* page

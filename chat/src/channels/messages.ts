@@ -1318,34 +1318,39 @@ export function useChannelMessages(
     if (!xmppClient.value || !activeChannelId.value || !session.value)
       return;
 
-    // Compute the new reaction set for this user
     const msg = findMessageById(messages.value, messageId);
     const targetId = msg?.reactionTargetId;
     if (!targetId) return;
     const myNick = session.value.username;
     const currentReactions = msg?.reactions ?? {};
 
-    // Gather all emojis this user currently has on this message
-    const myEmojis = new Set<string>();
+    const previousEmojis: string[] = [];
     for (const [e, nicks] of Object.entries(currentReactions)) {
-      if (nicks.includes(myNick)) myEmojis.add(e);
+      if (nicks.includes(myNick)) previousEmojis.push(e);
     }
+    const myEmojis = new Set(previousEmojis);
 
-    // Toggle the emoji
-    if (myEmojis.has(emoji)) {
-      myEmojis.delete(emoji);
-    } else {
-      myEmojis.add(emoji);
-    }
+    if (myEmojis.has(emoji)) myEmojis.delete(emoji);
+    else myEmojis.add(emoji);
+
+    const nextEmojis = [...myEmojis];
+    const senderId = currentRoomJid.value
+      ? `${currentRoomJid.value}/${myNick}`
+      : myNick;
+    applyReaction(targetId, myNick, nextEmojis, senderId);
 
     try {
       await xmppClient.value.sendReaction(
         activeSpaceId.value ?? "",
         activeChannelId.value,
         targetId,
-        [...myEmojis],
+        nextEmojis,
       );
     } catch (e) {
+      // Roll back the optimistic update so the chip stops claiming a
+      // reaction the server never accepted (no echo will arrive to
+      // reconcile it).
+      applyReaction(targetId, myNick, previousEmojis, senderId);
       actionError.value = normalizeError(e);
     }
   }
