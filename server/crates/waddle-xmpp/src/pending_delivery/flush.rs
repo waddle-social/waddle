@@ -65,6 +65,33 @@ impl MaterializedPayload {
     }
 }
 
+/// Reason text to attach to the `<delay/>` element added by
+/// [`build_replay_stanza`].
+///
+/// XEP-0203 §4.2 makes the element text purely informational; the
+/// authoritative delivery-history signal is the `from` + `stamp`
+/// attribute pair. The reason therefore varies by replay path so
+/// clients/operators surfacing the description aren't told the wrong
+/// story (issue #209 finding #4).
+#[derive(Debug, Clone, Copy)]
+pub enum ReplayReason {
+    /// Replay from XEP-0160 `pending_delivery` storage (offline hold).
+    OfflineStorage,
+    /// XEP-0198 SM-expiry redelivery to an alternate live resource.
+    /// The stanza was never persisted offline; only the timestamp is
+    /// late, so no human-readable reason is attached.
+    SmRedelivery,
+}
+
+impl ReplayReason {
+    fn description(self) -> Option<&'static str> {
+        match self {
+            Self::OfflineStorage => Some("Offline Storage"),
+            Self::SmRedelivery => None,
+        }
+    }
+}
+
 /// Build the `<message>` stanza to send to a recovering resource
 /// (locked Q5).
 ///
@@ -77,6 +104,11 @@ impl MaterializedPayload {
 /// is what XEP-0203 §4.2 + XEP-0198 §5 line 364 require on the
 /// `<delay/>` stamp.
 ///
+/// `reason` selects the optional human-readable description carried
+/// by the `<delay/>` element. SM-expiry redelivery uses
+/// [`ReplayReason::SmRedelivery`] to avoid mislabeling the path as
+/// offline-storage replay (issue #209 finding #4).
+///
 /// The function preserves all sender-set children. It does NOT add a
 /// `<stanza-id/>` here; for `Archived` rows the stamp lives in the
 /// MAM payload already and is preserved by `MaterializedPayload`, and
@@ -85,6 +117,7 @@ pub fn build_replay_stanza(
     payload: MaterializedPayload,
     server_domain: &str,
     original_receipt_at: DateTime<Utc>,
+    reason: ReplayReason,
 ) -> Message {
     let mut message = *payload.into_message();
     // Strip ONLY any pre-existing `<delay/>` whose `from` attribute
@@ -106,7 +139,7 @@ pub fn build_replay_stanza(
     message.payloads.push(build_offline_delay(
         server_domain,
         original_receipt_at,
-        Some("Offline Storage"),
+        reason.description(),
     ));
     message
 }
@@ -189,7 +222,12 @@ mod tests {
         let row = transient_row("alice@example.com", "off the record");
         let payload =
             MaterializedPayload::from_transient(&row).expect("transient row materializes");
-        let replayed = build_replay_stanza(payload, "example.com", row.original_receipt_at);
+        let replayed = build_replay_stanza(
+            payload,
+            "example.com",
+            row.original_receipt_at,
+            ReplayReason::OfflineStorage,
+        );
         let delay = delay_element(&replayed).expect("delay element appended");
         assert_eq!(delay.attr("from"), Some("example.com"));
         // ISO-8601 stamp matches the original receipt time, not "now".
@@ -204,10 +242,43 @@ mod tests {
     }
 
     #[test]
+    fn replay_stanza_sm_redelivery_omits_offline_storage_reason_text() {
+        // SM-expiry redelivery never persisted the stanza offline; the
+        // load-bearing signal is the typed `from`+`stamp` pair, not the
+        // optional human-readable description (XEP-0203 §4.2). Issue
+        // #209 finding #4 — clients/operators surfacing the description
+        // were told the wrong story when SM redelivery reused the
+        // offline-flush builder verbatim.
+        let row = transient_row("alice@example.com", "hi");
+        let payload = MaterializedPayload::from_transient(&row).expect("transient");
+        let replayed = build_replay_stanza(
+            payload,
+            "example.com",
+            row.original_receipt_at,
+            ReplayReason::SmRedelivery,
+        );
+        let delay = delay_element(&replayed).expect("delay element appended");
+        assert_eq!(delay.attr("from"), Some("example.com"));
+        assert_eq!(
+            delay.attr("stamp").map(str::to_string),
+            Some("2026-05-01T12:30:00Z".to_string())
+        );
+        assert!(
+            delay.text().is_empty(),
+            "SmRedelivery must not emit the 'Offline Storage' description"
+        );
+    }
+
+    #[test]
     fn replay_stanza_preserves_original_to_and_from() {
         let row = transient_row("alice@example.com", "hi");
         let payload = MaterializedPayload::from_transient(&row).unwrap();
-        let replayed = build_replay_stanza(payload, "example.com", row.original_receipt_at);
+        let replayed = build_replay_stanza(
+            payload,
+            "example.com",
+            row.original_receipt_at,
+            ReplayReason::OfflineStorage,
+        );
         let from_jid = replayed.from.expect("from preserved");
         assert_eq!(from_jid.to_string(), "bob@elsewhere/x");
         let to_jid = replayed.to.expect("to preserved");
@@ -231,8 +302,12 @@ mod tests {
                 .push(Element::builder("custom", "urn:test:custom").build());
         }
         let payload = MaterializedPayload::from_transient(&row_with_ext).unwrap();
-        let replayed =
-            build_replay_stanza(payload, "example.com", row_with_ext.original_receipt_at);
+        let replayed = build_replay_stanza(
+            payload,
+            "example.com",
+            row_with_ext.original_receipt_at,
+            ReplayReason::OfflineStorage,
+        );
         let custom_present = replayed
             .payloads
             .iter()
@@ -252,7 +327,12 @@ mod tests {
                 .push(build_offline_delay("example.com", fixed_receipt(), None));
         }
         let payload = MaterializedPayload::from_transient(&row).unwrap();
-        let replayed = build_replay_stanza(payload, "example.com", row.original_receipt_at);
+        let replayed = build_replay_stanza(
+            payload,
+            "example.com",
+            row.original_receipt_at,
+            ReplayReason::OfflineStorage,
+        );
         let self_stamped = replayed
             .payloads
             .iter()
@@ -283,7 +363,12 @@ mod tests {
             ));
         }
         let payload = MaterializedPayload::from_transient(&row).unwrap();
-        let replayed = build_replay_stanza(payload, "example.com", row.original_receipt_at);
+        let replayed = build_replay_stanza(
+            payload,
+            "example.com",
+            row.original_receipt_at,
+            ReplayReason::OfflineStorage,
+        );
         let upstream_preserved = replayed.payloads.iter().any(|payload| {
             payload.name() == "delay"
                 && payload.ns() == NS_DELAY

@@ -13,8 +13,13 @@
 //!   stanza-id `by=` attribution.
 //! - **Groupchat**: skipped — the room handler chain (PR5) owns the
 //!   single room-side archive write per XEP-0313 §5.1.3.
-//! - **Error / Headline / non-Chat-or-Normal**: skipped per XEP-0313
-//!   §5.1.3 archive-eligibility rules and XEP-0334 hint precedence.
+//! - **Error / Groupchat**: skipped at this layer (room chain owns
+//!   groupchat archive writes; XEP-0334 §6 ¶3 forbids hint overrides
+//!   on error stanzas).
+//! - **Headline**: skipped by default per XEP-0313 §5.1.3, but an
+//!   explicit `<store/>` hint forces archival to keep the user-side
+//!   handler in lockstep with the DM-intake classifier (project rule
+//!   that `<store/>` wins over the XEP-0160 §4 default skip).
 //!
 //! XEP-0313 §5.1.3 archive-eligibility rules implemented here:
 //!
@@ -101,15 +106,31 @@ impl MessageHandler for ArchiveHandler {
 ///
 /// Returns `true` when the message should be archived.
 pub fn is_archivable(message: &Message) -> bool {
-    // Skip non-archivable types.
+    // Skip types that are never archived by the user-side handler:
+    // - Groupchat: the room chain owns its single archive write.
+    // - Error: XEP-0334 §6 ¶3 says hints are ignored on error stanzas,
+    //   so `<store/>` cannot override here.
     match message.type_ {
-        MessageType::Chat | MessageType::Normal => {}
-        // Groupchat is the room chain's job; error / headline are
-        // never archived.
-        MessageType::Groupchat | MessageType::Error | MessageType::Headline => return false,
+        MessageType::Groupchat | MessageType::Error => return false,
+        MessageType::Headline | MessageType::Chat | MessageType::Normal => {}
     }
     // XEP-0334 hint precedence (`<store>` overrides `<no-store>`).
     if message.should_skip_archive() {
+        return false;
+    }
+    // An explicit `<store/>` hint forces archival even for body-less
+    // stanzas (XEP-0334 §5.4 SHOULD store) and also overrides the
+    // XEP-0160 §4 default headline-skip — the project rule (see
+    // dm_routing.rs `store_hint_overrides_default_skip_for_headline`)
+    // is that `<store/>` wins. The classifier MUST agree with this
+    // function or the offline path drops a `pending_delivery` row
+    // referencing a missing MAM id (issue #209 finding #2).
+    if message.has_store() {
+        return true;
+    }
+    // Without `<store/>`, headline messages fall back to the XEP-0160
+    // §4 default skip.
+    if matches!(message.type_, MessageType::Headline) {
         return false;
     }
     let has_body = has_substantive_body(message);
@@ -119,9 +140,26 @@ pub fn is_archivable(message: &Message) -> bool {
     if !message.subjects.is_empty() && !has_body {
         return false;
     }
-    // Require either a non-empty body or a substantive payload (e.g.
-    // a XEP-0424 retraction, XEP-0308 correction, or XEP-0444 reaction). Pure presence-like
-    // messages with no body and no archivable payload are dropped.
+    has_body || has_archivable_payload(message)
+}
+
+/// True when the message carries content that justifies a MAM archive
+/// row even without an explicit `<store/>` hint (a non-empty body or a
+/// substantive XEP-0308 / XEP-0424 / XEP-0444 payload).
+///
+/// Public so the DM-intake classifier shares the exact same matrix as
+/// [`is_archivable`] — the two must never disagree, or the classifier
+/// will route stanzas to `pending_delivery` as `Archived` whose MAM row
+/// the archive handler refuses to write (issue #209 finding #1).
+///
+/// Mirrors the subject-only exclusion in [`is_archivable`]: a stanza
+/// with a `<subject/>` and no substantive body is not archivable on
+/// content grounds alone, even if it carries an archivable payload.
+pub fn has_archivable_content(message: &Message) -> bool {
+    let has_body = has_substantive_body(message);
+    if !message.subjects.is_empty() && !has_body {
+        return false;
+    }
     has_body || has_archivable_payload(message)
 }
 
@@ -444,5 +482,69 @@ mod tests {
         );
         let outcome = run(&local, &mut msg);
         assert!(extract_archive_events(&outcome).is_empty());
+    }
+
+    #[test]
+    fn xep_0334_store_hint_overrides_headline_default_skip() {
+        // Project rule: `<store/>` forces archival even for headline
+        // messages, mirroring the DM-intake classifier
+        // (`store_hint_overrides_default_skip_for_headline`). Without
+        // this, the classifier produces `PendingDecision::Archived`
+        // for a stanza the archive handler refuses to write, and the
+        // offline flush path drops it as a poison pill (issue #209
+        // finding #2).
+        let local = full("alice@example.com/web");
+        let mut msg = Message::new(Some("alice@example.com".parse().expect("jid")));
+        msg.from = Some("system@example.com/notify".parse().expect("jid"));
+        msg.type_ = MessageType::Headline;
+        msg.bodies
+            .insert(String::new(), Body("breaking news".to_string()));
+        msg.payloads.push(
+            Element::builder(Hint::Store.element_name(), crate::xep::xep0334::NS_HINTS).build(),
+        );
+        assert!(is_archivable(&msg));
+        let outcome = run(&local, &mut msg);
+        assert_eq!(extract_archive_events(&outcome).len(), 1);
+    }
+
+    #[test]
+    fn xep_0160_headline_without_store_is_not_archived() {
+        let local = full("alice@example.com/web");
+        let mut msg = Message::new(Some("alice@example.com".parse().expect("jid")));
+        msg.from = Some("system@example.com/notify".parse().expect("jid"));
+        msg.type_ = MessageType::Headline;
+        msg.bodies
+            .insert(String::new(), Body("breaking news".to_string()));
+        assert!(!is_archivable(&msg));
+        let outcome = run(&local, &mut msg);
+        assert!(extract_archive_events(&outcome).is_empty());
+    }
+
+    #[test]
+    fn has_archivable_content_agrees_with_is_archivable_for_subject_only_payload() {
+        // Subject-only stanza carrying an archivable payload must NOT be
+        // considered archivable on content grounds — `is_archivable`
+        // would reject it (subject + no body), so the classifier path
+        // sharing this matrix must too. Otherwise the DM intake routes
+        // the stanza to `pending_delivery` as `Archived`, but
+        // `ArchiveHandler` skips it, leaving `OfflineDeliveryHandler`
+        // unable to find a recipient `<stanza-id/>` (issue #209
+        // finding #1).
+        let mut msg = Message::new(Some("bob@example.com".parse().expect("jid")));
+        msg.from = Some("alice@example.com/web".parse().expect("jid"));
+        msg.type_ = MessageType::Chat;
+        msg.subjects
+            .insert(String::new(), Subject("New Topic".to_string()));
+        msg.payloads
+            .push(crate::xep::xep0424::build_retract_element("stanza-X"));
+
+        assert!(
+            !has_archivable_content(&msg),
+            "subject-only + archivable payload must not be archivable on content grounds"
+        );
+        assert!(
+            !is_archivable(&msg),
+            "subject-only + archivable payload must not be archivable per XEP-0313 §5.1.3"
+        );
     }
 }

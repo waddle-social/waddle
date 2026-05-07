@@ -453,6 +453,49 @@ impl InMemorySmSessionRegistry {
     }
 }
 
+/// Parse a wire-XML fragment back to a typed
+/// [`super::persistence::PersistedUnackedStanza`] keyed under
+/// `stream_id`. Used by both `store_session` (full batch decode) and
+/// `record_outbound_for_detached_stream_at` (per-stanza incremental
+/// persist for issue #209 finding #8). Returns an `Internal` error
+/// for malformed XML or unknown root elements so the caller can
+/// abort the persist without leaving an inconsistent durable view.
+fn parse_xml_to_persisted_unacked(
+    stream_id: &str,
+    sequence: u32,
+    stanza_xml: &str,
+    original_receipt_at: chrono::DateTime<chrono::Utc>,
+) -> Result<super::persistence::PersistedUnackedStanza, SmRegistryError> {
+    let element: minidom::Element = stanza_xml.parse().map_err(|e: minidom::Error| {
+        SmRegistryError::Internal(format!("parse unacked stanza for persistence: {e}"))
+    })?;
+    let stanza = match element.name() {
+        "message" => crate::Stanza::Message(
+            xmpp_parsers::message::Message::try_from(element)
+                .map_err(|e| SmRegistryError::Internal(e.to_string()))?,
+        ),
+        "iq" => crate::Stanza::Iq(
+            xmpp_parsers::iq::Iq::try_from(element)
+                .map_err(|e| SmRegistryError::Internal(e.to_string()))?,
+        ),
+        "presence" => crate::Stanza::Presence(
+            xmpp_parsers::presence::Presence::try_from(element)
+                .map_err(|e| SmRegistryError::Internal(e.to_string()))?,
+        ),
+        other => {
+            return Err(SmRegistryError::Internal(format!(
+                "unknown unacked stanza element '{other}'"
+            )))
+        }
+    };
+    Ok(super::persistence::PersistedUnackedStanza {
+        stream_id: crate::pending_delivery::SmSessionId::new(stream_id.to_string()),
+        sequence,
+        stanza: Box::new(stanza),
+        original_receipt_at,
+    })
+}
+
 /// Convert a [`DetachedSession`] (in-memory shape) to a
 /// [`super::persistence::PersistedSession`] (durable shape) for write
 /// to [`SmPersistenceStorage`].
@@ -644,43 +687,12 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
             // a round-trip to the backend.
             let mut unacked_rows = Vec::with_capacity(session.unacked_stanzas.len());
             for entry in &session.unacked_stanzas {
-                let element: minidom::Element =
-                    entry.stanza_xml.parse().map_err(|e: minidom::Error| {
-                        SmRegistryError::Internal(format!(
-                            "parse unacked stanza for persistence: {e}"
-                        ))
-                    })?;
-                let stanza = match element.name() {
-                    "message" => crate::Stanza::Message(
-                        xmpp_parsers::message::Message::try_from(element)
-                            .map_err(|e| SmRegistryError::Internal(e.to_string()))?,
-                    ),
-                    "iq" => crate::Stanza::Iq(
-                        xmpp_parsers::iq::Iq::try_from(element)
-                            .map_err(|e| SmRegistryError::Internal(e.to_string()))?,
-                    ),
-                    "presence" => crate::Stanza::Presence(
-                        xmpp_parsers::presence::Presence::try_from(element)
-                            .map_err(|e| SmRegistryError::Internal(e.to_string()))?,
-                    ),
-                    other => {
-                        return Err(SmRegistryError::Internal(format!(
-                            "unknown unacked stanza element '{other}'"
-                        )))
-                    }
-                };
-                // Locked Q6c (issue #209 PR #361): persist the row's
-                // actual receipt time, not Utc::now() at persist time.
-                // This is what makes the XEP-0203 `<delay/>` on a
-                // future Q6 SM-expiry promotion advertise the original
-                // failed-delivery time per XEP-0203 §4.1 + XEP-0198
-                // §5 line 364.
-                unacked_rows.push(super::persistence::PersistedUnackedStanza {
-                    stream_id: crate::pending_delivery::SmSessionId::new(stream_id.clone()),
-                    sequence: entry.sequence,
-                    stanza: Box::new(stanza),
-                    original_receipt_at: entry.original_receipt_at,
-                });
+                unacked_rows.push(parse_xml_to_persisted_unacked(
+                    &stream_id,
+                    entry.sequence,
+                    &entry.stanza_xml,
+                    entry.original_receipt_at,
+                )?);
             }
             storage
                 .store_session_atomic(persisted, unacked_rows)
@@ -922,18 +934,29 @@ impl InMemorySmSessionRegistry {
     /// implementation deleted durable rows up-front, losing
     /// stanzas on any partial-promotion failure.)
     pub async fn drain_all_for_shutdown(&self) -> Result<Vec<DetachedSession>, SmRegistryError> {
+        // Issue #209 finding #3: drain ONLY the detached pool. Sessions
+        // in `claimed_sessions` have an in-flight `<resume previd='…'/>`
+        // claim — pulling one out here while the resuming connection
+        // is between `claim_session` and `complete_claim` causes
+        // duplicate delivery: the client receives the SM resume replay
+        // AND the shutdown drain re-promotes the same unacked queue
+        // through Q6, generating a fresh `pending_delivery` row that
+        // re-flushes on the next presence after restart. The in-flight
+        // resume is responsible for either completing (which calls
+        // `complete_claim` → `persist_delete_session`) or releasing
+        // (which puts the session back in the detached pool); either
+        // outcome cleans up without needing the shutdown drain to
+        // touch claimed sessions. If the resume never completes
+        // before the runtime exits, the durable row survives and the
+        // restart-time expiry path picks it up on the next janitor
+        // pass — the same fail-closed retry semantics already used
+        // for `PromotedOutcome::StorageFailure`.
         let drained: Vec<DetachedSession> = {
             let mut sessions = self
                 .sessions
                 .write()
                 .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-            let mut claimed = self
-                .claimed_sessions
-                .write()
-                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-            let mut out: Vec<DetachedSession> = sessions.drain().map(|(_, s)| s).collect();
-            out.extend(claimed.drain().map(|(_, s)| s));
-            out
+            sessions.drain().map(|(_, s)| s).collect()
         };
         Ok(drained)
     }
@@ -1366,6 +1389,42 @@ impl InMemorySmSessionRegistry {
         stanza_xml: String,
         original_receipt_at: DateTime<Utc>,
     ) -> Result<bool, SmRegistryError> {
+        // Issue #209 finding #8: mirror the in-memory append to the
+        // durable persistence layer. Without this, a stanza routed
+        // into the second-detach drain (after `store_session` has
+        // already snapshotted the unacked queue) lives only in
+        // memory; a process crash before resume loses it. Persisting
+        // first preserves at-least-once semantics — if the durable
+        // append succeeds but the in-memory append doesn't run
+        // (shouldn't happen in practice), restart-time
+        // `restore_from_persistence` rebuilds the in-memory view
+        // from durable state.
+        //
+        // BUT: pre-check session eligibility before persisting, so a
+        // call for an unknown / expired stream_id doesn't durably
+        // append a row that has no owning session and can never be
+        // cleaned up via `delete_session` (Qodo finding on PR #409 —
+        // some persistence backends accept `append_unacked` for any
+        // stream_id, leaving orphan rows). Locks are dropped before
+        // any `.await` so persistence I/O never holds a lock.
+        let eligible = self.detached_session_is_live(stream_id)?;
+        if !eligible {
+            return Ok(false);
+        }
+
+        if let Some(storage) = &self.persistence {
+            let persisted = parse_xml_to_persisted_unacked(
+                stream_id,
+                sequence,
+                &stanza_xml,
+                original_receipt_at,
+            )?;
+            storage
+                .append_unacked(persisted)
+                .await
+                .map_err(|e| SmRegistryError::Internal(e.to_string()))?;
+        }
+
         let mut sessions = self
             .sessions
             .write()
@@ -1391,6 +1450,30 @@ impl InMemorySmSessionRegistry {
             return Ok(false);
         }
         Ok(false)
+    }
+
+    /// Returns true when `stream_id` names a detached session that is
+    /// present (in either the live `sessions` or the `claimed_sessions`
+    /// map) and not yet expired. Used as a pre-flight check by
+    /// [`Self::record_outbound_for_detached_stream_at`] so we don't
+    /// durably persist unacked stanzas for sessions that no longer
+    /// exist.
+    fn detached_session_is_live(&self, stream_id: &str) -> Result<bool, SmRegistryError> {
+        let sessions = self
+            .sessions
+            .read()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+        if let Some(session) = sessions.get(stream_id) {
+            return Ok(!session.is_expired());
+        }
+        drop(sessions);
+        let claimed = self
+            .claimed_sessions
+            .read()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+        Ok(claimed
+            .get(stream_id)
+            .is_some_and(|session| !session.is_expired()))
     }
 
     /// List all detached resources for a bare JID, including resources that

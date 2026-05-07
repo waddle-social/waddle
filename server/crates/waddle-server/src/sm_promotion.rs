@@ -24,6 +24,9 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use jid::{BareJid, FullJid};
 use tracing::{debug, instrument, warn};
+use waddle_xmpp::pending_delivery::flush::{
+    build_replay_stanza, MaterializedPayload, ReplayReason,
+};
 use waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage;
 use waddle_xmpp::pending_delivery::{InsertOutcome, PendingPayload, PendingRow, PendingRowId};
 use waddle_xmpp::protocol::dm_routing::{
@@ -114,6 +117,7 @@ pub async fn promote_session_unacked(
     registry: &ConnectionRegistry,
     pending_storage: &Arc<dyn PendingDeliveryStorage>,
     blocklist: &Blocklist,
+    server_domain: &str,
 ) -> PromotionSummary {
     let mut summary = PromotionSummary::default();
     let recipient_bare = session.jid.to_bare();
@@ -124,19 +128,17 @@ pub async fn promote_session_unacked(
     // unless other resources joined after detach).
     let online = build_online_resources(registry, &recipient_bare);
 
+    let ctx = PromoteOneCtx {
+        online: &online,
+        blocklist,
+        registry,
+        pending_storage,
+        server_domain,
+    };
     for entry in &session.unacked_stanzas {
         let outcome = match parse_stanza(&entry.stanza_xml) {
             Some(Stanza::Message(message)) => {
-                promote_one(
-                    message,
-                    entry.sequence,
-                    &online,
-                    blocklist,
-                    registry,
-                    pending_storage,
-                    entry.original_receipt_at,
-                )
-                .await
+                promote_one(message, entry.sequence, entry.original_receipt_at, &ctx).await
             }
             Some(Stanza::Iq(iq)) => promote_iq(iq, registry).await,
             Some(Stanza::Presence(presence)) => promote_presence(presence, registry).await,
@@ -159,17 +161,34 @@ pub async fn promote_session_unacked(
     summary
 }
 
+/// Bundle of references shared by every `promote_one` invocation in a
+/// session — the per-stanza arguments are `message`, `sequence`, and
+/// `original_receipt_fallback`. Carved out so the function signature
+/// stays under clippy's `too_many_arguments` threshold without an
+/// allow attribute (project hard rule, `server/CLAUDE.md`).
+struct PromoteOneCtx<'a> {
+    online: &'a OnlineResources,
+    blocklist: &'a Blocklist,
+    registry: &'a ConnectionRegistry,
+    pending_storage: &'a Arc<dyn PendingDeliveryStorage>,
+    server_domain: &'a str,
+}
+
 /// Promote a single typed [`xmpp_parsers::message::Message`] per the
 /// locked Q6 chain.
 async fn promote_one(
     message: xmpp_parsers::message::Message,
     sequence: u32,
-    online: &OnlineResources,
-    blocklist: &Blocklist,
-    registry: &ConnectionRegistry,
-    pending_storage: &Arc<dyn PendingDeliveryStorage>,
     original_receipt_fallback: DateTime<Utc>,
+    ctx: &PromoteOneCtx<'_>,
 ) -> PromotedOutcome {
+    let PromoteOneCtx {
+        online,
+        blocklist,
+        registry,
+        pending_storage,
+        server_domain,
+    } = *ctx;
     let routing: DmRouting = classify_dm_intake(&message, online, blocklist);
 
     // Step 1: alt-resource — if the classifier says live-deliver,
@@ -183,6 +202,25 @@ async fn promote_one(
     if !matches!(routing.live, LiveDecision::None) {
         let targets = collect_live_targets(&routing, &message, registry);
         if !targets.is_empty() {
+            // XEP-0198 §5 line 364 + XEP-0203 §4.1: stamp the original
+            // failed-receipt time on the redelivered stanza so the
+            // alt-resource sees this as a delayed delivery (same wire
+            // shape the offline-storage branch produces). Issue #209
+            // finding #6 — earlier code sent the verbatim original
+            // without `<delay/>`, leaving the recipient unable to tell
+            // a redelivered stanza from a fresh one.
+            //
+            // The reason text differs from the offline-storage path: the
+            // stanza was never persisted offline, so the human-readable
+            // description is omitted (issue #209 finding #4). Only the
+            // typed `from`+`stamp` pair carries the load-bearing
+            // delivery-history signal per XEP-0203 §4.2.
+            let delayed = build_replay_stanza(
+                MaterializedPayload::Transient(Box::new(message.clone())),
+                server_domain,
+                original_receipt_fallback,
+                ReplayReason::SmRedelivery,
+            );
             // Send to all eligible resources; mark redelivered if at
             // least one send succeeds (matches the live-route fanout
             // semantics in interpret.rs's `RouteToConnection` arm).
@@ -190,7 +228,7 @@ async fn promote_one(
             for target in targets {
                 if matches!(
                     registry
-                        .send_to(&target, Stanza::Message(message.clone()))
+                        .send_to(&target, Stanza::Message(delayed.clone()))
                         .await,
                     SendResult::Sent
                 ) && delivered_to.is_none()
@@ -606,8 +644,14 @@ mod tests {
             vec![dm_xml("bob@elsewhere/x", "alice@example.com", "missed me?")],
         );
 
-        let summary =
-            promote_session_unacked(&session, &registry, &storage, &Blocklist::empty()).await;
+        let summary = promote_session_unacked(
+            &session,
+            &registry,
+            &storage,
+            &Blocklist::empty(),
+            "example.com",
+        )
+        .await;
 
         assert_eq!(summary.queued, 1);
         assert_eq!(summary.redelivered, 0);
@@ -638,13 +682,96 @@ mod tests {
             )],
         );
 
-        let summary =
-            promote_session_unacked(&session, &registry, &storage, &Blocklist::empty()).await;
+        let summary = promote_session_unacked(
+            &session,
+            &registry,
+            &storage,
+            &Blocklist::empty(),
+            "example.com",
+        )
+        .await;
 
         assert_eq!(summary.redelivered, 1);
         assert_eq!(summary.queued, 0);
         assert_eq!(storage.count(&bare("alice@example.com")).await.unwrap(), 0);
         assert!(rx.try_recv().is_ok(), "stanza pushed to alt resource");
+    }
+
+    /// Issue #209 finding #6 — XEP-0198 §5 line 364 + XEP-0203 §4.1
+    /// require a `<delay/>` stamp with the original failed-receipt time
+    /// on alt-resource redelivery, not just on offline-storage replay.
+    #[tokio::test]
+    async fn promotes_to_alt_resource_stamps_delay_with_original_receipt() {
+        use chrono::TimeZone;
+        let storage: Arc<dyn PendingDeliveryStorage> =
+            Arc::new(InMemoryPendingDeliveryStorage::unlimited());
+        let registry = ConnectionRegistry::new();
+        let alt = full("alice@example.com/web");
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        registry.register(alt.clone(), tx);
+        registry.update_presence(&alt, true, 1);
+
+        // Build a session with a known per-stanza original receipt
+        // time so we can assert the `<delay/>` stamp matches verbatim.
+        let original_receipt = Utc.with_ymd_and_hms(2025, 11, 4, 9, 17, 42).unwrap();
+        let session = DetachedSession {
+            stream_id: "stream-1".to_string(),
+            user_id: "alice".to_string(),
+            jid: full("alice@example.com/laptop"),
+            inbound_count: 0,
+            outbound_count: 1,
+            last_acked: 0,
+            unacked_stanzas: vec![waddle_xmpp::stream_management::DetachedUnackedStanza {
+                sequence: 1,
+                stanza_xml: dm_xml("bob@elsewhere/x", "alice@example.com", "alt resource"),
+                original_receipt_at: original_receipt,
+            }],
+            max_resume_time: Some(60),
+            detached_at: Instant::now(),
+            carbons_enabled: false,
+            roster_interested: false,
+            presence_available: false,
+            presence_show: None,
+            presence_status: None,
+            presence_priority: 0,
+        };
+
+        let summary = promote_session_unacked(
+            &session,
+            &registry,
+            &storage,
+            &Blocklist::empty(),
+            "example.com",
+        )
+        .await;
+        assert_eq!(summary.redelivered, 1);
+
+        let pushed = rx.try_recv().expect("alt-resource received the stanza");
+        let message = match &pushed.stanza {
+            Stanza::Message(m) => m,
+            _ => panic!("expected Message"),
+        };
+        let delay = message
+            .payloads
+            .iter()
+            .find(|p| {
+                p.name() == "delay"
+                    && p.ns() == waddle_xmpp_core::carbons::DELAY_NS
+                    && p.attr("from") == Some("example.com")
+            })
+            .expect("alt-resource redelivery carries server-stamped <delay/>");
+        assert_eq!(
+            delay.attr("stamp").map(str::to_string),
+            Some("2025-11-04T09:17:42Z".to_string()),
+            "stamp must reflect the original failed-receipt time, not Q6 promotion time"
+        );
+        // Issue #209 finding #4: the alt-resource redelivery path must
+        // NOT label itself as offline-storage replay — the stanza was
+        // never persisted offline.
+        assert!(
+            delay.text().is_empty(),
+            "SM redelivery <delay/> must omit the 'Offline Storage' description"
+        );
     }
 
     #[tokio::test]
@@ -673,8 +800,14 @@ mod tests {
             )],
         );
 
-        let summary =
-            promote_session_unacked(&session, &registry, &storage, &Blocklist::empty()).await;
+        let summary = promote_session_unacked(
+            &session,
+            &registry,
+            &storage,
+            &Blocklist::empty(),
+            "example.com",
+        )
+        .await;
 
         assert_eq!(summary.bounced, 1);
         assert_eq!(summary.queued, 0);
@@ -712,8 +845,14 @@ mod tests {
         let session =
             detached_session_with_unacked("stream-1", full("alice@example.com/laptop"), vec![xml]);
 
-        let summary =
-            promote_session_unacked(&session, &registry, &storage, &Blocklist::empty()).await;
+        let summary = promote_session_unacked(
+            &session,
+            &registry,
+            &storage,
+            &Blocklist::empty(),
+            "example.com",
+        )
+        .await;
 
         assert_eq!(summary.dropped, 1);
         assert_eq!(summary.queued, 0);
@@ -754,8 +893,14 @@ mod tests {
         let session =
             detached_session_with_unacked("stream-1", full("alice@example.com/laptop"), vec![xml]);
 
-        let summary =
-            promote_session_unacked(&session, &registry, &storage, &Blocklist::empty()).await;
+        let summary = promote_session_unacked(
+            &session,
+            &registry,
+            &storage,
+            &Blocklist::empty(),
+            "example.com",
+        )
+        .await;
 
         assert_eq!(summary.redelivered, 1);
         assert_eq!(summary.queued, 0);
@@ -786,8 +931,14 @@ mod tests {
             vec![dm_xml("bob@elsewhere/x", "alice@example.com", "fanout")],
         );
 
-        let summary =
-            promote_session_unacked(&session, &registry, &storage, &Blocklist::empty()).await;
+        let summary = promote_session_unacked(
+            &session,
+            &registry,
+            &storage,
+            &Blocklist::empty(),
+            "example.com",
+        )
+        .await;
 
         assert_eq!(summary.redelivered, 1);
         // Both resources receive the stanza.
@@ -824,8 +975,14 @@ mod tests {
             vec![iq_xml],
         );
 
-        let summary =
-            promote_session_unacked(&session, &registry, &storage, &Blocklist::empty()).await;
+        let summary = promote_session_unacked(
+            &session,
+            &registry,
+            &storage,
+            &Blocklist::empty(),
+            "example.com",
+        )
+        .await;
 
         assert_eq!(summary.redelivered, 1);
         assert_eq!(
@@ -863,8 +1020,14 @@ mod tests {
             vec![iq_xml],
         );
 
-        let summary =
-            promote_session_unacked(&session, &registry, &storage, &Blocklist::empty()).await;
+        let summary = promote_session_unacked(
+            &session,
+            &registry,
+            &storage,
+            &Blocklist::empty(),
+            "example.com",
+        )
+        .await;
 
         assert_eq!(summary.dropped, 1);
         assert_eq!(summary.queued, 0, "IQs never go to offline storage");
@@ -880,8 +1043,14 @@ mod tests {
             full("alice@example.com/laptop"),
             vec!["not actually XML".to_string()],
         );
-        let summary =
-            promote_session_unacked(&session, &registry, &storage, &Blocklist::empty()).await;
+        let summary = promote_session_unacked(
+            &session,
+            &registry,
+            &storage,
+            &Blocklist::empty(),
+            "example.com",
+        )
+        .await;
         assert_eq!(summary.unparseable, 1);
         assert_eq!(summary.queued, 0);
     }
@@ -922,8 +1091,14 @@ mod tests {
             presence_priority: 0,
         };
 
-        let summary =
-            promote_session_unacked(&session, &registry, &storage, &Blocklist::empty()).await;
+        let summary = promote_session_unacked(
+            &session,
+            &registry,
+            &storage,
+            &Blocklist::empty(),
+            "example.com",
+        )
+        .await;
         assert_eq!(summary.queued, 1);
 
         let rows = storage.list(&bare("alice@example.com")).await.unwrap();
@@ -1029,8 +1204,14 @@ mod tests {
             )],
         );
 
-        let summary =
-            promote_session_unacked(&session, &registry, &storage, &Blocklist::empty()).await;
+        let summary = promote_session_unacked(
+            &session,
+            &registry,
+            &storage,
+            &Blocklist::empty(),
+            "example.com",
+        )
+        .await;
 
         assert_eq!(summary.storage_failed, 1, "storage failure surfaced");
         assert_eq!(summary.dropped, 0, "must not collapse into Dropped");

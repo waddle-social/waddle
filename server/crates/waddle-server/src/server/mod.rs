@@ -1453,6 +1453,7 @@ async fn create_router(
                         &state.deps.protocol.connection_registry,
                         &state.deps.protocol.pending_delivery_storage,
                         &blocklist,
+                        state.deps.auth_state.xmpp_domain.as_str(),
                     )
                     .await;
                     if summary.queued + summary.redelivered + summary.bounced > 0
@@ -1681,30 +1682,45 @@ async fn create_router(
                     .await
                 {
                     Ok(orphans) if !orphans.is_empty() => {
-                        let count = orphans.len();
+                        let candidate_count = orphans.len();
+                        let mut released = 0u64;
+                        let mut skipped_reclaimed = 0u64;
                         for (row_id, session) in orphans {
-                            if let Err(error) = state
+                            // Issue #209 finding #9: re-validate the row is
+                            // still claimed by the session we believed dead at
+                            // snapshot time. If a fresh bind has re-claimed it
+                            // under a now-live session in the gap, leave it
+                            // alone — clearing `outbound_sequence` would
+                            // wedge the new claim because the new session's
+                            // SM ack filters `outbound_sequence IS NOT NULL`.
+                            match state
                                 .deps
                                 .protocol
                                 .pending_delivery_storage
-                                .release_row(&row_id)
+                                .release_row_if_session(&row_id, &session)
                                 .await
                             {
-                                warn!(
-                                    row_id = %row_id,
-                                    session = %session,
-                                    error = %error,
-                                    "claim-expiry janitor: release_row failed; row stays \
-                                     claimed and will be retried next sweep"
-                                );
+                                Ok(0) => skipped_reclaimed += 1,
+                                Ok(_) => released += 1,
+                                Err(error) => {
+                                    warn!(
+                                        row_id = %row_id,
+                                        session = %session,
+                                        error = %error,
+                                        "claim-expiry janitor: release_row_if_session failed; \
+                                         row stays claimed and will be retried next sweep"
+                                    );
+                                }
                             }
                         }
                         info!(
-                            count,
+                            candidate_count,
+                            released,
+                            skipped_reclaimed,
                             "claim-expiry janitor: released orphaned pending_delivery claims"
                         );
                         waddle_xmpp::prometheus::add_pending_delivery_orphan_claims_released(
-                            count as u64,
+                            released,
                         );
                     }
                     Ok(_) => {}
@@ -1897,6 +1913,7 @@ async fn create_router(
                         &drain_state.deps.protocol.connection_registry,
                         &drain_state.deps.protocol.pending_delivery_storage,
                         &blocklist,
+                        drain_state.deps.auth_state.xmpp_domain.as_str(),
                     )
                     .await;
                     info!(

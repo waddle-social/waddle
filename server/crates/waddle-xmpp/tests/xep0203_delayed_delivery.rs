@@ -22,7 +22,9 @@
 
 use chrono::{TimeZone, Utc};
 use jid::{BareJid, Jid};
-use waddle_xmpp::pending_delivery::flush::{build_replay_stanza, MaterializedPayload};
+use waddle_xmpp::pending_delivery::flush::{
+    build_replay_stanza, MaterializedPayload, ReplayReason,
+};
 use waddle_xmpp::pending_delivery::{PendingPayload, PendingRow, PendingRowId};
 use waddle_xmpp::xep::NS_DELAY;
 use xmpp_parsers::message::{Body, Message, MessageType};
@@ -58,7 +60,12 @@ fn xep0203_delay_from_attribute_is_server_jid() {
     let t = Utc.with_ymd_and_hms(2026, 5, 1, 12, 30, 0).unwrap();
     let row = transient_row("alice@example.com", "hi", t);
     let payload = MaterializedPayload::from_transient(&row).expect("transient");
-    let replayed = build_replay_stanza(payload, "example.com", row.original_receipt_at);
+    let replayed = build_replay_stanza(
+        payload,
+        "example.com",
+        row.original_receipt_at,
+        ReplayReason::OfflineStorage,
+    );
     let delay = replayed
         .payloads
         .iter()
@@ -74,7 +81,12 @@ fn xep0203_delay_stamp_is_original_receipt_time_in_xep0082_z_form() {
     let t = Utc.with_ymd_and_hms(2026, 4, 17, 9, 15, 30).unwrap();
     let row = transient_row("alice@example.com", "hi", t);
     let payload = MaterializedPayload::from_transient(&row).expect("transient");
-    let replayed = build_replay_stanza(payload, "example.com", row.original_receipt_at);
+    let replayed = build_replay_stanza(
+        payload,
+        "example.com",
+        row.original_receipt_at,
+        ReplayReason::OfflineStorage,
+    );
     let delay = replayed
         .payloads
         .iter()
@@ -109,7 +121,7 @@ fn xep0203_delay_stamp_uses_caller_supplied_receipt_time_verbatim() {
     let t_old =
         chrono::DateTime::<Utc>::from_timestamp_millis(1_700_000_000_000).expect("valid timestamp");
     let payload = MaterializedPayload::from_transient(&row).expect("transient");
-    let replayed = build_replay_stanza(payload, "example.com", t_old);
+    let replayed = build_replay_stanza(payload, "example.com", t_old, ReplayReason::OfflineStorage);
     let delay = replayed
         .payloads
         .iter()
@@ -123,7 +135,12 @@ fn xep0203_delay_stamp_uses_caller_supplied_receipt_time_verbatim() {
     // clock the builder might consult.
     let t_recent = Utc.with_ymd_and_hms(2026, 1, 15, 8, 0, 0).unwrap();
     let payload2 = MaterializedPayload::from_transient(&row).expect("transient");
-    let replayed2 = build_replay_stanza(payload2, "example.com", t_recent);
+    let replayed2 = build_replay_stanza(
+        payload2,
+        "example.com",
+        t_recent,
+        ReplayReason::OfflineStorage,
+    );
     let delay2 = replayed2
         .payloads
         .iter()
@@ -140,7 +157,12 @@ fn xep0203_flush_appends_single_delay_element() {
     let t = Utc.with_ymd_and_hms(2026, 5, 1, 12, 30, 0).unwrap();
     let row = transient_row("alice@example.com", "hi", t);
     let payload = MaterializedPayload::from_transient(&row).expect("transient");
-    let replayed = build_replay_stanza(payload, "example.com", row.original_receipt_at);
+    let replayed = build_replay_stanza(
+        payload,
+        "example.com",
+        row.original_receipt_at,
+        ReplayReason::OfflineStorage,
+    );
     let delays: Vec<_> = replayed
         .payloads
         .iter()
@@ -159,7 +181,12 @@ fn xep0203_delay_lives_in_stanza_payloads_not_body() {
     let t = Utc.with_ymd_and_hms(2026, 5, 1, 12, 30, 0).unwrap();
     let row = transient_row("alice@example.com", "hi-with-body", t);
     let payload = MaterializedPayload::from_transient(&row).expect("transient");
-    let replayed = build_replay_stanza(payload, "example.com", row.original_receipt_at);
+    let replayed = build_replay_stanza(
+        payload,
+        "example.com",
+        row.original_receipt_at,
+        ReplayReason::OfflineStorage,
+    );
     // Body is unchanged; delay is in payloads.
     assert_eq!(
         replayed.bodies.get("").map(|b| b.0.as_str()),

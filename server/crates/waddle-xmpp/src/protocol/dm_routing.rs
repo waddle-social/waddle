@@ -37,11 +37,13 @@
 //! It performs no I/O. Wiring this into the routing layer and existing
 //! handler chain is a follow-up step.
 
+use crate::protocol::handlers::archive::has_archivable_content;
 use crate::protocol::session_state::Blocklist;
 use crate::xep::xep0085::is_standalone_notification;
 use crate::xep::xep0334::{has_hint, Hint};
 use jid::{BareJid, FullJid, Jid};
 use std::collections::BTreeMap;
+use waddle_xmpp_core::carbons::CARBONS_NS;
 use xmpp_parsers::message::{Message, MessageType};
 
 /// Should the message be written to the MAM archive (XEP-0313)?
@@ -185,6 +187,16 @@ pub fn classify_dm_intake(
         }
     }
 
+    // ── XEP-0280 §6: a stanza wrapping a `<sent xmlns='urn:xmpp:carbons:2'/>`
+    // or `<received .../>` payload is a forwarded carbon copy — never a
+    // fresh DM. Treating it as a new DM here would cause Q6 SM-expiry
+    // promotion to re-route the wrapper to the recipient's other
+    // resources, which already saw it via the original carbon fanout
+    // (issue #209 finding #7).
+    if has_carbon_wrapper(message) {
+        return DmRouting::dropped();
+    }
+
     // RFC 6121 §8.5.2 (bare JID): server delivers only to resources
     // with non-negative priority.
     // RFC 6121 §8.5.3 (full JID): server delivers to that specific
@@ -281,7 +293,18 @@ pub fn classify_dm_intake(
     // ── ArchiveDecision (XEP-0313 + XEP-0334 §5.1/§5.2)
     //     <no-permanent-store/> excludes MAM even when storage_allowed
     //     is true, because §5.1 explicitly names XEP-0313 as forbidden.
-    let archive = if storage_allowed && !has_no_permanent_store {
+    //
+    // The classifier MUST agree with `archive::is_archivable` — if it
+    // says Mam but the archive handler refuses to write (body-less
+    // chat-type stanza without an archivable payload), the offline
+    // delivery handler stamps a `pending_delivery` row referencing a
+    // MAM id that doesn't exist, and the flush path treats it as a
+    // poison pill and silently deletes the message (issue #209
+    // finding #1). An explicit `<store/>` hint forces archival even
+    // for body-less stanzas (XEP-0334 §5.4 SHOULD store).
+    let archivable_content = has_archivable_content(message);
+    let archive = if storage_allowed && !has_no_permanent_store && (archivable_content || has_store)
+    {
         ArchiveDecision::Mam
     } else {
         ArchiveDecision::None
@@ -310,6 +333,18 @@ pub fn classify_dm_intake(
     } else if has_no_permanent_store {
         // <no-permanent-store/> (without <store/> override) allows
         // transient hold-and-forward — the §5.1 use case.
+        PendingDecision::Transient
+    } else if storage_allowed {
+        // Type rule says chat/normal is storable but the stanza has
+        // no archivable body/payload (e.g. a XEP-0184 receipt, XEP-0333
+        // marker, XEP-0224 attention ping, or other side-channel
+        // payload). XEP-0160 §3 still requires offline storage when
+        // there is no available resource, but with no MAM row to
+        // reference we hold the stanza inline as Transient and drop
+        // the inbox bump (locked Q10b). Issue #209 finding #1 — prior
+        // logic emitted Archived here, the archive handler refused the
+        // write, and the flush path silently dropped the row as a
+        // poison pill.
         PendingDecision::Transient
     } else {
         // Type rule says skip storage (headline, etc.) and no <store/>
@@ -374,6 +409,21 @@ fn carbons_decision(message: &Message, has_no_copy: bool) -> CarbonsDecision {
     } else {
         CarbonsDecision::Eligible
     }
+}
+
+/// Does the message wrap a XEP-0280 carbon copy — `<sent>` or
+/// `<received>` payload under `urn:xmpp:carbons:2`?
+///
+/// These wrappers are server-generated forwarded copies, never
+/// intake-time DMs from the wire. A federated peer or replayed unacked
+/// queue entry containing one MUST NOT be re-classified as a fresh DM:
+/// doing so would fan it back out to the recipient's other resources
+/// that already saw it via the original carbon route (issue #209
+/// finding #7).
+fn has_carbon_wrapper(message: &Message) -> bool {
+    message.payloads.iter().any(|payload| {
+        payload.ns() == CARBONS_NS && (payload.name() == "sent" || payload.name() == "received")
+    })
 }
 
 #[cfg(test)]
@@ -783,6 +833,108 @@ mod tests {
         assert_eq!(r.pending, PendingDecision::None);
         assert_eq!(r.live, LiveDecision::None);
         assert_eq!(r.inbox, InboxDecision::None);
+    }
+
+    // ── Issue #209 finding #1 — body-less chat-type DMs ────────────
+
+    #[test]
+    fn body_less_chat_to_offline_recipient_is_transient_not_archived() {
+        // A body-less chat-type DM (e.g. a XEP-0184 receipt, a XEP-0333
+        // marker, a XEP-0224 attention ping, or a custom side-channel
+        // payload) sent to a fully-offline recipient previously took
+        // the Archived path, but the archive handler refused the write
+        // (no body, no archivable payload), and the flush path then
+        // treated the resulting `pending_delivery` row as a poison pill
+        // and silently deleted it. Issue #209 finding #1.
+        //
+        // The classifier MUST agree with `archive::is_archivable`: when
+        // a body-less chat-type DM has no `<store/>` hint, it cannot be
+        // archived to MAM, so offline storage holds the stanza inline
+        // as Transient instead.
+        let msg = dm(
+            "bob@elsewhere/x",
+            "alice@example.com",
+            MessageType::Chat,
+            None,
+        );
+        let routing = classify_dm_intake(&msg, &OnlineResources::empty(), &Blocklist::empty());
+        assert_eq!(routing.archive, ArchiveDecision::None);
+        assert_eq!(routing.pending, PendingDecision::Transient);
+        assert_eq!(routing.live, LiveDecision::None);
+        // Locked Q10b — Transient leaves no inbox trace.
+        assert_eq!(routing.inbox, InboxDecision::None);
+    }
+
+    #[test]
+    fn body_less_chat_with_store_hint_archives_to_mam() {
+        // XEP-0334 §5.4 + project rule: an explicit `<store/>` hint
+        // forces archival even when the stanza would otherwise be
+        // body-less and skip MAM. Verifies the classifier and
+        // `archive::is_archivable` agree on the override.
+        let mut msg = dm(
+            "bob@elsewhere/x",
+            "alice@example.com",
+            MessageType::Chat,
+            None,
+        );
+        add_hint(&mut msg, Hint::Store);
+        let routing = classify_dm_intake(&msg, &OnlineResources::empty(), &Blocklist::empty());
+        assert_eq!(routing.archive, ArchiveDecision::Mam);
+        assert_eq!(routing.pending, PendingDecision::Archived);
+    }
+
+    #[test]
+    fn body_less_chat_to_online_recipient_does_not_archive_or_queue() {
+        // Online recipient, body-less chat: live-deliver, no archive,
+        // no pending row. Inbox stays untouched (no archive_ref since
+        // the stanza isn't MAM-eligible).
+        let msg = dm(
+            "bob@elsewhere/x",
+            "alice@example.com",
+            MessageType::Chat,
+            None,
+        );
+        let routing = classify_dm_intake(&msg, &one_resource_online(1), &Blocklist::empty());
+        assert_eq!(routing.archive, ArchiveDecision::None);
+        assert_eq!(routing.pending, PendingDecision::None);
+        assert_eq!(routing.live, LiveDecision::DeliverToBareWithFanout);
+        assert_eq!(routing.inbox, InboxDecision::None);
+    }
+
+    // ── Issue #209 finding #7 — XEP-0280 carbon wrappers ───────────
+
+    #[test]
+    fn carbon_sent_wrapper_is_dropped_not_classified_as_dm() {
+        use minidom::Element;
+        // A `<sent xmlns='urn:xmpp:carbons:2'/>` wrapper is a forwarded
+        // copy generated by carbons fanout; treating it as a fresh DM
+        // would re-route it back to the recipient's other resources
+        // (which already saw the original carbon route).
+        let mut msg = dm(
+            "alice@example.com",
+            "alice@example.com/web",
+            MessageType::Chat,
+            None,
+        );
+        msg.payloads
+            .push(Element::builder("sent", CARBONS_NS).build());
+        let routing = classify_dm_intake(&msg, &OnlineResources::empty(), &Blocklist::empty());
+        assert_eq!(routing, DmRouting::dropped());
+    }
+
+    #[test]
+    fn carbon_received_wrapper_is_dropped_not_classified_as_dm() {
+        use minidom::Element;
+        let mut msg = dm(
+            "alice@example.com",
+            "alice@example.com/web",
+            MessageType::Chat,
+            None,
+        );
+        msg.payloads
+            .push(Element::builder("received", CARBONS_NS).build());
+        let routing = classify_dm_intake(&msg, &OnlineResources::empty(), &Blocklist::empty());
+        assert_eq!(routing, DmRouting::dropped());
     }
 
     #[test]
