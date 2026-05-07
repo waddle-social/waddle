@@ -131,7 +131,7 @@ schema.#Project & {
 		test: schema.#Task & {
 			command: "bun"
 			args: ["test"]
-			dependsOn: [buildWasm, generateTypes]
+			dependsOn: [build]
 			inputs: [
 				"../package.json",
 				"../bun.lock",
@@ -139,6 +139,7 @@ schema.#Project & {
 				"tsconfig.json",
 				"src/**",
 				"tests/**",
+				"dist/**",
 			]
 		}
 
