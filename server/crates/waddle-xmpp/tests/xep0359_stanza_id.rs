@@ -14,7 +14,9 @@
 
 use chrono::Utc;
 use jid::{BareJid, Jid};
-use waddle_xmpp::pending_delivery::flush::{build_replay_stanza, MaterializedPayload};
+use waddle_xmpp::pending_delivery::flush::{
+    build_replay_stanza, MaterializedPayload, ReplayReason,
+};
 use waddle_xmpp::pending_delivery::{PendingPayload, PendingRow, PendingRowId};
 use waddle_xmpp_core::xep0359::{build_stanza_id_element, StanzaId, NS_SID};
 use xmpp_parsers::message::{Body, Message, MessageType};
@@ -59,7 +61,12 @@ fn xep0359_archived_flush_preserves_stanza_id_for_dedupe() {
         &Jid::from(recipient.clone()),
     ));
     let payload = MaterializedPayload::Archived(Box::new(archived));
-    let replayed = build_replay_stanza(payload, "example.com", Utc::now());
+    let replayed = build_replay_stanza(
+        payload,
+        "example.com",
+        Utc::now(),
+        ReplayReason::OfflineStorage,
+    );
     let stanza_id_el = replayed
         .payloads
         .iter()
@@ -89,7 +96,12 @@ fn xep0359_transient_flush_omits_stanza_id() {
         outbound_sequence: None,
     };
     let payload = MaterializedPayload::from_transient(&row).expect("transient");
-    let replayed = build_replay_stanza(payload, "example.com", row.original_receipt_at);
+    let replayed = build_replay_stanza(
+        payload,
+        "example.com",
+        row.original_receipt_at,
+        ReplayReason::OfflineStorage,
+    );
     let stanza_id_el = replayed
         .payloads
         .iter()
@@ -116,7 +128,12 @@ fn xep0359_archived_flush_preserves_multiple_stanza_ids() {
         .payloads
         .push(build_stanza_id_element("server-stamp-id", &server));
     let payload = MaterializedPayload::Archived(Box::new(archived));
-    let replayed = build_replay_stanza(payload, "example.com", Utc::now());
+    let replayed = build_replay_stanza(
+        payload,
+        "example.com",
+        Utc::now(),
+        ReplayReason::OfflineStorage,
+    );
     let ids: Vec<_> = replayed
         .payloads
         .iter()

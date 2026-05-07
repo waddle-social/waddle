@@ -24,7 +24,9 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use jid::{BareJid, FullJid};
 use tracing::{debug, instrument, warn};
-use waddle_xmpp::pending_delivery::flush::{build_replay_stanza, MaterializedPayload};
+use waddle_xmpp::pending_delivery::flush::{
+    build_replay_stanza, MaterializedPayload, ReplayReason,
+};
 use waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage;
 use waddle_xmpp::pending_delivery::{InsertOutcome, PendingPayload, PendingRow, PendingRowId};
 use waddle_xmpp::protocol::dm_routing::{
@@ -207,10 +209,17 @@ async fn promote_one(
             // finding #6 — earlier code sent the verbatim original
             // without `<delay/>`, leaving the recipient unable to tell
             // a redelivered stanza from a fresh one.
+            //
+            // The reason text differs from the offline-storage path: the
+            // stanza was never persisted offline, so the human-readable
+            // description is omitted (issue #209 finding #4). Only the
+            // typed `from`+`stamp` pair carries the load-bearing
+            // delivery-history signal per XEP-0203 §4.2.
             let delayed = build_replay_stanza(
                 MaterializedPayload::Transient(Box::new(message.clone())),
                 server_domain,
                 original_receipt_fallback,
+                ReplayReason::SmRedelivery,
             );
             // Send to all eligible resources; mark redelivered if at
             // least one send succeeds (matches the live-route fanout
@@ -754,6 +763,13 @@ mod tests {
             delay.attr("stamp").map(str::to_string),
             Some("2025-11-04T09:17:42Z".to_string()),
             "stamp must reflect the original failed-receipt time, not Q6 promotion time"
+        );
+        // Issue #209 finding #4: the alt-resource redelivery path must
+        // NOT label itself as offline-storage replay — the stanza was
+        // never persisted offline.
+        assert!(
+            delay.text().is_empty(),
+            "SM redelivery <delay/> must omit the 'Offline Storage' description"
         );
     }
 
