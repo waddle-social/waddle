@@ -11,8 +11,6 @@ use waddle_xmpp::inbox::{InboxEntry, storage::InboxStorage};
 use waddle_xmpp::{Session as XmppSession, UserDirectoryEntry, XmppError};
 
 #[cfg(test)]
-use crate::auth::jid::jid_to_localpart;
-#[cfg(test)]
 use crate::auth::{NativeUserStore, RegisterRequest, SessionManager, localpart_to_jid};
 #[cfg(test)]
 use crate::db::Database;
@@ -151,52 +149,7 @@ impl waddle_xmpp::AppState for XmppAppState {
         jid: &jid::Jid,
         token: &str,
     ) -> Result<XmppSession, XmppError> {
-        debug!(jid = %jid, "Validating XMPP session");
-
-        // Convert JID to localpart for verification
-        let expected_localpart = jid_to_localpart(&jid.to_string()).map_err(|e| {
-            warn!(jid = %jid, error = %e, "Failed to extract localpart from JID");
-            XmppError::auth_failed(format!("Invalid JID format: {}", e))
-        })?;
-
-        // Validate the session token (which is the session ID)
-        let session = self
-            .session_manager
-            .validate_session(token)
-            .await
-            .map_err(|e| {
-                warn!(token_prefix = %&token[..token.len().min(8)], error = %e, "Session validation failed");
-                match e {
-                    crate::auth::AuthError::SessionNotFound(_) => XmppError::SessionNotFound,
-                    crate::auth::AuthError::SessionExpired => XmppError::SessionNotFound,
-                    _ => XmppError::auth_failed(format!("Session validation failed: {}", e)),
-                }
-            })?;
-
-        // Verify the localpart matches the immutable session localpart.
-        if session.xmpp_localpart != expected_localpart {
-            warn!(
-                expected_localpart = %expected_localpart,
-                session_localpart = %session.xmpp_localpart,
-                "Localpart mismatch between JID and session"
-            );
-            return Err(XmppError::auth_failed("JID does not match session"));
-        }
-
-        // Convert to XMPP session
-        let bare_jid = jid.to_bare();
-
-        // Calculate expires_at - use session expiry or default to 24 hours from now
-        let expires_at = session
-            .expires_at
-            .unwrap_or_else(|| chrono::Utc::now() + chrono::Duration::hours(24));
-
-        Ok(XmppSession {
-            user_id: session.user_id,
-            jid: bare_jid,
-            created_at: session.created_at,
-            expires_at,
-        })
+        super::xmpp_auth_state::validate_session(&self.session_manager, jid, token).await
     }
 
     /// Check if a subject has permission to perform an action on a resource.
@@ -223,46 +176,8 @@ impl waddle_xmpp::AppState for XmppAppState {
     /// The token is expected to be a session ID. The JID is derived from the
     /// session's immutable localpart after validation.
     async fn validate_session_token(&self, token: &str) -> Result<XmppSession, XmppError> {
-        debug!(token_prefix = %&token[..token.len().min(8)], "Validating XMPP session token (OAUTHBEARER)");
-
-        // Validate the session token (which is the session ID)
-        let session = self
-            .session_manager
-            .validate_session(token)
+        super::xmpp_auth_state::validate_session_token(&self.session_manager, &self.domain, token)
             .await
-            .map_err(|e| {
-                warn!(token_prefix = %&token[..token.len().min(8)], error = %e, "Session validation failed");
-                match e {
-                    crate::auth::AuthError::SessionNotFound(_) => XmppError::SessionNotFound,
-                    crate::auth::AuthError::SessionExpired => XmppError::SessionNotFound,
-                    _ => XmppError::auth_failed(format!("Session validation failed: {}", e)),
-                }
-            })?;
-
-        // Convert immutable localpart to JID
-        let jid_str = localpart_to_jid(&session.xmpp_localpart, &self.domain).map_err(|e| {
-            warn!(localpart = %session.xmpp_localpart, error = %e, "Failed to convert localpart to JID");
-            XmppError::auth_failed(format!("Invalid localpart format: {}", e))
-        })?;
-
-        let bare_jid: jid::BareJid = jid_str.parse().map_err(|e| {
-            warn!(jid = %jid_str, error = ?e, "Failed to parse generated JID");
-            XmppError::auth_failed(format!("Invalid JID: {:?}", e))
-        })?;
-
-        // Calculate expires_at - use session expiry or default to 24 hours from now
-        let expires_at = session
-            .expires_at
-            .unwrap_or_else(|| chrono::Utc::now() + chrono::Duration::hours(24));
-
-        debug!(jid = %bare_jid, user_id = %session.user_id, "OAUTHBEARER session validated");
-
-        Ok(XmppSession {
-            user_id: session.user_id,
-            jid: bare_jid,
-            created_at: session.created_at,
-            expires_at,
-        })
     }
 
     /// Get the XMPP server domain.
@@ -274,14 +189,7 @@ impl waddle_xmpp::AppState for XmppAppState {
     ///
     /// Returns the RFC 8414 OAuth authorization server metadata endpoint URL.
     fn oauth_discovery_url(&self) -> String {
-        // Construct the discovery URL based on the domain
-        // In production, this should be configurable via environment variable
-        let base_url =
-            std::env::var("WADDLE_BASE_URL").unwrap_or_else(|_| format!("https://{}", self.domain));
-        format!(
-            "{}/.well-known/oauth-authorization-server",
-            base_url.trim_end_matches('/')
-        )
+        super::xmpp_auth_state::oauth_discovery_url(&self.domain)
     }
 
     /// List all relations a subject has on an object.

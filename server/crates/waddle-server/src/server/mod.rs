@@ -10,6 +10,8 @@ mod session_janitors;
 mod state;
 mod topology;
 mod trace;
+#[cfg(test)]
+mod xmpp_auth_state;
 mod xmpp_channels;
 #[cfg(test)]
 mod xmpp_permission_state;
