@@ -347,8 +347,19 @@ const activeForumTitle = computed({
 const activeTypingUsers = computed(() =>
   ui.sidebarMode.value === "dms" ? dmMessaging.typingUsers.value : messaging.typingUsers.value,
 );
+const isApplyingRoute = ref(false);
+let routeRequestId = 0;
 const activeIsLoadingMessages = computed(() =>
   ui.sidebarMode.value === "dms" ? dmMessaging.isLoadingMessages.value : messaging.isLoadingMessages.value,
+);
+const isResolvingActiveConversation = computed(() =>
+  ui.activePage.value === "chat"
+  && !waddles.currentChannel.value
+  && !activeDmPeer.value
+  && (isApplyingRoute.value || waddles.isLoadingStructure.value),
+);
+const contentAreaIsLoadingMessages = computed(() =>
+  activeIsLoadingMessages.value || isResolvingActiveConversation.value,
 );
 const activeIsLoadingOlderMessages = computed(() =>
   ui.sidebarMode.value === "dms" ? dmMessaging.isLoadingOlderMessages.value : messaging.isLoadingOlderMessages.value,
@@ -606,8 +617,6 @@ watch(xmppClient, (client) => {
   });
 }, { immediate: true });
 
-const isApplyingRoute = ref(false);
-let routeRequestId = 0;
 const settingsPath = buildChatSettingsPath();
 
 const currentChatPath = computed(() =>
@@ -1602,7 +1611,7 @@ onUnmounted(() => {
                :action-error="activeActionError"
               :update-available="appUpdate.updateAvailable.value"
               :is-applying-update="appUpdate.isApplyingUpdate.value"
-              :is-loading-messages="activeIsLoadingMessages"
+              :is-loading-messages="contentAreaIsLoadingMessages"
               :is-loading-older-messages="activeIsLoadingOlderMessages"
               :has-older-messages="activeHasOlderMessages"
               :is-sending="activeIsSending"
