@@ -666,6 +666,15 @@ const activeUploadProgress = computed(() =>
 const activeActionError = computed(() =>
   ui.actionError.value || (ui.sidebarMode.value === "channels" ? mentionSourceDiagnostic.value : "")
 );
+const activeErrorActionLabel = computed(() => {
+  const peer = activeDmPeer.value;
+  return ui.sidebarMode.value === "dms" &&
+    peer &&
+    dmMessaging.loadErrorPeerJid.value === peer.peerJid &&
+    activeActionError.value === dmMessaging.loadErrorMessage.value
+    ? "Try again"
+    : null;
+});
 let setupPromptShown = false;
 
 function showFirstRunSetupIfNeeded() {
@@ -832,6 +841,12 @@ function clearActiveSearch() {
 
 function loadOlderActiveMessages() {
   void activeTarget.value.loadOlderMessages();
+}
+
+function retryActiveLoad() {
+  const peer = activeDmPeer.value;
+  if (ui.sidebarMode.value !== "dms" || !peer) return;
+  void dmMessaging.loadMessages(peer.peerJid);
 }
 
 function ensureActiveMessageLoaded(messageId: string) {
@@ -1599,7 +1614,8 @@ onUnmounted(() => {
               :messages="activeMessages"
               :first-unseen-id="activeFirstUnseenId"
               :xmpp-status="messaging.xmppStatus.value"
-               :action-error="activeActionError"
+              :action-error="activeActionError"
+              :error-action-label="activeErrorActionLabel"
               :update-available="appUpdate.updateAvailable.value"
               :is-applying-update="appUpdate.isApplyingUpdate.value"
               :is-loading-messages="activeIsLoadingMessages"
@@ -1634,6 +1650,7 @@ onUnmounted(() => {
               @search="searchActiveMessages"
               @clear-search="clearActiveSearch"
               @load-older="loadOlderActiveMessages"
+              @retry-load="retryActiveLoad"
               @edit-channel="openChannelEdit"
               @open-nav="ui.showMobileNav.value = true"
               @open-details="ui.showMobileDetails.value = true"

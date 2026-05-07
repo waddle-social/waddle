@@ -68,6 +68,43 @@ afterEach(() => {
 });
 
 describe("client send readiness", () => {
+  test("DM load failures use deterministic UI copy and keep raw errors out of actionError", async () => {
+    const rawError = new Error("remote-server-timeout at xmpp.example.com for bob@example.com");
+    const client = {
+      queryPersonalMamPage: mock(async () => {
+        throw rawError;
+      }),
+    } as unknown as BrowserXmppClient;
+    const actionError = ref("");
+    const normalize = mock(() => "Something went wrong. remote-server-timeout at xmpp.example.com for bob@example.com");
+    const originalConsoleError = console.error;
+    const consoleError = mock(() => undefined);
+    console.error = consoleError as typeof console.error;
+    try {
+      const dm = useDirectMessages(
+        ref<WaddleSession | null>(session()),
+        ref<BrowserXmppClient | null>(client),
+        ref("bob@example.com"),
+        normalize,
+        actionError,
+        () => {
+          actionError.value = "";
+        },
+      );
+
+      await dm.loadMessages("bob@example.com");
+
+      expect(actionError.value).toBe("Could not load @bob. Check the connection and try again.");
+      expect(actionError.value).not.toContain("xmpp.example.com");
+      expect(actionError.value).not.toContain("bob@example.com");
+      expect(normalize).not.toHaveBeenCalled();
+      expect(consoleError).toHaveBeenCalledWith("Could not load DM conversation", rawError);
+      expect(dm.loadErrorPeerJid.value).toBe("bob@example.com");
+    } finally {
+      console.error = originalConsoleError;
+    }
+  });
+
   test("room sends immediately when the room is ready", async () => {
     const xmpp = { send_groupchat_message: mock(async (_room: string, _body: string, opts: { stanza_id?: string }) => opts.stanza_id) };
     const client = new BrowserXmppClient(session());

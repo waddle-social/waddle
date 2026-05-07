@@ -121,6 +121,10 @@ export function useDirectMessages(
 ) {
   const { mode: scrollDirection } = useScrollDirectionPreference();
   const peerNameFromJid = (jid: string) => barePeerJid(jid).split("@")[0] ?? "unknown";
+  const dmLoadErrorMessage = (peerJid: string) => {
+    const username = peerNameFromJid(peerJid).trim();
+    return `Could not load ${username ? `@${username}` : "this chat"}. Check the connection and try again.`;
+  };
   const messages = ref<TimelineMessage[]>([]);
   const draft = ref("");
   const isLoadingMessages = ref(false);
@@ -139,6 +143,8 @@ export function useDirectMessages(
   const isSearching = ref(false);
   const uploadProgress = ref({ uploading: false, progress: 0, filename: "" });
   const firstUnseenId = ref<string | null>(null);
+  const loadErrorPeerJid = ref<string | null>(null);
+  const loadErrorMessage = ref("");
   const latestRemoteMessageId = computed<string | null>(() => {
     for (let i = messages.value.length - 1; i >= 0; i--) {
       const m = messages.value[i];
@@ -508,6 +514,8 @@ export function useDirectMessages(
     pinnedEdgeScroller.disconnect();
     firstUnseenId.value = null;
     clearActionError();
+    loadErrorPeerJid.value = null;
+    loadErrorMessage.value = "";
     pendingEchoClientIds.clear();
     messages.value = appendQueuedMessages([], peerJid);
     try {
@@ -520,6 +528,8 @@ export function useDirectMessages(
           ? await xmppClient.value.queryPersonalMam(peerJid, 100)
           : [];
       if (requestId !== messageRequestId || activePeerJid.value !== peerJid) return;
+      loadErrorPeerJid.value = null;
+      loadErrorMessage.value = "";
       oldestArchiveId = page?.firstArchiveId ?? mamResults[0]?.id ?? null;
       hasOlderMessages.value = page ? !page.complete && !!page.firstArchiveId : mamResults.length >= 100;
       const timeline = buildTimelineFromMamResults(mamResults);
@@ -539,9 +549,12 @@ export function useDirectMessages(
       if (newest) setLastSeen(key, newest.id);
     } catch (e) {
       if (requestId === messageRequestId) {
+        console.error("Could not load DM conversation", e);
         const queuedOnly = appendQueuedMessages([], peerJid);
         messages.value = queuedOnly;
-        actionError.value = queuedOnly.length > 0 ? "" : normalizeError(e);
+        loadErrorPeerJid.value = queuedOnly.length > 0 ? null : peerJid;
+        loadErrorMessage.value = queuedOnly.length > 0 ? "" : dmLoadErrorMessage(peerJid);
+        actionError.value = loadErrorMessage.value;
         isLoadingMessages.value = false;
       }
     }
@@ -576,7 +589,10 @@ export function useDirectMessages(
         el.scrollTop = previousTop + (el.scrollHeight - previousHeight);
       }
     } catch (e) {
-      if (isCurrentRequest()) actionError.value = normalizeError(e);
+      if (isCurrentRequest()) {
+        console.error("Could not load older DM messages", e);
+        actionError.value = dmLoadErrorMessage(peerJid);
+      }
     } finally {
       if (isCurrentRequest()) isLoadingOlderMessages.value = false;
     }
@@ -957,6 +973,8 @@ export function useDirectMessages(
     timelineEdgeScroller,
     searchResults,
     isSearching,
+    loadErrorPeerJid,
+    loadErrorMessage,
     loadMessages,
     loadOlderMessages,
     ensureMessageLoaded,

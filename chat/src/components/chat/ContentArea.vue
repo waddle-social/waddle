@@ -42,6 +42,7 @@ const props = defineProps<{
   firstUnseenId: string | null;
   xmppStatus: XmppStatusSnapshot;
   actionError: string;
+  errorActionLabel?: string | null;
   updateAvailable: boolean;
   isApplyingUpdate: boolean;
   isLoadingMessages: boolean;
@@ -93,6 +94,7 @@ const emit = defineEmits<{
   openThread: [threadId: string, targetMessageId?: string];
   refreshUpdate: [];
   loadOlder: [];
+  retryLoad: [];
 }>();
 
 // Hide thread members from the main feed — they live inside the thread panel.
@@ -794,7 +796,18 @@ function dayDividerLabel(createdAt: string): string {
       v-if="actionError"
       class="type-control bg-destructive/10 border-b border-destructive/20 text-destructive animate-fade-in"
     >
-      <div class="chat-message-lane px-[var(--chat-content-inline)] py-3">{{ actionError }}</div>
+      <div class="chat-message-lane flex flex-col gap-2 px-[var(--chat-content-inline)] py-3 sm:flex-row sm:items-center sm:justify-between">
+        <span>{{ actionError }}</span>
+        <button
+          v-if="errorActionLabel"
+          type="button"
+          class="inline-flex h-8 shrink-0 items-center justify-center gap-1.5 rounded-md border border-destructive/25 bg-background/80 px-3 text-destructive transition-colors hover:bg-destructive/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-destructive/30"
+          @click="emit('retryLoad')"
+        >
+          <RefreshCw class="h-3.5 w-3.5" />
+          {{ errorActionLabel }}
+        </button>
+      </div>
     </div>
     <div
       v-if="replyJumpNotice"
@@ -907,6 +920,20 @@ function dayDividerLabel(createdAt: string): string {
               ? "Select a forum to browse topics"
               : "Select a channel to start chatting" }}
         </p>
+      </div>
+
+      <div v-else-if="errorActionLabel" class="chat-empty-state">
+        <div class="w-12 h-12 rounded-lg bg-destructive/10 flex items-center justify-center">
+          <AlertCircle class="w-5 h-5 text-destructive" />
+        </div>
+        <div class="chat-field-stack">
+          <p class="type-empty-title">
+            Messages are not available right now.
+          </p>
+          <p class="type-field text-muted-foreground">
+            Check the connection and try again.
+          </p>
+        </div>
       </div>
 
       <div v-else-if="feedMessages.length === 0" class="chat-empty-state">
