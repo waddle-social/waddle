@@ -795,6 +795,9 @@ function dayDividerLabel(createdAt: string): string {
     <div
       v-if="actionError"
       class="type-control bg-destructive/10 border-b border-destructive/20 text-destructive animate-fade-in"
+      role="alert"
+      aria-live="assertive"
+      aria-atomic="true"
     >
       <div class="chat-message-lane flex flex-col gap-2 px-[var(--chat-content-inline)] py-3 sm:flex-row sm:items-center sm:justify-between">
         <span>{{ actionError }}</span>

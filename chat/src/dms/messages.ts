@@ -121,9 +121,12 @@ export function useDirectMessages(
 ) {
   const { mode: scrollDirection } = useScrollDirectionPreference();
   const peerNameFromJid = (jid: string) => barePeerJid(jid).split("@")[0] ?? "unknown";
-  const dmLoadErrorMessage = (peerJid: string) => {
+  const dmLoadErrorMessage = (peerJid: string, opts: { queuedOnly?: boolean } = {}) => {
     const username = peerNameFromJid(peerJid).trim();
-    return `Could not load ${username ? `@${username}` : "this chat"}. Check the connection and try again.`;
+    const target = username ? `@${username}` : "this chat";
+    return opts.queuedOnly
+      ? `Could not load ${target} history. Showing queued messages only. Check the connection and try again.`
+      : `Could not load ${target}. Check the connection and try again.`;
   };
   const messages = ref<TimelineMessage[]>([]);
   const draft = ref("");
@@ -547,13 +550,13 @@ export function useDirectMessages(
       initialLatestPagePinned = true;
       const newest = [...timelineWithQueue].reverse().find(isFeedVisible);
       if (newest) setLastSeen(key, newest.id);
-    } catch (e) {
+    } catch {
       if (requestId === messageRequestId) {
-        console.error("Could not load DM conversation", e);
+        console.warn("Could not load DM conversation");
         const queuedOnly = appendQueuedMessages([], peerJid);
         messages.value = queuedOnly;
-        loadErrorPeerJid.value = queuedOnly.length > 0 ? null : peerJid;
-        loadErrorMessage.value = queuedOnly.length > 0 ? "" : dmLoadErrorMessage(peerJid);
+        loadErrorPeerJid.value = peerJid;
+        loadErrorMessage.value = dmLoadErrorMessage(peerJid, { queuedOnly: queuedOnly.length > 0 });
         actionError.value = loadErrorMessage.value;
         isLoadingMessages.value = false;
       }
@@ -588,9 +591,9 @@ export function useDirectMessages(
       if (el && !isTopPinnedScrollDirection(scrollDirection.value)) {
         el.scrollTop = previousTop + (el.scrollHeight - previousHeight);
       }
-    } catch (e) {
+    } catch {
       if (isCurrentRequest()) {
-        console.error("Could not load older DM messages", e);
+        console.warn("Could not load older DM messages");
         actionError.value = dmLoadErrorMessage(peerJid);
       }
     } finally {
