@@ -219,6 +219,27 @@ pub trait SmPersistenceStorage: Send + Sync {
         }
         Ok(())
     }
+
+    /// Atomically increment the persistent promotion-failure counter
+    /// for `stream_id` and return the new value. Used by the SM-
+    /// expiry janitor (issue #209 finding #14) to break runaway retry
+    /// loops when Q6 promotion fails repeatedly for permanent reasons
+    /// (disk full, schema corruption, etc.) — once the count crosses a
+    /// threshold the caller dead-letters the durable row instead of
+    /// preserving it for yet another retry.
+    ///
+    /// Default impl returns `Ok(0)` — in-memory backends don't track
+    /// the counter durably, so the janitor's dead-letter path simply
+    /// never trips for them. Production backends override with a
+    /// `UPDATE … SET promotion_attempts = promotion_attempts + 1` plus
+    /// a follow-up SELECT.
+    async fn record_promotion_failure(
+        &self,
+        stream_id: &SmSessionId,
+    ) -> Result<u32, SmPersistenceError> {
+        let _ = stream_id;
+        Ok(0)
+    }
 }
 
 /// In-memory implementation suitable for tests and as the structural

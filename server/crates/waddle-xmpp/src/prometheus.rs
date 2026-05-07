@@ -27,6 +27,50 @@ static BROADCAST_DROPPED_CLOSED: AtomicU64 = AtomicU64::new(0);
 // later `<resumed/>` will silently drop that stanza.
 static SM_UNACKED_EVICTED: AtomicU64 = AtomicU64::new(0);
 
+// Issue #209 finding #11 — observability for the offline-DM /
+// SM-expiry surface. None of these existed before; the entire
+// runtime behavior described by issue #209 was previously
+// unobservable beyond grep'ing log lines.
+//
+// `pending_delivery_quota_exceeded`: per-recipient cap hit at intake
+// (XEP-0160 §3 step 3 bounce). Sustained non-zero indicates a
+// recipient queue saturated by a single sender or a permanently-
+// offline target.
+static PENDING_DELIVERY_QUOTA_EXCEEDED: AtomicU64 = AtomicU64::new(0);
+// `pending_delivery_orphan_claims_released`: claim-expiry janitor
+// activity — non-zero is normal (sessions die without acks); a
+// growing rate signals broken SM lifecycle.
+static PENDING_DELIVERY_ORPHAN_CLAIMS_RELEASED: AtomicU64 = AtomicU64::new(0);
+// `pending_delivery_aged_out`: aging janitor (issue #209 finding #5)
+// drops rows older than the configured max age. Sustained non-zero
+// indicates recipients with permanently-stale queues.
+static PENDING_DELIVERY_AGED_OUT: AtomicU64 = AtomicU64::new(0);
+// `pending_delivery_unresolved_poison_pill`: flush could not
+// materialize a row's MAM payload and dropped it. Should be ~0 on a
+// healthy deployment; non-zero signals MAM corruption.
+static PENDING_DELIVERY_UNRESOLVED_POISON_PILL: AtomicU64 = AtomicU64::new(0);
+// `sm_promotion_storage_failed`: Q6 promotion encountered a
+// pending_delivery insert error and preserved the durable SM row for
+// retry (issue #209 PR #346 + finding #14 dead-letter cap).
+static SM_PROMOTION_STORAGE_FAILED: AtomicU64 = AtomicU64::new(0);
+// `sm_promotion_blocklist_failed`: blocklist storage load failed
+// during Q6 promotion; the session was skipped fail-closed.
+static SM_PROMOTION_BLOCKLIST_FAILED: AtomicU64 = AtomicU64::new(0);
+// `sm_promotion_dead_lettered`: a session crossed the configured
+// promotion-attempt threshold and was dead-lettered (issue #209
+// finding #14). Each event is a permanent loss of unacked stanzas
+// from one session.
+static SM_PROMOTION_DEAD_LETTERED: AtomicU64 = AtomicU64::new(0);
+// `sm_drain_timeout`: graceful-shutdown drain hit the configured
+// deadline with sessions still pending. Each event implies durable
+// rows surviving for restart-time retry.
+static SM_DRAIN_TIMEOUT: AtomicU64 = AtomicU64::new(0);
+// `sm_resume_window_clamped`: a client requested a resume window
+// larger than the server-side cap (`WADDLE_SM_MAX_RESUME_SECS`) and
+// was silently lowered. Sustained non-zero indicates the cap is too
+// tight for the client population.
+static SM_RESUME_WINDOW_CLAMPED: AtomicU64 = AtomicU64::new(0);
+
 fn unix_timestamp_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -96,6 +140,42 @@ pub fn increment_sm_unacked_evicted() {
     SM_UNACKED_EVICTED.fetch_add(1, Ordering::Relaxed);
 }
 
+pub fn increment_pending_delivery_quota_exceeded() {
+    PENDING_DELIVERY_QUOTA_EXCEEDED.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn add_pending_delivery_orphan_claims_released(n: u64) {
+    PENDING_DELIVERY_ORPHAN_CLAIMS_RELEASED.fetch_add(n, Ordering::Relaxed);
+}
+
+pub fn add_pending_delivery_aged_out(n: u64) {
+    PENDING_DELIVERY_AGED_OUT.fetch_add(n, Ordering::Relaxed);
+}
+
+pub fn increment_pending_delivery_unresolved_poison_pill() {
+    PENDING_DELIVERY_UNRESOLVED_POISON_PILL.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn add_sm_promotion_storage_failed(n: u64) {
+    SM_PROMOTION_STORAGE_FAILED.fetch_add(n, Ordering::Relaxed);
+}
+
+pub fn increment_sm_promotion_blocklist_failed() {
+    SM_PROMOTION_BLOCKLIST_FAILED.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn increment_sm_promotion_dead_lettered() {
+    SM_PROMOTION_DEAD_LETTERED.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn increment_sm_drain_timeout() {
+    SM_DRAIN_TIMEOUT.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn increment_sm_resume_window_clamped() {
+    SM_RESUME_WINDOW_CLAMPED.fetch_add(1, Ordering::Relaxed);
+}
+
 pub fn render_metrics() -> String {
     let now = unix_timestamp_secs();
     rotate_second_bucket(now);
@@ -109,6 +189,15 @@ pub fn render_metrics() -> String {
     let broadcast_dropped_full = BROADCAST_DROPPED_FULL.load(Ordering::Relaxed);
     let broadcast_dropped_closed = BROADCAST_DROPPED_CLOSED.load(Ordering::Relaxed);
     let sm_unacked_evicted = SM_UNACKED_EVICTED.load(Ordering::Relaxed);
+    let pending_quota_exceeded = PENDING_DELIVERY_QUOTA_EXCEEDED.load(Ordering::Relaxed);
+    let pending_orphan_released = PENDING_DELIVERY_ORPHAN_CLAIMS_RELEASED.load(Ordering::Relaxed);
+    let pending_aged_out = PENDING_DELIVERY_AGED_OUT.load(Ordering::Relaxed);
+    let pending_poison_pill = PENDING_DELIVERY_UNRESOLVED_POISON_PILL.load(Ordering::Relaxed);
+    let sm_promotion_storage_failed = SM_PROMOTION_STORAGE_FAILED.load(Ordering::Relaxed);
+    let sm_promotion_blocklist_failed = SM_PROMOTION_BLOCKLIST_FAILED.load(Ordering::Relaxed);
+    let sm_promotion_dead_lettered = SM_PROMOTION_DEAD_LETTERED.load(Ordering::Relaxed);
+    let sm_drain_timeout = SM_DRAIN_TIMEOUT.load(Ordering::Relaxed);
+    let sm_resume_window_clamped = SM_RESUME_WINDOW_CLAMPED.load(Ordering::Relaxed);
 
     format!(
         concat!(
@@ -139,6 +228,33 @@ pub fn render_metrics() -> String {
             "# HELP waddle_sm_unacked_evicted_total XEP-0198 unacked-queue entries evicted because the queue hit capacity; each eviction will be missing from a later <resumed/> replay.\n",
             "# TYPE waddle_sm_unacked_evicted_total counter\n",
             "waddle_sm_unacked_evicted_total {sm_unacked_evicted}\n",
+            "# HELP waddle_pending_delivery_quota_exceeded_total Inserts rejected because the per-recipient pending_delivery quota was full (XEP-0160 §3 step 3 bounce path).\n",
+            "# TYPE waddle_pending_delivery_quota_exceeded_total counter\n",
+            "waddle_pending_delivery_quota_exceeded_total {pending_quota_exceeded}\n",
+            "# HELP waddle_pending_delivery_orphan_claims_released_total Pending_delivery rows the claim-expiry janitor released because their session was no longer live.\n",
+            "# TYPE waddle_pending_delivery_orphan_claims_released_total counter\n",
+            "waddle_pending_delivery_orphan_claims_released_total {pending_orphan_released}\n",
+            "# HELP waddle_pending_delivery_aged_out_total Pending_delivery rows the aging janitor dropped because they exceeded WADDLE_PENDING_DELIVERY_MAX_AGE_DAYS.\n",
+            "# TYPE waddle_pending_delivery_aged_out_total counter\n",
+            "waddle_pending_delivery_aged_out_total {pending_aged_out}\n",
+            "# HELP waddle_pending_delivery_unresolved_poison_pill_total Pending_delivery flushes that dropped a row because its MAM payload could not be resolved (corruption signal).\n",
+            "# TYPE waddle_pending_delivery_unresolved_poison_pill_total counter\n",
+            "waddle_pending_delivery_unresolved_poison_pill_total {pending_poison_pill}\n",
+            "# HELP waddle_sm_promotion_storage_failed_total Q6 promotion encountered a transient pending_delivery insert error; durable SM row preserved for retry.\n",
+            "# TYPE waddle_sm_promotion_storage_failed_total counter\n",
+            "waddle_sm_promotion_storage_failed_total {sm_promotion_storage_failed}\n",
+            "# HELP waddle_sm_promotion_blocklist_failed_total Q6 promotion skipped a session because its blocklist load failed (fail-closed XEP-0191 policy).\n",
+            "# TYPE waddle_sm_promotion_blocklist_failed_total counter\n",
+            "waddle_sm_promotion_blocklist_failed_total {sm_promotion_blocklist_failed}\n",
+            "# HELP waddle_sm_promotion_dead_lettered_total Q6 promotion failed WADDLE_SM_PROMOTION_MAX_ATTEMPTS times in a row for a session; durable row deleted to break the retry loop. Each event is a permanent loss of unacked stanzas.\n",
+            "# TYPE waddle_sm_promotion_dead_lettered_total counter\n",
+            "waddle_sm_promotion_dead_lettered_total {sm_promotion_dead_lettered}\n",
+            "# HELP waddle_sm_drain_timeout_total Graceful-shutdown drain hit WADDLE_DRAIN_TIMEOUT_SECS with sessions still pending; remaining durable rows survive for restart-time retry.\n",
+            "# TYPE waddle_sm_drain_timeout_total counter\n",
+            "waddle_sm_drain_timeout_total {sm_drain_timeout}\n",
+            "# HELP waddle_sm_resume_window_clamped_total Client-requested XEP-0198 resume window exceeded WADDLE_SM_MAX_RESUME_SECS and was silently lowered.\n",
+            "# TYPE waddle_sm_resume_window_clamped_total counter\n",
+            "waddle_sm_resume_window_clamped_total {sm_resume_window_clamped}\n",
         ),
         connected_users = connected_users,
         room_count = room_count,
@@ -149,6 +265,15 @@ pub fn render_metrics() -> String {
         broadcast_dropped_full = broadcast_dropped_full,
         broadcast_dropped_closed = broadcast_dropped_closed,
         sm_unacked_evicted = sm_unacked_evicted,
+        pending_quota_exceeded = pending_quota_exceeded,
+        pending_orphan_released = pending_orphan_released,
+        pending_aged_out = pending_aged_out,
+        pending_poison_pill = pending_poison_pill,
+        sm_promotion_storage_failed = sm_promotion_storage_failed,
+        sm_promotion_blocklist_failed = sm_promotion_blocklist_failed,
+        sm_promotion_dead_lettered = sm_promotion_dead_lettered,
+        sm_drain_timeout = sm_drain_timeout,
+        sm_resume_window_clamped = sm_resume_window_clamped,
     )
 }
 
@@ -174,6 +299,15 @@ mod tests {
         BROADCAST_DROPPED_FULL.store(0, Ordering::Release);
         BROADCAST_DROPPED_CLOSED.store(0, Ordering::Release);
         SM_UNACKED_EVICTED.store(0, Ordering::Release);
+        PENDING_DELIVERY_QUOTA_EXCEEDED.store(0, Ordering::Release);
+        PENDING_DELIVERY_ORPHAN_CLAIMS_RELEASED.store(0, Ordering::Release);
+        PENDING_DELIVERY_AGED_OUT.store(0, Ordering::Release);
+        PENDING_DELIVERY_UNRESOLVED_POISON_PILL.store(0, Ordering::Release);
+        SM_PROMOTION_STORAGE_FAILED.store(0, Ordering::Release);
+        SM_PROMOTION_BLOCKLIST_FAILED.store(0, Ordering::Release);
+        SM_PROMOTION_DEAD_LETTERED.store(0, Ordering::Release);
+        SM_DRAIN_TIMEOUT.store(0, Ordering::Release);
+        SM_RESUME_WINDOW_CLAMPED.store(0, Ordering::Release);
     }
 
     #[test]
@@ -263,6 +397,54 @@ mod tests {
         assert!(rendered.contains("waddle_broadcast_not_connected_total 1"));
         assert!(rendered.contains("waddle_broadcast_dropped_full_total 3"));
         assert!(rendered.contains("waddle_broadcast_dropped_closed_total 1"));
+    }
+
+    /// Issue #209 finding #11: every metric introduced for the
+    /// offline-DM / SM-expiry surface MUST appear in the rendered
+    /// output with HELP+TYPE headers. Without these headers, a
+    /// scraper accepts the line but dashboards lose the metric type.
+    #[test]
+    fn test_issue_209_finding_11_metric_families_render() {
+        let _guard = test_lock().lock().unwrap();
+        reset_metrics_for_test();
+
+        increment_pending_delivery_quota_exceeded();
+        add_pending_delivery_orphan_claims_released(7);
+        add_pending_delivery_aged_out(3);
+        increment_pending_delivery_unresolved_poison_pill();
+        add_sm_promotion_storage_failed(2);
+        increment_sm_promotion_blocklist_failed();
+        increment_sm_promotion_dead_lettered();
+        increment_sm_drain_timeout();
+        increment_sm_resume_window_clamped();
+
+        let rendered = render_metrics();
+
+        for family in [
+            "waddle_pending_delivery_quota_exceeded_total",
+            "waddle_pending_delivery_orphan_claims_released_total",
+            "waddle_pending_delivery_aged_out_total",
+            "waddle_pending_delivery_unresolved_poison_pill_total",
+            "waddle_sm_promotion_storage_failed_total",
+            "waddle_sm_promotion_blocklist_failed_total",
+            "waddle_sm_promotion_dead_lettered_total",
+            "waddle_sm_drain_timeout_total",
+            "waddle_sm_resume_window_clamped_total",
+        ] {
+            assert!(
+                rendered.contains(&format!("# HELP {family}")),
+                "missing HELP header for {family}"
+            );
+            assert!(
+                rendered.contains(&format!("# TYPE {family} counter")),
+                "missing TYPE header for {family}"
+            );
+        }
+        assert!(rendered.contains("waddle_pending_delivery_quota_exceeded_total 1"));
+        assert!(rendered.contains("waddle_pending_delivery_orphan_claims_released_total 7"));
+        assert!(rendered.contains("waddle_pending_delivery_aged_out_total 3"));
+        assert!(rendered.contains("waddle_sm_promotion_storage_failed_total 2"));
+        assert!(rendered.contains("waddle_sm_resume_window_clamped_total 1"));
     }
 
     #[test]

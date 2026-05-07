@@ -177,6 +177,7 @@ where
             // perspective; we surface it loudly so production logs
             // can flag MAM corruption / unexpected tombstones.
             outcome.unresolved += 1;
+            waddle_xmpp::prometheus::increment_pending_delivery_unresolved_poison_pill();
             if let Err(error) = storage.delete_row(&row.id).await {
                 warn!(
                     row_id = %row.id,
@@ -400,6 +401,32 @@ const PAYLOAD_KIND_TRANSIENT: &str = "transient";
 /// Lock granularity is per recipient — concurrent inserts for
 /// *different* recipients don't contend.
 type RecipientLockMap = dashmap::DashMap<BareJid, std::sync::Arc<tokio::sync::Mutex<()>>>;
+
+/// Sweep [`RecipientLockMap`] entries that no caller is currently
+/// holding. Called periodically from the claim-expiry janitor (issue
+/// #209 finding #4): the map was previously append-only and grew with
+/// every distinct recipient bare-JID seen by the process, leaking an
+/// `Arc<Mutex<()>>` per user permanently.
+///
+/// Race-safe: `remove_if` evaluates the predicate while holding the
+/// shard's write lock, and the predicate (`strong_count == 1`) is
+/// only true when no other task currently has a clone of the lock.
+/// If a clone is in flight we leave the entry alone and the next
+/// sweep retries.
+pub fn sweep_recipient_locks(
+    locks: &dashmap::DashMap<BareJid, std::sync::Arc<tokio::sync::Mutex<()>>>,
+) -> usize {
+    let mut removed = 0;
+    locks.retain(|_, lock| {
+        if std::sync::Arc::strong_count(lock) > 1 {
+            true
+        } else {
+            removed += 1;
+            false
+        }
+    });
+    removed
+}
 
 /// libSQL/Postgres-backed [`PendingDeliveryStorage`] implementation.
 ///
@@ -961,6 +988,21 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
             .get(0)
             .map_err(|e| PendingStorageError::Other(e.to_string()))?;
         Ok(count.max(0) as u32)
+    }
+
+    async fn delete_older_than(
+        &self,
+        cutoff: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64, PendingStorageError> {
+        self.execute(
+            "DELETE FROM pending_delivery WHERE original_receipt_at < ?",
+            crate::db_params![cutoff.timestamp_millis()],
+        )
+        .await
+    }
+
+    fn sweep_internal_bookkeeping(&self) -> usize {
+        sweep_recipient_locks(&self.recipient_locks)
     }
 }
 
@@ -1921,6 +1963,12 @@ mod tests {
             }
             async fn count(&self, recipient: &BareJid) -> Result<u32, PendingStorageError> {
                 self.inner.count(recipient).await
+            }
+            async fn delete_older_than(
+                &self,
+                cutoff: chrono::DateTime<chrono::Utc>,
+            ) -> Result<u64, PendingStorageError> {
+                self.inner.delete_older_than(cutoff).await
             }
         }
 

@@ -13,7 +13,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use jid::FullJid;
-use tracing::{info, instrument};
+use tracing::{debug, info, instrument};
 use waddle_xmpp::pending_delivery::SmSessionId;
 use waddle_xmpp::stream_management::persistence::{
     PersistedSession, PersistedUnackedStanza, SmPersistenceError, SmPersistenceStorage,
@@ -118,6 +118,39 @@ impl DatabaseSmPersistence {
         Ok(storage)
     }
 
+    /// Add a column to an existing table idempotently across libSQL
+    /// and Postgres. Mirrors the established pattern in
+    /// `pending_delivery::DatabasePendingDeliveryStorage::initialize`:
+    /// Postgres has `ADD COLUMN IF NOT EXISTS` natively; older SQLite
+    /// builds error with "duplicate column", which we treat as a
+    /// no-op. Issue #209 finding #13: the previous schema had no
+    /// migration affordance, so any future column addition would
+    /// silently no-op the `CREATE TABLE IF NOT EXISTS` then crash on
+    /// first SELECT/INSERT against an upgraded deployment. This
+    /// helper is the building block; adding a column becomes one call
+    /// alongside the `CREATE TABLE` block.
+    async fn add_column_if_missing(
+        &self,
+        table: &str,
+        column_def: &str,
+    ) -> Result<(), SmPersistenceError> {
+        let alter_sql = match self.db.driver() {
+            DatabaseDriver::Postgres => {
+                format!("ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column_def}")
+            }
+            DatabaseDriver::Sqlite => format!("ALTER TABLE {table} ADD COLUMN {column_def}"),
+        };
+        if let Err(error) = self.execute(&alter_sql, ()).await {
+            let msg = error.to_string().to_lowercase();
+            if msg.contains("duplicate column") || msg.contains("already exists") {
+                debug!(table, column_def, "column already present; skipping ALTER");
+                return Ok(());
+            }
+            return Err(error);
+        }
+        Ok(())
+    }
+
     async fn initialize(&self) -> Result<(), SmPersistenceError> {
         // Driver-aware bigint type: Postgres INTEGER is i32 (overflows
         // for `timestamp_millis()` after Jan 2038); BIGINT is i64.
@@ -144,7 +177,8 @@ impl DatabaseSmPersistence {
                     presence_available INTEGER NOT NULL,
                     presence_show TEXT,
                     presence_status TEXT,
-                    presence_priority INTEGER NOT NULL
+                    presence_priority INTEGER NOT NULL,
+                    promotion_attempts INTEGER NOT NULL DEFAULT 0
                 )
                 "#
             ),
@@ -174,6 +208,26 @@ impl DatabaseSmPersistence {
             "CREATE INDEX IF NOT EXISTS idx_sm_sessions_detached \
              ON sm_sessions (detached_at_ms)",
             (),
+        )
+        .await?;
+        // Idempotent column-add migrations (issue #209 finding #13:
+        // schema previously had no migration affordance — any future
+        // column addition would crash on first use against an upgraded
+        // deployment). Add new migrations as one call each below;
+        // pre-existing deployments whose tables predate the column
+        // see the column added, freshly-created tables (where
+        // CREATE TABLE above already declares the column) see the
+        // duplicate-column error and skip.
+        //
+        // `promotion_attempts` (issue #209 finding #14): tracks the
+        // number of consecutive Q6-promotion failures for this
+        // session so the SM-expiry janitor can dead-letter durable
+        // rows that fail promotion repeatedly (e.g. permanent disk-
+        // full or schema-corruption scenarios) instead of retrying
+        // forever. `DEFAULT 0` so existing rows compare cleanly.
+        self.add_column_if_missing(
+            "sm_sessions",
+            "promotion_attempts INTEGER NOT NULL DEFAULT 0",
         )
         .await?;
         Ok(())
@@ -210,6 +264,22 @@ impl DatabaseSmPersistence {
             .entry(stream_id.clone())
             .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
             .clone()
+    }
+
+    /// Drop the per-stream lock entry once a session is terminally
+    /// done (delete_session). Without this, every distinct stream id
+    /// the process has ever seen leaks an `Arc<Mutex<()>>` for the
+    /// lifetime of the runtime — issue #209 finding #4.
+    ///
+    /// Race-safe: DashMap's `remove_if` only removes the entry when
+    /// the predicate returns true, evaluated while holding the
+    /// shard's write lock. We check `Arc::strong_count == 1` so we
+    /// only remove when no other task currently holds a clone of the
+    /// lock; if another caller is mid-acquire, we leave the entry
+    /// alone and the next terminal cleanup retries.
+    fn drop_stream_lock(&self, stream_id: &SmSessionId) {
+        self.stream_locks
+            .remove_if(stream_id, |_, lock| Arc::strong_count(lock) == 1);
     }
 
     fn decode_session(row: &crate::db::Row) -> Result<PersistedSession, SmPersistenceError> {
@@ -437,6 +507,46 @@ impl SmPersistenceStorage for DatabaseSmPersistence {
     }
 
     #[instrument(skip(self), fields(stream_id = %stream_id))]
+    async fn record_promotion_failure(
+        &self,
+        stream_id: &SmSessionId,
+    ) -> Result<u32, SmPersistenceError> {
+        let lock = self.lock_for(stream_id);
+        let _guard = lock.lock().await;
+        // Increment in place; rows_affected = 0 means the session was
+        // already deleted (raced with a concurrent expire path),
+        // which we surface as count = 0 so the caller doesn't trigger
+        // a dead-letter on a row that no longer exists.
+        let updated = self
+            .execute(
+                "UPDATE sm_sessions SET promotion_attempts = promotion_attempts + 1 \
+                 WHERE stream_id = ?",
+                crate::db_params![stream_id.as_str().to_string()],
+            )
+            .await?;
+        if updated == 0 {
+            return Ok(0);
+        }
+        let mut rows = self
+            .query(
+                "SELECT promotion_attempts FROM sm_sessions WHERE stream_id = ?",
+                crate::db_params![stream_id.as_str().to_string()],
+            )
+            .await?;
+        let count = match rows
+            .next()
+            .await
+            .map_err(|e| SmPersistenceError::Other(e.to_string()))?
+        {
+            Some(row) => row
+                .get::<i64>(0)
+                .map_err(|e| SmPersistenceError::Other(e.to_string()))?,
+            None => 0,
+        };
+        Ok(u32::try_from(count).unwrap_or(u32::MAX))
+    }
+
+    #[instrument(skip(self), fields(stream_id = %stream_id))]
     async fn delete_session(&self, stream_id: &SmSessionId) -> Result<(), SmPersistenceError> {
         let lock = self.lock_for(stream_id);
         let _guard = lock.lock().await;
@@ -452,6 +562,13 @@ impl SmPersistenceStorage for DatabaseSmPersistence {
             crate::db_params![stream_id.as_str().to_string()],
         )
         .await?;
+        // Drop guard then attempt to free the per-stream lock entry.
+        // We have to release the lock first so `Arc::strong_count`
+        // can settle to 1 (only the DashMap entry holds a clone).
+        // Issue #209 finding #4 — the StreamLockMap was previously
+        // append-only and grew with every distinct session id seen.
+        drop(_guard);
+        self.drop_stream_lock(stream_id);
         Ok(())
     }
 

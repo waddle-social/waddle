@@ -1571,6 +1571,33 @@ pub(crate) fn build_iq_error_xml_typed(
     element_to_xml(iq)
 }
 
+/// Server-side maximum XEP-0198 resume window in seconds.
+///
+/// Reads `WADDLE_SM_MAX_RESUME_SECS` (clamped to `[60, 86400]`) and
+/// falls back to 300 (5 min). Issue #209 finding #12: mobile-heavy
+/// deployments routinely use 600s+ resume windows; the previous
+/// hardcoded 300s silently rewrote larger client requests. Operators
+/// can override via env without recompile; absurd values get clamped
+/// rather than rejected so a typo doesn't take the server down.
+fn max_resume_secs_from_env() -> u32 {
+    const DEFAULT_MAX_RESUME_SECS: u32 = 300;
+    const MIN_MAX_RESUME_SECS: u32 = 60;
+    const MAX_MAX_RESUME_SECS: u32 = 86_400;
+    match std::env::var("WADDLE_SM_MAX_RESUME_SECS") {
+        Ok(raw) => match raw.parse::<u32>() {
+            Ok(secs) => secs.clamp(MIN_MAX_RESUME_SECS, MAX_MAX_RESUME_SECS),
+            Err(_) => {
+                warn!(
+                    raw = %raw,
+                    "WADDLE_SM_MAX_RESUME_SECS not parseable; using default {DEFAULT_MAX_RESUME_SECS}s"
+                );
+                DEFAULT_MAX_RESUME_SECS
+            }
+        },
+        Err(_) => DEFAULT_MAX_RESUME_SECS,
+    }
+}
+
 fn build_handled_count_too_high_stream_error(acknowledged: u32, send_count: u32) -> String {
     let mut writer = Writer::new(Vec::new());
     let mut stream_error = BytesStart::new("stream:error");
@@ -1813,14 +1840,22 @@ fn handle_sm_enable(
     }
 
     let stream_id = uuid::Uuid::new_v4().to_string();
-    // Clamp resumption window to our server-side maximum (5 minutes) — this
-    // is also the registry TTL. Clients that asked for less get what they
-    // asked for; clients that asked for more or didn't specify get 300s.
-    const MAX_RESUME_SECS: u32 = 300;
-    let max = enable
-        .max
-        .map(|m| m.min(MAX_RESUME_SECS))
-        .unwrap_or(MAX_RESUME_SECS);
+    // Clamp resumption window to our server-side maximum. Default 300s
+    // (5 min) matches XEP-0198 §5 prose; mobile-heavy deployments
+    // routinely use 600s+ resume windows (Conversations defaults to
+    // 5–10 min) and can override via WADDLE_SM_MAX_RESUME_SECS.
+    // Clients that asked for less get what they asked for; clients
+    // that asked for more or didn't specify get the (possibly
+    // configured) max. Issue #209 finding #12.
+    let max_resume_secs = max_resume_secs_from_env();
+    let max = match enable.max {
+        Some(m) if m > max_resume_secs => {
+            waddle_xmpp::prometheus::increment_sm_resume_window_clamped();
+            max_resume_secs
+        }
+        Some(m) => m,
+        None => max_resume_secs,
+    };
     sm_state.enable(stream_id.clone(), enable.resume, Some(max));
 
     // Publish the stream id onto the registry's ConnectionEntry so

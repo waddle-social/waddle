@@ -1087,6 +1087,7 @@ async fn interpret_with_depth(
                         );
                     }
                     Ok(waddle_xmpp::pending_delivery::InsertOutcome::QuotaExceeded) => {
+                        waddle_xmpp::prometheus::increment_pending_delivery_quota_exceeded();
                         // XEP-0160 §3 step 3 + RFC 6120 §8.3 — return a
                         // typed `<service-unavailable/>` bounce that
                         // echoes the original payload (RFC 6120 §8.3.4
