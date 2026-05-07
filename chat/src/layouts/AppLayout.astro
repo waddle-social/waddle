@@ -66,6 +66,55 @@ const giphyApiKey = env.GIPHY_API_KEY ?? "";
   </head>
   <body class="bg-background text-foreground font-sans antialiased">
     <XmppProvider client:only="vue" transition:persist serverBaseUrl={serverBaseUrl ?? ""} />
-    <ChatApp client:only="vue" giphyApiKey={giphyApiKey} />
+    <ChatApp client:only="vue" giphyApiKey={giphyApiKey}>
+      <div slot="fallback" class="chat-app-shell chat-startup-shell" role="status" aria-live="polite">
+        <div class="chat-desktop-shell">
+          <div class="chat-desktop-rail-slot">
+            <div class="chat-startup-rail">
+              <div class="chat-startup-logo" aria-hidden="true">
+                <img src="/waddle-logo.svg" alt="" width="32" height="32" />
+              </div>
+            </div>
+          </div>
+          <div class="chat-sidebar-slot">
+            <aside class="chat-sidebar-pane glass-panel">
+              <div class="chat-sidebar-header">
+                <span class="type-pane-title text-sidebar-foreground">Spaces</span>
+              </div>
+              <div class="chat-pane-scroll chat-sidebar-scroll">
+                <div class="chat-startup-sidebar-loading type-caption text-sidebar-muted">
+                  <div class="flex items-center justify-center gap-1" aria-hidden="true">
+                    <span class="typing-dot"></span>
+                    <span class="typing-dot"></span>
+                    <span class="typing-dot"></span>
+                  </div>
+                  <span class="sr-only">Loading Waddle</span>
+                </div>
+              </div>
+            </aside>
+          </div>
+          <main class="chat-workspace">
+            <section class="chat-content-pane">
+              <header class="chat-startup-header">
+                <div class="chat-startup-mobile-logo" aria-hidden="true">
+                  <img src="/waddle-logo.svg" alt="" width="28" height="28" />
+                </div>
+                <span class="type-pane-title">Waddle</span>
+              </header>
+              <div class="chat-pane-scroll chat-message-scroll chat-startup-main">
+                <div class="type-caption flex flex-col items-center justify-center gap-3 py-16 text-center text-muted-foreground">
+                  <div class="flex items-center justify-center gap-1.5" aria-hidden="true">
+                    <span class="typing-dot"></span>
+                    <span class="typing-dot"></span>
+                    <span class="typing-dot"></span>
+                  </div>
+                  <p class="text-muted-foreground/60">Checking session.</p>
+                </div>
+              </div>
+            </section>
+          </main>
+        </div>
+      </div>
+    </ChatApp>
   </body>
 </html>
