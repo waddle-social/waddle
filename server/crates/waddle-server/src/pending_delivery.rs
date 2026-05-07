@@ -33,7 +33,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use jid::{BareJid, FullJid};
 use tracing::{debug, info, instrument, warn};
-use waddle_xmpp::pending_delivery::flush::{build_replay_stanza, MaterializedPayload};
+use waddle_xmpp::pending_delivery::flush::{
+    build_replay_stanza, MaterializedPayload, ReplayReason,
+};
 use waddle_xmpp::pending_delivery::storage::{PendingDeliveryStorage, PendingStorageError};
 use waddle_xmpp::pending_delivery::{
     InsertOutcome, PendingPayload, PendingRow, PendingRowId, QuotaPolicy, SmSessionId,
@@ -236,7 +238,12 @@ where
                 }
             }
         }
-        let replay = build_replay_stanza(payload, server_domain, row.original_receipt_at);
+        let replay = build_replay_stanza(
+            payload,
+            server_domain,
+            row.original_receipt_at,
+            ReplayReason::OfflineStorage,
+        );
         let stanza = Stanza::Message(replay);
         // SM-enabled path: tag outbound with row id so the recipient's
         // main loop can stamp `outbound_sequence` post-`record_outbound`.
@@ -2088,6 +2095,7 @@ mod tests {
             &registry,
             &storage,
             &waddle_xmpp::protocol::session_state::Blocklist::empty(),
+            "example.com",
         )
         .await;
         assert_eq!(summary.queued, 1);

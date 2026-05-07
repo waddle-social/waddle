@@ -16,7 +16,9 @@ use chrono::{TimeZone, Utc};
 use jid::{BareJid, FullJid, Jid};
 use minidom::Element;
 use waddle_xmpp::disco::{server_features, Feature};
-use waddle_xmpp::pending_delivery::flush::{build_replay_stanza, MaterializedPayload};
+use waddle_xmpp::pending_delivery::flush::{
+    build_replay_stanza, MaterializedPayload, ReplayReason,
+};
 use waddle_xmpp::pending_delivery::{PendingPayload, PendingRow, PendingRowId, SmSessionId};
 use waddle_xmpp::protocol::dm_routing::{
     classify_dm_intake, ArchiveDecision, CarbonsDecision, InboxDecision, LiveDecision,
@@ -248,7 +250,12 @@ fn transient_row(recipient: &str, body: &str) -> PendingRow {
 fn xep0160_flushed_message_carries_delay_with_original_receipt_time() {
     let row = transient_row("alice@example.com", "hi");
     let payload = MaterializedPayload::from_transient(&row).expect("transient");
-    let replayed = build_replay_stanza(payload, "example.com", row.original_receipt_at);
+    let replayed = build_replay_stanza(
+        payload,
+        "example.com",
+        row.original_receipt_at,
+        ReplayReason::OfflineStorage,
+    );
     let delay = replayed
         .payloads
         .iter()
@@ -266,7 +273,12 @@ fn xep0160_flushed_message_preserves_original_to_attribute() {
     // §3 example preserves the sender's original `to` (locked Q5a).
     let row = transient_row("alice@example.com", "hi");
     let payload = MaterializedPayload::from_transient(&row).expect("transient");
-    let replayed = build_replay_stanza(payload, "example.com", row.original_receipt_at);
+    let replayed = build_replay_stanza(
+        payload,
+        "example.com",
+        row.original_receipt_at,
+        ReplayReason::OfflineStorage,
+    );
     let to = replayed.to.expect("to preserved");
     assert_eq!(to.to_string(), "alice@example.com");
 }
@@ -288,7 +300,12 @@ fn xep0160_archived_flush_includes_xep0359_stanza_id() {
         &Jid::from(recipient.clone()),
     ));
     let payload = MaterializedPayload::Archived(Box::new(m));
-    let replayed = build_replay_stanza(payload, "example.com", fixed_receipt());
+    let replayed = build_replay_stanza(
+        payload,
+        "example.com",
+        fixed_receipt(),
+        ReplayReason::OfflineStorage,
+    );
     let stanza_id = replayed
         .payloads
         .iter()
@@ -304,7 +321,12 @@ fn xep0160_transient_flush_omits_xep0359_stanza_id() {
     // stanza-id (no MAM row exists for them).
     let row = transient_row("alice@example.com", "hi");
     let payload = MaterializedPayload::from_transient(&row).expect("transient");
-    let replayed = build_replay_stanza(payload, "example.com", row.original_receipt_at);
+    let replayed = build_replay_stanza(
+        payload,
+        "example.com",
+        row.original_receipt_at,
+        ReplayReason::OfflineStorage,
+    );
     let has_stanza_id = replayed
         .payloads
         .iter()
@@ -321,7 +343,12 @@ fn xep0160_flushed_message_preserves_sender_extensions() {
             .push(Element::builder("custom", "urn:test:custom").build());
     }
     let payload = MaterializedPayload::from_transient(&row).expect("transient");
-    let replayed = build_replay_stanza(payload, "example.com", row.original_receipt_at);
+    let replayed = build_replay_stanza(
+        payload,
+        "example.com",
+        row.original_receipt_at,
+        ReplayReason::OfflineStorage,
+    );
     assert!(replayed
         .payloads
         .iter()
@@ -834,7 +861,12 @@ fn xep0160_flush_and_mam_emit_same_stanza_id_for_same_message() {
     // Flush via the Archived payload variant — same wire shape as
     // the recipient's MAM catch-up would produce.
     let payload = MaterializedPayload::Archived(Box::new(archived));
-    let replay = build_replay_stanza(payload, "example.com", fixed_receipt());
+    let replay = build_replay_stanza(
+        payload,
+        "example.com",
+        fixed_receipt(),
+        ReplayReason::OfflineStorage,
+    );
     // Verify the stanza-id is preserved verbatim — this is the
     // dedup key client implementations key on.
     let stanza_id = replay
