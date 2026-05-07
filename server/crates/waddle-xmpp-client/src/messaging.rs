@@ -421,23 +421,21 @@ fn parse_message(el: &Element) -> InboundMessage {
             Some(u) => u,
             None => continue,
         };
-        // begin/end are optional per XEP-0372, but if PRESENT they MUST be
-        // valid non-negative integers. A reference with `begin="abc"` is
-        // malformed; silently coercing it to 0 would mis-position the
-        // highlighted span. Drop the whole reference instead.
-        let begin = match child.attr("begin") {
-            Some(v) => match v.parse::<u32>() {
-                Ok(parsed) => parsed,
-                Err(_) => continue,
+        // begin/end are optional per XEP-0372, but they form an all-or-nothing
+        // pair: a reference either points at a body substring (both present
+        // and numeric) or it is anchor-only (both absent → represented as the
+        // (0, 0) sentinel). A half-specified pair like `begin="3"` with no
+        // `end` is meaningless — drop it. Same for malformed values like
+        // `begin="abc"`, which would otherwise mis-position the span.
+        let begin_attr = child.attr("begin");
+        let end_attr = child.attr("end");
+        let (begin, end) = match (begin_attr, end_attr) {
+            (Some(b), Some(e)) => match (b.parse::<u32>(), e.parse::<u32>()) {
+                (Ok(b), Ok(e)) if e >= b => (b, e),
+                _ => continue,
             },
-            None => 0,
-        };
-        let end = match child.attr("end") {
-            Some(v) => match v.parse::<u32>() {
-                Ok(parsed) => parsed,
-                Err(_) => continue,
-            },
-            None => 0,
+            (None, None) => (0, 0),
+            _ => continue,
         };
         let anchor = child.attr("anchor").map(String::from);
 
@@ -1596,6 +1594,26 @@ mod tests {
                   uri='https://other.example' begin='0' end='not-a-number'/>\
              </message>",
         );
+        let MessagingEvent::Message(msg) = parse(&e).unwrap() else {
+            panic!("expected Message");
+        };
+        assert!(msg.references.is_empty());
+    }
+
+    #[test]
+    fn parse_message_reference_skipped_when_only_one_of_begin_end_is_present() {
+        // begin/end form an all-or-nothing pair under XEP-0372: either both
+        // are present (the reference points at a body substring) or both are
+        // absent (anchor-only). A half-specified `begin="3"` with no `end` is
+        // meaningless and would silently coerce `end` to 0, putting `end`
+        // before `begin` — drop the reference instead.
+        let e = el("<message xmlns='jabber:client' type='chat' id='m-half'>\
+               <body>see https://example.com</body>\
+               <reference xmlns='urn:xmpp:reference:0' type='data' \
+                  uri='https://example.com' begin='4'/>\
+               <reference xmlns='urn:xmpp:reference:0' type='data' \
+                  uri='https://other.example' end='10'/>\
+             </message>");
         let MessagingEvent::Message(msg) = parse(&e).unwrap() else {
             panic!("expected Message");
         };
