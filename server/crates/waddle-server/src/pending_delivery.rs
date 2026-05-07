@@ -584,6 +584,17 @@ impl DatabasePendingDeliveryStorage {
             (),
         )
         .await?;
+        // Range index for the issue #209 finding #5 aging janitor's
+        // `DELETE FROM pending_delivery WHERE original_receipt_at < ?`
+        // query. Without this, the periodic delete is a full scan and
+        // becomes a significant DB load source on large tables (Qodo
+        // finding on PR #410).
+        self.execute(
+            "CREATE INDEX IF NOT EXISTS idx_pending_delivery_original_receipt_at \
+             ON pending_delivery (original_receipt_at)",
+            (),
+        )
+        .await?;
         Ok(())
     }
 
