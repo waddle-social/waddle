@@ -4,114 +4,14 @@
 //! the existing auth, session, and permission services in waddle-server.
 
 #[cfg(test)]
-use tracing::{debug, warn};
-#[cfg(test)]
 use waddle_xmpp::inbox::{InboxEntry, storage::InboxStorage};
 #[cfg(test)]
 use waddle_xmpp::{Session as XmppSession, XmppError};
 
 #[cfg(test)]
-use crate::auth::{NativeUserStore, SessionManager};
-#[cfg(test)]
-use crate::db::Database;
-#[cfg(test)]
-use crate::db::actor::{DbActor, DbQueryOne};
-#[cfg(test)]
-use crate::db::actor::{DbExecute, GetDatabase};
-#[cfg(test)]
-use crate::db::{ValueExt, row_value};
-#[cfg(test)]
-use crate::permissions::{Object, PermissionActor, Subject};
-#[cfg(test)]
-use crate::vcard::VCardStore;
-#[cfg(test)]
-use kameo::actor::ActorRef;
-#[cfg(test)]
-use std::sync::Arc;
+pub use super::xmpp_app_state::XmppAppState;
 
 pub(crate) use super::xmpp_channels::{XmppChannelRecord, get_xmpp_channel, list_xmpp_channels};
-
-/// XMPP application state that bridges to waddle-server services.
-///
-/// This struct implements `waddle_xmpp::AppState` by delegating to:
-/// - `SessionManager` for session validation
-/// - `PermissionActor` for permission checks
-/// - `NativeUserStore` for XEP-0077 registration and SCRAM authentication
-/// - `VCardStore` for XEP-0054 vcard-temp storage
-/// - `Database` for upload slot storage (XEP-0363)
-#[cfg(test)]
-pub struct XmppAppState {
-    /// The XMPP server domain (e.g., "waddle.social")
-    domain: String,
-    /// Session manager for validating XMPP authentication tokens
-    session_manager: SessionManager,
-    /// Permission actor for authorization checks
-    permission_actor: ActorRef<PermissionActor>,
-    /// Native user store for XEP-0077 registration and SCRAM authentication
-    native_user_store: NativeUserStore,
-    /// vCard store for XEP-0054 vcard-temp
-    vcard_store: VCardStore,
-    /// Global database actor for runtime repository access.
-    global_db_actor: ActorRef<DbActor>,
-    /// Database actor for canonical space data.
-    space_db_actor: Option<ActorRef<DbActor>>,
-    /// Shared Waddle inbox projection storage.
-    inbox_storage: Option<Arc<dyn InboxStorage>>,
-}
-
-#[cfg(test)]
-impl XmppAppState {
-    /// Create a new XMPP application state.
-    ///
-    /// # Arguments
-    ///
-    /// * `domain` - The XMPP server domain (e.g., "waddle.social")
-    /// * `db` - The global database for session and permission storage
-    /// * `encryption_key` - Optional encryption key for session token encryption
-    pub fn new(
-        domain: String,
-        db: Arc<Database>,
-        db_actor: ActorRef<DbActor>,
-        permission_actor: ActorRef<PermissionActor>,
-        encryption_key: Option<&[u8]>,
-    ) -> Self {
-        let session_manager = SessionManager::new(db_actor.clone(), encryption_key);
-        let native_user_store = NativeUserStore::new(db_actor.clone());
-        let vcard_store = VCardStore::new(Arc::clone(&db));
-
-        Self {
-            domain,
-            session_manager,
-            permission_actor,
-            native_user_store,
-            vcard_store,
-            global_db_actor: db_actor,
-            space_db_actor: None,
-            inbox_storage: None,
-        }
-    }
-
-    /// Parse a resource string into an Object.
-    ///
-    /// Resource format: "space:{id}" or "channel:{id}"
-    fn parse_resource(resource: &str) -> Result<Object, XmppError> {
-        super::xmpp_permission_state::parse_resource(resource)
-    }
-
-    /// Parse a subject string into a Subject.
-    ///
-    /// Subject format: "user:{user_id}" or "space:{id}#member"
-    fn parse_subject(subject: &str) -> Result<Subject, XmppError> {
-        super::xmpp_permission_state::parse_subject(subject)
-    }
-
-    async fn global_database(&self) -> Result<Database, XmppError> {
-        self.global_db_actor
-            .ask(GetDatabase)
-            .await
-            .map_err(|e| XmppError::internal(format!("Failed to access global database: {}", e)))
-    }
-}
 
 #[cfg(test)]
 impl waddle_xmpp::AppState for XmppAppState {
@@ -273,28 +173,12 @@ impl waddle_xmpp::AppState for XmppAppState {
 
     /// Get the vCard for a user (XEP-0054).
     async fn get_vcard(&self, jid: &jid::BareJid) -> Result<Option<String>, XmppError> {
-        debug!(jid = %jid, "Getting vCard");
-
-        match self.vcard_store.get(jid).await {
-            Ok(vcard) => Ok(vcard),
-            Err(e) => {
-                warn!(jid = %jid, error = %e, "Failed to get vCard");
-                Err(XmppError::internal(format!("Database error: {}", e)))
-            }
-        }
+        super::xmpp_profile_state::get_vcard(&self.vcard_store, jid).await
     }
 
     /// Store/update the vCard for a user (XEP-0054).
     async fn set_vcard(&self, jid: &jid::BareJid, vcard_xml: &str) -> Result<(), XmppError> {
-        debug!(jid = %jid, "Setting vCard");
-
-        match self.vcard_store.set(jid, vcard_xml).await {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                warn!(jid = %jid, error = %e, "Failed to set vCard");
-                Err(XmppError::internal(format!("Database error: {}", e)))
-            }
-        }
+        super::xmpp_profile_state::set_vcard(&self.vcard_store, jid, vcard_xml).await
     }
 
     /// Look up the externally-hosted avatar URL for a JID (XEP-0084 `url=`).
@@ -303,34 +187,7 @@ impl waddle_xmpp::AppState for XmppAppState {
     /// captured during OIDC login (e.g. a GitHub avatar). Missing or empty
     /// values return `Ok(None)`.
     async fn get_user_avatar_url(&self, jid: &jid::BareJid) -> Result<Option<String>, XmppError> {
-        let Some(localpart) = jid.node().map(|n| n.to_string()) else {
-            return Ok(None);
-        };
-
-        let row = self
-            .global_db_actor
-            .ask(DbQueryOne {
-                sql: "SELECT avatar_url FROM users WHERE xmpp_localpart = ? LIMIT 1".to_string(),
-                params: vec![crate::db::Value::from(localpart.clone())],
-            })
-            .await
-            .map_err(|e| {
-                warn!(jid = %jid, error = %e, "avatar_url query failed");
-                XmppError::internal(format!("Database actor error: {}", e))
-            })?;
-
-        let Some(row) = row else {
-            return Ok(None);
-        };
-
-        let url = row_value(&row, 0)
-            .and_then(|value| value.as_optional_string())
-            .map_err(|e| {
-                warn!(jid = %jid, error = %e, "avatar_url column decode failed");
-                XmppError::internal(format!("Database error: {}", e))
-            })?;
-
-        Ok(url.filter(|s| !s.is_empty()))
+        super::xmpp_profile_state::get_user_avatar_url(&self.global_db_actor, jid).await
     }
 
     /// Create an upload slot for XEP-0363 HTTP File Upload.
@@ -341,90 +198,20 @@ impl waddle_xmpp::AppState for XmppAppState {
         size: u64,
         content_type: Option<&str>,
     ) -> Result<waddle_xmpp::UploadSlotInfo, XmppError> {
-        use waddle_xmpp::xep::xep0363::{effective_content_type, sanitize_filename};
-
-        debug!(
-            jid = %requester_jid,
-            filename = %filename,
-            size = size,
-            content_type = ?content_type,
-            "Creating upload slot"
-        );
-
-        // Check file size limit
-        let max_size = self.max_upload_size();
-        if size > max_size {
-            warn!(
-                jid = %requester_jid,
-                size = size,
-                max_size = max_size,
-                "File too large for upload"
-            );
-            return Err(XmppError::not_acceptable(Some(format!(
-                "File too large. Maximum size is {} bytes.",
-                max_size
-            ))));
-        }
-
-        // Sanitize the filename
-        let safe_filename = sanitize_filename(filename);
-        let effective_type = effective_content_type(content_type).to_string();
-
-        // Generate a unique slot ID
-        let slot_id = uuid::Uuid::new_v4().to_string();
-
-        // Calculate expiration (15 minutes from now)
-        let expires_at = chrono::Utc::now() + chrono::Duration::minutes(15);
-
-        // Get the base URL for uploads
-        let base_url =
-            std::env::var("WADDLE_BASE_URL").unwrap_or_else(|_| format!("https://{}", self.domain));
-        let base_url = base_url.trim_end_matches('/');
-
-        // Build the PUT and GET URLs
-        let put_url = format!("{}/api/upload/{}", base_url, slot_id);
-        let get_url = format!("{}/api/files/{}/{}", base_url, slot_id, safe_filename);
-
-        // Store the slot in the database
-        self.global_db_actor
-            .ask(DbExecute {
-                sql: "INSERT INTO upload_slots (id, requester_jid, filename, size_bytes, content_type, status, expires_at) VALUES (?, ?, ?, ?, ?, 'pending', ?)".to_string(),
-                params: vec![
-                    crate::db::Value::from(slot_id.clone()),
-                    crate::db::Value::from(requester_jid.to_string()),
-                    crate::db::Value::from(safe_filename.clone()),
-                    crate::db::Value::from(size as i64),
-                    crate::db::Value::from(effective_type.clone()),
-                    crate::db::Value::from(expires_at.to_rfc3339()),
-                ],
-            })
-            .await
-            .map_err(|e| {
-                warn!(error = %e, "Failed to create upload slot in database");
-                XmppError::internal(format!("Database actor error: {}", e))
-            })?;
-
-        debug!(
-            slot_id = %slot_id,
-            put_url = %put_url,
-            get_url = %get_url,
-            "Created upload slot"
-        );
-
-        Ok(waddle_xmpp::UploadSlotInfo {
-            put_url,
-            get_url,
-            put_headers: vec![("Content-Type".to_string(), effective_type)],
-        })
+        super::xmpp_upload_state::create_upload_slot(
+            &self.global_db_actor,
+            &self.domain,
+            requester_jid,
+            filename,
+            size,
+            content_type,
+        )
+        .await
     }
 
     /// Get the maximum allowed file upload size in bytes.
     fn max_upload_size(&self) -> u64 {
-        // Check environment variable, default to 10 MB
-        std::env::var("WADDLE_MAX_UPLOAD_SIZE")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(10 * 1024 * 1024)
+        super::xmpp_upload_state::max_upload_size()
     }
 
     // =========================================================================

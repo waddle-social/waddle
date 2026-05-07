@@ -13,14 +13,20 @@ mod trace;
 #[cfg(test)]
 mod xmpp_account_state;
 #[cfg(test)]
+mod xmpp_app_state;
+#[cfg(test)]
 mod xmpp_auth_state;
 mod xmpp_channels;
 #[cfg(test)]
 mod xmpp_permission_state;
 #[cfg(test)]
+mod xmpp_profile_state;
+#[cfg(test)]
 mod xmpp_roster_state;
 #[cfg(test)]
 mod xmpp_space_state;
+#[cfg(test)]
+mod xmpp_upload_state;
 #[cfg(test)]
 mod xmpp_user_storage_state;
 
