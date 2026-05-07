@@ -1,4 +1,7 @@
-export { BrowserXmppClient } from "./client";
+export {
+  BrowserXmppClient,
+  RoomMemberListUnavailableError,
+} from "./client";
 export {
   barePeerJid,
   jidDomain,

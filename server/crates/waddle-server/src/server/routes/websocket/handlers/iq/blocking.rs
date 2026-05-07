@@ -10,12 +10,11 @@ pub(super) async fn handle_blocking_iq(
     state_machine: Option<&mut waddle_xmpp::protocol::XmppStateMachine>,
 ) -> Vec<String> {
     let Some(sender_jid) = sender_jid else {
-        return vec![build_iq_error_xml_with_addresses(
+        return vec![build_iq_error_xml_typed(
             &iq.id,
             response_from,
             response_to,
-            "auth",
-            "not-authorized",
+            not_authorized_iq_error("Authentication required."),
         )];
     };
     let user_bare = sender_jid.to_bare();
@@ -23,12 +22,11 @@ pub(super) async fn handle_blocking_iq(
         Ok(db) => db,
         Err(error) => {
             warn!(error = %error, "Failed to access database for blocking IQ");
-            return vec![build_iq_error_xml_with_addresses(
+            return vec![build_iq_error_xml_typed(
                 &iq.id,
                 response_from,
                 response_to,
-                "wait",
-                "internal-server-error",
+                internal_server_error_iq_error("Internal server error."),
             )];
         }
     };
@@ -37,12 +35,11 @@ pub(super) async fn handle_blocking_iq(
         Ok(request) => request,
         Err(error) => {
             warn!(error = %error, "Invalid blocking IQ");
-            return vec![build_iq_error_xml_with_addresses(
+            return vec![build_iq_error_xml_typed(
                 &iq.id,
                 response_from,
                 response_to,
-                "modify",
-                "bad-request",
+                bad_request_iq_error("Malformed IQ payload."),
             )];
         }
     };
@@ -55,12 +52,11 @@ pub(super) async fn handle_blocking_iq(
                 )],
                 Err(error) => {
                     warn!(jid = %user_bare, error = %error, "Failed to load blocklist");
-                    vec![build_iq_error_xml_with_addresses(
+                    vec![build_iq_error_xml_typed(
                         &iq.id,
                         response_from,
                         response_to,
-                        "wait",
-                        "internal-server-error",
+                        internal_server_error_iq_error("Internal server error."),
                     )]
                 }
             };
@@ -68,12 +64,11 @@ pub(super) async fn handle_blocking_iq(
         waddle_xmpp::xep::xep0191::BlockingRequest::Block(jids) => {
             if let Err(error) = storage.add_blocks(&user_bare, &jids).await {
                 warn!(jid = %user_bare, error = %error, "Failed to add blocks");
-                return vec![build_iq_error_xml_with_addresses(
+                return vec![build_iq_error_xml_typed(
                     &iq.id,
                     response_from,
                     response_to,
-                    "wait",
-                    "internal-server-error",
+                    internal_server_error_iq_error("Internal server error."),
                 )];
             }
             send_blocking_presence_side_effects(state, &user_bare, &jids, true).await;
@@ -88,35 +83,32 @@ pub(super) async fn handle_blocking_iq(
                     Ok(current) => current,
                     Err(error) => {
                         warn!(jid = %user_bare, error = %error, "Failed to load blocklist before unblock-all");
-                        return vec![build_iq_error_xml_with_addresses(
+                        return vec![build_iq_error_xml_typed(
                             &iq.id,
                             response_from,
                             response_to,
-                            "wait",
-                            "internal-server-error",
+                            internal_server_error_iq_error("Internal server error."),
                         )];
                     }
                 };
                 if let Err(error) = storage.remove_all_blocks(&user_bare).await {
                     warn!(jid = %user_bare, error = %error, "Failed to remove all blocks");
-                    return vec![build_iq_error_xml_with_addresses(
+                    return vec![build_iq_error_xml_typed(
                         &iq.id,
                         response_from,
                         response_to,
-                        "wait",
-                        "internal-server-error",
+                        internal_server_error_iq_error("Internal server error."),
                     )];
                 }
                 current
             } else {
                 if let Err(error) = storage.remove_blocks(&user_bare, &jids).await {
                     warn!(jid = %user_bare, error = %error, "Failed to remove blocks");
-                    return vec![build_iq_error_xml_with_addresses(
+                    return vec![build_iq_error_xml_typed(
                         &iq.id,
                         response_from,
                         response_to,
-                        "wait",
-                        "internal-server-error",
+                        internal_server_error_iq_error("Internal server error."),
                     )];
                 }
                 jids

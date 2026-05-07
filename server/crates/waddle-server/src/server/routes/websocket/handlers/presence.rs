@@ -16,6 +16,7 @@ use waddle_xmpp::{
     Affiliation, Role, Stanza,
 };
 use xmpp_parsers::minidom::Element;
+use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
 use super::super::{
     element_to_xml, get_or_create_room_actor, get_room_actor, stanza_to_xml, WebSocketState,
@@ -1589,52 +1590,72 @@ pub async fn handle_muc_join(
         Ok(channel) => channel,
         Err(error) => {
             warn!(room = %room_jid, error = %error, "Failed to resolve managed MUC channel");
-            return vec![build_muc_join_error_xml(
+            return vec![build_muc_presence_error_xml(
                 room_jid,
                 nick,
                 sender_jid,
-                "wait",
-                "internal-server-error",
+                StanzaError::new(
+                    ErrorType::Wait,
+                    DefinedCondition::InternalServerError,
+                    "en",
+                    "Failed to resolve managed channel for room.",
+                ),
             )];
         }
     };
     let managed_affiliation = if let Some(channel) = managed_channel.as_ref() {
         let Some(session) = authenticated_session else {
-            return vec![build_muc_join_error_xml(
+            return vec![build_muc_presence_error_xml(
                 room_jid,
                 nick,
                 sender_jid,
-                "auth",
-                "not-authorized",
+                StanzaError::new(
+                    ErrorType::Auth,
+                    DefinedCondition::NotAuthorized,
+                    "en",
+                    "Authentication required to join managed channel.",
+                ),
             )];
         };
         match resolve_managed_channel_affiliation(state, session, &channel.id).await {
             Ok(Some(Affiliation::Outcast)) => {
-                return vec![build_muc_join_error_xml(
+                return vec![build_muc_presence_error_xml(
                     room_jid,
                     nick,
                     sender_jid,
-                    "auth",
-                    "forbidden",
+                    StanzaError::new(
+                        ErrorType::Auth,
+                        DefinedCondition::Forbidden,
+                        "en",
+                        "Banned from managed channel.",
+                    ),
                 )];
             }
             Ok(Some(affiliation)) => Some(affiliation),
             Ok(None) => {
-                return vec![build_muc_join_error_xml(
+                return vec![build_muc_presence_error_xml(
                     room_jid,
                     nick,
                     sender_jid,
-                    "auth",
-                    "registration-required",
+                    StanzaError::new(
+                        ErrorType::Auth,
+                        DefinedCondition::RegistrationRequired,
+                        "en",
+                        "Membership required to join managed channel.",
+                    ),
                 )];
             }
             Err(()) => {
-                return vec![build_muc_join_error_xml(
+                return vec![build_muc_presence_error_xml(
                     room_jid,
                     nick,
                     sender_jid,
-                    "wait",
-                    "internal-server-error",
+                    StanzaError::new(
+                        ErrorType::Wait,
+                        DefinedCondition::InternalServerError,
+                        "en",
+                        "Failed to resolve managed-channel affiliation.",
+                    ),
                 )];
             }
         }
@@ -1655,12 +1676,16 @@ pub async fn handle_muc_join(
                 .await
                 .unwrap_or(false)
             {
-                return vec![build_muc_join_error_xml(
+                return vec![build_muc_presence_error_xml(
                     room_jid,
                     nick,
                     sender_jid,
-                    "cancel",
-                    "not-allowed",
+                    StanzaError::new(
+                        ErrorType::Cancel,
+                        DefinedCondition::NotAllowed,
+                        "en",
+                        "Creating new MUC rooms is not permitted for this account.",
+                    ),
                 )];
             }
 
@@ -2003,49 +2028,44 @@ fn build_muc_join_presence_stanza(params: MucJoinPresence<'_>) -> xmpp_parsers::
 /// by a different user. The joiner receives a `<presence type='error'/>` and
 /// no room state changes.
 fn build_muc_conflict_presence_xml(room_jid: &BareJid, nick: &str, to_jid: &FullJid) -> String {
-    let from_jid = room_jid
-        .clone()
-        .with_resource_str(nick)
-        .unwrap_or_else(|_| to_jid.clone());
-
-    let error_payload = Element::builder("error", waddle_xmpp::ns::JABBER_CLIENT)
-        .attr("type", "cancel")
-        .append(Element::builder("conflict", "urn:ietf:params:xml:ns:xmpp-stanzas").build())
-        .build();
-
-    element_to_xml(
-        Element::builder("presence", waddle_xmpp::ns::JABBER_CLIENT)
-            .attr("from", from_jid.to_string())
-            .attr("to", to_jid.to_string())
-            .attr("type", "error")
-            .append(error_payload)
-            .build(),
+    build_muc_presence_error_xml(
+        room_jid,
+        nick,
+        to_jid,
+        StanzaError::new(
+            ErrorType::Cancel,
+            DefinedCondition::Conflict,
+            "en",
+            "Nickname is already in use by another occupant.",
+        ),
     )
 }
 
-fn build_muc_join_error_xml(
+/// Build a `<presence type='error'>` MUC join failure response.
+///
+/// Per the typed-payloads hard rule (CLAUDE.md), the error type and
+/// condition flow as a typed
+/// [`xmpp_parsers::stanza_error::StanzaError`] — never as `&str`. The
+/// `<error/>` element is serialised via the upstream
+/// `From<StanzaError> for Element` impl so the wire shape is identical
+/// to the legacy `Element::builder("error", …)` literal.
+fn build_muc_presence_error_xml(
     room_jid: &BareJid,
     nick: &str,
     to_jid: &FullJid,
-    error_type: &str,
-    condition: &str,
+    error: StanzaError,
 ) -> String {
     let from_jid = room_jid
         .clone()
         .with_resource_str(nick)
         .unwrap_or_else(|_| to_jid.clone());
 
-    let error_payload = Element::builder("error", waddle_xmpp::ns::JABBER_CLIENT)
-        .attr("type", error_type)
-        .append(Element::builder(condition, "urn:ietf:params:xml:ns:xmpp-stanzas").build())
-        .build();
-
     element_to_xml(
         Element::builder("presence", waddle_xmpp::ns::JABBER_CLIENT)
             .attr("from", from_jid.to_string())
             .attr("to", to_jid.to_string())
             .attr("type", "error")
-            .append(error_payload)
+            .append(Element::from(error))
             .build(),
     )
 }

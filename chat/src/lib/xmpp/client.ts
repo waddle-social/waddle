@@ -61,6 +61,7 @@ import type { ActivityPublication, MoodPublication, TunePublication, UserPepProf
 import {
   buildReplyFallbackPrefix,
   shiftMarkupSpans,
+  shiftReferenceOffsets,
   type OutboundFileAttachment,
   type ReplyTarget,
   type SendDirectMessageOptions,
@@ -74,6 +75,7 @@ import type {
   WasmMessage,
   WasmPepProfile,
   WasmPresence,
+  WasmReference,
   WasmRoomMember,
   WasmRosterContact,
   WasmSendOptions,
@@ -189,7 +191,28 @@ function stripMarkupRange<T extends { start: number; end: number }>(spans: reado
   });
 }
 
-function stripReplyFallback<T extends { body: string; markup?: Array<{ start: number; end: number }> }>(
+function stripReferenceRange<T extends { begin?: number; end?: number }>(references: readonly T[], start: number, end: number): T[] {
+  return references.flatMap((reference) => {
+    if (typeof reference.begin !== "number" || typeof reference.end !== "number") return [];
+    // Anchor-only references (no body position) use the (0, 0) sentinel and
+    // are unaffected by reply-fallback stripping — preserve them verbatim.
+    if (reference.begin === 0 && reference.end === 0) return [reference];
+    const rebased = {
+      ...reference,
+      begin: rebaseOffsetAfterRemoval(reference.begin, start, end),
+      end: rebaseOffsetAfterRemoval(reference.end, start, end),
+    };
+    return rebased.end > rebased.begin ? [rebased] : [];
+  });
+}
+
+function stripReplyFallback<
+  T extends {
+    body: string;
+    markup?: Array<{ start: number; end: number }>;
+    references?: Array<{ begin?: number; end?: number }>;
+  },
+>(
   message: T,
   start?: number,
   end?: number,
@@ -198,7 +221,13 @@ function stripReplyFallback<T extends { body: string; markup?: Array<{ start: nu
   const points = Array.from(message.body);
   const strippedBody = `${points.slice(0, start).join("")}${points.slice(end).join("")}`;
   const markup = message.markup?.length ? stripMarkupRange(message.markup, start, end) : undefined;
-  return { ...message, body: strippedBody, ...(markup?.length ? { markup } : {}) };
+  const references = message.references?.length ? stripReferenceRange(message.references, start, end) : undefined;
+  return {
+    ...message,
+    body: strippedBody,
+    ...(markup?.length ? { markup } : {}),
+    ...(references?.length ? { references } : {}),
+  };
 }
 
 function sharedFileFromWasm(file: WasmSharedFile): SharedFileInfo {
@@ -213,7 +242,17 @@ function sharedFileFromWasm(file: WasmSharedFile): SharedFileInfo {
   };
 }
 
-function roomMessageFromArchived(message: WasmArchivedMessage): LiveRoomMessage | null {
+function referenceFromWasm(reference: WasmReference): import("@/lib/rich-message").MessageReference {
+  return {
+    type: reference.ref_type,
+    uri: reference.uri,
+    begin: reference.begin,
+    end: reference.end,
+    ...(reference.anchor ? { anchor: reference.anchor } : {}),
+  };
+}
+
+export function roomMessageFromArchived(message: WasmArchivedMessage): LiveRoomMessage | null {
   const roomJid = barePeerJid(message.from ?? message.to ?? "");
   const nick = (message.from ?? "").split("/")[1] ?? "unknown";
   const createdAt = message.timestamp ?? new Date().toISOString();
@@ -244,6 +283,7 @@ function roomMessageFromArchived(message: WasmArchivedMessage): LiveRoomMessage 
   const sharedFiles = message.shared_files ?? [];
   const mentionUris = message.mention_uris ?? [];
   const markupSpans = message.markup_spans ?? [];
+  const references = message.references ?? [];
   if (!message.body && !message.subject && !sharedFiles.length && !message.thread && !message.forum_post_kind) {
     return null;
   }
@@ -268,6 +308,7 @@ function roomMessageFromArchived(message: WasmArchivedMessage): LiveRoomMessage 
     ...(mentionUris.length ? { mentions: mentionUris.map((uri) => uri.replace(/^xmpp:/, "")) } : {}),
     ...(message.broadcast_mention === "here" || message.broadcast_mention === "everyone" ? { broadcastMention: message.broadcast_mention } : {}),
     ...(markupSpans.length ? { markup: markupSpans.flatMap((s) => { const m = wasmSpanToMarkupSpan(s); return m ? [m] : []; }) } : {}),
+    ...(references.length ? { references: references.map(referenceFromWasm) } : {}),
     ...(sharedFiles.length ? { sharedFiles: sharedFiles.map(sharedFileFromWasm) } : {}),
     ...(message.is_sticker ? { isSticker: true } : {}),
     ...(message.stanza_id ?? message.origin_id ? { correctionTargetId: message.origin_id ?? message.id ?? "" } : {}),
@@ -276,7 +317,7 @@ function roomMessageFromArchived(message: WasmArchivedMessage): LiveRoomMessage 
   return stripReplyFallback(base, message.reply_fallback_start, message.reply_fallback_end);
 }
 
-function dmMessageFromArchived(message: WasmArchivedMessage, selfBareJid: string): LiveDmMessage | null {
+export function dmMessageFromArchived(message: WasmArchivedMessage, selfBareJid: string): LiveDmMessage | null {
   const fromBare = barePeerJid(message.from ?? "");
   const toBare = barePeerJid(message.to ?? "");
   const isSelf = fromBare === selfBareJid;
@@ -313,6 +354,7 @@ function dmMessageFromArchived(message: WasmArchivedMessage, selfBareJid: string
   const sharedFiles = message.shared_files ?? [];
   const mentionUris = message.mention_uris ?? [];
   const markupSpans = message.markup_spans ?? [];
+  const references = message.references ?? [];
   if (!message.body && !message.subject && !sharedFiles.length && !message.thread) return null;
   const base: LiveDmMessage = {
     id: message.id ?? message.stanza_id ?? message.mam_id,
@@ -331,6 +373,7 @@ function dmMessageFromArchived(message: WasmArchivedMessage, selfBareJid: string
     ...(message.forum_thread_title ? { forumThreadTitle: message.forum_thread_title } : {}),
     ...(mentionUris.length ? { mentions: mentionUris.map((uri) => uri.replace(/^xmpp:/, "")) } : {}),
     ...(markupSpans.length ? { markup: markupSpans.flatMap((s) => { const m = wasmSpanToMarkupSpan(s); return m ? [m] : []; }) } : {}),
+    ...(references.length ? { references: references.map(referenceFromWasm) } : {}),
     ...(sharedFiles.length ? { sharedFiles: sharedFiles.map(sharedFileFromWasm) } : {}),
     ...(message.is_sticker ? { isSticker: true } : {}),
     ...(message.origin_id || message.id ? { correctionTargetId: message.origin_id ?? message.id ?? "" } : {}),
@@ -399,17 +442,24 @@ function buildWasmSendOptions(opts: SendGroupMessageOptions | SendDirectMessageO
       uri: reference.uri ?? "",
       begin: reference.begin ?? 0,
       end: reference.end ?? 0,
+      ...(reference.anchor ? { anchor: reference.anchor } : {}),
     }));
   }
   return wasmOpts;
 }
 
-function encodeBodyForSend(body: string, replyTo?: ReplyTarget, markup?: SendGroupMessageOptions["markup"]) {
+function encodeBodyForSend(
+  body: string,
+  replyTo?: ReplyTarget,
+  markup?: SendGroupMessageOptions["markup"],
+  references?: SendGroupMessageOptions["references"],
+) {
   const { prefix, length } = replyTo ? buildReplyFallbackPrefix(replyTo.body) : { prefix: "", length: 0 };
   return {
     effectiveBody: `${prefix}${body}`,
     replyFallbackLength: length,
     rebasedMarkup: markup?.length ? shiftMarkupSpans(markup, length) : undefined,
+    rebasedReferences: references?.length ? shiftReferenceOffsets(references, length) : undefined,
   };
 }
 
@@ -423,6 +473,13 @@ async function loadWasmModule(): Promise<WasmModule> {
     });
   }
   return wasmModulePromise;
+}
+
+export class RoomMemberListUnavailableError extends Error {
+  constructor(message = "Member list is temporarily unavailable.") {
+    super(message);
+    this.name = "RoomMemberListUnavailableError";
+  }
 }
 
 export class BrowserXmppClient {
@@ -674,7 +731,9 @@ export class BrowserXmppClient {
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.roomJoinWaiters.delete(fullJid);
-        reject(new Error(`Timed out waiting for self-presence in ${roomJid}`));
+        const detail = `Timed out waiting for self-presence in ${roomJid}`;
+        this.emitError({ kind: "connect-timeout", recoverable: true, detail });
+        reject(new Error("Channel presence did not finish syncing. Try again in a moment."));
       }, 4000);
       this.roomJoinWaiters.set(fullJid, {
         resolve: () => {
@@ -811,15 +870,15 @@ export class BrowserXmppClient {
   }
 
   private async compatSendGroupMessage(xmpp: XmppClientInstance, roomJid: string, body: string, opts: SendGroupMessageOptions): Promise<string | null> {
-    const { effectiveBody, replyFallbackLength, rebasedMarkup } = encodeBodyForSend(body, opts.replyTo, opts.markup);
-    const wasmOpts = buildWasmSendOptions({ ...opts, markup: rebasedMarkup }, replyFallbackLength);
+    const { effectiveBody, replyFallbackLength, rebasedMarkup, rebasedReferences } = encodeBodyForSend(body, opts.replyTo, opts.markup, opts.references);
+    const wasmOpts = buildWasmSendOptions({ ...opts, markup: rebasedMarkup, references: rebasedReferences }, replyFallbackLength);
     if (xmpp.send_groupchat_message) return await xmpp.send_groupchat_message(roomJid, effectiveBody, wasmOpts) as string;
     throw new Error("XMPP session is not ready");
   }
 
   private async compatSendDirectMessage(xmpp: XmppClientInstance, peerJid: string, body: string, opts: SendDirectMessageOptions): Promise<string | null> {
-    const { effectiveBody, replyFallbackLength, rebasedMarkup } = encodeBodyForSend(body, opts.replyTo, opts.markup);
-    const wasmOpts = buildWasmSendOptions({ ...opts, markup: rebasedMarkup }, replyFallbackLength);
+    const { effectiveBody, replyFallbackLength, rebasedMarkup, rebasedReferences } = encodeBodyForSend(body, opts.replyTo, opts.markup, opts.references);
+    const wasmOpts = buildWasmSendOptions({ ...opts, markup: rebasedMarkup, references: rebasedReferences }, replyFallbackLength);
     if (xmpp.send_chat_message) return await xmpp.send_chat_message(peerJid, effectiveBody, wasmOpts) as string;
     throw new Error("XMPP session is not ready");
   }
@@ -850,8 +909,8 @@ export class BrowserXmppClient {
   }
 
   private async compatSendCorrection(xmpp: XmppClientInstance, to: string, type: "chat" | "groupchat", body: string, replacesId: string, opts?: SendGroupMessageOptions | SendDirectMessageOptions): Promise<string | null> {
-    const { effectiveBody, replyFallbackLength, rebasedMarkup } = encodeBodyForSend(body, opts?.replyTo, opts?.markup);
-    const wasmOpts = buildWasmSendOptions({ ...(opts ?? {}), markup: rebasedMarkup }, replyFallbackLength);
+    const { effectiveBody, replyFallbackLength, rebasedMarkup, rebasedReferences } = encodeBodyForSend(body, opts?.replyTo, opts?.markup, opts?.references);
+    const wasmOpts = buildWasmSendOptions({ ...(opts ?? {}), markup: rebasedMarkup, references: rebasedReferences }, replyFallbackLength);
     if (xmpp.send_correction) return await xmpp.send_correction(to, type, effectiveBody, replacesId, wasmOpts) as string;
     throw new Error("XMPP session is not ready");
   }
@@ -1062,7 +1121,9 @@ export class BrowserXmppClient {
     for (const affiliation of affiliations) {
       try { const result = await listMembers(affiliation); for (const item of result ?? []) { if (!item.jid) continue; members.push({ jid: item.jid, username: item.jid.split("@")[0] ?? item.jid, avatar_url: null, role: affiliation, joined_at: "" }); } } catch (error: any) { failedAffiliations.push(affiliation); const condition = error?.condition ?? error?.error?.condition; const detail = condition === "forbidden" ? `forbidden affiliation query — ${roomJid}` : condition === "service-unavailable" ? `unsupported member query — ${roomJid}` : `affiliation query failed for ${affiliation} — ${roomJid}; reconstructed room JID may not match`; this.emitError({ kind: "member-query", recoverable: true, detail, cause: error, condition }); }
     }
-    if (members.length === 0 && failedAffiliations.length > 0) throw new Error("refusing to show Members 0");
+    if (members.length === 0 && failedAffiliations.length > 0) {
+      throw new RoomMemberListUnavailableError();
+    }
     return members;
   }
   async setRoomAffiliation(channelId: string, jid: string, affiliation: MemberSummary["role"]): Promise<void> { const xmpp = await this.requireConnectedXmpp(); await xmpp.set_room_affiliation?.(this.roomJidForChannel(channelId), jid, affiliation === "none" ? "none" : affiliation); }

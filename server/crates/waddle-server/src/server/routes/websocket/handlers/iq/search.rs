@@ -12,21 +12,19 @@ pub(super) async fn handle_channel_search_iq(
         .as_ref()
         .is_some_and(|to| to.to_string() != muc_domain)
     {
-        return vec![build_iq_error_xml_with_addresses(
+        return vec![build_iq_error_xml_typed(
             &iq.id,
             response_from,
             response_to,
-            "cancel",
-            "item-not-found",
+            item_not_found_iq_error("Requested item not found."),
         )];
     }
     let Some(request) = parse_search_request(iq) else {
-        return vec![build_iq_error_xml_with_addresses(
+        return vec![build_iq_error_xml_typed(
             &iq.id,
             response_from,
             response_to,
-            "modify",
-            "bad-request",
+            bad_request_iq_error("Malformed IQ payload."),
         )];
     };
     let limit = request.max.unwrap_or(50).clamp(1, 200) as usize;
@@ -36,12 +34,11 @@ pub(super) async fn handle_channel_search_iq(
             Ok(channels) => channels,
             Err(error) => {
                 warn!(error = %error, "Failed to load channels for WebSocket search");
-                return vec![build_iq_error_xml_with_addresses(
+                return vec![build_iq_error_xml_typed(
                     &iq.id,
                     response_from,
                     response_to,
-                    "wait",
-                    "internal-server-error",
+                    internal_server_error_iq_error("Internal server error."),
                 )];
             }
         };
@@ -97,12 +94,11 @@ pub(super) async fn handle_user_search_iq(
                 .unwrap_or_default();
             let term = term.trim();
             if term.chars().count() < MIN_USER_SEARCH_TERM_CHARS {
-                return vec![build_iq_error_xml_with_addresses(
+                return vec![build_iq_error_xml_typed(
                     &iq.id,
                     response_from,
                     response_to,
-                    "modify",
-                    "bad-request",
+                    bad_request_iq_error("Malformed IQ payload."),
                 )];
             }
             let like = format!("%{}%", escape_like_pattern(term));
@@ -121,13 +117,12 @@ pub(super) async fn handle_user_search_iq(
                 Ok(rows) => rows,
                 Err(error) => {
                     warn!(error = %error, "Failed to search native users over WebSocket");
-                    return vec![build_iq_error_xml_with_addresses(
-                        &iq.id,
-                        response_from,
-                        response_to,
-                        "wait",
-                        "internal-server-error",
-                    )];
+                    return vec![build_iq_error_xml_typed(
+                                    &iq.id,
+                                    response_from,
+                                    response_to,
+                                    internal_server_error_iq_error("Internal server error."),
+                                )];
                 }
             };
             let mut query = Element::builder("query", "jabber:iq:search");
@@ -155,12 +150,11 @@ pub(super) async fn handle_user_search_iq(
                 Some(query.build()),
             )]
         }
-        _ => vec![build_iq_error_xml_with_addresses(
+        _ => vec![build_iq_error_xml_typed(
             &iq.id,
             response_from,
             response_to,
-            "modify",
-            "bad-request",
+            bad_request_iq_error("Malformed IQ payload."),
         )],
     }
 }

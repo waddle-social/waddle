@@ -1,6 +1,6 @@
 import { describe, expect, mock, test } from "bun:test";
 import type { WaddleSession } from "../src/lib/server-auth";
-import { BrowserXmppClient } from "../src/lib/xmpp-client";
+import { BrowserXmppClient, RoomMemberListUnavailableError } from "../src/lib/xmpp-client";
 import type { XmppErrorEvent } from "../src/lib/xmpp-client";
 
 type TestXmpp = {
@@ -84,7 +84,7 @@ describe("BrowserXmppClient.listRoomMembers", () => {
     expect(errors[1].detail).toContain("unsupported member query");
   });
 
-  test("does not silently show zero members when only failed queries could contain members", async () => {
+  test("reports unavailable member lists without the retired zero-member failure copy", async () => {
     const listRoomMembers = mock(async (
       _room: string,
       affiliation: "owner" | "admin" | "member" | "outcast",
@@ -98,7 +98,10 @@ describe("BrowserXmppClient.listRoomMembers", () => {
     const errors: XmppErrorEvent[] = [];
     client.onError((event) => errors.push(event));
 
-    await expect(client.listRoomMembers("general")).rejects.toThrow("refusing to show Members 0");
+    const result = client.listRoomMembers("general");
+
+    await expect(result).rejects.toBeInstanceOf(RoomMemberListUnavailableError);
+    await expect(result).rejects.toThrow("Member list is temporarily unavailable.");
 
     expect(listRoomMembers).toHaveBeenCalledTimes(4);
     expect(errors.some((event) => event.detail.includes("reconstructed room JID may not match"))).toBe(true);

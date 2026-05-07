@@ -21,6 +21,8 @@ interface LoadStructureOptions {
   noChannelSelect?: boolean;
 }
 
+export type MemberLoadState = "idle" | "loading" | "ready" | "unavailable";
+
 export function useWaddleDirectory(
   _api: Ref<null>,
   xmppClient: Ref<BrowserXmppClient | null>,
@@ -32,6 +34,7 @@ export function useWaddleDirectory(
   const waddles = ref<SpaceSummary[]>([]);
   const channels = ref<ChannelSummary[]>([]);
   const members = ref<MemberSummary[]>([]);
+  const memberLoadState = ref<MemberLoadState>("idle");
   const serverRole = ref<SpaceSummary["role"]>(null);
   const mucServiceJid = ref<string | null>(null);
   const spacesServiceJid = ref<string | null>(null);
@@ -45,6 +48,7 @@ export function useWaddleDirectory(
   let spaceRequestId = 0;
   let structureRequestId = 0;
   let memberRequestId = 0;
+  const memberSnapshotsByChannelId = new Map<string, MemberSummary[]>();
 
   const editWaddleForm = ref<CommunityFormData>({
     name: "",
@@ -146,6 +150,23 @@ export function useWaddleDirectory(
     createChannelForm.value = defaultCreateForm();
   }
 
+  function beginMemberLoad(channelId: string) {
+    memberLoadState.value = "loading";
+    members.value = memberSnapshotsByChannelId.get(channelId) ?? [];
+  }
+
+  function completeMemberLoad(channelId: string, freshMembers: MemberSummary[]) {
+    memberSnapshotsByChannelId.set(channelId, freshMembers);
+    members.value = freshMembers;
+    memberLoadState.value = "ready";
+  }
+
+  function failMemberLoad(channelId: string, error: unknown) {
+    console.warn("Unable to load room members", error);
+    members.value = memberSnapshotsByChannelId.get(channelId) ?? members.value;
+    memberLoadState.value = "unavailable";
+  }
+
   function prepareCreateChannelForContext(spaceId: string | null = currentSpace.value?.id ?? null) {
     createChannelForm.value = defaultCreateFormForContext(spaceId);
   }
@@ -185,11 +206,12 @@ export function useWaddleDirectory(
       }));
 
       channels.value = channelList;
-      members.value = [];
 
       if (opts?.noChannelSelect) {
         activeChannelId.value = null;
         selectedSpaceId.value = null;
+        members.value = [];
+        memberLoadState.value = "idle";
         resetForms();
         return null;
       }
@@ -206,19 +228,20 @@ export function useWaddleDirectory(
       selectedSpaceId.value = nextChannel ? nextChannel.spaceId ?? null : selectedSpaceId.value;
       if (nextChannelId && xmppClient.value) {
         const memberReqId = ++memberRequestId;
+        beginMemberLoad(nextChannelId);
         try {
           const freshMembers = await xmppClient.value.listRoomMembers(nextChannelId, { roomJid: nextChannel?.jid });
           if (requestId === structureRequestId && memberReqId === memberRequestId) {
-            members.value = freshMembers;
+            completeMemberLoad(nextChannelId, freshMembers);
           }
         } catch (e) {
           if (requestId === structureRequestId && memberReqId === memberRequestId) {
-            console.warn("Unable to load room members", e);
-            members.value = [];
+            failMemberLoad(nextChannelId, e);
           }
         }
       } else {
         members.value = [];
+        memberLoadState.value = "idle";
       }
       resetForms();
       return nextChannelId;
@@ -254,14 +277,15 @@ export function useWaddleDirectory(
 
     const channel = channels.value.find((c) => c.id === channelId);
     const requestId = ++memberRequestId;
+    beginMemberLoad(channelId);
 
     try {
       const freshMembers = await xmppClient.value.listRoomMembers(channelId, { roomJid: channel?.jid });
       if (requestId !== memberRequestId) return;
-      members.value = freshMembers;
+      completeMemberLoad(channelId, freshMembers);
     } catch (e) {
       if (requestId === memberRequestId) {
-        actionError.value = normalizeError(e);
+        failMemberLoad(channelId, e);
       }
     }
   }
@@ -414,6 +438,8 @@ export function useWaddleDirectory(
     waddles.value = [];
     channels.value = [];
     members.value = [];
+    memberLoadState.value = "idle";
+    memberSnapshotsByChannelId.clear();
     serverRole.value = null;
     activeChannelId.value = null;
     selectedSpaceId.value = null;
@@ -423,6 +449,7 @@ export function useWaddleDirectory(
     waddles,
     channels,
     members,
+    memberLoadState,
     serverRole,
     activeSpaceId,
     activeChannelId,

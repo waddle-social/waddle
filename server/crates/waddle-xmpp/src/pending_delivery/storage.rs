@@ -376,8 +376,8 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
 mod tests {
     use super::*;
     use crate::pending_delivery::PendingPayload;
-    use crate::protocol::event::{StanzaIdRef, StanzaIdValue};
     use chrono::Utc;
+    use waddle_xmpp_core::xep0359::StanzaId;
     use xmpp_parsers::message::Message;
 
     fn bare(s: &str) -> BareJid {
@@ -385,14 +385,12 @@ mod tests {
     }
 
     fn archived_row(recipient: &str, id: &str) -> PendingRow {
+        let archive_jid: jid::Jid = bare(recipient).into();
         PendingRow {
             id: PendingRowId::fresh(),
             recipient: bare(recipient),
             original_receipt_at: Utc::now(),
-            payload: PendingPayload::Archived(StanzaIdRef {
-                by: bare(recipient),
-                id: StanzaIdValue::new(id),
-            }),
+            payload: PendingPayload::Archived(StanzaId::new(id, archive_jid)),
             flushed_in_session: None,
             outbound_sequence: None,
         }

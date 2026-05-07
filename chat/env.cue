@@ -61,7 +61,7 @@ schema.#Project & {
 				contents:   "read"
 				"id-token": "write"
 			}
-			"tasks": [tasks.lint, tasks.build]
+			"tasks": [tasks.test, tasks.lint, tasks.build]
 		}
 	}
 
@@ -125,6 +125,21 @@ schema.#Project & {
 				"src/**",
 				"scripts/**",
 				"tests/**",
+			]
+		}
+
+		test: schema.#Task & {
+			command: "bun"
+			args: ["test"]
+			dependsOn: [build]
+			inputs: [
+				"../package.json",
+				"../bun.lock",
+				"package.json",
+				"tsconfig.json",
+				"src/**",
+				"tests/**",
+				"dist/**",
 			]
 		}
 

@@ -36,7 +36,16 @@ use xmpp_parsers::message::Message;
 pub const NS_SID: &str = "urn:xmpp:sid:0";
 
 /// A server-assigned stable stanza ID.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// This is the canonical workspace shape for an XEP-0359 stanza-id at every
+/// boundary above the wire — handler outputs, archive payloads, inbox
+/// projections, pending-delivery references — so the `id` cannot drift
+/// from its assigning `by` archive across crate boundaries.
+///
+/// Refs:
+/// - XEP-0359 §3 (`<stanza-id/>` element)
+/// - issue #329 (consolidation of duplicate StanzaId-ish newtypes)
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct StanzaId {
     /// The stable ID assigned by the server/service.
     pub id: String,
@@ -49,10 +58,20 @@ impl StanzaId {
     pub fn new(id: impl Into<String>, by: jid::Jid) -> Self {
         Self { id: id.into(), by }
     }
+
+    /// Borrow the opaque id portion as a string slice.
+    pub fn as_str(&self) -> &str {
+        &self.id
+    }
 }
 
 /// A client-assigned origin ID.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Per XEP-0359 §3 the origin-id is a client-stamped opaque identifier with
+/// no `by` context (the originating entity is implied by the message's
+/// `from`). This is the canonical workspace shape; the protocol-layer
+/// `OriginIdValue` newtype was removed in the #329 consolidation.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct OriginId {
     /// The unique ID assigned by the originating client.
     pub id: String,
@@ -62,6 +81,23 @@ impl OriginId {
     /// Create a new origin ID.
     pub fn new(id: impl Into<String>) -> Self {
         Self { id: id.into() }
+    }
+
+    /// Borrow the opaque id portion as a string slice.
+    pub fn as_str(&self) -> &str {
+        &self.id
+    }
+}
+
+impl std::fmt::Display for StanzaId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.id)
+    }
+}
+
+impl std::fmt::Display for OriginId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.id)
     }
 }
 

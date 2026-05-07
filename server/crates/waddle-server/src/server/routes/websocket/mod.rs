@@ -54,6 +54,10 @@ use waddle_xmpp::{
 };
 use xmpp_parsers::minidom::Element;
 
+use crate::server::routes::websocket::handlers::iq::errors::{
+    feature_not_implemented_iq_error, not_authorized_iq_error,
+};
+
 #[cfg(test)]
 use waddle_xmpp::mam::InMemoryMamStorage;
 
@@ -1535,12 +1539,20 @@ pub(crate) fn build_iq_result_xml(
     element_to_xml(iq)
 }
 
-pub(crate) fn build_iq_error_xml_with_addresses(
+/// Build an `<iq type='error'>` reply from a typed
+/// [`xmpp_parsers::stanza_error::StanzaError`].
+///
+/// Replaces the previous stringly-typed `build_iq_error_xml*` helpers
+/// per the typed-payloads hard rule (CLAUDE.md): `error_type` and
+/// `condition` MUST flow as typed enum values across function
+/// boundaries, never as `&str`. Serialization uses the upstream
+/// `From<StanzaError> for Element` impl so the wire shape is identical
+/// to the previous manual builder.
+pub(crate) fn build_iq_error_xml_typed(
     id: &str,
     from: Option<&str>,
     to: Option<&str>,
-    error_type: &str,
-    condition: &str,
+    error: xmpp_parsers::stanza_error::StanzaError,
 ) -> String {
     let mut iq = xmpp_parsers::minidom::Element::builder("iq", "jabber:client")
         .attr("id", id)
@@ -1553,25 +1565,10 @@ pub(crate) fn build_iq_error_xml_with_addresses(
     }
 
     let iq = iq
-        .append(
-            xmpp_parsers::minidom::Element::builder("error", "jabber:client")
-                .attr("type", error_type)
-                .append(
-                    xmpp_parsers::minidom::Element::builder(
-                        condition,
-                        "urn:ietf:params:xml:ns:xmpp-stanzas",
-                    )
-                    .build(),
-                )
-                .build(),
-        )
+        .append(xmpp_parsers::minidom::Element::from(error))
         .build();
 
     element_to_xml(iq)
-}
-
-pub(crate) fn build_iq_error_xml(id: &str, error_type: &str, condition: &str) -> String {
-    build_iq_error_xml_with_addresses(id, None, None, error_type, condition)
 }
 
 fn build_handled_count_too_high_stream_error(acknowledged: u32, send_count: u32) -> String {
@@ -2250,12 +2247,11 @@ fn invalid_iq_parse_error_response(frame: &str) -> Option<String> {
         .and_then(|element| element.attr("from"))
         .map(ToString::to_string)
         .or_else(|| decoded_raw_xml_attr_value(frame, "from"));
-    Some(build_iq_error_xml_with_addresses(
+    Some(build_iq_error_xml_typed(
         &id,
         response_from.as_deref(),
         response_to.as_deref(),
-        "cancel",
-        "feature-not-implemented",
+        feature_not_implemented_iq_error("Requested feature not implemented."),
     ))
 }
 
@@ -2697,12 +2693,22 @@ fn handle_resource_binding(
 
     if !phase.allows_resource_binding() {
         warn!(phase = ?phase, id = %id, "Resource binding received in invalid phase");
-        return vec![build_iq_error_xml(&id, "auth", "not-authorized")];
+        return vec![build_iq_error_xml_typed(
+            &id,
+            None,
+            None,
+            not_authorized_iq_error("Authentication required."),
+        )];
     }
 
     let Some(bare_jid) = phase.authenticated_bare_jid() else {
         warn!(id = %id, "Resource binding without authenticated session");
-        return vec![build_iq_error_xml(&id, "auth", "not-authorized")];
+        return vec![build_iq_error_xml_typed(
+            &id,
+            None,
+            None,
+            not_authorized_iq_error("Authentication required."),
+        )];
     };
     let bare_jid = bare_jid.clone();
     let resource = match &iq.payload {
@@ -2759,6 +2765,16 @@ mod tests {
     use waddle_xmpp::Affiliation;
     use xmpp_parsers::iq::{Iq, IqType};
     use xmpp_parsers::message::MessageType as XmppMessageType;
+
+    #[test]
+    fn service_domains_use_component_parent_for_extension_component() {
+        let domains = XmppServiceDomains::new("waddle.social", "waddle.local");
+
+        assert_eq!(domains.extensions, "extensions.waddle.local");
+        assert_eq!(domains.muc, "muc.waddle.local");
+        assert_eq!(domains.spaces, "spaces.waddle.local");
+        assert_eq!(domains.upload, "upload.waddle.social");
+    }
 
     #[derive(Default)]
     struct TestSink {
@@ -4291,7 +4307,12 @@ mod tests {
 
         assert_eq!(
             bind_two_responses,
-            vec![build_iq_error_xml("bind-2", "auth", "not-authorized")]
+            vec![build_iq_error_xml_typed(
+                "bind-2",
+                None,
+                None,
+                not_authorized_iq_error("Authentication required."),
+            )]
         );
         assert_eq!(conn.phase.bound_jid(), first_bound_jid.as_ref());
         assert!(matches!(conn.phase, ConnectionPhase::Ready { .. }));

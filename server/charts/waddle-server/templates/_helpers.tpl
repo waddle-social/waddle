@@ -80,7 +80,7 @@ ConfigMap name.
 {{- end -}}
 
 {{/*
-Secret name.
+Secret name (operator-supplied values).
 */}}
 {{- define "waddle-server.secretName" -}}
 {{- if .Values.secret.existingSecret -}}
@@ -91,9 +91,29 @@ Secret name.
 {{- end -}}
 
 {{/*
+Bootstrap Secret name (chart-managed auto-generated keys).
+
+The bootstrap Secret is created out-of-band by a pre-install hook (see
+templates/secret-bootstrap-hook.yaml) so that `helm template` does not
+produce drift against the live cluster. See waddle-social/waddle#303.
+*/}}
+{{- define "waddle-server.bootstrapSecretName" -}}
+{{- printf "%s-bootstrap-secrets" (include "waddle-server.fullname" .) -}}
+{{- end -}}
+
+{{/*
 Checksum external envFrom Secret contents so Helm reconciles roll pods after
 ExternalSecret-backed key rotation. The Secret values stay hashed; they are not
 rendered into the pod template.
+
+This deliberately uses `lookup` to observe live Secret data. Without cluster
+access (`helm template`) the checksum collapses to `missing`; the
+deployment annotation will then differ from a live render. That is benign
+drift -- the annotation only drives pod template hashing, never secret
+generation, and matches the documented purpose of `extraSecretChecksum`
+(rotate pods when ExternalSecret keys change). For a cluster-access-free
+GitOps flow that needs stable annotations, set `extraSecretChecksum` from
+`HelmRelease.spec.valuesFrom` referencing the source-of-truth checksum.
 */}}
 {{- define "waddle-server.extraSecretChecksum" -}}
 {{- range $name := .Values.extraSecretRefs }}

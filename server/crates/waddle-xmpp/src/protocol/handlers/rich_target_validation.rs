@@ -46,13 +46,12 @@
 use super::errors::{
     bad_request_reply, item_not_found_reply, not_acceptable_reply, send_message_error,
 };
-use crate::protocol::event::{
-    ArchivedMessage, CallbackId, MessageRef, OriginIdValue, OutboundEvent, StanzaIdValue,
-};
+use crate::protocol::event::{ArchivedMessage, CallbackId, MessageRef, OutboundEvent};
 use crate::protocol::message_context::MessageContext;
 use crate::protocol::traits::{HandlerOutcome, MessageHandler};
 use crate::xep::{xep0308, xep0424, xep0461};
 use jid::BareJid;
+use waddle_xmpp_core::xep0359::{OriginId, StanzaId};
 use xmpp_parsers::message::{Message, MessageType};
 
 /// Sentinel callback id used by handlers that emit
@@ -190,7 +189,7 @@ pub fn detect(message: &Message, ctx: &MessageContext<'_>) -> Option<DetectedRic
             kind: RichTargetKind::Correction,
             reference: MessageRef::OriginId {
                 sender: author.clone(),
-                origin_id: OriginIdValue::new(correction.replaces_id),
+                origin_id: OriginId::new(correction.replaces_id),
             },
             author,
         });
@@ -201,11 +200,11 @@ pub fn detect(message: &Message, ctx: &MessageContext<'_>) -> Option<DetectedRic
     if let Some(xep0424::RetractionKind::Request(retraction)) =
         xep0424::extract_retraction_from_message(message)
     {
+        let archive_jid: jid::Jid = author.clone().into();
         return Some(DetectedRichTarget {
             kind: RichTargetKind::Retraction,
             reference: MessageRef::StanzaId {
-                by: author.clone(),
-                id: StanzaIdValue::new(retraction.retracts_id),
+                stanza_id: StanzaId::new(retraction.retracts_id, archive_jid),
             },
             author,
         });
@@ -213,11 +212,11 @@ pub fn detect(message: &Message, ctx: &MessageContext<'_>) -> Option<DetectedRic
 
     // XEP-0461 reply — references the target message by stanza-id.
     if let Some(reply) = xep0461::parse_reply_from_message(message) {
+        let archive_jid: jid::Jid = author.clone().into();
         return Some(DetectedRichTarget {
             kind: RichTargetKind::Reply,
             reference: MessageRef::StanzaId {
-                by: author.clone(),
-                id: StanzaIdValue::new(reply.id),
+                stanza_id: StanzaId::new(reply.id, archive_jid),
             },
             author,
         });
@@ -271,7 +270,6 @@ fn same_author(archived: &ArchivedMessage, author: &BareJid) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::event::StanzaIdRef;
     use crate::protocol::id_gen::FixedIdGenerator;
     use crate::protocol::message_context::MessageContextEnv;
     use crate::protocol::session_state::{Blocklist, CarbonsState, MucOccupancy};
@@ -331,11 +329,9 @@ mod tests {
         m.from = Some(from.parse().expect("jid"));
         m.type_ = MessageType::Chat;
         m.bodies.insert(String::new(), Body(body.to_string()));
+        let archive_jid: jid::Jid = bare("alice@example.com").into();
         ArchivedMessage {
-            stanza_id: StanzaIdRef {
-                by: bare("alice@example.com"),
-                id: StanzaIdValue::new("archive-A1"),
-            },
+            stanza_id: StanzaId::new("archive-A1", archive_jid),
             message: Box::new(m),
             tombstoned: false,
         }
@@ -442,9 +438,10 @@ mod tests {
         let outcome = run(&local, &mut msg);
         let (_id, _archive, reference) = extract_lookup_event(&outcome);
         match reference {
-            MessageRef::StanzaId { by, id } => {
-                assert_eq!(*by, bare("alice@example.com"));
-                assert_eq!(id.as_str(), "stanza-X");
+            MessageRef::StanzaId { stanza_id } => {
+                let expected_by: jid::Jid = bare("alice@example.com").into();
+                assert_eq!(stanza_id.by, expected_by);
+                assert_eq!(stanza_id.as_str(), "stanza-X");
             }
             other => panic!("expected StanzaId ref, got {other:?}"),
         }
@@ -461,8 +458,8 @@ mod tests {
         let outcome = run(&local, &mut msg);
         let (_id, _archive, reference) = extract_lookup_event(&outcome);
         match reference {
-            MessageRef::StanzaId { by: _, id } => {
-                assert_eq!(id.as_str(), "stanza-Y");
+            MessageRef::StanzaId { stanza_id } => {
+                assert_eq!(stanza_id.as_str(), "stanza-Y");
             }
             other => panic!("expected StanzaId ref, got {other:?}"),
         }

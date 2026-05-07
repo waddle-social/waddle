@@ -9,12 +9,11 @@ pub(super) async fn handle_muc_admin_iq(
     response_to: Option<&str>,
 ) -> Vec<String> {
     let Some(sender_jid) = sender_jid else {
-        return vec![build_iq_error_xml_with_addresses(
+        return vec![build_iq_error_xml_typed(
             &iq.id,
             response_from,
             response_to,
-            "auth",
-            "not-authorized",
+            not_authorized_iq_error("Authentication required."),
         )];
     };
     let mut iq_with_from = iq.clone();
@@ -24,12 +23,11 @@ pub(super) async fn handle_muc_admin_iq(
         Err(error) => return vec![build_xmpp_error_response(&iq_with_from, error)],
     };
     let Some(room_actor) = get_room_actor(state, &query.room_jid).await else {
-        return vec![build_iq_error_xml_with_addresses(
+        return vec![build_iq_error_xml_typed(
             &iq.id,
             response_from,
             response_to,
-            "cancel",
-            "item-not-found",
+            item_not_found_iq_error("Requested item not found."),
         )];
     };
     let context = match room_actor
@@ -40,36 +38,33 @@ pub(super) async fn handle_muc_admin_iq(
     {
         Ok(context) => context,
         Err(_) => {
-            return vec![build_iq_error_xml_with_addresses(
+            return vec![build_iq_error_xml_typed(
                 &iq.id,
                 response_from,
                 response_to,
-                "wait",
-                "internal-server-error",
+                internal_server_error_iq_error("Internal server error."),
             )]
         }
     };
     let is_admin = matches!(context.affiliation, Affiliation::Owner | Affiliation::Admin)
         || matches!(context.role, waddle_xmpp::Role::Moderator);
     if !is_admin {
-        return vec![build_iq_error_xml_with_addresses(
+        return vec![build_iq_error_xml_typed(
             &iq.id,
             response_from,
             response_to,
-            "auth",
-            "forbidden",
+            forbidden_iq_error("Operation not permitted."),
         )];
     }
     if query.is_get {
         let snapshot = match room_actor.ask(GetSnapshot).await {
             Ok(snapshot) => snapshot.room,
             Err(_) => {
-                return vec![build_iq_error_xml_with_addresses(
+                return vec![build_iq_error_xml_typed(
                     &iq.id,
                     response_from,
                     response_to,
-                    "wait",
-                    "internal-server-error",
+                    internal_server_error_iq_error("Internal server error."),
                 )]
             }
         };
@@ -129,22 +124,20 @@ pub(super) async fn handle_muc_admin_iq(
         Ok(updates) => updates,
         Err(kameo::error::SendError::HandlerError(error)) => {
             warn!(room = %room_jid, error = %error, "MUC admin set rejected");
-            return vec![build_iq_error_xml_with_addresses(
+            return vec![build_iq_error_xml_typed(
                 &iq.id,
                 response_from,
                 response_to,
-                "auth",
-                "forbidden",
+                forbidden_iq_error("Operation not permitted."),
             )];
         }
         Err(error) => {
             warn!(room = %room_jid, error = ?error, "Failed to apply MUC admin IQ");
-            return vec![build_iq_error_xml_with_addresses(
+            return vec![build_iq_error_xml_typed(
                 &iq.id,
                 response_from,
                 response_to,
-                "wait",
-                "internal-server-error",
+                internal_server_error_iq_error("Internal server error."),
             )];
         }
     };

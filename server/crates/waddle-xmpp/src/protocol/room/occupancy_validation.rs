@@ -19,14 +19,19 @@
 //! `deliver_groupchat_via_room_actor` bridge silently dropped on
 //! `BuildGroupchatBroadcast` errors and never produced a typed XEP-0045
 //! reply. This handler emits the typed reply directly.
+//!
+//! Typed-error construction is centralized in
+//! [`super::errors`] — this handler only decides *which* of the three
+//! XEP-0045 §7.4 / §7.5 / managed-room constructors to invoke.
 
-use super::super::handlers::errors::{message_error_reply, send_message_error};
+use super::super::handlers::errors::send_message_error;
 use super::context::RoomContext;
+use super::errors::{
+    managed_room_forbidden_reply, xep_0045_not_acceptable_reply, xep_0045_visitor_forbidden_reply,
+};
 use super::traits::{RoomHandler, RoomHandlerOutcome};
 use crate::types::Role;
-use jid::Jid;
-use xmpp_parsers::message::{Message, MessageType};
-use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
+use xmpp_parsers::message::Message;
 
 /// Sender-occupancy gate for the room handler chain.
 #[derive(Debug, Default, Clone, Copy)]
@@ -43,13 +48,13 @@ impl RoomHandler for OccupancyValidationHandler {
         // `announcements` localpart marker before constructing the
         // context, so the handler stays sync.
         if ctx.managed_room_forbidden {
-            let reply = forbidden_reply(message, ctx);
+            let reply = managed_room_forbidden_reply(message, ctx.room, ctx.sender_full);
             return RoomHandlerOutcome::Halt(vec![send_message_error(reply)]);
         }
 
         // XEP-0045 §7.4: non-occupants cannot send to the room.
         let Some(sender) = ctx.sender_snapshot() else {
-            let reply = not_acceptable_reply(message, ctx);
+            let reply = xep_0045_not_acceptable_reply(message, ctx.room, ctx.sender_full);
             return RoomHandlerOutcome::Halt(vec![send_message_error(reply)]);
         };
 
@@ -59,69 +64,12 @@ impl RoomHandler for OccupancyValidationHandler {
         // chain mirrors it here so the cutover doesn't drop the
         // conformance gate (Copilot review on PR #279).
         if ctx.room_moderated && sender.role == Role::Visitor {
-            let reply = visitor_forbidden_reply(message, ctx);
+            let reply = xep_0045_visitor_forbidden_reply(message, ctx.room, ctx.sender_full);
             return RoomHandlerOutcome::Halt(vec![send_message_error(reply)]);
         }
 
         RoomHandlerOutcome::Continue(Vec::new())
     }
-}
-
-/// Build the XEP-0045 §7.4 typed `<not-acceptable type='cancel'/>` reply
-/// addressed from the room JID back to the sender.
-fn not_acceptable_reply(incoming: &Message, ctx: &RoomContext<'_>) -> Message {
-    // Force the message-error reply to come "from the room" so clients
-    // can attribute the rejection — `message_error_reply` swaps from/to
-    // verbatim, which would put the original `to=room` value into
-    // `from`; we then refresh `to` to the sender's full JID.
-    let mut reply = message_error_reply(
-        incoming,
-        StanzaError::new(
-            ErrorType::Cancel,
-            DefinedCondition::NotAcceptable,
-            "en",
-            "Only room occupants may send messages to this room.",
-        ),
-    );
-    reply.from = Some(Jid::from(ctx.room.clone()));
-    reply.to = Some(Jid::from(ctx.sender_full.clone()));
-    reply.type_ = MessageType::Error;
-    reply
-}
-
-/// Build the managed-room `<forbidden type='auth'/>` reply.
-fn forbidden_reply(incoming: &Message, ctx: &RoomContext<'_>) -> Message {
-    let mut reply = message_error_reply(
-        incoming,
-        StanzaError::new(
-            ErrorType::Auth,
-            DefinedCondition::Forbidden,
-            "en",
-            "Sender is not permitted to address this resource.",
-        ),
-    );
-    reply.from = Some(Jid::from(ctx.room.clone()));
-    reply.to = Some(Jid::from(ctx.sender_full.clone()));
-    reply.type_ = MessageType::Error;
-    reply
-}
-
-/// Build the XEP-0045 §7.5 `<forbidden type='auth'/>` reply for a
-/// visitor attempting to send a message to a moderated room.
-fn visitor_forbidden_reply(incoming: &Message, ctx: &RoomContext<'_>) -> Message {
-    let mut reply = message_error_reply(
-        incoming,
-        StanzaError::new(
-            ErrorType::Auth,
-            DefinedCondition::Forbidden,
-            "en",
-            "Visitors may not send messages to this moderated room.",
-        ),
-    );
-    reply.from = Some(Jid::from(ctx.room.clone()));
-    reply.to = Some(Jid::from(ctx.sender_full.clone()));
-    reply.type_ = MessageType::Error;
-    reply
 }
 
 #[cfg(test)]
@@ -133,7 +81,9 @@ mod tests {
     use crate::types::{Affiliation, Role};
     use crate::xep::xep0421::OccupantIdSecret;
     use crate::Stanza;
-    use jid::{BareJid, FullJid};
+    use jid::{BareJid, FullJid, Jid};
+    use xmpp_parsers::message::{Body, MessageType};
+    use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
     fn full(s: &str) -> FullJid {
         s.parse().expect("valid full jid")
@@ -146,8 +96,7 @@ mod tests {
         let mut m = Message::new(Some(Jid::from(room.clone())));
         m.from = Some(Jid::from(sender.clone()));
         m.type_ = MessageType::Groupchat;
-        m.bodies
-            .insert(String::new(), xmpp_parsers::message::Body(body.to_string()));
+        m.bodies.insert(String::new(), Body(body.to_string()));
         m
     }
 
