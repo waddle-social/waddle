@@ -1,14 +1,20 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
+
+function builtAppLayoutChunk(): string {
+  const chunksDir = new URL("../dist/server/chunks/", import.meta.url);
+  const chunk = readdirSync(chunksDir).find((name) => name.startsWith("AppLayout_") && name.endsWith(".mjs"));
+  if (!chunk) throw new Error("built AppLayout chunk not found; run `bun run build` before this test");
+  return readFileSync(new URL(chunk, chunksDir), "utf8");
+}
 
 describe("startup loading fallback", () => {
-  test("renders a static shell before ChatApp hydrates", () => {
-    const layout = readFileSync(new URL("../src/layouts/AppLayout.astro", import.meta.url), "utf8");
+  test("build output includes the static shell before ChatApp hydrates", () => {
+    const html = builtAppLayoutChunk();
 
-    expect(layout).toContain('<ChatApp client:only="vue" giphyApiKey={giphyApiKey}>');
-    expect(layout).toContain('slot="fallback"');
-    expect(layout).toContain("chat-app-shell chat-startup-shell");
-    expect(layout).toContain("Checking session.");
+    expect(html).toContain("chat-app-shell chat-startup-shell");
+    expect(html).toContain("Loading Waddle");
+    expect(html).toContain("Checking session.");
   });
 
   test("keeps fallback dimensions stable without Vue", () => {
