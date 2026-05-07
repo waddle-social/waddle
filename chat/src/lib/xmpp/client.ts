@@ -38,6 +38,7 @@ import type {
 } from "./types";
 import { mergeOccupantHats, roleHatsForOccupant } from "./occupant-badges";
 import { prepareEncryptedAttachmentUpload } from "./encrypted-attachments";
+import type { WaddleEncryptedFile } from "./extensions/encrypted-file";
 
 import { discoverChannels, discoverTopology } from "./discovery";
 import { discoverUploadService, uploadFile, type UploadProgress } from "./file-upload";
@@ -239,6 +240,29 @@ function sharedFileFromWasm(file: WasmSharedFile): SharedFileInfo {
     ...(typeof file.size === "number" ? { size: file.size } : {}),
     ...(typeof file.width === "number" ? { width: file.width } : {}),
     ...(typeof file.height === "number" ? { height: file.height } : {}),
+    ...(file.encrypted ? { encrypted: encryptedFromWasm(file.encrypted) } : {}),
+  };
+}
+
+function encryptedFromWasm(encrypted: NonNullable<WasmSharedFile["encrypted"]>): WaddleEncryptedFile {
+  return {
+    cipher: encrypted.cipher as WaddleEncryptedFile["cipher"],
+    keyB64: encrypted.key_b64,
+    ivB64: encrypted.iv_b64,
+    ...(encrypted.hashes.length
+      ? { hashes: encrypted.hashes.map((hash) => ({ algo: hash.algo, valueB64: hash.value_b64 })) }
+      : {}),
+    ...(encrypted.sources.length ? { sources: [...encrypted.sources] } : {}),
+  };
+}
+
+function encryptedToWasm(encrypted: WaddleEncryptedFile, fallbackUrl: string): NonNullable<WasmSharedFile["encrypted"]> {
+  return {
+    cipher: encrypted.cipher,
+    key_b64: encrypted.keyB64,
+    iv_b64: encrypted.ivB64,
+    hashes: (encrypted.hashes ?? []).map((hash) => ({ algo: hash.algo, value_b64: hash.valueB64 })),
+    sources: encrypted.sources?.length ? [...encrypted.sources] : [fallbackUrl],
   };
 }
 
@@ -424,6 +448,7 @@ function buildWasmSendOptions(opts: SendGroupMessageOptions | SendDirectMessageO
       width: file.width,
       height: file.height,
       disposition: file.disposition,
+      ...(file.encrypted ? { encrypted: encryptedToWasm(file.encrypted, file.url) } : {}),
     }));
   }
   if (opts.markup?.length) {

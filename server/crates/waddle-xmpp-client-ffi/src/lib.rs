@@ -180,6 +180,32 @@ pub struct WaddleSharedFile {
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub disposition: String,
+    /// XEP-0448 envelope when the bytes at `url` are ciphertext rather than
+    /// the plaintext file. Recipients MUST use these values to decrypt before
+    /// rendering.
+    pub encrypted: Option<WaddleEncryptedFile>,
+}
+
+/// XEP-0448 cipher/key/iv/hashes envelope for encrypted Stateless File
+/// Sharing payloads.
+#[derive(uniffi::Record, Clone)]
+pub struct WaddleEncryptedFile {
+    /// Cipher URN, e.g. `urn:xmpp:ciphers:aes-256-gcm-nopadding:0`.
+    pub cipher: String,
+    /// Base64-encoded symmetric key.
+    pub key_b64: String,
+    /// Base64-encoded initialization vector / nonce.
+    pub iv_b64: String,
+    pub hashes: Vec<WaddleEncryptedFileHash>,
+    /// Source URLs the ciphertext can be fetched from. Always non-empty.
+    pub sources: Vec<String>,
+}
+
+/// XEP-0300 hash entry nested under an `<encrypted/>` envelope.
+#[derive(uniffi::Record, Clone)]
+pub struct WaddleEncryptedFileHash {
+    pub algo: String,
+    pub value_b64: String,
 }
 
 /// Header the client must include when uploading to a XEP-0363 slot.
@@ -779,7 +805,59 @@ fn shared_file_to_ffi(file: waddle_xmpp_client::messaging::SharedFile) -> Waddle
         width: file.width,
         height: file.height,
         disposition: file.disposition.as_str().to_string(),
+        encrypted: file.encrypted.map(encrypted_file_to_ffi),
     }
+}
+
+fn encrypted_file_to_ffi(
+    enc: waddle_xmpp_client::xep::encrypted_file::EncryptedFile,
+) -> WaddleEncryptedFile {
+    WaddleEncryptedFile {
+        cipher: enc.cipher.as_uri().to_string(),
+        key_b64: enc.key_b64,
+        iv_b64: enc.iv_b64,
+        hashes: enc
+            .hashes
+            .into_iter()
+            .map(|h| WaddleEncryptedFileHash {
+                algo: h.algo,
+                value_b64: h.value_b64,
+            })
+            .collect(),
+        sources: enc.sources,
+    }
+}
+
+fn encrypted_file_from_ffi(
+    enc: WaddleEncryptedFile,
+) -> Result<waddle_xmpp_client::xep::encrypted_file::EncryptedFile, String> {
+    use waddle_xmpp_client::xep::encrypted_file::{Cipher, EncryptedFile, EncryptedHash};
+    let cipher = Cipher::from_uri(&enc.cipher).ok_or_else(|| {
+        format!(
+            "encrypted attachment has unknown cipher: {cipher}",
+            cipher = enc.cipher
+        )
+    })?;
+    if enc.sources.is_empty() {
+        return Err(
+            "encrypted attachment has no sources; recipients would receive ciphertext with no decryption metadata"
+                .to_string(),
+        );
+    }
+    Ok(EncryptedFile {
+        cipher,
+        key_b64: enc.key_b64,
+        iv_b64: enc.iv_b64,
+        hashes: enc
+            .hashes
+            .into_iter()
+            .map(|h| EncryptedHash {
+                algo: h.algo,
+                value_b64: h.value_b64,
+            })
+            .collect(),
+        sources: enc.sources,
+    })
 }
 
 fn upload_slot_to_ffi(slot: waddle_xmpp_client::discovery::UploadSlot) -> WaddleUploadSlot {
@@ -949,6 +1027,10 @@ fn send_options_from_ffi(opts: WaddleSendOptions) -> Result<SendMessageOptions, 
         parent: t.parent,
     });
 
+    // Surface invalid encryption metadata (unknown cipher, empty sources)
+    // as an explicit error rather than silently sending a ciphertext URL
+    // without the matching XEP-0448 envelope — that produces hard-to-debug
+    // broken attachments for recipients.
     let shared_files = opts
         .shared_files
         .into_iter()
@@ -957,7 +1039,8 @@ fn send_options_from_ffi(opts: WaddleSendOptions) -> Result<SendMessageOptions, 
                 Some(file.disposition.as_str()),
                 file.media_type.as_deref(),
             );
-            messaging::SharedFile {
+            let encrypted = file.encrypted.map(encrypted_file_from_ffi).transpose()?;
+            Ok(messaging::SharedFile {
                 url: file.url,
                 name: file.name,
                 media_type: file.media_type,
@@ -965,9 +1048,10 @@ fn send_options_from_ffi(opts: WaddleSendOptions) -> Result<SendMessageOptions, 
                 width: file.width,
                 height: file.height,
                 disposition,
-            }
+                encrypted,
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>, String>>()?;
 
     let stanza_id = opts
         .stanza_id
