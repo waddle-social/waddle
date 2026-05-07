@@ -11,8 +11,8 @@ Tracking doc for the multi-PR implementation of issue [#209](https://github.com/
 | Slice (d) phase 4 | [#346](https://github.com/waddle-social/waddle/pull/346) | ✅ merged | Q6 SM-expiry promotion (alt-resource → offline → service-unavailable), graceful-shutdown drain, persist-after-promotion ordering |
 | Q7 lifecycle | [#358](https://github.com/waddle-social/waddle/pull/358) | ✅ merged | SM-ack-keyed deletion of `pending_delivery` rows + pre-ack session-death re-flush |
 | Janitor + flush-time block | [#360](https://github.com/waddle-social/waddle/pull/360) | ✅ merged | Claim-expiry janitor + XEP-0191 flush-time block re-eval |
-| Receipt-time plumbing | [#361](https://github.com/waddle-social/waddle/pull/361) | 🟡 in review | `original_receipt_at` plumbing through `DetachedSession.unacked_stanzas` |
-| Test-coverage debt | [#350](#pr-350--test-coverage-debt--planned) | ⬜ planned | Un-ignore XEP-0160 integration tests + extend dedicated XEP-0198/0334/0280/0313/0203/0359/0191 suites |
+| Receipt-time plumbing | [#361](https://github.com/waddle-social/waddle/pull/361) | ✅ merged | `original_receipt_at` plumbing through `DetachedSession.unacked_stanzas` |
+| Test-coverage debt | [#362](https://github.com/waddle-social/waddle/pull/362) | 🟡 in review | Un-ignore XEP-0160 integration tests + extend dedicated XEP-0198/0203/0359/0191 suites |
 | Storage performance | [#351](#pr-351--storage-performance--planned) | ⬜ planned (low priority) | N+1 `list_unacked` JOIN; atomic transactions in `Database` abstraction |
 
 ## Locked design (from grilling session)

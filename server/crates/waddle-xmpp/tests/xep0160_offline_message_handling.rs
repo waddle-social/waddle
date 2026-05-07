@@ -95,10 +95,43 @@ fn xep0160_treats_negative_priority_resources_as_unavailable_for_storage() {
     assert_eq!(routing.live, LiveDecision::None);
 }
 
-#[test]
-#[ignore = "TODO #209 slice (b) phase 2: integration test requires full intake → quota path"]
-fn xep0160_queue_full_returns_service_unavailable_to_sender() {
-    todo!("integration: feed N+1 stanzas through OfflineDeliveryHandler with cap=N, assert bounce");
+// XEP-0160 §3 step 3 quota → `<service-unavailable/>` bounce is
+// covered by the storage-trait contract (`InsertOutcome::QuotaExceeded`
+// when over `QuotaPolicy::CountCap`) plus the dedicated server-side
+// integration test
+// `sm_promotion::tests::bounces_service_unavailable_when_quota_exceeded`
+// in `server/crates/waddle-server/src/sm_promotion.rs` (which exercises
+// the quota → bounce path through the actual flush/promotion pipeline).
+// See also the storage-layer tests
+// `pending_delivery::storage::tests::quota_exceeded_returns_outcome` and
+// `db_storage_quota_returns_quota_exceeded_outcome`.
+#[tokio::test]
+async fn xep0160_queue_full_returns_service_unavailable_to_sender() {
+    use std::sync::Arc;
+    use waddle_xmpp::pending_delivery::storage::{
+        InMemoryPendingDeliveryStorage, PendingDeliveryStorage,
+    };
+    use waddle_xmpp::pending_delivery::{InsertOutcome, QuotaPolicy};
+    let storage: Arc<dyn PendingDeliveryStorage> =
+        Arc::new(InMemoryPendingDeliveryStorage::new(QuotaPolicy::CountCap {
+            max_rows: 2,
+        }));
+    for n in 0..2 {
+        let outcome = storage
+            .insert(transient_row("alice@example.com", &format!("hi-{n}")))
+            .await
+            .expect("insert ok");
+        assert_eq!(outcome, InsertOutcome::Inserted);
+    }
+    // Third insert exceeds the per-recipient cap; the storage layer
+    // surfaces QuotaExceeded so the routing layer (interpret.rs ::
+    // OfflineDeliveryHandler) can bounce <service-unavailable/> per
+    // XEP-0160 §3 step 3 + RFC 6120 §8.3.
+    let outcome = storage
+        .insert(transient_row("alice@example.com", "overflow"))
+        .await
+        .expect("insert ok");
+    assert_eq!(outcome, InsertOutcome::QuotaExceeded);
 }
 
 // -----------------------------------------------------------------------------
@@ -299,28 +332,87 @@ fn xep0160_flushed_message_preserves_sender_extensions() {
 // §3 Process Flow — flush trigger (slice (d) integration scope)
 // -----------------------------------------------------------------------------
 
+/// Locked Q7a + Q7d: the offline-flush trigger fires AT MOST ONCE
+/// per fresh session, gated by a connection-entry CAS
+/// (`ConnectionEntry::claim_offline_flush`). Repeat presence
+/// updates (priority transitions including `-1 → +1`, status text
+/// changes, …) MUST observe `false` and skip the flush.
+///
+/// This pins the CAS contract used by the presence handler in
+/// `server/crates/waddle-server/src/server/routes/websocket/handlers/presence.rs::maybe_flush_pending_delivery`,
+/// which gates the actual flush on `priority >= 0` AND on this
+/// CAS returning `true`. The full presence-transition simulation
+/// (priority change events going through the live registry +
+/// presence handler) lives in waddle-server; this trait-level
+/// test verifies the building block — the second
+/// `claim_offline_flush()` call ALWAYS returns false, regardless
+/// of how many transitions happened between calls. Any future
+/// code that re-arms the CAS would need to update this test.
+/// (Copilot review on PR #362: previously two redundant tests
+/// covered this same property.)
 #[test]
-#[ignore = "TODO #209 slice (d): integration test against ConnectionRegistry+presence handler"]
-fn xep0160_flushes_on_first_non_negative_presence_of_fresh_session() {
-    todo!("integration: connect Alice, send presence priority=1, assert pending row pushed");
+fn xep0160_claim_offline_flush_cas_fires_once_per_connection() {
+    use waddle_xmpp::registry::ConnectionEntry;
+    let (tx, _rx) = tokio::sync::mpsc::channel(8);
+    let entry = ConnectionEntry::new(tx);
+    // First non-negative-priority presence wins; the presence
+    // handler triggers a flush only when this CAS returns true.
+    assert!(entry.claim_offline_flush(), "first call wins");
+    // Subsequent presence updates (priority transitions, status
+    // text changes, …) MUST observe `false` and skip the flush.
+    assert!(
+        !entry.claim_offline_flush(),
+        "second call (any cause: priority transition, status update) must NOT re-flush"
+    );
+    assert!(
+        !entry.claim_offline_flush(),
+        "third+ calls remain idempotent"
+    );
 }
 
-#[test]
-#[ignore = "TODO #209 slice (d): integration test"]
-fn xep0160_negative_to_non_negative_priority_transition_triggers_flush() {
-    todo!("integration: connect with priority=-1 then send priority=1; flush must fire on the +1");
-}
+// XEP-0160 SM-resumed session does NOT re-flush pending_delivery: covered
+// by the `ConnectionEntry::claim_offline_flush` CAS contract above plus
+// the presence-handler wiring in
+// `server/crates/waddle-server/src/server/routes/websocket/handlers/presence.rs`,
+// which only calls `maybe_flush_pending_delivery` on first non-negative
+// presence of a connection. A resumed session re-uses the same
+// `ConnectionEntry` so its `offline_flushed` AtomicBool stays `true`
+// (was claimed on first presence of the original session).
 
-#[test]
-#[ignore = "TODO #209 slice (d) phase 2-3: SM session resumption durability"]
-fn xep0160_sm_resumed_session_does_not_reflush_pending_delivery() {
-    todo!("integration: detach + resume SM session; pending_delivery must not double-flush");
-}
-
-#[test]
-#[ignore = "TODO #209 slice (d) phase 2: per-user-bare-JID lock under concurrency"]
-fn xep0160_concurrent_resources_first_presence_wins_via_lock() {
-    todo!("integration: race two resources' presence; second sees empty claim pool");
+/// Locked Q7c: when two resources race their first presence, the
+/// per-user lock built into `claim_for_session` ensures only the
+/// first caller sees the unclaimed pool — the second sees empty.
+#[tokio::test]
+async fn xep0160_concurrent_resources_first_presence_wins_via_lock() {
+    use std::sync::Arc;
+    use waddle_xmpp::pending_delivery::storage::{
+        InMemoryPendingDeliveryStorage, PendingDeliveryStorage,
+    };
+    let storage: Arc<dyn PendingDeliveryStorage> =
+        Arc::new(InMemoryPendingDeliveryStorage::unlimited());
+    let recipient = bare("alice@example.com");
+    for n in 0..3 {
+        storage
+            .insert(transient_row("alice@example.com", &format!("msg-{n}")))
+            .await
+            .unwrap();
+    }
+    let session_a = SmSessionId::new("alice@example.com/laptop");
+    let session_b = SmSessionId::new("alice@example.com/web");
+    let claimed_a = storage
+        .claim_for_session(&recipient, &session_a)
+        .await
+        .unwrap();
+    let claimed_b = storage
+        .claim_for_session(&recipient, &session_b)
+        .await
+        .unwrap();
+    assert_eq!(claimed_a.len(), 3, "first claimer wins all unclaimed rows");
+    assert_eq!(
+        claimed_b.len(),
+        0,
+        "second claimer sees empty pool (per-user lock)"
+    );
 }
 
 #[tokio::test]
@@ -487,31 +579,34 @@ fn xep0160_hints_in_error_stanzas_are_ignored() {
 // XEP-0198 SM-expiry promotion (locked Q2 / Q6) — slice (d) follow-up
 // -----------------------------------------------------------------------------
 
-#[test]
-#[ignore = "TODO #209 slice (d) phase 4: SM-expiry promotion path"]
-fn xep0160_sm_expired_unacked_promoted_to_alt_resource_when_available() {
-    todo!("integration: SM session expires; alt resource exists; unacked re-routes there");
-}
+// XEP-0160 SM-expiry promotion path (locked Q6 = B priority chain:
+// alt-resource → offline-storage → service-unavailable bounce) is
+// covered by the dedicated `sm_promotion::tests` module in
+// `server/crates/waddle-server/src/sm_promotion.rs`:
+//
+//   - `promotes_to_alt_resource_when_one_is_online` — Q6 step 1
+//   - `promotes_to_pending_delivery_when_no_alt_resource` — Q6 step 2
+//   - `bounces_service_unavailable_when_quota_exceeded` — Q6 step 3
+//   - `promoted_pending_row_carries_per_stanza_original_receipt_at`
+//     — Q6c receipt-time preservation (issue #209 PR #361)
+//   - `xep0160_promoted_stanzas_carry_original_receipt_time_in_delay`
+//     in `pending_delivery::tests` — full e2e flow from row insert
+//     through flush replay through SM-promote
+//
+// The promotion path lives in waddle-server (it depends on the
+// ConnectionRegistry and PendingDeliveryStorage); the dedicated
+// XEP-0160 suite here covers the classifier (intake) half and
+// pointer-comments the promotion half to its test home.
 
-#[test]
-#[ignore = "TODO #209 slice (d) phase 4: SM-expiry promotion path"]
-fn xep0160_sm_expired_unacked_promoted_to_pending_delivery_when_no_alt_resource() {
-    todo!(
-        "integration: SM session expires; user has no other resources; unacked → pending_delivery"
-    );
-}
-
-#[test]
-#[ignore = "TODO #209 slice (d) phase 4: SM-expiry promotion path"]
-fn xep0160_sm_expired_unacked_returns_service_unavailable_when_storage_refuses() {
-    todo!("integration: quota full + SM expiry → bounce sender");
-}
-
-#[test]
-#[ignore = "TODO #209 slice (d) phase 4: classifier reuse on promotion"]
-fn xep0160_sm_expiry_promotion_reuses_intake_classifier() {
-    todo!("verify Q6 promotion path delegates to classify_dm_intake (single source of truth)");
-}
+// XEP-0160 Q6b "promotion filter delegates to classify_dm_intake" is
+// pinned by the structural fact that `sm_promotion::promote_one`
+// calls `classify_dm_intake(message, online, blocklist)` directly —
+// see `server/crates/waddle-server/src/sm_promotion.rs:155` (line
+// number stable since PR #346). Any Q6 promotion test in
+// `sm_promotion::tests::*` is therefore also a classifier-reuse
+// test by construction. Trying to re-test it here would just be
+// asserting against an `#[allow(dead_code)]` re-export of the
+// classifier, which adds no value.
 
 // XEP-0160 promoted stanzas carrying their original receipt time on
 // the XEP-0203 `<delay/>` is now covered by the storage-trait
@@ -530,23 +625,41 @@ fn xep0160_sm_expiry_promotion_reuses_intake_classifier() {
 // Server restart durability (locked Q8 = B) — slice (d) follow-up
 // -----------------------------------------------------------------------------
 
-#[test]
-#[ignore = "TODO #209 slice (d) phase 2: requires DatabaseSmPersistence"]
-fn xep0160_pending_delivery_survives_server_restart() {
-    todo!("integration: insert + simulate restart + assert rows still present");
-}
+// XEP-0160 Q8 = B `pending_delivery` rows survive a process restart
+// is covered by the dedicated server-side integration test
+// `pending_delivery::tests::xep0160_pending_delivery_survives_server_restart`
+// in `server/crates/waddle-server/src/pending_delivery.rs`. That test
+// uses a `tempfile`-backed SQLite path: insert → drop the storage
+// handle → reopen the SAME path → assert the row is still there.
+// This is the actual "process restart" semantic.
+//
+// In-memory backends (the default in waddle-xmpp's test fixtures)
+// are per-handle and therefore can't model restart durability —
+// only the file-backed Database backend in waddle-server can. The
+// trait contract is identical, but the durability assertion only
+// holds for backends with on-disk storage.
 
-#[test]
-#[ignore = "TODO #209 slice (d) phase 2-3: SM session persistence + restoration"]
-fn xep0160_sm_session_resumable_after_server_restart() {
-    todo!("integration: detach SM, restart server, resume session, replay unacked");
-}
+// XEP-0160 SM session resumability across server restart is covered
+// by the dedicated SM-persistence tests in
+// `waddle_xmpp::stream_management::persistence::tests`:
+//   - `upsert_get_round_trip` — session round-trip
+//   - `persisted_unacked_round_trips_original_receipt_at` —
+//     unacked queue + original_receipt_at round-trip (issue #209 PR #361)
+//   - `delete_session_clears_unacked_too` — referential integrity
+// And by `InMemorySmSessionRegistry::restore_from_persistence` which
+// is the read-side path the SIGTERM/restart sequence relies on.
 
-#[test]
-#[ignore = "TODO #209 slice (d) phase 4: graceful-shutdown drain"]
-fn xep0160_graceful_shutdown_drains_unacked_into_pending_delivery() {
-    todo!("integration: SIGTERM → drain → unacked promoted via Q6 path");
-}
+// XEP-0160 graceful-shutdown drain is covered by the dedicated
+// `sm_promotion` tests in waddle-server (which exercise
+// `promote_session_unacked` — the same callable invoked by the
+// shutdown-drain task in
+// `server/crates/waddle-server/src/server/mod.rs::start_with_config`)
+// plus the persist-after-promotion contract on
+// `InMemorySmSessionRegistry::drain_all_for_shutdown` /
+// `confirm_drained` exercised by `xep0198_session_registry.rs::*`.
+// The end-to-end SIGTERM → drain → promote → confirm sequence
+// requires axum's runtime + the live websocket router; that
+// integration belongs in a separate full-server harness.
 
 // -----------------------------------------------------------------------------
 // XEP-0191 blocking interactions (locked final fork #1)
@@ -578,30 +691,172 @@ fn xep0160_blocked_sender_does_not_create_pending_delivery_row() {
 // Multi-resource and carbons (locked Q10a) — integration scope
 // -----------------------------------------------------------------------------
 
+/// Locked Q10a: offline flush is single-resource. The flush path
+/// pushes via the dedicated `send_pending_flush` API (DirectFrame
+/// — bypasses the recipient pass + carbon fanout), not via the
+/// PeerStanza route that triggers XEP-0280 carbon copying. The
+/// recovering session is the sole destination; the recipient's
+/// other resources (if any) catch up via MAM.
+///
+/// This is a structural property of the flush wire path:
+/// `send_pending_flush` constructs `OutboundStanza::for_pending_flush`
+/// which uses `DeliveryKind::DirectFrame`. Carbons fanout runs only
+/// for `DeliveryKind::PeerStanza` (see `RouteToConnection` in
+/// `interpret.rs`). There is therefore no code path that could
+/// carbon-copy a flush replay.
 #[test]
-#[ignore = "TODO #209 slice (d) phase 2: integration with carbons handler"]
 fn xep0160_flush_is_not_copied_via_xep0280_carbons() {
-    todo!("integration: 3 resources, flush only delivers single-resource");
+    use waddle_xmpp::pending_delivery::PendingRowId;
+    use waddle_xmpp::registry::{DeliveryKind, OutboundStanza};
+    use waddle_xmpp::Stanza;
+    let msg = dm(
+        "bob@elsewhere/x",
+        "alice@example.com",
+        MessageType::Chat,
+        Some("offline-only"),
+    );
+    let outbound =
+        OutboundStanza::for_pending_flush(Stanza::Message(msg), PendingRowId::fresh(), Utc::now());
+    assert_eq!(
+        outbound.kind,
+        DeliveryKind::DirectFrame,
+        "flush replay MUST use DirectFrame so the destination main loop \
+         writes it directly to the wire and does NOT feed it through the \
+         carbon-fanout (PeerStanza) path (locked Q10a)"
+    );
+    assert!(
+        outbound.pending_row_id.is_some(),
+        "flush replay carries the source row id"
+    );
 }
 
+/// Locked final fork #3: a connection's XEP-0280 carbons opt-in
+/// must survive XEP-0198 detach so the resumed session continues
+/// receiving carbon-routed stanzas without re-negotiating
+/// `<enable xmlns='urn:xmpp:carbons:2'/>`.
+///
+/// The carbons flag is per-connection and lives on
+/// `ConnectionEntry`, NOT on the `StreamManagementState` (which
+/// only carries SM-stream counters and the unacked queue).
+/// `restore_from_session` therefore correctly does NOT touch the
+/// carbons flag — the websocket bind handler reads
+/// `detached.carbons_enabled` and writes it onto the NEW
+/// `ConnectionEntry` it just created for the resumed transport.
+///
+/// What this test pins (the contract the resume handshake relies on):
+///   1. `to_detached_session` propagates the snapshot's
+///      `carbons_enabled` onto the `DetachedSession`.
+///   2. The value round-trips through the snapshot — flipping the
+///      input flips the output.
+///
+/// The bind-handler side of the handshake (writing the flag onto
+/// the new ConnectionEntry) lives in waddle-server and is exercised
+/// by the SM-resume flow there.
 #[test]
-#[ignore = "TODO #209 slice (d) phase 3: SM session persistence carries carbons_enabled"]
 fn xep0160_sm_resumption_preserves_carbons_enabled_state() {
-    todo!("integration: enable carbons → detach → resume → carbons still enabled");
+    use waddle_xmpp::stream_management::{DetachedSessionSnapshot, StreamManagementState};
+
+    // Case 1: carbons enabled at detach → preserved on DetachedSession.
+    let mut sm = StreamManagementState::new();
+    sm.enable("stream-carbons-on".to_string(), true, Some(300));
+    let detached_on = sm
+        .to_detached_session(DetachedSessionSnapshot {
+            user_id: "alice".to_string(),
+            jid: full("alice@example.com/laptop"),
+            carbons_enabled: true,
+            roster_interested: true,
+            presence_available: true,
+            presence_show: None,
+            presence_status: None,
+            presence_priority: 1,
+        })
+        .expect("session resumable");
+    assert!(
+        detached_on.carbons_enabled,
+        "carbons-enabled snapshot propagated onto DetachedSession"
+    );
+
+    // Case 2: carbons disabled at detach → preserved as false (the
+    // round-trip is faithful, not always-true). Without this, a
+    // future regression that always sets carbons_enabled = true on
+    // DetachedSession would silently grant carbons to clients that
+    // never enabled it.
+    let mut sm2 = StreamManagementState::new();
+    sm2.enable("stream-carbons-off".to_string(), true, Some(300));
+    let detached_off = sm2
+        .to_detached_session(DetachedSessionSnapshot {
+            user_id: "alice".to_string(),
+            jid: full("alice@example.com/laptop"),
+            carbons_enabled: false,
+            roster_interested: true,
+            presence_available: true,
+            presence_show: None,
+            presence_status: None,
+            presence_priority: 1,
+        })
+        .expect("session resumable");
+    assert!(
+        !detached_off.carbons_enabled,
+        "carbons-disabled snapshot also round-trips faithfully \
+         (no implicit enable on detach)"
+    );
 }
 
 // -----------------------------------------------------------------------------
 // Dedupe (locked Q10c / Q10d)
 // -----------------------------------------------------------------------------
 
+/// Locked Q10c: a stanza archived into MAM and later flushed via
+/// pending_delivery's Archived payload variant emits the SAME
+/// XEP-0359 stanza-id on both paths — the recipient's archive
+/// catch-up sees the same id as the live flush, so client-side
+/// dedup works.
+///
+/// Pinned at the build-replay-stanza wire-shape level: an Archived
+/// payload's `<stanza-id>` is preserved verbatim from the MAM row
+/// (the classifier stamps the id at intake; flush passes it through).
 #[test]
-#[ignore = "TODO #209 slice (d) phase 2: integration"]
 fn xep0160_flush_and_mam_emit_same_stanza_id_for_same_message() {
-    todo!("integration: archive a stanza, flush it, MAM-query for it → same stanza-id");
+    let recipient = bare("alice@example.com");
+    // Build the archived form of the message — the way MAM would
+    // store it after intake stamping.
+    let stanza_id_value = "mam-id-stable";
+    let mut archived = dm(
+        "bob@elsewhere/x",
+        "alice@example.com",
+        MessageType::Chat,
+        Some("from-archive"),
+    );
+    archived.payloads.push(build_stanza_id_element(
+        stanza_id_value,
+        &Jid::from(recipient.clone()),
+    ));
+    // Flush via the Archived payload variant — same wire shape as
+    // the recipient's MAM catch-up would produce.
+    let payload = MaterializedPayload::Archived(Box::new(archived));
+    let replay = build_replay_stanza(payload, "example.com", fixed_receipt());
+    // Verify the stanza-id is preserved verbatim — this is the
+    // dedup key client implementations key on.
+    let stanza_id = replay
+        .payloads
+        .iter()
+        .find(|p| p.name() == "stanza-id" && p.ns() == NS_SID)
+        .expect("flush replay carries the stanza-id");
+    assert_eq!(stanza_id.attr("id"), Some(stanza_id_value));
+    assert_eq!(stanza_id.attr("by"), Some("alice@example.com"));
 }
 
-#[test]
-#[ignore = "TODO #209 slice (d) phase 4: explicit no-server-side-dedupe assertion"]
-fn xep0160_server_does_not_filter_duplicates_across_channels() {
-    todo!("verify server is best-efforts per XEP-0198 §5 line 367; client dedupes");
-}
+// Locked Q10d (server is best-efforts; client dedupes via XEP-0359
+// stanza-id) is a structural property of the codebase: there is no
+// `dedup_against_sm_replay` API anywhere, the SM replay path
+// (`stanzas_to_resend`) returns the entire unacked queue
+// unconditionally, and `flush_for_resource` claims + pushes
+// unconditionally once `claim_offline_flush` returns true. The
+// invariant is enforced by code review on any future PR that would
+// introduce server-side cross-channel dedup; an always-passing
+// test here would be a false-green (Codex review on PR #362).
+//
+// The dedup contract IS exercised at the client side via XEP-0359
+// stanza-id matching — see `xep0359_archived_flush_preserves_stanza_id_for_dedupe`
+// in `tests/xep0359_stanza_id.rs` which pins the wire-shape
+// invariant the client dedups against.

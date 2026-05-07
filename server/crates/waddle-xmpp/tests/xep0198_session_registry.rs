@@ -347,3 +347,199 @@ async fn xep0198_detached_resource_lists_preserve_stream_flags() {
     assert!(available.contains(&tablet));
     assert!(!available.contains(&laptop));
 }
+
+// -----------------------------------------------------------------------------
+// Slice (d) PRs #346, #344, #361 — extended XEP-0198 contract coverage.
+// -----------------------------------------------------------------------------
+
+/// Locked Q8 = B (issue #209 PR #344): SM session round-trips
+/// through `SmPersistenceStorage` survive a process restart. Detach
+/// → write → restore → resume.
+#[tokio::test]
+async fn xep0198_session_round_trips_through_persistence() {
+    use std::sync::Arc;
+    use waddle_xmpp::stream_management::persistence::InMemorySmPersistence;
+
+    let persistence: Arc<dyn waddle_xmpp::stream_management::persistence::SmPersistenceStorage> =
+        Arc::new(InMemorySmPersistence::new());
+    let registry = InMemorySmSessionRegistry::new().with_persistence(Arc::clone(&persistence));
+    registry
+        .store_session(detached_session(
+            "stream-restart",
+            "alice@example.com/laptop",
+        ))
+        .await
+        .expect("store");
+
+    // Simulate restart: drop the registry, build a fresh one over the
+    // same persistence handle, restore.
+    drop(registry);
+    let restored = InMemorySmSessionRegistry::new().with_persistence(Arc::clone(&persistence));
+    let count = restored
+        .restore_from_persistence()
+        .await
+        .expect("restore from persistence");
+    assert_eq!(count, 1, "one session restored");
+
+    // The restored session is resumable.
+    let resumed = restored
+        .claim_session("stream-restart")
+        .await
+        .expect("claim restored session")
+        .expect("session present after restore");
+    assert_eq!(resumed.jid.to_string(), "alice@example.com/laptop");
+    assert!(resumed.carbons_enabled);
+}
+
+/// Locked Q8 = B persist-after-promotion contract (issue #209
+/// PR #346, post-Copilot-review): `drain_expired` and
+/// `drain_all_for_shutdown` MUST NOT delete the durable SM row
+/// up-front. Only `confirm_drained` performs the durable delete,
+/// and the caller invokes it AFTER successful Q6 promotion. This
+/// way a partial-promotion failure (panic, storage error) leaves
+/// the unacked queue intact for restart-time retry.
+#[tokio::test]
+async fn xep0198_drain_expired_does_not_delete_durable_row_until_confirmed() {
+    use std::sync::Arc;
+    use waddle_xmpp::stream_management::persistence::InMemorySmPersistence;
+
+    let persistence: Arc<dyn waddle_xmpp::stream_management::persistence::SmPersistenceStorage> =
+        Arc::new(InMemorySmPersistence::new());
+    let registry = InMemorySmSessionRegistry::new().with_persistence(Arc::clone(&persistence));
+    registry
+        .store_session(expiring_detached_session(
+            "stream-drain-no-delete",
+            "alice@example.com/laptop",
+        ))
+        .await
+        .expect("store");
+
+    // Wait for expiry then drain.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let drained = registry
+        .drain_expired()
+        .await
+        .expect("drain_expired succeeds");
+    assert_eq!(drained.len(), 1, "one expired session drained");
+
+    // Critical: durable row STILL present until confirm_drained.
+    let stored = persistence
+        .get_session(&waddle_xmpp::pending_delivery::SmSessionId::new(
+            "stream-drain-no-delete",
+        ))
+        .await
+        .expect("get durable session");
+    assert!(
+        stored.is_some(),
+        "drain_expired MUST NOT delete durable row up-front (PR #346 Copilot review)"
+    );
+
+    // Confirm: now the durable row is deleted.
+    registry.confirm_drained("stream-drain-no-delete").await;
+    let after = persistence
+        .get_session(&waddle_xmpp::pending_delivery::SmSessionId::new(
+            "stream-drain-no-delete",
+        ))
+        .await
+        .expect("get durable session post-confirm");
+    assert!(
+        after.is_none(),
+        "confirm_drained deletes the durable row after successful promotion"
+    );
+}
+
+/// Same persist-after-promotion contract for the graceful-shutdown
+/// path: `drain_all_for_shutdown` removes from in-memory but leaves
+/// durable rows for restart recovery.
+#[tokio::test]
+async fn xep0198_drain_all_for_shutdown_does_not_delete_durable_row_until_confirmed() {
+    use std::sync::Arc;
+    use waddle_xmpp::stream_management::persistence::InMemorySmPersistence;
+
+    let persistence: Arc<dyn waddle_xmpp::stream_management::persistence::SmPersistenceStorage> =
+        Arc::new(InMemorySmPersistence::new());
+    let registry = InMemorySmSessionRegistry::new().with_persistence(Arc::clone(&persistence));
+    registry
+        .store_session(detached_session(
+            "stream-shutdown-no-delete",
+            "alice@example.com/laptop",
+        ))
+        .await
+        .expect("store");
+
+    // Shutdown drain (NOT expiry-based — pulls everything).
+    let drained = registry
+        .drain_all_for_shutdown()
+        .await
+        .expect("drain_all_for_shutdown succeeds");
+    assert_eq!(drained.len(), 1, "one live session drained");
+
+    // Durable row preserved — restart-recovery path.
+    let stored = persistence
+        .get_session(&waddle_xmpp::pending_delivery::SmSessionId::new(
+            "stream-shutdown-no-delete",
+        ))
+        .await
+        .expect("get durable session");
+    assert!(
+        stored.is_some(),
+        "drain_all_for_shutdown MUST NOT delete durable row up-front \
+         so restart can restore it (PR #346 Copilot review)"
+    );
+
+    registry.confirm_drained("stream-shutdown-no-delete").await;
+    let after = persistence
+        .get_session(&waddle_xmpp::pending_delivery::SmSessionId::new(
+            "stream-shutdown-no-delete",
+        ))
+        .await
+        .expect("get durable session post-confirm");
+    assert!(after.is_none());
+}
+
+/// Issue #209 PR #361: `DetachedSession.unacked_stanzas` carries
+/// `original_receipt_at` per stanza. The Q6 SM-expiry promotion
+/// path consumes this for the XEP-0203 `<delay/>` stamp on offline
+/// replays. Verify the field round-trips through detach + restore.
+#[tokio::test]
+async fn xep0198_unacked_original_receipt_at_round_trips_through_persistence() {
+    use chrono::TimeZone;
+    use std::sync::Arc;
+    use waddle_xmpp::stream_management::{
+        persistence::InMemorySmPersistence, DetachedUnackedStanza,
+    };
+
+    let persistence: Arc<dyn waddle_xmpp::stream_management::persistence::SmPersistenceStorage> =
+        Arc::new(InMemorySmPersistence::new());
+    let registry = InMemorySmSessionRegistry::new().with_persistence(Arc::clone(&persistence));
+
+    let t1 = chrono::Utc
+        .with_ymd_and_hms(2026, 5, 1, 12, 0, 0)
+        .single()
+        .expect("valid time");
+    let mut session = detached_session("stream-receipt-rtt", "alice@example.com/laptop");
+    // Use jabber:client namespace so the persistence layer's XML
+    // round-trip can re-parse the stanza into a typed Stanza.
+    session.unacked_stanzas.push(DetachedUnackedStanza {
+        sequence: 12,
+        stanza_xml: "<message xmlns='jabber:client' id='m12'><body>queued at T1</body></message>"
+            .to_string(),
+        original_receipt_at: t1,
+    });
+    registry.store_session(session).await.expect("store");
+
+    // Simulate restart and restore.
+    drop(registry);
+    let restored = InMemorySmSessionRegistry::new().with_persistence(Arc::clone(&persistence));
+    restored.restore_from_persistence().await.expect("restore");
+    let claimed = restored
+        .claim_session("stream-receipt-rtt")
+        .await
+        .expect("claim restored")
+        .expect("present");
+    assert_eq!(claimed.unacked_stanzas.len(), 1);
+    assert_eq!(
+        claimed.unacked_stanzas[0].original_receipt_at, t1,
+        "original_receipt_at survives detach + persist + restore + claim"
+    );
+}

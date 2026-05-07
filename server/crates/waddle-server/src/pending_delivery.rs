@@ -2101,4 +2101,67 @@ mod tests {
              NOT the flush/drain/expiry wall-clock"
         );
     }
+
+    #[tokio::test]
+    async fn xep0160_pending_delivery_survives_server_restart() {
+        // Locked Q8 = B (issue #209): `pending_delivery` rows MUST
+        // survive a process restart. This is the actual restart-
+        // durability test (Codex P2 review on PR #362: the
+        // waddle-xmpp pointer test only exercised read-after-write
+        // through the same in-memory handle, which is not a
+        // restart-equivalent).
+        //
+        // Real restart simulation: open a SQLite-backed storage
+        // against a tempdir path, insert a row, drop the storage
+        // handle (closes the connection), reopen against the SAME
+        // path, assert the row is still present.
+        //
+        // Use `tempdir()` + `path.join()` rather than
+        // `NamedTempFile`: NamedTempFile keeps an open OS file
+        // handle alive for its lifetime, which can interfere with
+        // SQLite's file-locking semantics on some platforms
+        // (Copilot review on PR #362). The tempdir version creates
+        // only a directory; the SQLite file inside it has no other
+        // open handles.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir
+            .path()
+            .join("pending_delivery.sqlite")
+            .to_str()
+            .expect("utf-8 path")
+            .to_string();
+        let url = format!("sqlite://{path}");
+
+        // Boot 1: write a row + drop the handle to close the connection.
+        {
+            let storage = DatabasePendingDeliveryStorage::open(Some(&url), QuotaPolicy::Unlimited)
+                .await
+                .expect("open file-backed storage");
+            let outcome = storage
+                .insert(transient_row("alice@example.com", "across-restart"))
+                .await
+                .expect("insert before restart");
+            assert_eq!(outcome, InsertOutcome::Inserted);
+        }
+
+        // Boot 2: reopen against the SAME path (process restart
+        // semantics). The row MUST still be there.
+        let storage = DatabasePendingDeliveryStorage::open(Some(&url), QuotaPolicy::Unlimited)
+            .await
+            .expect("reopen file-backed storage");
+        let rows = storage
+            .list(&bare("alice@example.com"))
+            .await
+            .expect("list after restart");
+        assert_eq!(
+            rows.len(),
+            1,
+            "row durably persisted across the process-restart boundary"
+        );
+        let body = match &rows[0].payload {
+            PendingPayload::Transient(m) => m.bodies.get("").map(|b| b.0.as_str()),
+            _ => None,
+        };
+        assert_eq!(body, Some("across-restart"));
+    }
 }
