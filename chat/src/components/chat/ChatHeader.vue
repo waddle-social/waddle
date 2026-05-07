@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import type { Component } from "vue";
+import { computed, type Component } from "vue";
 import { ChevronRight, Hash, Menu, MessageCircle, MessagesSquare, Search, Settings, Users } from "lucide-vue-next";
 import type { ChannelSummary, SpaceSummary } from "@/lib/chat-types";
 import type { ConnectionNoticeCopy } from "@/lib/connection-notice";
+import type { MemberLoadState } from "@/waddles/directory";
 
 interface ConnectionStatusClasses {
   banner: string;
@@ -17,7 +18,8 @@ const props = defineProps<{
   dmPeer?: { peerJid?: string; peerUsername: string; presenceShow?: string } | null;
   isForumChannel: boolean;
   canManageChannels: boolean;
-  memberCount: number;
+  memberCount: number | null;
+  memberState: MemberLoadState;
   connectionNotice: ConnectionNoticeCopy | null;
   connectionStatusClasses: ConnectionStatusClasses | null;
   connectionStatusIcon: Component;
@@ -38,6 +40,35 @@ function presenceText(show?: string): string {
   if (show === "xa") return "extended away";
   return "offline";
 }
+
+const memberButtonCopy = computed(() => {
+  if (props.memberCount !== null) {
+    const noun = props.memberCount === 1 ? "member" : "members";
+    const suffix = props.memberState === "unavailable" ? ", last synced" : "";
+    return {
+      title: `${props.memberCount} ${noun}${suffix}`,
+      aria: `Open details (${props.memberCount} ${noun}${suffix})`,
+      primary: String(props.memberCount),
+      secondary: noun,
+    };
+  }
+
+  if (props.memberState === "loading") {
+    return {
+      title: "Members syncing",
+      aria: "Open details (members syncing)",
+      primary: "Syncing",
+      secondary: "members",
+    };
+  }
+
+  return {
+    title: "Members unavailable",
+    aria: "Open details (members unavailable)",
+    primary: "Unavailable",
+    secondary: "members",
+  };
+});
 </script>
 
 <template>
@@ -119,13 +150,13 @@ function presenceText(show?: string): string {
           v-if="channel"
           class="chat-action-button chat-action-button--secondary text-muted-foreground hover:text-foreground"
           type="button"
-          :title="`${memberCount} ${memberCount === 1 ? 'member' : 'members'}`"
-          :aria-label="`Open details (${memberCount} ${memberCount === 1 ? 'member' : 'members'})`"
+          :title="memberButtonCopy.title"
+          :aria-label="memberButtonCopy.aria"
           @click="emit('openDetails')"
         >
           <Users class="w-3.5 h-3.5" />
-          <span class="type-control">{{ memberCount }}</span>
-          <span class="hidden lg:inline type-control">{{ memberCount === 1 ? "member" : "members" }}</span>
+          <span class="type-control">{{ memberButtonCopy.primary }}</span>
+          <span class="hidden lg:inline type-control">{{ memberButtonCopy.secondary }}</span>
           <ChevronRight class="w-3.5 h-3.5 opacity-60" />
         </button>
       </div>

@@ -5,11 +5,13 @@ import AppAvatar from "@/components/ui/AppAvatar.vue";
 import type { MemberSummary, UserSearchResult } from "@/lib/chat-types";
 import type { EditableRole } from "@/lib/chat-ui";
 import type { RoomPresence } from "@/lib/xmpp-client";
+import type { MemberLoadState } from "@/waddles/directory";
 
 const open = defineModel<boolean>("open", { required: true });
 
 defineProps<{
   members: MemberSummary[];
+  memberState: MemberLoadState;
   memberQuery: string;
   newMemberRole: EditableRole;
   searchResults: UserSearchResult[];
@@ -104,6 +106,12 @@ const roles: EditableRole[] = ["member", "admin", "owner", "outcast"];
     <!-- Member list -->
     <div class="flex max-h-96 flex-col gap-1 overflow-auto px-4 py-3 sm:px-5">
       <div
+        v-if="memberState === 'unavailable' && members.length > 0"
+        class="type-caption rounded-md border border-border bg-muted/35 px-3 py-2 text-muted-foreground"
+      >
+        Showing last synced members.
+      </div>
+      <div
         v-for="member in members"
         :key="member.jid"
         class="chat-list-row flex min-h-12 items-center gap-2.5 p-2 hover:bg-muted/50"
@@ -135,7 +143,13 @@ const roles: EditableRole[] = ["member", "admin", "owner", "outcast"];
         </div>
       </div>
 
-      <div v-if="members.length === 0" class="type-caption text-center py-6 text-muted-foreground">
+      <div v-if="members.length === 0 && memberState === 'loading'" class="type-caption text-center py-6 text-muted-foreground">
+        Syncing members…
+      </div>
+      <div v-else-if="members.length === 0 && memberState === 'unavailable'" class="type-caption text-center py-6 text-muted-foreground">
+        Members are unavailable right now.
+      </div>
+      <div v-else-if="members.length === 0" class="type-caption text-center py-6 text-muted-foreground">
         No members
       </div>
     </div>

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { type ComponentPublicInstance, computed, onMounted, onUnmounted, ref, watch, watchEffect } from "vue";
 import { createKeystrok, type Keystrok } from "keystrok";
-import { useWaddleDirectory } from "@/waddles/directory";
+import { useWaddleDirectory, type MemberLoadState } from "@/waddles/directory";
 import { useWaddleMembers } from "@/waddles/members";
 import { useDirectMessageConversations } from "@/dms/conversations";
 import { useDirectMessages } from "@/dms/messages";
@@ -405,6 +405,29 @@ const mentionCandidates = computed(() =>
 const mentionSourceDiagnostic = computed(() =>
   mergedMentionMembers.value.diagnostics.join(" "),
 );
+watch(mentionSourceDiagnostic, (detail) => {
+  if (detail) console.warn(detail);
+});
+const memberRoleOrder = { owner: 0, admin: 1, member: 2, outcast: 3, none: 4 } as const;
+const displayedMembers = computed<MemberSummary[]>(() =>
+  [...mergedMentionMembers.value.members].sort(
+    (a, b) =>
+      (memberRoleOrder[a.role] ?? 4) - (memberRoleOrder[b.role] ?? 4) ||
+      a.username.localeCompare(b.username, undefined, { sensitivity: "base" }),
+  ),
+);
+const displayedMemberCount = computed<number | null>(() => {
+  const count = displayedMembers.value.length;
+  if (count > 0) return count;
+  return waddles.memberLoadState.value === "ready" ? 0 : null;
+});
+const displayedMemberState = computed<MemberLoadState>(() => waddles.memberLoadState.value);
+const memberCountLabel = computed(() => {
+  if (displayedMemberCount.value !== null) return String(displayedMemberCount.value);
+  if (displayedMemberState.value === "loading") return "syncing";
+  if (displayedMemberState.value === "unavailable") return "unavailable";
+  return "0";
+});
 const activeDmPeer = computed(() => {
   const active = dmConversations.activePeerJid.value;
   if (!active) return null;
@@ -481,13 +504,13 @@ const avatarUrlByAuthor = computed<Record<string, string | null>>(() => {
   return avatars;
 });
 const membersWithAvatars = computed<MemberSummary[]>(() =>
-  waddles.sortedMembers.value.map((member) => ({
+  displayedMembers.value.map((member) => ({
     ...member,
     avatar_url: fetchedAvatarUrlByJid.value[member.jid] ?? member.avatar_url,
   })),
 );
 const authorHatsByNick = computed(() =>
-  mergeRoomHats(roomHatsFromMembers(waddles.members.value), messaging.roomHats.value),
+  mergeRoomHats(roomHatsFromMembers(displayedMembers.value), messaging.roomHats.value),
 );
 
 watch(
@@ -663,9 +686,7 @@ async function refreshAppUpdate() {
 const activeUploadProgress = computed(() =>
   ui.sidebarMode.value === "dms" ? dmMessaging.uploadProgress.value : messaging.uploadProgress.value,
 );
-const activeActionError = computed(() =>
-  ui.actionError.value || (ui.sidebarMode.value === "channels" ? mentionSourceDiagnostic.value : "")
-);
+const activeActionError = computed(() => ui.actionError.value);
 const activeErrorActionLabel = computed(() => {
   const peer = activeDmPeer.value;
   return ui.sidebarMode.value === "dms" &&
@@ -1408,7 +1429,8 @@ onUnmounted(() => {
           :can-manage-channels="waddles.canManageChannels.value"
           :can-manage-community="waddles.canManageCommunity.value"
           :is-loading="waddles.isLoadingStructure.value"
-          :member-count="waddles.members.value.length"
+          :member-count="displayedMemberCount"
+          :member-state="displayedMemberState"
           :active-channel-jids="messaging.activeChannels.value"
           :collapsed-group-ids="ui.collapsedSpaceGroupIds.value"
           :channel-unread-map="computedChannelUnreadMap"
@@ -1477,7 +1499,7 @@ onUnmounted(() => {
             type="button"
             @click="ui.showMobileDetails.value = false; ui.showMembers.value = true"
           >
-            Members ({{ waddles.members.value.length }})
+            Members ({{ memberCountLabel }})
           </button>
         </div>
       </div>
@@ -1519,7 +1541,8 @@ onUnmounted(() => {
           :can-manage-channels="waddles.canManageChannels.value"
           :can-manage-community="waddles.canManageCommunity.value"
           :is-loading="waddles.isLoadingStructure.value"
-          :member-count="waddles.members.value.length"
+          :member-count="displayedMemberCount"
+          :member-state="displayedMemberState"
           :active-channel-jids="messaging.activeChannels.value"
           :collapsed-group-ids="ui.collapsedSpaceGroupIds.value"
           :channel-unread-map="computedChannelUnreadMap"
@@ -1623,7 +1646,8 @@ onUnmounted(() => {
               :has-older-messages="activeHasOlderMessages"
               :is-sending="activeIsSending"
               :can-manage-channels="waddles.canManageChannels.value"
-              :member-count="waddles.members.value.length"
+              :member-count="displayedMemberCount"
+              :member-state="displayedMemberState"
               :typing-users="activeTypingUsers"
               :current-user="connectionStore.session?.username"
               :self-domain="selfDomain"
@@ -1812,6 +1836,7 @@ onUnmounted(() => {
     <MemberManagement
       v-model:open="ui.showMembers.value"
       :members="membersWithAvatars"
+      :member-state="displayedMemberState"
       :member-query="members.memberQuery.value"
       :new-member-role="members.newMemberRole.value"
       :search-results="members.memberSearchResults.value"
