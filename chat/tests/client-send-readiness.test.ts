@@ -5,7 +5,7 @@ import type { WaddleSession } from "../src/lib/server-auth";
 import { useDirectMessages } from "../src/dms/messages";
 import { useChannelMessages } from "../src/channels/messages";
 import { BrowserXmppClient, roomBareJidFor, type InboxEntry } from "../src/lib/xmpp-client";
-import { listQueuedDmMessages, listQueuedRoomMessages } from "../src/lib/outbound-queue-store";
+import { enqueueQueuedMessage, listQueuedDmMessages, listQueuedRoomMessages } from "../src/lib/outbound-queue-store";
 import { handlerStubs } from "./helpers/xmpp-client-mock";
 
 function session(partial: Partial<WaddleSession> = {}): WaddleSession {
@@ -68,6 +68,91 @@ afterEach(() => {
 });
 
 describe("client send readiness", () => {
+  test("DM load failures use deterministic UI copy and keep raw errors out of actionError", async () => {
+    const rawError = new Error("remote-server-timeout at xmpp.example.com for bob@example.com");
+    const client = {
+      queryPersonalMamPage: mock(async () => {
+        throw rawError;
+      }),
+    } as unknown as BrowserXmppClient;
+    const actionError = ref("");
+    const normalize = mock(() => "Something went wrong. remote-server-timeout at xmpp.example.com for bob@example.com");
+    const originalConsoleWarn = console.warn;
+    const consoleWarn = mock(() => undefined);
+    console.warn = consoleWarn as typeof console.warn;
+    try {
+      const dm = useDirectMessages(
+        ref<WaddleSession | null>(session()),
+        ref<BrowserXmppClient | null>(client),
+        ref("bob@example.com"),
+        normalize,
+        actionError,
+        () => {
+          actionError.value = "";
+        },
+      );
+
+      await dm.loadMessages("bob@example.com");
+
+      expect(actionError.value).toBe("Could not load @bob. Check the connection and try again.");
+      expect(actionError.value).not.toContain("xmpp.example.com");
+      expect(actionError.value).not.toContain("bob@example.com");
+      expect(normalize).not.toHaveBeenCalled();
+      expect(consoleWarn).toHaveBeenCalledWith("Could not load DM conversation");
+      expect(consoleWarn.mock.calls.flat().join(" ")).not.toContain("xmpp.example.com");
+      expect(consoleWarn.mock.calls.flat().join(" ")).not.toContain("bob@example.com");
+      expect(dm.loadErrorPeerJid.value).toBe("bob@example.com");
+    } finally {
+      console.warn = originalConsoleWarn;
+    }
+  });
+
+  test("DM load failures keep queued messages visible with a retryable warning", async () => {
+    enqueueQueuedMessage("alice@example.com", {
+      kind: "dm",
+      id: "queued-dm-1",
+      createdAt: "2026-05-07T00:00:00Z",
+      peerJid: "bob@example.com",
+      body: "queued while offline",
+    });
+    const client = {
+      queryPersonalMamPage: mock(async () => {
+        throw new Error("remote-server-timeout at xmpp.example.com for bob@example.com");
+      }),
+    } as unknown as BrowserXmppClient;
+    const actionError = ref("");
+    const originalConsoleWarn = console.warn;
+    console.warn = mock(() => undefined) as typeof console.warn;
+    try {
+      const dm = useDirectMessages(
+        ref<WaddleSession | null>(session()),
+        ref<BrowserXmppClient | null>(client),
+        ref("bob@example.com"),
+        normalizeError,
+        actionError,
+        () => {
+          actionError.value = "";
+        },
+      );
+
+      await dm.loadMessages("bob@example.com");
+
+      expect(dm.messages.value).toHaveLength(1);
+      expect(dm.messages.value[0]).toMatchObject({
+        id: "queued-dm-1",
+        body: "queued while offline",
+        deliveryStatus: "queued",
+      });
+      expect(actionError.value).toBe(
+        "Could not load @bob history. Showing queued messages only. Check the connection and try again.",
+      );
+      expect(dm.loadErrorPeerJid.value).toBe("bob@example.com");
+      expect(dm.loadErrorMessage.value).toBe(actionError.value);
+    } finally {
+      console.warn = originalConsoleWarn;
+    }
+  });
+
   test("room sends immediately when the room is ready", async () => {
     const xmpp = { send_groupchat_message: mock(async (_room: string, _body: string, opts: { stanza_id?: string }) => opts.stanza_id) };
     const client = new BrowserXmppClient(session());
