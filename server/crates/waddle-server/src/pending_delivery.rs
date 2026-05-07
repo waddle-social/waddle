@@ -887,6 +887,31 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
         .await
     }
 
+    async fn release_row_if_session(
+        &self,
+        id: &PendingRowId,
+        expected_session: &SmSessionId,
+    ) -> Result<u64, PendingStorageError> {
+        // Conditional release for the claim-expiry janitor (issue #209
+        // finding #9). The (row_id, session) snapshot returned by
+        // `list_orphaned_claims` can be stale by the time the janitor
+        // releases — a fresh bind on a different recipient session may
+        // have re-claimed the row under a now-live session. Atomically
+        // re-validate `flushed_in_session = ?` so we leave that fresh
+        // claim alone instead of clearing `outbound_sequence` on a
+        // row some other session is actively SM-acking.
+        self.execute(
+            "UPDATE pending_delivery SET flushed_in_session = NULL, \
+                                          outbound_sequence = NULL \
+             WHERE row_id = ? AND flushed_in_session = ?",
+            crate::db_params![
+                id.as_str().to_string(),
+                expected_session.as_str().to_string()
+            ],
+        )
+        .await
+    }
+
     async fn record_pushed_at(
         &self,
         id: &PendingRowId,
@@ -1332,6 +1357,78 @@ mod tests {
         let removed = storage.delete_claimed(&session2).await.unwrap();
         assert_eq!(removed, 3);
         assert_eq!(storage.count(&recipient).await.unwrap(), 0);
+    }
+
+    /// Issue #209 finding #9: the libSQL/Postgres
+    /// `release_row_if_session` override MUST be atomic — the
+    /// `WHERE row_id = ? AND flushed_in_session = ?` predicate
+    /// re-validates inside the same UPDATE so a fresh bind that
+    /// re-claimed the row in the snapshot-vs-release window survives
+    /// untouched.
+    #[tokio::test]
+    async fn db_storage_release_row_if_session_skips_when_session_changed() {
+        let storage = DatabasePendingDeliveryStorage::open(None, QuotaPolicy::Unlimited)
+            .await
+            .unwrap();
+        let recipient = bare("alice@example.com");
+        storage
+            .insert(transient_row("alice@example.com", "wedge-target"))
+            .await
+            .unwrap();
+
+        let dead_session = SmSessionId::new("sm-stream-dead");
+        let live_session = SmSessionId::new("sm-stream-live");
+
+        // Claim under dead_session and stamp a sequence (simulates a
+        // row mid-SM-lifecycle when the session detached).
+        let claimed = storage
+            .claim_for_session(&recipient, &dead_session)
+            .await
+            .unwrap();
+        assert_eq!(claimed.len(), 1);
+        let row_id = claimed[0].id.clone();
+        storage.record_pushed_at(&row_id, 7).await.unwrap();
+
+        // Race window: dead_session expires, but before the janitor
+        // releases, a fresh bind re-claims the row under live_session.
+        // Simulated via the conditional-SQL path: release the dead
+        // claim then re-claim under live.
+        storage.release_claim(&dead_session).await.unwrap();
+        let reclaimed = storage
+            .claim_for_session(&recipient, &live_session)
+            .await
+            .unwrap();
+        assert_eq!(reclaimed.len(), 1);
+        assert_eq!(reclaimed[0].id, row_id);
+        storage.record_pushed_at(&row_id, 11).await.unwrap();
+
+        // Now the janitor (operating on its stale snapshot) calls
+        // release_row_if_session with the dead_session predicate.
+        // The atomic UPDATE WHERE flushed_in_session = dead_session
+        // matches zero rows — the fresh claim survives untouched.
+        let result = storage
+            .release_row_if_session(&row_id, &dead_session)
+            .await
+            .unwrap();
+        assert_eq!(
+            result, 0,
+            "conditional release MUST NOT clear a fresh claim under a different session"
+        );
+
+        let after = storage.list(&recipient).await.unwrap();
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].flushed_in_session.as_ref(), Some(&live_session));
+        assert_eq!(after[0].outbound_sequence, Some(11));
+
+        // Sanity: same-session release does fire.
+        let cleared = storage
+            .release_row_if_session(&row_id, &live_session)
+            .await
+            .unwrap();
+        assert_eq!(cleared, 1);
+        let after = storage.list(&recipient).await.unwrap();
+        assert!(after[0].flushed_in_session.is_none());
+        assert!(after[0].outbound_sequence.is_none());
     }
 
     #[tokio::test]
@@ -1845,6 +1942,95 @@ mod tests {
         assert!(dead_b.flushed_in_session.is_none());
         let unclaimed = by_body.get("unclaimed").expect("unclaimed present");
         assert!(unclaimed.flushed_in_session.is_none());
+    }
+
+    /// Issue #209 finding #9: between the janitor's `list_orphaned_claims`
+    /// snapshot and the per-row release, a fresh bind on a different
+    /// recipient session can re-claim the row under a now-live session.
+    /// `release_row_if_session` MUST atomically re-validate the
+    /// `flushed_in_session = ?` predicate so the fresh claim survives.
+    /// Otherwise the new session's SM ack would skip the row (filters
+    /// `outbound_sequence IS NOT NULL`) and we'd wedge.
+    #[tokio::test]
+    async fn release_row_if_session_skips_when_a_fresh_claim_replaced_the_dead_session() {
+        let storage: Arc<dyn PendingDeliveryStorage> =
+            Arc::new(InMemoryPendingDeliveryStorage::unlimited());
+        let alice = bare("alice@example.com");
+
+        storage
+            .insert(transient_row("alice@example.com", "wedge-target"))
+            .await
+            .unwrap();
+
+        let dead_session = SmSessionId::new("sm-stream-dead");
+        let live_session = SmSessionId::new("sm-stream-fresh-bind");
+
+        // Claim + sequence-stamp under dead_session.
+        let claimed = storage
+            .claim_for_session(&alice, &dead_session)
+            .await
+            .unwrap();
+        assert_eq!(claimed.len(), 1);
+        let row_id = claimed[0].id.clone();
+        storage.record_pushed_at(&row_id, 7).await.unwrap();
+
+        // Race: dead_session expires; before the janitor releases, a
+        // fresh bind re-claims the row under live_session.
+        storage.release_claim(&dead_session).await.unwrap();
+        let reclaimed = storage
+            .claim_for_session(&alice, &live_session)
+            .await
+            .unwrap();
+        assert_eq!(reclaimed.len(), 1);
+        assert_eq!(reclaimed[0].id, row_id);
+        storage.record_pushed_at(&row_id, 11).await.unwrap();
+
+        // Janitor's conditional release on the stale (dead_session)
+        // snapshot — must no-op.
+        let result = storage
+            .release_row_if_session(&row_id, &dead_session)
+            .await
+            .unwrap();
+        assert_eq!(
+            result, 0,
+            "conditional release MUST be a no-op when the row was re-claimed under a different session"
+        );
+
+        let after = storage.list(&alice).await.unwrap();
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].flushed_in_session.as_ref(), Some(&live_session));
+        assert_eq!(after[0].outbound_sequence, Some(11));
+    }
+
+    /// Issue #209 finding #9 happy path: when the row is still
+    /// claimed by the dead session at release time,
+    /// `release_row_if_session` clears the claim normally.
+    #[tokio::test]
+    async fn release_row_if_session_releases_when_claim_unchanged() {
+        let storage: Arc<dyn PendingDeliveryStorage> =
+            Arc::new(InMemoryPendingDeliveryStorage::unlimited());
+        let alice = bare("alice@example.com");
+        storage
+            .insert(transient_row("alice@example.com", "still-dead"))
+            .await
+            .unwrap();
+        let dead_session = SmSessionId::new("sm-stream-dead");
+        let claimed = storage
+            .claim_for_session(&alice, &dead_session)
+            .await
+            .unwrap();
+        let row_id = claimed[0].id.clone();
+        storage.record_pushed_at(&row_id, 3).await.unwrap();
+
+        let result = storage
+            .release_row_if_session(&row_id, &dead_session)
+            .await
+            .unwrap();
+        assert_eq!(result, 1);
+
+        let after = storage.list(&alice).await.unwrap();
+        assert!(after[0].flushed_in_session.is_none());
+        assert!(after[0].outbound_sequence.is_none());
     }
 
     #[tokio::test]
