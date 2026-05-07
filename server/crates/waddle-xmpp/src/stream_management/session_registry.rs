@@ -360,18 +360,19 @@ impl InMemorySmSessionRegistry {
             return Ok(0);
         };
         let now = chrono::Utc::now();
+        // Single round-trip — replaces an N+1 (1 list_all_sessions +
+        // N list_unacked) with a single SELECT … LEFT JOIN sm_unacked
+        // on backends that override (libSQL/Postgres). In-memory
+        // backends fall back to the trait-default N+1 path. Issue
+        // #209 PR #405.
         let stored = storage
-            .list_all_sessions()
+            .list_all_sessions_with_unacked()
             .await
             .map_err(|e| SmRegistryError::Internal(e.to_string()))?;
-        // First await all the unacked queries (no lock held); then
-        // do a single short-lived write critical section to insert
-        // the hydrated sessions. RwLock guards are not Send and
-        // cannot be held across .await points.
         let mut hydrated_sessions = Vec::with_capacity(stored.len());
         let mut expired_ids = Vec::new();
         let mut bad_rows = 0usize;
-        for persisted in stored {
+        for (persisted, unacked) in stored {
             // Filter expired-during-downtime: detached_at +
             // max_resume_duration <= now means the resume window is
             // already closed. Hydrating these would let them appear
@@ -386,18 +387,6 @@ impl InMemorySmSessionRegistry {
                 expired_ids.push(persisted.stream_id.clone());
                 continue;
             }
-            let unacked = match storage.list_unacked(&persisted.stream_id).await {
-                Ok(u) => u,
-                Err(error) => {
-                    debug!(
-                        stream_id = %persisted.stream_id,
-                        error = %error,
-                        "skipping persisted session: list_unacked failed"
-                    );
-                    bad_rows += 1;
-                    continue;
-                }
-            };
             match persisted_to_detached(&persisted, &unacked) {
                 Ok(session) => hydrated_sessions.push(session),
                 Err(error) => {
@@ -640,26 +629,20 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
         }
 
         // Persist the detached session + its unacked queue so it
-        // survives a server restart per locked Q8 = B.
+        // survives a server restart per locked Q8 = B. Use the
+        // atomic store API (issue #209 PR #405): backends that
+        // support transactions wrap the session upsert + N unacked
+        // appends in a single BEGIN/COMMIT so a panic / process
+        // crash mid-batch leaves the durable view consistent —
+        // either every row commits or none does. Backends that
+        // don't (in-memory) fall back to the trait default which
+        // performs the same upsert + N appends without atomicity.
         if let Some(storage) = &self.persistence {
             let persisted = detached_to_persisted(&session)?;
-            storage
-                .upsert_session(persisted)
-                .await
-                .map_err(|e| SmRegistryError::Internal(e.to_string()))?;
-            // Replace any prior unacked rows for this stream id with
-            // the current snapshot. Persistence ack_through can have
-            // truncated rows already, so the cleanest approach is to
-            // delete-via-ack to a high watermark and re-append, but
-            // that's a churn-y O(n) round-trip per detach; instead
-            // we rely on the fact that store_session is called only
-            // on detach and the unacked vec at that moment IS the
-            // snapshot we want to persist. Existing rows from a
-            // prior detach for the same stream id would have been
-            // taken on resume; if they're still there we replace
-            // them via append (PRIMARY KEY (stream_id, sequence)
-            // would conflict — caller is expected to take_session
-            // before storing a new one with the same id).
+            // Pre-decode every stanza outside the storage call so
+            // any parse failure rolls the whole batch back without
+            // a round-trip to the backend.
+            let mut unacked_rows = Vec::with_capacity(session.unacked_stanzas.len());
             for entry in &session.unacked_stanzas {
                 let element: minidom::Element =
                     entry.stanza_xml.parse().map_err(|e: minidom::Error| {
@@ -692,17 +675,17 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
                 // future Q6 SM-expiry promotion advertise the original
                 // failed-delivery time per XEP-0203 §4.1 + XEP-0198
                 // §5 line 364.
-                let unacked = super::persistence::PersistedUnackedStanza {
+                unacked_rows.push(super::persistence::PersistedUnackedStanza {
                     stream_id: crate::pending_delivery::SmSessionId::new(stream_id.clone()),
                     sequence: entry.sequence,
                     stanza: Box::new(stanza),
                     original_receipt_at: entry.original_receipt_at,
-                };
-                storage
-                    .append_unacked(unacked)
-                    .await
-                    .map_err(|e| SmRegistryError::Internal(e.to_string()))?;
+                });
             }
+            storage
+                .store_session_atomic(persisted, unacked_rows)
+                .await
+                .map_err(|e| SmRegistryError::Internal(e.to_string()))?;
         }
 
         debug!(stream_id = %stream_id, count = count, "Stored detached SM session");
