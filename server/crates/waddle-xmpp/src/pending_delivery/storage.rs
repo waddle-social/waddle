@@ -71,6 +71,36 @@ pub trait PendingDeliveryStorage: Send + Sync {
     /// push becomes eligible for re-claim on the next flush trigger.
     async fn release_row(&self, id: &PendingRowId) -> Result<u64, PendingStorageError>;
 
+    /// Release a single row only when it is still claimed by
+    /// `expected_session`. Used by the claim-expiry janitor (issue
+    /// #209 finding #9): the (row_id, session) pairs returned by
+    /// [`Self::list_orphaned_claims`] reflect a snapshot of the
+    /// live-set taken seconds ago. Between the snapshot and the
+    /// release, a fresh bind on a different recipient session can
+    /// have re-claimed the row under a now-live session. An
+    /// unconditional `release_row` would clear that fresh claim and
+    /// wedge the row (the new session's SM ack would skip it because
+    /// `outbound_sequence` is NULL).
+    ///
+    /// Returns the number of rows actually updated — `0` when the
+    /// row's `flushed_in_session` no longer matches `expected_session`
+    /// (i.e. someone else re-claimed it; leave it alone) or the row
+    /// has been deleted.
+    ///
+    /// Default impl falls back to the unconditional [`Self::release_row`]
+    /// path so in-memory backends keep working without re-implementing
+    /// the conditional check; the libSQL/Postgres backend overrides
+    /// with `UPDATE … WHERE row_id = ? AND flushed_in_session = ?`
+    /// so the per-row re-validation is atomic with the update.
+    async fn release_row_if_session(
+        &self,
+        id: &PendingRowId,
+        expected_session: &SmSessionId,
+    ) -> Result<u64, PendingStorageError> {
+        let _ = expected_session;
+        self.release_row(id).await
+    }
+
     /// Stamp the XEP-0198 outbound counter value onto a previously-
     /// claimed row, after that row's flush stanza has been pushed
     /// onto the recovering session's outbound queue and assigned its
@@ -286,6 +316,30 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
         for queue in guard.values_mut() {
             for row in queue.iter_mut() {
                 if &row.id == id {
+                    row.flushed_in_session = None;
+                    row.outbound_sequence = None;
+                    return Ok(1);
+                }
+            }
+        }
+        Ok(0)
+    }
+
+    async fn release_row_if_session(
+        &self,
+        id: &PendingRowId,
+        expected_session: &SmSessionId,
+    ) -> Result<u64, PendingStorageError> {
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?;
+        for queue in guard.values_mut() {
+            for row in queue.iter_mut() {
+                if &row.id == id {
+                    if row.flushed_in_session.as_ref() != Some(expected_session) {
+                        return Ok(0);
+                    }
                     row.flushed_in_session = None;
                     row.outbound_sequence = None;
                     return Ok(1);

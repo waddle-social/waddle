@@ -712,14 +712,49 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
                                             .record_pushed_at(&row_id, sequence)
                                             .await
                                         {
+                                            // Issue #209 finding #10: previously
+                                            // we only logged here. The result was
+                                            // a wedged row — `outbound_sequence`
+                                            // stayed NULL (so SM ack's
+                                            // `delete_acked_through` skipped it),
+                                            // the row remained claimed by the
+                                            // live session, and on session
+                                            // death + next-presence flush, the
+                                            // row re-flushed and duplicate-
+                                            // delivered. Delete the durable row
+                                            // instead so the in-memory SM unacked
+                                            // queue (already populated above) is
+                                            // the sole owner: SM ack clears it
+                                            // on success, Q6 promotion creates
+                                            // a fresh `pending_delivery` row on
+                                            // session expiry. Either path is
+                                            // bounded and dedup-safe.
                                             warn!(
                                                 row_id = %row_id,
                                                 sequence,
                                                 error = %error,
                                                 "pending_delivery record_pushed_at \
-                                                 failed; row remains claimed but unsequenced \
-                                                 and will be released on session death"
+                                                 failed; deleting row to avoid wedge \
+                                                 (issue #209 finding #10). The SM \
+                                                 unacked queue + Q6 promotion become \
+                                                 the sole owner of this stanza."
                                             );
+                                            if let Err(delete_error) = state
+                                                .deps
+                                                .protocol
+                                                .pending_delivery_storage
+                                                .delete_row(&row_id)
+                                                .await
+                                            {
+                                                warn!(
+                                                    row_id = %row_id,
+                                                    error = %delete_error,
+                                                    "pending_delivery delete_row \
+                                                     (record_pushed_at fallback) failed; \
+                                                     row may flush again on next presence \
+                                                     (XEP-0359 client dedup mitigates)"
+                                                );
+                                            }
                                         }
                                     }
                                 }
@@ -976,10 +1011,19 @@ async fn drain_outbound_into_replay(
         let receipt_at = outbound_stanza
             .pending_row_original_receipt_at
             .unwrap_or_else(chrono::Utc::now);
+        let pending_row_id = outbound_stanza.pending_row_id.clone();
         match outbound_stanza.kind {
             DeliveryKind::DirectFrame => {
                 let xml = stanza_to_xml(&outbound_stanza.stanza);
-                record_drained_xml(state, sm_state, detached_stream_id, xml, receipt_at).await;
+                record_drained_xml(
+                    state,
+                    sm_state,
+                    detached_stream_id,
+                    xml,
+                    receipt_at,
+                    pending_row_id,
+                )
+                .await;
             }
             DeliveryKind::PeerStanza => {
                 let Some(sm) = sm_borrow.as_deref_mut() else {
@@ -993,8 +1037,23 @@ async fn drain_outbound_into_replay(
                     outbound_stanza.stanza,
                 )));
                 let (frames, _close) = drive_interpret_loop(events, sm, &deps).await;
+                // PeerStanza paths produce zero-or-many frames per
+                // input; only the first frame inherits the pending
+                // row binding (the source pending_delivery row
+                // produces exactly one outbound frame per push, but
+                // be defensive here in case future handlers fan out).
+                let mut row_id_for_first = pending_row_id.clone();
                 for xml in frames {
-                    record_drained_xml(state, sm_state, detached_stream_id, xml, receipt_at).await;
+                    let row_for_this = row_id_for_first.take();
+                    record_drained_xml(
+                        state,
+                        sm_state,
+                        detached_stream_id,
+                        xml,
+                        receipt_at,
+                        row_for_this,
+                    )
+                    .await;
                 }
             }
         }
@@ -1007,19 +1066,81 @@ async fn drain_outbound_into_replay(
 /// `DirectFrame` and per-frame `PeerStanza` arms in
 /// [`drain_outbound_into_replay`] can share the same recording
 /// contract.
+///
+/// `pending_row_id` is `Some` when this drained frame originated as
+/// a `pending_delivery` flush replay; in that case we MUST stamp the
+/// SM-assigned `outbound_sequence` onto the source row via
+/// [`record_pushed_at`] so a subsequent `<a h>` ack from the
+/// resuming session can range-delete it. Without this binding the
+/// row stays claimed with a NULL sequence, the SM ack skips it,
+/// the session expires through Q6, and the same logical stanza
+/// re-flushes on next presence — duplicate delivery. (Issue #209
+/// finding #2.)
 async fn record_drained_xml(
     state: &WebSocketState,
     sm_state: &mut StreamManagementState,
     detached_stream_id: Option<&str>,
     xml: String,
     original_receipt_at: chrono::DateTime<chrono::Utc>,
+    pending_row_id: Option<waddle_xmpp::pending_delivery::PendingRowId>,
 ) {
     if !sm_state.enabled || !is_countable_stanza(&xml) {
+        // SM disabled or non-countable: the drained frame won't enter
+        // the replay queue, so SM ack will never delete the source
+        // row. Release the claim immediately so the next presence
+        // flush (or claim-expiry janitor) can re-claim and re-flush
+        // it. Without this the row would wedge until claim-expiry.
+        if let Some(row_id) = pending_row_id {
+            if let Err(error) = state
+                .deps
+                .protocol
+                .pending_delivery_storage
+                .release_row(&row_id)
+                .await
+            {
+                warn!(
+                    row_id = %row_id,
+                    %error,
+                    "pending_delivery release_row (drained non-countable / SM-disabled) failed"
+                );
+            }
+        }
         return;
     }
     sm_state.record_outbound_with_receipt_at(xml.clone(), original_receipt_at);
+    let sequence = sm_state.outbound_count;
+    if let Some(row_id) = pending_row_id.as_ref() {
+        if let Err(error) = state
+            .deps
+            .protocol
+            .pending_delivery_storage
+            .record_pushed_at(row_id, sequence)
+            .await
+        {
+            warn!(
+                row_id = %row_id,
+                sequence,
+                %error,
+                "pending_delivery record_pushed_at (drain path) failed; \
+                 deleting row to avoid wedge — SM unacked queue + Q6 \
+                 promotion become the sole owner (issue #209 finding #2)"
+            );
+            if let Err(delete_error) = state
+                .deps
+                .protocol
+                .pending_delivery_storage
+                .delete_row(row_id)
+                .await
+            {
+                warn!(
+                    row_id = %row_id,
+                    error = %delete_error,
+                    "pending_delivery delete_row (drain record_pushed_at fallback) failed"
+                );
+            }
+        }
+    }
     if let Some(stream_id) = detached_stream_id {
-        let sequence = sm_state.outbound_count;
         if let Err(error) = state
             .deps
             .protocol
