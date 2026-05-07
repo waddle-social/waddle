@@ -80,6 +80,60 @@ async fn references_route_and_replay_from_mam() {
 }
 
 #[tokio::test]
+async fn data_reference_with_anchor_routes_and_replays_from_mam() {
+    // XEP-0372: type="data" references attach a URI annotation to a span of
+    // body text — the standard wire shape for clickable links inside chat
+    // messages. The server must route them unchanged and MAM must replay them.
+    let _guard = TEST_SERIAL.lock().await;
+    let (_server, mut client) = setup().await;
+    let room = format!("reference-data-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
+    join_room(&mut client, &room).await;
+
+    client
+        .send(&format!(
+            r#"<message type="groupchat" to="{room}" id="reference-data-1">
+                <body>see https://example.com</body>
+                <reference xmlns="urn:xmpp:reference:0" type="data" begin="4" end="23" uri="https://example.com" anchor="https://example.com"/>
+            </message>"#
+        ))
+        .await
+        .expect("send data reference");
+    let echo = client
+        .recv_matching(|frame| {
+            frame.contains("urn:xmpp:reference:0") && frame.contains("type=\"data\"")
+        })
+        .await
+        .expect("data reference echo");
+    assert!(
+        echo.contains("https://example.com"),
+        "missing data reference uri: {echo}"
+    );
+    assert!(
+        echo.contains("anchor=\"https://example.com\""),
+        "missing anchor attribute: {echo}"
+    );
+
+    client
+        .send(&format!(
+            r#"<iq type="set" id="mam-data-reference" to="{room}"><query xmlns="urn:xmpp:mam:2"/></iq>"#
+        ))
+        .await
+        .expect("send MAM");
+    let frames = client
+        .recv_until(|frame| frame.contains("mam-data-reference") && frame.contains("<fin"))
+        .await
+        .expect("MAM frames");
+    assert!(
+        frames.iter().any(|frame| frame.contains("type=\"data\"")
+            && frame.contains("https://example.com")
+            && frame.contains("anchor=\"https://example.com\"")),
+        "MAM did not replay data reference with anchor: {frames:?}"
+    );
+
+    client.close().await;
+}
+
+#[tokio::test]
 async fn reference_without_required_attributes_returns_bad_request() {
     // XEP-0372: '<reference/>' MUST contain a 'type' and a 'uri'.
     // Server should reject malformed references with bad-request so
