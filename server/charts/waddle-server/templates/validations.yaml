@@ -99,3 +99,29 @@
 {{- fail "spicedb requires either secret.spicedbPresharedKey, secret.existingSecret, or extraSecretRefs providing WADDLE_SPICEDB_PRESHARED_KEY" -}}
 {{- end -}}
 {{- end -}}
+
+{{- /*
+Guard against a config where neither the chart's auto-generated bootstrap
+Secret nor any operator-supplied source carries WADDLE_SESSION_KEY /
+WADDLE_OCCUPANT_ID_SECRET. The server hard-fails at startup without these,
+so refuse to render rather than ship a broken Deployment.
+*/ -}}
+{{- if and .Values.secret.create (not .Values.secret.existingSecret) -}}
+{{- $autoGenerate := true -}}
+{{- if hasKey .Values.secret "autoGenerate" -}}
+{{- $autoGenerate = .Values.secret.autoGenerate -}}
+{{- end -}}
+{{- $hasExtraSecretRefs := gt (len .Values.extraSecretRefs) 0 -}}
+{{- if not $autoGenerate -}}
+{{- if and (not .Values.secret.sessionKey) (not $hasExtraSecretRefs) -}}
+{{- fail "secret.autoGenerate=false requires secret.sessionKey, secret.existingSecret, or extraSecretRefs providing WADDLE_SESSION_KEY" -}}
+{{- end -}}
+{{- $manageOccupantIdSecret := true -}}
+{{- if hasKey .Values.secret "manageOccupantIdSecret" -}}
+{{- $manageOccupantIdSecret = .Values.secret.manageOccupantIdSecret -}}
+{{- end -}}
+{{- if and $manageOccupantIdSecret (not .Values.secret.occupantIdSecret) (not $hasExtraSecretRefs) -}}
+{{- fail "secret.autoGenerate=false with secret.manageOccupantIdSecret=true requires secret.occupantIdSecret, secret.existingSecret, or extraSecretRefs providing WADDLE_OCCUPANT_ID_SECRET" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}

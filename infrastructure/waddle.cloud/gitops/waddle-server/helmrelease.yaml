@@ -10,7 +10,7 @@ spec:
   chart:
     spec:
       chart: waddle-server
-      version: 0.1.x
+      version: 0.2.x
       sourceRef:
         kind: HelmRepository
         name: waddle-server

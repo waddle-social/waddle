@@ -52,9 +52,25 @@ spec:
           envFrom:
             - configMapRef:
                 name: {{ include "waddle-server.configMapName" . }}
+            {{- /*
+              Order matters: later envFrom sources override earlier ones for
+              the same key. Auto-generated bootstrap keys come first; then
+              operator-supplied values (which may override session/occupant);
+              then external Secrets injected via extraSecretRefs.
+            */}}
+            {{- $autoGenerate := true -}}
+            {{- if hasKey .Values.secret "autoGenerate" -}}
+            {{- $autoGenerate = .Values.secret.autoGenerate -}}
+            {{- end }}
+            {{- if and .Values.secret.create (not .Values.secret.existingSecret) $autoGenerate }}
+            - secretRef:
+                name: {{ include "waddle-server.bootstrapSecretName" . }}
+                optional: true
+            {{- end }}
             {{- if or .Values.secret.create .Values.secret.existingSecret }}
             - secretRef:
                 name: {{ include "waddle-server.secretName" . }}
+                optional: true
             {{- end }}
             {{- range .Values.extraSecretRefs }}
             - secretRef:
