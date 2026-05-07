@@ -10,6 +10,7 @@ mod session_janitors;
 mod state;
 mod topology;
 mod trace;
+mod xmpp_channels;
 
 pub(crate) mod bootstrap_membership;
 pub(crate) mod managed_channel_policy;

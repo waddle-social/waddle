@@ -16,9 +16,11 @@ use crate::auth::jid::jid_to_localpart;
 use crate::auth::{NativeUserStore, RegisterRequest, SessionManager, localpart_to_jid};
 #[cfg(test)]
 use crate::db::Database;
+#[cfg(test)]
 use crate::db::actor::{DbActor, DbQuery, DbQueryOne};
 #[cfg(test)]
 use crate::db::actor::{DbExecute, GetDatabase};
+#[cfg(test)]
 use crate::db::{ValueExt, row_value};
 #[cfg(test)]
 use crate::permissions::{
@@ -27,26 +29,17 @@ use crate::permissions::{
 };
 #[cfg(test)]
 use crate::vcard::VCardStore;
+#[cfg(test)]
 use kameo::actor::ActorRef;
-use serde::Serialize;
 #[cfg(test)]
 use std::sync::Arc;
 
 #[cfg(test)]
 use crate::server::bootstrap_membership::{BootstrapMembershipConfig, provision_user_membership};
 
-#[derive(Debug, Serialize)]
-pub(crate) struct XmppChannelRecord {
-    pub id: String,
-    pub name: String,
-    pub description: Option<String>,
-    pub channel_type: String,
-    pub position: i32,
-    pub is_default: bool,
-    pub created_at: String,
-    pub updated_at: Option<String>,
-}
+pub(crate) use super::xmpp_channels::{XmppChannelRecord, get_xmpp_channel, list_xmpp_channels};
 
+#[cfg(test)]
 fn db_string(
     row: &crate::db::actor::RowValues,
     index: usize,
@@ -57,6 +50,7 @@ fn db_string(
         .map_err(|e| format!("Failed to get {name}: {e}"))
 }
 
+#[cfg(test)]
 fn db_optional_string(
     row: &crate::db::actor::RowValues,
     index: usize,
@@ -65,75 +59,6 @@ fn db_optional_string(
     row_value(row, index)
         .and_then(ValueExt::as_optional_string)
         .map_err(|e| format!("Failed to get {name}: {e}"))
-}
-
-fn db_i32(row: &crate::db::actor::RowValues, index: usize, name: &str) -> Result<i32, String> {
-    match row_value(row, index).map_err(|e| format!("Failed to get {name}: {e}"))? {
-        crate::db::Value::Integer(value) => Ok(*value as i32),
-        other => Err(format!("Failed to get {name}: unexpected value {other:?}")),
-    }
-}
-
-fn db_bool(row: &crate::db::actor::RowValues, index: usize, name: &str) -> Result<bool, String> {
-    match row_value(row, index).map_err(|e| format!("Failed to get {name}: {e}"))? {
-        crate::db::Value::Integer(value) => Ok(*value != 0),
-        other => Err(format!("Failed to get {name}: unexpected value {other:?}")),
-    }
-}
-
-fn parse_channel_record(row: &crate::db::actor::RowValues) -> Result<XmppChannelRecord, String> {
-    Ok(XmppChannelRecord {
-        id: db_string(row, 0, "id")?,
-        name: db_string(row, 1, "name")?,
-        description: db_optional_string(row, 2, "description")?,
-        channel_type: db_string(row, 3, "channel_type")?,
-        position: db_i32(row, 4, "position")?,
-        is_default: db_bool(row, 5, "is_default")?,
-        created_at: db_string(row, 6, "created_at")?,
-        updated_at: db_optional_string(row, 7, "updated_at")?,
-    })
-}
-
-pub(crate) async fn get_xmpp_channel(
-    actor: ActorRef<DbActor>,
-    channel_id: &str,
-) -> Result<Option<XmppChannelRecord>, String> {
-    let row = actor
-        .ask(DbQueryOne {
-            sql: r#"
-                SELECT id, name, description, channel_type, position, is_default, created_at, updated_at
-                FROM channels
-                WHERE id = ?
-            "#
-            .to_string(),
-            params: vec![channel_id.into()],
-        })
-        .await
-        .map_err(|e| format!("Failed to query channel: {e}"))?;
-
-    row.as_ref().map(parse_channel_record).transpose()
-}
-
-pub(crate) async fn list_xmpp_channels(
-    actor: ActorRef<DbActor>,
-    limit: usize,
-    offset: usize,
-) -> Result<Vec<XmppChannelRecord>, String> {
-    let rows = actor
-        .ask(DbQuery {
-            sql: r#"
-                SELECT id, name, description, channel_type, position, is_default, created_at, updated_at
-                FROM channels
-                ORDER BY position ASC, created_at ASC
-                LIMIT ? OFFSET ?
-            "#
-            .to_string(),
-            params: vec![(limit as i64).into(), (offset as i64).into()],
-        })
-        .await
-        .map_err(|e| format!("Failed to query channels: {e}"))?;
-
-    rows.iter().map(parse_channel_record).collect()
 }
 
 /// XMPP application state that bridges to waddle-server services.
