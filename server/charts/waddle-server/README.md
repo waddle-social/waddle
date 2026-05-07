@@ -84,23 +84,83 @@ helm upgrade --install waddle ./charts/waddle-server \
 
 ## Secret handling
 
-The chart supports an app secret containing:
+The chart manages two distinct Secrets:
 
-- `WADDLE_SESSION_KEY` (required by server features relying on encrypted session data)
-- `WADDLE_OCCUPANT_ID_SECRET` (**required**; per-deployment HMAC key for XEP-0421 occupant identifiers; ≥32 bytes)
-- `WADDLE_AUTH_PROVIDERS_JSON` (optional; required to enable `/api/auth/*` broker flows)
-- `WADDLE_DATABASE_URL` (optional; preferred location for DB DSN with credentials)
-- `WADDLE_XMPP_MAM_DATABASE_URL` (optional MAM DSN override)
-- `WADDLE_XMPP_INBOX_DATABASE_URL` (optional inbox DSN override)
+1. **Bootstrap Secret** (`<release>-waddle-server-bootstrap-secrets`) — created
+   out-of-band by a `pre-install` Helm hook Job. Holds chart-managed
+   auto-generated keys:
+   - `WADDLE_SESSION_KEY` — server session encryption key.
+   - `WADDLE_OCCUPANT_ID_SECRET` — per-deployment HMAC key for XEP-0421
+     occupant identifiers (≥32 bytes). Only included when
+     `secret.manageOccupantIdSecret=true` (default).
+2. **Operator Secret** (`<release>-waddle-server-secrets`) — regular Helm
+   template, populated only from operator-supplied values:
+   - `WADDLE_AUTH_PROVIDERS_JSON` (optional; required to enable `/api/auth/*`
+     broker flows).
+   - `WADDLE_DATABASE_URL` (optional; preferred location for DB DSN with
+     credentials).
+   - `WADDLE_XMPP_MAM_DATABASE_URL`, `WADDLE_XMPP_INBOX_DATABASE_URL`,
+     `WADDLE_XMPP_PUBSUB_DATABASE_URL` (optional DSN overrides).
+   - `WADDLE_SPICEDB_PRESHARED_KEY` (required when `spicedb.enabled=true`
+     and not supplied via `extraSecretRefs`).
+   - Any of the bootstrap keys above when set explicitly via values
+     (operator override; `envFrom` ordering puts the operator Secret
+     after the bootstrap Secret so operator values win).
 
-Provider JSON may also be set in `config.authProvidersJson`, but `secret.authProvidersJson`
-is recommended because provider definitions usually include client secrets.
+Provider JSON may also be set in `config.authProvidersJson`, but
+`secret.authProvidersJson` is recommended because provider definitions usually
+include client secrets.
+
+### Why two Secrets?
+
+Earlier versions of this chart used Helm's `lookup` function to preserve
+auto-generated values across upgrades. `lookup` only works when Helm has
+cluster access, so `helm template`, ArgoCD's `helm template` strategy, and
+`helm upgrade --dry-run=server` would render a fresh `randAlphaNum 64` value
+on every render — producing spurious diffs and (worst case) silent rotation
+of secrets that downstream tooling then applied to the cluster. See
+[#303](https://github.com/waddle-social/waddle/issues/303).
+
+The pre-install hook moves generation entirely out of the Helm template
+phase. The bootstrap Secret is created by `kubectl` from inside the hook Job
+and is owned by neither Helm nor the chart, so subsequent renders never
+reference it. `helm template` is now byte-stable across runs.
+
+### Hook lifecycle
+
+- Hook runs on `pre-install` only. It creates the bootstrap Secret if it
+  does not exist; if it already exists the Job exits cleanly (idempotent).
+- Hook is **not** run on `pre-upgrade` — the bootstrap Secret is
+  long-lived. Upgrade flows use whatever the cluster already holds.
+- Job, ServiceAccount, Role, and RoleBinding are deleted automatically
+  after the Job succeeds (`hook-delete-policy: hook-succeeded`).
+- The bootstrap Secret itself has **no Helm ownership labels** and is never
+  garbage-collected by `helm uninstall`. Operators must clean it up
+  explicitly if they want full namespace teardown.
+
+### Disaster recovery
+
+If the bootstrap Secret is deleted (accidentally or as part of a
+namespace wipe) the chart will not regenerate it on `helm upgrade` — the
+hook is `pre-install` only, by design, so that occupant-id continuity is
+never silently rotated. Pods will fail to start with a clear error from
+the server about missing `WADDLE_OCCUPANT_ID_SECRET`. Recover by either:
+
+- Restoring the Secret from your external backup (Velero, sealed-secrets,
+  password manager) — preserves XEP-0421 occupant-id continuity.
+- Re-running `helm uninstall <release> && helm install <release> …` —
+  triggers the hook to regenerate fresh values; **breaks** XEP-0421
+  occupant-id continuity for every existing room/user pair.
+
+This is the intended trade-off — a noisy failure that demands operator
+attention, rather than a silent regeneration that quietly invalidates
+client state.
 
 ### Required keys when bringing your own Secret
 
-Setting `secret.create=false` and providing `secret.existingSecret=<name>` skips
-chart templating entirely. The externally-managed Secret **must** contain at
-minimum:
+Setting `secret.create=false` and providing `secret.existingSecret=<name>`
+skips both the bootstrap hook and the operator Secret template. The
+externally-managed Secret **must** contain at minimum:
 
 - `WADDLE_SESSION_KEY`
 - `WADDLE_OCCUPANT_ID_SECRET`
@@ -110,25 +170,102 @@ SpiceDB preshared key) that your deployment relies on. If
 `WADDLE_OCCUPANT_ID_SECRET` is missing, the server hard-fails at startup with
 a clear error.
 
+### Disabling auto-generation
+
+Set `secret.autoGenerate=false` to suppress the pre-install hook. In this
+mode you **must** supply `WADDLE_SESSION_KEY` (and
+`WADDLE_OCCUPANT_ID_SECRET` when `manageOccupantIdSecret=true`) through one
+of:
+
+- `secret.sessionKey` / `secret.occupantIdSecret` values (rendered into the
+  operator Secret).
+- `secret.existingSecret` pointing to a pre-existing Secret.
+- An entry in `extraSecretRefs`.
+
+The chart fails render with a clear error if none of these are satisfied.
+
 ### Default behavior
 
-- `secret.create=true` creates a chart-managed secret
-- `secret.manageOccupantIdSecret=true` makes the chart own `WADDLE_OCCUPANT_ID_SECRET`
-- If `secret.sessionKey` / `secret.occupantIdSecret` is empty:
-  - on first install, a random 64-character alphanumeric value is generated
-  - on upgrades, the existing in-cluster value is preserved (via `lookup`)
-
-Set `secret.manageOccupantIdSecret=false` only when `WADDLE_OCCUPANT_ID_SECRET`
-is supplied by an external Secret in `extraSecretRefs`; otherwise the server
-will fail startup because the occupant secret is required.
+- `secret.create=true` and `secret.autoGenerate=true` (defaults): the
+  pre-install hook generates a 64-character alphanumeric
+  `WADDLE_SESSION_KEY` and (when `manageOccupantIdSecret=true`)
+  `WADDLE_OCCUPANT_ID_SECRET`, persisted in the bootstrap Secret.
+- The operator Secret is only created when at least one operator-supplied
+  value is set (auth providers, DB DSNs, spicedb key, or explicit
+  session/occupant overrides).
+- Set `secret.manageOccupantIdSecret=false` only when
+  `WADDLE_OCCUPANT_ID_SECRET` is supplied by an external Secret in
+  `extraSecretRefs`; otherwise the server will fail startup because the
+  occupant secret is required.
 
 > ⚠️ **Do not rotate `WADDLE_OCCUPANT_ID_SECRET` without an explicit migration plan.**
 > The XEP-0421 occupant identifier is the only stable per-(room, user) handle for
 > client-side identity continuity (recognising users across nick changes). Rotating
 > the secret invalidates every previously-issued occupant-id, severing that continuity.
-> The chart auto-generates the secret once on first install; back up the resulting
-> Kubernetes Secret externally (Velero, sealed-secrets export, password manager) so a
-> namespace deletion or etcd loss does not silently rotate the key.
+> The pre-install hook creates the secret once; back up the resulting Kubernetes
+> Secret externally (Velero, sealed-secrets export, password manager) so a namespace
+> deletion or etcd loss does not silently rotate the key.
+
+Manual rotation (only when intentional):
+
+```bash
+kubectl -n <ns> delete secret <release>-waddle-server-bootstrap-secrets
+helm upgrade --install <release> ./charts/waddle-server   # hook re-runs
+```
+
+### Migrating from chart < 0.2.0
+
+Two breaking behavior changes versus chart 0.1.x:
+
+1. **Auto-generated keys** (`WADDLE_SESSION_KEY`,
+   `WADDLE_OCCUPANT_ID_SECRET`) used to live in
+   `<release>-waddle-server-secrets` and were preserved across upgrades
+   via `lookup`. They now live in a dedicated bootstrap Secret created
+   by a pre-install hook (the cause of the change is
+   [#303](https://github.com/waddle-social/waddle/issues/303)).
+2. **Operator-supplied keys** (`WADDLE_AUTH_PROVIDERS_JSON`,
+   `WADDLE_DATABASE_URL`, `WADDLE_XMPP_*_DATABASE_URL`,
+   `WADDLE_SPICEDB_PRESHARED_KEY`) no longer use `lookup` to preserve
+   values across upgrades when the operator stops passing them. This
+   was a bug — the chart should reflect the values you actually pass on
+   each upgrade — but the silent "preserve" behavior may have masked
+   missing values in your `helm upgrade` invocation. Audit your
+   operator scripts and ensure all required values are passed on every
+   upgrade.
+
+For the bootstrap Secret split, two migration paths:
+
+**Option A — copy existing values into the new bootstrap Secret (preserves
+session/occupant-id state):**
+
+```bash
+NS=<namespace>
+REL=<release>
+SK=$(kubectl -n "$NS" get secret "${REL}-waddle-server-secrets" -o jsonpath='{.data.WADDLE_SESSION_KEY}' | base64 -d)
+OID=$(kubectl -n "$NS" get secret "${REL}-waddle-server-secrets" -o jsonpath='{.data.WADDLE_OCCUPANT_ID_SECRET}' | base64 -d)
+kubectl -n "$NS" create secret generic "${REL}-waddle-server-bootstrap-secrets" \
+  --from-literal=WADDLE_SESSION_KEY="$SK" \
+  --from-literal=WADDLE_OCCUPANT_ID_SECRET="$OID"
+helm upgrade "$REL" ./charts/waddle-server  # the hook detects the existing Secret and is a no-op
+```
+
+**Option B — pin existing values in values.yaml (operator override path,
+no bootstrap Secret):**
+
+```bash
+helm upgrade "$REL" ./charts/waddle-server \
+  --set secret.autoGenerate=false \
+  --set secret.sessionKey="$SK" \
+  --set secret.occupantIdSecret="$OID"
+```
+
+If you skip migration, the pre-install hook will not run on upgrade
+(`pre-install` only) and the chart will not regenerate the bootstrap
+Secret. Pods will still pick up the existing
+`<release>-waddle-server-secrets` keys via the operator Secret `envFrom`
+entry, so existing deployments keep working — but the next fresh
+`helm install` (e.g. into a new namespace) will use the new bootstrap
+flow.
 
 Recommended for stable upgrades:
 

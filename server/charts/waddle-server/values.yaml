@@ -143,14 +143,40 @@ telemetry:
 secret:
   create: true
   existingSecret: ""
+  # When true (default), a pre-install Helm hook generates and persists a
+  # separate Kubernetes Secret containing the auto-generated chart-managed
+  # keys (WADDLE_SESSION_KEY and, when manageOccupantIdSecret=true,
+  # WADDLE_OCCUPANT_ID_SECRET).
+  #
+  # The bootstrap Secret is owned by `kubectl` (not Helm), so it is never
+  # rendered by `helm template` and never produces drift in GitOps tools
+  # that render charts without cluster access. See
+  # https://github.com/waddle-social/waddle/issues/303.
+  #
+  # Set to false when supplying both secret.sessionKey and
+  # secret.occupantIdSecret (or manageOccupantIdSecret=false) explicitly,
+  # or when WADDLE_SESSION_KEY / WADDLE_OCCUPANT_ID_SECRET are injected
+  # through extraSecretRefs.
+  autoGenerate: true
+  bootstrap:
+    # Image used by the pre-install hook Job. Must contain `kubectl` and
+    # POSIX `tr` / `head` for random key generation.
+    image: "bitnami/kubectl:1.31"
+    imagePullPolicy: IfNotPresent
+  # When set, used as WADDLE_SESSION_KEY in the operator Secret and
+  # overrides the bootstrap-generated value (envFrom ordering: operator
+  # Secret follows the bootstrap Secret).
   sessionKey: ""
   # Set false when WADDLE_OCCUPANT_ID_SECRET is supplied by an external secret
   # referenced through extraSecretRefs.
   manageOccupantIdSecret: true
   # Per-deployment HMAC key used to derive XEP-0421 occupant identifiers.
-  # Required (≥32 bytes). When `secret.create` is true and this value is
-  # empty the chart auto-generates a 64-character alphanumeric secret on
-  # first install and preserves it across upgrades via `lookup`.
+  # Required (≥32 bytes). When `secret.create` is true,
+  # `secret.autoGenerate` is true, and this value is empty the pre-install
+  # hook auto-generates a 64-character alphanumeric secret on first
+  # install. The bootstrap Secret is created out-of-band by `kubectl`
+  # inside the hook Job and persists for the life of the namespace; it is
+  # never re-created on subsequent upgrades.
   # **Do not rotate** without an explicit migration plan — rotation breaks
   # XEP-0421 occupant-id continuity for every existing room/user pair.
   occupantIdSecret: ""
