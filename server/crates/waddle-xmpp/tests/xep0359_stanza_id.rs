@@ -16,7 +16,7 @@ use chrono::Utc;
 use jid::{BareJid, Jid};
 use waddle_xmpp::pending_delivery::flush::{build_replay_stanza, MaterializedPayload};
 use waddle_xmpp::pending_delivery::{PendingPayload, PendingRow, PendingRowId};
-use waddle_xmpp::protocol::event::{StanzaIdRef, StanzaIdValue};
+use waddle_xmpp::protocol::{StanzaIdRef, StanzaIdValue};
 use waddle_xmpp_core::xep0359::{build_stanza_id_element, NS_SID};
 use xmpp_parsers::message::{Body, Message, MessageType};
 
