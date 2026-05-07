@@ -173,6 +173,11 @@ pub struct InboundMessage {
     pub shared_files: Vec<SharedFile>,
     pub broadcast_mention: Option<String>,
     pub mention_uris: Vec<String>,
+    /// XEP-0372 references attached to this message. Populated for *every*
+    /// `<reference xmlns="urn:xmpp:reference:0"/>` child, regardless of type
+    /// (`mention`, `data`, or any other), as long as `type` and `uri` are
+    /// present (both required by XEP-0372).
+    pub references: Vec<ReferenceData>,
     pub forum_post_kind: Option<String>,
     pub forum_title: Option<String>,
     pub thread_id: Option<String>,
@@ -308,6 +313,9 @@ pub struct ReferenceData {
     pub uri: String,
     pub begin: u32,
     pub end: u32,
+    /// XEP-0372 optional `anchor` attribute. Carries the original, unresolved
+    /// display text (or arbitrary anchor URI) when offsets cannot be relied on.
+    pub anchor: Option<String>,
 }
 
 // ─── Parse entry point ────────────────────────────────────────────────────
@@ -387,6 +395,16 @@ fn parse_message(el: &Element) -> InboundMessage {
     let displayed_marker_id = parse_displayed_marker_payload(el).map(|payload| payload.id);
 
     // XEP-0372: References (mentions and data)
+    //
+    // Every `<reference xmlns="urn:xmpp:reference:0"/>` child with the required
+    // `type` and `uri` attributes is captured as a typed `ReferenceData` and
+    // also fans out into the flat helper views (`mention_uris`,
+    // `broadcast_mention`, `shared_files`) the rest of the codebase already
+    // consumes. The flat views are derived projections; `references` is the
+    // structural source of truth. Reading `begin`/`end` is the only string→u32
+    // parse on the inbound path; per the typed-payloads hard rule, no other
+    // boundary may stringify protocol values.
+    let mut references: Vec<ReferenceData> = Vec::new();
     let mut mention_uris: Vec<String> = Vec::new();
     let mut broadcast_mention: Option<String> = None;
     let mut shared_files: Vec<SharedFile> = Vec::new();
@@ -395,19 +413,43 @@ fn parse_message(el: &Element) -> InboundMessage {
         .children()
         .filter(|c| c.name() == "reference" && c.ns() == NS_REFERENCES)
     {
-        match child.attr("type") {
-            Some("mention") => {
-                if let Some(uri) = child.attr("uri") {
-                    let uri_str = uri.to_string();
-                    if uri_str.starts_with("xmpp:")
-                        && (uri_str.contains("@everyone") || uri_str.contains("@here"))
-                    {
-                        broadcast_mention = Some(uri_str.clone());
-                    }
-                    mention_uris.push(uri_str);
+        let ref_type = match child.attr("type") {
+            Some(t) => t,
+            None => continue,
+        };
+        let uri = match child.attr("uri") {
+            Some(u) => u,
+            None => continue,
+        };
+        let begin = child
+            .attr("begin")
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(0);
+        let end = child
+            .attr("end")
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(0);
+        let anchor = child.attr("anchor").map(String::from);
+
+        references.push(ReferenceData {
+            ref_type: ref_type.to_string(),
+            uri: uri.to_string(),
+            begin,
+            end,
+            anchor: anchor.clone(),
+        });
+
+        match ref_type {
+            "mention" => {
+                let uri_str = uri.to_string();
+                if uri_str.starts_with("xmpp:")
+                    && (uri_str.contains("@everyone") || uri_str.contains("@here"))
+                {
+                    broadcast_mention = Some(uri_str.clone());
                 }
+                mention_uris.push(uri_str);
             }
-            Some("data") => {
+            "data" => {
                 if let Some(file) = parse_shared_file(child) {
                     shared_files.push(file);
                 }
@@ -497,6 +539,7 @@ fn parse_message(el: &Element) -> InboundMessage {
         shared_files,
         broadcast_mention,
         mention_uris,
+        references,
         forum_post_kind,
         forum_title,
         thread_id,
@@ -1170,14 +1213,15 @@ pub fn build_outbound_message(
         builder = builder.append(markups);
     }
     for reference in &options.references {
-        builder = builder.append(
-            Element::builder("reference", NS_REFERENCES)
-                .attr("type", reference.ref_type.as_str())
-                .attr("begin", reference.begin.to_string())
-                .attr("end", reference.end.to_string())
-                .attr("uri", reference.uri.as_str())
-                .build(),
-        );
+        let mut ref_builder = Element::builder("reference", NS_REFERENCES)
+            .attr("type", reference.ref_type.as_str())
+            .attr("begin", reference.begin.to_string())
+            .attr("end", reference.end.to_string())
+            .attr("uri", reference.uri.as_str());
+        if let Some(anchor) = reference.anchor.as_deref() {
+            ref_builder = ref_builder.attr("anchor", anchor);
+        }
+        builder = builder.append(ref_builder.build());
     }
     for file in &options.shared_files {
         builder = builder.append(build_file_sharing_element(file));
@@ -1423,6 +1467,146 @@ mod tests {
     }
 
     #[test]
+    fn parse_message_extracts_references_for_data_type() {
+        let e = el(
+            "<message xmlns='jabber:client' type='groupchat' id='m-data'>\
+               <body>see https://example.com</body>\
+               <reference xmlns='urn:xmpp:reference:0' type='data' \
+                  uri='https://example.com' begin='4' end='23' \
+                  anchor='https://example.com'/>\
+             </message>",
+        );
+        let MessagingEvent::Message(msg) = parse(&e).unwrap() else {
+            panic!("expected Message");
+        };
+        assert_eq!(
+            msg.references,
+            vec![ReferenceData {
+                ref_type: "data".to_string(),
+                uri: "https://example.com".to_string(),
+                begin: 4,
+                end: 23,
+                anchor: Some("https://example.com".to_string()),
+            }]
+        );
+        // `type=data` references that don't carry XEP-0446/0447 file metadata
+        // must not pollute the shared_files projection.
+        assert!(msg.shared_files.is_empty());
+        // `type=data` references must not appear as mentions.
+        assert!(msg.mention_uris.is_empty());
+    }
+
+    #[test]
+    fn parse_message_extracts_references_for_mention_type() {
+        let e = el(
+            "<message xmlns='jabber:client' type='groupchat' id='m-mention'>\
+               <body>hi @bob</body>\
+               <reference xmlns='urn:xmpp:reference:0' type='mention' \
+                  uri='xmpp:bob@example.com' begin='3' end='7'/>\
+             </message>",
+        );
+        let MessagingEvent::Message(msg) = parse(&e).unwrap() else {
+            panic!("expected Message");
+        };
+        assert_eq!(
+            msg.references,
+            vec![ReferenceData {
+                ref_type: "mention".to_string(),
+                uri: "xmpp:bob@example.com".to_string(),
+                begin: 3,
+                end: 7,
+                anchor: None,
+            }]
+        );
+        // Mentions still also flow through the flat helper view.
+        assert_eq!(msg.mention_uris, vec!["xmpp:bob@example.com".to_string()]);
+    }
+
+    #[test]
+    fn parse_message_extracts_references_for_unknown_type() {
+        let e = el(
+            "<message xmlns='jabber:client' type='groupchat' id='m-unknown'>\
+               <body>see https://example.com</body>\
+               <reference xmlns='urn:xmpp:reference:0' type='quote' \
+                  uri='xmpp:room@conf.example?message;id=abc' begin='0' end='3'/>\
+             </message>",
+        );
+        let MessagingEvent::Message(msg) = parse(&e).unwrap() else {
+            panic!("expected Message");
+        };
+        assert_eq!(msg.references.len(), 1);
+        assert_eq!(msg.references[0].ref_type, "quote");
+        assert!(msg.mention_uris.is_empty());
+        assert!(msg.shared_files.is_empty());
+    }
+
+    #[test]
+    fn parse_message_reference_handles_missing_optional_attrs() {
+        let e = el("<message xmlns='jabber:client' type='chat' id='m-min'>\
+               <body>https://example.com</body>\
+               <reference xmlns='urn:xmpp:reference:0' type='data' \
+                  uri='https://example.com'/>\
+             </message>");
+        let MessagingEvent::Message(msg) = parse(&e).unwrap() else {
+            panic!("expected Message");
+        };
+        assert_eq!(
+            msg.references,
+            vec![ReferenceData {
+                ref_type: "data".to_string(),
+                uri: "https://example.com".to_string(),
+                begin: 0,
+                end: 0,
+                anchor: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn parse_message_reference_skipped_when_required_attr_missing() {
+        // XEP-0372 requires both `type` and `uri`. References missing either
+        // must be silently dropped — never returned with placeholder values.
+        let e = el("<message xmlns='jabber:client' type='chat' id='m-bad'>\
+               <body>https://example.com</body>\
+               <reference xmlns='urn:xmpp:reference:0' type='data'/>\
+               <reference xmlns='urn:xmpp:reference:0' uri='https://example.com'/>\
+             </message>");
+        let MessagingEvent::Message(msg) = parse(&e).unwrap() else {
+            panic!("expected Message");
+        };
+        assert!(msg.references.is_empty());
+    }
+
+    #[test]
+    fn build_outbound_message_emits_anchor_attribute_when_present() {
+        let options = SendMessageOptions {
+            references: vec![ReferenceData {
+                ref_type: "data".to_string(),
+                uri: "https://example.com".to_string(),
+                begin: 4,
+                end: 23,
+                anchor: Some("example.com".to_string()),
+            }],
+            ..Default::default()
+        };
+
+        let (_, stanza) = build_outbound_message(
+            "room@muc.example",
+            "groupchat",
+            "see https://example.com",
+            &options,
+        )
+        .unwrap();
+
+        let reference = stanza
+            .get_child("reference", NS_REFERENCES)
+            .expect("reference child");
+        assert_eq!(reference.attr("anchor"), Some("example.com"));
+        assert_eq!(reference.attr("type"), Some("data"));
+        assert_eq!(reference.attr("uri"), Some("https://example.com"));
+    }
+
+    #[test]
     fn parse_message_with_direct_file_sharing() {
         let e = el(
             "<message xmlns='jabber:client' type='chat'>\
@@ -1598,6 +1782,7 @@ mod tests {
                 uri: "xmpp:bob@example.com".to_string(),
                 begin: 6,
                 end: 10,
+                anchor: None,
             }],
             ..Default::default()
         };
@@ -1796,6 +1981,7 @@ mod tests {
                 uri: "xmpp:bob@example.com".to_string(),
                 begin: 6,
                 end: 10,
+                anchor: None,
             }],
             ..Default::default()
         };
