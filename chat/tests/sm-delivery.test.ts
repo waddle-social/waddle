@@ -379,6 +379,36 @@ describe("XEP-0198 session lifecycle catch-up (group chat)", () => {
     expect(sendReaction).toHaveBeenCalled();
   });
 
+  test("toggleReaction rolls back the optimistic update when sendReaction rejects", async () => {
+    const sendReaction = mock(async () => {
+      throw new Error("session not ready");
+    });
+    const client = makeRoomClient();
+    (client as unknown as { value: Record<string, unknown> }).value = {
+      ...(client as unknown as { value: Record<string, unknown> }).value,
+      sendReaction,
+    };
+    const { messaging, actionError } = makeRoomMessaging(client);
+
+    messaging.messages.value = [
+      {
+        id: "msg-rollback",
+        wireIds: ["msg-rollback", "room-stanza-rollback"],
+        reactionTargetId: "room-stanza-rollback",
+        author: "bob",
+        body: "react to me",
+        createdAt: "2024-01-01T00:00:00Z",
+        isSelf: false,
+      },
+    ];
+
+    await messaging.toggleReaction("msg-rollback", "👍");
+
+    const target = messaging.messages.value.find((m) => m.id === "msg-rollback");
+    expect(target?.reactions).toBeUndefined();
+    expect(actionError.value).not.toBe("");
+  });
+
   test("resumed session never triggers a MAM refetch", async () => {
     const client = makeRoomClient();
     const { messaging } = makeRoomMessaging(client);
@@ -501,6 +531,64 @@ describe("XEP-0198 delivery status (DM)", () => {
     const target = dm.messages.value.find((m) => m.id === "dm-target");
     expect(target?.reactions).toEqual({ "👍": ["alice"] });
     expect(sendDmReaction).toHaveBeenCalled();
+  });
+
+  test("DM onReaction attributes self-sent carbon-forwarded reactions to the sender, not the conversation partner", async () => {
+    // Self-sent DM reactions arrive on the sender's other devices via
+    // XEP-0280 carbons with `from = self`, `to = peer`. The dispatch
+    // normalizes `peerJid` to the conversation key (peer), so without
+    // a separate `reactorJid` field the UI would credit the partner
+    // for the reaction. Verify `onReaction` uses `reactorJid`.
+    const client = makeDmClient();
+    const { dm } = makeDmMessaging(client);
+
+    dm.messages.value = [
+      {
+        id: "dm-target",
+        author: "alice",
+        body: "react to me",
+        createdAt: "2024-01-01T00:00:00Z",
+        isSelf: true,
+      },
+    ];
+
+    dm.onReaction({
+      peerJid: "bob@example.com",
+      reactorJid: "alice@example.com",
+      messageId: "dm-target",
+      emojis: ["🎉"],
+    });
+
+    const target = dm.messages.value.find((m) => m.id === "dm-target");
+    expect(target?.reactions).toEqual({ "🎉": ["alice"] });
+  });
+
+  test("DM toggleReaction rolls back the optimistic update when sendDmReaction rejects", async () => {
+    const sendDmReaction = mock(async () => {
+      throw new Error("session not ready");
+    });
+    const client = makeDmClient();
+    (client as unknown as { value: Record<string, unknown> }).value = {
+      ...(client as unknown as { value: Record<string, unknown> }).value,
+      sendDmReaction,
+    };
+    const { dm, actionError } = makeDmMessaging(client);
+
+    dm.messages.value = [
+      {
+        id: "dm-rollback",
+        author: "bob",
+        body: "react to me",
+        createdAt: "2024-01-01T00:00:00Z",
+        isSelf: false,
+      },
+    ];
+
+    await dm.toggleReaction("dm-rollback", "👍");
+
+    const target = dm.messages.value.find((m) => m.id === "dm-rollback");
+    expect(target?.reactions).toBeUndefined();
+    expect(actionError.value).not.toBe("");
   });
 
   test("DM self-echo reconciles first send only when duplicate text is queued", async () => {

@@ -233,7 +233,14 @@ export interface DmDisplayedEvent {
 }
 
 export interface DmReactionEvent {
+  /** Conversation partner's bare JID — i.e. the key the local UI uses
+   * to address the conversation. For carbon-forwarded self-sent
+   * reactions this is the recipient (`to`), not the sender (`from`). */
   peerJid: string;
+  /** Bare JID of the user who emitted the reaction stanza. Distinct
+   * from `peerJid` for self-sent carbon-forwarded reactions, where
+   * `peerJid` is normalized to the conversation partner. */
+  reactorJid: string;
   messageId: string;
   emojis: string[];
 }

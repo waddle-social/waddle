@@ -358,7 +358,7 @@ function react(emoji: string) {
   closeSheet();
 }
 
-const reactionListFormatter = new Intl.ListFormat("en", { style: "long", type: "conjunction" });
+const reactionListFormatter = new Intl.ListFormat(undefined, { style: "long", type: "conjunction" });
 
 function formatReactors(nicks: readonly string[]): string {
   return reactionListFormatter.format([...nicks]);
@@ -980,7 +980,7 @@ watch(
         <span>{{ emoji }}</span>
         <span class="type-meta type-numeric text-muted-foreground">{{ nicks.length }}</span>
         <span
-          role="tooltip"
+          aria-hidden="true"
           class="chat-reaction-tooltip pointer-events-none absolute bottom-full left-1/2 z-popover mb-1 hidden -translate-x-1/2 max-w-xs rounded-md border border-border bg-popover px-2 py-1.5 text-popover-foreground shadow-md group-hover/reaction:flex group-focus-visible/reaction:flex flex-col items-center gap-0.5"
         >
           <span class="text-lg leading-none" aria-hidden="true">{{ emoji }}</span>

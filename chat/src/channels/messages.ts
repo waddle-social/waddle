@@ -1324,10 +1324,11 @@ export function useChannelMessages(
     const myNick = session.value.username;
     const currentReactions = msg?.reactions ?? {};
 
-    const myEmojis = new Set<string>();
+    const previousEmojis: string[] = [];
     for (const [e, nicks] of Object.entries(currentReactions)) {
-      if (nicks.includes(myNick)) myEmojis.add(e);
+      if (nicks.includes(myNick)) previousEmojis.push(e);
     }
+    const myEmojis = new Set(previousEmojis);
 
     if (myEmojis.has(emoji)) myEmojis.delete(emoji);
     else myEmojis.add(emoji);
@@ -1346,6 +1347,10 @@ export function useChannelMessages(
         nextEmojis,
       );
     } catch (e) {
+      // Roll back the optimistic update so the chip stops claiming a
+      // reaction the server never accepted (no echo will arrive to
+      // reconcile it).
+      applyReaction(targetId, myNick, previousEmojis, senderId);
       actionError.value = normalizeError(e);
     }
   }
