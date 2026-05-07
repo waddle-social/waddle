@@ -1003,6 +1003,28 @@ impl InMemorySmSessionRegistry {
         }
     }
 
+    /// Increment the persistent promotion-failure counter for
+    /// `stream_id` and return the new value. Used by the SM-expiry
+    /// janitor (issue #209 finding #14) to detect runaway retry loops
+    /// on permanent storage failures (disk full, schema corruption,
+    /// blocklist storage permanently broken). Once the count crosses
+    /// the operator-defined threshold the caller dead-letters the
+    /// durable row via `confirm_drained` instead of preserving it for
+    /// yet another retry pass.
+    ///
+    /// Returns `Ok(0)` when no persistence backend is configured
+    /// (in-memory tests), so the dead-letter path simply never trips.
+    pub async fn record_promotion_failure(&self, stream_id: &str) -> Result<u32, SmRegistryError> {
+        let Some(persistence) = self.persistence.as_ref() else {
+            return Ok(0);
+        };
+        let session_id = crate::pending_delivery::SmSessionId::new(stream_id.to_string());
+        persistence
+            .record_promotion_failure(&session_id)
+            .await
+            .map_err(|e| SmRegistryError::Internal(e.to_string()))
+    }
+
     /// Drain expired sessions from the in-memory view. Returns the
     /// drained sessions for the caller to run Q6 promotion on.
     ///

@@ -361,6 +361,7 @@ async fn insert_pending(
             // typed StanzaError builder the routing layer uses for
             // intake-time quota overflow so the wire shape is
             // identical.
+            waddle_xmpp::prometheus::increment_pending_delivery_quota_exceeded();
             send_quota_bounce(original_message, &recipient, registry).await;
             PromotedOutcome::Bounced
         }
@@ -1181,6 +1182,12 @@ mod tests {
                 Ok(vec![])
             }
             async fn count(&self, _recipient: &BareJid) -> Result<u32, PendingStorageError> {
+                Ok(0)
+            }
+            async fn delete_older_than(
+                &self,
+                _cutoff: chrono::DateTime<chrono::Utc>,
+            ) -> Result<u64, PendingStorageError> {
                 Ok(0)
             }
         }

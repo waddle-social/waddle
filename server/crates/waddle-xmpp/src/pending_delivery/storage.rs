@@ -152,6 +152,30 @@ pub trait PendingDeliveryStorage: Send + Sync {
     /// Current row count for `recipient` (used by the quota check;
     /// also exposed for metrics).
     async fn count(&self, recipient: &BareJid) -> Result<u32, PendingStorageError>;
+
+    /// Delete every row whose `original_receipt_at < cutoff`.
+    /// Returns the number of rows removed.
+    ///
+    /// Used by the pending_delivery aging janitor (issue #209
+    /// finding #5): without an upper age bound, a permanently-
+    /// offline recipient (deleted account, lost device) eventually
+    /// fills their per-recipient quota with stale rows that block
+    /// future legitimate senders forever via the
+    /// `<service-unavailable/>` bounce. Rows older than the
+    /// operator-defined threshold (default 30 days) are dropped.
+    async fn delete_older_than(
+        &self,
+        cutoff: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64, PendingStorageError>;
+
+    /// Periodically GC backend-internal bookkeeping that grows with
+    /// distinct keys seen by the process — e.g. per-recipient
+    /// insert-serialization locks (issue #209 finding #4). Default
+    /// impl is a no-op for backends that don't need it (in-memory).
+    /// Returns the number of entries removed for observability.
+    fn sweep_internal_bookkeeping(&self) -> usize {
+        0
+    }
 }
 
 /// In-memory implementation suitable for handler tests.
@@ -423,6 +447,24 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
             .lock()
             .map_err(|e| PendingStorageError::Other(e.to_string()))?;
         Ok(guard.get(recipient).map(|q| q.len() as u32).unwrap_or(0))
+    }
+
+    async fn delete_older_than(
+        &self,
+        cutoff: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64, PendingStorageError> {
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?;
+        let mut removed = 0u64;
+        for queue in guard.values_mut() {
+            let before = queue.len();
+            queue.retain(|row| row.original_receipt_at >= cutoff);
+            removed += (before - queue.len()) as u64;
+        }
+        guard.retain(|_, q| !q.is_empty());
+        Ok(removed)
     }
 }
 
