@@ -416,6 +416,12 @@ const displayedMembers = computed<MemberSummary[]>(() =>
       a.username.localeCompare(b.username, undefined, { sensitivity: "base" }),
   ),
 );
+const authoritativeMemberJids = computed(() => new Set(waddles.members.value.map((member) => member.jid)));
+const inferredMemberJids = computed(() =>
+  new Set(displayedMembers.value
+    .filter((member) => !authoritativeMemberJids.value.has(member.jid))
+    .map((member) => member.jid)),
+);
 const displayedMemberCount = computed<number | null>(() => {
   const count = displayedMembers.value.length;
   if (count > 0) return count;
@@ -1836,6 +1842,7 @@ onUnmounted(() => {
     <MemberManagement
       v-model:open="ui.showMembers.value"
       :members="membersWithAvatars"
+      :inferred-member-jids="inferredMemberJids"
       :member-state="displayedMemberState"
       :member-query="members.memberQuery.value"
       :new-member-role="members.newMemberRole.value"

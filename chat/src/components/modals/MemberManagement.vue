@@ -11,6 +11,7 @@ const open = defineModel<boolean>("open", { required: true });
 
 defineProps<{
   members: MemberSummary[];
+  inferredMemberJids: Set<string>;
   memberState: MemberLoadState;
   memberQuery: string;
   newMemberRole: EditableRole;
@@ -120,10 +121,10 @@ const roles: EditableRole[] = ["member", "admin", "owner", "outcast"];
         <div class="flex-1 min-w-0">
           <div class="type-control truncate">{{ member.username }}</div>
           <div class="type-caption text-muted-foreground capitalize">
-            {{ member.role }}
+            {{ inferredMemberJids.has(member.jid) ? "Present now" : member.role }}
           </div>
         </div>
-        <div v-if="canManageMembers && member.role !== 'owner'" class="flex items-center gap-1.5">
+        <div v-if="canManageMembers && !inferredMemberJids.has(member.jid) && member.role !== 'owner'" class="flex items-center gap-1.5">
           <select
             :value="member.role"
             class="type-caption type-emphasis h-8 appearance-none rounded-lg border border-border bg-muted/60 px-2.5 capitalize transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-primary/20"
@@ -140,6 +141,9 @@ const roles: EditableRole[] = ["member", "admin", "owner", "outcast"];
           >
             <X class="w-3.5 h-3.5" />
           </button>
+        </div>
+        <div v-else-if="inferredMemberJids.has(member.jid)" class="type-caption text-muted-foreground">
+          Synced from presence
         </div>
       </div>
 
