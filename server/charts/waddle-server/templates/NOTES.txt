@@ -14,8 +14,9 @@ Image:   {{ .Values.image.repository }}:{{ default .Chart.AppVersion .Values.ima
 {{- $autoGenerate = .Values.secret.autoGenerate -}}
 {{- end -}}
 
-{{- if .Release.IsInstall }}
 {{- if and .Values.secret.create (not .Values.secret.existingSecret) $autoGenerate }}
+
+{{- if .Release.IsInstall }}
 
 A pre-install / pre-upgrade Helm hook generated and persisted a Kubernetes
 Secret holding the chart-managed auto-generated keys
@@ -28,6 +29,40 @@ the rendered chart manifest. `helm template` and GitOps tools that render
 charts without cluster access will not produce drift against it. The Secret
 persists for the life of the namespace; subsequent upgrades detect the
 existing Secret and leave it untouched (the hook is idempotent).
+{{- else }}
+
+A pre-upgrade Helm hook ran before this upgrade rewrote the operator
+Secret. If you are upgrading from chart 0.1.x, the hook copied the
+auto-generated keys (WADDLE_SESSION_KEY{{ if .Values.secret.manageOccupantIdSecret }}, WADDLE_OCCUPANT_ID_SECRET{{ end }})
+forward into the bootstrap Secret BEFORE Helm pruned them from the
+operator Secret. XEP-0421 occupant-id continuity is preserved
+automatically.
+
+VERIFY MIGRATION (especially on the first 0.1.x → 0.2.x upgrade):
+
+  kubectl -n {{ .Release.Namespace }} get secret {{ include "waddle-server.bootstrapSecretName" . }}
+  kubectl -n {{ .Release.Namespace }} logs -l app.kubernetes.io/component=secret-bootstrap --tail=50
+
+The Job logs one of:
+
+  migrated WADDLE_SESSION_KEY from {{ include "waddle-server.secretName" . }}
+  migrated WADDLE_OCCUPANT_ID_SECRET from {{ include "waddle-server.secretName" . }}
+  generated fresh WADDLE_SESSION_KEY
+  generated fresh WADDLE_OCCUPANT_ID_SECRET
+
+A `generated fresh ...` line on a chart upgrade (rather than first
+install) means the legacy operator Secret did not contain that key —
+either you were already on 0.2.x, or the key was supplied externally
+(extraSecretRefs / existingSecret). A `generated fresh
+WADDLE_OCCUPANT_ID_SECRET` line on a 0.1.x → 0.2.x upgrade where you
+relied on the chart to manage the key indicates the migration did NOT
+find the legacy value and XEP-0421 occupant-id continuity has been
+broken — investigate before rolling restart.
+
+The Job, ServiceAccount, Role, and RoleBinding are deleted automatically
+after the Job succeeds, so the logs above are only available for ~5
+minutes (`ttlSecondsAfterFinished: 300`). Capture them now if needed.
+{{- end }}
 
 To rotate (DESTRUCTIVE -- breaks XEP-0421 occupant-id continuity and
 encrypted session state). Both the bootstrap Secret AND the auto-managed
@@ -43,7 +78,6 @@ helpfully migrates the legacy values back in:
 
 Back up the Secret externally (Velero, sealed-secrets export, password
 manager) so namespace deletion or etcd loss does not silently rotate it.
-{{- end }}
 {{- end }}
 
 {{- if .Values.secret.existingSecret }}
