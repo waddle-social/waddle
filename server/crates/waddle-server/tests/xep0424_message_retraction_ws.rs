@@ -3,7 +3,7 @@
 mod ws_common;
 
 use tokio::sync::Mutex;
-use ws_common::{extract_attr_after, TestServer, WsXmppClient};
+use ws_common::{TestServer, WsXmppClient};
 
 const DOMAIN: &str = "localhost";
 const USERNAME: &str = "admin";
@@ -33,34 +33,44 @@ async fn join_room(client: &mut WsXmppClient, room: &str) {
         .expect("join responses");
 }
 
-fn stanza_id(frame: &str) -> String {
-    extract_attr_after(frame, "stanza-id", "id").expect("stanza-id id")
-}
-
 #[tokio::test]
-async fn retraction_routes_and_replays_from_mam() {
+async fn xep_0424_groupchat_retraction_round_trip_succeeds() {
+    // L4 wire-trace coverage for #281: alice sends a groupchat
+    // message, the room reflects, alice retracts citing the
+    // **wire `id`** of the original (matching the XEP-0308 correction
+    // path's accessor — see `validate_groupchat_rich_targets` in
+    // `interpret.rs`). The retraction MUST be reflected (proving the
+    // validator resolved the target instead of returning
+    // `<item-not-found/>`), and a `<retracted/>` tombstone MUST
+    // replace the original row in MAM (XEP-0424 §"prevent further
+    // distribution").
+    //
+    // Pre-fix this assertion failed because the interpreter's
+    // groupchat retraction lookup keyed off the storage primary key
+    // instead of the wire id, so any client retraction citing the
+    // wire id (the only id XEP-0308 corrections accept in this
+    // codebase) returned `<item-not-found/>` to the sender.
     let _guard = TEST_SERIAL.lock().await;
     let (_server, mut client) = setup().await;
     let room = format!("retract-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
     join_room(&mut client, &room).await;
 
+    let original_id = "orig-1";
     client
         .send(&format!(
-            r#"<message type="groupchat" to="{room}" id="orig-1"><body>remove me</body></message>"#
+            r#"<message type="groupchat" to="{room}" id="{original_id}"><body>remove me</body></message>"#
         ))
         .await
         .expect("send original");
-    let target = stanza_id(
-        &client
-            .recv_matching(|frame| frame.contains("remove me"))
-            .await
-            .expect("original echo"),
-    );
+    let _echo = client
+        .recv_matching(|frame| frame.contains("remove me"))
+        .await
+        .expect("original echo");
 
     client
         .send(&format!(
             r#"<message type="groupchat" to="{room}" id="retract-1">
-                <retract xmlns="urn:xmpp:message-retract:1" id="{target}"/>
+                <retract xmlns="urn:xmpp:message-retract:1" id="{original_id}"/>
                 <body>/me retracted a previous message</body>
             </message>"#
         ))
@@ -70,7 +80,14 @@ async fn retraction_routes_and_replays_from_mam() {
         .recv_matching(|frame| frame.contains("urn:xmpp:message-retract:1"))
         .await
         .expect("retraction echo");
-    assert!(echo.contains(&target), "missing retraction target: {echo}");
+    assert!(
+        echo.contains(&format!("id=\"{original_id}\"")),
+        "retraction echo must cite the original wire id: {echo}"
+    );
+    assert!(
+        !echo.contains("<error"),
+        "successful retraction must not be an error stanza: {echo}"
+    );
 
     client
         .send(&format!(
@@ -89,8 +106,9 @@ async fn retraction_routes_and_replays_from_mam() {
     assert!(
         frames
             .iter()
-            .any(|frame| frame.contains("<retract ") && frame.contains(&target)),
-        "MAM did not replay retraction event: {frames:?}"
+            .any(|frame| frame.contains("<retract ")
+                && frame.contains(&format!("id=\"{original_id}\""))),
+        "MAM did not replay retraction event citing the original wire id: {frames:?}"
     );
 
     // XEP-0424 §"prevent further distribution… by replacing the
