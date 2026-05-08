@@ -626,14 +626,14 @@ mod tests {
         );
         let mut msg = pin_message("stanza-target", &sender);
         match MucPinHandler.handle(&mut msg, &ctx) {
-            RoomHandlerOutcome::Halt(events) => match &events[0] {
-                OutboundEvent::SendStanza(stanza) => match stanza.as_ref() {
+            RoomHandlerOutcome::Halt(events) => match events.as_slice() {
+                [OutboundEvent::SendStanza(stanza)] => match stanza.as_ref() {
                     crate::Stanza::Message(m) => {
                         assert_eq!(m.type_, MessageType::Error);
                     }
                     other => panic!("expected message stanza, got {other:?}"),
                 },
-                other => panic!("expected SendStanza, got {other:?}"),
+                other => panic!("expected single SendStanza, got {other:?}"),
             },
             RoomHandlerOutcome::Continue(_) => panic!("non-member must be rejected"),
         }
@@ -664,14 +664,14 @@ mod tests {
         );
         let mut msg = pin_message("stanza-target", &sender);
         match MucPinHandler.handle(&mut msg, &ctx) {
-            RoomHandlerOutcome::Halt(events) => match &events[0] {
-                OutboundEvent::SendStanza(stanza) => match stanza.as_ref() {
+            RoomHandlerOutcome::Halt(events) => match events.as_slice() {
+                [OutboundEvent::SendStanza(stanza)] => match stanza.as_ref() {
                     crate::Stanza::Message(m) => {
                         assert_eq!(m.type_, MessageType::Error);
                     }
                     other => panic!("expected message stanza, got {other:?}"),
                 },
-                other => panic!("expected SendStanza, got {other:?}"),
+                other => panic!("expected single SendStanza, got {other:?}"),
             },
             RoomHandlerOutcome::Continue(_) => panic!("visitor must be rejected"),
         }
@@ -697,14 +697,14 @@ mod tests {
         );
         let mut msg = pin_message("stanza-target", &sender);
         match MucPinHandler.handle(&mut msg, &ctx) {
-            RoomHandlerOutcome::Halt(events) => match &events[0] {
-                OutboundEvent::SendStanza(stanza) => match stanza.as_ref() {
+            RoomHandlerOutcome::Halt(events) => match events.as_slice() {
+                [OutboundEvent::SendStanza(stanza)] => match stanza.as_ref() {
                     crate::Stanza::Message(m) => {
                         assert_eq!(m.type_, MessageType::Error);
                     }
                     other => panic!("expected message stanza, got {other:?}"),
                 },
-                other => panic!("expected SendStanza, got {other:?}"),
+                other => panic!("expected single SendStanza, got {other:?}"),
             },
             RoomHandlerOutcome::Continue(_) => panic!("must reject"),
         }
