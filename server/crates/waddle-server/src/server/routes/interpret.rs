@@ -172,7 +172,6 @@ use room_helpers::{
 };
 use room_pin::apply_pin_change_event;
 use room_subject::persist_room_subject_event;
-use room_system_message::broadcast_room_system_message_event;
 use route_to_connection::route_to_connection;
 use routing::{deliver_peer_to_full, run_headless_recipient_pass};
 
@@ -317,12 +316,8 @@ async fn interpret_with_depth(
                 archive_groupchat_event(deps, room, sender, message, sender_nickname_generation)
                     .await;
             }
-            OutboundEvent::ApplyPinChange { room, change } => {
-                apply_pin_change_event(deps, room, change).await;
-            }
-            OutboundEvent::BroadcastRoomSystemMessage { room, message } => {
-                broadcast_room_system_message_event(registry, deps, room, message, recursion_depth)
-                    .await;
+            OutboundEvent::ApplyPinChange { room, request } => {
+                apply_pin_change_event(registry, deps, room, request, recursion_depth).await;
             }
             OutboundEvent::ApplyGroupchatRetractionTombstone {
                 room,

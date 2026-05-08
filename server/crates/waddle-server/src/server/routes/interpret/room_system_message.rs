@@ -113,14 +113,19 @@ pub(super) async fn broadcast_room_system_message_event(
     }
 
     // Fan out to every joined occupant. One `RouteToConnection`
-    // per occupant full JID — matches the regular reflector's
-    // per-occupant fan-out shape.
+    // per occupant full JID with the message's `to` set to that
+    // occupant's full JID, matching `ReflectorHandler`'s
+    // per-recipient personalization. Without this, downstream
+    // recipient-pass logic (incoming-blocking, archive, inbox) sees
+    // a stanza addressed to the room bare JID and may misroute.
     for occupant in &snapshot.occupants {
+        let mut copy = (*message).clone();
+        copy.to = Some(Jid::from(occupant.full_jid.clone()));
         route_to_connection(
             registry,
             deps,
             Jid::from(occupant.full_jid.clone()),
-            Box::new(Stanza::Message((*message).clone())),
+            Box::new(Stanza::Message(copy)),
             recursion_depth,
         )
         .await;

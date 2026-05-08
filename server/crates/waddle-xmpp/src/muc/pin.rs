@@ -57,8 +57,10 @@ impl PinPreview {
     }
 }
 
-/// A pin state mutation to apply to a room actor's pin list. Carried
-/// by [`crate::protocol::event::OutboundEvent::ApplyPinChange`].
+/// A pin state mutation to apply to a room actor's pin list. The
+/// actor consumes this directly via the `ApplyPin` message — Pin
+/// carries a fully resolved [`PinnedEntry`] (preview already populated
+/// from MAM by the interpreter), Unpin carries just the target.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PinStateChange {
     /// Add or replace a pin entry (newest pin first per upsert).
@@ -68,6 +70,49 @@ pub enum PinStateChange {
         /// Typed XEP-0359 stanza-id of the message whose pin is being cleared.
         target_stanza_id: StanzaId,
     },
+}
+
+/// A pin/unpin request carried by [`crate::protocol::event::OutboundEvent::ApplyPinChange`]
+/// from the chain handler to the interpreter. Distinct from
+/// [`PinStateChange`] because the chain is **synchronous** and cannot
+/// resolve the target message preview from MAM — the interpreter does
+/// the async lookup, builds the `PinnedEntry`, and only then hands a
+/// resolved [`PinStateChange`] to the room actor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PinChangeRequest {
+    /// Pin a message. The interpreter resolves the preview from MAM
+    /// at apply time so the stored preview reflects the *target*
+    /// message author + body + original timestamp, not the pinner or
+    /// pin-marker dispatch time.
+    Pin {
+        target_stanza_id: StanzaId,
+        pinner_jid: BareJid,
+        pinner_nick: String,
+        pinned_at: DateTime<Utc>,
+    },
+    /// Unpin a message. Carries the pinner identity so the broadcast
+    /// system message can attribute the action; `reason` is set to
+    /// `"retracted"` for the XEP-0424 retraction cascade.
+    Unpin {
+        target_stanza_id: StanzaId,
+        pinner_jid: BareJid,
+        pinner_nick: String,
+        reason: Option<String>,
+    },
+}
+
+impl PinChangeRequest {
+    /// The target stanza-id this request mutates.
+    pub fn target_stanza_id(&self) -> &StanzaId {
+        match self {
+            PinChangeRequest::Pin {
+                target_stanza_id, ..
+            }
+            | PinChangeRequest::Unpin {
+                target_stanza_id, ..
+            } => target_stanza_id,
+        }
+    }
 }
 
 /// A pinned message entry held on the room actor.

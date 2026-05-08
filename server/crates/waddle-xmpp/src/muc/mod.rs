@@ -39,7 +39,7 @@ pub use owner::{
     OwnerQuery, DATA_FORMS_NS, MUC_ROOMCONFIG_NS,
 };
 pub use pin::{
-    PinPreview, PinStateChange, PinnedEntry, MAX_PINNED_ENTRIES,
+    PinChangeRequest, PinPreview, PinStateChange, PinnedEntry, MAX_PINNED_ENTRIES,
     MAX_PREVIEW_LEN as PIN_PREVIEW_MAX_LEN,
 };
 pub use presence::{

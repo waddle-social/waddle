@@ -81,7 +81,7 @@ scenario: #Scenario & {
 		// halted before reaching the broadcast step.
 		#ExpectNoStanza & {
 			target:   alicePhone
-			contains: ["pin-event", "pinned"]
+			contains: ["pin-event"]
 			millis:   500
 		},
 	]

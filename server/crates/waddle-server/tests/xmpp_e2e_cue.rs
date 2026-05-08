@@ -1082,13 +1082,14 @@ fn payload_expectations(payloads: &[Payload], ctx: &ScenarioContext) -> Result<V
                 action,
             } => {
                 let target_id = resolve_payload_id(ctx, id.as_deref(), id_from.as_deref())?;
-                let marker = match action {
-                    PinAction::Pinned => "<pinned",
-                    PinAction::Unpinned => "<unpinned",
+                let action_attr = match action {
+                    PinAction::Pinned => "action=\"pinned\"",
+                    PinAction::Unpinned => "action=\"unpinned\"",
                 };
                 expected.extend([
                     "urn:waddle:pin:0".to_string(),
-                    marker.to_string(),
+                    "<pin-event".to_string(),
+                    action_attr.to_string(),
                     format!("target=\"{target_id}\""),
                 ]);
             }

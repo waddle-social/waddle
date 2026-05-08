@@ -28,7 +28,7 @@ use super::super::event::OutboundEvent;
 use super::super::handlers::errors::{message_error_reply, send_message_error};
 use super::context::RoomContext;
 use super::traits::{RoomHandler, RoomHandlerOutcome};
-use crate::muc::pin::{PinPreview, PinStateChange, PinnedEntry};
+use crate::muc::pin::{PinChangeRequest, PinPreview};
 use crate::types::Affiliation;
 use crate::xep::xep_waddle_pin::{extract_pin_intent_from_message, PinIntent, NS_WADDLE_PIN_V0};
 use chrono::{DateTime, Utc};
@@ -78,56 +78,30 @@ impl RoomHandler for MucPinHandler {
 
         let dispatched_at: DateTime<Utc> =
             DateTime::from_timestamp(ctx.dispatch_timestamp, 0).unwrap_or_else(Utc::now);
-        let pinner = sender.bare_jid();
+        let pinner_jid = sender.bare_jid();
+        let pinner_nick = sender.nick.clone();
         let target_stanza_id =
             StanzaId::new(intent.target().to_owned(), Jid::from(ctx.room.clone()));
 
-        let (change, system_message) = match intent {
-            PinIntent::Pin { .. } => {
-                let preview = pin_preview_from(message, ctx, dispatched_at);
-                let entry = PinnedEntry {
-                    target_stanza_id: target_stanza_id.clone(),
-                    pinner_jid: pinner.clone(),
-                    pinned_at: dispatched_at,
-                    preview: preview.clone(),
-                };
-                let sys = build_pinned_system_message(
-                    ctx.room,
-                    &pinner,
-                    &sender.nick,
-                    &target_stanza_id,
-                    Some(&preview),
-                    None,
-                );
-                (PinStateChange::Pin(entry), sys)
-            }
-            PinIntent::Unpin { .. } => {
-                let sys = build_unpinned_system_message(
-                    ctx.room,
-                    &pinner,
-                    &sender.nick,
-                    &target_stanza_id,
-                    None,
-                );
-                (
-                    PinStateChange::Unpin {
-                        target_stanza_id: target_stanza_id.clone(),
-                    },
-                    sys,
-                )
-            }
+        let request = match intent {
+            PinIntent::Pin { .. } => PinChangeRequest::Pin {
+                target_stanza_id,
+                pinner_jid,
+                pinner_nick,
+                pinned_at: dispatched_at,
+            },
+            PinIntent::Unpin { .. } => PinChangeRequest::Unpin {
+                target_stanza_id,
+                pinner_jid,
+                pinner_nick,
+                reason: None,
+            },
         };
 
-        RoomHandlerOutcome::Halt(vec![
-            OutboundEvent::ApplyPinChange {
-                room: ctx.room.clone(),
-                change,
-            },
-            OutboundEvent::BroadcastRoomSystemMessage {
-                room: ctx.room.clone(),
-                message: Box::new(system_message),
-            },
-        ])
+        RoomHandlerOutcome::Halt(vec![OutboundEvent::ApplyPinChange {
+            room: ctx.room.clone(),
+            request,
+        }])
     }
 }
 
@@ -141,39 +115,10 @@ fn carries_pin_marker_namespace(message: &Message) -> bool {
         .any(|elem| elem.ns() == NS_WADDLE_PIN_V0)
 }
 
-/// Capture a frozen preview of the original message at pin time. Note:
-/// the in-flight pin/unpin message itself usually carries no body —
-/// this preview is built from whatever metadata the sender included
-/// for testing/debugging. The chat client populates the preview at
-/// pin time via the IQ query response after publishing the pin marker.
-///
-/// In practice, the pin message can include a `<body>` for testing
-/// purposes, in which case we use it; otherwise the preview text is
-/// empty and the chat client falls back to fetching from MAM.
-fn pin_preview_from(
-    message: &Message,
-    ctx: &RoomContext<'_>,
-    dispatched_at: DateTime<Utc>,
-) -> PinPreview {
-    let body = message
-        .bodies
-        .get("")
-        .map(|Body(b)| b.as_str())
-        .or_else(|| message.bodies.values().next().map(|Body(b)| b.as_str()))
-        .unwrap_or("");
-    let sender = ctx
-        .sender_snapshot()
-        .map(|s| (s.bare_jid(), s.nick.clone()));
-    let (author_jid, author_nick) = sender.unwrap_or_else(|| (ctx.room.clone(), String::new()));
-    let nick = if author_nick.is_empty() {
-        None
-    } else {
-        Some(author_nick)
-    };
-    PinPreview::new(author_jid, nick, body, dispatched_at)
-}
-
-/// Build the system message broadcast on a successful pin.
+/// Build the system message broadcast on a successful pin. The
+/// system message carries a structured `<pin-event xmlns='urn:waddle:pin:0'
+/// action='pinned' …>` payload — clients parse pin events off the
+/// stable `pin-event` element regardless of action.
 pub fn build_pinned_system_message(
     room: &jid::BareJid,
     pinner_jid: &jid::BareJid,
@@ -182,16 +127,7 @@ pub fn build_pinned_system_message(
     preview: Option<&PinPreview>,
     reason: Option<&str>,
 ) -> Message {
-    let mut element = Element::builder("pinned", NS_WADDLE_PIN_V0)
-        .attr("target", target_stanza_id.id.as_str())
-        .attr("by", pinner_jid.to_string().as_str())
-        .build();
-    if let Some(reason) = reason {
-        element.set_attr("reason", reason);
-    }
-    if let Some(preview) = preview {
-        element.append_child(build_preview_element(preview));
-    }
+    let element = build_pin_event_element("pinned", pinner_jid, target_stanza_id, preview, reason);
     new_room_message(
         room,
         format!(
@@ -204,6 +140,7 @@ pub fn build_pinned_system_message(
 
 /// Build the system message broadcast on a successful unpin (or on a
 /// XEP-0424 retraction cascade, in which case `reason` is `Some("retracted")`).
+/// Wraps the action in the same `<pin-event>` envelope as the pin path.
 pub fn build_unpinned_system_message(
     room: &jid::BareJid,
     pinner_jid: &jid::BareJid,
@@ -211,13 +148,7 @@ pub fn build_unpinned_system_message(
     target_stanza_id: &StanzaId,
     reason: Option<&str>,
 ) -> Message {
-    let mut element = Element::builder("unpinned", NS_WADDLE_PIN_V0)
-        .attr("target", target_stanza_id.id.as_str())
-        .attr("by", pinner_jid.to_string().as_str())
-        .build();
-    if let Some(reason) = reason {
-        element.set_attr("reason", reason);
-    }
+    let element = build_pin_event_element("unpinned", pinner_jid, target_stanza_id, None, reason);
     let body = if reason == Some("retracted") {
         "Pinned message was retracted by its author".to_owned()
     } else {
@@ -227,6 +158,31 @@ pub fn build_unpinned_system_message(
         )
     };
     new_room_message(room, body, element)
+}
+
+/// Build a `<pin-event xmlns='urn:waddle:pin:0' action='…' target='…' by='…'
+/// [reason='…']>` element with an optional `<preview/>` child. The single
+/// element type carries both pin and unpin events so clients can filter
+/// the room timeline on `name() == "pin-event"` regardless of action.
+fn build_pin_event_element(
+    action: &str,
+    pinner_jid: &jid::BareJid,
+    target_stanza_id: &StanzaId,
+    preview: Option<&PinPreview>,
+    reason: Option<&str>,
+) -> Element {
+    let mut element = Element::builder("pin-event", NS_WADDLE_PIN_V0)
+        .attr("action", action)
+        .attr("target", target_stanza_id.id.as_str())
+        .attr("by", pinner_jid.to_string().as_str())
+        .build();
+    if let Some(reason) = reason {
+        element.set_attr("reason", reason);
+    }
+    if let Some(preview) = preview {
+        element.append_child(build_preview_element(preview));
+    }
+    element
 }
 
 fn new_room_message(room: &jid::BareJid, body: String, payload: Element) -> Message {
@@ -386,7 +342,7 @@ mod tests {
     }
 
     #[test]
-    fn admin_pin_emits_apply_and_broadcast_and_halts() {
+    fn admin_pin_emits_apply_request_and_halts() {
         let room = bare("room@conf.example");
         let sender = full("alice@example.com/web");
         let occupants = vec![occupant(sender.clone(), "alice", Affiliation::Admin)];
@@ -399,45 +355,34 @@ mod tests {
             RoomHandlerOutcome::Halt(events) => events,
             RoomHandlerOutcome::Continue(_) => panic!("authorized pin must Halt"),
         };
-        assert_eq!(events.len(), 2, "expected ApplyPinChange + Broadcast");
+        assert_eq!(
+            events.len(),
+            1,
+            "handler emits only ApplyPinChange — interpreter does MAM lookup + broadcast"
+        );
         match &events[0] {
-            OutboundEvent::ApplyPinChange { room: r, change } => {
+            OutboundEvent::ApplyPinChange { room: r, request } => {
                 assert_eq!(r, &room);
-                match change {
-                    PinStateChange::Pin(entry) => {
-                        assert_eq!(entry.target_stanza_id.id, "stanza-target");
-                        assert_eq!(entry.pinner_jid, bare("alice@example.com"));
+                match request {
+                    PinChangeRequest::Pin {
+                        target_stanza_id,
+                        pinner_jid,
+                        pinner_nick,
+                        ..
+                    } => {
+                        assert_eq!(target_stanza_id.id, "stanza-target");
+                        assert_eq!(pinner_jid, &bare("alice@example.com"));
+                        assert_eq!(pinner_nick, "alice");
                     }
-                    other => panic!("expected Pin change, got {other:?}"),
+                    other => panic!("expected Pin request, got {other:?}"),
                 }
             }
-            other => panic!("expected ApplyPinChange first, got {other:?}"),
-        }
-        match &events[1] {
-            OutboundEvent::BroadcastRoomSystemMessage { room: r, message } => {
-                assert_eq!(r, &room);
-                assert_eq!(message.type_, MessageType::Groupchat);
-                let from_jid = message.from.as_ref().expect("from set");
-                assert_eq!(from_jid.to_string(), room.to_string());
-                let pinned = message
-                    .payloads
-                    .iter()
-                    .find(|e| e.name() == "pinned" && e.ns() == NS_WADDLE_PIN_V0)
-                    .expect("pinned element present");
-                assert_eq!(pinned.attr("target"), Some("stanza-target"));
-                assert_eq!(pinned.attr("by"), Some("alice@example.com"));
-                let preview = pinned
-                    .children()
-                    .find(|c| c.name() == "preview")
-                    .expect("preview present on pin");
-                assert!(preview.children().any(|c| c.name() == "author"));
-            }
-            other => panic!("expected BroadcastRoomSystemMessage second, got {other:?}"),
+            other => panic!("expected ApplyPinChange, got {other:?}"),
         }
     }
 
     #[test]
-    fn admin_unpin_emits_unpin_change_without_preview() {
+    fn admin_unpin_emits_unpin_request_without_preview() {
         let room = bare("room@conf.example");
         let sender = full("alice@example.com/web");
         let occupants = vec![occupant(sender.clone(), "alice", Affiliation::Owner)];
@@ -450,29 +395,20 @@ mod tests {
             RoomHandlerOutcome::Halt(events) => events,
             RoomHandlerOutcome::Continue(_) => panic!("authorized unpin must Halt"),
         };
+        assert_eq!(events.len(), 1);
         match &events[0] {
-            OutboundEvent::ApplyPinChange { change, .. } => match change {
-                PinStateChange::Unpin { target_stanza_id } => {
+            OutboundEvent::ApplyPinChange { request, .. } => match request {
+                PinChangeRequest::Unpin {
+                    target_stanza_id,
+                    reason,
+                    ..
+                } => {
                     assert_eq!(target_stanza_id.id, "stanza-target");
+                    assert!(reason.is_none(), "manual unpin has no reason");
                 }
-                other => panic!("expected Unpin change, got {other:?}"),
+                other => panic!("expected Unpin request, got {other:?}"),
             },
-            other => panic!("expected ApplyPinChange first, got {other:?}"),
-        }
-        match &events[1] {
-            OutboundEvent::BroadcastRoomSystemMessage { message, .. } => {
-                let unpinned = message
-                    .payloads
-                    .iter()
-                    .find(|e| e.name() == "unpinned" && e.ns() == NS_WADDLE_PIN_V0)
-                    .expect("unpinned element present");
-                assert_eq!(unpinned.attr("target"), Some("stanza-target"));
-                assert!(
-                    unpinned.children().all(|c| c.name() != "preview"),
-                    "unpin must not carry preview"
-                );
-            }
-            other => panic!("expected BroadcastRoomSystemMessage second, got {other:?}"),
+            other => panic!("expected ApplyPinChange, got {other:?}"),
         }
     }
 

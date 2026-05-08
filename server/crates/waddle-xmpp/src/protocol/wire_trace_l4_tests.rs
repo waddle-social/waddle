@@ -345,7 +345,6 @@ fn outbound_variant_name(event: &OutboundEvent) -> &'static str {
             "ApplyGroupchatRetractionTombstone"
         }
         OutboundEvent::ApplyPinChange { .. } => "ApplyPinChange",
-        OutboundEvent::BroadcastRoomSystemMessage { .. } => "BroadcastRoomSystemMessage",
         OutboundEvent::PersistRoomSubject { .. } => "PersistRoomSubject",
         OutboundEvent::ProjectInbox { .. } => "ProjectInbox",
         OutboundEvent::ProjectGroupchatInbox { .. } => "ProjectGroupchatInbox",
