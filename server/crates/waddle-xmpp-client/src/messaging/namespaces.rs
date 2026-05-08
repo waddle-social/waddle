@@ -1,6 +1,6 @@
 pub(crate) const NS_DELAY: &str = "urn:xmpp:delay";
 pub(crate) const NS_STANZA_ID: &str = "urn:xmpp:sid:0";
-pub(crate) const NS_ORIGIN_ID: &str = "urn:xmpp:origin-id:0";
+pub(crate) const NS_ORIGIN_ID: &str = "urn:xmpp:sid:0";
 pub const NS_REACTIONS: &str = "urn:xmpp:reactions:0";
 pub(crate) const NS_MARKUP: &str = "urn:xmpp:markup:0";
 pub(crate) const NS_WADDLE_MARKUP: &str = "urn:waddle:markup:0";

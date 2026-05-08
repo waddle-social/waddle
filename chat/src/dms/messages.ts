@@ -600,7 +600,7 @@ export function useDirectMessages(
   async function toggleReaction(messageId: string, emoji: string) {
     if (!xmppClient.value || !activePeerJid.value || !session.value) return;
     const msg = findMessageById(messages.value, messageId);
-    const targetId = msg?.id ?? messageId;
+    const targetId = msg?.replyableId ?? msg?.id ?? messageId;
     const myNick = session.value.username;
     const currentReactions = msg?.reactions ?? {};
     const previousEmojis: string[] = [];

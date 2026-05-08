@@ -41,7 +41,9 @@ pub struct WaddleMessage {
 pub struct WaddleArchivedMessage {
     pub mam_id: String,
     pub query_id: Option<String>,
+    pub id: Option<String>,
     pub stanza_id: Option<String>,
+    pub origin_id: Option<String>,
     pub timestamp: Option<String>,
     pub from: Option<String>,
     pub to: Option<String>,

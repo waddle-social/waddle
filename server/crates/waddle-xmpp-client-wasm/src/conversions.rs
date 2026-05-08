@@ -130,7 +130,9 @@ pub(crate) fn archived_to_js(archived: ArchivedMessage) -> WaddleArchivedMessage
     WaddleArchivedMessage {
         mam_id: archived.mam_id,
         query_id: archived.query_id,
-        stanza_id: archived.stanza_id,
+        id: archived.id.map(|id| id.to_string()),
+        stanza_id: archived.stanza_id.map(|id| id.to_string()),
+        origin_id: archived.origin_id.map(|id| id.to_string()),
         timestamp: archived.timestamp.map(|timestamp| timestamp.to_rfc3339()),
         from: archived.from,
         to: archived.to,
@@ -365,6 +367,36 @@ mod inbound_to_js_tests {
         assert_eq!(reference.begin, 4);
         assert_eq!(reference.end, 23);
         assert!(reference.anchor.is_none());
+    }
+
+    #[test]
+    fn archived_to_js_preserves_direct_message_business_ids_for_xep0444_refresh() {
+        let archived = parse_mam_archived(
+            "<message xmlns='jabber:client'>\
+               <result xmlns='urn:xmpp:mam:2' id='mam-dm-original' queryid='q1'>\
+                 <forwarded xmlns='urn:xmpp:forward:0'>\
+                   <delay xmlns='urn:xmpp:delay' stamp='2026-05-06T12:00:00Z'/>\
+                   <message xmlns='jabber:client' type='chat' id='dm-original-wire-id' \
+                            from='alice@example.com/desktop' to='bob@example.com'>\
+                     <origin-id xmlns='urn:xmpp:sid:0' id='dm-original-origin-id'/>\
+                     <body>direct reaction survives refresh</body>\
+                   </message>\
+                 </forwarded>\
+               </result>\
+             </message>",
+        );
+
+        let value =
+            serde_json::to_value(archived_to_js(archived)).expect("archived DTO should serialize");
+
+        assert_eq!(
+            value.get("id").and_then(serde_json::Value::as_str),
+            Some("dm-original-wire-id")
+        );
+        assert_eq!(
+            value.get("origin_id").and_then(serde_json::Value::as_str),
+            Some("dm-original-origin-id")
+        );
     }
 
     #[test]

@@ -270,7 +270,9 @@ fn archived_to_ffi(archived: waddle_xmpp_client::ArchivedMessage) -> WaddleArchi
     WaddleArchivedMessage {
         mam_id: archived.mam_id,
         query_id: archived.query_id,
-        stanza_id: archived.stanza_id,
+        id: archived.id.map(|id| id.to_string()),
+        stanza_id: archived.stanza_id.map(|id| id.to_string()),
+        origin_id: archived.origin_id.map(|id| id.to_string()),
         timestamp: archived.timestamp.map(|t| t.to_rfc3339()),
         from: archived.from,
         to: archived.to,

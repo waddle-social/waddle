@@ -4,7 +4,7 @@ import type { WaddleSession } from "../src/lib/server-auth";
 import { roomBareJidFor, type LiveDmMessage, type LiveRoomMessage } from "../src/lib/xmpp-client";
 import { useDirectMessages } from "../src/dms/messages";
 import { useChannelMessages } from "../src/channels/messages";
-import { roomMessageFromArchived } from "../src/lib/xmpp/client";
+import { dmMessageFromArchived, roomMessageFromArchived } from "../src/lib/xmpp/client";
 import type { WasmArchivedMessage } from "../src/lib/xmpp/wasm-types";
 import { handlerStubs } from "./helpers/xmpp-client-mock";
 
@@ -505,6 +505,93 @@ describe("XEP-0198 delivery status (DM)", () => {
 
     const original = dm.messages.value.find((m) => m.id === "dm-original");
     expect(original?.reactions).toEqual({ "🔥": ["bob"] });
+  });
+
+  test("MAM-replayed DM reactions survive when archived DTOs expose the conformant direct ID", async () => {
+    const originalWireId = "dm-original-wire-id";
+    const archivedOriginal: WasmArchivedMessage = {
+      mam_id: "mam-dm-original",
+      message_type: "chat",
+      from: "alice@example.com/desktop",
+      to: "bob@example.com",
+      id: originalWireId,
+      body: "react to me in dm after refresh",
+      reaction_emojis: [],
+      is_muc: false,
+      markup_spans: [],
+      mention_uris: [],
+      references: [],
+      is_sticker: false,
+      shared_files: [],
+      timestamp: "2024-01-01T00:00:00Z",
+    };
+    const archivedReaction: WasmArchivedMessage = {
+      mam_id: "mam-dm-reaction",
+      message_type: "chat",
+      from: "bob@example.com/desktop",
+      to: "alice@example.com",
+      reaction_target_id: originalWireId,
+      reaction_emojis: ["🔥"],
+      is_muc: false,
+      markup_spans: [],
+      mention_uris: [],
+      references: [],
+      is_sticker: false,
+      shared_files: [],
+      timestamp: "2024-01-01T00:01:00Z",
+    };
+    const liveMessages = [archivedOriginal, archivedReaction]
+      .map((message) => dmMessageFromArchived(message, "alice@example.com"))
+      .filter((message): message is LiveDmMessage => !!message);
+    const client = makeDmClient(liveMessages);
+    const { dm } = makeDmMessaging(client);
+
+    await dm.loadMessages("bob@example.com");
+    await nextTick();
+
+    const original = dm.messages.value.find((m) => m.body === "react to me in dm after refresh");
+    expect(original).toBeDefined();
+    expect(original?.reactions).toEqual({ "🔥": ["bob"] });
+  });
+
+  test("DM reactions sent after MAM refresh target the archived origin-id before message id", async () => {
+    const messageId = "dm-message-id";
+    const originId = "dm-origin-id";
+    const archivedOriginal: WasmArchivedMessage = {
+      mam_id: "mam-dm-origin-original",
+      message_type: "chat",
+      from: "bob@example.com/desktop",
+      to: "alice@example.com",
+      id: messageId,
+      origin_id: originId,
+      body: "react to origin-id",
+      reaction_emojis: [],
+      is_muc: false,
+      markup_spans: [],
+      mention_uris: [],
+      references: [],
+      is_sticker: false,
+      shared_files: [],
+      timestamp: "2024-01-01T00:00:00Z",
+    };
+    const liveMessages = [archivedOriginal]
+      .map((message) => dmMessageFromArchived(message, "alice@example.com"))
+      .filter((message): message is LiveDmMessage => !!message);
+    const sendDmReaction = mock(async () => undefined);
+    const client = makeDmClient(liveMessages);
+    (client as unknown as { value: Record<string, unknown> }).value = {
+      ...(client as unknown as { value: Record<string, unknown> }).value,
+      sendDmReaction,
+    };
+    const { dm } = makeDmMessaging(client);
+
+    await dm.loadMessages("bob@example.com");
+    await nextTick();
+    await dm.toggleReaction(messageId, "👍");
+
+    expect(sendDmReaction).toHaveBeenCalledWith("bob@example.com", originId, ["👍"]);
+    const original = dm.messages.value.find((m) => m.body === "react to origin-id");
+    expect(original?.reactions).toEqual({ "👍": ["alice"] });
   });
 
   test("DM toggleReaction optimistically updates the local timeline (the sender device gets no carbon)", async () => {

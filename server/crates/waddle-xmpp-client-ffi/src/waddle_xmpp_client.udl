@@ -36,7 +36,9 @@ dictionary WaddleMessage {
 dictionary WaddleArchivedMessage {
     string mam_id;
     string? query_id;
+    string? id;
     string? stanza_id;
+    string? origin_id;
     string? timestamp;
     string? from;
     string? to;

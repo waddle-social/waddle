@@ -55,6 +55,24 @@ fn parse_message_with_stanza_id() {
 }
 
 #[test]
+fn parse_message_with_origin_id() {
+    let e = Element::builder("message", NS_CLIENT)
+        .attr("type", "chat")
+        .attr("id", "m4")
+        .append(Element::builder("body", NS_CLIENT).append("hi").build())
+        .append(
+            Element::builder("origin-id", NS_ORIGIN_ID)
+                .attr("id", "client-origin-42")
+                .build(),
+        )
+        .build();
+    let MessagingEvent::Message(msg) = parse(&e).unwrap() else {
+        panic!("expected Message");
+    };
+    assert_eq!(msg.origin_id.as_deref(), Some("client-origin-42"));
+}
+
+#[test]
 fn parse_message_with_chat_state() {
     let e = el(
         "<message xmlns='jabber:client' type='chat' to='alice@example.com'>\

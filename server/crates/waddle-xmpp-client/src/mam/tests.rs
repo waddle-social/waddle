@@ -83,9 +83,54 @@ fn parse_mam_result_happy_path() {
     assert_eq!(archived.message_type, "chat");
     assert_eq!(archived.body.as_deref(), Some("Hello world"));
     assert_eq!(archived.from.as_deref(), Some("alice@example.com/res"));
+    assert!(archived.id.is_none());
+    assert!(archived.origin_id.is_none());
     assert!(archived.timestamp.is_some());
     let ts = archived.timestamp.unwrap();
     assert_eq!(ts.year(), 2024);
+}
+
+#[test]
+fn parse_mam_result_preserves_inner_message_and_origin_ids() {
+    let inner = Element::builder("message", CLIENT_NS)
+        .attr("from", "alice@example.com/desktop")
+        .attr("to", "bob@example.com")
+        .attr("type", "chat")
+        .attr("id", "direct-message-id")
+        .append(
+            Element::builder("origin-id", XEP0359_NS)
+                .attr("id", "direct-origin-id")
+                .build(),
+        )
+        .append(Element::builder("body", CLIENT_NS).append("hi").build())
+        .build();
+    let forwarded = Element::builder("forwarded", FORWARD_NS)
+        .append(
+            Element::builder("delay", DELAY_NS)
+                .attr("stamp", "2024-01-01T12:00:00Z")
+                .build(),
+        )
+        .append(inner)
+        .build();
+    let result = Element::builder("result", MAM_NS)
+        .attr("id", "mam-id-with-business-id")
+        .attr("queryid", "qid-business")
+        .append(forwarded)
+        .build();
+    let el = Element::builder("message", CLIENT_NS)
+        .append(result)
+        .build();
+
+    let archived = parse_mam_result(&el).expect("should parse");
+
+    assert_eq!(
+        archived.id.as_ref().map(|id| id.as_str()),
+        Some("direct-message-id")
+    );
+    assert_eq!(
+        archived.origin_id.as_ref().map(|id| id.as_str()),
+        Some("direct-origin-id")
+    );
 }
 
 #[test]
@@ -389,7 +434,12 @@ mod query {
         ArchivedMessage {
             mam_id: mam_id.to_string(),
             query_id: Some(query_id.to_string()),
-            stanza_id: Some(mam_id.to_string()),
+            id: None,
+            stanza_id: Some(waddle_xmpp_core::xep0359::StanzaId::new(
+                mam_id,
+                "room@muc.example.com".parse().expect("valid archive jid"),
+            )),
+            origin_id: None,
             timestamp: None,
             from: Some("room@muc.example.com/alice".to_string()),
             to: Some("alice@example.com/res".to_string()),

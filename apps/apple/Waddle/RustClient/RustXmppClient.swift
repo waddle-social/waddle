@@ -220,7 +220,8 @@ final class RustXmppClient: ObservableObject {
             size: UInt64(size),
             width: nil,
             height: nil,
-            disposition: inferredDisposition(for: mediaType)
+            disposition: inferredDisposition(for: mediaType),
+            encrypted: nil
         )
         let options = WaddleSendOptions(
             stanzaId: nil,
@@ -382,6 +383,18 @@ private func parseRFC3339(_ string: String) -> Date? {
     return formatter.date(from: string)
 }
 
+private func makeEncryptedSource(
+    _ encrypted: WaddleEncryptedFile,
+    fallbackURL: String
+) -> XMPPEncryptedSource {
+    XMPPEncryptedSource(
+        url: encrypted.sources.first ?? fallbackURL,
+        keyBase64: encrypted.keyB64,
+        ivBase64: encrypted.ivB64,
+        cipher: encrypted.cipher
+    )
+}
+
 private func makeSharedFile(_ file: WaddleSharedFile) -> XMPPSharedFile {
     XMPPSharedFile(
         url: file.url,
@@ -391,7 +404,7 @@ private func makeSharedFile(_ file: WaddleSharedFile) -> XMPPSharedFile {
         width: file.width.flatMap(Int.init),
         height: file.height.flatMap(Int.init),
         disposition: file.disposition,
-        encryptedSource: nil
+        encryptedSource: file.encrypted.map { makeEncryptedSource($0, fallbackURL: file.url) }
     )
 }
 
@@ -409,11 +422,14 @@ private extension WaddleMamPage {
     func toXMPPArchivePage() -> XMPPArchivePage {
         let converted = messages.map { archived -> XMPPArchiveMessage in
             let timestamp = archived.timestamp.flatMap { parseRFC3339($0) }
+            let eventID = archived.messageType == "groupchat"
+                ? archived.stanzaId
+                : (archived.originId ?? archived.id ?? archived.stanzaId)
             let msgEvent = XMPPMessageEvent(
                 from: archived.from,
                 to: archived.to,
                 type: archived.messageType,
-                id: archived.stanzaId,
+                id: eventID,
                 stanzaID: archived.stanzaId,
                 body: archived.body,
                 subject: nil,
