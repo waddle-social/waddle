@@ -20,30 +20,28 @@
 
 .site-footer {
   position: fixed;
-  left: 50%;
-  bottom: clamp(0.15rem, 0.7vw, 0.45rem);
+  left: clamp(0.75rem, 1.6vw, 1.25rem);
+  right: clamp(0.75rem, 1.6vw, 1.25rem);
+  bottom: clamp(0.5rem, 1.2vw, 0.85rem);
   z-index: 3;
-  display: inline-flex;
+  display: flex;
   align-items: center;
   justify-content: center;
-  gap: 0.8rem;
-  max-width: calc(100% - 2rem);
+  flex-wrap: wrap;
+  gap: 0.6rem 0.8rem;
   padding: 0.55rem 0.75rem 0.6rem;
   border: 0;
   border-radius: 8px;
   background: none;
   color: color-mix(in oklab, var(--fg) 66%, var(--bg-c));
   font-family: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
-  font-size: 0.78rem;
+  font-size: clamp(0.92rem, 1.6vw, 1.05rem);
   font-weight: 500;
   line-height: 1;
-  white-space: nowrap;
-  transform: translateX(-50%);
 }
 
 .site-footer--stacked {
   position: static;
-  transform: none;
   margin-top: clamp(1rem, 3vw, 2rem);
 }
 
@@ -55,19 +53,20 @@
 
 .site-footer-made {
   gap: 0.35rem;
+  white-space: nowrap;
 }
 
 .site-footer-flags {
-  gap: 0.08rem;
-  font-size: 1rem;
+  gap: 0.08em;
+  font-size: 1.25em;
   line-height: 1;
 }
 
 .site-footer-flags a {
   display: inline-grid;
   place-items: center;
-  width: 1.35rem;
-  height: 1.35rem;
+  width: 1.3em;
+  height: 1.3em;
   border-radius: 4px;
   color: inherit;
   line-height: 1;
@@ -99,6 +98,37 @@ html[data-theme="dark"] .site-footer-flags a {
   background: currentColor;
 }
 
+.site-footer-infra {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  white-space: nowrap;
+}
+
+.site-footer-infra-link {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 3px;
+  line-height: 0;
+  transition: opacity 180ms ease;
+}
+
+.site-footer-infra-link:hover {
+  opacity: 0.85;
+}
+
+.site-footer-infra-link:focus-visible {
+  outline: 2px solid color-mix(in oklab, var(--halo) 70%, var(--bg-c));
+  outline-offset: 4px;
+}
+
+.site-footer-infra-logo {
+  display: block;
+  height: 1.65em;
+  width: auto;
+  border-radius: 3px;
+}
+
 .site-footer > a:hover {
   color: var(--halo);
 }
@@ -107,12 +137,4 @@ html[data-theme="dark"] .site-footer-flags a {
   border-radius: 4px;
   outline: 2px solid color-mix(in oklab, var(--halo) 70%, var(--bg-c));
   outline-offset: 4px;
-}
-
-@media (max-width: 30rem) {
-  .site-footer {
-    flex-wrap: wrap;
-    row-gap: 0.45rem;
-    white-space: normal;
-  }
 }

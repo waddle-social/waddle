@@ -8,6 +8,10 @@ export default defineConfig({
   site: "https://waddle.social",
   output: "server",
 
+  devToolbar: {
+    enabled: false,
+  },
+
   vite: {
     plugins: [tailwindcss()],
   },
