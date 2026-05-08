@@ -1,7 +1,8 @@
 //! XMPP AppState implementation bridging to waddle-server services.
 //!
 //! This module implements the `waddle_xmpp::AppState` trait by delegating to
-//! the existing auth, session, and permission services in waddle-server.
+//! the existing auth/session services and PermissionActor-backed permission
+//! actor in waddle-server.
 
 #[cfg(test)]
 use waddle_xmpp::inbox::InboxEntry;
