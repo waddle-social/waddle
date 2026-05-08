@@ -84,5 +84,30 @@ scenario: #Scenario & {
 			contains: ["pin-event"]
 			millis:   500
 		},
+
+		#DrainFrames & {
+			target:   alicePhone
+			contains: ["from=\"\(roomJid)\"", "<subject></subject>"]
+		},
+		#DrainFrames & {
+			target:   alicePhone
+			contains: ["<presence", "from=\"\(roomJid)/bob\""]
+		},
+		#DrainFrames & {
+			target:   alicePhone
+			contains: ["id=\"cue-pin-fb-target\"", "message bob will try to pin"]
+		},
+		#DrainFrames & {
+			target:   bobPhone
+			contains: ["<presence", "from=\"\(roomJid)/alice\""]
+		},
+		#DrainFrames & {
+			target:   bobPhone
+			contains: ["from=\"\(roomJid)\"", "<subject></subject>"]
+		},
+		#DrainFrames & {
+			target:   bobPhone
+			contains: ["urn:waddle:inbox:0", "cue-pin-fb-target"]
+		},
 	]
 }
