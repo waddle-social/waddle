@@ -1,4 +1,5 @@
 import type { WaddleChannelType } from "@/lib/channel-types";
+import type { PinPermission } from "@/lib/chat-types";
 import type { ExtensionAnnotation } from "@/lib/chat-ui";
 import type { WaddleEncryptedFile } from "./extensions/encrypted-file";
 
@@ -281,6 +282,11 @@ export interface DiscoveredChannel {
   spaceId?: string;
   standalone?: boolean;
   features?: string[];
+  /** #422: room's current pin permission, hydrated from the
+   * `urn:waddle:room-metadata` extended-disco form so non-owners
+   * can render the Pin action correctly under the `anyone`
+   * policy without needing owner-config access. */
+  pinPermission?: PinPermission;
 }
 
 export interface DiscoveredSpace {

@@ -200,10 +200,20 @@ pub fn build_room_space_metadata_forms_with_description(
 }
 
 /// Build Waddle-specific room metadata for values not standardized by XEP-0045.
-pub fn build_room_metadata_form(channel_type: &str) -> Element {
+///
+/// `pin_permission` carries the room's current
+/// `urn:waddle:roomconfig:pinpermission` value (#415, #422). Surfacing it
+/// here on disco-info lets non-owner clients render the Pin action
+/// correctly under the `anyone` policy without going through the
+/// owner-config GET (which would require Owner affiliation).
+pub fn build_room_metadata_form(channel_type: &str, pin_permission: &str) -> Element {
     DataForm::new(FormType::Result)
         .add_field(Field::form_type(NS_WADDLE_ROOM_METADATA))
         .add_field(Field::text_single("waddle#channel_type", channel_type))
+        .add_field(Field::text_single(
+            "urn:waddle:roomconfig:pinpermission",
+            pin_permission,
+        ))
         .into_element()
 }
 
@@ -361,7 +371,7 @@ mod tests {
 
     #[test]
     fn test_build_room_metadata_form() {
-        let form = build_room_metadata_form("forum");
+        let form = build_room_metadata_form("forum", "anyone");
         let form_type = form
             .children()
             .find(|field| field.attr("var") == Some("FORM_TYPE"))
@@ -375,6 +385,16 @@ mod tests {
             .expect("channel type field");
         let channel_type_value: String = channel_type.children().next().unwrap().texts().collect();
         assert_eq!(channel_type_value, "forum");
+
+        // #422: pin permission is surfaced on disco-info so non-owners
+        // can render the Pin action correctly under the `anyone` policy.
+        let pin_permission = form
+            .children()
+            .find(|field| field.attr("var") == Some("urn:waddle:roomconfig:pinpermission"))
+            .expect("pin permission field");
+        let pin_permission_value: String =
+            pin_permission.children().next().unwrap().texts().collect();
+        assert_eq!(pin_permission_value, "anyone");
     }
 
     #[test]

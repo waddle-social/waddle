@@ -96,7 +96,10 @@ pub(super) async fn handle_disco_info_iq(
                     if has_space_metadata {
                         features.push(Feature::spaces());
                     }
-                    extensions.push(build_room_metadata_form(channel_type));
+                    extensions.push(build_room_metadata_form(
+                        channel_type,
+                        snapshot.config.pin_permission.as_form_value(),
+                    ));
                     let response = build_disco_info_response_with_extensions(
                         request_iq,
                         &identities,
@@ -128,7 +131,13 @@ pub(super) async fn handle_disco_info_iq(
                         if has_space_metadata {
                             features.push(Feature::spaces());
                         }
-                        extensions.push(build_room_metadata_form(&channel.channel_type));
+                        // No live room actor → room isn't active; the
+                        // pin policy on disk defaults to admins-only
+                        // until the room is spun up.
+                        extensions.push(build_room_metadata_form(
+                            &channel.channel_type,
+                            waddle_xmpp::muc::PinPermission::default().as_form_value(),
+                        ));
                         let response = build_disco_info_response_with_extensions(
                             request_iq,
                             &identities,

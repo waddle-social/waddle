@@ -175,11 +175,21 @@ async function hydrateRoomInfo(xmpp: HybridClient, room: DiscoveredChannel): Pro
     const info = await sendDiscoInfo(xmpp, room.jid);
     if (!info) return room;
     const parentSpaceId = roomParentSpaceId(info);
+    // #422: server publishes the room's current pin policy on the
+    // `urn:waddle:room-metadata` extended-disco form so non-owners
+    // can read it without an owner-config GET. Unknown values fall
+    // through and the consumer defaults to `admins-only`.
+    const rawPinPermission = info.fields.get("urn:waddle:roomconfig:pinpermission");
+    const pinPermission =
+      rawPinPermission === "anyone" || rawPinPermission === "admins-only"
+        ? rawPinPermission
+        : undefined;
     return {
       ...room,
       channelType: channelTypeFromInfo(info),
       ...(parentSpaceId ? { spaceId: parentSpaceId, standalone: false } : {}),
       ...(info.features.length ? { features: info.features } : {}),
+      ...(pinPermission ? { pinPermission } : {}),
     };
   } catch {
     return room;

@@ -205,6 +205,10 @@ export function useWaddleDirectory(
         channel_type: c.channelType,
         position: c.position,
         features: c.features,
+        // #422: hydrated from the room's disco-info extended form so
+        // non-owners get correct Pin action visibility without owner
+        // affiliation.
+        ...(c.pinPermission ? { pinPermission: c.pinPermission } : {}),
       }));
 
       channels.value = channelList;
