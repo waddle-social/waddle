@@ -131,9 +131,14 @@ pub(super) async fn handle_disco_info_iq(
                         if has_space_metadata {
                             features.push(Feature::spaces());
                         }
-                        // No live room actor → room isn't active; the
-                        // pin policy on disk defaults to admins-only
-                        // until the room is spun up.
+                        // TODO(#422): RoomConfig.pin_permission is not
+                        // persisted to the `channels` table, so a
+                        // dormant room (no live actor) advertises the
+                        // default `admins-only` even if it was last
+                        // configured `anyone`. The accurate value
+                        // returns once the room actor is respawned.
+                        // Fix needs durable RoomConfig storage; track
+                        // separately.
                         extensions.push(build_room_metadata_form(
                             &channel.channel_type,
                             waddle_xmpp::muc::PinPermission::default().as_form_value(),
