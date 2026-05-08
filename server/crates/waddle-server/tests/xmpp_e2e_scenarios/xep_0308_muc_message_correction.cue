@@ -26,7 +26,23 @@ scenario: #Scenario & {
 
 	steps: [
 		#JoinMuc & {actor: alicePhone, room: roomJid, nick: "alice-phone"},
+		#ExpectFrame & {
+			target:   alicePhone
+			contains: ["from=\"\(roomJid)\"", "<subject></subject>"]
+		},
 		#JoinMuc & {actor: bobPhone, room: roomJid, nick: "bob-phone"},
+		#ExpectPresence & {
+			target:   bobPhone
+			contains: ["from=\"\(roomJid)/alice-phone\""]
+		},
+		#ExpectFrame & {
+			target:   bobPhone
+			contains: ["from=\"\(roomJid)\"", "<subject></subject>"]
+		},
+		#ExpectPresence & {
+			target:   alicePhone
+			contains: ["from=\"\(roomJid)/bob-phone\""]
+		},
 		#SendMessage & {
 			from: alicePhone
 			toJid: roomJid
@@ -35,9 +51,18 @@ scenario: #Scenario & {
 			body:  "helo from muc cue"
 		},
 		#ExpectMessage & {
+			target: alicePhone
+			body:   "helo from muc cue"
+			contains: [roomJid, "cue-muc-edit-original"]
+		},
+		#ExpectMessage & {
 			target: bobPhone
 			body:   "helo from muc cue"
 			contains: [roomJid, "cue-muc-edit-original"]
+		},
+		#ExpectFrame & {
+			target:   bobPhone
+			contains: ["urn:waddle:inbox:0", "cue-muc-edit-original"]
 		},
 		#SendMessage & {
 			from: alicePhone
@@ -50,11 +75,22 @@ scenario: #Scenario & {
 			]
 		},
 		#ExpectMessage & {
+			target: alicePhone
+			body:   "hello from muc cue"
+			payloads: [
+				#MessageCorrection & {id: "cue-muc-edit-original"},
+			]
+		},
+		#ExpectMessage & {
 			target: bobPhone
 			body:   "hello from muc cue"
 			payloads: [
 				#MessageCorrection & {id: "cue-muc-edit-original"},
 			]
+		},
+		#ExpectFrame & {
+			target:   bobPhone
+			contains: ["urn:waddle:inbox:0", "cue-muc-edit-correction"]
 		},
 	]
 }

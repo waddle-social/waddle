@@ -457,12 +457,12 @@ External integrations and bot platform.
 - [x] XEP-0163 PEP discoverable and functional
 - [x] XEP-0191 Blocking Command working
 - [x] XEP-0223 Persistent Storage best practices
-- [x] XEP-0398 Avatar Conversion (PEP↔vCard bridge)
+- [ ] XEP-0398 Avatar Conversion not supported (advertisement removed)
 - [x] XEP-0402 PEP Native Bookmarks working
 - [x] XEP-0410 MUC Self-Ping working
 
 ### MXC4: XEP-0479 Mobile Compliance
-- [x] XEP-0352 Client State Indication working
+- [ ] XEP-0352 Client State Indication not supported (advertisement removed)
 
 ### M0: XMPP Foundation
 - [x] waddle-xmpp crate created

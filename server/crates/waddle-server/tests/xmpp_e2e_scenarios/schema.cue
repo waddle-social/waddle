@@ -48,6 +48,7 @@ package xmpp_e2e_scenarios
 	#ExpectMamResult |
 	#ExpectNoMamResult |
 	#ExpectFrame |
+	#DrainFrames |
 	#ExpectNoStanza
 
 #EnableCarbons: {
@@ -254,6 +255,15 @@ package xmpp_e2e_scenarios
 	absent?: [...string]
 	elements?: [...#XmlElement]
 	absentElements?: [...#XmlElement]
+	...
+}
+
+#DrainFrames: {
+	kind: "drainFrames"
+	target: #Actor
+	contains: [...string] & [string, ...string]
+	elements?: [...#XmlElement]
+	millis: *250 | int & >=1
 	...
 }
 

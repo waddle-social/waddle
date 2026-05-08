@@ -439,5 +439,53 @@ scenario: #Scenario & {
 			}]
 			absent: [moderateBody]
 		},
+		#DrainFrames & {
+			target:   adminPhone
+			contains: ["from=\"\(roomJid)\"", "<subject></subject>"]
+		},
+		#DrainFrames & {
+			target:   adminPhone
+			contains: ["urn:xmpp:receipts", "cue-receipt-request"]
+		},
+		#DrainFrames & {
+			target:   adminPhone
+			contains: ["urn:waddle:inbox:0", "cue-fulltext-nonmatch"]
+		},
+		#DrainFrames & {
+			target:   adminPhone
+			contains: ["urn:waddle:inbox:0", "cue-reply"]
+		},
+		#DrainFrames & {
+			target:   bobPhone
+			contains: ["from=\"\(roomJid)/admin\""]
+		},
+		#DrainFrames & {
+			target:   bobPhone
+			contains: ["from=\"\(roomJid)\"", "<subject></subject>"]
+		},
+		#DrainFrames & {
+			target:   bobPhone
+			contains: ["urn:waddle:inbox:0", "cue-rich-original"]
+		},
+		#DrainFrames & {
+			target:   bobPhone
+			contains: ["cue-fulltext-nonmatch"]
+		},
+		#DrainFrames & {
+			target:   bobPhone
+			contains: ["cue-reply"]
+		},
+		#DrainFrames & {
+			target:   bobPhone
+			contains: ["urn:waddle:inbox:0", "cue-retract"]
+		},
+		#DrainFrames & {
+			target:   bobPhone
+			contains: ["urn:waddle:inbox:0", "cue-moderate-original"]
+		},
+		#DrainFrames & {
+			target:   bobPhone
+			contains: ["urn:xmpp:message-moderate:1", "cleanup"]
+		},
 	]
 }

@@ -36,8 +36,44 @@ scenario: #Scenario & {
 
 	steps: [
 		#JoinMuc & {actor: alicePhone, room: roomJid, nick: "alice-phone"},
+		#ExpectFrame & {
+			target:   alicePhone
+			contains: ["from=\"\(roomJid)\"", "<subject></subject>"]
+		},
 		#JoinMuc & {actor: aliceDesktop, room: roomJid, nick: "alice-desktop"},
+		#ExpectPresence & {
+			target:   aliceDesktop
+			contains: ["from=\"\(roomJid)/alice-phone\""]
+		},
+		#ExpectFrame & {
+			target:   aliceDesktop
+			contains: ["from=\"\(roomJid)\"", "<subject></subject>"]
+		},
+		#ExpectPresence & {
+			target:   alicePhone
+			contains: ["from=\"\(roomJid)/alice-desktop\""]
+		},
 		#JoinMuc & {actor: bobPhone, room: roomJid, nick: "bob-phone"},
+		#ExpectPresence & {
+			target:   bobPhone
+			contains: ["from=\"\(roomJid)/alice-desktop\""]
+		},
+		#ExpectPresence & {
+			target:   bobPhone
+			contains: ["from=\"\(roomJid)/alice-phone\""]
+		},
+		#ExpectFrame & {
+			target:   bobPhone
+			contains: ["from=\"\(roomJid)\"", "<subject></subject>"]
+		},
+		#ExpectPresence & {
+			target:   aliceDesktop
+			contains: ["from=\"\(roomJid)/bob-phone\""]
+		},
+		#ExpectPresence & {
+			target:   alicePhone
+			contains: ["from=\"\(roomJid)/bob-phone\""]
+		},
 		#SendMessage & {
 			from: alicePhone
 			toJid: roomJid
@@ -59,6 +95,10 @@ scenario: #Scenario & {
 			target: bobPhone
 			body:   "muc fanout message to all joined devices"
 			contains: [roomJid]
+		},
+		#ExpectFrame & {
+			target:   bobPhone
+			contains: ["urn:waddle:inbox:0", "cue-muc-fanout"]
 		},
 	]
 }

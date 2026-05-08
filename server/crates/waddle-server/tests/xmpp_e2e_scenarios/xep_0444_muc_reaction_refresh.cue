@@ -26,7 +26,23 @@ scenario: #Scenario & {
 
 	steps: [
 		#JoinMuc & {actor: alicePhone, room: roomJid, nick: "alice-phone"},
+		#ExpectFrame & {
+			target:   alicePhone
+			contains: ["from=\"\(roomJid)\"", "<subject></subject>"]
+		},
 		#JoinMuc & {actor: bobPhone, room: roomJid, nick: "bob-phone"},
+		#ExpectPresence & {
+			target:   bobPhone
+			contains: ["from=\"\(roomJid)/alice-phone\""]
+		},
+		#ExpectFrame & {
+			target:   bobPhone
+			contains: ["from=\"\(roomJid)\"", "<subject></subject>"]
+		},
+		#ExpectPresence & {
+			target:   alicePhone
+			contains: ["from=\"\(roomJid)/bob-phone\""]
+		},
 		#SendMessage & {
 			from:  alicePhone
 			toJid: roomJid
@@ -35,17 +51,38 @@ scenario: #Scenario & {
 			body:  "muc reaction survives refresh"
 		},
 		#ExpectMessage & {
+			target:   alicePhone
+			body:     "muc reaction survives refresh"
+			contains: [roomJid, "cue-muc-react-original"]
+		},
+		#ExpectMessage & {
 			target:             bobPhone
 			body:               "muc reaction survives refresh"
 			contains:           [roomJid, "cue-muc-react-original"]
 			captureStanzaIdAs:  "mucOriginalStanzaId"
 			captureStanzaIdBy:  roomJid
 		},
+		#ExpectFrame & {
+			target:   bobPhone
+			contains: ["urn:waddle:inbox:0", "cue-muc-react-original"]
+		},
 		#SendMessage & {
 			from:  bobPhone
 			toJid: roomJid
 			type:  "groupchat"
 			id:    "cue-muc-reaction-1"
+			payloads: [
+				#Reactions & {
+					idFrom: "mucOriginalStanzaId"
+					emojis: ["👍"]
+				},
+				#ProcessingHint & {name: "store"},
+			]
+		},
+		#ExpectMessage & {
+			target:     bobPhone
+			bodyAbsent: true
+			contains:   [roomJid, "cue-muc-reaction-1"]
 			payloads: [
 				#Reactions & {
 					idFrom: "mucOriginalStanzaId"
@@ -66,9 +103,32 @@ scenario: #Scenario & {
 				#ProcessingHint & {name: "store"},
 			]
 		},
+		#DrainFrames & {
+			target:   alicePhone
+			contains: ["urn:waddle:inbox:0", "cue-muc-reaction-1"]
+			millis:   1000
+		},
 		#DisconnectActor & {actor: alicePhone},
+		#DrainFrames & {
+			target:   bobPhone
+			contains: ["from=\"\(roomJid)/alice-phone\"", "type=\"unavailable\""]
+			millis:   1000
+		},
 		#ConnectActor & {actor: alicePhone},
 		#JoinMuc & {actor: alicePhone, room: roomJid, nick: "alice-phone"},
+		#ExpectFrame & {
+			target:   alicePhone
+			contains: ["from=\"\(roomJid)\"", "<subject></subject>"]
+		},
+		#ExpectPresence & {
+			target:   alicePhone
+			contains: ["from=\"\(roomJid)/bob-phone\""]
+		},
+		#DrainFrames & {
+			target:   bobPhone
+			contains: ["from=\"\(roomJid)/alice-phone\""]
+			millis:   1000
+		},
 		#QueryMam & {
 			actor:   alicePhone
 			archive: roomJid

@@ -439,6 +439,11 @@ impl WsXmppClient {
                     Ok(tungstenite::Message::Text(text)) if text.contains("<close") => {
                         return Ok(());
                     }
+                    Ok(tungstenite::Message::Text(text)) => {
+                        return Err(format!(
+                            "Unexpected text frame while waiting for XMPP close acknowledgement: {text}"
+                        ));
+                    }
                     Ok(tungstenite::Message::Close(_)) => {
                         return Err("WebSocket closed before XMPP close acknowledgement".into());
                     }
@@ -458,6 +463,11 @@ impl WsXmppClient {
             while let Some(message) = self.ws.next().await {
                 match message {
                     Ok(tungstenite::Message::Close(_)) => return Ok(()),
+                    Ok(tungstenite::Message::Text(text)) => {
+                        return Err(format!(
+                            "Unexpected text frame after WebSocket close request: {text}"
+                        ));
+                    }
                     // Once the XMPP close ack has been received and the
                     // WebSocket close frame has been sent, a peer-side TCP
                     // reset is equivalent to the connection being gone.

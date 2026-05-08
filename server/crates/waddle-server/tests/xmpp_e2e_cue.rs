@@ -372,6 +372,16 @@ enum Step {
         #[serde(default, rename = "absentElements")]
         absent_elements: Vec<XmlElementSpec>,
     },
+    #[serde(rename = "drainFrames")]
+    DrainFrames {
+        target: Actor,
+        #[serde(default)]
+        contains: Vec<String>,
+        #[serde(default)]
+        elements: Vec<XmlElementSpec>,
+        #[serde(default)]
+        millis: u64,
+    },
     #[serde(rename = "expectNoStanza")]
     ExpectNoStanza {
         target: Actor,
@@ -766,6 +776,7 @@ async fn run_scenario(scenario: Scenario) -> Result<()> {
     }
     if step_result.is_ok() {
         step_result = assert_mam_results_consumed(&ctx)
+            .and_then(|()| assert_no_pending_frames(&ctx))
             .with_context(|| format!("scenario {} ended", scenario.name));
     }
 
@@ -822,6 +833,7 @@ async fn close_clients(clients: HashMap<String, WsXmppClient>) -> Result<()> {
 
 async fn disconnect_actor(ctx: &mut ScenarioContext, actor: &Actor) -> Result<()> {
     let key = actor_key(actor);
+    assert_actor_has_no_pending_frames(ctx, actor)?;
     ctx.pending_frames.remove(&key);
     if let Some(client) = ctx.clients.remove(&key) {
         client
@@ -1484,6 +1496,36 @@ async fn execute_step(ctx: &mut ScenarioContext, step: &Step) -> Result<()> {
                 "frame expectation",
             )?;
         }
+        Step::DrainFrames {
+            target,
+            contains,
+            elements,
+            millis,
+        } => {
+            let captures_snapshot = ctx.captures.clone();
+            let drain_millis = if *millis == 0 { 250 } else { *millis };
+            let deadline = Instant::now() + Duration::from_millis(drain_millis);
+            let mut non_matching_frames = Vec::new();
+            loop {
+                let now = Instant::now();
+                if now >= deadline {
+                    break;
+                }
+                let Some(frame) = recv_timeout(ctx, target, deadline - now).await? else {
+                    break;
+                };
+                let matches = contains.iter().all(|part| frame.contains(part))
+                    && elements
+                        .iter()
+                        .all(|spec| frame_has_element(&frame, spec, &captures_snapshot));
+                if !matches {
+                    non_matching_frames.push(frame);
+                }
+            }
+            for frame in non_matching_frames.into_iter().rev() {
+                push_pending_front(ctx, target, frame);
+            }
+        }
         Step::ExpectNoStanza {
             target,
             body,
@@ -2076,6 +2118,32 @@ fn assert_mam_results_consumed(ctx: &ScenarioContext) -> Result<()> {
     Err(anyhow!(
         "unconsumed MAM results after previous query: {:?}",
         &ctx.last_mam_frames[ctx.last_mam_frame_index..]
+    ))
+}
+
+fn assert_no_pending_frames(ctx: &ScenarioContext) -> Result<()> {
+    let pending = ctx
+        .pending_frames
+        .iter()
+        .filter(|(_, frames)| !frames.is_empty())
+        .map(|(actor, frames)| format!("{actor}: {frames:?}"))
+        .collect::<Vec<_>>();
+    if pending.is_empty() {
+        return Ok(());
+    }
+    Err(anyhow!("unconsumed pending frames: {}", pending.join("; ")))
+}
+
+fn assert_actor_has_no_pending_frames(ctx: &ScenarioContext, actor: &Actor) -> Result<()> {
+    let key = actor_key(actor);
+    let Some(frames) = ctx.pending_frames.get(&key) else {
+        return Ok(());
+    };
+    if frames.is_empty() {
+        return Ok(());
+    }
+    Err(anyhow!(
+        "unconsumed pending frames before disconnecting {key}: {frames:?}"
     ))
 }
 

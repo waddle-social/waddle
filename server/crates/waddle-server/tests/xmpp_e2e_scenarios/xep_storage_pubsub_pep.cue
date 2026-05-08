@@ -231,6 +231,11 @@ scenario: #Scenario & {
 			}
 		},
 		#ExpectIq & {target: adminPhone, id: "cue-block-set", type: "result"},
+		#ExpectIq & {
+			target:   adminPhone
+			type:     "set"
+			contains: ["urn:xmpp:blocking", "spammer@localhost"]
+		},
 		#SendIq & {
 			actor: adminPhone
 			type:  "get"
