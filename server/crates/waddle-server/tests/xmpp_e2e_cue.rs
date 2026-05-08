@@ -381,6 +381,10 @@ enum Step {
         elements: Vec<XmlElementSpec>,
         #[serde(default)]
         millis: u64,
+        #[serde(default)]
+        min: Option<u64>,
+        #[serde(default)]
+        max: Option<u64>,
     },
     #[serde(rename = "expectNoStanza")]
     ExpectNoStanza {
@@ -1501,11 +1505,25 @@ async fn execute_step(ctx: &mut ScenarioContext, step: &Step) -> Result<()> {
             contains,
             elements,
             millis,
+            min,
+            max,
         } => {
             let captures_snapshot = ctx.captures.clone();
             let drain_millis = if *millis == 0 { 250 } else { *millis };
+            let min_matches = min.unwrap_or(1);
+            let max_matches = max.unwrap_or(min_matches);
+            if max_matches < min_matches {
+                return Err(anyhow!(
+                    "drainFrames for {}.{} has max {} below min {}",
+                    target.user,
+                    target.device,
+                    max_matches,
+                    min_matches
+                ));
+            }
             let deadline = Instant::now() + Duration::from_millis(drain_millis);
             let mut non_matching_frames = Vec::new();
+            let mut matched_frames = 0_u64;
             loop {
                 let now = Instant::now();
                 if now >= deadline {
@@ -1520,10 +1538,32 @@ async fn execute_step(ctx: &mut ScenarioContext, step: &Step) -> Result<()> {
                         .all(|spec| frame_has_element(&frame, spec, &captures_snapshot));
                 if !matches {
                     non_matching_frames.push(frame);
+                } else {
+                    matched_frames += 1;
                 }
             }
             for frame in non_matching_frames.into_iter().rev() {
                 push_pending_front(ctx, target, frame);
+            }
+            if matched_frames < min_matches {
+                return Err(anyhow!(
+                    "drainFrames for {}.{} matched {} frame(s), expected at least {} for {:?}",
+                    target.user,
+                    target.device,
+                    matched_frames,
+                    min_matches,
+                    contains
+                ));
+            }
+            if matched_frames > max_matches {
+                return Err(anyhow!(
+                    "drainFrames for {}.{} matched {} frame(s), expected at most {} for {:?}",
+                    target.user,
+                    target.device,
+                    matched_frames,
+                    max_matches,
+                    contains
+                ));
             }
         }
         Step::ExpectNoStanza {

@@ -457,7 +457,7 @@ scenario: #Scenario & {
 		},
 		#DrainFrames & {
 			target:   bobPhone
-			contains: ["from=\"\(roomJid)/admin\""]
+			contains: ["<presence", "from=\"\(roomJid)/admin\""]
 		},
 		#DrainFrames & {
 			target:   bobPhone
@@ -466,6 +466,8 @@ scenario: #Scenario & {
 		#DrainFrames & {
 			target:   bobPhone
 			contains: ["urn:waddle:inbox:0", "cue-rich-original"]
+			min:      2
+			max:      2
 		},
 		#DrainFrames & {
 			target:   bobPhone
@@ -481,7 +483,15 @@ scenario: #Scenario & {
 		},
 		#DrainFrames & {
 			target:   bobPhone
+			contains: ["id=\"cue-retract\"", "urn:xmpp:message-retract:1"]
+		},
+		#DrainFrames & {
+			target:   bobPhone
 			contains: ["urn:waddle:inbox:0", "cue-moderate-original"]
+		},
+		#DrainFrames & {
+			target:   bobPhone
+			contains: ["id=\"cue-moderate-original\"", moderateBody]
 		},
 		#DrainFrames & {
 			target:   bobPhone

@@ -264,6 +264,8 @@ package xmpp_e2e_scenarios
 	contains: [...string] & [string, ...string]
 	elements?: [...#XmlElement]
 	millis: *250 | int & >=1
+	min?:    int & >=0
+	max?:    int & >=0
 	...
 }
 

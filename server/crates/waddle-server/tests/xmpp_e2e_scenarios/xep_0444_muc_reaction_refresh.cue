@@ -113,6 +113,8 @@ scenario: #Scenario & {
 			target:   bobPhone
 			contains: ["from=\"\(roomJid)/alice-phone\"", "type=\"unavailable\""]
 			millis:   1000
+			min:      0
+			max:      1
 		},
 		#ConnectActor & {actor: alicePhone},
 		#JoinMuc & {actor: alicePhone, room: roomJid, nick: "alice-phone"},
