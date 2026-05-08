@@ -88,7 +88,15 @@ fn test_server_features_include_core_features() {
     assert!(features.contains(&Feature::receipts()));
     assert!(features.contains(&Feature::mam_extended()));
     assert!(!features.contains(&Feature::fulltext_mam()));
-    assert!(features.contains(&Feature::server_info()));
+}
+
+#[test]
+fn test_server_features_exclude_unimplemented_advertisements() {
+    let features = server_features();
+    assert!(!features.contains(&Feature::socks5_bytestreams()));
+    assert!(!features.contains(&Feature::server_info()));
+    assert!(!features.contains(&Feature::csi()));
+    assert!(!features.contains(&Feature::pep_vcard_conversion()));
 }
 
 #[test]

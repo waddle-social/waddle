@@ -17,17 +17,25 @@ package xmpp_e2e_scenarios
 }
 
 #Scenario: {
-	name:   string
-	domain: *"localhost" | string
-	users: [string]: #User
-	steps: [...#Step]
+	name:        string
+	description?: string
+	xeps?: [...#XepId]
+	domain:      *"localhost" | string
+	users:       [string]: #User
+	steps:      [...#Step]
 	...
 }
 
+#XepId: =~"^XEP-[0-9]{4}$"
+
 #Step:
 	#EnableCarbons |
+	#StreamManagement |
 	#ConnectActor |
 	#DisconnectActor |
+	#SendIq |
+	#ExpectIq |
+	#SendPresence |
 	#SendMessage |
 	#ExpectMessage |
 	#ExpectCarbon |
@@ -38,11 +46,22 @@ package xmpp_e2e_scenarios
 	#ExpectPresence |
 	#QueryMam |
 	#ExpectMamResult |
+	#ExpectNoMamResult |
+	#ExpectFrame |
 	#ExpectNoStanza
 
 #EnableCarbons: {
 	kind:  "enableCarbons"
 	actor: #Actor
+	...
+}
+
+#StreamManagement: {
+	kind:   "streamManagement"
+	actor:  #Actor
+	action: "enable" | "requestAck"
+	resume?: bool
+	max?:    int & >=1 & <=4294967295
 	...
 }
 
@@ -55,6 +74,41 @@ package xmpp_e2e_scenarios
 #DisconnectActor: {
 	kind:  "disconnectActor"
 	actor: #Actor
+	...
+}
+
+#SendIq: {
+	kind:  "sendIq"
+	actor: #Actor
+	type:  "get" | "set" | "result"
+	id?:   string
+	to?:   string
+	payload?: #XmlElement
+	...
+}
+
+#ExpectIq: {
+	kind:   "expectIq"
+	target: #Actor
+	id?:    string
+	type?:  "result" | "error" | "get" | "set"
+	contains?: [...string]
+	absent?: [...string]
+	elements?: [...#XmlElement]
+	absentElements?: [...#XmlElement]
+	captures?: [...#AttributeCapture]
+	...
+}
+
+#SendPresence: {
+	kind:   "sendPresence"
+	actor:  #Actor
+	to?:    string
+	type?:  "available" | "unavailable" | "subscribe" | "subscribed" | "unsubscribe" | "unsubscribed" | "probe"
+	show?:  "away" | "chat" | "dnd" | "xa"
+	status?: string
+	priority?: int & >=-128 & <=127
+	payloads?: [...#XmlElement]
 	...
 }
 
@@ -90,6 +144,9 @@ package xmpp_e2e_scenarios
 	captureStanzaIdBy?: string
 	payloads?: [...#ExpectedPayload]
 	contains?: [...string]
+	absent?: [...string]
+	elements?: [...#XmlElement]
+	absentElements?: [...#XmlElement]
 	...
 }
 
@@ -100,6 +157,9 @@ package xmpp_e2e_scenarios
 	#BodyExpectation
 	payloads?: [...#ExpectedPayload]
 	contains?: [...string]
+	absent?: [...string]
+	elements?: [...#XmlElement]
+	absentElements?: [...#XmlElement]
 	...
 }
 
@@ -146,7 +206,10 @@ package xmpp_e2e_scenarios
 #ExpectPresence: {
 	kind:   "expectPresence"
 	target: #Actor
-	contains: [...string] & [string, ...string]
+	contains?: [...string]
+	elements?: [...#XmlElement]
+	absentElements?: [...#XmlElement]
+	captures?: [...#AttributeCapture]
 	...
 }
 
@@ -155,7 +218,11 @@ package xmpp_e2e_scenarios
 	actor:   #Actor
 	archive: string
 	id?:     string
-	max:     *50 | int & >=1
+	max:     *50 | int & >=1 & <=4294967295
+	after?:  string
+	with?:   string
+	fulltext?: string
+	ids?: [...string]
 	...
 }
 
@@ -164,6 +231,28 @@ package xmpp_e2e_scenarios
 	#BodyExpectation
 	payloads?: [...#ExpectedPayload]
 	contains?: [...string]
+	absent?: [...string]
+	elements?: [...#XmlElement]
+	absentElements?: [...#XmlElement]
+	...
+}
+
+#ExpectNoMamResult: {
+	kind: "expectNoMamResult"
+	#BodyExpectation
+	payloads?: [...#ExpectedPayload]
+	contains?: [...string]
+	elements?: [...#XmlElement]
+	...
+}
+
+#ExpectFrame: {
+	kind: "expectFrame"
+	target: #Actor
+	contains: [...string] & [string, ...string]
+	absent?: [...string]
+	elements?: [...#XmlElement]
+	absentElements?: [...#XmlElement]
 	...
 }
 
@@ -184,9 +273,9 @@ package xmpp_e2e_scenarios
 	...
 }
 
-#Payload: #FileShare | #LinkMetadata | #MessageCorrection | #Reactions | #ProcessingHint | #PinAttachment
+#Payload: #FileShare | #LinkMetadata | #MessageCorrection | #Reactions | #ProcessingHint | #PinAttachment | #XmlPayload
 
-#ExpectedPayload: #FileShare | #LinkMetadata | #MessageCorrection | #Reactions | #ProcessingHint | #PinAttachment | #PinEvent
+#ExpectedPayload: #FileShare | #LinkMetadata | #MessageCorrection | #Reactions | #ProcessingHint | #PinAttachment | #PinEvent | #XmlPayload
 
 #MessageCorrection: {
 	kind: "messageCorrection"
@@ -257,5 +346,32 @@ package xmpp_e2e_scenarios
 	kind:   "pinEvent"
 	(#PinId | #PinIdFrom)
 	action: "pinned" | "unpinned"
+	...
+}
+
+#XmlPayload: {
+	kind:    "xml"
+	element: #XmlElement
+	expectElements?: [...#XmlElement]
+	...
+}
+
+#XmlElement: {
+	name: string
+	ns:   string
+	attrs?: [string]: string
+	attrsFrom?: [string]: string
+	attrsPresent?: [...string]
+	text?: string
+	children?: [...#XmlElement]
+	...
+}
+
+#AttributeCapture: {
+	as: string
+	name: string
+	element?: string
+	ns?: string
+	contains?: string
 	...
 }

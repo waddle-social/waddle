@@ -2,6 +2,7 @@ package xmpp_e2e_scenarios
 
 scenario: #Scenario & {
 	name: "multi-device-carbons"
+	xeps: ["XEP-0203", "XEP-0280", "XEP-0297", "XEP-0313"]
 	users: {
 		alice: devices: {
 			phone: #Actor & {

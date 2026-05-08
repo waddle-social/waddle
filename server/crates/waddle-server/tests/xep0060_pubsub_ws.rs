@@ -563,8 +563,8 @@ async fn outcast_subscriber_cannot_subscribe() {
 
     // Drain any remaining frames before dropping.
     let _ = bob.recv_timeout(Duration::from_millis(200)).await;
-    bob.close().await;
-    admin.close().await;
+    let _ = bob.close().await;
+    let _ = admin.close().await;
 }
 
 // ============================================================================
@@ -683,8 +683,8 @@ async fn publish_fans_event_with_payload_to_subscriber() {
         "deliver_payloads=true (PEP default) must include payload: {event}"
     );
 
-    bob.close().await;
-    admin.close().await;
+    let _ = bob.close().await;
+    let _ = admin.close().await;
 }
 
 #[tokio::test]
@@ -759,8 +759,8 @@ async fn publish_strips_payload_when_deliver_payloads_is_false() {
         "deliver_payloads=false must strip payload (§7.1.3.5): {event}"
     );
 
-    bob.close().await;
-    admin.close().await;
+    let _ = bob.close().await;
+    let _ = admin.close().await;
 }
 
 // XEP-0060 §6.1.7 single-resource fan-out (FullJid subscribers) is not yet
@@ -835,9 +835,9 @@ async fn bare_jid_subscription_targets_all_resources() {
         .expect("r2 must also receive event from bare-JID subscription");
     assert!(r2.contains(r#"id="event-4""#), "{r2}");
 
-    bob_r1.close().await;
-    bob_r2.close().await;
-    admin.close().await;
+    let _ = bob_r1.close().await;
+    let _ = bob_r2.close().await;
+    let _ = admin.close().await;
 }
 
 #[tokio::test]
@@ -885,8 +885,8 @@ async fn event_omits_publisher_attribute_when_publisher_equals_owner() {
         "publisher attr must be omitted when publisher == owner (§7.1.5): {event}"
     );
 
-    bob.close().await;
-    admin.close().await;
+    let _ = bob.close().await;
+    let _ = admin.close().await;
 }
 
 #[tokio::test]
@@ -967,9 +967,9 @@ async fn event_includes_publisher_attribute_when_publisher_differs_from_owner() 
         "publisher attribute must carry charlie's bare JID (§7.1.5): {event}"
     );
 
-    bob.close().await;
-    charlie.close().await;
-    admin.close().await;
+    let _ = bob.close().await;
+    let _ = charlie.close().await;
+    let _ = admin.close().await;
 }
 
 #[tokio::test]
@@ -999,5 +999,5 @@ async fn publish_with_no_subscribers_returns_result_and_emits_no_event() {
     );
     assert_no_event_message(&mut admin, "fanout-empty", Duration::from_millis(500)).await;
 
-    admin.close().await;
+    let _ = admin.close().await;
 }

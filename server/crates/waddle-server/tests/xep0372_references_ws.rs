@@ -76,7 +76,7 @@ async fn references_route_and_replay_from_mam() {
         "MAM did not replay reference: {frames:?}"
     );
 
-    client.close().await;
+    let _ = client.close().await;
 }
 
 #[tokio::test]
@@ -130,7 +130,7 @@ async fn data_reference_with_anchor_routes_and_replays_from_mam() {
         "MAM did not replay data reference with anchor: {frames:?}"
     );
 
-    client.close().await;
+    let _ = client.close().await;
 }
 
 #[tokio::test]
@@ -161,5 +161,5 @@ async fn reference_without_required_attributes_returns_bad_request() {
         "not an error stanza: {error}"
     );
 
-    client.close().await;
+    let _ = client.close().await;
 }

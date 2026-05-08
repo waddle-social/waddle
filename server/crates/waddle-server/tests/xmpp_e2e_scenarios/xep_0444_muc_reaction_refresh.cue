@@ -2,6 +2,7 @@ package xmpp_e2e_scenarios
 
 scenario: #Scenario & {
 	name: "xep-0444-muc-reaction-refresh"
+	xeps: ["XEP-0045", "XEP-0313", "XEP-0334", "XEP-0444"]
 	users: {
 		alice: devices: phone: #Actor & {
 			user:     "alice"

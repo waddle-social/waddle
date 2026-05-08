@@ -2,6 +2,7 @@ package xmpp_e2e_scenarios
 
 scenario: #Scenario & {
 	name: "xep-0447-stateless-file-sharing"
+	xeps: ["XEP-0103", "XEP-0313", "XEP-0428", "XEP-0446", "XEP-0447"]
 	users: {
 		alice: devices: phone: #Actor & {
 			user:     "alice"

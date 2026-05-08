@@ -68,7 +68,7 @@ async fn room_replaces_spoofed_room_stanza_id_and_preserves_origin_id() {
     );
     assert!(echo.contains(&format!("by=\"{room}\"")) || echo.contains(&format!("by='{room}'")));
 
-    client.close().await;
+    let _ = client.close().await;
 }
 
 #[tokio::test]
@@ -256,5 +256,5 @@ async fn server_disco_advertises_rich_message_features() {
         );
     }
 
-    client.close().await;
+    let _ = client.close().await;
 }

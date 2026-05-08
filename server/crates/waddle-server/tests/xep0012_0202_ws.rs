@@ -42,7 +42,7 @@ async fn websocket_disco_advertises_last_activity_and_entity_time() {
         "expected entity time feature, got: {response}"
     );
 
-    client.close().await;
+    let _ = client.close().await;
 }
 
 #[tokio::test]
@@ -66,7 +66,7 @@ async fn websocket_last_activity_query_returns_server_uptime() {
         "expected stanza id preserved, got: {response}"
     );
 
-    client.close().await;
+    let _ = client.close().await;
 }
 
 #[tokio::test]
@@ -90,7 +90,7 @@ async fn websocket_entity_time_query_returns_utc_and_tzo() {
         "expected <tzo/> child, got: {response}"
     );
 
-    client.close().await;
+    let _ = client.close().await;
 }
 
 #[tokio::test]
@@ -117,7 +117,7 @@ async fn websocket_entity_time_rejects_non_get_iq() {
         "expected bad-request for invalid entity time IQ, got: {response}"
     );
 
-    client.close().await;
+    let _ = client.close().await;
 }
 
 #[tokio::test]
@@ -144,5 +144,5 @@ async fn websocket_entity_time_rejects_non_server_target() {
         "expected service-unavailable for non-server entity time target, got: {response}"
     );
 
-    client.close().await;
+    let _ = client.close().await;
 }

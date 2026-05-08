@@ -2,6 +2,7 @@ package xmpp_e2e_scenarios
 
 scenario: #Scenario & {
 	name: "muc-admin-affiliations"
+	xeps: ["XEP-0045"]
 	users: {
 		alice: devices: phone: #Actor & {
 			user:     "alice"

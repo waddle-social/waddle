@@ -98,5 +98,5 @@ async fn xep_0421_groupchat_reflection_carries_occupant_id_keyed_by_env_secret()
          echo={echo}"
     );
 
-    client.close().await;
+    let _ = client.close().await;
 }

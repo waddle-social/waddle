@@ -128,8 +128,8 @@ async fn websocket_directed_presence_routes_to_target_resource() {
         "expected directed presence routed with full JIDs, got: {delivered}"
     );
 
-    bob.close().await;
-    alice.close().await;
+    let _ = bob.close().await;
+    let _ = alice.close().await;
 }
 
 #[tokio::test]
@@ -164,8 +164,8 @@ async fn websocket_full_jid_probe_returns_rich_resource_presence() {
         "full-JID probe must preserve rich resource presence: {probe}"
     );
 
-    bob.close().await;
-    alice.close().await;
+    let _ = bob.close().await;
+    let _ = alice.close().await;
 }
 
 #[tokio::test]
@@ -198,8 +198,8 @@ async fn websocket_blocking_prevents_presence_probe_response() {
     )
     .await;
 
-    bob.close().await;
-    alice.close().await;
+    let _ = bob.close().await;
+    let _ = alice.close().await;
 }
 
 #[tokio::test]
@@ -271,8 +271,8 @@ async fn websocket_blocking_filters_presence_broadcast_to_subscriber() {
     )
     .await;
 
-    bob.close().await;
-    alice.close().await;
+    let _ = bob.close().await;
+    let _ = alice.close().await;
 }
 
 #[tokio::test]
@@ -343,6 +343,6 @@ async fn websocket_blocking_filters_presence_broadcast_when_subscriber_blocks_se
     )
     .await;
 
-    bob.close().await;
-    alice.close().await;
+    let _ = bob.close().await;
+    let _ = alice.close().await;
 }

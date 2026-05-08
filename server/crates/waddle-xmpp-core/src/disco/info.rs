@@ -248,14 +248,11 @@ pub fn server_features() -> Vec<Feature> {
         Feature::offline_messages(),
         Feature::vcard(),
         Feature::http_upload(),
-        Feature::socks5_bytestreams(),
         Feature::blocking(),
         Feature::last_activity(),
         Feature::ping(),
         Feature::entity_time(),
         Feature::software_version(),
-        Feature::server_info(),
-        Feature::csi(),
         Feature::pubsub(),
         Feature::pep(),
         Feature::pubsub_auto_create(),
@@ -267,7 +264,6 @@ pub fn server_features() -> Vec<Feature> {
         Feature::pubsub_access_presence(),
         Feature::private_storage(),
         Feature::avatar_metadata_notify(),
-        Feature::pep_vcard_conversion(),
         Feature::new(NS_COMMANDS),
     ]
 }

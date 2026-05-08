@@ -76,7 +76,7 @@ async fn explicit_mentions_route_and_replay_from_mam() {
         "MAM did not replay mention: {frames:?}"
     );
 
-    client.close().await;
+    let _ = client.close().await;
 }
 
 #[tokio::test]
@@ -108,5 +108,5 @@ async fn mention_without_target_attribute_returns_bad_request() {
         "not an error stanza: {error}"
     );
 
-    client.close().await;
+    let _ = client.close().await;
 }

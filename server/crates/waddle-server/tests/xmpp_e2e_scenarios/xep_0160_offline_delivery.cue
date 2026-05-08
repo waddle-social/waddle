@@ -1,8 +1,8 @@
 package xmpp_e2e_scenarios
 
 scenario: #Scenario & {
-	name: "dm-delivery-and-mam"
-	xeps: ["XEP-0004", "XEP-0059", "XEP-0203", "XEP-0297", "XEP-0313"]
+	name: "xep-0160-offline-delivery"
+	xeps: ["XEP-0160", "XEP-0203"]
 	users: {
 		alice: devices: phone: #Actor & {
 			user:     "alice"
@@ -24,24 +24,23 @@ scenario: #Scenario & {
 	let bobPhone = users.bob.devices.phone
 
 	steps: [
+		#DisconnectActor & {actor: bobPhone},
 		#SendMessage & {
-			from: alicePhone
-			to:   bobPhone
-			id:   "cue-dm-1"
-			body: "hello-from-cue-scenario"
+			from:  alicePhone
+			toJid: bobPhone.bareJid
+			id:    "cue-offline-message"
+			body:  "offline delivery from cue"
 		},
+		#ConnectActor & {actor: bobPhone},
+		#SendPresence & {actor: bobPhone},
 		#ExpectMessage & {
 			target: bobPhone
-			from:   alicePhone
-			body:   "hello-from-cue-scenario"
-		},
-		#QueryMam & {
-			actor:   alicePhone
-			archive: alicePhone.bareJid
-			id:      "cue-dm-mam"
-		},
-		#ExpectMamResult & {
-			body: "hello-from-cue-scenario"
+			body:   "offline delivery from cue"
+			elements: [#XmlElement & {
+				name:         "delay"
+				ns:           "urn:xmpp:delay"
+				attrsPresent: ["stamp"]
+			}]
 		},
 	]
 }

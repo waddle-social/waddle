@@ -406,11 +406,53 @@ impl WsXmppClient {
         }
     }
 
-    pub async fn close(mut self) {
-        let _ = self
-            .send(r#"<close xmlns="urn:ietf:params:xml:ns:xmpp-framing"/>"#)
-            .await;
-        let _ = self.ws.close(None).await;
+    pub async fn close(mut self) -> Result<(), String> {
+        let close =
+            xmpp_parsers::minidom::Element::builder("close", "urn:ietf:params:xml:ns:xmpp-framing")
+                .build();
+        let mut close_xml = Vec::new();
+        close
+            .write_to(&mut close_xml)
+            .map_err(|error| format!("XMPP close serialization failed: {error}"))?;
+        let close_xml = String::from_utf8(close_xml)
+            .map_err(|error| format!("XMPP close serialization emitted invalid UTF-8: {error}"))?;
+        self.send(&close_xml).await?;
+        timeout(Duration::from_secs(2), async {
+            while let Some(message) = self.ws.next().await {
+                match message {
+                    Ok(tungstenite::Message::Text(text)) if text.contains("<close") => {
+                        return Ok(());
+                    }
+                    Ok(tungstenite::Message::Close(_)) => {
+                        return Err("WebSocket closed before XMPP close acknowledgement".into());
+                    }
+                    Err(error) => return Err(format!("WebSocket close receive failed: {error}")),
+                    Ok(_) => {}
+                }
+            }
+            Err("WebSocket ended before XMPP close acknowledgement".into())
+        })
+        .await
+        .map_err(|_| "Timed out waiting for XMPP close acknowledgement".to_string())??;
+        self.ws
+            .close(None)
+            .await
+            .map_err(|error| format!("WebSocket close send failed: {error}"))?;
+        timeout(Duration::from_secs(2), async {
+            while let Some(message) = self.ws.next().await {
+                match message {
+                    Ok(tungstenite::Message::Close(_)) => return Ok(()),
+                    // Once the XMPP close ack has been received and the
+                    // WebSocket close frame has been sent, a peer-side TCP
+                    // reset is equivalent to the connection being gone.
+                    Err(_) => return Ok(()),
+                    Ok(_) => {}
+                }
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|_| "Timed out waiting for WebSocket close".to_string())?
     }
 }
 

@@ -37,7 +37,7 @@ async fn websocket_disco_advertises_software_version() {
         "expected software version feature, got: {response}"
     );
 
-    client.close().await;
+    let _ = client.close().await;
 }
 
 #[tokio::test]
@@ -69,7 +69,7 @@ async fn websocket_version_query_returns_name_and_version_without_os() {
         "expected stanza id preserved, got: {response}"
     );
 
-    client.close().await;
+    let _ = client.close().await;
 }
 
 #[tokio::test]
@@ -96,7 +96,7 @@ async fn websocket_version_rejects_non_get_iq() {
         "expected bad-request for invalid version IQ, got: {response}"
     );
 
-    client.close().await;
+    let _ = client.close().await;
 }
 
 #[tokio::test]
@@ -123,5 +123,5 @@ async fn websocket_version_rejects_non_server_target() {
         "expected service-unavailable for non-server version target, got: {response}"
     );
 
-    client.close().await;
+    let _ = client.close().await;
 }

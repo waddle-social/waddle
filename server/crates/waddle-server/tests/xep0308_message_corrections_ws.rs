@@ -119,7 +119,7 @@ async fn correction_routes_and_replays_from_mam() {
         "MAM did not replay correction: {frames:?}"
     );
 
-    client.close().await;
+    let _ = client.close().await;
 }
 
 #[tokio::test]
@@ -162,7 +162,7 @@ async fn correction_can_target_original_message_id() {
         "missing correction target: {echo}"
     );
 
-    client.close().await;
+    let _ = client.close().await;
 }
 
 #[tokio::test]
@@ -190,7 +190,7 @@ async fn correction_without_target_id_returns_bad_request() {
         "not an error stanza: {error}"
     );
 
-    client.close().await;
+    let _ = client.close().await;
 }
 
 #[tokio::test]
@@ -247,7 +247,7 @@ async fn correction_after_leave_and_rejoin_under_same_nickname_is_forbidden() {
         "not an error stanza: {error}"
     );
 
-    client.close().await;
+    let _ = client.close().await;
 }
 
 #[tokio::test]
@@ -287,6 +287,6 @@ async fn correction_from_different_occupant_returns_forbidden() {
         "not an error stanza: {error}"
     );
 
-    admin.close().await;
-    bob.close().await;
+    let _ = admin.close().await;
+    let _ = bob.close().await;
 }

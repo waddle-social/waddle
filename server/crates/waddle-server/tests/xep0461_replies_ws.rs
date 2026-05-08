@@ -92,7 +92,7 @@ async fn reply_routes_and_replays_from_mam() {
         "MAM did not replay reply: {frames:?}"
     );
 
-    client.close().await;
+    let _ = client.close().await;
 }
 
 #[tokio::test]
@@ -131,7 +131,7 @@ async fn reply_to_unknown_target_routes_without_error() {
         "spec-non-conformant rejection: {echo}"
     );
 
-    client.close().await;
+    let _ = client.close().await;
 }
 
 #[tokio::test]
@@ -161,7 +161,7 @@ async fn reply_with_empty_to_jid_returns_bad_request() {
         "not an error stanza: {error}"
     );
 
-    client.close().await;
+    let _ = client.close().await;
 }
 
 #[tokio::test]
@@ -232,7 +232,7 @@ async fn reply_with_fallback_replays_from_mam() {
         "MAM replay should preserve fallback 'for' attribute: {reply_mam_frame}"
     );
 
-    client.close().await;
+    let _ = client.close().await;
 }
 
 const STORAGE_ARCHIVE: &str = "room@conference.example.com";

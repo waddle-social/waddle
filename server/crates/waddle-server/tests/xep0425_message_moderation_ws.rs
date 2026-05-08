@@ -197,7 +197,7 @@ async fn moderation_broadcasts_and_replays_from_mam() {
         "tombstoned row must not leak the original body: {tombstone}"
     );
 
-    client.close().await;
+    let _ = client.close().await;
 }
 
 #[tokio::test]
@@ -276,6 +276,6 @@ async fn moderation_from_non_moderator_returns_forbidden() {
         "not an error stanza: {error}"
     );
 
-    bob.close().await;
-    admin.close().await;
+    let _ = bob.close().await;
+    let _ = admin.close().await;
 }

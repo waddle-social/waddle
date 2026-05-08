@@ -91,8 +91,8 @@ async fn sent_carbon_delivered_to_opted_in_sibling_over_websocket() {
         "expected carbon namespace in frame: {carbon}"
     );
 
-    phone.close().await;
-    desktop.close().await;
+    let _ = phone.close().await;
+    let _ = desktop.close().await;
 }
 
 #[tokio::test]
@@ -174,8 +174,8 @@ async fn sent_carbon_replays_to_detached_resumable_sibling() {
         "expected sent carbon replay: {replay}"
     );
 
-    phone.close().await;
+    let _ = phone.close().await;
     if let Some(resumed) = resumed {
-        resumed.close().await;
+        let _ = resumed.close().await;
     }
 }

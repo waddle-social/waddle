@@ -83,7 +83,7 @@ async fn server_owner_can_configure_get_general_space() {
         resp.contains(r#"xmlns="jabber:x:data""#) || resp.contains(r#"xmlns='jabber:x:data'"#),
         "expected data form in configure-get response, got: {resp}"
     );
-    admin.close().await;
+    let _ = admin.close().await;
 }
 
 #[tokio::test]
@@ -106,7 +106,7 @@ async fn server_owner_can_configure_set_general_space() {
         is_result(&resp),
         "expected configure-set result, got: {resp}"
     );
-    admin.close().await;
+    let _ = admin.close().await;
 }
 
 #[tokio::test]
@@ -124,7 +124,7 @@ async fn server_owner_can_purge_general_space() {
     .await;
 
     assert!(is_result(&resp), "expected purge result, got: {resp}");
-    admin.close().await;
+    let _ = admin.close().await;
 }
 
 #[tokio::test]
@@ -147,7 +147,7 @@ async fn server_owner_can_set_affiliations_on_general_space() {
         is_result(&resp),
         "expected affiliations-set result, got: {resp}"
     );
-    admin.close().await;
+    let _ = admin.close().await;
 }
 
 #[tokio::test]
@@ -179,7 +179,7 @@ async fn newly_created_space_is_administrable_by_creator() {
         is_result(&cfg),
         "expected configure-get result on freshly-created space, got: {cfg}"
     );
-    admin.close().await;
+    let _ = admin.close().await;
 }
 
 #[tokio::test]
@@ -207,7 +207,7 @@ async fn server_owner_can_delete_a_spaces_node() {
     )
     .await;
     assert!(is_result(&resp), "expected delete result, got: {resp}");
-    admin.close().await;
+    let _ = admin.close().await;
 }
 
 #[tokio::test]
@@ -241,7 +241,7 @@ async fn non_owner_cannot_configure_general_space() {
         resp.contains("forbidden"),
         "expected <forbidden/> condition, got: {resp}"
     );
-    alice.close().await;
+    let _ = alice.close().await;
 }
 
 // ============================================================================
@@ -331,5 +331,5 @@ async fn spaces_publish_fans_event_to_subscriber() {
         "event must carry the published bookmark item id: {event}"
     );
 
-    admin.close().await;
+    let _ = admin.close().await;
 }
