@@ -184,9 +184,9 @@ package xmpp_e2e_scenarios
 	...
 }
 
-#Payload: #FileShare | #LinkMetadata | #MessageCorrection | #Reactions | #ProcessingHint
+#Payload: #FileShare | #LinkMetadata | #MessageCorrection | #Reactions | #ProcessingHint | #PinAttachment
 
-#ExpectedPayload: #FileShare | #LinkMetadata | #MessageCorrection | #Reactions | #ProcessingHint
+#ExpectedPayload: #FileShare | #LinkMetadata | #MessageCorrection | #Reactions | #ProcessingHint | #PinAttachment | #PinEvent
 
 #MessageCorrection: {
 	kind: "messageCorrection"
@@ -233,5 +233,29 @@ package xmpp_e2e_scenarios
 	title:       string
 	description: string
 	url:         string
+	...
+}
+
+#PinAttachment: {
+	kind:   "pinAttachment"
+	(#PinId | #PinIdFrom)
+	action: "pinned" | "unpinned"
+	...
+}
+
+#PinId: {
+	id: string
+	idFrom?: _|_
+}
+
+#PinIdFrom: {
+	id?: _|_
+	idFrom: string
+}
+
+#PinEvent: {
+	kind:   "pinEvent"
+	(#PinId | #PinIdFrom)
+	action: "pinned" | "unpinned"
 	...
 }

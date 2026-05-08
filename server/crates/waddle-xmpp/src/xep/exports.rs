@@ -347,6 +347,13 @@ pub use super::xep0470::{
     AttachmentPayload, AttachmentTarget, NS_PUBSUB_ATTACHMENTS,
 };
 
+pub use super::xep_waddle_pin::{
+    build_pinned_element as build_pinned_message_element,
+    build_unpinned_element as build_unpinned_message_element, extract_pin_intent_from_message,
+    parse_pinned_element as parse_pinned_message_element,
+    parse_unpinned_element as parse_unpinned_message_element, PinIntent, NS_WADDLE_PIN_V0,
+};
+
 pub use super::xep0472::{
     build_feed_entry_element, is_feed_entry, parse_feed_entry, FeedEntry, NS_SOCIAL_FEED,
     PUBSUB_NODE_FEED,

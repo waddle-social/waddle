@@ -11,6 +11,7 @@ use kameo::Actor;
 use std::convert::Infallible;
 use thiserror::Error;
 
+use super::pin::{PinStateChange, PinnedEntry};
 use super::room_registry::RoomInfo;
 use super::{MucRoom, RoomConfig, RoomSubjectTexts, SubjectState};
 use crate::types::{Affiliation, Role};
@@ -337,6 +338,52 @@ impl kameo::message::Message<SetSubject> for RoomActor {
     ) -> Self::Reply {
         self.room
             .set_subject(msg.texts, msg.setter, msg.setter_nick, msg.set_at);
+    }
+}
+
+/// Apply a pin state change to the room (#414). The interpreter emits
+/// this in response to an `OutboundEvent::ApplyPinChange` produced by
+/// the room handler chain's `MucPinHandler` after authorization passes.
+/// The actor delegates to [`MucRoom::upsert_pin`] /
+/// [`MucRoom::remove_pin_by_target`].
+pub struct ApplyPin {
+    pub change: PinStateChange,
+}
+
+impl kameo::message::Message<ApplyPin> for RoomActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        msg: ApplyPin,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        match msg.change {
+            PinStateChange::Pin(entry) => {
+                self.room.upsert_pin(entry);
+            }
+            PinStateChange::Unpin { target_stanza_id } => {
+                self.room.remove_pin_by_target(&target_stanza_id);
+            }
+        }
+    }
+}
+
+/// Read the room's pin list (#414). Returns the current pinned entries
+/// in pin-time-desc order. Used by the IQ query handler for
+/// `<query xmlns='urn:waddle:pin:0'/>` and by the chat-side hydration
+/// path on room entry.
+pub struct GetPinList;
+
+impl kameo::message::Message<GetPinList> for RoomActor {
+    type Reply = Vec<PinnedEntry>;
+
+    async fn handle(
+        &mut self,
+        _msg: GetPinList,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.room.pinned_entries().to_vec()
     }
 }
 

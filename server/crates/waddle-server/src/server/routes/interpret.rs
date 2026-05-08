@@ -90,8 +90,8 @@ use waddle_xmpp::mam::{
     RichMessageId, RichText, STANZA_ID_NS,
 };
 use waddle_xmpp::muc::room_actor::{
-    GetAffiliation, GetNicknameGeneration, GetRoomSnapshot, JoinWithAffiliation, RoomActor,
-    SetSubject,
+    ApplyPin, GetAffiliation, GetNicknameGeneration, GetRoomSnapshot, JoinWithAffiliation,
+    RoomActor, SetSubject,
 };
 use waddle_xmpp::muc::room_registry_actor::{GetRoom, RoomRegistryActor};
 use waddle_xmpp::parse_managed_room_jid;
@@ -139,7 +139,9 @@ mod groupchat_validation;
 mod offline_delivery;
 mod room_dispatch;
 mod room_helpers;
+mod room_pin;
 mod room_subject;
+mod room_system_message;
 mod route_to_connection;
 mod routing;
 
@@ -168,6 +170,7 @@ use room_helpers::{
     available_bot_nick, bot_full_jid, enrich_message_event, normalize_thread_create_source,
     session_is_server_owner,
 };
+use room_pin::apply_pin_change_event;
 use room_subject::persist_room_subject_event;
 use route_to_connection::route_to_connection;
 use routing::{deliver_peer_to_full, run_headless_recipient_pass};
@@ -313,6 +316,9 @@ async fn interpret_with_depth(
                 archive_groupchat_event(deps, room, sender, message, sender_nickname_generation)
                     .await;
             }
+            OutboundEvent::ApplyPinChange { room, request } => {
+                apply_pin_change_event(registry, deps, room, request, recursion_depth).await;
+            }
             OutboundEvent::ApplyGroupchatRetractionTombstone {
                 room,
                 target_message_id,
@@ -332,6 +338,19 @@ async fn interpret_with_depth(
                     &room,
                     &target_message_id,
                     &retraction_message,
+                )
+                .await;
+                // #414: cascade XEP-0424 retraction to the room's pin
+                // list. If the retracted stanza-id is currently pinned,
+                // remove it from the projection and broadcast a
+                // synthetic unpin system message so live clients see the
+                // tab update without a separate poll.
+                room_pin::cascade_retraction_to_pin_list(
+                    registry,
+                    deps,
+                    room,
+                    target_message_id,
+                    recursion_depth,
                 )
                 .await;
             }

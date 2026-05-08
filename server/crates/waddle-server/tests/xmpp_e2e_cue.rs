@@ -210,6 +210,27 @@ enum Payload {
     },
     #[serde(rename = "processingHint")]
     ProcessingHint { name: ProcessingHint },
+    #[serde(rename = "pinAttachment")]
+    PinAttachment {
+        id: Option<String>,
+        #[serde(rename = "idFrom")]
+        id_from: Option<String>,
+        action: PinAction,
+    },
+    #[serde(rename = "pinEvent")]
+    PinEvent {
+        id: Option<String>,
+        #[serde(rename = "idFrom")]
+        id_from: Option<String>,
+        action: PinAction,
+    },
+}
+
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum PinAction {
+    Pinned,
+    Unpinned,
 }
 
 #[derive(Debug, Deserialize)]
@@ -952,6 +973,28 @@ fn payload_element(payload: &Payload, ctx: &ScenarioContext) -> Result<Element> 
             Ok(xep0444::build_reactions_element(&target_id, &emoji_refs))
         }
         Payload::ProcessingHint { name } => Ok(xep0334::build_hint_element(Hint::from(name))),
+        Payload::PinAttachment {
+            id,
+            id_from,
+            action,
+        } => {
+            let target_id = resolve_payload_id(ctx, id.as_deref(), id_from.as_deref())?;
+            let stanza_id = waddle_xmpp_core::xep0359::StanzaId::new(
+                target_id,
+                jid::Jid::from(
+                    jid::BareJid::from_str("room@example.com")
+                        .map_err(|e| anyhow!("invalid placeholder jid: {e}"))?,
+                ),
+            );
+            let elem = match action {
+                PinAction::Pinned => waddle_xmpp::xep::build_pinned_message_element(&stanza_id),
+                PinAction::Unpinned => waddle_xmpp::xep::build_unpinned_message_element(&stanza_id),
+            };
+            Ok(elem)
+        }
+        Payload::PinEvent { .. } => Err(anyhow!(
+            "PinEvent is an expected-only payload; cannot be sent"
+        )),
     }
 }
 
@@ -1017,6 +1060,39 @@ fn payload_expectations(payloads: &[Payload], ctx: &ScenarioContext) -> Result<V
                     format!("<{}", hint.element_name()),
                 ]);
             }
+            Payload::PinAttachment {
+                id,
+                id_from,
+                action,
+            } => {
+                let target_id = resolve_payload_id(ctx, id.as_deref(), id_from.as_deref())?;
+                let marker = match action {
+                    PinAction::Pinned => "<pinned",
+                    PinAction::Unpinned => "<unpinned",
+                };
+                expected.extend([
+                    "urn:waddle:pin:0".to_string(),
+                    marker.to_string(),
+                    format!("target=\"{target_id}\""),
+                ]);
+            }
+            Payload::PinEvent {
+                id,
+                id_from,
+                action,
+            } => {
+                let target_id = resolve_payload_id(ctx, id.as_deref(), id_from.as_deref())?;
+                let action_attr = match action {
+                    PinAction::Pinned => "action=\"pinned\"",
+                    PinAction::Unpinned => "action=\"unpinned\"",
+                };
+                expected.extend([
+                    "urn:waddle:pin:0".to_string(),
+                    "<pin-event".to_string(),
+                    action_attr.to_string(),
+                    format!("target=\"{target_id}\""),
+                ]);
+            }
         }
     }
     Ok(expected)
@@ -1059,7 +1135,9 @@ fn validate_file_share_fallback_body(body: Option<&str>, payloads: &[Payload]) -
         Payload::LinkMetadata { .. }
         | Payload::MessageCorrection { .. }
         | Payload::Reactions { .. }
-        | Payload::ProcessingHint { .. } => false,
+        | Payload::ProcessingHint { .. }
+        | Payload::PinAttachment { .. }
+        | Payload::PinEvent { .. } => false,
     });
     if represented_by_payload {
         Ok(())

@@ -84,6 +84,7 @@ mod muc_admin;
 mod muc_owner_config;
 mod muc_owner_moderation;
 mod permissions;
+mod pin_query;
 mod pubsub_admin;
 mod pubsub_dispatch;
 mod pubsub_helpers;
@@ -116,6 +117,7 @@ use permissions::{
     muc_owner_authorized, server_affiliation_for_requester, space_affiliation_for_requester,
     spaces_node_mutation_allowed,
 };
+use pin_query::{handle_pin_query_iq, is_pin_query_iq};
 use pubsub_dispatch::handle_pubsub_iq;
 use pubsub_helpers::{
     canonical_channel_disco_items, handle_extension_route_items, handle_spaces_items,
@@ -326,6 +328,11 @@ pub async fn handle_iq_with_conn_state(
             response_to,
         )
         .await;
+    }
+
+    if is_pin_query_iq(&iq, muc_domain) {
+        return handle_pin_query_iq(&iq, state, phase.bound_jid(), response_from, response_to)
+            .await;
     }
 
     let muc_owner_or_moderation =

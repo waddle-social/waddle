@@ -13,6 +13,7 @@ pub mod admin;
 pub mod affiliation;
 pub mod messages;
 pub mod owner;
+pub mod pin;
 pub mod presence;
 mod room;
 pub mod room_actor;
@@ -36,6 +37,10 @@ pub use owner::{
     apply_config_form, build_config_form, build_config_result, build_destroy_notification,
     build_owner_set_result, parse_owner_query, ConfigFormData, DestroyRequest, OwnerAction,
     OwnerQuery, DATA_FORMS_NS, MUC_ROOMCONFIG_NS,
+};
+pub use pin::{
+    PinChangeRequest, PinPreview, PinStateChange, PinnedEntry, MAX_PINNED_ENTRIES,
+    MAX_PREVIEW_LEN as PIN_PREVIEW_MAX_LEN,
 };
 pub use presence::{
     build_affiliation_change_presence, build_ban_presence, build_kick_presence,

@@ -5,6 +5,7 @@ use waddle_xmpp_core::xep0359::StanzaId;
 use xmpp_parsers::iq::Iq;
 use xmpp_parsers::message::Message;
 
+use crate::muc::PinChangeRequest;
 use crate::Stanza;
 
 use super::{CallbackId, CarbonKind, GroupchatThreadProjection, MessageRef, TimerId};
@@ -202,6 +203,26 @@ pub enum OutboundEvent {
         /// Wall-clock time of the change (UTC). Becomes the XEP-0203
         /// `<delay/>` `stamp` attribute on the next join's emission.
         set_at: DateTime<Utc>,
+    },
+    /// Apply a pin/unpin request to a MUC room (#414).
+    ///
+    /// Emitted by [`super::room::pin::MucPinHandler`] when an
+    /// authorized occupant publishes a `urn:waddle:pin:0`
+    /// `<pinned/>` or `<unpinned/>` element on a groupchat message.
+    /// The interpreter resolves the target message from MAM (for
+    /// pins, to populate the preview), forwards the resolved change
+    /// to the room actor's `ApplyPin` message, and emits the
+    /// `<pin-event/>` system message broadcast itself.
+    ///
+    /// The chain handler is synchronous and cannot do the MAM
+    /// lookup, so it carries only the request fields here — the
+    /// interpreter is the async boundary that builds the resolved
+    /// `PinnedEntry`.
+    ApplyPinChange {
+        /// Room whose pin state is being mutated.
+        room: BareJid,
+        /// The request to apply.
+        request: PinChangeRequest,
     },
     /// XEP-0424 §"prevent further distribution" — replace the target
     /// row in a room's MAM archive with a tombstone after a groupchat
