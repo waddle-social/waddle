@@ -95,8 +95,13 @@ async function fetchMucOwnerConfig(
     if (field.localName !== "field" || field.namespaceURI !== NS_DATAFORM) continue;
     const name = field.getAttribute("var");
     if (!name) continue;
-    const value = field.getElementsByTagNameNS(NS_DATAFORM, "value")[0]?.textContent ?? "";
-    fields.set(name, value);
+    // Read the field's own <value> direct child, not <option><value>.
+    // list-single fields contain both a current <value> and several
+    // <option> elements that each carry their own <value>.
+    const valueChild = Array.from(field.children).find(
+      (child) => child.localName === "value" && child.namespaceURI === NS_DATAFORM,
+    );
+    fields.set(name, valueChild?.textContent ?? "");
   }
   return fields;
 }

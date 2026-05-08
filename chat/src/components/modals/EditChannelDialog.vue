@@ -66,10 +66,11 @@ const emit = defineEmits<{
         </label>
         <select
           id="edit-channel-pin-permission"
-          :value="form.pinPermission"
+          :value="form.pinPermission ?? ''"
           class="chat-field-control type-field"
           @change="$emit('update:form', { ...form, pinPermission: ($event.target as HTMLSelectElement).value as PinPermission })"
         >
+          <option value="" disabled>Keep current setting</option>
           <option value="admins-only">Admins only</option>
           <option value="anyone">Anyone</option>
         </select>
