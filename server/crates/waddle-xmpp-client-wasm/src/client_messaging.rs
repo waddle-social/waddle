@@ -66,6 +66,31 @@ impl WaddleClient {
         })
     }
 
+    /// Publish a pin request (#414). `room_jid` is the bare MUC JID;
+    /// `target_stanza_id` is the XEP-0359 `by=room` stanza-id of the
+    /// message to pin. Server gates on Owner/Admin affiliation; a
+    /// non-admin sender will receive a `<forbidden type='auth'/>`
+    /// reply via the inbound message stream.
+    pub fn pin_message(&self, room_jid: String, target_stanza_id: String) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let stanza = build_pinned_message(&room_jid, &target_stanza_id);
+            send_stanza_command(inner, stanza).await?;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
+    /// Publish an unpin request (#414). Same authorization rules as
+    /// [`Self::pin_message`].
+    pub fn unpin_message(&self, room_jid: String, target_stanza_id: String) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let stanza = build_unpinned_message(&room_jid, &target_stanza_id);
+            send_stanza_command(inner, stanza).await?;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
     pub fn send_retraction(&self, to: String, msg_type: String, retracts_id: String) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {

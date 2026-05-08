@@ -147,6 +147,9 @@ pub struct InboundMessage {
     pub thread_id: Option<String>,
     pub parent_thread_id: Option<String>,
     pub is_sticker: bool,
+    /// urn:waddle:pin:0 pin/unpin system event surfaced by the room.
+    /// `None` when the message carries no `<pin-event/>` payload.
+    pub pin_event: Option<crate::pin::PinEvent>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
