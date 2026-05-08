@@ -147,6 +147,7 @@ export class BrowserXmppClient {
   private get queueScope() { return barePeerJid(this.session.jid); }
   private readonly resource = createXmppResource();
   private messageHandler: ((message: LiveRoomMessage) => void) | null = null;
+  private pinEventHandler: ((event: { roomJid: string; event: import("./wasm-types").WasmPinEvent }) => void) | null = null;
   private directMessageHandler: ((message: LiveDmMessage) => void) | null = null;
   private statusHandler: ((status: XmppStatusSnapshot) => void) | null = null;
   private reactionHandler: ((event: ReactionEvent) => void) | null = null;
@@ -204,6 +205,8 @@ export class BrowserXmppClient {
   constructor(session: WaddleSession) { this.session = session; }
 
   setMessageHandler(h: (message: LiveRoomMessage) => void) { this.messageHandler = h; }
+  /** #414: receive `<pin-event/>` system messages from a room. */
+  setPinEventHandler(h: (event: { roomJid: string; event: import("./wasm-types").WasmPinEvent }) => void) { this.pinEventHandler = h; }
   setDirectMessageHandler(h: (message: LiveDmMessage) => void) { this.directMessageHandler = h; }
   setStatusHandler(h: (status: XmppStatusSnapshot) => void) { this.statusHandler = h; }
   setChatStateHandler(h: (event: ChatStateEvent) => void) { this.chatStateHandler = h; }
@@ -653,6 +656,29 @@ export class BrowserXmppClient {
   async sendChatState(spaceId: string, channelId: string, state: ChatStateType) { const { xmpp, roomJid } = await this.requireJoinedRoom(spaceId, channelId); await this.compatSendChatState(xmpp, roomJid, "groupchat", state); }
   async sendDisplayed(spaceId: string, channelId: string, messageId: string) { const { xmpp, roomJid } = await this.requireJoinedRoom(spaceId, channelId); await this.compatSendDisplayed(xmpp, roomJid, "groupchat", messageId); }
   async sendReaction(spaceId: string, channelId: string, messageId: string, emojis: string[]) { const { xmpp, roomJid } = await this.requireJoinedRoom(spaceId, channelId); await this.compatSendReaction(xmpp, roomJid, "groupchat", messageId, emojis); }
+  /** #414: pin a message in the room. Server gates on Owner/Admin
+   * affiliation; non-admins receive a `<forbidden/>` error which
+   * surfaces as a rejected Promise. */
+  async pinMessage(spaceId: string, channelId: string, targetStanzaId: string) {
+    const { xmpp, roomJid } = await this.requireJoinedRoom(spaceId, channelId);
+    if (typeof xmpp.pin_message !== "function") throw new Error("pin_message not available in wasm client");
+    await xmpp.pin_message(roomJid, targetStanzaId);
+  }
+  /** #414: unpin a message in the room. Same authorization rules. */
+  async unpinMessage(spaceId: string, channelId: string, targetStanzaId: string) {
+    const { xmpp, roomJid } = await this.requireJoinedRoom(spaceId, channelId);
+    if (typeof xmpp.unpin_message !== "function") throw new Error("unpin_message not available in wasm client");
+    await xmpp.unpin_message(roomJid, targetStanzaId);
+  }
+  /** #414: fetch the room's current pin list. Server requires the
+   * caller to be a current room occupant. Returns entries in
+   * pin-time-desc order. */
+  async fetchRoomPins(spaceId: string, channelId: string): Promise<import("./wasm-types").WasmPinEntry[]> {
+    const { xmpp, roomJid } = await this.requireJoinedRoom(spaceId, channelId);
+    if (typeof xmpp.fetch_room_pins !== "function") throw new Error("fetch_room_pins not available in wasm client");
+    const result = await xmpp.fetch_room_pins(roomJid);
+    return Array.isArray(result) ? (result as import("./wasm-types").WasmPinEntry[]) : [];
+  }
   async sendRetraction(spaceId: string, channelId: string, retractsId: string) { const { xmpp, roomJid } = await this.requireJoinedRoom(spaceId, channelId); await this.compatSendRetraction(xmpp, roomJid, "groupchat", retractsId); }
   async sendModeration(spaceId: string, channelId: string, targetId: string, reason?: string) { const { xmpp, roomJid } = await this.requireJoinedRoom(spaceId, channelId); await this.compatSendModeration(xmpp, roomJid, targetId, reason); }
   async sendCorrection(spaceId: string, channelId: string, body: string, replacesId: string, markup?: SendGroupMessageOptions["markup"], references?: SendGroupMessageOptions["references"]): Promise<string | null> { const { xmpp, roomJid } = await this.requireJoinedRoom(spaceId, channelId); return await this.compatSendCorrection(xmpp, roomJid, "groupchat", body, replacesId, { markup, references }); }
@@ -847,6 +873,11 @@ export class BrowserXmppClient {
     }
     if (message.displayed_marker_id) { if (message.is_muc) { const roomJid = barePeerJid(message.from ?? message.to ?? ""); const nick = (message.from ?? "").split("/")[1] ?? "unknown"; this.displayedHandler?.({ roomJid, nick, messageId: message.displayed_marker_id }); } else this.dmDisplayedHandler?.({ peerJid: barePeerJid(message.from ?? message.to ?? ""), messageId: message.displayed_marker_id }); return; }
     if (message.reaction_target_id) { if (message.is_muc) { const roomJid = barePeerJid(message.from ?? message.to ?? ""); const nick = (message.from ?? "").split("/")[1] ?? "unknown"; this.reactionHandler?.({ roomJid, nick, messageId: message.reaction_target_id, emojis: message.reaction_emojis }); } else { const fromBare = barePeerJid(message.from ?? ""); const toBare = barePeerJid(message.to ?? ""); const selfBare = barePeerJid(this.session.jid); const peerJid = fromBare === selfBare ? toBare : fromBare; const reactorJid = fromBare || selfBare; if (peerJid && reactorJid) this.dmReactionHandler?.({ peerJid, reactorJid, messageId: message.reaction_target_id, emojis: message.reaction_emojis }); } return; }
+    if (message.pin_event && message.is_muc) {
+      const roomJid = barePeerJid(message.from ?? message.to ?? "");
+      this.pinEventHandler?.({ roomJid, event: message.pin_event });
+      return;
+    }
     if (message.is_muc) {
       const converted = roomMessageFromArchived({ ...message, mam_id: message.id ?? crypto.randomUUID() } as WasmArchivedMessage);
       if (!converted) return;
