@@ -15,8 +15,15 @@ use tracing::{debug, instrument};
 use xmpp_parsers::iq::{Iq, IqType};
 use xmpp_parsers::presence::Presence;
 
+use super::pin::PinPermission;
 use super::{MucRoom, RoomConfig, NS_MUC_OWNER};
-use crate::xep::xep0004::{self, DataForm, Field, FormType, FromElement, IntoElement};
+
+/// XEP-0045 owner-config form field var for the per-room pin
+/// permission policy (#415).
+pub const FIELD_PIN_PERMISSION: &str = "urn:waddle:roomconfig:pinpermission";
+use crate::xep::xep0004::{
+    self, DataForm, Field, FieldOption, FieldType, FormType, FromElement, IntoElement,
+};
 use crate::xep::FIELD_FORUM_MODE;
 use crate::XmppError;
 
@@ -69,6 +76,9 @@ pub struct ConfigFormData {
     pub enable_logging: Option<bool>,
     /// Whether forum mode is enabled (muc#roomconfig_forum)
     pub forum: Option<bool>,
+    /// #415: who may pin/unpin messages in this room
+    /// (`urn:waddle:roomconfig:pinpermission`).
+    pub pin_permission: Option<PinPermission>,
 }
 
 /// Room destruction request.
@@ -226,6 +236,9 @@ fn parse_config_form(form_elem: &Element) -> Result<ConfigFormData, XmppError> {
             FIELD_FORUM_MODE => {
                 config.forum = field.value_as_bool();
             }
+            FIELD_PIN_PERMISSION => {
+                config.pin_permission = field.value().and_then(PinPermission::from_form_value);
+            }
             "FORM_TYPE" => {
                 // Ignore the FORM_TYPE field
             }
@@ -279,6 +292,19 @@ pub fn build_config_form(room: &MucRoom) -> Element {
                 .with_label("Enable Room Logging"),
         )
         .add_field(Field::boolean(FIELD_FORUM_MODE, room.config.forum).with_label("Forum Mode"))
+        .add_field(
+            Field::new(FIELD_PIN_PERMISSION, FieldType::ListSingle)
+                .with_label("Who can pin messages")
+                .with_value(room.config.pin_permission.as_form_value())
+                .add_option(FieldOption::with_label(
+                    "Admins only",
+                    PinPermission::AdminsOnly.as_form_value(),
+                ))
+                .add_option(FieldOption::with_label(
+                    "Anyone",
+                    PinPermission::Anyone.as_form_value(),
+                )),
+        )
         .into_element()
 }
 
@@ -440,6 +466,9 @@ pub fn apply_config_form(config: &mut RoomConfig, form_data: &ConfigFormData) {
     }
     if let Some(forum) = form_data.forum {
         config.forum = forum;
+    }
+    if let Some(pin_permission) = form_data.pin_permission {
+        config.pin_permission = pin_permission;
     }
 }
 

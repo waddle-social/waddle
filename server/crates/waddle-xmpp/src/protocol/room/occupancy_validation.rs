@@ -126,6 +126,7 @@ mod tests {
             occupants: &occupants,
             managed_room_forbidden: managed_forbidden,
             room_moderated: moderated,
+            pin_permission: crate::muc::PinPermission::default(),
             id_gen: &id_gen,
             occupant_id_secret: &secret,
             sender_nickname_generation: 0,

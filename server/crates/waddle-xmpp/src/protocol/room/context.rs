@@ -88,6 +88,11 @@ pub struct RoomContext<'a> {
     /// chain didn't, until this field landed (Copilot review on
     /// PR #279).
     pub room_moderated: bool,
+    /// #415: per-room pin permission policy (`urn:waddle:roomconfig:pinpermission`).
+    /// Frozen at dispatch start from `RoomConfig.pin_permission`; the
+    /// `MucPinHandler` reads this to decide whether non-admin members
+    /// may pin/unpin.
+    pub pin_permission: crate::muc::PinPermission,
     /// Source of fresh, opaque XEP-0359 stanza-id values for the
     /// canonical `<stanza-id by='room'/>` stamp the
     /// [`super::canonicalize::MucCanonicalizeHandler`] applies.

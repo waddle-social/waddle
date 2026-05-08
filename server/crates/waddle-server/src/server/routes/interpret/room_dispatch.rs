@@ -130,6 +130,7 @@ pub(super) async fn dispatch_to_room(
         occupants: &occupants,
         managed_room_forbidden,
         room_moderated: snapshot.config.moderated,
+        pin_permission: snapshot.config.pin_permission,
         id_gen: &id_gen,
         occupant_id_secret: &state.deps.occupant_id_secret,
         sender_nickname_generation: snapshot.sender_nickname_generation.unwrap_or(0),
@@ -247,6 +248,7 @@ pub(super) async fn dispatch_to_room(
         // the legacy `RoomActor::BuildGroupchatBroadcast` check that
         // previously emitted `RoomActorError::VisitorMayNotSpeak`.
         room_moderated: snapshot.config.moderated,
+        pin_permission: snapshot.config.pin_permission,
         id_gen: &id_gen,
         occupant_id_secret: &state.deps.occupant_id_secret,
         // Carry the sender's nickname-generation through the chain

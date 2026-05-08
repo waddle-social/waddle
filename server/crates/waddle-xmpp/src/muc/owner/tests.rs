@@ -172,6 +172,7 @@ fn test_apply_config_form() {
         max_occupants: Some(100),
         enable_logging: Some(false),
         forum: Some(true),
+        pin_permission: Some(super::super::pin::PinPermission::Anyone),
     };
 
     apply_config_form(&mut config, &form_data);
