@@ -13,19 +13,23 @@
 //!    §7.4 (only occupants may send) + Waddle managed-room policy.
 //! 2. [`canonicalize::MucCanonicalizeHandler`] — XEP-0359 stanza-id
 //!    `by=room`, XEP-0421 occupant-id stamp, `from='room/nick'` rewrite.
-//! 3. [`subject::MucSubjectHandler`] — XEP-0045 §8.1 subject-change
+//! 3. [`pin::MucPinHandler`] — XEP-0470 attachment with `urn:waddle:pin:0`
+//!    `<pinned/>` / `<unpinned/>` marker. Enforces affiliation-based
+//!    authorization; on allow halts with [`super::event::OutboundEvent::ApplyPinChange`]
+//!    + [`super::event::OutboundEvent::BroadcastRoomSystemMessage`].
+//! 4. [`subject::MucSubjectHandler`] — XEP-0045 §8.1 subject-change
 //!    capture. Enforces §8.1 role-based authorization inline; on allow
 //!    emits [`super::event::OutboundEvent::PersistRoomSubject`] for the
 //!    interpreter to land on the room actor; on deny halts with a
 //!    typed `<forbidden/>` reply so neither archive nor reflector run.
-//! 4. [`archive::MucArchiveHandler`] — XEP-0313 §5.1.3 archive-eligibility
+//! 5. [`archive::MucArchiveHandler`] — XEP-0313 §5.1.3 archive-eligibility
 //!    → emits [`super::event::OutboundEvent::ArchiveGroupchat`] and, for
 //!    XEP-0424 retraction requests, an
 //!    [`super::event::OutboundEvent::ApplyGroupchatRetractionTombstone`].
-//! 5. [`inbox::MucInboxHandler`] — Waddle inbox projection per occupant
+//! 6. [`inbox::MucInboxHandler`] — Waddle inbox projection per occupant
 //!    (channel + thread rows) via
 //!    [`super::event::OutboundEvent::ProjectGroupchatInbox`].
-//! 6. [`reflector::ReflectorHandler`] — per-occupant fan-out via
+//! 7. [`reflector::ReflectorHandler`] — per-occupant fan-out via
 //!    [`super::event::OutboundEvent::RouteToConnection`].
 
 pub mod archive;
@@ -35,6 +39,7 @@ pub mod dispatch;
 pub mod errors;
 pub mod inbox;
 pub mod occupancy_validation;
+pub mod pin;
 pub mod reflector;
 pub mod subject;
 pub mod traits;
@@ -49,6 +54,7 @@ pub use traits::{RoomHandler, RoomHandlerOutcome};
 pub fn register_default_room_handlers(dispatcher: &mut RoomDispatcher) {
     dispatcher.register(Arc::new(occupancy_validation::OccupancyValidationHandler));
     dispatcher.register(Arc::new(canonicalize::MucCanonicalizeHandler));
+    dispatcher.register(Arc::new(pin::MucPinHandler));
     dispatcher.register(Arc::new(subject::MucSubjectHandler));
     dispatcher.register(Arc::new(archive::MucArchiveHandler));
     dispatcher.register(Arc::new(inbox::MucInboxHandler));
@@ -64,7 +70,7 @@ pub fn default_room_dispatcher() -> RoomDispatcher {
     d
 }
 
-/// Register only the post-gate pipeline handlers (canonicalize →
+/// Register only the post-gate pipeline handlers (canonicalize → pin →
 /// subject → archive → inbox → reflector). The interpreter runs
 /// [`occupancy_validation::OccupancyValidationHandler`] as an
 /// explicit gate before rich-target validation (Copilot review on
@@ -72,6 +78,7 @@ pub fn default_room_dispatcher() -> RoomDispatcher {
 /// avoid running the gate twice.
 pub fn register_room_pipeline_handlers(dispatcher: &mut RoomDispatcher) {
     dispatcher.register(Arc::new(canonicalize::MucCanonicalizeHandler));
+    dispatcher.register(Arc::new(pin::MucPinHandler));
     dispatcher.register(Arc::new(subject::MucSubjectHandler));
     dispatcher.register(Arc::new(archive::MucArchiveHandler));
     dispatcher.register(Arc::new(inbox::MucInboxHandler));
@@ -92,14 +99,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_dispatcher_registers_six_handlers() {
+    fn default_dispatcher_registers_seven_handlers() {
         let d = default_room_dispatcher();
-        assert_eq!(d.handler_count(), 6);
+        assert_eq!(d.handler_count(), 7);
     }
 
     #[test]
-    fn pipeline_dispatcher_registers_five_handlers() {
+    fn pipeline_dispatcher_registers_six_handlers() {
         let d = default_room_pipeline_dispatcher();
-        assert_eq!(d.handler_count(), 5);
+        assert_eq!(d.handler_count(), 6);
     }
 }

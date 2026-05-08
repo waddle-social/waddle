@@ -5,6 +5,7 @@ use waddle_xmpp_core::xep0359::StanzaId;
 use xmpp_parsers::iq::Iq;
 use xmpp_parsers::message::Message;
 
+use crate::muc::PinStateChange;
 use crate::Stanza;
 
 use super::{CallbackId, CarbonKind, GroupchatThreadProjection, MessageRef, TimerId};
@@ -202,6 +203,42 @@ pub enum OutboundEvent {
         /// Wall-clock time of the change (UTC). Becomes the XEP-0203
         /// `<delay/>` `stamp` attribute on the next join's emission.
         set_at: DateTime<Utc>,
+    },
+    /// Apply a pinned-message state change to a MUC room actor (#414).
+    ///
+    /// Emitted by [`super::room::pin::MucPinHandler`] when an authorized
+    /// occupant publishes a `<message type='groupchat'>` carrying a
+    /// XEP-0470 `<attachments/>` element with a `urn:waddle:pin:0`
+    /// `<pinned/>` or `<unpinned/>` child. The interpreter forwards
+    /// this to the room actor, which mutates `MucRoom.pinned_entries`
+    /// via `upsert_pin` / `remove_pin_by_target`.
+    ///
+    /// The chain emits a sibling
+    /// [`OutboundEvent::BroadcastRoomSystemMessage`] in the same
+    /// dispatch so the corresponding `<pin-event/>` system message is
+    /// archived and reflected to occupants.
+    ApplyPinChange {
+        /// Room whose pin state is being mutated.
+        room: BareJid,
+        /// The state change to apply.
+        change: PinStateChange,
+    },
+    /// Broadcast a system message originating from the room itself,
+    /// archived and fanned out to every occupant (#414).
+    ///
+    /// Used for events the room emits on its own behalf — XEP-0045
+    /// `from='room@conf'` (no resource), with `type='groupchat'`. The
+    /// interpreter stamps a fresh XEP-0359 `<stanza-id by='room'/>`,
+    /// archives the message in MAM, and routes a copy to every joined
+    /// occupant. Bypasses the occupancy gate because the sender is the
+    /// service itself.
+    BroadcastRoomSystemMessage {
+        /// Room emitting the system message.
+        room: BareJid,
+        /// The system message body — `from`/`type` set by the
+        /// interpreter to `room@conf` / `groupchat` respectively;
+        /// callers populate `bodies` and `payloads`.
+        message: Box<Message>,
     },
     /// XEP-0424 §"prevent further distribution" — replace the target
     /// row in a room's MAM archive with a tombstone after a groupchat

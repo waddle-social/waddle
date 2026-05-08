@@ -343,8 +343,9 @@ pub use super::xep0471::{
 };
 
 pub use super::xep0470::{
-    build_attachments_element, has_pin_marker, is_attachments_element, parse_attachment_target,
-    Attachment, AttachmentPayload, AttachmentTarget, NS_PUBSUB_ATTACHMENTS, NS_WADDLE_PIN_V0,
+    build_attachments_element, has_pin_marker, has_unpin_marker, is_attachments_element,
+    parse_attachment_target, Attachment, AttachmentPayload, AttachmentTarget,
+    NS_PUBSUB_ATTACHMENTS, NS_WADDLE_PIN_V0,
 };
 
 pub use super::xep0472::{

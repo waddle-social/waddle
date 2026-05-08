@@ -48,6 +48,19 @@ impl PinPreview {
     }
 }
 
+/// A pin state mutation to apply to a room actor's pin list. Carried
+/// by [`crate::protocol::event::OutboundEvent::ApplyPinChange`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PinStateChange {
+    /// Add or replace a pin entry (newest pin first per upsert).
+    Pin(PinnedEntry),
+    /// Remove the pin entry matching `target_stanza_id`, if any.
+    Unpin {
+        /// XEP-0359 stanza-id of the message whose pin is being cleared.
+        target_stanza_id: String,
+    },
+}
+
 /// A pinned message entry held on the room actor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PinnedEntry {

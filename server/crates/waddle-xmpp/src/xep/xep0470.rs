@@ -63,6 +63,9 @@ pub enum AttachmentPayload {
     /// pin metadata (pinner, timestamp, preview) is held in the room-level
     /// projection list, not in the per-message attachment.
     Pin,
+    /// An unpin marker (`urn:waddle:pin:0` `<unpinned/>`). Symmetric to
+    /// `Pin` — used to clear an existing pin on the targeted message.
+    Unpin,
     /// A generic XML payload.
     Custom(Element),
 }
@@ -106,6 +109,15 @@ impl Attachment {
         }
     }
 
+    /// Create an unpin attachment marker.
+    pub fn unpin(target: AttachmentTarget) -> Self {
+        Self {
+            target,
+            payload: AttachmentPayload::Unpin,
+            author: None,
+        }
+    }
+
     /// Set the author.
     pub fn with_author(mut self, author: impl Into<String>) -> Self {
         self.author = Some(author.into());
@@ -125,6 +137,11 @@ impl Attachment {
     /// Returns `true` if this is a pin marker.
     pub fn is_pin(&self) -> bool {
         matches!(self.payload, AttachmentPayload::Pin)
+    }
+
+    /// Returns `true` if this is an unpin marker.
+    pub fn is_unpin(&self) -> bool {
+        matches!(self.payload, AttachmentPayload::Unpin)
     }
 }
 
@@ -157,6 +174,16 @@ pub fn has_pin_marker(elem: &Element) -> bool {
         .any(|child| child.name() == "pinned" && child.ns() == NS_WADDLE_PIN_V0)
 }
 
+/// Returns `true` if the given `<attachments/>` element carries a Waddle unpin
+/// marker (`<unpinned xmlns="urn:waddle:pin:0"/>`) as a direct child.
+pub fn has_unpin_marker(elem: &Element) -> bool {
+    if !is_attachments_element(elem) {
+        return false;
+    }
+    elem.children()
+        .any(|child| child.name() == "unpinned" && child.ns() == NS_WADDLE_PIN_V0)
+}
+
 // ── Building ─────────────────────────────────────────────────────────
 
 /// Build an `<attachments/>` element.
@@ -182,6 +209,9 @@ pub fn build_attachments_element(attachment: &Attachment) -> Element {
         }
         AttachmentPayload::Pin => {
             elem.append_child(Element::builder("pinned", NS_WADDLE_PIN_V0).build());
+        }
+        AttachmentPayload::Unpin => {
+            elem.append_child(Element::builder("unpinned", NS_WADDLE_PIN_V0).build());
         }
         AttachmentPayload::Custom(child) => {
             elem.append_child(child.clone());
@@ -259,7 +289,32 @@ mod tests {
         assert!(!Attachment::reaction(target.clone(), "👍").is_comment());
         assert!(Attachment::pin(target.clone()).is_pin());
         assert!(!Attachment::pin(target.clone()).is_comment());
-        assert!(!Attachment::pin(target).is_reaction());
+        assert!(!Attachment::pin(target.clone()).is_reaction());
+        assert!(Attachment::unpin(target.clone()).is_unpin());
+        assert!(!Attachment::unpin(target.clone()).is_pin());
+        assert!(!Attachment::pin(target).is_unpin());
+    }
+
+    #[test]
+    fn test_build_unpin_marker_and_detect() {
+        let target = AttachmentTarget::new("urn:xmpp:mam:2", "stanza-abc");
+        let elem = build_attachments_element(&Attachment::unpin(target));
+        assert!(has_unpin_marker(&elem));
+        assert!(!has_pin_marker(&elem));
+        let unpinned = elem.children().next().expect("unpinned child");
+        assert_eq!(unpinned.name(), "unpinned");
+        assert_eq!(unpinned.ns(), NS_WADDLE_PIN_V0);
+    }
+
+    #[test]
+    fn test_pin_and_unpin_are_distinct_markers() {
+        let target = AttachmentTarget::new("urn:xmpp:mam:2", "stanza-abc");
+        let pin_elem = build_attachments_element(&Attachment::pin(target.clone()));
+        let unpin_elem = build_attachments_element(&Attachment::unpin(target));
+        assert!(has_pin_marker(&pin_elem));
+        assert!(!has_unpin_marker(&pin_elem));
+        assert!(has_unpin_marker(&unpin_elem));
+        assert!(!has_pin_marker(&unpin_elem));
     }
 
     #[test]
