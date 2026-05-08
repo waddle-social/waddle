@@ -60,6 +60,8 @@ pub struct ArchivedMessage {
     pub message_type: String,
     pub body: Option<String>,
     pub thread: Option<String>,
+    /// All valid XEP-0359 stanza IDs embedded in the inner message.
+    pub stanza_ids: Vec<StableStanzaId>,
     /// XEP-0201 nested-thread parent. Populated from the `parent`
     /// attribute on the inner `<thread/>` element via the canonical
     /// `crate::xep::thread::parse_thread` helper. `None` for root
@@ -421,9 +423,12 @@ pub fn parse_mam_result(element: &Element) -> Option<ArchivedMessage> {
     let parent_thread_id = thread_ref.as_ref().and_then(|t| t.parent.clone());
 
     // XEP-0359 stanza-id embedded in the inner message.
-    let stanza_id = inner
-        .get_child("stanza-id", XEP0359_NS)
-        .and_then(parse_archived_stanza_id);
+    let stanza_ids: Vec<StableStanzaId> = inner
+        .children()
+        .filter(|child| child.name() == "stanza-id" && child.ns() == XEP0359_NS)
+        .filter_map(parse_archived_stanza_id)
+        .collect();
+    let stanza_id = stanza_ids.first().cloned();
     let origin_id = inner
         .get_child("origin-id", XEP0359_NS)
         .and_then(|s| s.attr("id"))
@@ -443,6 +448,7 @@ pub fn parse_mam_result(element: &Element) -> Option<ArchivedMessage> {
         message_type,
         body,
         thread,
+        stanza_ids,
         parent_thread_id,
         author_real_jid,
         inner,

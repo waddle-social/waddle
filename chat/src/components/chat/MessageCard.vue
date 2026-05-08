@@ -34,7 +34,7 @@ import {
   type MarkupSpan,
   type MessageReference,
 } from "@/lib/chat-ui";
-import { mentionMatchesUsername } from "@/lib/mentions";
+import { messageMentionsBareJid } from "@/lib/mentions";
 import { richMessageToTiptap, tiptapToRichMessage } from "@/lib/rich-message";
 import { applyShikiToCodeBlocks } from "@/lib/shiki";
 import type { OccupantHat, OccupantPresence } from "@/lib/xmpp-client";
@@ -77,6 +77,7 @@ const HAT_RANK: Record<string, number> = {
 const props = defineProps<{
   message: TimelineMessage;
   currentUser?: string;
+  currentUserJid?: string;
   hats: OccupantHat[];
   avatarUrl?: string | null;
   presence?: OccupantPresence;
@@ -240,9 +241,7 @@ function startReplyInThreadFromMenu() {
 }
 
 const isMentioned = computed(() => {
-  if (props.message.broadcastMention) return true;
-  if (!props.currentUser || !props.message.mentions) return false;
-  return props.message.mentions.some((mention) => mentionMatchesUsername(mention, props.currentUser));
+  return messageMentionsBareJid(props.message, props.currentUserJid);
 });
 const isForumTopic = computed(() => props.message.forumPostKind === "topic" && !!props.message.forumTitle);
 const isForumReply = computed(() => props.message.forumPostKind === "reply");

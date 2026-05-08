@@ -39,6 +39,7 @@ import {
   fromLiveDmMessage,
   isSameDmCorrectionSender,
   queuedDmMessageToTimeline,
+  retractDmTimelineMessage,
 } from "@/dms/message-timeline-state";
 
 export function useDirectMessages(
@@ -213,8 +214,12 @@ export function useDirectMessages(
     });
   }
 
-  function applyRetraction(retractsId: string) {
-    messages.value = messages.value.map((m) => (matchMessageId(m, retractsId) ? { ...m, body: "", isRetracted: true } : m));
+  function applyRetraction(msg: LiveDmMessage) {
+    messages.value = messages.value.map((m) =>
+      msg.retractsId && matchMessageId(m, msg.retractsId) && isSameDmCorrectionSender(m, msg.fromJid)
+        ? retractDmTimelineMessage(m, msg.retractionId)
+        : m
+    );
   }
 
   function applyCorrection(
@@ -259,7 +264,10 @@ export function useDirectMessages(
     });
   }
 
-  function mergeLiveMessage(msg: TimelineMessage) {
+  function mergeLiveMessage(rawMessage: TimelineMessage) {
+    const msg = rawMessage.isRetracted
+      ? retractDmTimelineMessage(rawMessage, rawMessage.retractionId)
+      : rawMessage;
     // Self-echo reconciliation: match by id first; otherwise body-match only
     // against messages still awaiting reconciliation so duplicates don't
     // retarget already-reconciled entries. Echo = authoritative → delivered.
@@ -764,7 +772,7 @@ export function useDirectMessages(
     if (!session.value || !activePeerJid.value || msg.peerJid !== activePeerJid.value) return;
     removeTypingUser(msg.nick);
     if (msg.retractsId) {
-      applyRetraction(msg.retractsId);
+      applyRetraction(msg);
       return;
     }
     if (msg.replacesId) {

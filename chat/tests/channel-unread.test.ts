@@ -28,6 +28,7 @@ const channelEntry: InboxEntry = {
   lastStanzaId: "sid-1",
   lastUpdated: 100,
   unread: 2,
+  preview: "channel preview",
 };
 
 const threadEntry: InboxEntry = {
@@ -38,6 +39,7 @@ const threadEntry: InboxEntry = {
   unread: 3,
   thread: "thread-1",
   threadTitle: "Planning",
+  preview: "thread preview",
 };
 
 describe("useChannelInbox", () => {
@@ -63,7 +65,13 @@ describe("useChannelInbox", () => {
     expect(composable.channelUnreadMap([
       { id: "space_channel", jid: "space_channel@conference.example.com" },
     ])).toMatchObject({
-      space_channel: { unread: 2, mentions: 0 },
+      space_channel: {
+        unread: 2,
+        mentions: 0,
+        threadUnread: 3,
+        preview: "thread preview",
+        lastUpdated: 200,
+      },
     });
   });
 

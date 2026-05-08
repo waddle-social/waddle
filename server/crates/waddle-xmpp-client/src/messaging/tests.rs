@@ -51,7 +51,38 @@ fn parse_message_with_stanza_id() {
     let MessagingEvent::Message(msg) = parse(&e).unwrap() else {
         panic!("expected Message");
     };
-    assert_eq!(msg.stanza_id.as_deref(), Some("server-sid-42"));
+    let stanza_id = msg.stanza_id.expect("stanza-id");
+    assert_eq!(stanza_id.as_str(), "server-sid-42");
+    assert_eq!(stanza_id.by.to_string(), "room@conf.example");
+}
+
+#[test]
+fn parse_message_preserves_multiple_typed_stanza_ids() {
+    let e = el("<message xmlns='jabber:client' type='groupchat' id='m3'>\
+         <body>hi</body>\
+         <stanza-id xmlns='urn:xmpp:sid:0' id='foreign-sid' by='archive.example'/>\
+         <stanza-id xmlns='urn:xmpp:sid:0' id='room-sid' by='room@conf.example'/>\
+         <stanza-id xmlns='urn:xmpp:sid:0' id='bad-sid' by=''/>\
+         </message>");
+    let MessagingEvent::Message(msg) = parse(&e).unwrap() else {
+        panic!("expected Message");
+    };
+    let stanza_ids: Vec<(String, String)> = msg
+        .stanza_ids
+        .iter()
+        .map(|stanza_id| (stanza_id.id.clone(), stanza_id.by.to_string()))
+        .collect();
+    assert_eq!(
+        stanza_ids,
+        vec![
+            ("foreign-sid".to_string(), "archive.example".to_string()),
+            ("room-sid".to_string(), "room@conf.example".to_string()),
+        ]
+    );
+    assert_eq!(
+        msg.stanza_id.as_ref().map(|id| id.as_str()),
+        Some("foreign-sid")
+    );
 }
 
 #[test]
@@ -143,12 +174,48 @@ fn parse_message_with_nested_thread() {
 #[test]
 fn parse_message_with_retract() {
     let e = el("<message xmlns='jabber:client' type='groupchat'>\
-         <retract xmlns='urn:xmpp:message-retract:0' id='old-msg-id'/>\
+         <retract xmlns='urn:xmpp:message-retract:1' id='old-msg-id'/>\
          </message>");
     let MessagingEvent::Message(msg) = parse(&e).unwrap() else {
         panic!("expected Message");
     };
     assert_eq!(msg.retracts_id.as_deref(), Some("old-msg-id"));
+    assert!(!msg.is_retracted);
+}
+
+#[test]
+fn parse_message_with_retracted_tombstone() {
+    let e = el(
+        "<message xmlns='jabber:client' type='groupchat' id='old-msg-id'>\
+         <retracted xmlns='urn:xmpp:message-retract:1' id='retract-msg-id'/>\
+         </message>",
+    );
+    let MessagingEvent::Message(msg) = parse(&e).unwrap() else {
+        panic!("expected Message");
+    };
+    assert_eq!(msg.retracts_id, None);
+    assert_eq!(msg.retraction_id.as_deref(), Some("retract-msg-id"));
+    assert!(msg.is_retracted);
+}
+
+#[test]
+fn parse_message_keeps_tombstone_with_malformed_moderated_by_jid() {
+    let e = el(
+        "<message xmlns='jabber:client' type='groupchat' id='old-msg-id'>\
+         <retracted xmlns='urn:xmpp:message-retract:1' id='retract-msg-id'>\
+             <moderated xmlns='urn:xmpp:message-moderate:1' by=''/>\
+             <reason>cleanup</reason>\
+         </retracted>\
+         </message>",
+    );
+    let MessagingEvent::Message(msg) = parse(&e).unwrap() else {
+        panic!("expected Message");
+    };
+    assert_eq!(msg.retracts_id, None);
+    assert_eq!(msg.retraction_id.as_deref(), Some("retract-msg-id"));
+    assert!(msg.is_retracted);
+    assert_eq!(msg.moderated_by, None);
+    assert_eq!(msg.moderation_reason.as_deref(), Some("cleanup"));
 }
 
 #[test]
@@ -167,12 +234,10 @@ fn parse_message_with_correction() {
 fn parse_message_with_moderation() {
     let e = el(
         "<message xmlns='jabber:client' type='groupchat' from='room@muc.example'>\
-         <apply-to xmlns='urn:xmpp:fasten:0' id='old-msg-id'>\
-             <moderated xmlns='urn:xmpp:message-moderate:0'>\
-                 <retract xmlns='urn:xmpp:message-retract:0'/>\
-                 <reason>cleanup</reason>\
-             </moderated>\
-         </apply-to>\
+         <retract xmlns='urn:xmpp:message-retract:1' id='old-msg-id'>\
+             <moderated xmlns='urn:xmpp:message-moderate:1' by='room@muc.example/moderator'/>\
+             <reason>cleanup</reason>\
+         </retract>\
          </message>",
     );
     let MessagingEvent::Message(msg) = parse(&e).unwrap() else {
@@ -180,8 +245,41 @@ fn parse_message_with_moderation() {
     };
     assert_eq!(msg.retracts_id.as_deref(), Some("old-msg-id"));
     assert_eq!(msg.moderation_target_id.as_deref(), Some("old-msg-id"));
-    assert_eq!(msg.moderated_by.as_deref(), Some(""));
+    assert_eq!(
+        msg.moderated_by.as_ref().map(|jid| jid.to_string()),
+        Some("room@muc.example/moderator".to_string())
+    );
     assert_eq!(msg.moderation_reason.as_deref(), Some("cleanup"));
+}
+
+#[test]
+fn parse_message_discards_spoofed_moderation_from_occupant() {
+    let e = el(
+        "<message xmlns='jabber:client' type='groupchat' from='room@muc.example/spoofer'>\
+         <body>/me attempted moderation</body>\
+         <retract xmlns='urn:xmpp:message-retract:1' id='old-msg-id'>\
+             <moderated xmlns='urn:xmpp:message-moderate:1' by='room@muc.example/spoofer'/>\
+         </retract>\
+         </message>",
+    );
+    assert!(parse(&e).is_none());
+}
+
+#[test]
+fn parse_message_keeps_moderation_with_malformed_by_jid() {
+    let e = el(
+        "<message xmlns='jabber:client' type='groupchat' from='room@muc.example'>\
+         <retract xmlns='urn:xmpp:message-retract:1' id='old-msg-id'>\
+             <moderated xmlns='urn:xmpp:message-moderate:1' by=''/>\
+         </retract>\
+         </message>",
+    );
+    let MessagingEvent::Message(msg) = parse(&e).unwrap() else {
+        panic!("expected Message");
+    };
+    assert_eq!(msg.retracts_id.as_deref(), Some("old-msg-id"));
+    assert_eq!(msg.moderation_target_id.as_deref(), Some("old-msg-id"));
+    assert_eq!(msg.moderated_by, None);
 }
 
 #[test]
@@ -1085,21 +1183,19 @@ fn build_moderation_message_has_expected_shape() {
     let stanza =
         build_moderation_message("room@muc.example", "groupchat", "msg-1", Some("cleanup"));
     assert_eq!(stanza.attr("to"), Some("room@muc.example"));
-    let apply_to = stanza
-        .get_child("apply-to", NS_FASTEN)
-        .expect("apply-to child");
-    assert_eq!(apply_to.attr("id"), Some("msg-1"));
-    let moderated = apply_to
-        .get_child("moderated", NS_MESSAGE_MODERATE)
-        .expect("moderated child");
-    assert!(moderated.get_child("retract", NS_MESSAGE_RETRACT).is_some());
+    assert_eq!(stanza.name(), "iq");
+    assert_eq!(stanza.attr("type"), Some("set"));
+    let moderate = stanza
+        .get_child("moderate", NS_MESSAGE_MODERATE)
+        .expect("moderate child");
+    assert_eq!(moderate.attr("id"), Some("msg-1"));
+    assert!(moderate.get_child("retract", NS_MESSAGE_RETRACT).is_some());
     assert_eq!(
-        moderated
+        moderate
             .get_child("reason", NS_MESSAGE_MODERATE)
             .map(|child| child.text()),
         Some("cleanup".to_string())
     );
-    assert!(stanza.get_child("store", NS_HINTS).is_some());
 }
 
 #[test]

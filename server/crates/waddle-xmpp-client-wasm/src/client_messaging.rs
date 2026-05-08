@@ -110,9 +110,9 @@ impl WaddleClient {
     ) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
-            let _ = (NS_FASTEN, NS_MODERATE, NS_RETRACT, NS_HINTS);
+            let _ = (NS_MODERATE, NS_RETRACT);
             let stanza = build_moderation_message(&to, &msg_type, &target_id, reason.as_deref());
-            send_stanza_command(inner, stanza).await?;
+            let _ = send_iq_command(inner, stanza).await?;
             Ok(JsValue::UNDEFINED)
         })
     }

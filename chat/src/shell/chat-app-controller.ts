@@ -24,7 +24,7 @@ import { useScrollDirectionPreference } from "@/preferences/scroll-direction";
 import type { MemberSummary } from "@/lib/chat-types";
 import type { ExtensionAnnotationAction, MarkupSpan, MessageReference, TimelineMessage } from "@/lib/chat-ui";
 import type { DiscoveredExtensionRoute } from "@/lib/xmpp/extension-commands";
-import { avatarLookupCandidates, mentionAutocompleteCandidates, mentionMatchesUsername, mergeMentionMembers } from "@/lib/mentions";
+import { avatarLookupCandidates, mentionAutocompleteCandidates, mentionMatchesBareJid, mergeMentionMembers } from "@/lib/mentions";
 import {
   moveReactionSelection,
   preserveReactionSelection,
@@ -64,6 +64,7 @@ export function useChatAppController(giphyApiKey: string) {
     ui.actionError,
     ui.clearActionError,
     mentionJidsByNickForSend,
+    computed(() => ui.activePage.value === "chat" && ui.sidebarMode.value === "channels"),
   );
 
   const dmConversations = useDirectMessageConversations(
@@ -540,7 +541,7 @@ export function useChatAppController(giphyApiKey: string) {
     const channelName = resolveChannelNameFromJid(event.roomJid) ?? "unknown";
     const isBroadcast = !!event.broadcastMention;
     const isPersonalMention = event.mentions?.some((mention) =>
-      mentionMatchesUsername(mention, connectionStore.session?.username)
+      mentionMatchesBareJid(mention, connectionStore.session?.jid)
     );
 
     if (isBroadcast || isPersonalMention) {

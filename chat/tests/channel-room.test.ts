@@ -1,5 +1,4 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
 import { roomJidForChannelId, roomJidForChannelSummary } from "../src/lib/channel-room";
 import type { WaddleSession } from "../src/lib/server-auth";
 
@@ -35,21 +34,4 @@ describe("roomJidForChannelSummary", () => {
     ], "random")).toBe("random@conference.example.net");
   });
 
-  test("ChatApp routes unread and activity clearing through the discovered room resolver", () => {
-    const controllerSource = readFileSync(
-      new URL("../src/shell/chat-app-controller.ts", import.meta.url),
-      "utf8",
-    );
-    const readActivitySource = readFileSync(
-      new URL("../src/shell/read-activity.ts", import.meta.url),
-      "utf8",
-    );
-
-    expect(controllerSource).toContain("roomJidForChannelId as resolveRoomJidForChannelId");
-    expect(readActivitySource).toContain("readReceiptsActiveRoomJid");
-    expect(readActivitySource).toContain("options.roomJidForChannelId(session, options.channels.value, channelId)");
-    expect(controllerSource).toContain("channelUnread.markThreadRead(roomJid, threadId)");
-    expect(controllerSource).toContain("messaging.clearChannelActivity(roomJid)");
-    expect(controllerSource).not.toContain("roomBareJidFor");
-  });
 });

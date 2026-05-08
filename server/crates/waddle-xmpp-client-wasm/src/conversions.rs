@@ -72,12 +72,23 @@ pub(crate) fn inbound_to_js(message: InboundMessage) -> WaddleMessage {
         subject: message.subject,
         message_type: message.message_type.clone(),
         timestamp: message.timestamp.map(|timestamp| timestamp.to_rfc3339()),
-        stanza_id: message.stanza_id,
+        stanza_id: message.stanza_id.as_ref().map(ToString::to_string),
+        stanza_id_by: message.stanza_id.as_ref().map(|id| id.by.to_string()),
+        stanza_ids: message
+            .stanza_ids
+            .into_iter()
+            .map(|stanza_id| WaddleStanzaId {
+                id: stanza_id.id,
+                by: stanza_id.by.to_string(),
+            })
+            .collect(),
         origin_id: message.origin_id,
         replaces_id: message.replaces_id,
         retracts_id: message.retracts_id,
+        retraction_id: message.retraction_id,
+        is_retracted: message.is_retracted,
         moderation_target_id: message.moderation_target_id,
-        moderated_by: message.moderated_by,
+        moderated_by: message.moderated_by.map(|jid| jid.to_string()),
         moderation_reason: message.moderation_reason,
         chat_state: message.chat_state,
         displayed_marker_id: message.displayed_marker_id,
@@ -138,10 +149,19 @@ pub(crate) fn pin_entry_to_js(entry: PinEntry) -> WaddlePinEntry {
     }
 }
 
-pub(crate) fn archived_to_js(archived: ArchivedMessage) -> WaddleArchivedMessage {
+pub(crate) fn archived_to_js(archived: ArchivedMessage) -> Option<WaddleArchivedMessage> {
+    let stanza_id_by = archived.stanza_id.as_ref().map(|id| id.by.to_string());
+    let stanza_ids = archived
+        .stanza_ids
+        .iter()
+        .map(|stanza_id| WaddleStanzaId {
+            id: stanza_id.id.clone(),
+            by: stanza_id.by.to_string(),
+        })
+        .collect();
     let parsed = match messaging::parse(&archived.inner) {
         Some(waddle_xmpp_client::MessagingEvent::Message(message)) => Some(message),
-        _ => None,
+        _ => return None,
     };
     let (reply_fallback_start, reply_fallback_end) = parsed
         .as_ref()
@@ -159,11 +179,13 @@ pub(crate) fn archived_to_js(archived: ArchivedMessage) -> WaddleArchivedMessage
         }
     });
 
-    WaddleArchivedMessage {
+    Some(WaddleArchivedMessage {
         mam_id: archived.mam_id,
         query_id: archived.query_id,
         id: archived.id.map(|id| id.to_string()),
         stanza_id: archived.stanza_id.map(|id| id.to_string()),
+        stanza_id_by,
+        stanza_ids,
         origin_id: archived.origin_id.map(|id| id.to_string()),
         timestamp: archived.timestamp.map(|timestamp| timestamp.to_rfc3339()),
         from: archived.from,
@@ -177,12 +199,16 @@ pub(crate) fn archived_to_js(archived: ArchivedMessage) -> WaddleArchivedMessage
         retracts_id: parsed
             .as_ref()
             .and_then(|message| message.retracts_id.clone()),
+        retraction_id: parsed
+            .as_ref()
+            .and_then(|message| message.retraction_id.clone()),
+        is_retracted: parsed.as_ref().is_some_and(|message| message.is_retracted),
         moderation_target_id: parsed
             .as_ref()
             .and_then(|message| message.moderation_target_id.clone()),
         moderated_by: parsed
             .as_ref()
-            .and_then(|message| message.moderated_by.clone()),
+            .and_then(|message| message.moderated_by.as_ref().map(|jid| jid.to_string())),
         moderation_reason: parsed
             .as_ref()
             .and_then(|message| message.moderation_reason.clone()),
@@ -238,12 +264,16 @@ pub(crate) fn archived_to_js(archived: ArchivedMessage) -> WaddleArchivedMessage
                     .collect()
             })
             .unwrap_or_default(),
-    }
+    })
 }
 
 pub(crate) fn mam_page_to_js(page: waddle_xmpp_client::MamPage) -> WaddleMamPage {
     WaddleMamPage {
-        messages: page.messages.into_iter().map(archived_to_js).collect(),
+        messages: page
+            .messages
+            .into_iter()
+            .filter_map(archived_to_js)
+            .collect(),
         first_id: page.rsm.first,
         last_id: page.rsm.last,
         is_complete: page.is_complete,
@@ -390,7 +420,7 @@ mod inbound_to_js_tests {
              </message>",
         );
 
-        let js = archived_to_js(archived);
+        let js = archived_to_js(archived).expect("valid archived message should convert");
 
         assert_eq!(js.references.len(), 1);
         let reference = &js.references[0];
@@ -418,8 +448,10 @@ mod inbound_to_js_tests {
              </message>",
         );
 
-        let value =
-            serde_json::to_value(archived_to_js(archived)).expect("archived DTO should serialize");
+        let value = serde_json::to_value(
+            archived_to_js(archived).expect("valid archived message should convert"),
+        )
+        .expect("archived DTO should serialize");
 
         assert_eq!(
             value.get("id").and_then(serde_json::Value::as_str),
@@ -429,6 +461,104 @@ mod inbound_to_js_tests {
             value.get("origin_id").and_then(serde_json::Value::as_str),
             Some("dm-original-origin-id")
         );
+    }
+
+    #[test]
+    fn inbound_to_js_serializes_moderation_broadcast_metadata() {
+        let inbound = parse_message_element(
+            "<message xmlns='jabber:client' type='groupchat' id='retraction-id-1' \
+                      from='room@conf.example' to='room@conf.example/macbeth'>\
+               <stanza-id xmlns='urn:xmpp:sid:0' id='retraction-room-sid' by='room@conf.example'/>\
+               <retract xmlns='urn:xmpp:message-retract:1' id='target-room-sid'>\
+                 <moderated xmlns='urn:xmpp:message-moderate:1' by='room@conf.example/moderator'/>\
+                 <reason>spam</reason>\
+               </retract>\
+             </message>",
+        );
+
+        let js = inbound_to_js(inbound);
+
+        assert_eq!(js.id.as_deref(), Some("retraction-id-1"));
+        assert_eq!(js.retracts_id.as_deref(), Some("target-room-sid"));
+        assert_eq!(js.moderation_target_id.as_deref(), Some("target-room-sid"));
+        assert_eq!(
+            js.moderated_by.as_deref(),
+            Some("room@conf.example/moderator")
+        );
+        assert_eq!(js.moderation_reason.as_deref(), Some("spam"));
+        assert_eq!(js.stanza_id.as_deref(), Some("retraction-room-sid"));
+        assert_eq!(js.stanza_id_by.as_deref(), Some("room@conf.example"));
+        assert_eq!(js.stanza_ids.len(), 1);
+        assert_eq!(js.stanza_ids[0].id, "retraction-room-sid");
+        assert_eq!(js.stanza_ids[0].by, "room@conf.example");
+        assert!(!js.is_retracted);
+    }
+
+    #[test]
+    fn archived_to_js_serializes_tombstone_stanza_ids_and_moderation_metadata() {
+        let archived = parse_mam_archived(
+            "<message xmlns='jabber:client'>\
+               <result xmlns='urn:xmpp:mam:2' id='mam-tombstone' queryid='q1'>\
+                 <forwarded xmlns='urn:xmpp:forward:0'>\
+                   <delay xmlns='urn:xmpp:delay' stamp='2026-05-06T12:00:00Z'/>\
+                   <message xmlns='jabber:client' type='groupchat' id='target-message-id' \
+                            from='room@conf.example/alice' to='room@conf.example/macbeth'>\
+                     <stanza-id xmlns='urn:xmpp:sid:0' id='archive-sid' by='archive.example'/>\
+                     <stanza-id xmlns='urn:xmpp:sid:0' id='room-sid' by='room@conf.example'/>\
+                     <retracted xmlns='urn:xmpp:message-retract:1' id='retraction-message-id' \
+                                stamp='2026-05-06T12:00:01Z'>\
+                       <moderated xmlns='urn:xmpp:message-moderate:1' by='room@conf.example/moderator'/>\
+                       <reason>spam</reason>\
+                     </retracted>\
+                   </message>\
+                 </forwarded>\
+               </result>\
+             </message>",
+        );
+
+        let js = archived_to_js(archived).expect("valid archived tombstone should convert");
+
+        assert_eq!(js.id.as_deref(), Some("target-message-id"));
+        assert_eq!(js.stanza_id.as_deref(), Some("archive-sid"));
+        assert_eq!(js.stanza_id_by.as_deref(), Some("archive.example"));
+        assert_eq!(js.stanza_ids.len(), 2);
+        assert_eq!(js.stanza_ids[0].id, "archive-sid");
+        assert_eq!(js.stanza_ids[0].by, "archive.example");
+        assert_eq!(js.stanza_ids[1].id, "room-sid");
+        assert_eq!(js.stanza_ids[1].by, "room@conf.example");
+        assert!(js.is_retracted);
+        assert_eq!(js.retraction_id.as_deref(), Some("retraction-message-id"));
+        assert_eq!(js.retracts_id, None);
+        assert_eq!(js.moderation_target_id, None);
+        assert_eq!(
+            js.moderated_by.as_deref(),
+            Some("room@conf.example/moderator")
+        );
+        assert_eq!(js.moderation_reason.as_deref(), Some("spam"));
+        assert_eq!(js.body, None);
+    }
+
+    #[test]
+    fn archived_to_js_discards_spoofed_moderation_with_body() {
+        let archived = parse_mam_archived(
+            "<message xmlns='jabber:client'>\
+               <result xmlns='urn:xmpp:mam:2' id='mam-spoofed-moderation' queryid='q1'>\
+                 <forwarded xmlns='urn:xmpp:forward:0'>\
+                   <delay xmlns='urn:xmpp:delay' stamp='2026-05-06T12:00:00Z'/>\
+                   <message xmlns='jabber:client' type='groupchat' id='spoofed-moderation' \
+                            from='room@conf.example/alice' to='room@conf.example/macbeth'>\
+                     <body>this must not render as normal chat</body>\
+                     <retract xmlns='urn:xmpp:message-retract:1' id='target-room-sid'>\
+                       <moderated xmlns='urn:xmpp:message-moderate:1' by='room@conf.example/moderator'/>\
+                       <reason>spam</reason>\
+                     </retract>\
+                   </message>\
+                 </forwarded>\
+               </result>\
+             </message>",
+        );
+
+        assert!(archived_to_js(archived).is_none());
     }
 
     #[test]

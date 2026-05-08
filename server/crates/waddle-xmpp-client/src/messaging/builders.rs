@@ -112,31 +112,26 @@ pub fn build_retraction_message(to: &str, message_type: &str, retracts_id: &str)
 
 pub fn build_moderation_message(
     to: &str,
-    message_type: &str,
+    _message_type: &str,
     target_id: &str,
     reason: Option<&str>,
 ) -> Element {
-    let mut moderated = Element::builder("moderated", NS_MESSAGE_MODERATE)
+    let mut moderate = Element::builder("moderate", NS_MESSAGE_MODERATE)
+        .attr("id", target_id)
         .append(Element::builder("retract", NS_MESSAGE_RETRACT).build());
     if let Some(reason) = reason {
-        moderated = moderated.append(
+        moderate = moderate.append(
             Element::builder("reason", NS_MESSAGE_MODERATE)
                 .append(reason)
                 .build(),
         );
     }
 
-    Element::builder("message", NS_CLIENT)
+    Element::builder("iq", NS_CLIENT)
         .attr("to", to)
-        .attr("type", message_type)
+        .attr("type", "set")
         .attr("id", Uuid::new_v4().to_string())
-        .append(
-            Element::builder("apply-to", NS_FASTEN)
-                .attr("id", target_id)
-                .append(moderated.build())
-                .build(),
-        )
-        .append(Element::builder("store", NS_HINTS).build())
+        .append(moderate.build())
         .build()
 }
 

@@ -89,6 +89,7 @@ export interface LiveRoomMessage {
   wireIds?: string[];
   /** XEP-0308 correction target: original sender message id/origin-id. */
   correctionTargetId?: string;
+  fromJid?: string;
   roomJid: string;
   nick: string;
   body: string;
@@ -101,6 +102,12 @@ export interface LiveRoomMessage {
   replacesId?: string;
   /** XEP-0424 */
   retractsId?: string;
+  retractionId?: string;
+  isRetracted?: boolean;
+  /** XEP-0425 moderation broadcast target. */
+  moderationTargetId?: string;
+  moderatedBy?: string;
+  moderationReason?: string;
   /** XEP-0372 */
   mentions?: string[];
   /** XEP-0394 */
@@ -154,6 +161,8 @@ export interface LiveDmMessage {
   type: "message";
   replacesId?: string;
   retractsId?: string;
+  retractionId?: string;
+  isRetracted?: boolean;
   mentions?: string[];
   /** XEP-0394 */
   markup?: import("@/lib/chat-ui").MarkupSpan[];

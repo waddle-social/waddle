@@ -7,12 +7,14 @@ use minidom::Element;
 
 use crate::xep::encrypted_file::{self as xep_encrypted_file, NS_ESFS as NS_ENCRYPTED_FILE};
 use crate::xep::{reply as xep_reply, thread as xep_thread};
+use waddle_xmpp_core::xep0359::StanzaId as StableStanzaId;
 
 use self::files::{parse_file_sharing_element, parse_shared_file};
 use self::markup::parse_markup_spans;
 pub use self::payloads::{
     parse_chat_state_payload, parse_correction_payload, parse_displayed_marker_payload,
     parse_moderation_payload, parse_reaction_payload, parse_retraction_payload,
+    parse_retraction_tombstone_payload,
 };
 use super::namespaces::*;
 use super::presence::parse_presence;
@@ -22,7 +24,9 @@ use super::types::*;
 /// element is not a `<message>` or `<presence>`.
 pub fn parse(element: &Element) -> Option<MessagingEvent> {
     match element.name() {
-        "message" => Some(MessagingEvent::Message(Box::new(parse_message(element)))),
+        "message" => {
+            parse_message(element).map(|message| MessagingEvent::Message(Box::new(message)))
+        }
         "presence" => Some(MessagingEvent::Presence(parse_presence(element))),
         _ => None,
     }
@@ -30,7 +34,7 @@ pub fn parse(element: &Element) -> Option<MessagingEvent> {
 
 // ─── Message parsing ──────────────────────────────────────────────────────
 
-fn parse_message(el: &Element) -> InboundMessage {
+fn parse_message(el: &Element) -> Option<InboundMessage> {
     let id = el.attr("id").map(String::from);
     let from = el.attr("from").map(String::from);
     let to = el.attr("to").map(String::from);
@@ -46,10 +50,16 @@ fn parse_message(el: &Element) -> InboundMessage {
         .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
         .map(|dt| dt.with_timezone(&Utc));
 
-    let stanza_id = el
-        .get_child("stanza-id", NS_STANZA_ID)
-        .and_then(|e| e.attr("id"))
-        .map(String::from);
+    let stanza_ids: Vec<StableStanzaId> = el
+        .children()
+        .filter(|child| child.name() == "stanza-id" && child.ns() == NS_STANZA_ID)
+        .filter_map(|child| {
+            let id = child.attr("id").filter(|id| !id.is_empty())?;
+            let by = child.attr("by")?.parse::<jid::Jid>().ok()?;
+            Some(StableStanzaId::new(id, by))
+        })
+        .collect();
+    let stanza_id = stanza_ids.first().cloned();
 
     let origin_id = el
         .get_child("origin-id", NS_ORIGIN_ID)
@@ -62,18 +72,36 @@ fn parse_message(el: &Element) -> InboundMessage {
         .map(|payload| payload.replaces_id.clone());
 
     let moderation = parse_moderation_payload(el);
+    if has_moderation_retract(el) && moderation.is_none() {
+        return None;
+    }
     let moderation_target_id = moderation.as_ref().map(|payload| payload.target_id.clone());
+    let tombstone = parse_retraction_tombstone_payload(el);
     let moderated_by = moderation
         .as_ref()
-        .map(|payload| payload.moderated_by.clone());
+        .and_then(|payload| payload.moderated_by.clone())
+        .or_else(|| {
+            tombstone
+                .as_ref()
+                .and_then(|payload| payload.moderated_by.clone())
+        });
     let moderation_reason = moderation
         .as_ref()
-        .and_then(|payload| payload.reason.clone());
+        .and_then(|payload| payload.reason.clone())
+        .or_else(|| {
+            tombstone
+                .as_ref()
+                .and_then(|payload| payload.reason.clone())
+        });
 
     let retraction = parse_retraction_payload(el);
     let retracts_id = moderation_target_id
         .clone()
         .or_else(|| retraction.as_ref().map(|payload| payload.target_id.clone()));
+    let retraction_id = tombstone
+        .as_ref()
+        .and_then(|payload| payload.retraction_id.clone());
+    let is_retracted = tombstone.is_some();
 
     let reaction = parse_reaction_payload(el);
     let reaction_target_id = reaction.as_ref().map(|payload| payload.target_id.clone());
@@ -262,12 +290,13 @@ fn parse_message(el: &Element) -> InboundMessage {
     // XEP-0449: Stickers
     let is_sticker = el.get_child("sticker", NS_STICKERS).is_some();
 
-    InboundMessage {
+    Some(InboundMessage {
         from,
         to,
         message_type,
         id,
         stanza_id,
+        stanza_ids,
         origin_id,
         body,
         subject,
@@ -275,6 +304,8 @@ fn parse_message(el: &Element) -> InboundMessage {
         timestamp,
         replaces_id,
         retracts_id,
+        retraction_id,
+        is_retracted,
         moderation_target_id,
         moderated_by,
         moderation_reason,
@@ -296,5 +327,12 @@ fn parse_message(el: &Element) -> InboundMessage {
         parent_thread_id,
         is_sticker,
         pin_event,
-    }
+    })
+}
+
+fn has_moderation_retract(element: &Element) -> bool {
+    element
+        .get_child("retract", NS_MESSAGE_RETRACT)
+        .and_then(|retract| retract.get_child("moderated", NS_MESSAGE_MODERATE))
+        .is_some()
 }

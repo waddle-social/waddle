@@ -92,9 +92,18 @@ export function useChatReadActivity(options: {
     activePeerJid: readReceiptsActivePeerJid,
     latestRemoteMessageId: readReceiptsLatestRemoteId,
     unreadCountForActive: readReceiptsUnreadCount,
-    markChannelRead: (jid) => options.channelUnread.markRead(jid),
+    markChannelRead: (jid) => {
+      options.channelUnread.markRead(jid);
+      options.messaging.clearChannelActivity(jid);
+    },
     markDmRead: (peer) => options.dmConversations.markRead(peer),
-    markDisplayed: (id) => options.activeTarget.value.markDisplayed(id),
+    markDisplayed: (id) => {
+      options.activeTarget.value.markDisplayed(id);
+      const roomJid = readReceiptsActiveRoomJid.value;
+      if (readReceiptsKind.value === "channel" && roomJid && readReceiptsUnreadCount.value === 0) {
+        options.messaging.clearChannelActivity(roomJid);
+      }
+    },
   });
 
   return {
