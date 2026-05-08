@@ -14,7 +14,9 @@ scenario: #Scenario & {
 		"XEP-0153",
 		"XEP-0163",
 		"XEP-0191",
+		"XEP-0384",
 		"XEP-0402",
+		"XEP-0490",
 	]
 	users: {
 		admin: devices: phone: #Actor & {
@@ -39,6 +41,47 @@ scenario: #Scenario & {
 	let avatarHash = "98f3b12600db9b8ef65f7d44fa8d6e1bd51d61c3"
 
 	steps: [
+		#SendIq & {
+			actor: adminPhone
+			type:  "get"
+			id:    "cue-pep-disco"
+			to:    adminPhone.bareJid
+			payload: #XmlElement & {
+				name: "query"
+				ns:   "http://jabber.org/protocol/disco#info"
+			}
+		},
+		#ExpectIq & {
+			target: adminPhone
+			id:     "cue-pep-disco"
+			type:   "result"
+			contains: [
+				"urn:xmpp:mam:2",
+				"urn:xmpp:mam:2#extended",
+				"urn:xmpp:fulltext:0",
+				"http://jabber.org/protocol/pubsub",
+				"http://jabber.org/protocol/pubsub#auto-create",
+				"http://jabber.org/protocol/pubsub#publish",
+				"http://jabber.org/protocol/pubsub#retrieve-items",
+				"http://jabber.org/protocol/pubsub#filtered-notifications",
+				"http://jabber.org/protocol/pubsub#config-node-max",
+				"urn:xmpp:push:0",
+				"urn:xmpp:bookmarks:1#compat",
+				"urn:xmpp:bookmarks:1#compat-pep",
+				"eu.siacs.conversations.axolotl.whitelisted",
+			]
+			absent: ["urn:xmpp:pep-vcard-conversion:0"]
+			elements: [
+				#XmlElement & {
+					name: "identity"
+					ns:   "http://jabber.org/protocol/disco#info"
+					attrs: {
+						category: "pubsub"
+						type:     "pep"
+					}
+				},
+			]
+		},
 		#SendIq & {
 			actor: adminPhone
 			type:  "set"

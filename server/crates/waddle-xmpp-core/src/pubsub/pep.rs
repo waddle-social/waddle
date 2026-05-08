@@ -88,7 +88,6 @@ pub fn pep_features() -> Vec<Feature> {
         Feature::mam(),
         Feature::mam_extended(),
         Feature::new("urn:xmpp:push:0"),
-        Feature::new("urn:xmpp:pep-vcard-conversion:0"),
         Feature::bookmarks_compat(),
         Feature::new("urn:xmpp:bookmarks:1#compat-pep"),
         Feature::new("http://jabber.org/protocol/pubsub#config-node-max"),

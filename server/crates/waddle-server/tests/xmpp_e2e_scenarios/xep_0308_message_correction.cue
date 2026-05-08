@@ -57,6 +57,7 @@ scenario: #Scenario & {
 			archive: alicePhone.bareJid
 			id:      "cue-edit-mam"
 		},
+		#ExpectMamResult & {body: "helo from cue"},
 		#ExpectMamResult & {
 			body: "hello from cue"
 			payloads: [

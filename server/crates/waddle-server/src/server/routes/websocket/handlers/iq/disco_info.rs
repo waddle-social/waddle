@@ -364,13 +364,17 @@ pub(super) async fn handle_disco_info_iq(
         if let (Some(target), Some(bound_jid)) = (target_to, phase.bound_jid()) {
             if let Ok(target_bare) = target.parse::<BareJid>() {
                 if target_bare == bound_jid.to_bare() {
-                    let identities = vec![Identity::server(Some("Personal Archive"))];
-                    let features = vec![
+                    let identities = vec![
+                        Identity::server(Some("Personal Archive")),
+                        build_pep_identity(),
+                    ];
+                    let mut features = vec![
                         Feature::disco_info(),
                         Feature::mam(),
                         Feature::mam_extended(),
                         Feature::fulltext_mam(),
                     ];
+                    features.extend(pep_features());
                     let response =
                         build_disco_info_response(request_iq, &identities, &features, None);
                     return vec![iq_to_xml(response)];

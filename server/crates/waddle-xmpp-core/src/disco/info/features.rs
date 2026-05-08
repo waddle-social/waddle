@@ -267,10 +267,6 @@ impl Feature {
         Self::new("urn:xmpp:avatar:metadata+notify")
     }
 
-    pub fn pep_vcard_conversion() -> Self {
-        Self::new("urn:xmpp:pep-vcard-conversion:0")
-    }
-
     pub fn private_storage() -> Self {
         Self::new("jabber:iq:private")
     }

@@ -47,7 +47,6 @@ scenario: #Scenario & {
 				"http://jabber.org/protocol/disco#items",
 				"http://jabber.org/protocol/caps",
 				"urn:xmpp:features:rosterver",
-				"urn:xmpp:mam:2",
 				"urn:xmpp:sid:0",
 				"urn:xmpp:sm:3",
 				"jabber:iq:roster",
@@ -59,9 +58,6 @@ scenario: #Scenario & {
 				"urn:xmpp:ping",
 				"urn:xmpp:time",
 				"jabber:iq:version",
-				"http://jabber.org/protocol/pubsub",
-				"http://jabber.org/protocol/pubsub#pep",
-				"urn:xmpp:avatar:metadata+notify",
 				"jabber:iq:private",
 				"http://jabber.org/protocol/commands",
 				"jabber:iq:search",
@@ -69,6 +65,9 @@ scenario: #Scenario & {
 			absent: [
 				"http://jabber.org/protocol/bytestreams",
 				"urn:xmpp:csi:0",
+				"urn:xmpp:mam:2",
+				"http://jabber.org/protocol/pubsub#pep",
+				"urn:xmpp:avatar:metadata+notify",
 				"urn:xmpp:pep-vcard-conversion:0",
 				"urn:xmpp:serverinfo:0",
 			]

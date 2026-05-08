@@ -96,6 +96,11 @@ impl TestServer {
             std::env::temp_dir().join(format!("waddle-test-port-{}", uuid::Uuid::new_v4()));
 
         let mut command = Command::new(bin);
+        for (key, _) in std::env::vars() {
+            if key.starts_with("WADDLE_") || key.starts_with("OTEL_") {
+                command.env_remove(key);
+            }
+        }
         command
             .env("WADDLE_CERTS_EPHEMERAL", "true")
             .env("WADDLE_TEST_FIXED_ACCOUNT_ENABLED", "true")

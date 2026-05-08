@@ -67,6 +67,7 @@ scenario: #Scenario & {
 			archive: alicePhone.bareJid
 			id:      "cue-direct-reaction-refresh-mam"
 		},
+		#ExpectMamResult & {body: "direct reaction survives refresh"},
 		#ExpectMamResult & {
 			bodyAbsent: true
 			contains: ["cue-direct-reaction-1"]

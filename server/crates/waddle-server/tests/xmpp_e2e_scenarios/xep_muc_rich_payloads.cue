@@ -379,6 +379,7 @@ scenario: #Scenario & {
 			actor:   adminPhone
 			archive: roomJid
 			id:      "cue-mam-retraction"
+			idsFrom: ["moderationTarget"]
 		},
 		#ExpectNoMamResult & {body: originalBody},
 		#ExpectMamResult & {
@@ -427,6 +428,7 @@ scenario: #Scenario & {
 			actor:   adminPhone
 			archive: roomJid
 			id:      "cue-mam-moderation"
+			idsFrom: ["moderationTarget"]
 		},
 		#ExpectMamResult & {
 			bodyAbsent: true

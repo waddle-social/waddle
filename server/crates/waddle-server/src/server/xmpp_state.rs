@@ -173,13 +173,20 @@ impl waddle_xmpp::AppState for XmppAppState {
     }
 
     /// Get the vCard for a user (XEP-0054).
-    async fn get_vcard(&self, jid: &jid::BareJid) -> Result<Option<String>, XmppError> {
+    async fn get_vcard(
+        &self,
+        jid: &jid::BareJid,
+    ) -> Result<Option<xmpp_parsers::minidom::Element>, XmppError> {
         super::xmpp_profile_state::get_vcard(&self.vcard_store, jid).await
     }
 
     /// Store/update the vCard for a user (XEP-0054).
-    async fn set_vcard(&self, jid: &jid::BareJid, vcard_xml: &str) -> Result<(), XmppError> {
-        super::xmpp_profile_state::set_vcard(&self.vcard_store, jid, vcard_xml).await
+    async fn set_vcard(
+        &self,
+        jid: &jid::BareJid,
+        vcard: &xmpp_parsers::minidom::Element,
+    ) -> Result<(), XmppError> {
+        super::xmpp_profile_state::set_vcard(&self.vcard_store, jid, vcard).await
     }
 
     /// Look up the externally-hosted avatar URL for a JID (XEP-0084 `url=`).

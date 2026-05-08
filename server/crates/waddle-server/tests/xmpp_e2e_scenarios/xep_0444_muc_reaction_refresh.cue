@@ -74,6 +74,7 @@ scenario: #Scenario & {
 			archive: roomJid
 			id:      "cue-muc-reaction-refresh-mam"
 		},
+		#ExpectMamResult & {body: "muc reaction survives refresh"},
 		#ExpectMamResult & {
 			bodyAbsent: true
 			contains: ["cue-muc-reaction-1"]

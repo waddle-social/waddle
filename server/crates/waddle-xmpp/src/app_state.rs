@@ -1,5 +1,6 @@
 use jid::BareJid;
 use waddle_xmpp_core::{ChannelInfo, ChannelRoomInfo, UploadSlotInfo};
+use xmpp_parsers::minidom::Element;
 
 use crate::{inbox, roster, Affiliation, XmppError};
 
@@ -158,19 +159,19 @@ pub trait AppState: Send + Sync + 'static {
 
     /// Get the vCard for a user (XEP-0054).
     ///
-    /// Returns the stored vCard XML for the given bare JID, or None if no vCard exists.
+    /// Returns the stored vCard element for the given bare JID, or None if no vCard exists.
     fn get_vcard(
         &self,
         jid: &jid::BareJid,
-    ) -> impl std::future::Future<Output = Result<Option<String>, XmppError>> + Send;
+    ) -> impl std::future::Future<Output = Result<Option<Element>, XmppError>> + Send;
 
     /// Store/update the vCard for a user (XEP-0054).
     ///
-    /// Stores the vCard XML string for the given bare JID.
+    /// Stores the vCard element for the given bare JID.
     fn set_vcard(
         &self,
         jid: &jid::BareJid,
-        vcard_xml: &str,
+        vcard: &Element,
     ) -> impl std::future::Future<Output = Result<(), XmppError>> + Send;
 
     /// Look up an externally-hosted avatar URL for a user.

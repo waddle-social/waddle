@@ -28,8 +28,117 @@ const SUPPORTED_XEPS: &[&str] = &[
     "XEP-0108", "XEP-0115", "XEP-0118", "XEP-0153", "XEP-0160", "XEP-0163", "XEP-0184", "XEP-0191",
     "XEP-0198", "XEP-0199", "XEP-0201", "XEP-0202", "XEP-0203", "XEP-0237", "XEP-0280", "XEP-0297",
     "XEP-0308", "XEP-0313", "XEP-0317", "XEP-0333", "XEP-0334", "XEP-0357", "XEP-0359", "XEP-0363",
-    "XEP-0372", "XEP-0402", "XEP-0410", "XEP-0421", "XEP-0424", "XEP-0425", "XEP-0428", "XEP-0431",
-    "XEP-0433", "XEP-0444", "XEP-0446", "XEP-0447", "XEP-0461", "XEP-0503", "XEP-0511", "XEP-0513",
+    "XEP-0372", "XEP-0384", "XEP-0402", "XEP-0410", "XEP-0421", "XEP-0424", "XEP-0425", "XEP-0428",
+    "XEP-0431", "XEP-0433", "XEP-0444", "XEP-0446", "XEP-0447", "XEP-0461", "XEP-0490", "XEP-0503",
+    "XEP-0511", "XEP-0513",
+];
+
+const ADVERTISED_FEATURE_XEPS: &[(&str, &str)] = &[
+    ("http://jabber.org/protocol/disco#info", "XEP-0030"),
+    ("http://jabber.org/protocol/disco#items", "XEP-0030"),
+    ("http://jabber.org/protocol/caps", "XEP-0115"),
+    ("urn:xmpp:features:rosterver", "XEP-0237"),
+    ("urn:xmpp:mam:2", "XEP-0313"),
+    ("urn:xmpp:mam:2#extended", "XEP-0313"),
+    ("urn:xmpp:sid:0", "XEP-0359"),
+    ("urn:xmpp:reply:0", "XEP-0461"),
+    ("urn:xmpp:message-correct:0", "XEP-0308"),
+    ("urn:xmpp:chat-markers:0", "XEP-0333"),
+    ("urn:xmpp:receipts", "XEP-0184"),
+    ("urn:xmpp:message-retract:1", "XEP-0424"),
+    ("urn:xmpp:message-moderate:1", "XEP-0425"),
+    ("urn:xmpp:reactions:0", "XEP-0444"),
+    ("urn:xmpp:reference:0", "XEP-0372"),
+    ("urn:xmpp:fallback:0", "XEP-0428"),
+    ("urn:xmpp:threads:0", "XEP-0201"),
+    ("urn:xmpp:sm:3", "XEP-0198"),
+    ("urn:xmpp:carbons:2", "XEP-0280"),
+    ("urn:xmpp:carbons:rules:0", "XEP-0280"),
+    ("urn:xmpp:http:upload:0", "XEP-0363"),
+    ("jabber:iq:last", "XEP-0012"),
+    ("urn:xmpp:blocking", "XEP-0191"),
+    ("urn:xmpp:ping", "XEP-0199"),
+    ("urn:xmpp:time", "XEP-0202"),
+    ("jabber:iq:version", "XEP-0092"),
+    ("http://jabber.org/protocol/pubsub", "XEP-0060"),
+    ("http://jabber.org/protocol/pubsub#pep", "XEP-0163"),
+    ("http://jabber.org/protocol/pubsub#auto-create", "XEP-0060"),
+    (
+        "http://jabber.org/protocol/pubsub#persistent-items",
+        "XEP-0060",
+    ),
+    ("http://jabber.org/protocol/pubsub#publish", "XEP-0060"),
+    (
+        "http://jabber.org/protocol/pubsub#retrieve-items",
+        "XEP-0060",
+    ),
+    ("http://jabber.org/protocol/pubsub#subscribe", "XEP-0060"),
+    (
+        "http://jabber.org/protocol/pubsub#access-whitelist",
+        "XEP-0060",
+    ),
+    (
+        "http://jabber.org/protocol/pubsub#access-presence",
+        "XEP-0060",
+    ),
+    (
+        "http://jabber.org/protocol/pubsub#auto-subscribe",
+        "XEP-0060",
+    ),
+    (
+        "http://jabber.org/protocol/pubsub#filtered-notifications",
+        "XEP-0060",
+    ),
+    (
+        "http://jabber.org/protocol/pubsub#config-node-max",
+        "XEP-0490",
+    ),
+    ("http://jabber.org/protocol/pubsub#create-nodes", "XEP-0060"),
+    ("http://jabber.org/protocol/pubsub#config-node", "XEP-0060"),
+    ("http://jabber.org/protocol/pubsub#meta-data", "XEP-0060"),
+    ("http://jabber.org/protocol/pubsub#delete-nodes", "XEP-0060"),
+    ("http://jabber.org/protocol/pubsub#delete-items", "XEP-0060"),
+    (
+        "http://jabber.org/protocol/pubsub#retract-items",
+        "XEP-0060",
+    ),
+    ("http://jabber.org/protocol/pubsub#multi-items", "XEP-0060"),
+    ("http://jabber.org/protocol/pubsub#item-ids", "XEP-0060"),
+    ("jabber:iq:private", "XEP-0049"),
+    ("http://jabber.org/protocol/commands", "XEP-0050"),
+    ("vcard-temp", "XEP-0054"),
+    ("urn:xmpp:push:0", "XEP-0357"),
+    ("urn:xmpp:bookmarks:1#compat", "XEP-0402"),
+    ("urn:xmpp:bookmarks:1#compat-pep", "XEP-0402"),
+    ("eu.siacs.conversations.axolotl.whitelisted", "XEP-0384"),
+    ("msgoffline", "XEP-0160"),
+    ("http://jabber.org/protocol/muc", "XEP-0045"),
+    (
+        "http://jabber.org/protocol/muc#self-ping-optimization",
+        "XEP-0410",
+    ),
+    ("http://jabber.org/protocol/chatstates", "XEP-0085"),
+    ("urn:xmpp:fulltext:0", "XEP-0431"),
+    ("urn:xmpp:occupant-id:0", "XEP-0421"),
+    ("urn:xmpp:hats:0", "XEP-0317"),
+    ("urn:xmpp:mentions:0", "XEP-0513"),
+    ("urn:xmpp:mentions:0#channel", "XEP-0513"),
+    ("jabber:iq:search", "XEP-0055"),
+];
+
+const ADVERTISED_FEATURE_EXEMPTIONS: &[&str] = &[
+    "jabber:iq:roster",
+    "muc_membersonly",
+    "muc_moderated",
+    "muc_nonanonymous",
+    "muc_open",
+    "muc_persistent",
+    "muc_public",
+    "muc_semianonymous",
+    "muc_temporary",
+    "muc_unmoderated",
+    "urn:waddle:inbox:0",
+    "urn:waddle:mam-thread:0",
 ];
 
 #[derive(Debug, Deserialize)]
@@ -226,6 +335,8 @@ enum Step {
         fulltext: Option<String>,
         #[serde(default)]
         ids: Vec<String>,
+        #[serde(default, rename = "idsFrom")]
+        ids_from: Vec<String>,
     },
     #[serde(rename = "expectMamResult")]
     ExpectMamResult {
@@ -425,7 +536,8 @@ struct AttributeCapture {
 struct ScenarioContext {
     clients: HashMap<String, WsXmppClient>,
     pending_frames: HashMap<String, VecDeque<String>>,
-    last_mam_frames: VecDeque<String>,
+    last_mam_frames: Vec<String>,
+    last_mam_frame_index: usize,
     captures: HashMap<String, String>,
     ws_url: String,
     domain: String,
@@ -456,16 +568,14 @@ async fn cue_scenarios_run_over_websocket() -> Result<()> {
 fn cue_scenarios_cover_supported_xeps_manifest() -> Result<()> {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/xmpp_e2e_scenarios");
     let supported = SUPPORTED_XEPS.iter().copied().collect::<BTreeSet<_>>();
-    let mut covered = BTreeSet::new();
+    let covered = cue_scenario_xep_tags(&root)?;
     let mut unknown = Vec::new();
 
     for scenario_file in discover_scenario_files(&root)? {
         let scenario = load_scenario_from_file(&root, &scenario_file)
             .with_context(|| format!("load {}", scenario_file.display()))?;
         for xep in &scenario.xeps {
-            if supported.contains(xep.as_str()) {
-                covered.insert(xep.clone());
-            } else {
+            if !supported.contains(xep.as_str()) {
                 unknown.push(format!("{} declares {xep}", scenario.name));
             }
         }
@@ -486,6 +596,73 @@ fn cue_scenarios_cover_supported_xeps_manifest() -> Result<()> {
         missing.join(", "),
         unknown.join(", ")
     ))
+}
+
+#[test]
+fn advertised_features_have_cue_xep_coverage() -> Result<()> {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/xmpp_e2e_scenarios");
+    let covered = cue_scenario_xep_tags(&root)?;
+    let feature_xeps = ADVERTISED_FEATURE_XEPS
+        .iter()
+        .copied()
+        .collect::<BTreeMap<_, _>>();
+    let exemptions = ADVERTISED_FEATURE_EXEMPTIONS
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let advertised = advertised_feature_vars();
+
+    let unmapped = advertised
+        .iter()
+        .filter(|feature| !feature_xeps.contains_key(feature.as_str()))
+        .filter(|feature| !exemptions.contains(feature.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    let uncovered = advertised
+        .iter()
+        .filter_map(|feature| {
+            feature_xeps
+                .get(feature.as_str())
+                .filter(|xep| !covered.contains(**xep))
+                .map(|xep| format!("{feature} -> {xep}"))
+        })
+        .collect::<Vec<_>>();
+
+    if unmapped.is_empty() && uncovered.is_empty() {
+        return Ok(());
+    }
+
+    Err(anyhow!(
+        "advertised feature coverage drift: unmapped features [{}]; uncovered XEPs [{}]",
+        unmapped.join(", "),
+        uncovered.join(", ")
+    ))
+}
+
+fn cue_scenario_xep_tags(root: &Path) -> Result<BTreeSet<String>> {
+    let mut covered = BTreeSet::new();
+    for scenario_file in discover_scenario_files(root)? {
+        let scenario = load_scenario_from_file(root, &scenario_file)
+            .with_context(|| format!("load {}", scenario_file.display()))?;
+        covered.extend(scenario.xeps);
+    }
+    Ok(covered)
+}
+
+fn advertised_feature_vars() -> BTreeSet<String> {
+    waddle_xmpp::disco::info::server_features()
+        .into_iter()
+        .chain(waddle_xmpp::disco::info::upload_service_features())
+        .chain(waddle_xmpp::disco::info::pubsub_service_features())
+        .chain(waddle_xmpp::disco::info::spaces_service_features())
+        .chain(waddle_xmpp::disco::info::muc_service_features())
+        .chain(waddle_xmpp::disco::info::muc_room_features(
+            true, true, false, true,
+        ))
+        .chain(waddle_xmpp::pubsub::pep_features())
+        .chain([waddle_xmpp::disco::Feature::new("jabber:iq:search")])
+        .map(|feature| feature.0)
+        .collect()
 }
 
 fn discover_scenario_files(root: &Path) -> Result<Vec<PathBuf>> {
@@ -574,7 +751,8 @@ async fn run_scenario(scenario: Scenario) -> Result<()> {
     let mut ctx = ScenarioContext {
         clients,
         pending_frames: HashMap::new(),
-        last_mam_frames: VecDeque::new(),
+        last_mam_frames: Vec::new(),
+        last_mam_frame_index: 0,
         captures: HashMap::new(),
         ws_url,
         domain: scenario.domain.clone(),
@@ -582,13 +760,20 @@ async fn run_scenario(scenario: Scenario) -> Result<()> {
         account_passwords: accounts,
     };
 
+    let mut step_result = Ok(());
     for (index, step) in scenario.steps.iter().enumerate() {
-        execute_step(&mut ctx, step)
+        if let Err(error) = execute_step(&mut ctx, step)
             .await
-            .with_context(|| format!("step {index} in scenario {}", scenario.name))?;
+            .with_context(|| format!("step {index} in scenario {}", scenario.name))
+        {
+            step_result = Err(error);
+            break;
+        }
     }
 
-    close_clients(ctx.clients).await;
+    let close_result = close_clients(ctx.clients).await;
+    step_result?;
+    close_result?;
     Ok(())
 }
 
@@ -619,9 +804,21 @@ fn account_password<'a>(
         .ok_or_else(|| anyhow!("missing password for {username}"))
 }
 
-async fn close_clients(clients: HashMap<String, WsXmppClient>) {
+async fn close_clients(clients: HashMap<String, WsXmppClient>) -> Result<()> {
+    let mut errors = Vec::new();
     for client in clients.into_values() {
-        let _ = client.close().await;
+        if let Err(error) = client.close().await {
+            errors.push(error);
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "failed to close {} scenario client(s): {}",
+            errors.len(),
+            errors.join("; ")
+        ))
     }
 }
 
@@ -881,11 +1078,11 @@ async fn execute_step(ctx: &mut ScenarioContext, step: &Step) -> Result<()> {
             }
             let captures_snapshot = ctx.captures.clone();
             let frame = recv_matching(ctx, target, |frame| {
-                frame.contains("<message")
+                frame_is_live_message(frame)
                     && body
                         .as_ref()
-                        .is_none_or(|body| frame_contains_body(frame, body))
-                    && (!*body_absent || !frame_has_direct_message_body(frame))
+                        .is_none_or(|body| frame_root_message_has_body(frame, Some(body)))
+                    && (!*body_absent || !frame_root_message_has_body(frame, None))
                     && from
                         .as_ref()
                         .is_none_or(|from| frame.contains(&format!("from=\"{}", from.bare_jid)))
@@ -899,7 +1096,7 @@ async fn execute_step(ctx: &mut ScenarioContext, step: &Step) -> Result<()> {
                         .all(|spec| frame_has_element(frame, spec, &captures_snapshot))
             })
             .await?;
-            if *body_absent && frame_has_direct_message_body(&frame) {
+            if *body_absent && frame_root_message_has_body(&frame, None) {
                 return Err(anyhow!(
                     "message expectation expected no <body> element, got: {frame}"
                 ));
@@ -1003,8 +1200,8 @@ async fn execute_step(ctx: &mut ScenarioContext, step: &Step) -> Result<()> {
             let xml = stanza_xml(Stanza::Presence(presence))?;
             let client = client_mut(ctx, actor)?;
             client.send(&xml).await.map_err(|error| anyhow!(error))?;
-            recv_until(ctx, actor, |frame| {
-                frame.contains("status code=\"110\"") || frame.contains("<subject")
+            recv_matching(ctx, actor, |frame| {
+                frame_is_muc_join_self_presence(frame, room, nick)
             })
             .await?;
         }
@@ -1101,16 +1298,25 @@ async fn execute_step(ctx: &mut ScenarioContext, step: &Step) -> Result<()> {
             with_jid,
             fulltext,
             ids,
+            ids_from,
         } => {
             let id = id
                 .clone()
                 .unwrap_or_else(|| format!("cue-mam-{}", uuid::Uuid::new_v4()));
+            let mut query_ids = ids.clone();
+            for capture in ids_from {
+                let value = ctx
+                    .captures
+                    .get(capture)
+                    .ok_or_else(|| anyhow!("unknown captured MAM id {capture}"))?;
+                query_ids.push(value.clone());
+            }
             let query = mam_query_element(
                 *max,
                 after.as_deref(),
                 with_jid.as_deref(),
                 fulltext.as_deref(),
-                ids,
+                &query_ids,
             );
             let iq = Iq {
                 from: None,
@@ -1122,11 +1328,15 @@ async fn execute_step(ctx: &mut ScenarioContext, step: &Step) -> Result<()> {
                 .send(&stanza_xml(Stanza::Iq(iq))?)
                 .await
                 .map_err(|error| anyhow!(error))?;
-            ctx.last_mam_frames = recv_until(ctx, actor, |frame| {
+            let query_frames = recv_until(ctx, actor, |frame| {
                 frame.contains("urn:xmpp:mam:2") && frame.contains("<fin") && frame.contains(&id)
             })
-            .await?
-            .into();
+            .await?;
+            ctx.last_mam_frames = query_frames
+                .into_iter()
+                .filter(|frame| frame_contains_mam_result(frame))
+                .collect();
+            ctx.last_mam_frame_index = 0;
         }
         Step::ExpectMamResult {
             body,
@@ -1140,35 +1350,36 @@ async fn execute_step(ctx: &mut ScenarioContext, step: &Step) -> Result<()> {
             let payload_expectations = payload_expectations(payloads, ctx)?;
             let payload_element_expectations = payload_element_expectations(payloads);
             let captures_snapshot = ctx.captures.clone();
-            let mut skipped = Vec::new();
-            let frame = loop {
-                let Some(frame) = ctx.last_mam_frames.pop_front() else {
-                    return Err(anyhow!(
-                        "no MAM result matched body {:?} and contains {:?}; skipped frames: {:?}; remaining frames: {:?}",
-                        body,
-                        contains,
-                        skipped,
-                        ctx.last_mam_frames
-                    ));
-                };
-                if frame.contains("<forwarded")
-                    && body
-                        .as_ref()
-                        .is_none_or(|body| frame_contains_body(&frame, body))
-                    && (!*body_absent || !frame_has_direct_message_body(&frame))
-                    && payload_expectations.iter().all(|part| frame.contains(part))
-                    && payload_element_expectations
-                        .iter()
-                        .all(|spec| frame_has_element(&frame, spec, &captures_snapshot))
-                    && contains.iter().all(|part| frame.contains(part))
-                    && elements
-                        .iter()
-                        .all(|spec| frame_has_element(&frame, spec, &captures_snapshot))
-                {
-                    break frame;
-                }
-                skipped.push(frame);
+            let Some(frame) = ctx.last_mam_frames.get(ctx.last_mam_frame_index) else {
+                return Err(anyhow!(
+                    "no next MAM result available for body {:?} and contains {:?}; frames: {:?}",
+                    body,
+                    contains,
+                    ctx.last_mam_frames
+                ));
             };
+            if !frame_contains_mam_result(frame)
+                || body
+                    .as_ref()
+                    .is_some_and(|body| !frame_contains_body(frame, body))
+                || (*body_absent && frame_has_direct_message_body(frame))
+                || !payload_expectations.iter().all(|part| frame.contains(part))
+                || !payload_element_expectations
+                    .iter()
+                    .all(|spec| frame_has_element(frame, spec, &captures_snapshot))
+                || !contains.iter().all(|part| frame.contains(part))
+                || !elements
+                    .iter()
+                    .all(|spec| frame_has_element(frame, spec, &captures_snapshot))
+            {
+                return Err(anyhow!(
+                    "next MAM result did not match body {:?} and contains {:?}: {frame}",
+                    body,
+                    contains
+                ));
+            }
+            let frame = frame.clone();
+            ctx.last_mam_frame_index += 1;
             if let Some(body) = body {
                 assert_contains_all(&frame, std::slice::from_ref(body), "MAM result body")?;
             }
@@ -1810,6 +2021,61 @@ fn frame_has_direct_message_body(frame: &str) -> bool {
 
 fn parse_frame(frame: &str) -> Option<Element> {
     Element::from_str(frame).ok()
+}
+
+fn frame_is_live_message(frame: &str) -> bool {
+    parse_frame(frame).is_some_and(|element| {
+        element.name() == "message"
+            && !element
+                .children()
+                .any(|child| child.name() == "result" && child.ns() == "urn:xmpp:mam:2")
+            && !element.children().any(|child| {
+                matches!(child.name(), "sent" | "received") && child.ns() == "urn:xmpp:carbons:2"
+            })
+    })
+}
+
+fn frame_contains_mam_result(frame: &str) -> bool {
+    parse_frame(frame).is_some_and(|element| {
+        element.name() == "message"
+            && element
+                .children()
+                .any(|child| child.name() == "result" && child.ns() == "urn:xmpp:mam:2")
+            && find_named_element(&element, "forwarded", "urn:xmpp:forward:0")
+    })
+}
+
+fn frame_root_message_has_body(frame: &str, expected: Option<&str>) -> bool {
+    parse_frame(frame).is_some_and(|element| {
+        element.name() == "message"
+            && element.children().any(|child| {
+                child.name() == "body"
+                    && child.ns() == element.ns()
+                    && expected.is_none_or(|body| child.text() == body)
+            })
+    })
+}
+
+fn frame_is_muc_join_self_presence(frame: &str, room: &str, nick: &str) -> bool {
+    let expected_from = format!("{room}/{nick}");
+    parse_frame(frame).is_some_and(|element| {
+        element.name() == "presence"
+            && element.attr("from") == Some(expected_from.as_str())
+            && element.children().any(|child| {
+                child.name() == "x"
+                    && child.ns() == "http://jabber.org/protocol/muc#user"
+                    && child.children().any(|grandchild| {
+                        grandchild.name() == "status" && grandchild.attr("code") == Some("110")
+                    })
+            })
+    })
+}
+
+fn find_named_element(element: &Element, name: &str, ns: &str) -> bool {
+    (element.name() == name && element.ns() == ns)
+        || element
+            .children()
+            .any(|child| find_named_element(child, name, ns))
 }
 
 fn frame_has_element(

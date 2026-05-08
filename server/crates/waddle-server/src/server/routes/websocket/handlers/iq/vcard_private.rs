@@ -37,22 +37,11 @@ pub(super) async fn handle_vcard_iq(
             .map(|jid| jid.to_bare())
             .unwrap_or_else(|| sender_jid.to_bare());
         let response = match store.get(&target_jid).await {
-            Ok(Some(xml)) => match xml.parse::<Element>() {
-                Ok(vcard) => xmpp_parsers::iq::Iq {
-                    from: iq.to.clone(),
-                    to: iq.from.clone(),
-                    id: iq.id.clone(),
-                    payload: xmpp_parsers::iq::IqType::Result(Some(vcard)),
-                },
-                Err(error) => {
-                    warn!(target = %target_jid, error = %error, "Stored vCard XML is invalid");
-                    return vec![build_iq_error_xml_typed(
-                        &iq.id,
-                        response_from,
-                        response_to,
-                        internal_server_error_iq_error("Internal server error."),
-                    )];
-                }
+            Ok(Some(vcard)) => xmpp_parsers::iq::Iq {
+                from: iq.to.clone(),
+                to: iq.from.clone(),
+                id: iq.id.clone(),
+                payload: xmpp_parsers::iq::IqType::Result(Some(vcard)),
             },
             Ok(None) => {
                 return vec![build_iq_error_xml_typed(
@@ -95,7 +84,7 @@ pub(super) async fn handle_vcard_iq(
         )];
     };
 
-    if let Err(error) = store.set(&sender_jid.to_bare(), &String::from(vcard)).await {
+    if let Err(error) = store.set(&sender_jid.to_bare(), vcard).await {
         warn!(jid = %sender_jid, error = %error, "Failed to store vCard");
         return vec![build_iq_error_xml_typed(
             &iq.id,

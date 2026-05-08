@@ -1,6 +1,7 @@
 use kameo::actor::ActorRef;
 use tracing::{debug, warn};
 use waddle_xmpp::XmppError;
+use xmpp_parsers::minidom::Element;
 
 use crate::db::actor::{DbActor, DbQueryOne};
 use crate::db::{row_value, Value, ValueExt};
@@ -9,7 +10,7 @@ use crate::vcard::VCardStore;
 pub(crate) async fn get_vcard(
     vcard_store: &VCardStore,
     jid: &jid::BareJid,
-) -> Result<Option<String>, XmppError> {
+) -> Result<Option<Element>, XmppError> {
     debug!(jid = %jid, "Getting vCard");
 
     match vcard_store.get(jid).await {
@@ -24,11 +25,11 @@ pub(crate) async fn get_vcard(
 pub(crate) async fn set_vcard(
     vcard_store: &VCardStore,
     jid: &jid::BareJid,
-    vcard_xml: &str,
+    vcard: &Element,
 ) -> Result<(), XmppError> {
     debug!(jid = %jid, "Setting vCard");
 
-    match vcard_store.set(jid, vcard_xml).await {
+    match vcard_store.set(jid, vcard).await {
         Ok(()) => Ok(()),
         Err(e) => {
             warn!(jid = %jid, error = %e, "Failed to set vCard");

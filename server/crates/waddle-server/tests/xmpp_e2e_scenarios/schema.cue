@@ -223,6 +223,7 @@ package xmpp_e2e_scenarios
 	with?:   string
 	fulltext?: string
 	ids?: [...string]
+	idsFrom?: [...string]
 	...
 }
 

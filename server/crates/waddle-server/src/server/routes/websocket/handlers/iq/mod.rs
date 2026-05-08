@@ -33,11 +33,11 @@ use waddle_xmpp::{
     },
     protocol::{ConnectionPhase, StanzaContext as ProtocolStanzaContext},
     pubsub::{
-        build_pubsub_affiliations_result, build_pubsub_configure_form_result, build_pubsub_error,
-        build_pubsub_items_result, build_pubsub_publish_result, build_pubsub_subscribe_result,
-        build_pubsub_success, is_pep_request, is_pep_request_to, is_pubsub_iq, parse_pubsub_iq,
-        PubSubError, PubSubItem, PubSubRequest, SubId, PEP_NODE_AVATAR_DATA,
-        PEP_NODE_AVATAR_METADATA,
+        build_pep_identity, build_pubsub_affiliations_result, build_pubsub_configure_form_result,
+        build_pubsub_error, build_pubsub_items_result, build_pubsub_publish_result,
+        build_pubsub_subscribe_result, build_pubsub_success, is_pep_request, is_pep_request_to,
+        is_pubsub_iq, parse_pubsub_iq, pep_features, PubSubError, PubSubItem, PubSubRequest, SubId,
+        PEP_NODE_AVATAR_DATA, PEP_NODE_AVATAR_METADATA,
     },
     registry::BroadcastOutcome,
     roster::{

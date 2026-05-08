@@ -151,9 +151,6 @@ impl XmlParser {
             ("<resume", parse_sm_nonza), // Must come before <r
             ("<r", parse_sm_nonza),
             ("<a ", parse_sm_nonza), // Note: space to avoid matching <auth
-            // XEP-0352 Client State Indication stanzas
-            ("<active", parse_csi_active),
-            ("<inactive", parse_csi_inactive),
         ];
 
         // Find the earliest matching pattern in the buffer.
@@ -264,10 +261,6 @@ pub enum ParsedStanza {
     SmAck { h: u32 },
     /// XEP-0198: Stream Management resume request
     SmResume { previd: String, h: u32 },
-    /// XEP-0352: Client State Indication - active
-    CsiActive,
-    /// XEP-0352: Client State Indication - inactive
-    CsiInactive,
 }
 
 /// Parse stream features element.
@@ -409,24 +402,6 @@ fn parse_sm_nonza(data: &str) -> Result<ParsedStanza, XmppError> {
         SmStanza::Enabled(_) | SmStanza::Resumed(_) | SmStanza::Failed(_) => Err(
             XmppError::xml_parse("Invalid SM client stanza: server-origin nonza"),
         ),
-    }
-}
-
-/// Parse XEP-0352 Client State Indication active element.
-fn parse_csi_active(data: &str) -> Result<ParsedStanza, XmppError> {
-    if data.contains("<active") && data.contains(ns::CSI) {
-        Ok(ParsedStanza::CsiActive)
-    } else {
-        Err(XmppError::xml_parse("Invalid CSI active element"))
-    }
-}
-
-/// Parse XEP-0352 Client State Indication inactive element.
-fn parse_csi_inactive(data: &str) -> Result<ParsedStanza, XmppError> {
-    if data.contains("<inactive") && data.contains(ns::CSI) {
-        Ok(ParsedStanza::CsiInactive)
-    } else {
-        Err(XmppError::xml_parse("Invalid CSI inactive element"))
     }
 }
 
