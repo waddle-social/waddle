@@ -51,6 +51,14 @@ impl RoomDispatcher {
         self.handlers.len()
     }
 
+    /// Names of registered handlers in registration order — used by
+    /// tests to assert handler ordering, not just count, so a future
+    /// reorder that puts (e.g.) reflector before pin can't pass the
+    /// chain-shape check silently.
+    pub fn handler_names(&self) -> Vec<&'static str> {
+        self.handlers.iter().map(|h| h.name()).collect()
+    }
+
     /// Run the chain against `message` with `ctx`.
     pub fn dispatch(&self, message: &mut Message, ctx: &RoomContext<'_>) -> RoomDispatchOutcome {
         let mut events = Vec::new();

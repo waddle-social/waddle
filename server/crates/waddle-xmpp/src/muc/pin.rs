@@ -9,11 +9,20 @@
 use chrono::{DateTime, Utc};
 use jid::BareJid;
 use serde::{Deserialize, Serialize};
+use waddle_xmpp_core::xep0359::StanzaId;
 
 /// Maximum preview text length stored for a pinned message. The preview
 /// is intentionally lossy — it's a projection-list affordance, not a
 /// faithful render. Click-through fetches the full body via MAM.
 pub const MAX_PREVIEW_LEN: usize = 280;
+
+/// Maximum pinned entries kept on a single room. When this cap is
+/// exceeded by a new pin (not a replacement), the oldest entry is
+/// evicted. Bounds room actor memory so admin pin-spam can't exhaust
+/// resources. Per the design grill (#414 Q9), v1 ships effectively
+/// unbounded — `1_000` is the documented "future projection node
+/// max_items" target and serves here as the in-memory ceiling.
+pub const MAX_PINNED_ENTRIES: usize = 1_000;
 
 /// Frozen snapshot of a pinned message at pin time.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -56,17 +65,18 @@ pub enum PinStateChange {
     Pin(PinnedEntry),
     /// Remove the pin entry matching `target_stanza_id`, if any.
     Unpin {
-        /// XEP-0359 stanza-id of the message whose pin is being cleared.
-        target_stanza_id: String,
+        /// Typed XEP-0359 stanza-id of the message whose pin is being cleared.
+        target_stanza_id: StanzaId,
     },
 }
 
 /// A pinned message entry held on the room actor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PinnedEntry {
-    /// XEP-0359 stanza-id of the pinned message in this room. Acts as
-    /// the entry's primary key — a message can be pinned at most once.
-    pub target_stanza_id: String,
+    /// Typed XEP-0359 stanza-id of the pinned message in this room.
+    /// Acts as the entry's primary key — a message can be pinned at
+    /// most once.
+    pub target_stanza_id: StanzaId,
     /// Bare JID of the user who pinned the message.
     pub pinner_jid: BareJid,
     /// When the pin was applied.
@@ -120,10 +130,14 @@ mod tests {
         assert!(preview.text.starts_with('🦆'));
     }
 
+    fn stanza(id: &str) -> StanzaId {
+        StanzaId::new(id.to_owned(), jid::Jid::from(jid("room@conf.example")))
+    }
+
     #[test]
     fn pinned_entry_roundtrips_via_serde_json() {
         let entry = PinnedEntry {
-            target_stanza_id: "stanza-abc".into(),
+            target_stanza_id: stanza("stanza-abc"),
             pinner_jid: jid("admin@example.com"),
             pinned_at: ts(),
             preview: PinPreview::new(

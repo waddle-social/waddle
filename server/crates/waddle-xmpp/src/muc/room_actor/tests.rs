@@ -417,3 +417,93 @@ async fn test_get_room_jid() {
         "testroom@muc.example.com".parse::<BareJid>().expect("jid")
     );
 }
+
+#[tokio::test]
+async fn apply_pin_then_get_pin_list_returns_entry() {
+    use crate::muc::pin::{PinPreview, PinStateChange, PinnedEntry};
+    use chrono::Utc;
+    use waddle_xmpp_core::xep0359::StanzaId;
+
+    let actor = spawn_room_actor().await;
+    let room_jid: BareJid = "testroom@muc.example.com".parse().expect("valid jid");
+    let target = StanzaId::new("stanza-1".to_string(), jid::Jid::from(room_jid.clone()));
+    let entry = PinnedEntry {
+        target_stanza_id: target.clone(),
+        pinner_jid: "admin@example.com".parse().expect("valid jid"),
+        pinned_at: Utc::now(),
+        preview: PinPreview::new(
+            "alice@example.com".parse().expect("valid jid"),
+            Some("alice".into()),
+            "important",
+            Utc::now(),
+        ),
+    };
+    actor
+        .ask(ApplyPin {
+            change: PinStateChange::Pin(entry.clone()),
+        })
+        .await
+        .expect("apply pin");
+    let entries = actor.ask(GetPinList).await.expect("get pin list");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].target_stanza_id, target);
+    assert_eq!(entries[0].pinner_jid, entry.pinner_jid);
+}
+
+#[tokio::test]
+async fn apply_unpin_removes_entry() {
+    use crate::muc::pin::{PinPreview, PinStateChange, PinnedEntry};
+    use chrono::Utc;
+    use waddle_xmpp_core::xep0359::StanzaId;
+
+    let actor = spawn_room_actor().await;
+    let room_jid: BareJid = "testroom@muc.example.com".parse().expect("valid jid");
+    let target = StanzaId::new("stanza-1".to_string(), jid::Jid::from(room_jid));
+    let entry = PinnedEntry {
+        target_stanza_id: target.clone(),
+        pinner_jid: "admin@example.com".parse().expect("valid jid"),
+        pinned_at: Utc::now(),
+        preview: PinPreview::new(
+            "alice@example.com".parse().expect("valid jid"),
+            None,
+            "hi",
+            Utc::now(),
+        ),
+    };
+    actor
+        .ask(ApplyPin {
+            change: PinStateChange::Pin(entry),
+        })
+        .await
+        .expect("apply pin");
+    actor
+        .ask(ApplyPin {
+            change: PinStateChange::Unpin {
+                target_stanza_id: target.clone(),
+            },
+        })
+        .await
+        .expect("apply unpin");
+    let entries = actor.ask(GetPinList).await.expect("get pin list");
+    assert!(entries.is_empty());
+}
+
+#[tokio::test]
+async fn apply_unpin_for_unknown_target_is_idempotent() {
+    use crate::muc::pin::PinStateChange;
+    use waddle_xmpp_core::xep0359::StanzaId;
+
+    let actor = spawn_room_actor().await;
+    let room_jid: BareJid = "testroom@muc.example.com".parse().expect("valid jid");
+    let target = StanzaId::new("never-pinned".to_string(), jid::Jid::from(room_jid));
+    actor
+        .ask(ApplyPin {
+            change: PinStateChange::Unpin {
+                target_stanza_id: target,
+            },
+        })
+        .await
+        .expect("apply unpin no-op");
+    let entries = actor.ask(GetPinList).await.expect("get pin list");
+    assert!(entries.is_empty());
+}

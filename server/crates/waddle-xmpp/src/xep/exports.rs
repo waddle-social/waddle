@@ -343,9 +343,15 @@ pub use super::xep0471::{
 };
 
 pub use super::xep0470::{
-    build_attachments_element, has_pin_marker, has_unpin_marker, is_attachments_element,
-    parse_attachment_target, Attachment, AttachmentPayload, AttachmentTarget,
-    NS_PUBSUB_ATTACHMENTS, NS_WADDLE_PIN_V0,
+    build_attachments_element, is_attachments_element, parse_attachment_target, Attachment,
+    AttachmentPayload, AttachmentTarget, NS_PUBSUB_ATTACHMENTS,
+};
+
+pub use super::xep_waddle_pin::{
+    build_pinned_element as build_pinned_message_element,
+    build_unpinned_element as build_unpinned_message_element, extract_pin_intent_from_message,
+    parse_pinned_element as parse_pinned_message_element,
+    parse_unpinned_element as parse_unpinned_message_element, PinIntent, NS_WADDLE_PIN_V0,
 };
 
 pub use super::xep0472::{

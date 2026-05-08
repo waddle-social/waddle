@@ -109,7 +109,9 @@ pub struct MucRoom {
     /// Lower bound for fresh nickname generations in this room actor's lifetime.
     pub(super) generation_floor: u64,
     /// Pinned messages in pin-time-desc order. A given `target_stanza_id`
-    /// appears at most once.
+    /// appears at most once. Held only in memory — pins do not survive
+    /// room-actor shutdown by design (#414); persistence is a follow-up
+    /// concern. Bounded by [`super::pin::MAX_PINNED_ENTRIES`].
     pub(super) pinned_entries: Vec<PinnedEntry>,
 }
 
@@ -233,45 +235,61 @@ impl MucRoom {
         }
     }
 
+    /// Whether `bare_jid` is currently joined to this room as an
+    /// occupant. Used by the pin-list IQ query handler to gate
+    /// access on membership.
+    pub fn has_occupant_with_bare_jid(&self, bare_jid: &BareJid) -> bool {
+        self.occupants
+            .values()
+            .any(|o| o.real_jid.to_bare() == *bare_jid)
+    }
+
     /// All pinned entries, newest pin first.
     pub fn pinned_entries(&self) -> &[PinnedEntry] {
         &self.pinned_entries
     }
 
     /// Add or replace a pinned entry. If a pin already exists for the
-    /// same `target_stanza_id`, the previous entry is replaced and moved
-    /// to the front. Returns the previous entry, if any.
+    /// same `target_stanza_id`, the previous entry is replaced and
+    /// moved to the front. When [`super::pin::MAX_PINNED_ENTRIES`] is
+    /// reached and the new entry isn't a replacement, the oldest entry
+    /// is evicted to keep the list bounded — admins are responsible
+    /// for periodic pruning, but the cap prevents pin-spam from
+    /// exhausting room memory. Returns the previous entry for the
+    /// same target, if any.
     pub fn upsert_pin(&mut self, entry: PinnedEntry) -> Option<PinnedEntry> {
         let previous = self.remove_pin_by_target(&entry.target_stanza_id);
         self.pinned_entries.insert(0, entry);
+        if self.pinned_entries.len() > super::pin::MAX_PINNED_ENTRIES {
+            self.pinned_entries.pop();
+        }
         previous
     }
 
     /// Remove the pin entry matching `target_stanza_id`, if present.
-    pub fn remove_pin_by_target(&mut self, target_stanza_id: &str) -> Option<PinnedEntry> {
+    /// Compares by the typed XEP-0359 id field — the `by` JID is
+    /// always the room itself for groupchat pins.
+    pub fn remove_pin_by_target(
+        &mut self,
+        target_stanza_id: &waddle_xmpp_core::xep0359::StanzaId,
+    ) -> Option<PinnedEntry> {
         let position = self
             .pinned_entries
             .iter()
-            .position(|e| e.target_stanza_id == target_stanza_id)?;
+            .position(|e| e.target_stanza_id.id == target_stanza_id.id)?;
         Some(self.pinned_entries.remove(position))
-    }
-
-    /// Look up a pin entry by its target stanza-id.
-    pub fn find_pin_by_target(&self, target_stanza_id: &str) -> Option<&PinnedEntry> {
-        self.pinned_entries
-            .iter()
-            .find(|e| e.target_stanza_id == target_stanza_id)
     }
 }
 
 #[cfg(test)]
 mod pin_state_tests {
     use super::*;
-    use crate::muc::pin::PinPreview;
+    use crate::muc::pin::{PinPreview, MAX_PINNED_ENTRIES};
     use chrono::{DateTime, Utc};
     use std::str::FromStr;
+    use waddle_xmpp_core::xep0359::StanzaId;
 
-    fn jid(s: &str) -> BareJid {
+    fn bare(s: &str) -> BareJid {
         BareJid::from_str(s).expect("valid bare jid")
     }
 
@@ -281,18 +299,22 @@ mod pin_state_tests {
             .with_timezone(&Utc)
     }
 
+    fn stanza(id: &str) -> StanzaId {
+        StanzaId::new(id.to_owned(), jid::Jid::from(bare("room@conf.example")))
+    }
+
     fn entry(target: &str, pinner: &str) -> PinnedEntry {
         PinnedEntry {
-            target_stanza_id: target.into(),
-            pinner_jid: jid(pinner),
+            target_stanza_id: stanza(target),
+            pinner_jid: bare(pinner),
             pinned_at: ts(),
-            preview: PinPreview::new(jid("alice@example.com"), None, "hi", ts()),
+            preview: PinPreview::new(bare("alice@example.com"), None, "hi", ts()),
         }
     }
 
     fn room() -> MucRoom {
         MucRoom::new(
-            jid("room@conf.example"),
+            bare("room@conf.example"),
             "wad-1".into(),
             "chan-1".into(),
             RoomConfig::default(),
@@ -307,7 +329,7 @@ mod pin_state_tests {
         let ids: Vec<_> = r
             .pinned_entries()
             .iter()
-            .map(|e| e.target_stanza_id.as_str())
+            .map(|e| e.target_stanza_id.id.as_str())
             .collect();
         assert_eq!(ids, vec!["b", "a"]);
     }
@@ -319,39 +341,67 @@ mod pin_state_tests {
         r.upsert_pin(entry("b", "admin1@example.com"));
         let previous = r.upsert_pin(entry("a", "admin2@example.com"));
         let prev = previous.expect("previous entry returned");
-        assert_eq!(prev.pinner_jid, jid("admin1@example.com"));
+        assert_eq!(prev.pinner_jid, bare("admin1@example.com"));
         let ids: Vec<_> = r
             .pinned_entries()
             .iter()
-            .map(|e| e.target_stanza_id.as_str())
+            .map(|e| e.target_stanza_id.id.as_str())
             .collect();
         assert_eq!(ids, vec!["a", "b"]);
-        assert_eq!(
-            r.find_pin_by_target("a").expect("found").pinner_jid.clone(),
-            jid("admin2@example.com")
-        );
+        let updated = r
+            .pinned_entries
+            .iter()
+            .find(|e| e.target_stanza_id.id == "a")
+            .expect("found");
+        assert_eq!(updated.pinner_jid, bare("admin2@example.com"));
     }
 
     #[test]
     fn remove_pin_by_target_returns_entry_when_present() {
         let mut r = room();
         r.upsert_pin(entry("a", "admin@example.com"));
-        let removed = r.remove_pin_by_target("a").expect("entry removed");
-        assert_eq!(removed.target_stanza_id, "a");
+        let removed = r.remove_pin_by_target(&stanza("a")).expect("entry removed");
+        assert_eq!(removed.target_stanza_id.id, "a");
         assert!(r.pinned_entries().is_empty());
     }
 
     #[test]
     fn remove_pin_by_target_returns_none_when_absent() {
         let mut r = room();
-        assert!(r.remove_pin_by_target("nope").is_none());
+        assert!(r.remove_pin_by_target(&stanza("nope")).is_none());
     }
 
     #[test]
-    fn find_pin_by_target_misses_after_removal() {
+    fn upsert_evicts_oldest_when_cap_reached() {
         let mut r = room();
-        r.upsert_pin(entry("a", "admin@example.com"));
-        r.remove_pin_by_target("a");
-        assert!(r.find_pin_by_target("a").is_none());
+        for n in 0..MAX_PINNED_ENTRIES {
+            r.upsert_pin(entry(&format!("p-{n}"), "admin@example.com"));
+        }
+        assert_eq!(r.pinned_entries().len(), MAX_PINNED_ENTRIES);
+        r.upsert_pin(entry("overflow", "admin@example.com"));
+        assert_eq!(r.pinned_entries().len(), MAX_PINNED_ENTRIES);
+        assert_eq!(
+            r.pinned_entries()
+                .first()
+                .expect("non-empty")
+                .target_stanza_id
+                .id,
+            "overflow"
+        );
+        assert!(r
+            .pinned_entries()
+            .iter()
+            .all(|e| e.target_stanza_id.id != "p-0"));
+    }
+
+    #[test]
+    fn fresh_room_has_no_pins() {
+        // Pins are held only on `MucRoom`; when the actor is dropped or
+        // the room is recreated via `MucRoom::new`, the list resets to
+        // empty. This test pins the in-memory contract — there is no
+        // persistence path. Future contributors adding persistence
+        // must update this contract explicitly.
+        let fresh = room();
+        assert!(fresh.pinned_entries().is_empty());
     }
 }

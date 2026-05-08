@@ -331,7 +331,8 @@ pub async fn handle_iq_with_conn_state(
     }
 
     if is_pin_query_iq(&iq, muc_domain) {
-        return handle_pin_query_iq(&iq, state, response_from, response_to).await;
+        return handle_pin_query_iq(&iq, state, phase.bound_jid(), response_from, response_to)
+            .await;
     }
 
     let muc_owner_or_moderation =

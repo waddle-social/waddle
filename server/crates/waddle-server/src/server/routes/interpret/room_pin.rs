@@ -1,17 +1,19 @@
-//! Interpreter arm for [`OutboundEvent::ApplyPinChange`] (#414).
+//! Interpreter arms for pin events (#414).
 //!
-//! Forwards the typed `PinStateChange` to the per-room `RoomActor` via
-//! the `ApplyPin` actor message, which delegates to
-//! [`waddle_xmpp::muc::MucRoom::upsert_pin`] /
-//! [`waddle_xmpp::muc::MucRoom::remove_pin_by_target`]. Mirrors the
-//! shape of [`super::room_subject::persist_room_subject_event`].
+//! Forwards `OutboundEvent::ApplyPinChange` to the per-room
+//! `RoomActor` via the `ApplyPin` actor message and runs the XEP-0424
+//! retraction → auto-unpin cascade. The cascade reads the room's
+//! current pin list, removes the matching entry atomically inside the
+//! actor (via the actor's serial mailbox), then broadcasts a
+//! synthetic `<unpinned reason='retracted'/>` system message via
+//! `broadcast_room_system_message_event`.
 
 use super::*;
 use waddle_xmpp::muc::pin::PinStateChange;
 use waddle_xmpp::muc::room_actor::GetPinList;
-use waddle_xmpp::xep::xep0470::NS_WADDLE_PIN_V0;
-use xmpp_parsers::message::{Body, Message, MessageType};
-use xmpp_parsers::minidom::Element;
+use waddle_xmpp::protocol::room::pin::build_unpinned_system_message;
+use waddle_xmpp::xep::xep_waddle_pin::MAX_TARGET_STANZA_ID_LEN;
+use waddle_xmpp_core::xep0359::StanzaId as Xep0359StanzaIdTyped;
 
 pub(super) async fn apply_pin_change_event(deps: &Deps<'_>, room: BareJid, change: PinStateChange) {
     let Some(room_registry) = deps.room_registry else {
@@ -66,6 +68,12 @@ pub(super) async fn cascade_retraction_to_pin_list(
     target_message_id: String,
     recursion_depth: u8,
 ) {
+    // Defense in depth: an oversized id can't legitimately match any
+    // pin entry, but bounding it prevents allocation amplification on
+    // the per-occupant fan-out below if something upstream was lax.
+    if target_message_id.is_empty() || target_message_id.len() > MAX_TARGET_STANZA_ID_LEN {
+        return;
+    }
     let Some(room_registry) = deps.room_registry else {
         return;
     };
@@ -91,15 +99,16 @@ pub(super) async fn cascade_retraction_to_pin_list(
     };
     let Some(entry) = entries
         .iter()
-        .find(|e| e.target_stanza_id == target_message_id)
+        .find(|e| e.target_stanza_id.id == target_message_id)
         .cloned()
     else {
         return;
     };
+    let target_typed = Xep0359StanzaIdTyped::new(target_message_id, Jid::from(room.clone()));
     if let Err(error) = room_actor
         .ask(ApplyPin {
             change: PinStateChange::Unpin {
-                target_stanza_id: target_message_id.clone(),
+                target_stanza_id: target_typed.clone(),
             },
         })
         .await
@@ -111,7 +120,9 @@ pub(super) async fn cascade_retraction_to_pin_list(
         );
         return;
     }
-    let system_message = build_cascade_unpin_message(&room, &entry.pinner_jid, &target_message_id);
+    let pinner = entry.pinner_jid.clone();
+    let system_message =
+        build_unpinned_system_message(&room, &pinner, "", &target_typed, Some("retracted"));
     super::room_system_message::broadcast_room_system_message_event(
         registry,
         deps,
@@ -120,30 +131,4 @@ pub(super) async fn cascade_retraction_to_pin_list(
         recursion_depth,
     )
     .await;
-}
-
-fn build_cascade_unpin_message(
-    room: &BareJid,
-    original_pinner: &BareJid,
-    target_stanza_id: &str,
-) -> Message {
-    let mut event = Element::builder("pin-event", NS_WADDLE_PIN_V0)
-        .attr("action", "unpinned")
-        .attr("by", original_pinner.to_string().as_str())
-        .attr("reason", "retracted")
-        .build();
-    event.append_child(
-        Element::builder("ref", NS_WADDLE_PIN_V0)
-            .attr("id", target_stanza_id)
-            .build(),
-    );
-    let mut msg = Message::new(Some(jid::Jid::from(room.clone())));
-    msg.from = Some(jid::Jid::from(room.clone()));
-    msg.type_ = MessageType::Groupchat;
-    msg.bodies.insert(
-        String::new(),
-        Body("Pinned message was retracted by its author".into()),
-    );
-    msg.payloads.push(event);
-    msg
 }

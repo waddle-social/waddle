@@ -979,12 +979,18 @@ fn payload_element(payload: &Payload, ctx: &ScenarioContext) -> Result<Element> 
             action,
         } => {
             let target_id = resolve_payload_id(ctx, id.as_deref(), id_from.as_deref())?;
-            let target = waddle_xmpp::xep::AttachmentTarget::new("urn:xmpp:mam:2", target_id);
-            let attachment = match action {
-                PinAction::Pinned => waddle_xmpp::xep::Attachment::pin(target),
-                PinAction::Unpinned => waddle_xmpp::xep::Attachment::unpin(target),
+            let stanza_id = waddle_xmpp_core::xep0359::StanzaId::new(
+                target_id,
+                jid::Jid::from(
+                    jid::BareJid::from_str("room@example.com")
+                        .map_err(|e| anyhow!("invalid placeholder jid: {e}"))?,
+                ),
+            );
+            let elem = match action {
+                PinAction::Pinned => waddle_xmpp::xep::build_pinned_message_element(&stanza_id),
+                PinAction::Unpinned => waddle_xmpp::xep::build_unpinned_message_element(&stanza_id),
             };
-            Ok(waddle_xmpp::xep::build_attachments_element(&attachment))
+            Ok(elem)
         }
         Payload::PinEvent { .. } => Err(anyhow!(
             "PinEvent is an expected-only payload; cannot be sent"
@@ -1065,10 +1071,9 @@ fn payload_expectations(payloads: &[Payload], ctx: &ScenarioContext) -> Result<V
                     PinAction::Unpinned => "<unpinned",
                 };
                 expected.extend([
-                    "urn:xmpp:pubsub-attachments:0".to_string(),
                     "urn:waddle:pin:0".to_string(),
-                    format!("item=\"{target_id}\""),
                     marker.to_string(),
+                    format!("target=\"{target_id}\""),
                 ]);
             }
             Payload::PinEvent {
@@ -1077,15 +1082,14 @@ fn payload_expectations(payloads: &[Payload], ctx: &ScenarioContext) -> Result<V
                 action,
             } => {
                 let target_id = resolve_payload_id(ctx, id.as_deref(), id_from.as_deref())?;
-                let action_attr = match action {
-                    PinAction::Pinned => "action=\"pinned\"",
-                    PinAction::Unpinned => "action=\"unpinned\"",
+                let marker = match action {
+                    PinAction::Pinned => "<pinned",
+                    PinAction::Unpinned => "<unpinned",
                 };
                 expected.extend([
                     "urn:waddle:pin:0".to_string(),
-                    "<pin-event".to_string(),
-                    action_attr.to_string(),
-                    format!("id=\"{target_id}\""),
+                    marker.to_string(),
+                    format!("target=\"{target_id}\""),
                 ]);
             }
         }

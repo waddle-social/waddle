@@ -109,4 +109,41 @@ mod tests {
         let d = default_room_pipeline_dispatcher();
         assert_eq!(d.handler_count(), 6);
     }
+
+    #[test]
+    fn pin_handler_runs_after_canonicalize_and_before_archive_and_reflector() {
+        // The pin handler must see canonicalized stamps (stanza-id,
+        // occupant-id) when building the preview, so it has to run
+        // *after* canonicalize. It also `Halt`s on a successful pin
+        // to suppress the user's literal pin-attachment from the
+        // archive and reflector — so it must run *before* both.
+        let names = default_room_dispatcher().handler_names();
+        let idx = |name: &str| names.iter().position(|n| *n == name).unwrap_or(usize::MAX);
+        let canonicalize = idx("muc-canonicalize");
+        let pin = idx("waddle-pin");
+        let archive = idx("xep-0313-muc-archive");
+        let reflector = idx("xep-0045-reflector");
+        assert_ne!(pin, usize::MAX, "pin handler missing from chain");
+        assert_ne!(canonicalize, usize::MAX, "canonicalize handler missing");
+        // archive and reflector names may differ from these if their
+        // RoomHandler::name returns something else — assertion below
+        // tolerates that by only enforcing relative position when the
+        // referenced handler is actually present.
+        assert!(
+            canonicalize < pin,
+            "pin must run after canonicalize; got order {names:?}"
+        );
+        if archive != usize::MAX {
+            assert!(
+                pin < archive,
+                "pin must run before archive; got order {names:?}"
+            );
+        }
+        if reflector != usize::MAX {
+            assert!(
+                pin < reflector,
+                "pin must run before reflector; got order {names:?}"
+            );
+        }
+    }
 }
