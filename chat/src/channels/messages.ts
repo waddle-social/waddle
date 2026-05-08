@@ -230,7 +230,8 @@ export function useChannelMessages(
       });
       // #414: route pin/unpin system events into the pinned-messages
       // store so PinnedPanel + the badge in MessageCard update live.
-      client.setPinEventHandler(({ roomJid, event }) => {
+      // Tests use a stub client that may not implement this; guard.
+      client.setPinEventHandler?.(({ roomJid, event }) => {
         if (event.action === "pinned" && event.preview) {
           applyPinEvent(roomJid, {
             action: "pinned",
