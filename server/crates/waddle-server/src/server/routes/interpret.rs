@@ -90,8 +90,8 @@ use waddle_xmpp::mam::{
     RichMessageId, RichText, STANZA_ID_NS,
 };
 use waddle_xmpp::muc::room_actor::{
-    GetAffiliation, GetNicknameGeneration, GetRoomSnapshot, JoinWithAffiliation, RoomActor,
-    SetSubject,
+    ApplyPin, GetAffiliation, GetNicknameGeneration, GetRoomSnapshot, JoinWithAffiliation,
+    RoomActor, SetSubject,
 };
 use waddle_xmpp::muc::room_registry_actor::{GetRoom, RoomRegistryActor};
 use waddle_xmpp::parse_managed_room_jid;
@@ -139,7 +139,9 @@ mod groupchat_validation;
 mod offline_delivery;
 mod room_dispatch;
 mod room_helpers;
+mod room_pin;
 mod room_subject;
+mod room_system_message;
 mod route_to_connection;
 mod routing;
 
@@ -168,7 +170,9 @@ use room_helpers::{
     available_bot_nick, bot_full_jid, enrich_message_event, normalize_thread_create_source,
     session_is_server_owner,
 };
+use room_pin::apply_pin_change_event;
 use room_subject::persist_room_subject_event;
+use room_system_message::broadcast_room_system_message_event;
 use route_to_connection::route_to_connection;
 use routing::{deliver_peer_to_full, run_headless_recipient_pass};
 
@@ -314,25 +318,11 @@ async fn interpret_with_depth(
                     .await;
             }
             OutboundEvent::ApplyPinChange { room, change } => {
-                // #414 follow-up: forward to room actor (Pin/Unpin
-                // messages on RoomActor) once the actor surface lands.
-                // For now the protocol layer is fully typed; wire the
-                // mutation in the next commit.
-                warn!(
-                    variant = "ApplyPinChange",
-                    room = %room,
-                    change = ?change,
-                    "OutboundEvent variant not yet wired in interpreter"
-                );
+                apply_pin_change_event(deps, room, change).await;
             }
-            OutboundEvent::BroadcastRoomSystemMessage { room, .. } => {
-                // #414 follow-up: stamp XEP-0359 by-room stanza-id,
-                // archive in MAM, fan out RouteToConnection per occupant.
-                warn!(
-                    variant = "BroadcastRoomSystemMessage",
-                    room = %room,
-                    "OutboundEvent variant not yet wired in interpreter"
-                );
+            OutboundEvent::BroadcastRoomSystemMessage { room, message } => {
+                broadcast_room_system_message_event(registry, deps, room, message, recursion_depth)
+                    .await;
             }
             OutboundEvent::ApplyGroupchatRetractionTombstone {
                 room,
