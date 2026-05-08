@@ -231,8 +231,8 @@ async fn roster_get_add_update_remove_uses_durable_state() {
         "missing remove should return item-not-found: {missing}"
     );
 
-    bob.close().await;
-    alice.close().await;
+    let _ = bob.close().await;
+    let _ = alice.close().await;
 }
 
 #[tokio::test]
@@ -389,9 +389,9 @@ async fn roster_set_pushes_only_to_interested_connected_user_resources() {
         "tablet should receive later roster push after unchanged get: {tablet_dave_push}"
     );
 
-    tablet.close().await;
-    phone.close().await;
-    desktop.close().await;
+    let _ = tablet.close().await;
+    let _ = phone.close().await;
+    let _ = desktop.close().await;
 }
 
 #[tokio::test]
@@ -651,8 +651,8 @@ async fn presence_subscription_state_is_reflected_in_roster_queries() {
         "bob roster should reflect unsubscribe state: {bob_after_unsubscribe}"
     );
 
-    bob.close().await;
-    alice.close().await;
+    let _ = bob.close().await;
+    let _ = alice.close().await;
 }
 
 #[tokio::test]
@@ -730,8 +730,8 @@ async fn subscription_denial_clears_pending_without_creating_recipient_item() {
         "pure denial must not send unavailable after the denial push: {after_denial_frame:?}"
     );
 
-    bob.close().await;
-    alice.close().await;
+    let _ = bob.close().await;
+    let _ = alice.close().await;
 }
 
 #[tokio::test]
@@ -848,8 +848,8 @@ async fn unsolicited_subscription_responses_do_not_create_roster_items() {
         "invalid unsubscribed must not mutate recipient roster item: {bob_roster}"
     );
 
-    bob.close().await;
-    alice.close().await;
+    let _ = bob.close().await;
+    let _ = alice.close().await;
 }
 
 #[tokio::test]
@@ -909,8 +909,8 @@ async fn preapproval_preserves_existing_to_state_and_can_be_cancelled() {
         "unsubscribed must cancel pre-approval without changing to subscription: {alice_roster}"
     );
 
-    bob.close().await;
-    alice.close().await;
+    let _ = bob.close().await;
+    let _ = alice.close().await;
 }
 
 #[tokio::test]
@@ -981,8 +981,8 @@ async fn offline_subscribe_is_removed_when_requester_unsubscribes_before_deliver
         "cancelled offline subscribe must not create Alice roster item: {alice_roster}"
     );
 
-    alice.close().await;
-    bob.close().await;
+    let _ = alice.close().await;
+    let _ = bob.close().await;
 }
 
 #[tokio::test]
@@ -1084,8 +1084,8 @@ async fn offline_subscribe_is_redelivered_until_answered() {
         "answered pending subscribe must not be redelivered: {after_denial:?}"
     );
 
-    alice.close().await;
-    bob.close().await;
+    let _ = alice.close().await;
+    let _ = bob.close().await;
 }
 
 #[tokio::test]
@@ -1160,6 +1160,6 @@ async fn live_subscribe_is_redelivered_until_answered() {
         .await
         .expect("bob receives live denial");
 
-    alice.close().await;
-    bob.close().await;
+    let _ = alice.close().await;
+    let _ = bob.close().await;
 }

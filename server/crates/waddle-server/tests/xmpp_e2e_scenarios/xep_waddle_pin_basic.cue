@@ -125,5 +125,30 @@ scenario: #Scenario & {
 				},
 			]
 		},
+
+		#DrainFrames & {
+			target:   alicePhone
+			contains: ["from=\"\(roomJid)\"", "<subject></subject>"]
+		},
+		#DrainFrames & {
+			target:   alicePhone
+			contains: ["<presence", "from=\"\(roomJid)/bob\""]
+		},
+		#DrainFrames & {
+			target:   alicePhone
+			contains: ["urn:waddle:inbox:0", "cue-pin-target"]
+		},
+		#DrainFrames & {
+			target:   bobPhone
+			contains: ["<presence", "from=\"\(roomJid)/alice\""]
+		},
+		#DrainFrames & {
+			target:   bobPhone
+			contains: ["from=\"\(roomJid)\"", "<subject></subject>"]
+		},
+		#DrainFrames & {
+			target:   bobPhone
+			contains: ["id=\"cue-pin-target\"", "important message that will be pinned"]
+		},
 	]
 }

@@ -75,8 +75,6 @@
 //!   with attachment target and typed payloads.
 //! - **XEP-0472**: Pubsub Social Feed - Social posts and activity feeds
 //!   via PubSub with title, body, author, and publication metadata.
-//! - **XEP-0490**: Message Displayed Synchronization - Cross-device read
-//!   state sync via PEP with stanza-id references.
 //! - **XEP-0492**: Chat Notification Settings - Per-room notification levels
 //!   (all, mentions-only, mute) with PEP storage and decision logic.
 //! - **XEP-0469**: Bookmark Pinning - Pin favorite channels via `<pinned/>`
@@ -111,11 +109,8 @@
 //! - **XEP-0223**: Persistent Storage Best Practices - Profile of PubSub.
 //! - **XEP-0249**: Direct MUC Invitations - Simple message-based invitations
 //!   for inviting users directly to MUC rooms.
-//! - **XEP-0352**: Client State Indication - Allows clients to indicate
-//!   active/inactive state for traffic optimization.
 //! - **XEP-0363**: HTTP File Upload - Server-side support for HTTP-based
 //!   file uploads, returning PUT and GET URLs for file transfer.
-//! - **XEP-0398**: User Avatar Conversion - Bridge between PEP and vCard avatars.
 //! - **XEP-0402**: PEP Native Bookmarks - MUC room bookmarks stored via PEP.
 //! - **XEP-0461**: Message Replies - Reply references and thread metadata.
 //! - **XEP-0513**: Explicit Mentions - @everyone, @here, @role, @user
@@ -158,14 +153,12 @@ pub mod xep0317;
 pub mod xep0319;
 pub mod xep0333;
 pub mod xep0334;
-pub mod xep0352;
 pub mod xep0357;
 pub mod xep0363;
 pub mod xep0372;
 pub mod xep0377;
 pub mod xep0392;
 pub mod xep0393;
-pub mod xep0398;
 pub mod xep0401;
 pub mod xep0402;
 pub mod xep0410;
@@ -191,7 +184,6 @@ pub mod xep0471;
 pub mod xep0472;
 pub mod xep0486;
 pub mod xep0488;
-pub mod xep0490;
 pub mod xep0492;
 pub mod xep0500;
 pub mod xep0501;

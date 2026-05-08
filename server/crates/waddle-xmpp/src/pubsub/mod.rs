@@ -10,7 +10,10 @@ pub mod stanzas;
 pub mod storage;
 
 pub use node::{AccessModel, NodeConfig, PublishModel, SendLastPublishedItem};
-pub use pep::{build_pep_identity, is_pep_request, is_pep_request_to, pep_features, PepHandler};
+pub use pep::{
+    build_pep_identity, is_pep_request, is_pep_request_to, pep_features, PepHandler,
+    PEP_NODE_AVATAR_DATA, PEP_NODE_AVATAR_METADATA, PEP_NODE_BOOKMARKS,
+};
 pub use stanzas::{
     build_pubsub_affiliations_result, build_pubsub_configure_form_result, build_pubsub_error,
     build_pubsub_event, build_pubsub_items_result, build_pubsub_publish_result,

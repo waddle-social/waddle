@@ -176,8 +176,8 @@ async fn pep_other_user_cannot_publish_to_alice_pep_node() {
 
     // Drain any remaining frames before dropping.
     let _ = bob.recv_timeout(Duration::from_millis(200)).await;
-    bob.close().await;
-    admin.close().await;
+    let _ = bob.close().await;
+    let _ = admin.close().await;
 }
 
 // ============================================================================
@@ -498,6 +498,6 @@ async fn pep_publish_fans_event_with_owner_jid_as_from() {
         "publisher attr must be omitted on PEP self-publish: {event}"
     );
 
-    bob.close().await;
-    admin.close().await;
+    let _ = bob.close().await;
+    let _ = admin.close().await;
 }

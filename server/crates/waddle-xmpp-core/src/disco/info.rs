@@ -12,7 +12,6 @@ mod tests;
 
 pub use features::Feature;
 
-const DATA_FORMS_NS: &str = "jabber:x:data";
 const SERVER_INFO_FORM_TYPE: &str = "urn:xmpp:serverinfo:0";
 const NS_CHATSTATES: &str = "http://jabber.org/protocol/chatstates";
 const NS_COMMANDS: &str = "http://jabber.org/protocol/commands";
@@ -186,41 +185,6 @@ pub fn build_disco_info_response_with_extensions(
     }
 }
 
-/// Build a server-info data form with an abuse contact (XEP-0157/XEP-0485).
-pub fn build_server_info_abuse_form(domain: &str) -> Element {
-    let abuse_address = format!("mailto:abuse@{}", domain);
-
-    Element::builder("x", DATA_FORMS_NS)
-        .attr("type", "result")
-        .append(data_form_field(
-            "FORM_TYPE",
-            Some("hidden"),
-            SERVER_INFO_FORM_TYPE,
-        ))
-        .append(data_form_field(
-            "abuse-addresses",
-            Some("text-single"),
-            &abuse_address,
-        ))
-        .build()
-}
-
-fn data_form_field(var: &str, field_type: Option<&str>, value: &str) -> Element {
-    let mut builder = Element::builder("field", DATA_FORMS_NS).attr("var", var);
-
-    if let Some(field_type) = field_type {
-        builder = builder.attr("type", field_type);
-    }
-
-    builder
-        .append(
-            Element::builder("value", DATA_FORMS_NS)
-                .append(value)
-                .build(),
-        )
-        .build()
-}
-
 /// Get the standard server features.
 pub fn server_features() -> Vec<Feature> {
     vec![
@@ -228,9 +192,6 @@ pub fn server_features() -> Vec<Feature> {
         Feature::disco_items(),
         Feature::caps(),
         Feature::roster_versioning(),
-        Feature::mam(),
-        Feature::mam_extended(),
-        Feature::waddle_mam_thread(),
         Feature::stanza_ids(),
         Feature::replies(),
         Feature::message_correction(),
@@ -248,26 +209,12 @@ pub fn server_features() -> Vec<Feature> {
         Feature::offline_messages(),
         Feature::vcard(),
         Feature::http_upload(),
-        Feature::socks5_bytestreams(),
         Feature::blocking(),
         Feature::last_activity(),
         Feature::ping(),
         Feature::entity_time(),
         Feature::software_version(),
-        Feature::server_info(),
-        Feature::csi(),
-        Feature::pubsub(),
-        Feature::pep(),
-        Feature::pubsub_auto_create(),
-        Feature::pubsub_persistent_items(),
-        Feature::pubsub_publish(),
-        Feature::pubsub_retrieve_items(),
-        Feature::pubsub_subscribe(),
-        Feature::pubsub_access_whitelist(),
-        Feature::pubsub_access_presence(),
         Feature::private_storage(),
-        Feature::avatar_metadata_notify(),
-        Feature::pep_vcard_conversion(),
         Feature::new(NS_COMMANDS),
     ]
 }

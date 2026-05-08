@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use tracing::debug;
+use xmpp_parsers::minidom::Element;
 
 use crate::db::{Database, Value};
 
@@ -21,6 +22,8 @@ use crate::db::{Database, Value};
 pub enum VCardError {
     #[error("Database error: {0}")]
     DatabaseError(String),
+    #[error("Stored vCard XML is invalid: {0}")]
+    InvalidXml(String),
 }
 
 /// vCard store for XEP-0054 vcard-temp.
@@ -49,8 +52,8 @@ impl VCardStore {
 
     /// Get the vCard for a user.
     ///
-    /// Returns the vCard XML if found, None otherwise.
-    pub async fn get(&self, jid: &jid::BareJid) -> Result<Option<String>, VCardError> {
+    /// Returns the vCard element if found, None otherwise.
+    pub async fn get(&self, jid: &jid::BareJid) -> Result<Option<Element>, VCardError> {
         let jid_str = jid.to_string();
         debug!(jid = %jid_str, "Getting vCard from storage");
 
@@ -67,8 +70,11 @@ impl VCardStore {
         match rows.next().await.map_err(db_err)? {
             Some(row) => {
                 let vcard_xml: String = row.get(0).map_err(db_err)?;
+                let vcard = vcard_xml
+                    .parse::<Element>()
+                    .map_err(|error| VCardError::InvalidXml(error.to_string()))?;
                 debug!(jid = %jid_str, "Found vCard");
-                Ok(Some(vcard_xml))
+                Ok(Some(vcard))
             }
             None => {
                 debug!(jid = %jid_str, "No vCard found");
@@ -80,12 +86,13 @@ impl VCardStore {
     /// Store or update the vCard for a user.
     ///
     /// This uses an UPSERT to handle both new vCards and updates.
-    pub async fn set(&self, jid: &jid::BareJid, vcard_xml: &str) -> Result<(), VCardError> {
+    pub async fn set(&self, jid: &jid::BareJid, vcard: &Element) -> Result<(), VCardError> {
         let jid_str = jid.to_string();
         debug!(jid = %jid_str, "Storing vCard");
 
         let conn = self.get_connection().await?;
         let now = Utc::now().to_rfc3339();
+        let vcard_xml = String::from(vcard);
 
         conn.execute(
             upsert_vcard_sql(),
@@ -164,23 +171,27 @@ mod tests {
         db
     }
 
+    fn vcard_element(xml: &str) -> Element {
+        xml.parse::<Element>().expect("valid vCard XML")
+    }
+
     #[tokio::test]
     async fn test_vcard_store_set_and_get() {
         let db = create_test_db().await;
         let store = VCardStore::new(db);
 
         let jid: jid::BareJid = "alice@example.com".parse().unwrap();
-        let vcard_xml = "<vCard xmlns='vcard-temp'><FN>Alice</FN></vCard>";
+        let vcard = vcard_element("<vCard xmlns='vcard-temp'><FN>Alice</FN></vCard>");
 
         // Store vCard
         store
-            .set(&jid, vcard_xml)
+            .set(&jid, &vcard)
             .await
             .expect("Failed to store vCard");
 
         // Retrieve vCard
         let retrieved = store.get(&jid).await.expect("Failed to get vCard");
-        assert_eq!(retrieved, Some(vcard_xml.to_string()));
+        assert_eq!(retrieved, Some(vcard));
     }
 
     #[tokio::test]
@@ -200,24 +211,24 @@ mod tests {
         let store = VCardStore::new(db);
 
         let jid: jid::BareJid = "bob@example.com".parse().unwrap();
-        let vcard_xml_v1 = "<vCard xmlns='vcard-temp'><FN>Bob</FN></vCard>";
-        let vcard_xml_v2 = "<vCard xmlns='vcard-temp'><FN>Robert</FN></vCard>";
+        let vcard_v1 = vcard_element("<vCard xmlns='vcard-temp'><FN>Bob</FN></vCard>");
+        let vcard_v2 = vcard_element("<vCard xmlns='vcard-temp'><FN>Robert</FN></vCard>");
 
         // Store initial vCard
         store
-            .set(&jid, vcard_xml_v1)
+            .set(&jid, &vcard_v1)
             .await
             .expect("Failed to store vCard");
 
         // Update vCard
         store
-            .set(&jid, vcard_xml_v2)
+            .set(&jid, &vcard_v2)
             .await
             .expect("Failed to update vCard");
 
         // Retrieve should return updated version
         let retrieved = store.get(&jid).await.expect("Failed to get vCard");
-        assert_eq!(retrieved, Some(vcard_xml_v2.to_string()));
+        assert_eq!(retrieved, Some(vcard_v2));
     }
 
     #[test]
@@ -234,11 +245,11 @@ mod tests {
         let store = VCardStore::new(db);
 
         let jid: jid::BareJid = "charlie@example.com".parse().unwrap();
-        let vcard_xml = "<vCard xmlns='vcard-temp'><FN>Charlie</FN></vCard>";
+        let vcard = vcard_element("<vCard xmlns='vcard-temp'><FN>Charlie</FN></vCard>");
 
         // Store vCard
         store
-            .set(&jid, vcard_xml)
+            .set(&jid, &vcard)
             .await
             .expect("Failed to store vCard");
 
@@ -262,16 +273,16 @@ mod tests {
 
         let jid1: jid::BareJid = "user1@example.com".parse().unwrap();
         let jid2: jid::BareJid = "user2@example.com".parse().unwrap();
-        let vcard1 = "<vCard xmlns='vcard-temp'><FN>User One</FN></vCard>";
-        let vcard2 = "<vCard xmlns='vcard-temp'><FN>User Two</FN></vCard>";
+        let vcard1 = vcard_element("<vCard xmlns='vcard-temp'><FN>User One</FN></vCard>");
+        let vcard2 = vcard_element("<vCard xmlns='vcard-temp'><FN>User Two</FN></vCard>");
 
         // Store vCards for different users
         store
-            .set(&jid1, vcard1)
+            .set(&jid1, &vcard1)
             .await
             .expect("Failed to store vCard 1");
         store
-            .set(&jid2, vcard2)
+            .set(&jid2, &vcard2)
             .await
             .expect("Failed to store vCard 2");
 
@@ -279,7 +290,7 @@ mod tests {
         let retrieved1 = store.get(&jid1).await.expect("Failed to get vCard 1");
         let retrieved2 = store.get(&jid2).await.expect("Failed to get vCard 2");
 
-        assert_eq!(retrieved1, Some(vcard1.to_string()));
-        assert_eq!(retrieved2, Some(vcard2.to_string()));
+        assert_eq!(retrieved1, Some(vcard1));
+        assert_eq!(retrieved2, Some(vcard2));
     }
 }

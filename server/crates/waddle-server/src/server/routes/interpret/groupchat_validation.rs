@@ -182,9 +182,9 @@ pub(super) fn has_malformed_rich_payload(message: &Message) -> bool {
                     || payload.attr("uri").is_none_or(str::is_empty)))
             || (payload.ns() == NS_EXPLICIT_MENTIONS
                 && payload.name() == "mention"
-                && payload.attr("jid").is_none_or(str::is_empty)
-                && payload.attr("occupantid").is_none_or(str::is_empty)
-                && payload.attr("mentions").is_none_or(str::is_empty))
+                && (payload.attr("jid").is_some()
+                    || (payload.attr("occupantid").is_none_or(str::is_empty)
+                        && payload.attr("mentions").is_none_or(str::is_empty))))
     })
 }
 

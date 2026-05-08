@@ -39,6 +39,7 @@ pub struct TestServer {
     process: Child,
     http_port: u16,
     port_file: std::path::PathBuf,
+    upload_dir: std::path::PathBuf,
     #[allow(dead_code)]
     fixed_account_password: String,
 }
@@ -89,12 +90,20 @@ impl TestServer {
             .map(|(username, password)| format!("{username}:{password}"))
             .collect::<Vec<_>>()
             .join(",");
+        let database_url = database_url.unwrap_or_else(|| "sqlite::memory:".to_string());
 
         // Temp file where the server writes its bound HTTP port
         let port_file =
             std::env::temp_dir().join(format!("waddle-test-port-{}", uuid::Uuid::new_v4()));
+        let upload_dir =
+            std::env::temp_dir().join(format!("waddle-test-uploads-{}", uuid::Uuid::new_v4()));
 
         let mut command = Command::new(bin);
+        for (key, _) in std::env::vars() {
+            if key.starts_with("WADDLE_") || key.starts_with("OTEL_") {
+                command.env_remove(key);
+            }
+        }
         command
             .env("WADDLE_CERTS_EPHEMERAL", "true")
             .env("WADDLE_TEST_FIXED_ACCOUNT_ENABLED", "true")
@@ -109,12 +118,20 @@ impl TestServer {
             .env("WADDLE_SERVER_OWNER_LOCALPARTS", "admin")
             .env("WADDLE_HTTP_ADDR", "127.0.0.1:0")
             .env("WADDLE_XMPP_DOMAIN", "localhost")
+            .env("WADDLE_DB_DRIVER", "sqlite")
+            .env("WADDLE_DATABASE_URL", &database_url)
             .env(
                 "WADDLE_XMPP_MAM_DATABASE_URL",
                 mam_database_url.as_deref().unwrap_or("sqlite::memory:"),
             )
             .env("WADDLE_XMPP_INBOX_DATABASE_URL", "sqlite::memory:")
+            .env("WADDLE_XMPP_SM_DATABASE_URL", "sqlite::memory:")
+            .env(
+                "WADDLE_XMPP_PENDING_DELIVERY_DATABASE_URL",
+                "sqlite::memory:",
+            )
             .env("WADDLE_XMPP_PUBSUB_DATABASE_URL", "sqlite::memory:")
+            .env("WADDLE_UPLOAD_DIR", &upload_dir)
             .env("WADDLE_GIT_SHA", TEST_GIT_SHA)
             .env(
                 "WADDLE_OCCUPANT_ID_SECRET",
@@ -123,9 +140,6 @@ impl TestServer {
             .env("WADDLE_HTTP_PORT_FILE", &port_file)
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        if let Some(url) = database_url {
-            command.env("WADDLE_DATABASE_URL", url);
-        }
         let child = command
             .spawn()
             .unwrap_or_else(|e| panic!("Failed to start waddle-server at {bin}: {e}"));
@@ -162,6 +176,7 @@ impl TestServer {
             process: child,
             http_port,
             port_file,
+            upload_dir,
             fixed_account_password,
         }
     }
@@ -183,6 +198,7 @@ impl Drop for TestServer {
         let _ = self.process.kill();
         let _ = self.process.wait();
         let _ = std::fs::remove_file(&self.port_file);
+        let _ = std::fs::remove_dir_all(&self.upload_dir);
     }
 }
 
@@ -406,11 +422,63 @@ impl WsXmppClient {
         }
     }
 
-    pub async fn close(mut self) {
-        let _ = self
-            .send(r#"<close xmlns="urn:ietf:params:xml:ns:xmpp-framing"/>"#)
-            .await;
-        let _ = self.ws.close(None).await;
+    pub async fn close(mut self) -> Result<(), String> {
+        let close =
+            xmpp_parsers::minidom::Element::builder("close", "urn:ietf:params:xml:ns:xmpp-framing")
+                .build();
+        let mut close_xml = Vec::new();
+        close
+            .write_to(&mut close_xml)
+            .map_err(|error| format!("XMPP close serialization failed: {error}"))?;
+        let close_xml = String::from_utf8(close_xml)
+            .map_err(|error| format!("XMPP close serialization emitted invalid UTF-8: {error}"))?;
+        self.send(&close_xml).await?;
+        timeout(Duration::from_secs(2), async {
+            while let Some(message) = self.ws.next().await {
+                match message {
+                    Ok(tungstenite::Message::Text(text)) if text.contains("<close") => {
+                        return Ok(());
+                    }
+                    Ok(tungstenite::Message::Text(text)) => {
+                        return Err(format!(
+                            "Unexpected text frame while waiting for XMPP close acknowledgement: {text}"
+                        ));
+                    }
+                    Ok(tungstenite::Message::Close(_)) => {
+                        return Err("WebSocket closed before XMPP close acknowledgement".into());
+                    }
+                    Err(error) => return Err(format!("WebSocket close receive failed: {error}")),
+                    Ok(_) => {}
+                }
+            }
+            Err("WebSocket ended before XMPP close acknowledgement".into())
+        })
+        .await
+        .map_err(|_| "Timed out waiting for XMPP close acknowledgement".to_string())??;
+        self.ws
+            .close(None)
+            .await
+            .map_err(|error| format!("WebSocket close send failed: {error}"))?;
+        timeout(Duration::from_secs(2), async {
+            while let Some(message) = self.ws.next().await {
+                match message {
+                    Ok(tungstenite::Message::Close(_)) => return Ok(()),
+                    Ok(tungstenite::Message::Text(text)) => {
+                        return Err(format!(
+                            "Unexpected text frame after WebSocket close request: {text}"
+                        ));
+                    }
+                    // Once the XMPP close ack has been received and the
+                    // WebSocket close frame has been sent, a peer-side TCP
+                    // reset is equivalent to the connection being gone.
+                    Err(_) => return Ok(()),
+                    Ok(_) => {}
+                }
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|_| "Timed out waiting for WebSocket close".to_string())?
     }
 }
 

@@ -2,8 +2,10 @@
 
 mod ws_common;
 
+use std::str::FromStr;
 use tokio::sync::Mutex;
 use ws_common::{TestServer, WsXmppClient};
+use xmpp_parsers::minidom::Element;
 
 const DOMAIN: &str = "localhost";
 const USERNAME: &str = "admin";
@@ -20,17 +22,33 @@ async fn setup() -> (TestServer, WsXmppClient) {
     (server, client)
 }
 
-async fn join_room(client: &mut WsXmppClient, room: &str) {
+async fn join_room(client: &mut WsXmppClient, room: &str) -> String {
     client
         .send(&format!(
             r#"<presence to="{room}/{USERNAME}"><x xmlns="http://jabber.org/protocol/muc"/></presence>"#
         ))
         .await
         .expect("send join");
-    client
-        .recv_until(|frame| frame.contains("<subject"))
+    let frames = client
+        .recv_until(|frame| frame.contains("urn:xmpp:occupant-id:0"))
         .await
         .expect("join responses");
+    frames
+        .iter()
+        .find_map(|frame| occupant_id_from_frame(frame))
+        .expect("self presence occupant id")
+}
+
+fn occupant_id_from_frame(frame: &str) -> Option<String> {
+    let element = Element::from_str(frame).ok()?;
+    find_occupant_id(&element)
+}
+
+fn find_occupant_id(element: &Element) -> Option<String> {
+    if element.name() == "occupant-id" && element.ns() == "urn:xmpp:occupant-id:0" {
+        return element.attr("id").map(str::to_string);
+    }
+    element.children().find_map(find_occupant_id)
 }
 
 #[tokio::test]
@@ -38,13 +56,13 @@ async fn explicit_mentions_route_and_replay_from_mam() {
     let _guard = TEST_SERIAL.lock().await;
     let (_server, mut client) = setup().await;
     let room = format!("mentions-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
-    join_room(&mut client, &room).await;
+    let occupant_id = join_room(&mut client, &room).await;
 
     client
         .send(&format!(
             r#"<message type="groupchat" to="{room}" id="mention-1">
                 <body>@admin please check this</body>
-                <mention xmlns="urn:xmpp:mentions:0" begin="0" end="6" jid="admin@localhost"/>
+                <mention xmlns="urn:xmpp:mentions:0" begin="0" end="6" occupantid="{occupant_id}"/>
             </message>"#
         ))
         .await
@@ -54,8 +72,12 @@ async fn explicit_mentions_route_and_replay_from_mam() {
         .await
         .expect("mention echo");
     assert!(
-        echo.contains("admin@localhost"),
-        "missing mentioned jid: {echo}"
+        echo.contains(&occupant_id),
+        "missing mentioned occupant id: {echo}"
+    );
+    assert!(
+        !echo.contains("jid=\"admin@localhost") && !echo.contains("jid='admin@localhost"),
+        "MUC mention payload leaked a JID despite occupant-id support: {echo}"
     );
 
     client
@@ -72,11 +94,13 @@ async fn explicit_mentions_route_and_replay_from_mam() {
         frames
             .iter()
             .any(|frame| frame.contains("urn:xmpp:mentions:0")
-                && frame.contains("admin@localhost")),
+                && frame.contains(&occupant_id)
+                && !frame.contains("jid=\"admin@localhost")
+                && !frame.contains("jid='admin@localhost")),
         "MAM did not replay mention: {frames:?}"
     );
 
-    client.close().await;
+    let _ = client.close().await;
 }
 
 #[tokio::test]
@@ -88,7 +112,7 @@ async fn mention_without_target_attribute_returns_bad_request() {
     let _guard = TEST_SERIAL.lock().await;
     let (_server, mut client) = setup().await;
     let room = format!("mention-bad-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
-    join_room(&mut client, &room).await;
+    let _occupant_id = join_room(&mut client, &room).await;
 
     client
         .send(&format!(
@@ -108,5 +132,33 @@ async fn mention_without_target_attribute_returns_bad_request() {
         "not an error stanza: {error}"
     );
 
-    client.close().await;
+    let _ = client.close().await;
+}
+
+#[tokio::test]
+async fn muc_jid_mention_returns_bad_request_when_occupant_ids_supported() {
+    let _guard = TEST_SERIAL.lock().await;
+    let (_server, mut client) = setup().await;
+    let room = format!("mention-jid-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
+    let _occupant_id = join_room(&mut client, &room).await;
+
+    client
+        .send(&format!(
+            r#"<message type="groupchat" to="{room}" id="jid-mention">
+                <body>jid mention</body>
+                <mention xmlns="urn:xmpp:mentions:0" begin="0" end="3" jid="admin@localhost"/>
+            </message>"#
+        ))
+        .await
+        .expect("send jid mention");
+    let error = client
+        .recv_matching(|frame| frame.contains("<bad-request"))
+        .await
+        .expect("bad-request error");
+    assert!(
+        error.contains("type=\"error\""),
+        "not an error stanza: {error}"
+    );
+
+    let _ = client.close().await;
 }

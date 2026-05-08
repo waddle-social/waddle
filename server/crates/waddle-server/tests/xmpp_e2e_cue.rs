@@ -5,7 +5,7 @@ mod ws_common;
 use anyhow::{anyhow, Context, Result};
 use jid::Jid;
 use serde::Deserialize;
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -18,10 +18,122 @@ use ws_common::{TestServer, WsXmppClient};
 use xmpp_parsers::iq::{Iq, IqType};
 use xmpp_parsers::message::{Body, Message, MessageType};
 use xmpp_parsers::minidom::Element;
-use xmpp_parsers::presence::Presence;
+use xmpp_parsers::presence::{Presence, Show as PresenceShow, Type as PresenceType};
 
 static TEST_SERIAL: Mutex<()> = Mutex::const_new(());
 const RECV_TIMEOUT: Duration = Duration::from_secs(10);
+const SUPPORTED_XEPS: &[&str] = &[
+    "XEP-0004", "XEP-0012", "XEP-0030", "XEP-0045", "XEP-0048", "XEP-0049", "XEP-0050", "XEP-0054",
+    "XEP-0055", "XEP-0059", "XEP-0060", "XEP-0084", "XEP-0085", "XEP-0092", "XEP-0103", "XEP-0107",
+    "XEP-0108", "XEP-0115", "XEP-0118", "XEP-0153", "XEP-0160", "XEP-0163", "XEP-0184", "XEP-0191",
+    "XEP-0198", "XEP-0199", "XEP-0201", "XEP-0202", "XEP-0203", "XEP-0237", "XEP-0280", "XEP-0297",
+    "XEP-0308", "XEP-0313", "XEP-0317", "XEP-0333", "XEP-0334", "XEP-0357", "XEP-0359", "XEP-0363",
+    "XEP-0372", "XEP-0402", "XEP-0410", "XEP-0421", "XEP-0424", "XEP-0425", "XEP-0428", "XEP-0431",
+    "XEP-0433", "XEP-0444", "XEP-0446", "XEP-0447", "XEP-0461", "XEP-0503", "XEP-0511", "XEP-0513",
+];
+
+const ADVERTISED_FEATURE_XEPS: &[(&str, &str)] = &[
+    ("http://jabber.org/protocol/disco#info", "XEP-0030"),
+    ("http://jabber.org/protocol/disco#items", "XEP-0030"),
+    ("http://jabber.org/protocol/caps", "XEP-0115"),
+    ("urn:xmpp:features:rosterver", "XEP-0237"),
+    ("urn:xmpp:mam:2", "XEP-0313"),
+    ("urn:xmpp:mam:2#extended", "XEP-0313"),
+    ("urn:xmpp:sid:0", "XEP-0359"),
+    ("urn:xmpp:reply:0", "XEP-0461"),
+    ("urn:xmpp:message-correct:0", "XEP-0308"),
+    ("urn:xmpp:chat-markers:0", "XEP-0333"),
+    ("urn:xmpp:receipts", "XEP-0184"),
+    ("urn:xmpp:message-retract:1", "XEP-0424"),
+    ("urn:xmpp:message-moderate:1", "XEP-0425"),
+    ("urn:xmpp:reactions:0", "XEP-0444"),
+    ("urn:xmpp:reference:0", "XEP-0372"),
+    ("urn:xmpp:fallback:0", "XEP-0428"),
+    ("urn:xmpp:threads:0", "XEP-0201"),
+    ("urn:xmpp:sm:3", "XEP-0198"),
+    ("urn:xmpp:carbons:2", "XEP-0280"),
+    ("urn:xmpp:carbons:rules:0", "XEP-0280"),
+    ("urn:xmpp:http:upload:0", "XEP-0363"),
+    ("jabber:iq:last", "XEP-0012"),
+    ("urn:xmpp:blocking", "XEP-0191"),
+    ("urn:xmpp:ping", "XEP-0199"),
+    ("urn:xmpp:time", "XEP-0202"),
+    ("jabber:iq:version", "XEP-0092"),
+    ("http://jabber.org/protocol/pubsub", "XEP-0060"),
+    ("http://jabber.org/protocol/pubsub#pep", "XEP-0163"),
+    ("http://jabber.org/protocol/pubsub#auto-create", "XEP-0060"),
+    (
+        "http://jabber.org/protocol/pubsub#persistent-items",
+        "XEP-0060",
+    ),
+    ("http://jabber.org/protocol/pubsub#publish", "XEP-0060"),
+    (
+        "http://jabber.org/protocol/pubsub#retrieve-items",
+        "XEP-0060",
+    ),
+    ("http://jabber.org/protocol/pubsub#subscribe", "XEP-0060"),
+    (
+        "http://jabber.org/protocol/pubsub#access-whitelist",
+        "XEP-0060",
+    ),
+    (
+        "http://jabber.org/protocol/pubsub#access-presence",
+        "XEP-0060",
+    ),
+    (
+        "http://jabber.org/protocol/pubsub#auto-subscribe",
+        "XEP-0060",
+    ),
+    (
+        "http://jabber.org/protocol/pubsub#filtered-notifications",
+        "XEP-0060",
+    ),
+    ("http://jabber.org/protocol/pubsub#create-nodes", "XEP-0060"),
+    ("http://jabber.org/protocol/pubsub#config-node", "XEP-0060"),
+    ("http://jabber.org/protocol/pubsub#meta-data", "XEP-0060"),
+    ("http://jabber.org/protocol/pubsub#delete-nodes", "XEP-0060"),
+    ("http://jabber.org/protocol/pubsub#delete-items", "XEP-0060"),
+    (
+        "http://jabber.org/protocol/pubsub#retract-items",
+        "XEP-0060",
+    ),
+    ("http://jabber.org/protocol/pubsub#multi-items", "XEP-0060"),
+    ("http://jabber.org/protocol/pubsub#item-ids", "XEP-0060"),
+    ("jabber:iq:private", "XEP-0049"),
+    ("http://jabber.org/protocol/commands", "XEP-0050"),
+    ("vcard-temp", "XEP-0054"),
+    ("urn:xmpp:push:0", "XEP-0357"),
+    ("urn:xmpp:bookmarks:1#compat", "XEP-0402"),
+    ("urn:xmpp:bookmarks:1#compat-pep", "XEP-0402"),
+    ("msgoffline", "XEP-0160"),
+    ("http://jabber.org/protocol/muc", "XEP-0045"),
+    (
+        "http://jabber.org/protocol/muc#self-ping-optimization",
+        "XEP-0410",
+    ),
+    ("http://jabber.org/protocol/chatstates", "XEP-0085"),
+    ("urn:xmpp:fulltext:0", "XEP-0431"),
+    ("urn:xmpp:occupant-id:0", "XEP-0421"),
+    ("urn:xmpp:hats:0", "XEP-0317"),
+    ("urn:xmpp:mentions:0", "XEP-0513"),
+    ("urn:xmpp:mentions:0#channel", "XEP-0513"),
+    ("jabber:iq:search", "XEP-0055"),
+];
+
+const ADVERTISED_FEATURE_EXEMPTIONS: &[&str] = &[
+    "jabber:iq:roster",
+    "muc_membersonly",
+    "muc_moderated",
+    "muc_nonanonymous",
+    "muc_open",
+    "muc_persistent",
+    "muc_public",
+    "muc_semianonymous",
+    "muc_temporary",
+    "muc_unmoderated",
+    "urn:waddle:inbox:0",
+    "urn:waddle:mam-thread:0",
+];
 
 #[derive(Debug, Deserialize)]
 struct ScenarioFile {
@@ -31,6 +143,8 @@ struct ScenarioFile {
 #[derive(Debug, Deserialize)]
 struct Scenario {
     name: String,
+    #[serde(default)]
+    xeps: Vec<String>,
     domain: String,
     users: BTreeMap<String, User>,
     steps: Vec<Step>,
@@ -57,10 +171,57 @@ struct Actor {
 enum Step {
     #[serde(rename = "enableCarbons")]
     EnableCarbons { actor: Actor },
+    #[serde(rename = "streamManagement")]
+    StreamManagement {
+        actor: Actor,
+        action: StreamManagementAction,
+        #[serde(default)]
+        resume: Option<bool>,
+        #[serde(default)]
+        max: Option<u32>,
+    },
     #[serde(rename = "connectActor")]
     ConnectActor { actor: Actor },
     #[serde(rename = "disconnectActor")]
     DisconnectActor { actor: Actor },
+    #[serde(rename = "sendIq")]
+    SendIq {
+        actor: Actor,
+        #[serde(rename = "type")]
+        type_: IqKindSpec,
+        id: Option<String>,
+        to: Option<String>,
+        payload: Option<XmlElementSpec>,
+    },
+    #[serde(rename = "expectIq")]
+    ExpectIq {
+        target: Actor,
+        id: Option<String>,
+        #[serde(rename = "type")]
+        type_: Option<IqResponseKind>,
+        #[serde(default)]
+        contains: Vec<String>,
+        #[serde(default)]
+        absent: Vec<String>,
+        #[serde(default)]
+        elements: Vec<XmlElementSpec>,
+        #[serde(default, rename = "absentElements")]
+        absent_elements: Vec<XmlElementSpec>,
+        #[serde(default)]
+        captures: Vec<AttributeCapture>,
+    },
+    #[serde(rename = "sendPresence")]
+    SendPresence {
+        actor: Actor,
+        to: Option<String>,
+        #[serde(rename = "type")]
+        type_: Option<PresenceKind>,
+        show: Option<String>,
+        status: Option<String>,
+        priority: Option<i8>,
+        #[serde(default)]
+        payloads: Vec<XmlElementSpec>,
+    },
     #[serde(rename = "sendMessage")]
     SendMessage {
         from: Actor,
@@ -89,6 +250,12 @@ enum Step {
         payloads: Vec<Payload>,
         #[serde(default)]
         contains: Vec<String>,
+        #[serde(default)]
+        absent: Vec<String>,
+        #[serde(default)]
+        elements: Vec<XmlElementSpec>,
+        #[serde(default, rename = "absentElements")]
+        absent_elements: Vec<XmlElementSpec>,
     },
     #[serde(rename = "expectCarbon")]
     ExpectCarbon {
@@ -101,6 +268,12 @@ enum Step {
         payloads: Vec<Payload>,
         #[serde(default)]
         contains: Vec<String>,
+        #[serde(default)]
+        absent: Vec<String>,
+        #[serde(default)]
+        elements: Vec<XmlElementSpec>,
+        #[serde(default, rename = "absentElements")]
+        absent_elements: Vec<XmlElementSpec>,
     },
     #[serde(rename = "joinMuc")]
     JoinMuc {
@@ -135,7 +308,14 @@ enum Step {
     #[serde(rename = "expectPresence")]
     ExpectPresence {
         target: Actor,
+        #[serde(default)]
         contains: Vec<String>,
+        #[serde(default)]
+        elements: Vec<XmlElementSpec>,
+        #[serde(default, rename = "absentElements")]
+        absent_elements: Vec<XmlElementSpec>,
+        #[serde(default)]
+        captures: Vec<AttributeCapture>,
     },
     #[serde(rename = "queryMam")]
     QueryMam {
@@ -143,6 +323,14 @@ enum Step {
         archive: String,
         id: Option<String>,
         max: u32,
+        after: Option<String>,
+        #[serde(rename = "with")]
+        with_jid: Option<String>,
+        fulltext: Option<String>,
+        #[serde(default)]
+        ids: Vec<String>,
+        #[serde(default, rename = "idsFrom")]
+        ids_from: Vec<String>,
     },
     #[serde(rename = "expectMamResult")]
     ExpectMamResult {
@@ -153,6 +341,50 @@ enum Step {
         payloads: Vec<Payload>,
         #[serde(default)]
         contains: Vec<String>,
+        #[serde(default)]
+        absent: Vec<String>,
+        #[serde(default)]
+        elements: Vec<XmlElementSpec>,
+        #[serde(default, rename = "absentElements")]
+        absent_elements: Vec<XmlElementSpec>,
+    },
+    #[serde(rename = "expectNoMamResult")]
+    ExpectNoMamResult {
+        body: Option<String>,
+        #[serde(default, rename = "bodyAbsent")]
+        body_absent: bool,
+        #[serde(default)]
+        payloads: Vec<Payload>,
+        #[serde(default)]
+        contains: Vec<String>,
+        #[serde(default)]
+        elements: Vec<XmlElementSpec>,
+    },
+    #[serde(rename = "expectFrame")]
+    ExpectFrame {
+        target: Actor,
+        #[serde(default)]
+        contains: Vec<String>,
+        #[serde(default)]
+        absent: Vec<String>,
+        #[serde(default)]
+        elements: Vec<XmlElementSpec>,
+        #[serde(default, rename = "absentElements")]
+        absent_elements: Vec<XmlElementSpec>,
+    },
+    #[serde(rename = "drainFrames")]
+    DrainFrames {
+        target: Actor,
+        #[serde(default)]
+        contains: Vec<String>,
+        #[serde(default)]
+        elements: Vec<XmlElementSpec>,
+        #[serde(default)]
+        millis: u64,
+        #[serde(default)]
+        min: Option<u64>,
+        #[serde(default)]
+        max: Option<u64>,
     },
     #[serde(rename = "expectNoStanza")]
     ExpectNoStanza {
@@ -170,6 +402,42 @@ enum MessageKind {
     Chat,
     Normal,
     Groupchat,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum StreamManagementAction {
+    Enable,
+    RequestAck,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum IqKindSpec {
+    Get,
+    Set,
+    Result,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum IqResponseKind {
+    Result,
+    Error,
+    Get,
+    Set,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum PresenceKind {
+    Available,
+    Unavailable,
+    Subscribe,
+    Subscribed,
+    Unsubscribe,
+    Unsubscribed,
+    Probe,
 }
 
 #[derive(Debug, Deserialize)]
@@ -224,6 +492,12 @@ enum Payload {
         id_from: Option<String>,
         action: PinAction,
     },
+    #[serde(rename = "xml")]
+    Xml {
+        element: XmlElementSpec,
+        #[serde(default, rename = "expectElements")]
+        expect_elements: Vec<XmlElementSpec>,
+    },
 }
 
 #[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
@@ -242,10 +516,36 @@ enum ProcessingHint {
     Store,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct XmlElementSpec {
+    name: String,
+    ns: String,
+    #[serde(default)]
+    attrs: BTreeMap<String, String>,
+    #[serde(default, rename = "attrsFrom")]
+    attrs_from: BTreeMap<String, String>,
+    #[serde(default, rename = "attrsPresent")]
+    attrs_present: Vec<String>,
+    text: Option<String>,
+    #[serde(default)]
+    children: Vec<XmlElementSpec>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AttributeCapture {
+    #[serde(rename = "as")]
+    capture_as: String,
+    name: String,
+    element: Option<String>,
+    ns: Option<String>,
+    contains: Option<String>,
+}
+
 struct ScenarioContext {
     clients: HashMap<String, WsXmppClient>,
     pending_frames: HashMap<String, VecDeque<String>>,
     last_mam_frames: Vec<String>,
+    last_mam_frame_index: usize,
     captures: HashMap<String, String>,
     ws_url: String,
     domain: String,
@@ -270,6 +570,107 @@ async fn cue_scenarios_run_over_websocket() -> Result<()> {
             .with_context(|| format!("scenario {} failed", scenario_file.display()))?;
     }
     Ok(())
+}
+
+#[test]
+fn cue_scenarios_cover_supported_xeps_manifest() -> Result<()> {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/xmpp_e2e_scenarios");
+    let supported = SUPPORTED_XEPS.iter().copied().collect::<BTreeSet<_>>();
+    let covered = cue_scenario_xep_tags(&root)?;
+    let mut unknown = Vec::new();
+
+    for scenario_file in discover_scenario_files(&root)? {
+        let scenario = load_scenario_from_file(&root, &scenario_file)
+            .with_context(|| format!("load {}", scenario_file.display()))?;
+        for xep in &scenario.xeps {
+            if !supported.contains(xep.as_str()) {
+                unknown.push(format!("{} declares {xep}", scenario.name));
+            }
+        }
+    }
+
+    let missing = SUPPORTED_XEPS
+        .iter()
+        .filter(|xep| !covered.contains(**xep))
+        .copied()
+        .collect::<Vec<_>>();
+
+    if missing.is_empty() && unknown.is_empty() {
+        return Ok(());
+    }
+
+    Err(anyhow!(
+        "CUE XEP coverage drift: missing scenario tags for [{}]; unknown tags [{}]",
+        missing.join(", "),
+        unknown.join(", ")
+    ))
+}
+
+#[test]
+fn advertised_features_have_cue_xep_coverage() -> Result<()> {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/xmpp_e2e_scenarios");
+    let covered = cue_scenario_xep_tags(&root)?;
+    let feature_xeps = ADVERTISED_FEATURE_XEPS
+        .iter()
+        .copied()
+        .collect::<BTreeMap<_, _>>();
+    let exemptions = ADVERTISED_FEATURE_EXEMPTIONS
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let advertised = advertised_feature_vars();
+
+    let unmapped = advertised
+        .iter()
+        .filter(|feature| !feature_xeps.contains_key(feature.as_str()))
+        .filter(|feature| !exemptions.contains(feature.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    let uncovered = advertised
+        .iter()
+        .filter_map(|feature| {
+            feature_xeps
+                .get(feature.as_str())
+                .filter(|xep| !covered.contains(**xep))
+                .map(|xep| format!("{feature} -> {xep}"))
+        })
+        .collect::<Vec<_>>();
+
+    if unmapped.is_empty() && uncovered.is_empty() {
+        return Ok(());
+    }
+
+    Err(anyhow!(
+        "advertised feature coverage drift: unmapped features [{}]; uncovered XEPs [{}]",
+        unmapped.join(", "),
+        uncovered.join(", ")
+    ))
+}
+
+fn cue_scenario_xep_tags(root: &Path) -> Result<BTreeSet<String>> {
+    let mut covered = BTreeSet::new();
+    for scenario_file in discover_scenario_files(root)? {
+        let scenario = load_scenario_from_file(root, &scenario_file)
+            .with_context(|| format!("load {}", scenario_file.display()))?;
+        covered.extend(scenario.xeps);
+    }
+    Ok(covered)
+}
+
+fn advertised_feature_vars() -> BTreeSet<String> {
+    waddle_xmpp::disco::info::server_features()
+        .into_iter()
+        .chain(waddle_xmpp::disco::info::upload_service_features())
+        .chain(waddle_xmpp::disco::info::pubsub_service_features())
+        .chain(waddle_xmpp::disco::info::spaces_service_features())
+        .chain(waddle_xmpp::disco::info::muc_service_features())
+        .chain(waddle_xmpp::disco::info::muc_room_features(
+            true, true, false, true,
+        ))
+        .chain(waddle_xmpp::pubsub::pep_features())
+        .chain([waddle_xmpp::disco::Feature::new("jabber:iq:search")])
+        .map(|feature| feature.0)
+        .collect()
 }
 
 fn discover_scenario_files(root: &Path) -> Result<Vec<PathBuf>> {
@@ -359,6 +760,7 @@ async fn run_scenario(scenario: Scenario) -> Result<()> {
         clients,
         pending_frames: HashMap::new(),
         last_mam_frames: Vec::new(),
+        last_mam_frame_index: 0,
         captures: HashMap::new(),
         ws_url,
         domain: scenario.domain.clone(),
@@ -366,13 +768,25 @@ async fn run_scenario(scenario: Scenario) -> Result<()> {
         account_passwords: accounts,
     };
 
+    let mut step_result = Ok(());
     for (index, step) in scenario.steps.iter().enumerate() {
-        execute_step(&mut ctx, step)
+        if let Err(error) = execute_step(&mut ctx, step)
             .await
-            .with_context(|| format!("step {index} in scenario {}", scenario.name))?;
+            .with_context(|| format!("step {index} in scenario {}", scenario.name))
+        {
+            step_result = Err(error);
+            break;
+        }
+    }
+    if step_result.is_ok() {
+        step_result = assert_mam_results_consumed(&ctx)
+            .and_then(|()| assert_no_pending_frames(&ctx))
+            .with_context(|| format!("scenario {} ended", scenario.name));
     }
 
-    close_clients(ctx.clients).await;
+    let close_result = close_clients(ctx.clients).await;
+    step_result?;
+    close_result?;
     Ok(())
 }
 
@@ -403,22 +817,39 @@ fn account_password<'a>(
         .ok_or_else(|| anyhow!("missing password for {username}"))
 }
 
-async fn close_clients(clients: HashMap<String, WsXmppClient>) {
+async fn close_clients(clients: HashMap<String, WsXmppClient>) -> Result<()> {
+    let mut errors = Vec::new();
     for client in clients.into_values() {
-        client.close().await;
+        if let Err(error) = client.close().await {
+            errors.push(error);
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "failed to close {} scenario client(s): {}",
+            errors.len(),
+            errors.join("; ")
+        ))
     }
 }
 
-async fn disconnect_actor(ctx: &mut ScenarioContext, actor: &Actor) {
+async fn disconnect_actor(ctx: &mut ScenarioContext, actor: &Actor) -> Result<()> {
     let key = actor_key(actor);
+    assert_actor_has_no_pending_frames(ctx, actor)?;
     ctx.pending_frames.remove(&key);
     if let Some(client) = ctx.clients.remove(&key) {
-        client.close().await;
+        client
+            .close()
+            .await
+            .map_err(|error| anyhow!("disconnect {}.{}: {error}", actor.user, actor.device))?;
     }
+    Ok(())
 }
 
 async fn reconnect_actor(ctx: &mut ScenarioContext, actor: &Actor) -> Result<()> {
-    disconnect_actor(ctx, actor).await;
+    disconnect_actor(ctx, actor).await?;
     let password = account_password(&ctx.account_passwords, &ctx.admin_password, &actor.username)?;
     let client = WsXmppClient::connect_and_auth(
         &ctx.ws_url,
@@ -452,11 +883,154 @@ async fn execute_step(ctx: &mut ScenarioContext, step: &Step) -> Result<()> {
             let response = recv_matching(ctx, actor, |frame| frame.contains(&id)).await?;
             assert_contains_all(&response, ["type=\"result\""], "enable carbons response")?;
         }
+        Step::StreamManagement {
+            actor,
+            action,
+            resume,
+            max,
+        } => {
+            let element = match action {
+                StreamManagementAction::Enable => {
+                    let mut builder = Element::builder("enable", "urn:xmpp:sm:3");
+                    if let Some(resume) = resume {
+                        builder = builder.attr("resume", if *resume { "true" } else { "false" });
+                    }
+                    let max_value = max.map(|value| value.to_string());
+                    if let Some(max) = max_value.as_deref() {
+                        builder = builder.attr("max", max);
+                    }
+                    builder.build()
+                }
+                StreamManagementAction::RequestAck => {
+                    Element::builder("r", "urn:xmpp:sm:3").build()
+                }
+            };
+            let xml = element_xml(&element)?;
+            client_mut(ctx, actor)?
+                .send(&xml)
+                .await
+                .map_err(|error| anyhow!(error))?;
+        }
         Step::DisconnectActor { actor } => {
-            disconnect_actor(ctx, actor).await;
+            disconnect_actor(ctx, actor).await?;
         }
         Step::ConnectActor { actor } => {
             reconnect_actor(ctx, actor).await?;
+        }
+        Step::SendIq {
+            actor,
+            type_,
+            id,
+            to,
+            payload,
+        } => {
+            let id = id
+                .clone()
+                .unwrap_or_else(|| format!("cue-iq-{}", uuid::Uuid::new_v4()));
+            let payload = payload
+                .as_ref()
+                .map(|payload| xml_element(payload, Some(ctx)))
+                .transpose()?;
+            let iq_type = match (type_, payload) {
+                (IqKindSpec::Get, Some(payload)) => IqType::Get(payload),
+                (IqKindSpec::Set, Some(payload)) => IqType::Set(payload),
+                (IqKindSpec::Result, payload) => IqType::Result(payload),
+                (IqKindSpec::Get | IqKindSpec::Set, None) => {
+                    return Err(anyhow!("sendIq get/set requires a payload"))
+                }
+            };
+            let iq = Iq {
+                from: None,
+                to: to.as_deref().map(str::parse).transpose()?,
+                id,
+                payload: iq_type,
+            };
+            client_mut(ctx, actor)?
+                .send(&stanza_xml(Stanza::Iq(iq))?)
+                .await
+                .map_err(|error| anyhow!(error))?;
+        }
+        Step::ExpectIq {
+            target,
+            id,
+            type_,
+            contains,
+            absent,
+            elements,
+            absent_elements,
+            captures,
+        } => {
+            let mut expected = contains.clone();
+            if let Some(id) = id {
+                expected.push(format!("id=\"{id}\""));
+            }
+            if let Some(type_) = type_ {
+                expected.push(format!("type=\"{}\"", iq_response_kind_name(type_)));
+            }
+            let captures_snapshot = ctx.captures.clone();
+            let frame = recv_matching(ctx, target, |frame| {
+                frame.contains("<iq")
+                    && id
+                        .as_ref()
+                        .is_none_or(|id| frame.contains(&format!("id=\"{id}\"")))
+                    && type_.as_ref().is_none_or(|type_| {
+                        frame.contains(&format!("type=\"{}\"", iq_response_kind_name(type_)))
+                    })
+                    && contains.iter().all(|part| frame.contains(part))
+                    && elements
+                        .iter()
+                        .all(|spec| frame_has_element(frame, spec, &captures_snapshot))
+            })
+            .await?;
+            assert_contains_all(&frame, &expected, "IQ expectation")?;
+            assert_absent_all(&frame, absent, "IQ expectation")?;
+            assert_elements_present(&frame, elements, &captures_snapshot, "IQ expectation")?;
+            assert_elements_absent(
+                &frame,
+                absent_elements,
+                &captures_snapshot,
+                "IQ expectation",
+            )?;
+            for capture in captures {
+                let value = extract_attr_capture(&frame, capture)?;
+                ctx.captures.insert(capture.capture_as.clone(), value);
+            }
+        }
+        Step::SendPresence {
+            actor,
+            to,
+            type_,
+            show,
+            status,
+            priority,
+            payloads,
+        } => {
+            let mut presence = Presence::new(match type_ {
+                None | Some(PresenceKind::Available) => PresenceType::None,
+                Some(PresenceKind::Unavailable) => PresenceType::Unavailable,
+                Some(PresenceKind::Subscribe) => PresenceType::Subscribe,
+                Some(PresenceKind::Subscribed) => PresenceType::Subscribed,
+                Some(PresenceKind::Unsubscribe) => PresenceType::Unsubscribe,
+                Some(PresenceKind::Unsubscribed) => PresenceType::Unsubscribed,
+                Some(PresenceKind::Probe) => PresenceType::Probe,
+            });
+            presence.to = to.as_deref().map(str::parse).transpose()?;
+            if let Some(show) = show {
+                presence.show = Some(show.parse::<PresenceShow>()?);
+            }
+            if let Some(status) = status {
+                presence.statuses.insert(String::new(), status.clone());
+            }
+            if let Some(priority) = priority {
+                presence.priority = *priority;
+            }
+            for payload in payloads {
+                presence.payloads.push(xml_element(payload, Some(ctx))?);
+            }
+            client_mut(ctx, actor)?
+                .send(&stanza_xml(Stanza::Presence(presence))?)
+                .await
+                .map_err(|error| anyhow!(error))?;
         }
         Step::SendMessage {
             from,
@@ -502,35 +1076,60 @@ async fn execute_step(ctx: &mut ScenarioContext, step: &Step) -> Result<()> {
             capture_stanza_id_by,
             payloads,
             contains,
+            absent,
+            elements,
+            absent_elements,
         } => {
             let mut expected = contains.clone();
             if let Some(body) = body {
                 expected.push(body_text_marker(body));
             }
             let payload_expectations = payload_expectations(payloads, ctx)?;
+            let payload_element_expectations = payload_element_expectations(payloads);
             expected.extend(payload_expectations.clone());
             if let Some(from) = from {
                 expected.push(format!("from=\"{}", from.bare_jid));
             }
+            let captures_snapshot = ctx.captures.clone();
             let frame = recv_matching(ctx, target, |frame| {
-                frame.contains("<message")
+                frame_is_live_message(frame)
                     && body
                         .as_ref()
-                        .is_none_or(|body| frame_contains_body(frame, body))
-                    && (!*body_absent || !frame_has_direct_message_body(frame))
+                        .is_none_or(|body| frame_root_message_has_body(frame, Some(body)))
+                    && (!*body_absent || !frame_root_message_has_body(frame, None))
                     && from
                         .as_ref()
                         .is_none_or(|from| frame.contains(&format!("from=\"{}", from.bare_jid)))
                     && payload_expectations.iter().all(|part| frame.contains(part))
+                    && payload_element_expectations
+                        .iter()
+                        .all(|spec| frame_has_element(frame, spec, &captures_snapshot))
                     && contains.iter().all(|part| frame.contains(part))
+                    && elements
+                        .iter()
+                        .all(|spec| frame_has_element(frame, spec, &captures_snapshot))
             })
             .await?;
-            if *body_absent && frame_has_direct_message_body(&frame) {
+            if *body_absent && frame_root_message_has_body(&frame, None) {
                 return Err(anyhow!(
                     "message expectation expected no <body> element, got: {frame}"
                 ));
             }
             assert_contains_all(&frame, &expected, "message expectation")?;
+            assert_absent_all(&frame, absent, "message expectation")?;
+            assert_elements_present(
+                &frame,
+                &payload_element_expectations,
+                &captures_snapshot,
+                "message payload expectation",
+            )?;
+            assert_elements_present(&frame, elements, &captures_snapshot, "message expectation")?;
+            assert_elements_absent(
+                &frame,
+                absent_elements,
+                &captures_snapshot,
+                "message expectation",
+            )?;
             if let Some(capture_name) = capture_stanza_id_as {
                 let stanza_id =
                     extract_stanza_id_from_frame(&frame, capture_stanza_id_by.as_deref())?;
@@ -544,6 +1143,9 @@ async fn execute_step(ctx: &mut ScenarioContext, step: &Step) -> Result<()> {
             body_absent,
             payloads,
             contains,
+            absent,
+            elements,
+            absent_elements,
         } => {
             let carbon_tag = match carbon {
                 CarbonKind::Sent => "<sent",
@@ -556,7 +1158,9 @@ async fn execute_step(ctx: &mut ScenarioContext, step: &Step) -> Result<()> {
                 expected.push(body_text_marker(body));
             }
             let payload_expectations = payload_expectations(payloads, ctx)?;
+            let payload_element_expectations = payload_element_expectations(payloads);
             expected.extend(payload_expectations.clone());
+            let captures_snapshot = ctx.captures.clone();
             let frame = recv_matching(ctx, target, |frame| {
                 frame.contains("urn:xmpp:carbons:2")
                     && frame.contains(carbon_tag)
@@ -565,7 +1169,13 @@ async fn execute_step(ctx: &mut ScenarioContext, step: &Step) -> Result<()> {
                         .is_none_or(|body| frame_contains_body(frame, body))
                     && (!*body_absent || !frame_has_direct_message_body(frame))
                     && payload_expectations.iter().all(|part| frame.contains(part))
+                    && payload_element_expectations
+                        .iter()
+                        .all(|spec| frame_has_element(frame, spec, &captures_snapshot))
                     && contains.iter().all(|part| frame.contains(part))
+                    && elements
+                        .iter()
+                        .all(|spec| frame_has_element(frame, spec, &captures_snapshot))
             })
             .await?;
             if *body_absent && frame_has_direct_message_body(&frame) {
@@ -574,6 +1184,20 @@ async fn execute_step(ctx: &mut ScenarioContext, step: &Step) -> Result<()> {
                 ));
             }
             assert_contains_all(&frame, &expected, "carbon expectation")?;
+            assert_absent_all(&frame, absent, "carbon expectation")?;
+            assert_elements_present(
+                &frame,
+                &payload_element_expectations,
+                &captures_snapshot,
+                "carbon payload expectation",
+            )?;
+            assert_elements_present(&frame, elements, &captures_snapshot, "carbon expectation")?;
+            assert_elements_absent(
+                &frame,
+                absent_elements,
+                &captures_snapshot,
+                "carbon expectation",
+            )?;
         }
         Step::JoinMuc { actor, room, nick } => {
             let mut presence = Presence::available();
@@ -590,8 +1214,8 @@ async fn execute_step(ctx: &mut ScenarioContext, step: &Step) -> Result<()> {
             let xml = stanza_xml(Stanza::Presence(presence))?;
             let client = client_mut(ctx, actor)?;
             client.send(&xml).await.map_err(|error| anyhow!(error))?;
-            recv_until(ctx, actor, |frame| {
-                frame.contains("status code=\"110\"") || frame.contains("<subject")
+            recv_matching(ctx, actor, |frame| {
+                frame_is_muc_join_self_presence(frame, room, nick)
             })
             .await?;
         }
@@ -650,32 +1274,66 @@ async fn execute_step(ctx: &mut ScenarioContext, step: &Step) -> Result<()> {
                 "MUC admin denial",
             )?;
         }
-        Step::ExpectPresence { target, contains } => {
+        Step::ExpectPresence {
+            target,
+            contains,
+            elements,
+            absent_elements,
+            captures,
+        } => {
+            let captures_snapshot = ctx.captures.clone();
             let frame = recv_matching(ctx, target, |frame| {
-                frame.contains("<presence") && contains.iter().all(|part| frame.contains(part))
+                frame.contains("<presence")
+                    && contains.iter().all(|part| frame.contains(part))
+                    && elements
+                        .iter()
+                        .all(|spec| frame_has_element(frame, spec, &captures_snapshot))
             })
             .await?;
             assert_contains_all(&frame, contains, "presence expectation")?;
+            assert_elements_present(&frame, elements, &captures_snapshot, "presence expectation")?;
+            assert_elements_absent(
+                &frame,
+                absent_elements,
+                &captures_snapshot,
+                "presence expectation",
+            )?;
+            for capture in captures {
+                let value = extract_attr_capture(&frame, capture)?;
+                ctx.captures.insert(capture.capture_as.clone(), value);
+            }
         }
         Step::QueryMam {
             actor,
             archive,
             id,
             max,
+            after,
+            with_jid,
+            fulltext,
+            ids,
+            ids_from,
         } => {
+            assert_mam_results_consumed(ctx)?;
             let id = id
                 .clone()
                 .unwrap_or_else(|| format!("cue-mam-{}", uuid::Uuid::new_v4()));
-            let rsm = Element::builder("set", "http://jabber.org/protocol/rsm")
-                .append(
-                    Element::builder("max", "http://jabber.org/protocol/rsm")
-                        .append(max.to_string())
-                        .build(),
-                )
-                .build();
-            let query = Element::builder("query", "urn:xmpp:mam:2")
-                .append(rsm)
-                .build();
+            let mut query_ids = ids.clone();
+            for capture in ids_from {
+                let value = ctx
+                    .captures
+                    .get(capture)
+                    .ok_or_else(|| anyhow!("unknown captured MAM id {capture}"))?;
+                query_ids.push(value.clone());
+            }
+            let query = mam_query_element(
+                &id,
+                *max,
+                after.as_deref(),
+                with_jid.as_deref(),
+                fulltext.as_deref(),
+                &query_ids,
+            );
             let iq = Iq {
                 from: None,
                 to: Some(archive.parse()?),
@@ -686,18 +1344,114 @@ async fn execute_step(ctx: &mut ScenarioContext, step: &Step) -> Result<()> {
                 .send(&stanza_xml(Stanza::Iq(iq))?)
                 .await
                 .map_err(|error| anyhow!(error))?;
-            ctx.last_mam_frames = recv_until(ctx, actor, |frame| {
-                frame.contains("urn:xmpp:mam:2") && frame.contains("<fin") && frame.contains(&id)
-            })
-            .await?;
+            let mut mam_frames = Vec::new();
+            let mut delayed_frames = Vec::new();
+            loop {
+                let frame = recv_next(ctx, actor).await?;
+                if frame_is_mam_fin_for_query(&frame, &id) {
+                    break;
+                }
+                if frame_contains_mam_result(&frame) {
+                    match frame_mam_result_query_id(&frame).as_deref() {
+                        Some(query_id) if query_id == id => mam_frames.push(frame),
+                        Some(query_id) => {
+                            return Err(anyhow!(
+                                "received MAM result for query id {query_id} while waiting for {id}: {frame}"
+                            ));
+                        }
+                        None => {
+                            return Err(anyhow!(
+                                "received MAM result without queryid while waiting for {id}: {frame}"
+                            ));
+                        }
+                    }
+                } else {
+                    delayed_frames.push(frame);
+                }
+            }
+            for frame in delayed_frames.into_iter().rev() {
+                push_pending_front(ctx, actor, frame);
+            }
+            ctx.last_mam_frames = mam_frames;
+            ctx.last_mam_frame_index = 0;
         }
         Step::ExpectMamResult {
             body,
             body_absent,
             payloads,
             contains,
+            absent,
+            elements,
+            absent_elements,
         } => {
             let payload_expectations = payload_expectations(payloads, ctx)?;
+            let payload_element_expectations = payload_element_expectations(payloads);
+            let captures_snapshot = ctx.captures.clone();
+            let Some(frame) = ctx.last_mam_frames.get(ctx.last_mam_frame_index) else {
+                return Err(anyhow!(
+                    "no next MAM result available for body {:?} and contains {:?}; frames: {:?}",
+                    body,
+                    contains,
+                    ctx.last_mam_frames
+                ));
+            };
+            if !frame_contains_mam_result(frame)
+                || body
+                    .as_ref()
+                    .is_some_and(|body| !frame_contains_body(frame, body))
+                || (*body_absent && frame_has_direct_message_body(frame))
+                || !payload_expectations.iter().all(|part| frame.contains(part))
+                || !payload_element_expectations
+                    .iter()
+                    .all(|spec| frame_has_element(frame, spec, &captures_snapshot))
+                || !contains.iter().all(|part| frame.contains(part))
+                || !elements
+                    .iter()
+                    .all(|spec| frame_has_element(frame, spec, &captures_snapshot))
+            {
+                return Err(anyhow!(
+                    "next MAM result did not match body {:?} and contains {:?}: {frame}",
+                    body,
+                    contains
+                ));
+            }
+            let frame = frame.clone();
+            ctx.last_mam_frame_index += 1;
+            if let Some(body) = body {
+                assert_contains_all(&frame, std::slice::from_ref(body), "MAM result body")?;
+            }
+            if *body_absent && frame_has_direct_message_body(&frame) {
+                return Err(anyhow!(
+                    "MAM result expected no <body> element, got: {frame}"
+                ));
+            }
+            assert_contains_all(&frame, &payload_expectations, "MAM result payloads")?;
+            assert_elements_present(
+                &frame,
+                &payload_element_expectations,
+                &captures_snapshot,
+                "MAM result payloads",
+            )?;
+            assert_contains_all(&frame, contains, "MAM result contains")?;
+            assert_absent_all(&frame, absent, "MAM result absent")?;
+            assert_elements_present(&frame, elements, &captures_snapshot, "MAM result elements")?;
+            assert_elements_absent(
+                &frame,
+                absent_elements,
+                &captures_snapshot,
+                "MAM result elements",
+            )?;
+        }
+        Step::ExpectNoMamResult {
+            body,
+            body_absent,
+            payloads,
+            contains,
+            elements,
+        } => {
+            let payload_expectations = payload_expectations(payloads, ctx)?;
+            let payload_element_expectations = payload_element_expectations(payloads);
+            let captures_snapshot = ctx.captures.clone();
             let matched = ctx.last_mam_frames.iter().find(|frame| {
                 frame.contains("<forwarded")
                     && body
@@ -705,26 +1459,112 @@ async fn execute_step(ctx: &mut ScenarioContext, step: &Step) -> Result<()> {
                         .is_none_or(|body| frame_contains_body(frame, body))
                     && (!*body_absent || !frame_has_direct_message_body(frame))
                     && payload_expectations.iter().all(|part| frame.contains(part))
+                    && payload_element_expectations
+                        .iter()
+                        .all(|spec| frame_has_element(frame, spec, &captures_snapshot))
                     && contains.iter().all(|part| frame.contains(part))
+                    && elements
+                        .iter()
+                        .all(|spec| frame_has_element(frame, spec, &captures_snapshot))
             });
-            let Some(frame) = matched else {
+            if let Some(frame) = matched {
                 return Err(anyhow!(
-                    "no MAM result matched body {:?} and contains {:?}; frames: {:?}",
+                    "unexpected MAM result matched body {:?} and contains {:?}: {frame}",
                     body,
-                    contains,
-                    ctx.last_mam_frames
+                    contains
                 ));
-            };
-            if let Some(body) = body {
-                assert_contains_all(frame, std::slice::from_ref(body), "MAM result body")?;
             }
-            if *body_absent && frame_has_direct_message_body(frame) {
+        }
+        Step::ExpectFrame {
+            target,
+            contains,
+            absent,
+            elements,
+            absent_elements,
+        } => {
+            let captures_snapshot = ctx.captures.clone();
+            let frame = recv_matching(ctx, target, |frame| {
+                contains.iter().all(|part| frame.contains(part))
+                    && elements
+                        .iter()
+                        .all(|spec| frame_has_element(frame, spec, &captures_snapshot))
+            })
+            .await?;
+            assert_contains_all(&frame, contains, "frame expectation")?;
+            assert_absent_all(&frame, absent, "frame expectation")?;
+            assert_elements_present(&frame, elements, &captures_snapshot, "frame expectation")?;
+            assert_elements_absent(
+                &frame,
+                absent_elements,
+                &captures_snapshot,
+                "frame expectation",
+            )?;
+        }
+        Step::DrainFrames {
+            target,
+            contains,
+            elements,
+            millis,
+            min,
+            max,
+        } => {
+            let captures_snapshot = ctx.captures.clone();
+            let drain_millis = if *millis == 0 { 250 } else { *millis };
+            let min_matches = min.unwrap_or(1);
+            let max_matches = max.unwrap_or(min_matches);
+            if max_matches < min_matches {
                 return Err(anyhow!(
-                    "MAM result expected no <body> element, got: {frame}"
+                    "drainFrames for {}.{} has max {} below min {}",
+                    target.user,
+                    target.device,
+                    max_matches,
+                    min_matches
                 ));
             }
-            assert_contains_all(frame, &payload_expectations, "MAM result payloads")?;
-            assert_contains_all(frame, contains, "MAM result contains")?;
+            let deadline = Instant::now() + Duration::from_millis(drain_millis);
+            let mut non_matching_frames = Vec::new();
+            let mut matched_frames = 0_u64;
+            loop {
+                let now = Instant::now();
+                if now >= deadline {
+                    break;
+                }
+                let Some(frame) = recv_timeout(ctx, target, deadline - now).await? else {
+                    break;
+                };
+                let matches = contains.iter().all(|part| frame.contains(part))
+                    && elements
+                        .iter()
+                        .all(|spec| frame_has_element(&frame, spec, &captures_snapshot));
+                if !matches {
+                    non_matching_frames.push(frame);
+                } else {
+                    matched_frames += 1;
+                }
+            }
+            for frame in non_matching_frames.into_iter().rev() {
+                push_pending_front(ctx, target, frame);
+            }
+            if matched_frames < min_matches {
+                return Err(anyhow!(
+                    "drainFrames for {}.{} matched {} frame(s), expected at least {} for {:?}",
+                    target.user,
+                    target.device,
+                    matched_frames,
+                    min_matches,
+                    contains
+                ));
+            }
+            if matched_frames > max_matches {
+                return Err(anyhow!(
+                    "drainFrames for {}.{} matched {} frame(s), expected at most {} for {:?}",
+                    target.user,
+                    target.device,
+                    matched_frames,
+                    max_matches,
+                    contains
+                ));
+            }
         }
         Step::ExpectNoStanza {
             target,
@@ -765,7 +1605,12 @@ where
 {
     let mut non_matching_frames = Vec::new();
     loop {
-        let frame = recv_next(ctx, actor).await?;
+        let Some(frame) = recv_timeout(ctx, actor, RECV_TIMEOUT).await? else {
+            return Err(anyhow!(
+                "Timeout waiting for matching frame; skipped frames: {:?}",
+                non_matching_frames
+            ));
+        };
         if predicate(&frame) {
             for frame in non_matching_frames.into_iter().rev() {
                 push_pending_front(ctx, actor, frame);
@@ -773,25 +1618,6 @@ where
             return Ok(frame);
         }
         non_matching_frames.push(frame);
-    }
-}
-
-async fn recv_until<F>(
-    ctx: &mut ScenarioContext,
-    actor: &Actor,
-    predicate: F,
-) -> Result<Vec<String>>
-where
-    F: Fn(&str) -> bool,
-{
-    let mut frames = Vec::new();
-    loop {
-        let frame = recv_next(ctx, actor).await?;
-        let done = predicate(&frame);
-        frames.push(frame);
-        if done {
-            return Ok(frames);
-        }
     }
 }
 
@@ -846,9 +1672,75 @@ fn message_type(kind: &MessageKind) -> MessageType {
     }
 }
 
+fn iq_response_kind_name(kind: &IqResponseKind) -> &'static str {
+    match kind {
+        IqResponseKind::Result => "result",
+        IqResponseKind::Error => "error",
+        IqResponseKind::Get => "get",
+        IqResponseKind::Set => "set",
+    }
+}
+
 enum IqKind {
     Get,
     Set,
+}
+
+fn mam_query_element(
+    query_id: &str,
+    max: u32,
+    after: Option<&str>,
+    with_jid: Option<&str>,
+    fulltext: Option<&str>,
+    ids: &[String],
+) -> Element {
+    const MAM_NS: &str = "urn:xmpp:mam:2";
+    const RSM_NS: &str = "http://jabber.org/protocol/rsm";
+    const DATA_FORMS_NS: &str = "jabber:x:data";
+    const FULLTEXT_MAM_FIELD: &str = "{urn:xmpp:fulltext:0}fulltext";
+
+    let mut rsm = Element::builder("set", RSM_NS).append(
+        Element::builder("max", RSM_NS)
+            .append(max.to_string())
+            .build(),
+    );
+    if let Some(after) = after {
+        rsm = rsm.append(Element::builder("after", RSM_NS).append(after).build());
+    }
+
+    let has_form = with_jid.is_some() || fulltext.is_some() || !ids.is_empty();
+    let mut query = Element::builder("query", MAM_NS)
+        .attr("queryid", query_id)
+        .append(rsm.build());
+    if has_form {
+        let mut form = Element::builder("x", DATA_FORMS_NS)
+            .attr("type", "submit")
+            .append(data_form_field("FORM_TYPE", &[MAM_NS]));
+        if let Some(with_jid) = with_jid {
+            form = form.append(data_form_field("with", &[with_jid]));
+        }
+        if let Some(fulltext) = fulltext {
+            form = form.append(data_form_field(FULLTEXT_MAM_FIELD, &[fulltext]));
+        }
+        if !ids.is_empty() {
+            let values = ids.iter().map(String::as_str).collect::<Vec<_>>();
+            form = form.append(data_form_field("ids", &values));
+        }
+        query = query.append(form.build());
+    }
+    query.build()
+}
+
+fn data_form_field(var: &str, values: &[&str]) -> Element {
+    let mut field = Element::builder("field", "jabber:x:data").attr("var", var);
+    for value in values {
+        field = field.append(
+            Element::builder("value", "jabber:x:data")
+                .append(*value)
+                .build(),
+        );
+    }
+    field.build()
 }
 
 async fn send_muc_admin_iq(
@@ -887,6 +1779,32 @@ async fn send_muc_admin_iq(
         .await
         .map_err(|error| anyhow!(error))?;
     Ok(())
+}
+
+fn xml_element(spec: &XmlElementSpec, ctx: Option<&ScenarioContext>) -> Result<Element> {
+    let mut builder = Element::builder(spec.name.as_str(), spec.ns.as_str());
+    for (name, value) in &spec.attrs {
+        builder = builder.attr(name.as_str(), value.as_str());
+    }
+    for (name, capture) in &spec.attrs_from {
+        let value = ctx
+            .and_then(|ctx| ctx.captures.get(capture))
+            .ok_or_else(|| anyhow!("unknown captured attribute value {capture:?}"))?;
+        builder = builder.attr(name.as_str(), value.as_str());
+    }
+    if let Some(text) = &spec.text {
+        builder = builder.append(text.as_str());
+    }
+    for child in &spec.children {
+        builder = builder.append(xml_element(child, ctx)?);
+    }
+    Ok(builder.build())
+}
+
+fn element_xml(element: &Element) -> Result<String> {
+    let mut buf = Vec::new();
+    element.write_to(&mut buf)?;
+    Ok(String::from_utf8(buf)?)
 }
 
 fn payload_element(payload: &Payload, ctx: &ScenarioContext) -> Result<Element> {
@@ -995,6 +1913,7 @@ fn payload_element(payload: &Payload, ctx: &ScenarioContext) -> Result<Element> 
         Payload::PinEvent { .. } => Err(anyhow!(
             "PinEvent is an expected-only payload; cannot be sent"
         )),
+        Payload::Xml { element, .. } => xml_element(element, Some(ctx)),
     }
 }
 
@@ -1093,9 +2012,25 @@ fn payload_expectations(payloads: &[Payload], ctx: &ScenarioContext) -> Result<V
                     format!("target=\"{target_id}\""),
                 ]);
             }
+            Payload::Xml { .. } => {}
         }
     }
     Ok(expected)
+}
+
+fn payload_element_expectations(payloads: &[Payload]) -> Vec<XmlElementSpec> {
+    let mut expected = Vec::new();
+    for payload in payloads {
+        if let Payload::Xml {
+            element,
+            expect_elements,
+        } = payload
+        {
+            expected.push(element.clone());
+            expected.extend(expect_elements.clone());
+        }
+    }
+    expected
 }
 
 fn resolve_payload_id(
@@ -1137,7 +2072,8 @@ fn validate_file_share_fallback_body(body: Option<&str>, payloads: &[Payload]) -
         | Payload::Reactions { .. }
         | Payload::ProcessingHint { .. }
         | Payload::PinAttachment { .. }
-        | Payload::PinEvent { .. } => false,
+        | Payload::PinEvent { .. }
+        | Payload::Xml { .. } => false,
     });
     if represented_by_payload {
         Ok(())
@@ -1172,6 +2108,205 @@ fn frame_has_direct_message_body(frame: &str) -> bool {
 
 fn parse_frame(frame: &str) -> Option<Element> {
     Element::from_str(frame).ok()
+}
+
+fn frame_is_live_message(frame: &str) -> bool {
+    parse_frame(frame).is_some_and(|element| {
+        element.name() == "message"
+            && !element
+                .children()
+                .any(|child| child.name() == "result" && child.ns() == "urn:xmpp:mam:2")
+            && !element.children().any(|child| {
+                matches!(child.name(), "sent" | "received") && child.ns() == "urn:xmpp:carbons:2"
+            })
+    })
+}
+
+fn frame_contains_mam_result(frame: &str) -> bool {
+    parse_frame(frame).is_some_and(|element| {
+        element.name() == "message"
+            && element
+                .children()
+                .any(|child| child.name() == "result" && child.ns() == "urn:xmpp:mam:2")
+            && find_named_element(&element, "forwarded", "urn:xmpp:forward:0")
+    })
+}
+
+fn frame_mam_result_query_id(frame: &str) -> Option<String> {
+    parse_frame(frame).and_then(|element| {
+        element
+            .children()
+            .find(|child| child.name() == "result" && child.ns() == "urn:xmpp:mam:2")
+            .and_then(|result| result.attr("queryid").map(ToOwned::to_owned))
+    })
+}
+
+fn frame_is_mam_fin_for_query(frame: &str, query_id: &str) -> bool {
+    parse_frame(frame).is_some_and(|element| {
+        element.name() == "iq"
+            && element.attr("id") == Some(query_id)
+            && element
+                .children()
+                .any(|child| child.name() == "fin" && child.ns() == "urn:xmpp:mam:2")
+    })
+}
+
+fn assert_mam_results_consumed(ctx: &ScenarioContext) -> Result<()> {
+    if ctx.last_mam_frame_index == ctx.last_mam_frames.len() {
+        return Ok(());
+    }
+    Err(anyhow!(
+        "unconsumed MAM results after previous query: {:?}",
+        &ctx.last_mam_frames[ctx.last_mam_frame_index..]
+    ))
+}
+
+fn assert_no_pending_frames(ctx: &ScenarioContext) -> Result<()> {
+    let pending = ctx
+        .pending_frames
+        .iter()
+        .filter(|(_, frames)| !frames.is_empty())
+        .map(|(actor, frames)| format!("{actor}: {frames:?}"))
+        .collect::<Vec<_>>();
+    if pending.is_empty() {
+        return Ok(());
+    }
+    Err(anyhow!("unconsumed pending frames: {}", pending.join("; ")))
+}
+
+fn assert_actor_has_no_pending_frames(ctx: &ScenarioContext, actor: &Actor) -> Result<()> {
+    let key = actor_key(actor);
+    let Some(frames) = ctx.pending_frames.get(&key) else {
+        return Ok(());
+    };
+    if frames.is_empty() {
+        return Ok(());
+    }
+    Err(anyhow!(
+        "unconsumed pending frames before disconnecting {key}: {frames:?}"
+    ))
+}
+
+fn frame_root_message_has_body(frame: &str, expected: Option<&str>) -> bool {
+    parse_frame(frame).is_some_and(|element| {
+        element.name() == "message"
+            && element.children().any(|child| {
+                child.name() == "body"
+                    && child.ns() == element.ns()
+                    && expected.is_none_or(|body| child.text() == body)
+            })
+    })
+}
+
+fn frame_is_muc_join_self_presence(frame: &str, room: &str, nick: &str) -> bool {
+    let expected_from = format!("{room}/{nick}");
+    parse_frame(frame).is_some_and(|element| {
+        element.name() == "presence"
+            && element.attr("from") == Some(expected_from.as_str())
+            && element.children().any(|child| {
+                child.name() == "x"
+                    && child.ns() == "http://jabber.org/protocol/muc#user"
+                    && child.children().any(|grandchild| {
+                        grandchild.name() == "status" && grandchild.attr("code") == Some("110")
+                    })
+            })
+    })
+}
+
+fn find_named_element(element: &Element, name: &str, ns: &str) -> bool {
+    (element.name() == name && element.ns() == ns)
+        || element
+            .children()
+            .any(|child| find_named_element(child, name, ns))
+}
+
+fn frame_has_element(
+    frame: &str,
+    spec: &XmlElementSpec,
+    captures: &HashMap<String, String>,
+) -> bool {
+    parse_frame(frame).is_some_and(|element| find_matching_element(&element, spec, captures))
+}
+
+fn find_matching_element(
+    element: &Element,
+    spec: &XmlElementSpec,
+    captures: &HashMap<String, String>,
+) -> bool {
+    element_matches_spec(element, spec, captures)
+        || element
+            .children()
+            .any(|child| find_matching_element(child, spec, captures))
+}
+
+fn element_matches_spec(
+    element: &Element,
+    spec: &XmlElementSpec,
+    captures: &HashMap<String, String>,
+) -> bool {
+    if element.name() != spec.name.as_str() || element.ns() != spec.ns.as_str() {
+        return false;
+    }
+    for (name, value) in &spec.attrs {
+        if element.attr(name.as_str()) != Some(value.as_str()) {
+            return false;
+        }
+    }
+    for (name, capture) in &spec.attrs_from {
+        let Some(value) = captures.get(capture) else {
+            return false;
+        };
+        if element.attr(name.as_str()) != Some(value.as_str()) {
+            return false;
+        }
+    }
+    for name in &spec.attrs_present {
+        if element.attr(name.as_str()).is_none() {
+            return false;
+        }
+    }
+    if spec
+        .text
+        .as_deref()
+        .is_some_and(|text| element.text() != text)
+    {
+        return false;
+    }
+    spec.children.iter().all(|spec_child| {
+        element
+            .children()
+            .any(|child| element_matches_spec(child, spec_child, captures))
+    })
+}
+
+fn assert_elements_present(
+    frame: &str,
+    specs: &[XmlElementSpec],
+    captures: &HashMap<String, String>,
+    context: &str,
+) -> Result<()> {
+    for spec in specs {
+        if !frame_has_element(frame, spec, captures) {
+            return Err(anyhow!("{context} expected element {spec:?}, got: {frame}"));
+        }
+    }
+    Ok(())
+}
+
+fn assert_elements_absent(
+    frame: &str,
+    specs: &[XmlElementSpec],
+    captures: &HashMap<String, String>,
+    context: &str,
+) -> Result<()> {
+    for spec in specs {
+        if frame_has_element(frame, spec, captures) {
+            return Err(anyhow!(
+                "{context} expected element {spec:?} to be absent, got: {frame}"
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn element_contains_direct_message_body(element: &Element, expected: Option<&str>) -> bool {
@@ -1226,6 +2361,42 @@ fn find_stanza_id(element: &Element, by: Option<&str>) -> Option<String> {
         .find_map(|child| find_stanza_id(child, by))
 }
 
+fn extract_attr_capture(frame: &str, capture: &AttributeCapture) -> Result<String> {
+    let element = Element::from_str(frame).with_context(|| format!("parse frame: {frame}"))?;
+    find_capture_element(&element, capture)
+        .and_then(|element| element.attr(capture.name.as_str()))
+        .map(str::to_string)
+        .ok_or_else(|| {
+            anyhow!(
+                "no attribute {:?} matched capture {:?}/{:?} in frame: {frame}",
+                capture.name,
+                capture.element,
+                capture.ns
+            )
+        })
+}
+
+fn find_capture_element<'a>(
+    element: &'a Element,
+    capture: &AttributeCapture,
+) -> Option<&'a Element> {
+    let name_matches = capture
+        .element
+        .as_deref()
+        .is_none_or(|name| element.name() == name);
+    let ns_matches = capture.ns.as_deref().is_none_or(|ns| element.ns() == ns);
+    let contains_matches = capture
+        .contains
+        .as_deref()
+        .is_none_or(|needle| element_xml(element).is_ok_and(|xml| xml.contains(needle)));
+    if name_matches && ns_matches && contains_matches {
+        return Some(element);
+    }
+    element
+        .children()
+        .find_map(|child| find_capture_element(child, capture))
+}
+
 fn assert_contains_all<I, S>(frame: &str, expected: I, context: &str) -> Result<()>
 where
     I: IntoIterator<Item = S>,
@@ -1235,6 +2406,22 @@ where
         let part = part.as_ref();
         if !frame.contains(part) {
             return Err(anyhow!("{context} expected {part:?}, got: {frame}"));
+        }
+    }
+    Ok(())
+}
+
+fn assert_absent_all<I, S>(frame: &str, absent: I, context: &str) -> Result<()>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    for part in absent {
+        let part = part.as_ref();
+        if frame.contains(part) {
+            return Err(anyhow!(
+                "{context} expected {part:?} to be absent, got: {frame}"
+            ));
         }
     }
     Ok(())

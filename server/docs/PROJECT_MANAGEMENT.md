@@ -149,7 +149,7 @@ No active tasks remain in this phase.
 | XEP-0163 PEP | ✅ Complete | P1 | Personal Eventing Protocol (pubsub/pep.rs) |
 | XEP-0191 Blocking Command | ✅ Complete | P1 | User blocking capability |
 | XEP-0223 Persistent Storage | ✅ Complete | P1 | PubSub best practices profile (xep/xep0223.rs) |
-| XEP-0398 Avatar Conversion | ✅ Complete | P1 | PEP↔vCard avatar bridge (xep/xep0398.rs) |
+| XEP-0398 Avatar Conversion | ❌ Not supported | P1 | Advertisement removed; no conformant PEP/vCard conversion implementation |
 | XEP-0402 PEP Native Bookmarks | ✅ Complete | P1 | Modern bookmark storage (xep/xep0402.rs) |
 | XEP-0410 MUC Self-Ping | ✅ Complete | P1 | Connection state verification |
 
@@ -166,7 +166,7 @@ No active tasks remain in this phase.
 
 | Task | Status | Priority | Notes |
 |------|--------|----------|-------|
-| XEP-0352 Client State Indication | ✅ Complete | P1 | Traffic optimization for mobile (xep/xep0352.rs) |
+| XEP-0352 Client State Indication | ❌ Not supported | P1 | Advertisement/parser removed; no conformant CSI handling |
 
 **Verification:**
 - [ ] Client can indicate active/inactive state
@@ -457,12 +457,12 @@ External integrations and bot platform.
 - [x] XEP-0163 PEP discoverable and functional
 - [x] XEP-0191 Blocking Command working
 - [x] XEP-0223 Persistent Storage best practices
-- [x] XEP-0398 Avatar Conversion (PEP↔vCard bridge)
+- [ ] XEP-0398 Avatar Conversion not supported (advertisement removed)
 - [x] XEP-0402 PEP Native Bookmarks working
 - [x] XEP-0410 MUC Self-Ping working
 
 ### MXC4: XEP-0479 Mobile Compliance
-- [x] XEP-0352 Client State Indication working
+- [ ] XEP-0352 Client State Indication not supported (advertisement removed)
 
 ### M0: XMPP Foundation
 - [x] waddle-xmpp crate created

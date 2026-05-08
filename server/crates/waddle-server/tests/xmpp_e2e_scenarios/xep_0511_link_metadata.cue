@@ -2,6 +2,7 @@ package xmpp_e2e_scenarios
 
 scenario: #Scenario & {
 	name: "xep-0511-link-metadata"
+	xeps: ["XEP-0313", "XEP-0511"]
 	users: {
 		alice: devices: phone: #Actor & {
 			user:     "alice"

@@ -101,7 +101,7 @@ async fn direct_reaction_replays_from_personal_mam_after_reconnect() {
         .await
         .expect("receive direct reaction");
 
-    alice.close().await;
+    let _ = alice.close().await;
     let mut alice = connect(
         &server,
         USERNAME,
@@ -133,8 +133,8 @@ async fn direct_reaction_replays_from_personal_mam_after_reconnect() {
         "direct reaction replay unexpectedly had a body: {reaction}"
     );
 
-    bob.close().await;
-    alice.close().await;
+    let _ = bob.close().await;
+    let _ = alice.close().await;
 }
 
 #[tokio::test]
@@ -190,7 +190,7 @@ async fn reaction_routes_and_replays_from_mam() {
         "MAM did not replay reaction: {frames:?}"
     );
 
-    client.close().await;
+    let _ = client.close().await;
 }
 
 /// Reproducer for the user-reported "reactions don't survive a page
@@ -259,5 +259,5 @@ async fn reaction_routes_and_replays_from_persistent_sqlite_mam() {
         "persistent-SQLite MAM did not replay reaction: {frames:?}"
     );
 
-    client.close().await;
+    let _ = client.close().await;
 }

@@ -2,6 +2,7 @@ package xmpp_e2e_scenarios
 
 scenario: #Scenario & {
 	name: "xep-0308-message-correction"
+	xeps: ["XEP-0308", "XEP-0313"]
 	users: {
 		alice: devices: phone: #Actor & {
 			user:     "alice"
@@ -56,6 +57,7 @@ scenario: #Scenario & {
 			archive: alicePhone.bareJid
 			id:      "cue-edit-mam"
 		},
+		#ExpectMamResult & {body: "helo from cue"},
 		#ExpectMamResult & {
 			body: "hello from cue"
 			payloads: [

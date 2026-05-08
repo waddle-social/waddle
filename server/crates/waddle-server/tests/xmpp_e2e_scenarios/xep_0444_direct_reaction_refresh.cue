@@ -2,6 +2,7 @@ package xmpp_e2e_scenarios
 
 scenario: #Scenario & {
 	name: "xep-0444-direct-reaction-refresh"
+	xeps: ["XEP-0313", "XEP-0334", "XEP-0444"]
 	users: {
 		alice: devices: phone: #Actor & {
 			user:     "alice"
@@ -66,6 +67,7 @@ scenario: #Scenario & {
 			archive: alicePhone.bareJid
 			id:      "cue-direct-reaction-refresh-mam"
 		},
+		#ExpectMamResult & {body: "direct reaction survives refresh"},
 		#ExpectMamResult & {
 			bodyAbsent: true
 			contains: ["cue-direct-reaction-1"]

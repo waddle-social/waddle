@@ -86,7 +86,7 @@ async fn seeded_general_space_lists_bookmarked_rooms() {
         items.contains("conference") && items.contains("urn:xmpp:bookmarks:1"),
         "expected XEP-0402 conference bookmark items: {items}"
     );
-    admin.close().await;
+    let _ = admin.close().await;
 }
 
 #[tokio::test]
@@ -119,5 +119,5 @@ async fn room_disco_advertises_parent_space_metadata() {
             && info.contains("xmpp:spaces.localhost?;node=general"),
         "expected MUC roominfo pubsub compatibility field: {info}"
     );
-    admin.close().await;
+    let _ = admin.close().await;
 }

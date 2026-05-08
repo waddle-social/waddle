@@ -134,7 +134,7 @@ async fn xep_0424_groupchat_retraction_round_trip_succeeds() {
         "original body must not appear in any MAM result after retraction: {frames:?}"
     );
 
-    client.close().await;
+    let _ = client.close().await;
 }
 
 #[tokio::test]
@@ -247,6 +247,6 @@ async fn dm_retraction_tombstones_both_archives() {
         "sender tombstone must cite the retraction stanza id: {admin_tombstone}"
     );
 
-    bob.close().await;
-    admin.close().await;
+    let _ = bob.close().await;
+    let _ = admin.close().await;
 }

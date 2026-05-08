@@ -152,7 +152,7 @@ async fn muc_message_archived_and_queryable() {
         );
     }
 
-    client.close().await;
+    let _ = client.close().await;
 }
 
 #[tokio::test]
@@ -263,7 +263,7 @@ async fn muc_mam_pagination() {
         ]
     );
 
-    client.close().await;
+    let _ = client.close().await;
 }
 
 #[tokio::test]
@@ -281,7 +281,7 @@ async fn personal_archive_disco_advertises_extended_mam_feature() {
         "personal archive disco missing urn:xmpp:mam:2#extended: {response}"
     );
 
-    client.close().await;
+    let _ = client.close().await;
 }
 
 #[tokio::test]
@@ -318,7 +318,7 @@ async fn personal_archive_mam_form_includes_extended_fields() {
     );
     assert!(response.contains("<open") || response.contains("<open/>"));
 
-    client.close().await;
+    let _ = client.close().await;
 }
 
 #[tokio::test]
@@ -347,7 +347,7 @@ async fn room_disco_advertises_extended_mam_feature() {
         "room disco missing urn:xmpp:mam:2#extended: {response}"
     );
 
-    client.close().await;
+    let _ = client.close().await;
 }
 
 #[tokio::test]
@@ -421,7 +421,7 @@ async fn room_mam_ids_query_returns_only_requested_messages() {
         vec!["ids one".to_string(), "ids three".to_string()]
     );
 
-    client.close().await;
+    let _ = client.close().await;
 }
 
 /// Returns the contents of the inner `<message>`'s `<body>` element
@@ -579,7 +579,7 @@ async fn xep_0313_archives_preserve_body_presence_distinction() {
         "Case 3 (no <body> element) must replay with NO <body> element on the inner message. Frame: {frame_absent}"
     );
 
-    client.close().await;
+    let _ = client.close().await;
 }
 
 // =========================================================================
@@ -626,7 +626,7 @@ async fn dm_archived_in_sender_personal_archive() {
         "DM body not found in MAM result frames"
     );
 
-    client.close().await;
+    let _ = client.close().await;
 }
 
 // =========================================================================

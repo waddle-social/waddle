@@ -33,10 +33,11 @@ use waddle_xmpp::{
     },
     protocol::{ConnectionPhase, StanzaContext as ProtocolStanzaContext},
     pubsub::{
-        build_pubsub_affiliations_result, build_pubsub_configure_form_result, build_pubsub_error,
-        build_pubsub_items_result, build_pubsub_publish_result, build_pubsub_subscribe_result,
-        build_pubsub_success, is_pep_request, is_pep_request_to, is_pubsub_iq, parse_pubsub_iq,
-        PubSubError, PubSubItem, PubSubRequest, SubId,
+        build_pep_identity, build_pubsub_affiliations_result, build_pubsub_configure_form_result,
+        build_pubsub_error, build_pubsub_items_result, build_pubsub_publish_result,
+        build_pubsub_subscribe_result, build_pubsub_success, is_pep_request, is_pep_request_to,
+        is_pubsub_iq, parse_pubsub_iq, pep_features, PubSubError, PubSubItem, PubSubRequest, SubId,
+        PEP_NODE_AVATAR_DATA, PEP_NODE_AVATAR_METADATA,
     },
     registry::BroadcastOutcome,
     roster::{
@@ -44,7 +45,6 @@ use waddle_xmpp::{
         parse_roster_set, AskType, RosterItem, RosterSetResult, RosterVersion, Subscription,
         ROSTER_NS,
     },
-    xep::xep0054::{VCard, VCardPhoto},
     xep::xep0357::{
         build_push_disable_result, build_push_enable_result, is_push_disable, is_push_enable,
         parse_push_disable, parse_push_enable,
@@ -143,8 +143,6 @@ use roster::handle_roster_iq;
 use sans_io::handle_sans_io_iq;
 use search::{handle_channel_search_iq, handle_user_search_iq};
 use session_misc::{handle_isr_token_request_iq, handle_muc_self_ping_iq, route_full_jid_iq};
-#[cfg(test)]
-use vcard_private::avatar_vcard_from_user_profile;
 use vcard_private::{handle_private_storage_iq, handle_vcard_iq};
 
 // `build_iq_error_xml_typed` is re-exported via `pub(super) use` so

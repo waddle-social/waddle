@@ -7,6 +7,10 @@ use super::node::AccessModel;
 use super::stanzas::is_pubsub_iq;
 use crate::disco::{Feature, Identity};
 
+pub const PEP_NODE_BOOKMARKS: &str = "urn:xmpp:bookmarks:1";
+pub const PEP_NODE_AVATAR_DATA: &str = "urn:xmpp:avatar:data";
+pub const PEP_NODE_AVATAR_METADATA: &str = "urn:xmpp:avatar:metadata";
+
 /// Check if an IQ is a PEP request for the current user.
 pub fn is_pep_request(iq: &Iq, user_jid: &BareJid) -> bool {
     if !is_pubsub_iq(iq) {
@@ -37,26 +41,21 @@ pub struct PepHandler;
 impl PepHandler {
     /// Check if a node name is one of the built-in well-known PEP nodes.
     pub fn is_well_known_node(node: &str) -> bool {
-        node == "urn:xmpp:bookmarks:1"
-            || node == "urn:xmpp:avatar:data"
-            || node == "urn:xmpp:avatar:metadata"
+        node == PEP_NODE_BOOKMARKS
+            || node == PEP_NODE_AVATAR_DATA
+            || node == PEP_NODE_AVATAR_METADATA
             || node == "http://jabber.org/protocol/nick"
             || node == "http://jabber.org/protocol/mood"
             || node == "http://jabber.org/protocol/activity"
             || node == "http://jabber.org/protocol/tune"
             || node == "http://jabber.org/protocol/geoloc"
             || node == "urn:xmpp:microblog:0"
-            || node.starts_with("eu.siacs.conversations.axolotl")
     }
 
     /// Get the default access model for a well-known PEP node.
     pub fn default_access_model_for_node(node: &str) -> AccessModel {
-        if node == "urn:xmpp:bookmarks:1" {
+        if node == PEP_NODE_BOOKMARKS {
             return AccessModel::Whitelist;
-        }
-
-        if node.starts_with("eu.siacs.conversations.axolotl") {
-            return AccessModel::Open;
         }
 
         AccessModel::Presence
@@ -84,11 +83,8 @@ pub fn pep_features() -> Vec<Feature> {
         Feature::mam(),
         Feature::mam_extended(),
         Feature::new("urn:xmpp:push:0"),
-        Feature::new("urn:xmpp:pep-vcard-conversion:0"),
         Feature::bookmarks_compat(),
         Feature::new("urn:xmpp:bookmarks:1#compat-pep"),
-        Feature::new("http://jabber.org/protocol/pubsub#config-node-max"),
-        Feature::new("eu.siacs.conversations.axolotl.whitelisted"),
     ]
 }
 
@@ -129,18 +125,17 @@ mod tests {
             PepHandler::default_access_model_for_node("urn:xmpp:bookmarks:1"),
             AccessModel::Whitelist
         );
-        assert_eq!(
-            PepHandler::default_access_model_for_node("eu.siacs.conversations.axolotl.devicelist"),
-            AccessModel::Open
-        );
+        assert!(!PepHandler::is_well_known_node(
+            "eu.siacs.conversations.axolotl.devicelist"
+        ));
     }
 
     #[test]
-    fn pep_features_are_unique_for_config_node_max() {
-        let count = pep_features()
-            .iter()
-            .filter(|feature| feature.0 == "http://jabber.org/protocol/pubsub#config-node-max")
-            .count();
-        assert_eq!(count, 1);
+    fn pep_features_do_not_advertise_unimplemented_config_options() {
+        let features = pep_features();
+        assert!(!features.contains(&Feature::new(
+            "http://jabber.org/protocol/pubsub#config-node-max"
+        )));
+        assert!(!features.contains(&Feature::new("eu.siacs.conversations.axolotl.whitelisted")));
     }
 }

@@ -164,7 +164,7 @@ async fn websocket_vcard_set_then_get_roundtrips() {
         "expected stored vCard, got: {get_response}"
     );
 
-    client.close().await;
+    let _ = client.close().await;
 }
 
 #[tokio::test]
@@ -201,7 +201,7 @@ async fn websocket_private_xml_set_then_get_roundtrips() {
         "expected stored private XML, got: {get_response}"
     );
 
-    client.close().await;
+    let _ = client.close().await;
 }
 
 #[tokio::test]
@@ -238,7 +238,7 @@ async fn websocket_blocking_set_then_get_returns_blocklist() {
         "expected blocked JID in blocklist, got: {get_response}"
     );
 
-    client.close().await;
+    let _ = client.close().await;
 }
 
 #[tokio::test]
@@ -261,7 +261,7 @@ async fn websocket_disco_advertises_blocking() {
         "expected blocking feature, got: {response}"
     );
 
-    client.close().await;
+    let _ = client.close().await;
 }
 
 #[tokio::test]
@@ -345,8 +345,8 @@ async fn websocket_blocking_updates_presence_visibility_for_subscribed_contact()
     )
     .await;
 
-    bob.close().await;
-    alice.close().await;
+    let _ = bob.close().await;
+    let _ = alice.close().await;
 }
 
 #[tokio::test]
@@ -383,7 +383,7 @@ async fn websocket_push_enable_disable_acknowledges_requests() {
         "expected push disable result, got: {disable_response}"
     );
 
-    client.close().await;
+    let _ = client.close().await;
 }
 
 #[tokio::test]
@@ -410,7 +410,7 @@ async fn websocket_push_enable_rejects_local_endpoint() {
         "expected bad-request for local push endpoint, got: {response}"
     );
 
-    client.close().await;
+    let _ = client.close().await;
 }
 
 #[tokio::test]
@@ -436,7 +436,7 @@ async fn websocket_isr_token_request_returns_token() {
         "expected ISR token payload, got: {response}"
     );
 
-    client.close().await;
+    let _ = client.close().await;
 }
 
 #[tokio::test]
@@ -554,7 +554,7 @@ async fn websocket_user_and_channel_search_return_results() {
         "expected channel search result, got: {channels}"
     );
 
-    client.close().await;
+    let _ = client.close().await;
 }
 
 #[tokio::test]
@@ -604,8 +604,8 @@ async fn websocket_full_jid_iq_routes_to_bound_resource() {
         "expected ping payload in routed IQ, got: {routed}"
     );
 
-    recipient.close().await;
-    sender.close().await;
+    let _ = recipient.close().await;
+    let _ = sender.close().await;
 }
 
 #[tokio::test]
@@ -677,8 +677,8 @@ async fn websocket_blocking_prevents_full_jid_iq_routing() {
     )
     .await;
 
-    recipient.close().await;
-    sender.close().await;
+    let _ = recipient.close().await;
+    let _ = sender.close().await;
 }
 
 #[tokio::test]
@@ -724,8 +724,8 @@ async fn websocket_direct_muc_invite_routes_normal_message() {
         "expected non-chat direct MUC invite, got: {invite}"
     );
 
-    recipient.close().await;
-    sender.close().await;
+    let _ = recipient.close().await;
+    let _ = sender.close().await;
 }
 
 #[tokio::test]
@@ -789,8 +789,8 @@ async fn websocket_blocking_prevents_direct_message_delivery() {
     )
     .await;
 
-    recipient.close().await;
-    sender.close().await;
+    let _ = recipient.close().await;
+    let _ = sender.close().await;
 }
 
 #[tokio::test]
@@ -841,8 +841,8 @@ async fn websocket_normal_message_routes_as_direct_message() {
         "expected routed normal direct message, got: {delivered}"
     );
 
-    recipient.close().await;
-    sender.close().await;
+    let _ = recipient.close().await;
+    let _ = sender.close().await;
 }
 
 #[tokio::test]
@@ -895,7 +895,7 @@ async fn websocket_pubsub_subscribe_and_unsubscribe_acknowledge_spaces_node() {
         "expected pubsub unsubscribe result, got: {unsub}"
     );
 
-    client.close().await;
+    let _ = client.close().await;
 }
 
 #[tokio::test]
@@ -929,7 +929,7 @@ async fn websocket_muc_self_ping_succeeds_for_joined_occupant() {
         "expected MUC self-ping result, got: {response}"
     );
 
-    client.close().await;
+    let _ = client.close().await;
 }
 
 #[tokio::test]
@@ -966,7 +966,7 @@ async fn websocket_muc_room_disco_advertises_self_ping_optimization_only_on_room
         "muc room disco missing XEP-0410 feature: {room_response}"
     );
 
-    client.close().await;
+    let _ = client.close().await;
 }
 
 #[tokio::test]
@@ -988,5 +988,5 @@ async fn websocket_rejects_spoofed_muc_domain_presence() {
     )
     .await;
 
-    client.close().await;
+    let _ = client.close().await;
 }

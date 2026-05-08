@@ -189,12 +189,6 @@ pub use waddle_xmpp_core::xep0359::{
     StanzaId as Xep0359StanzaId, StanzaIdCarrier, NS_SID,
 };
 
-pub use super::xep0352::{
-    build_csi_feature, classify_message_urgency, classify_presence_urgency,
-    data_contains_csi_active, data_contains_csi_inactive, is_csi_active, is_csi_inactive,
-    is_muc_mention, ClientState, StanzaUrgency, MAX_CSI_BUFFER_SIZE, NS_CSI,
-};
-
 pub use super::xep0357::{
     build_push_disable_result, build_push_enable_result, is_push_disable, is_push_enable,
     parse_push_disable, parse_push_enable, PushDisable, PushEnable, NS_PUSH,
@@ -270,11 +264,6 @@ pub use super::xep0084::{
 pub use super::xep0153::{
     build_vcard_update_element, compute_photo_hash, compute_photo_hash_from_base64,
     has_vcard_update, parse_vcard_update, NS_VCARD_UPDATE,
-};
-
-pub use super::xep0398::{
-    pep_avatar_to_vcard_photo, vcard_photo_to_pep_avatar, AvatarConversion,
-    DefaultAvatarConversion, NS_PEP_VCARD_CONVERSION,
 };
 
 pub use super::xep0223::{
@@ -357,11 +346,6 @@ pub use super::xep_waddle_pin::{
 pub use super::xep0472::{
     build_feed_entry_element, is_feed_entry, parse_feed_entry, FeedEntry, NS_SOCIAL_FEED,
     PUBSUB_NODE_FEED,
-};
-
-pub use super::xep0490::{
-    build_displayed_sync_element, is_displayed_sync_element, parse_displayed_sync, DisplayedSync,
-    DisplayedSyncState, NS_MDS_DISPLAYED, PEP_NODE_MDS,
 };
 
 pub use super::xep0492::{

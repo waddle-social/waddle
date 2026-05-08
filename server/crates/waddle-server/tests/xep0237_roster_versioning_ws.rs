@@ -118,7 +118,7 @@ async fn xep0237_first_sync_returns_full_roster_with_ver() {
         "first sync result must carry a `ver` attribute: {first_sync}"
     );
 
-    alice.close().await;
+    let _ = alice.close().await;
 }
 
 #[tokio::test]
@@ -138,7 +138,7 @@ async fn xep0237_matching_version_returns_empty_roster_result() {
         "matching ver must not include unchanged roster payload: {unchanged}"
     );
 
-    alice.close().await;
+    let _ = alice.close().await;
 }
 
 #[tokio::test]
@@ -164,7 +164,7 @@ async fn xep0237_stale_version_returns_full_updated_roster() {
     let v2 = roster_version(&stale);
     assert_ne!(v1, v2, "stale-ver response must advance the version");
 
-    alice.close().await;
+    let _ = alice.close().await;
 }
 
 #[tokio::test]
@@ -220,8 +220,8 @@ async fn xep0237_mutation_advances_version_and_push_carries_new_ver() {
         "pushes must carry the mutated item"
     );
 
-    r1.close().await;
-    r2.close().await;
+    let _ = r1.close().await;
+    let _ = r2.close().await;
 }
 
 #[tokio::test]
@@ -247,7 +247,7 @@ async fn xep0237_version_persists_across_server_restart() {
         let _ = roster_set_add(&mut alice, "xep237-t5-set", "ed@localhost", "Ed").await;
         let frame = roster_get(&mut alice, "xep237-t5-snapshot", None).await;
         let v = roster_version(&frame);
-        alice.close().await;
+        let _ = alice.close().await;
         v
     };
     // server dropped here — subprocess killed, file remains.
@@ -268,5 +268,5 @@ async fn xep0237_version_persists_across_server_restart() {
         "matching persisted ver must yield empty result: {frame}"
     );
 
-    alice2.close().await;
+    let _ = alice2.close().await;
 }

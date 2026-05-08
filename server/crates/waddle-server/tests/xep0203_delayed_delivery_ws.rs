@@ -103,5 +103,5 @@ async fn client_spoofed_delay_is_stripped_from_groupchat_flow() {
         "MAM replay leaked client-authored delay: {replay}"
     );
 
-    client.close().await;
+    let _ = client.close().await;
 }
