@@ -11,7 +11,7 @@ import { atom } from "nanostores";
 
 import type { WasmPinEntry } from "@/lib/xmpp/wasm-types";
 
-export interface PinnedRoomState {
+interface PinnedRoomState {
   /** Pin entries in pin-time-desc order, mirroring server output. */
   entries: WasmPinEntry[];
   /** Derived: stanza-ids of pinned messages for cheap presence check. */
@@ -20,42 +20,57 @@ export interface PinnedRoomState {
   hydrated: boolean;
 }
 
-export type PinnedRoomMap = Map<string, PinnedRoomState>;
-
-/** Empty state for a room that hasn't been hydrated yet. */
-export const emptyPinnedRoomState = (): PinnedRoomState => ({
-  entries: [],
-  stanzaIds: new Set(),
-  hydrated: false,
-});
-
 /** Reactive map: roomJid → PinnedRoomState. Replaced on every change. */
-export const $pinnedRooms = atom<PinnedRoomMap>(new Map());
+export const $pinnedRooms = atom<Map<string, PinnedRoomState>>(new Map());
+
+type PinUpdate =
+  | { action: "pinned"; target_stanza_id: string; entry?: WasmPinEntry }
+  | { action: "unpinned"; target_stanza_id: string };
+
+/** Pre-hydration event queue: events that arrive while
+ * `fetchRoomPins` is in flight are buffered here and replayed in
+ * order once `hydratePinnedRoom` lands. Without this, an admin's
+ * pin/unpin issued during initial hydration was silently dropped. */
+const pendingUpdates = new Map<string, PinUpdate[]>();
 
 /** Replace one room's state and notify subscribers. */
-export function setPinnedRoom(roomJid: string, state: PinnedRoomState): void {
+function setPinnedRoom(roomJid: string, state: PinnedRoomState): void {
   const next = new Map($pinnedRooms.get());
   next.set(roomJid, state);
   $pinnedRooms.set(next);
 }
 
-/** Hydrate the room with the full server-returned entries list. */
+/** Hydrate the room with the full server-returned entries list. Any
+ * pin/unpin events that arrived during the in-flight hydration are
+ * replayed on top of the canonical list, so the final state reflects
+ * both the snapshot and any concurrent mutations. */
 export function hydratePinnedRoom(roomJid: string, entries: WasmPinEntry[]): void {
   setPinnedRoom(roomJid, {
     entries,
     stanzaIds: new Set(entries.map((e) => e.target_stanza_id)),
     hydrated: true,
   });
+  const pending = pendingUpdates.get(roomJid);
+  if (pending && pending.length > 0) {
+    pendingUpdates.delete(roomJid);
+    for (const update of pending) {
+      applyPinEvent(roomJid, update);
+    }
+  }
 }
 
-/** Apply a pin-event update to a hydrated room. No-op if not hydrated:
- * the next room-entry will hydrate from scratch. */
-export function applyPinEvent(
-  roomJid: string,
-  event: { action: "pinned" | "unpinned"; target_stanza_id: string; entry?: WasmPinEntry },
-): void {
+/** Apply a pin-event update. If the room hasn't been hydrated yet,
+ * the event is queued and replayed once `hydratePinnedRoom` lands —
+ * preventing the dropped-event race when an admin pins/unpins during
+ * initial fetch. */
+export function applyPinEvent(roomJid: string, event: PinUpdate): void {
   const current = $pinnedRooms.get().get(roomJid);
-  if (!current || !current.hydrated) return;
+  if (!current || !current.hydrated) {
+    const queue = pendingUpdates.get(roomJid) ?? [];
+    queue.push(event);
+    pendingUpdates.set(roomJid, queue);
+    return;
+  }
   let entries = current.entries;
   if (event.action === "pinned") {
     const filtered = entries.filter((e) => e.target_stanza_id !== event.target_stanza_id);
@@ -70,17 +85,3 @@ export function applyPinEvent(
   });
 }
 
-/** Cheap O(1) presence check for `MessageCard.isPinned`. */
-export function isPinnedStanza(roomJid: string, stanzaId: string | undefined): boolean {
-  if (!stanzaId) return false;
-  const state = $pinnedRooms.get().get(roomJid);
-  return state?.stanzaIds.has(stanzaId) ?? false;
-}
-
-/** Drop a room's state — used on room destroy or sign-out. */
-export function clearPinnedRoom(roomJid: string): void {
-  const next = new Map($pinnedRooms.get());
-  if (next.delete(roomJid)) {
-    $pinnedRooms.set(next);
-  }
-}

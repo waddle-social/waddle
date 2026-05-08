@@ -98,6 +98,9 @@ const {
   retryActiveLoad,
   ensureActiveMessageLoaded,
   loadOlderThreadMessages,
+  pinActiveMessage,
+  unpinActiveMessage,
+  jumpToPinnedMessage,
 } = props.controller;
 </script>
 
@@ -414,7 +417,7 @@ const {
               :room-jid="activeChannelRoomJid"
               :channel-name="waddles.currentChannel.value?.name ?? ''"
               @close="ui.showPinnedPanel.value = false"
-              @jump-to-message="(stanzaId: string) => ensureActiveMessageLoaded(stanzaId)"
+              @jump-to-message="(stanzaId: string) => jumpToPinnedMessage(stanzaId)"
             />
           </div>
         </div>

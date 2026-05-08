@@ -331,7 +331,7 @@ const currentUserCanPin = computed(() => {
   const me = props.currentUser;
   if (!me) return false;
   const myHats = props.roomHats[me] ?? [];
-  return myHats.some((hat) => hat.uri === "urn:xmpp:hats:0:owner" || hat.uri === "urn:xmpp:hats:0:admin");
+  return myHats.some((hat) => hat.uri === "urn:xmpp:hats:owner" || hat.uri === "urn:xmpp:hats:admin");
 });
 const canShowComposer = computed(() => !!(props.channel || props.dmPeer));
 const queuedMessageCount = computed(() =>
@@ -488,7 +488,7 @@ async function scrollToPinnedEdge(mode: ScrollDirectionMode) {
   return true;
 }
 
-defineExpose({ messagesContainer, scrollToPinnedEdge });
+defineExpose({ messagesContainer, scrollToPinnedEdge, scrollToMessage });
 
 function doSearch() {
   searchSubmitted.value = !!searchInput.value.trim();

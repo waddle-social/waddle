@@ -1088,6 +1088,16 @@ watch(
       >
         <MessageSquare class="w-4 h-4" aria-hidden="true" />
       </button>
+      <button
+        v-if="canPinMessages && message.id"
+        type="button"
+        class="h-8 w-8 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-all duration-150"
+        :title="isPinned ? 'Unpin from channel' : 'Pin to channel'"
+        :aria-label="isPinned ? 'Unpin from channel' : 'Pin to channel'"
+        @click="togglePinFromMenu"
+      >
+        <component :is="isPinned ? PinOff : Pin" class="w-4 h-4" aria-hidden="true" />
+      </button>
       <template v-if="message.isSelf">
         <div class="w-px h-5 bg-border mx-0.5" />
         <button

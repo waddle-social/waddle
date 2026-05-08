@@ -15,7 +15,7 @@ import {
   type RoomPresence,
 } from "@/lib/xmpp-client";
 import { $xmppStatus } from "@/stores/xmpp-status";
-import { applyPinEvent } from "@/stores/pinned-messages";
+import { applyPinEvent, hydratePinnedRoom } from "@/stores/pinned-messages";
 import {
   inferredFileDisposition,
   type DeliveryStatus,
@@ -660,17 +660,18 @@ export function useChannelMessages(
     try {
       // #414: hydrate the pin store for this room. Fire-and-forget —
       // the panel + badge tolerate an empty store, and the live
-      // pin-event handler will mutate it from now on.
+      // pin-event handler will mutate it from now on. On error
+      // (e.g., <forbidden/>, network), still mark the room hydrated
+      // with an empty list so the panel exits its "Loading…" state.
       if (xmppClient.value && "fetchRoomPins" in xmppClient.value) {
         void xmppClient.value
           .fetchRoomPins(spaceId, channelId)
           .then((entries) => {
-            import("@/stores/pinned-messages").then(({ hydratePinnedRoom }) => {
-              hydratePinnedRoom(roomJid, entries);
-            });
+            hydratePinnedRoom(roomJid, entries);
           })
           .catch((error: unknown) => {
             console.warn("fetchRoomPins failed", error);
+            hydratePinnedRoom(roomJid, []);
           });
       }
       // XEP-0313: Load message history via MAM (XMPP-native)
