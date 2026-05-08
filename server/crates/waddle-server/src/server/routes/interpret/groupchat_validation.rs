@@ -1,0 +1,247 @@
+use super::*;
+
+pub(super) async fn validate_groupchat_rich_targets(
+    deps: &Deps<'_>,
+    room: &BareJid,
+    message: &Message,
+    sender_room_nick_jid: Option<&Jid>,
+    room_actor: &ActorRef<RoomActor>,
+    sender_nickname_generation: Option<u64>,
+) -> Result<(), StanzaError> {
+    if message.from.is_none() {
+        return Ok(());
+    }
+    if has_malformed_rich_payload(message) {
+        return Err(bad_request_error(
+            "Rich-message payload is missing a required identifier or contains an invalid JID.",
+        ));
+    }
+    let Some(mam_storage) = deps.mam_storage else {
+        // No archive available — nothing to validate against. Mirrors
+        // the legacy bridge's `state.deps.protocol.mam_storage` use:
+        // production always supplies it; in test fixtures without
+        // storage we treat the validation as a no-op.
+        return Ok(());
+    };
+    // The archive stores `from` in the XEP-0045 §7.2.13 `room/nick`
+    // form (the chain stamps it AFTER validation), so the
+    // same-sender check compares against the sender's room/nick view
+    // — not against `prototype.from` (alice's real full JID, set by
+    // the user-side state machine before `DispatchToRoom` was
+    // emitted). When the snapshot has no nick for the sender (sender
+    // not currently joined under any nickname), any rich-target
+    // operation is forbidden because we cannot satisfy the
+    // continuity check.
+    let Some(sender_archive_view) = sender_room_nick_jid else {
+        if extract_correction_from_message(message).is_some()
+            || matches!(
+                extract_retraction_from_message(message),
+                Some(RetractionKind::Request(_))
+            )
+        {
+            return Err(forbidden_error(
+                "Sender is not joined to the room; rich-target operations require occupancy.",
+            ));
+        }
+        return Ok(());
+    };
+
+    if let Some(correction) = extract_correction_from_message(message) {
+        let original = match mam_storage
+            .get_message_by_message_id(room, &correction.replaces_id)
+            .await
+        {
+            Ok(Some(original)) => original,
+            Ok(None) => return Err(item_not_found_error("Correction target not found.")),
+            Err(_) => return Err(internal_server_error_for_lookup()),
+        };
+        if !sender_matches_groupchat_from(sender_archive_view, &original.from) {
+            return Err(forbidden_error(
+                "Only the original sender may correct a message.",
+            ));
+        }
+        verify_groupchat_occupancy_generation(
+            sender_archive_view,
+            &original,
+            room_actor,
+            sender_nickname_generation,
+        )
+        .await?;
+    }
+
+    if let Some(RetractionKind::Request(retraction)) = extract_retraction_from_message(message) {
+        let original =
+            match lookup_groupchat_retraction_target(mam_storage, room, &retraction.retracts_id)
+                .await
+            {
+                Ok(Some(original)) => original,
+                Ok(None) => return Err(item_not_found_error("Retraction target not found.")),
+                Err(_) => return Err(internal_server_error_for_lookup()),
+            };
+        if !sender_matches_groupchat_from(sender_archive_view, &original.from) {
+            return Err(forbidden_error(
+                "Only the original sender may retract a message.",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// XEP-0424 §3.1 retraction target resolution for groupchat. The
+/// retract stanza cites the target by its wire `id` (mirrors the
+/// XEP-0308 correction path at `validate_groupchat_rich_targets` —
+/// both XEPs name the same room-archive row by the same accessor).
+///
+/// Looks the row up by **wire message id scoped to the room archive**
+/// via [`MamStorage::get_message_by_message_id`]; never by archive
+/// primary key. The PK happens to coincide with the room's XEP-0359
+/// stamp UUID, so a PK lookup against the wire id can only match when
+/// the storage backend collides them — which is not a guarantee waddle
+/// makes (and SQL backends never do).
+pub(super) async fn lookup_groupchat_retraction_target(
+    mam_storage: &Arc<dyn MamStorage>,
+    room: &BareJid,
+    target_id: &str,
+) -> Result<Option<MamArchivedMessage>, waddle_xmpp::mam::MamStorageError> {
+    mam_storage.get_message_by_message_id(room, target_id).await
+}
+
+/// Compare a XEP-0045 sender (the in-room full JID `room/nick`) against
+/// the archived `from` JID for groupchat ownership checks. Both are
+/// typed `Jid` so we can compare structurally without round-tripping
+/// through strings.
+pub(super) fn sender_matches_groupchat_from(sender: &Jid, original_from: &Jid) -> bool {
+    sender == original_from
+}
+
+/// XEP-0308 §3 occupancy continuity check: a full-JID that left the
+/// room and rejoined under the same nickname MUST NOT be allowed to
+/// correct messages from the previous occupancy. Compares the
+/// per-nickname generation captured on the archive row at write time
+/// against the room actor's current generation for the sender's
+/// nickname.
+pub(super) async fn verify_groupchat_occupancy_generation(
+    sender: &Jid,
+    original: &MamArchivedMessage,
+    room_actor: &ActorRef<RoomActor>,
+    sender_current_generation: Option<u64>,
+) -> Result<(), StanzaError> {
+    let Some(nick) = sender.resource().map(|r| r.to_string()) else {
+        return Err(forbidden_error(
+            "Correction sender has no MUC nickname for occupancy check.",
+        ));
+    };
+    let Some(archived_generation) = original.nickname_generation else {
+        return Err(forbidden_error(
+            "Original message predates occupancy tracking; correction window has closed.",
+        ));
+    };
+    // Prefer the generation snapshot already captured by `dispatch_to_room`
+    // (it came from the same `GetRoomSnapshot` query that populated the
+    // chain context); fall back to a fresh per-nickname query if the
+    // snapshot didn't include the sender (unlikely — would mean the
+    // sender is not joined under any nickname).
+    let current_generation = match sender_current_generation {
+        Some(value) => value,
+        None => match room_actor
+            .ask(GetNicknameGeneration { nick: nick.clone() })
+            .await
+        {
+            Ok(value) => value,
+            Err(_) => return Err(internal_server_error_for_lookup()),
+        },
+    };
+    if current_generation != archived_generation {
+        return Err(forbidden_error(
+            "Occupancy generation has advanced; correction is no longer permitted across the leave/rejoin boundary.",
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn has_malformed_rich_payload(message: &Message) -> bool {
+    message.payloads.iter().any(|payload| {
+        (payload.ns() == NS_MESSAGE_CORRECT
+            && payload.name() == "replace"
+            && payload.attr("id").is_none_or(str::is_empty))
+            || (payload.ns() == NS_MESSAGE_RETRACT
+                && payload.name() == "retract"
+                && payload.attr("id").is_none_or(str::is_empty))
+            || (payload.ns() == NS_REACTIONS
+                && payload.name() == "reactions"
+                && payload.attr("id").is_none_or(str::is_empty))
+            || (payload.ns() == NS_REPLY
+                && payload.name() == "reply"
+                && (payload.attr("id").is_none_or(str::is_empty)
+                    || payload.attr("to").is_some_and(|to| {
+                        to.trim().is_empty() || to.trim().parse::<Jid>().is_err()
+                    })))
+            || (payload.ns() == NS_REFERENCE
+                && payload.name() == "reference"
+                && (payload.attr("type").is_none_or(str::is_empty)
+                    || payload.attr("uri").is_none_or(str::is_empty)))
+            || (payload.ns() == NS_EXPLICIT_MENTIONS
+                && payload.name() == "mention"
+                && payload.attr("jid").is_none_or(str::is_empty)
+                && payload.attr("occupantid").is_none_or(str::is_empty)
+                && payload.attr("mentions").is_none_or(str::is_empty))
+    })
+}
+
+pub(super) fn remove_framework_envelopes(message: &mut Message) {
+    message
+        .payloads
+        .retain(|payload| !payload.ns().starts_with("urn:waddle:"));
+}
+
+pub(super) fn bad_request_error(text: &str) -> StanzaError {
+    StanzaError::new(ErrorType::Modify, DefinedCondition::BadRequest, "en", text)
+}
+
+pub(super) fn item_not_found_error(text: &str) -> StanzaError {
+    StanzaError::new(
+        ErrorType::Cancel,
+        DefinedCondition::ItemNotFound,
+        "en",
+        text,
+    )
+}
+
+pub(super) fn forbidden_error(text: &str) -> StanzaError {
+    StanzaError::new(ErrorType::Auth, DefinedCondition::Forbidden, "en", text)
+}
+
+pub(super) fn service_unavailable_error(text: &str) -> StanzaError {
+    StanzaError::new(
+        ErrorType::Wait,
+        DefinedCondition::ServiceUnavailable,
+        "en",
+        text,
+    )
+}
+
+pub(super) fn internal_server_error_for_lookup() -> StanzaError {
+    StanzaError::new(
+        ErrorType::Wait,
+        DefinedCondition::InternalServerError,
+        "en",
+        "Archive lookup failed while validating rich-message target.",
+    )
+}
+
+/// Build a typed `<message type='error'>` reply addressed from the
+/// room JID back to the sender. Mirrors the legacy `error_message`
+/// helper.
+pub(super) fn build_message_error_reply(
+    incoming: &Message,
+    room: &BareJid,
+    sender: &FullJid,
+    error: StanzaError,
+) -> Message {
+    let mut reply = incoming.clone();
+    reply.type_ = XmppMessageType::Error;
+    reply.from = Some(Jid::from(room.clone()));
+    reply.to = Some(Jid::from(sender.clone()));
+    reply.payloads.push(Element::from(error));
+    reply
+}

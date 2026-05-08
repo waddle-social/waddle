@@ -1,0 +1,235 @@
+use futures::future::BoxFuture;
+use futures::stream::{SplitSink, SplitStream};
+use futures::{SinkExt, StreamExt};
+use std::collections::VecDeque;
+use tokio::net::TcpStream;
+use tokio::time::timeout;
+use tokio_tungstenite::tungstenite::handshake::client::generate_key;
+use tokio_tungstenite::tungstenite::http::Request;
+use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
+
+use crate::config::ClientConfig;
+use crate::error::{ClientError, ClientResult};
+
+use super::{
+    decode_message, encode_message, StreamClose, TransportCapabilities, TransportEvent,
+    TransportKind, TransportMessage, TransportState,
+};
+
+/// Runtime-owned factory for a WebSocket transport implementation.
+pub trait WebSocketTransportFactory: Send + Sync {
+    fn connect<'a>(
+        &'a self,
+        config: &'a ClientConfig,
+    ) -> BoxFuture<'a, ClientResult<Box<dyn WebSocketTransport>>>;
+}
+
+/// Minimal async boundary for the WebSocket transport layer.
+pub trait WebSocketTransport: Send + Sync {
+    fn kind(&self) -> TransportKind {
+        TransportKind::WebSocket
+    }
+
+    fn capabilities(&self) -> TransportCapabilities {
+        TransportCapabilities::default()
+    }
+
+    fn drain_events(&mut self) -> Vec<TransportEvent>;
+
+    fn send<'a>(&'a mut self, message: TransportMessage) -> BoxFuture<'a, ClientResult<()>>;
+
+    fn next_event<'a>(&'a mut self) -> BoxFuture<'a, ClientResult<Option<TransportEvent>>>;
+
+    fn close<'a>(&'a mut self) -> BoxFuture<'a, ClientResult<()>>;
+}
+
+/// Default runtime factory for the concrete WebSocket transport.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct DefaultTransportFactory;
+
+impl WebSocketTransportFactory for DefaultTransportFactory {
+    fn connect<'a>(
+        &'a self,
+        config: &'a ClientConfig,
+    ) -> BoxFuture<'a, ClientResult<Box<dyn WebSocketTransport>>> {
+        Box::pin(async move {
+            let request = websocket_request(config)?;
+            let connect_timeout = config.transport.connect_timeout;
+            let (socket, _) = timeout(connect_timeout, connect_async(request))
+                .await
+                .map_err(|_| ClientError::WebSocketConnectTimeout {
+                    timeout: connect_timeout,
+                })??;
+
+            Ok(Box::new(ConnectedWebSocketTransport::new(socket)) as Box<dyn WebSocketTransport>)
+        })
+    }
+}
+
+type ClientWebSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
+type ClientWebSocketSink = SplitSink<ClientWebSocket, Message>;
+type ClientWebSocketStream = SplitStream<ClientWebSocket>;
+
+#[derive(Debug)]
+struct ConnectedWebSocketTransport {
+    sink: ClientWebSocketSink,
+    stream: ClientWebSocketStream,
+    state: TransportState,
+    pending_events: VecDeque<TransportEvent>,
+}
+
+impl ConnectedWebSocketTransport {
+    fn new(socket: ClientWebSocket) -> Self {
+        let mut pending_events = VecDeque::with_capacity(2);
+        pending_events.push_back(TransportEvent::StateChanged(TransportState::Connecting));
+        pending_events.push_back(TransportEvent::StateChanged(TransportState::Open));
+
+        let (sink, stream) = socket.split();
+
+        Self {
+            sink,
+            stream,
+            state: TransportState::Open,
+            pending_events,
+        }
+    }
+
+    fn queue_state_change(&mut self, state: TransportState) {
+        if self.state != state {
+            self.state = state;
+            self.pending_events
+                .push_back(TransportEvent::StateChanged(state));
+        }
+    }
+
+    fn queue_closed(&mut self) {
+        if self.state != TransportState::Closed {
+            self.state = TransportState::Closed;
+            self.pending_events
+                .push_back(TransportEvent::StateChanged(TransportState::Closed));
+            self.pending_events.push_back(TransportEvent::Closed);
+        }
+    }
+}
+
+impl WebSocketTransport for ConnectedWebSocketTransport {
+    fn drain_events(&mut self) -> Vec<TransportEvent> {
+        self.pending_events.drain(..).collect()
+    }
+
+    fn send<'a>(&'a mut self, message: TransportMessage) -> BoxFuture<'a, ClientResult<()>> {
+        Box::pin(async move {
+            if self.state == TransportState::Closed {
+                return Err(ClientError::TransportClosed);
+            }
+
+            let frame = encode_message(&message)?;
+            self.sink.send(Message::Text(frame)).await?;
+
+            if matches!(message, TransportMessage::Close(_)) {
+                self.queue_state_change(TransportState::Closing);
+            }
+            self.pending_events
+                .push_back(TransportEvent::MessageSent(message));
+            Ok(())
+        })
+    }
+
+    fn next_event<'a>(&'a mut self) -> BoxFuture<'a, ClientResult<Option<TransportEvent>>> {
+        Box::pin(async move {
+            if let Some(event) = self.pending_events.pop_front() {
+                return Ok(Some(event));
+            }
+
+            loop {
+                let inbound = self.stream.next().await;
+
+                match inbound {
+                    Some(Ok(Message::Text(text))) => {
+                        let message = decode_message(text.as_ref())?;
+                        if matches!(message, TransportMessage::Close(_)) {
+                            self.queue_state_change(TransportState::Closing);
+                        }
+                        self.pending_events
+                            .push_back(TransportEvent::MessageReceived(message));
+                        return Ok(self.pending_events.pop_front());
+                    }
+                    Some(Ok(Message::Ping(payload))) => {
+                        self.sink.send(Message::Pong(payload)).await?;
+                    }
+                    Some(Ok(Message::Pong(_))) => {}
+                    Some(Ok(Message::Close(_))) => {
+                        self.queue_closed();
+                        return Ok(self.pending_events.pop_front());
+                    }
+                    Some(Ok(Message::Binary(_))) => {
+                        self.queue_state_change(TransportState::Failed);
+                        return Err(ClientError::UnsupportedWebSocketMessage);
+                    }
+                    Some(Ok(_)) => {}
+                    Some(Err(err)) => {
+                        self.queue_state_change(TransportState::Failed);
+                        return Err(err.into());
+                    }
+                    None => {
+                        self.queue_closed();
+                        return Ok(self.pending_events.pop_front());
+                    }
+                }
+            }
+        })
+    }
+
+    fn close<'a>(&'a mut self) -> BoxFuture<'a, ClientResult<()>> {
+        Box::pin(async move {
+            if self.state == TransportState::Closed {
+                return Ok(());
+            }
+
+            if self.state != TransportState::Closing {
+                self.queue_state_change(TransportState::Closing);
+                let frame = encode_message(&TransportMessage::Close(StreamClose))?;
+                self.sink.send(Message::Text(frame)).await?;
+                self.pending_events.push_back(TransportEvent::MessageSent(
+                    TransportMessage::Close(StreamClose),
+                ));
+            }
+
+            self.sink.close().await?;
+            self.queue_closed();
+            Ok(())
+        })
+    }
+}
+
+fn websocket_request(config: &ClientConfig) -> ClientResult<Request<()>> {
+    let host = websocket_host_header(&config.transport.endpoint)?;
+    let mut builder = Request::builder()
+        .uri(config.transport.endpoint.as_str())
+        .header("Host", host)
+        .header("Connection", "Upgrade")
+        .header("Upgrade", "websocket")
+        .header("Sec-WebSocket-Version", "13")
+        .header("Sec-WebSocket-Key", generate_key())
+        .header("Sec-WebSocket-Protocol", "xmpp");
+
+    if let Some(origin) = &config.transport.origin {
+        builder = builder.header("Origin", origin.as_str());
+    }
+
+    builder
+        .body(())
+        .map_err(ClientError::InvalidWebSocketRequest)
+}
+
+fn websocket_host_header(endpoint: &url::Url) -> ClientResult<String> {
+    let host = endpoint
+        .host_str()
+        .ok_or(ClientError::MissingWebSocketHost)?;
+
+    Ok(match endpoint.port() {
+        Some(port) => format!("{host}:{port}"),
+        None => host.to_string(),
+    })
+}

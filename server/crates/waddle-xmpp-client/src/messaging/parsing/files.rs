@@ -1,0 +1,108 @@
+use minidom::Element;
+
+use super::super::namespaces::*;
+use super::super::types::*;
+
+pub(super) fn parse_shared_file(reference_el: &Element) -> Option<SharedFile> {
+    // Look for nested file metadata; structure varies by implementation.
+    // Try XEP-0447 <sources> / <url-data> layout first.
+    let mut url: Option<String> = None;
+    let mut name: Option<String> = None;
+    let mut media_type: Option<String> = None;
+    let mut size: Option<u64> = None;
+    let mut width: Option<u32> = None;
+    let mut height: Option<u32> = None;
+    let mut disposition: Option<String> = None;
+
+    for child in reference_el.children() {
+        match child.name() {
+            "url-data" => {
+                url = child.attr("target").map(String::from);
+            }
+            "file" => {
+                name = child
+                    .get_child("name", child.ns().as_str())
+                    .map(|e| e.text());
+                media_type = child
+                    .get_child("media-type", child.ns().as_str())
+                    .map(|e| e.text());
+                size = child
+                    .get_child("size", child.ns().as_str())
+                    .and_then(|e| e.text().parse().ok());
+                if let Some(thumb) = child.get_child("thumbnail", child.ns().as_str()) {
+                    width = thumb.attr("width").and_then(|v| v.parse().ok());
+                    height = thumb.attr("height").and_then(|v| v.parse().ok());
+                }
+                if let Some(disp) = child.get_child("disposition", child.ns().as_str()) {
+                    disposition = Some(disp.text());
+                }
+            }
+            // Simple <url> child fallback
+            "url" => {
+                url = Some(child.text());
+            }
+            _ => {}
+        }
+    }
+
+    let disposition =
+        SharedFileDisposition::from_text_or_infer(disposition.as_deref(), media_type.as_deref());
+    url.map(|u| SharedFile {
+        url: u,
+        name,
+        media_type,
+        size,
+        width,
+        height,
+        disposition,
+        encrypted: None,
+    })
+}
+
+pub(super) fn parse_file_sharing_element(file_sharing_el: &Element) -> Option<SharedFile> {
+    let mut url: Option<String> = None;
+    let mut name: Option<String> = None;
+    let mut media_type: Option<String> = None;
+    let mut size: Option<u64> = None;
+    let mut width: Option<u32> = None;
+    let mut height: Option<u32> = None;
+    let disposition_attr = file_sharing_el.attr("disposition");
+
+    if let Some(file_el) = file_sharing_el.get_child("file", NS_FILE_METADATA) {
+        name = file_el
+            .get_child("name", NS_FILE_METADATA)
+            .map(|e| e.text());
+        media_type = file_el
+            .get_child("media-type", NS_FILE_METADATA)
+            .map(|e| e.text());
+        size = file_el
+            .get_child("size", NS_FILE_METADATA)
+            .and_then(|e| e.text().parse().ok());
+        width = file_el
+            .get_child("width", NS_FILE_METADATA)
+            .and_then(|e| e.text().parse().ok());
+        height = file_el
+            .get_child("height", NS_FILE_METADATA)
+            .and_then(|e| e.text().parse().ok());
+    }
+
+    if let Some(sources_el) = file_sharing_el.get_child("sources", NS_SFS) {
+        url = sources_el
+            .get_child("url-data", NS_URL_DATA)
+            .and_then(|e| e.attr("target"))
+            .map(String::from);
+    }
+
+    let disposition =
+        SharedFileDisposition::from_text_or_infer(disposition_attr, media_type.as_deref());
+    url.map(|u| SharedFile {
+        url: u,
+        name,
+        media_type,
+        size,
+        width,
+        height,
+        disposition,
+        encrypted: None,
+    })
+}

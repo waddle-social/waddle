@@ -1,226 +1,18 @@
 //! XMPP AppState implementation bridging to waddle-server services.
 //!
 //! This module implements the `waddle_xmpp::AppState` trait by delegating to
-//! the existing auth, session, and permission services in waddle-server.
+//! the existing auth/session services and PermissionActor-backed permission
+//! actor in waddle-server.
 
 #[cfg(test)]
-use tracing::{debug, warn};
+use waddle_xmpp::inbox::InboxEntry;
 #[cfg(test)]
-use waddle_xmpp::inbox::{storage::InboxStorage, InboxEntry};
-#[cfg(test)]
-use waddle_xmpp::{Session as XmppSession, UserDirectoryEntry, XmppError};
+use waddle_xmpp::{Session as XmppSession, XmppError};
 
 #[cfg(test)]
-use crate::auth::jid::jid_to_localpart;
-#[cfg(test)]
-use crate::auth::{localpart_to_jid, NativeUserStore, RegisterRequest, SessionManager};
-use crate::db::actor::{DbActor, DbQuery, DbQueryOne};
-#[cfg(test)]
-use crate::db::actor::{DbExecute, GetDatabase};
-#[cfg(test)]
-use crate::db::Database;
-use crate::db::{row_value, ValueExt};
-#[cfg(test)]
-use crate::permissions::{
-    CheckPermission, DeleteTuple, ListRelations, ListSubjects, Object, ObjectType, Permission,
-    PermissionActor, Relation, Subject, SubjectType, Tuple, WriteTuple,
-};
-#[cfg(test)]
-use crate::vcard::VCardStore;
-use kameo::actor::ActorRef;
-use serde::Serialize;
-#[cfg(test)]
-use std::sync::Arc;
+pub use super::xmpp_app_state::XmppAppState;
 
-#[cfg(test)]
-use crate::server::bootstrap_membership::{provision_user_membership, BootstrapMembershipConfig};
-
-#[derive(Debug, Serialize)]
-pub(crate) struct XmppChannelRecord {
-    pub id: String,
-    pub name: String,
-    pub description: Option<String>,
-    pub channel_type: String,
-    pub position: i32,
-    pub is_default: bool,
-    pub created_at: String,
-    pub updated_at: Option<String>,
-}
-
-fn db_string(
-    row: &crate::db::actor::RowValues,
-    index: usize,
-    name: &str,
-) -> Result<String, String> {
-    row_value(row, index)
-        .and_then(ValueExt::as_string)
-        .map_err(|e| format!("Failed to get {name}: {e}"))
-}
-
-fn db_optional_string(
-    row: &crate::db::actor::RowValues,
-    index: usize,
-    name: &str,
-) -> Result<Option<String>, String> {
-    row_value(row, index)
-        .and_then(ValueExt::as_optional_string)
-        .map_err(|e| format!("Failed to get {name}: {e}"))
-}
-
-fn db_i32(row: &crate::db::actor::RowValues, index: usize, name: &str) -> Result<i32, String> {
-    match row_value(row, index).map_err(|e| format!("Failed to get {name}: {e}"))? {
-        crate::db::Value::Integer(value) => Ok(*value as i32),
-        other => Err(format!("Failed to get {name}: unexpected value {other:?}")),
-    }
-}
-
-fn db_bool(row: &crate::db::actor::RowValues, index: usize, name: &str) -> Result<bool, String> {
-    match row_value(row, index).map_err(|e| format!("Failed to get {name}: {e}"))? {
-        crate::db::Value::Integer(value) => Ok(*value != 0),
-        other => Err(format!("Failed to get {name}: unexpected value {other:?}")),
-    }
-}
-
-fn parse_channel_record(row: &crate::db::actor::RowValues) -> Result<XmppChannelRecord, String> {
-    Ok(XmppChannelRecord {
-        id: db_string(row, 0, "id")?,
-        name: db_string(row, 1, "name")?,
-        description: db_optional_string(row, 2, "description")?,
-        channel_type: db_string(row, 3, "channel_type")?,
-        position: db_i32(row, 4, "position")?,
-        is_default: db_bool(row, 5, "is_default")?,
-        created_at: db_string(row, 6, "created_at")?,
-        updated_at: db_optional_string(row, 7, "updated_at")?,
-    })
-}
-
-pub(crate) async fn get_xmpp_channel(
-    actor: ActorRef<DbActor>,
-    channel_id: &str,
-) -> Result<Option<XmppChannelRecord>, String> {
-    let row = actor
-        .ask(DbQueryOne {
-            sql: r#"
-                SELECT id, name, description, channel_type, position, is_default, created_at, updated_at
-                FROM channels
-                WHERE id = ?
-            "#
-            .to_string(),
-            params: vec![channel_id.into()],
-        })
-        .await
-        .map_err(|e| format!("Failed to query channel: {e}"))?;
-
-    row.as_ref().map(parse_channel_record).transpose()
-}
-
-pub(crate) async fn list_xmpp_channels(
-    actor: ActorRef<DbActor>,
-    limit: usize,
-    offset: usize,
-) -> Result<Vec<XmppChannelRecord>, String> {
-    let rows = actor
-        .ask(DbQuery {
-            sql: r#"
-                SELECT id, name, description, channel_type, position, is_default, created_at, updated_at
-                FROM channels
-                ORDER BY position ASC, created_at ASC
-                LIMIT ? OFFSET ?
-            "#
-            .to_string(),
-            params: vec![(limit as i64).into(), (offset as i64).into()],
-        })
-        .await
-        .map_err(|e| format!("Failed to query channels: {e}"))?;
-
-    rows.iter().map(parse_channel_record).collect()
-}
-
-/// XMPP application state that bridges to waddle-server services.
-///
-/// This struct implements `waddle_xmpp::AppState` by delegating to:
-/// - `SessionManager` for session validation
-/// - `PermissionActor` for permission checks
-/// - `NativeUserStore` for XEP-0077 registration and SCRAM authentication
-/// - `VCardStore` for XEP-0054 vcard-temp storage
-/// - `Database` for upload slot storage (XEP-0363)
-#[cfg(test)]
-pub struct XmppAppState {
-    /// The XMPP server domain (e.g., "waddle.social")
-    domain: String,
-    /// Session manager for validating XMPP authentication tokens
-    session_manager: SessionManager,
-    /// Permission actor for authorization checks
-    permission_actor: ActorRef<PermissionActor>,
-    /// Native user store for XEP-0077 registration and SCRAM authentication
-    native_user_store: NativeUserStore,
-    /// vCard store for XEP-0054 vcard-temp
-    vcard_store: VCardStore,
-    /// Global database actor for runtime repository access.
-    global_db_actor: ActorRef<DbActor>,
-    /// Database actor for canonical space data.
-    space_db_actor: Option<ActorRef<DbActor>>,
-    /// Shared Waddle inbox projection storage.
-    inbox_storage: Option<Arc<dyn InboxStorage>>,
-}
-
-#[cfg(test)]
-impl XmppAppState {
-    /// Create a new XMPP application state.
-    ///
-    /// # Arguments
-    ///
-    /// * `domain` - The XMPP server domain (e.g., "waddle.social")
-    /// * `db` - The global database for session and permission storage
-    /// * `encryption_key` - Optional encryption key for session token encryption
-    pub fn new(
-        domain: String,
-        db: Arc<Database>,
-        db_actor: ActorRef<DbActor>,
-        permission_actor: ActorRef<PermissionActor>,
-        encryption_key: Option<&[u8]>,
-    ) -> Self {
-        let session_manager = SessionManager::new(db_actor.clone(), encryption_key);
-        let native_user_store = NativeUserStore::new(db_actor.clone());
-        let vcard_store = VCardStore::new(Arc::clone(&db));
-
-        Self {
-            domain,
-            session_manager,
-            permission_actor,
-            native_user_store,
-            vcard_store,
-            global_db_actor: db_actor,
-            space_db_actor: None,
-            inbox_storage: None,
-        }
-    }
-
-    /// Parse a resource string into an Object.
-    ///
-    /// Resource format: "space:{id}" or "channel:{id}"
-    fn parse_resource(resource: &str) -> Result<Object, XmppError> {
-        Object::parse(resource).map_err(|e| {
-            XmppError::internal(format!("Invalid resource format '{}': {}", resource, e))
-        })
-    }
-
-    /// Parse a subject string into a Subject.
-    ///
-    /// Subject format: "user:{user_id}" or "space:{id}#member"
-    fn parse_subject(subject: &str) -> Result<Subject, XmppError> {
-        Subject::parse(subject).map_err(|e| {
-            XmppError::internal(format!("Invalid subject format '{}': {}", subject, e))
-        })
-    }
-
-    async fn global_database(&self) -> Result<Database, XmppError> {
-        self.global_db_actor
-            .ask(GetDatabase)
-            .await
-            .map_err(|e| XmppError::internal(format!("Failed to access global database: {}", e)))
-    }
-}
+pub(crate) use super::xmpp_channels::{get_xmpp_channel, list_xmpp_channels, XmppChannelRecord};
 
 #[cfg(test)]
 impl waddle_xmpp::AppState for XmppAppState {
@@ -233,52 +25,7 @@ impl waddle_xmpp::AppState for XmppAppState {
         jid: &jid::Jid,
         token: &str,
     ) -> Result<XmppSession, XmppError> {
-        debug!(jid = %jid, "Validating XMPP session");
-
-        // Convert JID to localpart for verification
-        let expected_localpart = jid_to_localpart(&jid.to_string()).map_err(|e| {
-            warn!(jid = %jid, error = %e, "Failed to extract localpart from JID");
-            XmppError::auth_failed(format!("Invalid JID format: {}", e))
-        })?;
-
-        // Validate the session token (which is the session ID)
-        let session = self
-            .session_manager
-            .validate_session(token)
-            .await
-            .map_err(|e| {
-                warn!(token_prefix = %&token[..token.len().min(8)], error = %e, "Session validation failed");
-                match e {
-                    crate::auth::AuthError::SessionNotFound(_) => XmppError::SessionNotFound,
-                    crate::auth::AuthError::SessionExpired => XmppError::SessionNotFound,
-                    _ => XmppError::auth_failed(format!("Session validation failed: {}", e)),
-                }
-            })?;
-
-        // Verify the localpart matches the immutable session localpart.
-        if session.xmpp_localpart != expected_localpart {
-            warn!(
-                expected_localpart = %expected_localpart,
-                session_localpart = %session.xmpp_localpart,
-                "Localpart mismatch between JID and session"
-            );
-            return Err(XmppError::auth_failed("JID does not match session"));
-        }
-
-        // Convert to XMPP session
-        let bare_jid = jid.to_bare();
-
-        // Calculate expires_at - use session expiry or default to 24 hours from now
-        let expires_at = session
-            .expires_at
-            .unwrap_or_else(|| chrono::Utc::now() + chrono::Duration::hours(24));
-
-        Ok(XmppSession {
-            user_id: session.user_id,
-            jid: bare_jid,
-            created_at: session.created_at,
-            expires_at,
-        })
+        super::xmpp_auth_state::validate_session(&self.session_manager, jid, token).await
     }
 
     /// Check if a subject has permission to perform an action on a resource.
@@ -291,42 +38,13 @@ impl waddle_xmpp::AppState for XmppAppState {
         action: &str,
         subject: &str,
     ) -> Result<bool, XmppError> {
-        debug!(
-            resource = resource,
-            action = action,
-            subject = subject,
-            "Checking XMPP permission"
-        );
-
-        let object = Self::parse_resource(resource)?;
-        let subject = Self::parse_subject(subject)?;
-
-        let response = self
-            .permission_actor
-            .ask(CheckPermission {
-                subject,
-                permission: Permission::Custom(action.to_string()),
-                object,
-            })
-            .await
-            .map_err(|e| {
-                warn!(
-                    resource = resource,
-                    action = action,
-                    error = %e,
-                    "Permission check failed"
-                );
-                XmppError::internal(format!("Permission check failed: {}", e))
-            })?;
-
-        debug!(
-            resource = resource,
-            action = action,
-            allowed = response.allowed,
-            "Permission check result"
-        );
-
-        Ok(response.allowed)
+        super::xmpp_permission_state::check_permission(
+            &self.permission_actor,
+            resource,
+            action,
+            subject,
+        )
+        .await
     }
 
     /// Validate an XMPP session token without a JID (for OAUTHBEARER).
@@ -334,46 +52,8 @@ impl waddle_xmpp::AppState for XmppAppState {
     /// The token is expected to be a session ID. The JID is derived from the
     /// session's immutable localpart after validation.
     async fn validate_session_token(&self, token: &str) -> Result<XmppSession, XmppError> {
-        debug!(token_prefix = %&token[..token.len().min(8)], "Validating XMPP session token (OAUTHBEARER)");
-
-        // Validate the session token (which is the session ID)
-        let session = self
-            .session_manager
-            .validate_session(token)
+        super::xmpp_auth_state::validate_session_token(&self.session_manager, &self.domain, token)
             .await
-            .map_err(|e| {
-                warn!(token_prefix = %&token[..token.len().min(8)], error = %e, "Session validation failed");
-                match e {
-                    crate::auth::AuthError::SessionNotFound(_) => XmppError::SessionNotFound,
-                    crate::auth::AuthError::SessionExpired => XmppError::SessionNotFound,
-                    _ => XmppError::auth_failed(format!("Session validation failed: {}", e)),
-                }
-            })?;
-
-        // Convert immutable localpart to JID
-        let jid_str = localpart_to_jid(&session.xmpp_localpart, &self.domain).map_err(|e| {
-            warn!(localpart = %session.xmpp_localpart, error = %e, "Failed to convert localpart to JID");
-            XmppError::auth_failed(format!("Invalid localpart format: {}", e))
-        })?;
-
-        let bare_jid: jid::BareJid = jid_str.parse().map_err(|e| {
-            warn!(jid = %jid_str, error = ?e, "Failed to parse generated JID");
-            XmppError::auth_failed(format!("Invalid JID: {:?}", e))
-        })?;
-
-        // Calculate expires_at - use session expiry or default to 24 hours from now
-        let expires_at = session
-            .expires_at
-            .unwrap_or_else(|| chrono::Utc::now() + chrono::Duration::hours(24));
-
-        debug!(jid = %bare_jid, user_id = %session.user_id, "OAUTHBEARER session validated");
-
-        Ok(XmppSession {
-            user_id: session.user_id,
-            jid: bare_jid,
-            created_at: session.created_at,
-            expires_at,
-        })
     }
 
     /// Get the XMPP server domain.
@@ -385,14 +65,7 @@ impl waddle_xmpp::AppState for XmppAppState {
     ///
     /// Returns the RFC 8414 OAuth authorization server metadata endpoint URL.
     fn oauth_discovery_url(&self) -> String {
-        // Construct the discovery URL based on the domain
-        // In production, this should be configurable via environment variable
-        let base_url =
-            std::env::var("WADDLE_BASE_URL").unwrap_or_else(|_| format!("https://{}", self.domain));
-        format!(
-            "{}/.well-known/oauth-authorization-server",
-            base_url.trim_end_matches('/')
-        )
+        super::xmpp_auth_state::oauth_discovery_url(&self.domain)
     }
 
     /// List all relations a subject has on an object.
@@ -403,38 +76,8 @@ impl waddle_xmpp::AppState for XmppAppState {
         resource: &str,
         subject: &str,
     ) -> Result<Vec<String>, XmppError> {
-        debug!(
-            resource = resource,
-            subject = subject,
-            "Listing relations for subject on resource"
-        );
-
-        let object = Self::parse_resource(resource)?;
-        let subject = Self::parse_subject(subject)?;
-
-        let relations = self
-            .permission_actor
-            .ask(ListRelations { subject, object })
+        super::xmpp_permission_state::list_relations(&self.permission_actor, resource, subject)
             .await
-            .map_err(|e| {
-                warn!(
-                    resource = resource,
-                    error = %e,
-                    "Failed to list relations"
-                );
-                XmppError::internal(format!("Failed to list relations: {}", e))
-            })?;
-
-        debug!(
-            resource = resource,
-            relations = ?relations,
-            "Listed relations"
-        );
-
-        Ok(relations
-            .into_iter()
-            .map(|relation| relation.name)
-            .collect())
     }
 
     /// List all subjects with a specific relation on an object.
@@ -445,124 +88,26 @@ impl waddle_xmpp::AppState for XmppAppState {
         resource: &str,
         relation: &str,
     ) -> Result<Vec<String>, XmppError> {
-        debug!(
-            resource = resource,
-            relation = relation,
-            "Listing subjects with relation on resource"
-        );
-
-        let object = Self::parse_resource(resource)?;
-
-        let subjects = self
-            .permission_actor
-            .ask(ListSubjects {
-                object,
-                relation: Relation::new(relation),
-            })
+        super::xmpp_permission_state::list_subjects(&self.permission_actor, resource, relation)
             .await
-            .map_err(|e| {
-                warn!(
-                    resource = resource,
-                    relation = relation,
-                    error = %e,
-                    "Failed to list subjects"
-                );
-                XmppError::internal(format!("Failed to list subjects: {}", e))
-            })?;
-
-        // Convert Subject objects to string format
-        let subject_strings: Vec<String> = subjects.iter().map(|s| s.to_string()).collect();
-
-        debug!(
-            resource = resource,
-            relation = relation,
-            count = subject_strings.len(),
-            "Listed subjects"
-        );
-
-        Ok(subject_strings)
     }
 
     async fn resolve_subject_jid(&self, subject: &str) -> Result<Option<jid::BareJid>, XmppError> {
-        let subject = Self::parse_subject(subject)?;
-        if subject.subject_type != SubjectType::User || subject.relation.is_some() {
-            return Ok(None);
-        }
-
-        let row = self
-            .global_db_actor
-            .ask(DbQueryOne {
-                sql: "SELECT xmpp_localpart FROM users WHERE id = ? LIMIT 1".to_string(),
-                params: vec![subject.id.as_str().into()],
-            })
-            .await
-            .map_err(|e| XmppError::internal(format!("Failed to resolve user JID: {}", e)))?;
-
-        let Some(row) = row else {
-            return Ok(None);
-        };
-        let localpart = db_string(&row, 0, "xmpp_localpart")
-            .map_err(|e| XmppError::internal(format!("Failed to decode user JID: {}", e)))?;
-        let jid = localpart_to_jid(&localpart, &self.domain)
-            .map_err(|e| XmppError::internal(format!("Failed to build user JID: {}", e)))?
-            .parse()
-            .map_err(|e| XmppError::internal(format!("Failed to parse user JID: {}", e)))?;
-        Ok(Some(jid))
+        super::xmpp_permission_state::resolve_subject_jid(
+            &self.global_db_actor,
+            &self.domain,
+            subject,
+        )
+        .await
     }
 
     async fn search_users(
         &self,
         query: &str,
         limit: usize,
-    ) -> Result<Vec<UserDirectoryEntry>, XmppError> {
-        let pattern = format!("%{}%", query.trim());
-        let rows = self
-            .global_db_actor
-            .ask(DbQuery {
-                sql: r#"
-                    SELECT username, xmpp_localpart, display_name, avatar_url
-                    FROM users
-                    WHERE username LIKE ? OR xmpp_localpart LIKE ? OR display_name LIKE ?
-                    ORDER BY username ASC
-                    LIMIT ?
-                "#
-                .to_string(),
-                params: vec![
-                    pattern.as_str().into(),
-                    pattern.as_str().into(),
-                    pattern.as_str().into(),
-                    (limit as i64).into(),
-                ],
-            })
+    ) -> Result<Vec<waddle_xmpp::UserDirectoryEntry>, XmppError> {
+        super::xmpp_account_state::search_users(&self.global_db_actor, &self.domain, query, limit)
             .await
-            .map_err(|e| XmppError::internal(format!("Failed to search users: {}", e)))?;
-
-        rows.iter()
-            .map(|row| {
-                let username = db_string(row, 0, "username").map_err(|e| {
-                    XmppError::internal(format!("Failed to decode username: {}", e))
-                })?;
-                let localpart = db_string(row, 1, "xmpp_localpart").map_err(|e| {
-                    XmppError::internal(format!("Failed to decode xmpp_localpart: {}", e))
-                })?;
-                let display_name = db_optional_string(row, 2, "display_name").map_err(|e| {
-                    XmppError::internal(format!("Failed to decode display_name: {}", e))
-                })?;
-                let avatar_url = db_optional_string(row, 3, "avatar_url").map_err(|e| {
-                    XmppError::internal(format!("Failed to decode avatar_url: {}", e))
-                })?;
-                let jid = localpart_to_jid(&localpart, &self.domain)
-                    .map_err(|e| XmppError::internal(format!("Failed to build user JID: {}", e)))?
-                    .parse()
-                    .map_err(|e| XmppError::internal(format!("Failed to parse user JID: {}", e)))?;
-                Ok(UserDirectoryEntry {
-                    jid,
-                    username,
-                    display_name,
-                    avatar_url,
-                })
-            })
-            .collect()
     }
 
     async fn set_room_affiliation(
@@ -571,57 +116,14 @@ impl waddle_xmpp::AppState for XmppAppState {
         jid: &jid::BareJid,
         affiliation: waddle_xmpp::Affiliation,
     ) -> Result<(), XmppError> {
-        let Some(localpart) = jid.node() else {
-            return Err(XmppError::bad_request(Some("JID has no localpart".into())));
-        };
-        let row = self
-            .global_db_actor
-            .ask(DbQueryOne {
-                sql: "SELECT id FROM users WHERE xmpp_localpart = ? LIMIT 1".to_string(),
-                params: vec![localpart.as_str().into()],
-            })
-            .await
-            .map_err(|e| XmppError::internal(format!("Failed to resolve user: {}", e)))?;
-        let Some(row) = row else {
-            return Err(XmppError::item_not_found(Some(format!(
-                "User {} not found",
-                jid
-            ))));
-        };
-        let user_id = db_string(&row, 0, "id")
-            .map_err(|e| XmppError::internal(format!("Failed to decode user id: {}", e)))?;
-
-        let object = Object::new(ObjectType::Channel, channel_id);
-        let subject = Subject::user(&user_id);
-        for relation in ["owner", "admin", "member", "outcast"] {
-            let tuple = Tuple::new(object.clone(), Relation::new(relation), subject.clone());
-            self.permission_actor
-                .ask(DeleteTuple { tuple })
-                .await
-                .map_err(|e| {
-                    XmppError::internal(format!("Failed to clear MUC affiliation tuple: {}", e))
-                })?;
-        }
-
-        let relation = match affiliation {
-            waddle_xmpp::Affiliation::Owner => Some("owner"),
-            waddle_xmpp::Affiliation::Admin => Some("admin"),
-            waddle_xmpp::Affiliation::Member => Some("member"),
-            waddle_xmpp::Affiliation::Outcast => Some("outcast"),
-            waddle_xmpp::Affiliation::None => None,
-        };
-
-        if let Some(relation) = relation {
-            let tuple = Tuple::new(object, Relation::new(relation), subject);
-            self.permission_actor
-                .ask(WriteTuple { tuple })
-                .await
-                .map_err(|e| {
-                    XmppError::internal(format!("Failed to write MUC affiliation tuple: {}", e))
-                })?;
-        }
-
-        Ok(())
+        super::xmpp_permission_state::set_room_affiliation(
+            &self.global_db_actor,
+            &self.permission_actor,
+            channel_id,
+            jid,
+            affiliation,
+        )
+        .await
     }
 
     /// Lookup SCRAM credentials for a native JID user.
@@ -632,30 +134,12 @@ impl waddle_xmpp::AppState for XmppAppState {
         &self,
         username: &str,
     ) -> Result<Option<waddle_xmpp::ScramCredentials>, XmppError> {
-        debug!(
-            username = username,
-            domain = %self.domain,
-            "Looking up SCRAM credentials for native user"
-        );
-
-        match self
-            .native_user_store
-            .get_scram_credentials(username, &self.domain)
-            .await
-        {
-            Ok(Some(creds)) => {
-                debug!(username = username, "Found SCRAM credentials");
-                Ok(Some(creds))
-            }
-            Ok(None) => {
-                debug!(username = username, "No SCRAM credentials found");
-                Ok(None)
-            }
-            Err(e) => {
-                warn!(username = username, error = %e, "Failed to lookup SCRAM credentials");
-                Err(XmppError::internal(format!("Database error: {}", e)))
-            }
-        }
+        super::xmpp_account_state::lookup_scram_credentials(
+            &self.native_user_store,
+            &self.domain,
+            username,
+        )
+        .await
     }
 
     /// Register a new native user via XEP-0077 In-Band Registration.
@@ -667,106 +151,35 @@ impl waddle_xmpp::AppState for XmppAppState {
         password: &str,
         email: Option<&str>,
     ) -> Result<(), XmppError> {
-        debug!(
-            username = username,
-            domain = %self.domain,
-            has_email = email.is_some(),
-            "Registering native user via XEP-0077"
-        );
-
-        let request = RegisterRequest {
-            username: username.to_string(),
-            domain: self.domain.clone(),
-            password: password.to_string(),
-            email: email.map(|s| s.to_string()),
-        };
-
-        match self.native_user_store.register(request).await {
-            Ok(user_id) => {
-                let subject_user_id = format!("{}@{}", username, self.domain);
-                provision_user_membership(
-                    &self.permission_actor,
-                    &BootstrapMembershipConfig::from_env(),
-                    &subject_user_id,
-                    username,
-                )
-                .await
-                .map_err(|err| {
-                    XmppError::internal(format!("Failed to provision account membership: {err}"))
-                })?;
-                debug!(
-                    username = username,
-                    user_id = user_id,
-                    "Native user registered successfully"
-                );
-                Ok(())
-            }
-            Err(crate::auth::AuthError::UserAlreadyExists(_)) => {
-                warn!(
-                    username = username,
-                    "Registration failed: user already exists"
-                );
-                Err(XmppError::conflict(Some(format!(
-                    "User '{}' already exists",
-                    username
-                ))))
-            }
-            Err(crate::auth::AuthError::InvalidUsername(msg)) => {
-                warn!(username = username, error = %msg, "Registration failed: invalid username");
-                Err(XmppError::not_acceptable(Some(msg)))
-            }
-            Err(e) => {
-                warn!(username = username, error = %e, "Registration failed");
-                Err(XmppError::internal(format!("Registration failed: {}", e)))
-            }
-        }
+        super::xmpp_account_state::register_native_user(
+            &self.native_user_store,
+            &self.permission_actor,
+            &self.domain,
+            username,
+            password,
+            email,
+        )
+        .await
     }
 
     /// Check if a native user exists.
     async fn native_user_exists(&self, username: &str) -> Result<bool, XmppError> {
-        debug!(
-            username = username,
-            domain = %self.domain,
-            "Checking if native user exists"
-        );
-
-        match self
-            .native_user_store
-            .user_exists(username, &self.domain)
-            .await
-        {
-            Ok(exists) => Ok(exists),
-            Err(e) => {
-                warn!(username = username, error = %e, "Failed to check user existence");
-                Err(XmppError::internal(format!("Database error: {}", e)))
-            }
-        }
+        super::xmpp_account_state::native_user_exists(
+            &self.native_user_store,
+            &self.domain,
+            username,
+        )
+        .await
     }
 
     /// Get the vCard for a user (XEP-0054).
     async fn get_vcard(&self, jid: &jid::BareJid) -> Result<Option<String>, XmppError> {
-        debug!(jid = %jid, "Getting vCard");
-
-        match self.vcard_store.get(jid).await {
-            Ok(vcard) => Ok(vcard),
-            Err(e) => {
-                warn!(jid = %jid, error = %e, "Failed to get vCard");
-                Err(XmppError::internal(format!("Database error: {}", e)))
-            }
-        }
+        super::xmpp_profile_state::get_vcard(&self.vcard_store, jid).await
     }
 
     /// Store/update the vCard for a user (XEP-0054).
     async fn set_vcard(&self, jid: &jid::BareJid, vcard_xml: &str) -> Result<(), XmppError> {
-        debug!(jid = %jid, "Setting vCard");
-
-        match self.vcard_store.set(jid, vcard_xml).await {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                warn!(jid = %jid, error = %e, "Failed to set vCard");
-                Err(XmppError::internal(format!("Database error: {}", e)))
-            }
-        }
+        super::xmpp_profile_state::set_vcard(&self.vcard_store, jid, vcard_xml).await
     }
 
     /// Look up the externally-hosted avatar URL for a JID (XEP-0084 `url=`).
@@ -775,34 +188,7 @@ impl waddle_xmpp::AppState for XmppAppState {
     /// captured during OIDC login (e.g. a GitHub avatar). Missing or empty
     /// values return `Ok(None)`.
     async fn get_user_avatar_url(&self, jid: &jid::BareJid) -> Result<Option<String>, XmppError> {
-        let Some(localpart) = jid.node().map(|n| n.to_string()) else {
-            return Ok(None);
-        };
-
-        let row = self
-            .global_db_actor
-            .ask(DbQueryOne {
-                sql: "SELECT avatar_url FROM users WHERE xmpp_localpart = ? LIMIT 1".to_string(),
-                params: vec![crate::db::Value::from(localpart.clone())],
-            })
-            .await
-            .map_err(|e| {
-                warn!(jid = %jid, error = %e, "avatar_url query failed");
-                XmppError::internal(format!("Database actor error: {}", e))
-            })?;
-
-        let Some(row) = row else {
-            return Ok(None);
-        };
-
-        let url = row_value(&row, 0)
-            .and_then(|value| value.as_optional_string())
-            .map_err(|e| {
-                warn!(jid = %jid, error = %e, "avatar_url column decode failed");
-                XmppError::internal(format!("Database error: {}", e))
-            })?;
-
-        Ok(url.filter(|s| !s.is_empty()))
+        super::xmpp_profile_state::get_user_avatar_url(&self.global_db_actor, jid).await
     }
 
     /// Create an upload slot for XEP-0363 HTTP File Upload.
@@ -813,90 +199,20 @@ impl waddle_xmpp::AppState for XmppAppState {
         size: u64,
         content_type: Option<&str>,
     ) -> Result<waddle_xmpp::UploadSlotInfo, XmppError> {
-        use waddle_xmpp::xep::xep0363::{effective_content_type, sanitize_filename};
-
-        debug!(
-            jid = %requester_jid,
-            filename = %filename,
-            size = size,
-            content_type = ?content_type,
-            "Creating upload slot"
-        );
-
-        // Check file size limit
-        let max_size = self.max_upload_size();
-        if size > max_size {
-            warn!(
-                jid = %requester_jid,
-                size = size,
-                max_size = max_size,
-                "File too large for upload"
-            );
-            return Err(XmppError::not_acceptable(Some(format!(
-                "File too large. Maximum size is {} bytes.",
-                max_size
-            ))));
-        }
-
-        // Sanitize the filename
-        let safe_filename = sanitize_filename(filename);
-        let effective_type = effective_content_type(content_type).to_string();
-
-        // Generate a unique slot ID
-        let slot_id = uuid::Uuid::new_v4().to_string();
-
-        // Calculate expiration (15 minutes from now)
-        let expires_at = chrono::Utc::now() + chrono::Duration::minutes(15);
-
-        // Get the base URL for uploads
-        let base_url =
-            std::env::var("WADDLE_BASE_URL").unwrap_or_else(|_| format!("https://{}", self.domain));
-        let base_url = base_url.trim_end_matches('/');
-
-        // Build the PUT and GET URLs
-        let put_url = format!("{}/api/upload/{}", base_url, slot_id);
-        let get_url = format!("{}/api/files/{}/{}", base_url, slot_id, safe_filename);
-
-        // Store the slot in the database
-        self.global_db_actor
-            .ask(DbExecute {
-                sql: "INSERT INTO upload_slots (id, requester_jid, filename, size_bytes, content_type, status, expires_at) VALUES (?, ?, ?, ?, ?, 'pending', ?)".to_string(),
-                params: vec![
-                    crate::db::Value::from(slot_id.clone()),
-                    crate::db::Value::from(requester_jid.to_string()),
-                    crate::db::Value::from(safe_filename.clone()),
-                    crate::db::Value::from(size as i64),
-                    crate::db::Value::from(effective_type.clone()),
-                    crate::db::Value::from(expires_at.to_rfc3339()),
-                ],
-            })
-            .await
-            .map_err(|e| {
-                warn!(error = %e, "Failed to create upload slot in database");
-                XmppError::internal(format!("Database actor error: {}", e))
-            })?;
-
-        debug!(
-            slot_id = %slot_id,
-            put_url = %put_url,
-            get_url = %get_url,
-            "Created upload slot"
-        );
-
-        Ok(waddle_xmpp::UploadSlotInfo {
-            put_url,
-            get_url,
-            put_headers: vec![("Content-Type".to_string(), effective_type)],
-        })
+        super::xmpp_upload_state::create_upload_slot(
+            &self.global_db_actor,
+            &self.domain,
+            requester_jid,
+            filename,
+            size,
+            content_type,
+        )
+        .await
     }
 
     /// Get the maximum allowed file upload size in bytes.
     fn max_upload_size(&self) -> u64 {
-        // Check environment variable, default to 10 MB
-        std::env::var("WADDLE_MAX_UPLOAD_SIZE")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(10 * 1024 * 1024)
+        super::xmpp_upload_state::max_upload_size()
     }
 
     // =========================================================================
@@ -908,28 +224,7 @@ impl waddle_xmpp::AppState for XmppAppState {
         &self,
         user_jid: &jid::BareJid,
     ) -> Result<Vec<waddle_xmpp::roster::RosterItem>, XmppError> {
-        use crate::db::roster::DatabaseRosterStorage;
-
-        debug!(jid = %user_jid, "Getting roster");
-
-        let db = self.global_database().await?;
-        let storage = DatabaseRosterStorage::new(db);
-
-        let rows = storage.get_roster(user_jid).await.map_err(|e| {
-            warn!(jid = %user_jid, error = %e, "Failed to get roster");
-            XmppError::internal(format!("Database error: {}", e))
-        })?;
-
-        // Convert RosterItemRow to RosterItem
-        let items: Result<Vec<_>, _> = rows
-            .into_iter()
-            .map(|row| row_to_roster_item(&row))
-            .collect();
-
-        items.map_err(|e| {
-            warn!(jid = %user_jid, error = %e, "Failed to convert roster items");
-            XmppError::internal(format!("Roster conversion error: {}", e))
-        })
+        super::xmpp_roster_state::get_roster(self.global_database().await?, user_jid).await
     }
 
     /// Get a single roster item by JID.
@@ -938,25 +233,12 @@ impl waddle_xmpp::AppState for XmppAppState {
         user_jid: &jid::BareJid,
         contact_jid: &jid::BareJid,
     ) -> Result<Option<waddle_xmpp::roster::RosterItem>, XmppError> {
-        use crate::db::roster::DatabaseRosterStorage;
-
-        debug!(user = %user_jid, contact = %contact_jid, "Getting roster item");
-
-        let db = self.global_database().await?;
-        let storage = DatabaseRosterStorage::new(db);
-
-        let row = storage.get_roster_item(user_jid, contact_jid).await.map_err(|e| {
-            warn!(user = %user_jid, contact = %contact_jid, error = %e, "Failed to get roster item");
-            XmppError::internal(format!("Database error: {}", e))
-        })?;
-
-        match row {
-            Some(r) => row_to_roster_item(&r).map(Some).map_err(|e| {
-                warn!(user = %user_jid, contact = %contact_jid, error = %e, "Failed to convert roster item");
-                XmppError::internal(format!("Roster conversion error: {}", e))
-            }),
-            None => Ok(None),
-        }
+        super::xmpp_roster_state::get_roster_item(
+            self.global_database().await?,
+            user_jid,
+            contact_jid,
+        )
+        .await
     }
 
     /// Add or update a roster item.
@@ -965,30 +247,8 @@ impl waddle_xmpp::AppState for XmppAppState {
         user_jid: &jid::BareJid,
         item: &waddle_xmpp::roster::RosterItem,
     ) -> Result<waddle_xmpp::roster::RosterSetResult, XmppError> {
-        use crate::db::roster::{DatabaseRosterStorage, RosterRowChange, RosterRowMutationKind};
-
-        debug!(user = %user_jid, contact = %item.jid, "Setting roster item");
-
-        let db = self.global_database().await?;
-        let storage = DatabaseRosterStorage::new(db);
-
-        let (mutation, _lock) = storage
-            .apply_roster_change(user_jid, RosterRowChange::Upsert(roster_item_to_row(item)))
+        super::xmpp_roster_state::set_roster_item(self.global_database().await?, user_jid, item)
             .await
-            .map_err(|e| {
-                warn!(user = %user_jid, contact = %item.jid, error = %e, "Failed to set roster item");
-                XmppError::internal(format!("Database error: {}", e))
-            })?;
-
-        Ok(match mutation.kind {
-            RosterRowMutationKind::Added(_) => {
-                waddle_xmpp::roster::RosterSetResult::Added(item.clone())
-            }
-            RosterRowMutationKind::Updated(_) => {
-                waddle_xmpp::roster::RosterSetResult::Updated(item.clone())
-            }
-            RosterRowMutationKind::Removed(_) => unreachable!("Upsert never reports Removed"),
-        })
     }
 
     /// Remove a roster item.
@@ -997,24 +257,12 @@ impl waddle_xmpp::AppState for XmppAppState {
         user_jid: &jid::BareJid,
         contact_jid: &jid::BareJid,
     ) -> Result<bool, XmppError> {
-        use crate::db::roster::{DatabaseRosterStorage, RosterRowChange, RosterStorageError};
-
-        debug!(user = %user_jid, contact = %contact_jid, "Removing roster item");
-
-        let db = self.global_database().await?;
-        let storage = DatabaseRosterStorage::new(db);
-
-        match storage
-            .apply_roster_change(user_jid, RosterRowChange::Remove(contact_jid.clone()))
-            .await
-        {
-            Ok(_) => Ok(true),
-            Err(RosterStorageError::ItemNotFound) => Ok(false),
-            Err(e) => {
-                warn!(user = %user_jid, contact = %contact_jid, error = %e, "Failed to remove roster item");
-                Err(XmppError::internal(format!("Database error: {}", e)))
-            }
-        }
+        super::xmpp_roster_state::remove_roster_item(
+            self.global_database().await?,
+            user_jid,
+            contact_jid,
+        )
+        .await
     }
 
     /// Get the current roster version for a user.
@@ -1022,17 +270,7 @@ impl waddle_xmpp::AppState for XmppAppState {
         &self,
         user_jid: &jid::BareJid,
     ) -> Result<Option<String>, XmppError> {
-        use crate::db::roster::DatabaseRosterStorage;
-
-        debug!(jid = %user_jid, "Getting roster version");
-
-        let db = self.global_database().await?;
-        let storage = DatabaseRosterStorage::new(db);
-
-        storage.get_roster_version(user_jid).await.map_err(|e| {
-            warn!(jid = %user_jid, error = %e, "Failed to get roster version");
-            XmppError::internal(format!("Database error: {}", e))
-        })
+        super::xmpp_roster_state::get_roster_version(self.global_database().await?, user_jid).await
     }
 
     /// Update the subscription state for a roster item.
@@ -1043,46 +281,14 @@ impl waddle_xmpp::AppState for XmppAppState {
         subscription: waddle_xmpp::roster::Subscription,
         ask: Option<waddle_xmpp::roster::AskType>,
     ) -> Result<waddle_xmpp::roster::RosterItem, XmppError> {
-        use crate::db::roster::{DatabaseRosterStorage, RosterRowMutationKind};
-
-        debug!(
-            user = %user_jid,
-            contact = %contact_jid,
-            subscription = %subscription,
-            ask = ?ask,
-            "Updating roster subscription"
-        );
-
-        let db = self.global_database().await?;
-        let storage = DatabaseRosterStorage::new(db);
-
-        let subscription_str = subscription.as_str();
-        let ask_str = ask.map(|a| a.as_str());
-
-        let (mutation, _lock) = storage
-            .apply_subscription_update(user_jid, contact_jid, subscription_str, ask_str)
-            .await
-            .map_err(|e| {
-                warn!(
-                    user = %user_jid,
-                    contact = %contact_jid,
-                    error = %e,
-                    "Failed to update roster subscription"
-                );
-                XmppError::internal(format!("Database error: {}", e))
-            })?;
-
-        let row = match mutation.kind {
-            RosterRowMutationKind::Added(row) | RosterRowMutationKind::Updated(row) => row,
-            RosterRowMutationKind::Removed(_) => {
-                unreachable!("apply_subscription_update never reports Removed")
-            }
-        };
-
-        row_to_roster_item(&row).map_err(|e| {
-            warn!(user = %user_jid, contact = %contact_jid, error = %e, "Failed to convert roster item");
-            XmppError::internal(format!("Roster conversion error: {}", e))
-        })
+        super::xmpp_roster_state::update_roster_subscription(
+            self.global_database().await?,
+            user_jid,
+            contact_jid,
+            subscription,
+            ask,
+        )
+        .await
     }
 
     /// Get all roster items where the user should send presence updates.
@@ -1090,31 +296,8 @@ impl waddle_xmpp::AppState for XmppAppState {
         &self,
         user_jid: &jid::BareJid,
     ) -> Result<Vec<jid::BareJid>, XmppError> {
-        use crate::db::roster::DatabaseRosterStorage;
-
-        debug!(jid = %user_jid, "Getting presence subscribers");
-
-        let db = self.global_database().await?;
-        let storage = DatabaseRosterStorage::new(db);
-
-        let jid_strings = storage
-            .get_presence_subscribers(user_jid)
+        super::xmpp_roster_state::get_presence_subscribers(self.global_database().await?, user_jid)
             .await
-            .map_err(|e| {
-                warn!(jid = %user_jid, error = %e, "Failed to get presence subscribers");
-                XmppError::internal(format!("Database error: {}", e))
-            })?;
-
-        // Parse JID strings into BareJids
-        let jids: Result<Vec<_>, _> = jid_strings
-            .iter()
-            .map(|s| s.parse::<jid::BareJid>())
-            .collect();
-
-        jids.map_err(|e| {
-            warn!(jid = %user_jid, error = ?e, "Failed to parse presence subscriber JIDs");
-            XmppError::internal(format!("JID parse error: {:?}", e))
-        })
     }
 
     /// Get all roster items where the user receives presence updates.
@@ -1122,31 +305,11 @@ impl waddle_xmpp::AppState for XmppAppState {
         &self,
         user_jid: &jid::BareJid,
     ) -> Result<Vec<jid::BareJid>, XmppError> {
-        use crate::db::roster::DatabaseRosterStorage;
-
-        debug!(jid = %user_jid, "Getting presence subscriptions");
-
-        let db = self.global_database().await?;
-        let storage = DatabaseRosterStorage::new(db);
-
-        let jid_strings = storage
-            .get_presence_subscriptions(user_jid)
-            .await
-            .map_err(|e| {
-                warn!(jid = %user_jid, error = %e, "Failed to get presence subscriptions");
-                XmppError::internal(format!("Database error: {}", e))
-            })?;
-
-        // Parse JID strings into BareJids
-        let jids: Result<Vec<_>, _> = jid_strings
-            .iter()
-            .map(|s| s.parse::<jid::BareJid>())
-            .collect();
-
-        jids.map_err(|e| {
-            warn!(jid = %user_jid, error = ?e, "Failed to parse presence subscription JIDs");
-            XmppError::internal(format!("JID parse error: {:?}", e))
-        })
+        super::xmpp_roster_state::get_presence_subscriptions(
+            self.global_database().await?,
+            user_jid,
+        )
+        .await
     }
 
     // =========================================================================
@@ -1155,17 +318,7 @@ impl waddle_xmpp::AppState for XmppAppState {
 
     /// Get all blocked JIDs for a user.
     async fn get_blocklist(&self, user_jid: &jid::BareJid) -> Result<Vec<String>, XmppError> {
-        use crate::db::blocking::DatabaseBlockingStorage;
-
-        debug!(jid = %user_jid, "Getting blocklist");
-
-        let db = self.global_database().await?;
-        let storage = DatabaseBlockingStorage::new(db);
-
-        storage.get_blocklist(user_jid).await.map_err(|e| {
-            warn!(jid = %user_jid, error = %e, "Failed to get blocklist");
-            XmppError::internal(format!("Database error: {}", e))
-        })
+        super::xmpp_user_storage_state::get_blocklist(self.global_database().await?, user_jid).await
     }
 
     /// Check if a JID is blocked by a user.
@@ -1174,17 +327,12 @@ impl waddle_xmpp::AppState for XmppAppState {
         user_jid: &jid::BareJid,
         blocked_jid: &jid::BareJid,
     ) -> Result<bool, XmppError> {
-        use crate::db::blocking::DatabaseBlockingStorage;
-
-        debug!(user = %user_jid, blocked = %blocked_jid, "Checking if JID is blocked");
-
-        let db = self.global_database().await?;
-        let storage = DatabaseBlockingStorage::new(db);
-
-        storage.is_blocked(user_jid, blocked_jid).await.map_err(|e| {
-            warn!(user = %user_jid, blocked = %blocked_jid, error = %e, "Failed to check if blocked");
-            XmppError::internal(format!("Database error: {}", e))
-        })
+        super::xmpp_user_storage_state::is_blocked(
+            self.global_database().await?,
+            user_jid,
+            blocked_jid,
+        )
+        .await
     }
 
     /// Add JIDs to a user's blocklist.
@@ -1193,20 +341,12 @@ impl waddle_xmpp::AppState for XmppAppState {
         user_jid: &jid::BareJid,
         blocked_jids: &[String],
     ) -> Result<usize, XmppError> {
-        use crate::db::blocking::DatabaseBlockingStorage;
-
-        debug!(jid = %user_jid, count = blocked_jids.len(), "Adding blocks");
-
-        let db = self.global_database().await?;
-        let storage = DatabaseBlockingStorage::new(db);
-
-        storage
-            .add_blocks(user_jid, blocked_jids)
-            .await
-            .map_err(|e| {
-                warn!(jid = %user_jid, error = %e, "Failed to add blocks");
-                XmppError::internal(format!("Database error: {}", e))
-            })
+        super::xmpp_user_storage_state::add_blocks(
+            self.global_database().await?,
+            user_jid,
+            blocked_jids,
+        )
+        .await
     }
 
     /// Remove JIDs from a user's blocklist.
@@ -1215,35 +355,18 @@ impl waddle_xmpp::AppState for XmppAppState {
         user_jid: &jid::BareJid,
         blocked_jids: &[String],
     ) -> Result<usize, XmppError> {
-        use crate::db::blocking::DatabaseBlockingStorage;
-
-        debug!(jid = %user_jid, count = blocked_jids.len(), "Removing blocks");
-
-        let db = self.global_database().await?;
-        let storage = DatabaseBlockingStorage::new(db);
-
-        storage
-            .remove_blocks(user_jid, blocked_jids)
-            .await
-            .map_err(|e| {
-                warn!(jid = %user_jid, error = %e, "Failed to remove blocks");
-                XmppError::internal(format!("Database error: {}", e))
-            })
+        super::xmpp_user_storage_state::remove_blocks(
+            self.global_database().await?,
+            user_jid,
+            blocked_jids,
+        )
+        .await
     }
 
     /// Remove all JIDs from a user's blocklist.
     async fn remove_all_blocks(&self, user_jid: &jid::BareJid) -> Result<usize, XmppError> {
-        use crate::db::blocking::DatabaseBlockingStorage;
-
-        debug!(jid = %user_jid, "Removing all blocks");
-
-        let db = self.global_database().await?;
-        let storage = DatabaseBlockingStorage::new(db);
-
-        storage.remove_all_blocks(user_jid).await.map_err(|e| {
-            warn!(jid = %user_jid, error = %e, "Failed to remove all blocks");
-            XmppError::internal(format!("Database error: {}", e))
-        })
+        super::xmpp_user_storage_state::remove_all_blocks(self.global_database().await?, user_jid)
+            .await
     }
 
     // =========================================================================
@@ -1256,31 +379,7 @@ impl waddle_xmpp::AppState for XmppAppState {
         jid: &jid::BareJid,
         namespace: &str,
     ) -> Result<Option<String>, XmppError> {
-        debug!(jid = %jid, namespace = %namespace, "Getting private XML");
-
-        let row = self
-            .global_db_actor
-            .ask(DbQueryOne {
-                sql: "SELECT xml_content FROM private_xml_storage WHERE jid = ? AND namespace = ?"
-                    .to_string(),
-                params: vec![
-                    crate::db::Value::from(jid.to_string()),
-                    crate::db::Value::from(namespace.to_string()),
-                ],
-            })
-            .await
-            .map_err(|e| {
-                warn!(jid = %jid, namespace = %namespace, error = %e, "Failed to get private XML");
-                XmppError::internal(format!("Database actor error: {}", e))
-            })?;
-
-        match row {
-            Some(values) => row_value(&values, 0)
-                .and_then(|value| value.as_string())
-                .map(Some)
-                .map_err(|e| XmppError::internal(format!("Database error: {}", e))),
-            None => Ok(None),
-        }
+        super::xmpp_user_storage_state::get_private_xml(&self.global_db_actor, jid, namespace).await
     }
 
     /// Store/update private XML data for a user by namespace.
@@ -1290,24 +389,13 @@ impl waddle_xmpp::AppState for XmppAppState {
         namespace: &str,
         xml_content: &str,
     ) -> Result<(), XmppError> {
-        debug!(jid = %jid, namespace = %namespace, "Setting private XML");
-
-        self.global_db_actor
-            .ask(DbExecute {
-                sql: "INSERT OR REPLACE INTO private_xml_storage (jid, namespace, xml_content, updated_at) VALUES (?, ?, ?, datetime('now'))".to_string(),
-                params: vec![
-                    crate::db::Value::from(jid.to_string()),
-                    crate::db::Value::from(namespace.to_string()),
-                    crate::db::Value::from(xml_content.to_string()),
-                ],
-            })
-            .await
-            .map_err(|e| {
-                warn!(jid = %jid, namespace = %namespace, error = %e, "Failed to set private XML");
-                XmppError::internal(format!("Database actor error: {}", e))
-            })?;
-
-        Ok(())
+        super::xmpp_user_storage_state::set_private_xml(
+            &self.global_db_actor,
+            jid,
+            namespace,
+            xml_content,
+        )
+        .await
     }
 
     // =========================================================================
@@ -1315,14 +403,7 @@ impl waddle_xmpp::AppState for XmppAppState {
     // =========================================================================
 
     async fn list_inbox(&self, user_jid: &jid::BareJid) -> Result<Vec<InboxEntry>, XmppError> {
-        let storage = self
-            .inbox_storage
-            .as_ref()
-            .ok_or_else(|| XmppError::internal("Inbox storage not configured"))?;
-        storage.list(user_jid).await.map_err(|error| {
-            warn!(jid = %user_jid, error = %error, "Failed to list inbox");
-            XmppError::internal(format!("Inbox error: {}", error))
-        })
+        super::xmpp_user_storage_state::list_inbox(self.inbox_storage.as_deref(), user_jid).await
     }
 
     async fn upsert_inbox_entry(
@@ -1331,18 +412,13 @@ impl waddle_xmpp::AppState for XmppAppState {
         entry: InboxEntry,
         increment_unread: bool,
     ) -> Result<(), XmppError> {
-        let storage = self
-            .inbox_storage
-            .as_ref()
-            .ok_or_else(|| XmppError::internal("Inbox storage not configured"))?;
-        storage
-            .upsert(user_jid, entry, increment_unread)
-            .await
-            .map(|_| ())
-            .map_err(|error| {
-                warn!(jid = %user_jid, error = %error, "Failed to upsert inbox entry");
-                XmppError::internal(format!("Inbox error: {}", error))
-            })
+        super::xmpp_user_storage_state::upsert_inbox_entry(
+            self.inbox_storage.as_deref(),
+            user_jid,
+            entry,
+            increment_unread,
+        )
+        .await
     }
 
     async fn mark_inbox_read(
@@ -1350,33 +426,17 @@ impl waddle_xmpp::AppState for XmppAppState {
         user_jid: &jid::BareJid,
         partner_jid: &jid::BareJid,
     ) -> Result<(), XmppError> {
-        let storage = self
-            .inbox_storage
-            .as_ref()
-            .ok_or_else(|| XmppError::internal("Inbox storage not configured"))?;
-        storage
-            .mark_read(user_jid, partner_jid, None)
-            .await
-            .map_err(|error| {
-                warn!(
-                    jid = %user_jid,
-                    partner = %partner_jid,
-                    error = %error,
-                    "Failed to mark inbox conversation read"
-                );
-                XmppError::internal(format!("Inbox error: {}", error))
-            })
+        super::xmpp_user_storage_state::mark_inbox_read(
+            self.inbox_storage.as_deref(),
+            user_jid,
+            partner_jid,
+        )
+        .await
     }
 
     async fn inbox_total_unread(&self, user_jid: &jid::BareJid) -> Result<u64, XmppError> {
-        let storage = self
-            .inbox_storage
-            .as_ref()
-            .ok_or_else(|| XmppError::internal("Inbox storage not configured"))?;
-        storage.total_unread(user_jid).await.map_err(|error| {
-            warn!(jid = %user_jid, error = %error, "Failed to count inbox unread");
-            XmppError::internal(format!("Inbox error: {}", error))
-        })
+        super::xmpp_user_storage_state::inbox_total_unread(self.inbox_storage.as_deref(), user_jid)
+            .await
     }
 
     // =========================================================================
@@ -1385,70 +445,7 @@ impl waddle_xmpp::AppState for XmppAppState {
 
     /// List all channels in the canonical space.
     async fn list_space_channels(&self) -> Result<Vec<waddle_xmpp::ChannelInfo>, XmppError> {
-        debug!("Listing space channels for auto-join");
-
-        let actor = self.space_db_actor.as_ref().ok_or_else(|| {
-            warn!("Database pool not configured for auto-join channel enumeration");
-            XmppError::internal("Database pool not configured".to_string())
-        })?;
-
-        const PAGE_SIZE: usize = 200;
-        let mut offset = 0usize;
-        let mut result = Vec::new();
-
-        loop {
-            let rows = actor
-                .ask(DbQuery {
-                    sql: r#"
-                        SELECT id, name, channel_type
-                        FROM channels
-                        ORDER BY position ASC, created_at ASC
-                        LIMIT ? OFFSET ?
-                    "#
-                    .to_string(),
-                    params: vec![
-                        crate::db::Value::from(PAGE_SIZE as i64),
-                        crate::db::Value::from(offset as i64),
-                    ],
-                })
-                .await
-                .map_err(|e| {
-                    warn!(error = %e, "Failed to list channels");
-                    XmppError::internal(format!("Failed to list channels: {}", e))
-                })?;
-
-            let page_len = rows.len();
-            for row in rows {
-                let id = row_value(&row, 0)
-                    .and_then(|value| value.as_string())
-                    .map_err(|e| {
-                        XmppError::internal(format!("Failed to parse channel id: {}", e))
-                    })?;
-                let name = row_value(&row, 1)
-                    .and_then(|value| value.as_string())
-                    .map_err(|e| {
-                        XmppError::internal(format!("Failed to parse channel name: {}", e))
-                    })?;
-                let channel_type = row_value(&row, 2)
-                    .and_then(|value| value.as_string())
-                    .map_err(|e| {
-                        XmppError::internal(format!("Failed to parse channel type: {}", e))
-                    })?;
-                result.push(waddle_xmpp::ChannelInfo {
-                    id,
-                    name,
-                    channel_type,
-                });
-            }
-
-            if page_len < PAGE_SIZE {
-                break;
-            }
-            offset += PAGE_SIZE;
-        }
-
-        debug!(count = result.len(), "Found space channels");
-        Ok(result)
+        super::xmpp_space_state::list_space_channels(self.space_db_actor.as_ref()).await
     }
 
     /// Look up a channel-backed room by channel ID.
@@ -1456,63 +453,8 @@ impl waddle_xmpp::AppState for XmppAppState {
         &self,
         channel_id: &str,
     ) -> Result<Option<waddle_xmpp::ChannelRoomInfo>, XmppError> {
-        debug!(
-            channel_id = %channel_id,
-            "Looking up channel-backed room metadata"
-        );
-
-        let Some(actor) = self.space_db_actor.as_ref() else {
-            debug!("Database pool not configured for channel room lookup");
-            return Ok(None);
-        };
-
-        match actor
-            .ask(DbQueryOne {
-                sql: r#"
-                    SELECT id, name, channel_type
-                    FROM channels
-                    WHERE id = ?
-                "#
-                .to_string(),
-                params: vec![crate::db::Value::from(channel_id.to_string())],
-            })
+        super::xmpp_space_state::get_channel_room_info(self.space_db_actor.as_ref(), channel_id)
             .await
-        {
-            Ok(Some(row)) => {
-                let id = row_value(&row, 0)
-                    .and_then(|value| value.as_string())
-                    .map_err(|e| {
-                        XmppError::internal(format!("Failed to parse channel id: {}", e))
-                    })?;
-                let name = row_value(&row, 1)
-                    .and_then(|value| value.as_string())
-                    .map_err(|e| {
-                        XmppError::internal(format!("Failed to parse channel name: {}", e))
-                    })?;
-                let channel_type = row_value(&row, 2)
-                    .and_then(|value| value.as_string())
-                    .map_err(|e| {
-                        XmppError::internal(format!("Failed to parse channel type: {}", e))
-                    })?;
-                Ok(Some(waddle_xmpp::ChannelRoomInfo {
-                    waddle_id: "space".to_string(),
-                    channel: waddle_xmpp::ChannelInfo {
-                        id,
-                        name,
-                        channel_type,
-                    },
-                }))
-            }
-            Ok(None) => Ok(None),
-            Err(e) => {
-                warn!(
-                    channel_id = %channel_id,
-                    error = %e,
-                    "Failed to query channel from database actor"
-                );
-                Ok(None)
-            }
-        }
     }
 
     // =========================================================================
@@ -1521,161 +463,12 @@ impl waddle_xmpp::AppState for XmppAppState {
 
     /// Get detailed information about the canonical space.
     async fn get_space_details(&self) -> Result<Option<waddle_xmpp::SpaceDetails>, XmppError> {
-        Ok(Some(waddle_xmpp::SpaceDetails {
-            id: "space".to_string(),
-            name: self.domain.clone(),
-            description: None,
-            owner_id: "server".to_string(),
-            icon_url: None,
-            is_public: true,
-            created_at: "1970-01-01T00:00:00Z".to_string(),
-        }))
-    }
-}
-
-// =========================================================================
-// Roster Conversion Helpers
-// =========================================================================
-
-/// Convert a database roster item row to a waddle_xmpp RosterItem.
-#[cfg(test)]
-fn row_to_roster_item(
-    row: &crate::db::roster::RosterItemRow,
-) -> Result<waddle_xmpp::roster::RosterItem, String> {
-    let jid: jid::BareJid = row
-        .contact_jid
-        .parse()
-        .map_err(|e| format!("Invalid JID '{}': {:?}", row.contact_jid, e))?;
-
-    let subscription = row
-        .subscription
-        .parse::<waddle_xmpp::roster::Subscription>()
-        .map_err(|e| format!("Invalid subscription '{}': {}", row.subscription, e))?;
-
-    let ask = match &row.ask {
-        Some(a) => Some(
-            a.parse::<waddle_xmpp::roster::AskType>()
-                .map_err(|e| format!("Invalid ask '{}': {}", a, e))?,
-        ),
-        None => None,
-    };
-
-    Ok(waddle_xmpp::roster::RosterItem {
-        jid,
-        name: row.name.clone(),
-        subscription,
-        ask,
-        approved: row.approved,
-        groups: row.groups.clone(),
-    })
-}
-
-/// Convert a waddle_xmpp RosterItem to a database roster item row.
-#[cfg(test)]
-fn roster_item_to_row(item: &waddle_xmpp::roster::RosterItem) -> crate::db::roster::RosterItemRow {
-    crate::db::roster::RosterItemRow {
-        contact_jid: item.jid.to_string(),
-        name: item.name.clone(),
-        subscription: item.subscription.as_str().to_string(),
-        ask: item.ask.map(|a| a.as_str().to_string()),
-        approved: item.approved,
-        groups: item.groups.clone(),
+        Ok(Some(super::xmpp_space_state::get_space_details(
+            &self.domain,
+        )))
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::db::MigrationRunner;
-    use crate::permissions::{ObjectType, PermissionActor};
-    use waddle_xmpp::AppState;
-
-    async fn create_test_db() -> (Arc<Database>, ActorRef<DbActor>) {
-        let db = Database::in_memory("test-xmpp-state")
-            .await
-            .expect("Failed to create test database");
-        let db = Arc::new(db);
-
-        // Run migrations
-        let runner = MigrationRunner::global();
-        runner.run(&db).await.expect("Failed to run migrations");
-
-        let actor = kameo::spawn(DbActor::new((*db).clone()));
-        (db, actor)
-    }
-
-    #[tokio::test]
-    async fn test_xmpp_state_creation() {
-        let (db, actor) = create_test_db().await;
-        let state = XmppAppState::new(
-            "waddle.social".to_string(),
-            Arc::clone(&db),
-            actor,
-            kameo::spawn(PermissionActor::new_for_tests(db)),
-            None,
-        );
-
-        assert_eq!(state.domain(), "waddle.social");
-    }
-
-    #[tokio::test]
-    async fn test_parse_resource() {
-        let obj = XmppAppState::parse_resource("space:penguin-club").expect("Failed to parse");
-        assert_eq!(obj.object_type, ObjectType::Space);
-        assert_eq!(obj.id, "penguin-club");
-
-        let obj = XmppAppState::parse_resource("channel:general").expect("Failed to parse");
-        assert_eq!(obj.object_type, ObjectType::Channel);
-        assert_eq!(obj.id, "general");
-    }
-
-    #[tokio::test]
-    async fn test_parse_subject() {
-        let subj = XmppAppState::parse_subject("user:user-abc123").expect("Failed to parse");
-        assert_eq!(subj.id, "user-abc123");
-        assert!(subj.relation.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_parse_invalid_resource() {
-        let result = XmppAppState::parse_resource("invalid");
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn test_parse_invalid_subject() {
-        let result = XmppAppState::parse_subject("invalid");
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn test_private_xml_roundtrip_uses_actor_boundary() {
-        let (db, actor) = create_test_db().await;
-        let state = XmppAppState::new(
-            "waddle.social".to_string(),
-            Arc::clone(&db),
-            actor,
-            kameo::spawn(PermissionActor::new_for_tests(db)),
-            None,
-        );
-        let jid: jid::BareJid = "alice@waddle.social".parse().expect("valid bare jid");
-
-        state
-            .set_private_xml(
-                &jid,
-                "urn:xmpp:test",
-                "<prefs><theme>aether</theme></prefs>",
-            )
-            .await
-            .expect("set private xml");
-
-        let stored = state
-            .get_private_xml(&jid, "urn:xmpp:test")
-            .await
-            .expect("get private xml");
-        assert_eq!(
-            stored.as_deref(),
-            Some("<prefs><theme>aether</theme></prefs>")
-        );
-    }
-}
+#[path = "xmpp_state_tests.rs"]
+mod tests;

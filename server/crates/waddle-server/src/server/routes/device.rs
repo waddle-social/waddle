@@ -199,7 +199,7 @@ pub async fn device_poll_handler(
                     "Device code not found or expired",
                 )),
             )
-                .into_response()
+                .into_response();
         }
     };
 

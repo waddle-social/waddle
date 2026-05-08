@@ -1,0 +1,163 @@
+/* Ambient tint background */
+@layer base {
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    background:
+      linear-gradient(180deg, var(--ambient-veil), transparent 34rem),
+      linear-gradient(115deg, transparent 0 55%, var(--ambient-shadow) 100%);
+  }
+}
+
+/* Scrollbar — ghost-thin, luminous */
+@layer base {
+  ::-webkit-scrollbar {
+    width: 5px;
+    height: 5px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--muted-foreground);
+    border-radius: 99px;
+    opacity: 0.2;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--primary);
+    opacity: 0.4;
+  }
+}
+
+/* Message entrance — fluid, spatial */
+@keyframes message-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.995);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.animate-message-in {
+  animation: message-in 0.2s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+/* Typing dots — luminous pulse */
+@keyframes typing-dot {
+  0%, 60%, 100% { opacity: 0.2; transform: translateY(0); }
+  30% { opacity: 1; transform: translateY(-3px); }
+}
+
+.typing-dot {
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--primary);
+  animation: typing-dot 1.4s infinite;
+}
+.typing-dot:nth-child(2) { animation-delay: 0.2s; }
+.typing-dot:nth-child(3) { animation-delay: 0.4s; }
+
+/* Activity pulse — soft glow */
+@keyframes pulse-glow {
+  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 var(--glow); }
+  50% { opacity: 0.7; box-shadow: 0 0 8px 2px var(--glow-strong); }
+}
+
+.animate-pulse-glow {
+  animation: pulse-glow 2s ease-in-out infinite;
+}
+
+/* Fade in */
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.animate-fade-in {
+  animation: fade-in 0.2s ease-out both;
+}
+
+/* Slide up — spatial entrance */
+@keyframes slide-up {
+  from { opacity: 0; transform: translateY(12px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.animate-slide-up {
+  animation: slide-up 0.3s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+/* Glow ring for focus states */
+@keyframes focus-glow {
+  0%, 100% { box-shadow: 0 0 0 2px var(--glow), 0 0 12px 0 var(--glow); }
+  50% { box-shadow: 0 0 0 2px var(--glow-strong), 0 0 20px 4px var(--glow); }
+}
+
+/* Suppress the iOS Safari callout / selection while a long-press is in progress.
+   Tailwind's `select-none` omits the iOS-only -webkit-touch-callout property,
+   and without it the system "Copy / Share" magnifier appears mid-gesture. */
+.no-callout {
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* Visible flash when a user jumps to a replied-to message via the reply chip. */
+@keyframes message-jump-flash {
+  0% {
+    border-color: color-mix(in oklab, var(--primary) 55%, transparent);
+    background: color-mix(in oklab, var(--primary) 14%, transparent);
+  }
+  100% {
+    border-color: color-mix(in oklab, var(--primary) 14%, transparent);
+    background: color-mix(in oklab, var(--primary) 4%, transparent);
+  }
+}
+.message-jump-flash {
+  border-radius: var(--radius-md);
+}
+.chat-message-grid.message-jump-flash::before {
+  opacity: 1;
+  animation: message-jump-flash 1.8s ease-out both;
+}
+.chat-message-grid.message-jump-flash.message-jump-flash-fade::before {
+  border-color: transparent;
+  background: transparent;
+  transition:
+    background-color 1.4s ease-out,
+    border-color 1.4s ease-out;
+}
+
+/* Suppress unnecessary motion for users who prefer reduced stimulus */
+@media (prefers-reduced-motion: reduce) {
+  body::before {
+    animation: none;
+  }
+  .animate-message-in,
+  .animate-slide-up,
+  .animate-fade-in {
+    animation: none;
+  }
+  .animate-pulse-glow {
+    animation: none;
+  }
+  .typing-dot {
+    animation: none;
+    opacity: 0.6;
+  }
+  .message-jump-flash {
+    animation: none;
+    transition: none;
+  }
+  .chat-message-grid.message-jump-flash::before {
+    animation: none;
+    transition: none;
+  }
+}

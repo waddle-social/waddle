@@ -1,0 +1,231 @@
+use jid::BareJid;
+use waddle_xmpp_core::roster::RosterItem;
+
+use crate::messaging::MucAffiliation;
+
+// ── Domain types ─────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DiscoFeature(pub String);
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DiscoIdentity {
+    pub category: String,
+    pub identity_type: String,
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DiscoInfoResult {
+    pub jid: String,
+    pub node: Option<String>,
+    pub identities: Vec<DiscoIdentity>,
+    pub features: Vec<String>,
+    pub forms: Vec<DiscoDataForm>,
+}
+
+impl DiscoInfoResult {
+    pub fn has_feature(&self, feature: &str) -> bool {
+        self.features.iter().any(|f| f == feature)
+    }
+
+    pub fn has_form_value(&self, form_type: &str, field_var: &str, value: &str) -> bool {
+        self.forms
+            .iter()
+            .filter(|form| form.form_type.as_deref() == Some(form_type))
+            .flat_map(|form| &form.fields)
+            .any(|field| {
+                field.var == field_var
+                    && field.values.iter().any(|field_value| field_value == value)
+            })
+    }
+
+    pub fn form_value(&self, form_type: &str, field_var: &str) -> Option<&str> {
+        self.forms
+            .iter()
+            .filter(|form| form.form_type.as_deref() == Some(form_type))
+            .flat_map(|form| &form.fields)
+            .find(|field| field.var == field_var)
+            .and_then(|field| field.values.first())
+            .map(String::as_str)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DiscoDataForm {
+    pub form_type: Option<String>,
+    pub fields: Vec<DiscoDataField>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DiscoDataField {
+    pub var: String,
+    pub values: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DiscoItem {
+    pub jid: String,
+    pub name: Option<String>,
+    pub node: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct UploadSlot {
+    pub put_url: String,
+    pub get_url: String,
+    pub put_headers: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct InboxEntry {
+    pub jid: String,
+    pub unread_count: u32,
+    pub last_message_body: Option<String>,
+    pub timestamp: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SpaceNode(String);
+
+impl SpaceNode {
+    pub fn new(value: impl Into<String>) -> Option<Self> {
+        let value = value.into();
+        if value.trim().is_empty() {
+            None
+        } else {
+            Some(Self(value))
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DiscoveredSpace {
+    pub id: SpaceNode,
+    pub service_jid: BareJid,
+    pub name: String,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DiscoveredChannelType {
+    Text,
+    Announcement,
+    Forum,
+}
+
+impl DiscoveredChannelType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Text => "text",
+            Self::Announcement => "announcement",
+            Self::Forum => "forum",
+        }
+    }
+
+    pub fn from_metadata(value: &str) -> Option<Self> {
+        match value.trim() {
+            "text" => Some(Self::Text),
+            "announcement" => Some(Self::Announcement),
+            "forum" => Some(Self::Forum),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DiscoveredChannel {
+    pub id: String,
+    pub room_jid: BareJid,
+    pub name: String,
+    pub description: Option<String>,
+    pub channel_type: DiscoveredChannelType,
+    pub position: i32,
+    pub space_id: SpaceNode,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DiscoveredTopology {
+    pub spaces: Vec<DiscoveredSpace>,
+    pub channels: Vec<DiscoveredChannel>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WaddleInboxQuery {
+    pub since: Option<u64>,
+    pub only_unread: bool,
+    pub room: Option<String>,
+    pub threads: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WaddleInboxMarkRead {
+    pub partner: String,
+    pub thread: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WaddleInboxConversation {
+    pub partner: String,
+    pub kind: String,
+    pub last_stanza_id: Option<String>,
+    pub last_updated: Option<u64>,
+    pub unread: u32,
+    pub preview: Option<String>,
+    pub thread: Option<String>,
+    pub thread_title: Option<String>,
+    pub reply_count: Option<u32>,
+    pub author: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WaddleInboxResult {
+    pub total_unread: Option<u32>,
+    pub conversations: Vec<WaddleInboxConversation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RosterResult {
+    pub ver: Option<String>,
+    pub items: Vec<RosterItem>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UserSearchQuery {
+    pub nick: Option<String>,
+    pub email: Option<String>,
+    pub first: Option<String>,
+    pub last: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserSearchForm {
+    pub instructions: Option<String>,
+    pub fields: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserSearchItem {
+    pub jid: String,
+    pub nick: Option<String>,
+    pub email: Option<String>,
+    pub first: Option<String>,
+    pub last: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserSearchResult {
+    pub items: Vec<UserSearchItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MucAdminAffiliationItem {
+    pub jid: Option<String>,
+    pub nick: Option<String>,
+    pub affiliation: Option<MucAffiliation>,
+    pub reason: Option<String>,
+}

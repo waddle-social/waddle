@@ -1,0 +1,276 @@
+use super::*;
+
+#[instrument(skip(state))]
+pub(super) async fn callback_handler(
+    State(state): State<Arc<AuthState>>,
+    Query(query): Query<CallbackQuery>,
+) -> impl IntoResponse {
+    if let Some(err) = query.error {
+        let msg = query
+            .error_description
+            .unwrap_or_else(|| "provider returned an error".to_string());
+        return auth_error_to_response(AuthError::AuthorizationFailed(format!("{}: {}", err, msg)))
+            .into_response();
+    }
+
+    let (Some(code), Some(state_key)) = (query.code, query.state) else {
+        return auth_error_to_response(AuthError::InvalidRequest("missing code/state".to_string()))
+            .into_response();
+    };
+
+    let pending = match state.pending_auth.remove(&state_key) {
+        Some((_, pending)) => pending,
+        None => return auth_error_to_response(AuthError::InvalidState).into_response(),
+    };
+
+    if pending.is_expired() {
+        return auth_error_to_response(AuthError::InvalidState).into_response();
+    }
+
+    if pending.state != state_key {
+        return auth_error_to_response(AuthError::InvalidState).into_response();
+    }
+
+    let provider = match state.providers.get(&pending.provider_id) {
+        Some(p) => p,
+        None => {
+            return auth_error_to_response(AuthError::InvalidProvider(pending.provider_id))
+                .into_response();
+        }
+    };
+
+    let identity_claims = match provider.kind {
+        AuthProviderKind::Oidc => {
+            let mut provider_for_exchange = provider.clone();
+            provider_for_exchange.client_id = pending.client_id.clone();
+            provider_for_exchange.client_secret = pending.client_secret.clone();
+            provider_for_exchange.token_endpoint_auth_method = pending.token_endpoint_auth_method;
+            provider_for_exchange.require_dpop = pending.require_dpop;
+
+            let issuer = provider.issuer.as_deref().ok_or_else(|| {
+                AuthError::InvalidRequest("oidc provider missing issuer".to_string())
+            });
+            let issuer = match issuer {
+                Ok(v) => v,
+                Err(err) => return auth_error_to_response(err).into_response(),
+            };
+
+            let discovery = match oidc::discover(&state.http_client, issuer).await {
+                Ok(v) => v,
+                Err(err) => return auth_error_to_response(err).into_response(),
+            };
+
+            let token = match oidc::exchange_authorization_code(
+                &state.http_client,
+                &provider_for_exchange,
+                &discovery,
+                &code,
+                &pending.redirect_uri,
+                &pending.code_verifier,
+                pending.require_dpop,
+            )
+            .await
+            {
+                Ok(v) => v,
+                Err(err) => return auth_error_to_response(err).into_response(),
+            };
+
+            match oidc::claims_from_token_response(
+                &state.http_client,
+                &provider_for_exchange,
+                &discovery,
+                &token,
+                Some(&pending.nonce),
+            )
+            .await
+            {
+                Ok(v) => v,
+                Err(err) => return auth_error_to_response(err).into_response(),
+            }
+        }
+        AuthProviderKind::OAuth2 => {
+            let token_endpoint = match provider.token_endpoint.as_deref() {
+                Some(v) => v,
+                None => {
+                    return auth_error_to_response(AuthError::InvalidRequest(
+                        "oauth2 provider missing token_endpoint".to_string(),
+                    ))
+                    .into_response();
+                }
+            };
+
+            let userinfo_endpoint = match provider.userinfo_endpoint.as_deref() {
+                Some(v) => v,
+                None => {
+                    return auth_error_to_response(AuthError::InvalidRequest(
+                        "oauth2 provider missing userinfo_endpoint".to_string(),
+                    ))
+                    .into_response();
+                }
+            };
+
+            let token = match oauth2::exchange_code(
+                &state.http_client,
+                provider,
+                token_endpoint,
+                &code,
+                &pending.redirect_uri,
+                &pending.code_verifier,
+                pending.require_dpop,
+            )
+            .await
+            {
+                Ok(v) => v,
+                Err(err) => return auth_error_to_response(err).into_response(),
+            };
+
+            match oidc::claims_from_oauth2_fallback(
+                &state.http_client,
+                provider,
+                provider.issuer.clone(),
+                &token.access_token,
+                userinfo_endpoint,
+            )
+            .await
+            {
+                Ok(v) => v,
+                Err(err) => return auth_error_to_response(err).into_response(),
+            }
+        }
+    };
+
+    let linked = match state
+        .identity_service
+        .resolve_or_create_user(provider, &identity_claims)
+        .await
+    {
+        Ok(v) => v,
+        Err(err) => return auth_error_to_response(err).into_response(),
+    };
+
+    if let Err(err) = reconcile_user_membership(
+        &state.permission_actor,
+        &state.bootstrap_membership,
+        &linked.user.id,
+        &linked.user.xmpp_localpart,
+    )
+    .await
+    {
+        return auth_error_to_response(AuthError::DatabaseError(format!(
+            "Failed to provision account membership: {err}"
+        )))
+        .into_response();
+    }
+
+    let session = Session::new(
+        &linked.user.id,
+        &linked.user.username,
+        &linked.user.xmpp_localpart,
+    );
+
+    if let Err(err) = state.session_manager.create_session(&session).await {
+        return auth_error_to_response(err).into_response();
+    }
+
+    match pending.flow {
+        PendingFlow::Browser {
+            next,
+            session_transport,
+        } => {
+            let redirect_to = match session_transport {
+                BrowserSessionTransport::Cookie => next.unwrap_or_else(|| "/".to_string()),
+                BrowserSessionTransport::Fragment => {
+                    let target = next.unwrap_or_else(|| "/".to_string());
+                    let mut url = match url::Url::parse(&target) {
+                        Ok(parsed) => parsed,
+                        Err(_) => match url::Url::parse(&state.base_url)
+                            .and_then(|base| base.join(&target))
+                        {
+                            Ok(parsed) => parsed,
+                            Err(err) => {
+                                return auth_error_to_response(AuthError::InvalidRequest(format!(
+                                    "invalid browser redirect target: {}",
+                                    err
+                                )))
+                                .into_response();
+                            }
+                        },
+                    };
+
+                    let mut fragment = url::form_urlencoded::Serializer::new(String::new());
+                    if let Some(existing) = url.fragment() {
+                        for (key, value) in
+                            url::form_urlencoded::parse(existing.as_bytes()).into_owned()
+                        {
+                            if key != "waddle_session_id" {
+                                fragment.append_pair(&key, &value);
+                            }
+                        }
+                    }
+                    fragment.append_pair("waddle_session_id", &session.id);
+                    url.set_fragment(Some(&fragment.finish()));
+                    url.to_string()
+                }
+            };
+
+            let mut response = Redirect::temporary(&redirect_to).into_response();
+            response.headers_mut().append(
+                header::SET_COOKIE,
+                state
+                    .session_cookie_header(Some(&session.id), 60 * 60 * 24 * 30)
+                    .parse()
+                    .expect("valid cookie"),
+            );
+            response
+        }
+        PendingFlow::Device { device_code } => {
+            if let Some(mut entry) = state.device_auth.get_mut(&device_code) {
+                entry.status = DeviceAuthStatus::Approved;
+                entry.session_id = Some(session.id.clone());
+            }
+
+            (
+                StatusCode::OK,
+                axum::response::Html("<html><body><h1>Device authorized</h1><p>You can close this window.</p></body></html>".to_string()),
+            )
+                .into_response()
+        }
+        PendingFlow::Xmpp {
+            client_redirect_uri,
+            client_state,
+            client_code_challenge,
+        } => {
+            let auth_code = Uuid::new_v4().to_string();
+            state.xmpp_auth_codes.insert(
+                auth_code.clone(),
+                XmppAuthCode {
+                    session_id: session.id,
+                    redirect_uri: client_redirect_uri.clone(),
+                    code_challenge: client_code_challenge,
+                    created_at: Utc::now(),
+                },
+            );
+
+            let mut redirect = match url::Url::parse(&client_redirect_uri) {
+                Ok(v) => v,
+                Err(err) => {
+                    error!(error = %err, "Invalid XMPP redirect URI");
+                    return auth_error_to_response(AuthError::InvalidRequest(
+                        "invalid xmpp redirect_uri".to_string(),
+                    ))
+                    .into_response();
+                }
+            };
+
+            {
+                let mut qp = redirect.query_pairs_mut();
+                qp.append_pair("code", &auth_code);
+                if let Some(state_value) = client_state {
+                    qp.append_pair("state", &state_value);
+                }
+            }
+
+            Redirect::temporary(redirect.as_str()).into_response()
+        }
+    }
+}

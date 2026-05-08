@@ -1,0 +1,346 @@
+use crate::config::ServerConfig;
+use crate::server::extension_commands::{build_extension_manager, register_extension_commands};
+use crate::server::extension_host_adapter;
+use crate::server::extension_host_tools::DeferredExtensionHostTools;
+use crate::server::health::{
+    configure_cors, detailed_health_handler, health_handler, metrics_handler, readiness_handler,
+};
+use crate::server::routes;
+use crate::server::routes::auth::AuthState;
+use crate::server::routes::uploads::UploadState;
+use crate::server::routes::websocket::{
+    ProtocolServices, WebSocketDeps, WebSocketState, XmppServiceDomains,
+};
+use crate::server::session_janitors::{
+    spawn_graceful_shutdown_drain, spawn_pending_delivery_claim_janitor, spawn_sm_expiry_janitor,
+};
+use crate::server::topology::bootstrap_fresh_xmpp_topology;
+use crate::server::trace::make_request_span;
+use crate::server::{AppState, XmppConfig};
+use anyhow::Result;
+use axum::{routing::get, Router};
+use rustls_acme::tower::TowerHttp01ChallengeService;
+use std::sync::Arc;
+use tower_http::{
+    compression::CompressionLayer,
+    trace::{DefaultOnResponse, TraceLayer},
+};
+use tracing::{info, warn, Level};
+use waddle_xmpp::mam::{MamStorage, SqlxMamStorage};
+use waddle_xmpp::{muc::room_registry_actor::RoomRegistryActor, registry::ConnectionRegistry};
+
+pub(crate) struct HttpServerDeps {
+    pub(crate) state: Arc<AppState>,
+    pub(crate) server_config: ServerConfig,
+    pub(crate) xmpp_config: XmppConfig,
+    pub(crate) mam_storage: Arc<dyn MamStorage>,
+    pub(crate) acme_http01_challenge_service: Option<TowerHttp01ChallengeService>,
+    pub(crate) listener: tokio::net::TcpListener,
+    pub(crate) stop_token: tokio_util::sync::CancellationToken,
+    /// Q6 graceful-shutdown drain completion signal — fired by the
+    /// drain task when it finishes promoting unacked queues. The
+    /// HTTP server's graceful_shutdown closure waits on this after
+    /// stop_token cancels so the runtime doesn't tear down mid-drain.
+    pub(crate) drain_complete: Arc<tokio::sync::Notify>,
+}
+
+/// Start the HTTP server with graceful shutdown support.
+pub(crate) async fn start_http_server(deps: HttpServerDeps) -> Result<()> {
+    let HttpServerDeps {
+        state,
+        server_config,
+        xmpp_config,
+        mam_storage,
+        acme_http01_challenge_service,
+        listener,
+        stop_token,
+        drain_complete,
+    } = deps;
+
+    let app = create_router(
+        state,
+        server_config,
+        xmpp_config,
+        mam_storage,
+        acme_http01_challenge_service,
+        stop_token.clone(),
+        drain_complete.clone(),
+    )
+    .await?;
+
+    let addr = listener.local_addr()?;
+    info!("Starting Axum HTTP server on {}", addr);
+
+    // When WADDLE_HTTP_PORT_FILE is set, write the bound port so test
+    // harnesses can discover it after binding to port 0.
+    if let Ok(path) = std::env::var("WADDLE_HTTP_PORT_FILE") {
+        if let Err(e) = std::fs::write(&path, addr.port().to_string()) {
+            warn!(path = %path, error = %e, "Failed to write HTTP port file");
+        }
+    }
+
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            stop_token.cancelled().await;
+            info!("HTTP server received shutdown signal; awaiting SM Q6 drain");
+            drain_complete.notified().await;
+            info!("HTTP server: SM drain complete; draining connections");
+        })
+        .await?;
+
+    Ok(())
+}
+
+pub(crate) async fn create_websocket_mam_storage(
+    database_url: Option<String>,
+) -> Result<Arc<dyn MamStorage>> {
+    let storage = match database_url.as_deref() {
+        Some(database_url) => SqlxMamStorage::open(database_url).await,
+        None => SqlxMamStorage::open_in_memory().await,
+    }
+    .map_err(|error| anyhow::anyhow!("Failed to initialize WebSocket MAM storage: {error}"))?;
+
+    Ok(Arc::new(storage))
+}
+
+/// Create the Axum router with all routes and middleware.
+pub(crate) async fn create_router(
+    state: Arc<AppState>,
+    server_config: ServerConfig,
+    xmpp_config: XmppConfig,
+    mam_storage: Arc<dyn MamStorage>,
+    acme_http01_challenge_service: Option<TowerHttp01ChallengeService>,
+    shutdown_stop_token: tokio_util::sync::CancellationToken,
+    drain_complete: Arc<tokio::sync::Notify>,
+) -> Result<Router> {
+    // Create auth broker state
+    let encryption_key = server_config.session_key.clone();
+
+    let auth_state = Arc::new(AuthState::new(
+        state.clone(),
+        &server_config,
+        encryption_key.as_ref().map(|s| s.as_bytes()),
+    ));
+
+    let websocket_state = create_websocket_state(
+        Arc::clone(&state),
+        &server_config,
+        &xmpp_config,
+        Arc::clone(&auth_state),
+        mam_storage,
+    )
+    .await?;
+
+    spawn_sm_expiry_janitor(&websocket_state);
+    spawn_pending_delivery_claim_janitor(&websocket_state);
+    spawn_graceful_shutdown_drain(
+        Arc::clone(&websocket_state),
+        shutdown_stop_token,
+        Arc::clone(&drain_complete),
+    );
+
+    let websocket_router = routes::websocket::router(websocket_state);
+
+    // Upload router for XEP-0363 HTTP File Upload
+    let upload_state = Arc::new(UploadState::new(state.clone()));
+    let upload_router = routes::uploads::router(upload_state);
+
+    // Well-known endpoints for XMPP service discovery (XEP-0156)
+    let well_known_router = routes::well_known::router(auth_state.clone());
+
+    // Build the base router with operational health endpoints.
+    let mut router = Router::new()
+        .route("/health", get(health_handler))
+        .route("/healthz", get(health_handler))
+        .route("/ready", get(readiness_handler))
+        .route("/readyz", get(readiness_handler))
+        .route("/metrics", get(metrics_handler))
+        .route("/api/v1/health", get(detailed_health_handler))
+        .with_state(state);
+
+    if let Some(challenge_service) = acme_http01_challenge_service {
+        router = router.route_service(
+            "/.well-known/acme-challenge/:challenge_token",
+            challenge_service,
+        );
+    }
+
+    // Always merge auth surfaces. If no providers are configured these endpoints
+    // return explicit errors.
+    let auth_router = routes::auth::router(auth_state.clone());
+    let device_router = routes::device::router(auth_state.clone());
+    let xmpp_oauth_router = routes::xmpp_oauth::router(auth_state.clone());
+    let auth_page_router = routes::auth_page::router(auth_state.clone());
+
+    router = router
+        .merge(auth_router)
+        .merge(device_router)
+        .merge(xmpp_oauth_router)
+        .merge(auth_page_router);
+
+    // Always merge common routes required by XMPP, auth, upload, and operations.
+    let router = router
+        // Merge XMPP over WebSocket endpoint
+        .merge(websocket_router)
+        // Merge well-known endpoints for XMPP service discovery
+        .merge(well_known_router)
+        // Merge upload routes for XEP-0363 HTTP File Upload
+        .merge(upload_router)
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(make_request_span)
+                .on_response(DefaultOnResponse::new().level(Level::INFO)),
+        )
+        .layer(CompressionLayer::new())
+        .layer(configure_cors());
+    Ok(router)
+}
+
+async fn create_websocket_state(
+    state: Arc<AppState>,
+    server_config: &ServerConfig,
+    xmpp_config: &XmppConfig,
+    auth_state: Arc<AuthState>,
+    mam_storage: Arc<dyn MamStorage>,
+) -> Result<Arc<WebSocketState>> {
+    // Create connection registry for WebSocket message routing
+    let connection_registry = Arc::new(ConnectionRegistry::new());
+
+    // Create MUC room registry with the XMPP domain (not the HTTP base_url host)
+    let xmpp_domain = auth_state.xmpp_domain.clone();
+    let service_domains = XmppServiceDomains::new(&xmpp_domain, &xmpp_config.component_domain);
+    let room_registry = kameo::spawn(RoomRegistryActor::new(
+        service_domains.muc.clone(),
+        server_config.occupant_id_secret.clone(),
+    ));
+
+    let deferred_extension_host_tools = Arc::new(DeferredExtensionHostTools::default());
+    let extension_manager = build_extension_manager(
+        server_config,
+        &xmpp_domain,
+        Arc::clone(&deferred_extension_host_tools),
+    )
+    .await?;
+
+    let websocket_command_registry = Arc::new(waddle_xmpp::commands::CommandRegistry::new());
+
+    // Build the sans-I/O stanza dispatcher with the handlers migrated so far.
+    // See `waddle_xmpp::protocol` for the state-machine design; any IQ
+    // namespace registered here short-circuits the legacy string-matching
+    // path in `routes::websocket::handle_iq`.
+    let mut stanza_dispatcher = waddle_xmpp::protocol::StanzaDispatcher::new();
+    waddle_xmpp::protocol::handlers::register_default_handlers(&mut stanza_dispatcher);
+    waddle_xmpp::protocol::handlers::register_default_message_handlers(&mut stanza_dispatcher);
+    let stanza_dispatcher = Arc::new(stanza_dispatcher);
+
+    // Shared durable PubSub/PEP storage for the WebSocket transport (XEP-0060/0163).
+    let pubsub_storage =
+        crate::pubsub::build_pubsub_storage(xmpp_config.pubsub_database_url.clone()).await?;
+    let extension_pubsub_owner: jid::BareJid = service_domains.extensions.parse()?;
+    register_extension_commands(
+        Arc::clone(&extension_manager),
+        Arc::clone(&websocket_command_registry),
+        Arc::clone(&pubsub_storage),
+        extension_pubsub_owner,
+        Arc::clone(&state),
+    )
+    .await;
+    if let Err(error) =
+        bootstrap_fresh_xmpp_topology(&state, Arc::clone(&pubsub_storage), &service_domains).await
+    {
+        warn!(error = %error, "Failed to bootstrap fresh XMPP topology");
+    }
+    let push_store: Arc<dyn waddle_xmpp::push::PushSubscriptionStore> =
+        Arc::new(waddle_xmpp::push::InMemoryPushStore::new());
+
+    let sm_session_registry = create_sm_session_registry(xmpp_config).await;
+    let resumable_sessions: Arc<dashmap::DashMap<String, crate::auth::Session>> =
+        Arc::new(dashmap::DashMap::new());
+    let blocking_storage: Arc<dyn waddle_xmpp::xep::xep0191::BlockingStorage> = Arc::new(
+        crate::db::blocking::DatabaseBlockingStorage::new(state.db_pool.global().clone()),
+    );
+    let pending_delivery_storage = create_pending_delivery_storage(xmpp_config).await;
+
+    let websocket_state = Arc::new(WebSocketState {
+        deps: WebSocketDeps {
+            app_state: state.clone(),
+            auth_state: auth_state.clone(),
+            service_domains,
+            protocol: ProtocolServices {
+                connection_registry,
+                room_registry,
+                mam_storage,
+                inbox_storage: Arc::clone(&state.inbox_storage),
+                blocking_storage,
+                pending_delivery_storage,
+                command_registry: websocket_command_registry,
+                extension_manager,
+                dispatcher: stanza_dispatcher,
+                pubsub_storage,
+                push_store,
+                isr_token_store: waddle_xmpp::isr::create_shared_store(),
+                sm_session_registry,
+                resumable_sessions,
+            },
+            occupant_id_secret: server_config.occupant_id_secret.clone(),
+        },
+    });
+    deferred_extension_host_tools.set(Arc::new(extension_host_adapter::ExtensionHostAdapter::new(
+        Arc::clone(&websocket_state),
+    )));
+    Ok(websocket_state)
+}
+
+async fn create_sm_session_registry(
+    xmpp_config: &XmppConfig,
+) -> Arc<waddle_xmpp::stream_management::InMemorySmSessionRegistry> {
+    let sm_database_url = xmpp_config.sm_database_url.clone();
+    if sm_database_url.is_none() {
+        warn!(
+            "Neither WADDLE_XMPP_SM_DATABASE_URL nor WADDLE_DATABASE_URL is set; \
+             falling back to in-memory SQLite for SM session persistence. \
+             Detached XEP-0198 sessions will NOT survive restart. Set one of \
+             these env vars for durable session resumption (issue #209)."
+        );
+    }
+    let sm_persistence: Arc<dyn waddle_xmpp::stream_management::persistence::SmPersistenceStorage> =
+        Arc::new(
+            crate::sm_persistence::DatabaseSmPersistence::open(sm_database_url.as_deref())
+                .await
+                .expect("open SM persistence storage"),
+        );
+    let sm_session_registry = waddle_xmpp::stream_management::InMemorySmSessionRegistry::new()
+        .with_persistence(Arc::clone(&sm_persistence));
+    if let Err(error) = sm_session_registry.restore_from_persistence().await {
+        warn!(
+            error = %error,
+            "restore_from_persistence failed at startup; continuing with empty \
+             in-memory SM session view. XEP-0198 resume will return <failed/> \
+             until storage health is restored."
+        );
+    }
+    Arc::new(sm_session_registry)
+}
+
+async fn create_pending_delivery_storage(
+    xmpp_config: &XmppConfig,
+) -> Arc<dyn waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage> {
+    let pending_delivery_url = xmpp_config.pending_delivery_database_url.clone();
+    if pending_delivery_url.is_none() {
+        warn!(
+            "Neither WADDLE_XMPP_PENDING_DELIVERY_DATABASE_URL nor \
+             WADDLE_DATABASE_URL is set; falling back to in-memory SQLite. \
+             Offline DMs queued via XEP-0160 will NOT survive restart. \
+             Set one of these env vars to a SQLite path or Postgres URL \
+             for durable offline delivery (issue #209)."
+        );
+    }
+    Arc::new(
+        crate::pending_delivery::DatabasePendingDeliveryStorage::open(
+            pending_delivery_url.as_deref(),
+            waddle_xmpp::pending_delivery::QuotaPolicy::default_policy(),
+        )
+        .await
+        .expect("open pending_delivery storage"),
+    )
+}

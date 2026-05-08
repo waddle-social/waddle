@@ -1,0 +1,14 @@
+/* ---------- reduced motion ---------- */
+
+@media (prefers-reduced-motion: reduce) {
+  html,
+  .celestial,
+  .celestial-slot,
+  .stars span,
+  .snow span,
+  .logo,
+  .waitlist-spinner::before {
+    animation: none !important;
+    transition: none !important;
+  }
+}

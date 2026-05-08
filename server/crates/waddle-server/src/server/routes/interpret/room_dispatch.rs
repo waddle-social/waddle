@@ -1,0 +1,323 @@
+use super::*;
+
+pub(super) async fn dispatch_to_room(
+    deps: &Deps<'_>,
+    room_jid: jid::BareJid,
+    incoming: Message,
+    recursion_depth: u8,
+) -> InterpretOutcome {
+    let mut outcome = InterpretOutcome::default();
+    let Some(state) = deps.web_socket_state else {
+        warn!(
+            variant = "DispatchToRoom",
+            room = %room_jid,
+            "DispatchToRoom: no web_socket_state in Deps; dropping. \
+             Production must populate web_socket_state."
+        );
+        return outcome;
+    };
+    let Some(room_registry) = deps.room_registry else {
+        warn!(
+            variant = "DispatchToRoom",
+            room = %room_jid,
+            "DispatchToRoom: no room_registry in Deps; dropping"
+        );
+        return outcome;
+    };
+    let Some(sender_full) = incoming
+        .from
+        .as_ref()
+        .and_then(|jid| jid.clone().try_into_full().ok())
+    else {
+        warn!(
+            room = %room_jid,
+            "DispatchToRoom: message.from is missing or not a full JID; dropping"
+        );
+        return outcome;
+    };
+
+    // 1. Prepare the prototype the room gate sees. Enrichment is delayed
+    //    until after occupancy / managed-room validation so unauthorized
+    //    senders receive the XEP-0045 room error before any Waddle-specific
+    //    extension payload checks or extension runtime calls.
+    let mut prototype = incoming.clone();
+    if prototype.id.is_none() {
+        prototype.id = Some(uuid::Uuid::new_v4().to_string());
+    }
+    prototype.type_ = XmppMessageType::Groupchat;
+    // Strip any client-claimed `<stanza-id by='room'/>` so the chain's
+    // canonicalize handler stamps the canonical value. Mirrors the
+    // legacy `remove_stanza_ids_by` call.
+    remove_stanza_ids_by(&mut prototype, &jid::Jid::from(room_jid.clone()));
+    // 2. Look up the room actor + snapshot in one round-trip each.
+    let room_actor = match room_registry
+        .ask(GetRoom {
+            room_jid: room_jid.clone(),
+        })
+        .await
+    {
+        Ok(Some(actor)) => actor,
+        Ok(None) => {
+            warn!(room = %room_jid, "DispatchToRoom: room not registered; dropping");
+            return outcome;
+        }
+        Err(error) => {
+            warn!(
+                room = %room_jid,
+                error = ?error,
+                "DispatchToRoom: room registry lookup failed; dropping"
+            );
+            return outcome;
+        }
+    };
+    let snapshot = match room_actor
+        .ask(GetRoomSnapshot {
+            sender_jid: sender_full.clone(),
+        })
+        .await
+    {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            warn!(
+                room = %room_jid,
+                error = ?error,
+                "DispatchToRoom: GetRoomSnapshot failed; dropping"
+            );
+            return outcome;
+        }
+    };
+
+    // 3. Managed-room owner override (announcements room admits
+    //    server owners only). Pre-derived synchronously here so the
+    //    chain's `OccupancyValidationHandler` can read
+    //    `managed_room_forbidden` without an async permission call.
+    let managed_room_forbidden =
+        if parse_managed_room_jid(&room_jid).as_deref() == Some("announcements") {
+            !session_is_server_owner(state, deps.authenticated_session).await
+        } else {
+            false
+        };
+
+    // 4. Run the chain's occupancy / managed-room gate FIRST, BEFORE
+    //    rich-target validation (Copilot review on PR #279). Otherwise
+    //    a non-occupant or managed-room-forbidden sender would receive
+    //    rich-target errors (potentially leaking archive-derived info
+    //    like `<item-not-found/>`) instead of the required XEP-0045
+    //    §7.4 `<not-acceptable/>` / managed-room `<forbidden/>` reply.
+    //    The gate handler (`OccupancyValidationHandler`) is sync and
+    //    pure — calling it directly here is equivalent to running a
+    //    one-handler dispatcher, with no extra allocation.
+    let occupants: Vec<OccupantSnapshot> = snapshot
+        .occupants
+        .iter()
+        .map(|o| OccupantSnapshot {
+            full_jid: o.full_jid.clone(),
+            nick: o.nick.clone(),
+            affiliation: o.affiliation,
+            role: o.role,
+        })
+        .collect();
+    let id_gen = UuidV4Generator;
+    // Capture a single dispatch timestamp here so every per-occupant
+    // `ProjectGroupchatInbox` event the chain emits carries the same
+    // value (Copilot review on PR #279). Avoids per-occupant
+    // `Utc::now()` drift across a second-boundary.
+    let dispatch_timestamp = chrono::Utc::now().timestamp();
+    normalize_thread_create_source(&mut prototype);
+    let gate_ctx = RoomContext {
+        room: &room_jid,
+        sender_full: &sender_full,
+        occupants: &occupants,
+        managed_room_forbidden,
+        room_moderated: snapshot.config.moderated,
+        id_gen: &id_gen,
+        occupant_id_secret: &state.deps.occupant_id_secret,
+        sender_nickname_generation: snapshot.sender_nickname_generation.unwrap_or(0),
+        project_sender_inbox: true,
+        dispatch_timestamp,
+    };
+    let mut gate_working = prototype.clone();
+    remove_framework_envelopes(&mut gate_working);
+    use waddle_xmpp::protocol::room::RoomHandler;
+    let gate_outcome =
+        waddle_xmpp::protocol::room::occupancy_validation::OccupancyValidationHandler
+            .handle(&mut gate_working, &gate_ctx);
+    if let waddle_xmpp::protocol::room::RoomHandlerOutcome::Halt(gate_events) = gate_outcome {
+        // Fold the nested outcome's full state — frames, close
+        // signal, and async-callback feedback — back into the outer
+        // outcome (Copilot review on PR #279). Dropping `close` /
+        // `feedback` would silently lose stream-close requests or
+        // pending callback completions if a future gate handler ever
+        // emits them.
+        let nested = Box::pin(interpret_with_depth(gate_events, deps, recursion_depth)).await;
+        outcome.frames.extend(nested.frames);
+        outcome.close = outcome.close || nested.close;
+        outcome.feedback.extend(nested.feedback);
+        return outcome;
+    }
+
+    if message_has_framework_envelope(&prototype) {
+        let mut sanitized = incoming.clone();
+        remove_framework_envelopes(&mut sanitized);
+        let reply = build_message_error_reply(
+            &sanitized,
+            &room_jid,
+            &sender_full,
+            bad_request_error("Client-authored Waddle extension envelopes are not allowed."),
+        );
+        match Stanza::Message(reply).to_element_string() {
+            Ok(xml) => outcome.frames.push(xml),
+            Err(error) => {
+                warn!(
+                    room = %room_jid,
+                    %error,
+                    "DispatchToRoom: failed to serialize framework-envelope rejection"
+                );
+            }
+        }
+        return outcome;
+    }
+
+    // 5. Enrich the message before the post-gate chain sees it. The legacy
+    //    bridge enriched on the prototype before
+    //    `BuildGroupchatBroadcast`, so reflected copies carry the
+    //    enrichment payloads. Fail-open: extension errors leave the
+    //    message unchanged.
+    let waddle_id = waddle_id_for_room_jid(&room_jid);
+    let sender_room_nick_jid = snapshot
+        .sender_nick
+        .as_deref()
+        .and_then(|nick| room_jid.clone().with_resource_str(nick).ok().map(Jid::from));
+    if let Some(sender_room_nick_jid) = sender_room_nick_jid.as_ref() {
+        prototype.from = Some(sender_room_nick_jid.clone());
+    }
+    let _extension_outcome = state
+        .deps
+        .protocol
+        .extension_manager
+        .process_message_enrichments_for_waddle_with_requester(
+            &mut prototype,
+            waddle_id,
+            Some(sender_full.to_bare()),
+        )
+        .await;
+    // 6. Rich-target validation against the room archive. Runs only
+    //    after the gate has admitted the sender, so non-occupants /
+    //    managed-room-forbidden senders never see archive-derived
+    //    error conditions. Archive rows store `from` in the XEP-0045
+    //    §7.2.13 `room/nick` form (the chain stamps it AFTER
+    //    validation), so derive that view here for the same-sender
+    //    comparison rather than relying on `prototype.from` (alice's
+    //    real full JID).
+    if let Err(stanza_error) = validate_groupchat_rich_targets(
+        deps,
+        &room_jid,
+        &prototype,
+        sender_room_nick_jid.as_ref(),
+        &room_actor,
+        snapshot.sender_nickname_generation,
+    )
+    .await
+    {
+        let reply = build_message_error_reply(&incoming, &room_jid, &sender_full, stanza_error);
+        match Stanza::Message(reply).to_element_string() {
+            Ok(xml) => outcome.frames.push(xml),
+            Err(error) => {
+                warn!(
+                    room = %room_jid,
+                    %error,
+                    "DispatchToRoom: failed to serialize rich-target error reply"
+                );
+            }
+        }
+        return outcome;
+    }
+
+    // 7. Build context + run the rest of the chain (canonicalize,
+    //    archive, inbox, reflect). Reuse the `gate_ctx` config — same
+    //    snapshot, same managed-room flag, same id-gen.
+    let ctx = RoomContext {
+        room: &room_jid,
+        sender_full: &sender_full,
+        occupants: &occupants,
+        managed_room_forbidden,
+        // XEP-0045 §7.5 (Copilot review on PR #279): the chain's
+        // `OccupancyValidationHandler` enforces visitor-may-not-speak
+        // against this flag + the sender's snapshot role, replacing
+        // the legacy `RoomActor::BuildGroupchatBroadcast` check that
+        // previously emitted `RoomActorError::VisitorMayNotSpeak`.
+        room_moderated: snapshot.config.moderated,
+        id_gen: &id_gen,
+        occupant_id_secret: &state.deps.occupant_id_secret,
+        // Carry the sender's nickname-generation through the chain
+        // so `MucArchiveHandler` can stamp it directly on
+        // `OutboundEvent::ArchiveGroupchat`. Avoids a second
+        // `RoomActor::GetRoomSnapshot` round-trip per groupchat
+        // archive write (Copilot review on PR #279).
+        sender_nickname_generation: snapshot.sender_nickname_generation.unwrap_or(0),
+        project_sender_inbox: true,
+        dispatch_timestamp,
+    };
+    let mut working = prototype;
+    // Run only the post-gate pipeline (canonicalize → archive → inbox
+    // → reflector). The occupancy gate already ran above as an
+    // explicit stand-alone call (Copilot review on PR #279); using
+    // the full `default_room_dispatcher()` here would re-run it.
+    let dispatch_outcome = default_room_pipeline_dispatcher().dispatch(&mut working, &ctx);
+    let observer_message = working.clone();
+
+    // 6. Recursively interpret the chain's emitted events. Pass the
+    //    depth through unchanged: `recursion_depth` is the headless
+    //    offline-recipient pass guard, and the room handler chain
+    //    legitimately emits one `RouteToConnection` per occupant —
+    //    including offline ones, which the `RouteToConnection` arm
+    //    promotes to a headless recipient pass (depth bumped there).
+    //    Bumping here would break that path for every offline
+    //    occupant.
+    let nested = Box::pin(interpret_with_depth(
+        dispatch_outcome.events,
+        deps,
+        recursion_depth,
+    ))
+    .await;
+    outcome.frames.extend(nested.frames);
+    if nested.close {
+        outcome.close = true;
+    }
+    outcome.feedback.extend(nested.feedback);
+
+    let mut observer_message = observer_message;
+    let observer_outcome = state
+        .deps
+        .protocol
+        .extension_manager
+        .process_message_observers_for_waddle_with_requester(
+            &mut observer_message,
+            waddle_id_for_room_jid(&room_jid),
+            Some(sender_full.to_bare()),
+        )
+        .await;
+    for effect in observer_outcome.effects {
+        if let ExtensionEffect::HostWarning(message) = effect {
+            warn!(warning = %message.as_str(), "extension message observer emitted host warning");
+            let reply = build_message_error_reply(
+                &incoming,
+                &room_jid,
+                &sender_full,
+                service_unavailable_error(message.as_str()),
+            );
+            match Stanza::Message(reply).to_element_string() {
+                Ok(xml) => outcome.frames.push(xml),
+                Err(error) => {
+                    warn!(
+                        room = %room_jid,
+                        %error,
+                        "DispatchToRoom: failed to serialize extension warning error reply"
+                    );
+                }
+            }
+        }
+    }
+
+    outcome
+}

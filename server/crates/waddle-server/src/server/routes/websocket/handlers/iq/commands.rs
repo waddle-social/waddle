@@ -1,3 +1,4 @@
+use super::extension_forms::is_extension_command_node;
 use super::*;
 
 pub(super) async fn handle_command_iq(

@@ -1,0 +1,89 @@
+@layer components {
+.chat-settings-form {
+  display: grid;
+  gap: var(--space-md);
+}
+
+.chat-settings-field-row {
+  display: grid;
+  gap: var(--space-sm);
+}
+
+.chat-rail-logo-slot {
+  width: var(--chat-rail-logo-size);
+  height: var(--chat-rail-logo-size);
+}
+
+.chat-rail-logo-mark {
+  width: var(--chat-rail-logo-mark-size);
+  height: var(--chat-rail-logo-mark-size);
+}
+
+.chat-rail-divider-horizontal {
+  width: 1px;
+  height: var(--chat-rail-divider-length);
+}
+
+.chat-rail-divider-vertical {
+  width: var(--chat-rail-divider-length);
+  height: 1px;
+}
+
+.chat-rail-indicator-horizontal {
+  width: var(--chat-rail-indicator-length);
+  height: var(--chat-rail-indicator-thickness);
+}
+
+.chat-rail-indicator-vertical {
+  width: var(--chat-rail-indicator-thickness);
+  height: var(--chat-rail-indicator-length);
+}
+
+.chat-lightbox-frame {
+  max-width: var(--chat-lightbox-max-width);
+  max-height: var(--chat-lightbox-max-height);
+}
+
+.chat-lightbox-image {
+  max-width: var(--chat-lightbox-max-width);
+  max-height: var(--chat-lightbox-image-max-height);
+}
+
+.chat-lightbox-caption {
+  display: block;
+  min-width: 0;
+  max-width: var(--chat-lightbox-caption-width);
+}
+
+@media (min-width: 40rem) {
+  .chat-settings-field-row {
+    grid-template-columns: minmax(0, var(--chat-settings-label-width)) 1fr;
+  }
+}
+
+@media (min-width: 64rem) {
+  .chat-settings-form {
+    grid-template-columns: minmax(0, var(--chat-settings-label-width)) 1fr;
+  }
+}
+
+.z-sticky {
+  z-index: var(--z-sticky);
+}
+
+.z-floating {
+  z-index: var(--z-floating);
+}
+
+.z-popover {
+  z-index: var(--z-popover);
+}
+
+.z-modal {
+  z-index: var(--z-modal);
+}
+
+.z-lightbox {
+  z-index: var(--z-lightbox);
+}
+}

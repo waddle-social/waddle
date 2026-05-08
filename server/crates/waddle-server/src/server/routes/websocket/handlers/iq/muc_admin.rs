@@ -43,7 +43,7 @@ pub(super) async fn handle_muc_admin_iq(
                 response_from,
                 response_to,
                 internal_server_error_iq_error("Internal server error."),
-            )]
+            )];
         }
     };
     let is_admin = matches!(context.affiliation, Affiliation::Owner | Affiliation::Admin)
@@ -65,7 +65,7 @@ pub(super) async fn handle_muc_admin_iq(
                     response_from,
                     response_to,
                     internal_server_error_iq_error("Internal server error."),
-                )]
+                )];
             }
         };
         let to_jid = Jid::from(sender_jid.clone());

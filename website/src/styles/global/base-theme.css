@@ -1,0 +1,94 @@
+:root {
+  font-family: var(--font-inter), ui-sans-serif, system-ui, -apple-system,
+    "Segoe UI", Roboto, sans-serif;
+  font-feature-settings: "cv11", "ss01", "ss03";
+}
+
+/* ---------- theme tokens (registered so they interpolate) ---------- */
+
+@property --bg-a   { syntax: "<color>"; inherits: true; initial-value: #092025; }
+@property --bg-b   { syntax: "<color>"; inherits: true; initial-value: #184c52; }
+@property --bg-c   { syntax: "<color>"; inherits: true; initial-value: #071619; }
+@property --fg     { syntax: "<color>"; inherits: true; initial-value: #f3fffb; }
+@property --halo   { syntax: "<color>"; inherits: true; initial-value: #8eeadd; }
+@property --halo-2 { syntax: "<color>"; inherits: true; initial-value: #397f84; }
+@property --frost  { syntax: "<color>"; inherits: true; initial-value: rgba(247, 255, 253, 0.6); }
+@property --edge   { syntax: "<color>"; inherits: true; initial-value: rgba(142, 234, 221, 0.32); }
+@property --card   { syntax: "<color>"; inherits: true; initial-value: rgba(247, 255, 253, 0.075); }
+
+:root,
+html[data-theme="dark"] {
+  color-scheme: dark;
+  --bg-a: #092025;
+  --bg-b: #184c52;
+  --bg-c: #071619;
+  --fg: #f3fffb;
+  --halo: #8eeadd;
+  --halo-2: #397f84;
+  --frost: rgba(247, 255, 253, 0.6);
+  --edge: rgba(142, 234, 221, 0.32);
+  --card: rgba(247, 255, 253, 0.075);
+  --logo-filter:
+    drop-shadow(0 0 1.5px rgba(243, 255, 251, 0.7))
+    drop-shadow(0 16px 44px rgba(0, 0, 0, 0.38));
+}
+
+html[data-theme="light"] {
+  color-scheme: light;
+  --bg-a: #fbfdff;
+  --bg-b: #d8ecef;
+  --bg-c: #eaf6f8;
+  --fg: #0b2429;
+  --halo: #6fb4c2;
+  --halo-2: #c7ecef;
+  --frost: rgba(11, 36, 41, 0.55);
+  --edge: rgba(111, 180, 194, 0.45);
+  --card: rgba(255, 255, 255, 0.6);
+  --logo-filter: drop-shadow(0 20px 60px rgba(11, 36, 41, 0.18));
+}
+
+/* single source of truth for the day/night crossfade timing.
+   every property that depends on theme tokens reads them via var(),
+   and since these vars are @property-registered colors they interpolate
+   smoothly over this duration — no mid-transition snap. */
+html {
+  transition:
+    --bg-a var(--fade) var(--ease),
+    --bg-b var(--fade) var(--ease),
+    --bg-c var(--fade) var(--ease),
+    --fg   var(--fade) var(--ease),
+    --halo var(--fade) var(--ease),
+    --halo-2 var(--fade) var(--ease),
+    --frost var(--fade) var(--ease),
+    --edge var(--fade) var(--ease),
+    --card var(--fade) var(--ease);
+  --fade: 1600ms;
+  --ease: cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  background: var(--bg-c);
+}
+
+body {
+  min-height: 100vh;
+  color: var(--fg);
+  background:
+    radial-gradient(
+      ellipse 70% 60% at 50% 40%,
+      var(--bg-b) 0%,
+      var(--bg-a) 60%,
+      var(--bg-c) 100%
+    );
+  overflow-x: hidden;
+}

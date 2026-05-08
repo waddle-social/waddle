@@ -1,0 +1,152 @@
+<script setup lang="ts">
+import WaddlesSidebar from "@/components/chat/WaddlesSidebar.vue";
+import TopicsPanel from "@/components/chat/TopicsPanel.vue";
+import DmPanel from "@/components/chat/DmPanel.vue";
+import SettingsMobileHeader from "@/components/chat/SettingsMobileHeader.vue";
+import ProfilePanel from "@/components/chat/ProfilePanel.vue";
+import AppDrawer from "@/components/ui/AppDrawer.vue";
+import type { ChatAppController } from "@/shell/chat-app-controller";
+
+const props = defineProps<{
+  controller: ChatAppController;
+}>();
+
+const {
+  connectionStore,
+  ui,
+  waddles,
+  messaging,
+  dmConversations,
+  channelUnread,
+  notifications,
+  version,
+  extensionRoutes,
+  activeExtensionRouteKey,
+  displayedMemberCount,
+  displayedMemberState,
+  memberCountLabel,
+  computedChannelUnreadMap,
+  openUserSettings,
+  handleLogout,
+  handleRequestNotifications,
+  handleToggleNotifications,
+  selectChannel,
+  onSelectThread,
+  selectExtensionRoute,
+  selectDm,
+  openCreateChannelDialog,
+  openChannelEdit,
+} = props.controller;
+</script>
+
+<template>
+    <!-- Mobile header (settings page only - chat pages render the consolidated header inside ContentArea) -->
+    <SettingsMobileHeader
+      v-if="ui.activePage.value === 'settings'"
+      @open-nav="ui.showMobileNav.value = true"
+    />
+
+    <!-- Mobile nav drawer -->
+    <AppDrawer v-model:open="ui.showMobileNav.value" side="left" label="Navigation drawer">
+      <template #title>
+        <span class="type-pane-title">Navigation</span>
+      </template>
+      <div class="chat-mobile-nav-body">
+        <div class="border-b border-border">
+          <WaddlesSidebar
+            :waddles="[]"
+            :active-space-id="null"
+            :active-sidebar-mode="ui.sidebarMode.value"
+            :has-unread-dms="dmConversations.hasUnread.value"
+            :session="null"
+            horizontal
+            @toggle-channels="ui.sidebarMode.value = 'channels'"
+            @toggle-dms="ui.sidebarMode.value = 'dms'"
+          />
+        </div>
+        <TopicsPanel
+          v-if="ui.sidebarMode.value === 'channels'"
+          :waddle="waddles.currentSpace.value"
+          :spaces="waddles.sortedSpaces.value"
+          :channels="waddles.sortedChannels.value"
+          :active-channel-id="waddles.activeChannelId.value"
+          :can-manage-channels="waddles.canManageChannels.value"
+          :can-manage-community="waddles.canManageCommunity.value"
+          :is-loading="waddles.isLoadingStructure.value"
+          :member-count="displayedMemberCount"
+          :member-state="displayedMemberState"
+          :active-channel-jids="messaging.activeChannels.value"
+          :collapsed-group-ids="ui.collapsedSpaceGroupIds.value"
+          :channel-unread-map="computedChannelUnreadMap"
+          :thread-entries-fn="(roomJid: string) => channelUnread.threadEntries(roomJid)"
+          :extension-routes="extensionRoutes"
+          :active-extension-route="ui.activePage.value === 'extension' ? activeExtensionRouteKey : null"
+          class="!w-full !border-r-0 !flex-1"
+          @select-channel="selectChannel"
+          @select-thread="onSelectThread"
+          @select-extension-route="selectExtensionRoute"
+          @create-channel="openCreateChannelDialog()"
+          @create-channel-in-space="openCreateChannelDialog"
+          @open-settings="ui.showWaddleSettings.value = true"
+          @open-members="ui.showMembers.value = true"
+          @update-collapsed-group-ids="ui.collapsedSpaceGroupIds.value = $event"
+        />
+        <DmPanel
+          v-else
+          :conversations="dmConversations.conversations.value"
+          :active-peer-jid="dmConversations.activePeerJid.value"
+          class="!w-full !border-r-0 !flex-1"
+          @select-dm="selectDm"
+          @new-dm="ui.showNewDm.value = true"
+        />
+        <ProfilePanel
+          v-if="connectionStore.session"
+          :session="connectionStore.session"
+          :notification-permission="notifications.permissionState.value"
+          :notifications-enabled="notifications.notificationsEnabled.value"
+          :total-unread-count="channelUnread.totalUnreadCount.value"
+          :total-mention-count="channelUnread.totalMentionCount.value"
+          :web-commit-sha="version.webCommitSha.value"
+          :server-version="version.serverVersion.value"
+          @open-settings="openUserSettings"
+          @logout="handleLogout"
+          @request-notifications="handleRequestNotifications"
+          @toggle-notifications="handleToggleNotifications"
+        />
+      </div>
+    </AppDrawer>
+
+    <!-- Mobile details drawer -->
+    <AppDrawer v-model:open="ui.showMobileDetails.value" side="right" label="Details drawer">
+      <template #title>
+        <span class="type-pane-title">Details</span>
+      </template>
+      <div class="flex flex-col gap-4 p-4">
+        <div v-if="waddles.currentSpace.value" class="flex flex-col gap-1.5">
+          <h3 class="type-pane-title">{{ waddles.currentSpace.value.name }}</h3>
+          <p v-if="waddles.currentSpace.value.description" class="type-field text-muted-foreground">
+            {{ waddles.currentSpace.value.description }}
+          </p>
+        </div>
+
+        <div class="flex flex-col gap-1.5">
+          <button
+            v-if="waddles.currentChannel.value && waddles.canManageChannels.value"
+            class="type-control h-9 w-full rounded-lg border border-border px-3 hover:bg-muted transition-colors"
+            type="button"
+            @click="openChannelEdit(); ui.showMobileDetails.value = false"
+          >
+            Edit channel
+          </button>
+          <button
+            class="type-control h-9 w-full rounded-lg border border-border px-3 hover:bg-muted transition-colors"
+            type="button"
+            @click="ui.showMobileDetails.value = false; ui.showMembers.value = true"
+          >
+            Members ({{ memberCountLabel }})
+          </button>
+        </div>
+      </div>
+    </AppDrawer>
+
+</template>

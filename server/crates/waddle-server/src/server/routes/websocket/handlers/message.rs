@@ -7,7 +7,9 @@ use waddle_xmpp::{
     Stanza,
 };
 
-use super::super::{build_interpret_deps, drive_interpret_loop, WebSocketState};
+use super::super::{
+    interpret_loop::build_interpret_deps, replay::drive_interpret_loop, WebSocketState,
+};
 use crate::auth::Session;
 use waddle_xmpp::protocol::ConnectionPhase;
 

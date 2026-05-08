@@ -1,0 +1,127 @@
+use super::permissions::write_tuple_if_absent;
+use super::*;
+
+fn data_form_value(form: &Element, var: &str) -> Option<String> {
+    form.children()
+        .filter(|child| child.name() == "field" && child.ns() == DATA_FORMS_NS)
+        .find(|field| field.attr("var") == Some(var))
+        .and_then(|field| field.get_child("value", DATA_FORMS_NS))
+        .map(|value| value.texts().collect())
+}
+
+fn data_form_bool(form: &Element, var: &str) -> Option<bool> {
+    data_form_value(form, var).and_then(|value| match value.as_str() {
+        "1" | "true" | "True" | "TRUE" => Some(true),
+        "0" | "false" | "False" | "FALSE" => Some(false),
+        _ => None,
+    })
+}
+
+pub(super) async fn apply_muc_owner_config(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    iq: &xmpp_parsers::iq::Iq,
+    session: Option<&Session>,
+) -> Result<(), String> {
+    let room_actor = get_room_actor(state, room_jid)
+        .await
+        .ok_or_else(|| "room actor not found".to_string())?;
+    let mut config = room_actor
+        .ask(GetSnapshot)
+        .await
+        .map_err(|error| format!("snapshot failed: {error:?}"))?
+        .room
+        .config;
+
+    if let xmpp_parsers::iq::IqType::Set(query) = &iq.payload {
+        if let Some(form) = query.get_child("x", DATA_FORMS_NS) {
+            if let Some(name) =
+                data_form_value(form, "muc#roomconfig_roomname").filter(|value| !value.is_empty())
+            {
+                config.name = name;
+            }
+            config.description = data_form_value(form, "muc#roomconfig_roomdesc")
+                .filter(|value| !value.is_empty())
+                .or(config.description);
+            if let Some(members_only) = data_form_bool(form, "muc#roomconfig_membersonly") {
+                config.members_only = members_only;
+            }
+            if let Some(moderated) = data_form_bool(form, "muc#roomconfig_moderatedroom") {
+                config.moderated = moderated;
+            }
+            if let Some(enable_logging) = data_form_bool(form, "muc#roomconfig_enablelogging") {
+                config.enable_logging = enable_logging;
+            }
+            if let Some(forum) = data_form_bool(form, "muc#roomconfig_forum") {
+                config.forum = forum;
+            }
+        }
+    }
+
+    // Waddle rooms are persistent, non-anonymous collaboration surfaces.
+    config.persistent = true;
+
+    room_actor
+        .ask(UpdateConfig {
+            config: config.clone(),
+        })
+        .await
+        .map_err(|error| format!("config update failed: {error:?}"))?;
+
+    let Some(channel_id) = waddle_xmpp::parse_managed_room_jid(room_jid) else {
+        return Ok(());
+    };
+    let now = chrono::Utc::now().to_rfc3339();
+    let actor = state.deps.app_state.db_pool.global_actor().clone();
+    actor
+        .ask(DbExecute {
+            sql: r#"
+                INSERT INTO channels (id, name, description, channel_type, position, is_default, created_at, updated_at)
+                VALUES (?, ?, ?, ?, 0, 0, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    name = excluded.name,
+                    description = excluded.description,
+                    channel_type = excluded.channel_type,
+                    updated_at = excluded.updated_at
+            "#
+            .to_string(),
+            params: vec![
+                channel_id.clone().into(),
+                config.name.into(),
+                config.description.into(),
+                (if config.forum { "forum" } else { "text" }).into(),
+                now.clone().into(),
+                now.into(),
+            ],
+        })
+        .await
+        .map_err(|error| format!("channel upsert failed: {error}"))?;
+
+    // Write channel#owner → session user so the creator can always rejoin the
+    // managed room after a server restart (before a Space bookmark is published).
+    // XEP-0045 §10 requires the room creator to be an owner; without this tuple
+    // the channel becomes unjoinable after restart.
+    match session {
+        Some(session) => {
+            write_tuple_if_absent(
+                state,
+                Tuple::new(
+                    Object::new(ObjectType::Channel, &channel_id),
+                    Relation::new("owner"),
+                    Subject::user(&session.user_id),
+                ),
+            )
+            .await
+            .map_err(|error| format!("channel owner tuple failed: {error}"))?;
+        }
+        None => {
+            warn!(
+                channel_id = %channel_id,
+                "apply_muc_owner_config called without a session; \
+                 channel owner tuple not written — room may be inaccessible after server restart"
+            );
+        }
+    }
+
+    Ok(())
+}

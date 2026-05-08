@@ -1,0 +1,120 @@
+/* ---------- brand cluster (wordmark + logo) ---------- */
+
+.brand {
+  position: relative;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  gap: clamp(1.1rem, 2.6vw, 2rem);
+  width: min(100%, 36rem);
+  text-align: center;
+  isolation: isolate;
+}
+
+.wordmark {
+  margin: 0;
+  width: 100%;
+  font-family: var(--font-fredoka), ui-rounded, ui-sans-serif, system-ui, sans-serif;
+  font-weight: 600;
+  font-size: clamp(2.5rem, 7vw, 5.25rem);
+  line-height: 1;
+  letter-spacing: -0.02em;
+  color: var(--fg);
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: baseline;
+  justify-content: center;
+}
+
+.wordmark-name {
+  color: var(--fg);
+}
+
+.wordmark-dot {
+  color: var(--halo);
+  margin: 0 0.02em;
+}
+
+.wordmark-tld {
+  font-weight: 400;
+  color: color-mix(in oklab, var(--fg) 60%, transparent);
+  letter-spacing: 0;
+}
+
+.tagline {
+  margin: 0;
+  max-width: 32rem;
+  color: color-mix(in oklab, var(--fg) 70%, transparent);
+  font-family: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  font-size: clamp(0.92rem, 1.6vw, 1.05rem);
+  font-weight: 500;
+  line-height: 1.55;
+  letter-spacing: 0.01em;
+  text-wrap: balance;
+}
+
+/* ---------- logo ↔ waitlist cross-fade ----------
+   the header stays fixed in the centered layout while the body swaps
+   between the logo and the waitlist form underneath it. */
+
+.brand-stack {
+  position: relative;
+  display: grid;
+  grid-template-areas: "stack";
+  align-items: start;
+  justify-items: center;
+  width: 100%;
+}
+
+.logo-wrap {
+  grid-area: stack;
+  z-index: 1;
+  width: clamp(14rem, 32vw, 22rem);
+  max-width: 100%;
+  align-self: center;
+  opacity: 1;
+  transform: scale(1);
+  transition:
+    opacity 700ms cubic-bezier(0.4, 0, 0.2, 1),
+    transform 700ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.brand-stack:has(.waitlist.is-open) .logo-wrap {
+  opacity: 0;
+  transform: scale(0.96);
+  pointer-events: none;
+}
+
+.logo-button {
+  position: relative;
+  z-index: 1;
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  outline: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.logo-button:focus-visible {
+  outline: none;
+}
+
+.logo {
+  width: 100%;
+  height: auto;
+  display: block;
+  filter: var(--logo-filter);
+  transition: scale 500ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.logo-button:hover .logo {
+  scale: 1.03;
+}
+
+.logo-button:active .logo {
+  scale: 0.97;
+}
