@@ -828,6 +828,46 @@ export function useChatAppController(giphyApiKey: string) {
     void activeTarget.value.toggleReaction(messageId, emoji);
   }
 
+  /** #414: pin or unpin the targeted message in the active channel. The
+   * server gates on Owner/Admin affiliation; the action sheet entry is
+   * also visibility-gated client-side, so non-admins shouldn't reach
+   * this — but the server is authoritative. */
+  function pinActiveMessage(messageId: string) {
+    const client = xmppClient.value;
+    const channel = waddles.currentChannel.value;
+    const space = waddles.currentSpace.value;
+    if (!client || !channel || !space) return;
+    const stanzaId = resolvePinTargetStanzaId(messageId);
+    if (!stanzaId) return;
+    void client.pinMessage(space.id, channel.id, stanzaId).catch((error: unknown) => {
+      console.warn("pinMessage failed", error);
+    });
+  }
+
+  function unpinActiveMessage(messageId: string) {
+    const client = xmppClient.value;
+    const channel = waddles.currentChannel.value;
+    const space = waddles.currentSpace.value;
+    if (!client || !channel || !space) return;
+    const stanzaId = resolvePinTargetStanzaId(messageId);
+    if (!stanzaId) return;
+    void client.unpinMessage(space.id, channel.id, stanzaId).catch((error: unknown) => {
+      console.warn("unpinMessage failed", error);
+    });
+  }
+
+  /** Map a chat-side message id to the room's XEP-0359 stanza-id. The
+   * pin server expects the stable archive id, not the wire `id`
+   * attribute on the original message. The timeline rows carry
+   * `wireIds[]`; we use the entry that matches a known stanza-id, or
+   * fall back to the message id if it already is one. */
+  function resolvePinTargetStanzaId(messageId: string): string | null {
+    const message = messaging.messages.value.find((m) => m.id === messageId);
+    if (!message) return null;
+    const wireIds = (message as TimelineMessage & { wireIds?: string[] }).wireIds ?? [];
+    return wireIds[0] ?? messageId;
+  }
+
   function markActiveDisplayed(messageId: string) {
     activeTarget.value.markDisplayed(messageId);
   }
@@ -1440,6 +1480,8 @@ export function useChatAppController(giphyApiKey: string) {
       editActiveMessage,
       retractActiveMessage,
       reactActiveMessage,
+      pinActiveMessage,
+      unpinActiveMessage,
       markActiveDisplayed,
       invokeActiveExtensionAction,
       invokeExtensionRouteAction,

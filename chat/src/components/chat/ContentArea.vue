@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch, type ComponentPublicInstance } from "vue";
+import { useStore } from "@nanostores/vue";
 import { AlertCircle, CheckCircle2, Hash, MessageCircle, MessagesSquare, RefreshCw, Search, Upload, WifiOff, X } from "lucide-vue-next";
+import { $pinnedRooms } from "@/stores/pinned-messages";
 import { isForumChannel as detectForumChannel } from "@/lib/channel-types";
 import { getConnectionNoticeCopy } from "@/lib/connection-notice";
 import { findMessageElementById } from "@/lib/message-targeting";
@@ -98,6 +100,8 @@ const emit = defineEmits<{
   refreshUpdate: [];
   loadOlder: [];
   retryLoad: [];
+  pinMessage: [messageId: string];
+  unpinMessage: [messageId: string];
 }>();
 
 // Hide thread members from the main feed — they live inside the thread panel.
@@ -306,6 +310,29 @@ const searchInput = ref("");
 const searchSubmitted = ref(false);
 const avatarUrlByAuthor = computed(() => props.avatarUrlByAuthor ?? {});
 const isForumChannel = computed(() => detectForumChannel(props.channel));
+
+// #414: pin state for the current room. Hydrated by the controller.
+const pinnedRooms = useStore($pinnedRooms);
+const pinnedStanzaIds = computed(() => {
+  if (!props.roomJid) return null;
+  return pinnedRooms.value.get(props.roomJid)?.stanzaIds ?? null;
+});
+function isPinnedMessage(msg: TimelineMessage): boolean {
+  const set = pinnedStanzaIds.value;
+  if (!set) return false;
+  if (msg.id && set.has(msg.id)) return true;
+  // Also match wireIds (XEP-0359 stanza-id mirrors).
+  const wireIds = (msg as TimelineMessage & { wireIds?: string[] }).wireIds;
+  return Boolean(wireIds?.some((wid) => set.has(wid)));
+}
+// Owner/Admin gate: any of the current user's hats indicates admin/owner
+// affiliation. The room sets these via the existing hats system.
+const currentUserCanPin = computed(() => {
+  const me = props.currentUser;
+  if (!me) return false;
+  const myHats = props.roomHats[me] ?? [];
+  return myHats.some((hat) => hat.uri === "urn:xmpp:hats:0:owner" || hat.uri === "urn:xmpp:hats:0:admin");
+});
 const canShowComposer = computed(() => !!(props.channel || props.dmPeer));
 const queuedMessageCount = computed(() =>
   props.messages.filter((message) =>
@@ -1008,6 +1035,8 @@ function dayDividerLabel(createdAt: string): string {
             :grouped="isGroupedFollowUp(msg.id)"
             :reaction-mode-selected="reactionMode?.selectedMessageId === msg.id"
             :invoke-extension-action="props.invokeExtensionAction"
+            :is-pinned="isPinnedMessage(msg)"
+            :can-pin-messages="currentUserCanPin"
             @edit="(id, body, m, r) => emit('editMessage', id, body, m, r)"
             @retract="(id) => emit('retractMessage', id)"
             @react="(id, emoji) => emit('reactMessage', id, emoji)"
@@ -1015,6 +1044,8 @@ function dayDividerLabel(createdAt: string): string {
             @scroll-to-message="scrollToMessage"
             @avatar-click="onAvatarClick"
             @open-thread="(tid: string) => emit('openThread', tid)"
+            @pin="(id: string) => emit('pinMessage', id)"
+            @unpin="(id: string) => emit('unpinMessage', id)"
           />
           <div
             v-if="showDividerAfter(msg.id)"

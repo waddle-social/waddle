@@ -15,6 +15,7 @@ import {
   type RoomPresence,
 } from "@/lib/xmpp-client";
 import { $xmppStatus } from "@/stores/xmpp-status";
+import { applyPinEvent } from "@/stores/pinned-messages";
 import {
   inferredFileDisposition,
   type DeliveryStatus,
@@ -226,6 +227,27 @@ export function useChannelMessages(
           event.emojis,
           event.authorRealJid ?? `${event.roomJid}/${event.nick}`,
         );
+      });
+      // #414: route pin/unpin system events into the pinned-messages
+      // store so PinnedPanel + the badge in MessageCard update live.
+      client.setPinEventHandler(({ roomJid, event }) => {
+        if (event.action === "pinned" && event.preview) {
+          applyPinEvent(roomJid, {
+            action: "pinned",
+            target_stanza_id: event.target_stanza_id,
+            entry: {
+              target_stanza_id: event.target_stanza_id,
+              pinner_jid: event.by,
+              pinned_at: new Date().toISOString(),
+              preview: event.preview,
+            },
+          });
+        } else {
+          applyPinEvent(roomJid, {
+            action: event.action,
+            target_stanza_id: event.target_stanza_id,
+          });
+        }
       });
       client.setDisplayedHandler((event) => {
         if (!currentRoomJid.value || event.roomJid !== currentRoomJid.value) return;
@@ -635,6 +657,21 @@ export function useChannelMessages(
     messages.value = appendQueuedMessages([], roomJid);
 
     try {
+      // #414: hydrate the pin store for this room. Fire-and-forget —
+      // the panel + badge tolerate an empty store, and the live
+      // pin-event handler will mutate it from now on.
+      if (xmppClient.value && "fetchRoomPins" in xmppClient.value) {
+        void xmppClient.value
+          .fetchRoomPins(spaceId, channelId)
+          .then((entries) => {
+            import("@/stores/pinned-messages").then(({ hydratePinnedRoom }) => {
+              hydratePinnedRoom(roomJid, entries);
+            });
+          })
+          .catch((error: unknown) => {
+            console.warn("fetchRoomPins failed", error);
+          });
+      }
       // XEP-0313: Load message history via MAM (XMPP-native)
       const page = xmppClient.value && "queryMamPage" in xmppClient.value
         ? await xmppClient.value.queryMamPage(spaceId, channelId, 100, { type: "latest" })

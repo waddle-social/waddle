@@ -272,6 +272,8 @@ const {
               @edit-message="editActiveMessage"
               @retract-message="retractActiveMessage"
               @react-message="reactActiveMessage"
+              @pin-message="pinActiveMessage"
+              @unpin-message="unpinActiveMessage"
               @search="searchActiveMessages"
               @clear-search="clearActiveSearch"
               @load-older="loadOlderActiveMessages"
