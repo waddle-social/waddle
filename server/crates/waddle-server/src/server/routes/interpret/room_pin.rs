@@ -23,7 +23,7 @@ use jid::BareJid;
 use waddle_xmpp::muc::pin::{
     PinChangeRequest, PinPreview, PinStateChange, PinnedEntry, MAX_PREVIEW_LEN,
 };
-use waddle_xmpp::muc::room_actor::GetPinList;
+use waddle_xmpp::muc::room_actor::{GetPinList, GetRoomSnapshot};
 use waddle_xmpp::protocol::room::pin::{
     build_pinned_system_message, build_unpinned_system_message,
 };
@@ -77,12 +77,43 @@ async fn apply_pin(
         return;
     };
 
+    // Pull the room snapshot once: we need its occupant list to map
+    // the archived `room/nick` from-JID back to the author's real
+    // bare JID for the preview.
+    let synthetic_sender = match room.clone().with_resource_str("__pin_resolver__") {
+        Ok(s) => s,
+        Err(error) => {
+            warn!(
+                room = %room,
+                ?error,
+                "ApplyPinChange::Pin: failed to build resolver sender; dropping"
+            );
+            return;
+        }
+    };
+    let snapshot = match room_actor
+        .ask(GetRoomSnapshot {
+            sender_jid: synthetic_sender,
+        })
+        .await
+    {
+        Ok(snap) => snap,
+        Err(error) => {
+            warn!(
+                room = %room,
+                error = ?error,
+                "ApplyPinChange::Pin: GetRoomSnapshot failed; dropping"
+            );
+            return;
+        }
+    };
+
     // Resolve the preview from MAM. If the target row is missing
     // (e.g., archive purged or wire id mismatched), fall back to a
     // placeholder preview keyed on the pinner — better than dropping
     // the pin silently. Most real pin requests target a recent
     // message that's still archived.
-    let preview = resolve_preview_from_mam(deps, &room, &target_stanza_id)
+    let preview = resolve_preview_from_mam(deps, &room, &target_stanza_id, &snapshot.occupants)
         .await
         .unwrap_or_else(|| {
             warn!(
@@ -229,10 +260,23 @@ async fn lookup_room_actor(
 /// `PinPreview` from it. Returns `None` if the message isn't found or
 /// MAM storage isn't wired in `Deps`. The body is truncated to
 /// `MAX_PREVIEW_LEN` UTF-8 chars by `PinPreview::new`.
+///
+/// Author resolution: groupchat archive rows store `from` as
+/// `room@conf/nick` (XEP-0045 §7.2.13 canonicalized form), so the
+/// resource part is the nickname and `to_bare()` collapses to the
+/// room JID. We extract the nick from the resource and consult the
+/// supplied occupant snapshot to recover the *current* real bare JID
+/// for that nick; if no current occupant matches (the author has
+/// left the room since posting), the preview falls back to the room
+/// JID as `author_jid` with the captured `author_nick` carrying the
+/// identity. This trades a small amount of fidelity for a stable
+/// non-async lookup — pinning is interactive, so racing with leaves
+/// is rare.
 async fn resolve_preview_from_mam(
     deps: &Deps<'_>,
     room: &BareJid,
     target_stanza_id: &StanzaId,
+    occupants: &[waddle_xmpp::muc::room_actor::RoomChainOccupant],
 ) -> Option<PinPreview> {
     let mam_storage = deps.mam_storage?;
     let row = match mam_storage
@@ -251,7 +295,16 @@ async fn resolve_preview_from_mam(
             return None;
         }
     };
-    let author_bare = row.from.to_bare();
+    let nick = row.from.resource().map(|r| r.to_string());
+    let author_bare = nick
+        .as_deref()
+        .and_then(|nick| {
+            occupants
+                .iter()
+                .find(|o| o.nick == nick)
+                .map(|o| o.full_jid.to_bare())
+        })
+        .unwrap_or_else(|| room.clone());
     let body = row.body.clone().unwrap_or_default();
     let truncated = if body.chars().count() > MAX_PREVIEW_LEN {
         body.chars().take(MAX_PREVIEW_LEN).collect()
@@ -260,7 +313,7 @@ async fn resolve_preview_from_mam(
     };
     Some(PinPreview::new(
         author_bare,
-        None,
+        nick,
         &truncated,
         row.timestamp,
     ))
