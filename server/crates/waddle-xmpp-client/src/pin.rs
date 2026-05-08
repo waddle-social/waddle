@@ -240,25 +240,39 @@ mod tests {
         assert!(parse_pin_list_response(&iq).is_empty());
     }
 
-    fn pin_event_message_xml(action: &str) -> String {
-        format!(
-            r#"<message xmlns='jabber:client' type='groupchat' from='room@conf.example'>
-              <body>alice {action} a message</body>
-              <pin-event xmlns='urn:waddle:pin:0' action='{action}' target='stanza-1' by='admin@example.com'>
-                <preview>
-                  <author jid='alice@example.com' nick='alice'/>
-                  <text>important</text>
-                  <ts>2026-05-08T11:55:00+00:00</ts>
-                </preview>
-              </pin-event>
-            </message>"#,
-            action = action
-        )
+    fn build_pin_event_message(action: &str) -> Element {
+        let author = Element::builder("author", NS_WADDLE_PIN_V0)
+            .attr("jid", "alice@example.com")
+            .attr("nick", "alice")
+            .build();
+        let mut text = Element::builder("text", NS_WADDLE_PIN_V0).build();
+        text.append_text_node("important");
+        let mut ts = Element::builder("ts", NS_WADDLE_PIN_V0).build();
+        ts.append_text_node("2026-05-08T11:55:00+00:00");
+        let preview = Element::builder("preview", NS_WADDLE_PIN_V0)
+            .append(author)
+            .append(text)
+            .append(ts)
+            .build();
+        let pin_event = Element::builder("pin-event", NS_WADDLE_PIN_V0)
+            .attr("action", action)
+            .attr("target", "stanza-1")
+            .attr("by", "admin@example.com")
+            .append(preview)
+            .build();
+        let mut body = Element::builder("body", "jabber:client").build();
+        body.append_text_node(format!("alice {action} a message"));
+        Element::builder("message", "jabber:client")
+            .attr("type", "groupchat")
+            .attr("from", "room@conf.example")
+            .append(body)
+            .append(pin_event)
+            .build()
     }
 
     #[test]
     fn extract_pin_event_decodes_pinned_with_preview() {
-        let msg: Element = pin_event_message_xml("pinned").parse().expect("parse msg");
+        let msg = build_pin_event_message("pinned");
         let event = extract_pin_event_from_message(&msg).expect("event present");
         assert_eq!(event.action, PinEventAction::Pinned);
         assert_eq!(event.target_stanza_id, "stanza-1");

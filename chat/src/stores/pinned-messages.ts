@@ -45,6 +45,22 @@ type PinUpdate =
  * pin/unpin issued during initial hydration was silently dropped. */
 const pendingUpdates = new Map<string, PinUpdate[]>();
 
+/** Monotonic epoch counter for pin-state lifetime. Incremented by
+ * `resetPinnedRooms()` (logout). In-flight `fetchRoomPins` Promises
+ * capture the epoch at request time and pass it back to
+ * `hydratePinnedRoom`; if the captured epoch no longer matches the
+ * current one, the late hydration is dropped. Without this guard a
+ * fetch initiated by user A could resolve after user B logs in and
+ * leak A's pinned-message previews into B's session. */
+let currentEpoch = 0;
+
+/** Snapshot of the current epoch — call this at the start of a
+ * `fetchRoomPins` request and pass the result back to
+ * `hydratePinnedRoom`. */
+export function pinnedRoomsEpoch(): number {
+  return currentEpoch;
+}
+
 /** Replace one room's state and notify subscribers. */
 function setPinnedRoom(roomJid: string, state: PinnedRoomState): void {
   const next = new Map($pinnedRooms.get());
@@ -54,9 +70,21 @@ function setPinnedRoom(roomJid: string, state: PinnedRoomState): void {
 
 /** Hydrate the room with the full server-returned entries list. Any
  * pin/unpin events that arrived during the in-flight hydration are
- * replayed on top of the canonical list, so the final state reflects
- * both the snapshot and any concurrent mutations. */
-export function hydratePinnedRoom(roomJid: string, entries: WasmPinEntry[]): void {
+ * replayed on top of the canonical list.
+ *
+ * `epoch` is the value returned by `pinnedRoomsEpoch()` at the
+ * moment the request was issued. If `resetPinnedRooms()` ran in
+ * between (e.g. user logged out), the epoch will have advanced and
+ * this hydration is silently dropped — preventing the prior
+ * session's data from leaking back in. Pass `pinnedRoomsEpoch()`
+ * as the epoch when called from a synchronous context where no
+ * stale-callback risk exists. */
+export function hydratePinnedRoom(
+  roomJid: string,
+  entries: WasmPinEntry[],
+  epoch: number = currentEpoch,
+): void {
+  if (epoch !== currentEpoch) return;
   setPinnedRoom(roomJid, {
     entries,
     stanzaIds: new Set(entries.map((e) => e.target_stanza_id)),
@@ -71,14 +99,15 @@ export function hydratePinnedRoom(roomJid: string, entries: WasmPinEntry[]): voi
   }
 }
 
-/** Reset all pin state: empties `$pinnedRooms` and clears the
- * pre-hydration update queue. Use this on full-session resets like
- * logout — without clearing `pendingUpdates`, buffered events from
- * the prior session can replay into a subsequent login's hydration
- * and leak across users. */
+/** Reset all pin state: empties `$pinnedRooms`, clears the
+ * pre-hydration update queue, and bumps the epoch so any in-flight
+ * `fetchRoomPins` callbacks captured before the reset are dropped
+ * instead of repopulating the store. Use this on full-session
+ * resets like logout. */
 export function resetPinnedRooms(): void {
   $pinnedRooms.set(new Map());
   pendingUpdates.clear();
+  currentEpoch += 1;
 }
 
 /** Apply a pin-event update. If the room hasn't been hydrated yet,
