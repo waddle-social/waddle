@@ -56,10 +56,9 @@ pub(super) async fn apply_muc_owner_config(
                 config.forum = forum;
             }
             // #415: per-room pin permission policy.
-            if let Some(value) = data_form_value(
-                form,
-                waddle_xmpp::muc::owner::FIELD_PIN_PERMISSION,
-            ) {
+            if let Some(value) =
+                data_form_value(form, waddle_xmpp::muc::owner::FIELD_PIN_PERMISSION)
+            {
                 if let Some(pin_permission) =
                     waddle_xmpp::muc::PinPermission::from_form_value(&value)
                 {
