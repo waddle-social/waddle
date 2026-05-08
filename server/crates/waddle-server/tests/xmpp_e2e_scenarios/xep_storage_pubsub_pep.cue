@@ -14,9 +14,7 @@ scenario: #Scenario & {
 		"XEP-0153",
 		"XEP-0163",
 		"XEP-0191",
-		"XEP-0384",
 		"XEP-0402",
-		"XEP-0490",
 	]
 	users: {
 		admin: devices: phone: #Actor & {
@@ -64,13 +62,53 @@ scenario: #Scenario & {
 				"http://jabber.org/protocol/pubsub#publish",
 				"http://jabber.org/protocol/pubsub#retrieve-items",
 				"http://jabber.org/protocol/pubsub#filtered-notifications",
-				"http://jabber.org/protocol/pubsub#config-node-max",
 				"urn:xmpp:push:0",
 				"urn:xmpp:bookmarks:1#compat",
 				"urn:xmpp:bookmarks:1#compat-pep",
+			]
+			absent: [
+				"urn:xmpp:pep-vcard-conversion:0",
+				"http://jabber.org/protocol/pubsub#config-node-max",
 				"eu.siacs.conversations.axolotl.whitelisted",
 			]
-			absent: ["urn:xmpp:pep-vcard-conversion:0"]
+			elements: [
+				#XmlElement & {
+					name: "identity"
+					ns:   "http://jabber.org/protocol/disco#info"
+					attrs: {
+						category: "pubsub"
+						type:     "pep"
+					}
+				},
+			]
+		},
+		#SendIq & {
+			actor: bobPhone
+			type:  "get"
+			id:    "cue-cross-user-pep-disco"
+			to:    adminPhone.bareJid
+			payload: #XmlElement & {
+				name: "query"
+				ns:   "http://jabber.org/protocol/disco#info"
+			}
+		},
+		#ExpectIq & {
+			target: bobPhone
+			id:     "cue-cross-user-pep-disco"
+			type:   "result"
+			contains: [
+				"http://jabber.org/protocol/pubsub",
+				"http://jabber.org/protocol/pubsub#auto-create",
+				"http://jabber.org/protocol/pubsub#publish",
+				"http://jabber.org/protocol/pubsub#retrieve-items",
+				"urn:xmpp:bookmarks:1#compat-pep",
+			]
+			absent: [
+				"jabber:iq:search",
+				"urn:xmpp:mam:2",
+				"http://jabber.org/protocol/pubsub#config-node-max",
+				"eu.siacs.conversations.axolotl.whitelisted",
+			]
 			elements: [
 				#XmlElement & {
 					name: "identity"

@@ -28,9 +28,8 @@ const SUPPORTED_XEPS: &[&str] = &[
     "XEP-0108", "XEP-0115", "XEP-0118", "XEP-0153", "XEP-0160", "XEP-0163", "XEP-0184", "XEP-0191",
     "XEP-0198", "XEP-0199", "XEP-0201", "XEP-0202", "XEP-0203", "XEP-0237", "XEP-0280", "XEP-0297",
     "XEP-0308", "XEP-0313", "XEP-0317", "XEP-0333", "XEP-0334", "XEP-0357", "XEP-0359", "XEP-0363",
-    "XEP-0372", "XEP-0384", "XEP-0402", "XEP-0410", "XEP-0421", "XEP-0424", "XEP-0425", "XEP-0428",
-    "XEP-0431", "XEP-0433", "XEP-0444", "XEP-0446", "XEP-0447", "XEP-0461", "XEP-0490", "XEP-0503",
-    "XEP-0511", "XEP-0513",
+    "XEP-0372", "XEP-0402", "XEP-0410", "XEP-0421", "XEP-0424", "XEP-0425", "XEP-0428", "XEP-0431",
+    "XEP-0433", "XEP-0444", "XEP-0446", "XEP-0447", "XEP-0461", "XEP-0503", "XEP-0511", "XEP-0513",
 ];
 
 const ADVERTISED_FEATURE_XEPS: &[(&str, &str)] = &[
@@ -89,10 +88,6 @@ const ADVERTISED_FEATURE_XEPS: &[(&str, &str)] = &[
         "http://jabber.org/protocol/pubsub#filtered-notifications",
         "XEP-0060",
     ),
-    (
-        "http://jabber.org/protocol/pubsub#config-node-max",
-        "XEP-0490",
-    ),
     ("http://jabber.org/protocol/pubsub#create-nodes", "XEP-0060"),
     ("http://jabber.org/protocol/pubsub#config-node", "XEP-0060"),
     ("http://jabber.org/protocol/pubsub#meta-data", "XEP-0060"),
@@ -110,7 +105,6 @@ const ADVERTISED_FEATURE_XEPS: &[(&str, &str)] = &[
     ("urn:xmpp:push:0", "XEP-0357"),
     ("urn:xmpp:bookmarks:1#compat", "XEP-0402"),
     ("urn:xmpp:bookmarks:1#compat-pep", "XEP-0402"),
-    ("eu.siacs.conversations.axolotl.whitelisted", "XEP-0384"),
     ("msgoffline", "XEP-0160"),
     ("http://jabber.org/protocol/muc", "XEP-0045"),
     (
@@ -770,6 +764,10 @@ async fn run_scenario(scenario: Scenario) -> Result<()> {
             break;
         }
     }
+    if step_result.is_ok() {
+        step_result = assert_mam_results_consumed(&ctx)
+            .with_context(|| format!("scenario {} ended", scenario.name));
+    }
 
     let close_result = close_clients(ctx.clients).await;
     step_result?;
@@ -1300,6 +1298,7 @@ async fn execute_step(ctx: &mut ScenarioContext, step: &Step) -> Result<()> {
             ids,
             ids_from,
         } => {
+            assert_mam_results_consumed(ctx)?;
             let id = id
                 .clone()
                 .unwrap_or_else(|| format!("cue-mam-{}", uuid::Uuid::new_v4()));
@@ -1312,6 +1311,7 @@ async fn execute_step(ctx: &mut ScenarioContext, step: &Step) -> Result<()> {
                 query_ids.push(value.clone());
             }
             let query = mam_query_element(
+                &id,
                 *max,
                 after.as_deref(),
                 with_jid.as_deref(),
@@ -1328,14 +1328,35 @@ async fn execute_step(ctx: &mut ScenarioContext, step: &Step) -> Result<()> {
                 .send(&stanza_xml(Stanza::Iq(iq))?)
                 .await
                 .map_err(|error| anyhow!(error))?;
-            let query_frames = recv_until(ctx, actor, |frame| {
-                frame.contains("urn:xmpp:mam:2") && frame.contains("<fin") && frame.contains(&id)
-            })
-            .await?;
-            ctx.last_mam_frames = query_frames
-                .into_iter()
-                .filter(|frame| frame_contains_mam_result(frame))
-                .collect();
+            let mut mam_frames = Vec::new();
+            let mut delayed_frames = Vec::new();
+            loop {
+                let frame = recv_next(ctx, actor).await?;
+                if frame_is_mam_fin_for_query(&frame, &id) {
+                    break;
+                }
+                if frame_contains_mam_result(&frame) {
+                    match frame_mam_result_query_id(&frame).as_deref() {
+                        Some(query_id) if query_id == id => mam_frames.push(frame),
+                        Some(query_id) => {
+                            return Err(anyhow!(
+                                "received MAM result for query id {query_id} while waiting for {id}: {frame}"
+                            ));
+                        }
+                        None => {
+                            return Err(anyhow!(
+                                "received MAM result without queryid while waiting for {id}: {frame}"
+                            ));
+                        }
+                    }
+                } else {
+                    delayed_frames.push(frame);
+                }
+            }
+            for frame in delayed_frames.into_iter().rev() {
+                push_pending_front(ctx, actor, frame);
+            }
+            ctx.last_mam_frames = mam_frames;
             ctx.last_mam_frame_index = 0;
         }
         Step::ExpectMamResult {
@@ -1518,25 +1539,6 @@ where
     }
 }
 
-async fn recv_until<F>(
-    ctx: &mut ScenarioContext,
-    actor: &Actor,
-    predicate: F,
-) -> Result<Vec<String>>
-where
-    F: Fn(&str) -> bool,
-{
-    let mut frames = Vec::new();
-    loop {
-        let frame = recv_next(ctx, actor).await?;
-        let done = predicate(&frame);
-        frames.push(frame);
-        if done {
-            return Ok(frames);
-        }
-    }
-}
-
 async fn recv_next(ctx: &mut ScenarioContext, actor: &Actor) -> Result<String> {
     recv_timeout(ctx, actor, RECV_TIMEOUT)
         .await?
@@ -1603,6 +1605,7 @@ enum IqKind {
 }
 
 fn mam_query_element(
+    query_id: &str,
     max: u32,
     after: Option<&str>,
     with_jid: Option<&str>,
@@ -1624,7 +1627,9 @@ fn mam_query_element(
     }
 
     let has_form = with_jid.is_some() || fulltext.is_some() || !ids.is_empty();
-    let mut query = Element::builder("query", MAM_NS).append(rsm.build());
+    let mut query = Element::builder("query", MAM_NS)
+        .attr("queryid", query_id)
+        .append(rsm.build());
     if has_form {
         let mut form = Element::builder("x", DATA_FORMS_NS)
             .attr("type", "submit")
@@ -2043,6 +2048,35 @@ fn frame_contains_mam_result(frame: &str) -> bool {
                 .any(|child| child.name() == "result" && child.ns() == "urn:xmpp:mam:2")
             && find_named_element(&element, "forwarded", "urn:xmpp:forward:0")
     })
+}
+
+fn frame_mam_result_query_id(frame: &str) -> Option<String> {
+    parse_frame(frame).and_then(|element| {
+        element
+            .children()
+            .find(|child| child.name() == "result" && child.ns() == "urn:xmpp:mam:2")
+            .and_then(|result| result.attr("queryid").map(ToOwned::to_owned))
+    })
+}
+
+fn frame_is_mam_fin_for_query(frame: &str, query_id: &str) -> bool {
+    parse_frame(frame).is_some_and(|element| {
+        element.name() == "iq"
+            && element.attr("id") == Some(query_id)
+            && element
+                .children()
+                .any(|child| child.name() == "fin" && child.ns() == "urn:xmpp:mam:2")
+    })
+}
+
+fn assert_mam_results_consumed(ctx: &ScenarioContext) -> Result<()> {
+    if ctx.last_mam_frame_index == ctx.last_mam_frames.len() {
+        return Ok(());
+    }
+    Err(anyhow!(
+        "unconsumed MAM results after previous query: {:?}",
+        &ctx.last_mam_frames[ctx.last_mam_frame_index..]
+    ))
 }
 
 fn frame_root_message_has_body(frame: &str, expected: Option<&str>) -> bool {

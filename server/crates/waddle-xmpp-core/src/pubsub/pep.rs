@@ -50,17 +50,12 @@ impl PepHandler {
             || node == "http://jabber.org/protocol/tune"
             || node == "http://jabber.org/protocol/geoloc"
             || node == "urn:xmpp:microblog:0"
-            || node.starts_with("eu.siacs.conversations.axolotl")
     }
 
     /// Get the default access model for a well-known PEP node.
     pub fn default_access_model_for_node(node: &str) -> AccessModel {
         if node == PEP_NODE_BOOKMARKS {
             return AccessModel::Whitelist;
-        }
-
-        if node.starts_with("eu.siacs.conversations.axolotl") {
-            return AccessModel::Open;
         }
 
         AccessModel::Presence
@@ -90,8 +85,6 @@ pub fn pep_features() -> Vec<Feature> {
         Feature::new("urn:xmpp:push:0"),
         Feature::bookmarks_compat(),
         Feature::new("urn:xmpp:bookmarks:1#compat-pep"),
-        Feature::new("http://jabber.org/protocol/pubsub#config-node-max"),
-        Feature::new("eu.siacs.conversations.axolotl.whitelisted"),
     ]
 }
 
@@ -132,18 +125,17 @@ mod tests {
             PepHandler::default_access_model_for_node("urn:xmpp:bookmarks:1"),
             AccessModel::Whitelist
         );
-        assert_eq!(
-            PepHandler::default_access_model_for_node("eu.siacs.conversations.axolotl.devicelist"),
-            AccessModel::Open
-        );
+        assert!(!PepHandler::is_well_known_node(
+            "eu.siacs.conversations.axolotl.devicelist"
+        ));
     }
 
     #[test]
-    fn pep_features_are_unique_for_config_node_max() {
-        let count = pep_features()
-            .iter()
-            .filter(|feature| feature.0 == "http://jabber.org/protocol/pubsub#config-node-max")
-            .count();
-        assert_eq!(count, 1);
+    fn pep_features_do_not_advertise_unimplemented_config_options() {
+        let features = pep_features();
+        assert!(!features.contains(&Feature::new(
+            "http://jabber.org/protocol/pubsub#config-node-max"
+        )));
+        assert!(!features.contains(&Feature::new("eu.siacs.conversations.axolotl.whitelisted")));
     }
 }

@@ -379,6 +379,53 @@ pub(super) async fn handle_disco_info_iq(
                         build_disco_info_response(request_iq, &identities, &features, None);
                     return vec![iq_to_xml(response)];
                 }
+                if target_bare.domain().as_str() == domain && target_bare.node().is_some() {
+                    let native_user_store =
+                        NativeUserStore::new(state.deps.app_state.db_pool.global_actor().clone());
+                    let Some(localpart) = target_bare.node() else {
+                        return vec![build_iq_error_xml_typed(
+                            id,
+                            response_from,
+                            response_to,
+                            item_not_found_iq_error("Requested item not found."),
+                        )];
+                    };
+                    match native_user_store
+                        .user_exists(localpart.as_str(), domain)
+                        .await
+                    {
+                        Ok(true) => {
+                            let identities = vec![build_pep_identity()];
+                            let mut features = vec![Feature::disco_info()];
+                            features.extend(pep_features().into_iter().filter(|feature| {
+                                !matches!(
+                                    feature.0.as_str(),
+                                    "urn:xmpp:mam:2" | "urn:xmpp:mam:2#extended"
+                                )
+                            }));
+                            let response =
+                                build_disco_info_response(request_iq, &identities, &features, None);
+                            return vec![iq_to_xml(response)];
+                        }
+                        Ok(false) => {
+                            return vec![build_iq_error_xml_typed(
+                                id,
+                                response_from,
+                                response_to,
+                                item_not_found_iq_error("Requested item not found."),
+                            )];
+                        }
+                        Err(error) => {
+                            warn!(target = %target_bare, error = %error, "Failed to resolve PEP disco target");
+                            return vec![build_iq_error_xml_typed(
+                                id,
+                                response_from,
+                                response_to,
+                                internal_server_error_iq_error("Internal server error."),
+                            )];
+                        }
+                    }
+                }
             }
         }
 

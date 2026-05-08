@@ -75,8 +75,6 @@
 //!   with attachment target and typed payloads.
 //! - **XEP-0472**: Pubsub Social Feed - Social posts and activity feeds
 //!   via PubSub with title, body, author, and publication metadata.
-//! - **XEP-0490**: Message Displayed Synchronization - Cross-device read
-//!   state sync via PEP with stanza-id references.
 //! - **XEP-0492**: Chat Notification Settings - Per-room notification levels
 //!   (all, mentions-only, mute) with PEP storage and decision logic.
 //! - **XEP-0469**: Bookmark Pinning - Pin favorite channels via `<pinned/>`
@@ -186,7 +184,6 @@ pub mod xep0471;
 pub mod xep0472;
 pub mod xep0486;
 pub mod xep0488;
-pub mod xep0490;
 pub mod xep0492;
 pub mod xep0500;
 pub mod xep0501;

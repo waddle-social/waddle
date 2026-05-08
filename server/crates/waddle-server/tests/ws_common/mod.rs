@@ -39,6 +39,7 @@ pub struct TestServer {
     process: Child,
     http_port: u16,
     port_file: std::path::PathBuf,
+    upload_dir: std::path::PathBuf,
     #[allow(dead_code)]
     fixed_account_password: String,
 }
@@ -94,6 +95,8 @@ impl TestServer {
         // Temp file where the server writes its bound HTTP port
         let port_file =
             std::env::temp_dir().join(format!("waddle-test-port-{}", uuid::Uuid::new_v4()));
+        let upload_dir =
+            std::env::temp_dir().join(format!("waddle-test-uploads-{}", uuid::Uuid::new_v4()));
 
         let mut command = Command::new(bin);
         for (key, _) in std::env::vars() {
@@ -128,6 +131,7 @@ impl TestServer {
                 "sqlite::memory:",
             )
             .env("WADDLE_XMPP_PUBSUB_DATABASE_URL", "sqlite::memory:")
+            .env("WADDLE_UPLOAD_DIR", &upload_dir)
             .env("WADDLE_GIT_SHA", TEST_GIT_SHA)
             .env(
                 "WADDLE_OCCUPANT_ID_SECRET",
@@ -172,6 +176,7 @@ impl TestServer {
             process: child,
             http_port,
             port_file,
+            upload_dir,
             fixed_account_password,
         }
     }
@@ -193,6 +198,7 @@ impl Drop for TestServer {
         let _ = self.process.kill();
         let _ = self.process.wait();
         let _ = std::fs::remove_file(&self.port_file);
+        let _ = std::fs::remove_dir_all(&self.upload_dir);
     }
 }
 

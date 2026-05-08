@@ -348,11 +348,6 @@ pub use super::xep0472::{
     PUBSUB_NODE_FEED,
 };
 
-pub use super::xep0490::{
-    build_displayed_sync_element, is_displayed_sync_element, parse_displayed_sync, DisplayedSync,
-    DisplayedSyncState, NS_MDS_DISPLAYED, PEP_NODE_MDS,
-};
-
 pub use super::xep0492::{
     build_notification_settings_element, is_notification_settings_element,
     parse_notification_setting, NotificationLevel, NotificationSettings, RoomNotificationSetting,
