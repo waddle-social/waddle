@@ -932,7 +932,9 @@ public func FfiConverterTypeWaddleClient_lower(_ value: WaddleClient) -> UnsafeM
 public struct WaddleArchivedMessage {
     public var mamId: String
     public var queryId: String?
+    public var id: String?
     public var stanzaId: String?
+    public var originId: String?
     public var timestamp: String?
     public var from: String?
     public var to: String?
@@ -950,10 +952,12 @@ public struct WaddleArchivedMessage {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(mamId: String, queryId: String?, stanzaId: String?, timestamp: String?, from: String?, to: String?, messageType: String, body: String?, reactionTargetId: String?, reactionEmojis: [String], thread: String?, parentThreadId: String?, replyToId: String?, replyToSender: String?, replyFallbackStart: UInt32?, replyFallbackEnd: UInt32?, sharedFiles: [WaddleSharedFile]) {
+    public init(mamId: String, queryId: String?, id: String?, stanzaId: String?, originId: String?, timestamp: String?, from: String?, to: String?, messageType: String, body: String?, reactionTargetId: String?, reactionEmojis: [String], thread: String?, parentThreadId: String?, replyToId: String?, replyToSender: String?, replyFallbackStart: UInt32?, replyFallbackEnd: UInt32?, sharedFiles: [WaddleSharedFile]) {
         self.mamId = mamId
         self.queryId = queryId
+        self.id = id
         self.stanzaId = stanzaId
+        self.originId = originId
         self.timestamp = timestamp
         self.from = from
         self.to = to
@@ -984,7 +988,13 @@ extension WaddleArchivedMessage: Equatable, Hashable {
         if lhs.queryId != rhs.queryId {
             return false
         }
+        if lhs.id != rhs.id {
+            return false
+        }
         if lhs.stanzaId != rhs.stanzaId {
+            return false
+        }
+        if lhs.originId != rhs.originId {
             return false
         }
         if lhs.timestamp != rhs.timestamp {
@@ -1035,7 +1045,9 @@ extension WaddleArchivedMessage: Equatable, Hashable {
     public func hash(into hasher: inout Hasher) {
         hasher.combine(mamId)
         hasher.combine(queryId)
+        hasher.combine(id)
         hasher.combine(stanzaId)
+        hasher.combine(originId)
         hasher.combine(timestamp)
         hasher.combine(from)
         hasher.combine(to)
@@ -1064,7 +1076,9 @@ public struct FfiConverterTypeWaddleArchivedMessage: FfiConverterRustBuffer {
             try WaddleArchivedMessage(
                 mamId: FfiConverterString.read(from: &buf),
                 queryId: FfiConverterOptionString.read(from: &buf),
+                id: FfiConverterOptionString.read(from: &buf),
                 stanzaId: FfiConverterOptionString.read(from: &buf),
+                originId: FfiConverterOptionString.read(from: &buf),
                 timestamp: FfiConverterOptionString.read(from: &buf),
                 from: FfiConverterOptionString.read(from: &buf),
                 to: FfiConverterOptionString.read(from: &buf),
@@ -1085,7 +1099,9 @@ public struct FfiConverterTypeWaddleArchivedMessage: FfiConverterRustBuffer {
     public static func write(_ value: WaddleArchivedMessage, into buf: inout [UInt8]) {
         FfiConverterString.write(value.mamId, into: &buf)
         FfiConverterOptionString.write(value.queryId, into: &buf)
+        FfiConverterOptionString.write(value.id, into: &buf)
         FfiConverterOptionString.write(value.stanzaId, into: &buf)
+        FfiConverterOptionString.write(value.originId, into: &buf)
         FfiConverterOptionString.write(value.timestamp, into: &buf)
         FfiConverterOptionString.write(value.from, into: &buf)
         FfiConverterOptionString.write(value.to, into: &buf)
@@ -1443,6 +1459,201 @@ public func FfiConverterTypeWaddleConfig_lift(_ buf: RustBuffer) throws -> Waddl
 #endif
 public func FfiConverterTypeWaddleConfig_lower(_ value: WaddleConfig) -> RustBuffer {
     return FfiConverterTypeWaddleConfig.lower(value)
+}
+
+
+/**
+ * XEP-0448 cipher/key/iv/hashes envelope for encrypted Stateless File
+ * Sharing payloads.
+ */
+public struct WaddleEncryptedFile {
+    /**
+     * Cipher URN, e.g. `urn:xmpp:ciphers:aes-256-gcm-nopadding:0`.
+     */
+    public var cipher: String
+    /**
+     * Base64-encoded symmetric key.
+     */
+    public var keyB64: String
+    /**
+     * Base64-encoded initialization vector / nonce.
+     */
+    public var ivB64: String
+    public var hashes: [WaddleEncryptedFileHash]
+    /**
+     * Source URLs the ciphertext can be fetched from. Always non-empty.
+     */
+    public var sources: [String]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Cipher URN, e.g. `urn:xmpp:ciphers:aes-256-gcm-nopadding:0`.
+         */cipher: String,
+        /**
+         * Base64-encoded symmetric key.
+         */keyB64: String,
+        /**
+         * Base64-encoded initialization vector / nonce.
+         */ivB64: String, hashes: [WaddleEncryptedFileHash],
+        /**
+         * Source URLs the ciphertext can be fetched from. Always non-empty.
+         */sources: [String]) {
+        self.cipher = cipher
+        self.keyB64 = keyB64
+        self.ivB64 = ivB64
+        self.hashes = hashes
+        self.sources = sources
+    }
+}
+
+#if compiler(>=6)
+extension WaddleEncryptedFile: Sendable {}
+#endif
+
+
+extension WaddleEncryptedFile: Equatable, Hashable {
+    public static func ==(lhs: WaddleEncryptedFile, rhs: WaddleEncryptedFile) -> Bool {
+        if lhs.cipher != rhs.cipher {
+            return false
+        }
+        if lhs.keyB64 != rhs.keyB64 {
+            return false
+        }
+        if lhs.ivB64 != rhs.ivB64 {
+            return false
+        }
+        if lhs.hashes != rhs.hashes {
+            return false
+        }
+        if lhs.sources != rhs.sources {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(cipher)
+        hasher.combine(keyB64)
+        hasher.combine(ivB64)
+        hasher.combine(hashes)
+        hasher.combine(sources)
+    }
+}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleEncryptedFile: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleEncryptedFile {
+        return
+            try WaddleEncryptedFile(
+                cipher: FfiConverterString.read(from: &buf),
+                keyB64: FfiConverterString.read(from: &buf),
+                ivB64: FfiConverterString.read(from: &buf),
+                hashes: FfiConverterSequenceTypeWaddleEncryptedFileHash.read(from: &buf),
+                sources: FfiConverterSequenceString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleEncryptedFile, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.cipher, into: &buf)
+        FfiConverterString.write(value.keyB64, into: &buf)
+        FfiConverterString.write(value.ivB64, into: &buf)
+        FfiConverterSequenceTypeWaddleEncryptedFileHash.write(value.hashes, into: &buf)
+        FfiConverterSequenceString.write(value.sources, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleEncryptedFile_lift(_ buf: RustBuffer) throws -> WaddleEncryptedFile {
+    return try FfiConverterTypeWaddleEncryptedFile.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleEncryptedFile_lower(_ value: WaddleEncryptedFile) -> RustBuffer {
+    return FfiConverterTypeWaddleEncryptedFile.lower(value)
+}
+
+
+/**
+ * XEP-0300 hash entry nested under an `<encrypted/>` envelope.
+ */
+public struct WaddleEncryptedFileHash {
+    public var algo: String
+    public var valueB64: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(algo: String, valueB64: String) {
+        self.algo = algo
+        self.valueB64 = valueB64
+    }
+}
+
+#if compiler(>=6)
+extension WaddleEncryptedFileHash: Sendable {}
+#endif
+
+
+extension WaddleEncryptedFileHash: Equatable, Hashable {
+    public static func ==(lhs: WaddleEncryptedFileHash, rhs: WaddleEncryptedFileHash) -> Bool {
+        if lhs.algo != rhs.algo {
+            return false
+        }
+        if lhs.valueB64 != rhs.valueB64 {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(algo)
+        hasher.combine(valueB64)
+    }
+}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleEncryptedFileHash: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleEncryptedFileHash {
+        return
+            try WaddleEncryptedFileHash(
+                algo: FfiConverterString.read(from: &buf),
+                valueB64: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleEncryptedFileHash, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.algo, into: &buf)
+        FfiConverterString.write(value.valueB64, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleEncryptedFileHash_lift(_ buf: RustBuffer) throws -> WaddleEncryptedFileHash {
+    return try FfiConverterTypeWaddleEncryptedFileHash.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleEncryptedFileHash_lower(_ value: WaddleEncryptedFileHash) -> RustBuffer {
+    return FfiConverterTypeWaddleEncryptedFileHash.lower(value)
 }
 
 
@@ -2233,10 +2444,21 @@ public struct WaddleSharedFile {
     public var width: UInt32?
     public var height: UInt32?
     public var disposition: String
+    /**
+     * XEP-0448 envelope when the bytes at `url` are ciphertext rather than
+     * the plaintext file. Recipients MUST use these values to decrypt before
+     * rendering.
+     */
+    public var encrypted: WaddleEncryptedFile?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(url: String, name: String?, mediaType: String?, size: UInt64?, width: UInt32?, height: UInt32?, disposition: String) {
+    public init(url: String, name: String?, mediaType: String?, size: UInt64?, width: UInt32?, height: UInt32?, disposition: String,
+        /**
+         * XEP-0448 envelope when the bytes at `url` are ciphertext rather than
+         * the plaintext file. Recipients MUST use these values to decrypt before
+         * rendering.
+         */encrypted: WaddleEncryptedFile?) {
         self.url = url
         self.name = name
         self.mediaType = mediaType
@@ -2244,6 +2466,7 @@ public struct WaddleSharedFile {
         self.width = width
         self.height = height
         self.disposition = disposition
+        self.encrypted = encrypted
     }
 }
 
@@ -2275,6 +2498,9 @@ extension WaddleSharedFile: Equatable, Hashable {
         if lhs.disposition != rhs.disposition {
             return false
         }
+        if lhs.encrypted != rhs.encrypted {
+            return false
+        }
         return true
     }
 
@@ -2286,6 +2512,7 @@ extension WaddleSharedFile: Equatable, Hashable {
         hasher.combine(width)
         hasher.combine(height)
         hasher.combine(disposition)
+        hasher.combine(encrypted)
     }
 }
 
@@ -2304,7 +2531,8 @@ public struct FfiConverterTypeWaddleSharedFile: FfiConverterRustBuffer {
                 size: FfiConverterOptionUInt64.read(from: &buf),
                 width: FfiConverterOptionUInt32.read(from: &buf),
                 height: FfiConverterOptionUInt32.read(from: &buf),
-                disposition: FfiConverterString.read(from: &buf)
+                disposition: FfiConverterString.read(from: &buf),
+                encrypted: FfiConverterOptionTypeWaddleEncryptedFile.read(from: &buf)
         )
     }
 
@@ -2316,6 +2544,7 @@ public struct FfiConverterTypeWaddleSharedFile: FfiConverterRustBuffer {
         FfiConverterOptionUInt32.write(value.width, into: &buf)
         FfiConverterOptionUInt32.write(value.height, into: &buf)
         FfiConverterString.write(value.disposition, into: &buf)
+        FfiConverterOptionTypeWaddleEncryptedFile.write(value.encrypted, into: &buf)
     }
 }
 
@@ -3285,6 +3514,30 @@ fileprivate struct FfiConverterOptionTypeWaddleAvatar: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeWaddleEncryptedFile: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleEncryptedFile?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeWaddleEncryptedFile.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeWaddleEncryptedFile.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeWaddleFallbackRange: FfiConverterRustBuffer {
     typealias SwiftType = WaddleFallbackRange?
 
@@ -3520,6 +3773,31 @@ fileprivate struct FfiConverterSequenceTypeWaddleChannel: FfiConverterRustBuffer
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeWaddleChannel.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeWaddleEncryptedFileHash: FfiConverterRustBuffer {
+    typealias SwiftType = [WaddleEncryptedFileHash]
+
+    public static func write(_ value: [WaddleEncryptedFileHash], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeWaddleEncryptedFileHash.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [WaddleEncryptedFileHash] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [WaddleEncryptedFileHash]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeWaddleEncryptedFileHash.read(from: &buf))
         }
         return seq
     }

@@ -10,6 +10,7 @@ use minidom::Element;
 use waddle_xmpp_core::mam::{
     DELAY_NS, FORWARD_NS, FULLTEXT_MAM_FIELD, MAM_NS, RSM_NS, WADDLE_MAM_THREAD_FIELD,
 };
+use waddle_xmpp_core::xep0359::{OriginId, StanzaId as StableStanzaId, NS_SID as XEP0359_NS};
 
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 use std::time::Duration;
@@ -48,7 +49,11 @@ pub struct MamPage {
 pub struct ArchivedMessage {
     pub mam_id: String,
     pub query_id: Option<String>,
-    pub stanza_id: Option<String>,
+    /// Inner forwarded `<message id='...'/>` value.
+    pub id: Option<ArchivedMessageId>,
+    pub stanza_id: Option<StableStanzaId>,
+    /// XEP-0359 `<origin-id/>` from the inner forwarded message.
+    pub origin_id: Option<OriginId>,
     pub timestamp: Option<DateTime<Utc>>,
     pub from: Option<String>,
     pub to: Option<String>,
@@ -64,6 +69,30 @@ pub struct ArchivedMessage {
     pub author_real_jid: Option<String>,
     /// Raw inner `<message>` element for full parsing by the messaging module.
     pub inner: Element,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ArchivedMessageId(String);
+
+impl ArchivedMessageId {
+    pub fn new(id: impl Into<String>) -> Option<Self> {
+        let id = id.into();
+        if id.is_empty() {
+            None
+        } else {
+            Some(Self(id))
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for ArchivedMessageId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 /// RSM (XEP-0059) pagination info from a MAM `<fin/>`.
@@ -376,6 +405,7 @@ pub fn parse_mam_result(element: &Element) -> Option<ArchivedMessage> {
     let from = inner.attr("from").map(str::to_string);
     let to = inner.attr("to").map(str::to_string);
     let message_type = inner.attr("type").unwrap_or("normal").to_string();
+    let id = inner.attr("id").and_then(ArchivedMessageId::new);
 
     let body = inner
         .get_child("body", CLIENT_NS)
@@ -392,15 +422,21 @@ pub fn parse_mam_result(element: &Element) -> Option<ArchivedMessage> {
 
     // XEP-0359 stanza-id embedded in the inner message.
     let stanza_id = inner
-        .get_child("stanza-id", "urn:xmpp:sid:0")
+        .get_child("stanza-id", XEP0359_NS)
+        .and_then(parse_archived_stanza_id);
+    let origin_id = inner
+        .get_child("origin-id", XEP0359_NS)
         .and_then(|s| s.attr("id"))
-        .map(str::to_string);
+        .filter(|id| !id.is_empty())
+        .map(OriginId::new);
     let author_real_jid = parse_archived_author_real_jid(&inner);
 
     Some(ArchivedMessage {
         mam_id,
         query_id,
+        id,
         stanza_id,
+        origin_id,
         timestamp,
         from,
         to,
@@ -411,6 +447,16 @@ pub fn parse_mam_result(element: &Element) -> Option<ArchivedMessage> {
         author_real_jid,
         inner,
     })
+}
+
+fn parse_archived_stanza_id(element: &Element) -> Option<StableStanzaId> {
+    let id = element.attr("id").filter(|id| !id.is_empty())?;
+    let by = element
+        .attr("by")
+        .filter(|by| !by.is_empty())?
+        .parse::<jid::Jid>()
+        .ok()?;
+    Some(StableStanzaId::new(id, by))
 }
 
 /// Parse a MAM `<fin/>` element into [`RsmPageInfo`] and a completeness flag.

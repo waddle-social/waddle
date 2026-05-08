@@ -1741,7 +1741,8 @@ final class AppModel: ObservableObject {
             size: UInt64(data.count),
             width: nil,
             height: nil,
-            disposition: sharedFileDisposition(for: mediaType)
+            disposition: sharedFileDisposition(for: mediaType),
+            encrypted: nil
         )
     }
 

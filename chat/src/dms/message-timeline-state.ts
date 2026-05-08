@@ -24,6 +24,7 @@ export function fromLiveDmMessage(
     isSelf: barePeerJid(msg.fromJid) === barePeerJid(session.jid),
   };
   if (msg.correctionTargetId) tm.correctionTargetId = msg.correctionTargetId;
+  if (msg.replyableId) tm.replyableId = msg.replyableId;
   if (msg.wireIds?.length) tm.wireIds = msg.wireIds;
   if (msg.mentions?.length) tm.mentions = msg.mentions;
   if (msg.markup?.length) tm.markup = msg.markup;

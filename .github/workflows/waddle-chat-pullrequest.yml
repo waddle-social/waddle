@@ -13,6 +13,7 @@ on:
     - chat/../server/crates/waddle-xmpp-client-wasm/**
     - chat/../server/crates/waddle-xmpp-client/**
     - chat/astro.config.mjs
+    - chat/dist/**
     - chat/env.cue
     - chat/knip.json
     - chat/package.json
