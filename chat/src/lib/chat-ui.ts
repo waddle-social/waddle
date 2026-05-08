@@ -1,3 +1,4 @@
+import type { PinPermission } from "@/lib/chat-types";
 import type { WaddleEncryptedFile } from "@/lib/xmpp/extensions/encrypted-file";
 import {
   renderRichMessageHtml,
@@ -289,10 +290,12 @@ export interface ChannelEditFormData {
   name: string;
   description: string;
   position: number;
-  /** #415: who may pin/unpin messages in this channel. Mirrors the
-   * server's `urn:waddle:roomconfig:pinpermission` field. Wire values
-   * are `admins-only` (default) | `anyone`. */
-  pinPermission: "admins-only" | "anyone";
+  /** #415: who may pin/unpin messages in this channel. `undefined`
+   * means "the user did not touch the select" — the save handler
+   * skips the field so the server's existing value round-trips
+   * through the GET-then-SET unchanged. Once the user picks an
+   * option from the dialog, this carries that explicit choice. */
+  pinPermission?: PinPermission;
 }
 
 // ── XEP-0392 Consistent Color Generation ────────────────────────────

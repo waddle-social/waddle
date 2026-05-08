@@ -76,9 +76,6 @@ pub struct ConfigFormData {
     pub enable_logging: Option<bool>,
     /// Whether forum mode is enabled (muc#roomconfig_forum)
     pub forum: Option<bool>,
-    /// #415: who may pin/unpin messages in this room
-    /// (`urn:waddle:roomconfig:pinpermission`).
-    pub pin_permission: Option<PinPermission>,
 }
 
 /// Room destruction request.
@@ -235,9 +232,6 @@ fn parse_config_form(form_elem: &Element) -> Result<ConfigFormData, XmppError> {
             }
             FIELD_FORUM_MODE => {
                 config.forum = field.value_as_bool();
-            }
-            FIELD_PIN_PERMISSION => {
-                config.pin_permission = field.value().and_then(PinPermission::from_form_value);
             }
             "FORM_TYPE" => {
                 // Ignore the FORM_TYPE field
@@ -466,9 +460,6 @@ pub fn apply_config_form(config: &mut RoomConfig, form_data: &ConfigFormData) {
     }
     if let Some(forum) = form_data.forum {
         config.forum = forum;
-    }
-    if let Some(pin_permission) = form_data.pin_permission {
-        config.pin_permission = pin_permission;
     }
 }
 

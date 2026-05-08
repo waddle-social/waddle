@@ -24,8 +24,14 @@ export interface ChannelSummary {
   /** #415: per-room pin permission. Mirrors the server's
    * `urn:waddle:roomconfig:pinpermission` field. Default
    * `admins-only`. */
-  pinPermission?: "admins-only" | "anyone";
+  pinPermission?: PinPermission;
 }
+
+/** #415: wire values for the `urn:waddle:roomconfig:pinpermission`
+ * MUC config field. The TypeScript canonical name is the same union
+ * that travels over the wire, so consumers can compare directly
+ * without translation. */
+export type PinPermission = "admins-only" | "anyone";
 
 export interface MemberSummary {
   jid: string;

@@ -63,7 +63,6 @@ export function useWaddleDirectory(
     name: "",
     description: "",
     position: 0,
-    pinPermission: "admins-only",
   });
 
   const currentChannel = computed(
@@ -144,7 +143,7 @@ export function useWaddleDirectory(
         name: c.name,
         description: c.description ?? "",
         position: c.position ?? 0,
-        pinPermission: c.pinPermission ?? "admins-only",
+        pinPermission: c.pinPermission,
       };
     }
   });
@@ -426,16 +425,16 @@ export function useWaddleDirectory(
     }
   }
 
-  async function updateChannel() {
+  async function updateChannel(): Promise<boolean> {
     const channel = currentChannel.value;
     if (!channel?.jid) {
       actionError.value = "Cannot edit a channel without a known room JID.";
-      return;
+      return false;
     }
     const client = xmppClient.value;
     if (!client) {
       actionError.value = "XMPP session is not ready.";
-      return;
+      return false;
     }
     isSubmitting.value = true;
     try {
@@ -453,11 +452,18 @@ export function useWaddleDirectory(
           ...channels.value[idx],
           name: editChannelForm.value.name.trim(),
           description: editChannelForm.value.description.trim(),
-          pinPermission: editChannelForm.value.pinPermission,
+          // Only stamp pinPermission locally when the user actually
+          // chose a value in the dialog; otherwise the server-side
+          // value (preserved by GET-then-SET) remains authoritative.
+          ...(editChannelForm.value.pinPermission !== undefined
+            ? { pinPermission: editChannelForm.value.pinPermission }
+            : {}),
         };
       }
+      return true;
     } catch (error) {
       actionError.value = normalizeError(error);
+      return false;
     } finally {
       isSubmitting.value = false;
     }

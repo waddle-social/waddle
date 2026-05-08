@@ -29,7 +29,7 @@ use super::super::handlers::errors::{message_error_reply, send_message_error};
 use super::context::RoomContext;
 use super::traits::{RoomHandler, RoomHandlerOutcome};
 use crate::muc::pin::{PinChangeRequest, PinPreview};
-use crate::types::Affiliation;
+use crate::types::{Affiliation, Role};
 use crate::xep::xep_waddle_pin::{extract_pin_intent_from_message, PinIntent, NS_WADDLE_PIN_V0};
 use chrono::{DateTime, Utc};
 use jid::Jid;
@@ -72,16 +72,16 @@ impl RoomHandler for MucPinHandler {
 
         // #415: gate on the room's pin_permission. AdminsOnly retains
         // the original Owner/Admin check; Anyone admits any joined
-        // member (sender_snapshot above proves occupancy via
-        // OccupancyValidationHandler). Outcasts are filtered out at
-        // the join gate so should never reach here, but defensively
-        // exclude them anyway.
+        // Participant or Moderator — Visitors (silenced occupants in
+        // moderated rooms, XEP-0045 §5.1.2) cannot pin because they
+        // cannot speak in the room. Outcasts are filtered at the join
+        // gate but defensively excluded anyway via the role check.
         let allowed = match ctx.pin_permission {
             crate::muc::PinPermission::AdminsOnly => {
                 matches!(sender.affiliation, Affiliation::Owner | Affiliation::Admin)
             }
             crate::muc::PinPermission::Anyone => {
-                !matches!(sender.affiliation, Affiliation::Outcast)
+                matches!(sender.role, Role::Participant | Role::Moderator)
             }
         };
         if !allowed {
@@ -303,11 +303,20 @@ mod tests {
     }
 
     fn occupant(full: FullJid, nick: &str, affiliation: Affiliation) -> OccupantSnapshot {
+        occupant_with_role(full, nick, affiliation, Role::Participant)
+    }
+
+    fn occupant_with_role(
+        full: FullJid,
+        nick: &str,
+        affiliation: Affiliation,
+        role: Role,
+    ) -> OccupantSnapshot {
         OccupantSnapshot {
             full_jid: full,
             nick: nick.into(),
             affiliation,
-            role: Role::Participant,
+            role,
         }
     }
 
@@ -589,6 +598,44 @@ mod tests {
         };
         assert_eq!(events.len(), 1, "single ApplyPinChange expected");
         assert!(matches!(events[0], OutboundEvent::ApplyPinChange { .. }));
+    }
+
+    /// #415: a Visitor (silenced occupant in a moderated room,
+    /// XEP-0045 §5.1.2) cannot pin even when `pin_permission=anyone`,
+    /// because they cannot speak in the room.
+    #[test]
+    fn visitor_pin_rejected_even_when_permission_is_anyone() {
+        let room = bare("room@conf.example");
+        let sender = full("eve@example.com/phone");
+        let occupants = vec![occupant_with_role(
+            sender.clone(),
+            "eve",
+            Affiliation::Member,
+            Role::Visitor,
+        )];
+        let id_gen = FixedIdGenerator("ignored".into());
+        let secret = occupant_id_secret();
+        let ctx = ctx_with_permission(
+            &room,
+            &sender,
+            &occupants,
+            &id_gen,
+            &secret,
+            crate::muc::PinPermission::Anyone,
+        );
+        let mut msg = pin_message("stanza-target", &sender);
+        match MucPinHandler.handle(&mut msg, &ctx) {
+            RoomHandlerOutcome::Halt(events) => match &events[0] {
+                OutboundEvent::SendStanza(stanza) => match stanza.as_ref() {
+                    crate::Stanza::Message(m) => {
+                        assert_eq!(m.type_, MessageType::Error);
+                    }
+                    other => panic!("expected message stanza, got {other:?}"),
+                },
+                other => panic!("expected SendStanza, got {other:?}"),
+            },
+            RoomHandlerOutcome::Continue(_) => panic!("visitor must be rejected"),
+        }
     }
 
     /// #415: when the room is configured `pin_permission=admins-only`

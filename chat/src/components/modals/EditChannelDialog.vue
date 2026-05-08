@@ -2,7 +2,7 @@
 import { X } from "lucide-vue-next";
 import AppDialog from "@/components/ui/AppDialog.vue";
 import type { ChannelEditFormData } from "@/lib/chat-ui";
-import type { ChannelSummary } from "@/lib/chat-types";
+import type { ChannelSummary, PinPermission } from "@/lib/chat-types";
 
 const open = defineModel<boolean>("open", { required: true });
 
@@ -68,7 +68,7 @@ const emit = defineEmits<{
           id="edit-channel-pin-permission"
           :value="form.pinPermission"
           class="chat-field-control type-field"
-          @change="$emit('update:form', { ...form, pinPermission: ($event.target as HTMLSelectElement).value as 'admins-only' | 'anyone' })"
+          @change="$emit('update:form', { ...form, pinPermission: ($event.target as HTMLSelectElement).value as PinPermission })"
         >
           <option value="admins-only">Admins only</option>
           <option value="anyone">Anyone</option>
