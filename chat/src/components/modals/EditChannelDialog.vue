@@ -59,6 +59,21 @@ const emit = defineEmits<{
           @input="$emit('update:form', { ...form, description: ($event.target as HTMLTextAreaElement).value })"
         />
       </div>
+
+      <div class="chat-field-stack">
+        <label for="edit-channel-pin-permission" class="type-section-label text-muted-foreground">
+          Who can pin messages
+        </label>
+        <select
+          id="edit-channel-pin-permission"
+          :value="form.pinPermission"
+          class="chat-field-control type-field"
+          @change="$emit('update:form', { ...form, pinPermission: ($event.target as HTMLSelectElement).value as 'admins-only' | 'anyone' })"
+        >
+          <option value="admins-only">Admins only</option>
+          <option value="anyone">Anyone</option>
+        </select>
+      </div>
     </div>
 
     <div class="chat-dialog-footer flex-col sm:flex-row sm:items-center sm:justify-between">

@@ -20,6 +20,14 @@ interface CreateMucRoomParams {
   description?: string;
   mucType?: "text" | "forum";
 }
+
+interface ConfigureMucRoomParams {
+  name: string;
+  description?: string;
+  /** #415: per-room pin permission. Wire values match the
+   * `urn:waddle:roomconfig:pinpermission` form field. */
+  pinPermission?: "admins-only" | "anyone";
+}
 interface CreateSpaceNodeParams { nodeId?: string; name: string; description?: string; }
 interface PublishMucToSpaceParams { name: string; autojoin?: boolean; }
 interface CreateMucInSpaceParams extends CreateMucRoomParams { spaceNode: string; }
@@ -63,6 +71,30 @@ async function joinRoom(client: HybridClient, roomJid: string, nick: string): Pr
 async function leaveRoom(client: HybridClient, roomJid: string, nick: string): Promise<void> {
   if (!client.leave_room) throw new Error("XMPP session is not ready");
   return client.leave_room(roomJid, nick);
+}
+
+/** #415: send the XEP-0045 owner-config form to update room metadata
+ * + pin permission for an existing MUC. The caller must already be
+ * joined to the room and have Owner/Admin affiliation. */
+export async function configureMucRoom(
+  client: HybridClient,
+  roomJid: string,
+  params: ConfigureMucRoomParams,
+): Promise<void> {
+  const fields = [
+    dataField("FORM_TYPE", NS_MUC_ROOMCONFIG),
+    dataField("muc#roomconfig_roomname", params.name),
+    ...(params.description ? [dataField("muc#roomconfig_roomdesc", params.description)] : []),
+    ...(params.pinPermission
+      ? [dataField("urn:waddle:roomconfig:pinpermission", params.pinPermission)]
+      : []),
+  ];
+  await sendIq(
+    client,
+    "set",
+    `<query xmlns="${NS_MUC_OWNER}"><x xmlns="${NS_DATAFORM}" type="submit">${fields.map((field) => `<field var="${escapeXml(field.name)}"><value>${escapeXml(field.value)}</value></field>`).join("")}</x></query>`,
+    roomJid,
+  );
 }
 
 export async function createMucRoom(client: HybridClient, mucServiceJid: string, params: CreateMucRoomParams): Promise<{ roomJid: string }> {

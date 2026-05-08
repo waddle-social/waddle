@@ -21,6 +21,10 @@ export interface ChannelSummary {
   is_default?: boolean;
   created_at?: string;
   updated_at?: string | null;
+  /** #415: per-room pin permission. Mirrors the server's
+   * `urn:waddle:roomconfig:pinpermission` field. Default
+   * `admins-only`. */
+  pinPermission?: "admins-only" | "anyone";
 }
 
 export interface MemberSummary {

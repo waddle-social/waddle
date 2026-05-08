@@ -5,6 +5,7 @@ import type { BrowserXmppClient } from "@/lib/xmpp-client";
 import type { CommunityFormData, CreateFormData, ChannelEditFormData, CreateChannelResult } from "@/lib/chat-ui";
 import { defaultCreateForm, defaultCreateFormForContext } from "@/lib/chat-ui";
 import {
+  configureMucRoom,
   createMucRoom,
   createSpaceNode,
   createMucInSpace,
@@ -62,6 +63,7 @@ export function useWaddleDirectory(
     name: "",
     description: "",
     position: 0,
+    pinPermission: "admins-only",
   });
 
   const currentChannel = computed(
@@ -142,6 +144,7 @@ export function useWaddleDirectory(
         name: c.name,
         description: c.description ?? "",
         position: c.position ?? 0,
+        pinPermission: c.pinPermission ?? "admins-only",
       };
     }
   });
@@ -424,7 +427,40 @@ export function useWaddleDirectory(
   }
 
   async function updateChannel() {
-    actionError.value = "Channel editing is not available until the XMPP command exists.";
+    const channel = currentChannel.value;
+    if (!channel?.jid) {
+      actionError.value = "Cannot edit a channel without a known room JID.";
+      return;
+    }
+    const client = xmppClient.value;
+    if (!client) {
+      actionError.value = "XMPP session is not ready.";
+      return;
+    }
+    isSubmitting.value = true;
+    try {
+      await configureMucRoom(client, channel.jid, {
+        name: editChannelForm.value.name.trim(),
+        description: editChannelForm.value.description.trim(),
+        pinPermission: editChannelForm.value.pinPermission,
+      });
+      // Optimistically apply locally so the action-sheet visibility
+      // updates without waiting for a re-fetch. The server is
+      // authoritative — a subsequent owner-config GET would refresh.
+      const idx = channels.value.findIndex((c) => c.id === channel.id);
+      if (idx >= 0) {
+        channels.value[idx] = {
+          ...channels.value[idx],
+          name: editChannelForm.value.name.trim(),
+          description: editChannelForm.value.description.trim(),
+          pinPermission: editChannelForm.value.pinPermission,
+        };
+      }
+    } catch (error) {
+      actionError.value = normalizeError(error);
+    } finally {
+      isSubmitting.value = false;
+    }
   }
 
   async function deleteChannel() {

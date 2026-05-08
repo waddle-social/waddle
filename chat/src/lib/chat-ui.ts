@@ -289,6 +289,10 @@ export interface ChannelEditFormData {
   name: string;
   description: string;
   position: number;
+  /** #415: who may pin/unpin messages in this channel. Mirrors the
+   * server's `urn:waddle:roomconfig:pinpermission` field. Wire values
+   * are `admins-only` (default) | `anyone`. */
+  pinPermission: "admins-only" | "anyone";
 }
 
 // ── XEP-0392 Consistent Color Generation ────────────────────────────
