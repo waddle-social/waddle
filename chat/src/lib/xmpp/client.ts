@@ -876,7 +876,9 @@ export class BrowserXmppClient {
     if (message.pin_event && message.is_muc) {
       const roomJid = barePeerJid(message.from ?? message.to ?? "");
       this.pinEventHandler?.({ roomJid, event: message.pin_event });
-      return;
+      // Fall through: also render the system message in the timeline so
+      // the user sees "alice pinned a message" inline (#414). The
+      // pin store update has already happened above.
     }
     if (message.is_muc) {
       const converted = roomMessageFromArchived({ ...message, mam_id: message.id ?? crypto.randomUUID() } as WasmArchivedMessage);

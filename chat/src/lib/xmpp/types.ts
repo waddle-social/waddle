@@ -93,7 +93,10 @@ export interface LiveRoomMessage {
   nick: string;
   body: string;
   createdAt: string;
-  type: "message" | "subject";
+  type: "message" | "subject" | "pin-event";
+  /** #414: pin/unpin action carried by a `<pin-event/>` system
+   * message. Set when `type === "pin-event"`. */
+  pinEventAction?: "pinned" | "unpinned";
   /** XEP-0308 */
   replacesId?: string;
   /** XEP-0424 */

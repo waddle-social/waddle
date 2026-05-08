@@ -466,9 +466,30 @@ watch(
 </script>
 
 <template>
+  <!-- #414: pin-event system message rendered distinctly from user
+       posts (no avatar, italic, muted) so the channel timeline
+       reads as "alice pinned a message" without looking like a chat
+       reply. -->
+  <div
+    v-if="message.isPinEvent"
+    :data-message-id="message.id"
+    :data-message-created-at="message.createdAt"
+    class="chat-message-grid animate-message-in"
+  >
+    <div class="chat-message-avatar-cell flex items-center justify-center text-muted-foreground/60">
+      <component :is="message.pinEventAction === 'unpinned' ? PinOff : Pin" class="w-4 h-4" aria-hidden="true" />
+    </div>
+    <div class="chat-message-body-stack">
+      <p class="type-field-sm italic text-muted-foreground">
+        {{ message.body }}
+        <span class="type-meta type-numeric ml-2">{{ formatTimelineTimeOfDay(message.createdAt) }}</span>
+      </p>
+    </div>
+  </div>
+
   <!-- Retracted tombstone -->
   <div
-    v-if="message.isRetracted"
+    v-else-if="message.isRetracted"
     :data-message-id="message.id"
     :data-message-created-at="message.createdAt"
     class="chat-message-grid opacity-35 animate-message-in"

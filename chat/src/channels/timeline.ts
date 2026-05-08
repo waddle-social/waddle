@@ -44,6 +44,10 @@ export function mapLiveRoomMessageToTimeline(
   if (msg.forumPostKind) tm.forumPostKind = msg.forumPostKind;
   if (msg.forumTitle) tm.forumTitle = msg.forumTitle;
   if (msg.forumThreadTitle) tm.forumThreadTitle = msg.forumThreadTitle;
+  if (msg.type === "pin-event") {
+    tm.isPinEvent = true;
+    if (msg.pinEventAction) tm.pinEventAction = msg.pinEventAction;
+  }
   return tm;
 }
 

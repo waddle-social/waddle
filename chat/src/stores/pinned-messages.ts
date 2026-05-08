@@ -7,7 +7,7 @@
 // `pin-event` observer in the chat-app-controller. See
 // `services/pinned-messages.ts` for the orchestration.
 
-import { atom } from "nanostores";
+import { atom, computed } from "nanostores";
 
 import type { WasmPinEntry } from "@/lib/xmpp/wasm-types";
 
@@ -22,6 +22,18 @@ interface PinnedRoomState {
 
 /** Reactive map: roomJid → PinnedRoomState. Replaced on every change. */
 export const $pinnedRooms = atom<Map<string, PinnedRoomState>>(new Map());
+
+/** Derived nanostore matching the contract specified in the #414 PRD:
+ * `Map<roomJid, Set<stanzaId>>` for cheap presence checks from
+ * MessageCard / ContentArea without exposing the richer PinnedRoomState
+ * shape. Updated whenever `$pinnedRooms` changes. */
+export const $pinnedStanzaIds = computed($pinnedRooms, (rooms) => {
+  const map = new Map<string, Set<string>>();
+  for (const [roomJid, state] of rooms) {
+    map.set(roomJid, state.stanzaIds);
+  }
+  return map;
+});
 
 type PinUpdate =
   | { action: "pinned"; target_stanza_id: string; entry?: WasmPinEntry }
@@ -57,6 +69,16 @@ export function hydratePinnedRoom(roomJid: string, entries: WasmPinEntry[]): voi
       applyPinEvent(roomJid, update);
     }
   }
+}
+
+/** Reset all pin state: empties `$pinnedRooms` and clears the
+ * pre-hydration update queue. Use this on full-session resets like
+ * logout — without clearing `pendingUpdates`, buffered events from
+ * the prior session can replay into a subsequent login's hydration
+ * and leak across users. */
+export function resetPinnedRooms(): void {
+  $pinnedRooms.set(new Map());
+  pendingUpdates.clear();
 }
 
 /** Apply a pin-event update. If the room hasn't been hydrated yet,

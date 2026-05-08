@@ -2,10 +2,11 @@
 import { computed, nextTick, onBeforeUnmount, ref, watch, type ComponentPublicInstance } from "vue";
 import { useStore } from "@nanostores/vue";
 import { AlertCircle, CheckCircle2, Hash, MessageCircle, MessagesSquare, RefreshCw, Search, Upload, WifiOff, X } from "lucide-vue-next";
-import { $pinnedRooms } from "@/stores/pinned-messages";
+import { $pinnedStanzaIds } from "@/stores/pinned-messages";
 import { isForumChannel as detectForumChannel } from "@/lib/channel-types";
 import { getConnectionNoticeCopy } from "@/lib/connection-notice";
 import { findMessageElementById } from "@/lib/message-targeting";
+import { findMessageById } from "@/lib/message-ids";
 import { getReplyJumpNotice } from "@/lib/reply-ux";
 import { findThreadToAutoOpen } from "@/lib/thread-auto-open";
 import {
@@ -201,10 +202,16 @@ async function scrollToMessage(messageId: string) {
     showReplyJumpNotice(getReplyJumpNotice(false));
     return;
   }
-  if (await virtualTimelineRef.value?.scrollToMessageId(messageId, "center")) {
+  // VirtualTimeline + the data-message-id index match items by their
+  // primary `id` only. Pinned-panel "jump to message" passes a
+  // XEP-0359 stanza-id, which on the timeline lives in `wireIds[]`,
+  // not `id`. Resolve the candidate to the primary id first so both
+  // paths work (#414).
+  const resolvedId = findMessageById(props.messages, messageId)?.id ?? messageId;
+  if (await virtualTimelineRef.value?.scrollToMessageId(resolvedId, "center")) {
     await nextTick();
   }
-  const el = findMessageElementById(messagesContainer.value, messageId);
+  const el = findMessageElementById(messagesContainer.value, resolvedId);
   const notice = getReplyJumpNotice(el instanceof HTMLElement);
   if (!notice && el instanceof HTMLElement) {
     clearReplyJumpNotice();
@@ -312,13 +319,15 @@ const avatarUrlByAuthor = computed(() => props.avatarUrlByAuthor ?? {});
 const isForumChannel = computed(() => detectForumChannel(props.channel));
 
 // #414: pin state for the current room. Hydrated by the controller.
-const pinnedRooms = useStore($pinnedRooms);
-const pinnedStanzaIds = computed(() => {
+// Reads from the derived `$pinnedStanzaIds` map (roomJid → Set<stanzaId>)
+// matching the #414 PRD contract for a presence-check store.
+const pinnedStanzaIdsByRoom = useStore($pinnedStanzaIds);
+const pinnedStanzaIdsForRoom = computed(() => {
   if (!props.roomJid) return null;
-  return pinnedRooms.value.get(props.roomJid)?.stanzaIds ?? null;
+  return pinnedStanzaIdsByRoom.value.get(props.roomJid) ?? null;
 });
 function isPinnedMessage(msg: TimelineMessage): boolean {
-  const set = pinnedStanzaIds.value;
+  const set = pinnedStanzaIdsForRoom.value;
   if (!set) return false;
   if (msg.id && set.has(msg.id)) return true;
   // Also match wireIds (XEP-0359 stanza-id mirrors).

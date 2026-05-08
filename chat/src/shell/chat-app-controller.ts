@@ -18,7 +18,7 @@ import { barePeerJid, jidDomain, parseManagedRoomBareJid } from "@/lib/xmpp-clie
 import { roomJidForChannelId as resolveRoomJidForChannelId } from "@/lib/channel-room";
 import { mergeRoomHats, roomHatsFromMembers } from "@/lib/xmpp/occupant-badges";
 import { connectionStore } from "@/lib/connection-store";
-import { $pinnedRooms } from "@/stores/pinned-messages";
+import { resetPinnedRooms } from "@/stores/pinned-messages";
 import { orderTimelineForScrollDirection, type ScrollDirectionMode } from "@/lib/scroll-direction";
 import { useScrollDirectionPreference } from "@/preferences/scroll-direction";
 import type { MemberSummary } from "@/lib/chat-types";
@@ -1247,8 +1247,9 @@ export function useChatAppController(giphyApiKey: string) {
     messaging.clearMessages();
     dmMessaging.clearMessages();
     // #414: drop all pin state on logout so a subsequent login doesn't
-    // see the prior user's pinned-message previews.
-    $pinnedRooms.set(new Map());
+    // see the prior user's pinned-message previews and pre-hydration
+    // events buffered from the prior session don't leak forward.
+    resetPinnedRooms();
     ui.showPinnedPanel.value = false;
     pushChannelRoute(null);
     await connectionStore.logout();
