@@ -344,9 +344,17 @@ function isPinnedMessage(msg: TimelineMessage): boolean {
 const currentUserCanPin = computed(() => {
   const me = props.currentUser;
   if (!me) return false;
+  // Membership signal: a defined roomHats entry means the user is a
+  // tracked occupant of this room. We use this as a defensive UI gate
+  // — non-occupants/visitors should never see the pin action even
+  // though the server would also reject them. The chat does not
+  // currently track role/affiliation directly, so this is the best
+  // membership proxy available; #422 will hydrate richer occupant
+  // metadata via XEP-0128 extended disco.
+  const myHats = props.roomHats[me];
+  if (myHats === undefined) return false;
   const channelPolicy = props.channel?.pinPermission ?? "admins-only";
   if (channelPolicy === "anyone") return true;
-  const myHats = props.roomHats[me] ?? [];
   return myHats.some((hat) => hat.uri === "urn:xmpp:hats:owner" || hat.uri === "urn:xmpp:hats:admin");
 });
 const canShowComposer = computed(() => !!(props.channel || props.dmPeer));
